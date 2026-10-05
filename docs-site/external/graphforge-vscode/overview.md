@@ -1,9 +1,17 @@
-# Overview
+# GraphForge in VS Code
 
 **GraphForge for VS Code** (`CurateLabs.graphforge`) brings [GraphForge](https://docs.graphforge.sh/)
 projects into the editor: an openCypher query surface, a set of analyst verbs (Rank, Cluster,
-Paths, Analyze, Similar, Find), a progressive ontology viewer, and an epistemic-aware result
-graph.
+Paths, Analyze, Similar, Find), a progressive ontology viewer, and a result graph that can display recorded evidence and knowledge status.
+
+**Advanced · Assumes familiarity with VS Code, terminal commands, and a Python
+or Node environment.** For the Basic lessons start with
+[Your first graph](https://docs.graphforge.sh/guide/quickstart/).
+
+This page describes the pinned extension snapshot. Compatibility of a packaged
+extension/runtime combination with v0.6.0 still needs
+[first-use qualification](https://github.com/CurateLabs/graphforge/issues/1209).
+Follow the explicit runtime selection in [setup](install.md).
 
 ## Who it's for
 
@@ -12,21 +20,21 @@ graph.
 - Python-first analysts working out of a `pyproject.toml`/`uv`-managed project or a
   notebook-heavy workspace — the extension runs the same commands against the `graphforge`
   PyPI package, not just the native Node binding.
-- Coding agents (Cursor, GitHub Copilot Agent Mode, or similar) driving the extension
-  end-to-end via stable `vscode.commands.executeCommand` IDs — see
+- Agent integrations that explicitly provide access to `vscode.commands.executeCommand`
+  and handle the remaining interactive dialogs — see
   [`agent-interop.md`](agent-interop.md).
 
 ## What you get
 
-| Surface | What it does |
-|---|---|
-| **Setup** | `GraphForge: Check Environment` and the two `Setup … Binding` commands are the palette-first, no-dead-end entry point — see [`install.md`](install.md). |
-| **Cypher** | `.cypher` / `.cql` language support with syntax highlighting, plus **Run Query** (and **Run Query with Parameters…**). |
-| **Analyst verbs** | Rank, Cluster, Paths, Analyze, Similar, Find — QuickPick-driven, each with an **Advanced…** variant for optional parameters. |
-| **Projects** | An Activity Bar explorer that lists folders containing a valid GraphForge `FORMAT` marker. |
-| **Ontology** | A mode badge (exploratory/advisory/strict) plus an entity/relation tree and an Ontology Viewer webview, including a **Load Ontology…** action. |
-| **Knowledge** | List, inspect, and create knowledge-ledger assertions, with Advanced commands for attaching evidence, assessing confidence, and recording status. |
-| **Result Graph** | A webview rendering query/verb results as a graph, styled by class and epistemic status. |
+| Surface           | What it does                                                                                                                                               |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Setup**         | `GraphForge: Check Environment` and the two `Setup … Binding` commands report runtime status and available setup actions — see [`install.md`](install.md). |
+| **Cypher**        | `.cypher` / `.cql` language support with syntax highlighting, plus **Run Query** (and **Run Query with Parameters…**).                                     |
+| **Analyst verbs** | Rank, Cluster, Paths, Analyze, Similar, Find — QuickPick-driven, each with an **Advanced…** variant for optional parameters.                               |
+| **Projects**      | An Activity Bar explorer that lists folders containing a valid GraphForge `FORMAT` marker.                                                                 |
+| **Ontology**      | A mode badge (exploratory/advisory/strict) plus an entity/relation tree and an Ontology Viewer webview, including a **Load Ontology…** action.             |
+| **Knowledge**     | List, inspect, and create knowledge-ledger assertions, with Advanced commands for attaching evidence, assessing confidence, and recording status.          |
+| **Result Graph**  | A webview rendering query/verb results as a graph, styled by class and epistemic status.                                                                   |
 
 ## Two runtimes, one extension
 

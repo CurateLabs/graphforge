@@ -1,187 +1,73 @@
-# GraphForge Roadmap
+# v0.6.0 release scope
 
-**Last Updated:** 2026-08-07
-**Current release line:** v0.5.2 (see [installation](../guide/installation.md))
+These docs describe GraphForge v0.6.0. They replace the earlier user guides;
+there is no maintained pre-v1 documentation archive or backward-compatibility
+promise. [Installation](../guide/installation.md) explains artifact availability
+and exact package versions. A source capability is not a claim that its release
+has already been published.
 
----
+## Start small
 
-## How to read this page
+The first experience is [basic graph use](../guide/quickstart.md): create
+connected data, ask a question, and inspect the answer. Choose an
+[agent](../guide/work-with-an-agent.md), a [notebook](../guide/use-a-notebook.md),
+or an [integration](../guide/integrate-graphforge.md).
 
-This roadmap describes **product surfaces and versions**, not internal delivery
-milestones. Where a GitHub milestone name appears elsewhere in the docs, it is paired with
-plain-language purpose there; this page stays version- and outcome-oriented.
+Additional capabilities are optional journeys. Users do not need the entire
+research model to use GraphForge.
 
----
+| When you need it                        | v0.6.0 surface                                                                                          | Guide                                                         |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| Query and analyze connected data        | openCypher, analyst verbs, Arrow results, graph construction                                            | [Basic graph](../guide/quickstart.md)                         |
+| Keep and reuse work                     | Durable projects, reusable saved queries                                                                | [Save and reopen](../guide/tutorial.md)                       |
+| Remember what an inquiry established    | Graph records for hypothesis, challenge, evidence, conclusion; optional native knowledge and provenance | [Record an inquiry](../guide/record-an-inquiry.md)            |
+| Explore and review independent research | Slices, Branches, immutable Versions, comparisons, Proposals, Forks                                     | [Research workspaces](../guide/research-journey.md)           |
+| Evaluate externally produced decisions  | Bounded context and validated choice, rubric, probability results; caller-owned policy                  | [Decision workflows](../book/use-cases/decision-workflows.md) |
+| Exchange research                       | Portable projects, Hub discovery, clone/publication, research history                                   | [Portable projects](../guide/portable-projects.md)            |
+| Work at larger scale                    | Bounded ingest and interchange; workload-specific scale and benchmark qualification                     | [Scale guidance](../reference/scale-limits.md)                |
 
-## v0.5.2 — Coordinated release (current)
+## Release readiness
 
-GraphForge **v0.5.2** is the current coordinated release across Rust crates,
-PyPI, npm bindings/CLI/skills, and public docs. Install from the published
-packages (see [installation](../guide/installation.md)).
+[M13](https://github.com/CurateLabs/graphforge/milestone/13) owns coordinated
+release readiness and publication across Rust, Python, Node, CLI, skills, and
+docs. [#1096](https://github.com/CurateLabs/graphforge/issues/1096) tracks readiness;
+[#1095](https://github.com/CurateLabs/graphforge/issues/1095) tracks publication.
+Use their live dependencies for status rather than inferring readiness from
+this feature list.
 
-- GitHub Release: https://github.com/CurateLabs/graphforge/releases/tag/v0.5.2
-- PyPI: https://pypi.org/project/graphforge/0.5.2/
-- npm: `@curatelabs/graphforge`, `@curatelabs/graphforge-cli`,
-  `@curatelabs/graphforge-agent-skills` at `0.5.2`
-- Docs: https://docs.graphforge.sh/
+The included programs cover architecture maintenance, scale/interchange,
+benchmarks, the research lifecycle, and provider-neutral decision workflows.
+Research history and Hub command ergonomics continue through
+[#1771](https://github.com/CurateLabs/graphforge/issues/1771) and
+[#1772](https://github.com/CurateLabs/graphforge/issues/1772). Documentation must
+use the implemented command surface, not planned command names.
 
-Capability surface matches the shipped v0.5 engine: openCypher, seven
-analyst-intent verbs, Parquet projects, and thin Python/Node bindings.
+Guide readiness is tracked in [#1208](https://github.com/CurateLabs/graphforge/issues/1208).
+[#1209](https://github.com/CurateLabs/graphforge/issues/1209) qualifies clean
+candidate installs, real editor/agent/notebook paths, expected outputs, durable
+reopen, and independent first-use review. Technical examples do not establish
+nontechnical usability or adoption.
 
-Mobile bindings (Swift/Kotlin/UniFFI) are **not** part of the current core
-package set.
+## Core and associated applications
 
-See [Publishing](../engineering/PUBLISHING.md) for artifact destinations and
-`RELEASING.md` at the repository root for the release steps.
+Core owns graph and research semantics. The VS Code extension, XYG visualization,
+and website/Hub own their respective interfaces and hosting. A Core release does
+not qualify every consumer feature. [The product map](https://github.com/orgs/CurateLabs/projects/2)
+coordinates their work without changing implementation ownership.
 
-### Prior coordinated line
+Public projects support transparent participation and attributable contributions,
+using familiar Git author/committer practices. Private projects provide a
+non-public space for known collaborators. The hosting application enforces
+project access; local graph or governance metadata is not access control.
 
-**v0.5.1** was the first complete coordinated registry publication after the
-incomplete v0.5.0 surface. Prefer v0.5.2 for new installs.
+## Beyond this release
 
----
+Optional model-specific adapters, mobile bindings, and post-release community
+pilots have their own delivery work. They are not prerequisites for basic graph
+use. A browser-executed graph engine is not part of this release; a protocol
+validation module for Hub consumers is a separate capability.
 
-## v0.6.0 — Analyst research lifecycle (Designed)
-
-The [analyst research experience](../engineering/analyst-ux.md) and
-[research workspace semantics](../book/architecture/research-workspaces.md)
-define the M11 work required before coordinated v0.6.0 release readiness.
-Deliver evidence/Artifact lineage, discoverable Project metadata, explainable
-Slices, independently evolving Branches, reproducible Versions, scoped
-canonical knowledge, semantic comparison, deliberate upstream updates,
-selective Proposals, and provenance-preserving acceptance and Forks.
-
-Rust owns these behaviors; Python, Node, and CLI expose them. Associated
-projects such as XYG and graphforge-nextjs, applications, and peer extensions
-own their interactive UX and hosting/access enforcement. They consume the
-Core contract without becoming Core dependencies.
-
-[M11 Analyst UX](https://github.com/CurateLabs/graphforge/milestone/11) precedes
-[M12 coordinated release](https://github.com/CurateLabs/graphforge/milestone/12).
-M3 architecture, M5 scale/interchange, and M10 benchmarks retain their existing
-release prerequisites. Documentation and issue creation do not establish
-implementation; [acceptance scenarios](../engineering/TESTING.md#analyst-ux-acceptance)
-must be proven before readiness.
-
-### Analyst entry and coordinated delivery
-
-The core audience is a nontechnical analyst working with an agent; v0.6.0 may
-initially provide a more complete path for technical analysts and integrators.
-Develop both paths using the [entry journeys and research questions](../engineering/analyst-ux.md#audience-and-entry-journeys).
-The complete research vocabulary is not a first-use prerequisite.
-
-Release readiness includes simple candidate first use (#1209) and a review of
-the user-guide tree against the substantial changes since v0.5.2 (#1208).
-Organize the guides around VS Code with an agent, agent-led workflows, and
-Jupyter notebooks; qualify Kaggle/Colab rather than assume durable filesystem
-support. Keep current release instructions and candidate-only behavior explicit.
-
-Coordinate the product group through the
-[GraphForge Product Map](https://github.com/orgs/CurateLabs/projects/2), with
-issues and implementation ownership remaining in their repositories. Project
-access follows organization permissions; public issue links below remain the
-readable delivery references.
-
-| Repository / existing tracker                                                      | Coordinated outcome                                                                                                      |
-| ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| [GraphForge #1096 / #1095](https://github.com/CurateLabs/graphforge/issues/1096)   | Core candidate readiness, then immutable RC/final publication and clean public-consumer proof.                           |
-| [XYG #108 / #40](https://github.com/CurateLabs/xyg/issues/108)                     | Compatible visualization candidate artifacts and cross-host evidence, with exact version/ABI identities.                 |
-| [VS Code extension #82](https://github.com/CurateLabs/graphforge-vscode/issues/82) | Packaged editor/agent journey consuming the matching GraphForge and XYG surfaces.                                        |
-| [Website/Hub #19](https://github.com/CurateLabs/graphforge-nextjs/issues/19)       | Accurate entry pages and supported browse/clone delivery, with the website and data-plane revisions recorded separately. |
-
-Shared coordination does not make every application feature a Core release
-blocker or create a circular publication dependency. Prepare against retained
-candidate artifacts; verify public install paths after publication. Each surface
-states its actual support and open blockers before it is advertised as ready.
-
-After release, community work (#1210) includes a bounded seed collection of
-existing datasets and evidence-linked information-extraction projects delivered
-through [website/Hub content work](https://github.com/CurateLabs/graphforge-nextjs/issues/33).
-Select useful research questions and exact sources,
-record licenses, provenance, extraction limitations and reproducible examples,
-and verify discovery through a first useful result. Content delivery belongs to
-its owning application/data work; it does not require all future peer extensions
-or prove adoption. Independent pilots and promotion retain their own evidence.
-
-## v0.5.0 — Rust core (shipped on `main`)
-
-GraphForge v0.5.0 is an embedded openCypher engine with a Rust core, Apache Arrow
-results, and Parquet-backed projects. The public surface is Cypher plus seven
-analyst-intent verbs:
-
-```python
-forge.execute(cypher)              # openCypher → Arrow Table
-forge.rank(label, by=...)          # centrality, structural scoring → Arrow Table + score
-forge.cluster(label, by=...)       # community detection, components → Arrow Table + community_id
-forge.paths(source, target, by=…)  # shortest paths, flow, reachability → Arrow Table
-forge.analyze(label, by=…)         # spanning trees, DAG, coloring, matching, embeddings → Arrow Table
-forge.similar(label, by=…)         # pairwise node similarity → Arrow Table
-forge.find(query, …)               # text/vector/hybrid search → Arrow Table + score + matched_on
-```
-
-Full algorithm catalog: [Algorithm Verbs](../book/architecture/algorithms.md)
-
-Architecture reference: [Architecture Overview](../book/architecture/overview.md),
-[Refactor notes](../book/architecture/refactor-v0.5.md)
-
-**Architecture decisions:** [ADR 0001](../adr/0001-rust-core.md), [ADR 0002](../adr/0002-lr1-grammar.md)
-
-### v0.5 capability surface
-
-Status vocabulary (same as architecture docs): **Shipped** = implemented and tested on
-`main`; **Partially built** = some paths real, others stubbed; **Designed** = specified, not
-yet a complete public capability; **Deferred** = intentionally after the current release line.
-
-Shipped capabilities (present tense — this is the product):
-
-| Capability | Status | What it is |
-| --- | --- | --- |
-| Compiler + ontology + Graph IR + relational lowering | Shipped | openCypher path into DataFusion |
-| Execution + adjacency index | Shipped | Parquet-backed execution; derived CSR adjacency under `indexes/adjacency/` ([ADR 0004](../adr/0004-adjacency-index.md)) |
-| Python + Node bindings | Shipped | Thin bindings over `graphforge-api`; Arrow / IPC results |
-| Conformance hardening | Shipped | openCypher TCK, fuzzing, and semantic gates |
-| Analyst verbs | Shipped | `rank` / `cluster` / `similar` / `paths` / `analyze` → Arrow |
-| Find / index | Shipped | `find` + `index` — text, vector, hybrid |
-| Knowledge layer | Shipped | Immutable assertions, confidence, evidence, provenance, neutral algorithm runs |
-| Epistemic model | Shipped | Append-only status, reasoning, supersession, hypotheses, optional valid time, resolved algorithm dispatch |
-
-Layer boundary notes: [refactor-v0.5 §8](../book/architecture/refactor-v0.5.md#8-v05-capability-layers).
-
-
-### Merge gates (required before merging to `main`)
-
-- Parser parity — RD+Pratt corpus + syntax goldens pass
-- openCypher TCK subset — agreed compliance threshold met
-- Ontology round-trips — load/validate/migrate stable
-- Arrow/IPC round-trips — data contract stable across shipped Rust, Python, and Node surfaces
-- Parquet provider — core semantics verified
-- Python + Node bindings — packaging and smoke tests pass
-- Observability — `explain`, query IDs, provenance IDs, structured errors
-- All seven analyst verbs — Arrow Tables, write-back, via/directed filters
-- `forge.find()` / `forge.index()` — lazy indexing, text + vector + hybrid
-
----
-
-## Language Binding Matrix
-
-| Language | Mechanism | Result | Status |
-| ----------------- | -------------- | ------------------------------------------ | --------- |
-| Python | PyO3 + maturin | `pyarrow.Table` | Shipped (v0.5) |
-| Node / TypeScript | napi-rs | Arrow IPC `Buffer` | Shipped (v0.5) |
-| Rust | Native crate | `ExecutionResult` | Shipped (semantic owner) |
-| Swift | UniFFI | Arrow IPC `Data` → `GraphForgeResult` | Planned (after v0.5.1 core publication) |
-| Kotlin / JVM | UniFFI | Arrow IPC `ByteArray` → `GraphForgeResult` | Planned (after v0.5.1 core publication) |
-
-
----
-
-## Version Numbering
-
-GraphForge follows [Semantic Versioning](https://semver.org/) and is **pre-v1.0**.
-The `0.x` series signals that the API is still maturing.
-
-- **Patch** (`0.5.y`): Bug fixes, small improvements, no intentional API breaks
-- **Minor** (`0.x.0`): New features; backwards-compatible where practical
-
-**v0.5.2** is the current coordinated release. A `v1.0` release will happen when
-the API is stable enough to commit to long-term compatibility.
+Before v1.0.0, APIs and project formats may change without migration support.
+Current-version integrity, corruption refusal, recovery, and supported
+interchange remain required. A v1.0 compatibility policy will be a separate
+decision. See [project compatibility](../book/architecture/project-format-compatibility.md).

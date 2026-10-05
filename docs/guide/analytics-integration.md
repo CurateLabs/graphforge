@@ -1,8 +1,25 @@
 # Analytics Integration
 
-Every GraphForge method returns an Apache Arrow Table. Arrow is the common currency —
-you can pass the result directly to pandas, Polars, NetworkX, or any Arrow-aware library
-with no intermediate conversion step.
+**Advanced:** this page assumes basic Python and the
+[graph quickstart](quickstart.md). Choose it when you want table libraries,
+network algorithms, or text/vector retrieval. For a guided first research
+project, begin with the Basic lessons instead.
+
+Queries and analyst verbs return Arrow data. In Python, inspect the PyArrow
+table directly or convert it for pandas, Polars, or NetworkX as shown below.
+Construction and control operations can return handles, metadata, or scalars.
+Start with the [basic graph quickstart](quickstart.md); these integrations are optional.
+
+The examples below use optional packages. Install them into the same Python
+environment as GraphForge before running the conversion and NetworkX blocks:
+
+```bash
+python -m pip install pandas polars networkx
+```
+
+Graph metrics describe connections in the supplied data. A high score is not
+evidence quality, statistical significance, or a causal explanation. Compare
+numeric results with source material and state the limits of your sample.
 
 ---
 
@@ -15,8 +32,9 @@ and `find()`.
 from graphforge import GraphForge
 
 forge = GraphForge()
-forge.add_node("Person", name="Alice", age=30)
-forge.add_node("Person", name="Bob",   age=25)
+alice = forge.add_node("Person", name="Alice", age=30)
+bob = forge.add_node("Person", name="Bob", age=25)
+forge.add_edge(alice, "KNOWS", bob)
 
 table = forge.execute("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
 # table is a pyarrow.Table
@@ -33,11 +51,11 @@ df = pl.from_arrow(table)
 for row in table.to_pylist():
     print(row["name"], row["age"])
 
-# Pass a single column to NumPy
+# Extract a single column as a Python list
 ages = table.column("age").to_pylist()
 ```
 
-There are no `CypherValue` wrappers or `.value` calls in v0.5.0. Column values are
+There are no `CypherValue` wrappers or `.value` calls. Column values are
 standard Python types (str, int, float, bool, None) when accessed via `to_pandas()`,
 `to_pylist()`, or `.as_py()`.
 
@@ -55,14 +73,22 @@ table = forge.execute("""
     RETURN a.name AS src, b.name AS dst
 """)
 
-G = nx.from_pandas_edgelist(table.to_pandas(), source="src", target="dst")
+G = nx.from_pandas_edgelist(
+    table.to_pandas(), source="src", target="dst", create_using=nx.DiGraph(),
+)
 print(f"Nodes: {G.number_of_nodes()}, Edges: {G.number_of_edges()}")
 
-# Run any NetworkX algorithm on the result
-pr = nx.pagerank(G)
+# Inspect degree and clustering on this small example
+print(dict(G.degree()))
 cc = nx.average_clustering(G.to_undirected())
 print(f"Avg clustering: {cc:.4f}")
 ```
+
+This prints two nodes, one edge, degree 1 for each person, and average
+clustering `0.0000`. The projection includes only nodes attached to a matching
+relationship. If isolated people matter to your question, add them from a
+separate node query rather than silently dropping them. Other NetworkX
+algorithms can require additional dependencies.
 
 ---
 
@@ -87,14 +113,14 @@ table = forge.rank("Person", by="degree")
 
 **Available algorithms for `by`:**
 
-| Value | Description |
-|-------|-------------|
-| `pagerank` | Eigenvector-based global influence |
-| `betweenness` | Fraction of shortest paths passing through a node |
-| `closeness` | Average inverse distance to all other nodes |
-| `degree` | Number of direct connections |
-| `clustering_coefficient` | Density of a node's local neighbourhood |
-| `triangles` | Count of closed triangles the node participates in |
+| Value                    | Description                                                              |
+| ------------------------ | ------------------------------------------------------------------------ |
+| `pagerank`               | Structural score based on incoming links and the scores of their sources |
+| `betweenness`            | Fraction of shortest paths passing through a node                        |
+| `closeness`              | Average inverse distance to all other nodes                              |
+| `degree`                 | Number of direct connections                                             |
+| `clustering_coefficient` | Density of a node's local neighbourhood                                  |
+| `triangles`              | Count of closed triangles the node participates in                       |
 
 ### Write-back (opt-in)
 
@@ -136,10 +162,10 @@ table = forge.cluster("Person", by="components")
 
 **Available algorithms for `by`:**
 
-| Value | Description |
-|-------|-------------|
-| `louvain` | Modularity-maximising community detection |
-| `components` | Weakly connected components |
+| Value        | Description                               |
+| ------------ | ----------------------------------------- |
+| `louvain`    | Modularity-maximising community detection |
+| `components` | Weakly connected components               |
 
 ### Write-back (opt-in)
 
@@ -164,7 +190,17 @@ It returns an Arrow Table with node properties plus `score` and `matched_on` col
 The index is built automatically on the first `find()` call — no explicit indexing step
 is required for a standard workflow. `label` is required on every call.
 
+The following is a separate, self-contained in-memory example. Finish the
+earlier graph with `forge.close()` before starting it in the same session.
+
 ```python
+from graphforge import GraphForge
+
+forge = GraphForge()
+survey = forge.add_node("Paper", title="GNN Survey", abstract="graph neural networks", year=2024)
+methods = forge.add_node("Paper", title="Network Methods", abstract="network analysis", year=2023)
+forge.add_edge(survey, "CITES", methods)
+
 # Text search
 table = forge.find("graph neural networks", label="Paper")
 df = table.to_pandas()
@@ -173,30 +209,16 @@ print(df[["title", "score", "matched_on"]])
 # Limit to a label and top-N results
 table = forge.find("graph neural networks", label="Paper", limit=20)
 
-# Hybrid text + vector search (bring your own embeddings)
-import openai
-client = openai.OpenAI()
-
-def embed(text: str) -> list[float]:
-    return client.embeddings.create(
-        input=text, model="text-embedding-3-small"
-    ).data[0].embedding
-
-query_vec = embed("scalable graph representation learning")
-table = forge.find("scalable graph learning", label="Paper", vector=query_vec)
-
-# Vector-only search
-table = forge.find(vector=query_vec, label="Paper")
 ```
 
 **Result columns:**
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `node_uuid` | bytes | Canonical UUID identity of the matched node |
-| (node properties) | varies | All properties of the matched node |
-| `score` | float | Combined relevance score |
-| `matched_on` | str | `"text"`, `"vector"`, or `"text+vector"` |
+| Column            | Type   | Description                                 |
+| ----------------- | ------ | ------------------------------------------- |
+| `node_uuid`       | bytes  | Canonical UUID identity of the matched node |
+| (node properties) | varies | All properties of the matched node          |
+| `score`           | float  | Combined relevance score                    |
+| `matched_on`      | str    | `"text"`, `"vector"`, or `"text+vector"`    |
 
 ### Explicit indexing
 
@@ -207,22 +229,33 @@ useful when you want to index a large batch before the first search call:
 # Index selected properties for text search
 forge.index("Paper", properties=["title", "abstract"])
 
-# Store a vector for a specific node — identity is the UUID `node_uuid`.
-# The vector mode takes `node=` as a UUID string, a NodeHandle, or a
-# label/property/value selector dict.
-import uuid
-
-nid = forge.execute(
-    "MATCH (n:Paper {title: 'GNN Survey'}) RETURN n.node_uuid AS nid"
-).column("nid")[0].as_py()
-
-forge.index(
-    "Paper",
-    node=str(uuid.UUID(bytes=nid)),
-    vector=embed("GNN Survey overview"),
-    space="sbert",
-)
 ```
+
+### Optional vector retrieval
+
+An embedding is a numeric representation produced by your chosen model or
+method. GraphForge stores and compares these vectors; it does not create them
+or interpret a similarity score as truth. In a real project, use the same
+model, dimensions, and preprocessing for documents and queries.
+
+These deliberately simple vectors demonstrate the API without a model service;
+they do not encode the meaning of the papers:
+
+```python
+forge.publish_caller_embeddings(
+    "demo",
+    [{"node": survey, "vector": [1.0, 0.0]},
+     {"node": methods, "vector": [0.0, 1.0]}],
+    dimensions=2,
+    source_projection={"label": "Paper", "recipe": "two_paper_demo"},
+)
+table = forge.find(vector=[1.0, 0.0], label="Paper", space="demo", limit=1)
+print(table.select(["title", "score"]).to_pylist())
+```
+
+Expected output: `[{'title': 'GNN Survey', 'score': 1.0}]`.
+For hybrid retrieval, supply both the text query and a vector from the same
+space: `forge.find("graph neural networks", label="Paper", vector=[1.0, 0.0], space="demo")`.
 
 ### Using find() results in Cypher
 
@@ -233,6 +266,8 @@ the `node_uuid` identity predicate for follow-up graph traversals:
 import uuid
 
 table = forge.find("graph neural networks", label="Paper", limit=5)
+if table.num_rows == 0:
+    raise ValueError("No matching paper; inspect the query and source data.")
 top_uuid = uuid.UUID(bytes=table.column("node_uuid")[0].as_py())
 
 neighbours = forge.execute("""
@@ -245,29 +280,30 @@ print(neighbours.to_pandas())
 ```
 
 A typed UUID parameter is only valid as a direct `node_uuid` / `edge_uuid` identity equality
-predicate; v0.5.0 exposes no numeric `id()` surrogate.
+predicate; GraphForge exposes no numeric `id()` surrogate.
 
 ---
 
 ## Choosing Between Methods
 
-| Goal | Method |
-|------|--------|
-| Declarative query — patterns, filters, aggregations | `forge.execute()` |
-| Score nodes by graph influence | `forge.rank()` |
-| Group nodes into communities | `forge.cluster()` |
-| Search by keywords or semantic similarity | `forge.find()` |
-| Custom graph algorithms via NetworkX | `forge.execute()` → Arrow → `nx.from_pandas_edgelist()` |
+| Goal                                                | Method                                                  |
+| --------------------------------------------------- | ------------------------------------------------------- |
+| Declarative query — patterns, filters, aggregations | `forge.execute()`                                       |
+| Score nodes by graph influence                      | `forge.rank()`                                          |
+| Group nodes into communities                        | `forge.cluster()`                                       |
+| Search by keywords or semantic similarity           | `forge.find()`                                          |
+| Custom graph algorithms via NetworkX                | `forge.execute()` → Arrow → `nx.from_pandas_edgelist()` |
 
 ---
 
 ## Schema Introspection
 
 ```python
-print(forge.labels())              # ['Author', 'Paper', 'Person']
-print(forge.relationship_types())  # ['AUTHORED', 'CITES', 'KNOWS']
-print(forge.node_count("Person"))  # 42
-print(forge.schema())              # Arrow Table — labels, property names, types
+print(forge.labels())              # Labels in this instance
+print(forge.relationship_types())  # Relationship types in this instance
+print(forge.node_count("Paper"))   # 2 in the search example
+print(forge.schema())              # Arrow table of labels/types and their counts
+forge.close()
 ```
 
 ---

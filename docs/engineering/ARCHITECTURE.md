@@ -26,19 +26,19 @@ flowchart LR
 
 ## Components
 
-| Component | Responsibility | Depends on |
-| --------- | -------------- | ---------- |
-| `graphforge-api` | Public facade: lifecycle, Cypher, analyst verbs | `graphforge-cypher`, `graphforge-exec`, `graphforge-storage`, knowledge crates |
-| `graphforge-cypher` / `graphforge-ast` | Parse Cypher to AST | — |
-| `graphforge-ir` / `graphforge-rel` | Graph IR and relational lowering | AST / ontology |
-| `graphforge-core` | Shared identities, values, options, and facade errors | No workspace crate dependencies |
-| `graphforge-plan` | DataFusion logical extension nodes and mutation specifications | Core, IR, DataFusion |
-| `graphforge-exec` | DataFusion execution, algorithms, search | IR, logical extension nodes, storage |
-| `graphforge-io` | Bounded, atomic Parquet and Arrow IPC result sinks | Arrow, Parquet, futures; no workspace crate dependencies |
-| `graphforge-storage` | Project generations, Arrow schemas, and Parquet storage | Core, discovery, filesystem, IR, ontology |
-| `graphforge-ontology` | Progressive ontology validation | API / binder |
-| `graphforge-provenance` / `graphforge-knowledge` | Provenance and epistemic records | UUID references to graph |
-| Bindings | Thin FFI projections | `graphforge-api` / core facade |
+| Component                                        | Responsibility                                                 | Depends on                                                                     |
+| ------------------------------------------------ | -------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `graphforge-api`                                 | Public facade: lifecycle, Cypher, analyst verbs                | `graphforge-cypher`, `graphforge-exec`, `graphforge-storage`, knowledge crates |
+| `graphforge-cypher` / `graphforge-ast`           | Parse Cypher to AST                                            | —                                                                              |
+| `graphforge-ir` / `graphforge-rel`               | Graph IR and relational lowering                               | AST / ontology                                                                 |
+| `graphforge-core`                                | Shared identities, values, options, and facade errors          | No workspace crate dependencies                                                |
+| `graphforge-plan`                                | DataFusion logical extension nodes and mutation specifications | Core, IR, DataFusion                                                           |
+| `graphforge-exec`                                | DataFusion execution, algorithms, search                       | IR, logical extension nodes, storage                                           |
+| `graphforge-io`                                  | Bounded, atomic Parquet and Arrow IPC result sinks             | Arrow, Parquet, futures; no workspace crate dependencies                       |
+| `graphforge-storage`                             | Project generations, Arrow schemas, and Parquet storage        | Core, discovery, filesystem, IR, ontology                                      |
+| `graphforge-ontology`                            | Progressive ontology validation                                | API / binder                                                                   |
+| `graphforge-provenance` / `graphforge-knowledge` | Provenance and epistemic records                               | UUID references to graph                                                       |
+| Bindings                                         | Thin FFI projections                                           | `graphforge-api` / core facade                                                 |
 
 ## Data model
 
@@ -61,15 +61,15 @@ architecture deep-dives in [`../book/architecture/`](../book/architecture/overvi
 
 ## Problem model and terminology
 
-| Concept | Meaning in this project | Relationships, states, rules, and owner |
-| --- | --- | --- |
-| Project | Durable research universe, not a single graph snapshot | Existing graph/knowledge workspace extended by the M11 research lifecycle; facade / storage |
-| Graph layer | Topology, properties, traversal, algorithms | Never stores knowledge semantics; Cypher reads only this layer |
-| Knowledge layer | Provenance, evidence, epistemic status | Attaches by UUID; append-only interpretation (ADR 0006) |
-| Workbench layer | Analyst verbs, search, workflows, recipes | Consumes lower layers; holds no graph-semantic state |
-| Progressive ontology | Exploration-first typing | Modes exploratory → advisory → strict; ADR 0003 |
-| Catalog ID vs ontology ID | Distinct ID spaces | Never substitute one for the other |
-| Analyst verb | Intent API bypassing Cypher | rank/cluster/paths/analyze/similar/find → Arrow |
+| Concept                   | Meaning in this project                                | Relationships, states, rules, and owner                                                     |
+| ------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------- |
+| Project                   | Durable research universe, not a single graph snapshot | Existing graph/knowledge workspace extended by the M11 research lifecycle; facade / storage |
+| Graph layer               | Topology, properties, traversal, algorithms            | Never stores knowledge semantics; Cypher reads only this layer                              |
+| Knowledge layer           | Provenance, evidence, epistemic status                 | Attaches by UUID; append-only interpretation (ADR 0006)                                     |
+| Workbench layer           | Analyst verbs, search, workflows, recipes              | Consumes lower layers; holds no graph-semantic state                                        |
+| Progressive ontology      | Exploration-first typing                               | Modes exploratory → advisory → strict; ADR 0003                                             |
+| Catalog ID vs ontology ID | Distinct ID spaces                                     | Never substitute one for the other                                                          |
+| Analyst verb              | Intent API bypassing Cypher                            | rank/cluster/paths/analyze/similar/find → Arrow                                             |
 
 ### M11 research model
 
@@ -152,29 +152,31 @@ Rust/Python/Node/CLI journey and captured consumer outputs. See [acceptance evid
 
 ## Decisions
 
-ADR bodies live in [`../adr/`](../adr/) as the contiguous v0.5.0 sequence `0001`–`0014`.
-The DocSlime index is [`adrs/README.md`](adrs/README.md) (links only; does not renumber bodies).
+ADR bodies and their current active/superseded status live in the
+[canonical ADR index](../adr/README.md). The table below highlights selected
+decisions; it is not the complete ADR sequence. The DocSlime index is
+[`adrs/README.md`](adrs/README.md) (links only; does not renumber bodies).
 
-| ADR | Decision |
-| --- | --- |
-| [0001](../adr/0001-rust-core.md) | Rust core owns semantics |
-| [0002](../adr/0002-lr1-grammar.md) | Recursive descent + Pratt parser for `graphforge-cypher` |
-| [0003](../adr/0003-progressive-ontology.md) | Progressive ontology — exploration first |
-| [0004](../adr/0004-adjacency-index.md) | Graph-native adjacency index |
-| [0005](../adr/0005-layered-architecture.md) | Graph / knowledge / workbench layers |
-| [0006](../adr/0006-epistemic-model.md) | Append-only epistemic interpretation |
-| [0007](../adr/0007-temporal-values.md) | Runtime temporal values |
-| [0008](../adr/0008-heterogeneous-lists.md) | Heterogeneous list values |
-| [0009](../adr/0009-nested-heterogeneous-lists.md) | Nested heterogeneous lists |
-| [0010](../adr/0010-wide-date-and-duration.md) | Wide date and duration |
-| [0011](../adr/0011-dynamic-heterogeneous-values.md) | Dynamic heterogeneous value lists |
-| [0012](../adr/0012-knowledge-domain-ownership.md) | Knowledge and epistemic domain ownership and schema evolution |
-| [0013](../adr/0013-project-generation-protocol.md) | Durable project-generation protocol |
-| [0014](../adr/0014-workspace-checkpoints.md) | Complete-workspace checkpoints |
-| [0015](../adr/0015-embedded-write-modes.md) | Three embedded project-write modes |
-| [0016](../adr/0016-repository-integration-and-deployment-configuration.md) | Repository integration and deployment configuration boundary |
-| [0018](../adr/0018-acknowledged-durability-isolation.md) | Acknowledged durability and isolation contract |
-| [0036](../adr/0036-release-version-contract.md) | The GraphForge release version contract (consolidates and supersedes 0017, 0033 and 0034) |
+| ADR                                                                        | Decision                                                                                  |
+| -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| [0001](../adr/0001-rust-core.md)                                           | Rust core owns semantics                                                                  |
+| [0002](../adr/0002-lr1-grammar.md)                                         | Recursive descent + Pratt parser for `graphforge-cypher`                                  |
+| [0003](../adr/0003-progressive-ontology.md)                                | Progressive ontology — exploration first                                                  |
+| [0004](../adr/0004-adjacency-index.md)                                     | Graph-native adjacency index                                                              |
+| [0005](../adr/0005-layered-architecture.md)                                | Graph / knowledge / workbench layers                                                      |
+| [0006](../adr/0006-epistemic-model.md)                                     | Append-only epistemic interpretation                                                      |
+| [0007](../adr/0007-temporal-values.md)                                     | Runtime temporal values                                                                   |
+| [0008](../adr/0008-heterogeneous-lists.md)                                 | Heterogeneous list values                                                                 |
+| [0009](../adr/0009-nested-heterogeneous-lists.md)                          | Nested heterogeneous lists                                                                |
+| [0010](../adr/0010-wide-date-and-duration.md)                              | Wide date and duration                                                                    |
+| [0011](../adr/0011-dynamic-heterogeneous-values.md)                        | Dynamic heterogeneous value lists                                                         |
+| [0012](../adr/0012-knowledge-domain-ownership.md)                          | Knowledge and epistemic domain ownership and schema evolution                             |
+| [0013](../adr/0013-project-generation-protocol.md)                         | Durable project-generation protocol                                                       |
+| [0014](../adr/0014-workspace-checkpoints.md)                               | Complete-workspace checkpoints                                                            |
+| [0015](../adr/0015-embedded-write-modes.md)                                | Three embedded project-write modes                                                        |
+| [0016](../adr/0016-repository-integration-and-deployment-configuration.md) | Repository integration and deployment configuration boundary                              |
+| [0018](../adr/0018-acknowledged-durability-isolation.md)                   | Acknowledged durability and isolation contract                                            |
+| [0036](../adr/0036-release-version-contract.md)                            | The GraphForge release version contract (consolidates and supersedes 0017, 0033 and 0034) |
 
 ## Risks & trade-offs
 

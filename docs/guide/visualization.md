@@ -1,37 +1,43 @@
 # Visualization examples
 
-GraphForge returns Arrow tables from its public Python and Node **data-plane**
-APIs (Cypher `execute`, analyst verbs, and other tabular results). This guide
-shows how to take **one shared real-data projection** and render it with common
-ecosystem libraries in both Python and Node.js—without adding visualization
-behavior to GraphForge Core.
+**Advanced:** use this optional integration guide after [Your first graph](quickstart.md).
+It assumes you can run Python scripts or Node programs and work from a source
+checkout. To begin with a table, `result.to_pylist()` is enough; a graph picture
+is not required to analyze data.
+
+GraphForge returns Arrow tables from queries and analyst verbs. The examples
+below render the same selected nodes and relationships with external libraries.
+GraphForge Core does not supply a point-and-click research or coding interface.
+For a first research report, explain what nodes and links represent and connect
+any visual pattern back to the underlying observations. Layout and color do not
+establish a finding.
 
 Runnable sources live under
 [`examples/visualization/`](https://github.com/CurateLabs/graphforge/tree/main/examples/visualization).
 
 ## Comparison
 
-| Runtime | Library | Artifact | Layout seed | Notes |
-| --- | --- | --- | --- | --- |
-| Python | [Plotly](https://plotly.com/python/) | `plotly_karate.html` + JSON | Deterministic circular layout using seed `42` | Fully offline-friendly HTML via CDN Plotly.js |
-| Python | [Jaal](https://github.com/imohitmayank/jaal) | `jaal_karate_payload.json` (+ Dash app) | **Not supported** by Jaal `create()`/`plot()` | Interactive view needs a Dash server (`--serve`) |
-| Python | [PyVis](https://pyvis.readthedocs.io/) | `pyvis_karate.html` | `layout.randomSeed = 42` | Writes standalone HTML |
-| Node.js | [Plotly.js](https://plotly.com/javascript/) | `plotly_js_karate.html` + JSON | Same circular layout / seed `42` as Python Plotly | CDN Plotly.js; figure JSON built without a Node Plotly package |
-| Node.js | [Cytoscape.js](https://js.cytoscape.org/) | elements JSON + HTML | cose has no portable seed matching the contract | Closest honest path: cose, `animate: false` |
-| Node.js | [Sigma.js](https://www.sigmajs.org/) | graphology JSON + HTML | Seeded circular coordinates (`42`) | Browser page loads graphology + sigma via import map |
+| Runtime | Library                                      | Artifact                                | Layout seed                                       | Notes                                                          |
+| ------- | -------------------------------------------- | --------------------------------------- | ------------------------------------------------- | -------------------------------------------------------------- |
+| Python  | [Plotly](https://plotly.com/python/)         | `plotly_karate.html` + JSON             | Deterministic circular layout using seed `42`     | Requires network access to load CDN Plotly.js                  |
+| Python  | [Jaal](https://github.com/imohitmayank/jaal) | `jaal_karate_payload.json` (+ Dash app) | **Not supported** by Jaal `create()`/`plot()`     | Interactive view needs a Dash server (`--serve`)               |
+| Python  | [PyVis](https://pyvis.readthedocs.io/)       | `pyvis_karate.html`                     | `layout.randomSeed = 42`                          | Writes standalone HTML                                         |
+| Node.js | [Plotly.js](https://plotly.com/javascript/)  | `plotly_js_karate.html` + JSON          | Same circular layout / seed `42` as Python Plotly | CDN Plotly.js; figure JSON built without a Node Plotly package |
+| Node.js | [Cytoscape.js](https://js.cytoscape.org/)    | elements JSON + HTML                    | cose has no portable seed matching the contract   | Closest honest path: cose, `animate: false`                    |
+| Node.js | [Sigma.js](https://www.sigmajs.org/)         | graphology JSON + HTML                  | Seeded circular coordinates (`42`)                | Browser page loads graphology + sigma via import map           |
 
 Awkward or limited options stay in the comparison with documented compromises.
 
 ## Dataset provenance
 
-| Field | Value |
-| --- | --- |
-| Dataset | Zachary's Karate Club |
-| Source | [Mark Newman network data](https://public.websites.umich.edu/~mejn/netdata/karate.zip) |
-| Version identity | SHA-256 of `karate.zip` recorded in `examples/visualization/dataset/MANIFEST.json` |
-| Nodes / edges | 34 / 78 |
-| Directed | No (undirected friendships) |
-| Citation | W. W. Zachary, *Journal of Anthropological Research* 33, 452–473 (1977) |
+| Field            | Value                                                                                  |
+| ---------------- | -------------------------------------------------------------------------------------- |
+| Dataset          | Zachary's Karate Club                                                                  |
+| Source           | [Mark Newman network data](https://public.websites.umich.edu/~mejn/netdata/karate.zip) |
+| Version identity | SHA-256 of `karate.zip` recorded in `examples/visualization/dataset/MANIFEST.json`     |
+| Nodes / edges    | 34 / 78                                                                                |
+| Directed         | No (undirected friendships)                                                            |
+| Citation         | W. W. Zachary, _Journal of Anthropological Research_ 33, 452–473 (1977)                |
 
 Raw archives and extracts are **not** committed. Fetch and verify:
 
@@ -62,19 +68,24 @@ rendering.
 
 ## Setup
 
+These commands use files from the GraphForge source repository, not files
+installed by the Python wheel. Download or clone the source revision matching
+your package, open a terminal at its root, and activate the environment from
+[Installation](installation.md). The dataset download needs network access.
+
 ### Python
 
-```bash
-python -m pip install graphforge
-```
+Install the matching GraphForge release or candidate as described in
+[Installation](installation.md), then install the example libraries:
 
 ```bash
 python -m pip install -r examples/visualization/requirements.txt
 python examples/visualization/dataset/fetch.py
 ```
 
-Pinned example libraries (install-time versions from the requirements file):
-Plotly, Jaal, PyVis, pandas, pyarrow.
+The requirements file declares minimum versions of Plotly, Jaal, PyVis, pandas,
+and PyArrow; it is not an exact version lock. Record the installed versions if
+you need to reproduce a rendered artifact.
 
 ### Node.js
 
@@ -116,7 +127,8 @@ node examples/visualization/node/sigma_example.mjs
 # -> output/sigma_karate_graph.json, output/sigma_karate.html
 ```
 
-Open the HTML files in a browser locally. Example tests validate artifact
+Open the HTML files in a browser locally. Pages that load scripts from a CDN
+still require network access. Example tests validate artifact
 construction without launching a browser:
 
 ```bash

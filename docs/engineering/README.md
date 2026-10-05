@@ -1,5 +1,9 @@
 # Engineering
 
+This section is for people developing, testing, or operating GraphForge. You do
+not need it to complete a research project. For a first mixed-methods exercise,
+start with [Your first research project](../guide/first-research-project.md).
+
 Engineering follows public behavior through design, pre-release evidence, continuous
 delivery, and production learning.
 
@@ -14,13 +18,13 @@ flowchart LR
 
 ## Lifecycle
 
-| Document | Responsibility |
-| --- | --- |
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | Problem model, responsibility boundaries, and components that satisfy requirements |
-| [`TESTING.md`](TESTING.md) | How tests and CI prove the system before release |
-| [`PUBLISHING.md`](PUBLISHING.md) | How verified artifacts are versioned, promoted, and rolled back |
-| [`OBSERVABILITY.md`](OBSERVABILITY.md) | How CI/release/user signals feed discovery |
-| [`adrs/`](adrs/) | ADR index (bodies in [`../adr/`](../adr/)) |
+| Document                               | Responsibility                                                                     |
+| -------------------------------------- | ---------------------------------------------------------------------------------- |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md)   | Problem model, responsibility boundaries, and components that satisfy requirements |
+| [`TESTING.md`](TESTING.md)             | How tests and CI prove the system before release                                   |
+| [`PUBLISHING.md`](PUBLISHING.md)       | How verified artifacts are versioned, promoted, and rolled back                    |
+| [`OBSERVABILITY.md`](OBSERVABILITY.md) | How CI/release/user signals feed discovery                                         |
+| [`adrs/`](adrs/)                       | ADR index (bodies in [`../adr/`](../adr/))                                         |
 
 ## Analyst UX requirements
 
@@ -37,13 +41,13 @@ They are requirements for implementation, not claims of shipped functionality.
 
 ## Supporting documentation
 
-| Document | Description |
-| --- | --- |
-| [`../book/architecture/`](../book/architecture/overview.md) | Deep architecture notes, pipeline, storage, embedding contracts |
-| [`../development/`](../development/contributing.md) | Contributor workflow, testing detail, release process |
-| [`../contracts/`](https://github.com/CurateLabs/graphforge/tree/main/docs/contracts) | Frozen public API / fingerprint JSON contracts |
-| [`../reference/`](../reference/api.md) | Compatibility, TCK, scale limits, column naming |
-| Root `AGENTS.md` | Agent workflow and validation gates |
+| Document                                                                             | Description                                                     |
+| ------------------------------------------------------------------------------------ | --------------------------------------------------------------- |
+| [`../book/architecture/`](../book/architecture/overview.md)                          | Deep architecture notes, pipeline, storage, embedding contracts |
+| [`../development/`](../development/contributing.md)                                  | Contributor workflow, testing detail, release process           |
+| [`../contracts/`](https://github.com/CurateLabs/graphforge/tree/main/docs/contracts) | Frozen public API / fingerprint JSON contracts                  |
+| [`../reference/`](../reference/api.md)                                               | Compatibility, TCK, scale limits, column naming                 |
+| Root `AGENTS.md`                                                                     | Agent workflow and validation gates                             |
 
 ## Decision records
 

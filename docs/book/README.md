@@ -1,19 +1,19 @@
-# Book
+# Further learning and reference
 
-Deeper GraphForge material: architecture, research notes, and richer usage narratives.
+Choose material for the task and experience you have now. You do not need the
+whole GraphForge vocabulary to obtain a useful result.
 
-This is the explanation and deep-usage layer. For install and everyday workflows, start in
-the [Guide](../guide/overview.md). Contributor engineering lifecycle docs live under
-[`../engineering/`](../engineering/README.md).
+| Level            | Start here                                                                                                                                                                           | Assumed background                                                                              |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| Basic            | [First graph](../guide/quickstart.md), [agent](../guide/work-with-an-agent.md), [notebook](../guide/use-a-notebook.md), [first research project](../guide/first-research-project.md) | A nontechnical analyst working with an agent; research concepts explained with guided execution |
+| Advanced         | [Worked examples](use-cases/README.md), [research and evaluation notes](research/README.md)                                                                                          | Basic Python, database, and terminal skills                                                     |
+| Expert reference | [Architecture](architecture/overview.md), [engineering](../engineering/README.md), [API reference](../reference/api.md)                                                              | Implementers investigating exact contracts, engine design, or contributor workflows             |
 
-## Contents
+Advanced examples explain the GraphForge concepts they introduce. Optional
+research history, collaboration, ontology, and external decision validation
+are not prerequisites for Basic work. Evaluation notes separate a valid graph
+result from a justified research interpretation or a qualified user experience.
 
-| Section | What it covers |
-| --- | --- |
-| [`architecture/`](architecture/overview.md) | Pipeline, storage, execution, algorithms, contracts |
-| [`use-cases/`](use-cases/README.md) | Worked deeper usage: KG construction, agents, network analysis, LLM workflows |
-| [`research/`](research/README.md) | Present-tense validation notes behind the use-case guides |
-
-ADR bodies remain under [`../adr/`](../adr/) (`0001`–`0014`), indexed from
-[`../engineering/adrs/`](../engineering/adrs/). On the published site they appear under
-**Engineering → Architecture Decision Records**, not under Understand.
+Architecture decision records live in [the ADR directory](../adr/README.md),
+with an [engineering index](../engineering/adrs/README.md). They explain
+implementation decisions and are not a required learning sequence.

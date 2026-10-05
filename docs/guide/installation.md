@@ -1,163 +1,128 @@
-# Installation
+# Install GraphForge
 
-GraphForge ships as thin native bindings over a Rust core
-(Python via maturin; Node via N-API). Install the published packages for
-normal use; build from source on `main` when developing the engine or
-bindings.
+**Advanced · Assumes basic Python, database, and terminal skills.**
+Start with the [Advanced introduction](advanced.md) for GraphForge terminology,
+or [Basic](overview.md#basic) for a guided first graph.
 
-Prefer an editor workflow? The optional [GraphForge VS Code extension](vscode-extension/install.md)
-detects Node- and Python-first workspaces, helps configure the appropriate native binding, and
-uses the same Rust-owned engine described below.
+These instructions target **v0.6.0**. Check the
+[GitHub releases](https://github.com/CurateLabs/graphforge/releases) for the
+available artifact before installing. The final-version commands below require
+v0.6.0 to have been published. While it is being prepared, use an explicitly
+published candidate or a source build; do not substitute an older package and
+assume it implements these docs.
 
-> **Name collision:** PyPI also lists an unrelated pure-Python package
-> named `graphforge` at **0.4.0** (~279 KB). Current CurateLabs GraphForge
-> releases are native wheels (Rust `.so` / `.node`) on PyPI and npm. Install
-> by package name to receive the current release.
+The site maintains one current documentation set. Before v1.0.0, GraphForge
+does not guarantee backward compatibility, legacy APIs, or project migration.
+Use matching engine, bindings, CLI, and skills versions. Keep original source
+data and reproducible construction code when changing versions.
 
----
+## Python
 
-## Python package
-
-**Requirements:** Python 3.10 or newer (3.10–3.14 tested in CI).
-
-**pip**
+Use Python 3.10 or newer in an isolated environment:
 
 ```bash
-pip install graphforge
+python3 -m venv .venv
 ```
 
-**uv** (recommended)
+On Windows, use `py -3 -m venv .venv` instead. If environment creation fails,
+install your Python distribution's venv and pip support before continuing.
+
+Activate it using the command for your shell (`source .venv/bin/activate` on
+POSIX shells; `.venv\Scripts\Activate.ps1` in PowerShell), then install:
 
 ```bash
-uv add graphforge
-```
-
-### Verify
-
-```python
-import graphforge
-print(graphforge.__version__)
-```
-
-### Optional dependencies
-
-```bash
-# Polars convenience wrapper around Arrow results
-pip install "graphforge[polars]"
-```
-
-Results are Apache Arrow tables. Convert with `table.to_pandas()`,
-`pl.from_arrow(table)`, or `table.to_pylist()` as needed. Graph algorithms
-run in the native Rust engine; NetworkX and igraph are development-only
-parity oracles, not runtime backends.
-
-Python installs typically also pull **PyArrow** as a separate runtime
-dependency (not bundled inside the `graphforge` wheel). See
-[Install footprint](#install-footprint) for approximate sizes.
-
----
-
-## Node package (`@curatelabs/graphforge`)
-
-**Requirements:** a current Node.js LTS (CI covers the binding’s supported
-targets).
-
-**npm**
-
-```bash
-npm install @curatelabs/graphforge
-```
-
-**pnpm**
-
-```bash
-pnpm add @curatelabs/graphforge
-```
-
-```js
-import { GraphForge } from "@curatelabs/graphforge";
-```
-
-For local engine work, install from a release build or path dependency in
-this repository (see [Install from source](#install-from-source-main)).
-
----
-
-## Install footprint
-
-Approximate **download** and **on-disk** sizes for operators sizing CI images,
-laptops, and air-gapped mirrors. These are **not** [scale-limits](../reference/scale-limits.md)
-query/bench results.
-
-| Surface | Packed / download | Installed / unpacked |
-|---|---|---|
-| Python `graphforge` | ~42 MB wheel | ~121 MB (mostly `_graphforge_rs.abi3.so`) |
-| Node `@curatelabs/graphforge` | ~44 MB npm pack | ~128 MB (mostly `.node` ≈ 121 MB) |
-| PyArrow (Python dep, e.g. 21.0.0) | ~31 MB wheel | ~108 MB |
-
-**Caveats**
-
-- Measured on **local macOS arm64 (darwin-arm64)** release builds of
-  **0.5.1**. Other OS/arch combinations will differ.
-- Almost all of the GraphForge footprint is the **Rust native binary**; the
-  thin Python/JS wrappers are negligible by comparison.
-- **PyArrow is separate** — it is not inside the `graphforge` wheel. Budget it
-  only for Python environments that install that dependency.
-- Do not confuse these sizes with PyPI `graphforge` **0.4.0** (unrelated
-  pure-Python package, ~279 KB).
-
----
-
-## Install from source (`main`)
-
-Building from source requires a Python environment and the Rust toolchain.
-
-### Requirements
-
-- Python 3.10 or newer
-- Rust stable toolchain (`rustup`)
-- [uv](https://github.com/astral-sh/uv)
-- [maturin](https://www.maturin.rs/) (Python/Rust build bridge)
-
-### Setup
-
-```bash
-# 1. Install Rust (if not already installed)
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-rustup update stable
-
-# 2. Clone
-git clone https://github.com/CurateLabs/graphforge.git
-cd graphforge
-
-# 3. Install Python dev dependencies
-uv sync --dev
-
-# 4. Build and install the Rust extension in development mode
-maturin develop --release -m crates/graphforge-bindings-py/Cargo.toml
-
-# 5. Verify
+python -m pip install graphforge==0.6.0
 python -c "import graphforge; print(graphforge.__version__)"
 ```
 
-### Run checks
+The imported version must match the release you selected. Native wheels include
+the Rust engine; pip installs PyArrow automatically as a runtime dependency. pandas
+and Polars are optional and are not needed for the first graph.
+
+For an available release candidate, use its exact PyPI version. Canonical
+`0.6.0-rc.N` is spelled `0.6.0rcN` on PyPI, with `N` replaced by the published
+candidate number. Verify that candidate exists before choosing it.
+
+Continue with [Your first graph](quickstart.md), [an agent](work-with-an-agent.md),
+or [a notebook](use-a-notebook.md).
+
+## Node and TypeScript
+
+Use Node.js 20 or newer and a platform with a matching native package:
 
 ```bash
-# Rust: unit + integration tests across all crates
-cargo test --workspace
-
-# Rust: lint
-cargo clippy --workspace -- -D warnings
-
-# Static checks (format, lint, type-check, policy)
-make check
+npm install @curatelabs/graphforge@0.6.0 apache-arrow
+npm ls @curatelabs/graphforge
 ```
 
----
+`apache-arrow` provides result decoding for the
+[Node integration example](integrate-graphforge.md#node-and-typescript).
+For an available candidate, use the exact npm version `0.6.0-rc.N`.
 
-## Next steps
+The separate CLI package can be invoked without a global install:
 
-- [VS Code extension](vscode-extension/install.md) — configure GraphForge inside your editor
-- [Quick Start](quickstart.md) — build your first graph in five minutes
-- [Tutorial](tutorial.md) — step-by-step guided walkthrough
-- [Architecture Overview](../book/architecture/overview.md) — Rust core design
+```bash
+npx @curatelabs/graphforge-cli@0.6.0 --help
+```
+
+The Python package provides `graphforge`; the npm CLI provides both
+`graphforge` and `gf`. All launch the Rust CLI. Repository initialization and
+project skills are optional next steps in [repository integration](repository-integration.md).
+
+## Durable storage
+
+Start with `GraphForge()` if you only need a temporary graph. It runs the full
+engine in memory and loses its state when closed or when the process exits.
+
+`GraphForge(path)` opens a durable project in an existing directory. Native
+filesystem admission must succeed before writing:
+
+| Platform | Durable storage                                                                      |
+| -------- | ------------------------------------------------------------------------------------ |
+| Linux    | Local ext4, xfs, or btrfs; the project and process-root ancestry must pass admission |
+| macOS    | An admitted local APFS volume                                                        |
+| Windows  | An admitted fixed local writable NTFS volume                                         |
+
+Network filesystems, container overlay roots, and other unproven filesystems
+are not a durable-storage workaround. On Linux, mounting ext4 below an
+unsupported root does not necessarily satisfy admission. A refusal reports
+`GF_UNSUPPORTED_FILESYSTEM`; move to a supported environment rather than
+bypassing the check. Native-package availability and filesystem admission are
+separate requirements.
+
+Use [the persistence tutorial](tutorial.md) to create, close, and reopen a
+project. Use [portable export/import](portable-projects.md) for movement;
+do not copy live project storage or add it to Git. Package verification does
+not provide a migration path from unsupported older versions.
+
+[Kaggle and Colab](use-a-notebook.md#hosted-notebooks) require their own
+qualification. A local notebook example does not establish hosted persistence.
+For detailed diagnostics, see [concurrency and recovery](../book/architecture/concurrency-recovery.md)
+and [agent environment notes](../development/agent-environment.md).
+
+## Build from source
+
+For engine development or evaluation before a matching artifact is published,
+use the Rust toolchain pinned by `rust-toolchain.toml`, Python 3.10+, `uv`, and
+maturin. Build from the source revision you intend to evaluate:
+
+```bash
+git clone https://github.com/CurateLabs/graphforge.git
+cd graphforge
+uv sync --inexact
+uv run maturin develop --release -m crates/graphforge-bindings-py/Cargo.toml
+uv run --no-sync python -c "import graphforge; print(graphforge.__version__)"
+```
+
+A development build can still carry the repository's pre-bump version. Record
+its source revision when evaluating it; it is not a published v0.6.0 artifact.
+See [contributing](../development/contributing.md) for the Node build and
+validation environment.
+
+## If setup fails
+
+Record your OS/architecture, Python or Node version, selected package version,
+and the complete installation error. For storage failures, also record the
+filesystem and whether you used a path or memory-only instance. Ask in
+[Discussions](https://github.com/CurateLabs/graphforge/discussions) or open a
+[minimal bug report](https://github.com/CurateLabs/graphforge/issues/new/choose).

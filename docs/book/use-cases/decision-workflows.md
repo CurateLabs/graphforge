@@ -1,90 +1,101 @@
-# Provider neutral decision workflows
+# Provider-neutral decision workflows
 
-GraphForge can validate caller supplied choice, ordered rubric, and yes/no
-probability results against bounded, explicitly identified graph context. The
-producer, ranking rules, review thresholds, and any action remain ordinary
-caller code. A valid result never authorizes a write.
+**Advanced:** this guide assumes basic Python dictionaries, API calls, and
+running a script from a terminal. For a first research assignment, start with
+[Your first research project](../../guide/first-research-project.md). A decision
+producer is not required for basic graph use or human interpretation.
 
-## Python and Node
+Use this workflow when another part of your application proposes a choice,
+an ordered rubric rating, or a yes/no probability. GraphForge checks whether
+the response matches the question and selected data. Your application decides
+what to do next. A structurally valid result is not necessarily a good judgment,
+and it never authorizes a write by itself.
 
-For a memory only first use, create GraphForge without a path, select a finite
-set of objects, and build a DecisionBatchV1 from the observed generation, the
-selected UUIDs, and digests of the exact projection and selection. Generate
-question IDs with the language's standard UUID library. A deterministic local
-fixture can return a choice such as research or human_review without network
-access; callers can replace that function with an independent application
-producer.
+## Run the offline analyst example
 
-Python exports DecisionBatchV1 and the supporting TypedDicts from graphforge.
-Pass the batch to GraphForge.validate_decision_batch(). It returns a
-pyarrow.Table with UUID and digest byte arrays, nullable values, and Float64
-probabilities intact. Node exposes validateDecisionBatch() and returns Arrow
-IPC bytes for apache-arrow's tableFromIPC(). Its discriminated TypeScript
-contracts are in @curatelabs/graphforge/lib/decision.
+Install the matching Python package through [Installation](../../guide/installation.md).
+The final v0.6.0 command applies only after publication; choose an available
+candidate explicitly while evaluating the release.
 
-Runnable offline examples are in examples/decision-workflow/analyst.py and
-examples/decision-workflow/agent.mjs. They create a memory only graph, select a
-bounded projection, use labeled local fixtures, inspect uncertainty, and gate
-a sample action in caller code. See the examples README for install and run
-commands; the Node example also needs apache-arrow.
+Download [analyst.py](../../../examples/decision-workflow/analyst.py), save it
+in your working folder, and run it with the same environment's interpreter:
 
-The Python example invokes a caller-owned function that returns route, rubric,
-and project-level probability records. The Node example creates and reloads an
-independent Arrow result artifact, then joins results by question and item UUID
-before validation. Neither path adds a provider to Core. The checked-in
-four-row evaluation fixture reports its rule baseline, answer errors, missing
-and uncertain results, review decisions, and a fixture-only Brier score; it is
-an executable measurement recipe, not model-quality or calibration evidence.
+```bash
+python analyst.py
+```
 
-The composition test
-`crates/graphforge-api/tests/decision_results.rs::composed_workflow_supports_independent_producers_explicit_action_and_replay`
-uses a durable graph rooted on a supported filesystem. It validates both
-producer paths through the Rust facade, confirms private fields are excluded,
-keeps missing/unavailable/uncertain and action failures distinct, rejects a
-stale action, and records a separate human override of an uncertain result
-before verifying exact Arrow payload identity plus exact receipt replay after
-cleanup and reopen. Python and Node examples are memory-only;
-their direct native validation tests are
-`crates/graphforge-bindings-py/tests/decision_results.py` and
-`crates/graphforge-bindings-node/tests/decision-results.test.mjs`.
+From a source checkout, the equivalent command is
+`python examples/decision-workflow/analyst.py`. You do not need to build Rust
+when using an installed matching native package. The example runs in memory,
+uses a local teaching fixture, and makes no model call.
 
-At this evidence point, the binding package metadata remains `0.5.2`. The
-coordinated `0.6` compatibility/version update belongs to #858; this M12 work
-does not claim a released package version.
+It creates two synthetic research candidates, Mystery and Voyage. The local
+producer supplies a route, an ordered rubric label, and a review probability.
+The example prints the validated Arrow rows and the caller's selected action.
+Expect a `research` route and `high` rubric for Mystery; Voyage has an uncertain
+`human_review` route and `medium` rubric. The fixture's project-level review
+probability is `0.25`. These values were chosen for teaching, not measured from
+real researchers or a model.
 
-The CLI accepts the same JSON contract and writes the Arrow result without
-invoking a producer: gf --project PROJECT research decision validate --file
-BATCH.json --output DECISIONS.arrow. The project is opened under the normal
-filesystem admission rules; the command does not mutate it.
+Read the source in this order:
 
-The Rust validator enforces the 256 expected result row limit, exact
-question/item correlation, finite choice/rubric domains, valid probabilities,
-and declared confidence scales. Missing and unavailable outcomes remain
-distinct from negative answers. It does not normalize probabilities, rank
-candidates, infer confidence meaning, or select a policy threshold.
+1. `caller_producer()` supplies proposed answers without changing the graph.
+2. `main()` selects the graph records and states the allowed answers.
+3. `validate_decision_batch()` checks the submitted answers against that request.
+4. Caller code checks the actual status and current state before applying its
+   separately permitted sample action.
 
-## Explicit policy and retry
+The script prepares opaque item/question IDs and content digests for you.
+IDs identify which answer belongs to which question or item; digests bind it to
+selected content. You do not need to invent those contracts to run the example.
 
-Caller code may route a clear result only after checking that the input
-generation is still current. Uncertain, missing, unavailable, or stale results
-should take a caller chosen clarification or review path. For an optional
-write, prepare its operation identity and expected state once, retain the exact
-request and resulting receipt, and reuse that request for an exact retry.
-Changed state requires explicit review or revalidation. Existing research
-prepare/commit and Proposal APIs provide the durable mutation receipts and
-replay contract; external decision results themselves create no authority.
+## Interpret uncertainty and validation correctly
 
-The binding tests in
-crates/graphforge-bindings-py/tests/decision_results.py and
-crates/graphforge-bindings-node/tests/decision-results.test.mjs exercise the
-real Rust validator. The Rust contract and reopened Artifact evidence are
-documented in the [research workspace guide](../architecture/research-workspaces.md#external-decision-results-1577).
+| Result                     | What it means                                         | What it does not establish           |
+| -------------------------- | ----------------------------------------------------- | ------------------------------------ |
+| Choice                     | One of the options supplied by the caller             | The best option or permission to act |
+| Rubric label               | A value in the caller's ordered scale                 | A universal quality score            |
+| Yes/no probability         | A supplied value in the declared probability range    | Calibration or factual correctness   |
+| `uncertain`                | The producer identifies uncertainty                   | A negative answer                    |
+| `missing` or `unavailable` | An expected answer is absent or could not be obtained | Evidence against the proposition     |
 
-## Retaining results
+The validator checks allowed values, finite numbers, stable correlation, and
+request bounds. It does not rank candidates, choose a threshold, judge evidence,
+or normalize malformed probabilities. A valid partial response keeps missing
+items explicit. Decide a review or clarification path in caller code.
 
-The initial path can remain memory only. To retain a result, serialize the
-validated Arrow table as Arrow IPC, explicitly register it as a local Artifact
-with a Source and selected-item derivation references, then capture a research
-Version. Reopen that Version before relying on retained evidence. Payload
-availability follows ordinary Version retention; release can make it
-unavailable. Durable project roots require ext4, xfs, or btrfs.
+## Change the producer or the policy
+
+You can replace the local fixture with your own function or independently
+produced data. Preserve question/item identity when results arrive in a different
+order. Record the producer revision if known; do not invent one.
+
+Before acting on a result, check that the selected live state has not changed.
+A stale result needs review or revalidation. Keep action failure distinct from
+successful validation. For a retry of a native mutation, preserve its prepared
+operation identity and exact request rather than constructing a new operation
+and risking a duplicate effect.
+
+The [Node example](../../../examples/decision-workflow/agent.mjs) reads an
+independent Arrow artifact before validation. Its
+[README](../../../examples/decision-workflow/README.md) documents setup and
+expected output; Node needs `apache-arrow`. Python returns a PyArrow table;
+Node returns Arrow IPC bytes.
+
+## Evaluate and retain results when needed
+
+The [evaluation fixture](../../../examples/decision-workflow/evaluate_fixtures.py)
+compares a small labeled example with an explicit rule baseline. It separates
+answer errors, missing results, uncertainty, and review decisions. Its four-row
+Brier score illustrates the calculation; it is not evidence of real-model
+quality or calibration. Evaluate representative, independently reviewed task
+cases before using a threshold in a real workflow.
+
+The examples are memory-only. Retaining an Arrow result file is different from
+retaining all graph and source context behind it. For richer retention, use the
+[research workspace contract](../architecture/research-workspaces.md#external-decision-results-1577)
+and [knowledge API](../architecture/knowledge-public-api-v1.md). These expert
+references explain explicit Artifact/Version registration and the exact batch
+schema. [Native test evidence](../../engineering/TESTING.md#m12-decision-workflow-contract)
+is separate from candidate-package and human-use qualification in
+[#1209](https://github.com/CurateLabs/graphforge/issues/1209).

@@ -11,28 +11,32 @@ provenance IDs, and structured errors ([`../releases/roadmap.md`](../releases/ro
 
 ## Observable outcomes
 
-| Outcome / requirement | Signal | Source | Expected range | Owner |
-| --- | --- | --- | --- | --- |
-| FR-1 / NFR-1 Cypher correctness | TCK runnable pass count | CI BDD / release gates | Full corpus green on release lineage | Maintainers |
-| FR-2 / NFR-7 Surface completeness | Non-Cypher inventory + evidence digests | Surface inventory script | No unclassified public methods | Maintainers |
-| FR-3 Project durability | Reopen / recovery tests | Lifecycle & checkpoint tests | Pass on changed surface | Maintainers |
-| FR-6 Binding parity | Arrow/IPC equality, structured codes | Binding parity / concurrency suites | Parity within published surface | Maintainers |
-| FR-8 Agent DX | Structured error codes vs prose-only failures | Facade + skills adapter tests | Stable codes on known failure classes | Maintainers |
-| Query diagnosability | `explain` / query ID availability | Architecture observability surfaces | Present on supported paths | Maintainers |
-| Clean-install success | Quickstart smokes after publish | `verify-published` job in `publish.yaml` | Pass from public registries | Release operator |
-| Docs usability | Docs build; link integrity | `docs.yml` / Starlight (`docs-site/`) | Green build | Docs owners |
-| Scale honesty | Fixed-hop LIMIT materialization ratios | Scale-limit CI gate | ≤3× rows on 10× edges for LIMIT 1000 shape | Maintainers |
-| Rust CI correctness | Workspace nextest, custom-harness targets, doctests | `Rust Tests` under `CI Gate` | Green on Rust-classified PRs | Maintainers |
+| Outcome / requirement             | Signal                                              | Source                                   | Expected range                             | Owner            |
+| --------------------------------- | --------------------------------------------------- | ---------------------------------------- | ------------------------------------------ | ---------------- |
+| FR-1 / NFR-1 Cypher correctness   | TCK runnable pass count                             | CI BDD / release gates                   | Full corpus green on release lineage       | Maintainers      |
+| FR-2 / NFR-7 Surface completeness | Non-Cypher inventory + evidence digests             | Surface inventory script                 | No unclassified public methods             | Maintainers      |
+| FR-3 Project durability           | Reopen / recovery tests                             | Lifecycle & checkpoint tests             | Pass on changed surface                    | Maintainers      |
+| FR-6 Binding parity               | Arrow/IPC equality, structured codes                | Binding parity / concurrency suites      | Parity within published surface            | Maintainers      |
+| FR-8 Agent DX                     | Structured error codes vs prose-only failures       | Facade + skills adapter tests            | Stable codes on known failure classes      | Maintainers      |
+| Query diagnosability              | `explain` / query ID availability                   | Architecture observability surfaces      | Present on supported paths                 | Maintainers      |
+| Clean-install success             | Quickstart smokes after publish                     | `verify-published` job in `publish.yaml` | Pass from public registries                | Release operator |
+| Docs technical health             | Docs build; link integrity                          | `docs.yml` / Starlight (`docs-site/`)    | Green build                                | Docs owners      |
+| Scale honesty                     | Fixed-hop LIMIT materialization ratios              | Scale-limit CI gate                      | ≤3× rows on 10× edges for LIMIT 1000 shape | Maintainers      |
+| Rust CI correctness               | Workspace nextest, custom-harness targets, doctests | `Rust Tests` under `CI Gate`             | Green on Rust-classified PRs               | Maintainers      |
+
+Docs builds and links establish technical health, not reader comprehension.
+Usability requires observing the intended reader complete a task and explain
+the result; see [analyst UX acceptance](TESTING.md#analyst-ux-acceptance).
 
 ## Service health
 
-| Service / journey | Indicator | Objective | Window |
-| ----------------- | --------- | --------- | ------ |
-| CI on `main` | Required workflows at merge SHA | Green after merge | Per merge |
-| Release | `publish.yaml` run for the tag, including `verify-published` | Every job green on the tagged commit | Per release |
-| Local embedded use | Structured API errors vs crashes | Fail closed with codes; no silent corruption | Per user session |
-| Agent skills loop | Offline smoke + compatibility JSON | Deterministic pack hash; fail-closed versions | Per skills change / RC |
-| Docs site | Starlight build/deploy success | Site serves current allowlisted `docs/` | Per docs change |
+| Service / journey  | Indicator                                                    | Objective                                     | Window                 |
+| ------------------ | ------------------------------------------------------------ | --------------------------------------------- | ---------------------- |
+| CI on `main`       | Required workflows at merge SHA                              | Green after merge                             | Per merge              |
+| Release            | `publish.yaml` run for the tag, including `verify-published` | Every job green on the tagged commit          | Per release            |
+| Local embedded use | Structured API errors vs crashes                             | Fail closed with codes; no silent corruption  | Per user session       |
+| Agent skills loop  | Offline smoke + compatibility JSON                           | Deterministic pack hash; fail-closed versions | Per skills change / RC |
+| Docs site          | Starlight build/deploy success                               | Site serves current allowlisted `docs/`       | Per docs change        |
 
 Embedded library use does not define availability SLOs for a network endpoint.
 
@@ -56,14 +60,14 @@ aggregate CI signals.
 
 ## Dashboards and alerts
 
-| Signal | Trigger | Severity | Owner | Response |
-| --- | --- | --- | --- | --- |
-| Required CI red on `main` | Workflow failure at merge SHA | High | Maintainers | Fix forward or revert; never ignore |
-| TCK / contract gate regression | Fail on PR | High | Surface owners | Root-cause; add regression coverage |
-| Binding / skills build failure | Parity or smoke red in CI or `publish.yaml` | High | Binding/skills owners | Root-cause; no wrapper-test substitution |
-| Docs build failure | `docs.yml` / Starlight build red | Medium | Docs owners | Fix content or site config |
-| Publish dry-run or tag-run failure | `publish.yaml` red | High | Release operator | Fix the cause; re-run the failed run (published versions are skipped) |
-| Scale-limit shape regression | Materialization ratio gate fail | Medium | Execution owners | Investigate adjacency/fetch path; update docs if limits change |
+| Signal                             | Trigger                                     | Severity | Owner                 | Response                                                              |
+| ---------------------------------- | ------------------------------------------- | -------- | --------------------- | --------------------------------------------------------------------- |
+| Required CI red on `main`          | Workflow failure at merge SHA               | High     | Maintainers           | Fix forward or revert; never ignore                                   |
+| TCK / contract gate regression     | Fail on PR                                  | High     | Surface owners        | Root-cause; add regression coverage                                   |
+| Binding / skills build failure     | Parity or smoke red in CI or `publish.yaml` | High     | Binding/skills owners | Root-cause; no wrapper-test substitution                              |
+| Docs build failure                 | `docs.yml` / Starlight build red            | Medium   | Docs owners           | Fix content or site config                                            |
+| Publish dry-run or tag-run failure | `publish.yaml` red                          | High     | Release operator      | Fix the cause; re-run the failed run (published versions are skipped) |
+| Scale-limit shape regression       | Materialization ratio gate fail             | Medium   | Execution owners      | Investigate adjacency/fetch path; update docs if limits change        |
 
 There is no hosted ops dashboard product; CI and release artifacts are the shared “dashboard.”
 Blacksmith Cache UI: https://app.blacksmith.sh/cache.
