@@ -934,14 +934,16 @@ fn execute_process_with_allocation(
             let receipts = match (receipts, released) {
                 (Ok(receipts), Ok(_)) => receipts,
                 (Ok(_), Err(error)) => return Err(error),
-                (Err(_), Ok(_)) if status.success() => {
+                (Err(receipt_error), Ok(_)) if status.success() => {
                     return Ok(Execution {
                         exit_code: status.code(),
                         duration_ms: millis(started.elapsed()),
                         peak_rss_bytes,
                         failure: Some(FailureKind::EvidenceInvalid),
                         cleanup_failure: None,
-                        error_tail,
+                        error_tail: error_tail.or_else(|| {
+                            Some(receipt_validation_detail(&stdout, &receipt_error))
+                        }),
                         receipts: Vec::new(),
                     });
                 }
@@ -1226,6 +1228,88 @@ fn parse_receipts(stdout: &[u8], expected: bool) -> Result<Vec<serde_json::Value
                 .ok_or_else(|| "public receipt contract is not allowlisted".to_owned())
         })
         .collect()
+}
+
+fn receipt_validation_detail(stdout: &[u8], error: &str) -> String {
+    let text = String::from_utf8_lossy(stdout);
+    let lines = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    let (stage, rejected_line) = if error == "public command omitted its JSON receipt" {
+        ("receipt-missing", 0)
+    } else if error == "public receipt was not UTF-8" {
+        ("receipt-encoding", 0)
+    } else if error == "public receipt was not one JSON object per line" {
+        ("receipt-json-line", 0)
+    } else {
+        lines
+            .iter()
+            .enumerate()
+            .find_map(|(index, line)| {
+                let value = serde_json::from_str::<serde_json::Value>(line).ok()?;
+                sanitize_receipt(&value)
+                    .is_none()
+                    .then(|| (receipt_rejection_stage(&value), index + 1))
+            })
+            .unwrap_or(("receipt-contract", 0))
+    };
+    let detail = format!(
+        "receipt validation invalid: stage={stage}, rejected_line={rejected_line}, stdout_line_count={}",
+        lines.len(),
+    );
+    debug_assert!(detail.chars().count() <= ERROR_TAIL_LIMIT_CHARS);
+    detail
+}
+
+fn receipt_rejection_stage(value: &serde_json::Value) -> &'static str {
+    let Some(object) = value.as_object() else {
+        return "receipt-object-shape";
+    };
+    match object.get("contract").and_then(serde_json::Value::as_str) {
+        Some("graphforge-import-session/1") => {
+            if !object
+                .get("outcome")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|outcome| {
+                    matches!(
+                        outcome,
+                        "begun"
+                            | "resumed"
+                            | "registered"
+                            | "checkpointed"
+                            | "validated"
+                            | "stage+seal"
+                            | "committed"
+                            | "aborted"
+                    )
+                })
+            {
+                "import-outcome"
+            } else if object
+                .get("construction")
+                .is_some_and(|construction| !sanitized_construction_tree(construction))
+            {
+                "import-construction"
+            } else if object.get("operation_timings").is_some_and(|timings| {
+                !matches!(
+                    object.get("outcome").and_then(serde_json::Value::as_str),
+                    Some("validated" | "stage+seal" | "committed")
+                ) || !sanitized_import_operation_timings(timings)
+            }) {
+                "import-operation-timings"
+            } else if object
+                .get("region_diagnostics")
+                .is_some_and(|value| !region_diagnostics::valid_snapshot(value))
+            {
+                "import-region-diagnostics"
+            } else {
+                "import-receipt-contract"
+            }
+        }
+        Some(_) => "receipt-contract-dispatch",
+        None => "receipt-contract-missing",
+    }
 }
 
 fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
@@ -3564,6 +3648,12 @@ fi
                 execution.failure,
                 reject_second.then_some(FailureKind::EvidenceInvalid)
             );
+            if reject_second {
+                let detail = execution.error_tail.as_deref().unwrap();
+                assert!(detail.contains("stage=receipt-contract-dispatch"));
+                assert!(detail.contains("rejected_line=1"), "{detail}");
+                assert!(!detail.contains(root.path().to_str().unwrap()));
+            }
             let workflow = execution
                 .receipts
                 .iter()
