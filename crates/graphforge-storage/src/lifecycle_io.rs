@@ -728,15 +728,21 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_inventory_is_the_construction_inventory_plus_the_read_path() {
+    fn lifecycle_inventory_includes_mutation_and_read_path_phases() {
         assert_eq!(
             StorageIoPhase::LIFECYCLE.len(),
-            StorageIoPhase::ALL.len() + 1
+            StorageIoPhase::ALL.len() + 3
         );
         for phase in StorageIoPhase::ALL {
             assert!(StorageIoPhase::LIFECYCLE.contains(&phase));
         }
         assert!(!StorageIoPhase::ALL.contains(&StorageIoPhase::ReadPathScan));
+        assert!(StorageIoPhase::LIFECYCLE.contains(&StorageIoPhase::PropertyMutationInventory));
+        assert!(
+            StorageIoPhase::LIFECYCLE.contains(&StorageIoPhase::PropertyMutationRouteAuthority)
+        );
+        assert!(!StorageIoPhase::ALL.contains(&StorageIoPhase::PropertyMutationInventory));
+        assert!(!StorageIoPhase::ALL.contains(&StorageIoPhase::PropertyMutationRouteAuthority));
         for (index, phase) in StorageIoPhase::LIFECYCLE.into_iter().enumerate() {
             assert_eq!(phase.lifecycle_index(), index);
         }
