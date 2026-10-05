@@ -2028,6 +2028,56 @@ mod tests {
     }
 
     #[test]
+    fn evidence_merge_enforces_combined_row_limit() {
+        fn uuid7_from_counter(counter: u128) -> Uuid {
+            let mut bytes = counter.to_be_bytes();
+            bytes[6] = (bytes[6] & 0x0f) | 0x70;
+            bytes[8] = (bytes[8] & 0x3f) | 0x80;
+            Uuid::from_bytes(bytes)
+        }
+
+        let links = (0..MAX_KNOWLEDGE_ROWS)
+            .map(|index| {
+                EvidenceLink::new(
+                    uuid7_from_counter(index as u128 + 1),
+                    uuid7(1),
+                    uuid7(40),
+                    EvidenceSourceKind::Document,
+                    EvidenceRole::Supports,
+                    None,
+                    uuid7(50),
+                    index as i64,
+                )
+                .unwrap()
+            })
+            .collect();
+        let current = EvidenceLedger::new(links).unwrap();
+        let staged = EvidenceLedger::new(vec![
+            EvidenceLink::new(
+                uuid7_from_counter(MAX_KNOWLEDGE_ROWS as u128 + 1),
+                uuid7(1),
+                uuid7(40),
+                EvidenceSourceKind::Document,
+                EvidenceRole::Supports,
+                None,
+                uuid7(50),
+                MAX_KNOWLEDGE_ROWS as i64,
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            current.merge(&staged),
+            Err(KnowledgeError::Limit {
+                participant: "evidence",
+                observed,
+                limit: MAX_KNOWLEDGE_ROWS,
+            }) if observed == MAX_KNOWLEDGE_ROWS + 1
+        ));
+    }
+
+    #[test]
     fn evidence_merge_keeps_canonical_order_and_conflict_semantics() {
         let make_link = |evidence_id, time| {
             EvidenceLink::new(
