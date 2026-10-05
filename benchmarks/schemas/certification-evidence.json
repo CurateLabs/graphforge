@@ -604,7 +604,7 @@
         "phases": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["append_merge", "seal_authentication", "shape_consume_reauthentication", "encode_write_postwrite_authentication", "publication_preauthentication", "cas_install_read_write", "hydration_verification", "fsync_synchronization", "recovery_reauthentication", "read_path_scan"],
+          "required": ["append_merge", "seal_authentication", "shape_consume_reauthentication", "encode_write_postwrite_authentication", "publication_preauthentication", "cas_install_read_write", "hydration_verification", "fsync_synchronization", "recovery_reauthentication", "read_path_scan", "property_mutation_inventory", "property_mutation_route_authority"],
           "properties": {
             "append_merge": { "$ref": "#/$defs/lifecycleIoCounters" },
             "seal_authentication": { "$ref": "#/$defs/lifecycleIoCounters" },
@@ -615,7 +615,9 @@
             "hydration_verification": { "$ref": "#/$defs/lifecycleIoCounters" },
             "fsync_synchronization": { "$ref": "#/$defs/lifecycleIoCounters" },
             "recovery_reauthentication": { "$ref": "#/$defs/lifecycleIoCounters" },
-            "read_path_scan": { "$ref": "#/$defs/lifecycleIoCounters" }
+            "read_path_scan": { "$ref": "#/$defs/lifecycleIoCounters" },
+            "property_mutation_inventory": { "$ref": "#/$defs/lifecycleIoCounters" },
+            "property_mutation_route_authority": { "$ref": "#/$defs/lifecycleIoCounters" }
           }
         },
         "totals": { "$ref": "#/$defs/lifecycleIoCounters" }

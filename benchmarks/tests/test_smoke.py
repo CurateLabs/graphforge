@@ -114,6 +114,70 @@ class WorkspaceSmokeTests(unittest.TestCase):
             }
         )
 
+    def test_lifecycle_application_io_schema_accepts_mutation_phases_and_stays_closed(self) -> None:
+        schema = json.loads(
+            (workspace_root() / "schemas" / "certification-evidence.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        validator = Draft202012Validator(schema)
+        phase_names = (
+            "append_merge",
+            "seal_authentication",
+            "shape_consume_reauthentication",
+            "encode_write_postwrite_authentication",
+            "publication_preauthentication",
+            "cas_install_read_write",
+            "hydration_verification",
+            "fsync_synchronization",
+            "recovery_reauthentication",
+            "read_path_scan",
+            "property_mutation_inventory",
+            "property_mutation_route_authority",
+        )
+        counters = {
+            "read_bytes": 0,
+            "write_bytes": 0,
+            "read_calls": 0,
+            "write_calls": 0,
+            "object_count": 0,
+            "block_count": 0,
+            "fsync_calls": 0,
+        }
+        application_io = {
+            "phases": {phase: dict(counters) for phase in phase_names},
+            "totals": dict(counters),
+        }
+        document = {
+            "schema": "graphforge-public-certification/1",
+            "profile_id": "tiny-public-certification",
+            "status": "passed",
+            "phases": [
+                {
+                    "phase": "reopen_proof",
+                    "status": "passed",
+                    "duration_ms": 1,
+                    "peak_rss_bytes": 1024,
+                    "exit_code": 0,
+                    "receipts": [{"application_io": application_io}],
+                }
+            ],
+            "failed_phase": None,
+        }
+        validator.validate(document)
+
+        unknown = deepcopy(document)
+        unknown["phases"][0]["receipts"][0]["application_io"]["phases"]["future_phase"] = dict(
+            counters
+        )
+        self.assertFalse(validator.is_valid(unknown))
+
+        missing = deepcopy(document)
+        del missing["phases"][0]["receipts"][0]["application_io"]["phases"][
+            "property_mutation_inventory"
+        ]
+        self.assertFalse(validator.is_valid(missing))
+
     def test_lifecycle_storage_receipt_schema_requires_closed_numeric_contract(self) -> None:
         schema = json.loads(
             (workspace_root() / "schemas" / "certification-evidence.json").read_text(
