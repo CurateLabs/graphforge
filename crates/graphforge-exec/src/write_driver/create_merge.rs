@@ -506,31 +506,148 @@ fn run_relationship_merge_phase(
         None => graphforge_storage::read_edges(env.dir, rel_name, env.mode),
     }
     .map_err(|e| GfError::Storage(e.to_string()))?;
+    // Validate null predicate values before opening any candidate property
+    // route, preserving the established null rejection for every row.
+    for row_spec in &row_specs {
+        reject_null_merge_properties(&row_spec.properties)?;
+    }
+    let mut wanted_endpoints = HashSet::with_capacity(frontier.num_rows());
+    for batch in &frontier.batches {
+        for row in 0..batch.num_rows() {
+            let source =
+                graphforge_core::uuid::to_bytes(&fixed_binary_uuid(batch, src.uuid_idx, row)?);
+            let destination =
+                graphforge_core::uuid::to_bytes(&fixed_binary_uuid(batch, dst.uuid_idx, row)?);
+            wanted_endpoints.insert((source, destination));
+            if matches!(spec.direction, Direction::Undirected) {
+                wanted_endpoints.insert((destination, source));
+            }
+        }
+    }
+    // Build one endpoint index for this clause. Each topology row is visited
+    // once here; input rows then inspect only their directed endpoint bucket.
+    let mut candidates = Vec::new();
+    let mut endpoint_index = HashMap::<([u8; 16], [u8; 16]), Vec<usize>>::new();
+    let mut topology_rows_inspected = 0u64;
+    for batch in &edge_batches {
+        let edge = uuid_column(batch, "edge_uuid")?;
+        let edge_src = uuid_column(batch, "src_uuid")?;
+        let edge_dst = uuid_column(batch, "dst_uuid")?;
+        let names = batch
+            .column_by_name("rel_type_name")
+            .and_then(|array| array.as_any().downcast_ref::<arrow::array::StringArray>());
+        for row in 0..batch.num_rows() {
+            topology_rows_inspected = topology_rows_inspected.saturating_add(1);
+            if names.is_some_and(|names| names.value(row) != rel_name) {
+                continue;
+            }
+            let mut uuid = [0; 16];
+            uuid.copy_from_slice(edge.value(row));
+            let mut source = [0; 16];
+            source.copy_from_slice(edge_src.value(row));
+            let mut destination = [0; 16];
+            destination.copy_from_slice(edge_dst.value(row));
+            if !wanted_endpoints.contains(&(source, destination)) {
+                continue;
+            }
+            let index = candidates.len();
+            candidates.push((uuid, source, destination));
+            endpoint_index
+                .entry((source, destination))
+                .or_default()
+                .push(index);
+        }
+    }
+    graphforge_storage::io_stats::record_relationship_merge_work(topology_rows_inspected, 0, 0);
+    let mut property_targets = std::collections::BTreeSet::new();
+    for batch in &frontier.batches {
+        for row in 0..batch.num_rows() {
+            let source =
+                graphforge_core::uuid::to_bytes(&fixed_binary_uuid(batch, src.uuid_idx, row)?);
+            let destination =
+                graphforge_core::uuid::to_bytes(&fixed_binary_uuid(batch, dst.uuid_idx, row)?);
+            if let Some(indices) = endpoint_index.get(&(source, destination)) {
+                property_targets.extend(
+                    indices
+                        .iter()
+                        .map(|index| candidates[*index].0)
+                        .filter(|uuid| !ctx.deleted.contains(uuid)),
+                );
+            }
+            if matches!(spec.direction, Direction::Undirected)
+                && source != destination
+                && let Some(indices) = endpoint_index.get(&(destination, source))
+            {
+                property_targets.extend(
+                    indices
+                        .iter()
+                        .map(|index| candidates[*index].0)
+                        .filter(|uuid| !ctx.deleted.contains(uuid)),
+                );
+            }
+        }
+    }
+    let mut property_rows = HashMap::<[u8; 16], HashMap<String, graphforge_ir::IrLiteral>>::new();
+    let decoded_property_rows = if property_targets.is_empty() {
+        0
+    } else if let Some(inventory) = env.inventory.as_deref() {
+        if inventory
+            .route_schema(graphforge_storage::PropertyRouteKind::Edge, rel_name)?
+            .is_some()
+        {
+            let selected = graphforge_storage::read_authenticated_property_targets_for_inventory(
+                inventory,
+                graphforge_storage::PropertyRouteKind::Edge,
+                rel_name,
+                &property_targets,
+            )?;
+            let decoded = selected.metrics.physical_rows;
+            property_rows.extend(
+                selected
+                    .rows
+                    .into_iter()
+                    .map(|(uuid, row)| (uuid, row.values.into_iter().collect())),
+            );
+            decoded
+        } else {
+            0
+        }
+    } else {
+        let all = graphforge_storage::read_edge_property_rows(env.dir, rel_name)?;
+        let decoded = all.len() as u64;
+        property_rows.extend(
+            all.into_iter()
+                .filter(|(uuid, _)| property_targets.contains(uuid)),
+        );
+        decoded
+    };
     let mut edge_rows = Vec::with_capacity(frontier.num_rows());
     let mut created = Vec::with_capacity(frontier.num_rows());
     let mut input_rows = Vec::with_capacity(frontier.num_rows());
 
     let mut spec_row = 0usize;
     let mut input_row = 0u64;
+    let mut candidate_rows_inspected = 0u64;
     for batch in &frontier.batches {
         for row in 0..batch.num_rows() {
             let row_spec = &row_specs[spec_row];
             spec_row += 1;
-            reject_null_merge_properties(&row_spec.properties)?;
             let src_uuid = fixed_binary_uuid(batch, src.uuid_idx, row)?;
             let dst_uuid = fixed_binary_uuid(batch, dst.uuid_idx, row)?;
             let src_bytes = to_bytes(&src_uuid);
             let dst_bytes = to_bytes(&dst_uuid);
             let matches = find_matching_merge_edges(
-                env,
                 &ctx.writer,
                 row_spec,
                 rel_name,
                 &src_bytes,
                 &dst_bytes,
-                &edge_batches,
+                &endpoint_index,
+                &candidates,
+                &property_rows,
                 &ctx.deleted,
-            )?;
+                &mut candidate_rows_inspected,
+            );
             if !matches.is_empty() {
                 for matched in matches {
                     edge_rows.push(matched);
@@ -567,6 +684,11 @@ fn run_relationship_merge_phase(
             ctx.mutation.counters.properties_set += row_spec.properties.len() as u64;
         }
     }
+    graphforge_storage::io_stats::record_relationship_merge_work(
+        0,
+        candidate_rows_inspected,
+        decoded_property_rows,
+    );
     frontier.take_rows(&input_rows)?;
     let property_names = edge_rows
         .iter()
@@ -677,15 +799,17 @@ fn reject_null_merge_properties(
     reason = "edge matching requires storage, pattern, endpoints, batches, and statement deletes"
 )]
 fn find_matching_merge_edges(
-    env: &PhaseEnv<'_>,
     writer: &graphforge_storage::GraphWriter,
     spec: &ResolvedEdgeSpec,
     rel_name: &str,
     wanted_src: &[u8; 16],
     wanted_dst: &[u8; 16],
-    batches: &[RecordBatch],
+    endpoint_index: &HashMap<([u8; 16], [u8; 16]), Vec<usize>>,
+    candidates: &[([u8; 16], [u8; 16], [u8; 16])],
+    property_rows: &HashMap<[u8; 16], HashMap<String, graphforge_ir::IrLiteral>>,
     deleted: &HashSet<[u8; 16]>,
-) -> Result<Vec<MatchedMergeEdge>, GfError> {
+    candidate_rows_inspected: &mut u64,
+) -> Vec<MatchedMergeEdge> {
     let mut matches = Vec::new();
     if let Some((uuid, src_uuid, dst_uuid, properties)) = writer.find_pending_edge(
         rel_name,
@@ -702,48 +826,39 @@ fn find_matching_merge_edges(
             properties,
         });
     }
-    for batch in batches {
-        let edge = uuid_column(batch, "edge_uuid")?;
-        let src = uuid_column(batch, "src_uuid")?;
-        let dst = uuid_column(batch, "dst_uuid")?;
-        let names = batch
-            .column_by_name("rel_type_name")
-            .and_then(|a| a.as_any().downcast_ref::<arrow::array::StringArray>());
-        for row in 0..batch.num_rows() {
-            if names.is_some_and(|names| names.value(row) != rel_name) {
-                continue;
-            }
-            let directed = src.value(row) == wanted_src && dst.value(row) == wanted_dst;
-            let reverse = src.value(row) == wanted_dst && dst.value(row) == wanted_src;
-            if !(directed || matches!(spec.direction, Direction::Undirected) && reverse) {
-                continue;
-            }
-            let mut uuid = [0u8; 16];
-            uuid.copy_from_slice(edge.value(row));
-            if deleted.contains(&uuid) {
-                continue;
-            }
-            let props = graphforge_storage::read_entity_properties(env.dir, rel_name, &uuid, true)?;
-            if spec
-                .properties
-                .iter()
-                .all(|(name, value)| props.get(name) == Some(value))
-            {
-                let mut src_uuid = [0u8; 16];
-                src_uuid.copy_from_slice(src.value(row));
-                let mut dst_uuid = [0u8; 16];
-                dst_uuid.copy_from_slice(dst.value(row));
-                matches.push(MatchedMergeEdge {
-                    uuid,
-                    src_uuid,
-                    dst_uuid,
-                    rel_type: rel_name.to_owned(),
-                    properties: props,
-                });
-            }
+    let mut candidate_indices = endpoint_index
+        .get(&(*wanted_src, *wanted_dst))
+        .cloned()
+        .unwrap_or_default();
+    if matches!(spec.direction, Direction::Undirected)
+        && wanted_src != wanted_dst
+        && let Some(reverse) = endpoint_index.get(&(*wanted_dst, *wanted_src))
+    {
+        candidate_indices.extend(reverse.iter().copied());
+        candidate_indices.sort_unstable();
+    }
+    for index in candidate_indices {
+        *candidate_rows_inspected = (*candidate_rows_inspected).saturating_add(1);
+        let (uuid, src_uuid, dst_uuid) = candidates[index];
+        if deleted.contains(&uuid) {
+            continue;
+        }
+        let props = property_rows.get(&uuid).cloned().unwrap_or_default();
+        if spec
+            .properties
+            .iter()
+            .all(|(name, value)| props.get(name) == Some(value))
+        {
+            matches.push(MatchedMergeEdge {
+                uuid,
+                src_uuid,
+                dst_uuid,
+                rel_type: rel_name.to_owned(),
+                properties: props,
+            });
         }
     }
-    Ok(matches)
+    matches
 }
 
 fn uuid_column<'a>(

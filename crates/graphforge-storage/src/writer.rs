@@ -2403,6 +2403,21 @@ pub fn read_node_property_rows(
         .collect())
 }
 
+/// Read all UUID-keyed edge property rows from one persisted route.
+///
+/// Callers that need several candidate edges from an unauthenticated scratch
+/// workspace can decode the route once and select identities in memory.
+pub fn read_edge_property_rows(
+    dir: &Path,
+    stem: &str,
+) -> Result<HashMap<[u8; 16], HashMap<String, IrLiteral>>, GfError> {
+    let batches = crate::catalog::read_edge_properties(dir, stem).map_err(pq_err)?;
+    Ok(decode_edge_property_rows(&batches)?
+        .into_iter()
+        .map(|row| (row.edge_uuid, row.props))
+        .collect())
+}
+
 /// Read typed node rows through an explicitly admitted generation inventory.
 pub fn read_node_property_rows_from_inventory(
     dir: &Path,

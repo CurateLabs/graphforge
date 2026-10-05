@@ -20,7 +20,9 @@ fn checkpoint_diff_batches_preserve_change_kinds_and_nullable_sides() {
             encoding: "arrow-ipc".into(),
             schema_fingerprint: [schema; 32],
             row_count: rows,
+            byte_length: 0,
             content_sha256: [content; 32],
+            content_xxh64: 0,
         }
     }
 
