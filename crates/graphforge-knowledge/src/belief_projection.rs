@@ -2,6 +2,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
+#[cfg(test)]
+use std::{cell::Cell, thread_local};
 
 use arrow::array::{
     Array, BinaryArray, BinaryBuilder, FixedSizeBinaryArray, FixedSizeBinaryBuilder, ListArray,
@@ -146,22 +148,53 @@ impl BeliefProjectionAttachment {
 }
 
 /// Validated append-only interpretation-attachment participant.
+///
+/// The validated collection is private so callers cannot invalidate it after
+/// construction. Read through [`Self::attachments`] or consume with
+/// [`Self::into_attachments`].
+/// This is a source compatibility change for callers that directly used the
+/// former public `attachments` field; construct ledgers with [`Self::new`].
+///
+/// ```compile_fail
+/// use graphforge_knowledge::BeliefProjectionAttachmentLedger;
+/// let mut ledger = BeliefProjectionAttachmentLedger::default();
+/// ledger.attachments.clear();
+/// ```
+///
+/// ```compile_fail
+/// use graphforge_knowledge::BeliefProjectionAttachmentLedger;
+/// let ledger = BeliefProjectionAttachmentLedger::default();
+/// ledger.attachments()[0].policy_version = 0;
+/// ```
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BeliefProjectionAttachmentLedger {
     /// Attachments ordered by `(recorded_at, attachment_uuid)`.
-    pub attachments: Vec<BeliefProjectionAttachment>,
+    attachments: Vec<BeliefProjectionAttachment>,
 }
 
 impl BeliefProjectionAttachmentLedger {
+    /// Borrow the validated attachments in deterministic order.
+    #[must_use]
+    pub fn attachments(&self) -> &[BeliefProjectionAttachment] {
+        &self.attachments
+    }
+
+    /// Consume the ledger and return its validated attachments.
+    #[must_use]
+    pub fn into_attachments(self) -> Vec<BeliefProjectionAttachment> {
+        self.attachments
+    }
+
     /// Validate, sort, and construct a complete participant.
-    pub fn new(mut attachments: Vec<BeliefProjectionAttachment>) -> Result<Self, KnowledgeError> {
-        if attachments.len() > MAX_KNOWLEDGE_ROWS {
-            return Err(KnowledgeError::Limit {
-                participant: "algorithm_interpretation_attachments",
-                observed: attachments.len(),
-                limit: MAX_KNOWLEDGE_ROWS,
-            });
-        }
+    pub fn new(attachments: Vec<BeliefProjectionAttachment>) -> Result<Self, KnowledgeError> {
+        Self::new_with_limit(attachments, MAX_KNOWLEDGE_ROWS)
+    }
+
+    fn new_with_limit(
+        mut attachments: Vec<BeliefProjectionAttachment>,
+        row_limit: usize,
+    ) -> Result<Self, KnowledgeError> {
+        validate_row_count(attachments.len(), row_limit)?;
         let mut ids = HashSet::with_capacity(attachments.len());
         for row in &attachments {
             validate(row)?;
@@ -175,23 +208,35 @@ impl BeliefProjectionAttachmentLedger {
 
     /// Merge with exact replay and transaction-conflict semantics.
     pub fn merge(&self, staged: &Self) -> Result<Self, KnowledgeError> {
-        let mut rows = self.attachments.clone();
-        let mut by_id = rows
-            .iter()
-            .cloned()
-            .map(|row| (row.attachment_uuid, row))
-            .collect::<HashMap<_, _>>();
+        self.merge_with_limit(staged, MAX_KNOWLEDGE_ROWS)
+    }
+
+    fn merge_with_limit(&self, staged: &Self, row_limit: usize) -> Result<Self, KnowledgeError> {
+        // Both operands crossed `new()` or `from_batches()`, and callers cannot
+        // mutate the private row vector. Revalidate only at those boundaries.
+        let mut rows = Vec::with_capacity(self.attachments.len() + staged.attachments.len());
+        rows.extend(self.attachments.iter().cloned());
+        let mut by_id = HashMap::with_capacity(self.attachments.len() + staged.attachments.len());
+        by_id.extend(
+            self.attachments
+                .iter()
+                .map(|row| (row.attachment_uuid, row)),
+        );
         for row in &staged.attachments {
             if let Some(existing) = by_id.get(&row.attachment_uuid) {
-                if existing != row {
+                if *existing != row {
                     return Err(KnowledgeError::TransactionConflict("attachment_uuid"));
                 }
             } else {
                 rows.push(row.clone());
-                by_id.insert(row.attachment_uuid, row.clone());
+                by_id.insert(row.attachment_uuid, row);
             }
         }
-        Self::new(rows)
+        // Preserve the previous error precedence: scan every staged identity
+        // for conflicts before reporting a combined row-limit violation.
+        validate_row_count(rows.len(), row_limit)?;
+        rows.sort_by_key(|row| (row.recorded_at_micros, row.attachment_uuid));
+        Ok(Self { attachments: rows })
     }
 
     /// Canonical fingerprint over one exact immutable attachment.
@@ -369,6 +414,9 @@ pub(crate) fn schema_registry_entry() -> SchemaRegistryEntry {
 }
 
 fn validate(row: &BeliefProjectionAttachment) -> Result<(), KnowledgeError> {
+    #[cfg(test)]
+    VALIDATION_CALLS.with(|calls| calls.set(calls.get() + 1));
+
     if row.contract_version != BELIEF_PROJECTION_ATTACHMENT_CONTRACT_VERSION {
         return Err(invalid(
             "belief_projection_attachment.contract_version",
@@ -385,13 +433,7 @@ fn validate(row: &BeliefProjectionAttachment) -> Result<(), KnowledgeError> {
             "must be positive",
         ));
     }
-    if u64::try_from(row.policy_bytes.len()).unwrap_or(u64::MAX) > MAX_CANONICAL_BINARY_BYTES {
-        return Err(KnowledgeError::Limit {
-            participant: "policy_bytes",
-            observed: row.policy_bytes.len(),
-            limit: usize::try_from(MAX_CANONICAL_BINARY_BYTES).unwrap_or(usize::MAX),
-        });
-    }
+    validate_policy_len(row.policy_bytes.len())?;
     let expected = fingerprint(
         CanonicalDomain::BeliefProjectionPolicy,
         CANONICAL_CONTRACT_VERSION,
@@ -417,6 +459,45 @@ fn validate(row: &BeliefProjectionAttachment) -> Result<(), KnowledgeError> {
         require_uuid(*source, "source_record_uuid")?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    static VALIDATION_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_validation_calls() {
+    VALIDATION_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+fn validation_call_count() -> usize {
+    VALIDATION_CALLS.with(Cell::get)
+}
+
+fn validate_row_count(count: usize, limit: usize) -> Result<(), KnowledgeError> {
+    if count > limit {
+        Err(KnowledgeError::Limit {
+            participant: "algorithm_interpretation_attachments",
+            observed: count,
+            limit,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_policy_len(length: usize) -> Result<(), KnowledgeError> {
+    if u64::try_from(length).unwrap_or(u64::MAX) > MAX_CANONICAL_BINARY_BYTES {
+        Err(KnowledgeError::Limit {
+            participant: "policy_bytes",
+            observed: length,
+            limit: usize::try_from(MAX_CANONICAL_BINARY_BYTES).unwrap_or(usize::MAX),
+        })
+    } else {
+        Ok(())
+    }
 }
 
 fn optional_i64(writer: &mut CanonicalWriter, value: Option<i64>) -> Result<(), KnowledgeError> {
@@ -572,6 +653,7 @@ const fn invalid(field: &'static str, message: &'static str) -> KnowledgeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
     fn uuid7(seed: u8) -> Uuid {
         let mut bytes = [seed; 16];
         bytes[6] = (bytes[6] & 0x0f) | 0x70;
@@ -596,6 +678,132 @@ mod tests {
             20,
         )
         .unwrap()
+    }
+
+    fn attachment_at(id: u8, recorded_at_micros: i64) -> BeliefProjectionAttachment {
+        let mut row = attachment(id, vec![]);
+        row.recorded_at_micros = recorded_at_micros;
+        row
+    }
+
+    fn non_v7_uuid(seed: u8) -> Uuid {
+        let mut bytes = [seed; 16];
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Uuid::from_bytes(bytes)
+    }
+
+    fn benchmark_uuid(seed: u64) -> Uuid {
+        let mut bytes = [0; 16];
+        bytes[8..].copy_from_slice(&seed.to_be_bytes());
+        bytes[6] = 0x70;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Uuid::from_bytes(bytes)
+    }
+
+    fn benchmark_attachment(seed: u64) -> BeliefProjectionAttachment {
+        let policy_bytes = b"benchmark-policy".to_vec();
+        BeliefProjectionAttachment {
+            attachment_uuid: benchmark_uuid(seed + 1),
+            run_uuid: benchmark_uuid(seed + 2),
+            source_generation_uuid: benchmark_uuid(seed + 3),
+            transaction_cutoff_micros: 10,
+            valid_time_micros: Some(11),
+            policy_version: 1,
+            policy_fingerprint: fingerprint(
+                CanonicalDomain::BeliefProjectionPolicy,
+                CANONICAL_CONTRACT_VERSION,
+                &policy_bytes,
+            )
+            .unwrap(),
+            policy_bytes,
+            snapshot_fingerprint: [3; 32],
+            valid_time_fingerprint: Some([4; 32]),
+            graph_content_fingerprint: [5; 32],
+            descriptor_fingerprint: [6; 32],
+            source_record_uuids: vec![benchmark_uuid(seed + 4)],
+            provenance_uuid: benchmark_uuid(seed + 5),
+            recorded_at_micros: i64::try_from(seed).unwrap(),
+            contract_version: BELIEF_PROJECTION_ATTACHMENT_CONTRACT_VERSION,
+        }
+    }
+
+    fn merge_with_full_revalidation(
+        existing: &BeliefProjectionAttachmentLedger,
+        staged: &BeliefProjectionAttachmentLedger,
+    ) -> Result<BeliefProjectionAttachmentLedger, KnowledgeError> {
+        let mut rows = existing.attachments.clone();
+        let mut by_id = rows
+            .iter()
+            .cloned()
+            .map(|row| (row.attachment_uuid, row))
+            .collect::<HashMap<_, _>>();
+        for row in &staged.attachments {
+            if let Some(previous) = by_id.get(&row.attachment_uuid) {
+                if previous != row {
+                    return Err(KnowledgeError::TransactionConflict("attachment_uuid"));
+                }
+            } else {
+                rows.push(row.clone());
+                by_id.insert(row.attachment_uuid, row.clone());
+            }
+        }
+        BeliefProjectionAttachmentLedger::new(rows)
+    }
+
+    fn median(mut values: Vec<Duration>) -> Duration {
+        values.sort_unstable();
+        values[values.len() / 2]
+    }
+
+    fn input_digest(
+        existing: &BeliefProjectionAttachmentLedger,
+        staged: &BeliefProjectionAttachmentLedger,
+    ) -> String {
+        let mut writer = CanonicalWriter::new();
+        for ledger in [existing, staged] {
+            writer.u64(ledger.attachments.len() as u64).unwrap();
+            for row in &ledger.attachments {
+                writer.raw(row.attachment_uuid.as_bytes()).unwrap();
+                writer.raw(row.run_uuid.as_bytes()).unwrap();
+                writer.raw(row.source_generation_uuid.as_bytes()).unwrap();
+                writer.i64(row.transaction_cutoff_micros).unwrap();
+                writer
+                    .u8(u8::from(row.valid_time_micros.is_some()))
+                    .unwrap();
+                if let Some(value) = row.valid_time_micros {
+                    writer.i64(value).unwrap();
+                }
+                writer.u32(row.policy_version).unwrap();
+                writer.binary(&row.policy_bytes).unwrap();
+                writer.raw(&row.policy_fingerprint).unwrap();
+                writer.raw(&row.snapshot_fingerprint).unwrap();
+                writer
+                    .u8(u8::from(row.valid_time_fingerprint.is_some()))
+                    .unwrap();
+                if let Some(value) = row.valid_time_fingerprint {
+                    writer.raw(&value).unwrap();
+                }
+                writer.raw(&row.graph_content_fingerprint).unwrap();
+                writer.raw(&row.descriptor_fingerprint).unwrap();
+                writer.u64(row.source_record_uuids.len() as u64).unwrap();
+                for source in &row.source_record_uuids {
+                    writer.raw(source.as_bytes()).unwrap();
+                }
+                writer.raw(row.provenance_uuid.as_bytes()).unwrap();
+                writer.i64(row.recorded_at_micros).unwrap();
+                writer.u32(row.contract_version).unwrap();
+            }
+        }
+        fingerprint(
+            CanonicalDomain::BeliefProjectionAttachment,
+            CANONICAL_CONTRACT_VERSION,
+            &writer.finish(),
+        )
+        .unwrap()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
     }
 
     #[test]
@@ -625,9 +833,7 @@ mod tests {
         let mut different = row;
         different.graph_content_fingerprint = [99; 32];
         let error = ledger
-            .merge(&BeliefProjectionAttachmentLedger {
-                attachments: vec![different],
-            })
+            .merge(&BeliefProjectionAttachmentLedger::new(vec![different]).unwrap())
             .unwrap_err();
         assert_eq!(error.code(), "GF_TRANSACTION_CONFLICT");
     }
@@ -681,6 +887,14 @@ mod tests {
                 .to_string()
                 .contains("sorted and deduplicated")
         );
+        invalid = row.clone();
+        invalid.source_record_uuids = vec![uuid7(41), uuid7(41)];
+        assert!(
+            validate(&invalid)
+                .unwrap_err()
+                .to_string()
+                .contains("sorted and deduplicated")
+        );
         invalid = row;
         invalid.source_record_uuids = vec![Uuid::nil()];
         assert!(
@@ -719,5 +933,276 @@ mod tests {
                 .to_string()
                 .contains("schema mismatch")
         );
+    }
+
+    #[test]
+    fn attachment_and_run_uuids_must_be_v7() {
+        let row = attachment(31, vec![]);
+        let mut invalid = row.clone();
+        invalid.attachment_uuid = non_v7_uuid(1);
+        assert!(
+            validate(&invalid)
+                .unwrap_err()
+                .to_string()
+                .contains("must be UUIDv7")
+        );
+        invalid = row;
+        invalid.run_uuid = non_v7_uuid(2);
+        assert!(
+            validate(&invalid)
+                .unwrap_err()
+                .to_string()
+                .contains("must be UUIDv7")
+        );
+    }
+
+    #[test]
+    fn attachment_contract_version_must_be_supported() {
+        let mut invalid = attachment(40, vec![]);
+        invalid.contract_version = BELIEF_PROJECTION_ATTACHMENT_CONTRACT_VERSION + 1;
+        assert!(
+            validate(&invalid)
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported version")
+        );
+    }
+
+    #[test]
+    fn duplicate_attachment_uuid_is_rejected() {
+        let first = attachment(41, vec![]);
+        let mut duplicate = first.clone();
+        duplicate.recorded_at_micros += 1;
+        assert!(matches!(
+            BeliefProjectionAttachmentLedger::new(vec![first, duplicate]),
+            Err(KnowledgeError::Duplicate("attachment_uuid"))
+        ));
+    }
+
+    #[test]
+    fn source_generation_and_provenance_uuids_must_be_non_nil() {
+        let row = attachment(32, vec![]);
+        let mut invalid = row.clone();
+        invalid.source_generation_uuid = Uuid::nil();
+        assert!(
+            validate(&invalid)
+                .unwrap_err()
+                .to_string()
+                .contains("must not be nil")
+        );
+        invalid = row;
+        invalid.provenance_uuid = Uuid::nil();
+        assert!(
+            validate(&invalid)
+                .unwrap_err()
+                .to_string()
+                .contains("must not be nil")
+        );
+    }
+
+    #[test]
+    fn policy_version_must_be_positive() {
+        let mut invalid = attachment(33, vec![]);
+        invalid.policy_version = 0;
+        assert!(
+            validate(&invalid)
+                .unwrap_err()
+                .to_string()
+                .contains("must be positive")
+        );
+    }
+
+    #[test]
+    fn policy_byte_limit_rejects_the_first_excess_byte() {
+        let maximum = usize::try_from(MAX_CANONICAL_BINARY_BYTES).unwrap();
+        assert!(validate_policy_len(maximum).is_ok());
+        assert!(matches!(
+            validate_policy_len(maximum + 1),
+            Err(KnowledgeError::Limit {
+                participant: "policy_bytes",
+                observed,
+                limit,
+            }) if observed == maximum + 1 && limit == maximum
+        ));
+        let mut invalid = attachment(39, vec![]);
+        invalid.policy_bytes = vec![0; maximum + 1];
+        assert!(
+            validate(&invalid)
+                .unwrap_err()
+                .to_string()
+                .contains("policy_bytes")
+        );
+    }
+
+    #[test]
+    fn policy_fingerprint_must_match_policy_bytes() {
+        let mut invalid = attachment(34, vec![]);
+        invalid.policy_fingerprint = [0; 32];
+        assert!(
+            validate(&invalid)
+                .unwrap_err()
+                .to_string()
+                .contains("does not match policy bytes")
+        );
+    }
+
+    #[test]
+    fn source_record_uuids_must_be_sorted_unique_and_non_nil() {
+        let row = attachment(35, vec![uuid7(40), uuid7(41)]);
+        let mut invalid = row.clone();
+        invalid.source_record_uuids = vec![uuid7(41), uuid7(40)];
+        assert!(
+            validate(&invalid)
+                .unwrap_err()
+                .to_string()
+                .contains("sorted and deduplicated")
+        );
+        invalid = row.clone();
+        invalid.source_record_uuids = vec![uuid7(40), uuid7(40)];
+        assert!(
+            validate(&invalid)
+                .unwrap_err()
+                .to_string()
+                .contains("sorted and deduplicated")
+        );
+        invalid = row;
+        invalid.source_record_uuids = vec![Uuid::nil()];
+        assert!(
+            validate(&invalid)
+                .unwrap_err()
+                .to_string()
+                .contains("must not be nil")
+        );
+    }
+
+    #[test]
+    fn row_limit_constructor_and_merge_reject_first_excess() {
+        let rows = vec![attachment(36, vec![]), attachment(37, vec![])];
+        assert!(BeliefProjectionAttachmentLedger::new_with_limit(rows.clone(), 2).is_ok());
+        assert!(matches!(
+            BeliefProjectionAttachmentLedger::new_with_limit(rows.clone(), 1),
+            Err(KnowledgeError::Limit {
+                observed: 2,
+                limit: 1,
+                ..
+            })
+        ));
+        let existing = BeliefProjectionAttachmentLedger::new_with_limit(rows, 2).unwrap();
+        let staged = BeliefProjectionAttachmentLedger::new(vec![attachment(38, vec![])]).unwrap();
+        assert!(matches!(
+            existing.merge_with_limit(&staged, 2),
+            Err(KnowledgeError::Limit {
+                observed: 3,
+                limit: 2,
+                ..
+            })
+        ));
+        let replay =
+            BeliefProjectionAttachmentLedger::new(vec![existing.attachments()[0].clone()]).unwrap();
+        assert_eq!(existing.merge_with_limit(&replay, 2).unwrap(), existing);
+
+        let novel = attachment_at(39, 10);
+        let mut conflicting = attachment_at(36, 30);
+        conflicting.graph_content_fingerprint = [99; 32];
+        let staged = BeliefProjectionAttachmentLedger::new(vec![novel, conflicting]).unwrap();
+        assert!(matches!(
+            existing.merge_with_limit(&staged, 2),
+            Err(KnowledgeError::TransactionConflict("attachment_uuid"))
+        ));
+    }
+
+    #[test]
+    fn incremental_merge_checks_staged_rows_once_and_never_existing_rows() {
+        let first = attachment(60, vec![]);
+        let replay = first.clone();
+        let later = attachment_at(70, 30);
+        let earlier = attachment_at(80, 15);
+        reset_validation_calls();
+        let existing = BeliefProjectionAttachmentLedger::new(vec![first]).unwrap();
+        assert_eq!(validation_call_count(), 1);
+        reset_validation_calls();
+        let staged = BeliefProjectionAttachmentLedger::new(vec![later, replay, earlier]).unwrap();
+        assert_eq!(validation_call_count(), 3);
+        reset_validation_calls();
+        let merged = existing.merge(&staged).unwrap();
+        assert_eq!(validation_call_count(), 0);
+        assert_eq!(
+            merged
+                .attachments()
+                .iter()
+                .map(|r| r.attachment_uuid)
+                .collect::<Vec<_>>(),
+            vec![uuid7(80), uuid7(60), uuid7(70)]
+        );
+        assert_eq!(merged.clone().into_attachments().len(), 3);
+    }
+
+    #[test]
+    fn constructor_validates_each_new_row_once() {
+        let rows = vec![attachment(100, vec![]), attachment(101, vec![])];
+        reset_validation_calls();
+        let ledger = BeliefProjectionAttachmentLedger::new(rows).unwrap();
+        assert_eq!(ledger.attachments().len(), 2);
+        assert_eq!(validation_call_count(), 2);
+    }
+
+    #[test]
+    fn constructor_sorts_rows_by_recorded_time_then_uuid() {
+        let late = attachment_at(110, 30);
+        let same_time_lower_uuid = attachment_at(100, 30);
+        let same_time_higher_uuid = attachment_at(120, 30);
+        let ledger = BeliefProjectionAttachmentLedger::new(vec![
+            same_time_higher_uuid,
+            late,
+            same_time_lower_uuid,
+        ])
+        .unwrap();
+        assert_eq!(
+            ledger
+                .attachments()
+                .iter()
+                .map(|row| row.attachment_uuid)
+                .collect::<Vec<_>>(),
+            vec![uuid7(100), uuid7(110), uuid7(120)]
+        );
+    }
+
+    #[test]
+    #[ignore = "manual quiet-host before/after merge-cost measurement"]
+    fn quiet_host_merge_cost_measurement() {
+        for existing_count in [1_000_u64, 10_000] {
+            let existing = BeliefProjectionAttachmentLedger::new(
+                (0..existing_count).map(benchmark_attachment).collect(),
+            )
+            .unwrap();
+            let mut staged_row = benchmark_attachment(existing_count + 10);
+            staged_row.recorded_at_micros = i64::try_from(existing_count / 2).unwrap();
+            let staged = BeliefProjectionAttachmentLedger::new(vec![staged_row]).unwrap();
+            let baseline = merge_with_full_revalidation(&existing, &staged).unwrap();
+            let incremental = existing.merge(&staged).unwrap();
+            assert_eq!(baseline, incremental);
+            let repetitions = 9;
+            let mut before = Vec::with_capacity(repetitions);
+            let mut after = Vec::with_capacity(repetitions);
+            for _ in 0..repetitions {
+                let start = Instant::now();
+                std::hint::black_box(merge_with_full_revalidation(&existing, &staged).unwrap());
+                before.push(start.elapsed());
+                let start = Instant::now();
+                std::hint::black_box(existing.merge(&staged).unwrap());
+                after.push(start.elapsed());
+            }
+            let before_median = median(before);
+            let after_median = median(after);
+            let divisor = existing_count as f64;
+            println!(
+                "existing_rows={existing_count} staged_rows=1 repetitions={repetitions} input_sha256={} before_ns={} before_ns_per_existing_row={:.3} after_ns={} after_ns_per_existing_row={:.3}",
+                input_digest(&existing, &staged),
+                before_median.as_nanos(),
+                before_median.as_nanos() as f64 / divisor,
+                after_median.as_nanos(),
+                after_median.as_nanos() as f64 / divisor,
+            );
+        }
     }
 }

@@ -544,7 +544,7 @@ impl GraphForge {
         }
         let existing = read_attachment_ledger(&parent)?;
         if let Some((index, row)) = existing
-            .attachments
+            .attachments()
             .iter()
             .enumerate()
             .find(|(_, row)| row.attachment_uuid == request.attachment_uuid)
@@ -611,7 +611,7 @@ impl GraphForge {
             &provenance,
         )?;
         let index = updated
-            .attachments
+            .attachments()
             .iter()
             .position(|row| row.attachment_uuid == request.attachment_uuid)
             .expect("published attachment exists");
