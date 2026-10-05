@@ -296,6 +296,7 @@ struct LifecycleStorageSession {
     portable_import_peak_observed: bool,
     imported_project_observed: bool,
     finalized: bool,
+    last_observation_stage: &'static str,
     retained_owner_facts: BTreeMap<String, graphforge_storage::PrivateStorageOwner>,
     artifact_paths: BTreeMap<String, std::collections::BTreeSet<std::path::PathBuf>>,
 }
@@ -307,6 +308,7 @@ impl LifecycleStorageSession {
         command: &PhaseCommand,
         receipts: &[serde_json::Value],
     ) -> Result<Option<serde_json::Value>, String> {
+        self.last_observation_stage = "session-state";
         if self.finalized {
             return Err("lifecycle storage session was already finalized".to_owned());
         }
@@ -325,6 +327,7 @@ impl LifecycleStorageSession {
         } else {
             "query-results"
         };
+        self.last_observation_stage = "artifact-paths";
         let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
         for args in &commands {
             for flag in ["--nodes", "--edges", "--output"] {
@@ -353,8 +356,10 @@ impl LifecycleStorageSession {
             .find_map(|args| argument_path(args, "--project"))
         {
             if project.join("FORMAT").is_file() && project.join("CURRENT").is_file() {
+                self.last_observation_stage = "resolve-project-generation";
                 let selected = graphforge_storage::resolve_project_generation(project)
                     .map_err(|error| error.to_string())?;
+                self.last_observation_stage = "capture-project-identity-union";
                 let union = graphforge_storage::capture_project_storage_identity_union(&selected)
                     .map_err(|error| error.to_string())?;
                 let owner = if matches!(phase, Phase::CleanImport | Phase::ReopenProof) {
@@ -367,10 +372,12 @@ impl LifecycleStorageSession {
                     }
                     "source-project"
                 };
+                self.last_observation_stage = "capture-published-ownership";
                 let published = graphforge_storage::capture_published_storage_ownership(&selected)
                     .map_err(|error| error.to_string())?;
                 self.retained_owner_facts
                     .insert(format!("{owner}-published"), published);
+                self.last_observation_stage = "capture-private-ownership";
                 let private = graphforge_storage::capture_private_storage_ownership(project)
                     .map_err(|error| error.to_string())?;
                 for (name, (_, snapshot)) in private.owners {
@@ -395,6 +402,7 @@ impl LifecycleStorageSession {
         if phase != Phase::ReopenProof {
             return Ok(None);
         }
+        self.last_observation_stage = "validate-lifecycle-receipts";
         if !self.generator_observed
             || !self.construction_peak_observed
             || !self.source_project_observed
@@ -408,6 +416,7 @@ impl LifecycleStorageSession {
                     .to_owned(),
             );
         }
+        self.last_observation_stage = "validate-peak-versus-retained";
         let source_project_current_allocated_bytes = self
             .source_project_current_allocated_bytes
             .ok_or_else(|| "source-project reopen allocation was not captured".to_owned())?;
@@ -417,6 +426,7 @@ impl LifecycleStorageSession {
             return Err("observed operation peak is below final retained allocation".to_owned());
         }
         for name in ["generated-inputs", "query-results", "portable-package"] {
+            self.last_observation_stage = "capture-artifact-ownership";
             let paths = self
                 .artifact_paths
                 .get(name)
@@ -428,6 +438,7 @@ impl LifecycleStorageSession {
                 .map_err(|error| error.to_string())?;
             self.retained_owner_facts.insert(name.to_owned(), snapshot);
         }
+        self.last_observation_stage = "validate-retained-owners";
         validate_retained_owner_facts(&self.allocation, &self.retained_owner_facts)?;
         self.finalized = true;
         let retained_owners = self
@@ -636,6 +647,21 @@ fn allocation_validation_detail(
     detail
 }
 
+fn lifecycle_observation_detail(
+    phase: Phase,
+    stage: &str,
+    retained: u64,
+    peak: u64,
+    source_current_present: bool,
+    receipt_count: usize,
+) -> String {
+    let detail = format!(
+        "lifecycle observation invalid: phase={phase}, stage={stage}, retained_storage_bytes={retained}, transient_peak_storage_bytes={peak}, source_current_present={source_current_present}, receipt_count={receipt_count}"
+    );
+    debug_assert!(detail.chars().count() <= ERROR_TAIL_LIMIT_CHARS);
+    detail
+}
+
 fn optional_u64(value: Option<u64>) -> String {
     value.map_or_else(|| "null".to_owned(), |value| value.to_string())
 }
@@ -708,7 +734,17 @@ impl PhaseExecutor for PublicProcessExecutor {
                 {
                     Ok(Some(receipt)) => result.receipts.push(receipt),
                     Ok(None) => {}
-                    Err(_) => result.failure = Some(FailureKind::EvidenceInvalid),
+                    Err(_) => {
+                        result.failure = Some(FailureKind::EvidenceInvalid);
+                        result.error_tail = Some(lifecycle_observation_detail(
+                            command.phase,
+                            self.lifecycle.last_observation_stage,
+                            self.lifecycle.allocation.current_allocated_bytes(),
+                            self.lifecycle.transient_peak_storage_bytes,
+                            self.lifecycle.source_project_current_allocated_bytes.is_some(),
+                            result.receipts.len(),
+                        ));
+                    }
                 }
             }
             return Ok(result);
@@ -748,7 +784,17 @@ impl PhaseExecutor for PublicProcessExecutor {
             {
                 Ok(Some(receipt)) => result.receipts.push(receipt),
                 Ok(None) => {}
-                Err(_) => result.failure = Some(FailureKind::EvidenceInvalid),
+                Err(_) => {
+                    result.failure = Some(FailureKind::EvidenceInvalid);
+                    result.error_tail = Some(lifecycle_observation_detail(
+                        command.phase,
+                        self.lifecycle.last_observation_stage,
+                        self.lifecycle.allocation.current_allocated_bytes(),
+                        self.lifecycle.transient_peak_storage_bytes,
+                        self.lifecycle.source_project_current_allocated_bytes.is_some(),
+                        result.receipts.len(),
+                    ));
+                }
             }
         }
         Ok(result)
@@ -3749,6 +3795,43 @@ fi
             receipt.get("contract").and_then(serde_json::Value::as_str)
                 != Some("graphforge-allocation-operation/1")
         }));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn public_executor_reports_safe_lifecycle_observation_stage() {
+        let root = std::env::temp_dir().join(format!(
+            "gf-certify-lifecycle-observation-detail-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let executable = root.join("gf");
+        write_executable_script(&executable, "#!/bin/sh\nexit 0\n");
+
+        let mut profile = tiny_profile();
+        profile.executable = executable.to_string_lossy().into_owned();
+        profile.lifecycle = progressive_profile().lifecycle;
+        let command = PhaseCommand {
+            phase: Phase::ReopenProof,
+            action: PhaseAction::BenchmarkGenerator {
+                identity: format!("sha256:{}", "0".repeat(64)),
+                executable: executable.to_string_lossy().into_owned(),
+                args: Vec::new(),
+            },
+        };
+        let result = PublicProcessExecutor::default()
+            .execute(&profile, &command)
+            .unwrap();
+
+        assert_eq!(result.failure, Some(FailureKind::EvidenceInvalid));
+        let detail = result.error_tail.unwrap();
+        assert!(detail.contains("phase=reopen_proof"), "{detail}");
+        assert!(detail.contains("stage=validate-lifecycle-receipts"));
+        assert!(detail.contains("retained_storage_bytes=0"));
+        assert!(detail.contains("transient_peak_storage_bytes=0"));
+        assert!(!detail.contains(root.to_str().unwrap()));
         fs::remove_dir_all(root).unwrap();
     }
 
