@@ -59,6 +59,12 @@ own their ledger records, validation, Arrow codecs, and direct tests. The root
 retains shared schemas, registry, errors, Arrow readers, and numeric validation.
 Explicit root exports preserve the public type paths.
 
+`BeliefProjectionAttachmentLedger` keeps its validated row vector private so
+merges can trust previously validated rows. Read rows through
+`attachments()` or consume the ledger with `into_attachments()`. This is a
+source-level change for Rust callers that previously initialized or mutated
+the public `attachments` field; construct ledgers with `new()` instead.
+
 The crate boundary is part of the storage contract:
 
 | Owner | Responsibility |
