@@ -1,15 +1,18 @@
 # GraphForge Architecture Overview
 
-**Status:** v0.5.0 — Rust core shipped
-**Last Updated:** 2026-09-29
+This is a technical reference for developers and integrators. You do not need
+the engine architecture to analyze your first dataset. Start with
+[Your first research project](../../guide/first-research-project.md) or
+[Your first graph](../../guide/quickstart.md).
 
-> **Implementation status legend** (used across architecture docs): **Shipped** = implemented and
-> tested on `main`; **Partially built** = some paths real, others stubbed; **Designed** = specified,
-> not yet a complete public capability; **Deferred** = intentionally after v0.5.0 (for example
-> Swift/Kotlin bindings). For v0.5.0: the Cypher pipeline
-> (`graphforge-cypher → graphforge-ir → graphforge-rel → graphforge-exec`), analyst verbs, Parquet project storage, thin Python/Node
-> bindings, and the knowledge layer (immutable provenance ledger + epistemic model) are **Shipped**.
----
+**Scope:** v0.6.0 architecture. Package availability and release qualification
+are described in [Installation](../../guide/installation.md).
+
+> **Implementation status legend:** **Implemented** means present in the source;
+> **Partially built** means some paths remain incomplete; **Designed** means
+> specified but not a complete public capability; **Deferred** means outside the
+> current release scope. Source implementation does not establish publication
+> or usability qualification for a release candidate.
 
 ## Executive Summary
 
@@ -17,26 +20,24 @@ GraphForge is a **Knowledge Analysis Workbench** — not a graph database or a g
 It optimizes for analyst workflows that begin with uncertainty, discover structure over time,
 and progressively formalize that structure into ontology, workflows, and repeatable analysis.
 
-For an explicit whole-system comparison with a database-centered analytics platform, including
-the tradeoffs between canonical Arrow results and GDS `stream`/`stats`/`mutate`/`write` modes,
-see [GraphForge v0.5 and Neo4j with Graph Data Science](graphforge-vs-neo4j-gds.md).
-
-The Project is the durable research universe. Its implemented v0.5 workspace
-contains the following assets:
+A Project groups graph data with optional research assets. The architecture
+organizes these concerns as follows:
 
 ```
 Project = Knowledge Graph + Documents + Provenance + Embeddings + Workflows + Artifacts + Sync State
 ```
 
-M11's [analyst research experience](../../engineering/analyst-ux.md) extends that
-workspace with explainable Slices, independent Branches, immutable Versions,
-Forks, and selective Proposals. This **Designed** research lifecycle supersedes
-the asset-list-only product model; it is not yet a shipped capability.
-[Research workspace semantics](research-workspaces.md) defines the contract
-for Core and associated UX projects such as XYG and graphforge-nextjs.
+The implemented Core [research workspace capabilities](research-workspaces.md)
+include Slices, independent Branches, immutable Versions, Forks, and selective
+Proposals. They are optional: ordinary graph construction and queries do not
+require them. [Keep research history](../../guide/research-journey.md) introduces
+a retained Version through a runnable example. The
+[analyst research experience](../../engineering/analyst-ux.md) also defines
+outcomes for associated interfaces such as XYG and the Hub; their qualification
+is separate from Core implementation.
 
 Behavior lives in a **Rust core**. Python and Node are thin bindings over `graphforge-api` — never fallback
-engines. v0.5.0 exposes a unified API and a compiler pipeline (DataFusion-backed execution, Arrow as
+engines. GraphForge exposes a unified API and a compiler pipeline (DataFusion-backed execution, Arrow as
 the stable in-memory and FFI contract, Parquet for durable graph data).
 
 Within the Rust facade, `query_execution` owns query binding/execution, streaming,
@@ -92,11 +93,11 @@ knowledge or workbench concerns**.
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
-| Layer | Owns | Where it lives |
-| ------------- | ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| **Graph** | Nodes, edges, properties, traversal, pattern matching, graph algorithms, adjacency | `graphforge-cypher`, `graphforge-ir`, `graphforge-rel`, `graphforge-exec`, `graphforge-storage` (`topology/`, `properties/`, `indexes/adjacency/`) |
-| **Knowledge** | Provenance, confidence, evidence, epistemic assertions/status/supersession/valid-time | `graphforge-provenance` + `graphforge-knowledge`; `provenance/`, `knowledge/` |
-| **Workbench** | Analyst verbs, hybrid search, workflows, exploration, project envelope | `graphforge-api`, bindings, search modules |
+| Layer         | Owns                                                                                  | Where it lives                                                                                                                                     |
+| ------------- | ------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Graph**     | Nodes, edges, properties, traversal, pattern matching, graph algorithms, adjacency    | `graphforge-cypher`, `graphforge-ir`, `graphforge-rel`, `graphforge-exec`, `graphforge-storage` (`topology/`, `properties/`, `indexes/adjacency/`) |
+| **Knowledge** | Provenance, confidence, evidence, epistemic assertions/status/supersession/valid-time | `graphforge-provenance` + `graphforge-knowledge`; `provenance/`, `knowledge/`                                                                      |
+| **Workbench** | Analyst verbs, hybrid search, workflows, exploration, project envelope                | `graphforge-api`, bindings, search modules                                                                                                         |
 
 **Boundary rule:** knowledge attaches to the graph by UUID reference, never by embedding columns on
 graph tables. Cypher/traversal/algorithms read only the graph layer, so the presence or absence of
@@ -129,7 +130,7 @@ Project = Graph (topology + properties)          ← graph layer
 ┌──────────────────────────────────────────────────────────────────────────────────┐
 │                               GraphForge API (graphforge-api)                             │
 │   Thin bindings: Python (PyO3/maturin)  ·  Node (napi-rs)                         │
-│   Swift/Kotlin: deferred to v0.5.1                                                │
+│   Swift/Kotlin: outside this release                                             │
 │                                                                                   │
 │  forge.execute(…)  forge.rank(…)   forge.cluster(…)  forge.paths(…)              │
 │  forge.analyze(…)  forge.similar(…)  forge.find(…)                               │
@@ -191,18 +192,16 @@ and core-only executor profiles.
 Feature gates control Rust API compilation and algorithm registration; they do
 not change graph storage formats or the Cypher execution pipeline.
 
-The diagram above shows execution flow, not Cargo dependencies. Today storage
-also depends on IR and ontology: `IrLiteral`, tagged runtime IDs and the runtime
-catalog's persistence schema live in IR, and storage consumes ontology and
-composition adapters. `IrVersion` annotates results; it is not a project-open
-compatibility gate.
+The diagram above shows execution flow, not Cargo dependencies. Storage
+consumes the shared value crate and still has IR and ontology dependencies;
+execution-flow diagrams do not describe every crate dependency. `IrVersion`
+annotates results; it is not a project-open compatibility gate.
 
 [ADR 0025](../../adr/0025-storage-value-contract.md) chooses a compiler-independent
 `graphforge-value` crate above core for shared values, checked tagged IDs and
-Arrow/catalog codecs. That extraction is **Designed**, tracked by #1011 and
-#1012; the crate is not yet present. Compiler plans remain in IR, storage owns
-project admission and physical persistence, and existing encodings must be
-preserved. The [project compatibility policy](project-format-compatibility.md)
+catalog representations. That crate is present and consumed by storage. Compiler
+plans remain in IR, storage owns project admission and physical persistence, and
+existing encodings must be preserved. The [project compatibility policy](project-format-compatibility.md)
 remains separate from compiler-plan versioning.
 
 ## Rust Workspace Layout
@@ -210,7 +209,8 @@ remains separate from compiler-plan versioning.
 ```
 crates/
   graphforge-api/              # public Rust facade (lifecycle, Cypher, verbs, knowledge)
-  graphforge-core/             # shared identities, values, options, and facade errors
+  graphforge-core/             # shared identities, options, and facade errors
+  graphforge-value/            # shared literals, tagged IDs, and catalog values
   graphforge-ast/              # AST + spans + syntax diagnostics
   graphforge-cypher/           # hand-written lexer + recursive-descent/Pratt parser
   graphforge-ontology/         # runtime ontology model, validation, migration
@@ -227,8 +227,7 @@ crates/
   graphforge-cli/              # command-line interface
 ```
 
-Feature flags: `default = ["datafusion", "parquet"]`. Optional: `polars`, `python`, `node`.
-Swift/Kotlin UniFFI bindings are deferred to v0.5.1.
+Swift/Kotlin UniFFI bindings are outside this release.
 
 ---
 
@@ -236,11 +235,11 @@ Swift/Kotlin UniFFI bindings are deferred to v0.5.1.
 
 The Cypher compiler maintains three distinct representations — they are not interchangeable:
 
-| Representation | Purpose | Stability |
+| Representation              | Purpose                                                 | Stability                        |
 | --------------------------- | ------------------------------------------------------- | -------------------------------- |
-| **AST** | Syntax-faithful, span-rich, close to Cypher source text | Internal only — no API guarantee |
-| **Graph IR** | Semantic and graph-native; the stable plan contract | Semver-versioned |
-| **DataFusion logical plan** | Relational/physical execution | DataFusion's own contract |
+| **AST**                     | Syntax-faithful, span-rich, close to Cypher source text | Internal only — no API guarantee |
+| **Graph IR**                | Semantic and graph-native; the stable plan contract     | Semver-versioned                 |
+| **DataFusion logical plan** | Relational/physical execution                           | DataFusion's own contract        |
 
 The AST is not the cross-language compatibility surface. The stable boundary is the Graph IR
 envelope and the Arrow result contract.
@@ -289,12 +288,12 @@ metadata, lifecycle, explanation, and construction. Python and Node mirror the
 same categories as thin projections — they do **not** execute graph logic or
 rebuild tabular engine results into binding-owned objects.
 
-| Category | Typical returns | Examples (Rust → Python / Node) |
-| -------- | --------------- | -------------------------------- |
-| **Metadata / inspection** | string collections, scalars | `labels()` / `relationship_types()` → `Vec<String>` / `list[str]`; `node_count()` → `u64` / `int` |
-| **Explanation** | plain text | `explain()` → `String` / `str` |
-| **Lifecycle / control** | unit (`()` / `None`) | `index(...)`, `load_ontology(...)`, `adopt_ontology(...)`, `clear_ontology(...)`, `execute_to_parquet(...)`, embedding publish helpers |
-| **Construction handles** | instance-bound handles | `add_node(...)` → `NodeHandle`; `add_edge(...)` → `EdgeHandle` |
+| Category                  | Typical returns             | Examples (Rust → Python / Node)                                                                                                        |
+| ------------------------- | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| **Metadata / inspection** | string collections, scalars | `labels()` / `relationship_types()` → `Vec<String>` / `list[str]`; `node_count()` → `u64` / `int`                                      |
+| **Explanation**           | plain text                  | `explain()` → `String` / `str`                                                                                                         |
+| **Lifecycle / control**   | unit (`()` / `None`)        | `index(...)`, `load_ontology(...)`, `adopt_ontology(...)`, `clear_ontology(...)`, `execute_to_parquet(...)`, embedding publish helpers |
+| **Construction handles**  | instance-bound handles      | `add_node(...)` → `NodeHandle`; `add_edge(...)` → `EdgeHandle`                                                                         |
 
 **Construction handles vs metadata/control:** a `NodeHandle` / `EdgeHandle` is a
 Rust-owned, instance-bound identity token (stable UUID plus label or relationship
@@ -309,13 +308,13 @@ receipts for atomic bulk publish).
 
 ## Multi-Language Bindings
 
-| Language | Mechanism | Crate / Package | Result contract | v0.5.0 |
-| ---------- | ---------------- | ----------------------------------------- | -------------------------------------------- | -------- |
-| **Rust** | Native crate API | `graphforge-api` / `graphforge-core` | Arrow for data-bearing results; scalars / collections / unit / handles elsewhere | **Shipped** |
-| **Python** | PyO3 + maturin | `graphforge-bindings-py` | `pyarrow.Table` (or reader) for tabular results; same non-Arrow categories as Rust | **Shipped** (thin) |
-| **Node** | napi-rs | `graphforge-bindings-node` | Arrow IPC `Buffer` → `tableFromIPC(buf)` for tabular results; same non-Arrow categories as Rust | **Shipped** (thin) |
-| **Swift** | UniFFI (planned) | deferred | Arrow IPC (data plane) | **Deferred** (v0.5.1) |
-| **Kotlin** | UniFFI (planned) | deferred | Arrow IPC (data plane) | **Deferred** (v0.5.1) |
+| Language   | Mechanism        | Crate / Package                      | Result contract                                                                                 | Status                 |
+| ---------- | ---------------- | ------------------------------------ | ----------------------------------------------------------------------------------------------- | ---------------------- |
+| **Rust**   | Native crate API | `graphforge-api` / `graphforge-core` | Arrow for data-bearing results; scalars / collections / unit / handles elsewhere                | **Implemented**        |
+| **Python** | PyO3 + maturin   | `graphforge-bindings-py`             | `pyarrow.Table` (or reader) for tabular results; same non-Arrow categories as Rust              | **Implemented** (thin) |
+| **Node**   | napi-rs          | `graphforge-bindings-node`           | Arrow IPC `Buffer` → `tableFromIPC(buf)` for tabular results; same non-Arrow categories as Rust | **Implemented** (thin) |
+| **Swift**  | UniFFI (planned) | deferred                             | Arrow IPC (data plane)                                                                          | **Deferred**           |
+| **Kotlin** | UniFFI (planned) | deferred                             | Arrow IPC (data plane)                                                                          | **Deferred**           |
 
 The architectural rule: **never let a binding become the semantic owner**. Bindings project
 requests and results; the Rust core owns Cypher, verbs, storage, and knowledge semantics.
@@ -324,29 +323,29 @@ See [ADR 0001](../../adr/0001-rust-core.md).
 
 ---
 
-## v0.5.0 correctness bar
+## Correctness bar
 
-Shipped v0.5.0 expects these surfaces to stay green on `main`:
+These surfaces must stay green on `main`:
 
-| Gate | Requirement |
-| ---------------------- | --------------------------------------------------------------------- |
-| Parser / compiler | RD+Pratt parse → bind → Graph IR → relational lowering → DataFusion |
-| OpenCypher conformance | Authoritative TCK corpus passes |
-| Ontology runtime | Load/validate round-trips for progressive modes |
-| Data contract | Arrow/Parquet/IPC round-trips pass |
-| Storage | Parquet project generations with atomic publication / recovery |
-| Bindings | Thin Python and Node projections; tabular results stay Arrow |
-| Knowledge | knowledge ledger + epistemic records attach by UUID without changing graph results |
+| Gate                   | Requirement                                                                        |
+| ---------------------- | ---------------------------------------------------------------------------------- |
+| Parser / compiler      | RD+Pratt parse → bind → Graph IR → relational lowering → DataFusion                |
+| OpenCypher conformance | Authoritative TCK corpus passes                                                    |
+| Ontology runtime       | Load/validate round-trips for progressive modes                                    |
+| Data contract          | Arrow/Parquet/IPC round-trips pass                                                 |
+| Storage                | Parquet project generations with atomic publication / recovery                     |
+| Bindings               | Thin Python and Node projections; tabular results stay Arrow                       |
+| Knowledge              | knowledge ledger + epistemic records attach by UUID without changing graph results |
+
 ---
 
 ## References
 
 - [AST & Planning](ast-and-planning.md) — recursive-descent/Pratt parser, three-tier IR, compiler pipeline
-- [GraphForge v0.5 and Neo4j GDS](graphforge-vs-neo4j-gds.md) — whole-system positioning, current limitations, and result-lifecycle tradeoffs
 - [Algorithm Verbs](algorithms.md) — full algorithm catalog across rank/cluster/paths/analyze/similar
 - [Execution Model](execution-model.md) — DataFusion integration, custom graph operators, Arrow result streams
 - [Storage](storage.md) — Project generations, Arrow schemas, and Parquet storage
-- [ADR Index](../../adr/README.md) — contiguous decision log (`0001`–`0025`)
+- [ADR Index](../../adr/README.md) — architecture decisions and their status
 - [ADR 0001: Rust Core](../../adr/0001-rust-core.md) — Rust core and binding strategy
 - [ADR 0002: RD+Pratt Parser](../../adr/0002-lr1-grammar.md) — Parser algorithm decision
 - [ADR 0003: Progressive Ontology](../../adr/0003-progressive-ontology.md) — exploration-first ontology modes

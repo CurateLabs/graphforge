@@ -1,66 +1,30 @@
-# Research: AI Agent Grounding — Ontology-Backed Tool Selection
+# Research notes: tool and capability graphs
 
-!!! note "Research note"
-    Durable findings for **GraphForge v0.5.0**. Prefer the
-    [agent grounding](../use-cases/agent-grounding.md) and
-    [tool recall](../use-cases/agent-tool-recall.md) guides for present-tense examples.
+This Advanced note supports [agent grounding](../use-cases/agent-grounding.md)
+and [tool recall](../use-cases/agent-tool-recall.md). It is for application
+developers. A student using an existing agent should start with
+[Work with an agent](../../guide/work-with-an-agent.md).
 
-**Scope:** Capability → tool ontologies, Cypher selection, `forge.find` recall,
-agent-loop ergonomics.
+## What the graph represents
 
----
+Tools, declared capabilities, inputs, outputs, dependencies, and deprecation can
+be stored as ordinary graph records. Cypher retrieves declared relationships;
+`forge.find` retrieves candidates from names/descriptions or a configured vector
+space. Neither executes tools nor enforces hosted permissions.
 
-## Executive summary
+Share reference nodes under stable keys so a dependency refers to the intended
+input or capability. A node labeled `Role` or an edge named `MAY_USE` records
+application metadata; actual authorization remains at the execution boundary.
 
-GraphForge works as an embedded tool registry for LLM agents: model capabilities,
-tools, parameters, dependencies, and permissions as a graph, then select with
-Cypher and/or `forge.find`.
+## What requires evaluation
 
-**What holds up:**
+Test capability lookup, missing inputs, deprecated tools, ambiguous intent, and
+unauthorized actions on the intended registry. Measure candidate recall and
+incorrect selections separately from latency. Do not infer agent reasoning
+quality from a successful graph query or from the absence of a network hop.
 
-- Capability hierarchy + `HAS_TOOL` / `REQUIRES` / `PRODUCES` patterns for planning
-- Permission and deprecation filters expressed as ordinary graph structure
-- `to_dicts()` / Arrow tables as the ergonomic boundary into agent loops
-- Sub-millisecond to low-millisecond lookup latency at tens–hundreds of tools
-- `forge.find` on tool name + description for paraphrase and CamelCase-adjacent recall
-
-**Design around:**
-
-- Exact-match Cypher on tool names is brittle when models invent casing or
-  paraphrases — index descriptions and search with `forge.find`
-- Split multi-statement create/link sequences when a single `execute()` would
-  rebind the same variable incorrectly
-- Prefer `MERGE` for shared ontology hubs (`DataModel`, `Capability`) so tools
-  link to one node rather than duplicates
-
----
-
-## Selection sketch
-
-```python
-from graphforge import GraphForge
-
-forge = GraphForge("tools/")
-
-# Structured filter
-allowed = forge.execute("""
-    MATCH (r:Role {name: $role})-[:MAY_USE]->(t:Tool)
-    WHERE coalesce(t.deprecated, false) = false
-    RETURN t.name AS name, t.description AS description
-""", {"role": "analyst"})
-
-# Fuzzy intent
-candidates = forge.find("search inventory stock", label="Tool", limit=5)
-```
-
-No major agent framework ships graph-native tool planning with dependency and
-permission traversal. GraphForge fills that gap as a local registry beside
-LangGraph, LlamaIndex, or custom loops.
-
----
-
-## Recommendations
-
-1. Index tool **name and description** for `forge.find`.
-2. Model dependencies as edges; plan with path queries, not flat ranking alone.
-3. Persist the registry as `GraphForge("tools/")` so agents reopen without rebuild.
+Native examples are linked from the [worked guide](../use-cases/agent-grounding.md#run-the-native-notebook).
+Its synthetic notebook checks exercise bounded behavior. They do not prove
+real-agent quality, a branded integration, or universal sub-millisecond lookup.
+For durable registries and transfer, use [save and reopen](../../guide/tutorial.md)
+and [portable projects](../../guide/portable-projects.md).

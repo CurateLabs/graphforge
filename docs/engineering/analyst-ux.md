@@ -8,12 +8,11 @@ The [research journey guide](../guide/research-journey.md) connects consumer
 questions to captured Core results. Application rendering and observed human
 comprehension have separate owners and evidence.
 
-The provider-neutral decision workflow below is an M12 design contract. The
-current M11 research journey and its tests do not claim that generic external
-decision inputs/results are already supported by a single public workflow.
-The [M12 acceptance map](TESTING.md#m12-decision-workflow-contract) names the
-capabilities that exist, the gaps assigned to M12 children, and the evidence
-each child must provide.
+The provider-neutral decision workflow has public validation APIs and runnable
+offline examples in the [decision workflow guide](../book/use-cases/decision-workflows.md).
+The [acceptance map](TESTING.md#m12-decision-workflow-contract) records the
+contract and its evidence. Core does not execute a model or grant authority
+from a validated prediction.
 
 M11 delivers Rust-owned capabilities through the public facade and thin Python,
 Node, and CLI surfaces, plus a consumer UX contract. Associated projects such as
@@ -24,10 +23,23 @@ does not itself enforce access. These consumers are not required dependencies
 of Core, and their application implementation is not an M11 Core close gate.
 
 GraphForge is an analytical environment for exploring, structuring, deriving,
-and publishing knowledge from heterogeneous evidence. Its primary journey is
+and publishing knowledge from heterogeneous evidence. First use is basic graph
+construction and querying. The optional research journey is
 **Explore → Focus → Branch → Analyze → Compare → Propose → Integrate**.
-Progressive ontology development remains part of that journey, rather than
-being the whole workflow.
+Users and agents need only the capabilities their current task requires.
+
+The public guides provide successive journeys: [basic graph use](../guide/quickstart.md),
+[analysis and persistence](../guide/tutorial.md),
+[recording and revisiting an inquiry](../guide/record-an-inquiry.md), then
+[retained research history](../guide/research-journey.md).
+An inquiry should retain its hypothesis, challenge, evidence, bounded conclusion,
+and retrieval path. An exhaustive finite-data check can establish a scoped
+absence; failure to reject a statistical null does not prove it.
+
+Public projects support transparent participation and Git-style author/committer
+attribution. Private projects provide a non-public space for known collaborators.
+Hosting owns access enforcement. Privacy and advanced research vocabulary are
+not prerequisites for obtaining the first useful graph result.
 
 From any meaningful analytical object, the analyst must be able to determine:
 what it is; where it came from; which Version is being inspected; and what
@@ -60,13 +72,35 @@ and Git commands are not prerequisites for doing research.
 
 ## Audience and entry journeys
 
-The core product audience is a **nontechnical analyst working with an agent**.
-The analyst brings a question, source material and research judgment; the agent
-helps operate the supported tools. Technical analysts and developers can also
-work directly in notebooks, scripts and applications. v0.6.0 may initially
-serve this technical path more completely while associated applications develop
-the agent-assisted experience. That delivery stage does not redefine the core
-audience or establish nontechnical usability by itself.
+The primary audience is a nontechnical analyst working with an agent. The
+documentation has two learning paths with an explicit prerequisite boundary:
+
+- **Basic:** a nontechnical analyst, with no programming prerequisite. Explain the question, records, connections,
+  evidence, interpretation, and limits in ordinary language. A coding agent or
+  helper handles setup and execution. The reader must be able to check the result
+  without reading Python or learning the whole research vocabulary.
+- **Advanced:** a reader with basic Python, database,
+  and command-line skills. Use those skills directly, but teach GraphForge-specific
+  concepts and give complete examples with interpretable results. Do not assume
+  native-engine, distributed-system, or research-ledger expertise.
+
+Architecture, wire contracts, benchmark methodology, and contributor internals
+are specialist references outside both learning paths. Link them for depth;
+do not make reading them a prerequisite for completing an analyst task.
+
+The [Basic mixed-methods lesson](../guide/first-research-project.md) connects a
+question to numerical and interview evidence, coding decisions, a counterexample,
+and a saved conclusion. A comprehension check asks the reader to explain the
+unit counted, trace a code to its source and rationale, identify a counterexample,
+state a limitation, and retrieve that limitation in a later session. The Advanced
+check additionally asks the reader to run and adapt a query, explain the returned
+rows, and reopen the saved project. Neither a site build nor an agent's successful
+execution establishes that a reader understood the lesson.
+
+The nontechnical analyst brings research judgment; the agent helps operate
+supported tools. v0.6.0 may serve the direct technical path more completely while
+associated applications develop the agent-assisted experience. That delivery
+stage does not establish nontechnical usability by itself.
 
 Expected first-use environments are VS Code with the GraphForge extension and
 an agent, other agent-led workflows, and Jupyter notebooks, including Kaggle and
@@ -75,7 +109,7 @@ environment or M11 operation is already supported.
 
 | Entry                           | First useful outcome                                                                                         | Required guidance and proof                                                                                                                                                                                                     |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| VS Code extension with an agent | Open or construct a small project, ask a research question, inspect the result and its source context.       | Packaged extension/native/XYG versions work together; the agent uses published operations and the analyst can inspect the result independently of its explanation.                                                              |
+| VS Code extension with an agent | Construct a small graph, ask a graph question, and inspect the actual result.                                | Packaged extension/native/XYG versions work together; the agent uses published operations and the analyst can inspect the result independently of its explanation.                                                              |
 | Agent-led setup and analysis    | Describe a task and obtain a supported query or analysis with an inspectable result and a clear next action. | Installed skills/tool schemas match the candidate; no repository checkout, invented API or undocumented setup intervention is required.                                                                                         |
 | Jupyter notebook                | Run a short sequence of cells from installation to an understandable table or visualization.                 | A fresh kernel can reproduce exact results; simple result display and construction do not require handwritten UUID generation or native IPC knowledge. Qualify Kaggle/Colab separately and record any unsupported combinations. |
 
@@ -104,10 +138,10 @@ Use the two-story corpus described in the [research journey guide](../guide/rese
 The synthetic decision cases add a finite set of review candidates with stable
 object identities and explicit source/evidence links:
 
-| Journey | Caller supplies | Producer returns | Caller decides | GraphForge can change |
-| --- | --- | --- | --- | --- |
-| Analyst evidence triage | An exact selected Version/projection, candidate item IDs, allowed review queues, and an ordered rubric for relevance/urgency. | A queue choice, one score per candidate and rubric, and a yes/no answer to “does this evidence need human review?”, each correlated by stable IDs. | Whether to route, rank, abstain, compare alternatives, or request human review. Tie-breaking and score thresholds are explicit caller policy. | Nothing from the returned values alone. A separate valid native research operation may record a review or apply an explicitly selected update. |
-| Agent next step | The current situation, an exact selected context, permitted next-step choices, and the yes/no question “is more context required before proceeding?”. | `continue`, `clarify`, or `review`, plus any answer, uncertainty, missing item, or unavailability by question/item ID. | Whether to ask for specified missing context, stop, request a person, or take an allowed action after revalidation. | Nothing from the answer alone. A separate action must name its target and use the native conflict/replay contract. |
+| Journey                 | Caller supplies                                                                                                                                       | Producer returns                                                                                                                                   | Caller decides                                                                                                                                | GraphForge can change                                                                                                                          |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Analyst evidence triage | An exact selected Version/projection, candidate item IDs, allowed review queues, and an ordered rubric for relevance/urgency.                         | A queue choice, one score per candidate and rubric, and a yes/no answer to “does this evidence need human review?”, each correlated by stable IDs. | Whether to route, rank, abstain, compare alternatives, or request human review. Tie-breaking and score thresholds are explicit caller policy. | Nothing from the returned values alone. A separate valid native research operation may record a review or apply an explicitly selected update. |
+| Agent next step         | The current situation, an exact selected context, permitted next-step choices, and the yes/no question “is more context required before proceeding?”. | `continue`, `clarify`, or `review`, plus any answer, uncertainty, missing item, or unavailability by question/item ID.                             | Whether to ask for specified missing context, stop, request a person, or take an allowed action after revalidation.                           | Nothing from the answer alone. A separate action must name its target and use the native conflict/replay contract.                             |
 
 The shared fixture proves representation and correlation, not model quality.
 An offline producer may be a caller-owned function returning records; another
@@ -134,14 +168,14 @@ model-evaluation evidence.
 Names here are conceptual fields, not proposed Rust or binding symbols. The
 native API may group them differently after verified gaps are implemented.
 
-| Record | Required content and rule |
-| --- | --- |
-| Selected state | Project and context identity; live or immutable source Version; projection identity/digest; selected object/item IDs; inclusion rule; separately listed boundary and dependency identities; evidence references and availability; fields deliberately omitted. A projection is not the complete Version. |
-| Question | Stable question ID; kind (`choice`, `rubric_score`, or `yes_no_probability`); exact selected-state identity; finite allowed choices or an ordered rubric; proposition text for yes/no. One question cannot silently become the state for another. |
-| Producer identity | Caller-supplied producer name and optional model/revision identity. Unknown revision is represented as unknown or absent, never guessed. This is descriptive provenance, not a claim that saving the name reproduces execution. |
-| Result | Question ID and, when applicable, candidate/item ID; typed choice, finite rubric score, or yes probability; optional explicit yes/no distribution; status (`answered`, `uncertain`, `unavailable`, or `missing`); optional confidence with value, declared domain and meaning. Results may arrive in any order; IDs, not row position, establish correlation. |
-| Policy outcome | Caller-owned threshold, ranking/tie rule, abstention/review rule, and selected next step. It records what the caller chose without granting GraphForge authority. |
-| Action outcome | Optional native action target, prepared operation identity, commit state and receipt. An action failure remains distinct from a successfully recorded external result; exact retry reuses the original prepared identity and request. |
+| Record            | Required content and rule                                                                                                                                                                                                                                                                                                                                     |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Selected state    | Project and context identity; live or immutable source Version; projection identity/digest; selected object/item IDs; inclusion rule; separately listed boundary and dependency identities; evidence references and availability; fields deliberately omitted. A projection is not the complete Version.                                                      |
+| Question          | Stable question ID; kind (`choice`, `rubric_score`, or `yes_no_probability`); exact selected-state identity; finite allowed choices or an ordered rubric; proposition text for yes/no. One question cannot silently become the state for another.                                                                                                             |
+| Producer identity | Caller-supplied producer name and optional model/revision identity. Unknown revision is represented as unknown or absent, never guessed. This is descriptive provenance, not a claim that saving the name reproduces execution.                                                                                                                               |
+| Result            | Question ID and, when applicable, candidate/item ID; typed choice, finite rubric score, or yes probability; optional explicit yes/no distribution; status (`answered`, `uncertain`, `unavailable`, or `missing`); optional confidence with value, declared domain and meaning. Results may arrive in any order; IDs, not row position, establish correlation. |
+| Policy outcome    | Caller-owned threshold, ranking/tie rule, abstention/review rule, and selected next step. It records what the caller chose without granting GraphForge authority.                                                                                                                                                                                             |
+| Action outcome    | Optional native action target, prepared operation identity, commit state and receipt. An action failure remains distinct from a successfully recorded external result; exact retry reuses the original prepared identity and request.                                                                                                                         |
 
 ### Validation, freshness, bounds, and retention
 
@@ -215,7 +249,7 @@ or version-control implementation knowledge.
 | I inspect an apparent fact.                 | Is this source evidence, a machine extraction or an analyst claim, and what supports or disputes it? | Source/Artifact lineage, creator or processing run, evidence and competing assertions.                                  |
 | I revisit or cite a result.                 | Which Version am I seeing, and can someone inspect the same evidence?                                | Live-versus-immutable reference, exact retained context and explicit external-evidence limitations.                     |
 | I notice upstream changes.                  | What changed, does it affect my research, and what happens if I adopt it?                            | Relevant semantic comparison, dependency effects, valid choices and conflicts in a read-only preview.                   |
-| I propose a contribution.                   | Exactly what am I sharing, what stays private/local, and can later edits change this proposal?       | Selected contributions and dependencies, omitted private content, and a frozen source Version.                          |
+| I propose a contribution.                   | Exactly what am I contributing, what remains outside the proposal, and can later edits change it?    | Selected contributions and dependencies, explicit omissions, and a frozen source Version.                               |
 | I review a contribution.                    | What will acceptance change, what remains deferred or rejected, and does it make a claim canonical?  | Item-level outcomes and an explicit canonical decision separate from integration.                                       |
 | I continue after acceptance.                | What was accepted, can I keep working, and will a retry apply it twice?                              | Durable receipt, accepted-contribution mapping, continued Branch state and supported replay outcome.                    |
 | I save or share my work.                    | What survives closing/resetting this environment, and what will another reader receive?              | Temporary-versus-retained state, supported save/export path, complete-versus-selected identity and reader requirements. |

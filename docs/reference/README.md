@@ -1,112 +1,47 @@
 # GraphForge Reference Documentation
 
-This directory contains comprehensive reference documentation for GraphForge's OpenCypher implementation and TCK compliance.
+Use reference pages to look up an exact command, supported query form, or
+technical limit. For a guided first exercise, start with
+[Your first research project](../guide/first-research-project.md) or
+[Your first graph](../guide/quickstart.md).
 
-## Directory Structure
+## Current product reference
 
-### `opencypher-features/`
-Authoritative documentation of OpenCypher features from the official specification, organized by category:
+| What you need                                    | Page                                                    |
+| ------------------------------------------------ | ------------------------------------------------------- |
+| Method arguments and return values               | [API reference](api.md)                                 |
+| Supported query language and its limits          | [openCypher compatibility](opencypher-compatibility.md) |
+| Query examples with explanations                 | [Cypher guide](../guide/cypher-guide.md)                |
+| Names of columns returned by a query             | [Column naming](column-naming-behavior.md)              |
+| Workload and resource considerations             | [Scale limits](scale-limits.md)                         |
+| Conformance method and authoritative test status | [TCK compliance](tck-compliance.md)                     |
 
-- `01-clauses.md` - Query clauses (MATCH, CREATE, WHERE, RETURN, WITH, etc.)
-- `02-functions.md` - Built-in functions (string, numeric, list, aggregation, etc.)
-- `03-operators.md` - Operators and expressions (comparison, logical, arithmetic, etc.)
-- `04-patterns.md` - Pattern matching syntax (nodes, relationships, paths)
-- `05-data-types.md` - Data types (primitives, structural, composite, temporal)
+The API reference is the published site's reference landing page. These docs
+target v0.6.0; [Installation](../guide/installation.md) explains package
+availability.
 
-Each document includes:
-- Complete feature list for that category
-- Syntax and examples
-- Links to OpenCypher specification
-- Usage notes and edge cases
+## Specialist material
 
-### `implementation-status/`
-Implementation status reports for GraphForge, showing which features are complete, partial, or not implemented:
+The remaining files support implementers, compatibility researchers, and
+release operators. They are not prerequisites for a student research project.
 
-- `clauses.md` - Status of each query clause
-- `functions.md` - Status of each built-in function
-- `operators.md` - Status of each operator
-- `patterns.md` - Status of pattern matching features
+- `opencypher-features/` describes language constructs.
+- `implementation-status/` and `feature-mapping/` contain feature inventories and
+  test mappings. Some files retain dated status snapshots; the current
+  conformance authority is identified in [TCK compliance](tck-compliance.md).
+- [Graph Scale Index](graph-scale-index.md) and
+  [scale evaluation](scale-evaluation.md) define profiling and benchmark methods.
+- `discovery/` and `hub-publish/` contain protocol contracts for integration
+  developers.
+- The JSON schema inventories describe exact machine-readable contracts.
 
-Each status report includes:
-- Feature name
-- Status: ✅ COMPLETE, ⚠️ PARTIAL, ❌ NOT_IMPLEMENTED
-- File references (e.g., `src/graphforge/executor/executor.py:234`)
-- Notes on partial implementations or known limitations
+The optional [`scripts/build_feature_graph.py`](../../scripts/build_feature_graph.py)
+builder turns the feature inventories into a local graph. Its default output
+is `docs/feature-graph.db`, a generated project directory, not a bundled product
+dataset. The graph reflects its input documents and is not independent proof
+of current feature support. See [its schema](feature-graph-schema.md) and
+[example queries](feature-graph-queries.md) when maintaining that inventory.
 
-### `feature-mapping/`
-Mappings between OpenCypher features and TCK test coverage:
-
-- `clause-to-tck.md` - TCK scenarios that test each clause
-- `function-to-tck.md` - TCK scenarios that test each function
-- `tck-inventory.md` - Complete inventory of all TCK test scenarios
-
-Shows which features have strong TCK coverage and which have gaps.
-
-### Root Reference Documents
-
-- `opencypher-compatibility.md` - Main compatibility document (overview, quick reference)
-- `opencypher-compatibility-matrix.md` - Comprehensive matrix showing all features, status, and TCK coverage
-- `feature-graph-schema.md` - Schema for the GraphForge knowledge graph
-- `feature-graph-queries.md` - Example Cypher queries for analyzing feature status
-- `tck-compliance.md` - TCK compliance metrics and progress tracking
-
-## GraphForge Knowledge Graph
-
-The feature inventory, implementation status, and TCK mapping are also available as a queryable GraphForge database:
-
-- **Location**: `docs/feature-graph.db`
-- **Builder script**: `scripts/build_feature_graph.py`
-- **Schema**: See `feature-graph-schema.md`
-- **Example queries**: See `feature-graph-queries.md`
-
-This demonstrates GraphForge's capabilities by using it to model its own feature landscape.
-
-## How to Use This Documentation
-
-### For Contributors
-
-1. **Implementing a new feature?**
-   - Check `implementation-status/` to see current status
-   - Check `feature-mapping/` to find relevant TCK tests
-   - Update status after implementation
-
-2. **Improving TCK coverage?**
-   - See `tck-inventory.md` for all available scenarios
-   - Check `feature-mapping/` to find under-tested features
-
-3. **Planning a release?**
-   - Query the feature graph for completion percentages
-   - Check `opencypher-compatibility-matrix.md` for gaps
-
-### For Users
-
-1. **Want to know if a feature is supported?**
-   - Check `opencypher-features/` for feature definition
-   - Check `implementation-status/` for GraphForge support
-   - See `opencypher-compatibility.md` for quick reference
-
-2. **Reporting a bug?**
-   - Check if the feature is complete or partial
-   - Reference the implementation status in your issue
-
-### For Researchers
-
-1. **Analyzing OpenCypher compliance?**
-   - Query the GraphForge knowledge graph
-   - See `feature-graph-queries.md` for examples
-   - Use `opencypher-compatibility-matrix.md` for overview
-
-## Maintenance
-
-This documentation is maintained alongside the codebase:
-
-- **Update frequency**: After each feature implementation
-- **Validation**: Run `scripts/build_feature_graph.py` to ensure consistency
-- **Source of truth**: OpenCypher specification at https://opencypher.org/resources/
-
-## Related Documentation
-
-- `docs/tutorial.md` - Getting started with GraphForge
-- `docs/guide/datasets/` - Dataset integration documentation
-- `docs/book/use-cases/` - Use case examples
-- [GitHub Releases](https://github.com/CurateLabs/graphforge/releases) - Version history and release notes
+Dated release tracking, validation reports, and failure histograms record their
+stated historical measurements. They do not establish the current release's
+capabilities or readiness.

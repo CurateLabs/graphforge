@@ -1,20 +1,25 @@
 # API Reference
 
-> **Checkpoint contract (v0.5.0):** The accepted Rust-owned contract for named
+Use this page to look up a method while writing code. For step-by-step learning,
+choose [Basic or Advanced](../guide/overview.md). The advanced guides assume
+basic Python, database, and command-line skills; the storage contracts below
+are specialist reference, not prerequisites for using GraphForge.
+
+> **Checkpoint contract:** The accepted Rust-owned contract for named
 > checkpoints, read-only historical views, complete-workspace revert, deletion,
 > retention, deterministic diff, and binding/CLI parity is
 > [ADR 0014](../adr/0014-workspace-checkpoints.md), with exact request and Arrow
 > schema inventory in
 > [`graphforge-checkpoint-api/1`](../contracts/checkpoint-api-v1.json).
 >
-> **Durability and isolation (v0.5.x / M6):** Acknowledged-durable writes,
+> **Durability and isolation:** Acknowledged-durable writes,
 > filesystem preflight, recovery authority, write-mode isolation tables, and the
 > optimistic write-skew witness are frozen by
 > [ADR 0018](../adr/0018-acknowledged-durability-isolation.md). The modes do not
 > claim generic ACID, serializable isolation, or SSI.
 
-!!! note "v0.5.0 unified API"
-This page documents the **v0.5.0 API**. **Data-returning** operations —
+!!! note "v0.6.0 API"
+This page documents the **v0.6.0 API**. **Data-returning** operations —
 Cypher `execute`, analyst verbs, `schema()`, bulk-construction receipts, and
 other tabular/data-bearing surfaces — return Arrow Tables. There are no
 `CypherValue` wrappers or `SearchHit` objects for those results. Control,
@@ -51,6 +56,12 @@ valid-time, resolved-projection, and attachment behavior is normative in
 [Epistemic inventory](epistemic-schema-inventory.json).
 
 ---
+
+For a first result, use [Your first graph](../guide/quickstart.md). For optional
+research, see [recording an inquiry](../guide/record-an-inquiry.md),
+[research workspaces](../book/architecture/research-workspaces.md), and
+[decision workflows](../book/use-cases/decision-workflows.md). Package availability
+and pre-v1 compatibility are described in [Installation](../guide/installation.md).
 
 ## Main API
 
@@ -121,15 +132,15 @@ idempotency decisions against a [`CompositeValidationSnapshot`] into one
 canonical Arrow receipt from `composite_receipt_schema()` without staging
 participants or publishing a generation. The singleton receipt row carries:
 
-| Field | Type | Notes |
-| --- | --- | --- |
-| `request_identity` | `FixedSizeBinary(16)` | Caller operation UUID |
-| `transaction_uuid` | `FixedSizeBinary(16)` | Same as `request_identity` for later publication |
-| `generation_uuid` | `FixedSizeBinary(16)` | Deterministic UUID from request identity + content fingerprint |
-| `content_fingerprint` | `FixedSizeBinary(32)` | Canonical composite request fingerprint |
-| `contract_version` | `UInt32` | Always `1` for this vocabulary |
-| `graph_mutation_count` | `UInt64` | Ordered mutation count |
-| `{kind}_count` | `UInt64` | One column per entry in `COMPOSITE_KNOWLEDGE_PARTICIPANT_KINDS`; empty optional sets are `0`, never null |
+| Field                  | Type                  | Notes                                                                                                    |
+| ---------------------- | --------------------- | -------------------------------------------------------------------------------------------------------- |
+| `request_identity`     | `FixedSizeBinary(16)` | Caller operation UUID                                                                                    |
+| `transaction_uuid`     | `FixedSizeBinary(16)` | Same as `request_identity` for later publication                                                         |
+| `generation_uuid`      | `FixedSizeBinary(16)` | Deterministic UUID from request identity + content fingerprint                                           |
+| `content_fingerprint`  | `FixedSizeBinary(32)` | Canonical composite request fingerprint                                                                  |
+| `contract_version`     | `UInt32`              | Always `1` for this vocabulary                                                                           |
+| `graph_mutation_count` | `UInt64`              | Ordered mutation count                                                                                   |
+| `{kind}_count`         | `UInt64`              | One column per entry in `COMPOSITE_KNOWLEDGE_PARTICIPANT_KINDS`; empty optional sets are `0`, never null |
 
 Schema metadata freezes `graphforge.composite_contract_version=1`,
 `graphforge.composite_kind=receipt`, `graphforge.row_order=singleton`, and
@@ -250,11 +261,11 @@ All are read-only by default; `write_property` opts into graph mutation where su
 
 Common parameters (availability varies by verb):
 
-| Parameter | Available on | Description |
+| Parameter        | Available on                                     | Description                                                         |
 | ---------------- | ------------------------------------------------ | ------------------------------------------------------------------- |
-| `via` | `rank`, `cluster`, `paths`, `analyze`, `similar` | Relationship type to traverse — `None` means all types |
-| `directed` | `rank`, `cluster`, `paths`, `analyze` | Treat edges as directed (the verb signature defines the default) |
-| `write_property` | `rank`, `cluster` | If set, persist the result column back to each node under this name |
+| `via`            | `rank`, `cluster`, `paths`, `analyze`, `similar` | Relationship type to traverse — `None` means all types              |
+| `directed`       | `rank`, `cluster`, `paths`, `analyze`            | Treat edges as directed (the verb signature defines the default)    |
+| `write_property` | `rank`, `cluster`                                | If set, persist the result column back to each node under this name |
 
 Full algorithm catalog: [Algorithm Verbs](../book/architecture/algorithms.md)
 
@@ -3900,13 +3911,13 @@ cargo doc --workspace --no-deps --open
 
 Key public types:
 
-| Type | Crate | Description |
-| ----------------- | ------------- | ------------------------------------ |
-| `GraphForge` | `graphforge-core` | Main engine facade — builder pattern |
-| `ExecutionResult` | `graphforge-core` | `{ schema, batches, stats }` |
-| `GraphPlan` | `graphforge-ir` | Versioned graph IR envelope |
-| `OntologyHandle` | `graphforge-ontology` | Loaded ontology reference |
-| `GfError` | `graphforge-core` | Typed public error enum |
+| Type              | Crate                 | Description                          |
+| ----------------- | --------------------- | ------------------------------------ |
+| `GraphForge`      | `graphforge-core`     | Main engine facade — builder pattern |
+| `ExecutionResult` | `graphforge-core`     | `{ schema, batches, stats }`         |
+| `GraphPlan`       | `graphforge-ir`       | Versioned graph IR envelope          |
+| `OntologyHandle`  | `graphforge-ontology` | Loaded ontology reference            |
+| `GfError`         | `graphforge-core`     | Typed public error enum              |
 
 ---
 

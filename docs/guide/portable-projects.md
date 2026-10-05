@@ -1,5 +1,9 @@
 # Move projects with portable project v2
 
+**Advanced · Assumes basic Python, database, and terminal skills.**
+Start with the [Advanced introduction](advanced.md) for GraphForge terminology,
+or [Basic](overview.md#basic) for a guided first graph.
+
 Portable project v2 is GraphForge's primary workflow for moving a project
 between workspaces, machines, and registries. It packages one immutable project
 generation with a canonical semantic identity. Use it for local copies,
@@ -16,6 +20,81 @@ The Rust engine owns selection, packaging, verification, import, and OCI
 behavior. Python, Node, and the CLI are thin projections of the same operations
 and return the same package identity, selection receipt, state classification,
 progress, and typed failures.
+
+## Copy the graph you just saved
+
+After [Query, analyze, and save a graph](tutorial.md), transfer its three-paper
+graph into a separate project. Finish the tutorial's `forge.close()` first, and
+run these commands from the directory containing `citation-project`. Use the
+matching `graphforge` CLI from [Installation](installation.md). The destination
+must use [supported durable storage](installation.md#durable-storage).
+
+Export the source and fully verify the resulting bundle:
+
+```bash
+graphforge --project citation-project portable export --current --profile complete \
+  --format bundle --output ./citation-transfer.gfpb
+graphforge portable verify --input ./citation-transfer.gfpb --mode full
+```
+
+The verification result must report `integrity=Verified` and
+`compatibility=Supported`. The export and verification report the same
+`package_digest`; its value depends on your project. The bundle is outside the
+source project. To transfer between machines, move this bundle and verify it on
+the receiving machine before importing.
+
+Create a separate empty destination and import the complete package:
+
+```bash
+mkdir citation-copy
+graphforge --project citation-copy portable import --input ./citation-transfer.gfpb \
+  --idempotency-key 018f0f4e-7f4d-7c24-8f8f-8cbab5f47001
+```
+
+`--project` selects the source for export and the destination for import. It
+does not select a code repository. If `citation-copy` already exists, choose a
+different empty destination; do not import over your original project. The
+example supplies a UUIDv7 operation key. Keep the same key and exact input when
+retrying this import; use a fresh key for a different import operation.
+
+Now open the destination in a new Python session from that same parent
+directory and ask the tutorial's question:
+
+```python
+from graphforge import GraphForge
+
+forge = GraphForge("citation-copy")
+query = """
+    MATCH (source:Paper {title: $title})-[:CITES]->(paper:Paper)
+    RETURN paper.title AS title
+    ORDER BY title
+"""
+print(forge.execute(query, {"title": "Survey"}).to_pylist())
+forge.close()
+```
+
+Expected output:
+
+```text
+[{'title': 'Methods'}, {'title': 'Replication'}]
+```
+
+The source remains available at `citation-project`; the imported copy is a
+separate durable project. You have completed the transfer. Continue below only
+when you need selective packages, collaboration, or registry transport.
+
+## Choose where to collaborate
+
+Public projects support transparent participation with attributable authors and
+committers, following Git practices. Private projects provide a non-public
+space for known collaborators. The Hub or hosting application enforces that
+access; local Project metadata and Branch isolation do not enforce it.
+
+For ordinary graph use, you do not need to publish anything. Start with
+[saving and reopening a local graph](tutorial.md). When sharing is useful,
+choose the intended Project and selected content, then use the supported
+transfer path below. See [research workspaces](research-journey.md) for review
+and contribution concepts.
 
 ## Keep the five identities separate
 
@@ -93,9 +172,9 @@ release and subsequent destination edits; a changed request is rejected.
 See [research workspace semantics](../book/architecture/research-workspaces.md).
 
 ```text
-graphforge portable preview --current --profile complete --strict
-graphforge portable export --current --profile complete \
-  --format bundle --output transfer.gfpb
+graphforge --project ./citation-project portable preview --current --profile complete --strict
+graphforge --project ./citation-project portable export --current --profile complete \
+  --format bundle --output ./transfer.gfpb
 ```
 
 Use `--checkpoint NAME` instead of `--current` to package a named immutable
@@ -117,7 +196,7 @@ implicitly.
 Full verification is required before import or promotion:
 
 ```text
-graphforge portable verify --input transfer.gfpb --mode full
+graphforge portable verify --input ./transfer.gfpb --mode full
 ```
 
 `--mode inspect` checks bounded structure only. It is useful for inventory, but
@@ -145,11 +224,13 @@ replace, remove, activate, deactivate, or clear ontology authority.
 ## Import a complete package
 
 Import only into a new, empty, or pristine initialized destination, using a
-caller-owned idempotency key:
+caller-owned idempotency key. This alternative example uses a fresh destination,
+separate from the completed copy above:
 
 ```text
-graphforge portable import --input transfer.gfpb \
-  --idempotency-key 018f0f4e-7f4d-7c24-8f8f-8cbab5f47001
+mkdir selected-copy
+graphforge --project ./selected-copy portable import --input ./transfer.gfpb \
+  --idempotency-key 018f0f4e-7f4d-7c24-8f8f-8cbab5f47002
 ```
 
 GraphForge fully verifies before admitting the destination, streams content
@@ -208,26 +289,26 @@ Progress is printed to standard error.
 
 **Limits.**
 
-| Limit | Value |
-|---|---|
-| One downloaded object | 1 TiB, the same bound `gf publish` admits for a repository |
-| One file inside the package | 8 GiB (the USTAR entry size field of a `.gfpb` bundle) |
-| Package payload | 1 TiB |
-| Files in a package | 1,000,000 entries, but the 4 MiB tag manifest bounds a package to roughly 20,000 files at typical path lengths |
+| Limit                       | Value                                                                                                          |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| One downloaded object       | 1 TiB, the same bound `gf publish` admits for a repository                                                     |
+| One file inside the package | 8 GiB (the USTAR entry size field of a `.gfpb` bundle)                                                         |
+| Package payload             | 1 TiB                                                                                                          |
+| Files in a package          | 1,000,000 entries, but the 4 MiB tag manifest bounds a package to roughly 20,000 files at typical path lengths |
 
 **Errors.** Codes are stable; the message adds detail.
 
-| Code | Meaning | What to do |
-|---|---|---|
-| `GF_UNSUPPORTED_FILESYSTEM` | The destination filesystem cannot hold a durable project | Clone onto a supported local volume |
-| `hub.insufficient_space` | Not enough free space beside the destination | Free space or choose another destination |
-| `hub.interrupted` | The download stopped or was cancelled | Rerun the same command |
-| `hub.network` | The Hub could not be reached or answered with an error status (named in the message) | Rerun later |
-| `hub.integrity` | The downloaded bytes do not match their digest; the partial download was removed | Rerun to download again |
-| `hub.package.*` | The package failed verification or import, with the import's own code (for example `hub.package.io` or `hub.package.cancelled`) | `hub.package.io` and `hub.package.cancelled`: rerun; others: the package is unusable |
-| `hub.destination_conflict` | The destination already exists, or appeared while the clone ran. Clone never replaces it; it removes its own staging for that destination, including any partial download | Choose another destination, or remove the existing one and rerun |
-| `hub.concurrent_clone` | Another clone to the same destination is running | Wait for it |
-| `hub.limit_exceeded` | An object exceeds the 1 TiB bound | None; the repository cannot be cloned |
+| Code                        | Meaning                                                                                                                                                                   | What to do                                                                           |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `GF_UNSUPPORTED_FILESYSTEM` | The destination filesystem cannot hold a durable project                                                                                                                  | Clone onto a supported local volume                                                  |
+| `hub.insufficient_space`    | Not enough free space beside the destination                                                                                                                              | Free space or choose another destination                                             |
+| `hub.interrupted`           | The download stopped or was cancelled                                                                                                                                     | Rerun the same command                                                               |
+| `hub.network`               | The Hub could not be reached or answered with an error status (named in the message)                                                                                      | Rerun later                                                                          |
+| `hub.integrity`             | The downloaded bytes do not match their digest; the partial download was removed                                                                                          | Rerun to download again                                                              |
+| `hub.package.*`             | The package failed verification or import, with the import's own code (for example `hub.package.io` or `hub.package.cancelled`)                                           | `hub.package.io` and `hub.package.cancelled`: rerun; others: the package is unusable |
+| `hub.destination_conflict`  | The destination already exists, or appeared while the clone ran. Clone never replaces it; it removes its own staging for that destination, including any partial download | Choose another destination, or remove the existing one and rerun                     |
+| `hub.concurrent_clone`      | Another clone to the same destination is running                                                                                                                          | Wait for it                                                                          |
+| `hub.limit_exceeded`        | An object exceeds the 1 TiB bound                                                                                                                                         | None; the repository cannot be cloned                                                |
 
 ## Carry TCK results as evidence
 

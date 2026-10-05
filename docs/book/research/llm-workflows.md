@@ -1,63 +1,43 @@
-# Research: LLM-Powered Extraction → Storage → Retrieval
+# Research notes: LLM extraction, storage, and review
 
-!!! note "Research note"
-    Durable findings for **GraphForge v0.5.0**. Prefer the
-    [use-case guide](../use-cases/llm-workflows.md) for present-tense examples.
-    Context composition details live in [LLM context building](llm-context-building.md).
+This Advanced note supports the runnable
+[extraction workflow](../use-cases/llm-workflows.md). An LLM is optional;
+[Your first research project](../../guide/first-research-project.md) can begin
+with source text and human coding.
 
-**Scope:** Extract → MERGE → query → synthesise loops; provenance; neighbourhood
-context; `forge.find`.
+## Separate the layers of a claim
 
----
+Retain the source passage, proposed extraction, producer details where known,
+review decision, and bounded research conclusion as separate records. A prompt
+that calls all retrieved records "facts" erases these distinctions. Neither
+model confidence nor a `verified` property establishes correctness.
 
-## Executive summary
+Repeated extraction can repeat an error. Agreement with a prior model output is
+not independent corroboration. Preserve disagreements, missing output, and
+unavailable source material instead of converting them into confident answers.
+A graph makes such records retrievable; it does not adjudicate them.
 
-The core LLM workflow — extract structured triples, MERGE them with provenance,
-retrieve neighbourhood or search context, then synthesise — works cleanly on the
-v0.5.0 surface.
+## Keep the producer in caller code
 
-**What holds up:**
+Use a narrow output schema and validate it before storing proposed records.
+Fixed labels and relationship types avoid inserting model-generated query
+structure; source text belongs in parameters. The worked guide uses a clearly
+labeled local fixture, not a real model or an accuracy demonstration.
 
-- `MERGE` + `ON CREATE SET` / `ON MATCH SET` for idempotent entity upserts
-- Provenance properties and confidence updates in Cypher
-- Variable-length neighbourhood queries and the `neighbourhood()` recipe
-- `forge.find` for fuzzy entity lookup and hybrid text/vector recall
-- Batching many MERGEs in one transaction when ingesting a document batch
+`execute()` returns a PyArrow table; use `to_pylist()` for ordinary dictionaries.
+`graphforge.recipes.neighbourhood()` also returns an Arrow table, not a list.
+Search results are candidates with retrieval scores, not confidence judgments.
+See [context building](llm-context-building.md) and
+[entity resolution](search-entity-resolution.md).
 
-**Design around:**
+## Evaluate against the intended task
 
-- Prefer `neighbourhood` + `forge.find` over hand-rolled shortest-path helpers
-- Avoid f-string interpolation of labels/relationship types from LLM output —
-  whitelist types or parameterize property values only
-- Do not expect `ORDER BY` after `UNION` to sort the combined result unless you
-  wrap the union in a subquery / outer query that the dialect supports
+Compare proposed extractions with independently reviewed source passages.
+Report omissions, unsupported additions, and disagreements as well as successes.
+For mixed methods, distinguish counts of participants from counts of passages
+or extraction runs. Preserve a passage that challenges the dominant theme.
 
----
-
-## Pipeline sketch
-
-```python
-from graphforge import GraphForge
-from graphforge.recipes import neighbourhood
-
-forge = GraphForge("knowledge/")
-
-# 1) store extraction
-forge.execute("""
-    MERGE (e:Entity {canonical: $canonical})
-    ON CREATE SET e.name = $name, e.source = $source, e.confidence = $confidence
-    ON MATCH SET e.confirmations = coalesce(e.confirmations, 0) + 1
-""", extraction)
-
-# 2) build context for the next LLM call
-ctx = neighbourhood(forge, extraction["canonical"], hops=2)
-hits = forge.find(question, label="Entity", limit=5)
-```
-
----
-
-## Recommendations
-
-1. Keep extraction schemas narrow (canonical id + name + provenance).
-2. Build prompts from `neighbourhood` (structure) + `forge.find` (loose recall).
-3. Persist projects under a directory path so reopen/recovery matches production usage.
+Use [decision workflows](../use-cases/decision-workflows.md) only when typed
+choice/rubric/probability validation is needed. It checks the declared contract,
+not scientific validity, and does not authorize action. Persistence requires
+[save and reopen](../../guide/tutorial.md); model context alone is not memory.

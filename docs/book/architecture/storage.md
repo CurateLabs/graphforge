@@ -99,14 +99,14 @@ Project metadata and manifests use JSON. A future storage backend would need to 
 
 GraphForge uses a **dual-key pattern** for all first-class objects:
 
-| Key | Type | Purpose |
-|---|---|---|
-| **UUID** (`*_uuid`) | `FixedSizeBinary(16)` — UUIDv7 | Canonical stable identity. Globally unique. Immutable. Survives project merges, offline generation, and cross-analyst exchanges. |
-| **Surrogate** (`*_id`) | `UInt64` | Execution-time optimization. Assigned at ingest/load time. Used for DataFusion join operations. Never exposed in public API results. |
+| Key                    | Type                           | Purpose                                                                                                                              |
+| ---------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| **UUID** (`*_uuid`)    | `FixedSizeBinary(16)` — UUIDv7 | Canonical stable identity. Globally unique. Immutable. Survives project merges, offline generation, and cross-analyst exchanges.     |
+| **Surrogate** (`*_id`) | `UInt64`                       | Execution-time optimization. Assigned at ingest/load time. Used for DataFusion join operations. Never exposed in public API results. |
 
 ### Why UUIDv7
 
-UUIDv7 (RFC 9562) is time-ordered within a millisecond, globally unique without coordination, fits in Arrow `FixedSizeBinary(16)`, and supports offline generation on mobile devices or air-gapped systems. See [refactor-v0.5.md §5](refactor-v0.5.md) for the full rationale.
+UUIDv7 (RFC 9562) is time-ordered within a millisecond, globally unique without coordination, fits in Arrow `FixedSizeBinary(16)`, and supports offline generation on mobile devices or air-gapped systems. See [UUID membership indexes](uuid-membership-index.md) for identity lookup.
 
 UUID byte order, accepted text form, content-derived UUIDv8 records, canonical
 Arrow bytes, and domain-separated SHA-256 fingerprints follow the frozen
@@ -173,20 +173,20 @@ minimal version tag or a v3 document mixed with v4 fields fails closed.
 
 ### Objects requiring UUID identity
 
-| Object | UUID column |
-|---|---|
-| Node (entity) | `node_uuid` |
-| Edge (relationship) | `edge_uuid` |
-| Document | `doc_uuid` |
-| Provenance event | `provenance_uuid` |
-| Analyst/User | `analyst_uuid` |
-| Project | `project_uuid` |
-| Workflow | `workflow_uuid` |
-| Embedding | `embedding_uuid` |
-| Source reference | `source_uuid` |
-| Ranking output row | `rank_uuid` |
-| Clustering output row | `cluster_uuid` |
-| Generated artifact | `artifact_uuid` |
+| Object                | UUID column       |
+| --------------------- | ----------------- |
+| Node (entity)         | `node_uuid`       |
+| Edge (relationship)   | `edge_uuid`       |
+| Document              | `doc_uuid`        |
+| Provenance event      | `provenance_uuid` |
+| Analyst/User          | `analyst_uuid`    |
+| Project               | `project_uuid`    |
+| Workflow              | `workflow_uuid`   |
+| Embedding             | `embedding_uuid`  |
+| Source reference      | `source_uuid`     |
+| Ranking output row    | `rank_uuid`       |
+| Clustering output row | `cluster_uuid`    |
+| Generated artifact    | `artifact_uuid`   |
 
 ---
 
@@ -382,14 +382,14 @@ The same-inode, same-length corruption tests in
 `graphforge-api/src/workspace_hydration/tests.rs` cover every role, including
 real adjacency and search index publications:
 
-| Role | Inventory source | Corruption coverage |
-| --- | --- | --- |
-| Topology | `topology/`, including the current `topology/runtime_catalog.parquet` | Nodes and edges are refused on first touch (open or the first query/recount); sidecars (generation counters, label encoding, surrogate tails, runtime catalog) are refused at open; a mutating commit refuses a corrupted edge payload instead of republishing it |
-| Properties | `properties/` and `edge_properties/` | Real property payload; open checks each fragment's exact length only, and every read (projection, filter, `find`, portable export, `SET`) refuses a corrupted fragment on first touch |
-| Index | Published `indexes/adjacency/` CSR and `indexes/search/` artifacts | Both real build paths reach the compact inventory; adjacency build records and shard manifests are refused at open, CSR shards by their own checksum on read, search artifacts on first touch |
-| Delta | `deltas/` journal runs | Role-level full-admission test uses an opaque fixture; journal replay has separate validation |
-| Catalog | Top-level `semantic-routes.json` | Real control payload, authenticated by SHA-256 with the manifest |
-| Other | Any admitted graph workspace file outside the named prefixes | Opaque fixture is copied and checked while hydrating, so it is refused at open |
+| Role       | Inventory source                                                      | Corruption coverage                                                                                                                                                                                                                                               |
+| ---------- | --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Topology   | `topology/`, including the current `topology/runtime_catalog.parquet` | Nodes and edges are refused on first touch (open or the first query/recount); sidecars (generation counters, label encoding, surrogate tails, runtime catalog) are refused at open; a mutating commit refuses a corrupted edge payload instead of republishing it |
+| Properties | `properties/` and `edge_properties/`                                  | Real property payload; open checks each fragment's exact length only, and every read (projection, filter, `find`, portable export, `SET`) refuses a corrupted fragment on first touch                                                                             |
+| Index      | Published `indexes/adjacency/` CSR and `indexes/search/` artifacts    | Both real build paths reach the compact inventory; adjacency build records and shard manifests are refused at open, CSR shards by their own checksum on read, search artifacts on first touch                                                                     |
+| Delta      | `deltas/` journal runs                                                | Role-level full-admission test uses an opaque fixture; journal replay has separate validation                                                                                                                                                                     |
+| Catalog    | Top-level `semantic-routes.json`                                      | Real control payload, authenticated by SHA-256 with the manifest                                                                                                                                                                                                  |
+| Other      | Any admitted graph workspace file outside the named prefixes          | Opaque fixture is copied and checked while hydrating, so it is refused at open                                                                                                                                                                                    |
 
 `runtime_catalog.parquet` at the graph root would be Catalog-role, but the
 current compact writer places it under `topology/`. The role classifier permits
@@ -811,21 +811,21 @@ never falsely fresh.
 
 **`index_manifest.parquet`**
 
-| Column | Arrow type | Notes |
-|---|---|---|
-| `relation_type` | `Utf8` | Relation type name, or `_all` for the union index |
-| `direction` | `Utf8` | `"out"` \| `"in"` |
-| `topology_generation` | `UInt64` | Counter pinned before the source scan |
-| `built_at` | `Timestamp(Microseconds, UTC)` | |
-| `node_count` | `UInt64` | Number of source nodes covered (CSR row count) |
-| `edge_count` | `UInt64` | Number of `(edge, neighbor)` entries |
+| Column                | Arrow type                     | Notes                                             |
+| --------------------- | ------------------------------ | ------------------------------------------------- |
+| `relation_type`       | `Utf8`                         | Relation type name, or `_all` for the union index |
+| `direction`           | `Utf8`                         | `"out"` \| `"in"`                                 |
+| `topology_generation` | `UInt64`                       | Counter pinned before the source scan             |
+| `built_at`            | `Timestamp(Microseconds, UTC)` |                                                   |
+| `node_count`          | `UInt64`                       | Number of source nodes covered (CSR row count)    |
+| `edge_count`          | `UInt64`                       | Number of `(edge, neighbor)` entries              |
 
 **Sharded CSR (`<REL_TYPE>.<dir>.csr.json`)** — a versioned JSON manifest names an
 immutable, content-addressed shard directory. Each bounded shard is Arrow IPC with one
 column and covers a contiguous local surrogate range:
 
-| Column | Arrow type | Notes |
-|---|---|---|
+| Column      | Arrow type                                                   | Notes                                                                        |
+| ----------- | ------------------------------------------------------------ | ---------------------------------------------------------------------------- |
 | `adjacency` | `LargeList<Struct { edge_id: UInt64, neighbor_id: UInt64 }>` | Row `i` holds the adjacency entries of surrogate `node_id = i`, in CSR order |
 
 Within each shard this is the CSR structure in its idiomatic Arrow encoding — the two logical arrays cannot be
@@ -952,13 +952,13 @@ shards; only `row_chunk` bounds the returned row portion by its limit.
   Freshness requires a non-empty manifest whose topology generation is current
   directly or through a complete bounded delta chain. Fresh + row present ⇒ load
   (`adjacency=hit`); stale or torn ⇒ lazy rebuild, then serve; fresh but **no
-  row** for the requested relation ⇒ scan-build *without* rebuild (rebuilding
+  row** for the requested relation ⇒ scan-build _without_ rebuild (rebuilding
   cannot add an unknown relation — prevents a rebuild-per-query loop); a
   missing shard manifest for a manifest row, or one that disagrees with the index
   manifest's counts ⇒ lazy rebuild; a corrupt accelerator ⇒ `GF_VALIDATION`, never a
   rebuild; an unreadable generation counter ⇒ scan-build; capability absent ⇒ scan-build
   (`adjacency=building`). Typed-mode `"*"` bypasses the index entirely
-  (reported as `building`, never a false miss). A failure to *write* a missing or
+  (reported as `building`, never a false miss). A failure to _write_ a missing or
   stale index never fails the query — only its speed.
 - **Direction.** `out` and `in` CSRs are stored separately; undirected traversal unions them.
   In exploratory mode, `_exploratory.parquet` rows are routed by their `rel_type_name` column.
@@ -978,14 +978,14 @@ Graph traversal reads only the topology layer. No property columns are read unle
 
 **`topology/nodes.parquet`**
 
-| Column | Arrow type | Notes |
-|---|---|---|
-| `node_uuid` | `FixedSizeBinary(16)` | UUIDv7 — canonical stable identity |
-| `node_id` | `UInt64` | Local surrogate — DataFusion join key |
-| `type_id` | `UInt32` | Immutable primary label used for property-file routing |
-| `type_ids` | `List<UInt32>` | Authoritative complete label set; scans use membership in this column |
-| `created_at` | `Timestamp(Microseconds, UTC)` | |
-| `updated_at` | `Timestamp(Microseconds, UTC)` | |
+| Column       | Arrow type                     | Notes                                                                 |
+| ------------ | ------------------------------ | --------------------------------------------------------------------- |
+| `node_uuid`  | `FixedSizeBinary(16)`          | UUIDv7 — canonical stable identity                                    |
+| `node_id`    | `UInt64`                       | Local surrogate — DataFusion join key                                 |
+| `type_id`    | `UInt32`                       | Immutable primary label used for property-file routing                |
+| `type_ids`   | `List<UInt32>`                 | Authoritative complete label set; scans use membership in this column |
+| `created_at` | `Timestamp(Microseconds, UTC)` |                                                                       |
+| `updated_at` | `Timestamp(Microseconds, UTC)` |                                                                       |
 
 The first label in a node's creation pattern is its immutable **primary label**.
 The property route continues to use that primary label, encoded through the
@@ -1012,15 +1012,15 @@ project-format compatibility path.
 
 **`topology/edges/TYPENAME.parquet`** (one file per relation type)
 
-| Column | Arrow type | Notes |
-|---|---|---|
-| `edge_uuid` | `FixedSizeBinary(16)` | UUIDv7 |
-| `src_uuid` | `FixedSizeBinary(16)` | References `node_uuid` |
-| `dst_uuid` | `FixedSizeBinary(16)` | References `node_uuid` |
-| `edge_id` | `UInt64` | Local surrogate |
-| `src_id` | `UInt64` | Local surrogate — DataFusion join key |
-| `dst_id` | `UInt64` | Local surrogate — DataFusion join key |
-| `created_at` | `Timestamp(Microseconds, UTC)` | |
+| Column       | Arrow type                     | Notes                                 |
+| ------------ | ------------------------------ | ------------------------------------- |
+| `edge_uuid`  | `FixedSizeBinary(16)`          | UUIDv7                                |
+| `src_uuid`   | `FixedSizeBinary(16)`          | References `node_uuid`                |
+| `dst_uuid`   | `FixedSizeBinary(16)`          | References `node_uuid`                |
+| `edge_id`    | `UInt64`                       | Local surrogate                       |
+| `src_id`     | `UInt64`                       | Local surrogate — DataFusion join key |
+| `dst_id`     | `UInt64`                       | Local surrogate — DataFusion join key |
+| `created_at` | `Timestamp(Microseconds, UTC)` |                                       |
 
 Typed edge tables replace the unified `edge_facts` table. A relation is a
 logical union of its legacy flat fragment and ordered immutable range
@@ -1029,8 +1029,7 @@ decodes and rewrites prior edge topology. Ordinary catalog, traversal,
 adjacency, UUID-index, mutation, projection, and delta-replay paths enumerate
 the same fragments. This keeps aggregate fresh-import edge encoding O(N) and
 resident topology bounded by the configured construction window while
-preserving direct single-relation scans. See [refactor-v0.5.md §7](refactor-v0.5.md)
-for performance analysis.
+preserving direct single-relation scans.
 
 Node topology follows the same immutable layout: the first compatible write
 may retain `topology/nodes.parquet`, while later appends create ordered
@@ -1111,10 +1110,10 @@ routes, unsupported versions and authenticated old-root reads.
 The mapped component resolves to the semantic entity type; legacy raw layouts
 use the entity type directly at the same route position.
 
-| Column | Arrow type | Notes |
-|---|---|---|
-| `node_uuid` | `FixedSizeBinary(16)` | Join key back to `topology/nodes.parquet` |
-| *(property columns)* | *(per ontology)* | e.g. `name Utf8`, `age Int64`, `email Utf8` |
+| Column               | Arrow type            | Notes                                       |
+| -------------------- | --------------------- | ------------------------------------------- |
+| `node_uuid`          | `FixedSizeBinary(16)` | Join key back to `topology/nodes.parquet`   |
+| _(property columns)_ | _(per ontology)_      | e.g. `name Utf8`, `age Int64`, `email Utf8` |
 
 Property access joins the logical node-topology shard union to the logical
 property overlay on `node_uuid`. Catalog, direct, SQL, export, verification,
@@ -1165,11 +1164,11 @@ analyst-verb/find execution.
 
 The ontology is a **runtime-loadable knowledge schema**, not Rust structs generated into the binary. Three representations serve different purposes:
 
-| Format | Purpose |
-|---|---|
-| **YAML / JSON** | Human-authored ontology definitions (Serde-based load) |
-| **Arrow tables** | Compiled execution format — cheap joins during binding and planning |
-| **Parquet** | Derived compiled-runtime snapshot for rapid startup or reproducible deployments; discard and recompile on ontology-checksum mismatch |
+| Format           | Purpose                                                                                                                              |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| **YAML / JSON**  | Human-authored ontology definitions (Serde-based load)                                                                               |
+| **Arrow tables** | Compiled execution format — cheap joins during binding and planning                                                                  |
+| **Parquet**      | Derived compiled-runtime snapshot for rapid startup or reproducible deployments; discard and recompile on ontology-checksum mismatch |
 
 ### Ontology authoring format (YAML)
 
@@ -1206,16 +1205,16 @@ At load time this compiles into Arrow lookup tables keyed by integer type IDs. S
 
 ### Ontology runtime tables
 
-| Table | Purpose |
-|---|---|
-| `ontology_meta` | Identity, version, IR compatibility range, checksum |
-| `entity_types` | Node classes and inheritance DAG (acyclicity enforced at load) |
-| `relation_types` | Edge classes, endpoint type constraints, inverse pairs |
-| `property_types` | Name, owner, value type, nullability, cardinality |
-| `type_constraints` | Validation rules (unique, required, range) |
-| `cardinality_rules` | Endpoint multiplicity (min/max per relation type) |
-| `semantic_flags` | `transitive`, `symmetric`, `reflexive`, `functional`, `acyclic` |
-| `aliases` | Human-facing and deprecated names |
+| Table               | Purpose                                                         |
+| ------------------- | --------------------------------------------------------------- |
+| `ontology_meta`     | Identity, version, IR compatibility range, checksum             |
+| `entity_types`      | Node classes and inheritance DAG (acyclicity enforced at load)  |
+| `relation_types`    | Edge classes, endpoint type constraints, inverse pairs          |
+| `property_types`    | Name, owner, value type, nullability, cardinality               |
+| `type_constraints`  | Validation rules (unique, required, range)                      |
+| `cardinality_rules` | Endpoint multiplicity (min/max per relation type)               |
+| `semantic_flags`    | `transitive`, `symmetric`, `reflexive`, `functional`, `acyclic` |
+| `aliases`           | Human-facing and deprecated names                               |
 
 Versioned migration transforms remain part of the authoritative `OntologyDoc`;
 they are not a ninth compiled runtime table or Parquet snapshot file.
@@ -1224,20 +1223,20 @@ they are not a ninth compiled runtime table or Parquet snapshot file.
 
 Two independent version axes:
 
-| Axis | Meaning |
-|---|---|
-| `ontology_version` | Meaning of types and rules — changes when the schema evolves |
-| `ir_version` | Runtime/compiler contract — changes when the IR format changes |
+| Axis               | Meaning                                                        |
+| ------------------ | -------------------------------------------------------------- |
+| `ontology_version` | Meaning of types and rules — changes when the schema evolves   |
+| `ir_version`       | Runtime/compiler contract — changes when the IR format changes |
 
 A new ontology version does not require a new IR version, and vice versa. Persisted datasets record the `ontology_version` used to write them. Arrow schema metadata carries both versions through IPC and Parquet round-trips.
 
 ### Validation model
 
-| Level | When | Examples |
-|---|---|---|
-| **Ontology-load** | On file/table load | Duplicate names, missing parents, inheritance cycles, bad inverse references |
-| **Write-time** | On `CREATE`, `MERGE`, batch ingest | Unknown property, wrong value type, illegal endpoint type, cardinality overflow |
-| **Query-time** | During binding/planning | Unknown labels/types/properties, illegal pattern shape, ambiguous property resolution |
+| Level             | When                               | Examples                                                                              |
+| ----------------- | ---------------------------------- | ------------------------------------------------------------------------------------- |
+| **Ontology-load** | On file/table load                 | Duplicate names, missing parents, inheritance cycles, bad inverse references          |
+| **Write-time**    | On `CREATE`, `MERGE`, batch ingest | Unknown property, wrong value type, illegal endpoint type, cardinality overflow       |
+| **Query-time**    | During binding/planning            | Unknown labels/types/properties, illegal pattern shape, ambiguous property resolution |
 
 ---
 
@@ -1245,10 +1244,10 @@ A new ontology version does not require a new IR version, and vice versa. Persis
 
 **Default rule (with two named exceptions):**
 
-| System | Purpose | Format |
-|---|---|---|
+| System                                     | Purpose                                                                        | Format                                |
+| ------------------------------------------ | ------------------------------------------------------------------------------ | ------------------------------------- |
 | **Arrow / Parquet** (`graphforge-storage`) | Graph topology/properties and generic persistence of domain-owned participants | Binary columnar (Arrow IPC / Parquet) |
-| **JSON / YAML** (`graphforge-ontology`) | Ontology definitions and metadata | Text (human-readable, validatable) |
+| **JSON / YAML** (`graphforge-ontology`)    | Ontology definitions and metadata                                              | Text (human-readable, validatable)    |
 
 Graph data → Arrow/Parquet. Ontology definitions and metadata → JSON or YAML.
 The permanent exceptions are (1) authoritative, versioned GFDR binary delta
@@ -1280,10 +1279,8 @@ The storage layer is transparent to all API surfaces.
 ## References
 
 - [Architecture Overview](overview.md) — workspace layout and provider trait
-- [Architecture Refactor v0.5](refactor-v0.5.md) — UUID identity model, typed edge tables, project structure
 - [Execution Model](execution-model.md) — how providers connect to DataFusion
 - [ADR 0001: Rust Core](../../adr/0001-rust-core.md) — Parquet-as-primary and provider strategy
-
 
 ## Current publishing contract
 
@@ -1316,18 +1313,18 @@ Every applicable graph publisher preserves these authorities together:
   local. Replay and compaction retain the accepted codec; private IPC/spill,
   portable containers and query sinks have separate contracts.
 
-| Producer → publisher → consumer | Operation boundary and applicable proof |
-| --- | --- |
-| Public construction → canonical graph generation → facade/reopen | Typed/exploratory topology and properties, sharded nodes, routes, all graph identity authorities and continuation tails. Construction, CAS ownership and publishing-budget facade regressions cover exact reopening and portable interchange. |
-| Ordinary Cypher/analyst mutation → MutationTransaction/GraphWriter → generation readers | Canonical topology and property mutation; complete participant publication. Public CREATE/DELETE/SET, active streams, fault recovery and next-ID tests apply. |
+| Producer → publisher → consumer                                                                             | Operation boundary and applicable proof                                                                                                                                                                                                                                                                                                                          |
+| ----------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Public construction → canonical graph generation → facade/reopen                                            | Typed/exploratory topology and properties, sharded nodes, routes, all graph identity authorities and continuation tails. Construction, CAS ownership and publishing-budget facade regressions cover exact reopening and portable interchange.                                                                                                                    |
+| Ordinary Cypher/analyst mutation → MutationTransaction/GraphWriter → generation readers                     | Canonical topology and property mutation; complete participant publication. Public CREATE/DELETE/SET, active streams, fault recovery and next-ID tests apply.                                                                                                                                                                                                    |
 | Composite property mutation → compact root publication (GFDR preparation retained for existing generations) | Composite property mutation publishes a compact root and no delta run (#1388). The GFDR storage APIs and their verified replay/compaction remain for generations that already carry runs: only the four property operations are admitted, and ownership fixtures cover sparse latest values, removals, nulls, route identity and shared immutable base payloads. |
-| Composite topology mutation → canonical GraphWriter publication → facade | Never GFDR. Qualified create and owner-routing regressions cover identities and subsequent property mutation. |
-| Storage GFDR APIs → framed runs → direct replay, open, checkpoint, compaction/import | All topology operations are unsupported, including checksum-valid records, duplicate operation IDs and matching transaction retries. Refusal precedes authority changes; direct replay leaves the entire supplied state unchanged. |
-| Public compaction → complete new generation → refreshed facade | Full verified property chain, same-facade subsequent mutation, exact retry, retained streams and imported continuation. Private hydration and selected permanent ownership are measured separately. |
-| Ontology adoption/clear and retained semantic transformations → workspace generation → prepared readers | Same-name promotion stages graph and ontology together; disjoint metadata-only adoption reuses payloads. Unsupported clear/type-ID reinterpretation refuses before selection. Existing semantic transformation and promotion lifecycle tests own applicable retained-data proofs. |
-| Graph/belief/portable projection → selected artifact → verifier/import | Exact selection and endpoint closure, schemas, routes and rebuilt applicable controls. An exported artifact is not a selected live generation; clean import must validate it before subsequent mutation. |
-| Portable clean import/checkpoint restoration → complete generation → facade | Complete participant authentication and corruption refusal, exact identities/properties and continuation. Persisted unsupported topology GFDR cannot be imported as supported current state. |
-| Catalog/vector/knowledge/epistemic/provenance/restore markers → declared participant → domain reader | Domain schemas, references, authentication and atomic participant ownership apply. These writers do not allocate graph topology IDs; graph ordering/tails are inapplicable to the participant payload itself. |
+| Composite topology mutation → canonical GraphWriter publication → facade                                    | Never GFDR. Qualified create and owner-routing regressions cover identities and subsequent property mutation.                                                                                                                                                                                                                                                    |
+| Storage GFDR APIs → framed runs → direct replay, open, checkpoint, compaction/import                        | All topology operations are unsupported, including checksum-valid records, duplicate operation IDs and matching transaction retries. Refusal precedes authority changes; direct replay leaves the entire supplied state unchanged.                                                                                                                               |
+| Public compaction → complete new generation → refreshed facade                                              | Full verified property chain, same-facade subsequent mutation, exact retry, retained streams and imported continuation. Private hydration and selected permanent ownership are measured separately.                                                                                                                                                              |
+| Ontology adoption/clear and retained semantic transformations → workspace generation → prepared readers     | Same-name promotion stages graph and ontology together; disjoint metadata-only adoption reuses payloads. Unsupported clear/type-ID reinterpretation refuses before selection. Existing semantic transformation and promotion lifecycle tests own applicable retained-data proofs.                                                                                |
+| Graph/belief/portable projection → selected artifact → verifier/import                                      | Exact selection and endpoint closure, schemas, routes and rebuilt applicable controls. An exported artifact is not a selected live generation; clean import must validate it before subsequent mutation.                                                                                                                                                         |
+| Portable clean import/checkpoint restoration → complete generation → facade                                 | Complete participant authentication and corruption refusal, exact identities/properties and continuation. Persisted unsupported topology GFDR cannot be imported as supported current state.                                                                                                                                                                     |
+| Catalog/vector/knowledge/epistemic/provenance/restore markers → declared participant → domain reader        | Domain schemas, references, authentication and atomic participant ownership apply. These writers do not allocate graph topology IDs; graph ordering/tails are inapplicable to the participant payload itself.                                                                                                                                                    |
 
 Private accepted construction/merge streams, decoder spools, standalone ontology
 persistence without a graph publisher, external query sinks, and test/benchmark
@@ -1373,14 +1370,14 @@ not isolated rejection costs or hard temporary-disk limits. The evidence records
 OS block counters, sample gaps, overlapping validation activity and failed
 superseded fixture attempts. No incomparable baseline improvement is claimed.
 
-| Contract outcome | Direct evidence |
-| --- | --- |
-| Supported producers, complete authorities and encoding selection | The producer matrix above; shared-policy and per-path budgets in the permanent-storage assessment. Participant-only paths explicitly exclude topology allocation. |
-| Unsupported topology refuses before authority changes | `topology_payloads_reject_before_encoding_preparation_or_publication`, `topology_cannot_bypass_published_retry_or_mutate_direct_replay_state`, `committed_checksum_valid_invalid_memberships_reject_without_authority_mutation`, and `topology_overlay_refusal_preserves_routes_and_full_width_ids`. These cover all topology variants, retry/direct-replay bypasses, authenticated persisted records and unchanged target bytes. |
-| Flat/sharded and exploratory/ontology public lifecycle | The four `publishing_contract_*` cases above assert the selected topology layout after optional adoption. They preserve exact node/edge UUIDs, endpoints, nullable values, route counts and consumed node/edge IDs across deletion, reopen, CREATE, export/full verification, clean import and subsequent mutation. |
-| Authentication and recovery remain enforced | Existing journal checksum/order/missing-run tests; compaction cancellation, checkpoint retention, cleanup and exact retry; portable import crash windows and pristine-target corruption refusal. Merged #1219, #1224, #1229 and #1231 supply public active-snapshot and returned-error lifecycle coverage. |
-| Resource bounds remain meaningful | `streaming_resource_ladder_is_independent_of_base_rows` uses 260/516/1,028 nodes, seven-row batches, 2 MiB replay admission and at most 256 KiB logical/allocated decoder spool. It compares exact output with the non-spooling path and limits logical replay-state growth to 128 bytes. Public conformance enforces 2 MiB compaction output and 8 KiB logical replay-state ceilings. These counters exclude process/native memory. |
-| Portable current-format identity correctness | `valid_identity_package_keeps_absent_primary_and_runtime_catalog_bytes`, `invalid_delta_identity_package_preserves_pristine_target_authority`, and `absent_primary_round_trip_and_topology_replay_refusal_preserve_state` distinguish valid full-width identities from unsupported topology replay. |
+| Contract outcome                                                 | Direct evidence                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Supported producers, complete authorities and encoding selection | The producer matrix above; shared-policy and per-path budgets in the permanent-storage assessment. Participant-only paths explicitly exclude topology allocation.                                                                                                                                                                                                                                                                    |
+| Unsupported topology refuses before authority changes            | `topology_payloads_reject_before_encoding_preparation_or_publication`, `topology_cannot_bypass_published_retry_or_mutate_direct_replay_state`, `committed_checksum_valid_invalid_memberships_reject_without_authority_mutation`, and `topology_overlay_refusal_preserves_routes_and_full_width_ids`. These cover all topology variants, retry/direct-replay bypasses, authenticated persisted records and unchanged target bytes.    |
+| Flat/sharded and exploratory/ontology public lifecycle           | The four `publishing_contract_*` cases above assert the selected topology layout after optional adoption. They preserve exact node/edge UUIDs, endpoints, nullable values, route counts and consumed node/edge IDs across deletion, reopen, CREATE, export/full verification, clean import and subsequent mutation.                                                                                                                  |
+| Authentication and recovery remain enforced                      | Existing journal checksum/order/missing-run tests; compaction cancellation, checkpoint retention, cleanup and exact retry; portable import crash windows and pristine-target corruption refusal. Merged #1219, #1224, #1229 and #1231 supply public active-snapshot and returned-error lifecycle coverage.                                                                                                                           |
+| Resource bounds remain meaningful                                | `streaming_resource_ladder_is_independent_of_base_rows` uses 260/516/1,028 nodes, seven-row batches, 2 MiB replay admission and at most 256 KiB logical/allocated decoder spool. It compares exact output with the non-spooling path and limits logical replay-state growth to 128 bytes. Public conformance enforces 2 MiB compaction output and 8 KiB logical replay-state ceilings. These counters exclude process/native memory. |
+| Portable current-format identity correctness                     | `valid_identity_package_keeps_absent_primary_and_runtime_catalog_bytes`, `invalid_delta_identity_package_preserves_pristine_target_authority`, and `absent_primary_round_trip_and_topology_replay_refusal_preserve_state` distinguish valid full-width identities from unsupported topology replay.                                                                                                                                  |
 
 This ledger maps ordinary implementation criteria to their existing tests. It
 adds no release-gate requirement and does not claim final capacity
@@ -1421,7 +1418,6 @@ measurement limits. The candidate point-in-time whole-project census includes
 21,979,136 allocated file bytes plus 1,257,472 directory bytes; no equivalent
 baseline census or whole-project reduction is claimed.
 
-
 ### Bounded CSR allocation and cost evidence (#1205)
 
 The fixed eight-route public lifecycle fixture uses 4,097 nodes, 65,537 edges,
@@ -1430,19 +1426,19 @@ compare the uncompressed current baseline with the bounded compressed writer;
 both produce the same semantic fingerprint through reopen, export, full
 verification and clean import.
 
-| Measurement | Uncompressed baseline | Bounded Zstd |
-|---|---:|---:|
-| Actual CSR payload bytes (18 shards) | 4,920,564 | 1,324,020 |
-| Actual CSR allocated bytes | 4,972,544 | 1,363,968 |
-| CSR metadata logical bytes | 10,329 | 11,431 |
-| Attributed permanent allocated bytes | 15,151,104 | 11,542,528 |
-| Whole-project file allocation, point census | 44,806,144 | 41,197,568 |
-| Whole-lifecycle process peak RSS, KiB | 220,400 | 238,252 |
-| Whole-lifecycle syscall read bytes | 2,309,281,609 | 2,098,377,656 |
-| Whole-lifecycle syscall write bytes | 357,447,042 | 328,689,815 |
-| Sampled overlapping workspace allocated peak | 89,038,848 | 74,625,024 |
-| Cold-probe direct CSR read bytes | 35,552,246 | 9,577,462 |
-| Cold-probe first-query median, seconds | 3.855 | 3.891 |
+| Measurement                                  | Uncompressed baseline |  Bounded Zstd |
+| -------------------------------------------- | --------------------: | ------------: |
+| Actual CSR payload bytes (18 shards)         |             4,920,564 |     1,324,020 |
+| Actual CSR allocated bytes                   |             4,972,544 |     1,363,968 |
+| CSR metadata logical bytes                   |                10,329 |        11,431 |
+| Attributed permanent allocated bytes         |            15,151,104 |    11,542,528 |
+| Whole-project file allocation, point census  |            44,806,144 |    41,197,568 |
+| Whole-lifecycle process peak RSS, KiB        |               220,400 |       238,252 |
+| Whole-lifecycle syscall read bytes           |         2,309,281,609 | 2,098,377,656 |
+| Whole-lifecycle syscall write bytes          |           357,447,042 |   328,689,815 |
+| Sampled overlapping workspace allocated peak |            89,038,848 |    74,625,024 |
+| Cold-probe direct CSR read bytes             |            35,552,246 |     9,577,462 |
+| Cold-probe first-query median, seconds       |                 3.855 |         3.891 |
 
 Payload and allocation both meet the deterministic 70% reduction budget. The
 whole-lifecycle RSS increase is a measured cost, not a decoded-memory improvement.
@@ -1510,11 +1506,11 @@ construction, mutations, exact queries and portable lifecycle work. The original
 baseline refuses corruption before completing that lifecycle, so these are
 corrected-path costs rather than a speedup comparison.
 
-| Fixture | CPU seconds (3 runs) | Maximum RSS (KiB) | Successful syscall read / write bytes | Sampled allocated bytes |
-|---|---:|---:|---:|---:|
-| Mixed construction and ordinary mutation, 33 / 4,097 nodes | 4.20–4.21 | 120,536 | 340,327,349 / 69,275,673 | 14,802,944 |
-| 8,193-edge multi-batch owner and replacement work | 1.57–1.60 | 166,980 | 114,304,045 / 25,674,019 | 5,394,432 |
-| Qualified mutation, reopen and portable lifecycle | 1.07–1.16 | 90,456 | 28,610,264 / 2,582,102 | 2,129,920 |
+| Fixture                                                    | CPU seconds (3 runs) | Maximum RSS (KiB) | Successful syscall read / write bytes | Sampled allocated bytes |
+| ---------------------------------------------------------- | -------------------: | ----------------: | ------------------------------------: | ----------------------: |
+| Mixed construction and ordinary mutation, 33 / 4,097 nodes |            4.20–4.21 |           120,536 |              340,327,349 / 69,275,673 |              14,802,944 |
+| 8,193-edge multi-batch owner and replacement work          |            1.57–1.60 |           166,980 |              114,304,045 / 25,674,019 |               5,394,432 |
+| Qualified mutation, reopen and portable lifecycle          |            1.07–1.16 |            90,456 |                28,610,264 / 2,582,102 |               2,129,920 |
 
 Syscall bytes include non-file descriptors and count a file copy once as a read
 and once as a write; they are not physical disk I/O. The evidence records GNU
@@ -1539,12 +1535,12 @@ A frozen release comparison on 4,097 random-ID nodes with sixteen nullable
 256-byte text columns measured three fresh processes per query, each executing
 five queries. Exact nullable values and identities passed for every run.
 
-| Query | First-query median ms, before → after | Reused-query median ms, before → after | Process CPU seconds, before → after |
-|---|---:|---:|---:|
-| UUID and score | 321 → 37 | 291 → 28 | 1.49–1.55 → 0.21–0.22 |
-| All properties | 327 → 342 | 294 → 309 | 2.61–2.72 → 2.71–2.77 |
-| Ordered LIMIT 16 | 323 → 38 | 291 → 28 | 1.53–1.57 → 0.21–0.22 |
-| Negative text lookup | 321 → 57 | 277 → 46 | 1.46–1.56 → 0.29–0.31 |
+| Query                | First-query median ms, before → after | Reused-query median ms, before → after | Process CPU seconds, before → after |
+| -------------------- | ------------------------------------: | -------------------------------------: | ----------------------------------: |
+| UUID and score       |                              321 → 37 |                               291 → 28 |               1.49–1.55 → 0.21–0.22 |
+| All properties       |                             327 → 342 |                              294 → 309 |               2.61–2.72 → 2.71–2.77 |
+| Ordered LIMIT 16     |                              323 → 38 |                               291 → 28 |               1.53–1.57 → 0.21–0.22 |
+| Negative text lookup |                              321 → 57 |                               277 → 46 |               1.46–1.56 → 0.29–0.31 |
 
 For UUID/score projection, five-query successful syscall reads fell from
 227,678,948 to 90,168,422 bytes and writes from 131,441,481 to 44,041,853 bytes.
@@ -1598,13 +1594,13 @@ speedups must not be multiplied. Neither query repair reduced the measured
 physical filesystem input blocks. Full-width property queries became slightly
 slower within their preselected envelope; that is not a full-scan speedup.
 
-| Candidate | Bounded comparison and decision |
-| --- | --- |
-| Predicate/projection placement | #1241 and #1247 are validated, merged improvements. The fixed-path probe reduces generated candidates from 1,113,889 to 272 and key rows from 8,932,490 to 80,898. The wide narrow query avoids 87,399,628 syscall write bytes across five executions. Remaining key validation is not credited as avoidable payload work. |
-| Optimizer statistics | Conservative cardinality forwarding changes actual join/aggregate execution, but none of seven scalar workloads meets its preselected process-CPU saving. Empty-label warm execution improves from 14.6 to 3.3 ms and saves 472,867 read / 331,707 write bytes over five queries; retain this result without claiming a general improvement. Exact forwarding is invalid because the child statistics ignore per-fragment limits and footer metadata does not prove completed decoding. The experimental patch is reverted. A separate identity-row-marker experiment meets its empty-count CPU budget and selects #1249; it does not forward statistics. |
-| Parquet layout | On five CURRENT wide shards, 128-row groups reduce a one-target-per-shard second pass from 8,094,549 to 1,012,462 compressed column bytes. This excludes the mandatory full validation pass. Repeated-text allocation doubles (143,360 to 286,720 bytes), while dense second-pass bytes increase from 109,509 to 160,364. Reject the global row-group change. The 16 KiB page target produces byte-identical files with the existing 1,024-row write batch. Plain strings save 45,056 allocated bytes for random text but breach the observed RSS selection cap and add 12,288 bytes for repeated text. Reject that global encoding change. Conditional policies remain unvalidated possibilities, not selected repairs. |
-| Property Bloom filters | Random-text filters occupy 8,303 bytes and produce 14 false positives in 20,480 verified-absent checks, with no false negatives for present values. Repeated-text filters occupy 235 bytes. Current readers must validate requested values before negative pruning, so these experiments demonstrate filter effectiveness but zero validated public read savings. Do not publish filters without an admitted consumer or credit skipping mandatory validation. |
-| Fragmentation and maintenance | Public construction, eight fixed CREATE/DELETE events and 1/8/32 repeated property transactions preserve exact UUID/value/null results. Existing compaction folds all runs, and existing cleanup reclaims retained generations. Query-only warm latency remains approximately 14 ms. Full process CPU falls from 0.46–0.50 s to 0.39–0.40 s; this includes open/validation and is not a query-latency gain. Compaction fails the preselected read-I/O ceiling in all three cases. The failed budget stays visible; whole-tree authentication cannot be removed merely by retaining a lease or parsed runs. No additional compactor is selected. |
+| Candidate                      | Bounded comparison and decision                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Predicate/projection placement | #1241 and #1247 are validated, merged improvements. The fixed-path probe reduces generated candidates from 1,113,889 to 272 and key rows from 8,932,490 to 80,898. The wide narrow query avoids 87,399,628 syscall write bytes across five executions. Remaining key validation is not credited as avoidable payload work.                                                                                                                                                                                                                                                                                                                                                                                               |
+| Optimizer statistics           | Conservative cardinality forwarding changes actual join/aggregate execution, but none of seven scalar workloads meets its preselected process-CPU saving. Empty-label warm execution improves from 14.6 to 3.3 ms and saves 472,867 read / 331,707 write bytes over five queries; retain this result without claiming a general improvement. Exact forwarding is invalid because the child statistics ignore per-fragment limits and footer metadata does not prove completed decoding. The experimental patch is reverted. A separate identity-row-marker experiment meets its empty-count CPU budget and selects #1249; it does not forward statistics.                                                                |
+| Parquet layout                 | On five CURRENT wide shards, 128-row groups reduce a one-target-per-shard second pass from 8,094,549 to 1,012,462 compressed column bytes. This excludes the mandatory full validation pass. Repeated-text allocation doubles (143,360 to 286,720 bytes), while dense second-pass bytes increase from 109,509 to 160,364. Reject the global row-group change. The 16 KiB page target produces byte-identical files with the existing 1,024-row write batch. Plain strings save 45,056 allocated bytes for random text but breach the observed RSS selection cap and add 12,288 bytes for repeated text. Reject that global encoding change. Conditional policies remain unvalidated possibilities, not selected repairs. |
+| Property Bloom filters         | Random-text filters occupy 8,303 bytes and produce 14 false positives in 20,480 verified-absent checks, with no false negatives for present values. Repeated-text filters occupy 235 bytes. Current readers must validate requested values before negative pruning, so these experiments demonstrate filter effectiveness but zero validated public read savings. Do not publish filters without an admitted consumer or credit skipping mandatory validation.                                                                                                                                                                                                                                                           |
+| Fragmentation and maintenance  | Public construction, eight fixed CREATE/DELETE events and 1/8/32 repeated property transactions preserve exact UUID/value/null results. Existing compaction folds all runs, and existing cleanup reclaims retained generations. Query-only warm latency remains approximately 14 ms. Full process CPU falls from 0.46–0.50 s to 0.39–0.40 s; this includes open/validation and is not a query-latency gain. Compaction fails the preselected read-I/O ceiling in all three cases. The failed budget stays visible; whole-tree authentication cannot be removed merely by retaining a lease or parsed runs. No additional compactor is selected.                                                                          |
 
 The additional selected repair, #1249, anchors the existing null-preserving
 `COUNT(*)` row marker to an available qualified identity instead of an unused
@@ -1762,7 +1758,6 @@ reachability before deletion. Recovery/read-side reachability acquires shared
 CAS access before the writer lock. No callback reacquires a shared CAS lock
 while cleanup holds it exclusively. Historical materialization writes only to
 an empty private target and preserves the Project's read-only state.
-
 
 ## Physical durability owner
 

@@ -1,10 +1,15 @@
 # Agent interop
 
-Every command in [`commands.md`](commands.md) is a stable ID callable via
-`vscode.commands.executeCommand("graphforge.<id>", ...)` — no Command Palette click required.
-This makes GraphForge drivable end-to-end by an in-editor coding agent (a Cursor agent, GitHub
-Copilot Agent Mode, or any other extension calling the VS Code command API), not just by a
-human clicking through menus.
+An integration with access to VS Code's command API can call command IDs via
+`vscode.commands.executeCommand("graphforge.<id>", ...)`. This API is available
+to extensions; it is not automatically available to every coding agent or chat
+window. Check the integration's actual tools before choosing this path.
+
+The structured commands and remaining interactive steps are listed below.
+For a shell-capable agent's basic graph task, start with the
+[Python agent guide](../work-with-an-agent.md). The packaged editor/agent
+journey still requires v0.6.0 qualification through
+[Core #1209](https://github.com/CurateLabs/graphforge/issues/1209).
 
 ## The core loop
 
@@ -36,13 +41,13 @@ flowchart TD
 
 ## What's structured vs. interactive
 
-| Command | Accepts args to skip prompts | Returns |
-|---|---|---|
-| `graphforge.checkEnvironment` | `{ silent?: boolean }` | `EnvironmentReport` always |
-| `graphforge.openProject` | `pathArg?: string` | — |
-| `graphforge.runQuery` / `runQueryWithParams` | `{ cypher?: string; params?: Record<string, unknown> }` | `QueryResult` (`{ columns, rows, rowCount, algorithm? }`) or a structured `{ error, code?, nextAction }` |
-| `graphforge.rank` / `cluster` / `paths` / `analyze` / `similar` / `find` (and `…Advanced…`) | Not yet — still QuickPick-driven | Verb result object (`{ verb, by, label, columns, rows, rowCount, algorithm? }`), `{ error }`, or `{ cancelled: true }` |
-| `graphforge.setupNativeBinding` / `setupPythonBinding` / `initializeProjectHere` / `loadOntology` / `showResultGraphAdvanced` | No — these are inherently human choices (which folder, which binding source) | — |
+| Command                                                                                                                       | Accepts args to skip prompts                                                 | Returns                                                                                                                |
+| ----------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `graphforge.checkEnvironment`                                                                                                 | `{ silent?: boolean }`                                                       | `EnvironmentReport` always                                                                                             |
+| `graphforge.openProject`                                                                                                      | `pathArg?: string`                                                           | —                                                                                                                      |
+| `graphforge.runQuery` / `runQueryWithParams`                                                                                  | `{ cypher?: string; params?: Record<string, unknown> }`                      | `QueryResult` (`{ columns, rows, rowCount, algorithm? }`) or a structured `{ error, code?, nextAction }`               |
+| `graphforge.rank` / `cluster` / `paths` / `analyze` / `similar` / `find` (and `…Advanced…`)                                   | Not yet — still QuickPick-driven                                             | Verb result object (`{ verb, by, label, columns, rows, rowCount, algorithm? }`), `{ error }`, or `{ cancelled: true }` |
+| `graphforge.setupNativeBinding` / `setupPythonBinding` / `initializeProjectHere` / `loadOntology` / `showResultGraphAdvanced` | No — these are inherently human choices (which folder, which binding source) | —                                                                                                                      |
 
 For a command not listed above, treat it as QuickPick/dialog-driven unless
 `src/test/extension.test.ts` (source of truth, in the repository) says otherwise.
