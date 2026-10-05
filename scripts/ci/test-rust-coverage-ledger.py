@@ -222,6 +222,42 @@ mod external_tests;
                 f"{member_filtered}"
             )
 
+        delimited_source = """fn call_surface() {
+    let _ = consume(
+        #[cfg(test)]
+        test_call_argument::<Result<
+            Vec<u8>,
+            Error,
+        >>(),
+        production_call_argument(),
+    );
+}
+fn array_surface() {
+    let _values = [
+        #[cfg(test)]
+        test_array_element::<Result<
+            Vec<u8>,
+            Error,
+        >>(),
+        production_array_element(),
+    ];
+}
+"""
+        source_path.write_text(delimited_source, encoding="utf-8")
+        delimited_lines = set(range(1, len(delimited_source.splitlines()) + 1))
+        delimited_records = {"crates/example/src/lib.rs": dict.fromkeys(delimited_lines, 0)}
+        delimited_filtered = ledger_module.production_records(delimited_records, fixture_root)
+        expected_delimited = {
+            "crates/example/src/lib.rs": dict.fromkeys(
+                delimited_lines - {3, 4, 5, 6, 7, 13, 14, 15, 16, 17}, 0
+            )
+        }
+        if delimited_filtered != expected_delimited:
+            raise AssertionError(
+                "cfg(test) call arguments or array elements changed production coverage: "
+                f"{delimited_filtered}"
+            )
+
         comparison_initializer = """fn production(a: i32, b: i32) -> Handle {
     Handle {
         #[cfg(test)]
