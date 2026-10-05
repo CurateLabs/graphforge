@@ -305,50 +305,7 @@ impl PreparedGenerationRequest {
             .collect::<std::collections::BTreeSet<_>>();
         let mut all = participants;
         let mut reused = Vec::new();
-        for descriptor in parent.participant_descriptors()? {
-            let key = (
-                descriptor.capability_id.clone(),
-                descriptor.record_family_id.clone(),
-            );
-            if replaced.contains(&key) {
-                continue;
-            }
-            let source = parent.participant_path(&key.0, &key.1)?;
-            let index = all.len();
-            all.push(ProjectParticipant {
-                capability_id: descriptor.capability_id,
-                capability_version: descriptor.capability_version,
-                record_family_id: descriptor.record_family_id,
-                record_version: descriptor.record_version,
-                encoding: match descriptor.encoding.as_str() {
-                    "parquet" => ProjectParticipantEncoding::Parquet,
-                    "arrow" => ProjectParticipantEncoding::Arrow,
-                    "json" => ProjectParticipantEncoding::Json,
-                    _ => {
-                        return Err(project_error(
-                            ProjectErrorCode::PublicationFailed,
-                            "unsupported parent participant encoding",
-                        ));
-                    }
-                },
-                schema_fingerprint: descriptor.schema_fingerprint,
-                row_count: descriptor.row_count,
-                bytes: Vec::new(),
-            });
-            reused.push(ReusedParticipantPayload {
-                index,
-                capability_id: key.0,
-                record_family_id: key.1,
-                source,
-                parent_generation_uuid: parent.generation_uuid(),
-                parent_manifest_sha256: parent.manifest_sha256(),
-                identity: ParticipantIdentity {
-                    byte_length: descriptor.byte_length,
-                    content_sha256: descriptor.content_sha256,
-                    content_xxh64: descriptor.content_xxh64,
-                },
-            });
-        }
+        Self::append_reused_parent_participants(parent, &replaced, &mut all, &mut reused)?;
         all.sort_by(|left, right| {
             (&left.capability_id, &left.record_family_id)
                 .cmp(&(&right.capability_id, &right.record_family_id))
@@ -408,6 +365,59 @@ impl PreparedGenerationRequest {
             identities,
             reused,
         })
+    }
+
+    fn append_reused_parent_participants(
+        parent: &ResolvedProjectGeneration,
+        replaced: &std::collections::BTreeSet<(String, String)>,
+        participants: &mut Vec<ProjectParticipant>,
+        reused: &mut Vec<ReusedParticipantPayload>,
+    ) -> Result<(), GfError> {
+        for descriptor in parent.participant_descriptors()? {
+            let key = (
+                descriptor.capability_id.clone(),
+                descriptor.record_family_id.clone(),
+            );
+            if replaced.contains(&key) {
+                continue;
+            }
+            let source = parent.participant_path(&key.0, &key.1)?;
+            let index = participants.len();
+            participants.push(ProjectParticipant {
+                capability_id: descriptor.capability_id,
+                capability_version: descriptor.capability_version,
+                record_family_id: descriptor.record_family_id,
+                record_version: descriptor.record_version,
+                encoding: match descriptor.encoding.as_str() {
+                    "parquet" => ProjectParticipantEncoding::Parquet,
+                    "arrow" => ProjectParticipantEncoding::Arrow,
+                    "json" => ProjectParticipantEncoding::Json,
+                    _ => {
+                        return Err(project_error(
+                            ProjectErrorCode::PublicationFailed,
+                            "unsupported parent participant encoding",
+                        ));
+                    }
+                },
+                schema_fingerprint: descriptor.schema_fingerprint,
+                row_count: descriptor.row_count,
+                bytes: Vec::new(),
+            });
+            reused.push(ReusedParticipantPayload {
+                index,
+                capability_id: key.0,
+                record_family_id: key.1,
+                source,
+                parent_generation_uuid: parent.generation_uuid(),
+                parent_manifest_sha256: parent.manifest_sha256(),
+                identity: ParticipantIdentity {
+                    byte_length: descriptor.byte_length,
+                    content_sha256: descriptor.content_sha256,
+                    content_xxh64: descriptor.content_xxh64,
+                },
+            });
+        }
+        Ok(())
     }
 
     /// The immutable request.
@@ -1038,40 +1048,21 @@ fn stage_project_generation_inner_with_locks(
     };
     let operation_fingerprint =
         operation_fingerprint.map_or_else(|| request_fingerprint.clone(), hex_digest);
-    let transactions_dir = ensure_machine_directory(&root, Path::new(TRANSACTIONS_DIR))?;
-    sync_directory(&root)?;
-    let journal_path =
-        transactions_dir.join(format!("{}.json", request.transaction_uuid.hyphenated()));
-    if journal_path.exists()
-        && let Some(outcome) = handle_existing_journal(
-            &root,
-            request,
-            &request_fingerprint,
-            &operation_fingerprint,
-            revert.as_ref(),
-            &journal_path,
-            allocation,
-        )?
-    {
+    let (journal_path, replayed) = prepare_publication_journal(
+        &root,
+        request,
+        &request_fingerprint,
+        &operation_fingerprint,
+        revert.as_ref(),
+        allocation,
+    )?;
+    if let Some(outcome) = replayed {
         return Ok(outcome);
     }
 
     // Resolve a published retry before comparing its pinned parent with
     // CURRENT. CURRENT may have advanced after this exact transaction landed.
-    if let ParticipantPayloads::Memory(_, reused) = payloads {
-        for reference in reused {
-            if reference.parent_generation_uuid != parent.generation_uuid()
-                || reference.parent_manifest_sha256 != parent.manifest_sha256()
-                || parent.participant_path(&reference.capability_id, &reference.record_family_id)?
-                    != reference.source
-            {
-                return Err(project_error(
-                    ProjectErrorCode::WriteConflict,
-                    "reused participant does not belong to the pinned parent generation",
-                ));
-            }
-        }
-    }
+    validate_reused_parent(payloads, &parent)?;
 
     let requires_promotion = matches!(publication_lock, PublicationLock::Optimistic(_));
     let generation_root =
@@ -1154,6 +1145,57 @@ fn stage_project_generation_inner_with_locks(
             revert,
         },
     )))
+}
+
+fn prepare_publication_journal(
+    root: &Path,
+    request: &ProjectGenerationRequest,
+    request_fingerprint: &str,
+    operation_fingerprint: &str,
+    revert: Option<&RevertJournalExtension>,
+    allocation: Option<&crate::StorageAllocationOperation>,
+) -> Result<(PathBuf, Option<ProjectStageOutcome>), GfError> {
+    let transactions_dir = ensure_machine_directory(root, Path::new(TRANSACTIONS_DIR))?;
+    sync_directory(root)?;
+    let journal_path =
+        transactions_dir.join(format!("{}.json", request.transaction_uuid.hyphenated()));
+    let replayed = if journal_path.exists() {
+        handle_existing_journal(
+            root,
+            request,
+            request_fingerprint,
+            operation_fingerprint,
+            revert,
+            &journal_path,
+            allocation,
+        )?
+    } else {
+        None
+    };
+    Ok((journal_path, replayed))
+}
+
+fn validate_reused_parent(
+    payloads: ParticipantPayloads<'_>,
+    parent: &ResolvedProjectGeneration,
+) -> Result<(), GfError> {
+    // Resolve a published retry before comparing its pinned parent with
+    // CURRENT. CURRENT may have advanced after this exact transaction landed.
+    if let ParticipantPayloads::Memory(_, reused) = payloads {
+        for reference in reused {
+            if reference.parent_generation_uuid != parent.generation_uuid()
+                || reference.parent_manifest_sha256 != parent.manifest_sha256()
+                || parent.participant_path(&reference.capability_id, &reference.record_family_id)?
+                    != reference.source
+            {
+                return Err(project_error(
+                    ProjectErrorCode::WriteConflict,
+                    "reused participant does not belong to the pinned parent generation",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn acquire_writer_lock(root: &Path, request: &ProjectGenerationRequest) -> Result<File, GfError> {

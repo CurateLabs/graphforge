@@ -3,8 +3,8 @@
 use super::{
     ATTEMPTS_DIR, Digest, File, GENERATIONS_DIR, GfError, MAX_GRAPH_MANIFEST_SEGMENT_BYTES,
     Ordering, PARTICIPANTS_DIR, ParticipantPayloads, Path, PathBuf, ProjectCapability,
-    ProjectErrorCode, ProjectGenerationRequest, ProjectParticipantEncoding, Read,
-    ResolvedProjectGeneration, Serialize, StagedParticipant, Write, canonical_line,
+    ProjectErrorCode, ProjectGenerationRequest, ProjectParticipant, ProjectParticipantEncoding,
+    Read, ResolvedProjectGeneration, Serialize, StagedParticipant, Write, canonical_line,
     ensure_machine_directory, hex_digest, project_error, project_failpoint, publication_io,
     sync_directory, transaction_conflict,
 };
@@ -304,129 +304,166 @@ pub(super) fn stage_participant_files(
             ParticipantPayloads::Files(..) => None,
         };
         if let Some(reference) = reused {
-            let source_parent_path = reference.source.parent().ok_or_else(|| {
-                project_error(
-                    ProjectErrorCode::PublicationFailed,
-                    "reused participant path has no parent",
-                )
-            })?;
-            let source_name = reference.source.file_name().ok_or_else(|| {
-                project_error(
-                    ProjectErrorCode::PublicationFailed,
-                    "reused participant path has no name",
-                )
-            })?;
-            let source_parent = graphforge_filesystem::StableDirectory::open(source_parent_path)
-                .map_err(publication_io)?;
-            let source_file = source_parent
-                .open_child_file(source_name)
-                .map_err(publication_io)?;
-            let source_metadata = source_file.metadata().map_err(publication_io)?;
-            if !source_metadata.file_type().is_file()
-                || source_metadata.len() != metadata.byte_length
-            {
-                return Err(project_error(
-                    ProjectErrorCode::PublicationFailed,
-                    "reused participant is missing, linked, or has an invalid length",
-                ));
-            }
-            let identity =
-                graphforge_filesystem::file_identity(&source_file).map_err(publication_io)?;
-            let (linked, _) = source_parent
-                .link_child_into(
-                    source_name,
-                    &source_file,
-                    identity,
-                    &parent,
-                    destination.file_name().expect("participant has a name"),
-                )
-                .map_err(publication_io)?;
-            drop(linked);
-            crate::concurrency_attribution::RegionScope::record_work(
-                "participant_reused_bytes",
-                metadata.byte_length,
-            );
+            stage_reused_participant(request, metadata, reference, &destination, &parent)?;
+            continue;
+        }
+        stage_new_participant(&NewParticipantStage {
+            request,
+            metadata,
+            payloads,
+            index,
+            input,
+            destination: &destination,
+            parent: &parent,
+            allocation,
+        })?;
+    }
+    Ok(())
+}
+
+fn stage_reused_participant(
+    request: &ProjectGenerationRequest,
+    metadata: &StagedParticipant,
+    reference: &super::ReusedParticipantPayload,
+    destination: &Path,
+    destination_parent: &graphforge_filesystem::StableDirectory,
+) -> Result<(), GfError> {
+    let source_parent_path = reference.source.parent().ok_or_else(|| {
+        project_error(
+            ProjectErrorCode::PublicationFailed,
+            "reused participant path has no parent",
+        )
+    })?;
+    let source_name = reference.source.file_name().ok_or_else(|| {
+        project_error(
+            ProjectErrorCode::PublicationFailed,
+            "reused participant path has no name",
+        )
+    })?;
+    let source_parent =
+        graphforge_filesystem::StableDirectory::open(source_parent_path).map_err(publication_io)?;
+    let source_file = source_parent
+        .open_child_file(source_name)
+        .map_err(publication_io)?;
+    let source_metadata = source_file.metadata().map_err(publication_io)?;
+    if !source_metadata.file_type().is_file() || source_metadata.len() != metadata.byte_length {
+        return Err(project_error(
+            ProjectErrorCode::PublicationFailed,
+            "reused participant is missing, linked, or has an invalid length",
+        ));
+    }
+    let identity = graphforge_filesystem::file_identity(&source_file).map_err(publication_io)?;
+    let (linked, _) = source_parent
+        .link_child_into(
+            source_name,
+            &source_file,
+            identity,
+            destination_parent,
+            destination.file_name().expect("participant has a name"),
+        )
+        .map_err(publication_io)?;
+    drop(linked);
+    crate::concurrency_attribution::RegionScope::record_work(
+        "participant_reused_bytes",
+        metadata.byte_length,
+    );
+    project_failpoint::hit(
+        "project.after_participant_fsync",
+        Some(request.transaction_uuid),
+        Some(request.generation_uuid),
+        "STAGED",
+        false,
+    )
+}
+
+struct NewParticipantStage<'a> {
+    request: &'a ProjectGenerationRequest,
+    metadata: &'a StagedParticipant,
+    payloads: ParticipantPayloads<'a>,
+    index: usize,
+    input: &'a ProjectParticipant,
+    destination: &'a Path,
+    parent: &'a graphforge_filesystem::StableDirectory,
+    allocation: Option<&'a crate::StorageAllocationOperation>,
+}
+
+fn stage_new_participant(stage: &NewParticipantStage<'_>) -> Result<(), GfError> {
+    let NewParticipantStage {
+        request,
+        metadata,
+        payloads,
+        index,
+        input,
+        destination,
+        parent,
+        allocation,
+    } = *stage;
+    let primary = std::cell::RefCell::new(None);
+    let copied_hash_streams = std::cell::Cell::new(0);
+    let result = crate::durable_commit::stage_private_file(
+        parent,
+        destination.file_name().expect("participant has a name"),
+        |file| {
+            let write_result = (|| -> Result<(), GfError> {
+                match payloads {
+                    ParticipantPayloads::Memory(..) => {
+                        file.write_all(&input.bytes).map_err(publication_io)?;
+                    }
+                    ParticipantPayloads::Files(files, cancelled, copy_buffer_bytes, captures) => {
+                        copied_hash_streams.set(copy_file_participant(
+                            file,
+                            &files[index],
+                            metadata,
+                            cancelled,
+                            copy_buffer_bytes,
+                            captures
+                                .and_then(|authorities| authorities.get(&files[index].source))
+                                .copied(),
+                        )?);
+                    }
+                }
+                Ok(())
+            })();
+            write_result.map_err(|error| {
+                let cause = std::io::Error::other(error.to_string());
+                *primary.borrow_mut() = Some(error);
+                cause
+            })
+        },
+        || {
             project_failpoint::hit(
-                "project.after_participant_fsync",
+                "project.after_participant_write",
                 Some(request.transaction_uuid),
                 Some(request.generation_uuid),
                 "STAGED",
                 false,
-            )?;
-            continue;
-        }
-        let primary = std::cell::RefCell::new(None);
-        let copied_hash_streams = std::cell::Cell::new(0);
-        let result = crate::durable_commit::stage_private_file(
-            &parent,
-            destination.file_name().expect("participant has a name"),
-            |file| {
-                let write_result = (|| -> Result<(), GfError> {
-                    match payloads {
-                        ParticipantPayloads::Memory(..) => {
-                            file.write_all(&input.bytes).map_err(publication_io)?;
-                        }
-                        ParticipantPayloads::Files(
-                            files,
-                            cancelled,
-                            copy_buffer_bytes,
-                            captures,
-                        ) => {
-                            copied_hash_streams.set(copy_file_participant(
-                                file,
-                                &files[index],
-                                metadata,
-                                cancelled,
-                                copy_buffer_bytes,
-                                captures
-                                    .and_then(|authorities| authorities.get(&files[index].source))
-                                    .copied(),
-                            )?);
-                        }
-                    }
-                    Ok(())
-                })();
-                write_result.map_err(|error| {
-                    let cause = std::io::Error::other(error.to_string());
-                    *primary.borrow_mut() = Some(error);
-                    cause
-                })
-            },
-            || {
-                project_failpoint::hit(
-                    "project.after_participant_write",
-                    Some(request.transaction_uuid),
-                    Some(request.generation_uuid),
-                    "STAGED",
-                    false,
-                )
-                .map_err(|error| {
-                    let cause = std::io::Error::other(error.to_string());
-                    *primary.borrow_mut() = Some(error);
-                    cause
-                })
-            },
-            allocation,
-        );
-        let file = result.map_err(|error| {
-            primary
-                .into_inner()
-                .unwrap_or_else(|| publication_io(error))
-        })?;
-        project_failpoint::hit(
-            "project.after_participant_fsync",
-            Some(request.transaction_uuid),
-            Some(request.generation_uuid),
-            "STAGED",
-            false,
-        )?;
-        drop(file);
-        verify_participant_file(&destination, metadata)?;
-        crate::graph_construction::diagnostics::sealed_payload(
-            metadata.byte_length,
-            copied_hash_streams.get(),
-        );
-    }
+            )
+            .map_err(|error| {
+                let cause = std::io::Error::other(error.to_string());
+                *primary.borrow_mut() = Some(error);
+                cause
+            })
+        },
+        allocation,
+    );
+    let file = result.map_err(|error| {
+        primary
+            .into_inner()
+            .unwrap_or_else(|| publication_io(error))
+    })?;
+    project_failpoint::hit(
+        "project.after_participant_fsync",
+        Some(request.transaction_uuid),
+        Some(request.generation_uuid),
+        "STAGED",
+        false,
+    )?;
+    drop(file);
+    verify_participant_file(destination, metadata)?;
+    crate::graph_construction::diagnostics::sealed_payload(
+        metadata.byte_length,
+        copied_hash_streams.get(),
+    );
     Ok(())
 }
 

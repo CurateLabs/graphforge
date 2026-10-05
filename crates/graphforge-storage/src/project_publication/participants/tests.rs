@@ -69,6 +69,7 @@ fn reused_parent_participants_are_hard_linked_without_payload_hash_or_write() {
         &parent,
         &[("graph".into(), "nodes".into())],
         changed,
+        |_, _| Uuid::now_v7(),
     )
     .unwrap();
     let capture = crate::concurrency_attribution::RegionCapture::start("publish");

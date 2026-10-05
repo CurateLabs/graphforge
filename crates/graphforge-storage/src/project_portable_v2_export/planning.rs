@@ -398,7 +398,7 @@ fn bridge_component_id(digest: &str) -> String {
     reason = "projection appends one authenticated closure to the existing immutable plan"
 )]
 fn project_ontology_composition(
-    source: &Path,
+    generation: &ResolvedProjectGeneration,
     projected: &[crate::PortableV2ProjectedSelectionEntry],
     limits: PortableV2ExportLimits,
     total: &mut u64,
@@ -406,25 +406,30 @@ fn project_ontology_composition(
     components: &mut Vec<Component>,
     roots: &mut Vec<String>,
 ) -> Result<(), ExportError> {
-    let mut input = open_source_no_follow(source)?;
-    let before = identity(&input.metadata().map_err(storage)?)?;
-    if before.len > MAX_WORKSPACE_ONTOLOGY_COMPOSITION_BYTES as u64 {
+    let identity = generation
+        .portable_participant_identity(
+            crate::WORKSPACE_CAPABILITY_ID,
+            crate::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY,
+        )
+        .map_err(storage)?;
+    if identity.byte_length() > MAX_WORKSPACE_ONTOLOGY_COMPOSITION_BYTES as u64 {
         return Err(limit(
             "ontology composition authority exceeds configured limit",
         ));
     }
-    let mut bytes = Vec::new();
-    std::io::Read::by_ref(&mut input)
-        .take(MAX_WORKSPACE_ONTOLOGY_COMPOSITION_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(storage)?;
-    if bytes.len() as u64 != before.len || identity(&input.metadata().map_err(storage)?)? != before
-    {
-        return Err(err(
-            "GF_SOURCE_CHANGED",
-            "ontology composition changed during planning",
-        ));
-    }
+    // This source came from a selected generation manifest. Read it through
+    // the manifest-authenticated participant boundary, which checks length,
+    // XXH64 and the JSON SHA-256 while allowing its validated carry-forward
+    // hard link. Untrusted/local planning inputs continue through strict
+    // single-link `identity()` checks.
+    let bytes = generation
+        .participant_snapshot(
+            crate::WORKSPACE_CAPABILITY_ID,
+            crate::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY,
+        )
+        .map_err(storage)?
+        .ok_or_else(|| err("GF_INVALID_STRUCTURE", "ontology composition is missing"))?
+        .bytes;
     let composition =
         crate::WorkspaceOntologyComposition::from_canonical_json(&bytes).map_err(storage)?;
 
@@ -709,7 +714,7 @@ pub fn plan_selected_portable_v2(
     let mut roots = Vec::new();
     let mut runtime_participants = Vec::new();
     let mut graph_inventory_participant = None;
-    let mut ontology_composition_source = None;
+    let mut has_ontology_composition = false;
     let mut total = 0;
     for d in g.participant_descriptors()? {
         if !selection.includes(&d.capability_id, &d.record_family_id) {
@@ -718,8 +723,7 @@ pub fn plan_selected_portable_v2(
         if d.capability_id == crate::WORKSPACE_CAPABILITY_ID
             && d.record_family_id == crate::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY
         {
-            ontology_composition_source =
-                Some(g.participant_path(&d.capability_id, &d.record_family_id)?);
+            has_ontology_composition = true;
             continue;
         }
         let id = portable_participant_id(&d.capability_id, &d.record_family_id);
@@ -774,9 +778,9 @@ pub fn plan_selected_portable_v2(
             files: vec![cf],
         });
     }
-    if let Some(source) = ontology_composition_source {
+    if has_ontology_composition {
         project_ontology_composition(
-            &source,
+            g,
             &selection.projected,
             limits,
             &mut total,

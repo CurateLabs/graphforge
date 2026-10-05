@@ -348,7 +348,7 @@ fn copy(
     }
     let (mut input, planned_identity) = open_planned_source(planned)?;
     let mut buffer = vec![0; size];
-    let mut digest = Some(Sha256::new());
+    let mut digest = planned.checksum.is_none().then(Sha256::new);
     let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut bytes_read = 0;
     let bound = planned
@@ -426,7 +426,7 @@ fn stream(
     }
     let (mut input, planned_identity) = open_planned_source(planned)?;
     let mut buffer = vec![0; size];
-    let mut digest = Some(Sha256::new());
+    let mut digest = planned.checksum.is_none().then(Sha256::new);
     let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut bytes_read = 0;
     let bound = planned

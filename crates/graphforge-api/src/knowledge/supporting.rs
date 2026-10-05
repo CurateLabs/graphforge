@@ -322,6 +322,32 @@ fn validate_evidence_source(
     }
 }
 
+fn read_confidence_domain_ledgers(
+    parent: &ResolvedProjectGeneration,
+    assertion_uuid: Uuid,
+) -> Result<ConfidenceLedger, GfError> {
+    let assertions = {
+        let _domain_ledger_decode = graphforge_storage::concurrency_attribution::RegionScope::named(
+            "confidence_domain_ledger_decode",
+        );
+        read_ledger(parent)?
+    };
+    if !assertions
+        .assertions
+        .iter()
+        .any(|row| row.assertion_uuid == assertion_uuid)
+    {
+        return Err(not_found_kind("assertion"));
+    }
+    let existing = {
+        let _domain_ledger_decode = graphforge_storage::concurrency_attribution::RegionScope::named(
+            "confidence_domain_ledger_decode",
+        );
+        read_confidence_ledger(parent)?
+    };
+    Ok(existing)
+}
+
 impl GraphForge {
     /// Atomically record one confidence assessment, its input snapshot, and provenance.
     #[allow(
@@ -350,27 +376,7 @@ impl GraphForge {
                 "project generation changed before confidence publication",
             ));
         }
-        let assertions = {
-            let _domain_ledger_decode =
-                graphforge_storage::concurrency_attribution::RegionScope::named(
-                    "confidence_domain_ledger_decode",
-                );
-            read_ledger(&parent)?
-        };
-        if !assertions
-            .assertions
-            .iter()
-            .any(|row| row.assertion_uuid == request.assertion_uuid)
-        {
-            return Err(not_found_kind("assertion"));
-        }
-        let existing = {
-            let _domain_ledger_decode =
-                graphforge_storage::concurrency_attribution::RegionScope::named(
-                    "confidence_domain_ledger_decode",
-                );
-            read_confidence_ledger(&parent)?
-        };
+        let existing = read_confidence_domain_ledgers(&parent, request.assertion_uuid)?;
         let recorded_at_micros = (self.clock.lock().expect("clock lock poisoned"))()?;
         let event = ProvenanceEvent::new(
             request.context.operation_uuid.0,

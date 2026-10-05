@@ -166,7 +166,7 @@ impl GraphForge {
         candidate_bindings: Option<&graphforge_storage::SemanticStorageBindings>,
         repair_corrupt_adjacency: bool,
     ) -> Result<(), GfError> {
-        use graphforge_storage::{ProjectCapability, ProjectStageOutcome};
+        use graphforge_storage::ProjectStageOutcome;
 
         // Publication rebuilds indexes and stages from `self.dir()` in place; a
         // pinned alias of a published tree must never reach that point.
@@ -213,23 +213,11 @@ impl GraphForge {
             recorded_at_micros,
         )?;
         drop(installed_bindings);
-        let capabilities = parent
-            .capabilities()
-            .into_iter()
-            .map(|capability| ProjectCapability {
-                capability_id: capability.capability_id,
-                capability_version: capability.capability_version,
-            })
-            .collect::<Vec<_>>();
-        let request = graphforge_storage::PreparedGenerationRequest::new_reusing_parent(
-            operation_uuid,
-            capabilities,
+        let request = prepare_graph_generation_request(
             &parent,
-            &replaced_graph_participant_keys(provenance_enabled),
+            operation_uuid,
+            provenance_enabled,
             participants,
-            |participants, content_sha256| {
-                mutation_generation_uuid(operation_uuid, participants, content_sha256)
-            },
         )?;
         let generation_uuid = request.generation_uuid;
         let publication = match graphforge_storage::stage_project_generation_with_graph_tree_mode(
@@ -561,6 +549,32 @@ fn graph_publication_participants(
             .cmp(&(&right.capability_id, &right.record_family_id))
     });
     Ok(participants)
+}
+
+fn prepare_graph_generation_request(
+    parent: &graphforge_storage::ResolvedProjectGeneration,
+    operation_uuid: uuid::Uuid,
+    provenance_enabled: bool,
+    participants: Vec<graphforge_storage::ProjectParticipant>,
+) -> Result<graphforge_storage::PreparedGenerationRequest, GfError> {
+    let capabilities = parent
+        .capabilities()
+        .into_iter()
+        .map(|capability| graphforge_storage::ProjectCapability {
+            capability_id: capability.capability_id,
+            capability_version: capability.capability_version,
+        })
+        .collect::<Vec<_>>();
+    graphforge_storage::PreparedGenerationRequest::new_reusing_parent(
+        operation_uuid,
+        capabilities,
+        parent,
+        &replaced_graph_participant_keys(provenance_enabled),
+        participants,
+        |participants, content_sha256| {
+            mutation_generation_uuid(operation_uuid, participants, content_sha256)
+        },
+    )
 }
 
 fn replaced_graph_participant_keys(provenance_enabled: bool) -> Vec<(String, String)> {
