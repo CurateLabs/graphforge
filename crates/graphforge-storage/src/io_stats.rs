@@ -148,6 +148,9 @@ pub(crate) struct Counters {
     relationship_merge_topology_rows: AtomicU64,
     relationship_merge_candidate_rows: AtomicU64,
     relationship_merge_property_rows: AtomicU64,
+    workspace_checkpoint_bytes: AtomicU64,
+    workspace_checkpoint_files: AtomicU64,
+    workspace_checkpoint_flushes: AtomicU64,
 }
 
 /// A point-in-time copy of requested I/O counters. Difference two
@@ -217,6 +220,12 @@ pub struct IoSnapshot {
     pub relationship_merge_candidate_rows: u64,
     /// Authenticated property rows decoded for relationship MERGE candidates.
     pub relationship_merge_property_rows: u64,
+    /// Bytes copied into rollback workspace checkpoints.
+    pub workspace_checkpoint_bytes: u64,
+    /// Files copied into rollback workspace checkpoints.
+    pub workspace_checkpoint_files: u64,
+    /// File durability barriers issued while creating rollback checkpoints.
+    pub workspace_checkpoint_flushes: u64,
 }
 
 /// Capture requested counters, or report an unavailable observation.
@@ -267,6 +276,11 @@ pub fn snapshot() -> Option<IoSnapshot> {
             .load(Ordering::Relaxed),
         relationship_merge_property_rows: counters
             .relationship_merge_property_rows
+            .load(Ordering::Relaxed),
+        workspace_checkpoint_bytes: counters.workspace_checkpoint_bytes.load(Ordering::Relaxed),
+        workspace_checkpoint_files: counters.workspace_checkpoint_files.load(Ordering::Relaxed),
+        workspace_checkpoint_flushes: counters
+            .workspace_checkpoint_flushes
             .load(Ordering::Relaxed),
     })
 }
@@ -329,6 +343,15 @@ pub fn reset() {
         counters
             .relationship_merge_property_rows
             .store(0, Ordering::Relaxed);
+        counters
+            .workspace_checkpoint_bytes
+            .store(0, Ordering::Relaxed);
+        counters
+            .workspace_checkpoint_files
+            .store(0, Ordering::Relaxed);
+        counters
+            .workspace_checkpoint_flushes
+            .store(0, Ordering::Relaxed);
     });
 }
 
@@ -345,6 +368,29 @@ pub fn record_relationship_merge_work(topology_rows: u64, candidate_rows: u64, p
         counters
             .relationship_merge_property_rows
             .fetch_add(property_rows, Ordering::Relaxed);
+    });
+}
+
+/// Record bytes and durability barriers actually used to create a rollback checkpoint.
+pub(crate) fn record_workspace_checkpoint_copy(bytes: u64, flushes: u64) {
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters
+            .workspace_checkpoint_bytes
+            .fetch_add(bytes, Ordering::Relaxed);
+        counters
+            .workspace_checkpoint_files
+            .fetch_add(1, Ordering::Relaxed);
+        counters
+            .workspace_checkpoint_flushes
+            .fetch_add(flushes, Ordering::Relaxed);
+    });
+}
+
+pub(crate) fn record_workspace_checkpoint_flush() {
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters
+            .workspace_checkpoint_flushes
+            .fetch_add(1, Ordering::Relaxed);
     });
 }
 

@@ -1851,8 +1851,15 @@ impl GraphWorkspaceCheckpoint {
                             storage("create rollback snapshot directory", parent, error)
                         })?;
                     }
-                    copy_regular_file(&input, &output)?;
+                    let copied = copy_regular_file(&input, &output)?;
+                    crate::io_stats::record_workspace_checkpoint_copy(
+                        copied.write_bytes,
+                        copied.fsync_calls,
+                    );
                     make_private_copy_owner_writable(&output)?;
+                    if cfg!(unix) {
+                        crate::io_stats::record_workspace_checkpoint_flush();
+                    }
                 }
                 verify_graph_tree(backup.path(), &inventory)?;
                 (inventory, false)
