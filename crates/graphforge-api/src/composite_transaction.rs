@@ -618,7 +618,7 @@ fn encode_knowledge(
             composite_reasoning_fingerprint(row)?,
         )?;
     }
-    for row in &status.events {
+    for row in status.events() {
         encode_owned(
             writer,
             row.status_event_uuid,

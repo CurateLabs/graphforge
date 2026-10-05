@@ -18,6 +18,12 @@ execution.
 - Rust `EvidenceLedger` values expose validated links through `links()` and
   `into_links()`; the collection is private so callers cannot invalidate rows
   after construction and bypass incremental merge validation.
+- Rust `AssertionStatusLedger` values expose validated events through
+  `events()` and `into_events()`; the event collection is private so callers
+  cannot mutate rows after construction and bypass incremental merge
+  validation. This is a pre-v1 Rust source-compatibility change; callers that
+  used the public vector should migrate to these accessors. The Python and Node
+  API contracts do not change.
 - `graphforge-storage` receives opaque participants and owns generation publication.
 - Graph reads, openCypher reads, and analyst-verb/find compute never open provenance or
   knowledge participants.

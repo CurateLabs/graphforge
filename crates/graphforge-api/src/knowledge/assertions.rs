@@ -182,7 +182,7 @@ fn committed_status_event(
     let committed = graphforge_storage::resolve_project_generation(root)?;
     let ledger = read_status_ledger(&committed)?;
     let index = ledger
-        .events
+        .events()
         .iter()
         .position(|row| row.status_event_uuid == status_event_uuid)
         .ok_or_else(|| GfError::Validation("committed status event is absent".into()))?;
@@ -446,7 +446,7 @@ impl GraphForge {
             .iter()
             .find(|row| row.assertion_uuid == request.assertion.assertion_uuid);
         let existing_status = statuses
-            .events
+            .events()
             .iter()
             .find(|row| row.status_event_uuid == request.first_status.status_event_uuid);
         match (existing_assertion, existing_status) {
@@ -460,7 +460,7 @@ impl GraphForge {
                     && status.provenance_uuid == assertion.provenance_uuid =>
             {
                 let index = statuses
-                    .events
+                    .events()
                     .iter()
                     .position(|row| row.status_event_uuid == request.first_status.status_event_uuid)
                     .expect("matched status belongs to ledger");
@@ -667,11 +667,11 @@ impl GraphForge {
         )?;
         let existing = read_status_ledger(&parent)?;
         if let Some(index) = existing
-            .events
+            .events()
             .iter()
             .position(|row| row.status_event_uuid == request.status_event_uuid)
         {
-            let row = &existing.events[index];
+            let row = &existing.events()[index];
             if row.assertion_uuid == request.assertion_uuid
                 && row.status == request.status
                 && row.confidence_uuid == request.confidence_uuid
@@ -724,7 +724,7 @@ impl GraphForge {
             || RecordBatch::new_empty(Arc::clone(&ASSERTION_STATUS_SCHEMA)),
             |event| {
                 let index = ledger
-                    .events
+                    .events()
                     .iter()
                     .position(|row| row.status_event_uuid == event.status_event_uuid)
                     .expect("current status belongs to ledger");
@@ -749,7 +749,7 @@ impl GraphForge {
         let generation = self.generation_for_read()?;
         let ledger = read_status_ledger(&generation)?;
         let selected = ledger
-            .events
+            .events()
             .iter()
             .enumerate()
             .filter(|(_, row)| {
@@ -857,7 +857,7 @@ impl GraphForge {
                 && row.status_event_uuid == request.status_event_uuid
                 && row.reasoning_uuid == request.reasoning_uuid
                 && row.provenance_uuid == request.provenance_uuid
-                && existing_statuses.events.iter().any(|status| {
+                && existing_statuses.events().iter().any(|status| {
                     status.status_event_uuid == request.status_event_uuid
                         && status.assertion_uuid == request.prior_assertion_uuid
                         && status.status == AssertionStatus::Superseded
@@ -877,7 +877,7 @@ impl GraphForge {
             ));
         }
         if existing_statuses
-            .events
+            .events()
             .iter()
             .any(|row| row.status_event_uuid == request.status_event_uuid)
         {

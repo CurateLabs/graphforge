@@ -683,7 +683,7 @@ fn build_validation_snapshot(
             .collect();
         let status = crate::knowledge::read_status_ledger(parent)?;
         snapshot.status_events = status
-            .events
+            .events()
             .iter()
             .map(|row| row.status_event_uuid)
             .collect();
@@ -1590,7 +1590,12 @@ mod tests {
                 .records
                 .is_empty()
         );
-        assert!(merge_status(&parent, &knowledge).unwrap().events.is_empty());
+        assert!(
+            merge_status(&parent, &knowledge)
+                .unwrap()
+                .events()
+                .is_empty()
+        );
         assert!(
             merge_supersessions(&parent, &knowledge)
                 .unwrap()

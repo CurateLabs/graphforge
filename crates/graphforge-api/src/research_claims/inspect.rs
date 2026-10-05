@@ -301,7 +301,7 @@ fn knowledge_state(
     };
     let mut latest = HashMap::new();
     let mut history_count = HashMap::new();
-    for row in &status_ledger.events {
+    for row in status_ledger.events() {
         latest.insert(row.assertion_uuid, row.status.as_str());
         *history_count.entry(row.assertion_uuid).or_insert(0_u64) += 1;
     }
