@@ -532,6 +532,10 @@ export default defineConfig({
                   label: '0055 — Research Versions are commits',
                   slug: 'adr/0055-versions-are-commits',
                 },
+                {
+                  label: '0056 — Shaping stays serial within stages until one sub-phase dominates',
+                  slug: 'adr/0056-stage-internal-parallelism',
+                },
                 // END generated ADR records
               ],
             },
