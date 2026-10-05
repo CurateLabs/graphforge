@@ -83,7 +83,19 @@ const MEASUREMENTS: [&str; 14] = [
     "fsync_calls",
     "fsync_elapsed_ns",
 ];
-const REGIONS: [&str; 55] = [
+const WORK_UNITS_V1: [&str; 6] = ["rows", "bytes", "nodes", "edges", "hashed_bytes", "written_bytes"];
+const WORK_UNITS_V2: [&str; 9] = [
+    "rows",
+    "bytes",
+    "nodes",
+    "edges",
+    "hashed_bytes",
+    "written_bytes",
+    "participant_materialized_bytes",
+    "participant_reused_bytes",
+    "participant_payload_read_bytes",
+];
+const REGIONS: [&str; 57] = [
     "import_command",
     "begin_import",
     "resume_import",
@@ -139,6 +151,8 @@ const REGIONS: [&str; 55] = [
     "runtime_catalog",
     "shape_completion",
     "participant_materialization",
+    "participant_carry_forward",
+    "participant_reuse_validation",
 ];
 
 pub(crate) fn valid_snapshot(value: &Value) -> bool {
@@ -150,6 +164,11 @@ pub(crate) fn valid_snapshot(value: &Value) -> bool {
         &MEASUREMENTS[..9]
     } else {
         &MEASUREMENTS[..]
+    };
+    let work_units = if legacy {
+        &WORK_UNITS_V1[..]
+    } else {
+        &WORK_UNITS_V2[..]
     };
     if object.len() != if legacy { 5 } else { 6 }
         || value["complete"] != true
@@ -178,6 +197,9 @@ pub(crate) fn valid_snapshot(value: &Value) -> bool {
                                 "stage+seal"
                                     | "append_nodes"
                                     | "append_edges"
+                                    | "participant_materialization"
+                                    | "participant_carry_forward"
+                                    | "participant_reuse_validation"
                                     | "source_read"
                                     | "manifest_persistence"
                                     | "journal_append"
@@ -193,7 +215,7 @@ pub(crate) fn valid_snapshot(value: &Value) -> bool {
                 && row.as_object().is_some_and(|r| r.len() == 4)
                 && row["work"].as_object().is_some_and(|work| {
                     work.iter().all(|(k, v)| {
-                        matches!(k.as_str(), "rows" | "bytes" | "nodes" | "edges" | "hashed_bytes" | "written_bytes")
+                        work_units.contains(&k.as_str())
                             && v.as_u64().is_some()
                     })
                 })
@@ -245,6 +267,18 @@ mod tests {
             graphforge_storage::concurrency_attribution::RegionCapture::start("import_command");
         graphforge_storage::concurrency_attribution::RegionScope::record_work("hashed_bytes", 17);
         graphforge_storage::concurrency_attribution::RegionScope::record_work("written_bytes", 11);
+        graphforge_storage::concurrency_attribution::RegionScope::record_work(
+            "participant_materialized_bytes",
+            13,
+        );
+        graphforge_storage::concurrency_attribution::RegionScope::record_work(
+            "participant_reused_bytes",
+            17,
+        );
+        graphforge_storage::concurrency_attribution::RegionScope::record_work(
+            "participant_payload_read_bytes",
+            19,
+        );
         let mut value = serde_json::to_value(capture.finish()).unwrap();
         assert!(valid_snapshot(&value));
         value["regions"]["import_command"]["work"]["attempted_bytes"] = json!(17);
@@ -310,7 +344,16 @@ mod tests {
                 )
             });
         assert!(valid_snapshot(&legacy));
-        for name in journal_regions {
+        for name in [
+            "journal_append",
+            "journal_sync",
+            "journal_namespace_publication",
+            "source_publication",
+            "source_cleanup",
+            "participant_materialization",
+            "participant_carry_forward",
+            "participant_reuse_validation",
+        ] {
             let mut invalid_legacy = legacy.clone();
             invalid_legacy["regions"][format!("import_command/begin_import/{name}")] =
                 legacy["regions"]["import_command/begin_import"].clone();
@@ -347,18 +390,25 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_contract_accepts_participant_materialization_region() {
+    fn snapshot_contract_accepts_participant_reuse_regions() {
         let capture =
             graphforge_storage::concurrency_attribution::RegionCapture::start("import_command");
-        {
-            let _materialization =
-                graphforge_storage::concurrency_attribution::RegionScope::named(
-                    "participant_materialization",
-                );
+        for name in [
+            "participant_materialization",
+            "participant_carry_forward",
+            "participant_reuse_validation",
+        ] {
+            let _region = graphforge_storage::concurrency_attribution::RegionScope::named(name);
         }
         let value = serde_json::to_value(capture.finish()).unwrap();
         assert!(valid_snapshot(&value));
-        assert!(value["regions"]["import_command/participant_materialization"].is_object());
+        for name in [
+            "participant_materialization",
+            "participant_carry_forward",
+            "participant_reuse_validation",
+        ] {
+            assert!(value["regions"][format!("import_command/{name}")].is_object());
+        }
     }
 
     #[test]
@@ -367,10 +417,17 @@ mod tests {
         for contract in ["regionDiagnosticsV2", "regionDiagnosticsV1"] {
             let work = &schema["$defs"][contract]["properties"]["regions"]["additionalProperties"]["properties"]["work"];
             assert_eq!(work["additionalProperties"], false);
+            let expected = if contract == "regionDiagnosticsV1" {
+                &WORK_UNITS_V1[..]
+            } else {
+                &WORK_UNITS_V2[..]
+            };
             let mut names: Vec<_> = work["properties"].as_object().unwrap().keys().map(String::as_str).collect();
             names.sort_unstable();
-            assert_eq!(names, ["bytes", "edges", "hashed_bytes", "nodes", "rows", "written_bytes"]);
-            for unit in ["hashed_bytes", "written_bytes"] {
+            let mut expected = expected.to_vec();
+            expected.sort_unstable();
+            assert_eq!(names, expected);
+            for unit in expected {
                 assert_eq!(work["properties"][unit]["type"], "integer");
                 assert_eq!(work["properties"][unit]["minimum"], 0);
             }

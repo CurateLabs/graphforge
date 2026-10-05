@@ -441,6 +441,14 @@ summary exposes them as `successful_hashed_bytes` and
 `successful_written_bytes`; historical receipts missing a unit retain an
 unknown column rather than an invented zero.
 
+Region diagnostics v2 also records participant reuse work: `participant_materialized_bytes`
+for bytes read while materializing a manifest-authenticated participant,
+`participant_reused_bytes` for bytes carried forward by hard link, and
+`participant_payload_read_bytes` for bytes read while authenticating a reused
+participant. These are successful local work counters and may overlap with
+process-level byte and hash measurements. Historical v1 receipts retain their
+original closed set of work units.
+
 Successful hash work counts actual inputs to completed SHA-256 and XXH64
 payload streams. Each stream counts separately: SHA plus XXH64 over one
 payload contributes twice its length, and a reused digest contributes no SHA
