@@ -668,7 +668,11 @@ fn build_validation_snapshot(
             .map(|row| row.confidence_uuid)
             .collect();
         let evidence = crate::knowledge::read_evidence_ledger(parent)?;
-        snapshot.evidence = evidence.links.iter().map(|row| row.evidence_uuid).collect();
+        snapshot.evidence = evidence
+            .links()
+            .iter()
+            .map(|row| row.evidence_uuid)
+            .collect();
     }
     if parent.capability("epistemic")?.is_some() {
         let reasoning = crate::knowledge::read_reasoning_ledger(parent)?;
@@ -1577,7 +1581,7 @@ mod tests {
         assert!(
             merge_evidence(&parent, &knowledge)
                 .unwrap()
-                .links
+                .links()
                 .is_empty()
         );
         assert!(

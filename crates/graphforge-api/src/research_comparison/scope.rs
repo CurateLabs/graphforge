@@ -12,7 +12,7 @@ pub(crate) fn dependencies(
     if generation.capability("knowledge")?.is_none() {
         return Ok(objects);
     }
-    for link in crate::knowledge::read_evidence_ledger(&generation)?.links {
+    for link in crate::knowledge::read_evidence_ledger(&generation)?.into_links() {
         cancel.checkpoint()?;
         if !selected.contains(&("assertion".into(), link.assertion_uuid)) {
             continue;

@@ -103,7 +103,7 @@ fn knowledge_rows(
     .map_err(error)?;
     let evidence = EvidenceLedger::new(
         knowledge::read_evidence_ledger(generation)?
-            .links
+            .into_links()
             .into_iter()
             .filter(|r| has(ids, "assertion", r.assertion_uuid))
             .collect(),
@@ -131,7 +131,7 @@ fn knowledge_rows(
         .map(|r| r.provenance_uuid)
         .chain(artifacts.artifacts.iter().map(|r| r.provenance_uuid))
         .chain(assertions.assertions.iter().map(|r| r.provenance_uuid))
-        .chain(evidence.links.iter().map(|r| r.provenance_uuid))
+        .chain(evidence.links().iter().map(|r| r.provenance_uuid))
     {
         ids.insert(("provenance".into(), id));
     }

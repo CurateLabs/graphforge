@@ -90,7 +90,7 @@ fn subject_membership(
             .filter(|id| requested.contains(id))
             .collect(),
         DerivationSubjectKind::EvidenceLink => read_evidence_ledger(parent)?
-            .links
+            .into_links()
             .into_iter()
             .map(|row| row.evidence_uuid)
             .filter(|id| requested.contains(id))

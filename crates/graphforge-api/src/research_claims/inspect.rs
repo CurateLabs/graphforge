@@ -306,7 +306,7 @@ fn knowledge_state(
         *history_count.entry(row.assertion_uuid).or_insert(0_u64) += 1;
     }
     let mut evidence_count = HashMap::new();
-    for row in k::read_evidence_ledger(generation)?.links {
+    for row in k::read_evidence_ledger(generation)?.into_links() {
         *evidence_count.entry(row.assertion_uuid).or_insert(0_u64) += 1;
     }
     Ok(KnowledgeState {

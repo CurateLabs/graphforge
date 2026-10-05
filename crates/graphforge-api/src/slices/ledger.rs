@@ -196,7 +196,7 @@ fn assertion_dependencies(
                 reference.graph_uuid,
             ));
     }
-    for link in evidence.links {
+    for link in evidence.into_links() {
         let kind = match link.source_kind {
             graphforge_knowledge::EvidenceSourceKind::GraphNode => "node",
             graphforge_knowledge::EvidenceSourceKind::GraphEdge => "edge",

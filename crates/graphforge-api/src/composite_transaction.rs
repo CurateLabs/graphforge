@@ -600,7 +600,7 @@ fn encode_knowledge(
             external_confidence_input_fingerprint(row)?,
         )?;
     }
-    for row in &evidence.links {
+    for row in evidence.links() {
         encode_owned(
             writer,
             row.evidence_uuid,

@@ -114,7 +114,7 @@ fn validate_subject_exists(
             .iter()
             .any(|row| row.assertion_uuid == subject_uuid),
         DerivationSubjectKind::EvidenceLink => read_evidence_ledger(generation)?
-            .links
+            .links()
             .iter()
             .any(|row| row.evidence_uuid == subject_uuid),
         DerivationSubjectKind::AlgorithmRun => read_algorithm_run_ledger(generation)?
