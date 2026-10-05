@@ -551,29 +551,27 @@ impl AssertionLedger {
             .iter()
             .find(|row| row.assertion_uuid == assertion_uuid)
             .ok_or(KnowledgeError::Dangling("assertion_uuid"))?;
-        let refs = refs_for(&self.graph_refs, assertion_uuid);
-        let mut writer = CanonicalWriter::new();
-        writer.raw(b"GFAS")?;
-        writer.u32(ASSERTION_CONTRACT_VERSION)?;
-        writer.text(&assertion.claim)?;
-        writer.u64(
-            u64::try_from(refs.len()).map_err(|_| KnowledgeError::Limit {
-                participant: "assertion_graph_refs",
-                observed: refs.len(),
-                limit: MAX_KNOWLEDGE_ROWS,
-            })?,
-        )?;
-        for reference in refs {
-            writer.text(reference.role.as_str())?;
-            writer.u32(reference.ordinal)?;
-            writer.text(reference.graph_kind.as_str())?;
-            writer.raw(reference.graph_uuid.as_bytes())?;
+        assertion_fingerprint_for_row(assertion, &refs_for(&self.graph_refs, assertion_uuid))
+    }
+
+    /// Compute canonical assertion fingerprints with a single grouped graph-ref pass.
+    pub fn assertion_fingerprints(&self) -> Result<Vec<(Uuid, [u8; 32])>, KnowledgeError> {
+        let mut refs = HashMap::<Uuid, Vec<&AssertionGraphRef>>::new();
+        for reference in &self.graph_refs {
+            refs.entry(reference.assertion_uuid)
+                .or_default()
+                .push(reference);
         }
-        Ok(fingerprint(
-            CanonicalDomain::Assertion,
-            CANONICAL_CONTRACT_VERSION,
-            &writer.finish(),
-        )?)
+        self.assertions
+            .iter()
+            .map(|row| {
+                let row_refs = refs.get(&row.assertion_uuid).map_or(&[][..], Vec::as_slice);
+                Ok((
+                    row.assertion_uuid,
+                    assertion_fingerprint_for_row(row, row_refs)?,
+                ))
+            })
+            .collect()
     }
 
     /// Build the authoritative assertion Arrow batch.
@@ -864,19 +862,15 @@ impl EvidenceLedger {
             .iter()
             .find(|row| row.evidence_uuid == evidence_uuid)
             .ok_or(KnowledgeError::Dangling("evidence_uuid"))?;
-        let mut writer = CanonicalWriter::new();
-        writer.raw(b"GFEV")?;
-        writer.u32(EVIDENCE_LINK_CONTRACT_VERSION)?;
-        writer.raw(row.assertion_uuid.as_bytes())?;
-        writer.raw(row.source_uuid.as_bytes())?;
-        writer.text(row.source_kind.as_str())?;
-        writer.text(row.role.as_str())?;
-        canonical_optional_f64(&mut writer, row.weight)?;
-        Ok(fingerprint(
-            CanonicalDomain::EvidenceLink,
-            CANONICAL_CONTRACT_VERSION,
-            &writer.finish(),
-        )?)
+        evidence_fingerprint_for_row(row)
+    }
+
+    /// Compute canonical evidence fingerprints in one pass without UUID searches.
+    pub fn evidence_fingerprints(&self) -> Result<Vec<(Uuid, [u8; 32])>, KnowledgeError> {
+        self.links
+            .iter()
+            .map(|row| Ok((row.evidence_uuid, evidence_fingerprint_for_row(row)?)))
+            .collect()
     }
 
     /// Build the authoritative evidence Arrow batch.
@@ -1431,11 +1425,10 @@ fn canonical_optional_f64(
     Ok(())
 }
 
-fn refs_for(rows: &[AssertionGraphRef], assertion_uuid: Uuid) -> Vec<AssertionGraphRef> {
+fn refs_for(rows: &[AssertionGraphRef], assertion_uuid: Uuid) -> Vec<&AssertionGraphRef> {
     let mut refs = rows
         .iter()
         .filter(|row| row.assertion_uuid == assertion_uuid)
-        .cloned()
         .collect::<Vec<_>>();
     refs.sort_by_key(|row| {
         (
@@ -1446,6 +1439,50 @@ fn refs_for(rows: &[AssertionGraphRef], assertion_uuid: Uuid) -> Vec<AssertionGr
         )
     });
     refs
+}
+
+fn assertion_fingerprint_for_row(
+    assertion: &Assertion,
+    refs: &[&AssertionGraphRef],
+) -> Result<[u8; 32], KnowledgeError> {
+    let mut writer = CanonicalWriter::new();
+    writer.raw(b"GFAS")?;
+    writer.u32(ASSERTION_CONTRACT_VERSION)?;
+    writer.text(&assertion.claim)?;
+    writer.u64(
+        u64::try_from(refs.len()).map_err(|_| KnowledgeError::Limit {
+            participant: "assertion_graph_refs",
+            observed: refs.len(),
+            limit: MAX_KNOWLEDGE_ROWS,
+        })?,
+    )?;
+    for reference in refs {
+        writer.text(reference.role.as_str())?;
+        writer.u32(reference.ordinal)?;
+        writer.text(reference.graph_kind.as_str())?;
+        writer.raw(reference.graph_uuid.as_bytes())?;
+    }
+    Ok(fingerprint(
+        CanonicalDomain::Assertion,
+        CANONICAL_CONTRACT_VERSION,
+        &writer.finish(),
+    )?)
+}
+
+fn evidence_fingerprint_for_row(row: &EvidenceLink) -> Result<[u8; 32], KnowledgeError> {
+    let mut writer = CanonicalWriter::new();
+    writer.raw(b"GFEV")?;
+    writer.u32(EVIDENCE_LINK_CONTRACT_VERSION)?;
+    writer.raw(row.assertion_uuid.as_bytes())?;
+    writer.raw(row.source_uuid.as_bytes())?;
+    writer.text(row.source_kind.as_str())?;
+    writer.text(row.role.as_str())?;
+    canonical_optional_f64(&mut writer, row.weight)?;
+    Ok(fingerprint(
+        CanonicalDomain::EvidenceLink,
+        CANONICAL_CONTRACT_VERSION,
+        &writer.finish(),
+    )?)
 }
 
 const fn role_order(role: AssertionGraphRole) -> u8 {

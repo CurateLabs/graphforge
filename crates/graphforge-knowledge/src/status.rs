@@ -271,21 +271,15 @@ impl AssertionStatusLedger {
             .iter()
             .find(|row| row.status_event_uuid == status_event_uuid)
             .ok_or(KnowledgeError::Dangling("status_event_uuid"))?;
-        let mut writer = CanonicalWriter::new();
-        writer.raw(row.status_event_uuid.as_bytes())?;
-        writer.raw(row.assertion_uuid.as_bytes())?;
-        writer.text(row.status.as_str())?;
-        optional_uuid(&mut writer, row.confidence_uuid)?;
-        optional_uuid(&mut writer, row.reasoning_uuid)?;
-        writer.raw(row.provenance_uuid.as_bytes())?;
-        writer.i64(row.recorded_at_micros)?;
-        writer.u32(row.contract_version)?;
-        fingerprint(
-            CanonicalDomain::AssertionStatus,
-            CANONICAL_CONTRACT_VERSION,
-            &writer.finish(),
-        )
-        .map_err(Into::into)
+        event_fingerprint_for_row(row)
+    }
+
+    /// Compute canonical fingerprints in one pass without searching by UUID.
+    pub fn event_fingerprints(&self) -> Result<Vec<(Uuid, [u8; 32])>, KnowledgeError> {
+        self.events
+            .iter()
+            .map(|row| Ok((row.status_event_uuid, event_fingerprint_for_row(row)?)))
+            .collect()
     }
 
     /// Resolve current status deterministically, returning `None` for statusless assertions.
@@ -368,6 +362,24 @@ impl AssertionStatusLedger {
         }
         Self::new(events)
     }
+}
+
+fn event_fingerprint_for_row(row: &AssertionStatusEvent) -> Result<[u8; 32], KnowledgeError> {
+    let mut writer = CanonicalWriter::new();
+    writer.raw(row.status_event_uuid.as_bytes())?;
+    writer.raw(row.assertion_uuid.as_bytes())?;
+    writer.text(row.status.as_str())?;
+    optional_uuid(&mut writer, row.confidence_uuid)?;
+    optional_uuid(&mut writer, row.reasoning_uuid)?;
+    writer.raw(row.provenance_uuid.as_bytes())?;
+    writer.i64(row.recorded_at_micros)?;
+    writer.u32(row.contract_version)?;
+    fingerprint(
+        CanonicalDomain::AssertionStatus,
+        CANONICAL_CONTRACT_VERSION,
+        &writer.finish(),
+    )
+    .map_err(Into::into)
 }
 
 pub(crate) fn schema_registry_entry() -> SchemaRegistryEntry {
