@@ -146,8 +146,8 @@ impl GraphForge {
     }
 
     /// Execute a write Cypher statement against the private workspace without
-    /// moving `CURRENT`. Used by the uniform transaction lifecycle so multiple
-    /// staged writers share one later publication.
+    /// moving `CURRENT`. Kept for focused lifecycle unit tests.
+    #[cfg(test)]
     pub(crate) fn execute_write_without_publish(
         &self,
         cypher: &str,
@@ -156,17 +156,38 @@ impl GraphForge {
         self.run_query_with_publish(cypher, params, false)
     }
 
+    /// Execute one unpublished write inside an enclosing facade transaction.
+    /// The transaction owner holds the sole workspace rollback checkpoint.
+    pub(crate) fn execute_write_in_transaction(
+        &self,
+        cypher: &str,
+        params: &HashMap<String, IrLiteral>,
+    ) -> Result<ExecutionResult, GfError> {
+        self.run_query_with_publish_mode(cypher, params, false, true)
+    }
+
     fn run_query_with_publish(
         &self,
         cypher: &str,
         params: &HashMap<String, IrLiteral>,
         publish: bool,
     ) -> Result<ExecutionResult, GfError> {
+        self.run_query_with_publish_mode(cypher, params, publish, false)
+    }
+
+    fn run_query_with_publish_mode(
+        &self,
+        cypher: &str,
+        params: &HashMap<String, IrLiteral>,
+        publish: bool,
+        transaction_managed: bool,
+    ) -> Result<ExecutionResult, GfError> {
         self.run_query_with_optional_composition(
             cypher,
             params,
             self.default_composition_snapshot(),
             publish,
+            transaction_managed,
         )
     }
 
@@ -220,7 +241,7 @@ impl GraphForge {
         composition: Arc<CompositionBindingContext>,
         publish: bool,
     ) -> Result<ExecutionResult, GfError> {
-        self.run_query_with_optional_composition(cypher, params, Some(composition), publish)
+        self.run_query_with_optional_composition(cypher, params, Some(composition), publish, false)
     }
 
     fn run_query_with_optional_composition(
@@ -229,6 +250,7 @@ impl GraphForge {
         params: &HashMap<String, IrLiteral>,
         composition: Option<Arc<CompositionBindingContext>>,
         publish: bool,
+        transaction_managed: bool,
     ) -> Result<ExecutionResult, GfError> {
         let _admission = self.admit_heavy_query()?;
         let composition = composition
@@ -312,6 +334,7 @@ impl GraphForge {
             legacy_route_moves,
             transaction,
             is_mutation && publish,
+            transaction_managed,
         );
         let result = result.map_err(publicize_query_error)?;
         shape_result(result, self.ontology_mode, self.ontology.as_ref())
@@ -336,7 +359,7 @@ impl GraphForge {
         publish: bool,
     ) -> Result<ExecutionResult, GfError> {
         self.run_plan_with_publish_and_bindings(
-            plan, params, publish, None, None, None, None, false,
+            plan, params, publish, None, None, None, None, false, false,
         )
     }
 
@@ -352,6 +375,7 @@ impl GraphForge {
         legacy_route_moves: Option<&[(std::path::PathBuf, std::path::PathBuf)]>,
         transaction: Option<graphforge_exec::mutation::MutationTransaction>,
         write_admission_held: bool,
+        transaction_managed: bool,
     ) -> Result<ExecutionResult, GfError> {
         use graphforge_exec::ExecutionSession;
 
@@ -404,12 +428,20 @@ impl GraphForge {
             graphforge_exec::mutation::MutationTransaction::catalog,
         );
         let mut lifecycle = if is_write {
-            Some(mutation_transaction::FacadeMutationLifecycle::new(
-                self,
-                prior_catalog,
-                publish,
-                candidate_bindings,
-            )?)
+            Some(if transaction_managed {
+                mutation_transaction::FacadeMutationLifecycle::new_transaction_statement(
+                    self,
+                    prior_catalog,
+                    candidate_bindings,
+                )?
+            } else {
+                mutation_transaction::FacadeMutationLifecycle::new(
+                    self,
+                    prior_catalog,
+                    publish,
+                    candidate_bindings,
+                )?
+            })
         } else {
             None
         };

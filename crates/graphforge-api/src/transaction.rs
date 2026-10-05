@@ -509,15 +509,14 @@ impl GraphTransaction {
         // Inner statements stage against the current private workspace. The outer
         // owner restores the transaction's original authority on every later
         // failure, including clock and publication failures.
-        let mut lifecycle = crate::mutation_transaction::FacadeMutationLifecycle::new(
-            graph,
-            prior_catalog,
-            true,
-            None,
-        )?;
+        let mut lifecycle =
+            crate::mutation_transaction::FacadeMutationLifecycle::new_transaction_owner(
+                graph,
+                prior_catalog,
+            )?;
         let result = (|| {
             for (query, params) in &cypher {
-                graph.execute_write_without_publish(query, params)?;
+                graph.execute_write_in_transaction(query, params)?;
             }
 
             if request.graph_mutations.is_empty() && knowledge_row_count(&request.knowledge) == 0 {

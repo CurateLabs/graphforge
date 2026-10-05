@@ -16,6 +16,7 @@ pub(crate) struct FacadeMutationLifecycle<'a> {
     publish: bool,
     bindings: Option<&'a SemanticStorageBindings>,
     unpublished: Option<graphforge_storage::GraphWorkspaceCheckpoint>,
+    defer_abort: bool,
 }
 
 impl<'a> FacadeMutationLifecycle<'a> {
@@ -24,6 +25,36 @@ impl<'a> FacadeMutationLifecycle<'a> {
         prior_catalog: RuntimeCatalog,
         publish: bool,
         bindings: Option<&'a SemanticStorageBindings>,
+    ) -> Result<Self, GfError> {
+        Self::new_with_rollback(graph, prior_catalog, publish, bindings, !publish, false)
+    }
+
+    /// Create the outer owner for a multi-statement transaction. Its single
+    /// checkpoint covers all unpublished statement writes until publication.
+    pub(crate) fn new_transaction_owner(
+        graph: &'a GraphForge,
+        prior_catalog: RuntimeCatalog,
+    ) -> Result<Self, GfError> {
+        Self::new_with_rollback(graph, prior_catalog, true, None, true, false)
+    }
+
+    /// Create an inner statement lifecycle whose rollback is owned by the
+    /// enclosing transaction. It must not snapshot or restore the workspace.
+    pub(crate) fn new_transaction_statement(
+        graph: &'a GraphForge,
+        prior_catalog: RuntimeCatalog,
+        bindings: Option<&'a SemanticStorageBindings>,
+    ) -> Result<Self, GfError> {
+        Self::new_with_rollback(graph, prior_catalog, false, bindings, false, true)
+    }
+
+    fn new_with_rollback(
+        graph: &'a GraphForge,
+        prior_catalog: RuntimeCatalog,
+        publish: bool,
+        bindings: Option<&'a SemanticStorageBindings>,
+        capture_checkpoint: bool,
+        defer_abort: bool,
     ) -> Result<Self, GfError> {
         if graph.read_only {
             return Err(GfError::Execution(
@@ -35,12 +66,12 @@ impl<'a> FacadeMutationLifecycle<'a> {
         let parent = graphforge_storage::resolve_project_generation(
             graph.resolved_generation.container_root(),
         )?;
-        let unpublished = if publish {
-            None
-        } else {
+        let unpublished = if capture_checkpoint {
             Some(graphforge_storage::GraphWorkspaceCheckpoint::capture(
                 &graph.dir(),
             )?)
+        } else {
+            None
         };
         Ok(Self {
             prior_topology: graph.dir().topology_files()?,
@@ -50,6 +81,7 @@ impl<'a> FacadeMutationLifecycle<'a> {
             publish,
             bindings,
             unpublished,
+            defer_abort,
         })
     }
 
@@ -122,6 +154,9 @@ impl MutationLifecycle for FacadeMutationLifecycle<'_> {
     }
 
     fn abort(&mut self) -> Result<(), GfError> {
+        if self.defer_abort {
+            return Ok(());
+        }
         let health = self.graph.graph_visibility.health.clone();
         health.recover(|| self.restore())
     }

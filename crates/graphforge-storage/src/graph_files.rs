@@ -1840,6 +1840,7 @@ impl GraphWorkspaceCheckpoint {
                 let (inventory, _) = capture_graph_files(source)?;
                 // A rollback snapshot preserves the admitted layout exactly;
                 // ordinary hydration may instead upgrade legacy route names.
+                crate::io_stats::record_workspace_checkpoint_capture(inventory.total_byte_length);
                 for entry in &inventory.files {
                     let input = resolve_v1_inventory_entry(source, entry)?;
                     let relative = input
@@ -1851,8 +1852,15 @@ impl GraphWorkspaceCheckpoint {
                             storage("create rollback snapshot directory", parent, error)
                         })?;
                     }
-                    copy_regular_file(&input, &output)?;
+                    let copied = copy_regular_file(&input, &output)?;
+                    crate::io_stats::record_workspace_checkpoint_copy(
+                        copied.write_bytes,
+                        copied.fsync_calls,
+                    );
                     make_private_copy_owner_writable(&output)?;
+                    if cfg!(unix) {
+                        crate::io_stats::record_workspace_checkpoint_flush();
+                    }
                 }
                 verify_graph_tree(backup.path(), &inventory)?;
                 (inventory, false)
