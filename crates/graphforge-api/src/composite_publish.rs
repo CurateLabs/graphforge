@@ -713,7 +713,7 @@ fn build_validation_snapshot(
     if parent.capability("valid_time")?.is_some() {
         let validity = crate::valid_time::read_ledger(parent)?;
         snapshot.validity_events = validity
-            .events
+            .events()
             .iter()
             .map(|row| row.validity_event_uuid)
             .collect();
@@ -1609,7 +1609,7 @@ mod tests {
         assert!(
             merge_validity(&parent, &knowledge)
                 .unwrap()
-                .events
+                .events()
                 .is_empty()
         );
         assert!(

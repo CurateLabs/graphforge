@@ -688,7 +688,7 @@ fn encode_knowledge(
             hypothesis_selection_fingerprint(row)?,
         )?;
     }
-    for row in &validity.events {
+    for row in validity.events() {
         encode_owned(
             writer,
             row.validity_event_uuid,

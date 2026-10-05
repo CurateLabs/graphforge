@@ -552,7 +552,7 @@ fn validate_composite_references(ledgers: CompositeLedgers<'_>) -> Result<(), Gf
     for row in ledgers
         .valid_time
         .into_iter()
-        .flat_map(|value| &value.events)
+        .flat_map(graphforge_knowledge::AssertionValidityLedger::events)
     {
         require(
             assertion_ids.contains(&row.assertion_uuid),
