@@ -824,26 +824,44 @@ mod tests {
             let existing =
                 ReasoningLedger::new((0..existing_count).map(benchmark_row).collect()).unwrap();
             let staged = ReasoningLedger::new(vec![benchmark_row(existing_count)]).unwrap();
+            let baseline_result = merge_with_full_revalidation(&existing, &staged).unwrap();
+            let incremental_result = existing.merge(&staged).unwrap();
+            assert_eq!(
+                baseline_result, incremental_result,
+                "baseline and incremental ledgers must match before timing"
+            );
             let repetitions = 9;
             let mut before = Vec::with_capacity(repetitions);
             let mut after = Vec::with_capacity(repetitions);
-            for _ in 0..repetitions {
-                let start = Instant::now();
-                std::hint::black_box(merge_with_full_revalidation(&existing, &staged).unwrap());
-                before.push(start.elapsed());
-
-                let start = Instant::now();
-                std::hint::black_box(existing.merge(&staged).unwrap());
-                after.push(start.elapsed());
+            for repetition in 0..repetitions {
+                let baseline = || {
+                    let start = Instant::now();
+                    std::hint::black_box(merge_with_full_revalidation(&existing, &staged).unwrap());
+                    start.elapsed()
+                };
+                let incremental = || {
+                    let start = Instant::now();
+                    std::hint::black_box(existing.merge(&staged).unwrap());
+                    start.elapsed()
+                };
+                if repetition % 2 == 0 {
+                    before.push(baseline());
+                    after.push(incremental());
+                } else {
+                    after.push(incremental());
+                    before.push(baseline());
+                }
             }
-            let before_median = median(before);
-            let after_median = median(after);
+            let before_median = median(before.clone());
+            let after_median = median(after.clone());
             let divisor = existing_count as f64;
             println!(
-                "existing_rows={existing_count} staged_rows=1 repetitions={repetitions} input_sha256={} before_ns={} before_ns_per_existing_row={:.3} after_ns={} after_ns_per_existing_row={:.3}",
+                "existing_rows={existing_count} staged_rows=1 repetitions={repetitions} input_sha256={} baseline_then_candidate_on_even_pairs=true baseline_ns={:?} baseline_median_ns={} baseline_ns_per_existing_row={:.3} incremental_ns={:?} incremental_median_ns={} incremental_ns_per_existing_row={:.3}",
                 input_digest(&existing, &staged),
+                before.iter().map(Duration::as_nanos).collect::<Vec<_>>(),
                 before_median.as_nanos(),
                 before_median.as_nanos() as f64 / divisor,
+                after.iter().map(Duration::as_nanos).collect::<Vec<_>>(),
                 after_median.as_nanos(),
                 after_median.as_nanos() as f64 / divisor,
             );

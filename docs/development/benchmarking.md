@@ -61,6 +61,37 @@ trusted path still clones and sorts the merged rows and compares staged records;
 it avoids the complete existing-row validation pass. Raw observations and the
 executable digest belong on the issue or PR that produced them.
 
+## ReasoningLedger merge comparison
+
+The ignored test
+`graphforge-knowledge::reasoning::tests::quiet_host_merge_cost_measurement`
+compares rebuilding the concatenated records through `ReasoningLedger::new`
+with trusted `ReasoningLedger::merge`. For each scale it checks complete ledger
+equality before timing, then alternates baseline-first and incremental-first
+order over nine pairs. The test prints the canonical input SHA-256, every sample,
+and each median at 1,000 and 10,000 existing rows.
+
+Build into an isolated target, then run the quiet-host guard immediately before
+the measured command:
+
+```bash
+CARGO_TARGET_DIR=/home/ubuntu/.cache/graphforge-target-1828-measurement \
+  cargo test --release --locked -p graphforge-knowledge --lib \
+  reasoning::tests::quiet_host_merge_cost_measurement --no-run
+source /home/ubuntu/.claude/gf-quiet-host.sh && require_quiet_host && \
+  CARGO_TARGET_DIR=/home/ubuntu/.cache/graphforge-target-1828-measurement \
+  cargo test --release --locked -p graphforge-knowledge --lib \
+  reasoning::tests::quiet_host_merge_cost_measurement -- \
+  --ignored --nocapture --test-threads=1
+```
+
+Record the current source digest with
+`sha256sum crates/graphforge-knowledge/src/reasoning.rs`, the test executable
+digest, exact command, input digests, paired samples, and medians on the issue.
+This is an in-process merge measurement, not public API latency. The incremental
+path still clones and sorts records and checks staged identities; it skips the
+full revalidation of the existing rows.
+
 ## Construction syscall comparison
 
 [`construction-syscall-comparison.py`](../../benchmarks/scripts/construction-syscall-comparison.py)
