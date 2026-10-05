@@ -1299,6 +1299,66 @@ mod tests {
     }
 
     #[test]
+    fn routed_label_mutation_refuses_a_corrupt_candidate_without_staging() {
+        let dir = TempDir::new().unwrap();
+        let node = new_v7();
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
+        writer
+            .create_node(node, EntityTypeId::ontology(TypeId(1)).unwrap())
+            .unwrap();
+        writer.flush().unwrap();
+
+        let node_files = node_parquet_files(dir.path()).unwrap();
+        let nodes = crate::read_nodes(dir.path()).unwrap();
+        let node_id = nodes[0]
+            .column_by_name("node_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .value(0);
+        assert_ne!(node_id, 0);
+        let legacy = dir.path().join("topology/nodes.parquet");
+        let shard_candidate = node_files.iter().find(|path| {
+            if **path == legacy {
+                return false;
+            }
+            let relative = path.strip_prefix(dir.path()).unwrap();
+            let (first, last) = canonical_topology_shard_range(relative, "node").unwrap();
+            (first..=last).contains(&node_id)
+        });
+        let path = shard_candidate
+            .or_else(|| node_files.iter().find(|path| **path == legacy))
+            .expect("the correct surrogate route selects a node fragment");
+
+        let original = std::fs::read(path).unwrap();
+        let mut corrupt = original.clone();
+        let final_byte = corrupt.last_mut().unwrap();
+        *final_byte ^= 1;
+        std::fs::write(path, &corrupt).unwrap();
+
+        let additions = HashMap::from([(
+            to_bytes(&node),
+            HashSet::from([EntityTypeId::ontology(TypeId(2)).unwrap()]),
+        )]);
+        let removals: HashMap<[u8; 16], HashSet<EntityTypeId>> = HashMap::new();
+        let routes = HashMap::from([(to_bytes(&node), node_id)]);
+        let mut staged = RewriteBatch::new();
+        let result = stage_mutate_node_labels_routed(
+            &mut staged,
+            dir.path(),
+            &additions,
+            &removals,
+            &routes,
+        );
+        assert!(result.is_err());
+        assert_eq!(staged.staged_paths().count(), 0);
+        drop(staged);
+        std::fs::write(path, &original).unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), original);
+    }
+
+    #[test]
     fn delete_nodes_removes_node_rows_and_leaves_edges() {
         let (dir, a, _b, _c) = chain();
         assert_eq!(row_count(dir.path(), "topology/nodes.parquet"), 3);

@@ -72,6 +72,12 @@ fn exercise(unrelated_nodes: usize) -> ((u64, u64, u64), (u64, u64, u64)) {
         .execute("MATCH (n:Base {name: 'target'}) SET n:Extra")
         .expect("add label");
     let set_work = scoped_work(set_capture.finish());
+    let updated = forge
+        .execute("MATCH (n:Base {name: 'target'}) RETURN labels(n) AS labels")
+        .expect("read labels after addition");
+    let mut updated_labels = only_labels(&updated.batches);
+    updated_labels.sort();
+    assert_eq!(updated_labels, vec!["Base", "Extra"]);
 
     let retained_batches = futures::executor::block_on(retained.try_collect::<Vec<_>>())
         .expect("consume retained reader");
