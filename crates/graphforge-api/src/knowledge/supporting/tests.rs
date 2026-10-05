@@ -85,6 +85,220 @@ fn reasoning_is_append_only_exact_idempotent_and_reopenable() {
 }
 
 #[test]
+fn confidence_mutation_reuses_large_unchanged_assertion_participant() {
+    let mut work = Vec::new();
+    for repeats in [4_096, 8_192] {
+        let root = tempfile::tempdir().unwrap();
+        let graph = GraphForge::new(root.path().to_str()).unwrap();
+        graph.set_clock_for_test(|| Ok(10));
+        enable(&graph, CapabilityId::Provenance, 80);
+        enable(&graph, CapabilityId::Knowledge, 81);
+        let node = graph
+            .add_node("ConfidenceSubject", &HashMap::new())
+            .unwrap();
+        let assertion_uuid = uuid7(82);
+        graph
+            .create_assertion(CreateAssertionRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(83)),
+                    actor_uuid: None,
+                },
+                assertion_uuid,
+                claim: {
+                    let mut random_state = 0x1810_092_u64;
+                    (0..repeats * 32)
+                        .map(|_| {
+                            random_state = random_state
+                                .wrapping_mul(6_364_136_223_846_793_005)
+                                .wrapping_add(1);
+                            char::from(b'a' + ((random_state >> 32) % 26) as u8)
+                        })
+                        .collect()
+                },
+                graph_refs: vec![AssertionGraphRefInput {
+                    graph_uuid: node.uuid,
+                    graph_kind: GraphObjectKind::Node,
+                    role: AssertionGraphRole::Subject,
+                    ordinal: 0,
+                }],
+            })
+            .unwrap();
+        let before = graphforge_storage::resolve_project_generation(root.path()).unwrap();
+        let assertions_before = before
+            .participant_snapshot("knowledge", "assertions")
+            .unwrap()
+            .unwrap();
+        let unchanged_bytes = assertions_before.bytes.clone();
+        eprintln!(
+            "knowledge fixture repeats={repeats} ledger_bytes={}",
+            unchanged_bytes.len()
+        );
+        assert!(unchanged_bytes.len() >= 64 * 1024);
+
+        let _io_capture = graphforge_storage::lifecycle_io::CaptureScope::install();
+        let capture = graphforge_storage::concurrency_attribution::RegionCapture::start("mutation");
+        graph
+            .assess_confidence(AssessConfidenceRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(84)),
+                    actor_uuid: None,
+                },
+                confidence_uuid: uuid7(85),
+                assertion_uuid,
+                policy: ConfidencePolicyRequest::Explicit { value: 0.75 },
+            })
+            .unwrap();
+        let evidence = capture.finish();
+        let io = graphforge_storage::lifecycle_io::snapshot()
+            .expect("publication lifecycle I/O is captured");
+        let carry = evidence
+            .regions
+            .iter()
+            .find(|(name, _)| name.ends_with("participant_carry_forward"))
+            .map(|(_, row)| row)
+            .expect("carry-forward phase is attributed");
+        let reuse_validation = evidence
+            .regions
+            .iter()
+            .find(|(name, _)| name.ends_with("participant_reuse_validation"))
+            .map(|(_, row)| row)
+            .expect("reused participant checksum validation is attributed");
+        let materialization_rows = evidence
+            .regions
+            .iter()
+            .filter(|(name, _)| name.ends_with("participant_materialization"))
+            .collect::<Vec<_>>();
+        eprintln!(
+            "knowledge ledger_bytes={} carry_forward={:?}",
+            unchanged_bytes.len(),
+            carry.work
+        );
+        assert!(
+            carry
+                .work
+                .get("participant_reused_bytes")
+                .copied()
+                .unwrap_or_default()
+                >= unchanged_bytes.len() as u64
+        );
+        assert!(
+            carry.work.get("written_bytes").copied().unwrap_or_default()
+                < unchanged_bytes.len() as u64
+        );
+        assert!(
+            carry.work.get("hashed_bytes").copied().unwrap_or_default()
+                < 2 * unchanged_bytes.len() as u64
+        );
+        let validation_read_bytes = reuse_validation
+            .work
+            .get("participant_payload_read_bytes")
+            .copied()
+            .unwrap_or_default();
+        let reused_bytes = carry
+            .work
+            .get("participant_reused_bytes")
+            .copied()
+            .unwrap_or_default();
+        assert_eq!(
+            validation_read_bytes, reused_bytes,
+            "reuse validation reads each reused sibling once; total includes all siblings"
+        );
+        let validation_hashed_bytes = reuse_validation
+            .work
+            .get("hashed_bytes")
+            .copied()
+            .unwrap_or_default();
+        assert_eq!(
+            validation_hashed_bytes,
+            2 * validation_read_bytes,
+            "reuse validation computes SHA-256 and XXH64 over each reused sibling once"
+        );
+        let materialized_bytes = materialization_rows
+            .iter()
+            .map(|(_, row)| {
+                row.work
+                    .get("participant_materialized_bytes")
+                    .copied()
+                    .unwrap_or_default()
+            })
+            .sum::<u64>();
+        let domain_materialized_bytes = materialization_rows
+            .iter()
+            .filter(|(name, _)| name.contains("confidence_domain_ledger_decode"))
+            .map(|(_, row)| {
+                row.work
+                    .get("participant_materialized_bytes")
+                    .copied()
+                    .unwrap_or_default()
+            })
+            .sum::<u64>();
+        assert!(
+            domain_materialized_bytes >= unchanged_bytes.len() as u64,
+            "required assertion-domain decoding reads the target assertion ledger"
+        );
+        let carry_forward_materialized_bytes =
+            materialized_bytes.saturating_sub(domain_materialized_bytes);
+        assert!(
+            carry_forward_materialized_bytes < unchanged_bytes.len() as u64,
+            "carry-forward does not materialize the unchanged sibling a second time"
+        );
+        assert!(
+            io.phases[&graphforge_storage::StorageIoPhase::PublicationPreauthentication].read_bytes
+                >= validation_read_bytes,
+            "the ordinary lifecycle I/O counter includes the reuse checksum read"
+        );
+        eprintln!(
+            "knowledge ledger_bytes={} reused_bytes={} validation_read_bytes={} validation_hash_bytes={} domain_materialized_bytes={} carry_forward_materialized_bytes={} changed_written_bytes={} changed_hash_bytes={}",
+            unchanged_bytes.len(),
+            reused_bytes,
+            validation_read_bytes,
+            validation_hashed_bytes,
+            domain_materialized_bytes,
+            carry_forward_materialized_bytes,
+            carry.work.get("written_bytes").copied().unwrap_or_default(),
+            carry.work.get("hashed_bytes").copied().unwrap_or_default(),
+        );
+        work.push((
+            unchanged_bytes.len() as u64,
+            carry
+                .work
+                .get("participant_reused_bytes")
+                .copied()
+                .unwrap_or_default(),
+            carry.work.get("written_bytes").copied().unwrap_or_default(),
+            carry.work.get("hashed_bytes").copied().unwrap_or_default(),
+            validation_read_bytes,
+            validation_hashed_bytes,
+        ));
+
+        let after = graphforge_storage::resolve_project_generation(root.path()).unwrap();
+        let assertions_after = after
+            .participant_snapshot("knowledge", "assertions")
+            .unwrap()
+            .unwrap();
+        assert_eq!(assertions_after.bytes, unchanged_bytes);
+        assert_eq!(assertions_after.row_count, assertions_before.row_count);
+        assert_eq!(
+            GraphForge::new(root.path().to_str())
+                .unwrap()
+                .confidence_assessment(uuid7(85), None)
+                .unwrap()
+                .stats
+                .rows_produced,
+            1
+        );
+    }
+    assert!(work[1].0 > work[0].0 * 19 / 10);
+    assert!(work[1].1 > work[0].1 * 18 / 10);
+    assert!(work[1].2.abs_diff(work[0].2) <= 64);
+    assert!(work[1].3.abs_diff(work[0].3) <= 64);
+    assert_eq!(work[0].4, work[0].1);
+    assert_eq!(work[1].4, work[1].1);
+    assert_eq!(work[0].5, 2 * work[0].4);
+    assert_eq!(work[1].5, 2 * work[1].4);
+}
+
+#[test]
 fn reasoning_rejects_dangling_cross_assertion_and_conflicting_replay() {
     let graph = GraphForge::new(None).unwrap();
     graph.set_clock_for_test(|| Ok(10));

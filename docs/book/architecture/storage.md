@@ -274,6 +274,18 @@ length and checksum; JSON control participants retain SHA-256 authentication.
 Old generation manifests and missing or malformed checksum metadata are refused.
 The unchanged project `FORMAT` and `CURRENT` envelopes keep their version 1.
 
+Graph publication and the confidence-assessment mutation select replaced
+participant families from manifest descriptors before opening sibling payloads.
+Unchanged immutable participants in those paths are carried into the child's
+complete manifest by a stable-path hard link to the pinned parent file;
+publication rechecks file identity, length, XXH64 and SHA-256 before advancing
+`CURRENT`. This narrow hard-link allowance applies only to
+manifest-authenticated participant payloads. Project control files remain
+single-link files, and JSON participants retain their SHA-256 content check.
+Other knowledge publication paths may still materialize sibling participants.
+Each generation remains independently readable and owns a flat participant
+inventory, so retention and garbage collection do not follow manifest chains.
+
 A minimal committed generation declares `graph@1` and `workspace@1`.
 `workspace@1` contains canonical JSON records for explicit ontology absence (or
 an adopted advisory/strict ontology) and authoritative registered project

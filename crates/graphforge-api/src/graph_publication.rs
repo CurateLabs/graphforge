@@ -166,7 +166,7 @@ impl GraphForge {
         candidate_bindings: Option<&graphforge_storage::SemanticStorageBindings>,
         repair_corrupt_adjacency: bool,
     ) -> Result<(), GfError> {
-        use graphforge_storage::{ProjectCapability, ProjectStageOutcome};
+        use graphforge_storage::ProjectStageOutcome;
 
         // Publication rebuilds indexes and stages from `self.dir()` in place; a
         // pinned alias of a published tree must never reach that point.
@@ -213,21 +213,11 @@ impl GraphForge {
             recorded_at_micros,
         )?;
         drop(installed_bindings);
-        let capabilities = parent
-            .capabilities()
-            .into_iter()
-            .map(|capability| ProjectCapability {
-                capability_id: capability.capability_id,
-                capability_version: capability.capability_version,
-            })
-            .collect::<Vec<_>>();
-        let request = graphforge_storage::PreparedGenerationRequest::new(
+        let request = prepare_graph_generation_request(
+            &parent,
             operation_uuid,
-            capabilities,
+            provenance_enabled,
             participants,
-            |participants, content_sha256| {
-                mutation_generation_uuid(operation_uuid, participants, content_sha256)
-            },
         )?;
         let generation_uuid = request.generation_uuid;
         let publication = match graphforge_storage::stage_project_generation_with_graph_tree_mode(
@@ -280,9 +270,7 @@ impl GraphForge {
         expected_parent: uuid::Uuid,
         recorded_at_micros: i64,
     ) -> Result<(), GfError> {
-        use graphforge_storage::{
-            ProjectCapability, ProjectGenerationRequest, ProjectStageOutcome,
-        };
+        use graphforge_storage::{ProjectCapability, ProjectStageOutcome};
 
         self.require_private_workspace()?;
         let root = self.resolved_generation.container_root();
@@ -324,12 +312,15 @@ impl GraphForge {
                 capability_version: capability.capability_version,
             })
             .collect();
-        let request = ProjectGenerationRequest {
-            transaction_uuid: operation_uuid,
-            generation_uuid,
-            capabilities,
-            participants,
-        };
+        let request =
+            graphforge_storage::PreparedGenerationRequest::new_reusing_parent_with_generation_uuid(
+                operation_uuid,
+                generation_uuid,
+                capabilities,
+                &parent,
+                &replaced_graph_participant_keys(provenance_enabled),
+                participants,
+            )?;
         let publication = match graphforge_storage::stage_project_generation_with_graph_tree_mode(
             root,
             &request,
@@ -496,6 +487,7 @@ impl GraphForge {
     }
 }
 
+#[cfg(test)]
 pub(super) fn participant_encoding(
     value: &str,
 ) -> Result<graphforge_storage::ProjectParticipantEncoding, GfError> {
@@ -520,46 +512,16 @@ fn graph_publication_participants(
     actor_uuid: Option<uuid::Uuid>,
     recorded_at_micros: i64,
 ) -> Result<Vec<graphforge_storage::ProjectParticipant>, GfError> {
-    let mut participants = parent
-        .participant_snapshots()?
-        .into_iter()
-        .filter(|snapshot| {
-            !(snapshot.capability_id == "graph"
-                && matches!(
-                    snapshot.record_family_id.as_str(),
-                    "snapshot" | "files" | graphforge_storage::GRAPH_SEMANTIC_BINDINGS_FAMILY
-                )
-                || provenance_enabled
-                    && snapshot.capability_id == "provenance"
-                    && matches!(snapshot.record_family_id.as_str(), "events" | "lineage"))
-        })
-        .map(|snapshot| {
-            Ok(graphforge_storage::ProjectParticipant {
-                capability_id: snapshot.capability_id,
-                capability_version: snapshot.capability_version,
-                record_family_id: snapshot.record_family_id,
-                record_version: snapshot.record_version,
-                encoding: participant_encoding(&snapshot.encoding)?,
-                schema_fingerprint: snapshot.schema_fingerprint,
-                row_count: snapshot.row_count,
-                bytes: snapshot.bytes,
-            })
-        })
-        .collect::<Result<Vec<_>, GfError>>()?;
-    participants.push(graph);
+    let mut participants = vec![graph];
     if let Some(bindings) = semantic_bindings {
-        participants.push(bindings.to_project_participant()?);
-        let composition = participants
-            .iter()
-            .find(|participant| {
-                participant.capability_id == "workspace"
-                    && participant.record_family_id == "ontology_composition"
-            })
+        let composition = parent
+            .participant_snapshot("workspace", "ontology_composition")?
             .ok_or_else(|| {
                 GfError::Validation(
                     "semantic graph publication requires persisted composition authority".into(),
                 )
             })?;
+        participants.push(bindings.to_project_participant()?);
         let value: serde_json::Value = serde_json::from_slice(&composition.bytes)
             .map_err(|_| GfError::Validation("persisted composition is malformed".into()))?;
         if value
@@ -587,6 +549,50 @@ fn graph_publication_participants(
             .cmp(&(&right.capability_id, &right.record_family_id))
     });
     Ok(participants)
+}
+
+fn prepare_graph_generation_request(
+    parent: &graphforge_storage::ResolvedProjectGeneration,
+    operation_uuid: uuid::Uuid,
+    provenance_enabled: bool,
+    participants: Vec<graphforge_storage::ProjectParticipant>,
+) -> Result<graphforge_storage::PreparedGenerationRequest, GfError> {
+    let capabilities = parent
+        .capabilities()
+        .into_iter()
+        .map(|capability| graphforge_storage::ProjectCapability {
+            capability_id: capability.capability_id,
+            capability_version: capability.capability_version,
+        })
+        .collect::<Vec<_>>();
+    graphforge_storage::PreparedGenerationRequest::new_reusing_parent(
+        operation_uuid,
+        capabilities,
+        parent,
+        &replaced_graph_participant_keys(provenance_enabled),
+        participants,
+        |participants, content_sha256| {
+            mutation_generation_uuid(operation_uuid, participants, content_sha256)
+        },
+    )
+}
+
+fn replaced_graph_participant_keys(provenance_enabled: bool) -> Vec<(String, String)> {
+    let mut keys = vec![
+        ("graph".into(), "snapshot".into()),
+        ("graph".into(), "files".into()),
+        (
+            "graph".into(),
+            graphforge_storage::GRAPH_SEMANTIC_BINDINGS_FAMILY.into(),
+        ),
+    ];
+    if provenance_enabled {
+        keys.extend([
+            ("provenance".into(), "events".into()),
+            ("provenance".into(), "lineage".into()),
+        ]);
+    }
+    keys
 }
 
 /// Generation identity over the operation and each participant's exact-byte

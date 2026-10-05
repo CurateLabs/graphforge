@@ -1,4 +1,5 @@
 use super::super::USTAR_MAX_ENTRY_BYTES;
+use super::super::identity;
 use super::super::planning::{inspect, portable_id, portable_participant_id};
 use super::*;
 

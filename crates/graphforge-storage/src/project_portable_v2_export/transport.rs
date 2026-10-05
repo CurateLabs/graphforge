@@ -2,8 +2,8 @@
 use super::{
     BAG_INFO, BAGIT, ExportAllocationObserver, ExportError, File, Identity, Path, PathBuf,
     PlannedFile, PlannedSource, PortableV2ExportLimits, PortableV2ExportPlan,
-    PortableV2ExportProgress, err, fs, hex, identity, limit, observed_write_result,
-    open_source_no_follow, storage, sync_dir,
+    PortableV2ExportProgress, err, fs, hex, identity_with_link_policy, limit,
+    observed_write_result, open_source_no_follow, storage, sync_dir,
 };
 use graphforge_core::hash_observation::{ContractSha256, ControlSha256, PortableSha256 as Sha256};
 use sha2::Digest;
@@ -390,7 +390,10 @@ fn copy(
         return Err(err("GF_SOURCE_CHANGED", "source changed during export"));
     }
     if let Some(expected) = planned_identity
-        && identity(&input.metadata().map_err(storage)?)? != expected
+        && identity_with_link_policy(
+            &input.metadata().map_err(storage)?,
+            expected.allow_hardlinks,
+        )? != expected
     {
         return Err(err("GF_SOURCE_CHANGED", "source changed during export"));
     }
@@ -464,7 +467,10 @@ fn stream(
         return Err(err("GF_SOURCE_CHANGED", "source changed during export"));
     }
     if let Some(expected) = planned_identity
-        && identity(&input.metadata().map_err(storage)?)? != expected
+        && identity_with_link_policy(
+            &input.metadata().map_err(storage)?,
+            expected.allow_hardlinks,
+        )? != expected
     {
         return Err(err("GF_SOURCE_CHANGED", "source changed during export"));
     }
@@ -480,7 +486,11 @@ pub(super) fn open_planned_source(
             identity: expected,
         } => {
             let input = open_source_no_follow(path)?;
-            if identity(&input.metadata().map_err(storage)?)? != *expected {
+            if identity_with_link_policy(
+                &input.metadata().map_err(storage)?,
+                expected.allow_hardlinks,
+            )? != *expected
+            {
                 return Err(err("GF_SOURCE_CHANGED", "source changed"));
             }
             Ok((input, Some(*expected)))

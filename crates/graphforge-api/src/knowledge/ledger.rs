@@ -517,25 +517,11 @@ pub(super) fn assertion_publication_participants(
 }
 
 pub(super) fn confidence_publication_participants(
-    parent: &ResolvedProjectGeneration,
+    _parent: &ResolvedProjectGeneration,
     knowledge: &ConfidenceLedger,
     provenance: &ProvenanceLedger,
 ) -> Result<Vec<ProjectParticipant>, GfError> {
-    let mut participants = parent
-        .participant_snapshots()?
-        .into_iter()
-        .filter(|snapshot| {
-            !(snapshot.capability_id == "knowledge"
-                && matches!(
-                    snapshot.record_family_id.as_str(),
-                    "confidence_assessments" | "confidence_inputs"
-                )
-                || snapshot.capability_id == "provenance"
-                    && matches!(snapshot.record_family_id.as_str(), "events" | "lineage"))
-        })
-        .map(snapshot_to_participant)
-        .collect::<Result<Vec<_>, _>>()?;
-    participants.extend(encode_confidence_ledger(knowledge)?);
+    let mut participants = encode_confidence_ledger(knowledge)?;
     participants.extend(crate::provenance::encode_ledger(provenance)?);
     participants.sort_by(|left, right| {
         (&left.capability_id, &left.record_family_id)
@@ -1052,6 +1038,26 @@ pub(crate) fn prepare_knowledge_request(
     graphforge_storage::PreparedGenerationRequest::new(
         operation_uuid.0,
         capabilities,
+        participants,
+        |participants, content_sha256| {
+            knowledge_generation_uuid(operation, operation_uuid, participants, content_sha256)
+        },
+    )
+}
+
+pub(crate) fn prepare_knowledge_request_reusing_parent(
+    operation: &[u8],
+    operation_uuid: OperationId,
+    capabilities: Vec<graphforge_storage::ProjectCapability>,
+    parent: &ResolvedProjectGeneration,
+    replaced: &[(String, String)],
+    participants: Vec<ProjectParticipant>,
+) -> Result<graphforge_storage::PreparedGenerationRequest, GfError> {
+    graphforge_storage::PreparedGenerationRequest::new_reusing_parent(
+        operation_uuid.0,
+        capabilities,
+        parent,
+        replaced,
         participants,
         |participants, content_sha256| {
             knowledge_generation_uuid(operation, operation_uuid, participants, content_sha256)
