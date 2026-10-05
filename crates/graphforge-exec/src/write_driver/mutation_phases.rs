@@ -1205,6 +1205,30 @@ pub(super) fn run_label_phase(
     ctx: &mut StatementWriteContext,
 ) -> Result<(), GfError> {
     for item in items {
+        let mut mutation = LabelItemMutation::resolve(item, add, frontier)?;
+        for batch in &frontier.batches {
+            mutation.apply_batch(batch, ctx)?;
+        }
+        mutation.apply_frontier(frontier)?;
+    }
+    Ok(())
+}
+
+struct LabelItemMutation<'a> {
+    item: &'a graphforge_ir::LabelItem,
+    add: bool,
+    identity: WriteCol,
+    node_id_idx: usize,
+    type_ids_idx: usize,
+    seen: HashSet<[u8; 16]>,
+}
+
+impl<'a> LabelItemMutation<'a> {
+    fn resolve(
+        item: &'a graphforge_ir::LabelItem,
+        add: bool,
+        frontier: &Frontier,
+    ) -> Result<Self, GfError> {
         let identity = WriteCol::resolve(&frontier.df_schema, item.target.0, false, "")
             .ok_or_else(|| GfError::Plan("label mutation target is not a bound node".into()))?;
         let qualifier = datafusion::common::TableReference::bare(format!("var_{}", item.target.0));
@@ -1212,97 +1236,138 @@ pub(super) fn run_label_phase(
             .df_schema
             .index_of_column_by_name(Some(&qualifier), "type_ids")
             .ok_or_else(|| GfError::Plan("label mutation target has no type_ids".into()))?;
-        let requested = item.labels.clone();
-        let mut seen = HashSet::new();
-        for batch in &frontier.batches {
-            let id_col = batch.column(identity.uuid_idx);
-            let labels = batch
-                .column(type_ids_idx)
+        let node_id_idx = frontier
+            .df_schema
+            .index_of_column_by_name(Some(&qualifier), "node_id")
+            .ok_or_else(|| GfError::Plan("label mutation target has no node_id".into()))?;
+        Ok(Self {
+            item,
+            add,
+            identity,
+            node_id_idx,
+            type_ids_idx,
+            seen: HashSet::new(),
+        })
+    }
+
+    fn apply_batch(
+        &mut self,
+        batch: &arrow::record_batch::RecordBatch,
+        ctx: &mut StatementWriteContext,
+    ) -> Result<(), GfError> {
+        let id_col = batch.column(self.identity.uuid_idx);
+        let node_ids = batch
+            .column(self.node_id_idx)
+            .as_any()
+            .downcast_ref::<arrow::array::UInt64Array>()
+            .ok_or_else(|| GfError::Execution("node_id is not UInt64".into()))?;
+        let labels = batch
+            .column(self.type_ids_idx)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .ok_or_else(|| GfError::Execution("node type_ids are not a list".into()))?;
+        for row in 0..batch.num_rows() {
+            if id_col.is_null(row) {
+                continue;
+            }
+            let uuid = to_bytes(&fixed_binary_uuid(batch, self.identity.uuid_idx, row)?);
+            if !self.seen.insert(uuid) {
+                continue;
+            }
+            if ctx.deleted.contains(&uuid) {
+                return Err(GfError::Execution(
+                    "cannot mutate labels on an entity deleted in this statement".into(),
+                ));
+            }
+            let values = labels.value(row);
+            let values = values
                 .as_any()
-                .downcast_ref::<ListArray>()
-                .ok_or_else(|| GfError::Execution("node type_ids are not a list".into()))?;
-            for row in 0..batch.num_rows() {
-                if id_col.is_null(row) {
-                    continue;
-                }
-                let uuid = to_bytes(&fixed_binary_uuid(batch, identity.uuid_idx, row)?);
-                if !seen.insert(uuid) {
-                    continue;
-                }
-                if ctx.deleted.contains(&uuid) {
-                    return Err(GfError::Execution(
-                        "cannot mutate labels on an entity deleted in this statement".into(),
-                    ));
-                }
-                let values = labels.value(row);
-                let values = values
-                    .as_any()
-                    .downcast_ref::<UInt32Array>()
-                    .ok_or_else(|| GfError::Execution("node type_ids are not UInt32".into()))?;
-                let mut changed = requested
-                    .iter()
-                    .copied()
-                    .filter(|label| values.values().contains(&label.encode()) != add)
-                    .collect::<Vec<_>>();
-                changed.sort_unstable_by_key(|label| label.encode());
-                changed.dedup();
-                if changed.is_empty() {
-                    continue;
-                }
-                let count = if ctx.writer.contains_pending_node(&uuid) {
-                    if add {
-                        ctx.writer.add_pending_node_labels(&uuid, &changed)
-                    } else {
-                        ctx.writer.remove_pending_node_labels(&uuid, &changed)
-                    }
-                } else if add {
-                    if let Some(removals) = ctx.label_removals.get_mut(&uuid) {
-                        for label in &changed {
-                            removals.remove(label);
-                        }
-                    }
-                    let additions = ctx.label_additions.entry(uuid).or_default();
-                    let before = additions.len();
-                    additions.extend(changed.iter().copied());
-                    (additions.len() - before) as u64
+                .downcast_ref::<UInt32Array>()
+                .ok_or_else(|| GfError::Execution("node type_ids are not UInt32".into()))?;
+            let mut changed = self
+                .item
+                .labels
+                .iter()
+                .copied()
+                .filter(|label| values.values().contains(&label.encode()) != self.add)
+                .collect::<Vec<_>>();
+            changed.sort_unstable_by_key(|label| label.encode());
+            changed.dedup();
+            if changed.is_empty() {
+                continue;
+            }
+            let count = self.stage_row_change(uuid, node_ids.value(row), &changed, ctx)?;
+            if count > 0 {
+                ctx.adjust_label_memberships(changed.iter().copied(), self.add)?;
+                if self.add {
+                    ctx.record_label_tokens(changed.iter().copied());
                 } else {
-                    if let Some(additions) = ctx.label_additions.get_mut(&uuid) {
-                        for label in &changed {
-                            additions.remove(label);
-                        }
-                    }
-                    let removals = ctx.label_removals.entry(uuid).or_default();
-                    let before = removals.len();
-                    removals.extend(changed.iter().copied());
-                    (removals.len() - before) as u64
-                };
-                if count > 0 {
-                    ctx.adjust_label_memberships(changed.iter().copied(), add)?;
-                    if add {
-                        ctx.record_label_tokens(changed.iter().copied());
-                    } else {
-                        ctx.record_removed_label_tokens(changed.iter().copied());
-                    }
-                    ctx.record_mutation_output(
-                        if add {
-                            crate::MutationKind::AddLabel
-                        } else {
-                            crate::MutationKind::RemoveLabel
-                        },
-                        crate::MutationSubjectKind::Node,
-                        uuid,
-                    );
+                    ctx.record_removed_label_tokens(changed.iter().copied());
                 }
+                ctx.record_mutation_output(
+                    if self.add {
+                        crate::MutationKind::AddLabel
+                    } else {
+                        crate::MutationKind::RemoveLabel
+                    },
+                    crate::MutationSubjectKind::Node,
+                    uuid,
+                );
             }
         }
-        if add {
-            let mask = vec![true; frontier.num_rows()];
-            frontier.add_node_labels(item.target, &requested, &mask)?;
+        Ok(())
+    }
+
+    fn stage_row_change(
+        &self,
+        uuid: [u8; 16],
+        node_id: u64,
+        changed: &[graphforge_value::EntityTypeId],
+        ctx: &mut StatementWriteContext,
+    ) -> Result<u64, GfError> {
+        if ctx.writer.contains_pending_node(&uuid) {
+            return Ok(if self.add {
+                ctx.writer.add_pending_node_labels(&uuid, changed)
+            } else {
+                ctx.writer.remove_pending_node_labels(&uuid, changed)
+            });
+        }
+        if node_id == 0 {
+            return Err(GfError::Storage("persisted node has zero node_id".into()));
+        }
+        ctx.label_target_node_ids.insert(uuid, node_id);
+        if self.add {
+            if let Some(removals) = ctx.label_removals.get_mut(&uuid) {
+                for label in changed {
+                    removals.remove(label);
+                }
+            }
+            let additions = ctx.label_additions.entry(uuid).or_default();
+            let before = additions.len();
+            additions.extend(changed.iter().copied());
+            Ok((additions.len() - before) as u64)
         } else {
-            frontier.remove_node_labels(item.target, &requested)?;
+            if let Some(additions) = ctx.label_additions.get_mut(&uuid) {
+                for label in changed {
+                    additions.remove(label);
+                }
+            }
+            let removals = ctx.label_removals.entry(uuid).or_default();
+            let before = removals.len();
+            removals.extend(changed.iter().copied());
+            Ok((removals.len() - before) as u64)
         }
     }
-    Ok(())
+
+    fn apply_frontier(&self, frontier: &mut Frontier) -> Result<(), GfError> {
+        if self.add {
+            let mask = vec![true; frontier.num_rows()];
+            frontier.add_node_labels(self.item.target, &self.item.labels, &mask)?;
+        } else {
+            frontier.remove_node_labels(self.item.target, &self.item.labels)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

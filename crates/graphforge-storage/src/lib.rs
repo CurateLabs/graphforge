@@ -547,7 +547,7 @@ pub use mutator::{
     delete_edges, delete_nodes, delete_nodes_and_edges, delete_nodes_and_edges_with_topology,
     incident_edge_uuids, incident_edge_uuids_from_files, stage_add_node_labels, stage_delete_edges,
     stage_delete_edges_authenticated, stage_delete_nodes, stage_delete_nodes_authenticated,
-    stage_mutate_node_labels,
+    stage_mutate_node_labels, stage_mutate_node_labels_routed,
 };
 
 pub mod staging;

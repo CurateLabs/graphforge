@@ -318,6 +318,8 @@ pub(crate) struct StatementWriteContext {
     pub remove_acc: RemoveAccumulator,
     pub label_additions: HashMap<[u8; 16], HashSet<EntityTypeId>>,
     pub label_removals: HashMap<[u8; 16], HashSet<EntityTypeId>>,
+    /// Immutable surrogate routing for persisted nodes with buffered label changes.
+    pub label_target_node_ids: HashMap<[u8; 16], u64>,
     /// Label tokens already present before, or introduced during, this statement.
     pub known_labels: HashSet<EntityTypeId>,
     pub label_membership_counts: HashMap<EntityTypeId, u64>,
@@ -374,6 +376,7 @@ impl StatementWriteContext {
             remove_acc: RemoveAccumulator::default(),
             label_additions: HashMap::new(),
             label_removals: HashMap::new(),
+            label_target_node_ids: HashMap::new(),
             known_labels,
             label_membership_counts,
             label_summary_needs_write,
@@ -1754,11 +1757,12 @@ pub(crate) fn stage_statement(
     }
     ctx.set_acc.stage_into(&mut staged, dir, inventory)?;
     ctx.remove_acc.stage_into(&mut staged, dir, inventory)?;
-    graphforge_storage::stage_mutate_node_labels(
+    graphforge_storage::stage_mutate_node_labels_routed(
         &mut staged,
         dir,
         &ctx.label_additions,
         &ctx.label_removals,
+        &ctx.label_target_node_ids,
     )?;
     if ctx.label_summary_needs_write && !ctx.mutation_receipt().is_empty() {
         graphforge_storage::stage_label_membership_counts(
