@@ -422,11 +422,13 @@ fn serial_and_parallel_import_publish_identical_payloads_with_recorded_clock_fix
         );
         let mut fingerprint = payload_digests(&root.join("encoded-v1/graph"));
         assert!(fingerprint.len() > 20);
+        // An initial build resolves endpoints by the node index and shapes no
+        // edge-endpoint family (ADR 0057); its surrogates are in the encoded
+        // payload digests above.
         for name in [
             "shaped-identities.run",
             "shaped-node-details.run",
             "shaped-edge-details.run",
-            "shaped-edge-endpoints.run",
         ] {
             // Encoding retires shaped payloads after authenticating their
             // successor. Compare the retained content-addressing receipts.

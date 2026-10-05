@@ -224,6 +224,27 @@ pub(super) fn open(root: &TempDir, operation: u128) -> GraphConstructionSession 
     .unwrap()
 }
 
+/// Default budgets with the node index (ADR 0057) off, for tests of the
+/// endpoint family's routing, stages, failpoints and successors. Appends and
+/// over-budget builds still take that path.
+pub(super) fn endpoint_family_budgets() -> GraphConstructionBudgets {
+    GraphConstructionBudgets {
+        max_node_index_bytes: 0,
+        ..GraphConstructionBudgets::default()
+    }
+}
+
+/// [`open`] on the endpoint family.
+pub(super) fn open_endpoint_family(root: &TempDir, operation: u128) -> GraphConstructionSession {
+    GraphConstructionSession::open(
+        root.path(),
+        Uuid::from_u128(operation),
+        0,
+        endpoint_family_budgets(),
+    )
+    .unwrap()
+}
+
 #[test]
 fn generation_zero_accepts_empty_node_parquet() {
     let root = TempDir::new().unwrap();

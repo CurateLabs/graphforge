@@ -131,7 +131,9 @@ fn external_partition_subprocess() {
     let case = std::env::var("GF_EXTERNAL_TEST_CASE").unwrap();
     let project = root.join(std::env::var("GF_EXTERNAL_TEST_PROJECT").unwrap());
     std::fs::create_dir_all(&project).unwrap();
-    let mut budgets = budgets(EXTERNAL_TEST_PARTITIONS);
+    // Hub endpoints are what push a partition over budget, and only the
+    // endpoint family routes them (ADR 0057).
+    let mut budgets = family_budgets(EXTERNAL_TEST_PARTITIONS);
     if let Ok(value) = std::env::var("GF_EXTERNAL_TEST_PARTITION_BYTES") {
         budgets.max_partition_bytes = value.parse().unwrap();
     }

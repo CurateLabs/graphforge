@@ -65,13 +65,37 @@ mod lifecycle_budget {
         let Ok(path) = std::env::var("GF_SUPERSESSION_CRASH_ROOT") else {
             return;
         };
-        let mut session = small_session(Path::new(&path));
+        let budgets = if std::env::var("GF_TEST_ENDPOINT_FAMILY").is_ok_and(|value| value == "1") {
+            endpoint_family_budgets()
+        } else {
+            GraphConstructionBudgets::default()
+        };
+        let mut session = GraphConstructionSession::open_with_mode(
+            Path::new(&path),
+            Uuid::from_u128(119_500),
+            0,
+            graphforge_core::OntologyMode::Exploratory,
+            budgets,
+        )
+        .unwrap();
         complete_small(&mut session);
     }
 
+    /// Every crash window resumes and supersedes exactly, on both endpoint
+    /// resolution paths (ADR 0057); the node index never reaches the
+    /// endpoint-family retirement window.
     #[test]
     fn supersession_crashes_reconcile_removed_allocations_and_replay() {
-        for boundary in [
+        for (endpoint_family, boundary) in [true, false]
+            .into_iter()
+            .flat_map(|family| SUPERSESSION_CRASH_BOUNDARIES.map(|boundary| (family, boundary)))
+            .filter(|(family, boundary)| *family || *boundary != "shape.after_endpoint_retirement")
+        {
+            supersession_crash_reconciles(endpoint_family, boundary);
+        }
+    }
+
+    const SUPERSESSION_CRASH_BOUNDARIES: [&str; 14] = [
             "shape.after_identity_retirement",
             "shape.after_endpoint_retirement",
             "shape.after_derived_unlink",
@@ -86,7 +110,10 @@ mod lifecycle_budget {
             "supersession.before_shape_checkpoint",
             "supersession.shape_after_unlink",
             "supersession.shape_after_sync",
-        ] {
+    ];
+
+    fn supersession_crash_reconciles(endpoint_family: bool, boundary: &str) {
+        {
             let root = TempDir::new().unwrap();
             crate::open_or_initialize_project(root.path()).unwrap();
             let prior = std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap();
@@ -101,9 +128,13 @@ mod lifecycle_budget {
                     "graphforge-construction-test-v1",
                 )
                 .env("GF_CONSTRUCTION_FAILPOINT", boundary)
+                .env(
+                    "GF_TEST_ENDPOINT_FAMILY",
+                    if endpoint_family { "1" } else { "0" },
+                )
                 .status()
                 .unwrap();
-            assert_eq!(status.code(), Some(86), "{boundary}");
+            assert_eq!(status.code(), Some(86), "{endpoint_family} {boundary}");
             assert_eq!(
                 std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap(),
                 prior
@@ -1274,9 +1305,19 @@ mod lifecycle_budget {
         }
     }
 
+    /// Retirement of the endpoint family and its successors, so it shapes
+    /// that family; reopening under the default budgets adopts the recorded
+    /// ones.
     fn sealed_retirement_fixture(root: &TempDir) -> GraphConstructionSession {
         crate::open_or_initialize_project(root.path()).unwrap();
-        let mut session = small_session(root.path());
+        let mut session = GraphConstructionSession::open_with_mode(
+            root.path(),
+            Uuid::from_u128(119_500),
+            0,
+            graphforge_core::OntologyMode::Exploratory,
+            endpoint_family_budgets(),
+        )
+        .unwrap();
         session
             .append(
                 ConstructionChunkKind::Node,
@@ -1584,11 +1625,33 @@ mod group_boundary {
     /// fixture: `partition_count: 1` puts one spill behind each family, so
     /// the cadence threshold is four spills times 255 KiB, and an 8192-row
     /// edge chunk stages well above it.
+    /// One partition, on the endpoint family: the crash matrices below pin
+    /// that family's stages, successors and failpoints.
     fn boundary_budgets() -> GraphConstructionBudgets {
+        GraphConstructionBudgets {
+            partition_count: 1,
+            max_node_index_bytes: 0,
+            ..Default::default()
+        }
+    }
+
+    /// [`boundary_budgets`] resolving endpoints by the node index (ADR 0057).
+    fn index_boundary_budgets() -> GraphConstructionBudgets {
         GraphConstructionBudgets {
             partition_count: 1,
             ..Default::default()
         }
+    }
+
+    fn index_boundary_session(path: &Path, operation: u128) -> GraphConstructionSession {
+        GraphConstructionSession::open_with_mode(
+            path,
+            Uuid::from_u128(operation),
+            0,
+            graphforge_core::OntologyMode::Exploratory,
+            index_boundary_budgets(),
+        )
+        .unwrap()
     }
 
     fn boundary_session(path: &Path, operation: u128) -> GraphConstructionSession {
@@ -2121,7 +2184,11 @@ mod group_boundary {
         let Ok(path) = std::env::var("GF_SUPERSESSION_CRASH_ROOT") else {
             return;
         };
-        let mut session = boundary_session(Path::new(&path), 156_200);
+        let mut session = if std::env::var("GF_TEST_NODE_INDEX").is_ok_and(|value| value == "1") {
+            index_boundary_session(Path::new(&path), 156_200)
+        } else {
+            boundary_session(Path::new(&path), 156_200)
+        };
         if std::env::var_os("GF_TEST_CONSTRUCTION_LANES").is_some() {
             session.set_cpu_admission(Some(eight_lanes()));
         }
@@ -2140,6 +2207,10 @@ mod group_boundary {
     }
 
     fn crash_at_finish_stage_with(failpoint: &str, lanes: bool) -> TempDir {
+        crash_at_finish_stage_on(failpoint, lanes, false)
+    }
+
+    fn crash_at_finish_stage_on(failpoint: &str, lanes: bool, node_index: bool) -> TempDir {
         let root = TempDir::new().unwrap();
         crate::open_or_initialize_project(root.path()).unwrap();
         let prior = std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap();
@@ -2154,7 +2225,8 @@ mod group_boundary {
                 "GF_CONSTRUCTION_FAILPOINT_COOKIE",
                 "graphforge-construction-test-v1",
             )
-            .env("GF_CONSTRUCTION_FAILPOINT", failpoint);
+            .env("GF_CONSTRUCTION_FAILPOINT", failpoint)
+            .env("GF_TEST_NODE_INDEX", if node_index { "1" } else { "0" });
         if lanes {
             command.env("GF_TEST_CONSTRUCTION_LANES", "8");
         } else {
@@ -2353,6 +2425,64 @@ mod group_boundary {
                 stage_control_names(&session_path).is_empty(),
                 "{failpoint}: stage controls outlived supersession"
             );
+        }
+    }
+
+    /// ADR 0057: the node-index path keeps the finish-stage crash contract.
+    /// Its endpoint stages record no outputs and no endpoint or resolved
+    /// segment is ever sealed; the validation pass runs before the shape can
+    /// complete; every crash, with or without lanes, resumes to the
+    /// uninterrupted graph and reconciles every allocation.
+    #[test]
+    fn node_index_finish_stage_crashes_resume_with_the_same_graph() {
+        let clean_root = TempDir::new().unwrap();
+        crate::open_or_initialize_project(clean_root.path()).unwrap();
+        let mut clean = index_boundary_session(clean_root.path(), 156_200);
+        stage_boundary_chunks(&mut clean);
+        let shape = clean.shape_canonical_with_cancellation(|| false).unwrap();
+        assert!(shape.edge_endpoints.is_none());
+        let clean_outputs = shape_output_content(&clean);
+        complete_boundary(&mut clean);
+        let clean_current = clean.evidence().storage_current.clone();
+        drop(clean);
+
+        for (failpoint, lanes) in [
+            ("shape.partition_output.after_install", false),
+            ("shape.stage.identities.after_install", false),
+            ("shape.stage.edge-details.after_retire", false),
+            ("shape.stage.endpoints.after_install", false),
+            ("shape.stage.assigned.after_install", false),
+            ("shape.after_identity_retirement", false),
+            ("shape.stage.resolved-routed.after_install", false),
+            ("shape.endpoint_index.after_validation", false),
+            ("shape.endpoint_index.after_validation", true),
+            ("shape.stage.resolved.after_install", false),
+        ] {
+            let root = crash_at_finish_stage_on(failpoint, lanes, true);
+            let session_path = session_directory(root.path(), 156_200);
+            let segments = segment_names(&session_path);
+            assert!(
+                !segments.iter().any(|name| name.starts_with("part-endpoints-g")
+                    || name.starts_with("part-resolved-g")),
+                "{failpoint}: the node index sealed endpoint segments: {segments:?}"
+            );
+            let mut recovered = index_boundary_session(root.path(), 156_200);
+            if lanes {
+                recovered.set_cpu_admission(Some(eight_lanes()));
+            }
+            recovered.shape_canonical_with_cancellation(|| false).unwrap();
+            assert_eq!(
+                shape_output_content(&recovered),
+                clean_outputs,
+                "{failpoint}: resumed shape differs from the uninterrupted one"
+            );
+            complete_boundary(&mut recovered);
+            assert_eq!(
+                recovered.evidence().storage_current,
+                clean_current,
+                "{failpoint}: resumed run must reconcile every allocation"
+            );
+            assert_eq!(published_edge_count(root.path()), 8 * 8192, "{failpoint}");
         }
     }
 

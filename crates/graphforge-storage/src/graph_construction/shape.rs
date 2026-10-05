@@ -147,6 +147,41 @@ impl GraphConstructionSession {
         self.sample_partition_plan(Some(ConstructionChunkKind::Node), cancelled)
     }
 
+    /// Whether this shape resolves endpoints by the node index (ADR 0057):
+    /// an initial build whose staged node identities, an upper bound on its
+    /// new nodes, fit `max_node_index_bytes`. Appends keep the endpoint family:
+    /// their base endpoints resolve in one ordered sweep of the base index,
+    /// which edge-ordered probes would scatter. A pure function of recorded
+    /// receipts and budgets.
+    fn endpoint_index_fits(
+        &mut self,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<bool, GfError> {
+        let budget = self.checkpoint.budgets.max_node_index_bytes;
+        if budget == 0
+            || self.checkpoint.parent_topology_generation != 0
+            || self.base_snapshot.is_some()
+        {
+            return Ok(false);
+        }
+        let mut node_bytes = 0_u64;
+        for sequence in 0..self.checkpoint.next_sequence {
+            reject_cancelled(cancelled)?;
+            let receipt = self.read_receipt(sequence)?;
+            if receipt.kind != ConstructionChunkKind::Node {
+                continue;
+            }
+            let records = receipt.identities.bytes / IDENTITY_WIDTH as u64;
+            node_bytes = node_bytes
+                .checked_add(records.saturating_mul(super::node_index::NODE_INDEX_RECORD_BYTES))
+                .ok_or_else(|| storage("node index byte count overflows"))?;
+            if node_bytes > budget {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     /// Shared sampler behind [`Self::choose_partition_plan`] and
     /// [`Self::choose_node_partition_plan`]: identical logic, restricted to
     /// receipts of `kind_filter` when given.
@@ -345,6 +380,13 @@ impl GraphConstructionSession {
         let node_partitions = node_plan.partitions();
         self.checkpoint.evidence.shape_node_partitions =
             u64::try_from(node_partitions).map_err(storage)?;
+        // ADR 0057: an initial build whose new-node index fits its recorded
+        // budget resolves endpoints by probing that index, so its endpoint
+        // family is never routed. A resumed shape replays its intent's choice.
+        let endpoint_index = match &resume {
+            Some(state) => state.endpoint_index,
+            None => self.endpoint_index_fits(&mut cancelled)?,
+        };
         let mut identities = FixedRangePartitioner::<BASE_IDENTITY_WIDTH>::new(
             &self.root,
             PartitionFamily::Identities,
@@ -487,6 +529,7 @@ impl GraphConstructionSession {
             splitters: encode_splitters(&plan),
             node_splitters: encode_splitters(&node_plan),
             partition_identity_rows: Vec::new(),
+            endpoint_index,
         };
         if resume.is_none() {
             install_shape_intent(&self.root, &mut shape_intent)?;
@@ -612,23 +655,27 @@ impl GraphConstructionSession {
                         &mut cancelled,
                         &mut self.checkpoint.evidence,
                     )?;
+                    let staged_endpoints = receipt
+                        .endpoints
+                        .as_ref()
+                        .ok_or_else(|| storage("edge receipt lacks endpoint run"))?;
                     // Endpoints are keyed by the referenced *node*'s UUID at
                     // this staged, pre-resolution stage (#1439) -- the later
                     // resolved endpoints, re-keyed by edge UUID in
                     // `resolve_endpoint_surrogates`, correctly keep using
-                    // `plan`.
-                    route_fixed_run::<ENDPOINT_WIDTH>(
-                        &self.root,
-                        &node_plan,
-                        receipt
-                            .endpoints
-                            .as_ref()
-                            .ok_or_else(|| storage("edge receipt lacks endpoint run"))?,
-                        None,
-                        &mut endpoints,
-                        &mut cancelled,
-                        &mut self.checkpoint.evidence,
-                    )?;
+                    // `plan`. The node-index path (ADR 0057) resolves from the
+                    // edge details instead and never reads this run.
+                    if !endpoint_index {
+                        route_fixed_run::<ENDPOINT_WIDTH>(
+                            &self.root,
+                            &node_plan,
+                            staged_endpoints,
+                            None,
+                            &mut endpoints,
+                            &mut cancelled,
+                            &mut self.checkpoint.evidence,
+                        )?;
+                    }
                 }
             }
             routed_since_boundary = routed_since_boundary
@@ -925,6 +972,26 @@ impl GraphConstructionSession {
             self.cpu_admission.as_ref(),
             &mut cancelled,
         )?;
+        if endpoint_index {
+            if edge_endpoints.is_some() {
+                return Err(storage("node-index shape produced an endpoint family"));
+            }
+            // Encoding resolves these endpoints later; prove now, before the
+            // shape can be recorded complete, that every one names a new node.
+            let _validation =
+                crate::concurrency_attribution::RegionScope::named("endpoint_index_validation");
+            validate_endpoints_by_index(
+                &self.root,
+                &identities,
+                edge_details.as_deref(),
+                detail_codec,
+                self.checkpoint.budgets.max_batch_rows,
+                self.cpu_admission.as_ref(),
+                &mut cancelled,
+                &mut self.checkpoint.evidence,
+            )?;
+            construction_failpoint("shape.endpoint_index.after_validation");
+        }
         drop(resolution);
         let node_count = self
             .checkpoint
@@ -1091,6 +1158,7 @@ impl GraphConstructionSession {
                 splitters: shape_intent.splitters,
                 node_splitters: shape_intent.node_splitters,
                 partition_identity_rows,
+                endpoint_index,
             },
         )?;
         construction_failpoint("shape.after_complete_inventory");
@@ -1211,6 +1279,7 @@ impl GraphConstructionSession {
             row_schemas,
             last_progress_sha256: Some(last_progress_sha256),
             stages,
+            endpoint_index: intent.endpoint_index,
         }))
     }
 }
@@ -1943,6 +2012,90 @@ fn reject_staged_base_conflicts(
     account_fixed_read_operations(&reader_counter, evidence)?;
     release_counted_reader_cache(&mut reader, evidence)?;
     base.revalidate()?;
+    Ok(())
+}
+
+/// Build the node index (ADR 0057) from the node records of a shaped identity
+/// run, in UUID order.
+pub(super) fn node_index_from_identities(
+    root: &StableDirectory,
+    identities_name: &str,
+    cancelled: &mut impl FnMut() -> bool,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<super::node_index::NodeIndex, GfError> {
+    let (mut identities, counter) = open_counted_fixed_reader(root, identities_name, evidence)?;
+    let mut builder = super::node_index::NodeIndexBuilder::default();
+    let mut read = 0_u64;
+    while let Some(record) = read_fixed::<BASE_IDENTITY_WIDTH>(&mut identities)? {
+        account_merge_read::<BASE_IDENTITY_WIDTH>(evidence)?;
+        if record[16] == 0 {
+            builder.push(
+                record[..16].try_into().expect("fixed UUID"),
+                u64::from_be_bytes(
+                    record[IDENTITY_SURROGATE_OFFSET..BASE_IDENTITY_WIDTH]
+                        .try_into()
+                        .expect("fixed surrogate"),
+                ),
+            )?;
+        }
+        read += 1;
+        if read.is_multiple_of(4096) {
+            reject_cancelled(cancelled)?;
+        }
+    }
+    account_fixed_read_operations(&counter, evidence)?;
+    release_counted_reader_cache(&mut identities, evidence)?;
+    Ok(builder.finish())
+}
+
+/// Prove that every edge endpoint names a new node, by probing the node index
+/// with each edge detail's source and target UUIDs (ADR 0057). The node-index
+/// path's counterpart of the merge join's refusal, run while shaping so that
+/// a shape that cannot encode is never recorded complete.
+#[allow(clippy::too_many_arguments)]
+fn validate_endpoints_by_index(
+    root: &StableDirectory,
+    identities_name: &str,
+    edge_details_name: Option<&str>,
+    codec: DetailCodec,
+    window_rows: usize,
+    cpu_admission: Option<&std::sync::Arc<super::cpu_admission::ConstructionCpuAdmission>>,
+    cancelled: &mut impl FnMut() -> bool,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<(), GfError> {
+    let Some(edge_details_name) = edge_details_name else {
+        return Ok(());
+    };
+    let index = node_index_from_identities(root, identities_name, cancelled, evidence)?;
+    let (mut details, counter) = open_counted_fixed_reader(root, edge_details_name, evidence)?;
+    let window_rows = window_rows.max(1);
+    let mut endpoints = Vec::with_capacity(2 * window_rows);
+    let mut surrogates = vec![0_u64; 2 * window_rows];
+    loop {
+        endpoints.clear();
+        while endpoints.len() < 2 * window_rows {
+            let Some(detail) = codec
+                .read::<EDGE_DETAIL_WIDTH>(&mut details)
+                .map_err(storage)?
+            else {
+                break;
+            };
+            account_merge_read::<EDGE_DETAIL_WIDTH>(evidence)?;
+            endpoints.push(detail[16..32].try_into().expect("fixed UUID"));
+            endpoints.push(detail[32..48].try_into().expect("fixed UUID"));
+        }
+        if endpoints.is_empty() {
+            break;
+        }
+        index.resolve(
+            &endpoints,
+            &mut surrogates[..endpoints.len()],
+            cpu_admission,
+        )?;
+        reject_cancelled(cancelled)?;
+    }
+    account_fixed_read_operations(&counter, evidence)?;
+    release_counted_reader_cache(&mut details, evidence)?;
     Ok(())
 }
 
