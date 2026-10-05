@@ -816,7 +816,7 @@ pub(super) fn write_batch_creates(
                     )?;
                 }
                 if let Some(rec) = extras.recorder.as_deref_mut() {
-                    rec.record_node(spec.var, to_bytes(&uuid), node_id, type_id);
+                    rec.record_node(spec.var, to_bytes(&uuid), node_id, type_id, &type_ids);
                 }
                 tally.nodes_created += 1;
             }

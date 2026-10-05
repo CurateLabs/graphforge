@@ -276,6 +276,7 @@ impl GraphForge {
             stats: ExecutionStats {
                 rows_produced: rows,
                 execution_time_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                ..ExecutionStats::default()
             },
             side_effects: None,
             mutation_receipt: None,

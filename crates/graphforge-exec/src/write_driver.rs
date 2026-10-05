@@ -320,6 +320,9 @@ pub(crate) struct StatementWriteContext {
     pub label_removals: HashMap<[u8; 16], HashSet<EntityTypeId>>,
     /// Label tokens already present before, or introduced during, this statement.
     pub known_labels: HashSet<EntityTypeId>,
+    pub label_membership_counts: HashMap<EntityTypeId, u64>,
+    pub label_summary_needs_write: bool,
+    pub initialization_work: crate::WriteInitializationWork,
     pub removed_label_tokens: HashSet<EntityTypeId>,
     pub mutation: crate::mutation::MutationState,
 }
@@ -343,23 +346,20 @@ impl StatementWriteContext {
             Some(authority) => graphforge_storage::enumerate_topology_files(authority, None)?,
             None => graphforge_storage::TopologyFiles::discover_legacy(dir)?,
         };
-        let mut known_labels = HashSet::new();
-        for batch in graphforge_storage::read_nodes_from_files(&files)
-            .map_err(|error| GfError::Storage(error.to_string()))?
-        {
-            let Some(labels) = batch
-                .column_by_name("type_ids")
-                .and_then(|array| array.as_any().downcast_ref::<ListArray>())
-            else {
-                continue;
-            };
-            for row in 0..labels.len() {
-                let values = labels.value(row);
-                if let Some(values) = values.as_any().downcast_ref::<UInt32Array>() {
-                    known_labels.extend(decode_memberships(values)?);
-                }
-            }
-        }
+        let (
+            label_membership_counts,
+            summary_bytes_read,
+            label_summary_needs_write,
+            summary_establishment_rows,
+            summary_establishment_fragments,
+        ) = if let Some((counts, bytes)) = graphforge_storage::read_label_membership_counts(dir)? {
+            (counts, bytes, false, 0, 0)
+        } else {
+            let (counts, rows, fragments) =
+                graphforge_storage::establish_label_membership_counts(&files)?;
+            (counts, 0, true, rows, fragments)
+        };
+        let known_labels = label_membership_counts.keys().copied().collect();
         Ok(Self {
             writer: match topology {
                 Some(authority) => {
@@ -375,6 +375,15 @@ impl StatementWriteContext {
             label_additions: HashMap::new(),
             label_removals: HashMap::new(),
             known_labels,
+            label_membership_counts,
+            label_summary_needs_write,
+            initialization_work: crate::WriteInitializationWork {
+                node_rows_decoded: summary_establishment_rows,
+                node_fragments_read: summary_establishment_fragments,
+                summary_bytes_read,
+                summary_establishment_rows,
+                summary_establishment_fragments,
+            },
             removed_label_tokens: HashSet::new(),
             mutation: crate::mutation::MutationState::default(),
         })
@@ -413,6 +422,34 @@ impl StatementWriteContext {
 
     pub(crate) fn mutation_receipt(&self) -> crate::MutationReceipt {
         self.mutation.mutation_receipt()
+    }
+
+    pub(crate) fn adjust_label_memberships(
+        &mut self,
+        labels: impl IntoIterator<Item = EntityTypeId>,
+        add: bool,
+    ) -> Result<(), GfError> {
+        for label in labels {
+            self.label_summary_needs_write = true;
+            if add {
+                let count = self.label_membership_counts.entry(label).or_default();
+                *count = count
+                    .checked_add(1)
+                    .ok_or_else(|| GfError::Storage("label membership count overflow".into()))?;
+            } else {
+                let count = self
+                    .label_membership_counts
+                    .get_mut(&label)
+                    .ok_or_else(|| GfError::Storage("label membership summary underflow".into()))?;
+                *count = count
+                    .checked_sub(1)
+                    .ok_or_else(|| GfError::Storage("label membership summary underflow".into()))?;
+                if *count == 0 {
+                    self.label_membership_counts.remove(&label);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn record_label_tokens(&mut self, labels: impl IntoIterator<Item = EntityTypeId>) {
@@ -1225,6 +1262,7 @@ struct NodeIdentities {
     uuids: Vec<[u8; 16]>,
     node_ids: Vec<u64>,
     type_ids: Vec<graphforge_value::PrimaryEntityTypeId>,
+    labels: Vec<Vec<EntityTypeId>>,
 }
 
 type NodeIdentitySlices<'a> = (
@@ -1258,11 +1296,16 @@ impl CreateRecorder {
         uuid: [u8; 16],
         node_id: u64,
         type_id: graphforge_value::PrimaryEntityTypeId,
+        labels: &[EntityTypeId],
     ) {
         let n = self.nodes.entry(var).or_default();
         n.uuids.push(uuid);
         n.node_ids.push(node_id);
         n.type_ids.push(type_id);
+        let mut unique_labels = labels.to_vec();
+        unique_labels.sort_unstable_by_key(|label| label.encode());
+        unique_labels.dedup();
+        n.labels.push(unique_labels);
     }
 
     pub(crate) fn record_edge(
@@ -1290,6 +1333,15 @@ impl CreateRecorder {
                 n.node_ids.as_slice(),
                 n.type_ids.as_slice(),
             )
+        })
+    }
+
+    fn label_memberships(&self) -> impl Iterator<Item = EntityTypeId> + '_ {
+        self.nodes.values().flat_map(|nodes| {
+            nodes
+                .labels
+                .iter()
+                .flat_map(|labels| labels.iter().copied())
         })
     }
 
@@ -1704,6 +1756,13 @@ pub(crate) fn stage_statement(
         &ctx.label_additions,
         &ctx.label_removals,
     )?;
+    if ctx.label_summary_needs_write && !ctx.mutation_receipt().is_empty() {
+        graphforge_storage::stage_label_membership_counts(
+            &mut staged,
+            dir,
+            &ctx.label_membership_counts,
+        )?;
+    }
     graphforge_storage::stage_delete_edges(&mut staged, dir, &ctx.pending_edge_deletes)?;
     graphforge_storage::stage_delete_nodes(&mut staged, dir, &ctx.pending_node_deletes)?;
     ctx.writer.flush_into(&mut staged)?;

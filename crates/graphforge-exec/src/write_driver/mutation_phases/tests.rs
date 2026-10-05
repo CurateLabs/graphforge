@@ -644,10 +644,20 @@ fn label_phase_routes_pending_cancellation_and_deleted_entities() {
             EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap(),
         )
         .unwrap();
+    pending
+        .adjust_label_memberships(
+            [EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap()],
+            true,
+        )
+        .unwrap();
     run_label_phase(&[add.clone()], true, &mut make_frontier(), &mut pending).unwrap();
     run_label_phase(&[remove.clone()], false, &mut make_frontier(), &mut pending).unwrap();
 
     let mut persisted = StatementWriteContext::new(dir.path(), OntologyMode::Exploratory).unwrap();
+    persisted.label_membership_counts.insert(
+        EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap(),
+        1,
+    );
     persisted
         .label_removals
         .insert([7; 16], HashSet::from([EntityTypeId::decode(2).unwrap()]));
