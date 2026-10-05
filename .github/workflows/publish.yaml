@@ -45,6 +45,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       version: ${{ steps.version.outputs.version }}
+      npm_version: ${{ steps.version.outputs.npm_version }}
       npm_dist_tag: ${{ steps.version.outputs.npm_dist_tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -67,6 +68,8 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          npm_version="$(python3 -c 'import json; print(json.load(open("crates/graphforge-bindings-node/package.json"))["version"])')"
+          echo "npm_version=$npm_version" >> "$GITHUB_OUTPUT"
           echo "npm_dist_tag=$(python3 scripts/publish_npm.py --print-dist-tag)" >> "$GITHUB_OUTPUT"
 
   wheels:
@@ -337,7 +340,7 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     env:
-      RELEASE_VERSION: ${{ needs.version.outputs.version }}
+      NPM_PACKAGE_VERSION: ${{ needs.version.outputs.npm_version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -386,7 +389,7 @@ jobs:
           # The main tarball must carry the loaders (named exactly, so a
           # prerelease version such as 0.6.0-rc.1 resolves).
           # Naming the members makes tar fail if either is absent.
-          tar -tzf "$out/curatelabs-graphforge-$RELEASE_VERSION.tgz" \
+          tar -tzf "$out/curatelabs-graphforge-$NPM_PACKAGE_VERSION.tgz" \
             package/index.js package/index.d.ts > /dev/null
 
       - name: Install the packed packages in a clean project and run them
@@ -398,9 +401,9 @@ jobs:
           cd "$RUNNER_TEMP/packed-smoke"
           npm init --yes
           npm install \
-            "$out/curatelabs-graphforge-$RELEASE_VERSION.tgz" \
-            "$out/curatelabs-graphforge-cli-$RELEASE_VERSION.tgz" \
-            "$out/curatelabs-graphforge-linux-x64-gnu-$RELEASE_VERSION.tgz"
+            "$out/curatelabs-graphforge-$NPM_PACKAGE_VERSION.tgz" \
+            "$out/curatelabs-graphforge-cli-$NPM_PACKAGE_VERSION.tgz" \
+            "$out/curatelabs-graphforge-linux-x64-gnu-$NPM_PACKAGE_VERSION.tgz"
           node "$GITHUB_WORKSPACE/scripts/ci/multi-ontology-packaged-smoke.mjs"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -5,6 +5,7 @@ Surfaces:
 - Cargo workspace ``[workspace.package].version``
 - Cargo lockfile entries for workspace packages
 - Benchmark/fuzz path dependency pins and local library lockfile entries
+- SNB BI fixture driver identity covering its versioned runner manifest
 - Python ``crates/graphforge-bindings-py/pyproject.toml`` (PEP 440)
 - Node ``crates/graphforge-bindings-node/package.json``
 - NPX lifecycle CLI ``packages/cli/package.json``
@@ -44,6 +45,7 @@ is not a second version.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -126,6 +128,35 @@ def local_library_entries(path: Path) -> list[tuple[str, str, str]]:
         if match and match.group(1) in release_names and not re.search(r"(?m)^source\s*=", block):
             entries.append((match.group(1), match.group(2), block))
     return entries
+
+
+def staged_driver_identities(manifests: list[tuple[Path, str]]) -> list[tuple[Path, dict]]:
+    """Refresh synthetic SNB BI fixtures after changing their hashed manifest.
+
+    Match the path/content framing checked by the benchmark's existing source
+    identity test. These are fixture inputs, not historical benchmark results.
+    """
+    benchmark_root = ROOT / "benchmarks"
+    identity_path = benchmark_root / "profiles" / "gdc" / "snb-bi-identity.json"
+    if not identity_path.is_file():
+        return []
+    runner = benchmark_root / "runners" / "gdc-snb-bi"
+    staged = dict(manifests)
+    digest = hashlib.sha256()
+    for relative in ("Cargo.toml", "src/lib.rs", "src/main.rs"):
+        path = runner / relative
+        content = staged[path].encode("utf-8") if path in staged else path.read_bytes()
+        digest.update(relative.encode("utf-8") + b"\0" + content + b"\0")
+    documents = [(identity_path, "driver")]
+    for fixture in ("compatible", "reference-mismatch", "semantic-incompat"):
+        path = benchmark_root / "fixtures" / "gdc" / "snb-bi-tiny" / fixture / "acquisition.json"
+        documents.append((path, "recorded_driver"))
+    updates = []
+    for path, key in documents:
+        meta = json.loads(path.read_text(encoding="utf-8"))
+        meta[key]["content_sha256"] = digest.hexdigest()
+        updates.append((path, meta))
+    return updates
 
 
 RELEASE_RE = re.compile(r"\d+\.\d+\.\d+")
@@ -381,7 +412,7 @@ def apply_version(base: str, *, dev: bool, dry_run: bool, pre: str | None = None
     if n != 1:
         raise ValueError("failed to update Python pyproject version")
 
-    staged_packages: list[tuple[Path, dict]] = []
+    staged_packages: list[tuple[Path, dict]] = staged_driver_identities(staged_manifests)
     for path, key in (
         (NODE_PACKAGE, "node"),
         (CLI_PACKAGE, "cli"),

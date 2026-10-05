@@ -1,5 +1,6 @@
 """Tests for multi-surface release version alignment."""
 
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -201,7 +202,7 @@ def test_dry_run_does_not_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 @pytest.mark.parametrize(
     ("workspace", "relative_manifest", "runner"),
     [
-        ("benchmarks", "runners/smoke/Cargo.toml", "graphforge-benchmark-smoke"),
+        ("benchmarks", "runners/gdc-snb-bi/Cargo.toml", "graphforge-benchmark-gdc-snb-bi"),
         ("fuzz", "Cargo.toml", "graphforge-fuzz"),
     ],
 )
@@ -248,6 +249,28 @@ def test_apply_version_rewrites_every_surface(
         'checksum = "also-retained"\n'
     )
     harness_lock.write_text(harness_before, encoding="utf-8")
+    identity_documents = []
+    if workspace == "benchmarks":
+        sources = harness_manifest.parent / "src"
+        sources.mkdir()
+        (sources / "lib.rs").write_text("// library\n", encoding="utf-8")
+        (sources / "main.rs").write_text("fn main() {}\n", encoding="utf-8")
+        identity_documents.append(
+            (tmp_path / "benchmarks/profiles/gdc/snb-bi-identity.json", "driver")
+        )
+        for fixture in ("compatible", "reference-mismatch", "semantic-incompat"):
+            identity_documents.append(
+                (
+                    tmp_path / "benchmarks/fixtures/gdc/snb-bi-tiny" / fixture / "acquisition.json",
+                    "recorded_driver",
+                )
+            )
+        for path, key in identity_documents:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps({key: {"content_sha256": "stale", "name": runner}, "assets": []}),
+                encoding="utf-8",
+            )
     native.parent.mkdir(parents=True)
     native.write_text('{"version":"0.5.0"}\n', encoding="utf-8")
     for path, content in (
@@ -298,6 +321,18 @@ def test_apply_version_rewrites_every_surface(
     assert harness_lock.read_text(encoding="utf-8") == harness_before.replace(
         'version = "0.4.0"', f'version = "{target}"'
     )
+    if identity_documents:
+        digest = hashlib.sha256()
+        for relative in ("Cargo.toml", "src/lib.rs", "src/main.rs"):
+            digest.update(relative.encode())
+            digest.update(b"\0")
+            digest.update((harness_manifest.parent / relative).read_bytes())
+            digest.update(b"\0")
+        for path, key in identity_documents:
+            assert json.loads(path.read_text(encoding="utf-8")) == {
+                key: {"content_sha256": digest.hexdigest(), "name": runner},
+                "assets": [],
+            }
     assert json.loads(native.read_text(encoding="utf-8"))["version"] == mapping["node"]
     for path in (
         tmp_path / "node" / "package.json",
