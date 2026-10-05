@@ -22,6 +22,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 
 use arrow::array::{Array, FixedSizeBinaryArray};
 use graphforge_api::{
@@ -70,6 +71,16 @@ const CONTROL_SLACK_BYTES: u64 = 64 * 1024;
 const HYDRATION_PASSES: u64 = 2;
 /// Footer reads and catalog sidecars no reader reports to the attribution.
 const UNATTRIBUTED_SLACK_BYTES: u64 = 64 * 1024;
+
+// `/proc/self/io` is process-wide, so serialize every test in this binary while
+// any test measures an open through the default parallel test harness.
+static PROCESS_IO_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn isolate_process_io_measurements() -> MutexGuard<'static, ()> {
+    PROCESS_IO_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// What an open may copy and read, from the manifest alone: the fixed controls
 /// plus a row per declared file, each read twice, plus the fixed slack.
@@ -396,6 +407,7 @@ fn assert_open_bounded(measured: &Measured) {
 
 #[test]
 fn mutated_project_open_reads_controls_not_payload_across_a_16x_range() {
+    let _process_io_guard = isolate_process_io_measurements();
     assert_eq!(LARGE_NODES, 16 * SMALL_NODES);
     if process_rchar().is_none() {
         eprintln!(
@@ -419,6 +431,7 @@ fn mutated_project_open_reads_controls_not_payload_across_a_16x_range() {
 /// construction and one from a mutating commit.
 #[test]
 fn mutated_project_with_properties_opens_without_reading_them_across_a_16x_range() {
+    let _process_io_guard = isolate_process_io_measurements();
     if process_rchar().is_none() {
         eprintln!(
             "SKIPPED whole-process rchar assertions: /proc/self/io is unavailable on this \
@@ -545,6 +558,7 @@ fn inert_offset(project: &Path, entry: &graphforge_storage::GraphFileEntry) -> u
 #[cfg(unix)]
 #[test]
 fn mutated_project_refuses_a_same_inode_flip_on_the_touching_query() {
+    let _process_io_guard = isolate_process_io_measurements();
     let project = tempfile::tempdir().expect("project directory");
     let path = project_path(&project);
     let nodes = SMALL_NODES / 2;
@@ -687,6 +701,7 @@ fn commit_over_constructed_parent(forge: &GraphForge, commit: Commit) {
 /// that follows defers payload content to first touch.
 #[test]
 fn every_mutating_commit_publishes_a_compact_root() {
+    let _process_io_guard = isolate_process_io_measurements();
     for constructed in [false, true] {
         for commit in COMMITS {
             let project = tempfile::tempdir().expect("project directory");
@@ -776,6 +791,7 @@ fn every_mutating_commit_publishes_a_compact_root() {
 /// answer the same.
 #[test]
 fn expanded_parent_is_converted_on_next_commit() {
+    let _process_io_guard = isolate_process_io_measurements();
     let source = tempfile::tempdir().expect("source project directory");
     let source_path = project_path(&source);
     bulk_fixture::generate_bulk_graph_with_index(&source_path, PARENT_NODES, PARENT_FAN_OUT, false);
