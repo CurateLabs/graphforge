@@ -3,6 +3,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use arrow::array::{
     Array, FixedSizeBinaryArray, FixedSizeBinaryBuilder, StringArray, StringBuilder,
     TimestampMicrosecondArray, TimestampMicrosecondBuilder, UInt32Array, UInt32Builder,
@@ -156,20 +159,40 @@ impl AssertionStatusEvent {
 }
 
 /// Validated append-only assertion-status participant.
+///
+/// Event storage is immutable through the public API so a validated ledger remains a trusted base:
+///
+/// ```compile_fail
+/// use graphforge_knowledge::AssertionStatusLedger;
+/// let mut ledger = AssertionStatusLedger::default();
+/// ledger.events.clear();
+/// ```
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AssertionStatusLedger {
     /// Events ordered by `(recorded_at, status_event_uuid)`.
-    pub events: Vec<AssertionStatusEvent>,
+    events: Vec<AssertionStatusEvent>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static STATUS_ROW_VALIDATION_COUNT: Cell<usize> = const { Cell::new(0) };
 }
 
 impl AssertionStatusLedger {
     /// Validate, sort, and construct one complete participant.
-    pub fn new(mut events: Vec<AssertionStatusEvent>) -> Result<Self, KnowledgeError> {
-        if events.len() > MAX_KNOWLEDGE_ROWS {
+    pub fn new(events: Vec<AssertionStatusEvent>) -> Result<Self, KnowledgeError> {
+        Self::new_with_limit(events, MAX_KNOWLEDGE_ROWS)
+    }
+
+    fn new_with_limit(
+        mut events: Vec<AssertionStatusEvent>,
+        max_rows: usize,
+    ) -> Result<Self, KnowledgeError> {
+        if events.len() > max_rows {
             return Err(KnowledgeError::Limit {
                 participant: "assertion_status_events",
                 observed: events.len(),
-                limit: MAX_KNOWLEDGE_ROWS,
+                limit: max_rows,
             });
         }
         let mut ids = HashSet::with_capacity(events.len());
@@ -180,20 +203,28 @@ impl AssertionStatusLedger {
             }
         }
         events.sort_by_key(|row| (row.recorded_at_micros, row.status_event_uuid));
-        let mut terminal_assertions = HashSet::new();
-        for event in &events {
-            if terminal_assertions.contains(&event.assertion_uuid) && !event.status.is_terminal() {
-                return Err(invalid("assertion_status.status", "superseded is terminal"));
-            }
-            if event.status.is_terminal() {
-                terminal_assertions.insert(event.assertion_uuid);
-            }
-        }
+        validate_terminal_sequence(&events)?;
         Ok(Self { events })
+    }
+
+    /// Read the validated events in canonical order.
+    #[must_use]
+    pub fn events(&self) -> &[AssertionStatusEvent] {
+        &self.events
+    }
+
+    /// Consume the validated participant and return its events.
+    #[must_use]
+    pub fn into_events(self) -> Vec<AssertionStatusEvent> {
+        self.events
     }
 
     /// Merge staged append-only events with exact replay semantics.
     pub fn merge(&self, staged: &Self) -> Result<Self, KnowledgeError> {
+        self.merge_with_limit(staged, MAX_KNOWLEDGE_ROWS)
+    }
+
+    fn merge_with_limit(&self, staged: &Self, max_rows: usize) -> Result<Self, KnowledgeError> {
         let mut events = self.events.clone();
         let terminal_assertions = self
             .events
@@ -217,11 +248,20 @@ impl AssertionStatusLedger {
                 {
                     return Err(invalid("assertion_status.status", "superseded is terminal"));
                 }
+                validate_event(event)?;
                 events.push(event.clone());
                 by_id.insert(event.status_event_uuid, event.clone());
             }
         }
-        Self::new(events)
+        if events.len() > max_rows {
+            return Err(KnowledgeError::Limit {
+                participant: "assertion_status_events",
+                observed: events.len(),
+                limit: max_rows,
+            });
+        }
+        events.sort_by_key(|row| (row.recorded_at_micros, row.status_event_uuid));
+        Ok(Self { events })
     }
 
     /// Canonical fingerprint over one exact immutable event.
@@ -350,6 +390,8 @@ pub(crate) fn schema_registry_entry() -> SchemaRegistryEntry {
 }
 
 fn validate_event(row: &AssertionStatusEvent) -> Result<(), KnowledgeError> {
+    #[cfg(test)]
+    STATUS_ROW_VALIDATION_COUNT.with(|count| count.set(count.get() + 1));
     if row.contract_version != ASSERTION_STATUS_CONTRACT_VERSION {
         return Err(invalid(
             "assertion_status.contract_version",
@@ -365,6 +407,29 @@ fn validate_event(row: &AssertionStatusEvent) -> Result<(), KnowledgeError> {
         require_v7(value, "reasoning_uuid")?;
     }
     require_uuid(row.provenance_uuid, "provenance_uuid")
+}
+
+fn validate_terminal_sequence(events: &[AssertionStatusEvent]) -> Result<(), KnowledgeError> {
+    let mut terminal_assertions = HashSet::new();
+    for event in events {
+        if terminal_assertions.contains(&event.assertion_uuid) && !event.status.is_terminal() {
+            return Err(invalid("assertion_status.status", "superseded is terminal"));
+        }
+        if event.status.is_terminal() {
+            terminal_assertions.insert(event.assertion_uuid);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn reset_status_row_validation_count() {
+    STATUS_ROW_VALIDATION_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn status_row_validation_count() -> usize {
+    STATUS_ROW_VALIDATION_COUNT.with(Cell::get)
 }
 
 fn optional_uuid(writer: &mut CanonicalWriter, value: Option<Uuid>) -> Result<(), KnowledgeError> {
@@ -496,6 +561,69 @@ mod tests {
         .unwrap()
     }
 
+    fn measurement_uuid(seed: u64) -> Uuid {
+        let mut bytes = [0; 16];
+        bytes[8..].copy_from_slice(&seed.to_be_bytes());
+        bytes[6] = 0x70;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Uuid::from_bytes(bytes)
+    }
+
+    fn merge_with_full_revalidation(
+        existing: &AssertionStatusLedger,
+        staged: &AssertionStatusLedger,
+    ) -> Result<AssertionStatusLedger, KnowledgeError> {
+        let mut events = existing.events.clone();
+        let mut by_id = events
+            .iter()
+            .cloned()
+            .map(|row| (row.status_event_uuid, row))
+            .collect::<HashMap<_, _>>();
+        for event in staged.events() {
+            if let Some(previous) = by_id.get(&event.status_event_uuid) {
+                if previous != event {
+                    return Err(KnowledgeError::Conflict("status_event_uuid"));
+                }
+            } else {
+                events.push(event.clone());
+                by_id.insert(event.status_event_uuid, event.clone());
+            }
+        }
+        AssertionStatusLedger::new(events)
+    }
+
+    fn status_measurement_digest(
+        existing: &AssertionStatusLedger,
+        staged: &AssertionStatusLedger,
+    ) -> String {
+        let mut writer = CanonicalWriter::new();
+        for ledger in [existing, staged] {
+            writer.u64(ledger.events().len() as u64).unwrap();
+            for row in ledger.events() {
+                writer.raw(row.status_event_uuid.as_bytes()).unwrap();
+                writer.raw(row.assertion_uuid.as_bytes()).unwrap();
+                writer.text(row.status.as_str()).unwrap();
+                optional_uuid(&mut writer, row.confidence_uuid).unwrap();
+                optional_uuid(&mut writer, row.reasoning_uuid).unwrap();
+                writer.raw(row.provenance_uuid.as_bytes()).unwrap();
+                writer.i64(row.recorded_at_micros).unwrap();
+                writer.u32(row.contract_version).unwrap();
+            }
+        }
+        let bytes = fingerprint(
+            CanonicalDomain::AssertionStatus,
+            CANONICAL_CONTRACT_VERSION,
+            &writer.finish(),
+        )
+        .unwrap();
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn median_duration(mut durations: Vec<std::time::Duration>) -> std::time::Duration {
+        durations.sort_unstable();
+        durations[durations.len() / 2]
+    }
+
     #[test]
     fn round_trip_fingerprint_statusless_and_identical_time_order_are_stable() {
         assert_eq!(
@@ -618,6 +746,271 @@ mod tests {
             base.merge(&conflict),
             Err(KnowledgeError::Conflict("status_event_uuid"))
         ));
+    }
+
+    #[test]
+    fn status_validator_checks_contract_version() {
+        let mut row = event(1, 20, AssertionStatus::Supported, 1);
+        row.contract_version += 1;
+        assert!(matches!(
+            AssertionStatusLedger::new(vec![row]),
+            Err(KnowledgeError::Invalid {
+                field: "assertion_status.contract_version",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn status_validator_checks_status_event_uuid_version() {
+        let mut row = event(1, 20, AssertionStatus::Supported, 1);
+        row.status_event_uuid = Uuid::from_u128(1);
+        assert!(matches!(
+            AssertionStatusLedger::new(vec![row]),
+            Err(KnowledgeError::Invalid {
+                field: "status_event_uuid",
+                message: "must be UUIDv7",
+            })
+        ));
+    }
+
+    #[test]
+    fn status_validator_checks_assertion_uuid_version() {
+        let mut row = event(1, 20, AssertionStatus::Supported, 1);
+        row.assertion_uuid = Uuid::from_u128(1);
+        assert!(matches!(
+            AssertionStatusLedger::new(vec![row]),
+            Err(KnowledgeError::Invalid {
+                field: "assertion_uuid",
+                message: "must be UUIDv7",
+            })
+        ));
+    }
+
+    #[test]
+    fn status_validator_checks_optional_confidence_uuid_version() {
+        let mut row = event(1, 20, AssertionStatus::Supported, 1);
+        row.confidence_uuid = Some(Uuid::from_u128(1));
+        assert!(matches!(
+            AssertionStatusLedger::new(vec![row]),
+            Err(KnowledgeError::Invalid {
+                field: "confidence_uuid",
+                message: "must be UUIDv7",
+            })
+        ));
+    }
+
+    #[test]
+    fn status_validator_checks_optional_reasoning_uuid_version() {
+        let mut row = event(1, 20, AssertionStatus::Supported, 1);
+        row.reasoning_uuid = Some(Uuid::from_u128(1));
+        assert!(matches!(
+            AssertionStatusLedger::new(vec![row]),
+            Err(KnowledgeError::Invalid {
+                field: "reasoning_uuid",
+                message: "must be UUIDv7",
+            })
+        ));
+    }
+
+    #[test]
+    fn status_validator_checks_non_nil_provenance_uuid() {
+        let mut row = event(1, 20, AssertionStatus::Supported, 1);
+        row.provenance_uuid = Uuid::nil();
+        assert!(matches!(
+            AssertionStatusLedger::new(vec![row]),
+            Err(KnowledgeError::Invalid {
+                field: "provenance_uuid",
+                message: "must not be nil",
+            })
+        ));
+    }
+
+    #[test]
+    fn status_validator_rejects_duplicate_event_identity() {
+        let first = event(1, 20, AssertionStatus::Supported, 1);
+        let mut duplicate = event(2, 21, AssertionStatus::Refuted, 2);
+        duplicate.status_event_uuid = first.status_event_uuid;
+        assert!(matches!(
+            AssertionStatusLedger::new(vec![first, duplicate]),
+            Err(KnowledgeError::Duplicate("status_event_uuid"))
+        ));
+    }
+
+    #[test]
+    fn status_validator_enforces_row_cap() {
+        assert!(matches!(
+            AssertionStatusLedger::new_with_limit(
+                vec![
+                    event(1, 20, AssertionStatus::Supported, 1),
+                    event(2, 21, AssertionStatus::Refuted, 2),
+                ],
+                1,
+            ),
+            Err(KnowledgeError::Limit {
+                participant: "assertion_status_events",
+                observed: 2,
+                limit: 1,
+            })
+        ));
+    }
+
+    #[test]
+    fn status_validator_sorts_by_time_then_event_uuid() {
+        let late_time_low_uuid = event(1, 20, AssertionStatus::Supported, 20);
+        let early_time_high_uuid = event(4, 20, AssertionStatus::Hypothesis, 10);
+        let early_time_low_uuid = event(2, 20, AssertionStatus::Disputed, 10);
+        let early_time_mid_uuid = event(3, 20, AssertionStatus::Refuted, 10);
+        let ledger = AssertionStatusLedger::new(vec![
+            late_time_low_uuid,
+            early_time_high_uuid,
+            early_time_mid_uuid,
+            early_time_low_uuid,
+        ])
+        .unwrap();
+        assert_eq!(
+            ledger
+                .events()
+                .iter()
+                .map(|row| row.status_event_uuid)
+                .collect::<Vec<_>>(),
+            vec![uuid7(2), uuid7(3), uuid7(4), uuid7(1)]
+        );
+    }
+
+    #[test]
+    fn status_validator_rejects_nonterminal_after_superseded() {
+        assert!(matches!(
+            AssertionStatusLedger::new(vec![
+                event(1, 20, AssertionStatus::Superseded, 1),
+                event(2, 20, AssertionStatus::Supported, 2),
+            ]),
+            Err(KnowledgeError::Invalid {
+                field: "assertion_status.status",
+                message: "superseded is terminal",
+            })
+        ));
+    }
+
+    #[test]
+    fn status_merge_validates_staged_rows_without_revalidating_base_rows() {
+        let replay = event(1, 20, AssertionStatus::Hypothesis, 1);
+        let base = AssertionStatusLedger::new(vec![
+            replay.clone(),
+            event(2, 21, AssertionStatus::Supported, 2),
+        ])
+        .unwrap();
+        let staged =
+            AssertionStatusLedger::new(vec![replay, event(3, 22, AssertionStatus::Refuted, 3)])
+                .unwrap();
+
+        reset_status_row_validation_count();
+        let merged = base.merge(&staged).unwrap();
+
+        assert_eq!(status_row_validation_count(), 1);
+        assert_eq!(merged.events().len(), 3);
+    }
+
+    #[test]
+    fn status_merge_enforces_combined_row_cap_after_replay_elision() {
+        let first = event(1, 20, AssertionStatus::Supported, 1);
+        let base = AssertionStatusLedger::new(vec![
+            first.clone(),
+            event(2, 21, AssertionStatus::Refuted, 2),
+        ])
+        .unwrap();
+        let replay = AssertionStatusLedger::new(vec![first]).unwrap();
+        assert_eq!(base.merge_with_limit(&replay, 2).unwrap().events().len(), 2);
+
+        let staged =
+            AssertionStatusLedger::new(vec![event(3, 22, AssertionStatus::Disputed, 3)]).unwrap();
+        assert!(matches!(
+            base.merge_with_limit(&staged, 2),
+            Err(KnowledgeError::Limit {
+                participant: "assertion_status_events",
+                observed: 3,
+                limit: 2,
+            })
+        ));
+    }
+
+    #[test]
+    // Reproduce on an otherwise idle host:
+    // source /home/ubuntu/.claude/gf-quiet-host.sh && require_quiet_host && \
+    // CARGO_TARGET_DIR=/home/ubuntu/.cache/graphforge-target-1827-validation cargo test --release --locked -p graphforge-knowledge status::tests::quiet_host_status_merge_cost_measurement -- --ignored --nocapture --test-threads=1
+    #[ignore = "manual quiet-host before/after merge-cost measurement"]
+    fn quiet_host_status_merge_cost_measurement() {
+        use std::time::Instant;
+
+        for existing_count in [10_000_u64, 100_000] {
+            let existing = AssertionStatusLedger::new(
+                (0..existing_count)
+                    .map(|seed| {
+                        AssertionStatusEvent::new(
+                            measurement_uuid(seed + 1),
+                            measurement_uuid(2_000_000),
+                            AssertionStatus::Supported,
+                            None,
+                            None,
+                            measurement_uuid(seed + 1_000_000),
+                            i64::try_from(seed).unwrap(),
+                        )
+                        .unwrap()
+                    })
+                    .collect(),
+            )
+            .unwrap();
+            let staged = AssertionStatusLedger::new(vec![
+                AssertionStatusEvent::new(
+                    measurement_uuid(existing_count + 1),
+                    measurement_uuid(2_000_000),
+                    AssertionStatus::Refuted,
+                    None,
+                    None,
+                    measurement_uuid(existing_count + 1_000_000),
+                    i64::try_from(existing_count).unwrap(),
+                )
+                .unwrap(),
+            ])
+            .unwrap();
+            let input_digest = status_measurement_digest(&existing, &staged);
+            assert_eq!(
+                merge_with_full_revalidation(&existing, &staged).unwrap(),
+                existing.merge(&staged).unwrap()
+            );
+            let repetitions = 7;
+            let mut before = Vec::with_capacity(repetitions);
+            let mut after = Vec::with_capacity(repetitions);
+            for repetition in 0..repetitions {
+                if repetition % 2 == 0 {
+                    let start = Instant::now();
+                    std::hint::black_box(merge_with_full_revalidation(&existing, &staged).unwrap());
+                    before.push(start.elapsed());
+
+                    let start = Instant::now();
+                    std::hint::black_box(existing.merge(&staged).unwrap());
+                    after.push(start.elapsed());
+                } else {
+                    let start = Instant::now();
+                    std::hint::black_box(existing.merge(&staged).unwrap());
+                    after.push(start.elapsed());
+
+                    let start = Instant::now();
+                    std::hint::black_box(merge_with_full_revalidation(&existing, &staged).unwrap());
+                    before.push(start.elapsed());
+                }
+            }
+            let before_median = median_duration(before);
+            let after_median = median_duration(after);
+            let divisor = existing_count as f64;
+            eprintln!(
+                "existing_rows={existing_count} staged_rows=1 repetitions={repetitions} input_sha256={input_digest} baseline_ns={} baseline_ns_per_existing_row={:.3} optimized_ns={} optimized_ns_per_existing_row={:.3}",
+                before_median.as_nanos(),
+                before_median.as_nanos() as f64 / divisor,
+                after_median.as_nanos(),
+                after_median.as_nanos() as f64 / divisor,
+            );
+        }
     }
 
     #[test]

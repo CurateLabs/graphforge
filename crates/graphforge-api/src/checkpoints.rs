@@ -434,7 +434,7 @@ fn validate_composite_references(ledgers: CompositeLedgers<'_>) -> Result<(), Gf
     let status_ids = ledgers
         .statuses
         .into_iter()
-        .flat_map(|ledger| ledger.events.iter().map(|row| row.status_event_uuid))
+        .flat_map(|ledger| ledger.events().iter().map(|row| row.status_event_uuid))
         .collect::<HashSet<_>>();
 
     let require = |present: bool, kind: &'static str| {
@@ -480,7 +480,11 @@ fn validate_composite_references(ledgers: CompositeLedgers<'_>) -> Result<(), Gf
         )?;
         provenance(row.provenance_uuid)?;
     }
-    for row in ledgers.statuses.into_iter().flat_map(|value| &value.events) {
+    for row in ledgers
+        .statuses
+        .into_iter()
+        .flat_map(graphforge_knowledge::AssertionStatusLedger::events)
+    {
         require(
             assertion_ids.contains(&row.assertion_uuid),
             "status assertion",

@@ -248,7 +248,7 @@ fn compose_rows(
         .collect::<HashSet<_>>();
     let statuses = AssertionStatusLedger::new(
         statuses
-            .events
+            .into_events()
             .into_iter()
             .filter(|row| row.recorded_at_micros <= cutoff)
             .collect(),
@@ -299,7 +299,7 @@ fn compose_rows(
         .map(|row| row.reasoning_uuid)
         .collect::<HashSet<_>>();
     let visible_statuses = statuses
-        .events
+        .events()
         .iter()
         .map(|row| row.status_event_uuid)
         .collect::<HashSet<_>>();
@@ -310,7 +310,7 @@ fn compose_rows(
         .map(|row| row.confidence_uuid)
         .collect::<HashSet<_>>();
     for source in statuses
-        .events
+        .events()
         .iter()
         .map(|row| row.assertion_uuid)
         .chain(reasoning.records.iter().map(|row| row.assertion_uuid))
@@ -321,7 +321,7 @@ fn compose_rows(
             ));
         }
     }
-    for event in &statuses.events {
+    for event in statuses.events() {
         if event
             .confidence_uuid
             .is_some_and(|uuid| !visible_confidence.contains(&uuid))
@@ -393,7 +393,7 @@ fn compose_rows(
     let mut current_status_by_assertion: HashMap<Uuid, (i64, Uuid, &'static str)> = HashMap::new();
     let mut status_event_uuids_by_assertion: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
     let mut status_extra_sources_by_assertion: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
-    for event in &statuses.events {
+    for event in statuses.events() {
         status_event_uuids_by_assertion
             .entry(event.assertion_uuid)
             .or_default()

@@ -171,7 +171,7 @@ fn epistemic(
         ids.insert(("provenance".into(), row.provenance_uuid));
     }
     let statuses = k::read_status_ledger(g)?
-        .events
+        .into_events()
         .into_iter()
         .filter(|r| has(ids, "assertion", r.assertion_uuid))
         .collect::<Vec<_>>();
