@@ -1,21 +1,31 @@
 # Repository integration
 
+**Advanced:** assumes basic shell commands, Python environments, and Git.
+Use this guide when you want to manage a project's definitions in a code
+repository. Ordinary graph use and [saving a graph](tutorial.md) do not require
+Git or repository initialization.
+
 GraphForge uses one `.graphforge/` directory. Definitions in `graphforge.yaml`,
 `ontology/`, `schemas/`, `seeds/`, and `migrations/` are ordinary reviewable Git
 content. Runtime state, imports, and exports are data and must not be committed.
 
-> **CLI entry points:** Use the published packages (`uvx graphforge`,
-> `npx @curatelabs/graphforge-cli`) or, from a source checkout, run
-> `cargo run -p graphforge-cli -- <arguments>`.
-
-The Python and Node packages project the same native lifecycle contract:
+Follow [Installation](installation.md) to install the selected v0.6.0 release
+or candidate. The examples below use `graphforge` from that activated Python
+environment. Open a terminal at the root of the Git repository you intend to
+manage. Durable state needs [supported storage](installation.md#durable-storage).
 
 ```bash
-uvx graphforge init
-npx @curatelabs/graphforge-cli init
+graphforge --version
+graphforge --project-dir . init
 ```
 
-Both entry points forward arguments to the Rust CLI and preserve its exact
+Alternatively, replace `graphforge` in the commands below with
+`npx @curatelabs/graphforge-cli@0.6.0`, substituting the exact published
+candidate version when appropriate. The npm package also supplies the `gf`
+alias; the Python package supplies only `graphforge`. Run one launcher, not
+both initialization paths.
+
+Both launchers forward arguments to the Rust CLI and preserve its exact
 stdout, stderr, structured JSON, and exit status. They do not contain Python or
 JavaScript fallback implementations.
 
@@ -28,11 +38,13 @@ versioned managed manifest: unrelated skills and user edits are preserved, and
 can change them.
 
 ```bash
-gf --project-dir . skills install
-gf --project-dir . skills status --json
-gf --project-dir . skills update
-gf --project-dir . skills remove
+graphforge --project-dir . skills install
+graphforge --project-dir . skills status --json
 ```
+
+Use `skills update` when intentionally refreshing installed guidance, or
+`skills remove` when intentionally removing it. These are separate maintenance
+actions, not steps to run after every installation.
 
 The installed skills are tracked repository guidance, not graph data. Do not
 blanket-ignore `.agents/skills/`; review and commit the GraphForge skill
@@ -40,15 +52,13 @@ directories and their managed provenance manifest when the team wants the same
 agent experience across clones.
 
 ```bash
-gf --project-dir . init
-gf --project-dir . config validate
-gf --project-dir . config resolve --json
-gf --project-dir . sync --check --json
-gf --project-dir . sync \
+graphforge --project-dir . config validate
+graphforge --project-dir . config resolve --json
+graphforge --project-dir . sync --check --json
+graphforge --project-dir . sync \
   --idempotency-key 41414141-4141-4141-4141-414141414141 \
   --actor-uuid 42424242-4242-4242-4242-424242424242 \
   --json
-gf --project-dir . remove --yes
 ```
 
 Commands discover the nearest Git worktree when `--project-dir` is omitted.
@@ -85,8 +95,8 @@ retain their established nonzero exit codes.
 Checkpoint metadata inspection and checkpoint queries are separate:
 
 ```bash
-gf --project-dir . checkpoint show before-change
-gf --project-dir . checkpoint open before-change -- \
+graphforge --project-dir . checkpoint show before-change
+graphforge --project-dir . checkpoint open before-change -- \
   "MATCH (n) RETURN n"
 ```
 
@@ -100,14 +110,15 @@ Revert is fail-closed. Preview resolves the checkpoint and current generation
 without publishing anything and does not require mutation identity:
 
 ```bash
-gf --project-dir . --json revert before-change --preview
+graphforge --project-dir . --json revert before-change --preview
 ```
 
-An actual revert requires `--reason`, `--idempotency-key`, and explicit
-non-interactive confirmation with `--yes`:
+Only after inspecting the preview and choosing to replace the current state
+with the checkpoint, run the following revert. It requires `--reason`,
+`--idempotency-key`, and explicit confirmation with `--yes`:
 
 ```bash
-gf --project-dir . revert before-change \
+graphforge --project-dir . revert before-change \
   --reason "restore known state" \
   --idempotency-key 4f6a9b78-887d-4b8e-872b-a8b59059f777 \
   --yes
@@ -116,6 +127,14 @@ gf --project-dir . revert before-change \
 Omitting `--yes` refuses the mutation. Successful and idempotently replayed
 receipts identify the prior current generation so automation can relate the
 previewed state to the published result.
+
+## Remove repository runtime state
+
+Removal is an optional destructive maintenance action. It deletes
+`.graphforge/state/`, including the local graph, rather than closing the project.
+Export any state you need to keep first. Inspect `graphforge remove --help` and
+use `graphforge --project-dir . remove --yes` only when you intend that deletion.
+This is not part of setup or synchronization.
 
 ## Repository synchronization
 
@@ -149,8 +168,8 @@ copying GraphForge's live project layout. Select the current committed
 generation explicitly, or select the generation pinned by a named checkpoint:
 
 ```bash
-gf --project-dir . export --current --output .graphforge/exports/current.gfportable
-gf --project-dir . export --checkpoint before-change \
+graphforge --project-dir . export --current --output .graphforge/exports/current.gfportable
+graphforge --project-dir . export --checkpoint before-change \
   --output .graphforge/exports/before-change.gfportable
 ```
 
@@ -170,11 +189,11 @@ one. It is therefore not a raw archive of `.graphforge/state/`.
 
 Import accepts a portable envelope only into a new, empty, or pristine
 initialized project container. The pristine case is what makes import usable
-immediately after `gf init`; any graph mutation or extra project artifact makes
+immediately after `graphforge init`; any graph mutation or extra project artifact makes
 the target ineligible:
 
 ```bash
-gf --project-dir . import \
+graphforge --project-dir . import \
   --input .graphforge/imports/incoming.gfportable \
   --idempotency-key 4f6a9b78-887d-4b8e-872b-a8b59059f777
 ```

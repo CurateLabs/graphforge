@@ -1,132 +1,46 @@
-# Guide Overview
+# Choose your learning path
 
-This guide is the basic-usage path: install GraphForge, run your first queries, and
-cover everyday workflows. For architecture, research, and deeper narratives, see the
-[Book](../book/README.md). The public [documentation map](../README.md) lists published
-trees.
+The primary audience is a **nontechnical analyst working with an agent**.
+Both paths start with [a small graph and a question](quickstart.md). Choose by
+your current skills, not by how ambitious your research question is. The docs
+target v0.6.0; [Installation](installation.md) states package availability.
 
-## Start here
+## Basic
 
-| Page | Purpose |
-| --- | --- |
-| [Installation](installation.md) | Install v0.5.1 via pip, npm, or source |
-| [Quick Start](quickstart.md) | First graph in five minutes |
-| [Tutorial](tutorial.md) | Step-by-step walkthrough |
-| [VS Code extension](vscode-extension/) | Explore projects, run Cypher, and pair with coding agents inside your editor |
-| [Move projects with portable project v2](portable-projects.md) | Verify and move immutable projects locally, air-gapped, or through OCI |
-| [CLI and repository integration](repository-integration.md) | Initialize, validate, synchronize, checkpoint, export, and import a project |
-| [Validate infrastructure intent](infrastructure-validation.md) | Check a named deployment target before any cloud provider is selected |
+**No programming prerequisite.** The explanations assume no more technical
+background than a first-year anthropology student.
+Learn what the data represents, how records are connected, how to inspect an
+answer, and what conclusions the evidence supports. Technical execution is
+guided or assisted by a coding agent or technical helper.
 
-## Everyday workflows
+1. [Your first graph](quickstart.md): understand items, connections, and a question.
+2. [Work with an agent](work-with-an-agent.md): ask for a result and check what ran.
+3. [Your first mixed-methods project](first-research-project.md): connect survey
+   responses and interview excerpts, challenge an explanation, and revisit a saved finding.
 
-### [Use GraphForge in VS Code](vscode-extension/)
-The optional GraphForge extension adds project exploration, Cypher execution, analyst verbs,
-ontology views, result graphs, and structured command interop to VS Code-compatible editors.
-It uses the native Node or Python binding; graph behavior remains owned by the Rust engine.
-See the synchronized extension guide for setup, runtime selection, and the complete command map.
+You can complete these tasks without studying research Branches, ontology
+contracts, command-line flags, or database internals. Basic does not mean a
+point-and-click application is available: the execution guide states when a
+helper needs to install or run software.
 
-### [Cypher Query Language](cypher-guide.md)
-Learn the openCypher query language — GraphForge's primary interface for working with graphs.
+## Advanced
 
-### [Graph Construction](graph-construction.md)
-Build graphs programmatically using the Python API.
+**Basic Python, database, and terminal skills.** Think of the technical background
+of a second-year data science student. Write and adapt queries, run analyses,
+save and move projects, and use research history when needed.
+GraphForge-specific concepts are introduced at
+the task that uses them; expert engine knowledge is not assumed.
 
-### [Analytics Integration](analytics-integration.md)
-Export graphs to NetworkX, igraph, and pandas for further analysis.
+Start with [Advanced: work directly with GraphForge](advanced.md), then choose
+[a notebook](use-a-notebook.md) or [language integration](integrate-graphforge.md).
+Continue to [save and reopen](tutorial.md), [query](cypher-guide.md),
+[construct](graph-construction.md), and [analyze](analytics-integration.md).
+[Inquiry records](record-an-inquiry.md), [history](research-journey.md), and
+[sharing](portable-projects.md) are optional tasks, not a completion checklist.
 
-### [Move projects with portable project v2](portable-projects.md)
-Preview, export, verify, import, selectively share, and promote immutable project
-packages without copying live storage state or committing graph data to Git.
+## Specialist reference and contributor material
 
-### [Visualization examples](visualization.md)
-Comparable Plotly, Jaal, PyVis, Cytoscape.js, and Sigma.js paths over one shared
-real-data GraphForge projection.
-
-### Ranking Nodes — `forge.rank()`
-Score every node with a graph centrality algorithm (PageRank, betweenness, closeness, degree,
-clustering coefficient, or triangle count). Returns an Arrow Table with node properties plus a
-`score` column. Pass `write_property` to persist scores back to the graph.
-See the [tutorial](tutorial.md#ranking-nodes-with-forgerank) for examples.
-
-### Clustering Nodes — `forge.cluster()`
-Assign community membership using Louvain or connected-components algorithms. Returns an Arrow
-Table with node properties plus a `community_id` column. Pass `write_property` to persist
-assignments back to the graph.
-See the [tutorial](tutorial.md#clustering-nodes-with-forgecluster) for examples.
-
-### Finding Nodes — `forge.find()`
-Full-text, vector similarity, or hybrid search over node properties. Bring your own vectors —
-GraphForge stores and queries them but does not generate embeddings. Returns an Arrow Table with
-node properties plus `score` and `matched_on` columns.
-See the [tutorial](tutorial.md#finding-nodes-with-forgefind) for examples.
-
-## Reference (not everyday)
-
-### [Datasets (backlog)](datasets/overview.md)
-Planned open-dataset catalogs — **not shipped** in v0.5.0. Kept under Reference for readers
-tracking the backlog extension.
-
-## Core Concepts
-
-### Graphs
-A graph consists of **nodes** (vertices) and **relationships** (edges) connecting them.
-
-### Nodes
-Nodes represent entities in your graph. They can have:
-- **Labels** - Types or categories (e.g., `Person`, `Product`)
-- **Properties** - Key-value pairs with data
-
-### Relationships
-Relationships connect nodes and can have:
-- **Type** - The nature of the connection (e.g., `KNOWS`, `PURCHASED`)
-- **Direction** - From one node to another
-- **Properties** - Additional data about the relationship
-
-### Patterns
-Cypher uses ASCII-art patterns to describe graph structures:
-
-```cypher
-(a:Person)-[:KNOWS]->(b:Person)
-```
-
-This pattern matches two Person nodes connected by a KNOWS relationship.
-
-## Query Flow
-
-1. **MATCH** - Find patterns in the graph
-2. **WHERE** - Filter results
-3. **RETURN** - Specify what to return
-4. **ORDER BY** - Sort results
-5. **LIMIT** - Limit number of results
-
-## Result Types
-
-**v0.5.0 data plane:** Cypher `execute`, analyst verbs (`rank`, `cluster`,
-`paths`, `analyze`, `similar`, `find`), and tabular helpers such as `schema()`
-return a PyArrow `Table`. There are no `CypherValue` wrappers and no
-`SearchHit` objects for those results. Access values via `.as_py()` or pass the
-table directly to pandas, Polars, or NetworkX.
-
-**Control / construction plane:** methods such as `labels()`,
-`relationship_types()`, `node_count()`, `explain()`, ontology lifecycle helpers,
-and scalar `add_node` / `add_edge` return lists, integers, strings, `None`, or
-construction handles — not Arrow tables. See the
-[architecture overview](../book/architecture/overview.md#arrow-as-the-data-contract).
-
-```python
-table = forge.execute("MATCH (p:Person) RETURN p.name, p.age")
-# table is a pyarrow.Table — use Arrow, pandas, or Polars to consume it
-import pandas as pd
-df = table.to_pandas()
-```
-
-## Next Steps
-
-- [Analyst research experience](../engineering/analyst-ux.md) — native M11
-  Project, Slice, Branch, Version, and Proposal workflow for Core and associated UX projects
-- [Research journey](research-journey.md) — follow two stories through real operations and inspect captured results
-- [Cypher Guide](cypher-guide.md) — complete query language reference
-- [Graph Construction](graph-construction.md) — build graphs with Python
-- [VS Code extension](vscode-extension/) — use GraphForge from your editor or coding agent
-- [Book](../book/README.md) — architecture, research, and deeper usage
-- [Architecture Overview](../book/architecture/overview.md) — Rust core design
+The [API reference](../reference/api.md) is for looking up a command or method.
+[Architecture](../book/architecture/overview.md), formal contracts, and
+[engineering](../engineering/README.md) serve implementers and maintainers.
+They remain available, but neither learning path requires reading them first.

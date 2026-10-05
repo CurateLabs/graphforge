@@ -1,6 +1,11 @@
 # Cypher Reference
 
-GraphForge implements the full openCypher language on the v0.5.0 Rust core. Run
+**Advanced:** this reference assumes basic Python and database-query concepts.
+For guided first use, start with [Your first graph](quickstart.md). Each Cypher
+example below is a separate statement; copy one into `forge.execute()` using a
+graph with the labels and properties shown.
+
+GraphForge executes openCypher through its Rust core. Run
 queries through `forge.execute(query, params=None)` — every call returns a
 PyArrow `Table` (no `CypherValue` wrappers).
 
@@ -34,12 +39,19 @@ A Project can keep named, reusable read-only analyses. Each definition has a
 stable `query_uuid`, a unique case-sensitive name without surrounding whitespace,
 an optional description, Cypher text, and parameter declarations. These are native
 Project metadata, so they survive reopen and complete portable export/import.
+Creating or changing this metadata requires admitted storage. Use a new project
+on [supported durable storage](installation.md#durable-storage) for this example;
+do not assume the memory-only quickstart removes this requirement. In particular,
+an in-memory instance whose temporary directory is on an unsupported filesystem
+can query the graph but fail when saving a query definition.
 
 ```python
+from pathlib import Path
 from uuid import uuid4
 from graphforge import GraphForge
 
-forge = GraphForge()
+Path("saved-query-project").mkdir()
+forge = GraphForge("saved-query-project")
 forge.execute("CREATE (:Person {age:20}), (:Person {age:40})")
 query_uuid = str(uuid4())
 forge.create_saved_query({
@@ -55,6 +67,7 @@ table = forge.execute_saved_query(query_uuid, {"minimum": 30})
 assert table.to_pylist() == [{"people": 1}]
 forge.update_saved_query({**definition, "name": "People by age threshold"})
 forge.delete_saved_query(query_uuid)
+forge.close()
 ```
 
 Parameter declarations must exactly name the `$parameters` referenced by the
@@ -301,7 +314,7 @@ CREATE (a:Person {name: 'Alice'})-[:KNOWS]->(b:Person {name: 'Bob'})
 
 -- CREATE ... RETURN
 CREATE (p:Person {name: 'Alice'})
-RETURN p.name AS name, id(p) AS node_id
+RETURN p.name AS name, p.node_uuid AS node_uuid
 ```
 
 ### MERGE
@@ -310,11 +323,13 @@ Find or create — safe for idempotent upserts within the shipped Rust subset
 ([implementation status](../reference/implementation-status/clauses.md#merge)).
 
 **Supported:**
+
 - Standalone new-node MERGE: `MERGE (p:Person {email: '…'})`
 - Relationship MERGE when both endpoints are already bound: `MATCH (a), (b) MERGE (a)-[:KNOWS]->(b)`
 - `ON CREATE SET` / `ON MATCH SET` property (and label) actions when every row takes the same create-or-match branch
 
 **Not supported (structured plan errors):**
+
 - Multi-node / relationship-construction MERGE such as `MERGE (a:A)-[:R]->(b:B)` → `relationship and multi-node MERGE execution is not implemented yet`
 - Row-conditional map actions (`+=` / `=`) when some rows create and others match → `row-conditional MERGE map actions are not implemented yet`
 
@@ -473,28 +488,28 @@ MATCH (p2:Person) RETURN p2.name AS name
 
 ### Node Patterns
 
-| Pattern | Meaning |
-|---------|---------|
-| `(n)` | Any node |
-| `(n:Person)` | Node with label Person |
-| `(n:Person:Employee)` | Node with both labels |
+| Pattern                | Meaning                      |
+| ---------------------- | ---------------------------- |
+| `(n)`                  | Any node                     |
+| `(n:Person)`           | Node with label Person       |
+| `(n:Person:Employee)`  | Node with both labels        |
 | `(n:Person {age: 30})` | Node with label and property |
-| `(:Person)` | Anonymous node with label |
-| `({name: 'Alice'})` | Anonymous node with property |
+| `(:Person)`            | Anonymous node with label    |
+| `({name: 'Alice'})`    | Anonymous node with property |
 
 ### Relationship Patterns
 
-| Pattern | Meaning |
-|---------|---------|
-| `-[r]->` | Any directed relationship |
-| `-[:KNOWS]->` | Specific type |
-| `-[r:KNOWS {since: 2020}]->` | Type with property |
-| `-[:KNOWS\|LIKES]->` | Multiple types (OR) |
-| `-[*]->` | Variable-length (any) |
-| `-[*2]->` | Exactly 2 hops |
-| `-[*1..3]->` | 1 to 3 hops |
-| `-[*..5]->` | Up to 5 hops |
-| `-[*3..]->` | 3 or more hops |
+| Pattern                      | Meaning                   |
+| ---------------------------- | ------------------------- |
+| `-[r]->`                     | Any directed relationship |
+| `-[:KNOWS]->`                | Specific type             |
+| `-[r:KNOWS {since: 2020}]->` | Type with property        |
+| `-[:KNOWS\|LIKES]->`         | Multiple types (OR)       |
+| `-[*]->`                     | Variable-length (any)     |
+| `-[*2]->`                    | Exactly 2 hops            |
+| `-[*1..3]->`                 | 1 to 3 hops               |
+| `-[*..5]->`                  | Up to 5 hops              |
+| `-[*3..]->`                  | 3 or more hops            |
 
 ### Path Variables
 
@@ -518,7 +533,8 @@ RETURN p
 RETURN 5 + 3         -- 8
 RETURN 5 - 3         -- 2
 RETURN 5 * 3         -- 15
-RETURN 5 / 2         -- 2.5
+RETURN 5 / 2         -- 2 (integer division)
+RETURN 5.0 / 2       -- 2.5
 RETURN 5 % 2         -- 1
 RETURN 2 ^ 10        -- 1024.0
 ```
@@ -603,55 +619,55 @@ END
 
 ### String Functions
 
-| Function | Example | Result |
-|----------|---------|--------|
-| `toLower(s)` | `toLower('HELLO')` | `'hello'` |
-| `toUpper(s)` | `toUpper('hello')` | `'HELLO'` |
-| `trim(s)` | `trim(' hi ')` | `'hi'` |
-| `ltrim(s)` | `ltrim(' hi')` | `'hi'` |
-| `rtrim(s)` | `rtrim('hi ')` | `'hi'` |
-| `replace(s, f, r)` | `replace('aaa', 'a', 'b')` | `'bbb'` |
-| `substring(s, start, len)` | `substring('hello', 1, 3)` | `'ell'` |
-| `left(s, n)` | `left('hello', 2)` | `'he'` |
-| `right(s, n)` | `right('hello', 2)` | `'lo'` |
-| `split(s, delim)` | `split('a,b,c', ',')` | `['a','b','c']` |
-| `reverse(s)` | `reverse('hello')` | `'olleh'` |
-| `size(s)` | `size('hello')` | `5` |
-| `toString(x)` | `toString(42)` | `'42'` |
+| Function                   | Example                    | Result          |
+| -------------------------- | -------------------------- | --------------- |
+| `toLower(s)`               | `toLower('HELLO')`         | `'hello'`       |
+| `toUpper(s)`               | `toUpper('hello')`         | `'HELLO'`       |
+| `trim(s)`                  | `trim(' hi ')`             | `'hi'`          |
+| `ltrim(s)`                 | `ltrim(' hi')`             | `'hi'`          |
+| `rtrim(s)`                 | `rtrim('hi ')`             | `'hi'`          |
+| `replace(s, f, r)`         | `replace('aaa', 'a', 'b')` | `'bbb'`         |
+| `substring(s, start, len)` | `substring('hello', 1, 3)` | `'ell'`         |
+| `left(s, n)`               | `left('hello', 2)`         | `'he'`          |
+| `right(s, n)`              | `right('hello', 2)`        | `'lo'`          |
+| `split(s, delim)`          | `split('a,b,c', ',')`      | `['a','b','c']` |
+| `reverse(s)`               | `reverse('hello')`         | `'olleh'`       |
+| `size(s)`                  | `size('hello')`            | `5`             |
+| `toString(x)`              | `toString(42)`             | `'42'`          |
 
 ### Math Functions
 
-| Function | Description |
-|----------|-------------|
-| `abs(n)` | Absolute value |
-| `ceil(n)` | Round up |
-| `floor(n)` | Round down |
-| `round(n)` | Round to nearest |
-| `sqrt(n)` | Square root |
-| `pow(base, exp)` | Power |
-| `exp(n)` | e^n |
-| `log(n)` | Natural log |
-| `log10(n)` | Base-10 log |
-| `sin(n)`, `cos(n)`, `tan(n)` | Trig (radians) |
-| `asin(n)`, `acos(n)`, `atan(n)`, `atan2(y,x)` | Inverse trig |
-| `pi()` | π (3.14159…) |
-| `e()` | e (2.71828…) |
-| `rand()` | Random 0.0–1.0 |
-| `sign(n)` | -1, 0, or 1 |
+| Function                                      | Description      |
+| --------------------------------------------- | ---------------- |
+| `abs(n)`                                      | Absolute value   |
+| `ceil(n)`                                     | Round up         |
+| `floor(n)`                                    | Round down       |
+| `round(n)`                                    | Round to nearest |
+| `sqrt(n)`                                     | Square root      |
+| `pow(base, exp)`                              | Power            |
+| `exp(n)`                                      | e^n              |
+| `log(n)`                                      | Natural log      |
+| `log10(n)`                                    | Base-10 log      |
+| `sin(n)`, `cos(n)`, `tan(n)`                  | Trig (radians)   |
+| `asin(n)`, `acos(n)`, `atan(n)`, `atan2(y,x)` | Inverse trig     |
+| `pi()`                                        | π (3.14159…)     |
+| `e()`                                         | e (2.71828…)     |
+| `rand()`                                      | Random 0.0–1.0   |
+| `sign(n)`                                     | -1, 0, or 1      |
 
 ### List Functions
 
-| Function | Example | Result |
-|----------|---------|--------|
-| `head(list)` | `head([1,2,3])` | `1` |
-| `tail(list)` | `tail([1,2,3])` | `[2,3]` |
-| `last(list)` | `last([1,2,3])` | `3` |
-| `size(list)` | `size([1,2,3])` | `3` |
-| `range(start, end)` | `range(1,5)` | `[1,2,3,4,5]` |
-| `range(start, end, step)` | `range(0,10,2)` | `[0,2,4,6,8,10]` |
-| `reverse(list)` | `reverse([1,2,3])` | `[3,2,1]` |
-| `sort(list)` | `sort([3,1,2])` | `[1,2,3]` |
-| `keys(map)` | `keys({a:1,b:2})` | `['a','b']` |
+| Function                  | Example            | Result           |
+| ------------------------- | ------------------ | ---------------- |
+| `head(list)`              | `head([1,2,3])`    | `1`              |
+| `tail(list)`              | `tail([1,2,3])`    | `[2,3]`          |
+| `last(list)`              | `last([1,2,3])`    | `3`              |
+| `size(list)`              | `size([1,2,3])`    | `3`              |
+| `range(start, end)`       | `range(1,5)`       | `[1,2,3,4,5]`    |
+| `range(start, end, step)` | `range(0,10,2)`    | `[0,2,4,6,8,10]` |
+| `reverse(list)`           | `reverse([1,2,3])` | `[3,2,1]`        |
+| `sort(list)`              | `sort([3,1,2])`    | `[1,2,3]`        |
+| `keys(map)`               | `keys({a:1,b:2})`  | `['a','b']`      |
 
 ### List Comprehension and Predicates
 
@@ -712,8 +728,8 @@ MATCH (p:Person) RETURN percentileDisc(p.age, 0.5) AS median
 ### Graph Functions
 
 ```cypher
--- Node identity
-RETURN id(n)
+-- Node identity (UUID, not a numeric storage ID)
+MATCH (n:Person) RETURN n.node_uuid
 
 -- Labels
 RETURN labels(n)               -- list of labels
@@ -747,10 +763,10 @@ RETURN size((n)-[:KNOWS]->()) AS out_degree
 -- exists() — property exists
 MATCH (p:Person) WHERE exists(p.email) RETURN p
 
--- isEmpty()
-RETURN isEmpty([])     -- true
-RETURN isEmpty('')     -- true
-RETURN isEmpty(null)   -- true
+-- Empty lists and strings; unknown is separate from empty
+RETURN size([]) = 0    -- true
+RETURN size('') = 0    -- true
+RETURN size(null) = 0  -- null
 
 -- Null coalescing
 RETURN coalesce(null, null, 'default')   -- 'default'
@@ -765,8 +781,11 @@ RETURN toInteger(3.7)          -- 3
 RETURN toFloat('3.14')         -- 3.14
 RETURN toString(42)            -- '42'
 RETURN toBoolean('true')       -- true
-RETURN toBoolean(0)            -- false
+RETURN toBoolean('false')      -- false
 ```
+
+`toBoolean()` accepts booleans and strings (or null), not numeric values.
+For a numeric coding rule, state it explicitly, for example `RETURN 0 <> 0`.
 
 ---
 
@@ -941,4 +960,4 @@ RETURN p.name AS isolated
 - [Graph Construction](graph-construction.md) — Python API for building graphs
 - [Quick Start](quickstart.md) — five-minute walkthrough
 - [OpenCypher Compatibility](../reference/opencypher-compatibility.md) — feature matrix
-- [TCK Compliance](../reference/tck-compliance.md) — Rust v0.5 conformance status
+- [TCK Compliance](../reference/tck-compliance.md) — Rust engine conformance status

@@ -1,106 +1,60 @@
 # Documentation
 
-The **published Starlight site** is organized around **reader journeys** (Diátaxis-aligned):
+The public Starlight site targets **GraphForge v0.6.0**. It maintains one current
+user guide set, without pre-v1 legacy instructions or migration promises.
 
-1. **Get started** — install, quickstart, tutorial
-2. **Use every day** — Cypher, construction, analytics, datasets
-3. **Understand** — architecture Book, use cases, research
-4. **Reference** — API, compatibility, and TCK
-5. **Contribute & operate** — development, testing, release, this map
-6. **Engineering** — contributor lifecycle summaries and ADRs
-7. **Community** — licensing, security, code of conduct
+## Reader journeys
 
-On disk, published sources live in Guide / Book / Reference / `engineering/` plus supporting
-folders. Documentation covers current user and contributor workflows as well as
-explicitly marked planned product specifications.
+Basic graph use is the first complete experience. Further journeys are optional:
+users and agents do not need the full capability set to obtain a useful result.
 
-The Astro Starlight site (`docs-site/`) syncs an allowlisted subset of these trees.
-Sidebar labels follow reader journeys; **content paths / URLs stay on the Guide / Book /
-Reference / engineering layout** so existing public links remain stable.
+| Navigation                         | Reader and purpose                                                                                                                                                                                                             |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Basic                              | Nontechnical analyst working with an agent; no programming prerequisite: [first graph](guide/quickstart.md), [agent-assisted use](guide/work-with-an-agent.md), [first mixed-methods project](guide/first-research-project.md) |
+| Advanced                           | Reader with basic Python, database, and terminal skills: [start here](guide/advanced.md), then choose a task                                                                                                                   |
+| Internals (specialist)             | Architecture and implementation contracts; outside both learning paths                                                                                                                                                         |
+| API and feature reference          | Lookup material for a specific operation or constraint                                                                                                                                                                         |
+| Contribute & operate / Engineering | Contributor setup, testing, implementation decisions, and publishing                                                                                                                                                           |
+| Community                          | Licensing, security, and conduct                                                                                                                                                                                               |
 
-## Local docs site
+Both learning paths explain their subject without assuming expert knowledge.
+Basic keeps commands in optional helper instructions and lets readers check the
+meaning of results without reading code. Advanced may use code and database
+vocabulary, but introduces GraphForge-specific terms before relying on them.
+Do not relabel specialist contracts as Advanced tutorials without teaching the
+concepts and showing a bounded task.
 
-From the repository root (requires Node ≥ 22.12 and the repo `pnpm` workspace):
+Introduce a concept at the task that needs it. Keep low-level request shapes and
+receipts in references. A simple graph-model inquiry is distinct from native
+immutable knowledge or research history; name that boundary explicitly.
+
+## Authoring and publication
+
+Sources live in `docs/guide`, `docs/book`, `docs/reference`, and supporting
+engineering/development directories. Edit those sources, not generated
+`docs-site/src/content/docs` files. `docs-site/scripts/sync-content.mjs` publishes
+an allowlist; a new public page also needs an entry there and a discoverable
+navigation or guide link in `docs-site/astro.config.mjs` or an existing page.
+
+The VS Code guide is a pinned public snapshot from its owning repository.
+`docs-site/external-docs.json` records the revision, checksums, and local patches.
+Use the refresh procedure in [the site README](../docs-site/README.md).
+
+## Preview and validate
+
+From the repository root, with Node 22.12+ and pnpm:
 
 ```bash
-pnpm install
-pnpm docs:dev          # http://localhost:4321/
-pnpm docs:build        # output: docs-site/dist/
-pnpm docs:check-links  # after build: zero broken same-site hrefs
-pnpm docs:preview      # serve the build output
+pnpm install --frozen-lockfile
+pnpm docs:dev
+pnpm docs:build
+pnpm docs:check-links
 ```
 
-Makefile shortcuts: `make docs-serve`, `make docs-build`, `make docs-clean`.
-
-Markdown sources stay in `docs/`; `docs-site/scripts/sync-content.mjs` copies the
-allowlist into the Starlight content collection before `dev` / `build`. It also imports the
-four public extension pages from a checked-in snapshot of
-`CurateLabs/graphforge-vscode/docs/published/`. The authenticated
-`pnpm docs:update-extension <full-commit-sha>` command refreshes that snapshot; normal builds
-verify the immutable revision and checksums recorded in `docs-site/external-docs.json`. No other
-extension documents are eligible for publication.
-
-## Published reader map
-
-| Journey | Start here |
-| --- | --- |
-| Get started | [`guide/installation.md`](guide/installation.md), [`guide/quickstart.md`](guide/quickstart.md), [`guide/tutorial.md`](guide/tutorial.md) |
-| Use every day | [`guide/overview.md`](guide/overview.md), Cypher / construction / analytics / [`guide/datasets/`](guide/datasets/overview.md) |
-| Understand | [`book/README.md`](book/README.md), architecture / use cases / research |
-| Reference | [`reference/api.md`](reference/api.md) and siblings |
-| Contribute & operate | [`development/contributing.md`](development/contributing.md), release docs, [`releases/roadmap.md`](releases/roadmap.md) |
-| Engineering | [`engineering/`](engineering/README.md) (ADRs under Engineering), [`adr/`](adr/) |
-| Community | [`legal/licensing.md`](legal/licensing.md), [`community/`](community/) |
-
-## On-disk authoring trees
-
-### Guide (basic usage)
-
-| Path | Contents |
-| --- | --- |
-| [`guide/installation.md`](guide/installation.md) | Install via pip or uv |
-| [`guide/quickstart.md`](guide/quickstart.md) | First graph in minutes |
-| [`guide/tutorial.md`](guide/tutorial.md) | Guided walkthrough |
-| [`guide/overview.md`](guide/overview.md) | Everyday workflows index |
-| [`guide/cypher-guide.md`](guide/cypher-guide.md) | openCypher language guide |
-| [`guide/graph-construction.md`](guide/graph-construction.md) | Build graphs with API and Cypher |
-| [`guide/analytics-integration.md`](guide/analytics-integration.md) | Arrow, pandas, Polars, analyst verbs |
-| [`guide/visualization.md`](guide/visualization.md) | Real-data Plotly / Jaal / PyVis / Cytoscape.js / Sigma.js examples |
-| [`guide/datasets/`](guide/datasets/overview.md) | Load real-world networks |
-| [`guide/repository-integration.md`](guide/repository-integration.md) | CLI, repository, checkpoint, export, and import workflows |
-| [`guide/infrastructure-validation.md`](guide/infrastructure-validation.md) | Validate a deployment target's intent before provisioning |
-
-### Book (research, architecture, deeper usage)
-
-| Path | Contents |
-| --- | --- |
-| [`book/README.md`](book/README.md) | Book map |
-| [`book/architecture/`](book/architecture/overview.md) | Pipeline, storage, execution, algorithms, contracts |
-| [`book/use-cases/`](book/use-cases/README.md) | Deeper usage narratives |
-| [`book/research/`](book/research/README.md) | Present-tense v0.5 research notes behind the use cases |
-
-### Engineering (public contributor lifecycle)
-
-| Document | Question it answers |
-| --- | --- |
-| [`engineering/analyst-ux.md`](engineering/analyst-ux.md) | What analyst experience and consumer contract does Core provide? |
-| [`book/architecture/research-workspaces.md`](book/architecture/research-workspaces.md) | How do Slices, Branches, Versions, and Proposals behave? |
-| [`engineering/ARCHITECTURE.md`](engineering/ARCHITECTURE.md) | Which concepts, boundaries, and components shape the system? |
-| [`engineering/TESTING.md`](engineering/TESTING.md) | How do we prove it before release? |
-| [`engineering/PUBLISHING.md`](engineering/PUBLISHING.md) | How do verified artifacts reach users safely? |
-| [`engineering/OBSERVABILITY.md`](engineering/OBSERVABILITY.md) | How do CI/release signals feed learning? |
-| [`engineering/adrs/`](engineering/adrs/) | ADR index with status and revisit triggers (bodies in [`adr/`](adr/)) |
-
-### Supporting public trees
-
-| Folder | Contents |
-| --- | --- |
-| [`index.md`](index.md) | Site home (reader-journey framed) |
-| [`reference/`](reference/api.md) | API, compatibility, TCK, scale limits |
-| [`development/`](development/contributing.md) | Contributor and release process detail |
-| [`legal/licensing.md`](legal/licensing.md) | Licensing copy |
-| [`adr/`](adr/) | ADR bodies; superseded records under `adr/superseded/` |
-| [`releases/roadmap.md`](releases/roadmap.md) | Public product roadmap |
+The development server defaults to port 4321. Execute changed examples against
+the intended binding build; a successful site build checks rendering, not
+engine behavior or human comprehension. Candidate-wide first-use qualification
+belongs to [#1209](https://github.com/CurateLabs/graphforge/issues/1209).
 
 ## Conventions
 

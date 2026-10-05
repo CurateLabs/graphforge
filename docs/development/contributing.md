@@ -2,12 +2,12 @@
 
 Thank you for your interest in contributing to GraphForge!
 
-GraphForge is a Rust core with thin Python and Node bindings. The current
-public release is **v0.5.1**. Develop and verify from source on `main` for
+GraphForge is a Rust core with thin Python and Node bindings. These docs target **v0.6.0**; see [installation](../guide/installation.md) for
+artifact availability. Develop and verify from source on `main` for
 engine and binding work.
 
-| Branch | Role |
-|--------|------|
+| Branch | Role                                                                             |
+| ------ | -------------------------------------------------------------------------------- |
 | `main` | Current product line (Rust core, Arrow results, Parquet projects, analyst verbs) |
 
 **Next steps for contributors:** set up the environment below → run the validation
@@ -187,11 +187,13 @@ prove its acceptance criteria. Size is advisory: split XL work or independently
 reviewable concerns when the review benefit justifies another CI cycle.
 
 **Good:**
+
 - Single feature or bug fix
 - Clear, focused purpose
 - Acceptance criteria covered by tests or deterministic evidence
 
 **Too large:**
+
 - Multiple unrelated changes
 - Refactoring + new feature + bug fixes combined
 
@@ -284,9 +286,9 @@ source: the published site renders an allowlisted subset and keeps no copies.
 
 ## Releases and Versioning
 
-GraphForge follows [Semantic Versioning](https://semver.org/). The current
-coordinated public release is **v0.5.1** (see
-[installation](../guide/installation.md)).
+GraphForge follows [Semantic Versioning](https://semver.org/). The documentation targets **v0.6.0** (see
+[installation](../guide/installation.md) for artifact availability). Before
+v1.0.0, backward compatibility and migration support are not guaranteed.
 
 See `RELEASING.md` at the repository root for the release procedure and
 [roadmap.md](../releases/roadmap.md) for delivery sequencing.

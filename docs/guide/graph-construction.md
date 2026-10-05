@@ -1,7 +1,11 @@
 # Graph Construction
 
+**Advanced:** assumes basic Python and the [first graph lesson](quickstart.md).
+Use this reference to map your own records into nodes, properties, and
+relationships. Start with scalar construction; bulk publication is optional.
+
 Build graphs with the Python API or openCypher. This page is the everyday
-construction path for v0.5.0: scalar nodes and edges first, then atomic bulk
+construction path: scalar nodes and edges first, then atomic bulk
 batches. Scalar `add_node` / `add_edge` return construction handles; atomic bulk
 publish and Cypher/analyst paths return Apache Arrow tables (including bulk
 receipts).
@@ -53,8 +57,11 @@ table = forge.execute("""
     MATCH (a:Person)-[r:KNOWS]->(b:Person)
     RETURN a.name AS from, b.name AS to, r.since AS since
 """)
-print(table.to_pandas())
+print(table.to_pylist())
 ```
+
+Expected output: `[{'from': 'Alice', 'to': 'Bob', 'since': 2020}]`.
+This needs no pandas installation.
 
 ---
 
@@ -239,7 +246,7 @@ python3 scripts/ci/bulk-construction-conformance.py validate
    `close()` releases them, which Windows requires before the project directory
    can be moved or removed.
 5. **Consume Arrow results** with `to_pandas()`, `polars.from_arrow`, or
-   `to_pylist()` — there are no `CypherValue` wrappers in v0.5.0.
+   `to_pylist()` — there are no `CypherValue` wrappers.
 
 ---
 

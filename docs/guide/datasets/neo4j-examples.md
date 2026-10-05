@@ -1,109 +1,35 @@
-# Neo4j Graph Examples
+# Adapt a Neo4j teaching dataset
 
-> **Status:** Backlog — not shipped in v0.5.0 (see [Datasets overview](overview.md)).
+**Advanced:** assumes basic Python, tabular data, and graph queries. For a
+guided introduction, start with [Your first graph](../quickstart.md).
 
-Planned support for Neo4j's curated collection of example graph datasets.
+[Neo4j Graph Examples](https://github.com/neo4j-graph-examples) contains external
+teaching projects. Start with [Your first graph](../quickstart.md) if you have
+not yet created and queried a GraphForge graph. GraphForge v0.6.0 does not ship
+a loader for this collection.
 
-## Overview
+## Choose a small example
 
-Neo4j Graph Examples provides educational and demonstration datasets that are perfect for learning Cypher and exploring graph concepts.
+Read the selected project's README, data files, license, and required Neo4j
+version or extensions. A teaching movie graph can help you learn relationships;
+it is not a representative research sample.
 
-## Dataset Source
+Identify which source records become nodes and which become relationships.
+Keep the original record identifiers and the source citation. Do not assume
+all projects in the collection share a license, format, or execution setup.
 
-- **URL:** https://github.com/neo4j-graph-examples
-- **License:** Apache 2.0 (most datasets)
-- **Category:** Educational, Demonstrations
+## Adapt the data and queries
 
-## Available Datasets
+Use [Graph construction](../graph-construction.md) for Python construction, or
+review and execute individual statements through `forge.execute()`.
+The [Cypher reference](../cypher-guide.md) describes GraphForge's query surface.
+Neo4j-specific procedures, administration commands, and extensions are not
+automatically translated.
 
-### Popular Examples
+Read [Cypher script handling](cypher-script-loading.md) before adapting an
+existing script. Do not discard constraints or failed statements and assume the
+remaining data is equivalent. Verify counts, source identifiers, and a few
+known relationships after construction.
 
-| Dataset | Nodes | Edges | Size | Description |
-|---------|-------|-------|------|-------------|
-| movie-graph | ~170 | ~250 | ~50 KB | Classic movie database |
-| northwind | ~1K | ~3K | ~100 KB | Northwind business data |
-| game-of-thrones | ~800 | ~3K | ~150 KB | Character relationships |
-| stackoverflow | ~50K | ~200K | ~15 MB | Q&A network |
-| twitter | ~2K | ~8K | ~500 KB | Twitter interactions |
-
-## Schema Examples
-
-### Movie Graph
-
-**Nodes:**
-- `Person` (actors, directors)
-- `Movie`
-
-**Relationships:**
-- `ACTED_IN`
-- `DIRECTED`
-- `PRODUCED`
-- `REVIEWED`
-
-## Usage
-
-```python
-from graphforge import GraphForge
-from graphforge.datasets import load_dataset
-
-# Load the movie graph
-gf = GraphForge()
-load_dataset(gf, "neo4j-movie-graph")
-
-# Find movies and actors
-results = gf.execute("""
-    MATCH (p:Person)-[:ACTED_IN]->(m:Movie)
-    WHERE m.released > 2000
-    RETURN p.name, m.title, m.released
-    ORDER BY m.released DESC
-""")
-```
-
-## Example Queries
-
-### Movie Recommendations
-
-```cypher
-MATCH (p:Person {name: 'Tom Hanks'})-[:ACTED_IN]->(m:Movie)<-[:ACTED_IN]-(coActor:Person)
-MATCH (coActor)-[:ACTED_IN]->(rec:Movie)
-WHERE NOT (p)-[:ACTED_IN]->(rec)
-RETURN DISTINCT rec.title AS recommendation
-LIMIT 10
-```
-
-### Director Analysis
-
-```cypher
-MATCH (d:Person)-[:DIRECTED]->(m:Movie)
-RETURN d.name AS director, count(m) AS moviesDirected
-ORDER BY moviesDirected DESC
-```
-
-## CLI Usage
-
-```bash
-# List Neo4j example datasets
-graphforge list-datasets --source neo4j-examples
-
-# Load movie graph
-graphforge load-dataset neo4j-movie-graph
-```
-
-## Learning Resources
-
-These datasets are ideal for:
-- Learning Cypher syntax
-- Understanding graph modeling
-- Demonstrations and presentations
-- Testing queries before production
-
-## References
-
-- [Neo4j Graph Examples Repository](https://github.com/neo4j-graph-examples)
-- [Neo4j GraphAcademy](https://graphacademy.neo4j.com/)
-
-## Related
-
-- [Dataset Overview](overview.md)
-- [Cypher Guide](../cypher-guide.md)
-- [Tutorial](../tutorial.md)
+For a complete supported example without adaptation, use the
+[citation tutorial](../tutorial.md).

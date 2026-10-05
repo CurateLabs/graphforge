@@ -1,36 +1,36 @@
 // @ts-check
-import { defineConfig } from 'astro/config';
-import starlight from '@astrojs/starlight';
+import { defineConfig } from "astro/config";
+import starlight from "@astrojs/starlight";
 
 /** @type {import('astro').AstroUserConfig} */
 export default defineConfig({
-  site: 'https://docs.graphforge.sh',
-  outDir: 'dist',
+  site: "https://docs.graphforge.sh",
+  outDir: "dist",
   // docs/guides/ merged into docs/guide/ (#1625); keep the published URL alive.
   redirects: {
-    '/guides/repository-integration/': '/guide/repository-integration/',
+    "/guides/repository-integration/": "/guide/repository-integration/",
   },
   integrations: [
     starlight({
-      title: 'GraphForge',
-      description: 'Composable graph tooling for analysis, construction, and refinement',
-      favicon: '/favicon.svg',
+      title: "GraphForge v0.6.0",
+      description: "Build a graph, ask a question, and keep what you learn.",
+      favicon: "/favicon.svg",
       social: [
         {
-          icon: 'github',
-          label: 'GitHub',
-          href: 'https://github.com/CurateLabs/graphforge',
+          icon: "github",
+          label: "GitHub",
+          href: "https://github.com/CurateLabs/graphforge",
         },
       ],
       editLink: {
-        baseUrl: 'https://github.com/CurateLabs/graphforge/edit/main/docs/',
+        baseUrl: "https://github.com/CurateLabs/graphforge/edit/main/docs/",
       },
-      customCss: ['./src/styles/custom.css'],
+      customCss: ["./src/styles/custom.css"],
       // Full EC options (light fg/bg, frames, customizeTheme) live in ec.config.mjs.
       expressiveCode: {
         minSyntaxHighlightingColorContrast: 10,
         styleOverrides: {
-          codeFontWeight: '500',
+          codeFontWeight: "500",
         },
       },
 
@@ -38,199 +38,303 @@ export default defineConfig({
       // Guide / Book / Reference; slugs are unchanged so prior URLs stay stable.
       sidebar: [
         {
-          label: 'Get started',
+          label: "Basic",
           items: [
-            { label: 'Installation', slug: 'guide/installation' },
-            { label: 'Quick Start', slug: 'guide/quickstart' },
-            { label: 'Tutorial', slug: 'guide/tutorial' },
-            { label: 'CLI & repositories', slug: 'guide/repository-integration' },
-            { label: 'Validate infrastructure intent', slug: 'guide/infrastructure-validation' },
-          ],
-        },
-        {
-          label: 'Use every day',
-          items: [
-            { label: 'Overview', slug: 'guide/overview' },
+            { label: "Choose your learning path", slug: "guide/overview" },
+            { label: "Your first graph", slug: "guide/quickstart" },
+            { label: "Work with an agent", slug: "guide/work-with-an-agent" },
             {
-              label: 'VS Code extension',
-              collapsed: false,
-              items: [
-                { label: 'Overview', slug: 'guide/vscode-extension' },
-                { label: 'Install and choose a runtime', slug: 'guide/vscode-extension/install' },
-                { label: 'Commands', slug: 'guide/vscode-extension/commands' },
-                { label: 'Agent interop', slug: 'guide/vscode-extension/agent-interop' },
-              ],
-            },
-            { label: 'Cypher Query Language', slug: 'guide/cypher-guide' },
-            { label: 'Graph Construction', slug: 'guide/graph-construction' },
-            { label: 'Move portable projects', slug: 'guide/portable-projects' },
-            { label: 'Follow a research journey', slug: 'guide/research-journey' },
-            { label: 'Analytics Integration', slug: 'guide/analytics-integration' },
-            { label: 'Visualization examples', slug: 'guide/visualization' },
-            { label: 'Exploratory Analyst', slug: 'guide/exploratory-analyst' },
-            { label: 'Visualization limits', slug: 'guide/visualization-limits' },
-          ],
-        },
-        {
-          label: 'Understand',
-          items: [
-            { label: 'Overview', slug: 'book' },
-            {
-              label: 'Architecture',
-              collapsed: true,
-              items: [
-                { label: 'Overview', slug: 'book/architecture/overview' },
-                {
-                  label: 'GraphForge and Neo4j GDS',
-                  slug: 'book/architecture/graphforge-vs-neo4j-gds',
-                },
-                { label: 'Storage', slug: 'book/architecture/storage' },
-                {
-                  label: 'Concurrency and recovery',
-                  slug: 'book/architecture/concurrency-recovery',
-                },
-                {
-                  label: 'Pre-v1 Project Compatibility',
-                  slug: 'book/architecture/project-format-compatibility',
-                },
-                {
-                  label: 'Portable Project v2',
-                  slug: 'book/architecture/portable-project-v2',
-                },
-                {
-                  label: 'Composable Multi-Ontology',
-                  slug: 'book/architecture/composable-multi-ontology',
-                },
-                {
-                  label: 'Canonical Fingerprints v1',
-                  slug: 'book/architecture/canonical-fingerprints-v1',
-                },
-                {
-                  label: 'Immutable Knowledge Ledger',
-                  slug: 'book/architecture/knowledge-ledger',
-                },
-                {
-                  label: 'Knowledge Public API',
-                  slug: 'book/architecture/knowledge-public-api-v1',
-                },
-                { label: 'AST & Planning', slug: 'book/architecture/ast-and-planning' },
-                { label: 'Execution Model', slug: 'book/architecture/execution-model' },
-                { label: 'Algorithms', slug: 'book/architecture/algorithms' },
-                { label: 'Architecture Refactor v0.5', slug: 'book/architecture/refactor-v0-5' },
-                { label: 'Embedding v1', slug: 'book/architecture/embedding-v1' },
-                {
-                  label: 'Analyst Invocation Descriptor',
-                  slug: 'book/architecture/algorithm-invocation-descriptor-v1',
-                },
-              ],
-            },
-            {
-              label: 'Use Cases',
-              collapsed: true,
-              items: [
-                { label: 'Overview', slug: 'book/use-cases' },
-                {
-                  label: 'Knowledge Graph Construction',
-                  slug: 'book/use-cases/knowledge-graph-construction',
-                },
-                { label: 'Network Analysis', slug: 'book/use-cases/network-analysis' },
-                { label: 'LLM-Powered Workflows', slug: 'book/use-cases/llm-workflows' },
-                { label: 'AI Agent Grounding', slug: 'book/use-cases/agent-grounding' },
-                { label: 'AI Agent Tool Recall', slug: 'book/use-cases/agent-tool-recall' },
-              ],
-            },
-            {
-              label: 'Research',
-              collapsed: true,
-              items: [
-                { label: 'Overview', slug: 'book/research' },
-                { label: 'Knowledge Graph Construction', slug: 'book/research/kg-construction' },
-                { label: 'Network Analysis', slug: 'book/research/network-analysis' },
-                { label: 'Analyst Verbs at Scale', slug: 'book/research/analyst-verbs-at-scale' },
-                { label: 'LLM-Powered Workflows', slug: 'book/research/llm-workflows' },
-                { label: 'LLM Context Building', slug: 'book/research/llm-context-building' },
-                { label: 'AI Agent Grounding', slug: 'book/research/agent-grounding' },
-                {
-                  label: 'Search & Entity Resolution',
-                  slug: 'book/research/search-entity-resolution',
-                },
-                { label: 'Genealogy', slug: 'book/research/genealogy' },
-              ],
+              label: "Your first mixed-methods project",
+              slug: "guide/first-research-project",
             },
           ],
         },
         {
-          label: 'Reference',
-          items: [
-            { label: 'API Documentation', slug: 'reference/api' },
-            {
-              label: 'OpenCypher Compatibility',
-              slug: 'reference/opencypher-compatibility',
-            },
-            { label: 'TCK Compliance', slug: 'reference/tck-compliance' },
-            { label: 'Scale Limits', slug: 'reference/scale-limits' },
-            {
-              label: 'Graph Scale Index (GSI)',
-              slug: 'reference/graph-scale-index',
-            },
-            {
-              label: 'Scale Evaluation',
-              slug: 'reference/scale-evaluation',
-            },
-            { label: 'Column Naming', slug: 'reference/column-naming-behavior' },
-            {
-              // Catalog loaders are backlog — not a v0.5.0 core/product surface.
-              label: 'Datasets (backlog)',
-              collapsed: true,
-              items: [
-                { label: 'Overview', slug: 'guide/datasets/overview' },
-                { label: 'LDBC full suite', slug: 'guide/datasets/ldbc' },
-                { label: 'Neo4j Examples', slug: 'guide/datasets/neo4j-examples' },
-                { label: 'NetworkRepository', slug: 'guide/datasets/networkrepository' },
-                { label: 'SNAP', slug: 'guide/datasets/snap' },
-                { label: 'Cypher Script Loading', slug: 'guide/datasets/cypher-script-loading' },
-              ],
-            },
-          ],
-        },
-        {
-          label: 'Contribute & operate',
+          label: "Advanced",
           collapsed: true,
           items: [
-            { label: 'Documentation map', slug: 'documentation' },
-            { label: 'Contributing', slug: 'development/contributing' },
-            { label: 'Testing Strategy', slug: 'development/testing' },
-            { label: 'Billion-edge certification', slug: 'development/g500-certification' },
-            { label: 'Product roadmap', slug: 'releases/roadmap' },
-            { label: 'Publishing', slug: 'engineering/publishing' },
-          ],
-        },
-        {
-          label: 'Engineering',
-          collapsed: true,
-          items: [
-            { label: 'Overview', slug: 'engineering' },
             {
-              label: 'Planned Analyst UX',
+              label: "Start here: Python, databases, and CLI",
+              slug: "guide/advanced",
+            },
+            { label: "Installation", slug: "guide/installation" },
+            { label: "Use a notebook", slug: "guide/use-a-notebook" },
+            { label: "Query, analyze, and save", slug: "guide/tutorial" },
+            { label: "Write Cypher queries", slug: "guide/cypher-guide" },
+            { label: "Construct a graph", slug: "guide/graph-construction" },
+            { label: "Analyze results", slug: "guide/analytics-integration" },
+            { label: "Visualize results", slug: "guide/visualization" },
+            {
+              label: "Visualization limits",
+              slug: "guide/visualization-limits",
+            },
+            {
+              label: "Record and revisit an inquiry",
+              slug: "guide/record-an-inquiry",
+            },
+            { label: "Keep research history", slug: "guide/research-journey" },
+            {
+              label: "Move and share projects",
+              slug: "guide/portable-projects",
+            },
+            {
+              label: "Refine an exploratory graph",
+              slug: "guide/exploratory-analyst",
+            },
+            {
+              label: "Integrate GraphForge",
+              slug: "guide/integrate-graphforge",
+            },
+            {
+              label: "Validate external decisions",
+              slug: "book/use-cases/decision-workflows",
+            },
+            {
+              label: "Editor and CLI tools",
               collapsed: true,
               items: [
-                { label: 'Analyst research experience', slug: 'engineering/analyst-ux' },
+                { label: "VS Code overview", slug: "guide/vscode-extension" },
                 {
-                  label: 'Research workspace semantics',
-                  slug: 'book/architecture/research-workspaces',
+                  label: "Editor runtime setup",
+                  slug: "guide/vscode-extension/install",
+                },
+                {
+                  label: "Editor commands",
+                  slug: "guide/vscode-extension/commands",
+                },
+                {
+                  label: "Editor agent interop",
+                  slug: "guide/vscode-extension/agent-interop",
+                },
+                {
+                  label: "CLI and repositories",
+                  slug: "guide/repository-integration",
                 },
               ],
             },
-            { label: 'Architecture', slug: 'engineering/architecture' },
-            { label: 'Testing', slug: 'engineering/testing' },
-            { label: 'Publishing', slug: 'engineering/publishing' },
-            { label: 'Observability', slug: 'engineering/observability' },
             {
-              label: 'Architecture Decision Records',
+              label: "Use Cases",
               collapsed: true,
               items: [
-                { label: 'Decision log', slug: 'engineering/adrs' },
-                { label: 'Index', slug: 'adr' },
+                { label: "Overview", slug: "book/use-cases" },
+                {
+                  label: "Knowledge Graph Construction",
+                  slug: "book/use-cases/knowledge-graph-construction",
+                },
+                {
+                  label: "Network Analysis",
+                  slug: "book/use-cases/network-analysis",
+                },
+                {
+                  label: "LLM-Powered Workflows",
+                  slug: "book/use-cases/llm-workflows",
+                },
+                {
+                  label: "AI Agent Grounding",
+                  slug: "book/use-cases/agent-grounding",
+                },
+                {
+                  label: "AI Agent Tool Recall",
+                  slug: "book/use-cases/agent-tool-recall",
+                },
+              ],
+            },
+            {
+              label: "Research",
+              collapsed: true,
+              items: [
+                { label: "Overview", slug: "book/research" },
+                {
+                  label: "Knowledge Graph Construction",
+                  slug: "book/research/kg-construction",
+                },
+                {
+                  label: "Network Analysis",
+                  slug: "book/research/network-analysis",
+                },
+                {
+                  label: "Analyst Verbs at Scale",
+                  slug: "book/research/analyst-verbs-at-scale",
+                },
+                {
+                  label: "LLM-Powered Workflows",
+                  slug: "book/research/llm-workflows",
+                },
+                {
+                  label: "LLM Context Building",
+                  slug: "book/research/llm-context-building",
+                },
+                {
+                  label: "AI Agent Grounding",
+                  slug: "book/research/agent-grounding",
+                },
+                {
+                  label: "Search & Entity Resolution",
+                  slug: "book/research/search-entity-resolution",
+                },
+                { label: "Genealogy", slug: "book/research/genealogy" },
+              ],
+            },
+          ],
+        },
+        {
+          label: "Internals (specialist)",
+          collapsed: true,
+          items: [
+            {
+              label: "Architecture",
+              collapsed: true,
+              items: [
+                { label: "Overview", slug: "book/architecture/overview" },
+                { label: "Storage", slug: "book/architecture/storage" },
+                {
+                  label: "Concurrency and recovery",
+                  slug: "book/architecture/concurrency-recovery",
+                },
+                {
+                  label: "Pre-v1 Project Compatibility",
+                  slug: "book/architecture/project-format-compatibility",
+                },
+                {
+                  label: "Portable Project v2",
+                  slug: "book/architecture/portable-project-v2",
+                },
+                {
+                  label: "Composable Multi-Ontology",
+                  slug: "book/architecture/composable-multi-ontology",
+                },
+                {
+                  label: "Canonical Fingerprints v1",
+                  slug: "book/architecture/canonical-fingerprints-v1",
+                },
+                {
+                  label: "Immutable Knowledge Ledger",
+                  slug: "book/architecture/knowledge-ledger",
+                },
+                {
+                  label: "Knowledge Public API",
+                  slug: "book/architecture/knowledge-public-api-v1",
+                },
+                {
+                  label: "AST & Planning",
+                  slug: "book/architecture/ast-and-planning",
+                },
+                {
+                  label: "Execution Model",
+                  slug: "book/architecture/execution-model",
+                },
+                { label: "Algorithms", slug: "book/architecture/algorithms" },
+                {
+                  label: "Embedding v1",
+                  slug: "book/architecture/embedding-v1",
+                },
+                {
+                  label: "Analyst Invocation Descriptor",
+                  slug: "book/architecture/algorithm-invocation-descriptor-v1",
+                },
+              ],
+            },
+          ],
+        },
+        {
+          label: "API and feature reference",
+          collapsed: true,
+          items: [
+            { label: "API Documentation", slug: "reference/api" },
+            {
+              label: "OpenCypher Compatibility",
+              slug: "reference/opencypher-compatibility",
+            },
+            { label: "TCK Compliance", slug: "reference/tck-compliance" },
+            { label: "Scale Limits", slug: "reference/scale-limits" },
+            {
+              label: "Graph Scale Index (GSI)",
+              slug: "reference/graph-scale-index",
+            },
+            {
+              label: "Scale Evaluation",
+              slug: "reference/scale-evaluation",
+            },
+            {
+              label: "Column Naming",
+              slug: "reference/column-naming-behavior",
+            },
+            {
+              // External sources; convenience catalog loaders are not shipped.
+              label: "External data sources",
+              collapsed: true,
+              items: [
+                { label: "Overview", slug: "guide/datasets/overview" },
+                { label: "LDBC full suite", slug: "guide/datasets/ldbc" },
+                {
+                  label: "Neo4j Examples",
+                  slug: "guide/datasets/neo4j-examples",
+                },
+                {
+                  label: "NetworkRepository",
+                  slug: "guide/datasets/networkrepository",
+                },
+                { label: "SNAP", slug: "guide/datasets/snap" },
+                {
+                  label: "Cypher Script Loading",
+                  slug: "guide/datasets/cypher-script-loading",
+                },
+              ],
+            },
+          ],
+        },
+        {
+          label: "Contribute & operate",
+          collapsed: true,
+          items: [
+            { label: "Documentation map", slug: "documentation" },
+            { label: "Contributing", slug: "development/contributing" },
+            { label: "Testing Strategy", slug: "development/testing" },
+            {
+              label: "Billion-edge certification",
+              slug: "development/g500-certification",
+            },
+            { label: "Product roadmap", slug: "releases/roadmap" },
+            { label: "Publishing", slug: "engineering/publishing" },
+            {
+              label: "Infrastructure validation",
+              slug: "guide/infrastructure-validation",
+            },
+          ],
+        },
+        {
+          label: "Engineering",
+          collapsed: true,
+          items: [
+            { label: "Overview", slug: "engineering" },
+            {
+              label: "Research experience contracts",
+              collapsed: true,
+              items: [
+                {
+                  label: "Analyst research experience",
+                  slug: "engineering/analyst-ux",
+                },
+                {
+                  label: "Research workspace semantics",
+                  slug: "book/architecture/research-workspaces",
+                },
+              ],
+            },
+            { label: "Architecture", slug: "engineering/architecture" },
+            { label: "Testing", slug: "engineering/testing" },
+            { label: "Publishing", slug: "engineering/publishing" },
+            {
+              label: "Infrastructure validation",
+              slug: "guide/infrastructure-validation",
+            },
+            { label: "Observability", slug: "engineering/observability" },
+            {
+              label: "Architecture Decision Records",
+              collapsed: true,
+              items: [
+                { label: "Decision log", slug: "engineering/adrs" },
+                { label: "Index", slug: "adr" },
                 // BEGIN generated ADR records — scripts/ci/adr-index.py generate
                 { label: '0001 — Rust Core', slug: 'adr/0001-rust-core' },
                 {
@@ -434,12 +538,12 @@ export default defineConfig({
           ],
         },
         {
-          label: 'Community',
+          label: "Community",
           collapsed: true,
           items: [
-            { label: 'Licensing', slug: 'legal/licensing' },
-            { label: 'Security', slug: 'community/security' },
-            { label: 'Code of Conduct', slug: 'community/code-of-conduct' },
+            { label: "Licensing", slug: "legal/licensing" },
+            { label: "Security", slug: "community/security" },
+            { label: "Code of Conduct", slug: "community/code-of-conduct" },
           ],
         },
       ],

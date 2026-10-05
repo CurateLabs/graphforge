@@ -1,58 +1,46 @@
-# Research: Network Analysis Notebook Workflow
+# Research notes: network analysis
 
-!!! note "Research note"
-    Durable findings for **GraphForge v0.5.0**. Prefer the
-    [use-case guide](../use-cases/network-analysis.md) for present-tense examples.
-    For algorithm timings, see [analyst verbs at scale](analyst-verbs-at-scale.md).
+This Advanced note supports [Network analysis in notebooks](../use-cases/network-analysis.md).
+For a first mixed-methods assignment, start with
+[Your first research project](../../guide/first-research-project.md).
 
-**Scope:** SNAP datasets, Cypher metrics, pandas/NetworkX bridge, analyst verbs.
+## Define the network before measuring it
 
----
+Specify the unit represented by each node, the meaning and direction of each
+relationship, the collection period, and the inclusion rule. Distinguish an
+absent recorded relationship from evidence that no relationship exists. Record
+whether repeated edges are meaningful or duplicate imports.
 
-## Executive summary
+The worked guide uses a synthetic graph and the native construction API.
+`graphforge.datasets` is a proposed catalogue, not an installed loader. For a
+real dataset, retain its exact source, license, preparation code, and schema;
+use [graph construction](../../guide/graph-construction.md) for import.
 
-Notebook network analysis works best when GraphForge owns storage and Cypher,
-analyst verbs own the common centrality/community algorithms, and NetworkX or
-igraph are used as optional visualization / oracle layers.
+## Interpret results within their scope
 
-**What holds up:**
+- Degree counts depend on whether you count edges or distinct neighbors and
+  whether incoming, outgoing, or undirected relationships are included.
+- Use `count(relationship)` after an `OPTIONAL MATCH` to preserve zero-degree
+  nodes without counting the unmatched row as an edge.
+- Community labels describe an algorithmic partition. They do not identify
+  social groups, interview themes, or shared beliefs without further evidence.
+- A path demonstrates recorded connectivity, not causation or transmission.
+- Centrality does not by itself measure expertise, credibility, or influence.
 
-- `load_dataset(..., "snap-ego-facebook")` loads `:Node` / `:CONNECTED_TO` — match
-  those labels in Cypher (not invented `:Person` / `:FRIEND_OF` aliases)
-- Degree, triangle, and path queries in openCypher for exploratory metrics
-- `forge.rank` / `forge.cluster` with optional `write_property` for persistence
-- `to_networkx()` / `to_igraph()` / `to_dataframe()` for bridges
-- Parquet project directories for shareable notebook state
+Connect a numerical pattern back to source material and inspect exceptions.
+Do not infer a population relationship from a convenience sample merely because
+its graph query has a deterministic answer.
 
-**Friction to design around:**
+## Reproduce the analysis
 
-- Exported NetworkX node IDs are internal integers unless you pass
-  `node_id_property=...` — plan write-back with an explicit id property
-- Prefer analyst verbs over per-node Cypher UNWIND write-back for large score maps
-- Align every snippet’s labels with the dataset schema before debugging the engine
+Record selected labels, relationship types, direction, algorithm options, and
+source scope. Public result identities are UUIDs; do not depend on internal
+numeric storage IDs. Python results are Arrow tables. See
+[analytics integration](../../guide/analytics-integration.md) for explicit
+pandas/NetworkX/igraph conversion, and the
+[algorithm catalog](../architecture/algorithms.md) for native verbs.
 
----
-
-## Label alignment
-
-```python
-from graphforge import GraphForge
-from graphforge.datasets import load_dataset
-
-forge = GraphForge("facebook/")
-load_dataset(forge, "snap-ego-facebook")
-
-# Dataset schema
-forge.execute("MATCH (n) RETURN DISTINCT labels(n) AS labels LIMIT 5")
-forge.execute("MATCH ()-[r]->() RETURN DISTINCT type(r) AS t")
-```
-
----
-
-## Recommendations
-
-1. Discover labels once after `load_dataset`; never hard-code a different schema.
-2. Use `forge.rank` / `forge.cluster` for catalog algorithms; see
-   [analyst verbs at scale](analyst-verbs-at-scale.md).
-3. Pass `node_id_property` when round-tripping algorithm results through NetworkX.
-4. Persist notebooks with `GraphForge("analysis/")`, not ad-hoc pickle files.
+Use [save and reopen](../../guide/tutorial.md) for a durable working graph and
+[portable projects](../../guide/portable-projects.md) to share it. A saved score
+is an observation about the graph used to compute it, not an automatically
+updated property of later graph states.

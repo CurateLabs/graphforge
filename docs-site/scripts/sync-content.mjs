@@ -1,32 +1,34 @@
 #!/usr/bin/env node
 /** Sync allowlisted docs into Starlight content collection. */
-import fs from 'node:fs';
-import path from 'node:path';
-import crypto from 'node:crypto';
-import { fileURLToPath } from 'node:url';
+import fs from "node:fs";
+import path from "node:path";
+import crypto from "node:crypto";
+import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const siteRoot = path.resolve(__dirname, '..');
-const repoRoot = path.resolve(siteRoot, '..');
-const contentRoot = path.join(siteRoot, 'src/content/docs');
-const docsRoot = path.join(repoRoot, 'docs');
-const externalManifest = JSON.parse(fs.readFileSync(path.join(siteRoot, 'external-docs.json'), 'utf8'));
+const siteRoot = path.resolve(__dirname, "..");
+const repoRoot = path.resolve(siteRoot, "..");
+const contentRoot = path.join(siteRoot, "src/content/docs");
+const docsRoot = path.join(repoRoot, "docs");
+const externalManifest = JSON.parse(
+  fs.readFileSync(path.join(siteRoot, "external-docs.json"), "utf8"),
+);
 
-const GH_DOCS_BLOB = 'https://github.com/CurateLabs/graphforge/blob/main/docs';
-const GH_REPO_BLOB = 'https://github.com/CurateLabs/graphforge/blob/main';
-const GH_DOCS_TREE = 'https://github.com/CurateLabs/graphforge/tree/main/docs';
+const GH_DOCS_BLOB = "https://github.com/CurateLabs/graphforge/blob/main/docs";
+const GH_REPO_BLOB = "https://github.com/CurateLabs/graphforge/blob/main";
+const GH_DOCS_TREE = "https://github.com/CurateLabs/graphforge/tree/main/docs";
 
 /** Directory hrefs with no published index → concrete allowlisted page (docs-relative). */
 const DIRECTORY_DEFAULTS = {
-  guide: 'guide/overview.md',
-  'guide/vscode-extension': 'guide/vscode-extension/index.md',
-  'guide/datasets': 'guide/datasets/overview.md',
-  'book/architecture': 'book/architecture/overview.md',
-  'book/use-cases': 'book/use-cases/knowledge-graph-construction.md',
-  'book/research': 'book/research/llm-workflows.md',
-  reference: 'reference/api.md',
-  development: 'development/contributing.md',
-  legal: 'legal/licensing.md',
+  guide: "guide/overview.md",
+  "guide/vscode-extension": "guide/vscode-extension/index.md",
+  "guide/datasets": "guide/datasets/overview.md",
+  "book/architecture": "book/architecture/overview.md",
+  "book/use-cases": "book/use-cases/knowledge-graph-construction.md",
+  "book/research": "book/research/llm-workflows.md",
+  reference: "reference/api.md",
+  development: "development/contributing.md",
+  legal: "legal/licensing.md",
 };
 
 /**
@@ -36,88 +38,93 @@ const DIRECTORY_DEFAULTS = {
  * are eligible for publication.
  */
 const PAGES = [
-  'index.md',
+  "index.md",
   // Public documentation map
-  'README.md',
+  "README.md",
   // Public contributor engineering lifecycle (ADRs under Engineering per #2771)
-  'engineering/README.md',
-  'engineering/analyst-ux.md',
-  'book/architecture/research-workspaces.md',
-  'engineering/ARCHITECTURE.md',
-  'engineering/TESTING.md',
-  'engineering/PUBLISHING.md',
-  'engineering/OBSERVABILITY.md',
-  'engineering/adrs/README.md',
+  "engineering/README.md",
+  "engineering/analyst-ux.md",
+  "book/architecture/research-workspaces.md",
+  "engineering/ARCHITECTURE.md",
+  "engineering/TESTING.md",
+  "engineering/PUBLISHING.md",
+  "engineering/OBSERVABILITY.md",
+  "engineering/adrs/README.md",
   // Guide — basic usage
-  'guide/overview.md',
-  'guide/installation.md',
-  'guide/quickstart.md',
-  'guide/tutorial.md',
-  'guide/cypher-guide.md',
-  'guide/graph-construction.md',
-  'guide/portable-projects.md',
-  'guide/research-journey.md',
-  'guide/analytics-integration.md',
-  'guide/visualization.md',
-  'guide/exploratory-analyst.md',
-  'guide/visualization-limits.md',
-  'guide/repository-integration.md',
-  'guide/infrastructure-validation.md',
-  'guide/datasets/overview.md',
-  'guide/datasets/ldbc.md',
-  'guide/datasets/neo4j-examples.md',
-  'guide/datasets/networkrepository.md',
-  'guide/datasets/snap.md',
-  'guide/datasets/cypher-script-loading.md',
+  "guide/overview.md",
+  "guide/advanced.md",
+  "guide/first-research-project.md",
+  "guide/installation.md",
+  "guide/quickstart.md",
+  "guide/work-with-an-agent.md",
+  "guide/use-a-notebook.md",
+  "guide/integrate-graphforge.md",
+  "guide/record-an-inquiry.md",
+  "guide/tutorial.md",
+  "guide/cypher-guide.md",
+  "guide/graph-construction.md",
+  "guide/portable-projects.md",
+  "guide/research-journey.md",
+  "guide/analytics-integration.md",
+  "guide/visualization.md",
+  "guide/exploratory-analyst.md",
+  "guide/visualization-limits.md",
+  "guide/repository-integration.md",
+  "guide/infrastructure-validation.md",
+  "guide/datasets/overview.md",
+  "guide/datasets/ldbc.md",
+  "guide/datasets/neo4j-examples.md",
+  "guide/datasets/networkrepository.md",
+  "guide/datasets/snap.md",
+  "guide/datasets/cypher-script-loading.md",
   // Book — architecture, research, deeper usage
-  'book/README.md',
-  'book/architecture/overview.md',
-  'book/architecture/graphforge-vs-neo4j-gds.md',
-  'book/architecture/storage.md',
-  'book/architecture/directory-capabilities.md',
-  'book/architecture/concurrency-recovery.md',
-  'book/architecture/project-format-compatibility.md',
-  'book/architecture/portable-project-v2.md',
-  'book/architecture/composable-multi-ontology.md',
-  'book/architecture/canonical-fingerprints-v1.md',
-  'book/architecture/knowledge-ledger.md',
-  'book/architecture/knowledge-public-api-v1.md',
-  'book/architecture/ast-and-planning.md',
-  'book/architecture/execution-model.md',
-  'book/architecture/algorithms.md',
+  "book/README.md",
+  "book/architecture/overview.md",
+  "book/architecture/storage.md",
+  "book/architecture/directory-capabilities.md",
+  "book/architecture/concurrency-recovery.md",
+  "book/architecture/project-format-compatibility.md",
+  "book/architecture/portable-project-v2.md",
+  "book/architecture/composable-multi-ontology.md",
+  "book/architecture/canonical-fingerprints-v1.md",
+  "book/architecture/knowledge-ledger.md",
+  "book/architecture/knowledge-public-api-v1.md",
+  "book/architecture/ast-and-planning.md",
+  "book/architecture/execution-model.md",
+  "book/architecture/algorithms.md",
   // Linked from published Book/Guide/ADR pages after #2738 IA move
-  'book/architecture/refactor-v0.5.md',
-  'book/architecture/embedding-v1.md',
-  'book/architecture/algorithm-invocation-descriptor-v1.md',
-  'book/use-cases/README.md',
-  'book/use-cases/knowledge-graph-construction.md',
-  'book/use-cases/network-analysis.md',
-  'book/use-cases/llm-workflows.md',
-  'book/use-cases/agent-grounding.md',
-  'book/use-cases/agent-tool-recall.md',
-  'book/research/README.md',
-  'book/research/kg-construction.md',
-  'book/research/network-analysis.md',
-  'book/research/analyst-verbs-at-scale.md',
-  'book/research/llm-workflows.md',
-  'book/research/llm-context-building.md',
-  'book/research/agent-grounding.md',
-  'book/research/search-entity-resolution.md',
-  'book/research/genealogy.md',
+  "book/architecture/embedding-v1.md",
+  "book/architecture/algorithm-invocation-descriptor-v1.md",
+  "book/use-cases/README.md",
+  "book/use-cases/knowledge-graph-construction.md",
+  "book/use-cases/decision-workflows.md",
+  "book/use-cases/network-analysis.md",
+  "book/use-cases/llm-workflows.md",
+  "book/use-cases/agent-grounding.md",
+  "book/use-cases/agent-tool-recall.md",
+  "book/research/README.md",
+  "book/research/kg-construction.md",
+  "book/research/network-analysis.md",
+  "book/research/analyst-verbs-at-scale.md",
+  "book/research/llm-workflows.md",
+  "book/research/llm-context-building.md",
+  "book/research/agent-grounding.md",
+  "book/research/search-entity-resolution.md",
+  "book/research/genealogy.md",
   // Reference + contributor surfaces
-  'reference/api.md',
-  'reference/opencypher-compatibility.md',
-  'reference/tck-compliance.md',
-  'reference/scale-limits.md',
-  'reference/graph-scale-index.md',
-  'reference/scale-evaluation.md',
-  'reference/column-naming-behavior.md',
-  'development/contributing.md',
-  'development/testing.md',
-  'development/g500-certification.md',
+  "reference/api.md",
+  "reference/opencypher-compatibility.md",
+  "reference/tck-compliance.md",
+  "reference/scale-limits.md",
+  "reference/graph-scale-index.md",
+  "reference/scale-evaluation.md",
+  "reference/column-naming-behavior.md",
+  "development/contributing.md",
+  "development/testing.md",
+  "development/g500-certification.md",
   // Active ADRs; docs/adr/README.md is the index. Superseded records stay
   // under docs/adr/superseded/ and are not published.
-  'adr/README.md',
+  "adr/README.md",
   // BEGIN generated ADR records — scripts/ci/adr-index.py generate
   'adr/0001-rust-core.md',
   'adr/0002-lr1-grammar.md',
@@ -172,10 +179,10 @@ const PAGES = [
   'adr/0054-product-component-boundaries.md',
   'adr/0055-versions-are-commits.md',
   // END generated ADR records
-  'releases/roadmap.md',
-  'legal/licensing.md',
-  'community/security.md',
-  'community/code-of-conduct.md',
+  "releases/roadmap.md",
+  "legal/licensing.md",
+  "community/security.md",
+  "community/code-of-conduct.md",
 ];
 
 function ensureDir(dir) {
@@ -204,7 +211,7 @@ function titleFromMarkdown(md, fallback) {
 
 function stripFirstH1(md) {
   // No `$` without /m — otherwise `.+` swallows the whole file.
-  return md.replace(/^#\s+.+\r?\n/, '');
+  return md.replace(/^#\s+.+\r?\n/, "");
 }
 
 function upsertFrontmatter(md, title) {
@@ -214,10 +221,13 @@ function upsertFrontmatter(md, title) {
     if (!/^\s*title\s*:/m.test(fmBody)) {
       fmBody = `title: ${JSON.stringify(title)}\n${fmBody}`;
     }
-    const body = stripFirstH1(md.slice(fmMatch[0].length)).replace(/^\s*\n/, '');
+    const body = stripFirstH1(md.slice(fmMatch[0].length)).replace(
+      /^\s*\n/,
+      "",
+    );
     return `---\n${fmBody}\n---\n\n${body}`;
   }
-  const body = stripFirstH1(md).replace(/^\s*\n/, '');
+  const body = stripFirstH1(md).replace(/^\s*\n/, "");
   return `---\ntitle: ${JSON.stringify(title)}\n---\n\n${body}`;
 }
 
@@ -229,22 +239,24 @@ function convertAdmonitions(md) {
   return md.replace(
     /^!!!\s+(\w+)(?:\s+"([^"]*)")?\s*\r?\n([\s\S]*?)(?=\r?\n(?:!!!|\s*#|\s*---|\s*$|\r?\n))/gm,
     (_m, type, title, body) => {
-      const lines = body.replace(/\r?\n$/, '').split(/\r?\n/);
-      const indented = lines.every((line) => line === '' || /^\s+/.test(line));
+      const lines = body.replace(/\r?\n$/, "").split(/\r?\n/);
+      const indented = lines.every((line) => line === "" || /^\s+/.test(line));
       let cleaned;
       if (indented) {
-        cleaned = lines.map((line) => line.replace(/^[ \t]{4}/, '').replace(/^[ \t]+/, '')).join('\n');
+        cleaned = lines
+          .map((line) => line.replace(/^[ \t]{4}/, "").replace(/^[ \t]+/, ""))
+          .join("\n");
       } else {
         // Take contiguous non-empty lines after the admonition marker.
         const kept = [];
         for (const line of lines) {
-          if (line.trim() === '') break;
+          if (line.trim() === "") break;
           kept.push(line);
         }
-        cleaned = kept.join('\n');
+        cleaned = kept.join("\n");
       }
-      cleaned = cleaned.replace(/\n+$/, '');
-      const label = title ? `[${title}]` : '';
+      cleaned = cleaned.replace(/\n+$/, "");
+      const label = title ? `[${title}]` : "";
       return `:::${type}${label}\n${cleaned}\n:::\n`;
     },
   );
@@ -253,15 +265,15 @@ function convertAdmonitions(md) {
 function neutralizeMkdocstrings(md) {
   return md.replace(
     /^:::\s+graphforge[\w.]*\s*$/gm,
-    '> Python recipe API details are documented in the GraphForge Python package docstrings.',
+    "> Python recipe API details are documented in the GraphForge Python package docstrings.",
   );
 }
 
 /** Map a docs-relative source path to its Starlight slug (no leading/trailing slash). */
 function sourcePathToSlug(sourceRel) {
-  const normalized = sourceRel.replace(/\\/g, '/').replace(/^\.\//, '');
-  if (normalized === 'index.md') return '';
-  const parts = normalized.split('/');
+  const normalized = sourceRel.replace(/\\/g, "/").replace(/^\.\//, "");
+  if (normalized === "index.md") return "";
+  const parts = normalized.split("/");
   const out = [];
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i];
@@ -272,92 +284,96 @@ function sourcePathToSlug(sourceRel) {
     }
     const ext = path.extname(part);
     const stem = path.basename(part, ext);
-    if (stem.toLowerCase() === 'index') {
-      return out.join('/');
+    if (stem.toLowerCase() === "index") {
+      return out.join("/");
     }
-    if (stem.toLowerCase() === 'readme') {
-      if (i === 0) return 'documentation';
-      return out.join('/');
+    if (stem.toLowerCase() === "readme") {
+      if (i === 0) return "documentation";
+      return out.join("/");
     }
-    out.push(stem.toLowerCase().replace(/\./g, '-'));
+    out.push(stem.toLowerCase().replace(/\./g, "-"));
   }
-  return out.join('/');
+  return out.join("/");
 }
 
 /** Destination content-collection relative path for an allowlisted source. */
 function sourcePathToDestRel(sourceRel) {
   return sourceRel
-    .split('/')
+    .split("/")
     .map((part, idx, arr) => {
       if (idx === arr.length - 1) {
         const ext = path.extname(part);
         const stem = path.basename(part, ext);
-        if (stem.toLowerCase() === 'readme') {
-          return idx === 0 ? `documentation${ext.toLowerCase()}` : `index${ext.toLowerCase()}`;
+        if (stem.toLowerCase() === "readme") {
+          return idx === 0
+            ? `documentation${ext.toLowerCase()}`
+            : `index${ext.toLowerCase()}`;
         }
-        return `${stem.toLowerCase().replace(/\./g, '-')}${ext.toLowerCase()}`;
+        return `${stem.toLowerCase().replace(/\./g, "-")}${ext.toLowerCase()}`;
       }
       return part.toLowerCase();
     })
-    .join('/');
+    .join("/");
 }
 
 function siteHrefForSlug(fromSlug, toSlug, hash) {
   // Pages are served as SITE_BASE/<slug>/ (directory URLs). Compute a relative
   // href from the current page directory so links work under the project base.
-  const fromDir = fromSlug === '' ? '.' : fromSlug;
-  const toDir = toSlug === '' ? '.' : toSlug;
+  const fromDir = fromSlug === "" ? "." : fromSlug;
+  const toDir = toSlug === "" ? "." : toSlug;
   let rel = path.posix.relative(fromDir, toDir);
-  if (rel === '') rel = '.';
-  if (!rel.startsWith('.') && !rel.startsWith('/')) rel = `./${rel}`;
-  if (rel === '.') {
-    return hash ? `./${hash}` : './';
+  if (rel === "") rel = ".";
+  if (!rel.startsWith(".") && !rel.startsWith("/")) rel = `./${rel}`;
+  if (rel === ".") {
+    return hash ? `./${hash}` : "./";
   }
-  if (!rel.endsWith('/')) rel += '/';
-  return `${rel}${hash || ''}`;
+  if (!rel.endsWith("/")) rel += "/";
+  return `${rel}${hash || ""}`;
 }
 
 function resolveDocsTarget(fromRel, hrefPath) {
-  const fromDir = path.posix.dirname(fromRel.replace(/\\/g, '/'));
-  let target = hrefPath.replace(/\\/g, '/');
-  if (target.startsWith('/')) {
+  const fromDir = path.posix.dirname(fromRel.replace(/\\/g, "/"));
+  let target = hrefPath.replace(/\\/g, "/");
+  if (target.startsWith("/")) {
     // Treat as docs-root-relative without leading slash.
-    target = target.replace(/^\//, '');
+    target = target.replace(/^\//, "");
   } else {
-    target = path.posix.normalize(path.posix.join(fromDir === '.' ? '' : fromDir, target));
+    target = path.posix.normalize(
+      path.posix.join(fromDir === "." ? "" : fromDir, target),
+    );
     // `../../AGENTS.md` from docs/… escapes the docs tree into the repo root.
-    if (target.startsWith('../') || target === '..') {
-      const repoPath = target.replace(/^(\.\.\/)+/, '');
+    if (target.startsWith("../") || target === "..") {
+      const repoPath = target.replace(/^(\.\.\/)+/, "");
       if (
         repoPath &&
-        !repoPath.includes('..') &&
+        !repoPath.includes("..") &&
         fs.existsSync(path.join(repoRoot, repoPath))
       ) {
-        return { kind: 'github-repo', path: repoPath };
+        return { kind: "github-repo", path: repoPath };
       }
       return null;
     }
   }
   // Strip trailing slash for lookup.
-  const trimmed = target.replace(/\/$/, '');
+  const trimmed = target.replace(/\/$/, "");
   if (DIRECTORY_DEFAULTS[trimmed]) {
-    return { kind: 'md', path: DIRECTORY_DEFAULTS[trimmed] };
+    return { kind: "md", path: DIRECTORY_DEFAULTS[trimmed] };
   }
-  if (trimmed === 'contracts' || target === 'contracts/') {
-    return { kind: 'github-tree', path: 'contracts' };
+  if (trimmed === "contracts" || target === "contracts/") {
+    return { kind: "github-tree", path: "contracts" };
   }
   if (/\.(json|sha256)$/i.test(trimmed)) {
-    return { kind: 'github-docs', path: trimmed };
+    return { kind: "github-docs", path: trimmed };
   }
   if (/\.ipynb$/i.test(trimmed)) {
     // notebooks live at repo root, not under docs/
-    const repoPath = trimmed.startsWith('examples/')
+    const repoPath = trimmed.startsWith("examples/")
       ? trimmed
-      : trimmed.replace(/^(\.\.\/)+/, '');
-    return { kind: 'github-repo', path: repoPath };
+      : trimmed.replace(/^(\.\.\/)+/, "");
+    return { kind: "github-repo", path: repoPath };
   }
-  if (trimmed.endsWith('.md')) {
-    return { kind: 'md', path: trimmed };
+  if (trimmed.endsWith(".md")) {
+    return { kind: "md", path: trimmed };
   }
   // Extensionless / directory: try README, overview, or .md
   const candidates = [
@@ -368,15 +384,24 @@ function resolveDocsTarget(fromRel, hrefPath) {
   ];
   for (const c of candidates) {
     if (fs.existsSync(path.join(docsRoot, c))) {
-      if (c.endsWith('README.md') || c.endsWith('overview.md') || c.endsWith('index.md') || c.endsWith('.md')) {
+      if (
+        c.endsWith("README.md") ||
+        c.endsWith("overview.md") ||
+        c.endsWith("index.md") ||
+        c.endsWith(".md")
+      ) {
         // Prefer DIRECTORY_DEFAULTS when only a loose directory was linked and README isn't published
-        return { kind: 'md', path: c };
+        return { kind: "md", path: c };
       }
     }
   }
-  if (fs.existsSync(path.join(docsRoot, trimmed)) && fs.statSync(path.join(docsRoot, trimmed)).isDirectory()) {
-    if (DIRECTORY_DEFAULTS[trimmed]) return { kind: 'md', path: DIRECTORY_DEFAULTS[trimmed] };
-    return { kind: 'github-tree', path: trimmed };
+  if (
+    fs.existsSync(path.join(docsRoot, trimmed)) &&
+    fs.statSync(path.join(docsRoot, trimmed)).isDirectory()
+  ) {
+    if (DIRECTORY_DEFAULTS[trimmed])
+      return { kind: "md", path: DIRECTORY_DEFAULTS[trimmed] };
+    return { kind: "github-tree", path: trimmed };
   }
   return null;
 }
@@ -388,7 +413,10 @@ function resolveDocsTarget(fromRel, hrefPath) {
  */
 function rewriteMarkdownLinks(md, fromRel) {
   const fromSlug = sourcePathToSlug(fromRel);
-  const allowlist = new Set([...PAGES, ...externalManifest.pages.map((page) => page.destination)]);
+  const allowlist = new Set([
+    ...PAGES,
+    ...externalManifest.pages.map((page) => page.destination),
+  ]);
 
   // Protect fenced code blocks from link rewriting.
   const fences = [];
@@ -400,10 +428,10 @@ function rewriteMarkdownLinks(md, fromRel) {
 
   const rewriteHref = (text, href, wrap) => {
     if (/^(https?:|mailto:|tel:)/i.test(href)) return null;
-    if (href.startsWith('#')) return null;
+    if (href.startsWith("#")) return null;
 
     const hashMatch = href.match(/(#[^)]*)$/);
-    const hash = hashMatch ? hashMatch[1] : '';
+    const hash = hashMatch ? hashMatch[1] : "";
     const hrefPath = hash ? href.slice(0, -hash.length) : href;
     if (!hrefPath) return null;
 
@@ -411,14 +439,17 @@ function rewriteMarkdownLinks(md, fromRel) {
     if (!resolved) return null;
 
     let next;
-    if (resolved.kind === 'github-docs') {
+    if (resolved.kind === "github-docs") {
       next = `${GH_DOCS_BLOB}/${resolved.path}${hash}`;
-    } else if (resolved.kind === 'github-repo') {
+    } else if (resolved.kind === "github-repo") {
       next = `${GH_REPO_BLOB}/${resolved.path}${hash}`;
-    } else if (resolved.kind === 'github-tree') {
+    } else if (resolved.kind === "github-tree") {
       next = `${GH_DOCS_TREE}/${resolved.path}${hash}`;
-    } else if (resolved.kind === 'md') {
-      if (!allowlist.has(resolved.path) && !allowlist.has(resolved.path.replace(/\\/g, '/'))) {
+    } else if (resolved.kind === "md") {
+      if (
+        !allowlist.has(resolved.path) &&
+        !allowlist.has(resolved.path.replace(/\\/g, "/"))
+      ) {
         // Unpublished markdown: send readers to GitHub rather than a site 404.
         next = `${GH_DOCS_BLOB}/${resolved.path}${hash}`;
       } else {
@@ -436,45 +467,63 @@ function rewriteMarkdownLinks(md, fromRel) {
   let rewritten = withoutFences.replace(
     /\[(!\[[^\]]*\]\([^)\s]+\))\]\(([^)\s]+)\)/g,
     (full, imageMd, href) => {
-      const out = rewriteHref(imageMd, href, (text, next) => `[${text}](${next})`);
+      const out = rewriteHref(
+        imageMd,
+        href,
+        (text, next) => `[${text}](${next})`,
+      );
       return out ?? full;
     },
   );
 
-  rewritten = rewritten.replace(/\[([^\]]*)\]\(([^)\s]+)\)/g, (full, text, href) => {
-    const out = rewriteHref(text, href, (t, next) => `[${t}](${next})`);
-    return out ?? full;
-  });
+  rewritten = rewritten.replace(
+    /\[([^\]]*)\]\(([^)\s]+)\)/g,
+    (full, text, href) => {
+      const out = rewriteHref(text, href, (t, next) => `[${t}](${next})`);
+      return out ?? full;
+    },
+  );
 
   return rewritten.replace(/\0FENCE(\d+)\0/g, (_m, i) => fences[Number(i)]);
 }
 
 function validateExternalManifest(manifest) {
   if (!/^[0-9a-f]{40}$/.test(manifest.revision)) {
-    throw new Error('External docs revision must be an immutable full commit SHA');
+    throw new Error(
+      "External docs revision must be an immutable full commit SHA",
+    );
   }
-  if (manifest.sourceDirectory !== 'docs/published') {
-    throw new Error('External docs may only be imported from docs/published');
+  if (manifest.sourceDirectory !== "docs/published") {
+    throw new Error("External docs may only be imported from docs/published");
   }
   if (!/^[\w.-]+\/[\w.-]+$/.test(manifest.repository)) {
     throw new Error(`Invalid external docs repository: ${manifest.repository}`);
   }
-  const expected = new Set(['overview.md', 'install.md', 'commands.md', 'agent-interop.md']);
+  const expected = new Set([
+    "overview.md",
+    "install.md",
+    "commands.md",
+    "agent-interop.md",
+  ]);
   const sources = new Set(manifest.pages.map((page) => page.source));
   if (
     manifest.pages.length !== expected.size ||
     sources.size !== expected.size ||
     [...expected].some((source) => !sources.has(source))
   ) {
-    throw new Error(`External docs allowlist must be exactly: ${[...expected].join(', ')}`);
+    throw new Error(
+      `External docs allowlist must be exactly: ${[...expected].join(", ")}`,
+    );
   }
   const destinations = new Set(manifest.pages.map((page) => page.destination));
   if (destinations.size !== manifest.pages.length) {
-    throw new Error('External docs destinations must be unique');
+    throw new Error("External docs destinations must be unique");
   }
   for (const page of manifest.pages) {
-    if (page.source.includes('/') || page.source.includes('..')) {
-      throw new Error(`External docs source escapes docs/published: ${page.source}`);
+    if (page.source.includes("/") || page.source.includes("..")) {
+      throw new Error(
+        `External docs source escapes docs/published: ${page.source}`,
+      );
     }
     if (!/^guide\/vscode-extension\/[a-z0-9-]+\.md$/.test(page.destination)) {
       throw new Error(`Invalid external docs destination: ${page.destination}`);
@@ -486,7 +535,9 @@ function validateExternalManifest(manifest) {
 }
 
 function rewriteExternalMarkdownLinks(md, page, manifest) {
-  const mapping = new Map(manifest.pages.map((item) => [item.source, item.destination]));
+  const mapping = new Map(
+    manifest.pages.map((item) => [item.source, item.destination]),
+  );
   const fromSlug = sourcePathToSlug(page.destination);
   const sourceBase = `https://github.com/${manifest.repository}/blob/${manifest.revision}/${manifest.sourceDirectory}`;
   const fences = [];
@@ -498,12 +549,17 @@ function rewriteExternalMarkdownLinks(md, page, manifest) {
 
   const rewriteHref = (text, href, wrap) => {
     if (/^(https?:|mailto:|tel:|#)/i.test(href)) return null;
-    const [hrefPath, hashPart] = href.split('#', 2);
-    const normalized = path.posix.normalize(path.posix.join(path.posix.dirname(page.source), hrefPath));
-    const hash = hashPart ? `#${hashPart}` : '';
+    const [hrefPath, hashPart] = href.split("#", 2);
+    const normalized = path.posix.normalize(
+      path.posix.join(path.posix.dirname(page.source), hrefPath),
+    );
+    const hash = hashPart ? `#${hashPart}` : "";
     const destination = mapping.get(normalized);
     if (destination) {
-      return wrap(text, siteHrefForSlug(fromSlug, sourcePathToSlug(destination), hash));
+      return wrap(
+        text,
+        siteHrefForSlug(fromSlug, sourcePathToSlug(destination), hash),
+      );
     }
     return wrap(text, `${sourceBase}/${normalized}${hash}`);
   };
@@ -511,16 +567,30 @@ function rewriteExternalMarkdownLinks(md, page, manifest) {
   let rewritten = withoutFences.replace(
     /\[(!\[[^\]]*\]\([^)\s]+\))\]\(([^)\s]+)\)/g,
     (full, imageMd, href) => {
-      const out = rewriteHref(imageMd, href, (text, next) => `[${text}](${next})`);
+      const out = rewriteHref(
+        imageMd,
+        href,
+        (text, next) => `[${text}](${next})`,
+      );
       return out ?? full;
     },
   );
 
-  rewritten = rewritten.replace(/\[([^\]]*)\]\(([^)\s]+)\)/g, (full, text, href) => {
-    const out = rewriteHref(text, href, (label, next) => `[${label}](${next})`);
-    return out ?? full;
-  });
-  return rewritten.replace(/\0EXTERNAL_FENCE(\d+)\0/g, (_match, index) => fences[Number(index)]);
+  rewritten = rewritten.replace(
+    /\[([^\]]*)\]\(([^)\s]+)\)/g,
+    (full, text, href) => {
+      const out = rewriteHref(
+        text,
+        href,
+        (label, next) => `[${label}](${next})`,
+      );
+      return out ?? full;
+    },
+  );
+  return rewritten.replace(
+    /\0EXTERNAL_FENCE(\d+)\0/g,
+    (_match, index) => fences[Number(index)],
+  );
 }
 
 function addExternalSourceMetadata(md, page, manifest) {
@@ -536,16 +606,23 @@ async function syncExternalDocs(manifest) {
   validateExternalManifest(manifest);
   let imported = 0;
   for (const page of manifest.pages) {
-    const snapshot = path.join(siteRoot, 'external', 'graphforge-vscode', page.source);
+    const snapshot = path.join(
+      siteRoot,
+      "external",
+      "graphforge-vscode",
+      page.source,
+    );
     if (!fs.existsSync(snapshot)) {
       throw new Error(`Missing external docs snapshot: ${snapshot}`);
     }
-    let md = fs.readFileSync(snapshot, 'utf8');
-    const actualSha = crypto.createHash('sha256').update(md).digest('hex');
+    let md = fs.readFileSync(snapshot, "utf8");
+    const actualSha = crypto.createHash("sha256").update(md).digest("hex");
     if (actualSha !== page.sha256) {
-      throw new Error(`External docs checksum mismatch for ${page.source}: expected ${page.sha256}, got ${actualSha}`);
+      throw new Error(
+        `External docs checksum mismatch for ${page.source}: expected ${page.sha256}, got ${actualSha}`,
+      );
     }
-    const title = titleFromMarkdown(md, path.basename(page.source, '.md'));
+    const title = titleFromMarkdown(md, path.basename(page.source, ".md"));
     md = upsertFrontmatter(md, title);
     md = rewriteExternalMarkdownLinks(md, page, manifest);
     md = addExternalSourceMetadata(md, page, manifest);
@@ -569,7 +646,7 @@ for (const rel of PAGES) {
   if (!fs.existsSync(src)) {
     throw new Error(`Missing allowlisted documentation source: ${rel}`);
   }
-  let md = fs.readFileSync(src, 'utf8');
+  let md = fs.readFileSync(src, "utf8");
   const fallbackTitle = path.basename(rel, path.extname(rel));
   const title = titleFromMarkdown(md, fallbackTitle);
   md = upsertFrontmatter(md, title);

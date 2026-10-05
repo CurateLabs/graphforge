@@ -1,83 +1,58 @@
-# Research: Genealogy — Modelling Family History in a Graph
+# Research notes: modelling family history
 
-!!! note "Research note"
-    Durable findings for **GraphForge v0.5.0**. Schema and query patterns; no
-    dedicated use-case guide yet.
+This optional domain example assumes [basic graph use](../../guide/quickstart.md).
+For an integrated social-science assignment, start with
+[Your first research project](../../guide/first-research-project.md).
 
-**Scope:** Person schema, path queries, `forge.find` on names, `forge.cluster`,
-`neighbourhood()`.
+## Model a reported relationship
 
----
-
-## Executive summary
-
-Genealogy is a natural graph problem. GraphForge handles the core patterns well:
-
-**What works:**
-
-- Variable-length paths for ancestors, descendants, and relationship chains
-- Multiple labels (`:Person:Royal`) for sub-classification
-- `forge.find` on name / surname / aliases for partial-name lookup
-- `forge.cluster(..., by="louvain"|"components")` for family clusters and disconnected trees
-- `neighbourhood(forge, canonical, hops=2)` for “immediate family” LLM context
-
-**Design around:**
-
-- Prefer `[*1..N]` with `ORDER BY length(path) LIMIT 1` instead of assuming
-  `shortestPath()`
-- Avoid hyphens in indexed name text when they confuse tokenizer / query syntax —
-  store `"Brown Smith"` and query without exclusion-style punctuation
-- Store historical spelling variants explicitly in an `aliases` property
-
----
-
-## Schema sketch
-
-```cypher
-(:Person:Royal {
-    canonical: "g0-adam",
-    name: "Adam Smith",
-    surname: "Smith",
-    aliases: "Adamson Smythe",
-    birth_year: 1890
-})
-
-(parent:Person)-[:PARENT_OF]->(child:Person)
-(person:Person)-[:MARRIED_TO]->(spouse:Person)
-```
-
-Create both directions for undirected marriages. Optional event nodes (`:Birth`,
-`:Marriage`) keep dates queryable without stuffing every fact onto edges.
-
----
-
-## Queries
-
-```cypher
--- Ancestors within N generations
-MATCH (ancestor:Person)-[:PARENT_OF*1..4]->(d:Person {canonical: $canonical})
-RETURN ancestor.name AS name, ancestor.birth_year AS year
-ORDER BY year
-
--- Cluster membership after write-back
-MATCH (n:Person)
-RETURN n.cluster AS c, collect(n.name) AS names
-ORDER BY n.cluster
-```
+Distinguish a record's statement from a verified family relationship. Preserve
+its source, date or edition, and locator; record disputed parentage as competing
+claims rather than overwriting one parent edge and losing the earlier evidence.
+The synthetic example below models a reported relationship only:
 
 ```python
-from graphforge.recipes import neighbourhood
+from graphforge import GraphForge
 
-forge.cluster("Person", by="louvain", write_property="cluster")
-forge.cluster("Person", by="components", write_property="tree_id")
-context = neighbourhood(forge, "g2-emma", hops=2, label="Person")
-hits = forge.find("brown smith", label="Person", limit=10)
+forge = GraphForge()
+parent = forge.add_node("Person", key="person-1", name="Alex")
+child = forge.add_node("Person", key="person-2", name="Sam")
+forge.add_edge(
+    parent, "REPORTED_PARENT_OF", child,
+    source="Synthetic family record", locator="entry 1",
+)
+
+result = forge.execute("""
+    MATCH (parent:Person)-[report:REPORTED_PARENT_OF]->(child:Person)
+    WHERE child.key = $key
+    RETURN parent.name AS reported_parent, report.source AS source,
+           report.locator AS locator
+""", {"key": "person-2"})
+print(result.to_pylist())
+forge.close()
 ```
 
----
+Expected output:
 
-## Recommendations
+```text
+[{'reported_parent': 'Alex', 'source': 'Synthetic family record', 'locator': 'entry 1'}]
+```
 
-1. Index `name`, `surname`, and `aliases` together for `forge.find`.
-2. Use components for disconnected trees; Louvain for surname clusters inside a tree.
-3. Parse GEDCOM externally and MERGE into GraphForge — there is no built-in GEDCOM loader.
+## Extend only as needed
+
+Use distinct stable keys for people with the same name. Keep historical spelling
+and aliases as recorded; search is candidate retrieval, not proof of identity.
+A directed parent relationship is different from a marriage or an event. Define
+those meanings explicitly before traversing multiple generations.
+
+A path through reported relationships is a path through those reports, not
+independent proof of ancestry. Connected components describe connectivity;
+Louvain does not infer surname groups or biological relationships. Retain source
+context and disagreements when interpreting a result.
+
+GraphForge has no built-in GEDCOM loader. Parse a selected source externally,
+document your mapping, and use [construction APIs](../../guide/graph-construction.md).
+Use [save and reopen](../../guide/tutorial.md) for durable state and
+[portable projects](../../guide/portable-projects.md) for transfer. Richer
+[knowledge contracts](../architecture/knowledge-public-api-v1.md) are optional
+when source-derived assertions and status history are needed.

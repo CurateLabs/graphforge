@@ -1,61 +1,38 @@
-# Research: Building Context for an LLM Call
+# Research notes: building context for an LLM call
 
-!!! note "Research note"
-    Durable findings for **GraphForge v0.5.0**. Prefer the
-    [LLM workflows](../use-cases/llm-workflows.md) use-case for present-tense examples.
+This Advanced note supports [LLM workflows](../use-cases/llm-workflows.md).
+For source interpretation without a model, start with
+[Your first research project](../../guide/first-research-project.md).
 
-**Scope:** `graphforge.recipes.neighbourhood()`, `forge.find`, token budget,
-composition patterns.
+## Choose context for the question
 
----
+A neighborhood query follows recorded relationships; text/vector search finds
+candidate nodes under its retrieval rules. Neither guarantees complete relevant
+evidence. A fixed two-hop neighborhood may be too large, too small, or unrelated
+to the question. Inspect what was selected and what was omitted.
 
-## Executive summary
+`graphforge.recipes.neighbourhood(forge, canonical, hops=2)` returns a PyArrow
+table. Its default label is `Entity` and identifying property is `canonical`;
+pass `label` and `canonical_prop` to match another schema. Use `.to_pylist()`
+when constructing a Python prompt. Do not concatenate an Arrow table with a list
+or assume the helper retains source documents automatically.
 
-Given an entity or question, pull what the graph knows and hand it to the LLM.
-Two complementary tools cover most cases:
+## Preserve evidence and interpretation
 
-1. `neighbourhood(forge, canonical, hops=2)` — structured n-hop context as plain dicts
-2. `forge.find(...)` — lexical / hybrid recall for nodes not on the traversal frontier
+For each selected interpretation, include the source passage or locator,
+relevant surrounding context, and review status. Keep alternative explanations
+and contrary evidence visible. Retrieval rank is not probability of truth.
+When you trim to a token budget, disclose the selection rule; do not present
+truncated context as an exhaustive literature search.
 
-**Key findings:**
+The [source-linked extraction example](../use-cases/llm-workflows.md#retrieve-the-proposal-with-its-evidence)
+uses explicit graph relationships to show a proposal beside its original text.
+That is often sufficient before adding generic neighborhood or hybrid retrieval.
 
-- `hops=2` is the practical default: enough structure for most KG questions, typically
-  a few thousand tokens on hub-and-spoke graphs
-- `hops=3` rarely adds nodes in leaf-heavy schemas
-- Neighbourhood latency stays in the low tens of milliseconds at 10K-node sparse graphs
-- Combine neighbourhood (edges) with `forge.find` (keywords / vectors) and dedupe by
-  `canonical`
+## Evaluate the selection
 
----
-
-## Composition pattern
-
-```python
-from graphforge.recipes import neighbourhood
-
-def build_context(forge, canonical: str, question: str | None = None) -> str:
-    graph_context = neighbourhood(forge, canonical, hops=2)
-    search_context = []
-    if question:
-        table = forge.find(question, label="Entity", limit=5)
-        search_context = table.to_pylist()
-
-    seen = {canonical}
-    combined = []
-    for row in graph_context + search_context:
-        c = row.get("canonical", "")
-        if c and c not in seen:
-            seen.add(c)
-            combined.append(row)
-    return "\n".join(str(row) for row in combined)
-```
-
-| Approach | Best for | Misses |
-| --- | --- | --- |
-| `neighbourhood(hops=1)` | Direct facts | Indirect relations |
-| `neighbourhood(hops=2)` | Most KG Q&A | Disconnected but relevant nodes |
-| `forge.find(question)` | Natural-language recall | Pure structure without keyword overlap |
-| Combined | Comprehensive prompts | Overlong contexts — trim properties |
-
-Re-enter the graph with the `canonical` property from neighbourhood dicts; the
-recipe returns plain Python, ready for prompt serialization.
+Use representative questions with known relevant and contrary material. Check
+whether the selected context supports the eventual answer, which relevant
+sources were missed, and whether a reader can recover the source. Record
+latency and context size for that workload separately from answer quality.
+No general two-hop token count or lookup-latency guarantee follows from the API.
