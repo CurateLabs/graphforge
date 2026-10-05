@@ -424,7 +424,7 @@ fn validate_composite_references(ledgers: CompositeLedgers<'_>) -> Result<(), Gf
     let reasoning_ids = ledgers
         .reasoning
         .into_iter()
-        .flat_map(|ledger| ledger.records.iter().map(|row| row.reasoning_uuid))
+        .flat_map(|ledger| ledger.records().iter().map(|row| row.reasoning_uuid))
         .collect::<HashSet<_>>();
     let provenance_ids = ledgers
         .provenance
@@ -472,7 +472,7 @@ fn validate_composite_references(ledgers: CompositeLedgers<'_>) -> Result<(), Gf
     for row in ledgers
         .reasoning
         .into_iter()
-        .flat_map(|value| &value.records)
+        .flat_map(|value| value.records())
     {
         require(
             assertion_ids.contains(&row.assertion_uuid),

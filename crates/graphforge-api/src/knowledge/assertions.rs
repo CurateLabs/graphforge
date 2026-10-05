@@ -246,7 +246,7 @@ fn validate_status_references(
     }
     if let Some(reasoning_uuid) = reasoning_uuid
         && !read_reasoning_ledger(generation)?
-            .records
+            .records()
             .iter()
             .any(|row| row.reasoning_uuid == reasoning_uuid && row.assertion_uuid == assertion_uuid)
     {
@@ -830,7 +830,7 @@ impl GraphForge {
             }
         }
         let reasoning = read_reasoning_ledger(&parent)?;
-        if !reasoning.records.iter().any(|row| {
+        if !reasoning.records().iter().any(|row| {
             row.reasoning_uuid == request.reasoning_uuid
                 && row.assertion_uuid == request.prior_assertion_uuid
         }) {

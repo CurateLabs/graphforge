@@ -1,5 +1,7 @@
 //! Immutable epistemic reasoning records and explicit amendment chains.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 
@@ -55,6 +57,11 @@ static REASONING_SCHEMA_FINGERPRINT: LazyLock<[u8; 32]> = LazyLock::new(|| {
     )
     .expect("registered reasoning schema is within canonical bounds")
 });
+
+#[cfg(test)]
+std::thread_local! {
+    static RECORD_VALIDATION_CALLS: Cell<Option<usize>> = const { Cell::new(None) };
+}
 
 /// Closed purpose of one reasoning record.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -194,19 +201,38 @@ impl ReasoningRecord {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ReasoningLedger {
     /// Records ordered by `(recorded_at, reasoning_uuid)`.
-    pub records: Vec<ReasoningRecord>,
+    records: Vec<ReasoningRecord>,
 }
 
 impl ReasoningLedger {
+    /// Borrow validated records in canonical order.
+    ///
+    /// ```compile_fail
+    /// use graphforge_knowledge::ReasoningLedger;
+    /// let mut ledger = ReasoningLedger::default();
+    /// ledger.records.clear();
+    /// ```
+    #[must_use]
+    pub fn records(&self) -> &[ReasoningRecord] {
+        &self.records
+    }
+
+    /// Consume this ledger and return its validated records in canonical order.
+    #[must_use]
+    pub fn into_records(self) -> Vec<ReasoningRecord> {
+        self.records
+    }
+
     /// Validate, sort, and construct one complete participant.
-    pub fn new(mut records: Vec<ReasoningRecord>) -> Result<Self, KnowledgeError> {
-        if records.len() > MAX_KNOWLEDGE_ROWS {
-            return Err(KnowledgeError::Limit {
-                participant: "reasoning",
-                observed: records.len(),
-                limit: MAX_KNOWLEDGE_ROWS,
-            });
-        }
+    pub fn new(records: Vec<ReasoningRecord>) -> Result<Self, KnowledgeError> {
+        Self::new_with_limit(records, MAX_KNOWLEDGE_ROWS)
+    }
+
+    fn new_with_limit(
+        mut records: Vec<ReasoningRecord>,
+        row_limit: usize,
+    ) -> Result<Self, KnowledgeError> {
+        validate_record_count(records.len(), row_limit)?;
         let mut by_id = HashMap::with_capacity(records.len());
         for record in &records {
             validate_record(record)?;
@@ -236,24 +262,45 @@ impl ReasoningLedger {
     }
 
     /// Merge staged append-only records with idempotent exact replay.
+    ///
+    /// Both inputs are validated ledgers and the row vector is private, so
+    /// existing records cannot be mutated after validation. The only new
+    /// whole-ledger condition is the combined row limit. A staged row that
+    /// refers to a base-only predecessor is rejected while constructing the
+    /// staged ledger because its predecessor is missing there. If the staged
+    /// ledger includes that base row to satisfy its own chain, merge accepts
+    /// it only as exact replay. Base rows cannot point to newly appended rows,
+    /// since the base ledger was already validated without those identities.
+    /// Therefore a cycle spanning base and staged rows is unreachable, while
+    /// any identity reuse is exact replay or a conflict.
     pub fn merge(&self, staged: &Self) -> Result<Self, KnowledgeError> {
+        self.merge_with_limit(staged, MAX_KNOWLEDGE_ROWS)
+    }
+
+    fn merge_with_limit(&self, staged: &Self, row_limit: usize) -> Result<Self, KnowledgeError> {
         let mut records = self.records.clone();
         let mut by_id = records
             .iter()
             .cloned()
             .map(|row| (row.reasoning_uuid, row))
             .collect::<HashMap<_, _>>();
+        let mut appended = false;
         for record in &staged.records {
             if let Some(existing) = by_id.get(&record.reasoning_uuid) {
                 if existing != record {
                     return Err(KnowledgeError::Conflict("reasoning_uuid"));
                 }
             } else {
+                validate_record_count(records.len().saturating_add(1), row_limit)?;
                 records.push(record.clone());
                 by_id.insert(record.reasoning_uuid, record.clone());
+                appended = true;
             }
         }
-        Self::new(records)
+        if appended {
+            records.sort_by_key(|row| (row.recorded_at_micros, row.reasoning_uuid));
+        }
+        Ok(Self { records })
     }
 
     /// Canonical fingerprint over the exact immutable record.
@@ -411,6 +458,13 @@ pub(crate) fn schema_registry_entry() -> SchemaRegistryEntry {
 }
 
 fn validate_record(row: &ReasoningRecord) -> Result<(), KnowledgeError> {
+    #[cfg(test)]
+    RECORD_VALIDATION_CALLS.with(|calls| {
+        if let Some(count) = calls.get() {
+            calls.set(Some(count + 1));
+        }
+    });
+
     if row.contract_version != REASONING_CONTRACT_VERSION {
         return Err(invalid("reasoning.contract_version", "unsupported version"));
     }
@@ -427,6 +481,17 @@ fn validate_record(row: &ReasoningRecord) -> Result<(), KnowledgeError> {
         require_v7(previous, "supersedes_reasoning_uuid")?;
     }
     validate_content(row.content_format, &row.content)
+}
+
+fn validate_record_count(count: usize, limit: usize) -> Result<(), KnowledgeError> {
+    if count > limit {
+        return Err(KnowledgeError::Limit {
+            participant: "reasoning",
+            observed: count,
+            limit,
+        });
+    }
+    Ok(())
 }
 
 fn validate_content(
@@ -565,6 +630,7 @@ fn uuid_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
 
     fn uuid7(seed: u8) -> Uuid {
         let mut bytes = [seed; 16];
@@ -585,6 +651,134 @@ mod tests {
             time,
         )
         .unwrap()
+    }
+
+    fn unvalidated_row(id: u8) -> ReasoningRecord {
+        ReasoningRecord {
+            reasoning_uuid: uuid7(id),
+            assertion_uuid: uuid7(id.wrapping_add(20)),
+            kind: ReasoningKind::LogicalInference,
+            content_format: ReasoningContentFormat::TextPlain,
+            content: b"reasoning".to_vec(),
+            supersedes_reasoning_uuid: None,
+            provenance_uuid: uuid7(id.wrapping_add(40)),
+            recorded_at_micros: i64::from(id),
+            contract_version: REASONING_CONTRACT_VERSION,
+        }
+    }
+
+    fn benchmark_uuid(seed: u64) -> Uuid {
+        let mut bytes = [0; 16];
+        bytes[8..].copy_from_slice(&seed.to_be_bytes());
+        bytes[6] = 0x70;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Uuid::from_bytes(bytes)
+    }
+
+    fn benchmark_row(seed: u64) -> ReasoningRecord {
+        ReasoningRecord {
+            reasoning_uuid: benchmark_uuid(seed + 1),
+            assertion_uuid: benchmark_uuid(10_000_000),
+            kind: ReasoningKind::LogicalInference,
+            content_format: ReasoningContentFormat::TextPlain,
+            content: b"bounded reasoning measurement".to_vec(),
+            supersedes_reasoning_uuid: None,
+            provenance_uuid: benchmark_uuid(seed + 20_000),
+            recorded_at_micros: i64::try_from(seed).unwrap(),
+            contract_version: REASONING_CONTRACT_VERSION,
+        }
+    }
+
+    fn merge_with_full_revalidation(
+        existing: &ReasoningLedger,
+        staged: &ReasoningLedger,
+    ) -> Result<ReasoningLedger, KnowledgeError> {
+        let mut records = existing.records.clone();
+        let mut by_id = records
+            .iter()
+            .cloned()
+            .map(|row| (row.reasoning_uuid, row))
+            .collect::<HashMap<_, _>>();
+        for row in staged.records() {
+            if let Some(previous) = by_id.get(&row.reasoning_uuid) {
+                if previous != row {
+                    return Err(KnowledgeError::Conflict("reasoning_uuid"));
+                }
+            } else {
+                records.push(row.clone());
+                by_id.insert(row.reasoning_uuid, row.clone());
+            }
+        }
+        ReasoningLedger::new(records)
+    }
+
+    fn input_digest(existing: &ReasoningLedger, staged: &ReasoningLedger) -> String {
+        let mut writer = CanonicalWriter::new();
+        for ledger in [existing, staged] {
+            writer.u64(ledger.records().len() as u64).unwrap();
+            for row in ledger.records() {
+                writer.raw(row.reasoning_uuid.as_bytes()).unwrap();
+                writer.raw(row.assertion_uuid.as_bytes()).unwrap();
+                writer.text(row.kind.as_str()).unwrap();
+                writer.text(row.content_format.as_str()).unwrap();
+                writer.binary(&row.content).unwrap();
+                match row.supersedes_reasoning_uuid {
+                    Some(previous) => {
+                        writer.u8(1).unwrap();
+                        writer.raw(previous.as_bytes()).unwrap();
+                    }
+                    None => writer.u8(0).unwrap(),
+                }
+                writer.raw(row.provenance_uuid.as_bytes()).unwrap();
+                writer.i64(row.recorded_at_micros).unwrap();
+                writer.u32(row.contract_version).unwrap();
+            }
+        }
+        let bytes = fingerprint(
+            CanonicalDomain::Reasoning,
+            CANONICAL_CONTRACT_VERSION,
+            &writer.finish(),
+        )
+        .unwrap();
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn median(mut values: Vec<Duration>) -> Duration {
+        values.sort_unstable();
+        values[values.len() / 2]
+    }
+
+    #[test]
+    #[ignore = "manual quiet-host before/after merge-cost measurement"]
+    fn quiet_host_merge_cost_measurement() {
+        for existing_count in [1_000_u64, 10_000] {
+            let existing =
+                ReasoningLedger::new((0..existing_count).map(benchmark_row).collect()).unwrap();
+            let staged = ReasoningLedger::new(vec![benchmark_row(existing_count)]).unwrap();
+            let repetitions = 9;
+            let mut before = Vec::with_capacity(repetitions);
+            let mut after = Vec::with_capacity(repetitions);
+            for _ in 0..repetitions {
+                let start = Instant::now();
+                std::hint::black_box(merge_with_full_revalidation(&existing, &staged).unwrap());
+                before.push(start.elapsed());
+
+                let start = Instant::now();
+                std::hint::black_box(existing.merge(&staged).unwrap());
+                after.push(start.elapsed());
+            }
+            let before_median = median(before);
+            let after_median = median(after);
+            let divisor = existing_count as f64;
+            println!(
+                "existing_rows={existing_count} staged_rows=1 repetitions={repetitions} input_sha256={} before_ns={} before_ns_per_existing_row={:.3} after_ns={} after_ns_per_existing_row={:.3}",
+                input_digest(&existing, &staged),
+                before_median.as_nanos(),
+                before_median.as_nanos() as f64 / divisor,
+                after_median.as_nanos(),
+                after_median.as_nanos() as f64 / divisor,
+            );
+        }
     }
 
     #[test]
@@ -613,6 +807,36 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_ledger_and_merge_sort_by_time_then_uuid() {
+        let constructed = ReasoningLedger::new(vec![
+            row(3, 20, None, 10),
+            row(2, 21, None, 10),
+            row(1, 22, None, 5),
+        ])
+        .unwrap();
+        assert_eq!(
+            constructed
+                .records()
+                .iter()
+                .map(|record| record.reasoning_uuid)
+                .collect::<Vec<_>>(),
+            vec![uuid7(1), uuid7(2), uuid7(3)]
+        );
+
+        let base = ReasoningLedger::new(vec![row(4, 23, None, 10)]).unwrap();
+        let backdated = ReasoningLedger::new(vec![row(5, 24, None, 5)]).unwrap();
+        let merged = base.merge(&backdated).unwrap();
+        assert_eq!(
+            merged
+                .records()
+                .iter()
+                .map(|record| record.reasoning_uuid)
+                .collect::<Vec<_>>(),
+            vec![uuid7(5), uuid7(4)]
+        );
+    }
+
+    #[test]
     fn replay_is_idempotent_and_conflicting_uuid_is_rejected() {
         let base = ReasoningLedger::new(vec![row(1, 20, None, 10)]).unwrap();
         assert_eq!(base.merge(&base).unwrap(), base);
@@ -622,6 +846,255 @@ mod tests {
         assert!(matches!(
             base.merge(&conflict),
             Err(KnowledgeError::Conflict("reasoning_uuid"))
+        ));
+    }
+
+    #[test]
+    fn ledger_rows_cannot_be_mutated_through_the_public_api() {
+        let ledger = ReasoningLedger::new(vec![row(1, 20, None, 10)]).unwrap();
+        assert_eq!(ledger.records().len(), 1);
+        assert_eq!(ledger.clone().into_records().len(), 1);
+    }
+
+    #[test]
+    fn incremental_merge_accepts_a_valid_new_amendment_without_revalidating_base() {
+        let base_records = vec![
+            row(1, 20, None, 10),
+            row(2, 20, Some(1), 20),
+            row(3, 20, Some(2), 30),
+        ];
+        let base = ReasoningLedger::new(base_records.clone()).unwrap();
+        RECORD_VALIDATION_CALLS.with(|calls| calls.set(Some(0)));
+        let staged = ReasoningLedger::new(vec![
+            base_records[0].clone(),
+            base_records[1].clone(),
+            base_records[2].clone(),
+            row(4, 20, Some(3), 40),
+        ])
+        .unwrap();
+        RECORD_VALIDATION_CALLS.with(|calls| {
+            assert_eq!(calls.get(), Some(4));
+            calls.set(Some(0));
+        });
+        let merged = base.merge(&staged).unwrap();
+        RECORD_VALIDATION_CALLS.with(|calls| {
+            assert_eq!(calls.get(), Some(0));
+            calls.set(None);
+        });
+
+        assert_eq!(merged.records().len(), 4);
+        assert_eq!(
+            merged
+                .records()
+                .iter()
+                .map(|record| record.reasoning_uuid)
+                .collect::<Vec<_>>(),
+            vec![uuid7(1), uuid7(2), uuid7(3), uuid7(4)]
+        );
+    }
+
+    #[test]
+    fn merge_enforces_the_combined_row_limit_after_replays() {
+        let base = ReasoningLedger::new(vec![row(1, 20, None, 10), row(2, 21, None, 20)]).unwrap();
+        let staged =
+            ReasoningLedger::new(vec![row(3, 22, None, 30), row(4, 23, None, 40)]).unwrap();
+        assert!(matches!(
+            base.merge_with_limit(&staged, 3),
+            Err(KnowledgeError::Limit {
+                participant: "reasoning",
+                observed: 4,
+                limit: 3,
+            })
+        ));
+        assert_eq!(base.merge_with_limit(&base, 2).unwrap(), base);
+    }
+
+    #[test]
+    fn reasoning_record_count_limit_accepts_the_limit_and_rejects_the_first_excess() {
+        assert!(validate_record_count(MAX_KNOWLEDGE_ROWS, MAX_KNOWLEDGE_ROWS).is_ok());
+        assert!(matches!(
+            validate_record_count(MAX_KNOWLEDGE_ROWS + 1, MAX_KNOWLEDGE_ROWS),
+            Err(KnowledgeError::Limit {
+                participant: "reasoning",
+                observed,
+                limit: MAX_KNOWLEDGE_ROWS,
+            }) if observed == MAX_KNOWLEDGE_ROWS + 1
+        ));
+        let rows = vec![row(1, 20, None, 10), row(2, 21, None, 20)];
+        assert!(ReasoningLedger::new_with_limit(rows.clone(), 2).is_ok());
+        assert!(matches!(
+            ReasoningLedger::new_with_limit(rows, 1),
+            Err(KnowledgeError::Limit {
+                participant: "reasoning",
+                observed: 2,
+                limit: 1,
+            })
+        ));
+    }
+
+    #[test]
+    fn reasoning_record_contract_version_must_be_supported() {
+        let mut record = unvalidated_row(1);
+        record.contract_version = REASONING_CONTRACT_VERSION + 1;
+        assert!(matches!(
+            ReasoningLedger::new(vec![record]),
+            Err(KnowledgeError::Invalid {
+                field: "reasoning.contract_version",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn reasoning_uuid_must_be_uuidv7() {
+        let mut record = unvalidated_row(1);
+        record.reasoning_uuid = Uuid::from_u128(1);
+        assert!(matches!(
+            ReasoningLedger::new(vec![record]),
+            Err(KnowledgeError::Invalid {
+                field: "reasoning_uuid",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn reasoning_assertion_uuid_must_be_uuidv7() {
+        let mut record = unvalidated_row(1);
+        record.assertion_uuid = Uuid::from_u128(1);
+        assert!(matches!(
+            ReasoningLedger::new(vec![record]),
+            Err(KnowledgeError::Invalid {
+                field: "assertion_uuid",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn reasoning_provenance_uuid_must_not_be_nil() {
+        let mut record = unvalidated_row(1);
+        record.provenance_uuid = Uuid::nil();
+        assert!(matches!(
+            ReasoningLedger::new(vec![record]),
+            Err(KnowledgeError::Invalid {
+                field: "provenance_uuid",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn superseded_reasoning_uuid_must_be_uuidv7() {
+        let mut record = unvalidated_row(2);
+        record.supersedes_reasoning_uuid = Some(Uuid::from_u128(1));
+        assert!(matches!(
+            ReasoningLedger::new(vec![record]),
+            Err(KnowledgeError::Invalid {
+                field: "supersedes_reasoning_uuid",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn reasoning_record_must_not_amend_itself() {
+        let mut record = unvalidated_row(1);
+        record.supersedes_reasoning_uuid = Some(record.reasoning_uuid);
+        assert!(matches!(
+            ReasoningLedger::new(vec![record]),
+            Err(KnowledgeError::Invalid {
+                field: "reasoning.supersedes_reasoning_uuid",
+                message: "self-link is forbidden",
+            })
+        ));
+    }
+
+    #[test]
+    fn reasoning_content_must_not_be_empty() {
+        let mut record = unvalidated_row(1);
+        record.content.clear();
+        assert!(matches!(
+            ReasoningLedger::new(vec![record]),
+            Err(KnowledgeError::Invalid {
+                field: "reasoning.content",
+                message: "must not be empty",
+            })
+        ));
+    }
+
+    #[test]
+    fn reasoning_content_limit_is_enforced_by_ledger_validation() {
+        let mut record = unvalidated_row(1);
+        record.content = vec![b'x'; MAX_REASONING_CONTENT_BYTES + 1];
+        assert!(matches!(
+            ReasoningLedger::new(vec![record]),
+            Err(KnowledgeError::Limit {
+                participant: "reasoning.content",
+                observed,
+                limit: MAX_REASONING_CONTENT_BYTES,
+            }) if observed == MAX_REASONING_CONTENT_BYTES + 1
+        ));
+    }
+
+    #[test]
+    fn reasoning_text_content_must_be_utf8() {
+        let mut record = unvalidated_row(1);
+        record.content = vec![0xff];
+        assert!(matches!(
+            ReasoningLedger::new(vec![record]),
+            Err(KnowledgeError::Invalid {
+                field: "reasoning.content",
+                message: "must be UTF-8",
+            })
+        ));
+    }
+
+    #[test]
+    fn application_json_content_must_be_valid_json() {
+        let mut record = unvalidated_row(1);
+        record.content_format = ReasoningContentFormat::ApplicationJson;
+        record.content = b"{not-json}".to_vec();
+        assert!(matches!(
+            ReasoningLedger::new(vec![record]),
+            Err(KnowledgeError::Invalid {
+                field: "reasoning.content",
+                message: "must be valid JSON",
+            })
+        ));
+    }
+
+    #[test]
+    fn reasoning_uuid_must_be_unique() {
+        assert!(matches!(
+            ReasoningLedger::new(vec![row(1, 20, None, 10), row(1, 21, None, 20)]),
+            Err(KnowledgeError::Duplicate("reasoning_uuid"))
+        ));
+    }
+
+    #[test]
+    fn amendment_predecessor_must_be_present_and_share_assertion() {
+        assert!(matches!(
+            ReasoningLedger::new(vec![row(2, 20, Some(1), 20)]),
+            Err(KnowledgeError::Dangling("supersedes_reasoning_uuid"))
+        ));
+        assert!(matches!(
+            ReasoningLedger::new(vec![row(1, 20, None, 10), row(2, 21, Some(1), 20)]),
+            Err(KnowledgeError::Invalid {
+                field: "reasoning.supersedes_reasoning_uuid",
+                message: "cross-assertion amendment is forbidden",
+            })
+        ));
+    }
+
+    #[test]
+    fn amendment_graph_must_be_acyclic() {
+        assert!(matches!(
+            ReasoningLedger::new(vec![row(1, 20, Some(2), 10), row(2, 20, Some(1), 20)]),
+            Err(KnowledgeError::Invalid {
+                field: "reasoning.supersedes_reasoning_uuid",
+                message: "amendment cycle",
+            })
         ));
     }
 

@@ -677,7 +677,7 @@ fn build_validation_snapshot(
     if parent.capability("epistemic")?.is_some() {
         let reasoning = crate::knowledge::read_reasoning_ledger(parent)?;
         snapshot.reasoning = reasoning
-            .records
+            .records()
             .iter()
             .map(|row| row.reasoning_uuid)
             .collect();

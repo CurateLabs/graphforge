@@ -869,11 +869,11 @@ impl GraphForge {
         }
         let existing = read_reasoning_ledger(&parent)?;
         if let Some(index) = existing
-            .records
+            .records()
             .iter()
             .position(|row| row.reasoning_uuid == request.reasoning_uuid)
         {
-            let row = &existing.records[index];
+            let row = &existing.records()[index];
             if row.assertion_uuid == request.assertion_uuid
                 && row.kind == request.kind
                 && row.content_format == request.content_format
@@ -901,7 +901,7 @@ impl GraphForge {
             recorded_at_micros,
         )
         .map_err(knowledge_error)?;
-        let mut records = existing.records;
+        let mut records = existing.into_records();
         records.push(record);
         let merged = ReasoningLedger::new(records).map_err(knowledge_error)?;
         publish_reasoning(self, &request, &parent, expected_parent, &merged)
@@ -924,7 +924,7 @@ impl GraphForge {
         let generation = self.generation_for_read()?;
         let ledger = read_reasoning_ledger(&generation)?;
         let index = ledger
-            .records
+            .records()
             .iter()
             .position(|row| row.reasoning_uuid == reasoning_uuid)
             .ok_or_else(|| not_found_kind("reasoning record"))?;
@@ -948,7 +948,7 @@ impl GraphForge {
         let generation = self.generation_for_read()?;
         let ledger = read_reasoning_ledger(&generation)?;
         let selected = ledger
-            .records
+            .records()
             .iter()
             .enumerate()
             .filter(|(_, row)| {

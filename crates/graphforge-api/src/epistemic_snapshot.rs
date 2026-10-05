@@ -256,7 +256,7 @@ fn compose_rows(
     .map_err(crate::knowledge::knowledge_error)?;
     let reasoning = ReasoningLedger::new(
         reasoning
-            .records
+            .into_records()
             .into_iter()
             .filter(|row| row.recorded_at_micros <= cutoff)
             .collect(),
@@ -294,7 +294,7 @@ fn compose_rows(
     .map_err(crate::knowledge::knowledge_error)?;
 
     let visible_reasoning = reasoning
-        .records
+        .records()
         .iter()
         .map(|row| row.reasoning_uuid)
         .collect::<HashSet<_>>();
@@ -313,7 +313,7 @@ fn compose_rows(
         .events()
         .iter()
         .map(|row| row.assertion_uuid)
-        .chain(reasoning.records.iter().map(|row| row.assertion_uuid))
+        .chain(reasoning.records().iter().map(|row| row.assertion_uuid))
     {
         if !visible_assertions.contains(&source) {
             return Err(GfError::Validation(
@@ -377,7 +377,7 @@ fn compose_rows(
     // number of rows read across every ledger.
     let mut history_by_assertion: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
     let mut superseded_reasoning_by_assertion: HashMap<Uuid, HashSet<Uuid>> = HashMap::new();
-    for row in &reasoning.records {
+    for row in reasoning.records() {
         history_by_assertion
             .entry(row.assertion_uuid)
             .or_default()
