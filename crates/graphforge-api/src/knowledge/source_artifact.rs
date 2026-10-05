@@ -1,5 +1,8 @@
 //! Research Source and Artifact registration (#1349).
 
+mod validation;
+use validation::validate_derivation_inputs;
+
 use std::collections::HashSet;
 
 use graphforge_knowledge::{
@@ -15,16 +18,14 @@ use super::ledger::{
     read_preference_ledger, read_retention_ledger, source_artifact_publication_participants,
 };
 use super::{
-    ApiErrorCode, EventKind, GfError, GraphForge, PageRequest, ProjectCapability,
-    ProjectStageOutcome, ProvenanceEvent, ResolvedProjectGeneration, Uuid, WriteContext,
-    assertion_result, concat_or_empty, knowledge_error, lock_graph_visibility,
-    match_requested_edge_uuids, match_requested_node_uuids, not_found_kind,
+    EventKind, GfError, GraphForge, PageRequest, ProjectCapability, ProjectStageOutcome,
+    ProvenanceEvent, ResolvedProjectGeneration, Uuid, WriteContext, assertion_result,
+    concat_or_empty, knowledge_error, lock_graph_visibility, not_found_kind,
     prepare_knowledge_request, provenance_error, read_artifact_ledger, read_derivation_ledger,
-    read_evidence_ledger, read_ledger, read_source_ledger, require_uuid, transaction_conflict,
-    validate_write_context, with_next_token,
+    read_source_ledger, require_uuid, transaction_conflict, validate_write_context,
+    with_next_token,
 };
 use crate::PageToken;
-use crate::algorithm_runs::read_ledger as read_algorithm_run_ledger;
 
 /// Payload reference for one Artifact registration.
 #[derive(Clone, Debug, PartialEq)]
@@ -257,14 +258,16 @@ impl GraphForge {
                 "project generation changed before artifact publication",
             ));
         }
-        if !read_source_ledger(&parent)?
+        let sources = read_source_ledger(&parent)?;
+        if !sources
             .sources
             .iter()
             .any(|row| row.source_uuid == request.source_uuid)
         {
             return Err(not_found_kind("source"));
         }
-        validate_derivation_inputs(self, &parent, &request.derivation_inputs)?;
+        let validated_artifacts =
+            validate_derivation_inputs(self, &parent, &request.derivation_inputs, &sources)?;
         let (
             payload_kind,
             content_sha256,
@@ -274,7 +277,10 @@ impl GraphForge {
             availability,
             local_bytes,
         ) = resolve_payload(&request.payload)?;
-        let existing_artifacts = read_artifact_ledger(&parent)?;
+        let existing_artifacts = match validated_artifacts {
+            Some(artifacts) => artifacts,
+            None => read_artifact_ledger(&parent)?,
+        };
         let recorded_at_micros = (self.clock.lock().expect("clock lock poisoned"))()?;
         let event = ProvenanceEvent::new(
             request.context.operation_uuid.0,
@@ -350,7 +356,6 @@ impl GraphForge {
         let derivations = existing_derivations
             .merge(&staged_derivations)
             .map_err(knowledge_error)?;
-        let sources = read_source_ledger(&parent)?;
         let preferences = read_preference_ledger(&parent)?;
         let retention = read_retention_ledger(&parent)?;
         let derivation_lineage = request
@@ -848,54 +853,6 @@ fn publish_source_artifact(
     Ok(assertion_result(
         ledger.batch().map_err(knowledge_error)?.slice(index, 1),
     ))
-}
-
-fn validate_derivation_inputs(
-    graph: &GraphForge,
-    parent: &ResolvedProjectGeneration,
-    inputs: &[DerivationInput],
-) -> Result<(), GfError> {
-    for input in inputs {
-        let found = match input.input_kind {
-            DerivationSubjectKind::Source => read_source_ledger(parent)?
-                .sources
-                .iter()
-                .any(|row| row.source_uuid == input.input_uuid),
-            DerivationSubjectKind::Artifact => read_artifact_ledger(parent)?
-                .artifacts
-                .iter()
-                .any(|row| row.artifact_uuid == input.input_uuid),
-            DerivationSubjectKind::Node => {
-                let mut pending = HashSet::from([input.input_uuid]);
-                match_requested_node_uuids(graph, &mut pending)?;
-                pending.is_empty()
-            }
-            DerivationSubjectKind::Edge => {
-                let mut pending = HashSet::from([input.input_uuid]);
-                match_requested_edge_uuids(graph, &mut pending)?;
-                pending.is_empty()
-            }
-            DerivationSubjectKind::Assertion => read_ledger(parent)?
-                .assertions
-                .iter()
-                .any(|row| row.assertion_uuid == input.input_uuid),
-            DerivationSubjectKind::EvidenceLink => read_evidence_ledger(parent)?
-                .links
-                .iter()
-                .any(|row| row.evidence_uuid == input.input_uuid),
-            DerivationSubjectKind::AlgorithmRun => read_algorithm_run_ledger(parent)?
-                .runs
-                .iter()
-                .any(|row| row.run_uuid == input.input_uuid),
-        };
-        if !found {
-            return Err(GfError::Api {
-                code: ApiErrorCode::NotFound,
-                message: "derivation input subject was not found".into(),
-            });
-        }
-    }
-    Ok(())
 }
 
 fn page_ledger_rows(
