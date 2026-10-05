@@ -1311,7 +1311,7 @@ impl GraphForge {
     /// Returns a structured project, execution, or schema error if the committed
     /// graph generation cannot be inspected.
     pub fn labels(&self) -> Result<Vec<String>, GfError> {
-        Ok(self.inspect_graph()?.labels())
+        Ok(self.inspect_nodes()?.labels())
     }
 
     /// Return all relationship type strings.
@@ -1320,7 +1320,7 @@ impl GraphForge {
     /// Returns a structured project, execution, or schema error if the committed
     /// graph generation cannot be inspected.
     pub fn relationship_types(&self) -> Result<Vec<String>, GfError> {
-        Ok(self.inspect_graph()?.relationship_types())
+        Ok(self.inspect_relationships()?.relationship_types())
     }
 
     /// Return the total node count for an empty label, or the exact count for a label.
@@ -1329,7 +1329,7 @@ impl GraphForge {
     /// Returns a structured project, execution, or schema error if the committed
     /// graph generation cannot be inspected.
     pub fn node_count(&self, label: &str) -> Result<u64, GfError> {
-        Ok(self.inspect_graph()?.node_count(label))
+        Ok(self.inspect_nodes()?.node_count(label))
     }
 
     /// Load and compile an ontology from `path` (YAML or JSON, dispatched by
