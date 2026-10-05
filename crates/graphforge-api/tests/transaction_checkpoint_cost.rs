@@ -114,6 +114,21 @@ fn transaction_checkpoint_work_is_once_per_transaction_and_tracks_workspace_size
     let large_many = measure(64, 4).0;
     let split_baseline = measure_split_transactions(8, 4);
 
+    for (label, work) in [
+        ("small_1", &small_one),
+        ("small_4", &small_many),
+        ("large_1", &large_one),
+        ("large_4", &large_many),
+        ("split_4", &split_baseline),
+    ] {
+        eprintln!(
+            "transaction checkpoint evidence {label}: bytes={} files={} flushes={}",
+            work.workspace_checkpoint_bytes,
+            work.workspace_checkpoint_files,
+            work.workspace_checkpoint_flushes
+        );
+    }
+
     for work in [&small_one, &small_many, &large_one, &large_many] {
         assert!(work.workspace_checkpoint_files > 0, "{work:?}");
         assert!(work.workspace_checkpoint_bytes > 0, "{work:?}");
@@ -164,5 +179,44 @@ fn transaction_checkpoint_work_is_once_per_transaction_and_tracks_workspace_size
     assert!(
         large_one.workspace_checkpoint_bytes > small_one.workspace_checkpoint_bytes,
         "workspace-size dimension was not observed: {small_one:?} {large_one:?}"
+    );
+}
+
+#[test]
+fn later_statement_failure_restores_prior_workspace_across_reopen() {
+    let _guard = IO_STATS_LOCK.lock().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("project");
+    let graph = GraphForge::new(path.to_str()).unwrap();
+    graph.execute("CREATE (:Retained {value: 7})").unwrap();
+
+    let transaction = graph.begin_transaction(context(0x1807_fa11)).unwrap();
+    transaction
+        .stage_cypher("CREATE (:Written {value: 9})", HashMap::new())
+        .unwrap();
+    transaction
+        .stage_cypher("THIS IS NOT CYPHER", HashMap::new())
+        .unwrap();
+    assert!(transaction.commit(&graph).is_err());
+    assert_eq!(count_nodes(&graph), 1);
+    drop(graph);
+
+    let reopened = GraphForge::new(path.to_str()).unwrap();
+    assert_eq!(count_nodes(&reopened), 1);
+    assert_eq!(
+        reopened
+            .execute("MATCH (n:Retained) RETURN n.value")
+            .unwrap()
+            .batches[0]
+            .num_rows(),
+        1
+    );
+    assert_eq!(
+        reopened
+            .execute("MATCH (n:Written) RETURN n")
+            .unwrap()
+            .batches[0]
+            .num_rows(),
+        0
     );
 }
