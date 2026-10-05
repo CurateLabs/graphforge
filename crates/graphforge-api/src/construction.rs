@@ -194,7 +194,15 @@ impl GraphForge {
                 self.install_property_generation(&current)?;
                 self.adjacency_provider_for_session().invalidate();
             } else {
-                crate::composite_publish::reconcile_workspace_to(self, &current)?;
+                // Keep this path available in lean feature sets as well: the
+                // reconciliation itself only depends on core graph authority.
+                crate::rematerialize_graph_workspace(&current, &self.dir())?;
+                *self
+                    .runtime_catalog
+                    .lock()
+                    .expect("runtime catalog poisoned") = crate::load_runtime_catalog(&self.dir())?;
+                self.install_property_generation(&current)?;
+                self.adjacency_provider_for_session().invalidate();
                 *self
                     .semantic_storage_bindings
                     .lock()
