@@ -472,7 +472,7 @@ fn validate_composite_references(ledgers: CompositeLedgers<'_>) -> Result<(), Gf
     for row in ledgers
         .reasoning
         .into_iter()
-        .flat_map(|value| value.records())
+        .flat_map(graphforge_knowledge::ReasoningLedger::records)
     {
         require(
             assertion_ids.contains(&row.assertion_uuid),

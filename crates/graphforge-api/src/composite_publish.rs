@@ -1587,7 +1587,7 @@ mod tests {
         assert!(
             merge_reasoning(&parent, &knowledge)
                 .unwrap()
-                .records
+                .records()
                 .is_empty()
         );
         assert!(
