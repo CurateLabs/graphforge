@@ -239,15 +239,33 @@ pub struct ExecutionStats {
     pub rows_produced: u64,
     /// Wall-clock time taken for execution, in milliseconds.
     pub execution_time_ms: u64,
+    /// Actual node-topology work performed while initializing a write context.
+    /// These counters are scoped to that phase; later staging and publication
+    /// work is accounted for by their own evidence.
+    pub write_initialization: WriteInitializationWork,
+}
+
+/// Deterministic work performed to initialize one write context.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WriteInitializationWork {
+    /// Node topology rows decoded to establish label presence.
+    pub node_rows_decoded: u64,
+    /// Authenticated node fragments opened to establish label presence.
+    pub node_fragments_read: u64,
+    /// Bytes read from the authenticated label-count summary.
+    pub summary_bytes_read: u64,
+    /// Rows and fragments read only to establish a missing summary once.
+    pub summary_establishment_rows: u64,
+    /// Node fragments opened only to establish a missing summary once.
+    pub summary_establishment_fragments: u64,
 }
 
 /// The openCypher write **side-effect ledger** for one statement (#601/#814):
 /// the counters a `Then the side effects should be:` table asserts against.
 ///
-/// `+labels`/`-labels` use label-*token* semantics (a label counts once per new
-/// token, not per node) and require a pre-write schema snapshot; they are not
-/// computed yet and remain `0` (the conformance harness treats any asserted
-/// non-zero label counter as a non-pass — conservative, no false pass).
+/// `+labels`/`-labels` use label-token semantics (a label counts once per new
+/// token, not per node). The pre-write token state comes from the authenticated
+/// generation-owned membership summary.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SideEffects {
     /// Nodes created (`+nodes`).

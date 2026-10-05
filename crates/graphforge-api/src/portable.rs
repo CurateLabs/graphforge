@@ -772,7 +772,11 @@ mod tests {
         assert_eq!(imported.source_generation_uuid, exported.generation_uuid);
         assert_eq!(imported.envelope_sha256, exported.envelope_sha256);
 
-        GraphForge::new(target.to_str()).expect("imported CURRENT must reopen");
+        let reopened = GraphForge::new(target.to_str()).expect("imported CURRENT must reopen");
+        let first_label = reopened.execute("CREATE (:ImportedLabel)").unwrap();
+        assert_eq!(first_label.side_effects.unwrap().labels_added, 1);
+        let existing_label = reopened.execute("CREATE (:ImportedLabel)").unwrap();
+        assert_eq!(existing_label.side_effects.unwrap().labels_added, 0);
     }
 
     #[test]

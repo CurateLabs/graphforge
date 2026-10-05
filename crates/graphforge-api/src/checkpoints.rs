@@ -653,6 +653,7 @@ fn execution(batch: RecordBatch) -> ExecutionResult {
         stats: graphforge_exec::ExecutionStats {
             rows_produced: rows,
             execution_time_ms: 0,
+            ..graphforge_exec::ExecutionStats::default()
         },
         side_effects: None,
         mutation_receipt: None,

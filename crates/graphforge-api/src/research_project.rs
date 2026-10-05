@@ -322,6 +322,7 @@ fn summaries_to_arrow(summaries: &[ResearchProjectSummary]) -> Result<ExecutionR
         stats: ExecutionStats {
             rows_produced: u64::try_from(row_count).unwrap_or(u64::MAX),
             execution_time_ms: 0,
+            ..ExecutionStats::default()
         },
         side_effects: None,
         mutation_receipt: None,

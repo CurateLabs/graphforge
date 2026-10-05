@@ -222,6 +222,7 @@ pub(super) fn run_delete_phase(
     for batch in &frontier.batches {
         collect_delete_targets(batch, &cols, &mut node_targets, &mut edge_targets)?;
     }
+    let frontier_node_labels = delete_variable_labels(frontier, vars)?;
     collect_delete_expr_targets(
         env,
         exprs,
@@ -245,25 +246,13 @@ pub(super) fn run_delete_phase(
         .collect();
     let committed_nodes: HashSet<[u8; 16]> =
         node_targets.difference(&pending_nodes).copied().collect();
-    let mut removed_labels = ctx.writer.pending_node_labels(&pending_nodes);
-    let mut committed_labels =
-        persisted_node_labels(&ctx.writer.topology_files()?, &committed_nodes)?;
-    for uuid in &committed_nodes {
-        let labels = committed_labels.entry(*uuid).or_default();
-        if let Some(additions) = ctx.label_additions.get(uuid) {
-            labels.extend(additions);
-        }
-        if let Some(removals) = ctx.label_removals.get(uuid) {
-            labels.retain(|label| !removals.contains(label));
-        }
-    }
-    removed_labels.extend(committed_labels.into_values().flatten());
-    if !removed_labels.is_empty() {
-        let surviving_labels =
-            surviving_node_labels(&ctx.writer.topology_files()?, &node_targets, ctx)?;
-        removed_labels.retain(|label| !surviving_labels.contains(label));
-    }
-    ctx.record_removed_label_tokens(removed_labels);
+    update_deleted_label_memberships(
+        env,
+        &pending_nodes,
+        &committed_nodes,
+        frontier_node_labels,
+        ctx,
+    )?;
     let mut incident: HashSet<[u8; 16]> = graphforge_storage::incident_edge_uuids_from_files(
         &ctx.writer.topology_files()?,
         &committed_nodes,
@@ -323,91 +312,103 @@ pub(super) fn run_delete_phase(
     Ok(())
 }
 
-fn persisted_node_labels(
-    files: &graphforge_storage::TopologyFiles,
-    targets: &HashSet<[u8; 16]>,
-) -> Result<HashMap<[u8; 16], HashSet<EntityTypeId>>, GfError> {
-    if targets.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let mut found = HashMap::new();
-    for batch in graphforge_storage::read_nodes_from_files(files)
-        .map_err(|error| GfError::Storage(error.to_string()))?
-    {
-        collect_node_label_batch(&batch, Some(targets), &mut found)?;
-    }
-    Ok(found)
-}
-
-fn surviving_node_labels(
-    files: &graphforge_storage::TopologyFiles,
-    deleting: &HashSet<[u8; 16]>,
-    ctx: &StatementWriteContext,
-) -> Result<HashSet<EntityTypeId>, GfError> {
-    let mut nodes = HashMap::new();
-    for batch in graphforge_storage::read_nodes_from_files(files)
-        .map_err(|error| GfError::Storage(error.to_string()))?
-    {
-        collect_node_label_batch(&batch, None, &mut nodes)?;
-    }
-    collect_node_label_batch(&ctx.writer.pending_nodes_batch()?, None, &mut nodes)?;
-    for uuid in deleting
-        .iter()
-        .chain(&ctx.pending_node_deletes)
-        .chain(&ctx.deleted)
-    {
-        nodes.remove(uuid);
-    }
-    for (uuid, additions) in &ctx.label_additions {
-        if let Some(labels) = nodes.get_mut(uuid) {
+fn update_deleted_label_memberships(
+    env: &PhaseEnv<'_>,
+    pending_nodes: &HashSet<[u8; 16]>,
+    committed_nodes: &HashSet<[u8; 16]>,
+    frontier_node_labels: HashMap<[u8; 16], HashSet<EntityTypeId>>,
+    ctx: &mut StatementWriteContext,
+) -> Result<(), GfError> {
+    let mut deleted_memberships = ctx.writer.pending_node_label_memberships(pending_nodes);
+    let frontier_label_uuids = frontier_node_labels.keys().copied().collect::<HashSet<_>>();
+    let missing_label_targets = committed_nodes
+        .difference(&frontier_label_uuids)
+        .copied()
+        .collect::<HashSet<_>>();
+    let mut committed_labels = frontier_node_labels
+        .into_iter()
+        .filter(|(uuid, _)| committed_nodes.contains(uuid))
+        .collect::<HashMap<_, _>>();
+    let files = ctx.writer.topology_files()?;
+    committed_labels.extend(graphforge_storage::read_node_labels_for_uuids(
+        env.dir,
+        &files,
+        &missing_label_targets.iter().copied().collect::<Vec<_>>(),
+    )?);
+    for uuid in committed_nodes {
+        let labels = committed_labels.entry(*uuid).or_default();
+        if let Some(additions) = ctx.label_additions.get(uuid) {
             labels.extend(additions);
         }
-    }
-    for (uuid, removals) in &ctx.label_removals {
-        if let Some(labels) = nodes.get_mut(uuid) {
+        if let Some(removals) = ctx.label_removals.get(uuid) {
             labels.retain(|label| !removals.contains(label));
         }
     }
-    Ok(nodes.into_values().flatten().collect())
-}
-
-fn collect_node_label_batch(
-    batch: &RecordBatch,
-    targets: Option<&HashSet<[u8; 16]>>,
-    found: &mut HashMap<[u8; 16], HashSet<EntityTypeId>>,
-) -> Result<(), GfError> {
-    let uuids = batch
-        .column_by_name("node_uuid")
-        .and_then(|array| {
-            array
-                .as_any()
-                .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
-        })
-        .ok_or_else(|| GfError::Storage("node topology missing node_uuid".into()))?;
-    let labels = batch
-        .column_by_name("type_ids")
-        .and_then(|array| array.as_any().downcast_ref::<ListArray>())
-        .ok_or_else(|| GfError::Storage("node topology missing type_ids".into()))?;
-    for row in 0..batch.num_rows() {
-        if uuids.is_null(row) || uuids.value_length() != 16 {
-            continue;
+    deleted_memberships.extend(committed_labels.into_values().flatten());
+    if !deleted_memberships.is_empty() {
+        let labels = deleted_memberships.iter().copied().collect::<HashSet<_>>();
+        for label in deleted_memberships {
+            ctx.adjust_label_memberships([label], false)?;
         }
-        let mut uuid = [0; 16];
-        uuid.copy_from_slice(uuids.value(row));
-        if targets.is_some_and(|targets| !targets.contains(&uuid)) {
-            continue;
-        }
-        let values = labels.value(row);
-        let values = values
-            .as_any()
-            .downcast_ref::<UInt32Array>()
-            .ok_or_else(|| GfError::Storage("node labels are not UInt32".into()))?;
-        found
-            .entry(uuid)
-            .or_default()
-            .extend(decode_memberships(values)?);
+        let last_use = labels
+            .into_iter()
+            .filter(|label| !ctx.label_membership_counts.contains_key(label))
+            .collect::<Vec<_>>();
+        ctx.record_removed_label_tokens(last_use);
     }
     Ok(())
+}
+
+fn delete_variable_labels(
+    frontier: &Frontier,
+    vars: &[VarId],
+) -> Result<HashMap<[u8; 16], HashSet<EntityTypeId>>, GfError> {
+    let mut found = HashMap::new();
+    for var in vars {
+        let qualifier = datafusion::common::TableReference::bare(format!("var_{}", var.0));
+        let Some(uuid_idx) = frontier
+            .df_schema
+            .index_of_column_by_name(Some(&qualifier), "node_uuid")
+        else {
+            continue;
+        };
+        let Some(labels_idx) = frontier
+            .df_schema
+            .index_of_column_by_name(Some(&qualifier), "type_ids")
+        else {
+            continue;
+        };
+        for batch in &frontier.batches {
+            let uuids = batch
+                .column(uuid_idx)
+                .as_any()
+                .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+                .ok_or_else(|| GfError::Execution("DELETE node UUID is not binary".into()))?;
+            let labels = batch
+                .column(labels_idx)
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .ok_or_else(|| GfError::Execution("DELETE node labels are not a list".into()))?;
+            for row in 0..batch.num_rows() {
+                if uuids.is_null(row) || labels.is_null(row) {
+                    continue;
+                }
+                let uuid = to_bytes(&fixed_binary_uuid(batch, uuid_idx, row)?);
+                let values = labels.value(row);
+                let values = values
+                    .as_any()
+                    .downcast_ref::<UInt32Array>()
+                    .ok_or_else(|| {
+                        GfError::Execution("DELETE node labels are not UInt32".into())
+                    })?;
+                found
+                    .entry(uuid)
+                    .or_insert_with(HashSet::new)
+                    .extend(decode_memberships(values)?);
+            }
+        }
+    }
+    Ok(found)
 }
 
 /// Mirror of the lowerer's `resolve_write_kind` against the frontier: node
@@ -1238,11 +1239,13 @@ pub(super) fn run_label_phase(
                     .as_any()
                     .downcast_ref::<UInt32Array>()
                     .ok_or_else(|| GfError::Execution("node type_ids are not UInt32".into()))?;
-                let changed = requested
+                let mut changed = requested
                     .iter()
                     .copied()
                     .filter(|label| values.values().contains(&label.encode()) != add)
                     .collect::<Vec<_>>();
+                changed.sort_unstable_by_key(|label| label.encode());
+                changed.dedup();
                 if changed.is_empty() {
                     continue;
                 }
@@ -1274,6 +1277,7 @@ pub(super) fn run_label_phase(
                     (removals.len() - before) as u64
                 };
                 if count > 0 {
+                    ctx.adjust_label_memberships(changed.iter().copied(), add)?;
                     if add {
                         ctx.record_label_tokens(changed.iter().copied());
                     } else {
