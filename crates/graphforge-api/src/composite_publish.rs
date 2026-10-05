@@ -724,7 +724,7 @@ fn build_validation_snapshot(
             .is_some()
     {
         let runs = crate::algorithm_runs::read_ledger(parent)?;
-        snapshot.algorithm_runs = runs.runs.iter().map(|row| row.run_uuid).collect();
+        snapshot.algorithm_runs = runs.runs().iter().map(|row| row.run_uuid).collect();
     }
     for mutation in &request.graph_mutations {
         match mutation {

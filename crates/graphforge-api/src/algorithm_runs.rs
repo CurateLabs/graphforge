@@ -157,7 +157,7 @@ impl GraphForge {
         let generation = self.generation_for_read()?;
         let ledger = read_ledger(&generation)?;
         let index = ledger
-            .runs
+            .runs()
             .iter()
             .position(|row| row.run_uuid == run_uuid)
             .ok_or_else(|| api_error(ApiErrorCode::NotFound, "algorithm run was not found"))?;
@@ -180,7 +180,7 @@ impl GraphForge {
         let batch = ledger.run_batch().map_err(knowledge_error)?;
         let wanted = request.algorithm.map(algorithm_id);
         let rows = ledger
-            .runs
+            .runs()
             .iter()
             .enumerate()
             .filter(|(_, row)| wanted.as_ref().is_none_or(|name| &row.algorithm == name))
@@ -215,7 +215,7 @@ impl GraphForge {
         }
         let batch = ledger.event_batch().map_err(knowledge_error)?;
         let rows = ledger
-            .events
+            .events()
             .iter()
             .enumerate()
             .filter(|(_, row)| row.run_uuid == run_uuid)
@@ -254,7 +254,7 @@ impl GraphForge {
         }
         let ledger = read_ledger(&parent)?;
         let pending = ledger
-            .runs
+            .runs()
             .iter()
             .filter(|run| ledger.terminal_event(run.run_uuid).is_none())
             .cloned()
@@ -294,10 +294,9 @@ impl GraphForge {
                 .merge(&run_provenance_ledger(provenance, run.run_uuid)?)
                 .map_err(provenance_error)?;
         }
-        let mut events = ledger.events.clone();
-        events.extend(staged_events);
-        let updated =
-            AlgorithmRunLedger::new(ledger.runs.clone(), events).map_err(knowledge_error)?;
+        let updated = ledger
+            .append_events(staged_events)
+            .map_err(knowledge_error)?;
         let provenance = crate::provenance::read_ledger(&parent)?
             .merge(&staged_provenance)
             .map_err(provenance_error)?;
@@ -444,9 +443,7 @@ fn publish_terminal(
         provenance.provenance_uuid,
     )
     .map_err(knowledge_error)?;
-    let mut events = ledger.events.clone();
-    events.push(event);
-    let updated = AlgorithmRunLedger::new(ledger.runs.clone(), events).map_err(knowledge_error)?;
+    let updated = ledger.append_events(vec![event]).map_err(knowledge_error)?;
     let merged_provenance = merge_run_provenance(&parent, provenance, run_uuid)?;
     publish(
         graph,
@@ -678,7 +675,7 @@ fn terminal_uuid(
 fn recovery_operation_uuid(ledger: &AlgorithmRunLedger) -> Uuid {
     let mut hasher = Sha256::new();
     hasher.update(b"graphforge-algorithm-run-recovery/1");
-    for event in &ledger.events {
+    for event in ledger.events() {
         if event.state == AlgorithmRunState::Interrupted {
             hasher.update(event.event_uuid.as_bytes());
         }
@@ -900,6 +897,17 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let (graph, descriptor) = recorded_fixture(&root);
         graph.set_clock_for_test(|| Ok(10));
+        graph
+            .invoke_recorded(RecordedAlgorithmRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(13)),
+                    actor_uuid: Some(uuid7(14)),
+                },
+                run_uuid: uuid7(15),
+                descriptor: descriptor.clone(),
+                cancellation: None,
+            })
+            .unwrap();
         let request = RecordedAlgorithmRequest {
             context: WriteContext {
                 operation_uuid: OperationId(uuid7(3)),
@@ -1052,64 +1060,84 @@ mod tests {
     }
 
     #[test]
-    fn reopen_reconciles_one_lone_start_exactly_once() {
+    fn reopen_reconciles_multiple_lone_starts_exactly_once() {
         let root = tempfile::tempdir().unwrap();
         let (graph, descriptor) = recorded_fixture(&root);
         let parent = graphforge_storage::resolve_project_generation(root.path()).unwrap();
-        let operation_uuid = uuid7(3);
-        let provenance =
-            ProvenanceEvent::new(operation_uuid, EventKind::RecordAlgorithmRun, None, 10).unwrap();
-        let run = AlgorithmRun::new(
-            uuid7(4),
-            algorithm_id(descriptor.algorithm()),
-            1,
-            descriptor.descriptor_version(),
-            descriptor.canonical_bytes().to_vec(),
-            *descriptor.projection_fingerprint(),
-            provenance.provenance_uuid,
-            10,
-        )
-        .unwrap();
-        let start = AlgorithmRunEvent::new(
-            operation_uuid,
-            uuid7(4),
-            AlgorithmRunState::Started,
-            None,
-            None,
-            10,
-            provenance.provenance_uuid,
-        )
-        .unwrap();
+        let mut runs = Vec::new();
+        let mut starts = Vec::new();
+        let mut provenance = ProvenanceLedger::default();
+        for (index, started_at) in [(4, 10), (5, 11)] {
+            let operation_uuid = uuid7(3 + index);
+            let run_uuid = uuid7(index);
+            let event = ProvenanceEvent::new(
+                operation_uuid,
+                EventKind::RecordAlgorithmRun,
+                None,
+                started_at,
+            )
+            .unwrap();
+            let run = AlgorithmRun::new(
+                run_uuid,
+                algorithm_id(descriptor.algorithm()),
+                1,
+                descriptor.descriptor_version(),
+                descriptor.canonical_bytes().to_vec(),
+                *descriptor.projection_fingerprint(),
+                event.provenance_uuid,
+                started_at,
+            )
+            .unwrap();
+            let start = AlgorithmRunEvent::new(
+                operation_uuid,
+                run_uuid,
+                AlgorithmRunState::Started,
+                None,
+                None,
+                started_at,
+                event.provenance_uuid,
+            )
+            .unwrap();
+            runs.push(run);
+            starts.push(start);
+            provenance = provenance
+                .merge(&merge_run_provenance(&parent, event, run_uuid).unwrap())
+                .unwrap();
+        }
         publish(
             &graph,
             &parent,
-            operation_uuid,
-            &AlgorithmRunLedger::new(vec![run], vec![start]).unwrap(),
-            &merge_run_provenance(&parent, provenance, uuid7(4)).unwrap(),
+            uuid7(9),
+            &AlgorithmRunLedger::new(runs, starts).unwrap(),
+            &provenance,
             b"start",
         )
         .unwrap();
         drop(graph);
 
         let reopened = GraphForge::new(root.path().to_str()).unwrap();
-        assert_eq!(
-            reopened
-                .algorithm_run_events(uuid7(4), PageRequest::default())
-                .unwrap()
-                .stats
-                .rows_produced,
-            2
-        );
+        for run_uuid in [uuid7(4), uuid7(5)] {
+            assert_eq!(
+                reopened
+                    .algorithm_run_events(run_uuid, PageRequest::default())
+                    .unwrap()
+                    .stats
+                    .rows_produced,
+                2
+            );
+        }
         drop(reopened);
         let reopened_again = GraphForge::new(root.path().to_str()).unwrap();
-        assert_eq!(
-            reopened_again
-                .algorithm_run_events(uuid7(4), PageRequest::default())
-                .unwrap()
-                .stats
-                .rows_produced,
-            2
-        );
+        for run_uuid in [uuid7(4), uuid7(5)] {
+            assert_eq!(
+                reopened_again
+                    .algorithm_run_events(run_uuid, PageRequest::default())
+                    .unwrap()
+                    .stats
+                    .rows_produced,
+                2
+            );
+        }
     }
 
     #[test]

@@ -24,6 +24,12 @@ execution.
   validation. This is a pre-v1 Rust source-compatibility change; callers that
   used the public vector should migrate to these accessors. The Python and Node
   API contracts do not change.
+- Rust `AlgorithmRunLedger` values keep validated runs and lifecycle events
+  private and expose them through `runs()`, `events()`, `into_runs()`,
+  `into_events()`, and `into_parts()`. This is a pre-v1 Rust source-compatibility
+  change for callers that accessed or constructed the public vectors; migrate
+  reads to the borrowed accessors and ownership transfers to the consuming
+  accessors. The Python and Node API contracts do not change.
 - `graphforge-storage` receives opaque participants and owns generation publication.
 - Graph reads, openCypher reads, and analyst-verb/find compute never open provenance or
   knowledge participants.

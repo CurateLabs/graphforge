@@ -564,10 +564,10 @@ fn validate_composite_references(ledgers: CompositeLedgers<'_>) -> Result<(), Gf
         provenance(row.provenance_uuid)?;
     }
     if let Some(ledger) = ledgers.algorithm_runs {
-        for row in &ledger.runs {
+        for row in ledger.runs() {
             provenance(row.provenance_uuid)?;
         }
-        for row in &ledger.events {
+        for row in ledger.events() {
             provenance(row.provenance_uuid)?;
         }
     }

@@ -2923,27 +2923,48 @@ mod tests {
         let merged = initial.merge(&staged).unwrap();
         assert_eq!(merged.terminal_event(run.run_uuid), Some(&completed));
 
-        let conflicting_run = AlgorithmRun {
-            algorithm: "hits".into(),
-            ..run.clone()
-        };
-        let conflict = AlgorithmRunLedger {
-            runs: vec![conflicting_run],
-            events: vec![],
-        };
+        let conflicting_run = AlgorithmRun::new(
+            run.run_uuid,
+            "hits".into(),
+            run.algorithm_version,
+            run.descriptor_version,
+            run.descriptor.clone(),
+            run.projection_fingerprint,
+            run.provenance_uuid,
+            run.started_at_micros,
+        )
+        .unwrap();
+        let conflicting_start = AlgorithmRunEvent::new(
+            uuid7(45),
+            conflicting_run.run_uuid,
+            AlgorithmRunState::Started,
+            None,
+            None,
+            conflicting_run.started_at_micros,
+            conflicting_run.provenance_uuid,
+        )
+        .unwrap();
+        let conflict =
+            AlgorithmRunLedger::new(vec![conflicting_run], vec![conflicting_start]).unwrap();
         assert!(matches!(
             initial.merge(&conflict),
             Err(KnowledgeError::Conflict("run_uuid"))
         ));
-        let conflicting_event = AlgorithmRunEvent {
-            error_code: Some("GF_EXECUTION".into()),
-            state: AlgorithmRunState::Failed,
-            ..completed
-        };
-        let conflict = AlgorithmRunLedger {
-            runs: vec![],
-            events: vec![conflicting_event],
-        };
+        let conflicting_event = AlgorithmRunEvent::new(
+            completed.event_uuid,
+            completed.run_uuid,
+            AlgorithmRunState::Failed,
+            None,
+            Some("GF_EXECUTION".into()),
+            completed.recorded_at_micros,
+            completed.provenance_uuid,
+        )
+        .unwrap();
+        let conflict = AlgorithmRunLedger::new(
+            vec![run],
+            vec![initial.events()[0].clone(), conflicting_event],
+        )
+        .unwrap();
         assert!(matches!(
             merged.merge(&conflict),
             Err(KnowledgeError::Conflict("event_uuid"))

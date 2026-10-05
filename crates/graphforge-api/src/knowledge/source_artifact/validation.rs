@@ -96,7 +96,7 @@ fn subject_membership(
             .filter(|id| requested.contains(id))
             .collect(),
         DerivationSubjectKind::AlgorithmRun => read_algorithm_run_ledger(parent)?
-            .runs
+            .into_runs()
             .into_iter()
             .map(|row| row.run_uuid)
             .filter(|id| requested.contains(id))

@@ -86,7 +86,7 @@ pub(super) fn create(
     knowledge::validate_graph_refs(owner, &request.graph_refs)?;
     if let Some(run) = request.run_uuid
         && !crate::algorithm_runs::read_ledger(&parent)?
-            .runs
+            .runs()
             .iter()
             .any(|row| row.run_uuid == run)
     {
