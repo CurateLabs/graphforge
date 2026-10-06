@@ -1115,8 +1115,17 @@ mod determinism {
             .unwrap()
             .remove("max_node_index_bytes")
             .unwrap();
-        let legacy: GraphConstructionBudgets = serde_json::from_value(recorded).unwrap();
+        let legacy: GraphConstructionBudgets = serde_json::from_value(recorded.clone()).unwrap();
         assert_eq!(legacy.max_node_index_bytes, 0);
+        // Finish-stage controls embed the budgets and chain by re-serializing
+        // them, so a legacy record must re-serialize byte for byte.
+        assert_eq!(serde_json::to_value(legacy).unwrap(), recorded);
+        assert!(
+            serde_json::to_value(GraphConstructionBudgets::default())
+                .unwrap()
+                .get("max_node_index_bytes")
+                .is_some()
+        );
 
         let nodes = node_ids(512);
         let edges = edge_ids(512);

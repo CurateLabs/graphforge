@@ -517,8 +517,10 @@ pub struct GraphConstructionBudgets {
     /// initial build within it skips the endpoint family's routing, sorting
     /// and merge join; an append, or a build over it, keeps them. Zero keeps
     /// them always. A checkpoint recorded before this field existed has none,
-    /// reads as zero, and resumes on the endpoint family.
-    #[serde(default)]
+    /// reads as zero, and resumes on the endpoint family. Zero is not
+    /// serialized, so finish-stage controls that embed these budgets re-hash
+    /// to the same chain digest whether an older or this binary wrote them.
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub max_node_index_bytes: u64,
 }
 
@@ -542,6 +544,14 @@ impl Default for GraphConstructionBudgets {
             max_node_index_bytes: DEFAULT_MAX_NODE_INDEX_BYTES,
         }
     }
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "Serde skip_serializing_if requires a reference"
+)]
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 /// Default node-index bound: 1 GiB, 64Mi new nodes, which covers the
