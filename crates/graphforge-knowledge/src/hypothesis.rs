@@ -2195,4 +2195,123 @@ mod tests {
             })
         ));
     }
+
+    #[test]
+    fn selected_removal_requires_a_paired_selection_for_the_same_group() {
+        let primary = group();
+        let secondary =
+            HypothesisGroup::new(uuid7(3), "cause.secondary".into(), uuid7(4), 1).unwrap();
+        let added = member(10, 20, 30, HypothesisMembershipAction::Added, 2);
+        let selected = selection(11, 21, Some(30), 3);
+        let removed = member(12, 22, 30, HypothesisMembershipAction::Removed, 4);
+        let other_group_clear = HypothesisSelectionEvent::new(
+            uuid7(13),
+            uuid7(22),
+            secondary.group_uuid,
+            None,
+            uuid7(53),
+            uuid7(93),
+            4,
+        )
+        .unwrap();
+
+        let base = HypothesisLedger::new(
+            vec![primary.clone(), secondary.clone()],
+            vec![added.clone()],
+            vec![selected],
+        )
+        .unwrap();
+        let staged = HypothesisLedger::new(
+            vec![primary, secondary],
+            vec![added, removed],
+            vec![other_group_clear],
+        )
+        .unwrap();
+
+        assert!(matches!(
+            base.merge(&staged),
+            Err(KnowledgeError::Invalid {
+                field: "hypothesis_membership.action",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn same_time_operations_follow_first_event_uuid_before_operation_uuid() {
+        let base_add = member(10, 90, 30, HypothesisMembershipAction::Added, 2);
+        let staged_history = vec![
+            member(5, 70, 30, HypothesisMembershipAction::Added, 1),
+            member(50, 20, 30, HypothesisMembershipAction::Removed, 2),
+        ];
+        let base = HypothesisLedger::new(vec![group()], vec![base_add], vec![]).unwrap();
+        let staged = HypothesisLedger::new(vec![group()], staged_history, vec![]).unwrap();
+
+        assert!(matches!(
+            base.merge(&staged),
+            Err(KnowledgeError::Invalid {
+                field: "hypothesis_membership.action",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn merge_orders_equal_time_groups_by_uuid() {
+        let existing =
+            HypothesisGroup::new(uuid7(20), "cause.existing".into(), uuid7(21), 10).unwrap();
+        let staged_group =
+            HypothesisGroup::new(uuid7(10), "cause.staged".into(), uuid7(11), 10).unwrap();
+        let base = HypothesisLedger::new(vec![existing], vec![], vec![]).unwrap();
+        let staged = HypothesisLedger::new(vec![staged_group], vec![], vec![]).unwrap();
+
+        let merged = base.merge(&staged).unwrap();
+
+        assert_eq!(
+            merged
+                .groups()
+                .iter()
+                .map(|row| row.group_uuid)
+                .collect::<Vec<_>>(),
+            vec![uuid7(10), uuid7(20)]
+        );
+    }
+
+    #[test]
+    fn merge_orders_equal_time_membership_events_by_uuid() {
+        let existing = member(19, 90, 30, HypothesisMembershipAction::Added, 2);
+        let staged_event = member(13, 90, 31, HypothesisMembershipAction::Added, 2);
+        let base = HypothesisLedger::new(vec![group()], vec![existing], vec![]).unwrap();
+        let staged = HypothesisLedger::new(vec![group()], vec![staged_event], vec![]).unwrap();
+
+        let merged = base.merge(&staged).unwrap();
+
+        assert_eq!(
+            merged
+                .membership_events()
+                .iter()
+                .map(|row| row.membership_event_uuid)
+                .collect::<Vec<_>>(),
+            vec![uuid7(13), uuid7(19)]
+        );
+    }
+
+    #[test]
+    fn merge_orders_equal_time_selection_events_by_uuid() {
+        let existing = selection(19, 90, None, 2);
+        let staged_event = selection(13, 90, None, 2);
+        let base = HypothesisLedger::new(vec![group()], vec![], vec![existing]).unwrap();
+        let staged = HypothesisLedger::new(vec![group()], vec![], vec![staged_event]).unwrap();
+
+        let merged = base.merge(&staged).unwrap();
+
+        assert_eq!(
+            merged
+                .selection_events()
+                .iter()
+                .map(|row| row.selection_event_uuid)
+                .collect::<Vec<_>>(),
+            vec![uuid7(13), uuid7(19)]
+        );
+    }
 }

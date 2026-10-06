@@ -26,6 +26,7 @@ from jsonschema import Draft202012Validator
 
 from graphforge_bench.native_rung import read_native_rung
 from graphforge_bench.progressive_qualification import (
+    UNBOUNDED_SCALES,
     QualificationError,
     load_profiles,
     project,
@@ -43,6 +44,7 @@ from graphforge_bench.progressive_run import (
     repository_commit,
     resolve_executables,
 )
+from graphforge_bench.quiet_host import HostNotQuietError, wait_for_quiet_host
 
 PLAN_SCHEMA = "graphforge-progressive-host-run-plan/1"
 RESULT_SCHEMA = "graphforge-progressive-host-run-result/1"
@@ -51,6 +53,7 @@ LADDER = (18, 19, 20, 22, 24, 25, 26)
 LOCAL_SCALES = (18, 19)
 PROVIDER_SCALES = (20, 22, 24, 25, 26)
 DEFAULT_RESERVE_BYTES = 75 * 1024**3
+DEFAULT_QUIET_HOST_WAIT_SECONDS = 3_600
 SYSTEM_BENCHEXEC_PYTHON = Path("/usr/bin/python3")
 
 
@@ -321,16 +324,23 @@ class RungWall:
     before BenchExec reports TIMEOUT. When a prior accepted measurement for the
     same scale is available, the rung is staged with that measurement plus a
     margin instead, capped at the envelope. Without a reference the envelope
-    applies unchanged.
+    applies unchanged. S24 and above are staged with no wall limit at all so
+    that they run to completion and are measured.
     """
 
-    wall_seconds: int
+    wall_seconds: int | None
     reference_wall_seconds: int | None
-    margin: float
+    margin: float | None
 
     @classmethod
-    def envelope(cls) -> RungWall:
-        return cls(MAXIMUM_WALL_SECONDS, None, DEFAULT_WALL_MARGIN)
+    def unbounded(cls) -> RungWall:
+        return cls(None, None, None)
+
+    @classmethod
+    def for_scale(cls, scale: int, reference_wall_seconds: int | None, margin: float) -> RungWall:
+        if scale in UNBOUNDED_SCALES:
+            return cls.unbounded()
+        return cls.from_reference(reference_wall_seconds, margin)
 
     @classmethod
     def from_reference(cls, reference_wall_seconds: int | None, margin: float) -> RungWall:
@@ -351,7 +361,7 @@ class RungWall:
 
     def policy(self) -> dict[str, Any]:
         return {
-            "maximum_wall_seconds": MAXIMUM_WALL_SECONDS,
+            "maximum_wall_seconds": None if self.wall_seconds is None else MAXIMUM_WALL_SECONDS,
             "reference_wall_seconds": self.reference_wall_seconds,
             "margin": self.margin,
         }
@@ -389,9 +399,10 @@ def build_plan(
     capacity: Mapping[str, Any] | None,
     projection: tuple[dict[str, Any], str] | None = None,
     wall: RungWall | None = None,
+    launch_host: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     require_order(root, output_dir, scale)
-    wall = wall or RungWall.envelope()
+    wall = wall or RungWall.for_scale(scale, None, DEFAULT_WALL_MARGIN)
     profile_path = _profile_path(root, scale)
     profile = _json(profile_path)
     _validate(root, "progressive-qualification-profile.json", profile)
@@ -446,6 +457,8 @@ def build_plan(
     }
     if capacity is not None:
         plan["work_root_capacity"] = dict(capacity)
+    if launch_host is not None:
+        plan["launch_host"] = dict(launch_host)
     _validate(root, "progressive-host-run-plan.json", plan)
     return plan
 
@@ -477,7 +490,7 @@ def _safe_stage_host(
     *,
     scale: int,
     work_root: Path,
-    wall_seconds: int = MAXIMUM_WALL_SECONDS,
+    wall_seconds: int | None = MAXIMUM_WALL_SECONDS,
 ) -> Path:
     stage = Path(tempfile.mkdtemp(prefix="gf-host-progressive-", dir=parent))
     profile_text = _rewrite_profile_for_work_root(
@@ -615,9 +628,13 @@ def _certify_phase_failure(stage: Path) -> PhaseFailure | None:
     return failure
 
 
-def _plan_wall_seconds(plan: Mapping[str, Any]) -> int:
+def _plan_wall_seconds(plan: Mapping[str, Any]) -> int | None:
     limits = plan.get("limits")
-    value = limits.get("wall_seconds") if isinstance(limits, Mapping) else None
+    if not isinstance(limits, Mapping) or "wall_seconds" not in limits:
+        raise HostRunError("run plan wall_seconds is malformed")
+    value = limits["wall_seconds"]
+    if value is None:
+        return None
     if isinstance(value, bool) or not isinstance(value, int):
         raise HostRunError("run plan wall_seconds is malformed")
     if value <= 0 or value > MAXIMUM_WALL_SECONDS:
@@ -785,6 +802,16 @@ def run(
     publish_json_no_clobber(result_path, passed)
 
 
+def _require_quiet_host(wait_seconds: int) -> dict[str, Any]:
+    try:
+        return wait_for_quiet_host(wait_seconds)
+    except HostNotQuietError as error:
+        raise HostRunError(
+            "host_not_quiet: busy processes "
+            f"{error.busy_processes or 'none'}, peak busy cores {error.busy_cores}"
+        ) from error
+
+
 def execute_ladder(
     *,
     root: Path,
@@ -798,6 +825,7 @@ def execute_ladder(
     rung: int | None = None,
     reference_dir: Path | None = None,
     wall_margin: float = DEFAULT_WALL_MARGIN,
+    quiet_host_wait_seconds: int = DEFAULT_QUIET_HOST_WAIT_SECONDS,
 ) -> list[dict[str, Any]]:
     """Advance the existing ladder once, stopping before any successor on failure."""
     completed = completed_prefix(root, output_dir)
@@ -856,6 +884,8 @@ def execute_ladder(
                 for name in ("plan", "projection", "result", "rung", "graphforge", "benchexec")
             ):
                 raise HostRunError("existing_attempt_requires_inspection")
+            # A dry run launches nothing, so it neither waits nor records a window.
+            launch_host = None if dry_run else _require_quiet_host(quiet_host_wait_seconds)
             capacity = measure_host_capacity(work_root, reserved_headroom_bytes)
             projection = (
                 _admit_projection(root, output_dir, scale, capacity) if scale >= 20 else None
@@ -868,9 +898,10 @@ def execute_ladder(
                 executables=executables,
                 capacity=capacity,
                 projection=projection,
-                wall=RungWall.from_reference(
-                    reference_wall_seconds(reference_dir, scale), wall_margin
+                wall=RungWall.for_scale(
+                    scale, reference_wall_seconds(reference_dir, scale), wall_margin
                 ),
+                launch_host=launch_host,
             )
             if shared_identity is not None and "producer_sha256" not in shared_identity:
                 plan["identities"].pop("producer_sha256", None)
@@ -942,6 +973,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=DEFAULT_WALL_MARGIN,
         help="fraction above the reference wall a rung may take before BenchExec stops it",
     )
+    parser.add_argument(
+        "--quiet-host-wait-seconds",
+        type=int,
+        default=DEFAULT_QUIET_HOST_WAIT_SECONDS,
+        help=(
+            "how long each rung launch waits for a 60 s quiet window before refusing "
+            "with host_not_quiet; 0 checks one window only"
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     root = Path(__file__).resolve().parents[2]
@@ -981,6 +1021,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             dry_run=args.dry_run,
             reference_dir=args.reference_evidence_dir,
             wall_margin=args.wall_margin,
+            quiet_host_wait_seconds=args.quiet_host_wait_seconds,
         )
         if args.dry_run:
             print(
@@ -999,7 +1040,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             failed["rung"] = error.rung
             if error.projection is not None:
                 failed["failed_checks"] = [
-                    key for key, passed in error.projection["checks"].items() if not passed
+                    key
+                    for key in error.projection["enforced_checks"]
+                    if not error.projection["checks"][key]
                 ]
                 failed["projection"] = error.projection
         print(json.dumps(failed, sort_keys=True))

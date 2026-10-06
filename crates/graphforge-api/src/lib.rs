@@ -158,6 +158,8 @@ mod permanent_parquet_test_support;
 mod pinned_workspace_tests;
 #[cfg(test)]
 mod property_mutation_inventory_tests;
+#[cfg(all(test, feature = "knowledge", feature = "provenance"))]
+mod public_facade_workflow_matrix_tests;
 #[cfg(test)]
 mod workspace_flip_policy_tests;
 #[cfg(feature = "research")]

@@ -22,6 +22,7 @@ from tests.host_run_fixture import ROOT, executables, write_host_bundle
 # test_progressive_host_run running first (#1679).
 from tests.test_progressive_host_run import (  # noqa: F401
     COMMIT,
+    QUIET_WINDOW,
     WORK_PARENT,
     setUpModule,
     sha256,
@@ -135,14 +136,82 @@ class NativeLadderControllerTests(unittest.TestCase):
             self.assertEqual(len(completed_prefix(ROOT, output)), 3)
             self.assertFalse((work / "workspace/s20").exists())
             projection = json.loads((output / "s20-projection.json").read_text())
-            self.assertEqual(
-                projection["native_capacity"]["rate_source"], "completed_adjacent_rungs"
-            )
+            self.assertEqual(projection["native_capacity"]["reserved_headroom_bytes"], 1)
+            self.assertEqual(plans[0]["launch_host"], QUIET_WINDOW)
             self.assertNotIn("image_digest", plans[-1]["identities"])
             self.assertEqual(
                 plans[-1]["identities"]["admitted_projection_sha256"],
                 sha256(output / "s20-projection.json"),
             )
+
+    def test_upper_rung_launches_with_no_wall_limit_and_records_its_quiet_window(self) -> None:
+        with tempfile.TemporaryDirectory(dir=WORK_PARENT) as temporary:
+            work = Path(temporary)
+            output = work / "evidence"
+            for scale in (18, 19, 20, 22):
+                write_host_bundle(output, scale)
+            staged = []
+
+            def execute(**kwargs):
+                staged.append(kwargs["plan"])
+                write_host_bundle(output, kwargs["scale"], kwargs["plan"])
+
+            with (
+                patch("graphforge_bench.progressive_host_run.version", return_value="3.35"),
+                patch("graphforge_bench.progressive_host_run.run", side_effect=execute),
+            ):
+                execute_ladder(
+                    root=ROOT,
+                    output_dir=output,
+                    work_root=work,
+                    maximum_scale=24,
+                    executables=executables(work),
+                    commit=COMMIT,
+                    reserved_headroom_bytes=1,
+                    reference_dir=output,
+                )
+            (plan,) = staged
+            self.assertEqual(plan["rung"], "S24")
+            self.assertIsNone(plan["limits"]["wall_seconds"])
+            self.assertEqual(
+                plan["wall_policy"],
+                {"maximum_wall_seconds": None, "reference_wall_seconds": None, "margin": None},
+            )
+            self.assertEqual(plan["launch_host"], QUIET_WINDOW)
+            projection = json.loads((output / "s24-projection.json").read_text())
+            self.assertNotIn("time_headroom", projection["enforced_checks"])
+
+    def test_contended_host_refuses_launch_before_writing_any_rung_file(self) -> None:
+        from graphforge_bench.quiet_host import HostNotQuietError
+
+        with tempfile.TemporaryDirectory(dir=WORK_PARENT) as temporary:
+            work = Path(temporary)
+            output = work / "evidence"
+            write_host_bundle(output, 18)
+            before = sorted(path.name for path in output.iterdir())
+            with (
+                patch("graphforge_bench.progressive_host_run.version", return_value="3.35"),
+                patch(
+                    "graphforge_bench.progressive_host_run.wait_for_quiet_host",
+                    side_effect=HostNotQuietError(["cargo"], 3.5),
+                ) as wait,
+                patch("graphforge_bench.progressive_host_run.run") as run,
+                self.assertRaisesRegex(HostRunError, r"host_not_quiet.*cargo") as raised,
+            ):
+                execute_ladder(
+                    root=ROOT,
+                    output_dir=output,
+                    work_root=work,
+                    maximum_scale=19,
+                    executables=executables(work),
+                    commit=COMMIT,
+                    reserved_headroom_bytes=1,
+                    quiet_host_wait_seconds=120,
+                )
+            wait.assert_called_once_with(120)
+            run.assert_not_called()
+            self.assertEqual(raised.exception.rung, "S19")
+            self.assertEqual(sorted(path.name for path in output.iterdir()), before)
 
     def test_s20_preview_never_publishes_projection(self) -> None:
         with tempfile.TemporaryDirectory(dir=WORK_PARENT) as temporary:
@@ -151,7 +220,10 @@ class NativeLadderControllerTests(unittest.TestCase):
             write_host_bundle(output, 18)
             write_host_bundle(output, 19)
             before = {p.name: p.read_bytes() for p in output.iterdir()}
-            with patch("graphforge_bench.progressive_host_run.version", return_value="3.35"):
+            with (
+                patch("graphforge_bench.progressive_host_run.version", return_value="3.35"),
+                patch("graphforge_bench.progressive_host_run.wait_for_quiet_host") as wait,
+            ):
                 plans = execute_ladder(
                     root=ROOT,
                     output_dir=output,
@@ -163,6 +235,8 @@ class NativeLadderControllerTests(unittest.TestCase):
                     dry_run=True,
                 )
             self.assertEqual(plans[0]["rung"], "S20")
+            self.assertNotIn("launch_host", plans[0])
+            wait.assert_not_called()
             self.assertEqual(before, {p.name: p.read_bytes() for p in output.iterdir()})
 
     def test_actual_work_root_free_space_and_reserve_refuse(self) -> None:
@@ -231,10 +305,8 @@ class NativeLadderControllerTests(unittest.TestCase):
         accepted = project(profile, [low, high], native_capacity=capacity)
         self.assertEqual(accepted["decision"], "admitted")
         self.assertEqual(accepted["limits"]["volume_bytes"], 1000)
-        self.assertIsNone(accepted["provider_capacity"])
         self.assertEqual(
-            accepted["native_capacity"]["observed_rates"]["physical_read_bytes_per_second"],
-            {"work_units": 600, "wall_seconds": 10},
+            accepted["native_capacity"], {"free_bytes": 1000, "reserved_headroom_bytes": 399}
         )
         rejected = project(
             profile, [low, high], native_capacity=capacity | {"reserved_headroom_bytes": 401}
@@ -302,41 +374,6 @@ class NativeLadderControllerTests(unittest.TestCase):
             retained.mkdir(parents=True)
             with self.assertRaisesRegex(StorageQualificationError, "not been reclaimed"):
                 build_native(paths, work_root=work, reserved_headroom_bytes=1)
-
-    def test_zero_cached_reads_and_fractional_rates_do_not_invent_capacity_refusals(self) -> None:
-        from graphforge_bench.progressive_qualification import load_profiles, project
-
-        from tests.test_progressive_host_run import passed_rung
-
-        profile = next(p for p in load_profiles() if p.scale == 20)
-        capacity = {"free_bytes": 10**12, "reserved_headroom_bytes": 1}
-        for low_reads, high_reads, low_time, high_time in (
-            (16384, 0, 195, 599),
-            (0, 16384, 195, 599),
-            (0, 0, 195, 599),
-            (1, 2, 3, 3),
-        ):
-            with self.subTest(observations=(low_reads, high_reads, low_time, high_time)):
-                low, high = passed_rung(18), passed_rung(19)
-                for rung, reads, seconds in (
-                    (low, low_reads, low_time),
-                    (high, high_reads, high_time),
-                ):
-                    rung["metrics"].update(physical_read_bytes=reads, wall_seconds=seconds)
-                evidence = project(profile, [low, high], native_capacity=capacity)
-                self.assertTrue(evidence["checks"]["io_reader_publication_headroom"])
-                observed = evidence["native_capacity"]["observed_rates"][
-                    "physical_read_bytes_per_second"
-                ]
-                if low_reads == high_reads == 0:
-                    self.assertIsNone(observed)
-                elif low_reads == 1:
-                    self.assertEqual(observed, {"work_units": 1, "wall_seconds": 3})
-        low, high = passed_rung(18), passed_rung(19)
-        low["metrics"].update(physical_read_bytes=1, wall_seconds=10000)
-        high["metrics"].update(physical_read_bytes=2, wall_seconds=10000)
-        insufficient = project(profile, [low, high], native_capacity=capacity)
-        self.assertFalse(insufficient["checks"]["io_reader_publication_headroom"])
 
     def test_resume_reclaims_accepted_final_rung_without_rerunning_or_changing_identity(
         self,

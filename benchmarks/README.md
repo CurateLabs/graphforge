@@ -481,14 +481,29 @@ make -C benchmarks progressive-host-ladder-run \
   RESERVED_HEADROOM_BYTES=80530636800
 ```
 
-The 4 h BenchExec envelope is the certification ceiling, not a stop condition.
-Pass `REFERENCE_EVIDENCE_DIR` (a prior ladder's evidence directory) to stage
+BenchExec stops a rung on elapsed wall time only. The definition sets no CPU
+time limit, so a rung that uses several cores is never killed for its CPU
+seconds; process-tree CPU time is still measured and reported. S24, S25 and S26
+are staged with no wall limit either, and run until they finish or fail;
+their plans record `limits.wall_seconds: null`.
+
+For S18–S22 the 4 h wall envelope is the certification ceiling, not a stop
+condition. Pass `REFERENCE_EVIDENCE_DIR` (a prior ladder's evidence directory) to stage
 each rung with that rung's accepted `s<scale>-rung.json` wall plus
 `WALL_MARGIN` (default `0.10`), capped at the envelope. A rung that regresses
 from minutes to hours then stops as `rung_wall_exceeded` within the margin
 instead of holding the host for four hours; rungs without a reference keep the
 envelope. The staged wall and its reference are recorded in the rung plan's
 `limits.wall_seconds` and `wall_policy`.
+
+Each rung launch first waits for a 60 s quiet window on the host: no `cargo`,
+`rustc`, `cargo-nextest`, `bazel`, `maturin`, `gf`, BenchExec or benchmark
+executable running, at most 0.5 busy cores on average and no 5 s sample above 2.
+The window and how long the launch waited are recorded in the plan's
+`launch_host`. A launch that finds no quiet window within
+`QUIET_HOST_WAIT_SECONDS` (default 3600) stops as `host_not_quiet` before
+writing any rung file, and the ladder resumes from its passed prefix when rerun.
+A dry run neither waits nor records a window.
 
 ```bash
 make -C benchmarks progressive-host-ladder-run \
@@ -613,10 +628,14 @@ reader calls, and publication work as independent dimensions.
 The provider ceiling is four hours, 4 GiB RSS, and 500 GiB storage. Admission
 reserves 20% time and RSS headroom and 15% storage headroom (425 GiB usable),
 which covers runtime variance and filesystem/package transients without
-turning the M5 ceiling into a sizing target. Adjacent RSS growth above 10% is
-an architectural refusal signal: GraphForge is expected to plateau in memory
-while storage and I/O grow. These are engineering qualification claims only,
-never official Graph500 submission claims.
+turning the M5 ceiling into a sizing target. S20 and S22 are refused when the
+projected time or RSS exceeds that headroom. S24, S25 and S26 run to completion:
+their time and RSS projections and checks are recorded, and only storage
+headroom can refuse them. The evidence names the checks that decided admission
+in `enforced_checks`. Logical and physical I/O, reader calls and publication
+work are projected and recorded; none of them gates admission. These are
+engineering qualification claims only, never official Graph500 submission
+claims.
 
 The ReFrame cases are manual execution entry points and are deliberately
 excluded from normal CI and `smoke`; list them with:
@@ -625,7 +644,7 @@ excluded from normal CI and `smoke`; list them with:
 make -C benchmarks progressive-qualification-list
 ```
 
-Actual Linux resource execution remains under the versioned 4 GiB/four-hour
+Actual Linux resource execution remains under the versioned four-hour wall
 BenchExec definition and public certification runner. Provider cases are not
 valid on the local ReFrame system. Provider provisioning is a later, separate
 operation; listing these profiles launches nothing.
@@ -655,8 +674,7 @@ policy consumes them as the adjacent S20 sources with one sanitized command:
 
 ```bash
 make -C benchmarks progressive-qualification-project-s20 \
-  OUTPUT_DIR=/admitted-volume/graphforge-evidence \
-  PROVIDER_CAPACITY=/sanitized/provider-capacity.json
+  OUTPUT_DIR=/admitted-volume/graphforge-evidence
 ```
 
 The sequential provider ladder has a separate no-spend control-plane planner.
@@ -669,8 +687,7 @@ make -C benchmarks progressive-provider-plan \
   COMMIT=$(git rev-parse HEAD) MAXIMUM_SCALE=26 \
   OUTPUT_DIR=/admitted-volume/graphforge-evidence \
   PLAN_OUT=/admitted-volume/graphforge-evidence/provider-plan.json \
-  IMAGE_DIGEST=registry.fly.io/graphforge-bench@sha256:<64-hex-digest> \
-  PROVIDER_CAPACITY=/sanitized/provider-capacity.json
+  IMAGE_DIGEST=registry.fly.io/graphforge-bench@sha256:<64-hex-digest>
 ```
 
 An admitted S20--S26 plan can be consumed by the offline provider runner inside

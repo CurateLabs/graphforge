@@ -19,7 +19,7 @@ from graphforge_bench.progressive_provider_attempt import CANONICAL_RUNGS
 from graphforge_bench.progressive_qualification import load_profiles, project
 from graphforge_bench.progressive_run import assemble_rung_evidence
 
-from tests.test_progressive_host_run import host_capacity, host_result
+from tests.test_progressive_host_run import host_result
 from tests.test_progressive_run import authoritative_receipts, benchexec, graphforge
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,10 +38,8 @@ def write_native_bundle(work: Path, scales: tuple[int, ...] = CANONICAL_RUNGS) -
     for i, scale in enumerate(scales):
         identities = host_result(scale)["identities"]
         if scale >= 20:
-            capacity = host_capacity()
-            rates = {key: capacity[key] for key in capacity if key.endswith("_per_second")}
             preceding = [json.loads((source / f"s{s}-rung.json").read_bytes()) for s in scales[:i]]
-            projection = project(profiles[scale], preceding, rates)
+            projection = project(profiles[scale], preceding)
             path = source / f"s{scale}-projection.json"
             write(path, projection)
             identities["admitted_projection_sha256"] = digest(path)
@@ -50,7 +48,11 @@ def write_native_bundle(work: Path, scales: tuple[int, ...] = CANONICAL_RUNGS) -
             "rung": f"S{scale}",
             "execution": "native_linux_benchexec_host",
             "identities": identities,
-            "limits": {"wall_seconds": 14400, "memory_bytes": 4294967296, "cores": 16},
+            "limits": {
+                "wall_seconds": None if scale >= 24 else 14400,
+                "memory_bytes": 4294967296,
+                "cores": 16,
+            },
             "outputs": [
                 f"s{scale}-{kind}.json"
                 for kind in ("plan", "benchexec", "graphforge", "rung", "result")

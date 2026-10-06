@@ -202,12 +202,6 @@ def result(scale: int) -> dict:
     }
 
 
-CAPACITY = {
-    "physical_read_bytes_per_second": 100,
-    "physical_write_bytes_per_second": 100,
-    "reader_calls_per_second": 100,
-    "publication_work_per_second": 100,
-}
 PROJECTED_FIELDS = (
     "wall_seconds",
     "peak_rss_bytes",
@@ -220,12 +214,6 @@ PROJECTED_FIELDS = (
     "reader_calls",
     "publication_work_units",
     "storage_peak_bytes",
-)
-RATE_FIELDS = (
-    "physical_read_bytes_per_second",
-    "physical_write_bytes_per_second",
-    "reader_calls_per_second",
-    "publication_work_per_second",
 )
 SLOPE_FIELDS = (
     "logical_read_bytes",
@@ -241,8 +229,6 @@ CHECK_FIELDS = (
     "retained_storage_headroom",
     "transient_storage_headroom",
     "storage_headroom",
-    "io_reader_publication_capacity_measured",
-    "io_reader_publication_headroom",
     "correctness",
 )
 IMAGE = "registry.fly.io/graphforge-bench@sha256:" + "1" * 64
@@ -298,10 +284,13 @@ class ProgressiveProviderPlanTests(unittest.TestCase):
             completed_rungs(ROOT, self.output)
 
     def test_projection_gate_is_required_before_s20(self) -> None:
+        slow = [rung(18), rung(19)]
+        for item in slow:
+            item["metrics"]["wall_seconds"] = 12_000
         with (
             patch(
                 "graphforge_bench.progressive_provider_plan.completed_rungs",
-                return_value=[rung(18), rung(19)],
+                return_value=slow,
             ),
             self.assertRaisesRegex(ProviderPlanError, "not admitted"),
         ):
@@ -331,11 +320,10 @@ class ProgressiveProviderPlanTests(unittest.TestCase):
                         "storage_fraction": 0.15,
                     },
                     "projected": dict.fromkeys(PROJECTED_FIELDS, 1),
-                    "required_rates": dict.fromkeys(RATE_FIELDS, 1),
-                    "provider_capacity": CAPACITY,
                     "slopes_observed": dict.fromkeys(SLOPE_FIELDS, 1),
                     "rss_growth_fraction": 0,
                     "checks": dict.fromkeys(CHECK_FIELDS, True),
+                    "enforced_checks": list(CHECK_FIELDS),
                     "claim": "engineering_evidence_only",
                 },
             ),
@@ -345,7 +333,6 @@ class ProgressiveProviderPlanTests(unittest.TestCase):
                 output_dir=self.output,
                 commit=COMMIT,
                 maximum_scale=20,
-                provider_capacity=CAPACITY,
                 image_digest=IMAGE,
             )
         self.assertEqual(plan["next_rung"], "S20")
@@ -369,7 +356,6 @@ class ProgressiveProviderPlanTests(unittest.TestCase):
                 output_dir=self.output,
                 commit=COMMIT,
                 maximum_scale=19,
-                provider_capacity=CAPACITY,
             )
 
     def test_plan_requires_exact_commit_bound_result_files(self) -> None:
@@ -389,7 +375,6 @@ class ProgressiveProviderPlanTests(unittest.TestCase):
                 output_dir=self.output,
                 commit=COMMIT,
                 maximum_scale=20,
-                provider_capacity=CAPACITY,
             )
 
     def test_minimal_result_document_is_rejected(self) -> None:
@@ -412,7 +397,6 @@ class ProgressiveProviderPlanTests(unittest.TestCase):
                 output_dir=self.output,
                 commit=COMMIT,
                 maximum_scale=20,
-                provider_capacity=CAPACITY,
             )
 
     def test_provider_result_hashes_bind_every_projection_artifact(self) -> None:
@@ -505,7 +489,6 @@ class ProgressiveProviderPlanTests(unittest.TestCase):
                 output_dir=self.output,
                 commit=COMMIT,
                 maximum_scale=20,
-                provider_capacity=CAPACITY,
                 image_digest=IMAGE,
             )
         require_execution_authority(plan)
@@ -555,7 +538,6 @@ class ProgressiveProviderPlanTests(unittest.TestCase):
                 output_dir=self.output,
                 commit=COMMIT,
                 maximum_scale=20,
-                provider_capacity=CAPACITY,
             )
 
 

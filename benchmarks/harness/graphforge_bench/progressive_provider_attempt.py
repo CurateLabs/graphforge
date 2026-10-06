@@ -86,7 +86,6 @@ class AttemptInvocation:
     evidence_dir: Path
     ledger_path: Path
     commit: str
-    provider_capacity: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -102,7 +101,6 @@ class AttemptRequest:
     image_digest: str
     maximum_scale: int
     spend_authorization: str | bytes | Mapping[str, Any] | None
-    provider_capacity: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -196,7 +194,6 @@ class Planner(Protocol):
         output_dir: Path,
         commit: str,
         maximum_scale: int,
-        provider_capacity: Mapping[str, Any] | None,
         image_digest: str | None,
     ) -> Mapping[str, Any]: ...
 
@@ -549,7 +546,6 @@ def _admitted_plan(
             output_dir=invocation.evidence_dir,
             commit=invocation.commit,
             maximum_scale=authorization.maximum_scale,
-            provider_capacity=invocation.provider_capacity,
             image_digest=authorization.image_digest,
         )
     except (OSError, ProviderPlanError, ValueError) as error:
@@ -990,7 +986,6 @@ def execute_attempt(
             evidence_dir=output_dir,
             ledger_path=ledger_path,
             commit=request.commit,
-            provider_capacity=request.provider_capacity,
         ),
         authorization,
         transport=boundary,

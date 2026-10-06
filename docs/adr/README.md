@@ -62,6 +62,7 @@ Roadmap-only ADRs are not retained in this tree.
 | 0054 | [GraphForge component boundaries: Core, XYG, editor, and Hub](0054-product-component-boundaries.md) | `0054-product-component-boundaries.md` |
 | 0055 | [Research Versions are commits](0055-versions-are-commits.md) | `0055-versions-are-commits.md` |
 | 0056 | [Shaping stays serial within stages until one sub-phase dominates](0056-stage-internal-parallelism.md) | `0056-stage-internal-parallelism.md` |
+| 0057 | [Initial builds resolve edge endpoints by a node-surrogate index instead of two endpoint sorts](0057-endpoint-resolution-by-node-index.md) | `0057-endpoint-resolution-by-node-index.md` |
 
 ## Superseded records
 

@@ -3,7 +3,7 @@
   "schema": "graphforge-progressive-qualification-evidence-schema/1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "target", "source_scales", "decision", "limits", "headroom", "projected", "required_rates", "provider_capacity", "slopes_observed", "rss_growth_fraction", "checks", "claim"],
+  "required": ["schema", "target", "source_scales", "decision", "limits", "headroom", "projected", "slopes_observed", "rss_growth_fraction", "checks", "claim"],
   "properties": {
     "schema": {"const": "graphforge-progressive-qualification-evidence/1"},
     "target": {"enum": ["S20", "S22", "S24", "S25", "S26"]},
@@ -18,7 +18,7 @@
     "rss_growth_fraction": {"type": "number"},
     "checks": {
       "type": "object", "additionalProperties": false,
-      "required": ["time_headroom", "rss_headroom", "retained_storage_headroom", "transient_storage_headroom", "storage_headroom", "io_reader_publication_capacity_measured", "io_reader_publication_headroom", "correctness"],
+      "required": ["time_headroom", "rss_headroom", "retained_storage_headroom", "transient_storage_headroom", "storage_headroom", "correctness"],
       "properties": {
         "time_headroom": {"type": "boolean"}, "rss_headroom": {"type": "boolean"},
         "retained_storage_headroom": {"type": "boolean"}, "transient_storage_headroom": {"type": "boolean"},
@@ -29,9 +29,13 @@
         "correctness": {"const": true}
       }
     },
+    "enforced_checks": {
+      "type": "array", "uniqueItems": true,
+      "items": {"enum": ["time_headroom", "rss_headroom", "retained_storage_headroom", "transient_storage_headroom", "storage_headroom", "correctness"]}
+    },
     "native_capacity": {
       "type": "object", "additionalProperties": false,
-      "required": ["free_bytes", "reserved_headroom_bytes", "rate_source", "observed_rates"],
+      "required": ["free_bytes", "reserved_headroom_bytes"],
       "properties": {
         "free_bytes": {"type": "integer", "minimum": 1},
         "reserved_headroom_bytes": {"type": "integer", "minimum": 0},
@@ -56,10 +60,7 @@
       "then": {"properties": {
         "limits": {"properties": {"volume_bytes": {"const": 536870912000}}},
         "headroom": {"properties": {"storage_fraction": {"const": 0.15}}}
-      }, "allOf": [{
-        "if": {"properties": {"decision": {"const": "admitted"}}},
-        "then": {"properties": {"provider_capacity": {"$ref": "#/$defs/rates"}}}
-      }]
+      }
       }
     },
     {
@@ -68,14 +69,29 @@
         "properties": {
           "checks": {
             "properties": {
-              "time_headroom": {"const": true}, "rss_headroom": {"const": true},
               "retained_storage_headroom": {"const": true}, "transient_storage_headroom": {"const": true},
-              "storage_headroom": {"const": true},
-              "io_reader_publication_capacity_measured": {"const": true},
-              "io_reader_publication_headroom": {"const": true}, "correctness": {"const": true}
+              "storage_headroom": {"const": true}, "correctness": {"const": true}
             }
           }
         }
+      }
+    },
+    {
+      "$comment": "Evidence written before enforced_checks existed enforced every check.",
+      "if": {"properties": {"target": {"enum": ["S20", "S22"]}}, "required": ["target"]},
+      "then": {
+        "properties": {
+          "enforced_checks": {"const": ["time_headroom", "rss_headroom", "retained_storage_headroom", "transient_storage_headroom", "storage_headroom", "correctness"]}
+        },
+        "if": {"properties": {"decision": {"const": "admitted"}}, "required": ["decision"]},
+        "then": {"properties": {"checks": {"properties": {"time_headroom": {"const": true}, "rss_headroom": {"const": true}}}}}
+      },
+      "else": {
+        "properties": {
+          "enforced_checks": {"const": ["retained_storage_headroom", "transient_storage_headroom", "storage_headroom", "correctness"]}
+        },
+        "if": {"properties": {"decision": {"const": "admitted"}}, "required": ["decision"], "not": {"required": ["enforced_checks"]}},
+        "then": {"properties": {"checks": {"properties": {"time_headroom": {"const": true}, "rss_headroom": {"const": true}}}}}
       }
     },
     {

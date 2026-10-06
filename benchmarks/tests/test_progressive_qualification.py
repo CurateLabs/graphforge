@@ -22,12 +22,6 @@ from jsonschema import Draft202012Validator
 from tests.lifecycle_storage_fixture import retained_owners
 
 ROOT = Path(__file__).resolve().parents[1]
-CAPACITY = {
-    "physical_read_bytes_per_second": 10**9,
-    "physical_write_bytes_per_second": 10**9,
-    "reader_calls_per_second": 10**6,
-    "publication_work_per_second": 10**6,
-}
 
 
 def storage_attribution(scale: int, multiplier: int) -> dict:
@@ -301,10 +295,10 @@ class ProgressiveQualificationTests(unittest.TestCase):
     def test_selection_is_progressive_and_stops_after_first_typed_failure(self) -> None:
         self.assertEqual(select_next(self.profiles, []).scale, 18)
         self.assertEqual(select_next(self.profiles, [rung(18)]).scale, 19)
-        self.assertEqual(select_next(self.profiles, [rung(18), rung(19)], CAPACITY).scale, 20)
+        self.assertEqual(select_next(self.profiles, [rung(18), rung(19)]).scale, 20)
         completed = [rung(scale) for scale in (18, 19, 20, 22, 24)]
-        self.assertEqual(select_next(self.profiles, completed, CAPACITY).scale, 25)
-        self.assertEqual(select_next(self.profiles, [*completed, rung(25)], CAPACITY).scale, 26)
+        self.assertEqual(select_next(self.profiles, completed).scale, 25)
+        self.assertEqual(select_next(self.profiles, [*completed, rung(25)]).scale, 26)
         failed = rung(19) | {"status": "failed", "correctness": False, "failure": "correctness"}
         failed["phases"] = list(PHASES[:6])
         self.rung_schema.validate(failed)
@@ -328,8 +322,7 @@ class ProgressiveQualificationTests(unittest.TestCase):
     def test_provider_selection_refuses_failed_projection(self) -> None:
         high = rung(19, wall=12_000)
         low = rung(18, wall=12_000)
-        self.assertIsNone(select_next(self.profiles, [low, high], CAPACITY))
-        self.assertIsNone(select_next(self.profiles, [rung(18), rung(19)]))
+        self.assertIsNone(select_next(self.profiles, [low, high]))
 
     def test_s20_requires_two_adjacent_completed_rungs(self) -> None:
         with self.assertRaisesRegex(QualificationError, "both declared"):
@@ -342,7 +335,6 @@ class ProgressiveQualificationTests(unittest.TestCase):
         evidence = project(
             self.profiles[2],
             [rung(18, rss=1_000_000_000, wall=100), rung(19, rss=1_050_000_000, wall=110)],
-            CAPACITY,
         )
         self.evidence_schema.validate(evidence)
         self.rung_schema.validate(rung(18))
@@ -360,9 +352,9 @@ class ProgressiveQualificationTests(unittest.TestCase):
         wrong_sources = copy.deepcopy(evidence)
         wrong_sources["source_scales"] = [24, 25]
         self.assertFalse(self.evidence_schema.is_valid(wrong_sources))
-        missing_capacity = copy.deepcopy(evidence)
-        missing_capacity["provider_capacity"] = None
-        self.assertFalse(self.evidence_schema.is_valid(missing_capacity))
+        relaxed = copy.deepcopy(evidence)
+        relaxed["enforced_checks"] = ["storage_headroom", "correctness"]
+        self.assertFalse(self.evidence_schema.is_valid(relaxed))
 
     def test_source_project_union_allocation_is_typed_but_additive_for_old_rungs(self) -> None:
         current = rung(18)
@@ -474,7 +466,7 @@ class ProgressiveQualificationTests(unittest.TestCase):
                 low["metrics"][metric] = high_value // 2
             high["metrics"][metric] = high_value
             with self.subTest(check=check):
-                evidence = project(self.profiles[2], [low, high], CAPACITY)
+                evidence = project(self.profiles[2], [low, high])
                 self.assertEqual(evidence["decision"], "refused")
                 self.assertFalse(evidence["checks"][check])
 
@@ -485,14 +477,13 @@ class ProgressiveQualificationTests(unittest.TestCase):
         evidence = project(
             self.profiles[2],
             [rung(18, rss=1_000_000_000), rung(19, rss=1_300_000_000)],
-            CAPACITY,
         )
         self.assertNotIn("rss_bounded_or_plateaued", evidence["checks"])
         self.assertAlmostEqual(evidence["rss_growth_fraction"], 0.3)
         self.assertTrue(evidence["checks"]["rss_headroom"])
 
     def test_io_reader_and_publication_slopes_are_independently_preserved(self) -> None:
-        evidence = project(self.profiles[2], [rung(18), rung(19)], CAPACITY)
+        evidence = project(self.profiles[2], [rung(18), rung(19)])
         self.assertEqual(
             set(evidence["slopes_observed"]),
             {
@@ -506,27 +497,69 @@ class ProgressiveQualificationTests(unittest.TestCase):
         )
         self.assertTrue(all(value > 0 for value in evidence["slopes_observed"].values()))
 
-    def test_provider_work_capacity_is_required_and_keeps_headroom(self) -> None:
-        missing = project(self.profiles[2], [rung(18), rung(19)])
-        self.assertEqual(missing["decision"], "refused")
-        self.assertFalse(missing["checks"]["io_reader_publication_capacity_measured"])
-        constrained = dict(CAPACITY)
-        constrained["reader_calls_per_second"] = 0
-        evidence = project(self.profiles[2], [rung(18), rung(19)], constrained)
-        self.assertFalse(evidence["checks"]["io_reader_publication_headroom"])
-        self.assertEqual(evidence["decision"], "refused")
+    def test_io_and_publication_work_are_projected_but_never_gate(self) -> None:
+        low, high = rung(18), rung(19)
+        for item in (low, high):
+            item["metrics"]["physical_read_bytes"] = 10**15
+            item["metrics"]["reader_calls"] = 10**12
+        high["metrics"]["physical_read_bytes"] = 2 * 10**15
+        evidence = project(self.profiles[2], [low, high])
+        self.evidence_schema.validate(evidence)
+        self.assertEqual(evidence["decision"], "admitted")
+        self.assertEqual(evidence["projected"]["physical_read_bytes"], 4 * 10**15)
+        self.assertNotIn("io_reader_publication_headroom", evidence["checks"])
+        self.assertNotIn("required_rates", evidence)
 
-    def test_provider_capacity_evidence_is_a_closed_rate_allowlist(self) -> None:
-        capacity = CAPACITY | {"provider_id": "must-not-escape", "secret": "must-not-escape"}
-        evidence = project(self.profiles[2], [rung(18), rung(19)], capacity)
-        self.assertEqual(evidence["provider_capacity"], CAPACITY)
-        self.assertNotIn("must-not-escape", json.dumps(evidence))
+    def test_upper_rungs_record_time_and_rss_without_refusing(self) -> None:
+        # Each projection keeps the worse of the adjacent slope and the latest ratio.
+        for index, sources, projected_wall in (
+            (4, (20, 22), 200_000),
+            (5, (22, 24), 100_000),
+            (6, (24, 25), 100_000),
+        ):
+            low = rung(sources[0], rss=3_600_000_000, wall=40_000)
+            high = rung(sources[1], rss=3_900_000_000, wall=50_000)
+            with self.subTest(target=self.profiles[index].scale):
+                evidence = project(self.profiles[index], [low, high])
+                self.evidence_schema.validate(evidence)
+                self.assertEqual(evidence["decision"], "admitted")
+                self.assertFalse(evidence["checks"]["time_headroom"])
+                self.assertFalse(evidence["checks"]["rss_headroom"])
+                self.assertEqual(evidence["projected"]["wall_seconds"], projected_wall)
+                self.assertEqual(
+                    evidence["enforced_checks"],
+                    [
+                        "retained_storage_headroom",
+                        "transient_storage_headroom",
+                        "storage_headroom",
+                        "correctness",
+                    ],
+                )
+                tightened = copy.deepcopy(evidence)
+                tightened["enforced_checks"] = list(tightened["checks"])
+                self.assertFalse(self.evidence_schema.is_valid(tightened))
+        # The same measurements still refuse S22, whose time and RSS gates remain.
+        s22 = project(self.profiles[3], [rung(19, wall=40_000), rung(20, wall=50_000)])
+        self.assertEqual(s22["decision"], "refused")
+        self.assertFalse(s22["checks"]["time_headroom"])
+
+    def test_upper_rungs_still_refuse_when_storage_would_not_fit(self) -> None:
+        low, high = rung(22), rung(24)
+        low["metrics"]["transient_peak_storage_bytes"] = 200 * 1024**3
+        high["metrics"]["transient_peak_storage_bytes"] = 400 * 1024**3
+        evidence = project(self.profiles[5], [low, high])
+        self.evidence_schema.validate(evidence)
+        self.assertEqual(evidence["decision"], "refused")
+        self.assertFalse(evidence["checks"]["transient_storage_headroom"])
+        admitted = copy.deepcopy(evidence)
+        admitted["decision"] = "admitted"
+        self.assertFalse(self.evidence_schema.is_valid(admitted))
 
     def test_projection_uses_worse_latest_ratio_not_only_small_delta(self) -> None:
         low, high = rung(18), rung(19)
         low["metrics"]["retained_storage_bytes"] = 100_000_000_000
         high["metrics"]["retained_storage_bytes"] = 101_000_000_000
-        evidence = project(self.profiles[2], [low, high], CAPACITY)
+        evidence = project(self.profiles[2], [low, high])
         self.assertEqual(evidence["projected"]["retained_storage_bytes"], 202_000_000_000)
 
     def test_every_provider_rung_keeps_its_declared_ladder_gate(self) -> None:
@@ -535,22 +568,22 @@ class ProgressiveQualificationTests(unittest.TestCase):
         self.assertEqual(self.profiles[5].projection_sources, (22, 24))
         self.assertEqual(self.profiles[6].projection_sources, (24, 25))
         for index, sources in ((3, (19, 20)), (4, (20, 22)), (5, (22, 24))):
-            evidence = project(self.profiles[index], [rung(sources[0]), rung(sources[1])], CAPACITY)
+            evidence = project(self.profiles[index], [rung(sources[0]), rung(sources[1])])
             self.evidence_schema.validate(evidence)
             self.assertEqual(evidence["source_scales"], list(sources))
-        s26 = project(self.profiles[6], [rung(24), rung(25)], CAPACITY)
+        s26 = project(self.profiles[6], [rung(24), rung(25)])
         self.assertEqual(s26["source_scales"], [24, 25])
         malformed = copy.copy(self.profiles[6])
         object.__setattr__(malformed, "projection_sources", (20, 22))
         with self.assertRaisesRegex(QualificationError, "adjacent S24 and S25"):
-            project(malformed, [rung(20), rung(22)], CAPACITY)
+            project(malformed, [rung(20), rung(22)])
         wrong_source = rung(25)
         wrong_source["source"] = "progressive_profile"
         with self.assertRaisesRegex(QualificationError, "canonical S24 and S25"):
-            project(self.profiles[6], [rung(24), wrong_source], CAPACITY)
+            project(self.profiles[6], [rung(24), wrong_source])
         unknown = Profile("graph500-s23-provider", 23, "provider", (20, 22))
         with self.assertRaisesRegex(QualificationError, "not on the progressive ladder"):
-            project(unknown, [rung(20), rung(22)], CAPACITY)
+            project(unknown, [rung(20), rung(22)])
 
 
 if __name__ == "__main__":
