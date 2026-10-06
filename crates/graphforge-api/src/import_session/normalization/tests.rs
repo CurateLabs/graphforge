@@ -71,7 +71,7 @@ fn window(graph: &GraphForge, budget: usize) -> Window<'_> {
         pending: Vec::new(),
         admitted_bytes: 0,
         byte_budget: budget,
-        workers: graph.compute_pool.num_threads().min(4),
+        workers: graph.construction_cpu_admission.limit(),
         probe: None,
     }
 }

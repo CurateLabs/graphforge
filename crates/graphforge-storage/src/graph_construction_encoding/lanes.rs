@@ -128,9 +128,10 @@ impl ParquetLanes {
     pub(super) fn new(admission: Option<&Arc<ConstructionCpuAdmission>>, budget: usize) -> Self {
         let pool = admission
             .and_then(|admission| {
-                admission.try_acquire(
-                    NonZeroUsize::new(admission.limit().min(8)).expect("positive admission"),
-                )
+                // Every lane the admission has free (#1863); the byte budget,
+                // not the lane count, bounds batches in flight.
+                admission
+                    .try_acquire(NonZeroUsize::new(admission.limit()).expect("positive admission"))
             })
             .filter(|lease| lease.lanes().get() > 1)
             .map(Pool::new);

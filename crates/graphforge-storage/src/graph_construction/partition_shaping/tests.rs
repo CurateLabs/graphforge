@@ -328,7 +328,8 @@ fn boundary_seal_on_lanes_matches_the_calling_thread() {
     };
     let serial = seal(1);
     let parallel = seal(8);
-    assert_eq!(serial.0, 1);
+    // A one-lane admission cannot parallelize, so nothing is leased (#1863).
+    assert_eq!(serial.0, 0);
     assert_eq!(parallel.0, 8, "sealing never ran on parallel lanes");
     assert_eq!(serial.1.len(), 48);
     assert_eq!(

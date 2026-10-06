@@ -983,9 +983,12 @@ fn finish_groups(
     let union = groups.remove(ALL_RELATIONS_STEM).unwrap_or_default();
     let mut ordered = std::mem::take(groups).into_iter().collect::<Vec<_>>();
     ordered.push((ALL_RELATIONS_STEM.to_owned(), union));
-    let want =
-        std::num::NonZeroUsize::new((ordered.len() * 2).min(8)).expect("union has two directions");
-    let lease = admission.and_then(|admission| admission.try_acquire(want));
+    // One lane per relation direction, up to the admission's limit (#1863).
+    let lease = admission.and_then(|admission| {
+        let want = std::num::NonZeroUsize::new((ordered.len() * 2).min(admission.limit()))
+            .expect("union has two directions");
+        admission.try_acquire(want)
+    });
     let lanes = lease.as_ref().map_or(1, |lease| lease.lanes().get());
     let mut outcomes = Vec::new();
     if lanes == 1 {

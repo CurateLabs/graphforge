@@ -369,7 +369,7 @@ mod determinism {
         let nodes = node_ids(4_096);
         let edges = edge_ids(4_096);
         let mut expected = None;
-        for (width, reverse) in [(1, false), (8, false), (8, true)] {
+        for (width, reverse) in [(1, false), (8, false), (8, true), (32, false)] {
             let root = TempDir::new().unwrap();
             let mut session = pinned_session(&root, 64);
             append_all(&mut session, &nodes, &edges, 128);
@@ -959,6 +959,32 @@ mod determinism {
                 "refusal": refusal,
             })
         );
+    }
+
+    /// #1863: an admission wider than the old fixed caps of eight lanes is
+    /// used, and it changes no shaped or published byte.
+    #[test]
+    fn a_wide_admission_is_used_and_preserves_every_digest() {
+        let nodes = node_ids(4_096);
+        let edges = edge_ids(16_384);
+        let baseline_root = TempDir::new().unwrap();
+        let (baseline, _) = ingest(&baseline_root, 64, &nodes, &edges, 512);
+        let root = TempDir::new().unwrap();
+        let mut session = pinned_session(&root, 64);
+        let admission = Arc::new(cpu_admission::ConstructionCpuAdmission::new(
+            std::num::NonZeroUsize::new(32).unwrap(),
+        ));
+        session.set_cpu_admission(Some(admission.clone()));
+        append_all(&mut session, &nodes, &edges, 512);
+        session.seal().unwrap();
+        let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+        assert_eq!(fingerprint(&mut session, &shape), baseline);
+        assert!(
+            admission.peak() > 8,
+            "no construction site leased past the old cap of eight: peak {}",
+            admission.peak()
+        );
+        assert_eq!(admission.in_use(), 0);
     }
 
     /// Budgets that keep the endpoint family: the node index is disabled.

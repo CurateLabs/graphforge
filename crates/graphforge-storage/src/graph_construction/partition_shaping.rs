@@ -308,14 +308,6 @@ impl SpillWriter {
     }
 }
 
-/// Most load workers a finish leases from the instance admission (#1448).
-/// The load window's weight bound, not this count, bounds memory.
-const LOAD_LANES: NonZeroUsize = NonZeroUsize::new(8).unwrap();
-
-/// Most lanes one boundary's spill seals lease (#1448). A seal is a data
-/// fsync, a rename and a small control install; lanes overlap the fsyncs.
-const SEAL_LANES: usize = 8;
-
 /// One open, unsealed fixed-width partition spill (#1439 follow-up, #1443).
 ///
 /// Unlike [`SpillWriter`], this holds no fixed-size per-partition block.
@@ -626,11 +618,16 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
         };
         // #1586: lease the workers from the instance admission. Scheduling
         // only; a partial grant runs with fewer workers and the same bytes.
-        // #1448: with an admission, ask for up to `LOAD_LANES`; the weight
-        // bound below keeps what is materialized at once to two partition
-        // budgets, the same peak two workers allow.
+        // #1448, #1863: with an admission, ask for one worker per partition up
+        // to the admission's whole limit; the weight bound below, not the
+        // worker count, keeps what is materialized at once to two partition
+        // budgets.
         let lease = match &self.cpu_admission {
-            Some(admission) => Some(admission.acquire(LOAD_LANES, &mut *cancelled)?),
+            Some(admission) => {
+                let want = NonZeroUsize::new(admission.limit().min(jobs.len()))
+                    .unwrap_or(NonZeroUsize::MIN);
+                Some(admission.acquire(want, &mut *cancelled)?)
+            }
             None => None,
         };
         let workers = lease.as_ref().map_or(
@@ -1238,11 +1235,12 @@ pub(super) fn seal_families_at_boundary(
             spill: Some(job.spill),
         })
         .collect::<Vec<_>>();
-    let want = NonZeroUsize::new(SEAL_LANES.min(jobs.len())).filter(|lanes| lanes.get() > 1);
-    let lease = want.and_then(|want| {
-        admission
-            .as_ref()
-            .and_then(|admission| admission.try_acquire(want))
+    // A seal is a data fsync, a rename and a small control install; lanes
+    // overlap the fsyncs, one per seal up to the admission's limit (#1863).
+    let lease = admission.as_ref().and_then(|admission| {
+        NonZeroUsize::new(admission.limit().min(jobs.len()))
+            .filter(|lanes| lanes.get() > 1)
+            .and_then(|want| admission.try_acquire(want))
             .filter(|lease| lease.lanes().get() > 1)
     });
     let mut first_error = None;

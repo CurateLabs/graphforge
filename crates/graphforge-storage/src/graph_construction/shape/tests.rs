@@ -847,7 +847,14 @@ fn segment_retirement_is_schedule_independent_including_failure() {
         )
         .unwrap_err()
         .to_string();
-        assert_eq!(admission.peak(), lanes.min(RETIRE_LANES));
+        // One lane per segment up to the admission; a one-lane admission
+        // cannot parallelize, so nothing is leased (#1863).
+        let expected_peak = if lanes > 1 {
+            lanes.min(segments.len())
+        } else {
+            0
+        };
+        assert_eq!(admission.peak(), expected_peak);
         let remaining = session
             .root
             .child_names()
