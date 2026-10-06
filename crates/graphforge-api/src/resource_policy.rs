@@ -210,6 +210,48 @@ fn logical_cpus() -> usize {
         .clamp(MIN_THREADS, MAX_THREADS)
 }
 
+/// Query memory each default DataFusion partition is sized for. A sort
+/// partition reserves `sort_spill_reservation_bytes` (10 MiB in DataFusion
+/// 54) plus GraphForge's 1 MiB minimum run before it holds any data
+/// (`graphforge-exec` `sort_runs`), all from the one `memory_budget` pool.
+/// 32 MiB per partition keeps one sort's up-front reservations near a third of
+/// the pool, so default queries spill rather than fail as partitions grow
+/// with the machine.
+const QUERY_PARTITION_MEMORY_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Automatic-mode defaults, derived from the machine and the memory budget,
+/// never from a host-tuned ceiling (#1863).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AutomaticDefaults {
+    /// Tokio workers and I/O concurrency: half the logical CPUs.
+    half: usize,
+    /// Compute threads, so the construction admission: every logical CPU.
+    all: usize,
+    /// DataFusion partitions: half the CPUs, as many as the query memory
+    /// budget can host at [`QUERY_PARTITION_MEMORY_BYTES`] each.
+    partitions: usize,
+}
+
+fn automatic_defaults(observed: usize, memory_budget_bytes: u64) -> AutomaticDefaults {
+    if observed <= 2 {
+        // Small machines stay serial.
+        return AutomaticDefaults {
+            half: 1,
+            all: 1,
+            partitions: 1,
+        };
+    }
+    let half = observed.div_ceil(2);
+    let affordable = usize::try_from(memory_budget_bytes / QUERY_PARTITION_MEMORY_BYTES)
+        .unwrap_or(usize::MAX)
+        .max(1);
+    AutomaticDefaults {
+        half,
+        all: observed,
+        partitions: half.min(affordable),
+    }
+}
+
 fn validate_thread_count(label: &str, value: usize) -> Result<usize, GfError> {
     if !(MIN_THREADS..=MAX_THREADS).contains(&value) {
         return Err(validation(format!(
@@ -274,23 +316,20 @@ impl ExecutionResourcePolicy {
                 (workers, partitions, io, compute)
             }
             ResourcePolicyMode::Automatic => {
-                // Derived from this machine, never a host-tuned ceiling (#1863).
-                // CPU-bound compute -- query kernels, and through the
-                // construction admission every construction lane -- gets every
-                // logical CPU. The async runtime, DataFusion partitions and I/O
-                // get half. Machines of two or fewer CPUs stay serial.
-                let (half, all) = if observed <= 2 {
-                    (1, 1)
-                } else {
-                    (observed.div_ceil(2), observed)
-                };
+                let defaults = automatic_defaults(
+                    observed,
+                    self.memory_budget_bytes
+                        .unwrap_or(DEFAULT_MEMORY_BUDGET_BYTES),
+                );
+                let (half, all) = (defaults.half, defaults.all);
                 let workers = validate_thread_count(
                     "tokio_worker_threads",
                     self.tokio_worker_threads.unwrap_or(half),
                 )?;
                 let partitions = validate_thread_count(
                     "target_partitions",
-                    self.target_partitions.unwrap_or(half.min(workers)),
+                    self.target_partitions
+                        .unwrap_or(defaults.partitions.min(workers)),
                 )?;
                 let io = validate_thread_count(
                     "io_concurrency",
@@ -556,7 +595,10 @@ mod tests {
             (observed.div_ceil(2), observed)
         };
         assert_eq!(normalized.tokio_worker_threads, half);
-        assert_eq!(normalized.target_partitions, half);
+        assert_eq!(
+            normalized.target_partitions,
+            automatic_defaults(observed, DEFAULT_MEMORY_BUDGET_BYTES).partitions
+        );
         assert_eq!(normalized.io_concurrency, half);
         // #1863: no fixed ceiling; compute and the construction admission
         // scale with every logical CPU the machine has.
@@ -572,6 +614,35 @@ mod tests {
             normalized.max_concurrent_heavy_queries,
             DEFAULT_MAX_CONCURRENT_HEAVY_QUERIES
         );
+    }
+
+    /// #1863: defaults scale with the machine, and DataFusion partitions also
+    /// stay within what the query memory budget can host, so default sorts
+    /// on a many-core machine spill instead of failing their reservations.
+    #[test]
+    fn automatic_defaults_scale_with_cpus_within_the_query_memory_budget() {
+        let mib = 1024 * 1024;
+        for (cpus, budget, half, all, partitions) in [
+            (1, DEFAULT_MEMORY_BUDGET_BYTES, 1, 1, 1),
+            (2, DEFAULT_MEMORY_BUDGET_BYTES, 1, 1, 1),
+            (16, DEFAULT_MEMORY_BUDGET_BYTES, 8, 16, 8),
+            (96, DEFAULT_MEMORY_BUDGET_BYTES, 48, 96, 16),
+            (256, DEFAULT_MEMORY_BUDGET_BYTES, 128, 256, 16),
+            (96, 4096 * mib, 48, 96, 48),
+            (16, 16 * mib, 8, 16, 1),
+        ] {
+            let defaults = automatic_defaults(cpus, budget);
+            assert_eq!(
+                (defaults.half, defaults.all, defaults.partitions),
+                (half, all, partitions),
+                "{cpus} CPUs, {budget} bytes"
+            );
+            assert!(
+                defaults.partitions == 1
+                    || defaults.partitions as u64 * QUERY_PARTITION_MEMORY_BYTES <= budget,
+                "{cpus} CPUs, {budget} bytes"
+            );
+        }
     }
 
     #[test]
