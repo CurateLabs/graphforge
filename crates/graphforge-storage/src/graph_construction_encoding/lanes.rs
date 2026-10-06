@@ -249,13 +249,6 @@ impl ParquetLanes {
         }
         Ok(())
     }
-    /// The leased lanes this pipeline's workers hold. Once [`Self::flush`]
-    /// returns they are parked, so the caller may run other CPU work on this
-    /// many threads without exceeding its admission (ADR 0057's endpoint
-    /// probes share encoding's lanes this way).
-    pub(super) fn idle_lanes(&self) -> usize {
-        self.pool.as_ref().map_or(0, |pool| pool.workers.len())
-    }
 }
 
 /// Preserve every Parquet write boundary when replaying onto the durable sink,

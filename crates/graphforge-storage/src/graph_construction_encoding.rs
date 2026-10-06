@@ -1650,15 +1650,10 @@ fn encode_edges(
                 break;
             }
             if let Some(index) = &node_index {
-                // Encoding's compression workers hold most of the admission.
-                // Let them finish the previous window and park, then probe on
-                // their lanes as well as any the admission has free.
-                encoding_lanes.flush(output, evidence, cancelled, artifacts)?;
-                let held = encoding_lanes.idle_lanes();
                 let _probe =
                     crate::concurrency_attribution::RegionScope::named("endpoint_index_probe");
-                index.resolve(&out_src, &mut out_src_id, held, admission)?;
-                index.resolve(&out_dst, &mut out_dst_id, held, admission)?;
+                index.resolve(&out_src, &mut out_src_id, admission)?;
+                index.resolve(&out_dst, &mut out_dst_id, admission)?;
             }
             let canonical = edge_batch(
                 &out_uuid,

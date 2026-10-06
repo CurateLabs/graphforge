@@ -27,7 +27,7 @@ fn resolves_each_uuid_to_its_dense_rank_after_the_base() {
     let (index, uuids) = index(1_000, 41);
     let probes = [uuids[0], uuids[999], uuids[500]];
     let mut surrogates = [0; 3];
-    index.resolve(&probes, &mut surrogates, 0, None).unwrap();
+    index.resolve(&probes, &mut surrogates, None).unwrap();
     assert_eq!(surrogates, [42, 1_041, 542]);
 }
 
@@ -36,7 +36,7 @@ fn refuses_an_endpoint_that_is_not_a_new_node() {
     let (index, _) = index(100, 0);
     let mut surrogates = [0; 1];
     let error = index
-        .resolve(&[uuid(100)], &mut surrogates, 0, None)
+        .resolve(&[uuid(100)], &mut surrogates, None)
         .unwrap_err();
     assert!(
         error
@@ -67,11 +67,11 @@ fn laned_resolution_matches_serial_resolution() {
         .map(|position| uuids[(position * 7_919) % uuids.len()])
         .collect();
     let mut serial = vec![0; probes.len()];
-    index.resolve(&probes, &mut serial, 0, None).unwrap();
+    index.resolve(&probes, &mut serial, None).unwrap();
     let admission = Arc::new(ConstructionCpuAdmission::new(NonZeroUsize::new(6).unwrap()));
     let mut laned = vec![0; probes.len()];
     index
-        .resolve(&probes, &mut laned, 0, Some(&admission))
+        .resolve(&probes, &mut laned, Some(&admission))
         .unwrap();
     assert_eq!(laned, serial);
     assert!(admission.peak() > 1, "the probes ran on more than one lane");
@@ -90,7 +90,7 @@ fn a_missing_endpoint_on_any_lane_is_refused() {
     let mut surrogates = vec![0; probes.len()];
     assert!(
         index
-            .resolve(&probes, &mut surrogates, 0, Some(&admission))
+            .resolve(&probes, &mut surrogates, Some(&admission))
             .is_err()
     );
 }
@@ -104,34 +104,9 @@ fn key_ordered_probes_return_each_surrogate_in_input_position() {
         .collect();
     probes.extend([uuids[0], uuids[4_999], uuids[0], uuids[2_500], uuids[2_500]]);
     let mut surrogates = vec![0; probes.len()];
-    index.resolve(&probes, &mut surrogates, 0, None).unwrap();
+    index.resolve(&probes, &mut surrogates, None).unwrap();
     for (probe, surrogate) in probes.iter().zip(&surrogates) {
         let rank = uuids.binary_search(probe).unwrap() as u64;
         assert_eq!(*surrogate, 100 + rank + 1);
     }
-}
-
-#[test]
-fn lanes_the_caller_already_holds_resolve_without_new_admission() {
-    let (index, uuids) = index(50_000, 3);
-    let probes: Vec<_> = (0..MIN_PROBES_PER_LANE * 8)
-        .map(|position| uuids[(position * 7_919) % uuids.len()])
-        .collect();
-    let mut serial = vec![0; probes.len()];
-    index.resolve(&probes, &mut serial, 0, None).unwrap();
-    // A fully leased admission grants nothing new; the held lanes still probe.
-    let admission = Arc::new(ConstructionCpuAdmission::new(NonZeroUsize::new(4).unwrap()));
-    let _held = admission
-        .try_acquire(NonZeroUsize::new(4).unwrap())
-        .unwrap();
-    let mut held = vec![0; probes.len()];
-    index
-        .resolve(&probes, &mut held, 4, Some(&admission))
-        .unwrap();
-    assert_eq!(held, serial);
-    assert_eq!(
-        admission.in_use(),
-        4,
-        "no lane beyond the held ones was leased"
-    );
 }

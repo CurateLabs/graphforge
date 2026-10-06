@@ -2090,7 +2090,6 @@ fn validate_endpoints_by_index(
         index.resolve(
             &endpoints,
             &mut surrogates[..endpoints.len()],
-            0,
             cpu_admission,
         )?;
         reject_cancelled(cancelled)?;

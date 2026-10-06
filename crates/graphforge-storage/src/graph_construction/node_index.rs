@@ -76,10 +76,10 @@ pub(crate) struct NodeIndex {
 }
 
 impl NodeIndex {
-    /// Resolve every UUID in `uuids` into `surrogates`, probing on up to one
-    /// lane per [`MIN_PROBES_PER_LANE`] probes: the `held_lanes` the caller
-    /// already leased and has idle, plus whatever the admission grants now.
-    /// Without either, the calling thread probes alone.
+    /// Resolve every UUID in `uuids` into `surrogates`, probing on as many
+    /// lanes as the admission grants now, up to one per
+    /// [`MIN_PROBES_PER_LANE`] probes. Without a free lane the calling thread
+    /// probes alone.
     ///
     /// # Errors
     /// `endpoint UUID lacks node surrogate` when a UUID is not a new node.
@@ -87,21 +87,19 @@ impl NodeIndex {
         &self,
         uuids: &[[u8; 16]],
         surrogates: &mut [u64],
-        held_lanes: usize,
         admission: Option<&Arc<ConstructionCpuAdmission>>,
     ) -> Result<(), GfError> {
         debug_assert_eq!(uuids.len(), surrogates.len());
         let useful = uuids.len() / MIN_PROBES_PER_LANE;
-        let held = held_lanes.min(useful);
         let lease =
             admission
-                .zip(NonZeroUsize::new(useful - held))
-                .and_then(|(admission, wanted)| {
-                    admission.try_acquire(wanted.min(
+                .zip(NonZeroUsize::new(useful))
+                .and_then(|(admission, useful)| {
+                    admission.try_acquire(useful.min(
                         NonZeroUsize::new(admission.limit()).expect("positive admission limit"),
                     ))
                 });
-        let lanes = held + lease.as_ref().map_or(0, |lease| lease.lanes().get());
+        let lanes = lease.as_ref().map_or(1, |lease| lease.lanes().get());
         let resolved = if lanes <= 1 {
             self.resolve_serial(uuids, surrogates)
         } else {
