@@ -985,6 +985,8 @@ mod determinism {
             admission.peak()
         );
         assert_eq!(admission.in_use(), 0);
+    }
+
     /// Budgets that keep the endpoint family: the node index is disabled.
     fn family_budgets(partition_count: u32) -> GraphConstructionBudgets {
         GraphConstructionBudgets {
