@@ -129,10 +129,10 @@ impl NodeIndex {
     /// every step. Sorted, consecutive probes land near each other: each one
     /// gallops forward from the previous rank and stays in cache.
     fn resolve_serial(&self, uuids: &[[u8; 16]], surrogates: &mut [u64]) -> Result<(), GfError> {
-        let mut probes: Vec<([u8; 16], u32)> = uuids
+        let mut probes: Vec<([u8; 16], usize)> = uuids
             .iter()
             .enumerate()
-            .map(|(position, uuid)| (*uuid, position as u32))
+            .map(|(position, uuid)| (*uuid, position))
             .collect();
         probes.sort_unstable();
         let mut low = 0;
@@ -140,7 +140,7 @@ impl NodeIndex {
             let rank = self
                 .rank_from(low, &uuid)
                 .ok_or_else(|| storage("endpoint UUID lacks node surrogate"))?;
-            surrogates[position as usize] = self.base + rank as u64 + 1;
+            surrogates[position] = self.base + rank as u64 + 1;
             low = rank;
         }
         Ok(())
