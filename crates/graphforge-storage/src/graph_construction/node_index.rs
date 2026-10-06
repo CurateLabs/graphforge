@@ -122,15 +122,42 @@ impl NodeIndex {
         resolved
     }
 
+    /// Probe in key order. Endpoints arrive in edge order, which scatters them
+    /// across the index, so independent binary searches miss cache at nearly
+    /// every step. Sorted, consecutive probes land near each other: each one
+    /// gallops forward from the previous rank and stays in cache.
     fn resolve_serial(&self, uuids: &[[u8; 16]], surrogates: &mut [u64]) -> Result<(), GfError> {
-        for (uuid, surrogate) in uuids.iter().zip(surrogates) {
+        let mut probes: Vec<([u8; 16], u32)> = uuids
+            .iter()
+            .enumerate()
+            .map(|(position, uuid)| (*uuid, position as u32))
+            .collect();
+        probes.sort_unstable();
+        let mut low = 0;
+        for (uuid, position) in probes {
             let rank = self
-                .uuids
-                .binary_search(uuid)
-                .map_err(|_| storage("endpoint UUID lacks node surrogate"))?;
-            *surrogate = self.base + rank as u64 + 1;
+                .rank_from(low, &uuid)
+                .ok_or_else(|| storage("endpoint UUID lacks node surrogate"))?;
+            surrogates[position as usize] = self.base + rank as u64 + 1;
+            low = rank;
         }
         Ok(())
+    }
+
+    /// The rank of `uuid`, searching only at or after `low`: an exponential
+    /// search for the bracket, then a binary search inside it.
+    fn rank_from(&self, low: usize, uuid: &[u8; 16]) -> Option<usize> {
+        let tail = self.uuids.get(low..)?;
+        let mut bound = 1;
+        while bound < tail.len() && tail[bound] < *uuid {
+            bound *= 2;
+        }
+        let start = bound / 2;
+        let end = (bound + 1).min(tail.len());
+        tail.get(start..end)?
+            .binary_search(uuid)
+            .ok()
+            .map(|at| low + start + at)
     }
 }
 

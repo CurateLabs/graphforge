@@ -94,3 +94,19 @@ fn a_missing_endpoint_on_any_lane_is_refused() {
             .is_err()
     );
 }
+
+#[test]
+fn key_ordered_probes_return_each_surrogate_in_input_position() {
+    let (index, uuids) = index(5_000, 100);
+    // Unsorted, with repeated hubs and both ends of the index.
+    let mut probes: Vec<_> = (0..20_000_usize)
+        .map(|position| uuids[(position * 104_729 + position / 7) % uuids.len()])
+        .collect();
+    probes.extend([uuids[0], uuids[4_999], uuids[0], uuids[2_500], uuids[2_500]]);
+    let mut surrogates = vec![0; probes.len()];
+    index.resolve(&probes, &mut surrogates, None).unwrap();
+    for (probe, surrogate) in probes.iter().zip(&surrogates) {
+        let rank = uuids.binary_search(probe).unwrap() as u64;
+        assert_eq!(*surrogate, 100 + rank + 1);
+    }
+}
