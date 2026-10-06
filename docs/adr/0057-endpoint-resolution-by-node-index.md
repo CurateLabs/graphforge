@@ -11,6 +11,8 @@ revisit_when: "The tracer's laned probe cost exceeds a third of the endpoint wor
 
 **Status:** Accepted
 
+**Implementation:** Slice A is implemented by #1862; see the implementation update below. Slice B is not started.
+
 **Related:**
 - ADR 0038 (determinism at the publication boundary)
 - ADR 0046 (construction keeps its own sorting and partitioning)
@@ -205,6 +207,44 @@ everywhere.
    ladder dropped it, and this design grows resident memory with node count by
    construction. A miss means the code does not merge; the measurement is
    attached and this record is revisited.
+
+## Implementation update: Slice A (#1862)
+
+Slice A shipped with two changes from the plan above, both found by measurement:
+
+- **Key-ordered probes.** Encoding probes each window in UUID order and gallops
+  forward from the previous rank. Independent binary searches in edge order
+  missed cache at nearly every step: 11.8 s for S20's 33.5M lookups when the
+  probes had no free lane.
+- **Probe lanes are the admission's free lanes only.** Sharing encoding's
+  compression lanes was measured and reverted: probes got faster, but
+  compression waited by the same amount.
+
+**Adoption measurement.** S20 and S22 complete ingest against `main`
+`a54d939c`, four ABBA pairs, quiet host, measured. Published results are the
+ladder's edge-count and traversal digests.
+
+| | S20 | S22 |
+| --- | ---: | ---: |
+| complete ingest | −17.6% (pairs −16.0 to −19.1%) | −11.6% (pairs −10.5 to −13.0%) |
+| shaping | −44.8% | −40.7% |
+| bytes written (stage+seal) | −30.1% | −29.9% |
+| fsync calls (stage+seal) | −57.3% | −55.3% |
+| transient peak | −11.6% | −13.3% |
+| VmHWM | unchanged | −17% |
+| published results | identical; equal the S20 ladder | identical; equal the S22 ladder |
+
+**The S22 result misses the predeclared 15%.** The index adds about 42 s of
+probing at S22:
+- 12.4 s for the validation pass;
+- about 29.5 s for encoding's probes, which find the host-capped 7-lane
+  admission held by Parquet compression.
+
+**Amended gate (maintainer decision, 2026-10-06):** ≥15% at S20 and ≥10% at
+S22, every pair the same sign, published results identical. The miss and the
+amendment are recorded on #1862, which also holds the evidence and its
+manifest digest. The S22 probe contention is expected to ease with
+machine-derived parallelism (#1863).
 
 ## Open questions
 
