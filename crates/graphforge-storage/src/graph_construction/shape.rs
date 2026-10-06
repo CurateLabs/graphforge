@@ -2386,11 +2386,6 @@ fn retire_behind_stage(
     Ok(())
 }
 
-/// Most lanes one retirement leases (#1448). Each segment's retirement is a
-/// few small metadata operations and two directory syncs, so lanes mostly
-/// overlap sync waits; more than this measured no further gain.
-const RETIRE_LANES: usize = 8;
-
 /// Unlink every retired segment, in parallel lanes when the instance has CPU
 /// admission to spare (#1448).
 ///
@@ -2406,11 +2401,13 @@ fn retire_segments(
     cpu_admission: Option<&std::sync::Arc<super::cpu_admission::ConstructionCpuAdmission>>,
     evidence: &mut GraphConstructionEvidence,
 ) -> Result<(), GfError> {
-    let want = std::num::NonZeroUsize::new(RETIRE_LANES.min(segments.len()))
-        .filter(|lanes| lanes.get() > 1);
-    let lease = want.and_then(|want| {
-        cpu_admission
-            .and_then(|admission| admission.try_acquire(want))
+    // Each retirement is a few small metadata operations and two directory
+    // syncs, so lanes mostly overlap sync waits: one per segment up to the
+    // admission's limit (#1863).
+    let lease = cpu_admission.and_then(|admission| {
+        std::num::NonZeroUsize::new(admission.limit().min(segments.len()))
+            .filter(|lanes| lanes.get() > 1)
+            .and_then(|want| admission.try_acquire(want))
             .filter(|lease| lease.lanes().get() > 1)
     });
     let lanes = lease.as_ref().map_or(1, |lease| lease.lanes().get());

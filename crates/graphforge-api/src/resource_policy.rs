@@ -274,29 +274,30 @@ impl ExecutionResourcePolicy {
                 (workers, partitions, io, compute)
             }
             ResourcePolicyMode::Automatic => {
-                // Prefer a bounded fraction of logical CPUs; small machines stay
-                // serial/minimally partitioned.
-                let auto = if observed <= 2 {
-                    1
+                // Derived from this machine, never a host-tuned ceiling (#1863).
+                // CPU-bound compute -- query kernels, and through the
+                // construction admission every construction lane -- gets every
+                // logical CPU. The async runtime, DataFusion partitions and I/O
+                // get half. Machines of two or fewer CPUs stay serial.
+                let (half, all) = if observed <= 2 {
+                    (1, 1)
                 } else {
-                    observed.div_ceil(2).clamp(MIN_THREADS, 8)
+                    (observed.div_ceil(2), observed)
                 };
                 let workers = validate_thread_count(
                     "tokio_worker_threads",
-                    self.tokio_worker_threads.unwrap_or(auto),
+                    self.tokio_worker_threads.unwrap_or(half),
                 )?;
                 let partitions = validate_thread_count(
                     "target_partitions",
-                    self.target_partitions.unwrap_or(auto.min(workers)),
+                    self.target_partitions.unwrap_or(half.min(workers)),
                 )?;
                 let io = validate_thread_count(
                     "io_concurrency",
-                    self.io_concurrency.unwrap_or(auto.min(workers)),
+                    self.io_concurrency.unwrap_or(half.min(workers)),
                 )?;
-                let compute = validate_thread_count(
-                    "compute_threads",
-                    self.compute_threads.unwrap_or(auto.min(workers)),
-                )?;
+                let compute =
+                    validate_thread_count("compute_threads", self.compute_threads.unwrap_or(all))?;
                 (workers, partitions, io, compute)
             }
         };
@@ -549,15 +550,17 @@ mod tests {
             .normalize()
             .expect("default policy");
         let observed = logical_cpus();
-        let expected = if observed <= 2 {
-            1
+        let (half, all) = if observed <= 2 {
+            (1, 1)
         } else {
-            observed.div_ceil(2).clamp(MIN_THREADS, 8)
+            (observed.div_ceil(2), observed)
         };
-        assert_eq!(normalized.tokio_worker_threads, expected);
-        assert_eq!(normalized.target_partitions, expected);
-        assert_eq!(normalized.io_concurrency, expected);
-        assert_eq!(normalized.compute_threads, expected);
+        assert_eq!(normalized.tokio_worker_threads, half);
+        assert_eq!(normalized.target_partitions, half);
+        assert_eq!(normalized.io_concurrency, half);
+        // #1863: no fixed ceiling; compute and the construction admission
+        // scale with every logical CPU the machine has.
+        assert_eq!(normalized.compute_threads, all);
         assert_eq!(normalized.mode, ResourcePolicyMode::Automatic);
         // #1595: spill into the project scratch directory by default.
         assert!(normalized.spill_enabled);

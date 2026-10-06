@@ -212,7 +212,9 @@ pub(super) fn for_each(
         byte_budget: usize::try_from(graph.resource_policy.memory_budget_bytes / 4)
             .unwrap_or(usize::MAX)
             .clamp(1, 256 << 20),
-        workers: graph.compute_pool.num_threads().min(4),
+        // One batch per construction lane per flush (#1863); `byte_budget`
+        // bounds the window's memory.
+        workers: graph.construction_cpu_admission.limit(),
         #[cfg(test)]
         probe: None,
     };
