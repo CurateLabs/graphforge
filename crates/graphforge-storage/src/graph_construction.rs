@@ -75,6 +75,7 @@ use catalog::{
     load_parent_runtime_catalog_from_compact,
 };
 mod finish_stages;
+pub(crate) mod node_index;
 mod partition_load;
 mod partition_memory;
 mod partition_records;
@@ -511,6 +512,16 @@ pub struct GraphConstructionBudgets {
     /// reads as zero, and keeps its refusal on resume.
     #[serde(default)]
     pub max_external_partition_bytes: u64,
+    /// Largest new-node index an initial build may hold in memory to resolve
+    /// edge endpoints by probing it, 16 bytes per new node (ADR 0057). An
+    /// initial build within it skips the endpoint family's routing, sorting
+    /// and merge join; an append, or a build over it, keeps them. Zero keeps
+    /// them always. A checkpoint recorded before this field existed has none,
+    /// reads as zero, and resumes on the endpoint family. Zero is not
+    /// serialized, so finish-stage controls that embed these budgets re-hash
+    /// to the same chain digest whether an older or this binary wrote them.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub max_node_index_bytes: u64,
 }
 
 impl Default for GraphConstructionBudgets {
@@ -530,9 +541,22 @@ impl Default for GraphConstructionBudgets {
             target_partition_records: partition::default_target_records(),
             max_partition_bytes: partition::default_materialization_bytes(),
             max_external_partition_bytes: DEFAULT_MAX_EXTERNAL_PARTITION_BYTES,
+            max_node_index_bytes: DEFAULT_MAX_NODE_INDEX_BYTES,
         }
     }
 }
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "Serde skip_serializing_if requires a reference"
+)]
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+/// Default node-index bound: 1 GiB, 64Mi new nodes, which covers the
+/// Graph500 S26 certification rung in one index.
+pub const DEFAULT_MAX_NODE_INDEX_BYTES: u64 = 1 << 30;
 
 /// Default external partition bound: 64 GiB of scratch for one partition,
 /// enough for a node with roughly two billion endpoint records.
@@ -887,6 +911,12 @@ struct ShapeIntent {
     /// Measured identity rows per effective partition, in partition order.
     #[serde(default)]
     partition_identity_rows: Vec<u64>,
+    /// Whether this shape resolves edge endpoints by the node index (ADR
+    /// 0057) instead of the endpoint family. Chosen from recorded data before
+    /// any partition writes a byte, so a resumed shape replays the same path.
+    /// An intent recorded before this field existed used the endpoint family.
+    #[serde(default)]
+    endpoint_index: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1363,14 +1393,21 @@ impl GraphConstructionSession {
         // that exact legacy default with today's default retains its authority;
         // explicit non-default changes still fail validate_checkpoint below.
         // Likewise a checkpoint recorded before external partitions (#1585)
-        // has no external bound and keeps its refusal contract.
+        // has no external bound and keeps its refusal contract, and one
+        // recorded before the node index (ADR 0057) keeps the endpoint family.
         let legacy_defaults = [256, GraphConstructionBudgets::default().partition_count]
             .into_iter()
             .flat_map(|partition_count| {
                 [0, DEFAULT_MAX_EXTERNAL_PARTITION_BYTES].map(|max_external_partition_bytes| {
+                    (partition_count, max_external_partition_bytes)
+                })
+            })
+            .flat_map(|(partition_count, max_external_partition_bytes)| {
+                [0, DEFAULT_MAX_NODE_INDEX_BYTES].map(|max_node_index_bytes| {
                     GraphConstructionBudgets {
                         partition_count,
                         max_external_partition_bytes,
+                        max_node_index_bytes,
                         ..GraphConstructionBudgets::default()
                     }
                 })

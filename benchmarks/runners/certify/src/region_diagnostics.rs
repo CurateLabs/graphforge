@@ -102,7 +102,7 @@ const WORK_UNITS_V2: [&str; 9] = [
     "participant_reused_bytes",
     "participant_payload_read_bytes",
 ];
-const REGIONS: [&str; 58] = [
+const REGIONS: [&str; 61] = [
     "import_command",
     "begin_import",
     "resume_import",
@@ -154,6 +154,9 @@ const REGIONS: [&str; 58] = [
     "partition_load_wait",
     "surrogate_assignment",
     "endpoint_resolution",
+    "endpoint_index_validation",
+    "endpoint_index_build",
+    "endpoint_index_probe",
     "shape_row_finish",
     "runtime_catalog",
     "shape_completion",
