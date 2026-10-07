@@ -313,6 +313,46 @@ impl GraphConstructionSession {
         &mut self,
         shape: &ConstructionShape,
         generation: u64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<GraphConstructionEncoding, GfError> {
+        self.encode_canonical_inner(shape, generation, None, cancelled)
+    }
+
+    /// Seal an empty initial session and build its generation from the planned
+    /// sources with the bulk builder (#1883). The shape is empty: every row
+    /// comes from `plan`, and the builder emits the same inventory the staged
+    /// encoder would. A crash discards the build and the next call reruns it;
+    /// an inventory the checkpoint already pins is reused.
+    ///
+    /// # Errors
+    /// Refuses a session that is not an empty initial build, and returns the
+    /// intake refusal of the first rejected source row.
+    pub fn prepare_bulk_encoding(
+        &mut self,
+        generation: u64,
+        plan: &crate::graph_construction_encoding::BulkBuildPlan<'_>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<GraphConstructionEncoding, GfError> {
+        reject_cancelled(&mut cancelled)?;
+        self.revalidate_authority()?;
+        if self.checkpoint.parent_topology_generation != 0 || self.checkpoint.next_sequence != 0 {
+            return Err(storage("the bulk builder only builds an empty initial session"));
+        }
+        if self.checkpoint.state == GraphConstructionState::Staging {
+            self.seal_inner(false)?;
+        }
+        if self.checkpoint.encoding_inventory_sha256.is_some() {
+            return self.prepare_canonical_encoding_with_cancellation(generation, cancelled);
+        }
+        let shape = self.shape_canonical_inner(&mut cancelled)?;
+        self.encode_canonical_inner(&shape, generation, Some(plan), cancelled)
+    }
+
+    fn encode_canonical_inner(
+        &mut self,
+        shape: &ConstructionShape,
+        generation: u64,
+        bulk: Option<&crate::graph_construction_encoding::BulkBuildPlan<'_>>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<GraphConstructionEncoding, GfError> {
         self.revalidate_authority()?;
@@ -339,22 +379,38 @@ impl GraphConstructionSession {
         {
             return Err(storage("construction ordinal parent is no longer CURRENT"));
         }
-        let encoded = crate::graph_construction_encoding::encode(
-            &self.root,
-            DetailCodec::from_version(self.checkpoint.format_version).map_err(storage)?,
-            shape,
-            generation,
-            self.checkpoint.ontology_mode,
-            self.base_snapshot.as_ref(),
-            parent.as_ref(),
-            self.semantic_authority.as_ref(),
-            &shape_outputs,
-            &shape_authority,
-            self.checkpoint.encoding_inventory_sha256.as_deref(),
-            self.checkpoint.budgets,
-            self.cpu_admission.as_ref(),
-            &mut cancelled,
-        )?;
+        let encoded = if let Some(plan) = bulk {
+            crate::graph_construction_encoding::encode_bulk(
+                &self.root,
+                shape,
+                generation,
+                self.checkpoint.ontology_mode,
+                self.semantic_authority.as_ref(),
+                &shape_authority,
+                self.checkpoint.budgets,
+                self.cpu_admission.as_ref(),
+                plan,
+                &self.bulk_report,
+                &mut cancelled,
+            )?
+        } else {
+            crate::graph_construction_encoding::encode(
+                &self.root,
+                DetailCodec::from_version(self.checkpoint.format_version).map_err(storage)?,
+                shape,
+                generation,
+                self.checkpoint.ontology_mode,
+                self.base_snapshot.as_ref(),
+                parent.as_ref(),
+                self.semantic_authority.as_ref(),
+                &shape_outputs,
+                &shape_authority,
+                self.checkpoint.encoding_inventory_sha256.as_deref(),
+                self.checkpoint.budgets,
+                self.cpu_admission.as_ref(),
+                &mut cancelled,
+            )?
+        };
         let encoded_entries =
             record_encoded_active_artifacts(&self.root, &encoded, &mut self.checkpoint.evidence)?;
         record_encoding_io_evidence(&mut self.checkpoint.evidence, &encoded)?;

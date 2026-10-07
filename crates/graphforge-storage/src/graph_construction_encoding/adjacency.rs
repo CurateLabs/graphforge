@@ -142,7 +142,7 @@ pub(super) fn encode_adjacency(
     Ok(())
 }
 
-fn register_adjacency_artifacts(
+pub(super) fn register_adjacency_artifacts(
     output: &StableDirectory,
     graph_root: &Path,
     adjacency: &Path,

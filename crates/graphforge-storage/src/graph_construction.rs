@@ -12,6 +12,7 @@ use intake::{
     uuid_column, uuid_value, validate_artifact_name, validate_intent, validate_parquet_metadata,
     validate_receipt_artifacts, validate_receipt_semantics, write_parquet_with_properties,
 };
+pub(crate) use intake::{normalized_schema_digest, uuid_column as batch_uuid_column, validate_schema as validate_canonical_batch};
 mod io_evidence;
 pub(crate) use io_evidence::{
     ConstructionFileHandle, CountingChunkReader, CountingRead, IoCounter,
@@ -190,6 +191,27 @@ pub static CONSTRUCTION_EDGE_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
 
 /// Fixed application buffer used by canonical construction encoding streams.
 pub const GRAPH_CONSTRUCTION_ENCODING_BUFFER_BYTES: usize = 1 << 20;
+
+/// The session clock recorded in the checkpoint and stamped into the canonical
+/// topology. With the `test-support` feature, `GF_TEST_SESSION_NOW_MICROS`
+/// pins it so two builds of one input can be compared byte for byte; release
+/// builds never read it.
+fn session_clock_micros() -> Result<i64, GfError> {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(value) = std::env::var_os("GF_TEST_SESSION_NOW_MICROS") {
+        return value
+            .to_str()
+            .and_then(|text| text.parse::<i64>().ok())
+            .filter(|micros| *micros > 0)
+            .ok_or_else(|| storage("GF_TEST_SESSION_NOW_MICROS is not a positive integer"));
+    }
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(storage)?
+        .as_micros()
+        .try_into()
+        .map_err(|_| storage("session timestamp exceeds i64"))
+}
 
 fn storage(error: impl std::fmt::Display) -> GfError {
     GfError::Storage(format!("graph construction session: {error}"))
@@ -711,6 +733,7 @@ impl ConstructionSemanticAuthority {
 }
 
 pub use crate::graph_construction_encoding::{
+    BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkSource,
     ConstructionRetainedArtifact, GraphConstructionEncoding, GraphConstructionEncodingEvidence,
     GraphConstructionEncodingInvocationEvidence,
 };
@@ -1032,6 +1055,8 @@ pub struct GraphConstructionSession {
     /// Instance-wide construction CPU admission (#1586, ADR 0047). `None`
     /// keeps the fixed finish-time worker count, as for direct storage users.
     cpu_admission: Option<std::sync::Arc<cpu_admission::ConstructionCpuAdmission>>,
+    /// Measurements of the last bulk build this session ran (#1883).
+    bulk_report: std::sync::Arc<std::sync::Mutex<crate::graph_construction_encoding::BulkBuildReport>>,
     session_lock: File,
     _reservation: ProcessReservation,
 }
@@ -1047,6 +1072,15 @@ impl Drop for GraphConstructionSession {
 }
 
 impl GraphConstructionSession {
+    /// Measurements of the most recent bulk build in this process.
+    #[must_use]
+    pub fn bulk_build_report(&self) -> crate::graph_construction_encoding::BulkBuildReport {
+        self.bulk_report
+            .lock()
+            .map(|report| report.clone())
+            .unwrap_or_default()
+    }
+
     /// Draw this session's parallel construction lanes from `admission`
     /// (#1586, ADR 0047). Scheduling only: output bytes and evidence do not
     /// depend on it. `None` restores the fixed finish-time worker count.
@@ -1651,12 +1685,7 @@ impl GraphConstructionSession {
                 ontology_mode,
                 lifecycle_mode,
                 semantic_authority_sha256: semantic_authority_sha256.clone(),
-                session_now_micros: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map_err(storage)?
-                    .as_micros()
-                    .try_into()
-                    .map_err(|_| storage("session timestamp exceeds i64"))?,
+                session_now_micros: session_clock_micros()?,
                 budgets,
                 state: GraphConstructionState::Staging,
                 publication_state: None,
@@ -1719,6 +1748,7 @@ impl GraphConstructionSession {
             shape_boundary_retired_through: 0,
             shape_finish_interrupted: false,
             cpu_admission: None,
+            bulk_report: std::sync::Arc::default(),
             session_lock,
             _reservation: reservation,
         };

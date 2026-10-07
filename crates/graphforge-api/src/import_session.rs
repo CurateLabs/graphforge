@@ -24,6 +24,7 @@ use crate::{BulkInputKind, CancellationToken, GraphConstructionBudgets, GraphFor
 
 #[cfg(test)]
 mod cpu_budget_report;
+mod bulk_source;
 mod journal;
 mod normalization;
 
@@ -177,6 +178,10 @@ pub struct ImportConstructionEvidence {
     /// Versioned named publication work, derived from the phase counters above.
     #[serde(default)]
     pub publication_work: PublicationWorkComponents,
+    /// Passes of the bulk builder when the generation was built from the
+    /// registered sources rather than staged chunk by chunk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bulk_build: Option<graphforge_storage::BulkBuildReport>,
     /// Exact accepted input rows.
     pub input_rows: u64,
     /// Exact non-replay input batches.
@@ -883,6 +888,22 @@ impl GraphImportSession {
         let mut construction = self.open_construction(graph)?;
         let session_root = self.root.clone();
         let batch_rows = self.manifest.limits.batch_rows;
+        // Pass 0 routing: an initial build that has staged nothing runs on the
+        // bulk builder; an append, or a session an earlier binary began staging,
+        // keeps the staged path. The choice is made here, from durable state.
+        let initial = {
+            let progress = construction.progress();
+            progress.parent_topology_generation == 0
+                && progress.accepted_chunks == 0
+                && self
+                    .manifest
+                    .sources
+                    .iter()
+                    .all(|source| !source.staged && source.batches_staged == 0)
+        };
+        if initial {
+            return self.build_initial(&mut construction, graph, cancellation);
+        }
         for input_kind in [BulkInputKind::Node, BulkInputKind::Edge] {
             for source_index in 0..self.manifest.sources.len() {
                 let source = self.manifest.sources[source_index].clone();
@@ -919,6 +940,58 @@ impl GraphImportSession {
             }
         }
         self.seal_construction(&mut construction, cancellation)
+    }
+
+    /// Build an initial generation from every registered source (#1883).
+    ///
+    /// Sources are read in place and in parallel; nothing is staged, so a
+    /// crash leaves nothing to resume and the next `validate` reruns the build.
+    fn build_initial(
+        &mut self,
+        construction: &mut crate::GraphConstructionSession<'_>,
+        graph: &GraphForge,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<ImportProgress, GfError> {
+        let mut plan = graphforge_storage::BulkBuildPlan::default();
+        for source in &self.manifest.sources {
+            let planned = bulk_source::plan(
+                graph,
+                &self.root,
+                source,
+                self.manifest.limits.batch_rows,
+                self.manifest.operation_uuid,
+                cancellation,
+            )?;
+            match source.kind.input_kind() {
+                BulkInputKind::Node => plan.nodes.push(planned),
+                BulkInputKind::Edge => plan.edges.push(planned),
+            }
+        }
+        let region = RegionScope::named("bulk_build");
+        let started = CallStart::now();
+        let built = construction.build_initial(&plan, cancellation);
+        if let (Some(timings), Some(started)) = (&mut self.operation_timings, started) {
+            timings.seal.record(started, built.is_err());
+        }
+        drop(region);
+        let report = built?;
+        let (nodes, edges) = (report.nodes, report.edges);
+        for source in &mut self.manifest.sources {
+            source.staged = true;
+        }
+        self.manifest.progress.rows_accepted = nodes.saturating_add(edges);
+        self.manifest.progress.files_pending = 0;
+        self.manifest.progress.peak_batch_rows = self
+            .manifest
+            .progress
+            .peak_batch_rows
+            .max(self.manifest.limits.batch_rows as u64);
+        self.update_construction_progress(&construction.progress())?;
+        if let Some(evidence) = self.manifest.progress.construction.as_mut() {
+            evidence.bulk_build = Some(report);
+        }
+        self.manifest.phase = ImportPhase::Validated;
+        self.checkpoint()
     }
 
     fn append_source_batch(
@@ -1188,6 +1261,12 @@ impl GraphImportSession {
             publication_committed: progress.publication_committed,
             application_io,
             publication_work,
+            bulk_build: self
+                .manifest
+                .progress
+                .construction
+                .as_ref()
+                .and_then(|evidence| evidence.bulk_build.clone()),
             input_rows: progress.evidence.input_rows,
             input_batches: progress.evidence.input_batches,
             immutable_artifacts: progress.evidence.immutable_artifacts,

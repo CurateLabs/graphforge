@@ -33,7 +33,7 @@ mod probing;
 mod rebuild;
 mod topology_delta;
 
-pub(crate) use construction::encode_construction_index;
+pub(crate) use construction::{ConstructionIdentityInput, encode_construction_index};
 pub(crate) use construction::is_exact_private_v4_name;
 pub use maintenance::maintain_uuid_membership_orphans;
 #[cfg(test)]

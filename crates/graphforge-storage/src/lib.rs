@@ -75,6 +75,7 @@ mod payload_digest;
 pub mod payload_digest;
 pub use graph_construction::cpu_admission::{ConstructionCpuAdmission, ConstructionCpuLease};
 pub use graph_construction::{
+    BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkSource,
     CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, ConstructionChunkKind,
     ConstructionChunkReceipt, ConstructionRetainedArtifact, ConstructionSemanticAuthority,
     ConstructionShape, GRAPH_CONSTRUCTION_ENCODING_BUFFER_BYTES, GraphConstructionBudgets,

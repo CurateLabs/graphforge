@@ -139,6 +139,61 @@ impl ConstructionRecoveryIntent {
     }
 }
 
+/// Where the UUID-ordered identity delta comes from.
+pub(crate) enum ConstructionIdentityInput<'a> {
+    /// The shaper's durable, authenticated identity run.
+    Shaped {
+        source: &'a graphforge_filesystem::StableDirectory,
+        name: &'a str,
+        xxh64: &'a str,
+    },
+    /// The same records generated in memory by the bulk builder. They are the
+    /// shaped run's bytes; only their durable staging is skipped.
+    Stream {
+        reader: Box<dyn std::io::Read + 'a>,
+        len: u64,
+    },
+}
+
+enum IdentityReader<'a> {
+    File(Option<File>),
+    Stream(Box<dyn std::io::Read + 'a>),
+    Releasing(graphforge_filesystem::FileCacheReleasingReader),
+}
+
+impl IdentityReader<'_> {
+    fn into_reader(self, window: std::num::NonZeroU64) -> Result<Self, GfError> {
+        match self {
+            Self::File(Some(file)) => Ok(Self::Releasing(
+                graphforge_filesystem::FileCacheReleasingReader::with_window_bytes(
+                    file,
+                    window,
+                    graphforge_filesystem::FileCacheReleaseTracker::default(),
+                )
+                .map_err(storage_err)?,
+            )),
+            other => Ok(other),
+        }
+    }
+
+    fn finish(self) -> Result<graphforge_filesystem::FileCacheReleaseEvidence, GfError> {
+        match self {
+            Self::Releasing(mut reader) => reader.finish().map_err(storage_err),
+            _ => Ok(graphforge_filesystem::FileCacheReleaseEvidence::default()),
+        }
+    }
+}
+
+impl std::io::Read for IdentityReader<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Releasing(reader) => reader.read(buffer),
+            Self::Stream(reader) => reader.read(buffer),
+            Self::File(_) => Err(std::io::Error::other("identity reader is not initialized")),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn construction_intent_digest(
     format_version: u32,
@@ -169,9 +224,7 @@ fn construction_intent_digest(
 /// retained payloads are read only when binary-carry compaction is required.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn encode_construction_index(
-    source: &graphforge_filesystem::StableDirectory,
-    identities_name: &str,
-    identities_xxh64: &str,
+    input: ConstructionIdentityInput<'_>,
     encoded: &graphforge_filesystem::StableDirectory,
     generation: u64,
     parent_generation: u64,
@@ -188,9 +241,7 @@ pub(crate) fn encode_construction_index(
         allocation: allocation.cloned(),
     };
     let result = encode_construction_index_inner(
-        source,
-        identities_name,
-        identities_xxh64,
+        input,
         encoded,
         generation,
         parent_generation,
@@ -216,9 +267,7 @@ pub(crate) fn encode_construction_index(
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn encode_construction_index_inner(
-    source: &graphforge_filesystem::StableDirectory,
-    identities_name: &str,
-    identities_xxh64: &str,
+    input: ConstructionIdentityInput<'_>,
     encoded: &graphforge_filesystem::StableDirectory,
     generation: u64,
     parent_generation: u64,
@@ -271,24 +320,44 @@ fn encode_construction_index_inner(
     let mut work = ConstructionIndexWork::default();
     let identity_temp = format!(".construction-identities-{}.tmp", Uuid::new_v4().simple());
     let surrogate_temp = format!(".construction-surrogates-{}.tmp", Uuid::new_v4().simple());
-    let input = source
-        .open_child_file(std::ffi::OsStr::new(identities_name))
-        .map_err(storage_err)?;
-    let input_len = input.metadata().map_err(storage_err)?.len();
+    let (input, identities_name, identities_xxh64, source_volume, source_file_id, input_len) =
+        match input {
+            ConstructionIdentityInput::Shaped { source, name, xxh64 } => {
+                let file = source
+                    .open_child_file(std::ffi::OsStr::new(name))
+                    .map_err(storage_err)?;
+                let len = file.metadata().map_err(storage_err)?.len();
+                let identity = graphforge_filesystem::file_identity(&file).map_err(storage_err)?;
+                (
+                    IdentityReader::File(Some(file)),
+                    name,
+                    Some(xxh64),
+                    identity.volume_serial,
+                    hex_bytes(&identity.file_id),
+                    len,
+                )
+            }
+            ConstructionIdentityInput::Stream { reader, len } => (
+                IdentityReader::Stream(reader),
+                "<in-memory identity stream>",
+                None,
+                0,
+                String::new(),
+                len,
+            ),
+        };
     if input_len % CONSTRUCTION_IDENTITY_WIDTH as u64 != 0 {
         return Err(storage_err("construction identity stream is truncated"));
     }
-    let source_identity = graphforge_filesystem::file_identity(&input).map_err(storage_err)?;
-    let source_file_id = hex_bytes(&source_identity.file_id);
     let mut intent = ConstructionRecoveryIntent {
         format_version: CONSTRUCTION_INTENT_FORMAT_VERSION,
         generation,
         parent_generation,
         identities_name: identities_name.to_owned(),
-        source_volume: source_identity.volume_serial,
+        source_volume,
         source_file_id: source_file_id.clone(),
         source_bytes: input_len,
-        source_xxh64: identities_xxh64.to_owned(),
+        source_xxh64: identities_xxh64.unwrap_or_default().to_owned(),
         authority_sha256: String::new(),
     };
     intent.authority_sha256 = construction_intent_digest(
@@ -315,12 +384,7 @@ fn encode_construction_index_inner(
         graphforge_filesystem::file_identity(&surrogate_writer).map_err(storage_err)?;
     let cache_window =
         graphforge_filesystem::cache_release_window_for_streams(3).map_err(storage_err)?;
-    let mut input = graphforge_filesystem::FileCacheReleasingReader::with_window_bytes(
-        input,
-        cache_window,
-        graphforge_filesystem::FileCacheReleaseTracker::default(),
-    )
-    .map_err(storage_err)?;
+    let mut input = input.into_reader(cache_window)?;
     let mut identity_writer = graphforge_filesystem::DurableFileCacheWriter::with_window_bytes(
         identity_writer,
         cache_window,
@@ -421,7 +485,9 @@ fn encode_construction_index_inner(
             work.write_operations = work.write_operations.saturating_add(1);
             remaining -= count as u64;
         }
-        if crate::corruption_checksum::hex(source_checksum.finish()) != identities_xxh64 {
+        if identities_xxh64.is_some_and(|expected| {
+            crate::corruption_checksum::hex(source_checksum.finish()) != expected
+        }) {
             return Err(storage_err("construction identity source digest changed"));
         }
         Ok(())
@@ -438,7 +504,7 @@ fn encode_construction_index_inner(
             .map_err(storage_err)
     })();
     let streamed = combine_v4_cleanup(streamed, observed, "construction allocation observation");
-    let released = input.finish().map_err(storage_err);
+    let released = input.finish();
     let input_cache_release = match (streamed, released) {
         (Ok(()), Ok(released)) => released,
         (Ok(()), Err(release)) => return Err(release),
