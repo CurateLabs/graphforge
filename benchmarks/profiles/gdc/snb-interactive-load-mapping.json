@@ -119,8 +119,7 @@
         },
         {
           "column": "creationDate",
-          "type": "datetime",
-          "format": "epoch-millis"
+          "type": "int64"
         },
         {
           "column": "locationIP",
@@ -159,8 +158,7 @@
         },
         {
           "column": "creationDate",
-          "type": "datetime",
-          "format": "epoch-millis"
+          "type": "int64"
         }
       ]
     },
@@ -191,13 +189,11 @@
         },
         {
           "column": "birthday",
-          "type": "date",
-          "format": "epoch-millis"
+          "type": "int64"
         },
         {
           "column": "creationDate",
-          "type": "datetime",
-          "format": "epoch-millis"
+          "type": "int64"
         },
         {
           "column": "locationIP",
@@ -239,8 +235,7 @@
         },
         {
           "column": "creationDate",
-          "type": "datetime",
-          "format": "epoch-millis"
+          "type": "int64"
         },
         {
           "column": "locationIP",
@@ -444,8 +439,7 @@
       "properties": [
         {
           "column": "joinDate",
-          "type": "datetime",
-          "format": "epoch-millis"
+          "type": "int64"
         }
       ]
     },
@@ -531,8 +525,7 @@
       "properties": [
         {
           "column": "creationDate",
-          "type": "datetime",
-          "format": "epoch-millis"
+          "type": "int64"
         }
       ]
     },
@@ -554,8 +547,7 @@
       "properties": [
         {
           "column": "creationDate",
-          "type": "datetime",
-          "format": "epoch-millis"
+          "type": "int64"
         }
       ]
     },
@@ -577,8 +569,7 @@
       "properties": [
         {
           "column": "creationDate",
-          "type": "datetime",
-          "format": "epoch-millis"
+          "type": "int64"
         }
       ]
     },
