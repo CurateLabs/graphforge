@@ -239,6 +239,7 @@ pub(crate) fn encode_bulk(
         tables::collect_nodes(&plan.nodes, retain_nodes, &cancel)
     })?;
     passes.push(meter.finish());
+    crate::graph_construction::construction_failpoint("bulk.after_nodes");
 
     // Pass 2: edges and endpoint resolution.
     let meter = PassMeter::start("edges");
@@ -248,6 +249,7 @@ pub(crate) fn encode_bulk(
     })?;
     drop(index);
     passes.push(meter.finish());
+    crate::graph_construction::construction_failpoint("bulk.after_edges");
 
     // Pass 3: catalog and ranked tables.
     let meter = PassMeter::start("catalog");
@@ -307,6 +309,7 @@ pub(crate) fn encode_bulk(
         )
     })?;
     passes.push(meter.finish());
+    crate::graph_construction::construction_failpoint("bulk.after_tables");
 
     let meter = PassMeter::start("adjacency");
     let adjacency = run_pass(&pool, cancelled, &cancel, || {
@@ -321,11 +324,13 @@ pub(crate) fn encode_bulk(
         )
     })?;
     passes.push(meter.finish());
+    crate::graph_construction::construction_failpoint("bulk.after_adjacency");
 
     let meter = PassMeter::start("membership");
     let membership = build_membership(&output, &nodes, &edges.uuids, generation, &cancel)?;
     check_cancelled(&cancel)?;
     passes.push(meter.finish());
+    crate::graph_construction::construction_failpoint("bulk.after_membership");
 
     // Property overlays: sequential, through the staged encoder's own writer.
     let meter = PassMeter::start("properties");
@@ -502,7 +507,9 @@ pub(crate) fn encode_bulk(
         evidence,
         invocation: GraphConstructionEncodingInvocationEvidence::default(),
     };
+    crate::graph_construction::construction_failpoint("bulk.before_inventory");
     install_json(&output, INVENTORY, &completed)?;
+    crate::graph_construction::construction_failpoint("bulk.after_inventory_before_intent_removal");
     authenticate_inventory_control(&completed, None)?;
     remove_encoding_intent(&output)?;
     passes.push(meter.finish());

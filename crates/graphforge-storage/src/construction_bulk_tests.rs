@@ -398,4 +398,64 @@ mod bulk_builder {
             assert_eq!(expected, inventory(&rerun), "cancelled after {polls_before_cancel} polls");
         }
     }
+
+    const CRASH_ROOT: &str = "GF_BULK_CRASH_ROOT";
+
+    /// The killed process: runs the build in a child that exits at the armed failpoint.
+    #[test]
+    fn bulk_crash_child() {
+        let Ok(path) = std::env::var(CRASH_ROOT) else {
+            return;
+        };
+        let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
+        let mut session = GraphConstructionSession::open(
+            Path::new(&path),
+            Uuid::from_u128(OPERATION),
+            0,
+            GraphConstructionBudgets::default(),
+        )
+        .unwrap();
+        session.checkpoint.session_now_micros = CLOCK;
+        session
+            .prepare_bulk_encoding(1, &plan(&nodes, &edges, 2), || false)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_process_killed_in_any_pass_reruns_to_identical_artifacts() {
+        let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
+        let expected = bulk_with(&nodes, &edges, 2, 4).unwrap();
+        for failpoint in [
+            "bulk.after_nodes",
+            "bulk.after_edges",
+            "bulk.after_tables",
+            "bulk.after_adjacency",
+            "uuid_encode.after_intent",
+            "uuid_encode.after_delta_runs",
+            "uuid_encode.after_manifest",
+            "bulk.after_membership",
+            "bulk.before_inventory",
+            "bulk.after_inventory_before_intent_removal",
+        ] {
+            let root = TempDir::new().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("graph_construction::tests::bulk_builder::bulk_crash_child")
+                .arg("--nocapture")
+                .env(CRASH_ROOT, root.path())
+                .env(
+                    "GF_CONSTRUCTION_FAILPOINT_COOKIE",
+                    "graphforge-construction-test-v1",
+                )
+                .env("GF_CONSTRUCTION_FAILPOINT", failpoint)
+                .status()
+                .unwrap();
+            assert_eq!(status.code(), Some(86), "{failpoint}");
+            let mut session = pinned(&root);
+            let rerun = session
+                .prepare_bulk_encoding(1, &plan(&nodes, &edges, 2), || false)
+                .unwrap();
+            assert_eq!(expected, inventory(&rerun), "killed at {failpoint}");
+        }
+    }
 }
