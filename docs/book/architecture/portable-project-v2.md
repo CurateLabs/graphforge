@@ -90,7 +90,8 @@ data/components/<kind>/<participant-id>/<files...>
 `bag-info.txt` contains exactly, in this order, LF terminated:
 `Bag-Software-Agent: GraphForge portable-v2\nBagging-Date: 1970-01-01\n`.
 `manifest-sha256.txt` contains every `data/` regular file in ascending portable
-path order as lowercase hex, two spaces, path, LF. `tagmanifest-sha256.txt`
+path order as lowercase hex, two spaces, path, LF; any other byte, including a
+CR, is refused. `tagmanifest-sha256.txt`
 contains `bag-info.txt`, `bagit.txt`, and `manifest-sha256.txt` in that order and
 the same syntax. It MUST NOT list itself. No fetch file, hidden file, directory
 entry, link, special file, or unmanifested file is allowed.
@@ -150,10 +151,28 @@ bytes and emitted densely, subject to the declared length and limits.
 
 Before payload access, readers enforce configurable limits no weaker than:
 10,000 components, 1,000,000 entries, 16 TiB per entry, 1 PiB declared total,
-16 MiB semantic manifest, 4 MiB tag manifests, and 4 KiB paths. Arithmetic is
-checked. Implementations MAY configure lower limits and return a typed limit
-result. Since v2 is uncompressed, decompressed length equals bundle payload
-length; a compression marker is unsupported, not auto-detected.
+16 MiB per retained JSON control (runtime map, ontology composition, ontology
+and bridge documents in aggregate), a 64 MiB semantic manifest ceiling, 4 MiB
+per retained tag file, and 4 KiB paths. Arithmetic is checked. Implementations
+MAY configure lower limits and return a typed limit result. Since v2 is
+uncompressed, decompressed length equals bundle payload length; a compression
+marker is unsupported, not auto-detected.
+
+Limits that grow with the entry count admit every package a project can
+produce. The semantic manifest lists one file record per entry: at most 186
+bytes of record plus the path, so 512 bytes per entry admits paths that average
+up to 326 bytes. Before parsing it, readers bound it by the package itself:
+the 16 MiB control allowance plus 512 bytes per regular entry the package
+holds, never above the ceiling. The ceiling holds the largest graph a project
+stores, 100,000 graph files x 512 bytes, rounded up to 64 MiB. A small package
+therefore cannot present a large manifest. The retained tag files are
+`bagit.txt`, `bag-info.txt`, and the three-row `tagmanifest-sha256.txt`, whose
+sizes do not depend on the entry count. The payload inventory,
+`manifest-sha256.txt`, has one row per `data/` file, so writers render it and
+readers check it as it streams, without holding it whole. Canonical order
+places every `data/` entry before it, and the reader checks each row against
+the entries it has already authenticated. Its size is bounded only by the entry
+and path limits.
 
 Cancellation is checked before each header, before each copy-buffer operation,
 and before publication. Validation and import stage privately; unsupported
@@ -173,7 +192,13 @@ The billion-edge structural conformance case is a single graph-data component
 whose descriptors may cover many bounded Parquet/sharded-index files totaling
 over 16 GiB. Neither representation has an envelope field; all lengths are
 64-bit and all I/O is incremental, so peak format memory is bounded by manifest,
-entry metadata limits, and the copy buffer rather than payload size.
+entry metadata limits, and the copy buffer rather than payload size. Writer and
+reader hold one path and digest per entry and the semantic manifest as bytes
+and as one parsed JSON tree, so format memory grows with the entry count and
+the manifest size, not with the payload inventory, which streams. A maximally
+hostile manifest (a flat array of zeros) costs about 18 times its size while
+parsed: about 300 MiB at the 16 MiB allowance and 1.2 GiB at the 64 MiB
+ceiling, which only a package of about 98,000 entries may present.
 
 ## Compatibility
 
@@ -198,9 +223,10 @@ Full mode reads and hashes every regular entry before returning
 `integrity: verified`. Structure-only mode returns `integrity: not_checked` and
 is never import or publication evidence. Reports keep integrity, compatibility,
 and authenticity separate and identify failures only by a bounded
-portable-relative entry. The implementation retains the bounded semantic/tag
-records, entry index, and configured copy buffer; payloads stream incrementally
-even when the declared package exceeds 16 GiB.
+portable-relative entry. The implementation retains the bounded semantic
+records, the retained tag files, the entry index, and the configured copy
+buffer; the payload inventory and the payloads stream incrementally even when
+the declared package exceeds 16 GiB.
 
 When `ontology-composition@1` is present, the verified report also exposes the
 authenticated exact module, bridge, activation, feature, and composition

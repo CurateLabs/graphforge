@@ -107,16 +107,16 @@ pub(super) fn expanded(
         payload.push((f.path.clone(), f.length, f.digest));
     }
     payload.sort_by(|a, b| a.0.cmp(&b.0));
-    let inv = inventory(&payload, l.max_tag_manifest_bytes)?;
-    write_bytes(stage, "manifest-sha256.txt", &inv, allocation)?;
+    let inventory = write_inventory(
+        stage,
+        payload
+            .iter()
+            .map(|(path, _, digest)| (path.as_str(), *digest)),
+        allocation,
+    )?;
     write_bytes(stage, "bagit.txt", BAGIT, allocation)?;
     write_bytes(stage, "bag-info.txt", BAG_INFO, allocation)?;
-    let tags = [
-        ("bag-info.txt", BAG_INFO),
-        ("bagit.txt", BAGIT),
-        ("manifest-sha256.txt", inv.as_slice()),
-    ];
-    let tag_rows = tags
+    let tag_rows = [("bag-info.txt", BAG_INFO), ("bagit.txt", BAGIT)]
         .iter()
         .map(|(p, b)| {
             (
@@ -125,8 +125,13 @@ pub(super) fn expanded(
                 ControlSha256::digest(b).into(),
             )
         })
+        .chain(std::iter::once((
+            INVENTORY_PATH.to_owned(),
+            inventory.length,
+            inventory.digest,
+        )))
         .collect::<Vec<_>>();
-    let tag = inventory(&tag_rows, l.max_tag_manifest_bytes)?;
+    let tag = tag_manifest(&tag_rows, l.max_tag_manifest_bytes)?;
     write_bytes(stage, "tagmanifest-sha256.txt", &tag, allocation)?;
     progress(PortableV2ExportProgress {
         entries_completed: plan.files.len() + 5,
@@ -161,15 +166,24 @@ fn capture_controls(
     captured: &mut std::collections::BTreeMap<String, (u64, [u8; 32], u64)>,
 ) -> Result<(), ExportError> {
     for (path, source) in entries(plan, limit)? {
-        if let Src::Bytes(bytes) = source {
-            captured.insert(
-                path,
-                (
-                    bytes.len() as u64,
-                    ControlSha256::digest(&bytes).into(),
-                    crate::corruption_checksum::checksum(&bytes),
-                ),
-            );
+        match source {
+            Src::Bytes(bytes) => {
+                captured.insert(
+                    path,
+                    (
+                        bytes.len() as u64,
+                        ControlSha256::digest(&bytes).into(),
+                        crate::corruption_checksum::checksum(&bytes),
+                    ),
+                );
+            }
+            Src::Inventory(inventory) => {
+                captured.insert(
+                    path,
+                    (inventory.length, inventory.digest, inventory.checksum),
+                );
+            }
+            Src::File(_) => {}
         }
     }
     Ok(())
@@ -178,15 +192,37 @@ fn capture_controls(
 pub(super) enum Src<'a> {
     Bytes(Vec<u8>),
     File(&'a PlannedFile),
+    /// The payload inventory, rendered from the `data/` entries while it is
+    /// written rather than held in memory.
+    Inventory(InventoryIdentity),
 }
 impl Src<'_> {
     pub(super) fn len(&self) -> u64 {
         match self {
             Self::Bytes(b) => b.len() as u64,
             Self::File(f) => f.length,
+            Self::Inventory(inventory) => inventory.length,
+        }
+    }
+    fn digest(&self) -> [u8; 32] {
+        match self {
+            Self::Bytes(b) => ControlSha256::digest(b).into(),
+            Self::File(f) => f.digest,
+            Self::Inventory(inventory) => inventory.digest,
         }
     }
 }
+
+/// Payload inventory rows: every `data/` entry, in canonical path order.
+fn payload_rows<'a>(
+    items: &'a [(String, Src<'_>)],
+) -> impl Iterator<Item = (&'a str, [u8; 32])> + 'a {
+    items
+        .iter()
+        .filter(|(path, _)| path.starts_with("data/"))
+        .map(|(path, source)| (path.as_str(), source.digest()))
+}
+
 pub(super) fn entries(
     plan: &PortableV2ExportPlan,
     max_tag_manifest_bytes: u64,
@@ -197,40 +233,20 @@ pub(super) fn entries(
     )];
     v.extend(plan.files.iter().map(|f| (f.path.clone(), Src::File(f))));
     v.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
-    let inv = inventory(
-        &v.iter()
-            .map(|(p, s)| {
-                (
-                    p.clone(),
-                    s.len(),
-                    match s {
-                        Src::Bytes(b) => ControlSha256::digest(b).into(),
-                        Src::File(f) => f.digest,
-                    },
-                )
-            })
-            .collect::<Vec<_>>(),
-        max_tag_manifest_bytes,
-    )?;
+    let inventory = inventory_identity(payload_rows(&v))?;
     let tags = [
-        ("bag-info.txt", BAG_INFO.to_vec()),
-        ("bagit.txt", BAGIT.to_vec()),
-        ("manifest-sha256.txt", inv),
+        ("bag-info.txt", Src::Bytes(BAG_INFO.to_vec())),
+        ("bagit.txt", Src::Bytes(BAGIT.to_vec())),
+        (INVENTORY_PATH, Src::Inventory(inventory)),
     ];
-    let tag = inventory(
+    let tag = tag_manifest(
         &tags
             .iter()
-            .map(|(p, b)| {
-                (
-                    p.to_string(),
-                    b.len() as u64,
-                    ControlSha256::digest(b).into(),
-                )
-            })
+            .map(|(p, s)| ((*p).to_owned(), s.len(), s.digest()))
             .collect::<Vec<_>>(),
         max_tag_manifest_bytes,
     )?;
-    v.extend(tags.into_iter().map(|(p, b)| (p.into(), Src::Bytes(b))));
+    v.extend(tags.into_iter().map(|(p, s)| (p.into(), s)));
     v.push(("tagmanifest-sha256.txt".into(), Src::Bytes(tag)));
     Ok(v)
 }
@@ -267,6 +283,16 @@ pub(super) fn bundle(
                     ControlSha256::digest(b).into(),
                     crate::corruption_checksum::checksum(b),
                 )
+            }
+            Src::Inventory(expected) => {
+                let written = emit_inventory(&mut out, &mut h, payload_rows(&items), allocation)?;
+                if written != *expected {
+                    return Err(err(
+                        "GF_SOURCE_CHANGED",
+                        "payload inventory changed while writing",
+                    ));
+                }
+                (written.digest, written.checksum)
             }
             Src::File(f) => (
                 f.digest,
@@ -607,16 +633,126 @@ fn pad(output: &mut File, digest: &mut TransportHash, length: u64) -> Result<(),
     let zeroes = [0u8; 512];
     emit(output, digest, &zeroes[..padding])
 }
-fn inventory(rows: &[(String, u64, [u8; 32])], limit_bytes: u64) -> Result<Vec<u8>, ExportError> {
+const INVENTORY_PATH: &str = "manifest-sha256.txt";
+/// Inventory rows are rendered and written in batches of about this many bytes.
+const INVENTORY_BATCH_BYTES: usize = 64 * 1024;
+
+/// Exact identity of a canonical payload inventory (`manifest-sha256.txt`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct InventoryIdentity {
+    length: u64,
+    digest: [u8; 32],
+    checksum: u64,
+}
+
+/// Render the canonical payload inventory, one `sha256  path` row per entry,
+/// into `sink` in bounded batches. The inventory is never held whole: memory
+/// is one batch plus one row, whatever the entry count (#900).
+fn render_inventory<'a>(
+    rows: impl Iterator<Item = (&'a str, [u8; 32])>,
+    mut sink: impl FnMut(&[u8]) -> Result<(), ExportError>,
+) -> Result<u64, ExportError> {
+    let mut batch = Vec::with_capacity(INVENTORY_BATCH_BYTES);
+    let mut length = 0_u64;
+    for (path, digest) in rows {
+        let row = 64 + 2 + path.len() + 1;
+        length = length
+            .checked_add(row as u64)
+            .ok_or_else(|| limit("payload inventory size overflow"))?;
+        if !batch.is_empty() && batch.len() + row > INVENTORY_BATCH_BYTES {
+            sink(&batch)?;
+            batch.clear();
+        }
+        batch.extend(hex(digest).bytes());
+        batch.extend(b"  ");
+        batch.extend(path.bytes());
+        batch.push(b'\n');
+    }
+    if !batch.is_empty() {
+        sink(&batch)?;
+    }
+    Ok(length)
+}
+
+/// Render the inventory into `write`, returning the identity of exactly the
+/// bytes passed to it.
+fn stream_inventory<'a>(
+    rows: impl Iterator<Item = (&'a str, [u8; 32])>,
+    mut write: impl FnMut(&[u8]) -> Result<(), ExportError>,
+) -> Result<InventoryIdentity, ExportError> {
+    let mut digest = ControlSha256::new();
+    let mut checksum = crate::corruption_checksum::Checksum::new();
+    let length = render_inventory(rows, |bytes| {
+        write(bytes)?;
+        digest.update(bytes);
+        checksum.update(bytes);
+        Ok(())
+    })?;
+    Ok(InventoryIdentity {
+        length,
+        digest: digest.finalize().into(),
+        checksum: checksum.finish(),
+    })
+}
+
+/// Identity of the inventory `rows` render to, computed without buffering it.
+fn inventory_identity<'a>(
+    rows: impl Iterator<Item = (&'a str, [u8; 32])>,
+) -> Result<InventoryIdentity, ExportError> {
+    stream_inventory(rows, |_| Ok(()))
+}
+
+/// Stream the inventory into the current bundle member.
+fn emit_inventory<'a>(
+    out: &mut File,
+    transport: &mut TransportHash,
+    rows: impl Iterator<Item = (&'a str, [u8; 32])>,
+    allocation: &mut ExportAllocationObserver,
+) -> Result<InventoryIdentity, ExportError> {
+    stream_inventory(rows, |bytes| {
+        observed_write_result(emit(out, transport, bytes), out, allocation)?;
+        allocation.observe(out)
+    })
+}
+
+/// Stream the inventory into the expanded package's `manifest-sha256.txt`.
+fn write_inventory<'a>(
+    root: &Path,
+    rows: impl Iterator<Item = (&'a str, [u8; 32])>,
+    allocation: &mut ExportAllocationObserver,
+) -> Result<InventoryIdentity, ExportError> {
+    let path = root.join(INVENTORY_PATH);
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&path)
+        .map_err(storage)?;
+    allocation.register(&path, &file)?;
+    let identity = stream_inventory(rows, |bytes| {
+        observed_write_result(file.write_all(bytes).map_err(storage), &file, allocation)?;
+        allocation.observe(&file)
+    })?;
+    crate::durable_commit::seal_file(&file).map_err(storage)?;
+    allocation.observe(&file)?;
+    Ok(identity)
+}
+
+/// Render `tagmanifest-sha256.txt`. It always has the same three rows; the
+/// reader retains it under `max_tag_manifest_bytes`, so the writer refuses
+/// what the reader would.
+fn tag_manifest(
+    rows: &[(String, u64, [u8; 32])],
+    limit_bytes: u64,
+) -> Result<Vec<u8>, ExportError> {
     let mut o = Vec::new();
     for (p, _, d) in rows {
         let row_bytes = 64_u64
             .checked_add(2)
             .and_then(|value| value.checked_add(p.len() as u64))
             .and_then(|value| value.checked_add(1))
-            .ok_or_else(|| limit("tag inventory size overflow"))?;
+            .ok_or_else(|| limit("tag manifest size overflow"))?;
         if (o.len() as u64).saturating_add(row_bytes) > limit_bytes {
-            return Err(limit("tag inventory exceeds configured limit"));
+            return Err(limit("tag manifest exceeds configured limit"));
         }
         o.extend(hex(*d).bytes());
         o.extend(b"  ");

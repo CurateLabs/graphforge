@@ -237,7 +237,7 @@ fn validate_saved_queries(
         source,
         entries,
         super::MANIFEST_PATH,
-        limits.max_manifest_bytes,
+        limits.semantic_manifest_bound(entries.len() as u64),
         cancelled,
     )?;
     let (manifest, _) = super::parse_manifest(&manifest_bytes, limits)?;

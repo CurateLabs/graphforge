@@ -4,16 +4,64 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// Writer and reader admission limits for portable-v2 packages.
+///
+/// Limits that grow with the entry count admit every package a project can
+/// produce (#900): the payload inventory streams, and the semantic manifest
+/// is bounded per package by the entries it actually lists.
 #[derive(Clone, Copy, Debug)]
 pub struct PortableV2Limits {
+    /// Components in the semantic manifest.
     pub max_components: u64,
+    /// Regular entries in the package, tag files included.
     pub max_entries: u64,
+    /// Bytes in one entry.
     pub max_entry_bytes: u64,
+    /// Declared payload bytes across all entries.
     pub max_total_bytes: u64,
+    /// Bytes in each retained JSON control whose size does not grow with the
+    /// entry count: the runtime map, the ontology composition, and ontology
+    /// and bridge documents in aggregate. It is also the semantic manifest's
+    /// fixed allowance; see [`Self::semantic_manifest_bound`].
     pub max_manifest_bytes: u64,
+    /// Ceiling on the semantic manifest, `data/graphforge-project.json`,
+    /// whatever its entry count. It is parsed whole, so this bounds reader
+    /// memory under untrusted input.
+    pub max_semantic_manifest_bytes: u64,
+    /// Bytes in each retained tag file: `bagit.txt`, `bag-info.txt` and
+    /// `tagmanifest-sha256.txt`, which has three rows. The payload inventory,
+    /// `manifest-sha256.txt`, has one row per `data/` entry; writer and reader
+    /// stream it, and it is bounded by `max_entries` and `max_path_bytes`.
     pub max_tag_manifest_bytes: u64,
+    /// UTF-8 bytes in one portable path.
     pub max_path_bytes: usize,
+    /// Bytes in the streaming copy buffer.
     pub copy_buffer_bytes: usize,
+}
+
+/// Semantic manifest budget per entry. A file record is
+/// `{"length":L,"media_type":"M","path":"P","sha256":"H"},`: 50 bytes of
+/// syntax, at most 20 length digits, a media type of at most 52 bytes and 64
+/// digest bytes, 186 bytes plus the path. The S26 Graph500 project's records
+/// average about 320 bytes (21,531 files, 6.9 MB), so 512 bytes admits paths
+/// that average up to 326 bytes, nearly twice S26's 169.
+pub const PORTABLE_V2_MANIFEST_BYTES_PER_ENTRY: u64 = 512;
+/// Most graph files one project holds: the storage graph-manifest default
+/// (`GraphManifestLimits::max_entries`), the largest graph a package can carry.
+const PRODUCER_MAX_GRAPH_FILES: u64 = 100_000;
+
+impl PortableV2Limits {
+    /// Largest semantic manifest admitted for a package of `entries` regular
+    /// entries, checked before it is parsed: the fixed `max_manifest_bytes`
+    /// allowance for components and selection, plus one file-record budget
+    /// per entry, never above `max_semantic_manifest_bytes`. A small package
+    /// therefore cannot present a large manifest.
+    #[must_use]
+    pub fn semantic_manifest_bound(&self, entries: u64) -> u64 {
+        self.max_manifest_bytes
+            .saturating_add(entries.saturating_mul(PORTABLE_V2_MANIFEST_BYTES_PER_ENTRY))
+            .min(self.max_semantic_manifest_bytes)
+    }
 }
 
 impl Default for PortableV2Limits {
@@ -24,6 +72,11 @@ impl Default for PortableV2Limits {
             max_entry_bytes: 16 * 1024_u64.pow(4),
             max_total_bytes: 1024 * 1024_u64.pow(4),
             max_manifest_bytes: 16 * 1024 * 1024,
+            // 100,000 graph files x 512 bytes = 51,200,000, rounded up to
+            // 64 MiB: a manifest for the largest graph a project holds fits.
+            max_semantic_manifest_bytes: (PRODUCER_MAX_GRAPH_FILES
+                * PORTABLE_V2_MANIFEST_BYTES_PER_ENTRY)
+                .next_power_of_two(),
             max_tag_manifest_bytes: 4 * 1024 * 1024,
             max_path_bytes: 4096,
             copy_buffer_bytes: 1024 * 1024,
@@ -719,5 +772,66 @@ mod preview_wire_tests {
                 "result_fingerprint":"result","subset_fingerprint":"subset"
             })
         );
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    /// The longest file record the writer emits, with an empty path.
+    fn longest_record_without_path() -> u64 {
+        let record = serde_json::json!({
+            "length": u64::MAX,
+            "media_type": "application/vnd.graphforge.ontology-composition+json",
+            "path": "",
+            "sha256": "0".repeat(64),
+        });
+        (serde_json::to_vec(&record).unwrap().len() + ",".len()) as u64
+    }
+
+    #[test]
+    fn default_limits_admit_every_package_a_project_can_produce() {
+        let limits = PortableV2Limits::default();
+        // The per-entry semantic manifest budget is one record plus its path.
+        assert_eq!(longest_record_without_path(), 186);
+        let path_budget = PORTABLE_V2_MANIFEST_BYTES_PER_ENTRY - longest_record_without_path();
+        assert_eq!(path_budget, 326);
+        // Controls that do not grow with the entry count keep 16 MiB; the
+        // semantic manifest ceiling holds the largest graph a project holds.
+        assert_eq!(limits.max_manifest_bytes, 16 * 1024 * 1024);
+        assert_eq!(limits.max_semantic_manifest_bytes, 64 * 1024 * 1024);
+        assert!(
+            PRODUCER_MAX_GRAPH_FILES * PORTABLE_V2_MANIFEST_BYTES_PER_ENTRY
+                <= limits.max_semantic_manifest_bytes
+        );
+        // S26 Graph500: 21,535 entries and a 6,874,538-byte manifest whose
+        // paths average 169 bytes. S28 has about four times as many entries.
+        assert!(6_874_538 <= limits.semantic_manifest_bound(21_535));
+        let s28_entries = 4 * 21_535;
+        let s28_manifest = s28_entries * (longest_record_without_path() + 169);
+        assert!(s28_manifest <= limits.semantic_manifest_bound(s28_entries));
+        assert!(169 < path_budget);
+        // The bound grows with the package and stops at the ceiling.
+        assert_eq!(limits.semantic_manifest_bound(0), limits.max_manifest_bytes);
+        assert_eq!(
+            limits.semantic_manifest_bound(1),
+            limits.max_manifest_bytes + PORTABLE_V2_MANIFEST_BYTES_PER_ENTRY
+        );
+        assert_eq!(
+            limits.semantic_manifest_bound(limits.max_entries),
+            limits.max_semantic_manifest_bytes
+        );
+        assert_eq!(
+            limits.semantic_manifest_bound(u64::MAX),
+            limits.max_semantic_manifest_bytes
+        );
+        // The tag files the tag limit bounds have a fixed size: the tag
+        // manifest has three rows whatever the entry count.
+        let tag_manifest = ["bag-info.txt", "bagit.txt", "manifest-sha256.txt"]
+            .iter()
+            .map(|path| 64 + 2 + path.len() as u64 + 1)
+            .sum::<u64>();
+        assert!(tag_manifest <= limits.max_tag_manifest_bytes);
     }
 }

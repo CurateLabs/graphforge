@@ -2762,6 +2762,13 @@ mod tests {
                     ..PortableV2Limits::default()
                 },
             ),
+            (
+                "semantic manifest",
+                PortableV2Limits {
+                    max_semantic_manifest_bytes: 1,
+                    ..PortableV2Limits::default()
+                },
+            ),
         ] {
             let target = package_parent.path().join(format!("target-{name}"));
             let error = import_complete_portable_v2(

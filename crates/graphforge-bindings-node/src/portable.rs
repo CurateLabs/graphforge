@@ -73,6 +73,10 @@ fn parse_limits(input: Option<PortableV2LimitsInput>) -> Result<PortableV2Limits
             Some(value) => crate::node_u64(Some(value), "maxManifestBytes")?,
             None => defaults.max_manifest_bytes,
         },
+        max_semantic_manifest_bytes: match input.max_semantic_manifest_bytes {
+            Some(value) => crate::node_u64(Some(value), "maxSemanticManifestBytes")?,
+            None => defaults.max_semantic_manifest_bytes,
+        },
         max_tag_manifest_bytes: match input.max_tag_manifest_bytes {
             Some(value) => crate::node_u64(Some(value), "maxTagManifestBytes")?,
             None => defaults.max_tag_manifest_bytes,
@@ -336,6 +340,7 @@ pub struct PortableV2LimitsInput {
     pub max_entry_bytes: Option<BigInt>,
     pub max_total_bytes: Option<BigInt>,
     pub max_manifest_bytes: Option<BigInt>,
+    pub max_semantic_manifest_bytes: Option<BigInt>,
     pub max_tag_manifest_bytes: Option<BigInt>,
     pub max_path_bytes: Option<BigInt>,
     pub copy_buffer_bytes: Option<BigInt>,

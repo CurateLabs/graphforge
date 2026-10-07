@@ -266,7 +266,10 @@ impl PortableV2ExportPlan {
             },
         };
         self.manifest = canonical_json(&serde_json::to_value(final_manifest).map_err(storage)?)?;
-        if self.manifest.len() as u64 > limits.max_manifest_bytes {
+        // The package holds every planned file, the semantic manifest and
+        // four tag files; the reader bounds the manifest by that count.
+        if self.manifest.len() as u64 > limits.semantic_manifest_bound(self.files.len() as u64 + 5)
+        {
             return Err(limit("semantic manifest exceeds configured limit"));
         }
         self.payload_bytes = total;
@@ -1062,7 +1065,7 @@ pub fn plan_selected_portable_v2(
         },
     };
     let manifest = canonical_json(&serde_json::to_value(final_manifest).map_err(storage)?)?;
-    if manifest.len() as u64 > limits.max_manifest_bytes {
+    if manifest.len() as u64 > limits.semantic_manifest_bound(files.len() as u64 + 5) {
         return Err(limit("semantic manifest exceeds configured limit"));
     }
     Ok(PortableV2ExportPlan {
