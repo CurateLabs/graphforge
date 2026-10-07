@@ -1,0 +1,76 @@
+{
+  "schema": "graphforge-gdc-snb-bi-query-parameters/1",
+  "queries": {
+    "BI1": {
+      "datetime": {"kind": "datetime", "value": "2012-06-01T00:00:00.000+00:00"}
+    },
+    "BI2": {
+      "date": {"kind": "datetime", "value": "2011-09-01T00:00:00.000+00:00"},
+      "tagClass": {"kind": "string", "value": "MusicalArtist"}
+    },
+    "BI3": {
+      "tagClass": {"kind": "string", "value": "Writer"},
+      "country": {"kind": "string", "value": "China"}
+    },
+    "BI4": {
+      "date": {"kind": "datetime", "value": "2010-06-01T00:00:00.000+00:00"}
+    },
+    "BI5": {
+      "tag": {"kind": "string", "value": "Che_Guevara"}
+    },
+    "BI6": {
+      "tag": {"kind": "string", "value": "Slavoj_Zizek"}
+    },
+    "BI7": {
+      "tag": {"kind": "string", "value": "Frank_Sinatra"}
+    },
+    "BI8": {
+      "tag": {"kind": "string", "value": "Enrique_Iglesias"},
+      "startDate": {"kind": "datetime", "value": "2011-01-01T00:00:00.000+00:00"},
+      "endDate": {"kind": "datetime", "value": "2012-07-01T00:00:00.000+00:00"}
+    },
+    "BI9": {
+      "startDate": {"kind": "datetime", "value": "2011-06-01T00:00:00.000+00:00"},
+      "endDate": {"kind": "datetime", "value": "2012-06-01T00:00:00.000+00:00"}
+    },
+    "BI10": {
+      "personId": {"kind": "int64", "value": 1},
+      "country": {"kind": "string", "value": "China"},
+      "tagClass": {"kind": "string", "value": "Writer"},
+      "minPathDistance": {"kind": "int64", "value": 3},
+      "maxPathDistance": {"kind": "int64", "value": 4}
+    },
+    "BI11": {
+      "country": {"kind": "string", "value": "India"},
+      "startDate": {"kind": "datetime", "value": "2010-01-01T00:00:00.000+00:00"},
+      "endDate": {"kind": "datetime", "value": "2012-06-01T00:00:00.000+00:00"}
+    },
+    "BI12": {
+      "startDate": {"kind": "datetime", "value": "2011-01-01T00:00:00.000+00:00"},
+      "lengthThreshold": {"kind": "int64", "value": 80},
+      "languages": {"kind": "string_list", "value": ["ar", "hu"]}
+    },
+    "BI13": {
+      "country": {"kind": "string", "value": "France"},
+      "endDate": {"kind": "datetime", "value": "2012-09-01T00:00:00.000+00:00"}
+    },
+    "BI14": {
+      "country1": {"kind": "string", "value": "India"},
+      "country2": {"kind": "string", "value": "China"}
+    },
+    "BI16": {
+      "tagA": {"kind": "string", "value": "Meryl_Streep"},
+      "dateA": {"kind": "datetime", "value": "2012-03-05T00:00:00.000+00:00"},
+      "tagB": {"kind": "string", "value": "Hank_Williams"},
+      "dateB": {"kind": "datetime", "value": "2012-04-10T00:00:00.000+00:00"},
+      "maxKnowsLimit": {"kind": "int64", "value": 4}
+    },
+    "BI17": {
+      "tag": {"kind": "string", "value": "Slavoj_Zizek"},
+      "delta": {"kind": "int64", "value": 4}
+    },
+    "BI18": {
+      "tag": {"kind": "string", "value": "Frank_Sinatra"}
+    }
+  }
+}

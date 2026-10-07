@@ -281,23 +281,27 @@ historical `snb-bi-sf0.003` identifier is not an official SF0.003 dataset, their
 `.graph`/`.out` bytes are synthetic replay inputs, and they provide no live
 engine evidence.
 
-The explicit `snb-bi-live` lane closes that static-replay gap for BI2. It loads
-the committed deterministic seed into `GraphForge::new(None)`, executes the BI2
-shape through `graphforge_api::GraphForge::execute_with_params`, validates the
-official `diff DESC, tag.name ASC` total order in the same trusted Rust process,
-and directly constructs the evidence. The command accepts no caller result
-rows, source label, parameter digest, or producer field. `run-static-suite` is
-the separate legacy replay command and cannot emit live evidence.
+The `snb-bi-queries` lane runs every mapped BI read as real Cypher. The query
+definitions are data in `runners/gdc-snb-bi/src/queries.rs` (operation, Cypher
+text, typed parameter names, result columns, the upstream LDBC query each one
+follows, and any exact rewrite GraphForge needs), so a driver can iterate them.
+`run-queries` loads the fixture's LDBC-shaped CSV files into
+`GraphForge::new(None)` through public Cypher, runs the 17 runnable reads
+through `execute_with_params`, and compares each result with rows that
+`graphforge_bench.gdc_snb_bi_reference` derives from the CSV files with plain
+Python, following the upstream Umbra SQL rather than the Cypher text. BI15,
+BI19 and BI20 stay refused. After editing the fixture, rewrite the expected rows
+with:
 
-The expected rows are independently derived from the seed. `identity.json`
-pins the complete closed operation context, official SNB specification and BI
-query release/commit, typed parameter names/kinds/values, content-addressed
-synthetic fixture, reference, normalization, and internal Rust driver contract.
-Runner evidence binds its actual executable digest; no nonexistent GraphForge
-release or commit is used. This lane does not claim LDBC datagen, official
-parameters, SF0.003, or certification. Live resource timings and row counts
-remain separate from correctness, and unobserved spill/RSS/I/O fields are named
-rather than invented. All evidence stamps `certification: false`:
+```bash
+PYTHONPATH=benchmarks/harness python3 -m graphforge_bench.gdc_snb_bi_reference \
+  benchmarks/fixtures/gdc/snb-bi-queries --write
+```
+
+The fixture is synthetic and LDBC-shaped; this lane does not claim LDBC
+datagen output, official parameters, or certification. It replaced the earlier
+BI2-only `snb-bi-live` lane, which used integer day windows.
+All evidence stamps `certification: false`:
 
 ```bash
 PYTHONPATH=benchmarks/harness uv run python -m unittest \

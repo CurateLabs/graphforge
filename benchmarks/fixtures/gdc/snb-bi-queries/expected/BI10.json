@@ -1,0 +1,15 @@
+{"schema": "graphforge-gdc-snb-bi-expected/1", "operation": "BI10", "authority": "independent_python_derivation_from_fixture_csv", "rows": [
+    [15, "Meryl_Streep", 2],
+    [16, "Slavoj_Zizek", 2],
+    [21, "Augustine_of_Hippo", 1],
+    [15, "Che_Guevara", 1],
+    [21, "Che_Guevara", 1],
+    [21, "Frank_Sinatra", 1],
+    [15, "Hank_Williams", 1],
+    [10, "Manuel_Noriega", 1],
+    [3, "Meryl_Streep", 1],
+    [22, "Meryl_Streep", 1],
+    [3, "Slavoj_Zizek", 1],
+    [4, "Slavoj_Zizek", 1],
+    [10, "Slavoj_Zizek", 1]
+  ]}

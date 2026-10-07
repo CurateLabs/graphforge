@@ -1,0 +1,16 @@
+{"schema": "graphforge-gdc-snb-bi-expected/1", "operation": "BI9", "authority": "independent_python_derivation_from_fixture_csv", "rows": [
+    [1, "Bo", "Li", 6, 12],
+    [5, "Fay", "Dubois", 2, 9],
+    [15, "Dev", "Zhou", 3, 8],
+    [20, "Ira", "Wang", 1, 6],
+    [7, "Hai", "Zhou", 3, 3],
+    [8, "Ira", "Khan", 3, 3],
+    [10, "Kai", "Martin", 1, 3],
+    [12, "Ali", "Wang", 2, 3],
+    [19, "Hai", "Rao", 3, 3],
+    [23, "Lea", "Zhou", 1, 3],
+    [13, "Bo", "Dubois", 2, 2],
+    [2, "Chen", "Martin", 1, 1],
+    [6, "Gus", "Shah", 1, 1],
+    [14, "Chen", "Shah", 1, 1]
+  ]}
