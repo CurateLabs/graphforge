@@ -1,7 +1,7 @@
 use super::*;
 use crate::import_session::{
     ImportSessionLimits,
-    test_fixtures::{edges, fixture, nodes},
+    test_fixtures::{edges, nodes, seeded_fixture as fixture},
 };
 use crate::{BulkInputKind, OperationId};
 
@@ -381,6 +381,9 @@ fn failed_cadence_sync_blocks_writes_until_fresh_format_aware_reopen() {
         .unwrap();
     assert_eq!(construction.progress().accepted_chunks, 0);
     drop(construction);
+    // Resuming an append's construction reconciles its checkpoint; the failed
+    // abort below must leave exactly the reconciled state.
+    let before_files = project_files(&directory.path().join("project"));
     let session_root = session.root.clone();
     assert_recovery_required(session.abort(&graph).unwrap_err());
     assert_eq!(

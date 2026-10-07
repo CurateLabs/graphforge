@@ -1795,6 +1795,29 @@ mod test_fixtures {
         let graph = GraphForge::new(project.to_str()).unwrap();
         (directory, project, graph)
     }
+
+    /// A project with one committed generation. An initial import runs on the
+    /// bulk builder, so tests of the staged path (journal replay, chunk
+    /// receipts, per-batch progress) import on top of this generation: an
+    /// append stages chunk by chunk.
+    pub(super) fn seeded_fixture() -> (tempfile::TempDir, PathBuf, GraphForge) {
+        let (directory, project, graph) = fixture();
+        let mut session = graph
+            .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
+            .unwrap();
+        let seed = RecordBatch::try_new(
+            bulk_node_input_schema(Vec::new()).unwrap(),
+            vec![
+                uuid_array(&[Uuid::now_v7()]),
+                Arc::new(StringArray::from(vec!["Seed"])),
+            ],
+        )
+        .unwrap();
+        session.append_arrow(BulkInputKind::Node, &[seed]).unwrap();
+        session.validate(&graph).unwrap();
+        session.commit(&graph, None).unwrap();
+        (directory, project, graph)
+    }
 }
 
 #[cfg(all(test, feature = "portable"))]
@@ -1804,7 +1827,7 @@ mod tests {
     use arrow::datatypes::DataType;
     use parquet::arrow::ArrowWriter;
 
-    use super::test_fixtures::{edges, fixture, nodes};
+    use super::test_fixtures::{edges, fixture, nodes, seeded_fixture};
     use super::*;
     use crate::{bulk_edge_input_schema, bulk_node_input_schema};
 
@@ -1850,7 +1873,7 @@ mod tests {
         let _capture = graphforge_storage::lifecycle_io::CaptureScope::install();
         // Real import operations carry process CPU in ordinary receipts;
         // CPU/wall is effective cores, never an inferred serial fraction.
-        let (_directory, _project, graph) = fixture();
+        let (_directory, _project, graph) = seeded_fixture();
         let mut session = graph
             .begin_import_session(
                 OperationId(Uuid::now_v7()),
@@ -1901,7 +1924,7 @@ mod tests {
     #[test]
     fn operation_timings_are_scoped_non_durable_and_preserve_cancelled_commit() {
         let _capture = graphforge_storage::lifecycle_io::CaptureScope::install();
-        let (_directory, _project, graph) = fixture();
+        let (_directory, _project, graph) = seeded_fixture();
         let mut session = graph
             .begin_import_session(
                 OperationId(Uuid::now_v7()),
@@ -2644,7 +2667,11 @@ mod tests {
         let progress = session.validate(&graph).unwrap();
         assert_eq!(progress.rows_accepted, 1);
         assert_eq!(progress.files_pending, 0);
-        assert_eq!(progress.construction.as_ref().unwrap().accepted_chunks, 1);
+        // The bulk builder stages no chunk; it reports its passes instead.
+        let construction = progress.construction.as_ref().unwrap();
+        assert_eq!(construction.accepted_chunks, 0);
+        let built = construction.bulk_build.as_ref().unwrap();
+        assert_eq!((built.nodes, built.edges), (1, 0));
         let generation = session.commit(&graph, None).unwrap();
 
         drop(graph);
@@ -2717,7 +2744,7 @@ mod tests {
         assert_eq!(ImportSessionLimits::default().batch_rows, 65_536);
 
         fn run(multiplier: usize) -> ImportConstructionEvidence {
-            let (_directory, project, graph) = fixture();
+            let (_directory, project, graph) = seeded_fixture();
             let source_dir = tempfile::tempdir().unwrap();
             let parquet = source_dir.path().join("nodes.parquet");
             let ids = (0..(4 * multiplier))
