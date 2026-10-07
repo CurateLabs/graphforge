@@ -262,6 +262,56 @@ class GdcSnbInteractiveSuiteTests(unittest.TestCase):
             )
         ).validate(evidence)
 
+    def test_query_fixture_schema_is_what_the_interactive_load_mapping_produces(self) -> None:
+        """#952 decision 2026-10-07: Interactive follows the v1 reference data
+        model (epoch-ms Int64). The queries are verified on the fixture, so the
+        fixture's labels, relationship types and property types must be ones
+        the converter's Interactive mapping writes."""
+        mapping = json.loads(
+            (self.root / "profiles" / "gdc" / "snb-interactive-load-mapping.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        stored: dict[str, tuple[str, dict[str, str]]] = {}
+        for table in mapping["node_tables"]:
+            types = {prop.get("name", prop["column"]): prop["type"] for prop in table["properties"]}
+            for label in (table.get("label_values") or {table["label"]: table["label"]}).values():
+                stored[label] = (table["label"], types)
+        edges: dict[tuple[str, str, str], dict[str, str]] = {}
+        for table in mapping["edge_tables"]:
+            key = (table["source"]["label"], table["rel_type"], table["target"]["label"])
+            edges[key] = {
+                prop.get("name", prop["column"]): prop["type"]
+                for prop in table.get("properties", [])
+            }
+        for table in mapping["node_tables"] + mapping["edge_tables"]:
+            for prop in table.get("properties", []):
+                self.assertNotIn(prop["type"], ("date", "datetime"), (table["id"], prop))
+
+        def json_type(value: object) -> str:
+            if isinstance(value, bool):
+                return "boolean"
+            if isinstance(value, int):
+                return "int64"
+            if isinstance(value, list):
+                return "list"
+            return "string"
+
+        document = reference.build_fixture()
+        labels = {}
+        for key, label, properties in document["nodes"]:
+            self.assertIn(label, stored, key)
+            identity, types = stored[label]
+            labels[key] = identity
+            for name, value in properties.items():
+                self.assertEqual(types.get(name), json_type(value), (key, name))
+        for source, rel_type, destination, properties in document["edges"]:
+            types = edges.get((labels[source], rel_type, labels[destination]))
+            self.assertIsNotNone(types, (source, rel_type, destination))
+            assert types is not None
+            for name, value in properties.items():
+                self.assertEqual(types.get(name), json_type(value), (rel_type, name))
+
     def test_query_definitions_are_exposed_as_data(self) -> None:
         queries = list_query_definitions()
         expected_reads = [read for read in COMPLEX_READS + SHORT_READS if read != "IC14"]
