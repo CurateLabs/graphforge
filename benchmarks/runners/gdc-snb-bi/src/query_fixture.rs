@@ -445,7 +445,8 @@ pub fn load_query_graph(forge: &GraphForge, directory: &Path) -> Result<LoadSumm
         let table = read_csv(directory, node_file.file)?;
         // Rows are grouped by which properties they carry: an absent optional
         // value is left off the CREATE rather than bound as null, because
-        // GraphForge panics on a list of maps whose values mix null and string.
+        // GraphForge panics on a list of maps whose values mix null and string
+        // (#1887 D10).
         let mut groups: BTreeMap<Vec<&'static str>, Vec<IrLiteral>> = BTreeMap::new();
         for row in &table.rows {
             let mut entries = Vec::new();
@@ -533,7 +534,7 @@ pub fn load_query_graph(forge: &GraphForge, directory: &Path) -> Result<LoadSumm
         };
         // The endpoints are matched in two clauses separated by WITH: matching
         // both in one clause after UNWIND fails to plan in GraphForge once node
-        // labels carry different property sets.
+        // labels carry different property sets (#1888 D9).
         let query = format!(
             "UNWIND $rows AS row \
              MATCH (source:{} {{id: row.source}}) \

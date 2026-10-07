@@ -17,7 +17,6 @@ from graphforge_bench.gdc_snb_bi import (
     BATCH_INSERTS,
     BATCH_UPDATE_CAUSE,
     EVIDENCE_SCHEMA,
-    LIVE_EVIDENCE_SCHEMA,
     OPERATIONS,
     QUERY_EVIDENCE_SCHEMA,
     QUERY_FIXTURE,
@@ -29,10 +28,8 @@ from graphforge_bench.gdc_snb_bi import (
     assert_separate_from_other_suites,
     list_operation_rules,
     map_operation_file,
-    run_live_bi2,
     run_query_fixture,
     run_tiny_suite,
-    validate_live_fixture,
 )
 from jsonschema import Draft202012Validator
 
@@ -148,28 +145,6 @@ class GdcSnbBiSuiteTests(unittest.TestCase):
             )
         ).validate(evidence)
 
-    def test_live_bi2_executes_real_in_memory_graphforge(self) -> None:
-        evidence = run_live_bi2()
-        self.assertEqual(evidence["schema"], LIVE_EVIDENCE_SCHEMA)
-        self.assertEqual(evidence["lane"], "live_in_memory")
-        self.assertEqual(evidence["operation"], "BI2")
-        self.assertEqual(evidence["source_mode"], "runner_owned_rust_api")
-        self.assertEqual(evidence["status"], "passed")
-        self.assertIs(evidence["certification"], False)
-        self.assertEqual(
-            evidence["correctness"]["rows"],
-            ["Beta 1 3 2", "Alpha 2 1 1", "Gamma 2 1 1"],
-        )
-        self.assertEqual(
-            evidence["correctness"]["validation_mode"],
-            "exact",
-        )
-        self.assertFalse(evidence["execution_authority"]["caller_supplied_result"])
-        self.assertRegex(
-            evidence["execution_authority"]["runner_executable_sha256"],
-            r"^[a-f0-9]{64}$",
-        )
-
     def test_runnable_reads_match_independent_expectations(self) -> None:
         evidence = run_query_fixture()
         self.assertEqual(evidence["schema"], QUERY_EVIDENCE_SCHEMA)
@@ -199,6 +174,32 @@ class GdcSnbBiSuiteTests(unittest.TestCase):
         self.assertEqual(derived["BI17"]["rows"][0], [3, 2])
         self.assertNotIn(19, [row[0] for row in derived["BI16"]["rows"]])
 
+    def test_query_lane_accepts_no_caller_results_and_live_lane_is_retired(self) -> None:
+        fixture = self.root / "fixtures" / "gdc" / QUERY_FIXTURE
+        with tempfile.TemporaryDirectory() as tmp:
+            evidence = Path(tmp) / "evidence.json"
+            forged = Path(tmp) / "rows.json"
+            forged.write_text("[]\n", encoding="utf-8")
+            extra = subprocess.run(
+                [str(self.binary), "run-queries", str(fixture), str(evidence), str(forged)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(extra.returncode, 2)
+            self.assertIn("usage: run-queries FIXTURE_DIR EVIDENCE.json", extra.stderr)
+            self.assertFalse(evidence.exists())
+            for retired in ("run-live", "validate-live-context"):
+                completed = subprocess.run(
+                    [str(self.binary), retired, str(fixture), str(evidence)],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(completed.returncode, 2, retired)
+                self.assertIn("unknown command", completed.stderr)
+                self.assertFalse(evidence.exists())
+
     def test_a_wrong_expectation_fails_the_read(self) -> None:
         source = self.root / "fixtures" / "gdc" / QUERY_FIXTURE
         with tempfile.TemporaryDirectory() as tmp:
@@ -214,177 +215,11 @@ class GdcSnbBiSuiteTests(unittest.TestCase):
         self.assertIn("BI5", str(raised.exception))
         self.assertNotIn("BI4:", str(raised.exception))
 
-    def test_live_lane_rejects_parameter_mutation_and_static_output(self) -> None:
-        with self.assertRaises(SnbBiSuiteError) as raised:
-            run_live_bi2(parameters_override={"tagClass": "SportsTeam"})
-        self.assertEqual(raised.exception.cause, "parameter_identity_mismatch")
-
-        fixture = self.root / "fixtures" / "gdc" / "snb-bi-live"
-        identity = validate_live_fixture(fixture)
-        forged = {
-            "schema": LIVE_EVIDENCE_SCHEMA,
-            "source_mode": "runner_owned_rust_api",
-            "parameters": identity["parameters"],
-            "rows": ["Beta 1 3 2", "Alpha 2 1 1", "Gamma 2 1 1"],
-        }
-        with tempfile.TemporaryDirectory() as tmp:
-            forged_path = Path(tmp) / "forged.json"
-            forged_path.write_text(json.dumps(forged) + "\n", encoding="utf-8")
-            evidence_path = Path(tmp) / "evidence.json"
-            completed = subprocess.run(
-                [str(self.binary), "run-live", str(forged_path), str(evidence_path)],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            self.assertNotEqual(completed.returncode, 0)
-            self.assertFalse(evidence_path.exists())
-
-    def test_python_wrapper_cannot_supply_rows_or_identity(self) -> None:
-        for replacement in (
-            {"rows": ["Beta 1 3 2", "Alpha 2 1 1", "Gamma 2 1 1"]},
-            {"identities": {}},
-            {"source": "graphforge_public_python_api"},
-            {"result_path": Path("forged.json")},
-        ):
-            with self.assertRaises(TypeError):
-                run_live_bi2(**replacement)
-
-    def test_adversarial_caller_envelope_cannot_emit_live_success(self) -> None:
-        fixture = self.root / "fixtures" / "gdc" / "snb-bi-live"
-        forged = {
-            "schema": "graphforge-gdc-snb-bi-live-result/1",
-            "operation": "BI2",
-            "source": "graphforge_public_python_api",
-            "parameters_sha256": "0" * 64,
-            "columns": ["tagName", "countWindow1", "countWindow2", "diff"],
-            "rows": ["Beta 1 3 2", "Alpha 2 1 1", "Gamma 2 1 1"],
-        }
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            envelope = tmp_path / "forged-envelope.json"
-            evidence = tmp_path / "evidence.json"
-            envelope.write_text(json.dumps(forged) + "\n", encoding="utf-8")
-            retired = subprocess.run(
-                [
-                    str(self.binary),
-                    "validate-live",
-                    str(envelope),
-                    str(fixture / "expected-bi2.ref"),
-                    "0" * 64,
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(retired.returncode, 2)
-            self.assertIn("unknown command", retired.stderr)
-            self.assertFalse(evidence.exists())
-
-            extra = subprocess.run(
-                [str(self.binary), "run-live", str(fixture), str(evidence), str(envelope)],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(extra.returncode, 2)
-            self.assertIn("accepts only FIXTURE_DIR EVIDENCE.json", extra.stderr)
-            self.assertFalse(evidence.exists())
-
-    def test_live_seed_parameter_and_reference_mutations_fail_closed(self) -> None:
-        source = self.root / "fixtures" / "gdc" / "snb-bi-live"
-        cases = (
-            ("seed.json", "checksum_mismatch"),
-            ("parameters.json", "parameter_identity_mismatch"),
-            ("expected-bi2.ref", "checksum_mismatch"),
-        )
-        with tempfile.TemporaryDirectory() as tmp:
-            for filename, cause in cases:
-                fixture = Path(tmp) / filename
-                shutil.copytree(source, fixture)
-                path = fixture / filename
-                path.write_bytes(path.read_bytes() + b"\nmutated\n")
-                with self.subTest(filename=filename), self.assertRaises(SnbBiSuiteError) as raised:
-                    validate_live_fixture(fixture)
-                self.assertEqual(raised.exception.cause, cause)
-                shutil.rmtree(fixture)
-
     def test_static_replay_uses_an_explicit_non_live_command(self) -> None:
         evidence = run_tiny_suite(fixture_name="compatible")
         self.assertEqual(evidence["schema"], EVIDENCE_SCHEMA)
         self.assertNotIn("execution_authority", evidence)
         self.assertNotEqual(evidence.get("lane"), "live_in_memory")
-
-    def test_every_live_identity_field_and_member_is_closed(self) -> None:
-        source = self.root / "fixtures" / "gdc" / "snb-bi-live"
-        original = json.loads((source / "identity.json").read_text(encoding="utf-8"))
-
-        def leaves(value: object, path: tuple[object, ...] = ()) -> list[tuple[object, ...]]:
-            if isinstance(value, dict):
-                return [
-                    leaf for key, child in value.items() for leaf in leaves(child, (*path, key))
-                ]
-            if isinstance(value, list):
-                return [
-                    leaf
-                    for index, child in enumerate(value)
-                    for leaf in leaves(child, (*path, index))
-                ]
-            return [path]
-
-        def mutate(value: object) -> object:
-            if value is None:
-                return "mutated"
-            if isinstance(value, bool):
-                return not value
-            if isinstance(value, int):
-                return value + 1
-            if isinstance(value, str):
-                return f"{value}-mutated"
-            raise AssertionError(type(value))
-
-        with tempfile.TemporaryDirectory() as tmp:
-            base = Path(tmp)
-            for index, path in enumerate(leaves(original)):
-                fixture = base / f"fixture-{index}"
-                shutil.copytree(source, fixture)
-                changed = json.loads(json.dumps(original))
-                parent = changed
-                for member in path[:-1]:
-                    parent = parent[member]
-                parent[path[-1]] = mutate(parent[path[-1]])
-                (fixture / "identity.json").write_text(
-                    json.dumps(changed) + "\n",
-                    encoding="utf-8",
-                )
-                with self.subTest(path=path), self.assertRaises(SnbBiSuiteError) as raised:
-                    validate_live_fixture(fixture)
-                self.assertEqual(raised.exception.cause, "identity_drift")
-                shutil.rmtree(fixture)
-
-            unknown = base / "fixture-unknown"
-            shutil.copytree(source, unknown)
-            changed = json.loads(json.dumps(original))
-            changed["unexpected"] = "forbidden"
-            (unknown / "identity.json").write_text(
-                json.dumps(changed) + "\n",
-                encoding="utf-8",
-            )
-            with self.assertRaises(SnbBiSuiteError):
-                validate_live_fixture(unknown)
-
-    def test_live_phase_and_resource_evidence_stays_out_of_correctness(self) -> None:
-        evidence = run_live_bi2()
-        self.assertEqual(evidence["phases"], ["load", "query", "validation"])
-        self.assertEqual(evidence["resources"]["load"]["rows_loaded"], 29)
-        self.assertEqual(evidence["resources"]["query"]["rows_returned"], 3)
-        self.assertIs(evidence["resources"]["correctness_authority"], False)
-        self.assertNotIn("resources", evidence["correctness"])
-        self.assertNotIn("wall_ms", evidence["correctness"])
-        self.assertEqual(
-            evidence["resources"]["unobserved"],
-            ["spill_bytes", "peak_rss_bytes", "io_bytes"],
-        )
 
     def test_resources_recorded_separately_from_correctness(self) -> None:
         evidence = run_tiny_suite(fixture_name="compatible")

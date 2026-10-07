@@ -62,6 +62,18 @@ fn fixture_lane_reports_every_read_once() {
         .filter(|entry| entry["status"] == "passed")
         .count();
     assert_eq!(passed, BI_QUERIES.len());
+    // The evidence carries each read's variance label for the scorecard.
+    for entry in operations
+        .iter()
+        .filter(|entry| entry["status"] == "passed")
+    {
+        let operation: Operation = entry["operation"].as_str().unwrap().parse().unwrap();
+        assert_eq!(
+            entry["rewrite"].as_str(),
+            query(operation).rewrite,
+            "{operation}"
+        );
+    }
     for refusal in &REFUSED_READS {
         assert!(operations.iter().any(|entry| {
             entry["operation"] == refusal.operation.code()
@@ -96,6 +108,44 @@ fn every_analytical_read_is_runnable_or_refused_exactly_once() {
                 assert!(!cause.is_empty());
             }
         }
+    }
+}
+
+/// Every departure from the LDBC text is labelled as a variance, and one caused
+/// by a GraphForge defect cites its tracking issue (#1887, #1888).
+#[test]
+fn rewrites_are_labelled_variances_that_cite_their_cause() {
+    let rewritten: Vec<Operation> = BI_QUERIES
+        .iter()
+        .filter(|query| query.rewrite.is_some())
+        .map(|query| query.operation)
+        .collect();
+    assert_eq!(
+        rewritten,
+        [
+            Operation::Bi1,
+            Operation::Bi2,
+            Operation::Bi4,
+            Operation::Bi8,
+            Operation::Bi10,
+            Operation::Bi13,
+            Operation::Bi14,
+            Operation::Bi16,
+            Operation::Bi17,
+        ]
+    );
+    for query in &BI_QUERIES {
+        let Some(rewrite) = query.rewrite else {
+            continue;
+        };
+        assert!(
+            rewrite.starts_with("rewrite: LDBC text "),
+            "{}",
+            query.operation
+        );
+        let cites_defect = rewrite.contains("#1887 D") || rewrite.contains("#1888 D");
+        let not_a_defect = matches!(query.operation, Operation::Bi10 | Operation::Bi14);
+        assert_eq!(cites_defect, !not_a_defect, "{}", query.operation);
     }
 }
 

@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import tempfile
 from typing import Any
@@ -40,9 +39,6 @@ OPERATIONS = ANALYTICAL_READS + BATCH_INSERTS + BATCH_DELETES
 JOB_SCHEMA = "graphforge-gdc-snb-bi-job/1"
 EVIDENCE_SCHEMA = "graphforge-gdc-snb-bi-evidence/1"
 RESOURCE_SCHEMA = "graphforge-gdc-snb-bi-resources/1"
-LIVE_EVIDENCE_SCHEMA = "graphforge-gdc-snb-bi-live-evidence/2"
-LIVE_OPERATION = "BI2"
-LIVE_FIXTURE = "snb-bi-live"
 QUERY_EVIDENCE_SCHEMA = "graphforge-gdc-snb-bi-query-evidence/1"
 QUERY_FIXTURE = "snb-bi-queries"
 
@@ -97,65 +93,6 @@ def _run_runner(args: list[str], root: Path | None = None) -> subprocess.Complet
         capture_output=True,
         text=True,
     )
-
-
-def _raise_live_error(completed: subprocess.CompletedProcess[str]) -> None:
-    message = completed.stderr.strip()
-    if "reference_mismatch" in message:
-        raise SnbBiSuiteError("reference_mismatch", message)
-    if "parameter" in message:
-        raise SnbBiSuiteError("parameter_identity_mismatch", message)
-    if "identity" in message:
-        raise SnbBiSuiteError("identity_drift", message)
-    if "checksum" in message:
-        raise SnbBiSuiteError("checksum_mismatch", message)
-    raise SnbBiSuiteError("invalid_document", message)
-
-
-def validate_live_fixture(
-    fixture: Path,
-    *,
-    root: Path | None = None,
-) -> dict[str, Any]:
-    """Ask the trusted Rust runner to validate the complete closed context."""
-    base = root or workspace_root()
-    completed = _run_runner(["validate-live-context", str(fixture)], base)
-    if completed.returncode != 0:
-        _raise_live_error(completed)
-    return json.loads((fixture / "identity.json").read_text(encoding="utf-8"))
-
-
-def run_live_bi2(
-    *,
-    root: Path | None = None,
-    parameters_override: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Run the trusted Rust-owned in-memory API execution and evidence path."""
-    base = root or workspace_root()
-    fixture = base / "fixtures" / "gdc" / LIVE_FIXTURE
-    with tempfile.TemporaryDirectory(prefix="gdc-snb-bi-live-") as tmp:
-        temp = Path(tmp)
-        execution_fixture = fixture
-        if parameters_override:
-            execution_fixture = temp / "fixture"
-            shutil.copytree(fixture, execution_fixture)
-            parameter_path = execution_fixture / "parameters.json"
-            parameters = json.loads(parameter_path.read_text(encoding="utf-8"))
-            for name, value in parameters_override.items():
-                parameters["bindings"][name]["value"] = value
-            parameter_path.write_text(json.dumps(parameters, indent=2) + "\n", encoding="utf-8")
-        evidence_path = temp / "evidence.json"
-        completed = _run_runner(
-            ["run-live", str(execution_fixture), str(evidence_path)],
-            base,
-        )
-        if completed.returncode != 0:
-            _raise_live_error(completed)
-        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
-    if evidence.get("schema") != LIVE_EVIDENCE_SCHEMA:
-        raise SnbBiSuiteError("invalid_document", "unexpected live evidence schema")
-    _enforce_measurement_boundary(evidence, label="live snb-bi evidence")
-    return evidence
 
 
 def run_query_fixture(
@@ -332,9 +269,6 @@ __all__ = [
     "BOUNDED_TINY_DATASET",
     "EVIDENCE_SCHEMA",
     "JOB_SCHEMA",
-    "LIVE_EVIDENCE_SCHEMA",
-    "LIVE_FIXTURE",
-    "LIVE_OPERATION",
     "OPERATIONS",
     "QUERY_EVIDENCE_SCHEMA",
     "QUERY_FIXTURE",
@@ -348,8 +282,6 @@ __all__ = [
     "identity_path",
     "list_operation_rules",
     "map_operation_file",
-    "run_live_bi2",
     "run_query_fixture",
     "run_tiny_suite",
-    "validate_live_fixture",
 ]

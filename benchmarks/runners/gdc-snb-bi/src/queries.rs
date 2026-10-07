@@ -74,8 +74,10 @@ pub struct BiQuery {
     pub columns: &'static [&'static str],
     /// Upstream reference query this text follows.
     pub upstream: &'static str,
-    /// How the text departs from the upstream Neo4j text, and why the result
-    /// is unchanged. `None` means the upstream text with result aliases only.
+    /// A variance from the upstream LDBC text: why GraphForge cannot run that
+    /// text (citing the tracking issue where a GraphForge defect is the cause)
+    /// and why the rewrite returns the same result. Always starts with
+    /// `rewrite:`. `None` means the upstream text with result aliases only.
     pub rewrite: Option<&'static str>,
 }
 
@@ -139,8 +141,9 @@ ORDER BY
         ],
         upstream: "neo4j/queries/bi-1.cypher",
         rewrite: Some(
-            "`message.creationDate.year` is read through a WITH-bound alias; GraphForge fails to plan \
-             a property access on a node property",
+            "rewrite: LDBC text hits #1888 D3 (`message.creationDate.year` fails to plan). The \
+             year is read from a WITH-bound alias of the same property, so every value is \
+             unchanged.",
         ),
     },
     BiQuery {
@@ -171,9 +174,10 @@ LIMIT 100",
         columns: &["tagName", "countWindow1", "countWindow2", "diff"],
         upstream: "neo4j/queries/bi-2.cypher",
         rewrite: Some(
-            "`$date + duration(...)` is written `datetime({datetime: $date}) + duration(...)`; \
-             `datetime({datetime: d})` is the identity on a datetime, and GraphForge rejects \
-             duration arithmetic on a bare datetime parameter",
+            "rewrite: LDBC text hits #1887 D2 (`$date + duration(...)` fails to plan on a \
+             datetime parameter). The window bounds are written `datetime({datetime: $date}) + \
+             duration(...)`; `datetime({datetime: d})` is the identity on a datetime, so the \
+             windows are unchanged.",
         ),
     },
     BiQuery {
@@ -239,14 +243,14 @@ LIMIT 100",
         ],
         upstream: "neo4j/queries/bi-4.cypher",
         rewrite: Some(
-            "GraphForge has no CALL subquery. The top-100 forums are ordered by their largest \
-             per-country member count, then id (the order upstream's ORDER BY + WITH DISTINCT \
-             yields, and Umbra's maxNumberOfMembers); the UNION ALL of members with their \
-             messages and members with 0 becomes every member of a top forum with an OPTIONAL \
-             MATCH count of distinct messages in top-forum threads. Forum membership in the top \
-             set is tested on forum ids because GraphForge evaluates `node IN list` as false, \
-             and inside the count because an OPTIONAL MATCH WHERE cannot reference a WITH \
-             variable in GraphForge",
+            "rewrite: LDBC text hits #1888 D5 (CALL subquery), and the CALL-free form hits #1887 \
+             D1 (`node IN list` is false) and #1888 D7 (OPTIONAL MATCH WHERE cannot see a WITH \
+             variable). The top-100 forums are ordered by their largest per-country member count, \
+             then id, which is the order the LDBC ORDER BY + WITH DISTINCT yields and Umbra's \
+             maxNumberOfMembers. The UNION ALL of members with their messages and members with 0 \
+             becomes every member of a top forum with an OPTIONAL MATCH count of distinct \
+             messages in top-forum threads. Top-forum membership is tested on forum ids, inside \
+             the count.",
         ),
     },
     BiQuery {
@@ -356,10 +360,10 @@ LIMIT 100",
         columns: &["personId", "score", "friendsScore"],
         upstream: "neo4j/queries/bi-8.cypher",
         rewrite: Some(
-            "the interested persons and the message creators are concatenated as person ids and \
-             the distinct persons re-matched by id, because GraphForge loses the node type of a \
-             concatenated node list (`a + collect(n)`) and then refuses the elements in a \
-             pattern",
+            "rewrite: LDBC text hits #1888 D8 (a concatenated node list `a + collect(n)` loses \
+             the node type, so its elements are refused in a pattern). The interested persons and \
+             the message creators are concatenated as person ids and the distinct persons \
+             re-matched by id, which selects the same persons.",
         ),
     },
     BiQuery {
@@ -423,13 +427,14 @@ LIMIT 100",
         columns: &["personId", "tagName", "messageCount"],
         upstream: "neo4j/queries/bi-10.cypher",
         rewrite: Some(
-            "upstream uses APOC subgraphNodes to keep persons whose shortest KNOWS distance lies in \
-             [minPathDistance, maxPathDistance]. Here the distance is the minimum length over KNOWS \
-             trails of length 1..4 from the start person, which equals the shortest-path distance \
-             for every person within 4 hops (a shortest walk is a trail); the start person is \
-             excluded as APOC's minLevel 1 excludes it. The specification fixes the distances at \
-             3 and 4 (umbra/queries/bi-10.sql), the pattern bound 4 relies on that, and the runner \
-             refuses any other binding",
+            "rewrite: LDBC text calls the APOC procedure `apoc.path.subgraphNodes`, which \
+             GraphForge does not provide. APOC keeps persons whose shortest KNOWS distance lies \
+             in [minPathDistance, maxPathDistance]; here the distance is the minimum length over \
+             KNOWS trails of length 1..4 from the start person, which equals the shortest-path \
+             distance for every person within 4 hops (a shortest walk is a trail). The start \
+             person is excluded, as APOC's minLevel 1 excludes it. The specification fixes the \
+             distances at 3 and 4 (umbra/queries/bi-10.sql), the pattern bound 4 relies on that, \
+             and the runner refuses any other binding.",
         ),
     },
     BiQuery {
@@ -546,12 +551,12 @@ LIMIT 100",
         columns: &["zombieId", "zombieLikeCount", "totalLikeCount", "zombieScore"],
         upstream: "neo4j/queries/bi-13.cypher",
         rewrite: Some(
-            "`$endDate.year`/`.month` and `zombie.creationDate.year`/`.month` are read through \
-             WITH-bound aliases (`datetime({datetime: $endDate})` is the identity), because \
-             GraphForge returns null for a parameter accessor and fails to plan a property access \
-             on a node property; zombie-set membership is tested on person ids because GraphForge \
-             evaluates `node IN list` as false, and inside the count because an OPTIONAL MATCH \
-             WHERE cannot reference a WITH variable in GraphForge",
+            "rewrite: LDBC text hits #1887 D2 (`$endDate.year` returns null), #1888 D3 \
+             (`zombie.creationDate.year` fails to plan) and #1887 D1 (`likerZombie IN zombies` is \
+             false), and the id-based form hits #1888 D7 (OPTIONAL MATCH WHERE cannot see a WITH \
+             variable). The month arithmetic reads WITH-bound aliases (`datetime({datetime: \
+             $endDate})` is the identity), and likes by zombies are counted on person ids inside \
+             the count, which counts the same like edges.",
         ),
     },
     BiQuery {
@@ -593,10 +598,10 @@ LIMIT 100",
         columns: &["person1Id", "person2Id", "city1Name", "score"],
         upstream: "neo4j/queries/bi-14.cypher",
         rewrite: Some(
-            "upstream picks each city's top pair as `collect(...)[0]` after an ORDER BY, which \
-             depends on aggregation preserving input order; here the pair is chosen explicitly as \
-             the highest score, then the lowest person1 id, then the lowest person2 id, which is \
-             the same pair",
+            "rewrite: LDBC text picks each city's top pair as `collect(...)[0]` after an ORDER \
+             BY, which depends on aggregation keeping input order; openCypher does not guarantee \
+             that. The pair is chosen explicitly as the highest score, then the lowest person1 \
+             id, then the lowest person2 id, which is the pair the LDBC ordering puts first.",
         ),
     },
     BiQuery {
@@ -631,10 +636,11 @@ LIMIT 20",
         columns: &["personId", "messageCountA", "messageCountB"],
         upstream: "neo4j/queries/bi-16.cypher",
         rewrite: Some(
-            "GraphForge has no CALL subquery. Upstream runs the same per-person subquery for (tagA, \
-             dateA) and (tagB, dateB) and keeps persons that pass both; here the A pass runs over \
-             all persons and the B pass runs for each person that passed A. A person's B counts \
-             depend only on that person, so the surviving persons and their counts are the same",
+            "rewrite: LDBC text hits #1888 D5 (CALL subquery). LDBC runs the same per-person \
+             subquery for (tagA, dateA) and (tagB, dateB) and keeps persons that pass both; here \
+             the A pass runs over all persons and the B pass runs for each person that passed A. \
+             A person's B counts depend only on that person, so the surviving persons and their \
+             counts are the same.",
         ),
     },
     BiQuery {
@@ -669,13 +675,13 @@ LIMIT 10",
         columns: &["person1Id", "messageCount"],
         upstream: "neo4j/queries/bi-17.cypher",
         rewrite: Some(
-            "`message1.creationDate + duration({hours: $delta})` becomes a comparison of epoch \
-             milliseconds with `$delta * 3600000` added, because GraphForge rejects `duration()` \
-             with a non-literal argument; adding whole hours to a UTC instant is exact millisecond \
-             arithmetic. Upstream relies on relationship isomorphism between the two HAS_MEMBER \
-             edges of forum1 to keep person2 and person3 apart; GraphForge does not enforce \
-             isomorphism across comma-separated patterns, so `person2 <> person3` is stated. \
-             The final WHERE moves onto a WITH carrying the compared values",
+            "rewrite: LDBC text hits #1888 D4 (`duration({hours: $delta})` with a non-literal \
+             argument fails) and #1887 D6 (relationship uniqueness is not enforced across \
+             comma-separated patterns, so person2 = person3 matches). The delta becomes a \
+             comparison of epoch milliseconds with `$delta * 3600000` added, which is exact for \
+             whole hours on a UTC instant, and `person2 <> person3` is stated, which is what \
+             LDBC's two HAS_MEMBER edges enforce. The final WHERE moves onto a WITH carrying the \
+             compared values.",
         ),
     },
     BiQuery {
