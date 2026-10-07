@@ -1,0 +1,50 @@
+{
+  "schema": "graphforge-gdc-pinned-identity/1",
+  "suite_id": "snb-interactive",
+  "disposition": "executable",
+  "spec": {
+    "name": "ldbc_snb_docs",
+    "source": "https://github.com/ldbc/ldbc_snb_docs",
+    "release": "v2.2.4",
+    "commit": "5f7956e07a214373c363b371a3b88bc83ddcd118"
+  },
+  "generator": {
+    "name": "graphforge-gdc-rung-fixture",
+    "source": "https://github.com/CurateLabs/graphforge/tree/main/benchmarks/fixtures/gdc/rung-fixture",
+    "release": "rung-fixture-v1",
+    "commit": null
+  },
+  "driver": {
+    "name": "graphforge-gdc-scorecard-converter",
+    "source": "https://github.com/CurateLabs/graphforge/tree/main/benchmarks/runners/gdc-scorecard",
+    "release": "converter-v1",
+    "commit": null
+  },
+  "datasets": [
+    {
+      "id": "rung-fixture-sf0",
+      "role": "dataset",
+      "checksum_sha256": "1140cac9f296d5691d7b7d9d82f4af50ce1e231d6584d7987eb8e94d15a45265",
+      "license": "Apache-2.0",
+      "acquisition": "download",
+      "source": "https://datasets.ldbcouncil.org/snb-interactive-v1/rung-fixture-sf0.tar.zst"
+    },
+    {
+      "id": "rung-fixture-sf1",
+      "role": "dataset",
+      "checksum_sha256": "cc68b1f5b5c21d0da553a70d94b0f3b0ddf313c46d6af243c2a86ec8b7868e8a",
+      "license": "Apache-2.0",
+      "acquisition": "download",
+      "source": "https://datasets.ldbcouncil.org/snb-interactive-v1/rung-fixture-sf1.tar.zst"
+    },
+    {
+      "id": "rung-fixture-sf2",
+      "role": "dataset",
+      "checksum_sha256": "cc68b1f5b5c21d0da553a70d94b0f3b0ddf313c46d6af243c2a86ec8b7868e8a",
+      "license": "Apache-2.0",
+      "acquisition": "download",
+      "source": "https://datasets.ldbcouncil.org/snb-interactive-v1/rung-fixture-sf1.tar.zst"
+    }
+  ],
+  "references": []
+}

@@ -1,0 +1,40 @@
+{
+  "schema": "graphforge-gdc-rung-reference/1",
+  "suite_id": "snb-interactive",
+  "rung_id": "sf0",
+  "source": "the rung fixture's hand-derived answers",
+  "queries": {
+    "friends": {
+      "matching": "exact",
+      "bindings": {
+        "person-10": {"columns": ["id", "name"], "rows": [["11", "Bo"]]},
+        "person-11": {"columns": ["id", "name"], "rows": [["12", "Cy"]]},
+        "person-13": {"columns": ["id", "name"], "rows": []}
+      }
+    },
+    "city-of": {
+      "matching": "exact",
+      "bindings": {
+        "person-10": {"columns": ["city"], "rows": [["Lisbon"]]},
+        "person-12": {"columns": ["city"], "rows": [["Porto"]]}
+      }
+    },
+    "people-per-city": {
+      "matching": "exact",
+      "bindings": {
+        "all": {"columns": ["city", "people"], "rows": [["Porto", "2"], ["Lisbon", "2"]]}
+      }
+    },
+    "person-components": {
+      "matching": "equivalence",
+      "key": ["id"],
+      "label": "community_id",
+      "bindings": {
+        "all": {
+          "columns": ["id", "community_id"],
+          "rows": [["10", "7"], ["11", "7"], ["12", "7"], ["13", "9"]]
+        }
+      }
+    }
+  }
+}

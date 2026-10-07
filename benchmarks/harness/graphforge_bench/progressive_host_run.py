@@ -547,11 +547,25 @@ def _result(
     return result
 
 
-def reclaim_rung_workspace(work_root: Path, scale: int) -> None:
-    """Delete a rung's datasets/projects after evidence is accepted."""
-    target = work_root / "workspace" / f"s{scale}"
+def reclaim_workspace(work_root: Path, name: str) -> None:
+    """Delete one rung workspace, `<work_root>/workspace/<name>`, by path.
+
+    `name` is a single path component, so reclaim never reaches outside the
+    work root's workspace scaffold, and a linked workspace is refused rather
+    than followed. A missing workspace is already reclaimed.
+    """
+    if not name or name in {".", ".."} or "/" in name or "\\" in name or "\0" in name:
+        raise HostRunError("workspace_name_invalid")
+    target = work_root / "workspace" / name
+    if target.is_symlink():
+        raise HostRunError("workspace_link_refused")
     if target.exists():
         shutil.rmtree(target)
+
+
+def reclaim_rung_workspace(work_root: Path, scale: int) -> None:
+    """Delete a Graph500 rung's datasets/projects after evidence is accepted."""
+    reclaim_workspace(work_root, f"s{scale}")
 
 
 def inventory_work_root(work_root: Path, output_dir: Path | None = None) -> dict[str, Any]:

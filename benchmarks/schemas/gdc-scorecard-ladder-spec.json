@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-gdc-scorecard-ladder-spec-schema/1",
+  "title": "GDC scorecard ladder spec",
+  "description": "What the rung runner needs to climb one suite's scorecard ladder: the identity profile to acquire from, the count ladder, and per rung the query workload, the queries refused at mapping, the pinned reference and the variances the card carries. Paths are relative to profile_root, itself relative to the benchmarks root.",
+  "type": "object",
+  "properties": {
+    "schema": { "const": "graphforge-gdc-scorecard-ladder-spec/1" },
+    "suite_id": { "enum": ["graphalytics", "snb-bi", "snb-interactive", "finbench-transaction"] },
+    "description": { "type": "string", "minLength": 1, "maxLength": 600 },
+    "profile_root": { "$ref": "#/$defs/relativePath" },
+    "identity_profile": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,40}$" },
+    "counts_ladder": { "$ref": "#/$defs/relativePath" },
+    "metric_shape": { "enum": ["queries", "graphalytics"] },
+    "variance_line": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "attribution": { "type": "string", "minLength": 1, "maxLength": 400 },
+    "variances": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/variance" } },
+    "rungs": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "$ref": "#/$defs/rung" } }
+  },
+  "required": [
+    "schema",
+    "suite_id",
+    "description",
+    "profile_root",
+    "identity_profile",
+    "counts_ladder",
+    "metric_shape",
+    "variance_line",
+    "attribution",
+    "variances",
+    "rungs"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "relativePath": {
+      "type": "string",
+      "pattern": "^(\\.|[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*)$"
+    },
+    "variance": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": ["rewrite", "spec_variance", "reference_reading", "discrepancy", "scope"]
+        },
+        "subject": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "text": { "type": "string", "minLength": 1, "maxLength": 800 }
+      },
+      "required": ["kind", "subject", "text"],
+      "additionalProperties": false
+    },
+    "refusal": {
+      "type": "object",
+      "properties": {
+        "query_id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$" },
+        "cause": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,80}$" }
+      },
+      "required": ["query_id", "cause"],
+      "additionalProperties": false
+    },
+    "rung": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$" },
+        "label": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "dataset_id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$" },
+        "input_subdir": {
+          "oneOf": [{ "$ref": "#/$defs/relativePath" }, { "type": "null" }]
+        },
+        "workload": { "$ref": "#/$defs/relativePath" },
+        "refused": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/refusal" } },
+        "reference": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "path": { "$ref": "#/$defs/relativePath" }
+              },
+              "required": ["path"],
+              "additionalProperties": false
+            },
+            { "type": "null" }
+          ]
+        },
+        "reference_note": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "variances": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/variance" } }
+      },
+      "required": [
+        "id",
+        "label",
+        "dataset_id",
+        "input_subdir",
+        "workload",
+        "refused",
+        "reference",
+        "variances"
+      ],
+      "additionalProperties": false,
+      "if": { "properties": { "reference": { "type": "null" } } },
+      "then": { "required": ["reference_note"] }
+    }
+  }
+}

@@ -1,0 +1,240 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-gdc-scorecard-card-schema/1",
+  "title": "GDC scorecard card",
+  "description": "One suite's unaudited scorecard in #952's card format: the largest passing rung, its numbers with their authorities, the next rung's outcome, the LDBC fair-use label, every variance and the attribution. Graphalytics replaces throughput and latency with Tl, Tp, makespan and EVPS.",
+  "type": "object",
+  "properties": {
+    "schema": { "const": "graphforge-gdc-scorecard-card/1" },
+    "suite_id": { "enum": ["graphalytics", "snb-bi", "snb-interactive", "finbench-transaction"] },
+    "certification": { "const": false },
+    "graphforge": {
+      "type": "object",
+      "properties": {
+        "version": { "type": "string", "minLength": 1 },
+        "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+      },
+      "required": ["version", "commit"],
+      "additionalProperties": false
+    },
+    "dataset": {
+      "type": "object",
+      "properties": {
+        "rung_id": { "type": "string", "minLength": 1 },
+        "label": { "type": "string", "minLength": 1 }
+      },
+      "required": ["rung_id", "label"],
+      "additionalProperties": false
+    },
+    "fair_use_label": { "const": "These are not LDBC Benchmark Results." },
+    "variance_line": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "hardware": { "type": "object" },
+    "graph": {
+      "type": "object",
+      "properties": {
+        "nodes": { "type": "integer", "minimum": 0 },
+        "edges": { "type": "integer", "minimum": 0 },
+        "published": { "$ref": "#/$defs/totals" },
+        "published_snapshot": { "oneOf": [{ "$ref": "#/$defs/totals" }, { "type": "null" }] }
+      },
+      "required": ["nodes", "edges", "published", "published_snapshot"],
+      "additionalProperties": false
+    },
+    "load": {
+      "type": "object",
+      "properties": {
+        "wall_seconds": { "type": "number", "minimum": 0 },
+        "conversion_wall_seconds": { "type": "number", "minimum": 0 }
+      },
+      "required": ["wall_seconds", "conversion_wall_seconds"],
+      "additionalProperties": false
+    },
+    "on_disk_bytes": { "type": "integer", "minimum": 0 },
+    "coverage": {
+      "type": "object",
+      "properties": {
+        "supported": { "type": "integer", "minimum": 1 },
+        "total": { "type": "integer", "minimum": 1 },
+        "refused": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "query_id": { "type": "string", "minLength": 1 },
+              "cause": { "type": "string", "minLength": 1 }
+            },
+            "required": ["query_id", "cause"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": ["supported", "total", "refused"],
+      "additionalProperties": false
+    },
+    "throughput": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "operations": { "type": "integer", "minimum": 1 },
+            "measured_seconds": { "type": "number", "exclusiveMinimum": 0 },
+            "operations_per_second": { "type": "number", "exclusiveMinimum": 0 }
+          },
+          "required": ["operations", "measured_seconds", "operations_per_second"],
+          "additionalProperties": false
+        },
+        { "type": "null" }
+      ]
+    },
+    "latency": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "p50_ns": { "type": "integer", "minimum": 0 },
+            "p95_ns": { "type": "integer", "minimum": 0 },
+            "samples": { "type": "integer", "minimum": 1 }
+          },
+          "required": ["p50_ns", "p95_ns", "samples"],
+          "additionalProperties": false
+        },
+        { "type": "null" }
+      ]
+    },
+    "graphalytics": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "tl_seconds": { "type": "number", "minimum": 0 },
+            "algorithms": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "algorithm": { "type": "string", "minLength": 1 },
+                  "tp_seconds": { "type": "number", "exclusiveMinimum": 0 },
+                  "runs": { "const": 3 },
+                  "evps": { "type": "number", "minimum": 0 },
+                  "makespan_seconds": { "type": ["number", "null"], "minimum": 0 }
+                },
+                "required": ["algorithm", "tp_seconds", "runs", "evps", "makespan_seconds"],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": ["tl_seconds", "algorithms"],
+          "additionalProperties": false
+        },
+        { "type": "null" }
+      ]
+    },
+    "peak_rss": {
+      "type": "object",
+      "properties": {
+        "load_bytes": { "type": "integer", "minimum": 0 },
+        "query_bytes": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["load_bytes", "query_bytes"],
+      "additionalProperties": false
+    },
+    "correctness": {
+      "type": "object",
+      "properties": {
+        "status": { "enum": ["passed", "not_reference_checked"] },
+        "matched": { "type": "integer", "minimum": 0 },
+        "checked": { "type": "integer", "minimum": 0 },
+        "reference_source": { "type": ["string", "null"] },
+        "reference_note": { "type": ["string", "null"] }
+      },
+      "required": ["status", "matched", "checked", "reference_source", "reference_note"],
+      "additionalProperties": false
+    },
+    "next_rung": {
+      "type": "object",
+      "properties": {
+        "label": { "type": ["string", "null"] },
+        "outcome": {
+          "enum": ["typed_failure", "not_admitted", "not_attempted", "top_of_ladder"]
+        },
+        "cause": { "type": ["string", "null"] }
+      },
+      "required": ["label", "outcome", "cause"],
+      "additionalProperties": false
+    },
+    "variances": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "enum": ["rewrite", "spec_variance", "reference_reading", "discrepancy", "scope"]
+          },
+          "subject": { "type": "string", "minLength": 1 },
+          "text": { "type": "string", "minLength": 1 }
+        },
+        "required": ["kind", "subject", "text"],
+        "additionalProperties": false
+      }
+    },
+    "attribution": { "type": "string", "pattern": "CC-BY 4\\.0" },
+    "metric_sources": { "type": "object" },
+    "evidence": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+    }
+  },
+  "required": [
+    "schema",
+    "suite_id",
+    "certification",
+    "graphforge",
+    "dataset",
+    "fair_use_label",
+    "variance_line",
+    "hardware",
+    "graph",
+    "load",
+    "on_disk_bytes",
+    "coverage",
+    "throughput",
+    "latency",
+    "graphalytics",
+    "peak_rss",
+    "correctness",
+    "next_rung",
+    "variances",
+    "attribution",
+    "metric_sources",
+    "evidence"
+  ],
+  "additionalProperties": false,
+  "if": { "properties": { "suite_id": { "const": "graphalytics" } } },
+  "then": {
+    "properties": {
+      "graphalytics": { "type": "object" },
+      "throughput": { "type": "null" },
+      "latency": { "type": "null" }
+    }
+  },
+  "else": {
+    "properties": {
+      "graphalytics": { "type": "null" },
+      "throughput": { "type": "object" },
+      "latency": { "type": "object" }
+    }
+  },
+  "$defs": {
+    "totals": {
+      "type": "object",
+      "properties": {
+        "nodes": { "type": "integer", "minimum": 0 },
+        "edges": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["nodes", "edges"],
+      "additionalProperties": false
+    }
+  }
+}

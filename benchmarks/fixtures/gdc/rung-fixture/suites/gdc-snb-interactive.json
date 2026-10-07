@@ -1,0 +1,13 @@
+{
+  "schema": "graphforge-benchmark-suite/1",
+  "id": "gdc-snb-interactive",
+  "family": "gdc",
+  "suite_id": "snb-interactive",
+  "disposition": "executable",
+  "pinned_identity": "profiles/gdc/rung-fixture-identity.json",
+  "identity_profiles": {
+    "scorecard": "profiles/gdc/rung-fixture-identity.json"
+  },
+  "runner": "gdc-snb-interactive",
+  "datasets": ["rung-fixture-sf0", "rung-fixture-sf1", "rung-fixture-sf2"]
+}

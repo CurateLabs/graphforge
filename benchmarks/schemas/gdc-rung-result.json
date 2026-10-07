@@ -1,0 +1,215 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-gdc-rung-result-schema/1",
+  "title": "GDC scorecard rung result",
+  "description": "The outcome of one GDC scorecard rung: passed, failed with typed causes, or not admitted. It names every document the rung published with its SHA-256; the card reads its numbers from those documents.",
+  "type": "object",
+  "properties": {
+    "schema": { "const": "graphforge-gdc-rung-result/1" },
+    "suite_id": { "enum": ["graphalytics", "snb-bi", "snb-interactive", "finbench-transaction"] },
+    "rung_id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$" },
+    "label": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "status": { "enum": ["passed", "failed", "not_admitted"] },
+    "failure": { "oneOf": [{ "$ref": "#/$defs/failure" }, { "type": "null" }] },
+    "failures": { "type": "array", "items": { "$ref": "#/$defs/failure" } },
+    "identities": {
+      "type": "object",
+      "properties": {
+        "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "producer_sha256": { "$ref": "#/$defs/sha256" },
+        "graphforge_version": { "type": "string", "minLength": 1 },
+        "gf_sha256": { "$ref": "#/$defs/sha256" },
+        "driver_sha256": { "$ref": "#/$defs/sha256" },
+        "benchexec_python_sha256": { "$ref": "#/$defs/sha256" },
+        "benchexec_version": { "type": "string", "minLength": 1 },
+        "ladder_spec_sha256": { "$ref": "#/$defs/sha256" },
+        "host_profile_id": { "const": "local-linux-cgroups-v2" }
+      },
+      "required": [
+        "commit",
+        "producer_sha256",
+        "graphforge_version",
+        "gf_sha256",
+        "driver_sha256",
+        "benchexec_python_sha256",
+        "benchexec_version",
+        "ladder_spec_sha256",
+        "host_profile_id"
+      ],
+      "additionalProperties": false
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "wall_seconds": { "const": 14400 },
+        "memory_bytes": { "const": 4294967296 },
+        "cores": { "const": 16 }
+      },
+      "required": ["wall_seconds", "memory_bytes", "cores"],
+      "additionalProperties": false
+    },
+    "launch_host": { "type": ["object", "null"] },
+    "work_root_capacity": { "type": ["object", "null"] },
+    "host": {
+      "type": "object",
+      "properties": {
+        "label": { "type": "string", "minLength": 1 },
+        "cores": { "type": "integer", "minimum": 0 },
+        "memory_bytes": { "type": "integer", "minimum": 0 },
+        "storage_medium": { "type": "string", "minLength": 1 },
+        "filesystem": { "type": "string", "minLength": 1 },
+        "os": { "type": "string", "minLength": 1 }
+      },
+      "required": ["label", "cores", "memory_bytes", "storage_medium", "filesystem", "os"],
+      "additionalProperties": false
+    },
+    "phases": {
+      "type": "object",
+      "propertyNames": { "enum": ["convert", "load", "query"] },
+      "additionalProperties": { "$ref": "#/$defs/phase" }
+    },
+    "counts": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "published": { "$ref": "#/$defs/totals" },
+            "published_snapshot": {
+              "oneOf": [{ "$ref": "#/$defs/totals" }, { "type": "null" }]
+            },
+            "discrepancies": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "kind": { "const": "discrepancy" },
+                  "subject": { "type": "string", "minLength": 1 },
+                  "text": { "type": "string", "minLength": 1 }
+                },
+                "required": ["kind", "subject", "text"],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": ["published", "published_snapshot", "discrepancies"],
+          "additionalProperties": false
+        },
+        { "type": "null" }
+      ]
+    },
+    "documents": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[A-Za-z0-9_.-]+\\.json$" },
+      "additionalProperties": { "$ref": "#/$defs/sha256" }
+    },
+    "inventory": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "empty": { "type": "boolean" },
+            "entries": { "type": "array", "items": { "type": "string" } }
+          },
+          "required": ["empty", "entries"],
+          "additionalProperties": false
+        },
+        { "type": "null" }
+      ]
+    },
+    "claim": { "const": "engineering_evidence_only" },
+    "certification": { "const": false }
+  },
+  "required": [
+    "schema",
+    "suite_id",
+    "rung_id",
+    "label",
+    "status",
+    "failure",
+    "failures",
+    "identities",
+    "limits",
+    "launch_host",
+    "work_root_capacity",
+    "host",
+    "phases",
+    "counts",
+    "documents",
+    "inventory",
+    "claim",
+    "certification"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "passed" } } },
+      "then": {
+        "properties": {
+          "failure": { "type": "null" },
+          "failures": { "maxItems": 0 },
+          "inventory": { "type": "object", "properties": { "empty": { "const": true } } },
+          "phases": { "required": ["convert", "load", "query"] },
+          "counts": { "type": "object" }
+        }
+      },
+      "else": {
+        "properties": {
+          "failure": { "$ref": "#/$defs/failure" },
+          "failures": { "minItems": 1 }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "totals": {
+      "type": "object",
+      "properties": {
+        "nodes": { "type": "integer", "minimum": 0 },
+        "edges": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["nodes", "edges"],
+      "additionalProperties": false
+    },
+    "failure": {
+      "type": "object",
+      "properties": {
+        "phase": {
+          "enum": [
+            "admission",
+            "acquisition",
+            "convert",
+            "counts",
+            "load",
+            "query",
+            "check",
+            "teardown"
+          ]
+        },
+        "cause": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,80}$" },
+        "detail": { "type": "string", "maxLength": 2048 }
+      },
+      "required": ["phase", "cause", "detail"],
+      "additionalProperties": false
+    },
+    "phase": {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "enum": ["passed", "timeout", "oom", "exit", "signal", "harness", "correctness", null]
+        },
+        "wall_seconds": { "type": ["number", "null"], "minimum": 0 },
+        "cpu_seconds": { "type": ["number", "null"], "minimum": 0 },
+        "peak_rss_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "benchexec_document": {
+          "oneOf": [
+            { "type": "string", "pattern": "^[A-Za-z0-9_.-]+-benchexec\\.json$" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "required": ["outcome", "wall_seconds", "cpu_seconds", "peak_rss_bytes", "benchexec_document"],
+      "additionalProperties": false
+    }
+  }
+}
