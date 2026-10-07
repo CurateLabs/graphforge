@@ -1,10 +1,11 @@
 //! Command-line front end for `gdc_scorecard::query`.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use gdc_scorecard::query::{QueryCause, QueryError, ResultsDir, run_with_results, sha256_hex};
+use gdc_scorecard::query::{QueryCause, QueryError, ResultsDir, run_with_results};
+use sha2::{Digest, Sha256};
 
 pub const USAGE: &str = "graphforge-benchmark-gdc-scorecard query --project DIR --workload FILE --expected-counts FILE --output FILE [--results-dir EMPTY_DIR]";
 
@@ -32,10 +33,26 @@ fn execute(paths: &Paths) -> Result<usize, QueryError> {
     let workload = read(&paths.workload, QueryCause::InvalidWorkload)?;
     let expected = read(&paths.expected, QueryCause::InvalidExpectedCounts)?;
     let results = paths.results.as_deref().map(ResultsDir::new).transpose()?;
-    let executable = std::env::current_exe()
-        .and_then(std::fs::read)
+    // Streamed, so hashing the executable never holds it in memory.
+    let executable_sha256 = std::env::current_exe()
+        .and_then(std::fs::File::open)
+        .and_then(|mut file| {
+            let mut hasher = Sha256::new();
+            let mut buffer = vec![0_u8; 1 << 20];
+            loop {
+                let read = file.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
+            }
+            Ok(hasher
+                .finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>())
+        })
         .map_err(|error| QueryError::new(QueryCause::Io, format!("driver executable: {error}")))?;
-    let executable_sha256 = sha256_hex(&executable);
     let evidence = run_with_results(
         &paths.project,
         &workload,
