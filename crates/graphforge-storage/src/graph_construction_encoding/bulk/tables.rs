@@ -55,59 +55,98 @@ impl LocalDictionary {
         id
     }
 
-    fn column(&mut self, values: &StringArray, out: &mut Vec<u32>) {
+    fn column(&mut self, values: &StringArray, out: &mut [u32]) {
         let mut previous: Option<(&str, u32)> = None;
-        for row in 0..values.len() {
+        for (row, slot) in out.iter_mut().enumerate() {
             let value = values.value(row);
             let id = match previous {
                 Some((text, id)) if text == value => id,
                 _ => self.id(value),
             };
             previous = Some((value, id));
-            out.push(id);
+            *slot = id;
         }
     }
 }
 
-fn fixed_rows(array: &FixedSizeBinaryArray, out: &mut Vec<[u8; 16]>) {
-    out.extend(
-        array
-            .value_data()
-            .chunks_exact(16)
-            .map(|bytes| <[u8; 16]>::try_from(bytes).expect("16-byte chunk")),
-    );
+fn copy_uuids(array: &FixedSizeBinaryArray, out: &mut [[u8; 16]]) {
+    for (slot, bytes) in out.iter_mut().zip(array.value_data().chunks_exact(16)) {
+        *slot = <[u8; 16]>::try_from(bytes).expect("16-byte chunk");
+    }
 }
 
-/// Assemble per-task columns into one array, freeing each task's column as soon
-/// as it is copied. The destination is zero-allocated, so its pages become
-/// resident only as they are written: decoded and assembled copies never coexist
-/// beyond one task's column per worker. (A generic `vec![zero; n]` would write
-/// the zeros eagerly, so the two element types are spelled out.)
-macro_rules! concat_columns {
-    ($name:ident, $element:ty, $zero:expr) => {
-        fn $name(mut parts: Vec<Vec<$element>>) -> Vec<$element> {
-            let total = parts.iter().map(Vec::len).sum();
-            let mut out = vec![$zero; total];
-            let mut rest = out.as_mut_slice();
-            let mut slices = Vec::with_capacity(parts.len());
-            for part in &parts {
-                let (head, tail) = rest.split_at_mut(part.len());
-                slices.push(head);
-                rest = tail;
-            }
-            slices
-                .into_par_iter()
-                .zip(parts.par_iter_mut())
-                .for_each(|(destination, source)| {
-                    destination.copy_from_slice(source);
-                    *source = Vec::new();
-                });
-            out
-        }
-    };
+/// The exact rows each task will emit, from the footers, and where they land in
+/// the assembled columns. Every task decodes straight into its own slice of the
+/// final arrays, so a decoded copy and an assembled copy never coexist.
+struct Tasks {
+    /// `(source, task, rows)` in input order.
+    items: Vec<(usize, usize, usize)>,
+    total: usize,
 }
-concat_columns!(concat_uuids, [u8; 16], [0_u8; 16]);
-concat_columns!(concat_ranks, u32, 0_u32);
+
+impl Tasks {
+    fn plan(sources: &[BulkSource<'_>], what: &str) -> Result<Self, GfError> {
+        let mut items = Vec::new();
+        let mut total = 0_usize;
+        for (source, planned) in sources.iter().enumerate() {
+            for task in 0..planned.tasks {
+                let rows = planned.reader.task_rows(task);
+                total = total
+                    .checked_add(rows)
+                    .ok_or_else(|| storage("source row count overflows"))?;
+                items.push((source, task, rows));
+            }
+        }
+        require_dense(total as u64, what)?;
+        Ok(Self { items, total })
+    }
+
+    /// One mutable slice of `column` per task.
+    fn carve<'a, T>(&self, column: &'a mut [T]) -> Vec<&'a mut [T]> {
+        let mut rest = column;
+        self.items
+            .iter()
+            .map(|&(_, _, rows)| {
+                let (head, tail) = std::mem::take(&mut rest).split_at_mut(rows);
+                rest = tail;
+                head
+            })
+            .collect()
+    }
+}
+
+/// Merge the tasks' local dictionaries into one and return each task's
+/// local-to-global id map.
+fn global_dictionary(dictionaries: &[&LocalDictionary]) -> (Vec<String>, Vec<Vec<u32>>) {
+    let mut global = LocalDictionary::default();
+    let maps = dictionaries
+        .iter()
+        .map(|dictionary| {
+            dictionary
+                .names
+                .iter()
+                .map(|name| global.id(name))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    (global.names, maps)
+}
+
+fn remap_in_place(tasks: &Tasks, column: &mut [u32], maps: &[Vec<u32>]) {
+    tasks
+        .carve(column)
+        .into_par_iter()
+        .zip(maps.par_iter())
+        .for_each(|(slice, map)| {
+            for id in slice {
+                *id = map[*id as usize];
+            }
+        });
+}
+
+fn short_source() -> GfError {
+    storage("a source emitted a different row count than its footer")
+}
 
 fn gather<T: Copy + Send + Sync>(source: &[T], order: &[u32]) -> Vec<T> {
     order
@@ -138,35 +177,10 @@ fn sort_unique(uuids: &mut Vec<[u8; 16]>, what: &str) -> Result<Option<Vec<u32>>
     Ok(order)
 }
 
-fn remap_to_global(dictionaries: &[LocalDictionary], columns: &mut [&mut Vec<u32>]) -> Vec<String> {
-    let mut global = LocalDictionary::default();
-    let maps = dictionaries
-        .iter()
-        .map(|dictionary| {
-            dictionary
-                .names
-                .iter()
-                .map(|name| global.id(name))
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    columns
-        .par_iter_mut()
-        .zip(maps.par_iter())
-        .for_each(|(column, map)| {
-            for id in column.iter_mut() {
-                *id = map[*id as usize];
-            }
-        });
-    global.names
-}
-
 // ---------------------------------------------------------------- nodes
 
 #[derive(Default)]
 struct NodeChunk {
-    uuids: Vec<[u8; 16]>,
-    labels: Vec<u32>,
     dictionary: LocalDictionary,
     kept: Vec<RecordBatch>,
 }
@@ -185,61 +199,58 @@ pub(super) fn collect_nodes(
     retain: bool,
     cancel: &AtomicBool,
 ) -> Result<NodeTable, GfError> {
-    let tasks = sources
-        .iter()
-        .enumerate()
-        .flat_map(|(source, planned)| (0..planned.tasks).map(move |task| (source, task)))
-        .collect::<Vec<_>>();
-    let mut chunks = tasks
+    let tasks = Tasks::plan(sources, "nodes")?;
+    // Zero-allocated: pages become resident only as tasks write them.
+    let mut uuids = vec![[0_u8; 16]; tasks.total];
+    let mut labels = vec![0_u32; tasks.total];
+    let chunks = tasks
+        .items
         .par_iter()
-        .map(|&(source, task)| {
+        .zip(tasks.carve(&mut uuids))
+        .zip(tasks.carve(&mut labels))
+        .map(|((&(source, task, rows), uuids), labels)| {
             check_cancelled(cancel)?;
             let mut chunk = NodeChunk::default();
+            let mut written = 0;
             sources[source].reader.read_task(task, &mut |batch| {
                 check_cancelled(cancel)?;
                 crate::graph_construction::validate_canonical_batch(
                     ConstructionChunkKind::Node,
                     &batch,
                 )?;
-                if batch.num_rows() == 0 {
+                let count = batch.num_rows();
+                if written + count > rows {
+                    return Err(short_source());
+                }
+                if count == 0 {
                     return Ok(());
                 }
-                fixed_rows(
+                copy_uuids(
                     crate::graph_construction::batch_uuid_column(&batch, "node_uuid")?,
-                    &mut chunk.uuids,
+                    &mut uuids[written..written + count],
                 );
-                chunk
-                    .dictionary
-                    .column(required_string(&batch, "label")?, &mut chunk.labels);
+                chunk.dictionary.column(
+                    required_string(&batch, "label")?,
+                    &mut labels[written..written + count],
+                );
+                written += count;
                 if retain {
                     chunk.kept.push(batch);
                 }
                 Ok(())
             })?;
+            if written != rows {
+                return Err(short_source());
+            }
             Ok(chunk)
         })
         .collect::<Result<Vec<_>, GfError>>()?;
-    let total = chunks.iter().map(|chunk| chunk.uuids.len() as u64).sum();
-    require_dense(total, "nodes")?;
     let dictionaries = chunks
-        .iter_mut()
-        .map(|chunk| std::mem::take(&mut chunk.dictionary))
+        .iter()
+        .map(|chunk| &chunk.dictionary)
         .collect::<Vec<_>>();
-    let mut label_columns = chunks
-        .iter_mut()
-        .map(|chunk| std::mem::take(&mut chunk.labels))
-        .collect::<Vec<_>>();
-    let label_names = remap_to_global(
-        &dictionaries,
-        &mut label_columns.iter_mut().collect::<Vec<_>>(),
-    );
-    let mut uuids = concat_uuids(
-        chunks
-            .iter_mut()
-            .map(|chunk| std::mem::take(&mut chunk.uuids))
-            .collect(),
-    );
-    let mut labels = concat_ranks(label_columns);
+    let (label_names, maps) = global_dictionary(&dictionaries);
+    remap_in_place(&tasks, &mut labels, &maps);
     let kept = chunks
         .into_iter()
         .flat_map(|chunk| chunk.kept)
@@ -317,10 +328,6 @@ impl<'a> NodeIndex<'a> {
 
 #[derive(Default)]
 struct EdgeChunk {
-    uuids: Vec<[u8; 16]>,
-    src: Vec<u32>,
-    dst: Vec<u32>,
-    rels: Vec<u32>,
     dictionary: LocalDictionary,
     kept: Vec<RecordBatch>,
     miss: Option<[u8; 16]>,
@@ -345,95 +352,78 @@ pub(super) fn collect_edges(
     index: &NodeIndex<'_>,
     cancel: &AtomicBool,
 ) -> Result<EdgeTable, GfError> {
-    let tasks = sources
-        .iter()
-        .enumerate()
-        .flat_map(|(source, planned)| (0..planned.tasks).map(move |task| (source, task)))
-        .collect::<Vec<_>>();
-    let mut chunks = tasks
+    let tasks = Tasks::plan(sources, "edges")?;
+    let mut uuids = vec![[0_u8; 16]; tasks.total];
+    let mut src = vec![0_u32; tasks.total];
+    let mut dst = vec![0_u32; tasks.total];
+    let mut rels = vec![0_u32; tasks.total];
+    let chunks = tasks
+        .items
         .par_iter()
-        .map(|&(source, task)| {
+        .zip(tasks.carve(&mut uuids))
+        .zip(tasks.carve(&mut src))
+        .zip(tasks.carve(&mut dst))
+        .zip(tasks.carve(&mut rels))
+        .map(|((((&(source, task, rows), uuids), src), dst), rels)| {
             check_cancelled(cancel)?;
             let mut chunk = EdgeChunk::default();
+            let mut written = 0;
+            let mut endpoints = Vec::new();
             sources[source].reader.read_task(task, &mut |batch| {
                 check_cancelled(cancel)?;
                 crate::graph_construction::validate_canonical_batch(
                     ConstructionChunkKind::Edge,
                     &batch,
                 )?;
-                if batch.num_rows() == 0 {
+                let count = batch.num_rows();
+                if written + count > rows {
+                    return Err(short_source());
+                }
+                if count == 0 {
                     return Ok(());
                 }
-                let first = chunk.uuids.len();
-                fixed_rows(
+                let range = written..written + count;
+                copy_uuids(
                     crate::graph_construction::batch_uuid_column(&batch, "edge_uuid")?,
-                    &mut chunk.uuids,
+                    &mut uuids[range.clone()],
                 );
-                chunk
-                    .dictionary
-                    .column(required_string(&batch, "rel_type")?, &mut chunk.rels);
-                let mut endpoints = Vec::with_capacity(batch.num_rows());
-                for (name, target) in [("source_uuid", false), ("target_uuid", true)] {
+                chunk.dictionary.column(
+                    required_string(&batch, "rel_type")?,
+                    &mut rels[range.clone()],
+                );
+                for (name, ranks) in [("source_uuid", &mut *src), ("target_uuid", &mut *dst)] {
                     endpoints.clear();
-                    fixed_rows(
+                    endpoints.resize(count, [0_u8; 16]);
+                    copy_uuids(
                         crate::graph_construction::batch_uuid_column(&batch, name)?,
                         &mut endpoints,
                     );
-                    for endpoint in &endpoints {
-                        let rank = index.find(endpoint).unwrap_or_else(|| {
+                    for (slot, endpoint) in ranks[range.clone()].iter_mut().zip(&endpoints) {
+                        *slot = index.find(endpoint).unwrap_or_else(|| {
                             chunk.miss.get_or_insert(*endpoint);
                             0
                         });
-                        if target {
-                            chunk.dst.push(rank);
-                        } else {
-                            chunk.src.push(rank);
-                        }
                     }
                 }
-                debug_assert_eq!(chunk.uuids.len() - first, batch.num_rows());
+                written += count;
                 if retain {
                     chunk.kept.push(batch);
                 }
                 Ok(())
             })?;
+            if written != rows {
+                return Err(short_source());
+            }
             Ok(chunk)
         })
         .collect::<Result<Vec<_>, GfError>>()?;
-    let total = chunks.iter().map(|chunk| chunk.uuids.len() as u64).sum();
-    require_dense(total, "edges")?;
     let miss = chunks.iter().find_map(|chunk| chunk.miss);
     let dictionaries = chunks
-        .iter_mut()
-        .map(|chunk| std::mem::take(&mut chunk.dictionary))
+        .iter()
+        .map(|chunk| &chunk.dictionary)
         .collect::<Vec<_>>();
-    let mut rel_columns = chunks
-        .iter_mut()
-        .map(|chunk| std::mem::take(&mut chunk.rels))
-        .collect::<Vec<_>>();
-    let rel_names = remap_to_global(
-        &dictionaries,
-        &mut rel_columns.iter_mut().collect::<Vec<_>>(),
-    );
-    let mut uuids = concat_uuids(
-        chunks
-            .iter_mut()
-            .map(|chunk| std::mem::take(&mut chunk.uuids))
-            .collect(),
-    );
-    let mut src = concat_ranks(
-        chunks
-            .iter_mut()
-            .map(|chunk| std::mem::take(&mut chunk.src))
-            .collect(),
-    );
-    let mut dst = concat_ranks(
-        chunks
-            .iter_mut()
-            .map(|chunk| std::mem::take(&mut chunk.dst))
-            .collect(),
-    );
-    let mut rels = concat_ranks(rel_columns);
+    let (rel_names, maps) = global_dictionary(&dictionaries);
+    remap_in_place(&tasks, &mut rels, &maps);
     let kept = chunks
         .into_iter()
         .flat_map(|chunk| chunk.kept)

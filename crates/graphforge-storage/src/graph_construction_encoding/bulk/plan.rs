@@ -24,6 +24,12 @@ pub trait BulkBatchReader: Send + Sync {
         task: usize,
         sink: &mut dyn FnMut(RecordBatch) -> Result<(), GfError>,
     ) -> Result<(), GfError>;
+
+    /// Exactly how many rows `task` will emit, known from the footer. Each task
+    /// decodes straight into its own slice of the final columns, so a decoded
+    /// copy and an assembled copy never coexist. A task that emits a different
+    /// number of rows fails the build.
+    fn task_rows(&self, task: usize) -> usize;
 }
 
 /// One planned input source (pass 0).

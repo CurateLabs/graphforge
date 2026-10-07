@@ -34,7 +34,57 @@ enum Format {
         metadata: ArrowReaderMetadata,
         rows: u64,
     },
-    Arrow,
+    /// Rows of every record batch, from the IPC footer's message headers.
+    Arrow { batch_rows: Vec<u64> },
+}
+
+/// Rows of every record batch of an Arrow IPC file, read from the footer and the
+/// batch message headers without decoding any column.
+fn ipc_batch_rows(path: &Path) -> Result<Vec<u64>, GfError> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+
+    let mut file = File::open(path).map_err(storage)?;
+    let length = file.metadata().map_err(storage)?.len();
+    let mut tail = [0_u8; 10];
+    if length < 10 {
+        return Err(storage("Arrow source is too short for an IPC footer"));
+    }
+    file.seek(SeekFrom::Start(length - 10)).map_err(storage)?;
+    file.read_exact(&mut tail).map_err(storage)?;
+    let footer_length = u64::try_from(i32::from_le_bytes(tail[..4].try_into().expect("4 bytes")))
+        .map_err(|_| storage("Arrow footer length is negative"))?;
+    if &tail[4..] != b"ARROW1" || footer_length + 10 > length {
+        return Err(storage("Arrow source is not an IPC file"));
+    }
+    let mut footer_bytes = vec![0_u8; usize::try_from(footer_length).map_err(storage)?];
+    file.seek(SeekFrom::Start(length - 10 - footer_length))
+        .map_err(storage)?;
+    file.read_exact(&mut footer_bytes).map_err(storage)?;
+    let footer = arrow::ipc::root_as_footer(&footer_bytes)
+        .map_err(|error| storage(format!("Arrow footer is invalid: {error}")))?;
+    let blocks = footer
+        .recordBatches()
+        .map(|blocks| blocks.iter().collect::<Vec<_>>());
+    blocks
+        .unwrap_or_default()
+        .into_iter()
+        .map(|block| {
+            let mut header = vec![0_u8; usize::try_from(block.metaDataLength()).map_err(storage)?];
+            file.seek(SeekFrom::Start(
+                u64::try_from(block.offset()).map_err(storage)?,
+            ))
+            .map_err(storage)?;
+            file.read_exact(&mut header).map_err(storage)?;
+            // A continuation marker (0xFFFFFFFF) precedes the 4-byte size.
+            let skip = if header.starts_with(&[0xff; 4]) { 8 } else { 4 };
+            let message = arrow::ipc::root_as_message(header.get(skip..).unwrap_or_default())
+                .map_err(|error| storage(format!("Arrow message is invalid: {error}")))?;
+            let batch = message
+                .header_as_record_batch()
+                .ok_or_else(|| storage("Arrow block is not a record batch"))?;
+            u64::try_from(batch.length()).map_err(storage)
+        })
+        .collect()
 }
 
 struct SourceReader<'a> {
@@ -63,7 +113,7 @@ impl SourceReader<'_> {
         }
         let batch = match self.format {
             Format::Parquet { .. } => canonicalize_parquet_batch(self.kind, &batch)?,
-            Format::Arrow => batch,
+            Format::Arrow { .. } => batch,
         };
         let normalized = normalize_batch(
             self.graph,
@@ -83,6 +133,26 @@ impl SourceReader<'_> {
 }
 
 impl BulkBatchReader for SourceReader<'_> {
+    fn task_rows(&self, task: usize) -> usize {
+        let first_batch = task as u64 * BATCHES_PER_TASK;
+        let batch_rows = self.batch_rows as u64;
+        let rows = match &self.format {
+            Format::Parquet { rows, .. } => {
+                (first_batch * batch_rows + BATCHES_PER_TASK * batch_rows).min(*rows)
+                    - (first_batch * batch_rows).min(*rows)
+            }
+            Format::Arrow { batch_rows } => {
+                let first = usize::try_from(first_batch).unwrap_or(usize::MAX);
+                batch_rows
+                    .iter()
+                    .skip(first)
+                    .take(usize::try_from(BATCHES_PER_TASK).unwrap_or(0))
+                    .sum()
+            }
+        };
+        usize::try_from(rows).unwrap_or(0)
+    }
+
     fn read_task(
         &self,
         task: usize,
@@ -142,7 +212,7 @@ impl BulkBatchReader for SourceReader<'_> {
                     self.emit(first_batch + offset as u64, batch.map_err(storage)?, sink)?;
                 }
             }
-            Format::Arrow => {
+            Format::Arrow { .. } => {
                 let mut reader = ArrowFileReader::try_new(file, None).map_err(storage)?;
                 let total = reader.num_batches() as u64;
                 for index in first_batch..(first_batch + BATCHES_PER_TASK).min(total) {
@@ -209,16 +279,21 @@ pub(super) fn plan<'a>(
             let file = File::open(&path).map_err(storage)?;
             let reader = ArrowFileReader::try_new(file, None).map_err(storage)?;
             let columns = reader.schema().fields().len();
-            // The IPC footer carries no row count; the batch count bounds it and
-            // the builder counts the rows it actually decodes.
-            let rows = reader.num_batches() as u64 * batch_rows as u64;
-            (Format::Arrow, rows, columns)
+            let counts = ipc_batch_rows(&path)?;
+            if counts.len() != reader.num_batches() {
+                return Err(storage("Arrow footer and batch headers disagree"));
+            }
+            let rows = counts.iter().sum();
+            (Format::Arrow { batch_rows: counts }, rows, columns)
         }
     };
     if columns < required {
         return Err(validation("Parquet import schema lacks required columns"));
     }
-    let batches = rows.div_ceil(batch_rows as u64);
+    let batches = match &format {
+        Format::Parquet { .. } => rows.div_ceil(batch_rows as u64),
+        Format::Arrow { batch_rows } => batch_rows.len() as u64,
+    };
     let decoded_bytes = match &format {
         Format::Parquet { metadata, .. } => metadata
             .metadata()
@@ -226,7 +301,7 @@ pub(super) fn plan<'a>(
             .iter()
             .map(|group| u64::try_from(group.total_byte_size()).unwrap_or(0))
             .sum(),
-        Format::Arrow => fs::metadata(&path).map_err(storage)?.len(),
+        Format::Arrow { .. } => fs::metadata(&path).map_err(storage)?.len(),
     };
     Ok(BulkSource {
         reader: Arc::new(SourceReader {

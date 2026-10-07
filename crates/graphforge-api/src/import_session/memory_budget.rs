@@ -162,6 +162,9 @@ mod tests {
 
         struct Never;
         impl BulkBatchReader for Never {
+            fn task_rows(&self, _: usize) -> usize {
+                unreachable!("planning only")
+            }
             fn read_task(
                 &self,
                 _: usize,

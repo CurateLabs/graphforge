@@ -23,6 +23,15 @@ mod bulk_builder {
     }
 
     impl BulkBatchReader for Memory {
+        fn task_rows(&self, task: usize) -> usize {
+            self.batches
+                .iter()
+                .skip(task * self.per_task)
+                .take(self.per_task)
+                .map(RecordBatch::num_rows)
+                .sum()
+        }
+
         fn read_task(
             &self,
             task: usize,

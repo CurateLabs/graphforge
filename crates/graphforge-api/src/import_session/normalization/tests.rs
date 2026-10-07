@@ -424,7 +424,7 @@ fn serial_and_parallel_import_publish_identical_payloads_with_recorded_clock_fix
             root.join("encoded-v1/graph/topology/uuid-membership/ordinal-v4-receipt.json")
                 .exists()
         );
-        let mut fingerprint = payload_digests(&root.join("encoded-v1/graph"));
+        let fingerprint = payload_digests(&root.join("encoded-v1/graph"));
         assert!(fingerprint.len() > 20);
         session.commit(&graph, None).unwrap();
         drop(session);
