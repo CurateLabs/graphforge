@@ -98,6 +98,81 @@ fn entries_over_the_ustar_size_field_carry_a_pax_size_record_and_a_zero_field() 
     );
 }
 
+/// A one-entry archive built through the writer's own primitives: headers,
+/// payload, zero padding and the two terminal zero blocks.
+fn single_entry_archive(path: &str, payload: &[u8]) -> Vec<u8> {
+    let out = tempfile::NamedTempFile::new().unwrap();
+    let mut file = out.reopen().unwrap();
+    let mut transport = TransportHash::new();
+    header(&mut file, &mut transport, path, payload.len() as u64).unwrap();
+    emit(&mut file, &mut transport, payload).unwrap();
+    pad(&mut file, &mut transport, payload.len() as u64).unwrap();
+    emit(&mut file, &mut transport, &[0u8; 1024]).unwrap();
+    fs::read(out.path()).unwrap()
+}
+
+#[test]
+fn entries_within_the_ustar_fields_keep_the_contract_archive_bytes() {
+    // ADR 0038: bundles of normal-size entries stay byte-stable. The vectors
+    // are derived independently by `scripts/ci/portable-v2-contract.py`.
+    let vectors: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../../tests/fixtures/portable-v2/bundle-byte-vectors.json"
+    ))
+    .unwrap();
+    let vectors = vectors["vectors"].as_array().unwrap();
+    assert_eq!(vectors.len(), 3);
+    for vector in vectors {
+        let name = vector["name"].as_str().unwrap();
+        let payload = (0..vector["payload_hex"].as_str().unwrap().len())
+            .step_by(2)
+            .map(|i| {
+                u8::from_str_radix(&vector["payload_hex"].as_str().unwrap()[i..i + 2], 16).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let archive = single_entry_archive(vector["path"].as_str().unwrap(), &payload);
+        assert_eq!(
+            archive.len() as u64,
+            vector["archive_length"].as_u64().unwrap(),
+            "{name}"
+        );
+        assert_eq!(
+            hex(sha2::Sha256::digest(&archive).into()),
+            vector["archive_sha256"].as_str().unwrap(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn an_oversized_entry_with_a_long_path_carries_both_records() {
+    let path = format!(
+        "data/components/graph-data/core/{}",
+        "b".repeat(crate::project_portable_v2::pax::PAX_RECORD_OVERHEAD_BYTES + 100)
+    );
+    assert!(
+        split(&path).is_err(),
+        "the path must not fit the ustar split"
+    );
+    let _limit = pax::test_seam::lower_ustar_size_limit(1);
+    let payload = b"{}";
+    let archive = single_entry_archive(&path, payload);
+    let records = format!("{}{}", pax::record("path", &path), pax::record("size", "2"));
+    assert_eq!(archive[156], b'x');
+    assert_eq!(&archive[512..512 + records.len()], records.as_bytes());
+    assert_eq!(
+        pax::parse(&records).unwrap(),
+        pax::PaxHeader {
+            path: path.clone(),
+            size: Some(2)
+        }
+    );
+    let regular = 1024;
+    assert_eq!(&archive[regular..regular + 9], b"PaxFiles/");
+    assert_eq!(&archive[regular + 124..regular + 136], b"00000000000\0");
+    assert_eq!(&archive[regular + 512..regular + 514], payload);
+    assert_eq!(archive.len(), 4 * 512 + 1024);
+}
+
 #[test]
 fn large_sparse_source_streams_densely_with_a_tiny_buffer() {
     let root = tempfile::tempdir().unwrap();
