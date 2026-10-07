@@ -66,7 +66,8 @@ impl BulkBuildPlan<'_> {
     /// and their sorted copy.
     #[must_use]
     pub fn estimated_resident_bytes(&self) -> u64 {
-        let rows = |sources: &[BulkSource<'_>]| sources.iter().map(|source| source.rows).sum::<u64>();
+        let rows =
+            |sources: &[BulkSource<'_>]| sources.iter().map(|source| source.rows).sum::<u64>();
         let retained = |sources: &[BulkSource<'_>]| {
             if sources.iter().all(|source| source.property_free) {
                 0

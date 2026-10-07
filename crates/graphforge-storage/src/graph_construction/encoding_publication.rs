@@ -336,7 +336,9 @@ impl GraphConstructionSession {
         reject_cancelled(&mut cancelled)?;
         self.revalidate_authority()?;
         if self.checkpoint.parent_topology_generation != 0 || self.checkpoint.next_sequence != 0 {
-            return Err(storage("the bulk builder only builds an empty initial session"));
+            return Err(storage(
+                "the bulk builder only builds an empty initial session",
+            ));
         }
         if self.checkpoint.state == GraphConstructionState::Staging {
             self.seal_inner(false)?;

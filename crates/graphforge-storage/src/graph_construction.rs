@@ -12,7 +12,10 @@ use intake::{
     uuid_column, uuid_value, validate_artifact_name, validate_intent, validate_parquet_metadata,
     validate_receipt_artifacts, validate_receipt_semantics, write_parquet_with_properties,
 };
-pub(crate) use intake::{normalized_schema_digest, uuid_column as batch_uuid_column, validate_schema as validate_canonical_batch};
+pub(crate) use intake::{
+    normalized_schema_digest, uuid_column as batch_uuid_column,
+    validate_schema as validate_canonical_batch,
+};
 mod io_evidence;
 pub(crate) use io_evidence::{
     ConstructionFileHandle, CountingChunkReader, CountingRead, IoCounter,
@@ -1059,7 +1062,8 @@ pub struct GraphConstructionSession {
     /// bulk builder supplies the rows (#1883).
     bulk_empty_shape: bool,
     /// Measurements of the last bulk build this session ran (#1883).
-    bulk_report: std::sync::Arc<std::sync::Mutex<crate::graph_construction_encoding::BulkBuildReport>>,
+    bulk_report:
+        std::sync::Arc<std::sync::Mutex<crate::graph_construction_encoding::BulkBuildReport>>,
     session_lock: File,
     _reservation: ProcessReservation,
 }

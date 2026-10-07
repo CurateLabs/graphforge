@@ -36,8 +36,9 @@ use sha2::Digest;
 use uuid::Uuid;
 
 use crate::graph_construction::{
-    ArtifactReceipt, ConstructionChunkKind, ConstructionSemanticAuthority, ConstructionShape, CountingChunkReader,
-    GraphConstructionBudgets, IoCounter, open_authenticated_shape_source, shaped_output_xxh64,
+    ArtifactReceipt, ConstructionChunkKind, ConstructionSemanticAuthority, ConstructionShape,
+    CountingChunkReader, GraphConstructionBudgets, IoCounter, open_authenticated_shape_source,
+    shaped_output_xxh64,
 };
 use crate::property_overlay::{
     PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY, PROPERTY_ORDINAL_KEY, PROPERTY_OVERLAY_FORMAT,
@@ -53,14 +54,12 @@ use crate::uuid_membership::{
 use crate::{SemanticRouteKind, SemanticStorageBindings};
 
 mod adjacency;
+mod bulk;
 mod inventory;
 mod lanes;
-mod bulk;
 mod properties;
-pub use bulk::{
-    BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkSource,
-};
 pub(crate) use bulk::encode_bulk;
+pub use bulk::{BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkSource};
 #[cfg(test)]
 pub(crate) use inventory::authenticate_inventory_payloads;
 pub(crate) use inventory::{authenticate_inventory, authenticate_inventory_control};
@@ -722,7 +721,7 @@ pub(crate) fn encode(
         crate::uuid_membership::ConstructionIdentityInput::Shaped {
             source: source.physical(),
             name: &shape.identities,
-            xxh64: &identities_xxh64,
+            xxh64: identities_xxh64,
         },
         output.physical(),
         generation,

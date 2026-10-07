@@ -2,12 +2,14 @@
 //! SHA-256 and XXH64 are computed from the bytes about to be written.
 
 use std::collections::HashMap;
-use std::io::Write as _;
 use std::sync::Mutex;
 
 use parquet::arrow::ArrowWriter;
 
-use super::*;
+use super::{
+    Component, ConstructionEncodedArtifact, Digest, GfError, OsStr, Path, RecordBatch, Sha256,
+    StableDirectory, Write, hex, storage,
+};
 
 pub(super) struct Installer<'a> {
     output: &'a StableDirectory,

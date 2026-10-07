@@ -115,7 +115,10 @@ fn every_intake_refusal_fires_on_an_initial_import() {
         &[node_rows(&[a], "Person")],
         &[edge_rows(&[e], "KNOWS", &[a], &[c])],
     );
-    assert!(message.contains("edge endpoint UUID does not exist"), "{message}");
+    assert!(
+        message.contains("edge endpoint UUID does not exist"),
+        "{message}"
+    );
 
     // An edge may not point at an edge, nor at itself.
     let message = refusal(
@@ -125,7 +128,10 @@ fn every_intake_refusal_fires_on_an_initial_import() {
             edge_rows(&[v7(101)], "KNOWS", &[a], &[e]),
         ],
     );
-    assert!(message.contains("edge endpoint is not a node UUID"), "{message}");
+    assert!(
+        message.contains("edge endpoint is not a node UUID"),
+        "{message}"
+    );
     let message = refusal(
         &[node_rows(&[a], "Person")],
         &[edge_rows(&[e], "KNOWS", &[a], &[e])],
@@ -163,15 +169,12 @@ fn pin_clock(root: &Path) {
 /// receipt, which carries a random rebuild nonce (ADR 0038).
 fn encoded_inventory(root: &Path) -> BTreeMap<String, (u64, String)> {
     let inventory: serde_json::Value =
-        serde_json::from_slice(&fs::read(root.join("encoded-v1/inventory.json")).unwrap())
-            .unwrap();
+        serde_json::from_slice(&fs::read(root.join("encoded-v1/inventory.json")).unwrap()).unwrap();
     inventory["artifacts"]
         .as_array()
         .unwrap()
         .iter()
-        .filter(|artifact| {
-            artifact["path"] != "topology/uuid-membership/ordinal-v4-receipt.json"
-        })
+        .filter(|artifact| artifact["path"] != "topology/uuid-membership/ordinal-v4-receipt.json")
         .map(|artifact| {
             (
                 artifact["path"].as_str().unwrap().to_owned(),
@@ -215,7 +218,9 @@ fn null_uuid_nodes(count: usize) -> RecordBatch {
     let mut builder = arrow::array::FixedSizeBinaryBuilder::with_capacity(count, 16);
     for index in 0..count {
         if index % 5 == 0 {
-            builder.append_value(v7(1_000 + index as u128).as_bytes()).unwrap();
+            builder
+                .append_value(v7(1_000 + index as u128).as_bytes())
+                .unwrap();
         } else {
             builder.append_null();
         }

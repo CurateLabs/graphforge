@@ -501,7 +501,10 @@ fn extract_runs(kind: ConstructionChunkKind, batch: &RecordBatch) -> Result<RunA
     })
 }
 
-pub(crate) fn validate_schema(kind: ConstructionChunkKind, batch: &RecordBatch) -> Result<(), GfError> {
+pub(crate) fn validate_schema(
+    kind: ConstructionChunkKind,
+    batch: &RecordBatch,
+) -> Result<(), GfError> {
     let expected = match kind {
         ConstructionChunkKind::Node => &*CONSTRUCTION_NODE_SCHEMA,
         ConstructionChunkKind::Edge => &*CONSTRUCTION_EDGE_SCHEMA,

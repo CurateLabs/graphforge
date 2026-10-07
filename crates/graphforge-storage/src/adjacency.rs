@@ -728,8 +728,8 @@ pub(crate) fn write_sharded_csr_from_sorted(
         .map(|(ordinal, &(from, to))| {
             let slice = &sorted[from..to];
             let first = key(slice[0]);
-            let local = usize::try_from(key(slice[slice.len() - 1]) - first + 1)
-                .map_err(storage_err)?;
+            let local =
+                usize::try_from(key(slice[slice.len() - 1]) - first + 1).map_err(storage_err)?;
             let mut offsets = vec![0_u64; local + 1];
             for entry in slice {
                 offsets[usize::try_from(key(*entry) - first).map_err(storage_err)? + 1] += 1;

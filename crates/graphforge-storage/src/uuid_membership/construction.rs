@@ -322,7 +322,11 @@ fn encode_construction_index_inner(
     let surrogate_temp = format!(".construction-surrogates-{}.tmp", Uuid::new_v4().simple());
     let (input, identities_name, identities_xxh64, source_volume, source_file_id, input_len) =
         match input {
-            ConstructionIdentityInput::Shaped { source, name, xxh64 } => {
+            ConstructionIdentityInput::Shaped {
+                source,
+                name,
+                xxh64,
+            } => {
                 let file = source
                     .open_child_file(std::ffi::OsStr::new(name))
                     .map_err(storage_err)?;

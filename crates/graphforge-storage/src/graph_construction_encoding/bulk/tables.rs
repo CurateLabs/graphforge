@@ -6,9 +6,13 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+use arrow::array::Array;
 use rayon::prelude::*;
 
-use super::*;
+use super::{
+    BulkSource, ConstructionChunkKind, FixedSizeBinaryArray, GfError, RecordBatch, StringArray,
+    required_string, storage,
+};
 
 /// Largest node or edge count the dense `u32` ranks can address.
 const MAX_DENSE: u64 = u32::MAX as u64 - 1;
@@ -107,9 +111,8 @@ fn sort_unique(uuids: &mut Vec<[u8; 16]>, what: &str) -> Result<Option<Vec<u32>>
     } else {
         let count = u32::try_from(uuids.len()).map_err(storage)?;
         let mut order = (0..count).collect::<Vec<_>>();
-        order.par_sort_unstable_by(|&left, &right| {
-            uuids[left as usize].cmp(&uuids[right as usize])
-        });
+        order
+            .par_sort_unstable_by(|&left, &right| uuids[left as usize].cmp(&uuids[right as usize]));
         *uuids = gather(uuids, &order);
         Some(order)
     };
@@ -121,10 +124,7 @@ fn sort_unique(uuids: &mut Vec<[u8; 16]>, what: &str) -> Result<Option<Vec<u32>>
     Ok(order)
 }
 
-fn remap_to_global(
-    dictionaries: Vec<LocalDictionary>,
-    columns: &mut [&mut Vec<u32>],
-) -> Vec<String> {
+fn remap_to_global(dictionaries: &[LocalDictionary], columns: &mut [&mut Vec<u32>]) -> Vec<String> {
     let mut global = LocalDictionary::default();
     let maps = dictionaries
         .iter()
@@ -210,13 +210,13 @@ pub(super) fn collect_nodes(
     let dictionaries = chunks
         .iter_mut()
         .map(|chunk| std::mem::take(&mut chunk.dictionary))
-        .collect();
+        .collect::<Vec<_>>();
     let mut label_columns = chunks
         .iter_mut()
         .map(|chunk| std::mem::take(&mut chunk.labels))
         .collect::<Vec<_>>();
     let label_names = remap_to_global(
-        dictionaries,
+        &dictionaries,
         &mut label_columns.iter_mut().collect::<Vec<_>>(),
     );
     let mut uuids = concat(
@@ -261,7 +261,11 @@ fn mix(uuid: &[u8; 16]) -> usize {
     let mut value = low.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ high.rotate_left(29);
     value = (value ^ (value >> 32)).wrapping_mul(0xD6E8_FEB8_6659_FD93);
     value ^= value >> 32;
-    value as usize
+    // Truncation on a 32-bit target only drops hash bits.
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        value as usize
+    }
 }
 
 impl<'a> NodeIndex<'a> {
@@ -323,6 +327,7 @@ pub(super) struct EdgeTable {
     pub(super) kept: Vec<RecordBatch>,
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) fn collect_edges(
     sources: &[BulkSource<'_>],
     retain: bool,
@@ -391,13 +396,13 @@ pub(super) fn collect_edges(
     let dictionaries = chunks
         .iter_mut()
         .map(|chunk| std::mem::take(&mut chunk.dictionary))
-        .collect();
+        .collect::<Vec<_>>();
     let mut rel_columns = chunks
         .iter_mut()
         .map(|chunk| std::mem::take(&mut chunk.rels))
         .collect::<Vec<_>>();
     let rel_names = remap_to_global(
-        dictionaries,
+        &dictionaries,
         &mut rel_columns.iter_mut().collect::<Vec<_>>(),
     );
     let mut uuids = concat(

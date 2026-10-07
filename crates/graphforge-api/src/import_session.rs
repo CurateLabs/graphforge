@@ -22,9 +22,9 @@ use uuid::Uuid;
 
 use crate::{BulkInputKind, CancellationToken, GraphConstructionBudgets, GraphForge, OperationId};
 
+mod bulk_source;
 #[cfg(test)]
 mod cpu_budget_report;
-mod bulk_source;
 mod journal;
 mod normalization;
 
@@ -906,7 +906,7 @@ impl GraphImportSession {
         if initial {
             let plan = self.plan_bulk_build(graph, cancellation)?;
             if plan.estimated_resident_bytes() <= bulk_source::bulk_build_memory_budget() {
-                return self.build_initial(&mut construction, plan, cancellation);
+                return self.build_initial(&mut construction, &plan, cancellation);
             }
         }
         for input_kind in [BulkInputKind::Node, BulkInputKind::Edge] {
@@ -978,12 +978,12 @@ impl GraphImportSession {
     fn build_initial(
         &mut self,
         construction: &mut crate::GraphConstructionSession<'_>,
-        plan: graphforge_storage::BulkBuildPlan<'_>,
+        plan: &graphforge_storage::BulkBuildPlan<'_>,
         cancellation: Option<&CancellationToken>,
     ) -> Result<ImportProgress, GfError> {
         let region = RegionScope::named("bulk_build");
         let started = CallStart::now();
-        let built = construction.build_initial(&plan, cancellation);
+        let built = construction.build_initial(plan, cancellation);
         if let (Some(timings), Some(started)) = (&mut self.operation_timings, started) {
             timings.seal.record(started, built.is_err());
         }

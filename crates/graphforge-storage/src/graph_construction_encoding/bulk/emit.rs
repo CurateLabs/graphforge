@@ -9,7 +9,13 @@ use rayon::prelude::*;
 
 use super::install::Installer;
 use super::tables::{EdgeTable, NodeTable, first_appearance};
-use super::*;
+use super::{
+    Arc, AtomicBool, CompositionBindingContext, ConstructionChunkKind, EntityTypeId, GfError,
+    GraphConstructionBudgets, OntologyMode, RecordBatch, SemanticRouteKind,
+    SemanticStorageBindings, StringArray, SymbolKind, UInt64Array, edge_batch,
+    encoded_route_component, node_batch, required_string, resolve_owner, select_rows, storage,
+    with_route_metadata_batch,
+};
 
 /// Rows per canonical topology file, matching the staged encoder's window.
 pub(super) fn window_rows(budgets: GraphConstructionBudgets, row_bytes: usize) -> usize {
@@ -45,8 +51,8 @@ pub(super) fn schema_groups(
             let schema = batches[0].schema();
             let merged = concat_batches(&schema, batches.iter().copied()).map_err(storage)?;
             let uuids = crate::graph_construction::batch_uuid_column(&merged, uuid_name)?;
-            let mut order = (0..u32::try_from(merged.num_rows()).map_err(storage)?)
-                .collect::<Vec<_>>();
+            let mut order =
+                (0..u32::try_from(merged.num_rows()).map_err(storage)?).collect::<Vec<_>>();
             order.par_sort_unstable_by_key(|&row| uuids.value(row as usize).to_vec());
             let indices = arrow::array::UInt32Array::from(order);
             let columns = merged
@@ -145,9 +151,10 @@ pub(super) fn build_catalog(
     edge_groups: Option<&[SchemaGroup]>,
 ) -> Result<BuiltCatalog, GfError> {
     let mut catalog = RuntimeCatalog::new();
-    match node_groups {
-        Some(groups) => intern_rows(&mut catalog, groups, ConstructionChunkKind::Node, budgets)?,
-        None => {
+    if let Some(groups) = node_groups {
+        intern_rows(&mut catalog, groups, ConstructionChunkKind::Node, budgets)?;
+    } else {
+        {
             let counts = observation_counts(&nodes.labels, nodes.label_names.len());
             for label in first_appearance(&nodes.labels, nodes.label_names.len()) {
                 catalog.intern_label_observed_at(
@@ -159,9 +166,10 @@ pub(super) fn build_catalog(
             }
         }
     }
-    match edge_groups {
-        Some(groups) => intern_rows(&mut catalog, groups, ConstructionChunkKind::Edge, budgets)?,
-        None => {
+    if let Some(groups) = edge_groups {
+        intern_rows(&mut catalog, groups, ConstructionChunkKind::Edge, budgets)?;
+    } else {
+        {
             let counts = observation_counts(&edges.rels, edges.rel_names.len());
             for rel in first_appearance(&edges.rels, edges.rel_names.len()) {
                 catalog.intern_relation_type_observed_at(
@@ -301,8 +309,7 @@ pub(super) fn relation_routes(
                 route,
                 runtime_route,
             )?;
-            let exploratory =
-                owner.symbol.is_none() && semantics.mode == OntologyMode::Exploratory;
+            let exploratory = owner.symbol.is_none() && semantics.mode == OntologyMode::Exploratory;
             Ok(RelationRoute {
                 logical: route.clone(),
                 topology_route: if exploratory {
@@ -393,11 +400,9 @@ pub(super) fn emit_edges(
                 };
                 let mut columns = selected.columns().to_vec();
                 columns.push(Arc::new(logical));
-                selected = RecordBatch::try_new(
-                    crate::schemas::EXPLORATORY_EDGE_SCHEMA.clone(),
-                    columns,
-                )
-                .map_err(storage)?;
+                selected =
+                    RecordBatch::try_new(crate::schemas::EXPLORATORY_EDGE_SCHEMA.clone(), columns)
+                        .map_err(storage)?;
             }
             if qualified {
                 selected = with_route_metadata_batch(

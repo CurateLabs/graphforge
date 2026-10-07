@@ -23,7 +23,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use super::*;
+use super::{
+    Component, CompositionBindingContext, ConstructionChunkKind, ConstructionEncodedArtifact,
+    ConstructionSemanticAuthority, ConstructionShape, Digest, ENCODED_ROOT,
+    ENCODING_FORMAT_VERSION, ENCODING_INTENT, EncodingIntent, EntityTypeId, FixedSizeBinaryArray,
+    GfError, GraphConstructionBudgets, GraphConstructionEncoding,
+    GraphConstructionEncodingEvidence, GraphConstructionEncodingInvocationEvidence, INVENTORY,
+    OntologyMode, OsStr, Path, RecordBatch, SemanticRouteKind, SemanticStorageBindings, Sha256,
+    StableDirectory, StringArray, SymbolKind, UInt64Array, Uuid, Write, account_cache_release,
+    adjacency, authenticate_inventory_control, copy_artifact, edge_batch, edge_property_batch,
+    encoded_route_component, hex, index_artifact, install_json, lanes, node_batch,
+    node_property_batch, remove_encoding_intent, required_string, resolve_owner, select_rows,
+    storage, with_route_metadata_batch, write_surrogate_tails,
+};
 
 mod csr;
 mod emit;
@@ -125,7 +137,8 @@ fn build_membership(
         .map_err(storage)?
         .open_child_directory(OsStr::new("uuid-membership"))
         .map_err(storage)?;
-    let cache_window = graphforge_filesystem::cache_release_window_for_streams(5).map_err(storage)?;
+    let cache_window =
+        graphforge_filesystem::cache_release_window_for_streams(5).map_err(storage)?;
     let mut writer = crate::uuid_membership::V4OrdinalConstructionWriter::start_with_cache_window(
         generation,
         membership_dir.physical(),
@@ -201,11 +214,12 @@ pub(crate) fn encode_bulk(
     install_json(&output, ENCODING_INTENT, &intent)?;
 
     let lease = admission.and_then(|admission| {
-        admission.acquire(
-            std::num::NonZeroUsize::new(admission.limit()).expect("positive admission"),
-            &mut || false,
-        )
-        .ok()
+        admission
+            .acquire(
+                std::num::NonZeroUsize::new(admission.limit()).expect("positive admission"),
+                &mut || false,
+            )
+            .ok()
     });
     let workers = lease.as_ref().map_or_else(
         || std::thread::available_parallelism().map_or(1, usize::from),

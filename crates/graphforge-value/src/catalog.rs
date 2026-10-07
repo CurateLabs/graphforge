@@ -165,9 +165,12 @@ impl RuntimeCatalogData {
     ) -> Result<RuntimeEntityId, GfError> {
         if let Some(&idx) = self.entity_types.get(name) {
             let entry = &mut self.entries[idx];
-            entry.observation_count = entry.observation_count.checked_add(observations).ok_or_else(|| {
-                GfError::Storage("runtime_catalog observation count overflow".to_owned())
-            })?;
+            entry.observation_count = entry
+                .observation_count
+                .checked_add(observations)
+                .ok_or_else(|| {
+                    GfError::Storage("runtime_catalog observation count overflow".to_owned())
+                })?;
             entry.last_seen = now;
             let CatalogIdentity::Entity(id) = entry.identity else {
                 unreachable!("catalog index matches identity kind")
@@ -210,9 +213,12 @@ impl RuntimeCatalogData {
     ) -> Result<RuntimeRelationId, GfError> {
         if let Some(&idx) = self.relation_types.get(name) {
             let entry = &mut self.entries[idx];
-            entry.observation_count = entry.observation_count.checked_add(observations).ok_or_else(|| {
-                GfError::Storage("runtime_catalog observation count overflow".to_owned())
-            })?;
+            entry.observation_count = entry
+                .observation_count
+                .checked_add(observations)
+                .ok_or_else(|| {
+                    GfError::Storage("runtime_catalog observation count overflow".to_owned())
+                })?;
             entry.last_seen = now;
             let CatalogIdentity::Relation(id) = entry.identity else {
                 unreachable!("catalog index matches identity kind")

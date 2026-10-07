@@ -20,7 +20,7 @@ use parquet::arrow::arrow_reader::{
 use uuid::Uuid;
 
 use super::{
-    ImportSourceKind, SourceRecord, canonicalize_parquet_batch, cancelled, import_batch_operation,
+    ImportSourceKind, SourceRecord, cancelled, canonicalize_parquet_batch, import_batch_operation,
     normalize_batch, storage, validation,
 };
 use crate::{BulkInputKind, CancellationToken, GraphForge};
@@ -146,7 +146,9 @@ impl BulkBatchReader for SourceReader<'_> {
                 let mut reader = ArrowFileReader::try_new(file, None).map_err(storage)?;
                 let total = reader.num_batches() as u64;
                 for index in first_batch..(first_batch + BATCHES_PER_TASK).min(total) {
-                    reader.set_index(usize::try_from(index).map_err(storage)?).map_err(storage)?;
+                    reader
+                        .set_index(usize::try_from(index).map_err(storage)?)
+                        .map_err(storage)?;
                     let batch = reader
                         .next()
                         .ok_or_else(|| storage("Arrow source ended before its footer count"))?
@@ -218,8 +220,8 @@ pub(super) fn plan<'a>(
             let file = File::open(&path).map_err(storage)?;
             let metadata =
                 ArrowReaderMetadata::load(&file, ArrowReaderOptions::new()).map_err(storage)?;
-            let rows = u64::try_from(metadata.metadata().file_metadata().num_rows())
-                .map_err(storage)?;
+            let rows =
+                u64::try_from(metadata.metadata().file_metadata().num_rows()).map_err(storage)?;
             let columns = metadata.schema().fields().len();
             (Format::Parquet { metadata, rows }, rows, columns)
         }

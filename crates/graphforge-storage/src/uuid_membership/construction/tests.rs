@@ -1,4 +1,3 @@
-use crate::uuid_membership::ConstructionIdentityInput;
 use super::super::BULK_IO_BYTES;
 use super::super::IDENTITY_RECORD_BYTES;
 use super::super::IDENTITY_RECORD_WIDTH;
@@ -18,6 +17,7 @@ use super::super::topology_delta::plan_uuid_membership_delta;
 use super::super::topology_delta::write_identity_records;
 use super::cleanup_private_construction_index;
 use super::encode_construction_index;
+use crate::uuid_membership::ConstructionIdentityInput;
 use std::fs;
 use std::fs::File;
 use std::io::BufWriter;

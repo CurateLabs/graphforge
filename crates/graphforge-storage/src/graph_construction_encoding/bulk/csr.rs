@@ -8,7 +8,7 @@ use rayon::prelude::*;
 
 use super::emit::RelationRoute;
 use super::tables::{EdgeTable, check_cancelled};
-use super::*;
+use super::{AtomicBool, GfError, Path, storage};
 use crate::adjacency::{AdjacencyManifestRow, Direction};
 
 pub(super) struct AdjacencyOutput {
@@ -53,12 +53,20 @@ pub(super) fn write_adjacency(
         }
     }
     let total = edges.uuids.len();
-    let mut ordered = names.iter().map(|(name, _)| (*name).to_owned()).collect::<Vec<_>>();
+    let mut ordered = names
+        .keys()
+        .map(|name| (*name).to_owned())
+        .collect::<Vec<_>>();
     // `names` assigned ids in first-seen order; map each relation to its group's rank in name order.
     let rank = names
         .keys()
         .enumerate()
-        .map(|(rank, name)| (*name, rank as u32))
+        .map(|(rank, name)| {
+            (
+                *name,
+                u32::try_from(rank).expect("bounded by relation count"),
+            )
+        })
         .collect::<std::collections::BTreeMap<_, _>>();
     let relation_group = relations
         .iter()
@@ -85,6 +93,7 @@ pub(super) fn write_adjacency(
         for (direction, entries, neighbors) in &directions {
             check_cancelled(cancel)?;
             let selected;
+            let group_rank = u32::try_from(group).expect("bounded by relation count");
             let slice = if group == union {
                 entries.as_slice()
             } else {
@@ -92,7 +101,7 @@ pub(super) fn write_adjacency(
                     .par_iter()
                     .filter(|entry| {
                         relation_group[edges.rels[(**entry & 0xffff_ffff) as usize - 1] as usize]
-                            == group as u32
+                            == group_rank
                     })
                     .copied()
                     .collect::<Vec<_>>();
