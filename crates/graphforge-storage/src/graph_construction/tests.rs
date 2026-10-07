@@ -927,6 +927,125 @@ fn uuid_encoding_crashes_recover_every_durable_boundary() {
     }
 }
 
+/// An encoded inventory over the bound is refused where it is written, before
+/// it is installed or pinned, so the session reopens and resumes; a larger
+/// bound then admits the same inventory, and readers enforce the same bound
+/// (#900).
+#[test]
+fn over_bound_encoded_inventory_is_refused_before_pinning_and_resumes() {
+    use crate::graph_construction_encoding::{InventoryBoundOverride, read_inventory};
+
+    // The encoding intent, a few hundred bytes, fits this bound; the
+    // inventory, whose evidence alone takes kilobytes, does not.
+    const LOWERED: u64 = 1024;
+    let root = TempDir::new().unwrap();
+    crate::open_or_initialize_project(root.path()).unwrap();
+    let operation = Uuid::from_u128(9_480);
+    let open = || {
+        GraphConstructionSession::open(
+            root.path(),
+            operation,
+            0,
+            GraphConstructionBudgets::default(),
+        )
+        .unwrap()
+    };
+    let encoded_root = root
+        .path()
+        .join(PRIVATE_ROOT)
+        .join(operation.simple().to_string())
+        .join("encoded-v1");
+    let assert_refused_unpinned = |session: &mut GraphConstructionSession| {
+        let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+        let _bound = InventoryBoundOverride::set(LOWERED);
+        let error = session.encode_canonical(&shape, 1).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                GfError::Project {
+                    code: graphforge_core::ProjectErrorCode::ResourceLimit,
+                    message,
+                } if message.starts_with(
+                    "encoded inventory.json exceeds the 1024-byte encoded inventory bound"
+                )
+            ),
+            "{error}"
+        );
+        assert_eq!(session.checkpoint.encoding_inventory_sha256, None);
+        assert!(session.checkpoint.encoded_index.is_none());
+        assert!(!encoded_root.join("inventory.json").exists());
+        assert!(encoded_root.join("encoding-intent.json").is_file());
+        assert!(tree_has_no_temps(&encoded_root));
+    };
+
+    let mut session = open();
+    session
+        .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 8))
+        .unwrap();
+    session.seal().unwrap();
+    assert_refused_unpinned(&mut session);
+    drop(session);
+
+    // The refusal left nothing pinned: the session reopens, under the
+    // lowered bound too, and refuses the same inventory again.
+    let mut resumed = {
+        let _bound = InventoryBoundOverride::set(LOWERED);
+        open()
+    };
+    assert_eq!(resumed.checkpoint.encoding_inventory_sha256, None);
+    assert_refused_unpinned(&mut resumed);
+
+    let shape = resumed.shape_canonical_with_cancellation(|| false).unwrap();
+    let encoding = {
+        let _bound = InventoryBoundOverride::set(1 << 20);
+        resumed.encode_canonical(&shape, 1).unwrap()
+    };
+    let inventory_bytes = std::fs::metadata(encoded_root.join("inventory.json"))
+        .unwrap()
+        .len();
+    assert!(inventory_bytes > LOWERED, "{inventory_bytes}");
+    assert_eq!(
+        resumed.checkpoint.encoding_inventory_sha256,
+        Some(crate::graph_construction_encoding::inventory_authority_sha256(&encoding).unwrap())
+    );
+    assert_eq!(encoding.evidence.membership_records, 8);
+    drop(resumed);
+
+    let encoded = StableDirectory::open(&encoded_root).unwrap();
+    {
+        let _bound = InventoryBoundOverride::set(inventory_bytes - 1);
+        let error = read_inventory(&encoded).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("canonical inventory exceeds bound"),
+            "{error}"
+        );
+    }
+    {
+        let _bound = InventoryBoundOverride::set(inventory_bytes);
+        let admitted = read_inventory(&encoded).unwrap().unwrap();
+        assert_eq!(
+            crate::graph_construction_encoding::inventory_authority_sha256(&admitted).unwrap(),
+            crate::graph_construction_encoding::inventory_authority_sha256(&encoding).unwrap()
+        );
+    }
+
+    // Under the default bound the pinned inventory restores on reopen and
+    // publishes.
+    let target = Uuid::from_u128(9_481);
+    let receipt = open()
+        .publish_canonical(&encoding, target, Uuid::from_u128(9_482))
+        .unwrap();
+    assert_eq!(receipt.generation_uuid, target);
+    assert_eq!(
+        crate::resolve_project_generation(root.path())
+            .unwrap()
+            .generation_uuid(),
+        target
+    );
+}
+
 /// The active-identity ledger every live staged artifact in the session
 /// directory implies: its native identity at the allocation the filesystem
 /// reports, read from the directory rather than from any control.

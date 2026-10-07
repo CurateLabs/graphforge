@@ -317,3 +317,64 @@ fn encoded_final_writer_captures_identity_and_checksum_once() {
         payload
     );
 }
+
+/// The encoded inventory bound is the graph-file cap times the row allowance.
+/// Raising either moves the bound and the resident memory of every inventory
+/// read, which `inventory_bound.rs` states: review both, then update this pin
+/// (#900).
+#[test]
+fn inventory_bound_tracks_the_graph_file_cap() {
+    use inventory_bound::{INVENTORY_ROW_BYTES, MAX_INVENTORY_BYTES};
+
+    let cap = crate::GraphManifestLimits::default().max_entries;
+    assert_eq!(cap, 100_000);
+    assert_eq!(INVENTORY_ROW_BYTES, 512);
+    assert_eq!(MAX_INVENTORY_BYTES, cap as u64 * INVENTORY_ROW_BYTES);
+    assert_eq!(MAX_INVENTORY_BYTES, 51_200_000);
+    assert_eq!(inventory_bound(), MAX_INVENTORY_BYTES);
+
+    // The longest encoded-artifact row the encoder writes fits the allowance.
+    let longest = ConstructionEncodedArtifact {
+        path: format!(
+            "edge_properties/{}/{:020}-{:020}.parquet",
+            crate::route_component::component("route"),
+            u64::MAX,
+            u64::MAX
+        ),
+        bytes: u64::MAX,
+        sha256: "f".repeat(64),
+        xxh64: u64::MAX,
+    };
+    assert_eq!(longest.path.len(), 132);
+    let row = serde_json::to_vec(&longest).unwrap().len() as u64 + 1;
+    assert_eq!(row, 276);
+    assert!(row <= INVENTORY_ROW_BYTES);
+    // The projected S28 inventory, 86,000 rows at S26's measured 262-byte
+    // average, is admitted with more than twice its size to spare.
+    assert!(2 * 86_000 * 262 < MAX_INVENTORY_BYTES);
+}
+
+#[test]
+fn bounded_control_write_refuses_one_byte_over_and_admits_the_bound() {
+    let value = serde_json::json!({"format_version": ENCODING_FORMAT_VERSION, "root": "x"});
+    let length = serde_json::to_vec(&value).unwrap().len() as u64;
+    let mut written = Vec::new();
+    {
+        let _bound = InventoryBoundOverride::set(length);
+        inventory_bound::write_bounded_json(&mut written, INVENTORY, &value).unwrap();
+    }
+    assert_eq!(written, serde_json::to_vec(&value).unwrap());
+    let _bound = InventoryBoundOverride::set(length - 1);
+    let error =
+        inventory_bound::write_bounded_json(&mut Vec::new(), INVENTORY, &value).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            GfError::Project {
+                code: graphforge_core::ProjectErrorCode::ResourceLimit,
+                ..
+            }
+        ),
+        "{error}"
+    );
+}
