@@ -82,8 +82,12 @@ functions.
   sources). Appends keep the staged path, as do initial builds made through the
   chunk API (`GraphConstructionSession::append_*`), until the builder takes
   those inputs.
-- The builder is in-memory. An initial build larger than memory needs the
-  scratch path of #1881, which must land before the ladder slice.
+- The builder is in-memory. An initial build whose estimated peak memory
+  exceeds the plan-time budget takes the staged path instead, which holds a
+  fixed window of memory and produces the same bytes. The route is chosen once,
+  in pass 0, from the footers and the process's cgroup-aware memory headroom
+  (three fifths of it). It is never a retry. The scratch path of #1881 replaces
+  this routing for large inputs, and must land before the ladder slice.
 - Node and edge counts are limited to 2^32 - 2 by the dense ids. A larger input
   is refused with a resource-limit error.
 
@@ -107,10 +111,14 @@ serial shaping spine. The CPU the staged path spends on routing, sorting and
 spill file lifecycle is removed from initial builds.
 
 **Costs.**
-- Memory: about 28 B/edge and 20 B/node of ranked arrays, plus the CSR entries
-  (8 B/edge per direction) and the encoded windows in flight. Peak RSS is
-  reported by the builder per pass. The ladder's 4 GiB envelope does not hold at
-  S22 until the scratch path exists.
+- Memory: measured peak RSS fits `684 MB + 54.4 B/edge + 82.0 B/node` for
+  property-free input (Graph500 S18-S24 and two S22 node sets with fewer edges;
+  worst measured/fitted ratio 1.10). The planner uses `768 MiB + 56 B/edge +
+  84 B/node` plus a 25% margin, so S22 plans for 6.1 GB (measured 4.7 GB), S24
+  for 21.6 GB (17.1 GB), S25 for 42.1 GB and S26 for 83.2 GB. A property-bearing
+  kind retains its decoded batches and two copies of them: six times their
+  uncompressed footer bytes, measured at 5.3. The ladder's 4 GiB RSS envelope
+  does not hold from S22 until the scratch path exists.
 - The session checkpoint records an empty shape for a builder session. The
   inventory's `shape_*` digests therefore differ from a staged build of the
   same input; they are session authority, not published bytes.

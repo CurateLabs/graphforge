@@ -51,19 +51,26 @@ pub struct BulkBuildPlan<'a> {
     pub edges: Vec<BulkSource<'a>>,
 }
 
-/// Resident bytes per node the builder holds: sorted UUID, label id, the
-/// endpoint index slots, the identity stream and the encoded window in flight.
-const BYTES_PER_NODE: u64 = 96;
-/// Resident bytes per edge: UUID, two endpoint ranks, relation id, the decode
-/// chunks that coexist with the assembled arrays, both CSR entry arrays and the
-/// encoded window in flight. Calibrated against the peak RSS the builder
-/// reports (about 104 B/edge at S20).
-const BYTES_PER_EDGE: u64 = 128;
+/// Peak-RSS model of the builder, fitted to measured runs (#1883):
+/// `peak = BASE + BYTES_PER_EDGE * edges + BYTES_PER_NODE * nodes` by least
+/// squares over Graph500 S18, S20, S22 and S24 plus two S22 node sets with 8 and
+/// 24 row groups of edges, all property-free: 684 MB + 54.4 B/edge + 82.0 B/node,
+/// worst measured/fitted ratio 1.10. The constants below round the fit up.
+const BASE_BYTES: u64 = 768 << 20;
+const BYTES_PER_EDGE: u64 = 56;
+const BYTES_PER_NODE: u64 = 84;
+/// A property-bearing kind retains its decoded batches, then a concatenated and
+/// a sorted copy per schema group. Measured at S20 with a `name` node property
+/// and a `weight` edge property: peak RSS exceeded the property-free model by
+/// 5.3 times the footers' uncompressed bytes.
+const RETAINED_FACTOR: u64 = 6;
+/// Safety margin on the sum, as a fraction: 5/4.
+const MARGIN_NUMERATOR: u64 = 5;
+const MARGIN_DENOMINATOR: u64 = 4;
 
 impl BulkBuildPlan<'_> {
-    /// An upper estimate of the builder's peak resident bytes, from the
-    /// footers alone. A property-bearing kind also retains its decoded batches
-    /// and their sorted copy.
+    /// Peak resident bytes the builder is expected to need, from the footers
+    /// alone: the fitted model plus a 25% margin.
     #[must_use]
     pub fn estimated_resident_bytes(&self) -> u64 {
         let rows =
@@ -76,14 +83,16 @@ impl BulkBuildPlan<'_> {
                     .iter()
                     .map(|source| source.decoded_bytes)
                     .sum::<u64>()
-                    .saturating_mul(2)
+                    .saturating_mul(RETAINED_FACTOR)
             }
         };
-        rows(&self.nodes)
-            .saturating_mul(BYTES_PER_NODE)
+        BASE_BYTES
+            .saturating_add(rows(&self.nodes).saturating_mul(BYTES_PER_NODE))
             .saturating_add(rows(&self.edges).saturating_mul(BYTES_PER_EDGE))
             .saturating_add(retained(&self.nodes))
             .saturating_add(retained(&self.edges))
+            .saturating_mul(MARGIN_NUMERATOR)
+            / MARGIN_DENOMINATOR
     }
 }
 

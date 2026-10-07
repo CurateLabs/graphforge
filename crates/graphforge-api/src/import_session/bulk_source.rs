@@ -161,9 +161,7 @@ impl BulkBatchReader for SourceReader<'_> {
     }
 }
 
-/// Resident bytes an initial build may use: three fifths of the memory the
-/// process can still claim, from `/proc/meminfo` and the cgroup limit, between
-/// 2 GiB and 256 GiB. Where neither is readable the budget is 4 GiB.
+/// Resident bytes an initial build may plan to use (see `memory_budget`).
 ///
 /// This chooses between two builds of the same bytes, never what is built: an
 /// initial build whose estimate exceeds it takes the staged path, which holds a
@@ -173,25 +171,7 @@ pub(super) fn bulk_build_memory_budget() -> u64 {
     if let Some(budget) = TEST_BUDGET.with(std::cell::Cell::get) {
         return budget;
     }
-    const MIN: u64 = 2 << 30;
-    const MAX: u64 = 256 << 30;
-    const FALLBACK: u64 = 4 << 30;
-    let available = fs::read_to_string("/proc/meminfo").ok().and_then(|text| {
-        text.lines()
-            .find_map(|line| line.strip_prefix("MemAvailable:"))
-            .and_then(|rest| rest.split_ascii_whitespace().next()?.parse::<u64>().ok())
-            .map(|kib| kib.saturating_mul(1024))
-    });
-    let limit = fs::read_to_string("/sys/fs/cgroup/memory.max")
-        .ok()
-        .and_then(|text| text.trim().parse::<u64>().ok());
-    match (available, limit) {
-        (None, None) => FALLBACK,
-        (a, l) => {
-            let claimable = a.unwrap_or(u64::MAX).min(l.unwrap_or(u64::MAX));
-            (claimable / 5 * 3).clamp(MIN, MAX)
-        }
-    }
+    super::memory_budget::bulk_build_memory_budget()
 }
 
 #[cfg(test)]

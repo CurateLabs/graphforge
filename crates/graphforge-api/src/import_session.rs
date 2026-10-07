@@ -26,6 +26,7 @@ mod bulk_source;
 #[cfg(test)]
 mod cpu_budget_report;
 mod journal;
+mod memory_budget;
 mod normalization;
 
 const FORMAT_VERSION: u32 = 2;
