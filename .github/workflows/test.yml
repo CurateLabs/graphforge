@@ -559,6 +559,16 @@ jobs:
         with:
           enable-cache: true
 
+      # The sticky target disks are shared across branches, and the GDC tests
+      # reuse any runner binary that already exists, so build every benchmark
+      # binary and gf from this tree first. Cargo is incremental: a no-op when
+      # nothing changed.
+      - name: Build benchmark binaries and gf from this tree
+        run: |
+          set -euo pipefail
+          cargo build --locked --manifest-path benchmarks/Cargo.toml --bins
+          cargo build --locked -p graphforge-cli --bin gf
+
       # Every benchmarks/tests module, found by unittest discovery so a new
       # one cannot escape CI (#1679).
       - name: Benchmark harness tests (unittest discovery)
@@ -578,6 +588,8 @@ jobs:
             -p graphforge-benchmark-graph500-generator
           cargo test --locked --manifest-path benchmarks/Cargo.toml \
             -p graphforge-benchmark-gdc-scorecard
+          cargo test --locked --manifest-path benchmarks/Cargo.toml \
+            -p graphforge-benchmark-gdc-snb-bi
           cargo test --locked --manifest-path benchmarks/Cargo.toml \
             -p graphforge-benchmark-certify --lib
           cargo build --locked -p graphforge-cli --bin gf
