@@ -35,9 +35,9 @@ from jsonschema import Draft202012Validator
 
 
 def _ensure_runner_built(root: Path) -> Path:
+    # Always invoke cargo: it is a no-op when the binary is current, and an
+    # existing binary may be stale (CI mounts a persistent benchmarks/target).
     binary = root / "target" / "debug" / "graphforge-benchmark-gdc-snb-bi"
-    if binary.is_file():
-        return binary
     target_dir = root / "target"
     completed = subprocess.run(
         [
