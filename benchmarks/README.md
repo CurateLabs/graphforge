@@ -92,7 +92,13 @@ reference, acquisition, and identity; creates `graphforge_api::GraphForge`
 in memory; loads through the public construction API; warms and executes IS1
 with fixed typed `personId`; and normalizes and validates Arrow rows itself.
 It accepts only an evidence output path, never caller rows or identities.
-Neither fixture is official Datagen scale-factor output. Evidence records
+`run_live_queries` orchestrates the Rust `run-live-queries` command, which loads
+the committed `snb-interactive-query-synthetic-v1` fixture through public Cypher,
+runs every runnable read (IC1–IC13, IS1–IS7) from `src/queries.rs`, and
+validates the rows against expected results that
+`graphforge_bench.gdc_snb_interactive_reference` derives from the fixture data
+without GraphForge. `list_query_definitions` returns those definitions as data.
+None of these fixtures is official Datagen scale-factor output. Evidence records
 `certification: false` and never masquerades as an audited GDC certification.
 
 The FinBench Transaction suite adapter is `graphforge_bench.gdc_finbench_transaction`

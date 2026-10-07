@@ -37,6 +37,8 @@ OPERATIONS = COMPLEX_READS + SHORT_READS + UPDATES
 JOB_SCHEMA = "graphforge-gdc-snb-interactive-job/1"
 EVIDENCE_SCHEMA = "graphforge-gdc-snb-interactive-evidence/1"
 LIVE_DATASET_ID = "snb-interactive-live-is1-synthetic-v1"
+QUERY_DATASET_ID = "snb-interactive-query-synthetic-v1"
+QUERIES_SCHEMA = "graphforge-gdc-snb-interactive-queries/1"
 
 UPDATE_CAUSE = "interactive_update_stream_not_exposed"
 IC14_CAUSE = "weighted_interaction_path_enumeration_not_exposed"
@@ -195,6 +197,53 @@ def run_live_is1(
         return evidence
 
 
+def run_live_queries(
+    *,
+    root: Path | None = None,
+    evidence_path: Path | None = None,
+) -> dict[str, Any]:
+    """Run every runnable read through the Rust runner on the committed query fixture.
+
+    The runner embeds the fixture and the independently derived expected rows;
+    this wrapper cannot supply either.
+    """
+    base = root or workspace_root()
+    with tempfile.TemporaryDirectory(prefix="gdc-snb-interactive-queries-") as tmp:
+        out_evidence = evidence_path or (Path(tmp) / "evidence.json")
+        completed = _run_runner(["run-live-queries", str(out_evidence)], base)
+        if not out_evidence.is_file():
+            raise SnbInteractiveSuiteError(
+                "invalid_live_result",
+                f"query runner did not emit evidence: {completed.stderr.strip()}",
+            )
+        evidence = json.loads(out_evidence.read_text(encoding="utf-8"))
+        if evidence.get("lane") != "live_query_fixture":
+            raise SnbInteractiveSuiteError(
+                "invalid_document", "query evidence lane marker is invalid"
+            )
+        _enforce_measurement_boundary(evidence, label="snb-interactive query evidence")
+        if completed.returncode != 0:
+            failed = [
+                f"{item['operation']}: {item.get('cause')}"
+                for item in evidence.get("operations", [])
+                if item.get("status") == "failed"
+            ]
+            raise SnbInteractiveSuiteError("reference_mismatch", "; ".join(failed))
+        return evidence
+
+
+def list_query_definitions(root: Path | None = None) -> list[dict[str, Any]]:
+    """Return the runnable read definitions (id, query text, parameters, columns)."""
+    completed = _run_runner(["list-queries"], root)
+    if completed.returncode != 0:
+        raise SnbInteractiveSuiteError("invalid_document", completed.stderr.strip())
+    document = json.loads(completed.stdout)
+    if document.get("schema") != QUERIES_SCHEMA:
+        raise SnbInteractiveSuiteError("invalid_document", "unexpected query definition schema")
+    queries: list[dict[str, Any]] = document["queries"]
+    return queries
+
+
 def map_operation_file(path: Path, root: Path | None = None) -> dict[str, Any]:
     completed = _run_runner(["map-operation", str(path)], root)
     if completed.returncode == 3:
@@ -234,6 +283,7 @@ __all__ = [
     "JOB_SCHEMA",
     "LIVE_DATASET_ID",
     "OPERATIONS",
+    "QUERY_DATASET_ID",
     "SHORT_READS",
     "UPDATES",
     "UPDATE_CAUSE",
@@ -242,8 +292,10 @@ __all__ = [
     "assert_separate_from_other_suites",
     "identity_path",
     "list_operation_rules",
+    "list_query_definitions",
     "live_identity_path",
     "map_operation_file",
     "run_live_is1",
+    "run_live_queries",
     "run_tiny_suite",
 ]

@@ -24,6 +24,18 @@ use arrow::util::display::array_value_to_string;
 use graphforge_api::{GraphForge, IrLiteral, PropValue};
 use sha2::{Digest, Sha256};
 
+pub mod live_queries;
+pub mod queries;
+
+pub use live_queries::{
+    QUERY_DATASET_ID, QueryLaneContext, QueryParameters, QueryResult, bind_parameters,
+    execute_query, load_committed_query_fixture, run_live_queries, validate_rows,
+};
+pub use queries::{
+    ParameterType, QueryDefinition, QueryInterface, QueryParameter, query_definition,
+    query_definitions,
+};
+
 pub const EVIDENCE_SCHEMA: &str = "graphforge-gdc-snb-interactive-evidence/1";
 pub const JOB_SCHEMA: &str = "graphforge-gdc-snb-interactive-job/1";
 pub const LADDER_SCHEMA: &str = "graphforge-gdc-snb-interactive-ladder/1";
@@ -271,14 +283,13 @@ impl Operation {
         }
     }
 
-    /// The validation mode a read *would* use if compatible. Reads with a
-    /// spec-mandated total order use `Exact`; set-shaped aggregations whose ties
-    /// are not totally ordered use `Normalized`.
+    /// The validation mode a read *would* use if compatible. Every SNB
+    /// Interactive read specifies a total result order (its sort keys end in a
+    /// unique id or name) and a `LIMIT`, so rows compare in order; set-valued
+    /// list columns are compared as sets inside the row
+    /// ([`QueryDefinition::unordered_list_columns`]).
     fn intended_validation(self) -> ValidationMode {
-        match self {
-            Self::Ic4 | Self::Ic6 | Self::Ic10 => ValidationMode::Normalized,
-            _ => ValidationMode::Exact,
-        }
+        ValidationMode::Exact
     }
 }
 
@@ -427,6 +438,7 @@ pub enum OperationStatus {
 pub enum EvidenceLane {
     StaticReplay,
     LiveInMemory,
+    LiveQueryFixture,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -528,6 +540,8 @@ pub struct SuiteEvidence {
     pub phase_evidence: Vec<PhaseEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub live_context: Option<LiveExecutionContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_context: Option<QueryLaneContext>,
     pub identities: serde_json::Value,
     pub operations: Vec<OperationOutcome>,
 }
@@ -562,86 +576,31 @@ impl std::error::Error for SuiteError {}
 /// require semantics the public property-graph + Cypher surface does not expose
 /// fail closed with a typed cause instead of silently approximating.
 pub fn map_operation(operation: Operation) -> MappingOutcome {
+    if let Some(definition) = query_definition(operation) {
+        return MappingOutcome::Compatible(match definition.interface {
+            QueryInterface::Cypher(text) => PublicApiMapping {
+                interface: "cypher".into(),
+                cypher_shape: text.into(),
+                notes: definition.notes.into(),
+            },
+            QueryInterface::BfsPathLength {
+                label,
+                id_property,
+                relationship_type,
+                source_parameter,
+                target_parameter,
+            } => PublicApiMapping {
+                interface: "analyst_verb".into(),
+                cypher_shape: format!(
+                    "paths(source={label}{{{id_property}: ${source_parameter}}}, \
+                     target={label}{{{id_property}: ${target_parameter}}}, by=bfs, \
+                     via={relationship_type}, directed=false)"
+                ),
+                notes: definition.notes.into(),
+            },
+        });
+    }
     match operation {
-        Operation::Ic1 => compatible(
-            "cypher",
-            "MATCH (p:Person {id:$id})-[:KNOWS*1..3]-(f:Person) WHERE f.firstName=$name \
-             RETURN f ORDER BY distance, f.lastName, f.id LIMIT 20",
-            "transitive KNOWS traversal to depth 3 with name filter; ordinary Cypher variable-length match",
-        ),
-        Operation::Ic2 => compatible(
-            "cypher",
-            "MATCH (p:Person {id:$id})-[:KNOWS]-(f)<-[:HAS_CREATOR]-(m:Message) \
-             WHERE m.creationDate<=$date RETURN f,m ORDER BY m.creationDate DESC, m.id LIMIT 20",
-            "friends' recent messages before a date; traversal + filter + order",
-        ),
-        Operation::Ic3 => compatible(
-            "cypher",
-            "MATCH (p:Person {id:$id})-[:KNOWS*1..2]-(f)-[:IS_LOCATED_IN]->(:City)-[:IS_PART_OF]->(c:Country) \
-             WHERE c.name IN [$countryX,$countryY] RETURN f, count(*) ORDER BY count(*) DESC, f.id LIMIT 20",
-            "friends/friends-of-friends filtered by country with aggregation",
-        ),
-        Operation::Ic4 => compatible(
-            "cypher",
-            "MATCH (p:Person {id:$id})-[:KNOWS]-(f)<-[:HAS_CREATOR]-(post:Post)-[:HAS_TAG]->(t:Tag) \
-             WHERE post.creationDate>=$start AND post.creationDate<$end RETURN t.name, count(*)",
-            "new-topic tag aggregation over friends' posts; result is a tag set (normalized validation)",
-        ),
-        Operation::Ic5 => compatible(
-            "cypher",
-            "MATCH (p:Person {id:$id})-[:KNOWS*1..2]-(f)<-[:HAS_MEMBER]-(forum:Forum) \
-             WHERE forum.joinDate>$date OPTIONAL MATCH (forum)-[:CONTAINER_OF]->(post)-[:HAS_CREATOR]->(f) \
-             RETURN forum, count(post) ORDER BY count(post) DESC, forum.id LIMIT 20",
-            "new forum groups among friends and friends-of-friends with post counts",
-        ),
-        Operation::Ic6 => compatible(
-            "cypher",
-            "MATCH (p:Person {id:$id})-[:KNOWS*1..2]-(f)<-[:HAS_CREATOR]-(post:Post)-[:HAS_TAG]->(t:Tag {name:$tag}) \
-             MATCH (post)-[:HAS_TAG]->(other:Tag) WHERE other.name<>$tag RETURN other.name, count(*)",
-            "tag co-occurrence over friends-of-friends posts; result is a tag set (normalized validation)",
-        ),
-        Operation::Ic7 => compatible(
-            "cypher",
-            "MATCH (p:Person {id:$id})<-[:HAS_CREATOR]-(m:Message)<-[l:LIKES]-(liker:Person) \
-             RETURN liker, m, l.creationDate ORDER BY l.creationDate DESC, liker.id LIMIT 20",
-            "recent likers of a person's messages; traversal + order",
-        ),
-        Operation::Ic8 => compatible(
-            "cypher",
-            "MATCH (p:Person {id:$id})<-[:HAS_CREATOR]-(m:Message)<-[:REPLY_OF]-(c:Comment)-[:HAS_CREATOR]->(a:Person) \
-             RETURN a, c ORDER BY c.creationDate DESC, c.id LIMIT 20",
-            "recent replies to a person's messages; traversal + order",
-        ),
-        Operation::Ic9 => compatible(
-            "cypher",
-            "MATCH (p:Person {id:$id})-[:KNOWS*1..2]-(f)<-[:HAS_CREATOR]-(m:Message) \
-             WHERE m.creationDate<$date RETURN f,m ORDER BY m.creationDate DESC, m.id LIMIT 20",
-            "recent messages by friends-of-friends before a date",
-        ),
-        Operation::Ic10 => compatible(
-            "cypher",
-            "MATCH (p:Person {id:$id})-[:KNOWS*2..2]-(f) WHERE f.birthday matches window \
-             OPTIONAL MATCH (f)<-[:HAS_CREATOR]-(post)-[:HAS_TAG]->(t)<-[:HAS_INTEREST]-(p) \
-             RETURN f, commonInterestScore ORDER BY score DESC, f.id",
-            "friend recommendation by common-interest score; equal-score ties are a set (normalized validation)",
-        ),
-        Operation::Ic11 => compatible(
-            "cypher",
-            "MATCH (p:Person {id:$id})-[:KNOWS*1..2]-(f)-[w:WORK_AT]->(co:Company)-[:IS_LOCATED_IN]->(c:Country {name:$country}) \
-             WHERE w.workFrom<$year RETURN f, co, w.workFrom ORDER BY w.workFrom, f.id, co.name LIMIT 10",
-            "job referral: friends working at companies in a country ordered by start year",
-        ),
-        Operation::Ic12 => compatible(
-            "cypher",
-            "MATCH (p:Person {id:$id})-[:KNOWS]-(f)<-[:HAS_CREATOR]-(c:Comment)-[:REPLY_OF]->(post:Post)-[:HAS_TAG]->(t:Tag)-[:HAS_TYPE]->(tc:TagClass) \
-             WHERE tc.name=$class OR (tc)-[:IS_SUBCLASS_OF*]->(:TagClass {name:$class}) RETURN f, count(c) ORDER BY count(c) DESC, f.id LIMIT 20",
-            "expert search over a tag-class hierarchy; variable-length subclass traversal in Cypher",
-        ),
-        Operation::Ic13 => MappingOutcome::Compatible(PublicApiMapping {
-            interface: "analyst_verb".into(),
-            cypher_shape: "paths(source=$person1, target=$person2, by=bfs) over the undirected KNOWS graph".into(),
-            notes: "single shortest path length between two persons via the public bfs path verb".into(),
-        }),
         Operation::Ic14 => MappingOutcome::SemanticIncompatibility {
             cause: "weighted_interaction_path_enumeration_not_exposed",
             detail: "IC14 enumerates ALL shortest paths between two persons and scores each edge by a \
@@ -650,45 +609,6 @@ pub fn map_operation(operation: Operation) -> MappingOutcome {
                      enumeration with a per-edge computed weight function"
                 .into(),
         },
-        Operation::Is1 => compatible(
-            "cypher",
-            "MATCH (p:Person)-[:IS_LOCATED_IN]->(city:City) WHERE p.id=$personId \
-             RETURN p.firstName, p.lastName, p.birthday, p.locationIP, p.browserUsed, \
-             city.id, p.gender, p.creationDate",
-            "SNB IS1 person profile lookup by explicit personId, including residence city",
-        ),
-        Operation::Is2 => compatible(
-            "cypher",
-            "MATCH (p:Person {id:$id})<-[:HAS_CREATOR]-(m:Message) RETURN m ORDER BY m.creationDate DESC, m.id DESC LIMIT 10",
-            "person's ten most recent messages",
-        ),
-        Operation::Is3 => compatible(
-            "cypher",
-            "MATCH (p:Person {id:$id})-[k:KNOWS]-(f:Person) RETURN f.id, f.firstName, k.creationDate ORDER BY k.creationDate DESC, f.id",
-            "person's friends ordered by friendship date",
-        ),
-        Operation::Is4 => compatible(
-            "cypher",
-            "MATCH (m:Message {id:$id}) RETURN coalesce(m.content, m.imageFile), m.creationDate",
-            "message content lookup by id",
-        ),
-        Operation::Is5 => compatible(
-            "cypher",
-            "MATCH (m:Message {id:$id})-[:HAS_CREATOR]->(p:Person) RETURN p.id, p.firstName, p.lastName",
-            "message creator lookup",
-        ),
-        Operation::Is6 => compatible(
-            "cypher",
-            "MATCH (m:Message {id:$id})-[:REPLY_OF*0..]->(post:Post)<-[:CONTAINER_OF]-(f:Forum)-[:HAS_MODERATOR]->(mod:Person) \
-             RETURN f.id, f.title, mod.id",
-            "forum and moderator of the post a message belongs to",
-        ),
-        Operation::Is7 => compatible(
-            "cypher",
-            "MATCH (m:Message {id:$id})<-[:REPLY_OF]-(c:Comment)-[:HAS_CREATOR]->(a:Person) \
-             RETURN c.id, c.content, a.id ORDER BY c.creationDate DESC, a.id",
-            "direct replies to a message",
-        ),
         Operation::Iu1 => update_incompatible("IU1 inserts a Person with dependency-time ordered edges"),
         Operation::Iu2 => update_incompatible("IU2 records a Person-likes-Post interaction"),
         Operation::Iu3 => update_incompatible("IU3 records a Person-likes-Comment interaction"),
@@ -697,15 +617,11 @@ pub fn map_operation(operation: Operation) -> MappingOutcome {
         Operation::Iu6 => update_incompatible("IU6 inserts a Post"),
         Operation::Iu7 => update_incompatible("IU7 inserts a Comment reply"),
         Operation::Iu8 => update_incompatible("IU8 inserts a KNOWS friendship"),
+        read => MappingOutcome::SemanticIncompatibility {
+            cause: "query_definition_missing",
+            detail: format!("{read} is a read without a runnable query definition"),
+        },
     }
-}
-
-fn compatible(interface: &str, cypher_shape: &str, notes: &str) -> MappingOutcome {
-    MappingOutcome::Compatible(PublicApiMapping {
-        interface: interface.into(),
-        cypher_shape: cypher_shape.into(),
-        notes: notes.into(),
-    })
 }
 
 fn update_incompatible(detail: &str) -> MappingOutcome {
@@ -879,6 +795,7 @@ pub fn assemble_evidence(
             })
             .collect(),
         live_context: None,
+        query_context: None,
         identities,
         operations: outcomes,
     }
@@ -928,7 +845,7 @@ fn embedded_live_assets() -> TrustedLiveAssets<'static> {
     }
 }
 
-fn sha256(text: &str) -> String {
+pub(crate) fn sha256(text: &str) -> String {
     let digest = Sha256::digest(text.as_bytes());
     let mut output = String::with_capacity(64);
     for byte in digest {
@@ -1335,6 +1252,7 @@ fn assemble_live_is1_evidence(
             ],
             normalization: "Arrow scalar display encoded as field-preserving JSON arrays".into(),
         }),
+        query_context: None,
         identities,
         operations: outcomes,
     }

@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import unittest
 
+from graphforge_bench import gdc_snb_interactive_reference as reference
 from graphforge_bench.gdc_contracts import list_gdc_suites, workspace_root
 from graphforge_bench.gdc_snb_interactive import (
     COMPLEX_READS,
@@ -14,14 +15,17 @@ from graphforge_bench.gdc_snb_interactive import (
     IC14_CAUSE,
     LIVE_DATASET_ID,
     OPERATIONS,
+    QUERY_DATASET_ID,
     SHORT_READS,
     UPDATE_CAUSE,
     UPDATES,
     SnbInteractiveSuiteError,
     assert_separate_from_other_suites,
     list_operation_rules,
+    list_query_definitions,
     map_operation_file,
     run_live_is1,
+    run_live_queries,
     run_tiny_suite,
 )
 from jsonschema import Draft202012Validator
@@ -81,10 +85,10 @@ class GdcSnbInteractiveSuiteTests(unittest.TestCase):
         for read in SHORT_READS:
             self.assertEqual(rules[read]["mapping"], "compatible", read)
             self.assertEqual(rules[read]["category"], "short_read", read)
-        self.assertEqual(rules["IC4"]["validation"], "normalized")
-        self.assertEqual(rules["IC6"]["validation"], "normalized")
-        self.assertEqual(rules["IC10"]["validation"], "normalized")
-        self.assertEqual(rules["IC1"]["validation"], "exact")
+        # Every read has a total specified order, so rows compare in order.
+        for read in list(COMPLEX_READS) + list(SHORT_READS):
+            if read != "IC14":
+                self.assertEqual(rules[read]["validation"], "exact", read)
         self.assertTrue(rules["IC14"]["mapping"].startswith("semantic_incompatibility"))
         for update in UPDATES:
             self.assertEqual(rules[update]["category"], "update", update)
@@ -215,6 +219,65 @@ class GdcSnbInteractiveSuiteTests(unittest.TestCase):
                 )
             )
         ).validate(evidence)
+
+    def test_query_fixture_and_expected_rows_are_derived_without_graphforge(self) -> None:
+        fixture = self.root / "fixtures" / "gdc" / "snb-interactive-queries"
+        committed_graph = (fixture / "graph.json").read_text(encoding="utf-8")
+        self.assertEqual(reference.render_graph(reference.build_fixture()), committed_graph)
+        document = json.loads(committed_graph)
+        self.assertEqual(document["dataset_id"], QUERY_DATASET_ID)
+        self.assertEqual(
+            reference.render_expected(reference.expected_document(document)),
+            (fixture / "expected.json").read_text(encoding="utf-8"),
+        )
+
+    def test_live_queries_run_every_mapped_read_against_independent_results(self) -> None:
+        evidence = run_live_queries()
+        self.assertEqual(evidence["dataset_id"], QUERY_DATASET_ID)
+        self.assertEqual(evidence["lane"], "live_query_fixture")
+        self.assertEqual(evidence["status"], "passed")
+        self.assertIs(evidence["certification"], False)
+        self.assertTrue(all(phase["status"] == "passed" for phase in evidence["phase_evidence"]))
+        by_op = {item["operation"]: item for item in evidence["operations"]}
+        self.assertEqual(set(by_op), set(OPERATIONS))
+        for read in list(COMPLEX_READS) + list(SHORT_READS):
+            if read == "IC14":
+                continue
+            self.assertEqual(by_op[read]["status"], "passed", by_op[read].get("cause"))
+            self.assertEqual(by_op[read]["validation_mode"], "exact", read)
+        self.assertEqual(by_op["IC14"]["status"], "semantic_incompatibility")
+        self.assertIn(IC14_CAUSE, by_op["IC14"]["cause"])
+        for update in UPDATES:
+            self.assertEqual(by_op[update]["status"], "semantic_incompatibility")
+            self.assertIn(UPDATE_CAUSE, by_op[update]["cause"])
+        context = evidence["query_context"]
+        self.assertEqual(context["runnable_operations"], 20)
+        self.assertEqual(context["public_api"], "graphforge_api::GraphForge")
+        self.assertEqual(context["mode"], "in_memory")
+        Draft202012Validator(
+            json.loads(
+                (self.root / "schemas" / "gdc-snb-interactive-evidence.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+        ).validate(evidence)
+
+    def test_query_definitions_are_exposed_as_data(self) -> None:
+        queries = list_query_definitions()
+        expected_reads = [read for read in COMPLEX_READS + SHORT_READS if read != "IC14"]
+        self.assertEqual([query["operation"] for query in queries], expected_reads)
+        for query in queries:
+            self.assertTrue(query["parameters"], query["operation"])
+            self.assertTrue(query["columns"], query["operation"])
+            if query["operation"] == "IC13":
+                self.assertEqual(query["interface"], "analyst_verb")
+                self.assertIsNone(query["cypher"])
+                self.assertIn("by=bfs", query["invocation"])
+                continue
+            self.assertEqual(query["interface"], "cypher")
+            for parameter in query["parameters"]:
+                self.assertIn(f"${parameter['name']}", query["cypher"])
+        self.assertEqual([p["name"] for p in queries[0]["parameters"]], ["personId", "firstName"])
 
     def test_python_wrapper_cannot_supply_rows_fixture_reference_or_identity(self) -> None:
         for replacement in (
