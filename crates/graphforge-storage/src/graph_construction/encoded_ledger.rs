@@ -8,9 +8,9 @@
 //! The pinned inventory (`Checkpoint::encoding_inventory_sha256`) names every
 //! encoded artifact, and the session never moves, links or removes one before
 //! the discard that deletes the whole tree. So the checkpoint omits the encoded
-//! entries as a whole and records only the native-identity authority digest of
-//! the omitted set (`Checkpoint::encoded_ledger_sha256`). Opening a session
-//! reads the authenticated inventory, re-derives each artifact's identity and
+//! entries as a whole and records only a control digest of the omitted set
+//! (`Checkpoint::encoded_ledger_sha256`). Opening a session reads the
+//! authenticated inventory, re-derives each artifact's identity and
 //! allocation from the file it names, and restores the entries only if they
 //! reproduce that digest, before anything can read or rewrite the ledger. A
 //! replaced inode or a changed allocation therefore refuses the open; it can
@@ -25,8 +25,8 @@
 use std::collections::BTreeMap;
 
 use super::{
-    Checkpoint, GfError, GraphConstructionState, OsStr, StableDirectory, file_identity, hex,
-    is_canonical_sha256, storage,
+    Checkpoint, Digest, GfError, GraphConstructionState, OsStr, Sha256, StableDirectory,
+    file_identity, hex, is_canonical_sha256, storage,
 };
 
 /// The identity and allocation of every artifact of one pinned encoded
@@ -71,9 +71,17 @@ impl EncodedIdentityIndex {
     }
 }
 
-/// Authority digest over a set of encoded ledger entries.
+/// Control authority digest over a set of encoded ledger entries: each key
+/// and allocation, length-prefixed, in key order.
 pub(super) fn encoded_ledger_sha256(entries: &BTreeMap<String, u64>) -> String {
-    crate::storage_attribution::identity_map_authority_sha256(entries)
+    let mut digest = Sha256::new();
+    digest.update(b"graphforge-construction-encoded-ledger-v1\0");
+    for (key, allocated_bytes) in entries {
+        digest.update((key.len() as u64).to_be_bytes());
+        digest.update(key.as_bytes());
+        digest.update(allocated_bytes.to_be_bytes());
+    }
+    hex(&digest.finalize())
 }
 
 /// The ledger key and filesystem space usage of the encoded artifact at the
@@ -121,10 +129,7 @@ pub(super) fn restore_encoded_ledger(
     let Some(recorded) = checkpoint.encoded_ledger_sha256.take() else {
         return Ok(());
     };
-    if !recorded
-        .strip_prefix("sha256:")
-        .is_some_and(is_canonical_sha256)
-    {
+    if !is_canonical_sha256(&recorded) {
         return Err(storage("checkpoint encoded ledger digest is invalid"));
     }
     let pinned = checkpoint

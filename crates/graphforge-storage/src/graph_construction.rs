@@ -855,7 +855,7 @@ struct Checkpoint {
     /// discard removes it. Absent in a checkpoint that omits nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     staged_ledger_from_sequence: Option<u64>,
-    /// Durable form only: the native-identity authority digest of the
+    /// Durable form only: the control authority digest of the
     /// encoded-artifact ledger entries the persisted ledger omits, because the
     /// pinned encoded inventory names each artifact and reopening re-derives
     /// and authenticates them (#900). `None` in memory once restored, except

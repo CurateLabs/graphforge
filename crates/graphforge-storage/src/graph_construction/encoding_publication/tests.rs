@@ -1055,6 +1055,9 @@ fn reclaim_refuses_encoded_artifact_inode_replacement() {
         "{error}"
     );
     drop(session);
+    // The checkpoint omits the encoded ledger entries and records their
+    // digest (#900), so a reopen refuses earlier, while restoring them: the
+    // replaced inode no longer reproduces the digest.
     let error = GraphConstructionSession::open(
         root.path(),
         operation,
@@ -1066,7 +1069,7 @@ fn reclaim_refuses_encoded_artifact_inode_replacement() {
     assert!(
         error
             .to_string()
-            .contains("supersession encoded artifact identity changed"),
+            .contains("encoded artifact identities or allocations differ from checkpoint"),
         "{error}"
     );
 }
