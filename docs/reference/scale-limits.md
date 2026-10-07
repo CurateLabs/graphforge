@@ -30,6 +30,27 @@ and a reproducibility link. A timing without those fields is not used here.
 The [scale evaluation method](scale-evaluation.md) explains the measurement
 terms; the issue results own the host ladder rather than duplicating it here.
 
+## Fixed project-size limit: graph files per generation
+
+A committed graph generation can list at most **100,000 graph files**. The
+limit is `GraphManifestLimits::max_entries` in
+[`graph_manifest.rs`](https://github.com/CurateLabs/graphforge/blob/main/crates/graphforge-storage/src/graph_manifest.rs);
+every caller uses the default, and it is not configurable. A generation over
+the limit is refused when its manifest is resolved, with
+`graph manifest declared entry limit exceeded` or
+`graph manifest entry limit exceeded`. Construction resolves that manifest
+when it encodes and publishes, so an import that would cross the limit fails
+during ingest rather than producing an unreadable project.
+
+The graph-file count grows with the graph, not just with its schema. The
+Graph500 S26 project (67,108,864 nodes, 1,073,741,824 edges) committed 21,525
+graph files ([#900](https://github.com/CurateLabs/graphforge/issues/900)),
+about a fifth of the limit. The count roughly doubles with each Graph500
+scale step, which projects to about 86,000 files (86%) at S28 and over the
+limit at S29. Those two figures are projections, not measurements. Raising the
+limit means changing the default and any bound derived from it, then
+re-checking manifest resolution memory and work.
+
 ## Choose a workload you can measure
 
 - Start with a [small graph](../guide/quickstart.md) and representative questions.
