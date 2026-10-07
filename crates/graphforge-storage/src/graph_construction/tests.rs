@@ -927,24 +927,104 @@ fn uuid_encoding_crashes_recover_every_durable_boundary() {
     }
 }
 
+/// The active-identity ledger every live staged artifact in the session
+/// directory implies: its native identity at the allocation the filesystem
+/// reports, read from the directory rather than from any control.
+fn staged_ledger_on_disk(session: &Path) -> BTreeMap<String, u64> {
+    std::fs::read_dir(session)
+        .unwrap()
+        .map(Result::unwrap)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("chunk-"))
+        .map(|entry| {
+            let file = std::fs::File::open(entry.path()).unwrap();
+            let identity = file_identity(&file).unwrap();
+            let usage = graphforge_filesystem::file_space_usage(&file).unwrap();
+            (
+                format!("{:016x}:{}", identity.volume_serial, hex(&identity.file_id)),
+                usage.allocated_bytes,
+            )
+        })
+        .collect()
+}
+
+/// Accept `prior` node chunks in the crash helper's session, so the helper's
+/// own chunk lands at sequence `prior`.
+fn stage_prior_crash_chunks(root: &Path, prior: u64) {
+    if prior == 0 {
+        return;
+    }
+    let mut session = GraphConstructionSession::open(
+        root,
+        Uuid::from_u128(600),
+        0,
+        GraphConstructionBudgets::default(),
+    )
+    .unwrap();
+    for chunk in 0..prior {
+        session
+            .append(
+                ConstructionChunkKind::Node,
+                &format!("prior-{chunk}"),
+                &node_batch(1_001 + u128::from(chunk) * 8, 8),
+            )
+            .unwrap();
+    }
+}
+
+/// A crash at every durable append boundary recovers. #900: the checkpoint
+/// omits the staged ledger entries the receipt journal names, so with or
+/// without chunks accepted before the crash, the reopened ledger must be
+/// exactly the one the live staged files imply, reopen to the same ledger
+/// again, and finish with the allocation evidence of a run that never
+/// crashed.
 #[test]
 fn subprocess_crashes_recover_each_durable_boundary() {
-    let receipt = receipt_name(0);
+    for prior in [0_u64, 2] {
+        subprocess_crashes_recover_each_durable_boundary_after(prior);
+    }
+}
+
+#[allow(clippy::too_many_lines)] // One crash matrix; the assertions are the point.
+fn subprocess_crashes_recover_each_durable_boundary_after(prior: u64) {
+    let reference = TempDir::new().unwrap();
+    stage_prior_crash_chunks(reference.path(), prior);
+    let mut clean = GraphConstructionSession::open(
+        reference.path(),
+        Uuid::from_u128(600),
+        0,
+        GraphConstructionBudgets::default(),
+    )
+    .unwrap();
+    clean
+        .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 8))
+        .unwrap();
+    let clean_evidence = clean.evidence().clone();
+    drop(clean);
+    let receipt = receipt_name(prior);
     let key = chunk_key_name("nodes");
-    let parquet = format!("{}.parquet", artifact_stem(0, ConstructionChunkKind::Node));
-    let cases = vec![
-        (
-            "control.install.after_partial.checkpoint.json".to_owned(),
-            0_u64,
-        ),
-        (
-            "control.install.after_temp_fsync.checkpoint.json".to_owned(),
-            0_u64,
-        ),
-        (
-            "control.install.after_install.checkpoint.json".to_owned(),
-            0,
-        ),
+    let parquet = format!(
+        "{}.parquet",
+        artifact_stem(prior, ConstructionChunkKind::Node)
+    );
+    let mut cases = Vec::new();
+    if prior == 0 {
+        // Only a fresh session installs its initial checkpoint.
+        cases.extend([
+            (
+                "control.install.after_partial.checkpoint.json".to_owned(),
+                0_u64,
+            ),
+            (
+                "control.install.after_temp_fsync.checkpoint.json".to_owned(),
+                0_u64,
+            ),
+            (
+                "control.install.after_install.checkpoint.json".to_owned(),
+                0,
+            ),
+        ]);
+    }
+    cases.extend([
         ("control.install.after_temp_fsync.intent.json".to_owned(), 0),
         ("control.install.after_install.intent.json".to_owned(), 0),
         (format!("artifact.after_temp_fsync.{parquet}"), 0),
@@ -967,9 +1047,10 @@ fn subprocess_crashes_recover_each_durable_boundary() {
             "control.replace.after_replace.checkpoint.json".to_owned(),
             1,
         ),
-    ];
+    ]);
     for (failpoint, accepted) in cases {
         let root = TempDir::new().unwrap();
+        stage_prior_crash_chunks(root.path(), prior);
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
             .arg("graph_construction::tests::crash_subprocess_helper")
@@ -982,7 +1063,7 @@ fn subprocess_crashes_recover_each_durable_boundary() {
             .env("GF_CONSTRUCTION_FAILPOINT", &failpoint)
             .status()
             .unwrap();
-        assert_eq!(status.code(), Some(86), "failpoint {failpoint}");
+        assert_eq!(status.code(), Some(86), "prior {prior} {failpoint}");
         let mut resumed = GraphConstructionSession::open(
             root.path(),
             Uuid::from_u128(600),
@@ -990,7 +1071,11 @@ fn subprocess_crashes_recover_each_durable_boundary() {
             GraphConstructionBudgets::default(),
         )
         .unwrap();
-        assert_eq!(resumed.accepted_chunks(), accepted, "{failpoint}");
+        assert_eq!(
+            resumed.accepted_chunks(),
+            prior + accepted,
+            "prior {prior} {failpoint}"
+        );
         if accepted == 1 {
             assert!(
                 resumed.evidence().recovery_application_read_bytes > 0,
@@ -1001,11 +1086,95 @@ fn subprocess_crashes_recover_each_durable_boundary() {
                 "accepted interrupted append must report recovery calls: {failpoint}"
             );
         }
+        // Every live staged file at its allocation, and nothing else; the
+        // category totals agree with that ledger.
+        let session_path = resumed.root.path().to_path_buf();
+        let on_disk = staged_ledger_on_disk(&session_path);
+        assert_eq!(
+            on_disk.len() as u64,
+            3 * (prior + accepted),
+            "prior {prior} {failpoint}"
+        );
+        assert_eq!(
+            resumed.evidence().storage_active_identity_allocated_bytes,
+            on_disk,
+            "prior {prior} {failpoint}: reopened ledger differs from the live staged files"
+        );
+        assert_eq!(
+            crate::storage_attribution::identity_map_authority_sha256(
+                &resumed.evidence().storage_active_identity_allocated_bytes
+            ),
+            crate::storage_attribution::identity_map_authority_sha256(&on_disk),
+            "prior {prior} {failpoint}"
+        );
+        resumed.evidence().storage_category_authorities().unwrap();
+        resumed
+            .evidence()
+            .storage_transient_peak_authorities()
+            .unwrap();
         if accepted == 0 {
             resumed
                 .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 8))
                 .unwrap();
         }
+        // Restoration is exact rather than convergent: another reopen
+        // restores the same ledger.
+        let before = resumed.evidence().clone();
+        drop(resumed);
+        let mut resumed = GraphConstructionSession::open(
+            root.path(),
+            Uuid::from_u128(600),
+            0,
+            GraphConstructionBudgets::default(),
+        )
+        .unwrap();
+        let evidence = resumed.evidence();
+        assert_eq!(
+            evidence.storage_active_identity_allocated_bytes,
+            before.storage_active_identity_allocated_bytes,
+            "prior {prior} {failpoint}"
+        );
+        assert_eq!(
+            evidence.storage_active_identity_allocated_bytes,
+            staged_ledger_on_disk(&session_path),
+            "prior {prior} {failpoint}"
+        );
+        // The allocation evidence of the run that never crashed: current and
+        // authority category totals, transient peaks, and allocation sizes.
+        assert_eq!(
+            evidence.storage_current, clean_evidence.storage_current,
+            "prior {prior} {failpoint}"
+        );
+        assert_eq!(
+            evidence.storage_receipt_category_authorities,
+            clean_evidence.storage_receipt_category_authorities,
+            "prior {prior} {failpoint}"
+        );
+        assert_eq!(
+            evidence.storage_transient_peak_allocated_bytes,
+            clean_evidence.storage_transient_peak_allocated_bytes,
+            "prior {prior} {failpoint}"
+        );
+        assert_eq!(
+            evidence.storage_receipt_transient_peak_authorities,
+            clean_evidence.storage_receipt_transient_peak_authorities,
+            "prior {prior} {failpoint}"
+        );
+        assert_eq!(
+            evidence.storage_transient_peak_total_allocated_bytes,
+            clean_evidence.storage_transient_peak_total_allocated_bytes,
+            "prior {prior} {failpoint}"
+        );
+        let sizes = |ledger: &BTreeMap<String, u64>| {
+            let mut sizes: Vec<u64> = ledger.values().copied().collect();
+            sizes.sort_unstable();
+            sizes
+        };
+        assert_eq!(
+            sizes(&evidence.storage_active_identity_allocated_bytes),
+            sizes(&clean_evidence.storage_active_identity_allocated_bytes),
+            "prior {prior} {failpoint}"
+        );
         resumed.seal().unwrap();
     }
 }

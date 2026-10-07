@@ -363,7 +363,7 @@ fn checkpoint_with_previous_format_version_fails_closed_with_restart_error() {
         .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
         .unwrap();
     session.checkpoint.format_version = FORMAT_VERSION - 1;
-    replace_checkpoint_control(&session.root, &session.checkpoint).unwrap();
+    replace_checkpoint_control(&session.root, &mut session.checkpoint).unwrap();
     drop(session);
     let result = GraphConstructionSession::open(
         root.path(),

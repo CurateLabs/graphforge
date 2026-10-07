@@ -212,7 +212,7 @@ impl GraphConstructionSession {
         validate_publication_intent(&intent, &self.checkpoint)?;
         install_control(&self.root, PUBLICATION_INTENT, &intent)?;
         self.checkpoint.publication_state = Some(ConstructionPublicationState::Publishing);
-        replace_checkpoint_control(&self.root, &self.checkpoint)?;
+        replace_checkpoint_control(&self.root, &mut self.checkpoint)?;
         Ok(intent)
     }
 
@@ -290,7 +290,7 @@ impl GraphConstructionSession {
         let receipt = provisional;
         install_control(&self.root, PUBLICATION_RECEIPT, &receipt)?;
         self.checkpoint.publication_state = Some(ConstructionPublicationState::Published);
-        replace_checkpoint_control(&self.root, &self.checkpoint)?;
+        replace_checkpoint_control(&self.root, &mut self.checkpoint)?;
         Ok(receipt)
     }
 
@@ -372,7 +372,7 @@ impl GraphConstructionSession {
             Some(_) => {}
             None => {
                 self.checkpoint.encoding_inventory_sha256 = Some(inventory_authority);
-                replace_checkpoint_control(&self.root, &self.checkpoint)?;
+                replace_checkpoint_control(&self.root, &mut self.checkpoint)?;
             }
         }
         self.reclaim_superseded_payloads_cancellable(&mut cancelled)?;

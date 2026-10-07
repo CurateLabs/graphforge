@@ -81,7 +81,7 @@ fn checkpoint_compacts_live_transition_history_without_losing_peak_or_union() {
         .unwrap()
         .clone();
     session.checkpoint.evidence.storage_allocation_transitions = vec![transition; 20_000];
-    replace_checkpoint_control(&session.root, &session.checkpoint).unwrap();
+    replace_checkpoint_control(&session.root, &mut session.checkpoint).unwrap();
     assert!(
         session
             .root

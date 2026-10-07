@@ -222,6 +222,168 @@ fn journal_is_constant_control_state_and_seal_reopens_every_artifact() {
     }
 }
 
+/// Lowers this thread's checkpoint write bound until dropped.
+struct CheckpointLimit;
+
+impl CheckpointLimit {
+    fn set(limit: u64) -> Self {
+        super::super::controls::CHECKPOINT_LIMIT_OVERRIDE.with(|cell| cell.set(Some(limit)));
+        Self
+    }
+}
+
+impl Drop for CheckpointLimit {
+    fn drop(&mut self) {
+        super::super::controls::CHECKPOINT_LIMIT_OVERRIDE.with(|cell| cell.set(None));
+    }
+}
+
+/// The allocation evidence a reopen must reproduce exactly.
+fn allocation_evidence(
+    evidence: &GraphConstructionEvidence,
+) -> (
+    std::collections::BTreeMap<String, u64>,
+    String,
+    std::collections::BTreeMap<crate::ArtifactCategory, crate::ArtifactStorageTotals>,
+    std::collections::BTreeMap<crate::ArtifactCategory, crate::ArtifactStorageTotals>,
+    std::collections::BTreeMap<crate::ArtifactCategory, u64>,
+    std::collections::BTreeMap<crate::ArtifactCategory, u64>,
+    u64,
+) {
+    (
+        evidence.storage_active_identity_allocated_bytes.clone(),
+        crate::storage_attribution::identity_map_authority_sha256(
+            &evidence.storage_active_identity_allocated_bytes,
+        ),
+        evidence.storage_current.clone(),
+        // Category totals equal the identity union (the category==identity
+        // invariant), or this refuses.
+        evidence.storage_category_authorities().unwrap(),
+        evidence.storage_transient_peak_allocated_bytes.clone(),
+        evidence.storage_transient_peak_authorities().unwrap(),
+        evidence.storage_transient_peak_total_allocated_bytes,
+    )
+}
+
+/// #900. The staging checkpoint is rewritten on every accepted chunk, so its
+/// size must not depend on how many chunks have been accepted.
+///
+/// S25 failed staging after 4,459 chunks because the checkpoint persisted one
+/// allocation-ledger entry per staged artifact: 17,324 of them, 1,039,441 of
+/// its 1,048,477 bytes, past the 1 MiB control bound, with the whole record
+/// rewritten per chunk. The invariant is asserted as a slope, as #1526 did for
+/// the shape end, because a threshold passes on any tree that merely still has
+/// margin. The write bound is lowered to 2 KiB above the one-chunk checkpoint
+/// only so the old record, which grew by three entries per node chunk,
+/// provably crosses it inside this fixture.
+#[test]
+fn staging_checkpoint_is_independent_of_accepted_chunk_count() {
+    let root = TempDir::new().unwrap();
+    let operation = 900_u128;
+    let mut session = open(&root, operation);
+    let checkpoint_path = session.root.path().join(CHECKPOINT);
+    let persisted = || -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(&checkpoint_path).unwrap()).unwrap()
+    };
+    let append = |session: &mut GraphConstructionSession, chunk: u64| {
+        session
+            .append(
+                ConstructionChunkKind::Node,
+                &format!("n-{chunk}"),
+                &node_batch(1 + u128::from(chunk) * 2, 2),
+            )
+            .unwrap();
+    };
+    // The first write fills the per-category maps the initial record lacks;
+    // the bound is measured from the record that has them.
+    append(&mut session, 0);
+    let bound = std::fs::metadata(&checkpoint_path).unwrap().len() + 2048;
+    let limit = CheckpointLimit::set(bound);
+    let mut sizes = std::collections::BTreeMap::new();
+    for chunk in 1..48_u64 {
+        append(&mut session, chunk);
+        let accepted = chunk + 1;
+        if accepted == 16 || accepted == 48 {
+            // Every staged entry is omitted, from the first chunk on.
+            let control = persisted();
+            assert_eq!(
+                control["evidence"]["storage_active_identity_allocated_bytes"],
+                serde_json::json!({}),
+                "{accepted} chunks"
+            );
+            assert_eq!(
+                control["staged_ledger_from_sequence"],
+                serde_json::json!(0),
+                "{accepted} chunks"
+            );
+            sizes.insert(accepted, std::fs::metadata(&checkpoint_path).unwrap().len());
+        }
+    }
+    let ledger = &session.evidence().storage_active_identity_allocated_bytes;
+    assert_eq!(ledger.len(), 48 * 3);
+    // The positive control: the record the old writer produced from this same
+    // state — the whole ledger, without transition history — is over the
+    // bound this run stayed under.
+    let mut old_record = session.checkpoint.clone();
+    old_record.evidence.storage_allocation_transitions.clear();
+    let old_bytes = serde_json::to_vec(&old_record).unwrap().len() as u64;
+    assert!(
+        old_bytes > bound,
+        "the fixture must stage past the old record's bound: {old_bytes} <= {bound}"
+    );
+    // The slope: 32 more chunks, 96 more staged artifacts, and the record
+    // grows by less than one ledger entry (only counter digits change).
+    let smallest_entry = ledger
+        .iter()
+        .map(|(key, allocated)| key.len() + allocated.to_string().len() + 4)
+        .min()
+        .unwrap() as u64;
+    let growth = sizes[&48] - sizes[&16];
+    assert!(
+        growth < smallest_entry,
+        "staging checkpoint grew {growth} bytes over 32 chunks ({sizes:?})"
+    );
+
+    // Reopening restores exactly the ledger the writer held, from the receipt
+    // journal, and keeps every allocation authority.
+    let before = allocation_evidence(session.evidence());
+    drop(session);
+    let mut session = open(&root, operation);
+    assert_eq!(allocation_evidence(session.evidence()), before);
+    // The restored index keeps later writes bounded too.
+    session
+        .append(ConstructionChunkKind::Node, "n-48", &node_batch(97, 2))
+        .unwrap();
+    session.seal().unwrap();
+    assert_eq!(
+        persisted()["evidence"]["storage_active_identity_allocated_bytes"],
+        serde_json::json!({})
+    );
+    let sealed = allocation_evidence(session.evidence());
+    drop(session);
+    let mut session = open(&root, operation);
+    assert_eq!(allocation_evidence(session.evidence()), sealed);
+
+    // Once supersession retires the staged inputs nothing is omitted: the
+    // persisted ledger is the whole ledger, as before #900.
+    drop(limit);
+    session.shape_canonical_with_cancellation(|| false).unwrap();
+    assert!(session.checkpoint.inputs_retired);
+    let control = persisted();
+    assert!(control.get("staged_ledger_from_sequence").is_none());
+    let shaped = allocation_evidence(session.evidence());
+    assert_eq!(
+        serde_json::from_value::<std::collections::BTreeMap<String, u64>>(
+            control["evidence"]["storage_active_identity_allocated_bytes"].clone()
+        )
+        .unwrap(),
+        shaped.0
+    );
+    drop(session);
+    let session = open(&root, operation);
+    assert_eq!(allocation_evidence(session.evidence()), shaped);
+}
+
 #[test]
 fn schema_group_admission_is_constant_and_budgeted() {
     let root = TempDir::new().unwrap();

@@ -294,7 +294,7 @@ impl GraphConstructionSession {
             .recovery_checkpoint_fsync_operations
             .checked_add(3)
             .ok_or_else(|| storage("supersession checkpoint synchronization count overflow"))?;
-        replace_checkpoint_control(&self.root, &next)?;
+        replace_checkpoint_control(&self.root, &mut next)?;
         self.checkpoint = next;
         Ok(())
     }
