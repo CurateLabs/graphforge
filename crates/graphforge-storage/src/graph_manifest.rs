@@ -217,6 +217,11 @@ impl<'de> Deserialize<'de> for GraphManifestNode {
     }
 }
 
+/// Most graph files one generation's manifest admits: the default
+/// [`GraphManifestLimits::max_entries`]. Construction sizes its encoded
+/// inventory bound from it, so raising it raises that bound too (#900).
+pub(crate) const MAX_GRAPH_FILES_PER_GENERATION: usize = 100_000;
+
 /// Admission bounds for resolving an untrusted radix manifest.
 #[allow(clippy::struct_field_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,7 +241,7 @@ impl Default for GraphManifestLimits {
             // A non-empty canonical Patricia tree has at most 2F-1 nodes for
             // F distinct path digests. The empty inventory has one root node.
             max_segments: 200_000,
-            max_entries: 100_000,
+            max_entries: MAX_GRAPH_FILES_PER_GENERATION,
             max_decoded_bytes: 1024 * 1024 * 1024,
             max_work_units: 500_000,
         }

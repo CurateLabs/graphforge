@@ -385,7 +385,7 @@ impl GraphConstructionSession {
                 replace_checkpoint_control(&self.root, &mut self.checkpoint)?;
             }
         }
-        self.reclaim_superseded_payloads_cancellable(&mut cancelled)?;
+        self.reclaim_superseded_payloads_with_successor(Some(&encoded), &mut cancelled)?;
         Ok(encoded)
     }
 
