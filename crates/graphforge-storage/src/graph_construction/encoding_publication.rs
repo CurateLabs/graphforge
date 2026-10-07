@@ -1063,4 +1063,4 @@ fn recover_publication_cancellable(
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

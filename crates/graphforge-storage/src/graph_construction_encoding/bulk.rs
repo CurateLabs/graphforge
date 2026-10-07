@@ -217,7 +217,7 @@ pub(crate) fn encode_bulk(
         .build()
         .map_err(storage)?;
     let cancel = AtomicBool::new(false);
-    let mut passes = Vec::new();
+    let mut passes = std::collections::BTreeMap::new();
     let mut evidence = GraphConstructionEncodingEvidence {
         peak_open_writers: 1,
         ..Default::default()
@@ -231,14 +231,14 @@ pub(crate) fn encode_bulk(
     tables::require_dense(edge_rows, "edges")?;
     let retain_nodes = plan.nodes.iter().any(|source| !source.property_free);
     let retain_edges = plan.edges.iter().any(|source| !source.property_free);
-    passes.push(meter.finish());
+    passes.extend([meter.finish()]);
 
     // Pass 1: nodes.
     let meter = PassMeter::start("nodes");
     let nodes = run_pass(&pool, cancelled, &cancel, || {
         tables::collect_nodes(&plan.nodes, retain_nodes, &cancel)
     })?;
-    passes.push(meter.finish());
+    passes.extend([meter.finish()]);
     crate::graph_construction::construction_failpoint("bulk.after_nodes");
 
     // Pass 2: edges and endpoint resolution.
@@ -248,7 +248,10 @@ pub(crate) fn encode_bulk(
         tables::collect_edges(&plan.edges, retain_edges, &nodes, &index, &cancel)
     })?;
     drop(index);
-    passes.push(meter.finish());
+    if nodes.uuids.is_empty() && edges.uuids.is_empty() {
+        return Err(storage("construction contains no identities"));
+    }
+    passes.extend([meter.finish()]);
     crate::graph_construction::construction_failpoint("bulk.after_edges");
 
     // Pass 3: catalog and ranked tables.
@@ -282,7 +285,7 @@ pub(crate) fn encode_bulk(
     let relations = emit::relation_routes(&edges.rel_names, &semantics)?;
     let mut routes = crate::route_component::RouteTable::default();
     let components = emit::register_routes(&mut routes, &relations)?;
-    passes.push(meter.finish());
+    passes.extend([meter.finish()]);
 
     let installer = Installer::new(&output);
     let node_window = emit::window_rows(budgets, 128);
@@ -308,7 +311,7 @@ pub(crate) fn encode_bulk(
             &cancel,
         )
     })?;
-    passes.push(meter.finish());
+    passes.extend([meter.finish()]);
     crate::graph_construction::construction_failpoint("bulk.after_tables");
 
     let meter = PassMeter::start("adjacency");
@@ -323,16 +326,18 @@ pub(crate) fn encode_bulk(
             &cancel,
         )
     })?;
-    passes.push(meter.finish());
+    passes.extend([meter.finish()]);
     crate::graph_construction::construction_failpoint("bulk.after_adjacency");
 
     let meter = PassMeter::start("membership");
     let membership = build_membership(&output, &nodes, &edges.uuids, generation, &cancel)?;
     check_cancelled(&cancel)?;
-    passes.push(meter.finish());
+    passes.extend([meter.finish()]);
     crate::graph_construction::construction_failpoint("bulk.after_membership");
 
-    // Property overlays: sequential, through the staged encoder's own writer.
+    // Property overlays: sequential, through the staged encoder's own writer,
+    // which leases its own compression lanes. Return ours first.
+    drop(lease);
     let meter = PassMeter::start("properties");
     let mut artifacts = Vec::new();
     {
@@ -396,7 +401,7 @@ pub(crate) fn encode_bulk(
         evidence.output_write_operations += property_evidence.output_write_operations;
         evidence.fsync_operations += property_evidence.fsync_operations;
     }
-    passes.push(meter.finish());
+    passes.extend([meter.finish()]);
 
     // Small controls, then the inventory.
     let meter = PassMeter::start("finalize");
@@ -512,7 +517,7 @@ pub(crate) fn encode_bulk(
     crate::graph_construction::construction_failpoint("bulk.after_inventory_before_intent_removal");
     authenticate_inventory_control(&completed, None)?;
     remove_encoding_intent(&output)?;
-    passes.push(meter.finish());
+    passes.extend([meter.finish()]);
     let invocation = completed.evidence.clone();
     completed.invocation = GraphConstructionEncodingInvocationEvidence {
         performed: true,
@@ -529,7 +534,6 @@ pub(crate) fn encode_bulk(
             passes,
         };
     }
-    drop(lease);
     Ok(completed)
 }
 

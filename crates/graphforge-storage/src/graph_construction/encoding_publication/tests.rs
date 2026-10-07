@@ -67,7 +67,9 @@ fn heterogeneous_property_batch(uuid: u128, property: usize) -> RecordBatch {
     .unwrap()
 }
 
-fn semantic_authority(mode: graphforge_core::OntologyMode) -> ConstructionSemanticAuthority {
+pub(in crate::graph_construction) fn semantic_authority(
+    mode: graphforge_core::OntologyMode,
+) -> ConstructionSemanticAuthority {
     let document = graphforge_ontology::OntologyDoc {
         ontology_id: "https://graphforge.dev/ontology/construction-test".into(),
         version: "1.0.0".into(),

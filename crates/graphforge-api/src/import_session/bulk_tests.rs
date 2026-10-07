@@ -1,0 +1,283 @@
+//! Initial imports run on the bulk builder (#1883): every intake refusal of the
+//! staged path still fires, routing is decided at plan time, and row groups that
+//! straddle task boundaries publish the staged path's bytes. Typed-ontology
+//! equivalence is proven in storage (`construction_bulk_tests`).
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use arrow::array::{ArrayRef, FixedSizeBinaryArray, StringArray};
+
+use super::test_fixtures::{fixture, nodes};
+use super::*;
+use crate::{bulk_edge_input_schema, bulk_node_input_schema};
+
+fn v7(value: u128) -> Uuid {
+    Uuid::from_u128((value << 64) | (0x7 << 76) | (0x8 << 60) | 1)
+}
+
+fn uuids(values: &[Uuid]) -> ArrayRef {
+    Arc::new(
+        FixedSizeBinaryArray::try_from_iter(values.iter().map(|value| value.as_bytes().as_slice()))
+            .unwrap(),
+    )
+}
+
+fn node_rows(ids: &[Uuid], label: &str) -> RecordBatch {
+    RecordBatch::try_new(
+        bulk_node_input_schema(Vec::new()).unwrap(),
+        vec![
+            uuids(ids),
+            Arc::new(StringArray::from(vec![label; ids.len()])),
+        ],
+    )
+    .unwrap()
+}
+
+fn edge_rows(ids: &[Uuid], rel: &str, from: &[Uuid], to: &[Uuid]) -> RecordBatch {
+    RecordBatch::try_new(
+        bulk_edge_input_schema(Vec::new()).unwrap(),
+        vec![
+            uuids(ids),
+            Arc::new(StringArray::from(vec![rel; ids.len()])),
+            uuids(from),
+            uuids(to),
+        ],
+    )
+    .unwrap()
+}
+
+/// The error an initial import of these batches ends in, after proving the
+/// project still has no generation of its own.
+fn refusal(node_batches: &[RecordBatch], edge_batches: &[RecordBatch]) -> String {
+    let (_directory, _project, graph) = fixture();
+    let before = *graph.current_generation_uuid.lock().unwrap();
+    let mut session = graph
+        .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
+        .unwrap();
+    if !node_batches.is_empty() {
+        session
+            .append_arrow(BulkInputKind::Node, node_batches)
+            .unwrap();
+    }
+    if !edge_batches.is_empty() {
+        session
+            .append_arrow(BulkInputKind::Edge, edge_batches)
+            .unwrap();
+    }
+    let error = session.validate(&graph).unwrap_err().to_string();
+    assert_eq!(*graph.current_generation_uuid.lock().unwrap(), before);
+    assert_eq!(session.manifest.progress.rows_accepted, 0);
+    assert!(
+        session
+            .commit(&graph, None)
+            .unwrap_err()
+            .to_string()
+            .contains("validated"),
+        "a refused import must not commit"
+    );
+    error
+}
+
+#[test]
+fn every_intake_refusal_fires_on_an_initial_import() {
+    let (a, b, c) = (v7(1), v7(2), v7(3));
+    let e = v7(100);
+
+    let message = refusal(&[node_rows(&[Uuid::new_v4()], "Person")], &[]);
+    assert!(message.contains("UUIDv7"), "{message}");
+
+    let message = refusal(&[node_rows(&[a, a], "Person")], &[]);
+    assert!(message.contains("duplicate"), "{message}");
+
+    let message = refusal(
+        &[node_rows(&[a, b], "Person"), node_rows(&[b, c], "Person")],
+        &[],
+    );
+    assert!(message.contains("duplicate"), "{message}");
+
+    let message = refusal(
+        &[node_rows(&[a, b], "Person")],
+        &[
+            edge_rows(&[e], "KNOWS", &[a], &[b]),
+            edge_rows(&[e], "KNOWS", &[b], &[a]),
+        ],
+    );
+    assert!(message.contains("duplicate"), "{message}");
+
+    let message = refusal(
+        &[node_rows(&[a, b], "Person")],
+        &[edge_rows(&[a], "KNOWS", &[a], &[b])],
+    );
+    assert!(message.contains("duplicate"), "{message}");
+
+    let message = refusal(
+        &[node_rows(&[a], "Person")],
+        &[edge_rows(&[e], "KNOWS", &[a], &[c])],
+    );
+    assert!(message.contains("edge endpoint UUID does not exist"), "{message}");
+
+    // An edge may not point at an edge, nor at itself.
+    let message = refusal(
+        &[node_rows(&[a, b], "Person")],
+        &[
+            edge_rows(&[e], "KNOWS", &[a], &[b]),
+            edge_rows(&[v7(101)], "KNOWS", &[a], &[e]),
+        ],
+    );
+    assert!(message.contains("edge endpoint is not a node UUID"), "{message}");
+    let message = refusal(
+        &[node_rows(&[a], "Person")],
+        &[edge_rows(&[e], "KNOWS", &[a], &[e])],
+    );
+    assert!(message.contains("duplicate"), "{message}");
+
+    let message = refusal(&[node_rows(&[a], "not an identifier")], &[]);
+    assert!(message.contains("invalid identifier"), "{message}");
+
+    let message = refusal(
+        &[node_rows(&[a, b], "Person")],
+        &[edge_rows(&[e], "bad rel!", &[a], &[b])],
+    );
+    assert!(message.contains("invalid identifier"), "{message}");
+
+    // Nothing at all names no graph.
+    let message = refusal(&[], &[]);
+    assert!(!message.is_empty());
+}
+
+const CLOCK: i64 = 1_789_000_000_000_000;
+
+/// Pin the recorded session clock of a construction before it stages anything,
+/// so two builds of one input are comparable (the staged path stamps it into
+/// the encoded topology).
+fn pin_clock(root: &Path) {
+    let path = root.join("checkpoint.json");
+    let mut checkpoint: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    checkpoint["session_now_micros"] = serde_json::json!(CLOCK);
+    fs::write(path, serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+}
+
+/// `(path, bytes, sha256)` of every encoded artifact except the ordinal
+/// receipt, which carries a random rebuild nonce (ADR 0038).
+fn encoded_inventory(root: &Path) -> BTreeMap<String, (u64, String)> {
+    let inventory: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("encoded-v1/inventory.json")).unwrap())
+            .unwrap();
+    inventory["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|artifact| {
+            artifact["path"] != "topology/uuid-membership/ordinal-v4-receipt.json"
+        })
+        .map(|artifact| {
+            (
+                artifact["path"].as_str().unwrap().to_owned(),
+                (
+                    artifact["bytes"].as_u64().unwrap(),
+                    artifact["sha256"].as_str().unwrap().to_owned(),
+                ),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn an_initial_import_larger_than_the_memory_budget_keeps_the_staged_path() {
+    let ids = (1..=30).map(v7).collect::<Vec<_>>();
+    for (budget, builder) in [(None, true), (Some(1), false)] {
+        bulk_source::TEST_BUDGET.with(|cell| cell.set(budget));
+        let (_directory, _project, graph) = fixture();
+        let mut session = graph
+            .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
+            .unwrap();
+        session
+            .append_arrow(BulkInputKind::Node, &[nodes(&ids)])
+            .unwrap();
+        let progress = session.validate(&graph);
+        bulk_source::TEST_BUDGET.with(|cell| cell.set(None));
+        let construction = progress.unwrap().construction.unwrap();
+        // The route is decided once, at plan time, from the footers: the same
+        // bytes either way.
+        assert_eq!(construction.bulk_build.is_some(), builder);
+        assert_eq!(construction.accepted_chunks, u64::from(!builder));
+        session.commit(&graph, None).unwrap();
+        assert_eq!(graph.node_count("Person").unwrap(), 30);
+    }
+}
+
+/// Rows whose UUID is null get a deterministic UUID derived from the operation,
+/// the source sequence and the batch index, so a task boundary that moved a
+/// batch boundary would change the published bytes.
+fn null_uuid_nodes(count: usize) -> RecordBatch {
+    let mut builder = arrow::array::FixedSizeBinaryBuilder::with_capacity(count, 16);
+    for index in 0..count {
+        if index % 5 == 0 {
+            builder.append_value(v7(1_000 + index as u128).as_bytes()).unwrap();
+        } else {
+            builder.append_null();
+        }
+    }
+    RecordBatch::try_new(
+        bulk_node_input_schema(Vec::new()).unwrap(),
+        vec![
+            Arc::new(builder.finish()),
+            Arc::new(StringArray::from(vec!["Person"; count])),
+        ],
+    )
+    .unwrap()
+}
+
+#[test]
+fn row_groups_that_straddle_task_boundaries_publish_the_staged_bytes() {
+    // 4-row batches, 16 batches per task (64 rows), 7-row row groups: every
+    // task boundary falls inside a row group.
+    let batch = null_uuid_nodes(300);
+    let mut inventories = Vec::new();
+    for budget in [None, Some(1)] {
+        bulk_source::TEST_BUDGET.with(|cell| cell.set(budget));
+        let source_dir = tempfile::tempdir().unwrap();
+        let parquet = source_dir.path().join("nodes.parquet");
+        let properties = parquet::file::properties::WriterProperties::builder()
+            .set_max_row_group_row_count(Some(7))
+            .build();
+        let mut writer = parquet::arrow::ArrowWriter::try_new(
+            File::create(&parquet).unwrap(),
+            batch.schema(),
+            Some(properties),
+        )
+        .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        let (_directory, _project, graph) = fixture();
+        let limits = ImportSessionLimits {
+            batch_rows: 4,
+            ..ImportSessionLimits::default()
+        };
+        let mut session = graph
+            .begin_import_session(OperationId(v7(5)), limits)
+            .unwrap();
+        session
+            .register_parquet(BulkInputKind::Node, &parquet)
+            .unwrap();
+        let construction = session.open_construction(&graph).unwrap();
+        let root = graph
+            .resolved_generation
+            .container_root()
+            .join(".graphforge-construction")
+            .join(construction.session_uuid().simple().to_string());
+        drop(construction);
+        pin_clock(&root);
+        let progress = session.validate(&graph);
+        bulk_source::TEST_BUDGET.with(|cell| cell.set(None));
+        let construction = progress.unwrap().construction.unwrap();
+        assert_eq!(construction.bulk_build.is_some(), budget.is_none());
+        session.commit(&graph, None).unwrap();
+        assert_eq!(graph.node_count("Person").unwrap(), 300);
+        inventories.push(encoded_inventory(&root));
+    }
+    assert_eq!(inventories[0], inventories[1]);
+}

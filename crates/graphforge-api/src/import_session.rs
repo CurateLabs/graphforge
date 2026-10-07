@@ -888,9 +888,11 @@ impl GraphImportSession {
         let mut construction = self.open_construction(graph)?;
         let session_root = self.root.clone();
         let batch_rows = self.manifest.limits.batch_rows;
-        // Pass 0 routing: an initial build that has staged nothing runs on the
-        // bulk builder; an append, or a session an earlier binary began staging,
-        // keeps the staged path. The choice is made here, from durable state.
+        // Pass 0 routing, decided here from durable state and the footers and
+        // never by retry: an initial build that has staged nothing, and whose
+        // estimated memory fits, runs on the bulk builder (ADR 0058). An
+        // append, a session an earlier binary began staging, and an initial
+        // build larger than memory keep the staged path.
         let initial = {
             let progress = construction.progress();
             progress.parent_topology_generation == 0
@@ -902,7 +904,10 @@ impl GraphImportSession {
                     .all(|source| !source.staged && source.batches_staged == 0)
         };
         if initial {
-            return self.build_initial(&mut construction, graph, cancellation);
+            let plan = self.plan_bulk_build(graph, cancellation)?;
+            if plan.estimated_resident_bytes() <= bulk_source::bulk_build_memory_budget() {
+                return self.build_initial(&mut construction, plan, cancellation);
+            }
         }
         for input_kind in [BulkInputKind::Node, BulkInputKind::Edge] {
             for source_index in 0..self.manifest.sources.len() {
@@ -942,16 +947,12 @@ impl GraphImportSession {
         self.seal_construction(&mut construction, cancellation)
     }
 
-    /// Build an initial generation from every registered source (#1883).
-    ///
-    /// Sources are read in place and in parallel; nothing is staged, so a
-    /// crash leaves nothing to resume and the next `validate` reruns the build.
-    fn build_initial(
-        &mut self,
-        construction: &mut crate::GraphConstructionSession<'_>,
-        graph: &GraphForge,
-        cancellation: Option<&CancellationToken>,
-    ) -> Result<ImportProgress, GfError> {
+    /// Pass 0: plan every registered source from its footer.
+    fn plan_bulk_build<'a>(
+        &self,
+        graph: &'a GraphForge,
+        cancellation: Option<&'a CancellationToken>,
+    ) -> Result<graphforge_storage::BulkBuildPlan<'a>, GfError> {
         let mut plan = graphforge_storage::BulkBuildPlan::default();
         for source in &self.manifest.sources {
             let planned = bulk_source::plan(
@@ -967,6 +968,19 @@ impl GraphImportSession {
                 BulkInputKind::Edge => plan.edges.push(planned),
             }
         }
+        Ok(plan)
+    }
+
+    /// Build an initial generation from every registered source (#1883).
+    ///
+    /// Sources are read in place and in parallel; nothing is staged, so a
+    /// crash leaves nothing to resume and the next `validate` reruns the build.
+    fn build_initial(
+        &mut self,
+        construction: &mut crate::GraphConstructionSession<'_>,
+        plan: graphforge_storage::BulkBuildPlan<'_>,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<ImportProgress, GfError> {
         let region = RegionScope::named("bulk_build");
         let started = CallStart::now();
         let built = construction.build_initial(&plan, cancellation);
@@ -1819,6 +1833,9 @@ mod test_fixtures {
         (directory, project, graph)
     }
 }
+
+#[cfg(all(test, feature = "portable"))]
+mod bulk_tests;
 
 #[cfg(all(test, feature = "portable"))]
 mod tests {

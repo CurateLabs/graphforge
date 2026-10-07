@@ -41,6 +41,7 @@ mod bulk_builder {
             tasks: batches.len().div_ceil(per_task),
             rows: batches.iter().map(|batch| batch.num_rows() as u64).sum(),
             property_free: batches.iter().all(|batch| batch.num_columns() == required),
+            decoded_bytes: batches.iter().map(|batch| batch.get_array_memory_size() as u64).sum(),
             reader: Arc::new(Memory {
                 batches: batches.to_vec(),
                 per_task,
@@ -457,5 +458,56 @@ mod bulk_builder {
                 .unwrap();
             assert_eq!(expected, inventory(&rerun), "killed at {failpoint}");
         }
+    }
+
+    /// The same typed (strict, qualified-route) input through both builds.
+    #[test]
+    fn a_typed_ontology_build_matches_the_staged_encoder() {
+        let authority = super::encoding_publication::tests::semantic_authority(
+            graphforge_core::OntologyMode::Strict,
+        );
+        let nodes = [node_property_batch(1, 2), node_property_batch(3, 1)];
+        let edges = [edge_property_batch(100, 2)];
+        let open = |root: &TempDir| {
+            let mut session = GraphConstructionSession::open_with_semantic_authority(
+                root.path(),
+                Uuid::from_u128(OPERATION),
+                0,
+                authority.clone(),
+                GraphConstructionBudgets::default(),
+            )
+            .unwrap();
+            session.checkpoint.session_now_micros = CLOCK;
+            session
+        };
+
+        let staged_root = TempDir::new().unwrap();
+        let mut staged_session = open(&staged_root);
+        for (index, batch) in nodes.iter().enumerate() {
+            staged_session
+                .append(ConstructionChunkKind::Node, &format!("n{index}"), batch)
+                .unwrap();
+        }
+        for (index, batch) in edges.iter().enumerate() {
+            staged_session
+                .append(ConstructionChunkKind::Edge, &format!("e{index}"), batch)
+                .unwrap();
+        }
+        staged_session.seal().unwrap();
+        let shape = staged_session
+            .shape_canonical_with_cancellation(|| false)
+            .unwrap();
+        let expected = inventory(&staged_session.encode_canonical(&shape, 1).unwrap());
+        assert!(expected.iter().any(|entry| entry.0.starts_with("properties/")));
+        assert!(expected
+            .iter()
+            .any(|entry| entry.0.starts_with("edge_properties/")));
+
+        let bulk_root = TempDir::new().unwrap();
+        let mut bulk_session = open(&bulk_root);
+        let built = bulk_session
+            .prepare_bulk_encoding(1, &plan(&nodes, &edges, 1), || false)
+            .unwrap();
+        assert_same(&expected, &inventory(&built));
     }
 }

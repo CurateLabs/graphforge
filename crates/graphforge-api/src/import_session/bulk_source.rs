@@ -5,7 +5,7 @@
 //! operation identity every batch normalizes under, match a sequential read of
 //! the file.
 
-use std::fs::File;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -159,6 +159,45 @@ impl BulkBatchReader for SourceReader<'_> {
     }
 }
 
+/// Resident bytes an initial build may use: three fifths of the memory the
+/// process can still claim, from `/proc/meminfo` and the cgroup limit, between
+/// 2 GiB and 256 GiB. Where neither is readable the budget is 4 GiB.
+///
+/// This chooses between two builds of the same bytes, never what is built: an
+/// initial build whose estimate exceeds it takes the staged path, which holds a
+/// fixed window of memory (ADR 0058).
+pub(super) fn bulk_build_memory_budget() -> u64 {
+    #[cfg(test)]
+    if let Some(budget) = TEST_BUDGET.with(std::cell::Cell::get) {
+        return budget;
+    }
+    const MIN: u64 = 2 << 30;
+    const MAX: u64 = 256 << 30;
+    const FALLBACK: u64 = 4 << 30;
+    let available = fs::read_to_string("/proc/meminfo").ok().and_then(|text| {
+        text.lines()
+            .find_map(|line| line.strip_prefix("MemAvailable:"))
+            .and_then(|rest| rest.split_ascii_whitespace().next()?.parse::<u64>().ok())
+            .map(|kib| kib.saturating_mul(1024))
+    });
+    let limit = fs::read_to_string("/sys/fs/cgroup/memory.max")
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok());
+    match (available, limit) {
+        (None, None) => FALLBACK,
+        (a, l) => {
+            let claimable = a.unwrap_or(u64::MAX).min(l.unwrap_or(u64::MAX));
+            (claimable / 5 * 3).clamp(MIN, MAX)
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Lets a test force the plan-time routing decision.
+    pub(super) static TEST_BUDGET: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
 /// Plan one registered source from its footer (pass 0).
 pub(super) fn plan<'a>(
     graph: &'a GraphForge,
@@ -198,6 +237,15 @@ pub(super) fn plan<'a>(
         return Err(validation("Parquet import schema lacks required columns"));
     }
     let batches = rows.div_ceil(batch_rows as u64);
+    let decoded_bytes = match &format {
+        Format::Parquet { metadata, .. } => metadata
+            .metadata()
+            .row_groups()
+            .iter()
+            .map(|group| u64::try_from(group.total_byte_size()).unwrap_or(0))
+            .sum(),
+        Format::Arrow => fs::metadata(&path).map_err(storage)?.len(),
+    };
     Ok(BulkSource {
         reader: Arc::new(SourceReader {
             graph,
@@ -212,5 +260,6 @@ pub(super) fn plan<'a>(
         tasks: usize::try_from(batches.div_ceil(BATCHES_PER_TASK)).map_err(storage)?,
         rows,
         property_free: columns == required,
+        decoded_bytes,
     })
 }
