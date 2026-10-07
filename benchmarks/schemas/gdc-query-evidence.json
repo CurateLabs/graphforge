@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-gdc-query-evidence-schema/1",
+  "description": "Per-operation results of `graphforge-benchmark-gdc-scorecard query` against one durable project. Every latency comes from the declared driver clock; see docs/development/benchmarking.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "certification",
+    "suite",
+    "driver",
+    "inputs",
+    "project",
+    "reconciliation",
+    "latency_clock",
+    "result_digest",
+    "variants"
+  ],
+  "properties": {
+    "schema": { "const": "graphforge-gdc-query-evidence/1" },
+    "certification": { "const": false },
+    "suite": { "type": "string", "minLength": 1 },
+    "driver": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "executable_sha256"],
+      "properties": {
+        "name": { "const": "graphforge-benchmark-gdc-scorecard query" },
+        "version": { "type": "string", "minLength": 1 },
+        "executable_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workload_sha256", "expected_counts_sha256"],
+      "properties": {
+        "workload_sha256": { "$ref": "#/$defs/sha256" },
+        "expected_counts_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "opened_with"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "opened_with": { "const": "graphforge_api::GraphForge::new(Some(path))" }
+      }
+    },
+    "reconciliation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "source", "method", "nodes", "edges", "labels", "types"],
+      "properties": {
+        "status": { "const": "reconciled" },
+        "source": { "type": "string", "minLength": 1 },
+        "method": { "type": "string", "minLength": 1 },
+        "nodes": { "$ref": "#/$defs/countPair" },
+        "edges": { "$ref": "#/$defs/countPair" },
+        "labels": { "type": "object", "additionalProperties": { "$ref": "#/$defs/countPair" } },
+        "types": { "type": "object", "additionalProperties": { "$ref": "#/$defs/countPair" } }
+      }
+    },
+    "latency_clock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "producer",
+        "source",
+        "unit",
+        "interval",
+        "warmup_passes_per_variant",
+        "percentile_method"
+      ],
+      "properties": {
+        "id": { "const": "graphforge-gdc-query-clock/1" },
+        "producer": { "const": "graphforge-benchmark-gdc-scorecard query" },
+        "source": { "const": "std::time::Instant" },
+        "unit": { "const": "ns" },
+        "interval": { "type": "string", "minLength": 1 },
+        "warmup_passes_per_variant": { "const": 1 },
+        "percentile_method": { "const": "nearest_rank" }
+      }
+    },
+    "result_digest": { "const": "graphforge-gdc-result-digest/1" },
+    "variants": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/variant" }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "count": { "type": "integer", "minimum": 0 },
+    "countPair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected", "observed"],
+      "properties": {
+        "expected": { "$ref": "#/$defs/count" },
+        "observed": { "$ref": "#/$defs/count" }
+      }
+    },
+    "variant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["query_id", "interface", "warmup", "samples", "summary"],
+      "properties": {
+        "query_id": { "type": "string", "minLength": 1 },
+        "interface": {
+          "enum": [
+            "graphforge_api::GraphForge::execute_with_params",
+            "graphforge_api::GraphForge::rank",
+            "graphforge_api::GraphForge::cluster",
+            "graphforge_api::GraphForge::paths"
+          ]
+        },
+        "warmup": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["binding_id", "excluded"],
+          "properties": {
+            "binding_id": { "type": "string", "minLength": 1 },
+            "excluded": { "const": true }
+          }
+        },
+        "samples": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["binding_id", "latency_ns", "rows", "result_sha256"],
+            "properties": {
+              "binding_id": { "type": "string", "minLength": 1 },
+              "latency_ns": { "$ref": "#/$defs/count" },
+              "rows": { "$ref": "#/$defs/count" },
+              "result_sha256": { "$ref": "#/$defs/sha256" }
+            }
+          }
+        },
+        "summary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["count", "p50_ns", "p95_ns"],
+          "properties": {
+            "count": { "type": "integer", "minimum": 1 },
+            "p50_ns": { "$ref": "#/$defs/count" },
+            "p95_ns": { "$ref": "#/$defs/count" }
+          }
+        }
+      }
+    }
+  }
+}

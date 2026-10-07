@@ -272,6 +272,47 @@ with `md5sum` and `sha256sum` on the archive.
 `tests.test_gdc_scorecard_load` builds `gf` and the converter when
 `GRAPHFORGE_GF_BIN` and `GRAPHFORGE_GDC_SCORECARD_BIN` are unset.
 
+### GDC per-operation query driver
+
+`graphforge-benchmark-gdc-scorecard query` runs a suite's queries against a
+loaded durable project and owns per-operation latency
+(`docs/development/benchmarking.md`, GDC per-operation query latency):
+
+```bash
+graphforge-benchmark-gdc-scorecard query --project <project> \
+  --workload <workload.json> --expected-counts <counts.json> --output <evidence.json>
+```
+
+A suite plugs in with two documents and no driver change (see
+`fixtures/gdc/query-fixture/`):
+
+- `graphforge-gdc-query-workload/1` lists query variants. Each has an `id`, an
+  `operation` and its `bindings`. An operation is `cypher` (`text`, run through
+  `execute_with_params`) or an analyst verb: `rank` or `cluster` (`label`,
+  `by`, `directed`, optional `via`), or `paths` (`by`, `directed`, optional
+  `via` and `weight`, and a `source` selecting `(:label {property: $param})`).
+  Binding `params` use the tagged `IrLiteral` JSON encoding, for example
+  `{"type": "Int", "value": 3}`.
+- `graphforge-gdc-expected-counts/1` gives the total node and edge counts,
+  every label's node count and every relationship type's edge count, and cites
+  their `source`. Type counts must sum to the edge total.
+
+The driver refuses a path without a project rather than creating one. After
+reopen it reads every count back through Cypher count probes and
+`GraphForge::labels`. Any difference, including an undeclared label, exits 2
+with `count_mismatch` before any query runs. Every other failure is also typed
+(`invalid_workload`, `project_missing`, `query_failed`, ...) as one JSON object
+on stderr. The first failing call stops the run, and no evidence is written.
+The `graphforge-gdc-query-evidence/1` output
+(`schemas/gdc-query-evidence.json`) records the reconciliation, the declared
+clock and, per variant, the excluded warm-up binding, each sample's binding id,
+latency, row count and result digest, and nearest-rank p50/p95.
+`gdc_measurement_policy.assert_query_latency_authority` validates it.
+
+```bash
+PYTHONPATH=harness uv run --locked python -m unittest tests.test_gdc_scorecard_query tests.test_gdc_measurement_policy
+```
+
 Per-suite adapters own workload semantics through their own Rust runner and
 harness module. The SNB BI suite (`gdc_snb_bi`) maps the 20 `BI*` analytical
 reads onto the public Cypher / analyst-verb surface and fails closed on weighted

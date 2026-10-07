@@ -1,0 +1,37 @@
+{
+  "schema": "graphforge-gdc-query-workload/1",
+  "suite": "load-fixture",
+  "variants": [
+    {
+      "id": "friends-of-person",
+      "operation": {
+        "kind": "cypher",
+        "text": "MATCH (:Person {id: $person})-[:KNOWS]->(friend:Person) RETURN friend.id AS id, friend.first_name AS name ORDER BY id"
+      },
+      "bindings": [
+        {"id": "person-1", "params": {"person": {"type": "Int", "value": 1}}},
+        {"id": "person-2", "params": {"person": {"type": "Int", "value": 2}}},
+        {"id": "person-3", "params": {"person": {"type": "Int", "value": 3}}}
+      ]
+    },
+    {
+      "id": "vertex-components",
+      "operation": {"kind": "cluster", "label": "Vertex", "by": "components", "directed": false},
+      "bindings": [{"id": "all"}]
+    },
+    {
+      "id": "vertex-bfs",
+      "operation": {
+        "kind": "paths",
+        "by": "bfs",
+        "directed": true,
+        "via": "LINK",
+        "source": {"label": "Vertex", "property": "id", "param": "source"}
+      },
+      "bindings": [
+        {"id": "from-1", "params": {"source": {"type": "Int", "value": 1}}},
+        {"id": "from-4", "params": {"source": {"type": "Int", "value": 4}}}
+      ]
+    }
+  ]
+}
