@@ -32,9 +32,10 @@ from jsonschema import Draft202012Validator
 
 
 def _ensure_runner_built(root: Path) -> Path:
+    # Always ask cargo: a binary left in a reused target directory (CI mounts a
+    # sticky benchmarks/target shared across branches) may predate this tree.
+    # Cargo rebuilds only what changed.
     binary = root / "target" / "debug" / "graphforge-benchmark-gdc-snb-interactive"
-    if binary.is_file():
-        return binary
     target_dir = root / "target"
     completed = subprocess.run(
         [
