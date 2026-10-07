@@ -1,0 +1,402 @@
+{
+  "schema": "graphforge-gdc-ldbc-csv-scorecard-ladder/1",
+  "suite_id": "finbench-transaction",
+  "identity_profile": "scorecard",
+  "load_mapping": "profiles/gdc/finbench-transaction-load-mapping.json",
+  "counts_source": {
+    "url": "https://github.com/ldbc/ldbc_finbench_docs/blob/aebdb298a7496484dad5321211c8d3486295395f/tables/number-of-entities-transaction.tex",
+    "description": "LDBC FinBench Transaction entity counts per scale factor (raw generated data)"
+  },
+  "rungs": [
+    {
+      "id": "sf1",
+      "order": 1,
+      "scale_factor": "1",
+      "dataset_id": "sf1",
+      "archive_url": "https://datasets.ldbcouncil.org/finbench/sf1.tar.gz",
+      "archive_bytes": 679844271,
+      "archive_md5": "0d24ce5fa4457a009cdadaaed52f4f5a",
+      "tables": [
+        {
+          "table": "account",
+          "kind": "nodes",
+          "ldbc_name": "account",
+          "published": 264075,
+          "listed": 204771,
+          "held_back": 34592,
+          "residual": 24712,
+          "deleted_in_raw": 36246,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply. raw/ also keeps deleted_in_raw rows of accounts deleted during generation (deleteTime set); residual of them are in neither snapshot/ nor incremental/."
+        },
+        {
+          "table": "company",
+          "kind": "nodes",
+          "ldbc_name": "company",
+          "published": 40000,
+          "listed": 38857,
+          "held_back": 1143,
+          "residual": 0,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply."
+        },
+        {
+          "table": "loan",
+          "kind": "nodes",
+          "ldbc_name": "loan",
+          "published": 159166,
+          "listed": 137811,
+          "held_back": 21355,
+          "residual": 0,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply."
+        },
+        {
+          "table": "medium",
+          "kind": "nodes",
+          "ldbc_name": "medium",
+          "published": 100000,
+          "listed": 96972,
+          "held_back": 3028,
+          "residual": 0,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply."
+        },
+        {
+          "table": "person",
+          "kind": "nodes",
+          "ldbc_name": "person",
+          "published": 80000,
+          "listed": 77671,
+          "held_back": 2329,
+          "residual": 0,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply."
+        },
+        {
+          "table": "account_repay_loan",
+          "kind": "edges",
+          "ldbc_name": "repay",
+          "published": 497033,
+          "listed": 263972,
+          "held_back": 200537,
+          "residual": 32524,
+          "deleted_in_raw": 53119,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply. raw/ also keeps deleted_in_raw rows of accounts deleted during generation (deleteTime set); residual of them are in neither snapshot/ nor incremental/."
+        },
+        {
+          "table": "account_transfer_account",
+          "kind": "edges",
+          "ldbc_name": "transfer+loanTransfer",
+          "published": 1864184,
+          "listed": 794180,
+          "held_back": 827753,
+          "residual": 242251,
+          "deleted_in_raw": 372259,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply. raw/ also keeps deleted_in_raw rows of accounts deleted during generation (deleteTime set); residual of them are in neither snapshot/ nor incremental/. published sums transfer and loanTransfer: snapshot plus incremental transfers exceed LDBC's transfer count alone, so AccountTransferAccount.csv carries both."
+        },
+        {
+          "table": "account_withdraw_account",
+          "kind": "edges",
+          "ldbc_name": "withdraw",
+          "published": 2011359,
+          "listed": 907482,
+          "held_back": 894826,
+          "residual": 209051,
+          "deleted_in_raw": 366808,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply. raw/ also keeps deleted_in_raw rows of accounts deleted during generation (deleteTime set); residual of them are in neither snapshot/ nor incremental/."
+        },
+        {
+          "table": "company_apply_loan",
+          "kind": "edges",
+          "ldbc_name": "companyApplyLoan",
+          "published": 52820,
+          "listed": 45733,
+          "held_back": 7087,
+          "residual": 0,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply."
+        },
+        {
+          "table": "company_guarantee_company",
+          "kind": "edges",
+          "ldbc_name": "companyGuarantee",
+          "published": 23870,
+          "listed": 18839,
+          "held_back": 5031,
+          "residual": 0,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply."
+        },
+        {
+          "table": "company_invest_company",
+          "kind": "edges",
+          "ldbc_name": "companyInvest",
+          "published": 86092,
+          "listed": 68041,
+          "held_back": 18051,
+          "residual": 0,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply."
+        },
+        {
+          "table": "company_own_account",
+          "kind": "edges",
+          "ldbc_name": "companyOwnAccount",
+          "published": 88119,
+          "listed": 68245,
+          "held_back": 11645,
+          "residual": 8229,
+          "deleted_in_raw": 12010,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply. raw/ also keeps deleted_in_raw rows of accounts deleted during generation (deleteTime set); residual of them are in neither snapshot/ nor incremental/."
+        },
+        {
+          "table": "loan_deposit_account",
+          "kind": "edges",
+          "ldbc_name": "deposit",
+          "published": 512680,
+          "listed": 272417,
+          "held_back": 206687,
+          "residual": 33576,
+          "deleted_in_raw": 54902,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply. raw/ also keeps deleted_in_raw rows of accounts deleted during generation (deleteTime set); residual of them are in neither snapshot/ nor incremental/."
+        },
+        {
+          "table": "medium_signin_account",
+          "kind": "edges",
+          "ldbc_name": "signIn",
+          "published": 451362,
+          "listed": 258056,
+          "held_back": 157406,
+          "residual": 35900,
+          "deleted_in_raw": 56345,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply. raw/ also keeps deleted_in_raw rows of accounts deleted during generation (deleteTime set); residual of them are in neither snapshot/ nor incremental/."
+        },
+        {
+          "table": "person_apply_loan",
+          "kind": "edges",
+          "ldbc_name": "personApplyLoan",
+          "published": 106346,
+          "listed": 92078,
+          "held_back": 14268,
+          "residual": 0,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply."
+        },
+        {
+          "table": "person_guarantee_person",
+          "kind": "edges",
+          "ldbc_name": "personGuarantee",
+          "published": 47935,
+          "listed": 37883,
+          "held_back": 10052,
+          "residual": 0,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply."
+        },
+        {
+          "table": "person_invest_company",
+          "kind": "edges",
+          "ldbc_name": "personInvest",
+          "published": 174064,
+          "listed": 137839,
+          "held_back": 36225,
+          "residual": 0,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply."
+        },
+        {
+          "table": "person_own_account",
+          "kind": "edges",
+          "ldbc_name": "personOwnAccount",
+          "published": 175956,
+          "listed": 136526,
+          "held_back": 22947,
+          "residual": 16483,
+          "deleted_in_raw": 24236,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply. raw/ also keeps deleted_in_raw rows of accounts deleted during generation (deleteTime set); residual of them are in neither snapshot/ nor incremental/."
+        }
+      ]
+    },
+    {
+      "id": "sf10",
+      "order": 2,
+      "scale_factor": "10",
+      "dataset_id": "sf10",
+      "archive_url": "https://datasets.ldbcouncil.org/finbench/sf10.tar.gz",
+      "archive_bytes": 2743383151,
+      "archive_md5": "24dc5f136785b736c7acf1f4238e6845",
+      "tables": [
+        {
+          "table": "account",
+          "kind": "nodes",
+          "ldbc_name": "account",
+          "published": 1980883,
+          "listed": 1534180,
+          "held_back": 260730,
+          "residual": 185973,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply. The residual rows touch accounts; this archive ships no raw/, so how many are rows of deleted accounts, as at SF1, is not measurable from it."
+        },
+        {
+          "table": "company",
+          "kind": "nodes",
+          "ldbc_name": "company",
+          "published": 300000,
+          "listed": 291235,
+          "held_back": 8765,
+          "residual": 0,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply."
+        },
+        {
+          "table": "loan",
+          "kind": "nodes",
+          "ldbc_name": "loan",
+          "published": 1189072,
+          "listed": 1028775,
+          "held_back": 160297,
+          "residual": 0,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply."
+        },
+        {
+          "table": "medium",
+          "kind": "nodes",
+          "ldbc_name": "medium",
+          "published": 2000000,
+          "listed": 1940119,
+          "held_back": 59881,
+          "residual": 0,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply."
+        },
+        {
+          "table": "person",
+          "kind": "nodes",
+          "ldbc_name": "person",
+          "published": 600000,
+          "listed": 582672,
+          "held_back": 17328,
+          "residual": 0,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply."
+        },
+        {
+          "table": "account_repay_loan",
+          "kind": "edges",
+          "ldbc_name": "repay",
+          "published": 3715487,
+          "listed": 1964476,
+          "held_back": 1506917,
+          "residual": 244094,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply. The residual rows touch accounts; this archive ships no raw/, so how many are rows of deleted accounts, as at SF1, is not measurable from it."
+        },
+        {
+          "table": "account_transfer_account",
+          "kind": "edges",
+          "ldbc_name": "transfer+loanTransfer",
+          "published": 14630588,
+          "listed": 6219881,
+          "held_back": 6520244,
+          "residual": 1890463,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply. The residual rows touch accounts; this archive ships no raw/, so how many are rows of deleted accounts, as at SF1, is not measurable from it. published sums transfer and loanTransfer: snapshot plus incremental transfers exceed LDBC's transfer count alone, so AccountTransferAccount.csv carries both."
+        },
+        {
+          "table": "account_withdraw_account",
+          "kind": "edges",
+          "ldbc_name": "withdraw",
+          "published": 15056721,
+          "listed": 6766001,
+          "held_back": 6678525,
+          "residual": 1612195,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply. The residual rows touch accounts; this archive ships no raw/, so how many are rows of deleted accounts, as at SF1, is not measurable from it."
+        },
+        {
+          "table": "company_apply_loan",
+          "kind": "edges",
+          "ldbc_name": "companyApplyLoan",
+          "published": 397060,
+          "listed": 343454,
+          "held_back": 53606,
+          "residual": 0,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply."
+        },
+        {
+          "table": "company_guarantee_company",
+          "kind": "edges",
+          "ldbc_name": "companyGuarantee",
+          "published": 179526,
+          "listed": 141653,
+          "held_back": 37873,
+          "residual": 0,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply."
+        },
+        {
+          "table": "company_invest_company",
+          "kind": "edges",
+          "ldbc_name": "companyInvest",
+          "published": 650190,
+          "listed": 512922,
+          "held_back": 137268,
+          "residual": 0,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply."
+        },
+        {
+          "table": "company_own_account",
+          "kind": "edges",
+          "ldbc_name": "companyOwnAccount",
+          "published": 660625,
+          "listed": 511266,
+          "held_back": 87272,
+          "residual": 62087,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply. The residual rows touch accounts; this archive ships no raw/, so how many are rows of deleted accounts, as at SF1, is not measurable from it."
+        },
+        {
+          "table": "loan_deposit_account",
+          "kind": "edges",
+          "ldbc_name": "deposit",
+          "published": 3829905,
+          "listed": 2024665,
+          "held_back": 1554830,
+          "residual": 250410,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply. The residual rows touch accounts; this archive ships no raw/, so how many are rows of deleted accounts, as at SF1, is not measurable from it."
+        },
+        {
+          "table": "medium_signin_account",
+          "kind": "edges",
+          "ldbc_name": "signIn",
+          "published": 8996781,
+          "listed": 5127913,
+          "held_back": 3166094,
+          "residual": 702774,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply. The residual rows touch accounts; this archive ships no raw/, so how many are rows of deleted accounts, as at SF1, is not measurable from it."
+        },
+        {
+          "table": "person_apply_loan",
+          "kind": "edges",
+          "ldbc_name": "personApplyLoan",
+          "published": 792012,
+          "listed": 685321,
+          "held_back": 106691,
+          "residual": 0,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply."
+        },
+        {
+          "table": "person_guarantee_person",
+          "kind": "edges",
+          "ldbc_name": "personGuarantee",
+          "published": 359283,
+          "listed": 284060,
+          "held_back": 75223,
+          "residual": 0,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply."
+        },
+        {
+          "table": "person_invest_company",
+          "kind": "edges",
+          "ldbc_name": "personInvest",
+          "published": 1300980,
+          "listed": 1028625,
+          "held_back": 272355,
+          "residual": 0,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply."
+        },
+        {
+          "table": "person_own_account",
+          "kind": "edges",
+          "ldbc_name": "personOwnAccount",
+          "published": 1320258,
+          "listed": 1022914,
+          "held_back": 173458,
+          "residual": 123886,
+          "discrepancy": "LDBC's table counts the generated data (raw/); the loaded graph is the archive's snapshot/, and incremental/ adds held_back rows for the write workload, which a read-only load does not apply. The residual rows touch accounts; this archive ships no raw/, so how many are rows of deleted accounts, as at SF1, is not measurable from it."
+        }
+      ]
+    }
+  ]
+}

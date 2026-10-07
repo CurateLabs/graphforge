@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import hashlib
 import io
 import json
 from pathlib import Path
 import shutil
+import tarfile
 import tempfile
 import unittest
+import zipfile
 
 from graphforge_bench import gdc_dataset_cache as cache
 from graphforge_bench.gdc_contracts import (
@@ -187,7 +190,9 @@ class AcquireTests(CacheTestCase):
     def test_sources_outside_the_ldbc_dataset_host_are_refused_before_any_request(self) -> None:
         for source in (
             "https://example.org/graphalytics/tiny-graph.tar.zst",
-            "https://datasets.ldbcouncil.org/graphalytics/tiny-graph.zip",
+            "https://datasets.ldbcouncil.org/graphalytics/tiny-graph.tar.bz2",
+            "https://datasets.ldbcouncil.org/graphalytics/tiny-graph.rar",
+            "https://datasets.ldbcouncil.org/graphalytics/tiny-graph.csv",
         ):
             pin = {**self.pin, "datasets": [{**self.pin["datasets"][0], "source": source}]}
             self.write_pin(pin)
@@ -309,6 +314,227 @@ class CacheRootTests(CacheTestCase):
         with self.assertRaises(cache.DatasetCacheError):
             self.acquire(opener, cache_root=self.scratch / "repo" / "cache")
         self.assertEqual(opener.requests, [])
+
+
+def _tar_gz(members: dict[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+    return buffer.getvalue()
+
+
+def _zip(members: dict[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+    return buffer.getvalue()
+
+
+class ServedFiles:
+    """An opener serving bytes per URL and counting requests, with no network."""
+
+    def __init__(self, payloads: dict[str, bytes]) -> None:
+        self.payloads = payloads
+        self.requests: list[str] = []
+
+    def __call__(self, url: str):
+        self.requests.append(url)
+        return contextlib.closing(io.BytesIO(self.payloads[url]))
+
+
+LDBC = "https://datasets.ldbcouncil.org"
+
+
+class LdbcCsvAssetTests(unittest.TestCase):
+    """`.tar.gz` datasets, `.zip` parameter sets and references, as LDBC publishes them."""
+
+    def setUp(self) -> None:
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.scratch = Path(scratch.name)
+        self.root = self.scratch / "benchmarks"
+        (self.root / "suites").mkdir(parents=True)
+        (self.root / "profiles" / "gdc").mkdir(parents=True)
+        shutil.copy(ROOT / "suites" / "gdc-snb-bi.json", self.root / "suites")
+        shutil.copy(ROOT / "profiles/gdc/snb-bi-identity.json", self.root / "profiles/gdc")
+        self.payloads = {
+            f"{LDBC}/finbench/sf1.tar.gz": _tar_gz(
+                {"sf1/snapshot/Person.csv": b"personId|personName\n1|Ada\n"}
+            ),
+            f"{LDBC}/finbench/sf3.tar.gz": _tar_gz(
+                {"sf3/snapshot/Person.csv": b"personId|personName\n1|Ada\n2|Bob\n"}
+            ),
+            f"{LDBC}/finbench/sf1_read_params.zip": _zip(
+                {"sf1_read_params/complex_1_param.csv": b"id|startTime\n1|1627020616747\n"}
+            ),
+            f"{LDBC}/bi-pre-audit/validation.tar.gz": _tar_gz(
+                {"validation/bi-1.json": b'{"result": []}\n'}
+            ),
+        }
+        real = load_pinned_identity(ROOT / "profiles/gdc/snb-bi-scorecard-identity.json")
+        self.pin = {
+            **real,
+            "datasets": [
+                self.dataset("sf1", "finbench/sf1.tar.gz", "dataset"),
+                self.dataset("sf3", "finbench/sf3.tar.gz", "dataset"),
+                self.dataset("sf1_read_params", "finbench/sf1_read_params.zip", "parameter"),
+            ],
+            "references": [
+                self.reference("sf1", "validation", "bi-pre-audit/validation.tar.gz"),
+                self.reference("sf3", "validation", "bi-pre-audit/validation.tar.gz"),
+            ],
+        }
+        self.write_pin(self.pin)
+        self.cache_root = self.scratch / "cache"
+
+    def dataset(self, dataset_id: str, path: str, role: str) -> dict:
+        source = f"{LDBC}/{path}"
+        return {
+            "id": dataset_id,
+            "role": role,
+            "checksum_sha256": hashlib.sha256(self.payloads[source]).hexdigest(),
+            "license": "publisher-unspecified",
+            "acquisition": "download",
+            "source": source,
+        }
+
+    def reference(self, dataset_id: str, key: str, path: str) -> dict:
+        source = f"{LDBC}/{path}"
+        return {
+            "dataset_id": dataset_id,
+            "workload_key": key,
+            "checksum_sha256": hashlib.sha256(self.payloads[source]).hexdigest(),
+            "source": source,
+        }
+
+    def write_pin(self, pin: dict) -> None:
+        (self.root / "profiles/gdc/snb-bi-scorecard-identity.json").write_text(
+            json.dumps(pin, indent=2), encoding="utf-8"
+        )
+
+    def acquire(self, opener, dataset_ids):
+        return cache.acquire(
+            suite_path=self.root / "suites" / "gdc-snb-bi.json",
+            profile="scorecard",
+            dataset_ids=dataset_ids,
+            cache_root=self.cache_root,
+            work_root=self.scratch / "work",
+            repo_root=self.scratch / "repo",
+            root=self.root,
+            opener=opener,
+            device_of=_same_device,
+        )
+
+    def test_tar_gz_dataset_zip_parameters_and_reference_are_pinned_extracted_and_recorded(
+        self,
+    ) -> None:
+        opener = ServedFiles(self.payloads)
+        result = self.acquire(opener, ["sf1", "sf1_read_params"])
+        self.assertEqual(
+            opener.requests,
+            [
+                f"{LDBC}/finbench/sf1.tar.gz",
+                f"{LDBC}/finbench/sf1_read_params.zip",
+                f"{LDBC}/bi-pre-audit/validation.tar.gz",
+            ],
+        )
+        extracted = result["extracted"]
+        self.assertEqual(
+            (extracted["sf1"] / "sf1/snapshot/Person.csv").read_bytes(),
+            b"personId|personName\n1|Ada\n",
+        )
+        self.assertEqual(
+            (extracted["sf1_read_params"] / "sf1_read_params/complex_1_param.csv").read_bytes(),
+            b"id|startTime\n1|1627020616747\n",
+        )
+        reference = result["extracted_references"]["sf1:validation"]
+        self.assertEqual((reference / "validation/bi-1.json").read_bytes(), b'{"result": []}\n')
+        document = json.loads(result["acquisition_path"].read_text(encoding="utf-8"))
+        self.assertEqual(
+            [(item["id"], item["path"]) for item in document["assets"]],
+            [("sf1", "sf1.tar.gz"), ("sf1_read_params", "sf1_read_params.zip")],
+        )
+        self.assertEqual(
+            document["references"],
+            [
+                {
+                    "dataset_id": "sf1",
+                    "workload_key": "validation",
+                    "path": "validation.tar.gz",
+                    "checksum_sha256": self.pin["references"][0]["checksum_sha256"],
+                }
+            ],
+        )
+        self.assertEqual(
+            result["evidence"]["references"],
+            [
+                {
+                    "dataset_id": "sf1",
+                    "workload_key": "validation",
+                    "checksum_sha256": self.pin["references"][0]["checksum_sha256"],
+                }
+            ],
+        )
+        self.assertEqual(list(self.cache_root.rglob("*.partial")), [])
+
+    def test_a_reference_is_acquired_only_with_its_dataset(self) -> None:
+        opener = ServedFiles(self.payloads)
+        result = self.acquire(opener, ["sf1_read_params"])
+        self.assertEqual(opener.requests, [f"{LDBC}/finbench/sf1_read_params.zip"])
+        self.assertEqual(result["acquisition"]["references"], [])
+        self.assertEqual(result["extracted_references"], {})
+
+    def test_a_reference_shared_by_two_datasets_is_fetched_and_extracted_once(self) -> None:
+        opener = ServedFiles(self.payloads)
+        result = self.acquire(opener, ["sf1", "sf3"])
+        self.assertEqual(opener.requests.count(f"{LDBC}/bi-pre-audit/validation.tar.gz"), 1)
+        self.assertEqual(
+            result["extracted_references"]["sf1:validation"],
+            result["extracted_references"]["sf3:validation"],
+        )
+        self.assertEqual(len(result["acquisition"]["references"]), 2)
+
+    def test_a_reference_that_drifted_from_its_pin_is_a_checksum_mismatch(self) -> None:
+        drifted = {**self.payloads, f"{LDBC}/bi-pre-audit/validation.tar.gz": _tar_gz({"x": b"y"})}
+        with self.assertRaises(cache.DatasetCacheError) as raised:
+            self.acquire(ServedFiles(drifted), ["sf1"])
+        self.assertEqual(raised.exception.cause, "checksum_mismatch")
+        self.assertIn("sf1:validation", str(raised.exception))
+        self.assertEqual(list(self.cache_root.rglob("*.partial")), [])
+        self.assertEqual(list(self.cache_root.rglob("validation.tar.gz")), [])
+
+    def test_a_zip_member_escaping_the_destination_is_refused(self) -> None:
+        url = f"{LDBC}/finbench/sf1_read_params.zip"
+        for member in ("../escaped.csv", "/absolute.csv", "a/../../escaped.csv"):
+            self.payloads[url] = _zip({member: b"x"})
+            self.pin["datasets"][2] = self.dataset(
+                "sf1_read_params", "finbench/sf1_read_params.zip", "parameter"
+            )
+            self.write_pin(self.pin)
+            shutil.rmtree(self.cache_root, ignore_errors=True)
+            with self.assertRaises(cache.DatasetCacheError) as raised:
+                self.acquire(ServedFiles(self.payloads), ["sf1_read_params"])
+            self.assertEqual(raised.exception.cause, "extraction_failed", member)
+            self.assertEqual(list(self.scratch.rglob("escaped.csv")), [], member)
+            self.assertEqual(list(self.scratch.rglob("absolute.csv")), [], member)
+            self.assertEqual(list((self.cache_root / "snb-bi").glob("extracted/*")), [], member)
+
+    def test_corrupt_tar_gz_and_zip_archives_fail_extraction_typed(self) -> None:
+        for index, path in ((0, "finbench/sf1.tar.gz"), (2, "finbench/sf1_read_params.zip")):
+            url = f"{LDBC}/{path}"
+            payloads = {**self.payloads, url: b"neither gzip nor zip"}
+            pin = copy.deepcopy(self.pin)
+            pin["datasets"][index]["checksum_sha256"] = hashlib.sha256(payloads[url]).hexdigest()
+            self.write_pin(pin)
+            shutil.rmtree(self.cache_root, ignore_errors=True)
+            with self.assertRaises(cache.DatasetCacheError) as raised:
+                self.acquire(ServedFiles(payloads), [pin["datasets"][index]["id"]])
+            self.assertEqual(raised.exception.cause, "extraction_failed", path)
+            self.assertEqual(list((self.cache_root / "snb-bi").glob("extracted/*")), [], path)
 
 
 class ScorecardProfileTests(unittest.TestCase):

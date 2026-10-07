@@ -1,0 +1,84 @@
+{
+  "schema": "graphforge-gdc-load-mapping/1",
+  "node_tables": [
+    {
+      "id": "place",
+      "format": "ldbc-csv",
+      "files": ["*/graphs/csv/bi/composite-projected-fk/initial_snapshot/static/Place/*.csv.gz"],
+      "label": "Place",
+      "label_column": "type",
+      "label_values": {"City": "City", "Country": "Country", "Continent": "Continent"},
+      "id_column": "id",
+      "properties": [
+        {"column": "id", "type": "int64"},
+        {"column": "name", "type": "string"},
+        {"column": "url", "type": "string"}
+      ]
+    },
+    {
+      "id": "person",
+      "format": "ldbc-csv",
+      "files": ["*/graphs/csv/bi/composite-projected-fk/initial_snapshot/dynamic/Person/*.csv.gz"],
+      "label": "Person",
+      "id_column": "id",
+      "properties": [
+        {"column": "id", "type": "int64"},
+        {"column": "creationDate", "type": "datetime"},
+        {"column": "firstName", "type": "string"},
+        {"column": "birthday", "type": "date"},
+        {"column": "language", "name": "speaks", "type": "list", "separator": ";"},
+        {"column": "email", "type": "list", "separator": ";"}
+      ]
+    },
+    {
+      "id": "owner",
+      "format": "ldbc-csv",
+      "files": ["*/snapshot/Person.csv"],
+      "label": "Owner",
+      "id_column": "personId",
+      "properties": [
+        {"column": "personId", "name": "id", "type": "int64"},
+        {"column": "isBlocked", "type": "boolean"},
+        {"column": "createTime", "type": "datetime", "format": "naive-utc"},
+        {"column": "birthday", "type": "date", "format": "naive-utc"}
+      ]
+    }
+  ],
+  "edge_tables": [
+    {
+      "id": "place_ispartof_place",
+      "format": "ldbc-csv",
+      "files": ["*/graphs/csv/bi/composite-projected-fk/initial_snapshot/static/Place_isPartOf_Place/*.csv.gz"],
+      "rel_type": "IS_PART_OF",
+      "source": {"label": "Place", "column": "Place1Id"},
+      "target": {"label": "Place", "column": "Place2Id"}
+    },
+    {
+      "id": "person_islocatedin_city",
+      "format": "ldbc-csv",
+      "files": ["*/graphs/csv/bi/composite-projected-fk/initial_snapshot/dynamic/Person_isLocatedIn_City/*.csv.gz"],
+      "rel_type": "IS_LOCATED_IN",
+      "source": {"label": "Person", "column": "PersonId"},
+      "target": {"label": "Place", "column": "CityId"},
+      "properties": [{"column": "creationDate", "type": "datetime"}]
+    },
+    {
+      "id": "person_knows_person",
+      "format": "ldbc-csv",
+      "files": ["*/graphs/csv/bi/composite-projected-fk/initial_snapshot/dynamic/Person_knows_Person/*.csv.gz"],
+      "rel_type": "KNOWS",
+      "source": {"label": "Person", "column": "Person1Id"},
+      "target": {"label": "Person", "column": "Person2Id"},
+      "properties": [{"column": "creationDate", "type": "datetime"}]
+    },
+    {
+      "id": "person_knows_person_long_date",
+      "format": "ldbc-csv",
+      "files": ["*/dynamic/person_knows_person_*.csv"],
+      "rel_type": "KNOWS",
+      "source": {"label": "Person", "column": "Person.id"},
+      "target": {"label": "Person", "column": "Person.id.1"},
+      "properties": [{"column": "creationDate", "type": "datetime", "format": "epoch-millis"}]
+    }
+  ]
+}

@@ -229,19 +229,42 @@ class GdcContractTests(unittest.TestCase):
         self.assertEqual(static_raised.exception.cause, "incomplete_provenance")
         self.assertIn("identity_profile", str(static_raised.exception))
 
-        single_pin_cases = (
-            ("gdc-snb-interactive.json", "snb-interactive-tiny/compatible"),
-            ("gdc-snb-bi.json", "snb-bi-tiny/compatible"),
-            ("gdc-finbench-transaction.json", "finbench-transaction-tiny/compatible"),
+        # The LDBC CSV suites pin their synthetic fixture as "static" and the
+        # published LDBC archives as "scorecard" (#1878); an acquisition must
+        # name which one it claims, exactly as for Graphalytics.
+        ldbc_csv_cases = (
+            ("gdc-snb-interactive.json", "snb-interactive", "snb-interactive-tiny/compatible"),
+            ("gdc-snb-bi.json", "snb-bi", "snb-bi-tiny/compatible"),
+            (
+                "gdc-finbench-transaction.json",
+                "finbench-transaction",
+                "finbench-transaction-tiny/compatible",
+            ),
         )
-        for suite_name, fixture_rel in single_pin_cases:
+        for suite_name, stem, fixture_rel in ldbc_csv_cases:
             suite = load_suite_declaration(self.root / "suites" / suite_name)
-            self.assertNotIn("identity_profiles", suite)
+            self.assertEqual(
+                suite["identity_profiles"],
+                {
+                    "static": f"profiles/gdc/{stem}-identity.json",
+                    "scorecard": f"profiles/gdc/{stem}-scorecard-identity.json",
+                },
+            )
+            self.assertEqual(suite["pinned_identity"], suite["identity_profiles"]["static"])
             fixture = self.fixtures / fixture_rel
             acquisition = load_acquisition(fixture / "acquisition.json")
             self.assertNotIn("identity_profile", acquisition)
-            evidence = validate_suite_acquisition(suite, acquisition, fixture, self.root)
+            with self.assertRaises(GdcContractError) as omitted:
+                validate_suite_acquisition(suite, acquisition, fixture, self.root)
+            self.assertEqual(omitted.exception.cause, "incomplete_provenance", suite_name)
+            static = {**acquisition, "identity_profile": "static"}
+            evidence = validate_suite_acquisition(suite, static, fixture, self.root)
             self.assertEqual(evidence["status"], "passed", suite_name)
+            # The fixture's synthetic assets are not the pinned LDBC archives.
+            with self.assertRaises(GdcContractError):
+                validate_suite_acquisition(
+                    suite, {**acquisition, "identity_profile": "scorecard"}, fixture, self.root
+                )
 
         spb = load_suite_declaration(self.root / "suites" / "gdc-spb.json")
         self.assertNotIn("identity_profiles", spb)
