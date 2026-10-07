@@ -143,7 +143,8 @@ def staged_driver_identities(manifests: list[tuple[Path, str]]) -> list[tuple[Pa
     runner = benchmark_root / "runners" / "gdc-snb-bi"
     staged = dict(manifests)
     digest = hashlib.sha256()
-    for relative in ("Cargo.toml", "src/lib.rs", "src/main.rs"):
+    sources = sorted(path.relative_to(runner).as_posix() for path in (runner / "src").rglob("*.rs"))
+    for relative in ("Cargo.toml", *sources):
         path = runner / relative
         content = staged[path].encode("utf-8") if path in staged else path.read_bytes()
         digest.update(relative.encode("utf-8") + b"\0" + content + b"\0")

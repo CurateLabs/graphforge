@@ -292,7 +292,11 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
 
 /// Parse an LDBC UTC timestamp, `YYYY-MM-DDTHH:MM:SS.mmm+00:00`.
 pub fn parse_utc_datetime(text: &str) -> Result<IrLiteral, SuiteError> {
-    let bad = || invalid(format!("datetime must be YYYY-MM-DDTHH:MM:SS.mmm+00:00: {text}"));
+    let bad = || {
+        invalid(format!(
+            "datetime must be YYYY-MM-DDTHH:MM:SS.mmm+00:00: {text}"
+        ))
+    };
     let bytes = text.as_bytes();
     if bytes.len() != 29 || !text.ends_with("+00:00") {
         return Err(bad());
@@ -458,7 +462,10 @@ pub fn load_query_graph(forge: &GraphForge, directory: &Path) -> Result<LoadSumm
                 .map(|column| column.name())
                 .filter(|name| entries.iter().any(|(key, _)| key == name))
                 .collect();
-            groups.entry(present).or_default().push(IrLiteral::Map(entries));
+            groups
+                .entry(present)
+                .or_default()
+                .push(IrLiteral::Map(entries));
         }
         for (present, rows) in groups {
             let properties = present
@@ -492,13 +499,22 @@ pub fn load_query_graph(forge: &GraphForge, directory: &Path) -> Result<LoadSumm
         let mut rows = Vec::with_capacity(table.rows.len());
         for row in &table.rows {
             let mut entries = Vec::new();
-            for (key, column) in [("source", edge_file.source.1), ("target", edge_file.target.1)] {
+            for (key, column) in [
+                ("source", edge_file.source.1),
+                ("target", edge_file.target.1),
+            ] {
                 let text = cell(&table, row, column, edge_file.file)?;
-                entries.push((key.to_string(), typed(Column::Int(column), &text, edge_file.file)?));
+                entries.push((
+                    key.to_string(),
+                    typed(Column::Int(column), &text, edge_file.file)?,
+                ));
             }
             for column in edge_file.properties {
                 let text = cell(&table, row, column.name(), edge_file.file)?;
-                entries.push((column.name().to_string(), typed(*column, &text, edge_file.file)?));
+                entries.push((
+                    column.name().to_string(),
+                    typed(*column, &text, edge_file.file)?,
+                ));
             }
             rows.push(IrLiteral::Map(entries));
         }
@@ -528,7 +544,10 @@ pub fn load_query_graph(forge: &GraphForge, directory: &Path) -> Result<LoadSumm
         );
         let expected = rows.len() as u64;
         let result = forge
-            .execute_with_params(&query, &HashMap::from([("rows".into(), IrLiteral::List(rows))]))
+            .execute_with_params(
+                &query,
+                &HashMap::from([("rows".into(), IrLiteral::List(rows))]),
+            )
             .map_err(|error| invalid(format!("load {}: {error}", edge_file.file)))?;
         let created = created_count(&result, "edges_created")?;
         if created != expected {
@@ -545,11 +564,7 @@ pub fn load_query_graph(forge: &GraphForge, directory: &Path) -> Result<LoadSumm
 /// Typed parameter bindings for every runnable query, keyed by operation.
 pub type QueryParameters = BTreeMap<Operation, HashMap<String, IrLiteral>>;
 
-fn bind_parameter(
-    query: &BiQuery,
-    name: &str,
-    binding: &Value,
-) -> Result<IrLiteral, SuiteError> {
+fn bind_parameter(query: &BiQuery, name: &str, binding: &Value) -> Result<IrLiteral, SuiteError> {
     let declared = query
         .parameters
         .iter()
@@ -558,8 +573,16 @@ fn bind_parameter(
     let object = binding
         .as_object()
         .filter(|object| object.len() == 2)
-        .ok_or_else(|| invalid(format!("{} {name}: binding must be {{kind, value}}", query.operation)))?;
-    let kind = object.get("kind").and_then(Value::as_str).unwrap_or_default();
+        .ok_or_else(|| {
+            invalid(format!(
+                "{} {name}: binding must be {{kind, value}}",
+                query.operation
+            ))
+        })?;
+    let kind = object
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     if kind != declared.kind.name() {
         return Err(invalid(format!(
             "{} {name}: kind {kind:?} does not match declared {}",
@@ -570,7 +593,12 @@ fn bind_parameter(
     let value = object
         .get("value")
         .ok_or_else(|| invalid(format!("{} {name}: missing value", query.operation)))?;
-    let wrong = || invalid(format!("{} {name}: value does not match kind {kind}", query.operation));
+    let wrong = || {
+        invalid(format!(
+            "{} {name}: value does not match kind {kind}",
+            query.operation
+        ))
+    };
     let literal = match declared.kind {
         ParameterKind::String => IrLiteral::Str(value.as_str().ok_or_else(wrong)?.to_string()),
         ParameterKind::Int64 => IrLiteral::Int(value.as_i64().ok_or_else(wrong)?),
@@ -600,8 +628,8 @@ pub fn load_query_parameters(fixture: &Path) -> Result<QueryParameters, SuiteErr
     let path = fixture.join("parameters.json");
     let text = fs::read_to_string(&path)
         .map_err(|error| invalid(format!("failed to read {}: {error}", path.display())))?;
-    let document: Value =
-        serde_json::from_str(&text).map_err(|error| invalid(format!("parameters.json: {error}")))?;
+    let document: Value = serde_json::from_str(&text)
+        .map_err(|error| invalid(format!("parameters.json: {error}")))?;
     if document.get("schema").and_then(Value::as_str) != Some(QUERY_PARAMETERS_SCHEMA) {
         return Err(invalid("parameters.json: unexpected schema"));
     }
@@ -652,13 +680,17 @@ fn cell_value(column: &dyn Array, row: usize) -> Result<Value, SuiteError> {
             any.downcast_ref::<Int64Array>().expect("Int64").value(row),
         )),
         DataType::Float64 => Ok(Value::from(
-            any.downcast_ref::<Float64Array>().expect("Float64").value(row),
+            any.downcast_ref::<Float64Array>()
+                .expect("Float64")
+                .value(row),
         )),
         DataType::Utf8 => Ok(Value::from(
             any.downcast_ref::<StringArray>().expect("Utf8").value(row),
         )),
         DataType::Boolean => Ok(Value::from(
-            any.downcast_ref::<BooleanArray>().expect("Boolean").value(row),
+            any.downcast_ref::<BooleanArray>()
+                .expect("Boolean")
+                .value(row),
         )),
         DataType::Struct(_) => {
             let value = any.downcast_ref::<StructArray>().expect("Struct");
@@ -687,7 +719,10 @@ fn cell_value(column: &dyn Array, row: usize) -> Result<Value, SuiteError> {
 }
 
 /// Result rows in `query.columns` order, as JSON values.
-pub fn result_rows(query: &BiQuery, batches: &[RecordBatch]) -> Result<Vec<Vec<Value>>, SuiteError> {
+pub fn result_rows(
+    query: &BiQuery,
+    batches: &[RecordBatch],
+) -> Result<Vec<Vec<Value>>, SuiteError> {
     let mut rows = Vec::new();
     for batch in batches {
         let names: Vec<&str> = batch
@@ -723,13 +758,20 @@ pub fn execute_query(
 ) -> Result<Vec<Vec<Value>>, SuiteError> {
     let result = forge
         .execute_with_params(query.cypher, parameters)
-        .map_err(|error| invalid(format!("live_api_execution_failed:{}: {error}", query.operation)))?;
+        .map_err(|error| {
+            invalid(format!(
+                "live_api_execution_failed:{}: {error}",
+                query.operation
+            ))
+        })?;
     result_rows(query, &result.batches)
 }
 
 fn cells_match(expected: &Value, actual: &Value) -> bool {
     match (expected, actual) {
-        (Value::Number(expected), Value::Number(actual)) if expected.is_f64() || actual.is_f64() => {
+        (Value::Number(expected), Value::Number(actual))
+            if expected.is_f64() || actual.is_f64() =>
+        {
             match (expected.as_f64(), actual.as_f64()) {
                 (Some(left), Some(right)) if expected.is_f64() && actual.is_f64() => {
                     (left - right).abs() <= FLOAT_TOLERANCE * left.abs().max(right.abs()).max(1.0)
@@ -771,12 +813,15 @@ pub fn compare_rows(
 }
 
 /// Read the independently derived expected rows for `operation`.
-pub fn load_expected_rows(fixture: &Path, operation: Operation) -> Result<Vec<Vec<Value>>, SuiteError> {
+pub fn load_expected_rows(
+    fixture: &Path,
+    operation: Operation,
+) -> Result<Vec<Vec<Value>>, SuiteError> {
     let path = fixture.join("expected").join(format!("{operation}.json"));
     let text = fs::read_to_string(&path)
         .map_err(|error| invalid(format!("failed to read {}: {error}", path.display())))?;
-    let document: Value =
-        serde_json::from_str(&text).map_err(|error| invalid(format!("{operation}.json: {error}")))?;
+    let document: Value = serde_json::from_str(&text)
+        .map_err(|error| invalid(format!("{operation}.json: {error}")))?;
     if document.get("schema").and_then(Value::as_str) != Some(QUERY_EXPECTED_SCHEMA)
         || document.get("operation").and_then(Value::as_str) != Some(operation.code())
         || document.get("authority").and_then(Value::as_str) != Some(EXPECTED_AUTHORITY)
@@ -886,8 +931,17 @@ mod tests {
             &row(Value::from(0.3)),
         )
         .unwrap();
-        assert!(compare_rows(Operation::Bi1, &row(Value::from(0.3)), &row(Value::from(0.31))).is_err());
-        assert!(compare_rows(Operation::Bi1, &row(Value::from(3.0)), &row(Value::from(3))).is_err());
+        assert!(
+            compare_rows(
+                Operation::Bi1,
+                &row(Value::from(0.3)),
+                &row(Value::from(0.31))
+            )
+            .is_err()
+        );
+        assert!(
+            compare_rows(Operation::Bi1, &row(Value::from(3.0)), &row(Value::from(3))).is_err()
+        );
         assert!(compare_rows(Operation::Bi1, &row(Value::from(3)), &row(Value::from(4))).is_err());
     }
 }

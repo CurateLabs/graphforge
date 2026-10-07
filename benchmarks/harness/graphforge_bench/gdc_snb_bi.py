@@ -43,6 +43,8 @@ RESOURCE_SCHEMA = "graphforge-gdc-snb-bi-resources/1"
 LIVE_EVIDENCE_SCHEMA = "graphforge-gdc-snb-bi-live-evidence/2"
 LIVE_OPERATION = "BI2"
 LIVE_FIXTURE = "snb-bi-live"
+QUERY_EVIDENCE_SCHEMA = "graphforge-gdc-snb-bi-query-evidence/1"
+QUERY_FIXTURE = "snb-bi-queries"
 
 BATCH_UPDATE_CAUSE = "bi_batch_update_stream_not_exposed"
 WEIGHTED_PATH_CAUSE = "weighted_shortest_path_not_exposed"
@@ -153,6 +155,37 @@ def run_live_bi2(
     if evidence.get("schema") != LIVE_EVIDENCE_SCHEMA:
         raise SnbBiSuiteError("invalid_document", "unexpected live evidence schema")
     _enforce_measurement_boundary(evidence, label="live snb-bi evidence")
+    return evidence
+
+
+def run_query_fixture(
+    *,
+    root: Path | None = None,
+    fixture: Path | None = None,
+) -> dict[str, Any]:
+    """Run every runnable BI read through the Rust runner on the query fixture.
+
+    The runner loads the fixture CSV files into an in-memory GraphForge, runs
+    each read through the public API, and compares the rows with the expected
+    rows derived independently by ``gdc_snb_bi_reference``.
+    """
+    base = root or workspace_root()
+    source = fixture or base / "fixtures" / "gdc" / QUERY_FIXTURE
+    with tempfile.TemporaryDirectory(prefix="gdc-snb-bi-queries-") as tmp:
+        evidence_path = Path(tmp) / "evidence.json"
+        completed = _run_runner(["run-queries", str(source), str(evidence_path)], base)
+        if not evidence_path.is_file():
+            raise SnbBiSuiteError("invalid_document", completed.stderr.strip())
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    if evidence.get("schema") != QUERY_EVIDENCE_SCHEMA:
+        raise SnbBiSuiteError("invalid_document", "unexpected snb-bi query evidence schema")
+    _enforce_measurement_boundary(evidence, label="snb-bi query evidence")
+    if completed.returncode != 0:
+        failed = [item for item in evidence["operations"] if item["status"] == "failed"]
+        raise SnbBiSuiteError(
+            "reference_mismatch",
+            "; ".join(f"{item['operation']}: {item['cause']}" for item in failed),
+        )
     return evidence
 
 
@@ -303,6 +336,8 @@ __all__ = [
     "LIVE_FIXTURE",
     "LIVE_OPERATION",
     "OPERATIONS",
+    "QUERY_EVIDENCE_SCHEMA",
+    "QUERY_FIXTURE",
     "RESOURCE_SCHEMA",
     "WEIGHTED_PATH_CAUSE",
     "WEIGHTED_PATH_READS",
@@ -314,6 +349,7 @@ __all__ = [
     "list_operation_rules",
     "map_operation_file",
     "run_live_bi2",
+    "run_query_fixture",
     "run_tiny_suite",
     "validate_live_fixture",
 ]

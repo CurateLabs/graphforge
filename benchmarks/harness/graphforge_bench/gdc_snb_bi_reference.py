@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import json
 from pathlib import Path
+import re
 import sys
 from typing import Any
 
@@ -80,15 +81,11 @@ class Graph:
         return {tag for tag, tag_name in self.tag_name.items() if tag_name == name}
 
     def tags_of_class(self, name: str) -> set[int]:
-        return {
-            tag for tag, cls in self.tag_class_of.items() if self.tag_class_name[cls] == name
-        }
+        return {tag for tag, cls in self.tag_class_of.items() if self.tag_class_name[cls] == name}
 
     def persons_in_country(self, name: str) -> set[int]:
         return {
-            person
-            for person in self.person
-            if self.country_name[self.country_of(person)] == name
+            person for person in self.person if self.country_name[self.country_of(person)] == name
         }
 
 
@@ -117,14 +114,12 @@ def load_graph(directory: Path) -> Graph:
         tag_class_name={int(r["id"]): r["name"] for r in _read(directory, "TagClass")},
         tag_name={int(r["id"]): r["name"] for r in _read(directory, "Tag")},
         tag_class_of={
-            int(r["TagId"]): int(r["TagClassId"])
-            for r in _read(directory, "Tag_hasType_TagClass")
+            int(r["TagId"]): int(r["TagClassId"]) for r in _read(directory, "Tag_hasType_TagClass")
         },
         country_name={int(r["id"]): r["name"] for r in _read(directory, "Country")},
         city_name={int(r["id"]): r["name"] for r in _read(directory, "City")},
         city_country={
-            int(r["CityId"]): int(r["CountryId"])
-            for r in _read(directory, "City_isPartOf_Country")
+            int(r["CityId"]): int(r["CountryId"]) for r in _read(directory, "City_isPartOf_Country")
         },
         person={
             int(r["id"]): {
@@ -221,10 +216,10 @@ def bi1(g: Graph, datetime: datetime) -> list[Row]:
     return rows
 
 
-def bi2(g: Graph, date: datetime, tagClass: str) -> list[Row]:
+def bi2(g: Graph, date: datetime, tag_class: str) -> list[Row]:
     w1, w2 = date + timedelta(days=100), date + timedelta(days=200)
     rows = []
-    for tag in g.tags_of_class(tagClass):
+    for tag in g.tags_of_class(tag_class):
         tagged = [m for m in g.messages.values() if tag in m.tags]
         c1 = sum(1 for m in tagged if date <= m.creation < w1)
         c2 = sum(1 for m in tagged if w1 <= m.creation < w2)
@@ -233,8 +228,8 @@ def bi2(g: Graph, date: datetime, tagClass: str) -> list[Row]:
     return rows[:100]
 
 
-def bi3(g: Graph, tagClass: str, country: str) -> list[Row]:
-    class_tags = g.tags_of_class(tagClass)
+def bi3(g: Graph, tag_class: str, country: str) -> list[Row]:
+    class_tags = g.tags_of_class(tag_class)
     located = g.persons_in_country(country)
     counts: dict[int, int] = defaultdict(int)
     for m in g.messages.values():
@@ -303,9 +298,7 @@ def bi5(g: Graph, tag: str) -> list[Row]:
             entry[0] += replies[m.id]
             entry[1] += like_counts[m.id]
             entry[2] += 1
-    rows = [
-        [person, rc, lc, mc, mc + 2 * rc + 10 * lc] for person, (rc, lc, mc) in stats.items()
-    ]
+    rows = [[person, rc, lc, mc, mc + 2 * rc + 10 * lc] for person, (rc, lc, mc) in stats.items()]
     rows.sort(key=lambda r: (-r[4], r[0]))
     return rows[:100]
 
@@ -346,14 +339,14 @@ def bi7(g: Graph, tag: str) -> list[Row]:
     return rows[:100]
 
 
-def bi8(g: Graph, tag: str, startDate: datetime, endDate: datetime) -> list[Row]:
+def bi8(g: Graph, tag: str, start_date: datetime, end_date: datetime) -> list[Row]:
     tag_ids = g.tags_named(tag)
     score: dict[int, int] = defaultdict(int)
     for person, interests in g.interests.items():
         if interests & tag_ids:
             score[person] += 100
     for m in g.messages.values():
-        if m.tags & tag_ids and startDate < m.creation < endDate:
+        if m.tags & tag_ids and start_date < m.creation < end_date:
             score[m.creator] += 1
     rows = []
     for person, own in score.items():
@@ -363,9 +356,9 @@ def bi8(g: Graph, tag: str, startDate: datetime, endDate: datetime) -> list[Row]
     return rows[:100]
 
 
-def bi9(g: Graph, startDate: datetime, endDate: datetime) -> list[Row]:
+def bi9(g: Graph, start_date: datetime, end_date: datetime) -> list[Row]:
     def in_window(value: datetime) -> bool:
-        return startDate <= value <= endDate
+        return start_date <= value <= end_date
 
     thread_messages: dict[int, int] = defaultdict(int)
     for m in g.messages.values():
@@ -387,14 +380,14 @@ def bi9(g: Graph, startDate: datetime, endDate: datetime) -> list[Row]:
 
 def bi10(
     g: Graph,
-    personId: int,
+    person_id: int,
     country: str,
-    tagClass: str,
-    minPathDistance: int,
-    maxPathDistance: int,
+    tag_class: str,
+    min_path_distance: int,
+    max_path_distance: int,
 ) -> list[Row]:
-    distance = {personId: 0}
-    frontier = [personId]
+    distance = {person_id: 0}
+    frontier = [person_id]
     while frontier:
         following = []
         for person in frontier:
@@ -404,11 +397,11 @@ def bi10(
                     following.append(friend)
         frontier = following
     located = g.persons_in_country(country)
-    class_tags = g.tags_of_class(tagClass)
+    class_tags = g.tags_of_class(tag_class)
     counts: dict[tuple[int, str], int] = defaultdict(int)
     for m in g.messages.values():
         hops = distance.get(m.creator)
-        if hops is None or not minPathDistance <= hops <= maxPathDistance:
+        if hops is None or not min_path_distance <= hops <= max_path_distance:
             continue
         if m.creator not in located or not m.tags & class_tags:
             continue
@@ -419,12 +412,12 @@ def bi10(
     return rows[:100]
 
 
-def bi11(g: Graph, country: str, startDate: datetime, endDate: datetime) -> list[Row]:
+def bi11(g: Graph, country: str, start_date: datetime, end_date: datetime) -> list[Row]:
     located = g.persons_in_country(country)
 
     def edge(a: int, b: int) -> bool:
         created = g.knows.get((a, b))
-        return created is not None and startDate <= created <= endDate
+        return created is not None and start_date <= created <= end_date
 
     people = sorted(located)
     count = 0
@@ -439,14 +432,14 @@ def bi11(g: Graph, country: str, startDate: datetime, endDate: datetime) -> list
     return [[count]]
 
 
-def bi12(g: Graph, startDate: datetime, lengthThreshold: int, languages: list[str]) -> list[Row]:
+def bi12(g: Graph, start_date: datetime, length_threshold: int, languages: list[str]) -> list[Row]:
     per_person = dict.fromkeys(g.person, 0)
     for m in g.messages.values():
         root = g.messages[g.root_post(m.id)]
         if (
             m.content is not None
-            and m.length < lengthThreshold
-            and m.creation > startDate
+            and m.length < length_threshold
+            and m.creation > start_date
             and root.language in languages
         ):
             per_person[m.creator] += 1
@@ -458,16 +451,16 @@ def bi12(g: Graph, startDate: datetime, lengthThreshold: int, languages: list[st
     return rows
 
 
-def bi13(g: Graph, country: str, endDate: datetime) -> list[Row]:
+def bi13(g: Graph, country: str, end_date: datetime) -> list[Row]:
     zombies = set()
     for person in g.persons_in_country(country):
         created = g.person[person]["creationDate"]
-        if created >= endDate:
+        if created >= end_date:
             continue
         messages = sum(
-            1 for m in g.messages.values() if m.creator == person and m.creation < endDate
+            1 for m in g.messages.values() if m.creator == person and m.creation < end_date
         )
-        months = 12 * (endDate.year - created.year) + (endDate.month - created.month) + 1
+        months = 12 * (end_date.year - created.year) + (end_date.month - created.month) + 1
         if messages < months:
             zombies.add(person)
     rows = []
@@ -476,7 +469,7 @@ def bi13(g: Graph, country: str, endDate: datetime) -> list[Row]:
         for liker, message in g.likes:
             if g.messages[message].creator != zombie:
                 continue
-            if g.person[liker]["creationDate"] < endDate:
+            if g.person[liker]["creationDate"] < end_date:
                 total += 1
                 zombie_likes += liker in zombies
         rows.append([zombie, zombie_likes, total, zombie_likes / total if total else 0.0])
@@ -489,43 +482,36 @@ def bi14(g: Graph, country1: str, country2: str) -> list[Row]:
 
     def replied(author: int, target: int) -> bool:
         return any(
-            m.creator == author
-            and m.parent is not None
-            and g.messages[m.parent].creator == target
+            m.creator == author and m.parent is not None and g.messages[m.parent].creator == target
             for m in g.messages.values()
         )
 
     def liked(liker: int, target: int) -> bool:
         return any(
-            person == liker and g.messages[message].creator == target
-            for person, message in g.likes
+            person == liker and g.messages[message].creator == target for person, message in g.likes
         )
 
     best: dict[int, tuple[int, int, int]] = {}
     for p1, p2 in g.knows:
         if p1 not in in1 or p2 not in in2:
             continue
-        score = (
-            4 * replied(p1, p2) + 1 * replied(p2, p1) + 10 * liked(p1, p2) + 1 * liked(p2, p1)
-        )
+        score = 4 * replied(p1, p2) + 1 * replied(p2, p1) + 10 * liked(p1, p2) + 1 * liked(p2, p1)
         city = g.person_city[p1]
         candidate = (-score, p1, p2)
         if city not in best or candidate < best[city]:
             best[city] = candidate
-    rows = [
-        [p1, p2, g.city_name[city], -negative] for city, (negative, p1, p2) in best.items()
-    ]
+    rows = [[p1, p2, g.city_name[city], -negative] for city, (negative, p1, p2) in best.items()]
     rows.sort(key=lambda r: (-r[3], r[0], r[1]))
     return rows[:100]
 
 
 def bi16(
     g: Graph,
-    tagA: str,
-    dateA: datetime,
-    tagB: str,
-    dateB: datetime,
-    maxKnowsLimit: int,
+    tag_a: str,
+    date_a: datetime,
+    tag_b: str,
+    date_b: datetime,
+    max_knows_limit: int,
 ) -> list[Row]:
     def side(tag: str, day: datetime) -> dict[int, int]:
         tag_ids = g.tags_named(tag)
@@ -536,10 +522,10 @@ def bi16(
         return {
             person: count
             for person, count in counts.items()
-            if len(g.friends(person) & counts.keys()) <= maxKnowsLimit
+            if len(g.friends(person) & counts.keys()) <= max_knows_limit
         }
 
-    a, b = side(tagA, dateA), side(tagB, dateB)
+    a, b = side(tag_a, date_a), side(tag_b, date_b)
     rows = [[person, a[person], b[person]] for person in a.keys() & b.keys()]
     rows.sort(key=lambda r: (-(r[1] + r[2]), r[0]))
     return rows[:20]
@@ -608,6 +594,11 @@ DERIVATIONS = {
 }
 
 
+def _snake_case(name: str) -> str:
+    """Map an LDBC parameter name (``tagClass``) to its argument (``tag_class``)."""
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
+
 def _bind(binding: dict[str, Any]) -> Any:
     kind, value = binding["kind"], binding["value"]
     if kind == "datetime":
@@ -631,7 +622,9 @@ def derive(fixture: Path) -> dict[str, dict[str, Any]]:
         raise ValueError(f"parameters must cover exactly {sorted(DERIVATIONS)}")
     expected = {}
     for operation, derivation in DERIVATIONS.items():
-        bindings = {name: _bind(binding) for name, binding in parameters[operation].items()}
+        bindings = {
+            _snake_case(name): _bind(binding) for name, binding in parameters[operation].items()
+        }
         expected[operation] = {
             "schema": EXPECTED_SCHEMA,
             "operation": operation,

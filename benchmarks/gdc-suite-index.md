@@ -87,16 +87,20 @@ PYTHONPATH=harness GRAPHFORGE_GDC_SNB_INTERACTIVE_BIN=target/debug/graphforge-be
 | Official focus | LDBC SNB Business Intelligence: analytical read queries over the social-network graph plus a batch maintenance stream |
 | Queries | 20 analytical reads `BI1`..`BI20` |
 | Maintenance | Batch inserts `INS1`..`INS8` and batch deletes `DEL1`..`DEL8` |
-| Runner | `runners/gdc-snb-bi` (`gdc-snb-bi`), serde-only control plane; no product-crate dependency |
+| Runner | `runners/gdc-snb-bi` (`gdc-snb-bi`), executes reads through the public `graphforge-api` |
 | GraphForge disposition | `executable` (bounded tiny fixture only) |
 | Certification | **false** — engineering evidence only; never masquerades as an audited GDC certification |
 
 ### Query mapping
 
-Analytical reads that are ordinary traversals, aggregations, grouped counts,
-and top-k rankings map to the public GraphForge Cypher / analyst-verb surface.
-The runner records the concrete Cypher/analyst-verb shape for each compatible
-read.
+Seventeen analytical reads run as Cypher through the public API. Their texts
+live in `runners/gdc-snb-bi/src/queries.rs` and follow the LDBC SNB BI
+reference queries (`neo4j/queries/bi-N.cypher`, with semantics cross-checked
+against `umbra/queries/bi-N.sql`). Where GraphForge cannot run the upstream text
+as written, the definition records the exact rewrite and why the result is
+unchanged. `run-queries` executes them on the committed `snb-bi-queries`
+fixture and compares every result with rows derived independently from the
+fixture CSV files.
 
 ### Unsupported policy (fail closed)
 

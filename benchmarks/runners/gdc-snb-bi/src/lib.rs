@@ -642,21 +642,31 @@ pub fn map_operation(operation: Operation) -> MappingOutcome {
         | Operation::Bi18
         | Operation::Bi19
         | Operation::Bi20 => map_analytical_read(operation),
-        Operation::Ins1 => batch_update_incompatible("INS1 inserts a Person with dependency-time-ordered edges"),
-        Operation::Ins2 => batch_update_incompatible("INS2 inserts a Person-likes-Post interaction"),
-        Operation::Ins3 => batch_update_incompatible("INS3 inserts a Person-likes-Comment interaction"),
+        Operation::Ins1 => {
+            batch_update_incompatible("INS1 inserts a Person with dependency-time-ordered edges")
+        }
+        Operation::Ins2 => {
+            batch_update_incompatible("INS2 inserts a Person-likes-Post interaction")
+        }
+        Operation::Ins3 => {
+            batch_update_incompatible("INS3 inserts a Person-likes-Comment interaction")
+        }
         Operation::Ins4 => batch_update_incompatible("INS4 inserts a Forum"),
         Operation::Ins5 => batch_update_incompatible("INS5 inserts a Forum membership"),
         Operation::Ins6 => batch_update_incompatible("INS6 inserts a Post"),
         Operation::Ins7 => batch_update_incompatible("INS7 inserts a Comment reply"),
         Operation::Ins8 => batch_update_incompatible("INS8 inserts a KNOWS friendship"),
-        Operation::Del1 => batch_update_incompatible("DEL1 deletes a Person and its dependent graph"),
+        Operation::Del1 => {
+            batch_update_incompatible("DEL1 deletes a Person and its dependent graph")
+        }
         Operation::Del2 => batch_update_incompatible("DEL2 deletes a Post-likes edge"),
         Operation::Del3 => batch_update_incompatible("DEL3 deletes a Comment-likes edge"),
         Operation::Del4 => batch_update_incompatible("DEL4 deletes a Forum and its dependents"),
         Operation::Del5 => batch_update_incompatible("DEL5 deletes a Forum membership"),
         Operation::Del6 => batch_update_incompatible("DEL6 deletes a Post and its reply subtree"),
-        Operation::Del7 => batch_update_incompatible("DEL7 deletes a Comment and its reply subtree"),
+        Operation::Del7 => {
+            batch_update_incompatible("DEL7 deletes a Comment and its reply subtree")
+        }
         Operation::Del8 => batch_update_incompatible("DEL8 deletes a KNOWS friendship"),
     }
 }

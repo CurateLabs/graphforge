@@ -123,10 +123,9 @@ fn declared_parameters_are_exactly_the_ones_the_text_uses() {
 
 #[test]
 fn bi10_refuses_path_distances_other_than_the_specification() {
-    let mut document: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(fixture().join("parameters.json")).unwrap(),
-    )
-    .unwrap();
+    let mut document: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(fixture().join("parameters.json")).unwrap())
+            .unwrap();
     document["queries"]["BI10"]["maxPathDistance"]["value"] = serde_json::json!(5);
     let directory = std::env::temp_dir().join(format!("gdc-snb-bi-bi10-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();

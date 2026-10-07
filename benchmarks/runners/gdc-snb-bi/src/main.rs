@@ -1,3 +1,4 @@
+use graphforge_benchmark_gdc_snb_bi::query_fixture::run_query_fixture;
 use graphforge_benchmark_gdc_snb_bi::{
     JOB_SCHEMA, MappingOutcome, Operation, OperationJob, OperationStatus, assemble_evidence,
     load_resource_report, load_result_rows, map_operation, operation_rules, run_job,
@@ -13,7 +14,7 @@ fn main() -> ExitCode {
     let Some(command) = args.next() else {
         eprintln!(
             "usage: graphforge-benchmark-gdc-snb-bi \
-             <list-operations|map-operation|validate-live-context|run-live|run-static-suite> ..."
+             <list-operations|map-operation|validate-live-context|run-live|run-queries|run-static-suite> ..."
         );
         return ExitCode::from(2);
     };
@@ -93,6 +94,33 @@ fn main() -> ExitCode {
                             eprintln!("failed to write live evidence: {error}");
                             ExitCode::FAILURE
                         }
+                    }
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "run-queries" => {
+            let (Some(fixture_path), Some(evidence_path), None) =
+                (args.next(), args.next(), args.next())
+            else {
+                eprintln!("usage: run-queries FIXTURE_DIR EVIDENCE.json");
+                return ExitCode::from(2);
+            };
+            match run_query_fixture(&PathBuf::from(fixture_path)) {
+                Ok(evidence) => {
+                    let payload = serde_json::to_string_pretty(&evidence).unwrap();
+                    if let Err(error) = fs::write(evidence_path, format!("{payload}\n")) {
+                        eprintln!("failed to write query evidence: {error}");
+                        return ExitCode::FAILURE;
+                    }
+                    if evidence["status"] == "passed" {
+                        ExitCode::SUCCESS
+                    } else {
+                        eprintln!("reference_mismatch: a runnable SNB BI read failed");
+                        ExitCode::FAILURE
                     }
                 }
                 Err(error) => {

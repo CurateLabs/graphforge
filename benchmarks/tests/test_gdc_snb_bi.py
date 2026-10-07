@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import unittest
 
+from graphforge_bench import gdc_snb_bi_reference
 from graphforge_bench.gdc_contracts import list_gdc_suites, workspace_root
 from graphforge_bench.gdc_snb_bi import (
     ANALYTICAL_READS,
@@ -18,6 +19,8 @@ from graphforge_bench.gdc_snb_bi import (
     EVIDENCE_SCHEMA,
     LIVE_EVIDENCE_SCHEMA,
     OPERATIONS,
+    QUERY_EVIDENCE_SCHEMA,
+    QUERY_FIXTURE,
     RESOURCE_SCHEMA,
     WEIGHTED_PATH_CAUSE,
     WEIGHTED_PATH_READS,
@@ -27,6 +30,7 @@ from graphforge_bench.gdc_snb_bi import (
     list_operation_rules,
     map_operation_file,
     run_live_bi2,
+    run_query_fixture,
     run_tiny_suite,
     validate_live_fixture,
 )
@@ -79,7 +83,10 @@ class GdcSnbBiSuiteTests(unittest.TestCase):
     def test_internal_driver_identity_matches_actual_source_bytes(self) -> None:
         runner = self.root / "runners" / "gdc-snb-bi"
         digest = hashlib.sha256()
-        for relative in ("Cargo.toml", "src/lib.rs", "src/main.rs"):
+        sources = sorted(
+            path.relative_to(runner).as_posix() for path in (runner / "src").rglob("*.rs")
+        )
+        for relative in ("Cargo.toml", *sources):
             digest.update(relative.encode())
             digest.update(b"\0")
             digest.update((runner / relative).read_bytes())
@@ -162,6 +169,50 @@ class GdcSnbBiSuiteTests(unittest.TestCase):
             evidence["execution_authority"]["runner_executable_sha256"],
             r"^[a-f0-9]{64}$",
         )
+
+    def test_runnable_reads_match_independent_expectations(self) -> None:
+        evidence = run_query_fixture()
+        self.assertEqual(evidence["schema"], QUERY_EVIDENCE_SCHEMA)
+        self.assertEqual(evidence["status"], "passed")
+        self.assertIs(evidence["certification"], False)
+        self.assertEqual(
+            evidence["expected_authority"], "independent_python_derivation_from_fixture_csv"
+        )
+        self.assertEqual(evidence["interface"], "graphforge_api::GraphForge::execute_with_params")
+        by_op = {item["operation"]: item for item in evidence["operations"]}
+        self.assertEqual(set(by_op), set(ANALYTICAL_READS))
+        for read in ANALYTICAL_READS:
+            if read in WEIGHTED_PATH_READS:
+                self.assertEqual(by_op[read]["status"], "semantic_incompatibility", read)
+                self.assertEqual(by_op[read]["cause"], WEIGHTED_PATH_CAUSE, read)
+            else:
+                self.assertEqual(by_op[read]["status"], "passed", read)
+                self.assertGreater(by_op[read]["rows"], 0, read)
+
+    def test_committed_expectations_are_the_independent_derivation(self) -> None:
+        fixture = self.root / "fixtures" / "gdc" / QUERY_FIXTURE
+        self.assertEqual(gdc_snb_bi_reference.main([str(fixture)]), 0)
+        derived = gdc_snb_bi_reference.derive(fixture)
+        # Hand-checked rows from the fixture's designed BI17 and BI16 cases:
+        # person 3's tagged post in forum 309 propagates to two forum-310
+        # messages, and person 19 has five same-day friends on tagA.
+        self.assertEqual(derived["BI17"]["rows"][0], [3, 2])
+        self.assertNotIn(19, [row[0] for row in derived["BI16"]["rows"]])
+
+    def test_a_wrong_expectation_fails_the_read(self) -> None:
+        source = self.root / "fixtures" / "gdc" / QUERY_FIXTURE
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / QUERY_FIXTURE
+            shutil.copytree(source, fixture)
+            expected_path = fixture / "expected" / "BI5.json"
+            document = json.loads(expected_path.read_text(encoding="utf-8"))
+            document["rows"][0][-1] += 1
+            expected_path.write_text(json.dumps(document), encoding="utf-8")
+            with self.assertRaises(SnbBiSuiteError) as raised:
+                run_query_fixture(fixture=fixture)
+        self.assertEqual(raised.exception.cause, "reference_mismatch")
+        self.assertIn("BI5", str(raised.exception))
+        self.assertNotIn("BI4:", str(raised.exception))
 
     def test_live_lane_rejects_parameter_mutation_and_static_output(self) -> None:
         with self.assertRaises(SnbBiSuiteError) as raised:
