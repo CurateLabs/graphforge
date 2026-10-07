@@ -75,7 +75,12 @@ fn live_identities(session_root: &Path) -> std::collections::BTreeSet<String> {
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
             if path.is_dir() {
                 walk(&path, name == "encoded-v1", keys);
-            } else if !(control_level && name.ends_with(".json") || name == "session.lock") {
+            } else if !(control_level
+                && path
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+                || name == "session.lock")
+            {
                 let identity = graphforge_filesystem::path_identity(&path).unwrap();
                 keys.insert(format!(
                     "{:016x}:{}",
