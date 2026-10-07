@@ -741,6 +741,7 @@ mod tests {
     mod historical_saved_queries;
     mod large_entries;
     mod participant_files;
+    mod payload_inventory;
     mod saved_queries;
     mod semantic_refusals;
     use super::planning::exact_identity;

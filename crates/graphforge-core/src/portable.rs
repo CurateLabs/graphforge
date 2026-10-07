@@ -4,26 +4,56 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// Writer and reader admission limits for portable-v2 packages.
+///
+/// The defaults are mutually consistent: every limit that grows with the
+/// entry count admits a package of `max_entries` entries (#900).
 #[derive(Clone, Copy, Debug)]
 pub struct PortableV2Limits {
+    /// Components in the semantic manifest.
     pub max_components: u64,
+    /// Regular entries in the package, tag files included.
     pub max_entries: u64,
+    /// Bytes in one entry.
     pub max_entry_bytes: u64,
+    /// Declared payload bytes across all entries.
     pub max_total_bytes: u64,
+    /// Bytes in the semantic manifest, `data/graphforge-project.json`, and in
+    /// each JSON control the reader retains and parses whole (runtime map,
+    /// ontology composition, ontology and bridge documents in aggregate).
     pub max_manifest_bytes: u64,
+    /// Bytes in each retained tag file: `bagit.txt`, `bag-info.txt` and
+    /// `tagmanifest-sha256.txt`, which has three rows. The payload inventory,
+    /// `manifest-sha256.txt`, has one row per `data/` entry; writer and reader
+    /// stream it, and it is bounded by `max_entries` and `max_path_bytes`.
     pub max_tag_manifest_bytes: u64,
+    /// UTF-8 bytes in one portable path.
     pub max_path_bytes: usize,
+    /// Bytes in the streaming copy buffer.
     pub copy_buffer_bytes: usize,
 }
+
+/// Default entries per package.
+const DEFAULT_MAX_ENTRIES: u64 = 1_000_000;
+/// Semantic manifest budget per entry. A file record is
+/// `{"length":L,"media_type":"M","path":"P","sha256":"H"},`: 50 bytes of
+/// syntax, at most 20 length digits, a media type of at most 52 bytes and 64
+/// digest bytes, 186 bytes plus the path. The S26 Graph500 project's records
+/// average about 320 bytes (21,531 files, 6.9 MB), so 512 bytes admits paths
+/// that average up to 326 bytes, nearly twice S26's 169.
+const MANIFEST_BYTES_PER_ENTRY: u64 = 512;
 
 impl Default for PortableV2Limits {
     fn default() -> Self {
         Self {
             max_components: 10_000,
-            max_entries: 1_000_000,
+            max_entries: DEFAULT_MAX_ENTRIES,
             max_entry_bytes: 16 * 1024_u64.pow(4),
             max_total_bytes: 1024 * 1024_u64.pow(4),
-            max_manifest_bytes: 16 * 1024 * 1024,
+            // 1,000,000 entries x 512 bytes = 512,000,000, rounded up to
+            // 512 MiB: a manifest listing `max_entries` files fits.
+            max_manifest_bytes: (DEFAULT_MAX_ENTRIES * MANIFEST_BYTES_PER_ENTRY)
+                .next_power_of_two(),
             max_tag_manifest_bytes: 4 * 1024 * 1024,
             max_path_bytes: 4096,
             copy_buffer_bytes: 1024 * 1024,

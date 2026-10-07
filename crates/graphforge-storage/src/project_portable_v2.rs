@@ -12,6 +12,7 @@ pub(crate) use materialization::{
     persist_composition_authority, persist_staged_composition, publish_compact_import_root,
 };
 mod authenticated_entries;
+mod inventory;
 use authenticated_entries::StreamHash;
 mod participant_files;
 pub(crate) mod pax;
@@ -598,6 +599,7 @@ fn verify_expanded(
     validate_path_set(&paths)?;
     let mut entries = Vec::with_capacity(paths.len());
     let mut total = 0u64;
+    let mut inventory_verdict = None;
     for path in &paths {
         check_cancel(cancelled)?;
         let full = root.join(path);
@@ -619,16 +621,22 @@ fn verify_expanded(
         }
         let length = before.len();
         enforce_length(path, length, &mut total, limits)?;
+        let mut check =
+            (path == inventory::INVENTORY_PATH).then(|| inventory::InventoryCheck::new(&entries));
         let (digest, bytes) = hash_file(
             &full,
             path,
             length,
             limits.copy_buffer_bytes,
             retained_limit(path, limits),
+            check.as_mut(),
             cancelled,
             sink.as_deref_mut(),
             expected_entry(written, path, length)?,
         )?;
+        if let Some(check) = check {
+            inventory_verdict = Some(check.finish());
+        }
         let after = fs::metadata(&full).map_err(|_| {
             PortableV2Error::at(
                 PortableV2ErrorCode::ConcurrentMutation,
@@ -663,6 +671,7 @@ fn verify_expanded(
         mode,
         limits,
         Some(transport),
+        inventory_verdict,
     )?;
     Ok((report, entries))
 }
@@ -773,6 +782,7 @@ fn verify_bundle(
     );
     let mut entries = Vec::new();
     let mut total = 0u64;
+    let mut inventory_verdict = None;
     let mut pending_pax: Option<(pax::PaxHeader, String)> = None;
     loop {
         check_cancel(cancelled)?;
@@ -875,17 +885,23 @@ fn verify_bundle(
         let offset = file
             .stream_position()
             .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "bundle position"))?;
+        let mut check = (entry_path == inventory::INVENTORY_PATH)
+            .then(|| inventory::InventoryCheck::new(&entries));
         let (digest, bytes) = hash_payload(
             &mut file,
             size,
             &mut transport,
             limits.copy_buffer_bytes,
             retained_limit(&entry_path, limits),
+            check.as_mut(),
             cancelled,
             &entry_path,
             sink.as_deref_mut(),
             expected_entry(written, &entry_path, size)?,
         )?;
+        if let Some(check) = check {
+            inventory_verdict = Some(check.finish());
+        }
         entries.push(Entry {
             path: entry_path,
             length: size,
@@ -942,6 +958,7 @@ fn verify_bundle(
         mode,
         limits,
         Some(hex(&transport.finish()?)),
+        inventory_verdict,
     )?;
     Ok((report, entries))
 }
@@ -952,6 +969,7 @@ fn validate_package(
     mode: PortableV2Mode,
     limits: PortableV2Limits,
     transport: Option<String>,
+    inventory: Option<inventory::InventoryVerdict>,
 ) -> Result<PortableV2Report, PortableV2Error> {
     let map: BTreeMap<_, _> = entries.iter().map(|e| (e.path.as_str(), e)).collect();
     require_exact(&map, "bagit.txt", BAGIT)?;
@@ -990,7 +1008,7 @@ fn validate_package(
         ));
     }
     validate_semantics(&manifest, limits)?;
-    validate_bag_manifests(&map, &manifest)?;
+    validate_bag_manifests(&map, &manifest, inventory)?;
     validate_runtime_map(&map, &manifest, limits)?;
     let (ontology_composition, ontology_composition_entries) =
         validate_ontology_composition(&map, &manifest, limits)?;
@@ -1158,6 +1176,7 @@ fn parse_manifest(
 fn validate_bag_manifests(
     map: &BTreeMap<&str, &Entry>,
     manifest: &Manifest,
+    inventory: Option<inventory::InventoryVerdict>,
 ) -> Result<(), PortableV2Error> {
     let declared: BTreeMap<_, _> = manifest
         .components
@@ -1165,7 +1184,7 @@ fn validate_bag_manifests(
         .flat_map(|c| &c.files)
         .map(|f| (f.path.as_str(), (f.length, f.sha256.as_str())))
         .collect();
-    for (path, (length, digest)) in declared {
+    for (&path, &(length, digest)) in &declared {
         let entry = map.get(path).ok_or_else(|| {
             PortableV2Error::at(
                 PortableV2ErrorCode::InvalidStructure,
@@ -1183,13 +1202,10 @@ fn validate_bag_manifests(
             ));
         }
     }
+    // A map lookup, not a scan of every declared file per entry: the scan was
+    // quadratic in the entry count (#900).
     for path in map.keys().filter(|p| p.starts_with("data/components/")) {
-        if !manifest
-            .components
-            .iter()
-            .flat_map(|c| &c.files)
-            .any(|f| f.path == **path)
-        {
+        if !declared.contains_key(path) {
             return Err(PortableV2Error::at(
                 PortableV2ErrorCode::InvalidStructure,
                 path,
@@ -1197,7 +1213,7 @@ fn validate_bag_manifests(
             ));
         }
     }
-    for required in ["manifest-sha256.txt", "tagmanifest-sha256.txt"] {
+    for required in [inventory::INVENTORY_PATH, "tagmanifest-sha256.txt"] {
         if !map.contains_key(required) {
             return Err(PortableV2Error::at(
                 PortableV2ErrorCode::InvalidStructure,
@@ -1206,22 +1222,15 @@ fn validate_bag_manifests(
             ));
         }
     }
-    let data_manifest = parse_digest_manifest(
-        &read_entry_bytes_from_map(map, "manifest-sha256.txt")?,
-        "manifest-sha256.txt",
-    )?;
-    let expected_data: BTreeMap<_, _> = map
-        .iter()
-        .filter(|(p, _)| p.starts_with("data/"))
-        .map(|(p, e)| ((*p).to_owned(), hex(&e.digest)))
-        .collect();
-    if data_manifest != expected_data {
-        return Err(PortableV2Error::at(
-            PortableV2ErrorCode::DigestMismatch,
-            "manifest-sha256.txt",
-            "data inventory manifest",
-        ));
-    }
+    // The payload inventory was checked row by row against the preceding
+    // `data/` entries while it streamed; its outcome is reported here.
+    inventory.ok_or_else(|| {
+        PortableV2Error::at(
+            PortableV2ErrorCode::InvalidStructure,
+            inventory::INVENTORY_PATH,
+            "tag bytes unavailable",
+        )
+    })??;
     let tag_manifest = parse_digest_manifest(
         &read_entry_bytes_from_map(map, "tagmanifest-sha256.txt")?,
         "tagmanifest-sha256.txt",
@@ -1237,13 +1246,9 @@ fn validate_bag_manifests(
             "tag inventory manifest",
         ));
     }
-    let mut allowed: BTreeSet<String> = expected_data
-        .keys()
-        .chain(expected_tags.keys())
-        .cloned()
-        .collect();
-    allowed.insert("tagmanifest-sha256.txt".to_owned());
-    if map.keys().any(|p| !allowed.contains(*p)) {
+    if map.keys().any(|p| {
+        !p.starts_with("data/") && !expected_tags.contains_key(*p) && *p != "tagmanifest-sha256.txt"
+    }) {
         return Err(PortableV2Error::new(
             PortableV2ErrorCode::InvalidStructure,
             "unmanifested extra entry",
@@ -1411,6 +1416,7 @@ fn hash_file(
     length: u64,
     buffer: usize,
     retain_limit: Option<u64>,
+    mut inventory: Option<&mut inventory::InventoryCheck<'_>>,
     cancelled: Option<&AtomicBool>,
     mut sink: Option<&mut materialization::CopySink<'_>>,
     expected: Option<([u8; 32], u64)>,
@@ -1467,6 +1473,9 @@ fn hash_file(
         }
         if let Some(bytes) = &mut kept {
             bytes.extend_from_slice(&b[..n]);
+        }
+        if let Some(inventory) = inventory.as_deref_mut() {
+            inventory.update(&b[..n]);
         }
         left -= n as u64;
     }
@@ -1701,6 +1710,7 @@ fn hash_payload(
     transport_hash: &mut StreamHash,
     buffer: usize,
     retain_limit: Option<u64>,
+    mut inventory: Option<&mut inventory::InventoryCheck<'_>>,
     cancelled: Option<&AtomicBool>,
     entry: &str,
     mut sink: Option<&mut materialization::CopySink<'_>>,
@@ -1736,6 +1746,9 @@ fn hash_payload(
         }
         if let Some(v) = &mut kept {
             v.extend_from_slice(&copy_buffer[..chunk_len]);
+        }
+        if let Some(inventory) = inventory.as_deref_mut() {
+            inventory.update(&copy_buffer[..chunk_len]);
         }
         left -= chunk_len as u64;
     }
@@ -1791,7 +1804,9 @@ fn retained_limit(path: &str, limits: PortableV2Limits) -> Option<u64> {
         MANIFEST_PATH | RUNTIME_MAP_PATH | ONTOLOGY_COMPOSITION_PATH => {
             Some(limits.max_manifest_bytes)
         }
-        "bagit.txt" | "bag-info.txt" | "manifest-sha256.txt" | "tagmanifest-sha256.txt" => {
+        // The payload inventory, `manifest-sha256.txt`, grows with the entry
+        // count and is checked as it streams instead (`inventory.rs`).
+        "bagit.txt" | "bag-info.txt" | "tagmanifest-sha256.txt" => {
             Some(limits.max_tag_manifest_bytes)
         }
         _ => None,
