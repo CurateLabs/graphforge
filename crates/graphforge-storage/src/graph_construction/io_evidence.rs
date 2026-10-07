@@ -6,9 +6,9 @@ use super::recovery::SHAPE_CLEANUP_FAILURES;
 use super::{
     ArtifactReceipt, AtomicU64, BLOCK_BYTES, BTreeMap, BTreeSet, BufReader, ChunkReader,
     Deserialize, DetailCodec, File, GfError, GraphConstructionEncoding,
-    GraphConstructionEncodingEvidence, GraphConstructionSession, Length, Ordering, OsStr, Path,
-    Read, Serialize, StableDirectory, Write, file_identity, hex, read_fixed,
-    replace_checkpoint_control, shape_publication_io_failure, storage,
+    GraphConstructionEncodingEvidence, GraphConstructionSession, Length, Ordering, OsStr, Read,
+    Serialize, StableDirectory, Write, read_fixed, replace_checkpoint_control,
+    shape_publication_io_failure, storage,
 };
 
 impl GraphConstructionSession {
@@ -1243,38 +1243,32 @@ pub(super) fn checked_evidence_sum(
     })
 }
 
+/// Install every encoded artifact into the allocation ledger, idempotently,
+/// and return the ledger entry of each: the identities and allocations the
+/// checkpoint may later omit in favour of the inventory (#900).
 pub(super) fn record_encoded_active_artifacts(
     session_root: &StableDirectory,
     encoding: &GraphConstructionEncoding,
     evidence: &mut GraphConstructionEvidence,
-) -> Result<(), GfError> {
+) -> Result<BTreeMap<String, u64>, GfError> {
     let encoded_root = session_root
         .open_child_directory(OsStr::new(&encoding.root))
         .map_err(storage)?
         .open_child_directory(OsStr::new("graph"))
         .map_err(storage)?;
+    let mut encoded = BTreeMap::new();
     for artifact in &encoding.artifacts {
-        let components = Path::new(&artifact.path)
-            .components()
-            .map(|component| match component {
-                std::path::Component::Normal(value) => Ok(value.to_owned()),
-                _ => Err(storage("encoded artifact path is not normalized")),
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let (name, directories) = components
-            .split_last()
-            .ok_or_else(|| storage("encoded artifact path is empty"))?;
-        let mut directory = encoded_root.try_clone().map_err(storage)?;
-        for child in directories {
-            directory = directory.open_child_directory(child).map_err(storage)?;
-        }
-        let file = directory.open_child_file(name).map_err(storage)?;
-        let identity = file_identity(&file).map_err(storage)?;
-        let usage = graphforge_filesystem::file_space_usage(&file).map_err(storage)?;
+        let (identity_key, usage) =
+            super::encoded_ledger::encoded_artifact_allocation(&encoded_root, &artifact.path)?;
         if usage.logical_bytes != artifact.bytes {
             return Err(storage("encoded artifact allocation authority changed"));
         }
-        let identity_key = format!("{:016x}:{}", identity.volume_serial, hex(&identity.file_id));
+        if encoded
+            .insert(identity_key.clone(), usage.allocated_bytes)
+            .is_some()
+        {
+            return Err(storage("encoded artifact identity installed twice"));
+        }
         if let Some(existing) = evidence
             .storage_active_identity_allocated_bytes
             .get(&identity_key)
@@ -1292,7 +1286,7 @@ pub(super) fn record_encoded_active_artifacts(
         )?;
         record_category_install(evidence, usage.logical_bytes, usage.allocated_bytes)?;
     }
-    Ok(())
+    Ok(encoded)
 }
 
 pub(super) fn account_merge_read<const N: usize>(

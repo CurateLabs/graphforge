@@ -43,6 +43,7 @@ use shape::{
     validate_shape_binding, validate_sorted_run,
 };
 pub(crate) use shape::{open_authenticated_shape_source, shaped_output_xxh64};
+mod encoded_ledger;
 mod encoding_publication;
 use encoding_publication::recover_publication;
 pub(crate) use encoding_publication::{CapturedEncodedArtifact, CapturedEncodedInventory};
@@ -854,10 +855,21 @@ struct Checkpoint {
     /// discard removes it. Absent in a checkpoint that omits nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     staged_ledger_from_sequence: Option<u64>,
+    /// Durable form only: the native-identity authority digest of the
+    /// encoded-artifact ledger entries the persisted ledger omits, because the
+    /// pinned encoded inventory names each artifact and reopening re-derives
+    /// and authenticates them (#900). `None` in memory once restored, except
+    /// in an aborted session; absent in a checkpoint that omits nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    encoded_ledger_sha256: Option<String>,
     /// In-memory index of every accepted chunk artifact, rebuilt from the
     /// receipt journal on open and extended as chunks are accepted.
     #[serde(skip)]
     staged_index: staged_ledger::StagedIdentityIndex,
+    /// In-memory identities and allocations of the pinned encoded inventory,
+    /// recorded at encoding or restored on open; never persisted.
+    #[serde(skip)]
+    encoded_index: Option<encoded_ledger::EncodedIdentityIndex>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1453,6 +1465,8 @@ impl GraphConstructionSession {
             // Before anything can rewrite the checkpoint: the persisted ledger
             // omits the staged entries the receipt journal names (#900).
             staged_ledger::restore_staged_ledger(&root, checkpoint)?;
+            // Likewise the encoded entries the pinned inventory names.
+            encoded_ledger::restore_encoded_ledger(&root, checkpoint)?;
             validate_parent_phase_bytes(checkpoint)?;
             cleanup_authenticated_control_temps(
                 &root,
@@ -1661,6 +1675,8 @@ impl GraphConstructionSession {
                 evidence,
                 staged_ledger_from_sequence: None,
                 staged_index: staged_ledger::StagedIdentityIndex::default(),
+                encoded_ledger_sha256: None,
+                encoded_index: None,
             };
             initial.format_version = initial_checkpoint_format(&root, project_identity, &initial)?;
             cleanup_authenticated_control_temps(
@@ -1762,7 +1778,13 @@ impl GraphConstructionSession {
                 });
         }
         session.revalidate_authority()?;
-        session.reclaim_superseded_payloads()?;
+        // An aborted session's only remaining operation is the discard that
+        // removes its tree. Reclaiming against an encoded successor needs the
+        // inventory and every encoded file, which an interrupted discard may
+        // already have unlinked, so it would make the retry impossible (#900).
+        if session.checkpoint.state != GraphConstructionState::Aborted {
+            session.reclaim_superseded_payloads()?;
+        }
         validate_parent_phase_bytes(&session.checkpoint)?;
         if shape_recovery_work.bytes != 0
             || shape_recovery_work.operations != 0
@@ -2077,7 +2099,25 @@ pub(crate) fn construction_failpoint(name: &str) {
     {
         std::process::exit(86);
     }
+    let mut armed = ARMED_FAILPOINT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((armed_name, remaining)) = armed.as_mut()
+        && armed_name == name
+    {
+        *remaining -= 1;
+        if *remaining == 0 {
+            std::process::exit(86);
+        }
+    }
 }
+
+/// A failpoint a crash child arms in-process just before the step it
+/// targets, firing at the given occurrence of `name` from then on. Generic
+/// names such as a checkpoint replace fire at every boundary, so the
+/// environment form above can only ever reach the first one (#900).
+#[cfg(test)]
+pub(crate) static ARMED_FAILPOINT: Mutex<Option<(String, u32)>> = Mutex::new(None);
 
 #[cfg(not(test))]
 pub(crate) fn construction_failpoint(_name: &str) {}
