@@ -78,22 +78,36 @@ fn fixed_rows(array: &FixedSizeBinaryArray, out: &mut Vec<[u8; 16]>) {
     );
 }
 
-fn concat<T: Copy + Send + Sync>(parts: &[&[T]], zero: T) -> Vec<T> {
-    let total = parts.iter().map(|part| part.len()).sum();
-    let mut out = vec![zero; total];
-    let mut rest = out.as_mut_slice();
-    let mut slices = Vec::with_capacity(parts.len());
-    for part in parts {
-        let (head, tail) = rest.split_at_mut(part.len());
-        slices.push(head);
-        rest = tail;
-    }
-    slices
-        .into_par_iter()
-        .zip(parts.par_iter())
-        .for_each(|(destination, source)| destination.copy_from_slice(source));
-    out
+/// Assemble per-task columns into one array, freeing each task's column as soon
+/// as it is copied. The destination is zero-allocated, so its pages become
+/// resident only as they are written: decoded and assembled copies never coexist
+/// beyond one task's column per worker. (A generic `vec![zero; n]` would write
+/// the zeros eagerly, so the two element types are spelled out.)
+macro_rules! concat_columns {
+    ($name:ident, $element:ty, $zero:expr) => {
+        fn $name(mut parts: Vec<Vec<$element>>) -> Vec<$element> {
+            let total = parts.iter().map(Vec::len).sum();
+            let mut out = vec![$zero; total];
+            let mut rest = out.as_mut_slice();
+            let mut slices = Vec::with_capacity(parts.len());
+            for part in &parts {
+                let (head, tail) = rest.split_at_mut(part.len());
+                slices.push(head);
+                rest = tail;
+            }
+            slices
+                .into_par_iter()
+                .zip(parts.par_iter_mut())
+                .for_each(|(destination, source)| {
+                    destination.copy_from_slice(source);
+                    *source = Vec::new();
+                });
+            out
+        }
+    };
 }
+concat_columns!(concat_uuids, [u8; 16], [0_u8; 16]);
+concat_columns!(concat_ranks, u32, 0_u32);
 
 fn gather<T: Copy + Send + Sync>(source: &[T], order: &[u32]) -> Vec<T> {
     order
@@ -219,17 +233,13 @@ pub(super) fn collect_nodes(
         &dictionaries,
         &mut label_columns.iter_mut().collect::<Vec<_>>(),
     );
-    let mut uuids = concat(
-        &chunks
-            .iter()
-            .map(|chunk| chunk.uuids.as_slice())
-            .collect::<Vec<_>>(),
-        [0_u8; 16],
+    let mut uuids = concat_uuids(
+        chunks
+            .iter_mut()
+            .map(|chunk| std::mem::take(&mut chunk.uuids))
+            .collect(),
     );
-    let mut labels = concat(
-        &label_columns.iter().map(Vec::as_slice).collect::<Vec<_>>(),
-        0,
-    );
+    let mut labels = concat_ranks(label_columns);
     let kept = chunks
         .into_iter()
         .flat_map(|chunk| chunk.kept)
@@ -405,31 +415,25 @@ pub(super) fn collect_edges(
         &dictionaries,
         &mut rel_columns.iter_mut().collect::<Vec<_>>(),
     );
-    let mut uuids = concat(
-        &chunks
-            .iter()
-            .map(|chunk| chunk.uuids.as_slice())
-            .collect::<Vec<_>>(),
-        [0_u8; 16],
+    let mut uuids = concat_uuids(
+        chunks
+            .iter_mut()
+            .map(|chunk| std::mem::take(&mut chunk.uuids))
+            .collect(),
     );
-    let mut src = concat(
-        &chunks
-            .iter()
-            .map(|chunk| chunk.src.as_slice())
-            .collect::<Vec<_>>(),
-        0,
+    let mut src = concat_ranks(
+        chunks
+            .iter_mut()
+            .map(|chunk| std::mem::take(&mut chunk.src))
+            .collect(),
     );
-    let mut dst = concat(
-        &chunks
-            .iter()
-            .map(|chunk| chunk.dst.as_slice())
-            .collect::<Vec<_>>(),
-        0,
+    let mut dst = concat_ranks(
+        chunks
+            .iter_mut()
+            .map(|chunk| std::mem::take(&mut chunk.dst))
+            .collect(),
     );
-    let mut rels = concat(
-        &rel_columns.iter().map(Vec::as_slice).collect::<Vec<_>>(),
-        0,
-    );
+    let mut rels = concat_ranks(rel_columns);
     let kept = chunks
         .into_iter()
         .flat_map(|chunk| chunk.kept)

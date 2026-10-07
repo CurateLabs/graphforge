@@ -52,7 +52,7 @@ pub(super) fn write_adjacency(
             names.entry(name).or_insert(next);
         }
     }
-    let total = edges.uuids.len();
+    let total = edges.src.len();
     let mut ordered = names
         .keys()
         .map(|name| (*name).to_owned())
@@ -84,17 +84,26 @@ pub(super) fn write_adjacency(
         shards: 0,
         source_rows: total as u64,
     };
-    let directions = [
-        (Direction::Out, sorted_entries(&edges.src), &edges.dst),
-        (Direction::In, sorted_entries(&edges.dst), &edges.src),
-    ];
-    let mut outcomes = Vec::new();
-    for (group, stem) in ordered.iter().enumerate() {
-        for (direction, entries, neighbors) in &directions {
+    // One direction's sorted entries are resident at a time; outcomes are
+    // collected by (stem, direction) and the manifest keeps the staged order.
+    let mut outcomes = std::collections::BTreeMap::new();
+    let covering = |group: usize| {
+        relation_group
+            .iter()
+            .filter(|rank| **rank == u32::try_from(group).unwrap_or(u32::MAX))
+            .count()
+            == relations.len()
+    };
+    for (direction, keys, neighbors) in [
+        (Direction::Out, &edges.src, &edges.dst),
+        (Direction::In, &edges.dst, &edges.src),
+    ] {
+        let entries = sorted_entries(keys);
+        for (group, stem) in ordered.iter().enumerate() {
             check_cancelled(cancel)?;
             let selected;
             let group_rank = u32::try_from(group).expect("bounded by relation count");
-            let slice = if group == union {
+            let slice = if group == union || covering(group) {
                 entries.as_slice()
             } else {
                 selected = entries
@@ -107,24 +116,27 @@ pub(super) fn write_adjacency(
                     .collect::<Vec<_>>();
                 selected.as_slice()
             };
-            outcomes.push((
-                stem.clone(),
-                *direction,
+            outcomes.insert(
+                (group, matches!(direction, Direction::In)),
                 crate::adjacency::write_sharded_csr_from_sorted(
-                    &crate::adjacency::csr_path(graph_root, stem, *direction),
+                    &crate::adjacency::csr_path(graph_root, stem, direction),
                     slice,
                     neighbors,
                     options.shard_max_edges,
                     options.shard_max_nodes,
                     allocation,
                 )?,
-            ));
+            );
         }
     }
-    for (stem, direction, outcome) in outcomes {
+    for ((group, incoming), outcome) in outcomes {
         manifest.push(AdjacencyManifestRow {
-            relation_type: stem,
-            direction,
+            relation_type: ordered[group].clone(),
+            direction: if incoming {
+                Direction::In
+            } else {
+                Direction::Out
+            },
             topology_generation: generation,
             built_at_micros,
             node_count: outcome.node_count,

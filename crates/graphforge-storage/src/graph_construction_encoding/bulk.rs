@@ -258,7 +258,7 @@ pub(crate) fn encode_bulk(
     // Pass 2: edges and endpoint resolution.
     let meter = PassMeter::start("edges");
     let index = pool.install(|| NodeIndex::build(&nodes.uuids));
-    let edges = run_pass(&pool, cancelled, &cancel, || {
+    let mut edges = run_pass(&pool, cancelled, &cancel, || {
         tables::collect_edges(&plan.edges, retain_edges, &nodes, &index, &cancel)
     })?;
     drop(index);
@@ -328,6 +328,16 @@ pub(crate) fn encode_bulk(
     passes.extend([meter.finish()]);
     crate::graph_construction::construction_failpoint("bulk.after_tables");
 
+    // Membership streams the sorted UUIDs; once it has, the edge UUIDs (16 B per
+    // edge) are released before the adjacency pass sorts its entries.
+    let meter = PassMeter::start("membership");
+    let membership = build_membership(&output, &nodes, &edges.uuids, generation, &cancel)?;
+    check_cancelled(&cancel)?;
+    passes.extend([meter.finish()]);
+    crate::graph_construction::construction_failpoint("bulk.after_membership");
+    let edge_count = edges.uuids.len() as u64;
+    edges.uuids = Vec::new();
+
     let meter = PassMeter::start("adjacency");
     let adjacency = run_pass(&pool, cancelled, &cancel, || {
         csr::write_adjacency(
@@ -342,12 +352,6 @@ pub(crate) fn encode_bulk(
     })?;
     passes.extend([meter.finish()]);
     crate::graph_construction::construction_failpoint("bulk.after_adjacency");
-
-    let meter = PassMeter::start("membership");
-    let membership = build_membership(&output, &nodes, &edges.uuids, generation, &cancel)?;
-    check_cancelled(&cancel)?;
-    passes.extend([meter.finish()]);
-    crate::graph_construction::construction_failpoint("bulk.after_membership");
 
     // Property overlays: sequential, through the staged encoder's own writer,
     // which leases its own compression lanes. Return ours first.
@@ -429,7 +433,7 @@ pub(crate) fn encode_bulk(
     write_surrogate_tails(
         &output,
         nodes.uuids.len() as u64,
-        edges.uuids.len() as u64,
+        edge_count,
         cancelled,
         &mut artifacts,
         &mut evidence,
@@ -454,7 +458,6 @@ pub(crate) fn encode_bulk(
         &mut evidence,
     )?;
     let node_count = nodes.uuids.len() as u64;
-    let edge_count = edges.uuids.len() as u64;
     drop((nodes, edges, node_groups, edge_groups));
 
     installer_extend_adjacency(
