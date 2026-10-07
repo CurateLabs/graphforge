@@ -23,6 +23,17 @@ impl GraphConstructionSession {
         &mut self,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), GfError> {
+        self.reclaim_superseded_payloads_with_successor(None, cancelled)
+    }
+
+    /// Reclaim with `successor`, the pinned encoded inventory the caller
+    /// already holds, when there is one. It is bound to the durable record by
+    /// digest instead of decoding a second copy of the inventory (#900).
+    pub(super) fn reclaim_superseded_payloads_with_successor(
+        &mut self,
+        successor: Option<&GraphConstructionEncoding>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), GfError> {
         super::reject_cancelled(cancelled)?;
         if self.checkpoint.shape_authority_sha256.is_none() {
             return Ok(());
@@ -47,10 +58,23 @@ impl GraphConstructionSession {
                 .root
                 .open_child_directory(OsStr::new("encoded-v1"))
                 .map_err(storage)?;
-            let inventory = crate::graph_construction_encoding::read_inventory(&output)?
-                .ok_or_else(|| storage("supersession encoding inventory is absent"))?;
-            if Some(crate::graph_construction_encoding::inventory_authority_sha256(&inventory)?)
-                != self.checkpoint.encoding_inventory_sha256
+            let decoded;
+            let (inventory, authority) = if let Some(held) = successor {
+                let durable =
+                    crate::graph_construction_encoding::durable_inventory_authority(&output)?;
+                if crate::graph_construction_encoding::inventory_authority_sha256(held)? != durable
+                {
+                    return Err(storage("supersession encoding authority changed"));
+                }
+                (held, durable)
+            } else {
+                decoded = crate::graph_construction_encoding::read_inventory(&output)?
+                    .ok_or_else(|| storage("supersession encoding inventory is absent"))?;
+                let authority =
+                    crate::graph_construction_encoding::inventory_authority_sha256(&decoded)?;
+                (&decoded, authority)
+            };
+            if Some(authority) != self.checkpoint.encoding_inventory_sha256
                 || Some(&inventory.shape_authority_sha256)
                     != self.checkpoint.shape_authority_sha256.as_ref()
             {
@@ -70,11 +94,11 @@ impl GraphConstructionSession {
             // the shape branch below).
             authenticate_encoded_artifact_identities(
                 &output,
-                &inventory,
+                inventory,
                 &self.checkpoint.evidence,
                 cancelled,
             )?;
-            self.authenticate_retained_successors(&inventory, cancelled)?
+            self.authenticate_retained_successors(inventory, cancelled)?
         } else {
             // The shape manifest is the successor authority here. Its retained
             // payloads were verified at the replay/recovery boundary by

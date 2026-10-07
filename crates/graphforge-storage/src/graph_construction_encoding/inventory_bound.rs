@@ -12,34 +12,43 @@
 //! The 512-byte row allowance covers the longest encoded-artifact row with
 //! room to spare. Its fixed fields take at most 144 bytes: a 20-digit length,
 //! a 64-digit SHA-256, a 16-digit xxh64, and the keys and punctuation. The
-//! longest path the encoder formats takes 132 bytes
-//! (`edge_properties/r-<64 hex>/<20 digits>-<20 digits>.parquet`), so the row
-//! takes at most 276 bytes. The Graph500 S26 inventory averaged 262 bytes per
+//! longest path the encoder writes is an adjacency CSR shard, 151 bytes
+//! (`indexes/adjacency/r-<64 hex>.out.csr.shards-<24 hex>.d/<20 digits>.csr`),
+//! so the row takes at most 295 bytes, 1.74× under the allowance. The Graph500 S26 inventory averaged 262 bytes per
 //! row: 5,650,146 bytes for 21,525 artifacts. At that average, the projected
 //! S28 inventory (about 86,000 artifacts, 22.6 MB) uses 44% of the bound, and
 //! a full 100,000-file generation uses 51%. The header and evidence take a few
 //! kilobytes. Retained-parent rows are longer, because they carry the parent
 //! root's path, but there is one per retained membership-index run.
 //!
-//! A reader holds the file bytes and the decoded inventory at once. Decoding
-//! an inventory at the bound peaks at 122 MB of heap with 262-byte rows
-//! (194,670 rows: a 64 MiB read buffer plus 55 MB of decoded rows) and at
-//! 134 MB with the shortest possible rows (406,335 rows of 126 bytes). The
-//! format check probes the version without first building a JSON tree of the
-//! whole inventory; building that tree first raised those peaks to 245 MB and
-//! 383 MB.
+//! A decoding reader holds the file bytes and the decoded inventory at once.
+//! The read buffer is sized from the file's length. At the bound, decoding
+//! peaks at 106 MB of heap with 262-byte rows (194,670 rows: the 51.2 MB file
+//! plus 54.7 MB of decoded rows) and at 119 MB with the shortest possible rows
+//! (406,335 rows of 126 bytes, 60.0 MB decoded). The format check probes the
+//! version without first building a JSON tree of the whole inventory.
+//!
+//! No caller decodes a second copy while it holds one. Supersession after
+//! encoding and the publication check bind the inventory the caller holds to
+//! the durable file through [`durable_inventory_authority_sha256`], which
+//! streams the file's bytes into the digest in 64 KiB chunks, and
+//! [`inventory_authority_sha256`] streams the held inventory's serialization
+//! the same way. These checks add about 1.1 MiB of buffers (a 1 MiB read
+//! buffer and two 64 KiB chunks) to the inventory the caller already holds.
 //!
 //! The writer counts bytes as it serializes and refuses before the temporary
 //! file is installed. A refused inventory is never installed or pinned by a
 //! checkpoint, so the session reopens and resumes from its encoding intent
 //! once the bound admits the inventory.
 
-use std::io::{Read, Write};
+use std::io::{BufWriter, Read, Write};
 
 use graphforge_core::ProjectErrorCode;
+use graphforge_core::hash_observation::ControlSha256;
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 
-use super::{ENCODING_FORMAT_VERSION, GfError, GraphConstructionEncoding, storage};
+use super::{ENCODING_FORMAT_VERSION, GfError, GraphConstructionEncoding, hex, storage};
 use crate::graph_manifest::MAX_GRAPH_FILES_PER_GENERATION;
 
 /// Allowance per inventory row; see the module documentation.
@@ -143,9 +152,11 @@ impl<W: Write> Write for BoundedWriter<W> {
 }
 
 /// Decode an encoded inventory of at most the bound, checking its format
-/// version before its schema.
+/// version before its schema. `length_hint` sizes the read buffer; a file
+/// reader passes the file's length so the buffer does not double past it.
 pub(crate) fn decode_encoding_inventory(
     reader: impl Read,
+    length_hint: u64,
 ) -> Result<GraphConstructionEncoding, GfError> {
     /// Reads only the version and skips every other field without building
     /// a JSON tree of the inventory.
@@ -155,7 +166,7 @@ pub(crate) fn decode_encoding_inventory(
     }
 
     let bound = inventory_bound();
-    let mut bytes = Vec::new();
+    let mut bytes = Vec::with_capacity(usize::try_from(length_hint.min(bound)).map_err(storage)?);
     reader
         .take(bound + 1)
         .read_to_end(&mut bytes)
@@ -175,4 +186,60 @@ pub(crate) fn decode_encoding_inventory(
         ));
     }
     serde_json::from_slice(&bytes).map_err(storage)
+}
+
+const INVENTORY_AUTHORITY_DOMAIN: &[u8] = b"graphforge-construction-encoding-inventory/v2\0";
+const DIGEST_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Authority over an inventory: the control digest of its serialization,
+/// streamed so that no serialized copy is held.
+pub(crate) fn inventory_authority_sha256(
+    inventory: &GraphConstructionEncoding,
+) -> Result<String, GfError> {
+    struct DigestWriter<'a>(&'a mut ControlSha256);
+    impl Write for DigestWriter<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut digest = ControlSha256::default();
+    digest.update(INVENTORY_AUTHORITY_DOMAIN);
+    let mut writer = BufWriter::with_capacity(DIGEST_CHUNK_BYTES, DigestWriter(&mut digest));
+    serde_json::to_writer(&mut writer, inventory).map_err(storage)?;
+    writer.flush().map_err(storage)?;
+    drop(writer);
+    Ok(hex(&digest.finalize()))
+}
+
+/// Authority over a durable inventory file, from its bytes within the bound
+/// and without decoding them. The encoder installs exactly the serialization
+/// that [`inventory_authority_sha256`] digests, so the two agree for an intact
+/// file, and a caller binds an inventory it already holds to the durable
+/// record without decoding a second copy (#900).
+pub(super) fn durable_inventory_authority_sha256(reader: impl Read) -> Result<String, GfError> {
+    let bound = inventory_bound();
+    let mut reader = reader.take(bound + 1);
+    let mut digest = ControlSha256::default();
+    digest.update(INVENTORY_AUTHORITY_DOMAIN);
+    let mut chunk = vec![0_u8; DIGEST_CHUNK_BYTES];
+    let mut total = 0_u64;
+    loop {
+        let read = match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(storage(error)),
+        };
+        total += read as u64;
+        if total > bound {
+            return Err(storage("canonical inventory exceeds bound"));
+        }
+        digest.update(&chunk[..read]);
+    }
+    Ok(hex(&digest.finalize()))
 }

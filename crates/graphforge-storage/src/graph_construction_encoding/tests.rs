@@ -246,7 +246,7 @@ fn encoded_inventory_version_precedes_required_checksums_and_current_wire_is_str
             .as_object_mut()
             .unwrap()
             .remove("xxh64");
-        let error = decode_encoding_inventory(serde_json::to_vec(&changed).unwrap().as_slice())
+        let error = decode_encoding_inventory(serde_json::to_vec(&changed).unwrap().as_slice(), 0)
             .unwrap_err();
         assert!(
             error
@@ -272,8 +272,9 @@ fn encoded_inventory_version_precedes_required_checksums_and_current_wire_is_str
                     .unwrap()
                     .remove("xxh64");
             }
-            let error = decode_encoding_inventory(serde_json::to_vec(&changed).unwrap().as_slice())
-                .unwrap_err();
+            let error =
+                decode_encoding_inventory(serde_json::to_vec(&changed).unwrap().as_slice(), 0)
+                    .unwrap_err();
             assert!(
                 !error.to_string().contains("unsupported encoded"),
                 "{error}"
@@ -281,7 +282,7 @@ fn encoded_inventory_version_precedes_required_checksums_and_current_wire_is_str
         }
     }
     assert_eq!(
-        decode_encoding_inventory(serde_json::to_vec(&original).unwrap().as_slice()).unwrap(),
+        decode_encoding_inventory(serde_json::to_vec(&original).unwrap().as_slice(), 0).unwrap(),
         inventory
     );
 }
@@ -333,21 +334,25 @@ fn inventory_bound_tracks_the_graph_file_cap() {
     assert_eq!(MAX_INVENTORY_BYTES, 51_200_000);
     assert_eq!(inventory_bound(), MAX_INVENTORY_BYTES);
 
-    // The longest encoded-artifact row the encoder writes fits the allowance.
+    // The longest encoded-artifact row the encoder writes, an adjacency CSR
+    // shard (`adjacency.rs` names the shard directory and file), fits the
+    // allowance.
+    let csr =
+        crate::adjacency::csr_path(Path::new(""), "relation", crate::adjacency::Direction::Out);
     let longest = ConstructionEncodedArtifact {
         path: format!(
-            "edge_properties/{}/{:020}-{:020}.parquet",
-            crate::route_component::component("route"),
-            u64::MAX,
+            "indexes/adjacency/{}.shards-{}.d/{:020}.csr",
+            csr.file_name().unwrap().to_str().unwrap(),
+            "f".repeat(24),
             u64::MAX
         ),
         bytes: u64::MAX,
         sha256: "f".repeat(64),
         xxh64: u64::MAX,
     };
-    assert_eq!(longest.path.len(), 132);
+    assert_eq!(longest.path.len(), 151);
     let row = serde_json::to_vec(&longest).unwrap().len() as u64 + 1;
-    assert_eq!(row, 276);
+    assert_eq!(row, 295);
     assert!(row <= INVENTORY_ROW_BYTES);
     // The projected S28 inventory, 86,000 rows at S26's measured 262-byte
     // average, is admitted with more than twice its size to spare.

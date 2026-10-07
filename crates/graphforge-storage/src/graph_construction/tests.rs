@@ -1030,6 +1030,63 @@ fn over_bound_encoded_inventory_is_refused_before_pinning_and_resumes() {
             crate::graph_construction_encoding::inventory_authority_sha256(&encoding).unwrap()
         );
     }
+    // Publication and supersession bind a held inventory to the durable one
+    // by streamed digest, under the same bound.
+    let session_root = StableDirectory::open(encoded_root.parent().unwrap()).unwrap();
+    {
+        let _bound = InventoryBoundOverride::set(inventory_bytes - 1);
+        for error in [
+            crate::graph_construction_encoding::durable_inventory_authority(&encoded).unwrap_err(),
+            crate::graph_construction_encoding::authenticate_inventory_control_for_publication(
+                &session_root,
+                &encoding,
+            )
+            .unwrap_err(),
+        ] {
+            assert!(
+                error
+                    .to_string()
+                    .contains("canonical inventory exceeds bound"),
+                "{error}"
+            );
+        }
+    }
+    {
+        let _bound = InventoryBoundOverride::set(inventory_bytes);
+        assert_eq!(
+            crate::graph_construction_encoding::durable_inventory_authority(&encoded).unwrap(),
+            crate::graph_construction_encoding::inventory_authority_sha256(&encoding).unwrap()
+        );
+        let io =
+            crate::graph_construction_encoding::authenticate_inventory_control_for_publication(
+                &session_root,
+                &encoding,
+            )
+            .unwrap();
+        assert_eq!(io.read_bytes, inventory_bytes);
+    }
+    let mut changed = encoding.clone();
+    changed.evidence.membership_records += 1;
+    let error = open()
+        .reclaim_superseded_payloads_with_successor(Some(&changed), &mut || false)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("supersession encoding authority changed"),
+        "{error}"
+    );
+    let error = crate::graph_construction_encoding::authenticate_inventory_control_for_publication(
+        &session_root,
+        &changed,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("publication inventory differs from durable encoding"),
+        "{error}"
+    );
 
     // Under the default bound the pinned inventory restores on reopen and
     // publishes.

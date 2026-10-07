@@ -61,8 +61,8 @@ pub(crate) use inventory::authenticate_inventory_payloads;
 pub(crate) use inventory::{authenticate_inventory, authenticate_inventory_control};
 #[cfg(test)]
 pub(crate) use inventory_bound::InventoryBoundOverride;
-pub(crate) use inventory_bound::decode_encoding_inventory;
 use inventory_bound::inventory_bound;
+pub(crate) use inventory_bound::{decode_encoding_inventory, inventory_authority_sha256};
 #[cfg(any(test, feature = "test-support"))]
 mod seam_spike;
 
@@ -526,15 +526,6 @@ struct EncodingIntent {
     semantic_authority_sha256: Option<String>,
     shape_inputs_sha256: String,
     shape_authority_sha256: String,
-}
-
-pub(crate) fn inventory_authority_sha256(
-    inventory: &GraphConstructionEncoding,
-) -> Result<String, GfError> {
-    let mut digest = graphforge_core::hash_observation::ControlSha256::default();
-    digest.update(b"graphforge-construction-encoding-inventory/v2\0");
-    digest.update(serde_json::to_vec(inventory).map_err(storage)?);
-    Ok(hex(&digest.finalize()))
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -2559,10 +2550,25 @@ pub(crate) fn read_inventory(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(storage(error)),
     };
-    if file.metadata().map_err(storage)?.len() > inventory_bound() {
+    let length = file.metadata().map_err(storage)?.len();
+    if length > inventory_bound() {
         return Err(storage("canonical inventory exceeds bound"));
     }
-    decode_encoding_inventory(BufReader::with_capacity(COPY_BUFFER_BYTES, file)).map(Some)
+    decode_encoding_inventory(BufReader::with_capacity(COPY_BUFFER_BYTES, file), length).map(Some)
+}
+
+/// Authority digest of the durable inventory in `root`, streamed from its
+/// bytes without decoding a copy (#900).
+pub(crate) fn durable_inventory_authority(root: &StableDirectory) -> Result<String, GfError> {
+    inventory_bound::durable_inventory_authority_sha256(BufReader::with_capacity(
+        COPY_BUFFER_BYTES,
+        open_inventory(root)?,
+    ))
+}
+
+/// The streaming digest enforces the bound as it reads.
+fn open_inventory(root: &StableDirectory) -> Result<File, GfError> {
+    root.open_child_file(OsStr::new(INVENTORY)).map_err(storage)
 }
 
 fn read_encoding_intent(root: &StableDirectory) -> Result<Option<EncodingIntent>, GfError> {
@@ -2678,21 +2684,18 @@ pub(crate) fn authenticate_inventory_control_for_publication(
     let encoded = source
         .open_child_directory(OsStr::new(ENCODED_ROOT))
         .map_err(storage)?;
-    let file = encoded
-        .open_child_file(OsStr::new(INVENTORY))
-        .map_err(storage)?;
-    if file.metadata().map_err(storage)?.len() > inventory_bound() {
-        return Err(storage("canonical inventory exceeds bound"));
-    }
+    let file = open_inventory(&encoded)?;
     let counter = IoCounter::default();
-    let recorded = decode_encoding_inventory(BufReader::with_capacity(
+    // Bind the caller's inventory to the durable bytes without decoding a
+    // second copy of them (#900).
+    let durable = inventory_bound::durable_inventory_authority_sha256(BufReader::with_capacity(
         COPY_BUFFER_BYTES,
         CountingInput {
             inner: file,
             counter: counter.clone(),
         },
     ))?;
-    if inventory_authority_sha256(&recorded)? != inventory_authority_sha256(inventory)? {
+    if durable != inventory_authority_sha256(inventory)? {
         return Err(storage(
             "publication inventory differs from durable encoding",
         ));
