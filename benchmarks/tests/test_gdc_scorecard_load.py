@@ -23,6 +23,7 @@ from graphforge_bench.gdc_contracts import workspace_root
 ROOT = workspace_root()
 REPOSITORY = ROOT.parent
 FIXTURE = ROOT / "fixtures" / "gdc" / "load-fixture"
+LDBC_CSV_FIXTURE = ROOT / "fixtures" / "gdc" / "ldbc-csv-fixture"
 CONVERTER = "graphforge-benchmark-gdc-scorecard"
 
 
@@ -206,6 +207,76 @@ class ScorecardLoadTests(unittest.TestCase):
         self.assertEqual(
             count(
                 "MATCH (:Vertex {id: 1})-[r:LINK {weight: 0.5}]->(:Vertex {id: 2}) RETURN count(r)"
+            ),
+            1,
+        )
+
+    def test_ldbc_csv_fixture_loads_column_labels_temporal_and_list_properties(self) -> None:
+        """Gzip parts, wildcards and the new property types survive import and reopen."""
+        converted = self.scratch / "converted"
+        completed = self.convert(LDBC_CSV_FIXTURE / "mapping.json", LDBC_CSV_FIXTURE, converted)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        project = self.scratch / "project"
+        self.assertEqual(Gf(self.gf, project).load(converted)["outcome"], "committed")
+
+        reopened = Gf(self.gf, project)
+        count = lambda cypher: reopened.count(cypher, self.scratch)  # noqa: E731
+        # The stored label comes from Place.type; the identity label is not stored.
+        self.assertEqual(count("MATCH (n:City) RETURN count(n)"), 2)
+        self.assertEqual(count("MATCH (n:Country) RETURN count(n)"), 1)
+        self.assertEqual(count("MATCH (n:Continent) RETURN count(n)"), 1)
+        self.assertEqual(count("MATCH (n:Place) RETURN count(n)"), 0)
+        self.assertEqual(count("MATCH (n:Person) RETURN count(n)"), 3)
+        self.assertEqual(count("MATCH (n:Owner) RETURN count(n)"), 2)
+        self.assertEqual(count("MATCH (n) RETURN count(n)"), 9)
+        # Edges reach column-labelled nodes through the identity label.
+        self.assertEqual(
+            count("MATCH (:Person)-[r:IS_LOCATED_IN]->(:City {name: 'Mumbai'}) RETURN count(r)"),
+            2,
+        )
+        self.assertEqual(
+            count("MATCH (:City)-[r:IS_PART_OF]->(:Country)-[:IS_PART_OF]->(:Continent) "
+                  "RETURN count(r)"),
+            2,
+        )
+        self.assertEqual(count("MATCH ()-[r:KNOWS]->() RETURN count(r)"), 3)
+        self.assertEqual(count("MATCH ()-[r]->() RETURN count(r)"), 9)
+        # date, datetime and list values read back as the Cypher values they name.
+        # A datetime is pinned by >= and <= rather than =: at this commit `=` on a
+        # persisted datetime is false even for one written by Cypher CREATE, while
+        # ordering and toString() agree (reported on #1878).
+        self.assertEqual(
+            count(
+                "MATCH (p:Person {id: 14}) WHERE p.birthday = date('1984-03-11') "
+                "AND p.creationDate >= datetime('2010-01-03T15:10:31.499Z') "
+                "AND p.creationDate <= datetime('2010-01-03T15:10:31.499Z') "
+                "AND toString(p.creationDate) = '2010-01-03T15:10:31.499Z' "
+                "AND p.speaks = ['fa', 'ku', 'en'] AND p.email = ['Hossein14@gmail.com'] "
+                "RETURN count(p)"
+            ),
+            1,
+        )
+        self.assertEqual(
+            count(
+                "MATCH (p:Person {id: 16}) WHERE p.speaks IS NULL AND p.email IS NULL "
+                "AND p.birthday < date('1907-01-01') RETURN count(p)"
+            ),
+            1,
+        )
+        self.assertEqual(
+            count(
+                "MATCH (:Person {id: 16})-[r:KNOWS]->(:Person {id: 14}) "
+                "WHERE toString(r.creationDate) = '2010-03-13T07:37:21.718Z' "
+                "AND r.creationDate > datetime('2010-03-13T07:37:21.717Z') RETURN count(r)"
+            ),
+            1,
+        )
+        self.assertEqual(
+            count(
+                "MATCH (o:Owner {id: 33066}) WHERE o.isBlocked "
+                "AND toString(o.createTime) = '2020-05-05T21:16:49.46Z' "
+                "AND o.createTime < datetime('2020-05-05T21:16:49.461Z') "
+                "AND o.birthday = date('1977-01-02') RETURN count(o)"
             ),
             1,
         )

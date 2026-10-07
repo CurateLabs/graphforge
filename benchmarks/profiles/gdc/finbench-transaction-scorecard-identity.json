@@ -1,0 +1,58 @@
+{
+  "schema": "graphforge-gdc-pinned-identity/1",
+  "suite_id": "finbench-transaction",
+  "disposition": "executable",
+  "spec": {
+    "name": "ldbc-finbench",
+    "source": "https://github.com/ldbc/ldbc_finbench_docs",
+    "release": "v0.1.0",
+    "commit": "d3ec7036bf6919df8cd3eeaa3a986048e779ea02"
+  },
+  "generator": {
+    "name": "ldbc-finbench-pre-generated-datasets",
+    "source": "https://datasets.ldbcouncil.org/finbench/",
+    "release": "unversioned-pinned-by-sha256",
+    "commit": null
+  },
+  "driver": {
+    "name": "graphforge-gdc-scorecard-converter",
+    "source": "https://github.com/CurateLabs/graphforge/tree/main/benchmarks/runners/gdc-scorecard",
+    "release": "converter-v1",
+    "commit": null
+  },
+  "datasets": [
+    {
+      "id": "sf1",
+      "role": "dataset",
+      "checksum_sha256": "598d82e0bc442150629f3db7b6c6942a3f1bf6414cbc2f4e8ac6d2da89884636",
+      "license": "publisher-unspecified; see https://ldbcouncil.org/benchmarks/finbench/datasets/",
+      "acquisition": "download",
+      "source": "https://datasets.ldbcouncil.org/finbench/sf1.tar.gz"
+    },
+    {
+      "id": "sf10",
+      "role": "dataset",
+      "checksum_sha256": "50d48cb68df5bc9563dc4d1f670507b8329431336d651b85d6a9952c3cc8923d",
+      "license": "publisher-unspecified; see https://ldbcouncil.org/benchmarks/finbench/datasets/",
+      "acquisition": "download",
+      "source": "https://datasets.ldbcouncil.org/finbench/sf10.tar.gz"
+    },
+    {
+      "id": "sf1_read_params",
+      "role": "parameter",
+      "checksum_sha256": "ca624fc25ef56b22819739e9ee34c49944fc902dd5a7eb8b6f24819e558c50bf",
+      "license": "publisher-unspecified; see https://ldbcouncil.org/benchmarks/finbench/datasets/",
+      "acquisition": "download",
+      "source": "https://datasets.ldbcouncil.org/finbench/sf1_read_params.zip"
+    },
+    {
+      "id": "sf10_read_params",
+      "role": "parameter",
+      "checksum_sha256": "489586faddec891379870a1860276e91582c9858b18ad7470b7d4415ea8451b0",
+      "license": "publisher-unspecified; see https://ldbcouncil.org/benchmarks/finbench/datasets/",
+      "acquisition": "download",
+      "source": "https://datasets.ldbcouncil.org/finbench/sf10_read_params.zip"
+    }
+  ],
+  "references": []
+}

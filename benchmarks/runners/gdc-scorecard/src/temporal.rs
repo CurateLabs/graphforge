@@ -1,11 +1,34 @@
 //! Strict parsing of LDBC date and datetime text into GraphForge's persisted
-//! forms: a date is days since the Unix epoch, a datetime is a UTC instant in
-//! microseconds. Every rejected value says why; nothing is rounded or guessed.
+//! temporal forms: a date is days since the Unix epoch; a datetime is the
+//! local date and time as written plus its UTC offset, the form a Cypher
+//! `datetime()` value takes. Every rejected value says why; nothing is rounded.
 
 use crate::mapping::TemporalFormat;
 
 const MILLIS_PER_DAY: i64 = 86_400_000;
-const MICROS_PER_SECOND: i64 = 1_000_000;
+const NANOS_PER_SECOND: i64 = 1_000_000_000;
+const NANOS_PER_MILLI: i64 = 1_000_000;
+/// GraphForge's certified offset range (`TemporalValue::validate`).
+const MAX_OFFSET_SECONDS: i64 = 18 * 3600;
+
+/// A datetime as stored: local calendar day and wall-clock time, and the
+/// offset of that wall clock east of UTC.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DateTime {
+    pub epoch_days: i64,
+    pub nanos: i64,
+    pub offset_seconds: i32,
+}
+
+impl DateTime {
+    /// Nanoseconds since the Unix epoch of the instant this value names.
+    #[must_use]
+    pub fn instant_nanos(&self) -> i128 {
+        i128::from(self.epoch_days) * 86_400 * i128::from(NANOS_PER_SECOND)
+            + i128::from(self.nanos)
+            - i128::from(self.offset_seconds) * i128::from(NANOS_PER_SECOND)
+    }
+}
 
 /// Days since 1970-01-01 of a proleptic Gregorian civil date (Howard
 /// Hinnant's `days_from_civil`).
@@ -51,8 +74,7 @@ fn civil_date(text: &str) -> Result<i64, String> {
     Ok(days_from_civil(year, month, day))
 }
 
-/// `HH:MM:SS[.fraction]` as microseconds of the day. Digits beyond the
-/// microsecond must be zero, so no precision is silently dropped.
+/// `HH:MM:SS[.fraction]` (one to nine fraction digits) as nanoseconds of the day.
 fn time_of_day(text: &str) -> Result<i64, String> {
     let (clock, fraction) = match text.split_once('.') {
         Some((clock, fraction)) => (clock, Some(fraction)),
@@ -68,23 +90,19 @@ fn time_of_day(text: &str) -> Result<i64, String> {
     if hour > 23 || minute > 59 || second > 59 {
         return Err(format!("time {text:?} does not exist"));
     }
-    let mut micros = 0;
+    let mut nanos = 0;
     if let Some(fraction) = fraction {
         if fraction.is_empty() || fraction.len() > 9 {
-            return Err(format!("time {text:?} has a 1-9 digit fraction"));
+            return Err(format!("time {text:?} needs a 1-9 digit fraction"));
         }
-        digits(fraction, "fraction")?;
-        let (kept, dropped) = fraction.split_at(fraction.len().min(6));
-        if dropped.bytes().any(|byte| byte != b'0') {
-            return Err(format!("time {text:?} is finer than a microsecond"));
-        }
-        micros = digits(kept, "fraction")? * 10_i64.pow(6 - u32::try_from(kept.len()).unwrap_or(6));
+        let scale = 10_i64.pow(9 - u32::try_from(fraction.len()).unwrap_or(9));
+        nanos = digits(fraction, "fraction")? * scale;
     }
-    Ok(((hour * 60 + minute) * 60 + second) * MICROS_PER_SECOND + micros)
+    Ok(((hour * 60 + minute) * 60 + second) * NANOS_PER_SECOND + nanos)
 }
 
 /// `Z`, `+HH:MM`, `-HH:MM`, `+HHMM` or `-HHMM` as seconds east of UTC.
-fn offset_seconds(text: &str) -> Result<i64, String> {
+fn offset_seconds(text: &str) -> Result<i32, String> {
     if text == "Z" {
         return Ok(0);
     }
@@ -99,26 +117,20 @@ fn offset_seconds(text: &str) -> Result<i64, String> {
         _ => return Err(format!("offset {text:?} is not Z or +HH:MM")),
     };
     let (hours, minutes) = (digits(hours, "offset")?, digits(minutes, "offset")?);
-    if hours > 18 || minutes > 59 {
-        return Err(format!("offset {text:?} is out of range"));
+    let seconds = hours * 3600 + minutes * 60;
+    if minutes > 59 || seconds > MAX_OFFSET_SECONDS {
+        return Err(format!("offset {text:?} is outside +/-18:00"));
     }
-    Ok(sign * (hours * 3600 + minutes * 60))
+    i32::try_from(sign * seconds).map_err(|_| format!("offset {text:?} is out of range"))
 }
 
 fn epoch_millis(text: &str) -> Result<i64, String> {
-    let digits_only = text.strip_prefix('-').unwrap_or(text);
-    if digits_only.is_empty() || !digits_only.bytes().all(|byte| byte.is_ascii_digit()) {
+    let unsigned = text.strip_prefix('-').unwrap_or(text);
+    if unsigned.is_empty() || !unsigned.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(format!("{text:?} is not epoch milliseconds"));
     }
     text.parse::<i64>()
         .map_err(|_| format!("{text:?} is out of range"))
-}
-
-fn micros(days: i64, time_micros: i64, offset: i64) -> Result<i64, String> {
-    days.checked_mul(86_400 * MICROS_PER_SECOND)
-        .and_then(|value| value.checked_add(time_micros))
-        .and_then(|value| value.checked_sub(offset * MICROS_PER_SECOND))
-        .ok_or_else(|| "datetime is out of range".to_owned())
 }
 
 /// Parses a date into days since the Unix epoch.
@@ -147,11 +159,12 @@ pub fn parse_date(text: &str, format: TemporalFormat) -> Result<i64, String> {
     }
 }
 
-/// Parses a datetime into microseconds since the Unix epoch, UTC.
+/// Parses a datetime. ISO-8601 text keeps its written wall clock and offset;
+/// naive UTC text and epoch milliseconds have offset zero.
 ///
 /// # Errors
 /// A message naming why `text` is not a datetime in `format`.
-pub fn parse_datetime(text: &str, format: TemporalFormat) -> Result<i64, String> {
+pub fn parse_datetime(text: &str, format: TemporalFormat) -> Result<DateTime, String> {
     match format {
         TemporalFormat::Iso8601 => {
             let (date, rest) = text
@@ -161,17 +174,30 @@ pub fn parse_datetime(text: &str, format: TemporalFormat) -> Result<i64, String>
                 .find(['Z', '+', '-'])
                 .ok_or_else(|| format!("datetime {text:?} has no UTC offset"))?;
             let (time, offset) = rest.split_at(split);
-            micros(civil_date(date)?, time_of_day(time)?, offset_seconds(offset)?)
+            Ok(DateTime {
+                epoch_days: civil_date(date)?,
+                nanos: time_of_day(time)?,
+                offset_seconds: offset_seconds(offset)?,
+            })
         }
         TemporalFormat::NaiveUtc => {
             let (date, time) = text
                 .split_once(' ')
                 .ok_or_else(|| format!("datetime {text:?} is not YYYY-MM-DD HH:MM:SS"))?;
-            micros(civil_date(date)?, time_of_day(time)?, 0)
+            Ok(DateTime {
+                epoch_days: civil_date(date)?,
+                nanos: time_of_day(time)?,
+                offset_seconds: 0,
+            })
         }
-        TemporalFormat::EpochMillis => epoch_millis(text)?
-            .checked_mul(1000)
-            .ok_or_else(|| format!("{text:?} is out of range")),
+        TemporalFormat::EpochMillis => {
+            let millis = epoch_millis(text)?;
+            Ok(DateTime {
+                epoch_days: millis.div_euclid(MILLIS_PER_DAY),
+                nanos: millis.rem_euclid(MILLIS_PER_DAY) * NANOS_PER_MILLI,
+                offset_seconds: 0,
+            })
+        }
     }
 }
 
@@ -179,6 +205,12 @@ pub fn parse_datetime(text: &str, format: TemporalFormat) -> Result<i64, String>
 mod tests {
     use super::*;
     use TemporalFormat::{EpochMillis, Iso8601, NaiveUtc};
+
+    const LDBC_BI_NANOS: i128 = 1_262_531_441_499_000_000;
+
+    fn instant(text: &str, format: TemporalFormat) -> i128 {
+        parse_datetime(text, format).unwrap().instant_nanos()
+    }
 
     #[test]
     fn civil_days_match_known_dates() {
@@ -214,60 +246,80 @@ mod tests {
     }
 
     #[test]
-    fn datetimes_are_utc_instants_in_microseconds() {
-        let ldbc_bi = parse_datetime("2010-01-03T15:10:41.499+00:00", Iso8601).unwrap();
-        assert_eq!(ldbc_bi, 1_262_531_441_499_000);
+    fn iso_datetimes_keep_their_wall_clock_and_offset() {
         assert_eq!(
-            parse_datetime("2010-01-03T15:10:41.499Z", Iso8601),
-            Ok(ldbc_bi)
+            parse_datetime("2010-01-03T15:10:41.499+00:00", Iso8601),
+            Ok(DateTime {
+                epoch_days: 14_612,
+                nanos: 54_641_499_000_000,
+                offset_seconds: 0
+            })
         );
         assert_eq!(
             parse_datetime("2010-01-03T17:10:41.499+0200", Iso8601),
-            Ok(ldbc_bi)
+            Ok(DateTime {
+                epoch_days: 14_612,
+                nanos: 61_841_499_000_000,
+                offset_seconds: 7_200
+            })
         );
         assert_eq!(
-            parse_datetime("2010-01-03T14:10:41.499-01:00", Iso8601),
-            Ok(ldbc_bi)
-        );
-        assert_eq!(
-            parse_datetime("2010-01-03 15:10:41.499", NaiveUtc),
-            Ok(ldbc_bi)
-        );
-        assert_eq!(parse_datetime("1262531441499", EpochMillis), Ok(ldbc_bi));
-        assert_eq!(
-            parse_datetime("2020-05-05 21:16:49.46", NaiveUtc),
-            parse_datetime("2020-05-05 21:16:49.460000000", NaiveUtc)
-        );
-        assert_eq!(parse_datetime("1970-01-01 00:00:00", NaiveUtc), Ok(0));
-        assert_eq!(
-            parse_datetime("1970-01-01T00:00:00.000001Z", Iso8601),
-            Ok(1)
+            parse_datetime("2010-01-03T14:10:41.499-01:00", Iso8601)
+                .unwrap()
+                .offset_seconds,
+            -3_600
         );
     }
 
     #[test]
-    fn datetimes_refuse_ambiguity_and_lost_precision() {
+    fn every_format_names_the_same_instant() {
+        for (text, format) in [
+            ("2010-01-03T15:10:41.499+00:00", Iso8601),
+            ("2010-01-03T15:10:41.499Z", Iso8601),
+            ("2010-01-03T17:10:41.499+0200", Iso8601),
+            ("2010-01-03T14:10:41.499-01:00", Iso8601),
+            ("2010-01-03T15:10:41.499000000Z", Iso8601),
+            ("2010-01-03 15:10:41.499", NaiveUtc),
+            ("1262531441499", EpochMillis),
+        ] {
+            assert_eq!(instant(text, format), LDBC_BI_NANOS, "{text}");
+        }
+        assert_eq!(
+            instant("2020-05-05 21:16:49.46", NaiveUtc),
+            instant("2020-05-05 21:16:49.460", NaiveUtc)
+        );
+        assert_eq!(instant("1970-01-01 00:00:00", NaiveUtc), 0);
+        assert_eq!(instant("1970-01-01T00:00:00.000000001Z", Iso8601), 1);
+        assert_eq!(instant("-1", EpochMillis), -1_000_000);
+        assert_eq!(
+            parse_datetime("-1", EpochMillis),
+            Ok(DateTime {
+                epoch_days: -1,
+                nanos: 86_399_999_000_000,
+                offset_seconds: 0
+            })
+        );
+    }
+
+    #[test]
+    fn datetimes_refuse_ambiguity_and_impossible_values() {
         for (text, format) in [
             ("2010-01-03T15:10:41.499", Iso8601),
             ("2010-01-03 15:10:41.499+00:00", Iso8601),
             ("2010-01-03T15:10:41.499+00:00", NaiveUtc),
-            ("2010-01-03T15:10:41.4990001Z", Iso8601),
-            ("2010-01-03T15:10:41.0000001Z", Iso8601),
+            ("2010-01-03T15:10:41.0000000001Z", Iso8601),
             ("2010-01-03T24:00:00Z", Iso8601),
             ("2010-01-03T15:60:00Z", Iso8601),
             ("2010-01-03T15:10:60Z", Iso8601),
             ("2010-01-03T15:10:41.Z", Iso8601),
-            ("2010-01-03T15:10:41+19:00", Iso8601),
+            ("2010-01-03T15:10:41+18:01", Iso8601),
             ("2010-01-03T15:10:41+1:00", Iso8601),
             ("2010-02-30T15:10:41Z", Iso8601),
             ("1.5", EpochMillis),
-            ("99999999999999999", EpochMillis),
+            ("99999999999999999999", EpochMillis),
         ] {
             assert!(parse_datetime(text, format).is_err(), "{text} {format:?}");
         }
-        assert_eq!(
-            parse_datetime("2010-01-03T15:10:41.4990Z", Iso8601),
-            parse_datetime("2010-01-03T15:10:41.499Z", Iso8601)
-        );
+        assert!(parse_datetime("2010-01-03T15:10:41-18:00", Iso8601).is_ok());
     }
 }

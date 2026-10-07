@@ -7,8 +7,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use arrow::array::{
-    Array, BooleanArray, FixedSizeBinaryArray, Int64Array, ListArray, StringArray, StructArray,
-    TimestampMicrosecondArray,
+    Array, BooleanArray, FixedSizeBinaryArray, Int32Array, Int64Array, ListArray, StringArray,
+    StructArray, Time64NanosecondArray,
 };
 use arrow::datatypes::{DataType, Field, TimeUnit};
 use arrow::record_batch::RecordBatch;
@@ -160,7 +160,15 @@ fn temporal_and_list_properties_use_the_canonical_graphforge_types() {
     );
     assert_eq!(
         schema.field_with_name("creationDate").unwrap().data_type(),
-        &DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+        &DataType::Struct(
+            vec![
+                Field::new("date", DataType::Int64, true),
+                Field::new("time", DataType::Time64(TimeUnit::Nanosecond), true),
+                Field::new("offset", DataType::Int32, true),
+                Field::new("zone", DataType::Utf8, true),
+            ]
+            .into()
+        )
     );
     assert_eq!(
         schema.field_with_name("speaks").unwrap().data_type(),
@@ -183,8 +191,11 @@ fn temporal_and_list_properties_use_the_canonical_graphforge_types() {
         (0..3).map(|row| days.value(row)).collect::<Vec<_>>(),
         [5_183, -56_270, -23_034]
     );
-    let created = column::<TimestampMicrosecondArray>(&person, "creationDate");
-    assert_eq!(created.value(0), 1_262_531_431_499_000);
+    // 2010-01-03T15:10:31.499+00:00: local day, nanoseconds of day, offset.
+    assert_eq!(
+        datetime_at(&person, "creationDate", 0),
+        Some((14_612, 54_631_499_000_000, 0))
+    );
     let speaks = column::<ListArray>(&person, "speaks");
     let email = column::<ListArray>(&person, "email");
     assert_eq!(
@@ -200,9 +211,14 @@ fn temporal_and_list_properties_use_the_canonical_graphforge_types() {
 
     // FinBench: naive UTC datetimes with a short fraction, a midnight date.
     let owner = read(&out.join("nodes/owner.parquet"));
-    let created = column::<TimestampMicrosecondArray>(&owner, "createTime");
-    assert_eq!(created.value(0), 1_577_837_161_273_000);
-    assert_eq!(created.value(1), 1_588_713_409_460_000);
+    assert_eq!(
+        datetime_at(&owner, "createTime", 0),
+        Some((18_262, 361_273_000_000, 0))
+    );
+    assert_eq!(
+        datetime_at(&owner, "createTime", 1),
+        Some((18_387, 76_609_460_000_000, 0))
+    );
     let birthday = column::<StructArray>(&owner, "birthday");
     let days = birthday
         .column(0)
@@ -223,10 +239,30 @@ fn temporal_and_list_properties_use_the_canonical_graphforge_types() {
         column::<FixedSizeBinaryArray>(&knows, "target_uuid").value(0),
         node_uuid("Person", 14)
     );
+    // 1268465841718 ms is 2010-03-13T07:37:21.718Z.
     assert_eq!(
-        column::<TimestampMicrosecondArray>(&knows, "creationDate").value(0),
-        1_268_465_841_718_000
+        datetime_at(&knows, "creationDate", 0),
+        Some((14_681, 27_441_718_000_000, 0))
     );
+}
+
+/// `(local epoch day, nanoseconds of day, offset seconds)` of a datetime
+/// struct row whose zone is null, or `None` for a null datetime.
+fn datetime_at(batch: &RecordBatch, name: &str, row: usize) -> Option<(i64, i64, i32)> {
+    let array = column::<StructArray>(batch, name);
+    if array.is_null(row) {
+        return None;
+    }
+    let field = |index: usize| array.column(index).as_any();
+    assert!(array.column(3).is_null(row), "an LDBC datetime names no zone");
+    Some((
+        field(0).downcast_ref::<Int64Array>().unwrap().value(row),
+        field(1)
+            .downcast_ref::<Time64NanosecondArray>()
+            .unwrap()
+            .value(row),
+        field(2).downcast_ref::<Int32Array>().unwrap().value(row),
+    ))
 }
 
 struct Workspace {

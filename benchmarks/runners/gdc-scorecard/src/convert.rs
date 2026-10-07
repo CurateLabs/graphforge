@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use arrow::array::{
     Array, ArrayRef, BooleanBuilder, FixedSizeBinaryBuilder, Float64Builder, Int64Builder,
-    ListBuilder, StringArray, StringBuilder, StructBuilder, TimestampMicrosecondBuilder,
+    Int32Builder, ListBuilder, StringArray, StringBuilder, StructBuilder, Time64NanosecondBuilder,
 };
 use arrow::datatypes::{DataType, Field, Fields, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
@@ -23,7 +23,7 @@ use crate::glob;
 use crate::identity::{Uuid, edge_uuid, hex, node_uuid};
 use crate::mapping::{EdgeTable, Mapping, NodeTable, Property, PropertyType, TemporalFormat};
 use crate::source::read_table;
-use crate::temporal::{parse_date, parse_datetime};
+use crate::temporal::{DateTime, parse_date, parse_datetime};
 use crate::spill::{
     Budget, DEFAULT_MEMORY_BUDGET_BYTES, Duplicate, Key, KeySorter, SpillDir, check_nodes,
     find_dangling,
@@ -319,6 +319,52 @@ fn date_fields() -> Fields {
     Fields::from(vec![Field::new("epoch_day", DataType::Int64, true)])
 }
 
+/// GraphForge's canonical `datetime` struct
+/// (`graphforge_ir::datetime_struct_fields`): the form a Cypher `datetime()`
+/// value is stored in, so loaded values compare with Cypher literals. A UTC
+/// `Timestamp` column would load, but it does not compare equal to them.
+fn datetime_fields() -> Fields {
+    Fields::from(vec![
+        Field::new("date", DataType::Int64, true),
+        Field::new("time", DataType::Time64(TimeUnit::Nanosecond), true),
+        Field::new("offset", DataType::Int32, true),
+        Field::new("zone", DataType::Utf8, true),
+    ])
+}
+
+fn datetime_builder() -> StructBuilder {
+    StructBuilder::new(
+        datetime_fields(),
+        vec![
+            Box::new(Int64Builder::new()),
+            Box::new(Time64NanosecondBuilder::new()),
+            Box::new(Int32Builder::new()),
+            Box::new(StringBuilder::new()),
+        ],
+    )
+}
+
+fn append_datetime(builder: &mut StructBuilder, value: Option<DateTime>) {
+    builder
+        .field_builder::<Int64Builder>(0)
+        .expect("datetime date field")
+        .append_option(value.map(|value| value.epoch_days));
+    builder
+        .field_builder::<Time64NanosecondBuilder>(1)
+        .expect("datetime time field")
+        .append_option(value.map(|value| value.nanos));
+    builder
+        .field_builder::<Int32Builder>(2)
+        .expect("datetime offset field")
+        .append_option(value.map(|value| value.offset_seconds));
+    // Offset-only: an LDBC datetime never names an IANA zone.
+    builder
+        .field_builder::<StringBuilder>(3)
+        .expect("datetime zone field")
+        .append_null();
+    builder.append(value.is_some());
+}
+
 fn list_item() -> Arc<Field> {
     Arc::new(Field::new("item", DataType::Utf8, true))
 }
@@ -330,7 +376,7 @@ fn arrow_type(kind: PropertyType) -> DataType {
         PropertyType::Float64 => DataType::Float64,
         PropertyType::Boolean => DataType::Boolean,
         PropertyType::Date => DataType::Struct(date_fields()),
-        PropertyType::Datetime => DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+        PropertyType::Datetime => DataType::Struct(datetime_fields()),
         PropertyType::List => DataType::List(list_item()),
     }
 }
@@ -356,7 +402,7 @@ enum Column {
     Float64(Float64Builder),
     Boolean(BooleanBuilder),
     Date(StructBuilder, TemporalFormat),
-    Datetime(TimestampMicrosecondBuilder, TemporalFormat),
+    Datetime(StructBuilder, TemporalFormat),
     List(ListBuilder<StringBuilder>, char),
 }
 
@@ -371,10 +417,7 @@ impl Column {
                 StructBuilder::new(date_fields(), vec![Box::new(Int64Builder::new())]),
                 property.temporal_format(),
             ),
-            PropertyType::Datetime => Self::Datetime(
-                TimestampMicrosecondBuilder::new().with_timezone("UTC"),
-                property.temporal_format(),
-            ),
+            PropertyType::Datetime => Self::Datetime(datetime_builder(), property.temporal_format()),
             PropertyType::List => Self::List(
                 ListBuilder::new(StringBuilder::new()).with_field(list_item()),
                 property
@@ -401,7 +444,8 @@ impl Column {
                     .append_option(day);
                 builder.append(day.is_some());
             }
-            Self::Datetime(builder, format) => builder.append_option(
+            Self::Datetime(builder, format) => append_datetime(
+                builder,
                 value
                     .map(|text| parse_datetime(text, *format))
                     .transpose()?,

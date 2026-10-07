@@ -5,6 +5,10 @@
   "suite_id": "finbench-transaction",
   "disposition": "executable",
   "pinned_identity": "profiles/gdc/finbench-transaction-identity.json",
+  "identity_profiles": {
+    "static": "profiles/gdc/finbench-transaction-identity.json",
+    "scorecard": "profiles/gdc/finbench-transaction-scorecard-identity.json"
+  },
   "runner": "gdc-finbench-transaction",
   "datasets": ["finbench-engineering-tiny-v1"]
 }

@@ -47,7 +47,8 @@ pub enum PropertyType {
     Boolean,
     /// A Cypher `date`: `Struct{epoch_day: Int64}`.
     Date,
-    /// A Cypher `datetime` instant: `Timestamp(Microsecond, "UTC")`.
+    /// A Cypher `datetime`: `Struct{date: Int64, time: Time64(ns), offset: Int32,
+    /// zone: Utf8}`, the local date and time as written and its UTC offset.
     Datetime,
     /// A list of strings split on `separator`: `List<Utf8>`.
     List,

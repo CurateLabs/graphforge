@@ -15,7 +15,7 @@ pub use convert::{Conversion, MANIFEST_FILE, MANIFEST_SCHEMA, convert, convert_w
 pub use error::{Cause, ConvertError};
 pub use identity::{edge_uuid, node_uuid};
 pub use mapping::{MAPPING_SCHEMA, Mapping, TemporalFormat};
-pub use temporal::{parse_date, parse_datetime};
+pub use temporal::{DateTime, parse_date, parse_datetime};
 pub use spill::{
     DEFAULT_MEMORY_BUDGET_BYTES, KEY_RECORD_BYTES, MIN_MEMORY_BUDGET_BYTES, SPILL_DIR,
 };

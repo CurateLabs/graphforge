@@ -1,0 +1,594 @@
+{
+  "schema": "graphforge-gdc-load-mapping/1",
+  "node_tables": [
+    {
+      "id": "account",
+      "format": "ldbc-csv",
+      "files": [
+        "*/snapshot/Account.csv"
+      ],
+      "label": "Account",
+      "id_column": "accountId",
+      "properties": [
+        {
+          "column": "accountId",
+          "name": "id",
+          "type": "int64"
+        },
+        {
+          "column": "createTime",
+          "type": "datetime",
+          "format": "naive-utc"
+        },
+        {
+          "column": "isBlocked",
+          "type": "boolean"
+        },
+        {
+          "column": "accoutType",
+          "name": "type",
+          "type": "string"
+        },
+        {
+          "column": "nickname",
+          "type": "string"
+        },
+        {
+          "column": "phonenum",
+          "type": "string"
+        },
+        {
+          "column": "email",
+          "type": "string"
+        },
+        {
+          "column": "freqLoginType",
+          "type": "string"
+        },
+        {
+          "column": "lastLoginTime",
+          "type": "datetime",
+          "format": "epoch-millis"
+        },
+        {
+          "column": "accountLevel",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "id": "company",
+      "format": "ldbc-csv",
+      "files": [
+        "*/snapshot/Company.csv"
+      ],
+      "label": "Company",
+      "id_column": "companyId",
+      "properties": [
+        {
+          "column": "companyId",
+          "name": "id",
+          "type": "int64"
+        },
+        {
+          "column": "companyName",
+          "name": "name",
+          "type": "string"
+        },
+        {
+          "column": "isBlocked",
+          "type": "boolean"
+        },
+        {
+          "column": "createTime",
+          "type": "datetime",
+          "format": "naive-utc"
+        },
+        {
+          "column": "country",
+          "type": "string"
+        },
+        {
+          "column": "city",
+          "type": "string"
+        },
+        {
+          "column": "business",
+          "type": "string"
+        },
+        {
+          "column": "description",
+          "type": "string"
+        },
+        {
+          "column": "url",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "id": "loan",
+      "format": "ldbc-csv",
+      "files": [
+        "*/snapshot/Loan.csv"
+      ],
+      "label": "Loan",
+      "id_column": "loanId",
+      "properties": [
+        {
+          "column": "loanId",
+          "name": "id",
+          "type": "int64"
+        },
+        {
+          "column": "loanAmount",
+          "type": "float64"
+        },
+        {
+          "column": "balance",
+          "type": "float64"
+        },
+        {
+          "column": "createTime",
+          "type": "datetime",
+          "format": "naive-utc"
+        },
+        {
+          "column": "loanUsage",
+          "type": "string"
+        },
+        {
+          "column": "interestRate",
+          "type": "float64"
+        }
+      ]
+    },
+    {
+      "id": "medium",
+      "format": "ldbc-csv",
+      "files": [
+        "*/snapshot/Medium.csv"
+      ],
+      "label": "Medium",
+      "id_column": "mediumId",
+      "properties": [
+        {
+          "column": "mediumId",
+          "name": "id",
+          "type": "int64"
+        },
+        {
+          "column": "mediumType",
+          "name": "type",
+          "type": "string"
+        },
+        {
+          "column": "isBlocked",
+          "type": "boolean"
+        },
+        {
+          "column": "createTime",
+          "type": "datetime",
+          "format": "naive-utc"
+        },
+        {
+          "column": "lastLoginTime",
+          "type": "datetime",
+          "format": "epoch-millis"
+        },
+        {
+          "column": "riskLevel",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "id": "person",
+      "format": "ldbc-csv",
+      "files": [
+        "*/snapshot/Person.csv"
+      ],
+      "label": "Person",
+      "id_column": "personId",
+      "properties": [
+        {
+          "column": "personId",
+          "name": "id",
+          "type": "int64"
+        },
+        {
+          "column": "personName",
+          "name": "name",
+          "type": "string"
+        },
+        {
+          "column": "isBlocked",
+          "type": "boolean"
+        },
+        {
+          "column": "createTime",
+          "type": "datetime",
+          "format": "naive-utc"
+        },
+        {
+          "column": "gender",
+          "type": "string"
+        },
+        {
+          "column": "birthday",
+          "type": "date",
+          "format": "naive-utc"
+        },
+        {
+          "column": "country",
+          "type": "string"
+        },
+        {
+          "column": "city",
+          "type": "string"
+        }
+      ]
+    }
+  ],
+  "edge_tables": [
+    {
+      "id": "account_repay_loan",
+      "format": "ldbc-csv",
+      "files": [
+        "*/snapshot/AccountRepayLoan.csv"
+      ],
+      "rel_type": "repay",
+      "source": {
+        "label": "Account",
+        "column": "accountId"
+      },
+      "target": {
+        "label": "Loan",
+        "column": "loanId"
+      },
+      "properties": [
+        {
+          "column": "amount",
+          "type": "float64"
+        },
+        {
+          "column": "createTime",
+          "type": "datetime",
+          "format": "naive-utc"
+        }
+      ]
+    },
+    {
+      "id": "account_transfer_account",
+      "format": "ldbc-csv",
+      "files": [
+        "*/snapshot/AccountTransferAccount.csv"
+      ],
+      "rel_type": "transfer",
+      "source": {
+        "label": "Account",
+        "column": "fromId"
+      },
+      "target": {
+        "label": "Account",
+        "column": "toId"
+      },
+      "properties": [
+        {
+          "column": "amount",
+          "type": "float64"
+        },
+        {
+          "column": "createTime",
+          "type": "datetime",
+          "format": "naive-utc"
+        },
+        {
+          "column": "orderNum",
+          "type": "string"
+        },
+        {
+          "column": "comment",
+          "type": "string"
+        },
+        {
+          "column": "payType",
+          "type": "string"
+        },
+        {
+          "column": "goodsType",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "id": "account_withdraw_account",
+      "format": "ldbc-csv",
+      "files": [
+        "*/snapshot/AccountWithdrawAccount.csv"
+      ],
+      "rel_type": "withdraw",
+      "source": {
+        "label": "Account",
+        "column": "fromId"
+      },
+      "target": {
+        "label": "Account",
+        "column": "toId"
+      },
+      "properties": [
+        {
+          "column": "amount",
+          "type": "float64"
+        },
+        {
+          "column": "createTime",
+          "type": "datetime",
+          "format": "naive-utc"
+        }
+      ]
+    },
+    {
+      "id": "company_apply_loan",
+      "format": "ldbc-csv",
+      "files": [
+        "*/snapshot/CompanyApplyLoan.csv"
+      ],
+      "rel_type": "apply",
+      "source": {
+        "label": "Company",
+        "column": "companyId"
+      },
+      "target": {
+        "label": "Loan",
+        "column": "loanId"
+      },
+      "properties": [
+        {
+          "column": "createTime",
+          "type": "datetime",
+          "format": "naive-utc"
+        },
+        {
+          "column": "org",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "id": "company_guarantee_company",
+      "format": "ldbc-csv",
+      "files": [
+        "*/snapshot/CompanyGuaranteeCompany.csv"
+      ],
+      "rel_type": "guarantee",
+      "source": {
+        "label": "Company",
+        "column": "fromId"
+      },
+      "target": {
+        "label": "Company",
+        "column": "toId"
+      },
+      "properties": [
+        {
+          "column": "createTime",
+          "type": "datetime",
+          "format": "naive-utc"
+        },
+        {
+          "column": "relation",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "id": "company_invest_company",
+      "format": "ldbc-csv",
+      "files": [
+        "*/snapshot/CompanyInvestCompany.csv"
+      ],
+      "rel_type": "invest",
+      "source": {
+        "label": "Company",
+        "column": "investorId"
+      },
+      "target": {
+        "label": "Company",
+        "column": "companyId"
+      },
+      "properties": [
+        {
+          "column": "ratio",
+          "type": "float64"
+        },
+        {
+          "column": "createTime",
+          "type": "datetime",
+          "format": "naive-utc"
+        }
+      ]
+    },
+    {
+      "id": "company_own_account",
+      "format": "ldbc-csv",
+      "files": [
+        "*/snapshot/CompanyOwnAccount.csv"
+      ],
+      "rel_type": "own",
+      "source": {
+        "label": "Company",
+        "column": "companyId"
+      },
+      "target": {
+        "label": "Account",
+        "column": "accountId"
+      },
+      "properties": [
+        {
+          "column": "createTime",
+          "type": "datetime",
+          "format": "naive-utc"
+        }
+      ]
+    },
+    {
+      "id": "loan_deposit_account",
+      "format": "ldbc-csv",
+      "files": [
+        "*/snapshot/LoanDepositAccount.csv"
+      ],
+      "rel_type": "deposit",
+      "source": {
+        "label": "Loan",
+        "column": "loanId"
+      },
+      "target": {
+        "label": "Account",
+        "column": "accountId"
+      },
+      "properties": [
+        {
+          "column": "amount",
+          "type": "float64"
+        },
+        {
+          "column": "createTime",
+          "type": "datetime",
+          "format": "naive-utc"
+        }
+      ]
+    },
+    {
+      "id": "medium_signin_account",
+      "format": "ldbc-csv",
+      "files": [
+        "*/snapshot/MediumSignInAccount.csv"
+      ],
+      "rel_type": "signIn",
+      "source": {
+        "label": "Medium",
+        "column": "mediumId"
+      },
+      "target": {
+        "label": "Account",
+        "column": "accountId"
+      },
+      "properties": [
+        {
+          "column": "createTime",
+          "type": "datetime",
+          "format": "naive-utc"
+        },
+        {
+          "column": "location",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "id": "person_apply_loan",
+      "format": "ldbc-csv",
+      "files": [
+        "*/snapshot/PersonApplyLoan.csv"
+      ],
+      "rel_type": "apply",
+      "source": {
+        "label": "Person",
+        "column": "personId"
+      },
+      "target": {
+        "label": "Loan",
+        "column": "loanId"
+      },
+      "properties": [
+        {
+          "column": "createTime",
+          "type": "datetime",
+          "format": "naive-utc"
+        },
+        {
+          "column": "org",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "id": "person_guarantee_person",
+      "format": "ldbc-csv",
+      "files": [
+        "*/snapshot/PersonGuaranteePerson.csv"
+      ],
+      "rel_type": "guarantee",
+      "source": {
+        "label": "Person",
+        "column": "fromId"
+      },
+      "target": {
+        "label": "Person",
+        "column": "toId"
+      },
+      "properties": [
+        {
+          "column": "createTime",
+          "type": "datetime",
+          "format": "naive-utc"
+        },
+        {
+          "column": "relation",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "id": "person_invest_company",
+      "format": "ldbc-csv",
+      "files": [
+        "*/snapshot/PersonInvestCompany.csv"
+      ],
+      "rel_type": "invest",
+      "source": {
+        "label": "Person",
+        "column": "investorId"
+      },
+      "target": {
+        "label": "Company",
+        "column": "companyId"
+      },
+      "properties": [
+        {
+          "column": "ratio",
+          "type": "float64"
+        },
+        {
+          "column": "createTime",
+          "type": "datetime",
+          "format": "naive-utc"
+        }
+      ]
+    },
+    {
+      "id": "person_own_account",
+      "format": "ldbc-csv",
+      "files": [
+        "*/snapshot/PersonOwnAccount.csv"
+      ],
+      "rel_type": "own",
+      "source": {
+        "label": "Person",
+        "column": "personId"
+      },
+      "target": {
+        "label": "Account",
+        "column": "accountId"
+      },
+      "properties": [
+        {
+          "column": "createTime",
+          "type": "datetime",
+          "format": "naive-utc"
+        }
+      ]
+    }
+  ]
+}
