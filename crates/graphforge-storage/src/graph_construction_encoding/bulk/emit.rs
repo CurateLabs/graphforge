@@ -113,6 +113,28 @@ fn intern_rows(
     Ok(())
 }
 
+/// Rows per name: the observation count the staged path's per-row interning leaves.
+fn observation_counts(values: &[u32], names: usize) -> Vec<u64> {
+    values
+        .par_chunks(1 << 20)
+        .map(|chunk| {
+            let mut counts = vec![0_u64; names];
+            for value in chunk {
+                counts[*value as usize] += 1;
+            }
+            counts
+        })
+        .reduce(
+            || vec![0_u64; names],
+            |mut left, right| {
+                for (total, count) in left.iter_mut().zip(right) {
+                    *total += count;
+                }
+                left
+            },
+        )
+}
+
 /// Intern in the order the staged path does: every node observation in UUID
 /// order (by schema group for property-bearing input), then every edge's.
 pub(super) fn build_catalog(
@@ -126,8 +148,13 @@ pub(super) fn build_catalog(
     match node_groups {
         Some(groups) => intern_rows(&mut catalog, groups, ConstructionChunkKind::Node, budgets)?,
         None => {
+            let counts = observation_counts(&nodes.labels, nodes.label_names.len());
             for label in first_appearance(&nodes.labels, nodes.label_names.len()) {
-                catalog.intern_label_at(&nodes.label_names[label as usize], 0)?;
+                catalog.intern_label_observed_at(
+                    &nodes.label_names[label as usize],
+                    0,
+                    counts[label as usize],
+                )?;
                 admit(&catalog, budgets)?;
             }
         }
@@ -135,8 +162,13 @@ pub(super) fn build_catalog(
     match edge_groups {
         Some(groups) => intern_rows(&mut catalog, groups, ConstructionChunkKind::Edge, budgets)?,
         None => {
+            let counts = observation_counts(&edges.rels, edges.rel_names.len());
             for rel in first_appearance(&edges.rels, edges.rel_names.len()) {
-                catalog.intern_relation_type_at(&edges.rel_names[rel as usize], 0)?;
+                catalog.intern_relation_type_observed_at(
+                    &edges.rel_names[rel as usize],
+                    0,
+                    counts[rel as usize],
+                )?;
                 admit(&catalog, budgets)?;
             }
         }
