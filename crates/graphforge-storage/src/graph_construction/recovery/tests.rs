@@ -363,7 +363,7 @@ fn checkpoint_with_previous_format_version_fails_closed_with_restart_error() {
         .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
         .unwrap();
     session.checkpoint.format_version = FORMAT_VERSION - 1;
-    replace_checkpoint_control(&session.root, &session.checkpoint).unwrap();
+    replace_checkpoint_control(&session.root, &mut session.checkpoint).unwrap();
     drop(session);
     let result = GraphConstructionSession::open(
         root.path(),
@@ -398,16 +398,23 @@ fn assert_resumed_seal_refuses_without_changing_authority(
         .collect::<BTreeMap<_, _>>();
     let current = std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap();
     drop(session);
-    let mut resumed = GraphConstructionSession::open(
+    // A damaged receipt is refused when the reopen restores the staged
+    // allocation ledger from the receipt journal (#900); a damaged artifact
+    // the receipt still describes is refused by the seal that re-reads it.
+    let error = match GraphConstructionSession::open(
         root.path(),
         operation,
         0,
         GraphConstructionBudgets::default(),
-    )
-    .unwrap();
-    let error = resumed.seal().unwrap_err().to_string();
+    ) {
+        Err(error) => error.to_string(),
+        Ok(mut resumed) => {
+            let error = resumed.seal().unwrap_err().to_string();
+            assert_eq!(resumed.checkpoint.state, GraphConstructionState::Staging);
+            error
+        }
+    };
     assert!(error.contains(expected_error), "{error}");
-    assert_eq!(resumed.checkpoint.state, GraphConstructionState::Staging);
     for (name, bytes) in controls {
         assert_eq!(std::fs::read(session_path.join(name)).unwrap(), bytes);
     }

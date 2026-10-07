@@ -81,6 +81,7 @@ mod partition_memory;
 mod partition_records;
 pub(crate) mod partition_shaping;
 mod progress;
+mod staged_ledger;
 mod supersession;
 use progress::{
     LoadedShapeProgress, ShapeResume, load_shape_progress_chain, scan_shape_segments,
@@ -845,6 +846,18 @@ struct Checkpoint {
     shape_retired: bool,
     base_work: UuidConstructionSnapshotWork,
     evidence: GraphConstructionEvidence,
+    /// Durable form only: the first chunk sequence whose staged artifacts the
+    /// persisted allocation ledger omits, because the authenticated receipt
+    /// journal records each one's identity and allocation (#900). Reopening
+    /// restores them, so in memory this is `None` and the ledger is complete,
+    /// except in an aborted session, which keeps its persisted form until the
+    /// discard removes it. Absent in a checkpoint that omits nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    staged_ledger_from_sequence: Option<u64>,
+    /// In-memory index of every accepted chunk artifact, rebuilt from the
+    /// receipt journal on open and extended as chunks are accepted.
+    #[serde(skip)]
+    staged_index: staged_ledger::StagedIdentityIndex,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1437,6 +1450,9 @@ impl GraphConstructionSession {
             return Err(storage("checkpoint private authority changed"));
         }
         if let Some(checkpoint) = recovered_checkpoint.as_mut() {
+            // Before anything can rewrite the checkpoint: the persisted ledger
+            // omits the staged entries the receipt journal names (#900).
+            staged_ledger::restore_staged_ledger(&root, checkpoint)?;
             validate_parent_phase_bytes(checkpoint)?;
             cleanup_authenticated_control_temps(
                 &root,
@@ -1643,6 +1659,8 @@ impl GraphConstructionSession {
                 shape_retired: false,
                 base_work,
                 evidence,
+                staged_ledger_from_sequence: None,
+                staged_index: staged_ledger::StagedIdentityIndex::default(),
             };
             initial.format_version = initial_checkpoint_format(&root, project_identity, &initial)?;
             cleanup_authenticated_control_temps(
@@ -1781,7 +1799,7 @@ impl GraphConstructionSession {
                 shape_recovery_work.cache_release,
                 &mut session.checkpoint.evidence,
             )?;
-            replace_checkpoint_control(&session.root, &session.checkpoint)?;
+            replace_checkpoint_control(&session.root, &mut session.checkpoint)?;
         }
         Ok(session)
     }
@@ -1924,7 +1942,7 @@ impl GraphConstructionSession {
             .ok_or_else(|| storage("seal application read byte count overflows"))?;
         self.checkpoint.state = GraphConstructionState::Sealed;
         self.checkpoint.publication_state = Some(ConstructionPublicationState::Sealed);
-        replace_checkpoint_control(&self.root, &self.checkpoint)
+        replace_checkpoint_control(&self.root, &mut self.checkpoint)
     }
 
     /// Abort before seal. CURRENT remains unchanged.
@@ -1935,7 +1953,7 @@ impl GraphConstructionSession {
             return Err(storage("non-staging session belongs to the publisher"));
         }
         self.checkpoint.state = GraphConstructionState::Aborted;
-        replace_checkpoint_control(&self.root, &self.checkpoint)
+        replace_checkpoint_control(&self.root, &mut self.checkpoint)
     }
 
     /// Authentically reclaim an unpublished session and every file it owns.
@@ -1956,7 +1974,12 @@ impl GraphConstructionSession {
             ));
         }
         self.checkpoint.state = GraphConstructionState::Aborted;
-        replace_checkpoint_control(&self.root, &self.checkpoint)?;
+        // An aborted checkpoint carries no publication state; a discarded
+        // sealed session that kept `Sealed` here was refused by
+        // `validate_checkpoint` on reopen, so an interrupted discard of it
+        // could never be retried (#900).
+        self.checkpoint.publication_state = None;
+        replace_checkpoint_control(&self.root, &mut self.checkpoint)?;
 
         let private = self
             .project

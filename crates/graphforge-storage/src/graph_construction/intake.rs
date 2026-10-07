@@ -109,7 +109,7 @@ impl GraphConstructionSession {
                     .replayed_chunks
                     .checked_add(1)
                     .ok_or_else(|| storage("replayed chunk count overflows"))?;
-                replace_checkpoint_control(&self.root, &self.checkpoint)?;
+                replace_checkpoint_control(&self.root, &mut self.checkpoint)?;
                 return Ok(receipt);
             }
             return Err(storage("conflicting construction chunk replay"));
@@ -272,27 +272,7 @@ impl GraphConstructionSession {
     }
 
     pub(super) fn read_receipt(&self, sequence: u64) -> Result<ConstructionChunkReceipt, GfError> {
-        let mut file = self
-            .root
-            .open_child_file(OsStr::new(&receipt_name(sequence)))
-            .map_err(storage)?;
-        let receipt = decode_bounded(&mut file)?;
-        validate_receipt_semantics(
-            &receipt,
-            sequence,
-            self.checkpoint.budgets,
-            DetailCodec::from_version(self.checkpoint.format_version).map_err(storage)?,
-        )?;
-        if receipt.operation_uuid != self.checkpoint.operation_uuid
-            || receipt.project_identity != self.checkpoint.project_identity
-            || receipt.session_identity != self.checkpoint.session_identity
-            || receipt.parent_topology_generation != self.checkpoint.parent_topology_generation
-            || receipt.ontology_mode != self.checkpoint.ontology_mode
-            || receipt.semantic_authority_sha256 != self.checkpoint.semantic_authority_sha256
-        {
-            return Err(storage("receipt authority differs from session checkpoint"));
-        }
-        Ok(receipt)
+        read_checkpoint_receipt(&self.root, &self.checkpoint, sequence)
     }
 
     pub(super) fn advance_checkpoint(
@@ -364,6 +344,7 @@ impl GraphConstructionSession {
                 .ok_or_else(|| storage("construction fsync count overflows"))?;
             record_category_install(evidence, artifact.bytes, artifact.allocated_bytes)?;
         }
+        self.checkpoint.staged_index.push(receipt)?;
         self.checkpoint.next_sequence = self
             .checkpoint
             .next_sequence
@@ -383,8 +364,36 @@ impl GraphConstructionSession {
             }
         }
         self.checkpoint.last_receipt_sha256 = Some(sha256(receipt_bytes));
-        replace_checkpoint_control(&self.root, &self.checkpoint)
+        replace_checkpoint_control(&self.root, &mut self.checkpoint)
     }
+}
+
+/// Read and validate one chunk receipt against the checkpoint's authority.
+pub(super) fn read_checkpoint_receipt(
+    root: &StableDirectory,
+    checkpoint: &Checkpoint,
+    sequence: u64,
+) -> Result<ConstructionChunkReceipt, GfError> {
+    let mut file = root
+        .open_child_file(OsStr::new(&receipt_name(sequence)))
+        .map_err(storage)?;
+    let receipt = decode_bounded(&mut file)?;
+    validate_receipt_semantics(
+        &receipt,
+        sequence,
+        checkpoint.budgets,
+        DetailCodec::from_version(checkpoint.format_version).map_err(storage)?,
+    )?;
+    if receipt.operation_uuid != checkpoint.operation_uuid
+        || receipt.project_identity != checkpoint.project_identity
+        || receipt.session_identity != checkpoint.session_identity
+        || receipt.parent_topology_generation != checkpoint.parent_topology_generation
+        || receipt.ontology_mode != checkpoint.ontology_mode
+        || receipt.semantic_authority_sha256 != checkpoint.semantic_authority_sha256
+    {
+        return Err(storage("receipt authority differs from session checkpoint"));
+    }
+    Ok(receipt)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

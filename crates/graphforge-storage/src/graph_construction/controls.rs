@@ -396,17 +396,68 @@ pub(super) fn replace_control<T: Serialize>(
     Ok(())
 }
 
-/// Persist only resumable allocation state. Transition history is live
-/// operation evidence; serializing it would make the fixed-size checkpoint
-/// grow with every accepted chunk. The exact current union and numeric peak
-/// remain durable.
+/// Persist only resumable allocation state, in a record whose size does not
+/// depend on the number of accepted chunks.
+///
+/// Transition history is live operation evidence; serializing it would make
+/// the fixed-size checkpoint grow with every accepted chunk. The staged-input
+/// entries of the allocation ledger grew the same way, one per staged
+/// artifact, until the S25 rung exceeded `MAX_CONTROL_BYTES` (#900). They are
+/// omitted here because the receipt journal already names each one's
+/// identity and allocation: the checkpoint records the first sequence they
+/// are omitted from, and reopening restores them (see `staged_ledger`). The
+/// omission is lossless by construction — only entries that equal their
+/// receipt are omitted, and only for a suffix of whole chunks. The numeric
+/// peaks and every other ledger entry remain durable.
+///
+/// Neither the ledger nor the history is cloned: both are moved aside for the
+/// write and restored afterwards, whether or not it succeeded.
+///
+/// An aborted session opened without its receipt journal (an interrupted
+/// discard may have unlinked receipts) is rewritten with its persisted ledger
+/// and suffix exactly as read; every other state requires the restored index.
 pub(super) fn replace_checkpoint_control(
     root: &StableDirectory,
-    checkpoint: &Checkpoint,
+    checkpoint: &mut Checkpoint,
 ) -> Result<(), GfError> {
-    let mut durable = checkpoint.clone();
-    durable.evidence.storage_allocation_transitions.clear();
-    replace_control(root, CHECKPOINT, &durable)
+    let transitions = std::mem::take(&mut checkpoint.evidence.storage_allocation_transitions);
+    let result = replace_checkpoint_with_staged_ledger(root, checkpoint);
+    checkpoint.evidence.storage_allocation_transitions = transitions;
+    result
+}
+
+fn replace_checkpoint_with_staged_ledger(
+    root: &StableDirectory,
+    checkpoint: &mut Checkpoint,
+) -> Result<(), GfError> {
+    if checkpoint.staged_index.unrestored() {
+        // An aborted session opened without its receipt journal: rewrite the
+        // persisted ledger and suffix exactly as they were read.
+        if checkpoint.state != GraphConstructionState::Aborted {
+            return Err(storage("checkpoint staged ledger was not restored"));
+        }
+        return replace_control(root, CHECKPOINT, &*checkpoint);
+    }
+    if checkpoint.staged_ledger_from_sequence.is_some() {
+        return Err(storage("checkpoint staged ledger was not restored"));
+    }
+    let elided = checkpoint.staged_index.elide(
+        &checkpoint.evidence.storage_active_identity_allocated_bytes,
+        checkpoint.next_sequence,
+    )?;
+    let ledger = elided.map(|(persisted, from_sequence)| {
+        checkpoint.staged_ledger_from_sequence = Some(from_sequence);
+        std::mem::replace(
+            &mut checkpoint.evidence.storage_active_identity_allocated_bytes,
+            persisted,
+        )
+    });
+    let result = replace_control(root, CHECKPOINT, &*checkpoint);
+    if let Some(ledger) = ledger {
+        checkpoint.evidence.storage_active_identity_allocated_bytes = ledger;
+    }
+    checkpoint.staged_ledger_from_sequence = None;
+    result
 }
 
 /// Persist a shape intent without transition history.
@@ -446,6 +497,12 @@ fn drop_live_evidence(intent: &mut ShapeIntent) {
 }
 
 fn control_limit(target: &str) -> u64 {
+    #[cfg(test)]
+    if target == CHECKPOINT
+        && let Some(limit) = CHECKPOINT_LIMIT_OVERRIDE.with(std::cell::Cell::get)
+    {
+        return limit;
+    }
     if target == SHAPE_INTENT
         || target.starts_with(super::progress::SHAPE_PROGRESS_PREFIX)
         || target.starts_with(super::finish_stages::SHAPE_STAGE_PREFIX)
@@ -547,6 +604,15 @@ fn write_control_body(
         file.write_all(body).map_err(storage)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// A smaller checkpoint write bound for this thread, so a test can show
+    /// that a record which grew with accepted chunks would cross it without
+    /// staging the thousands of chunks the production bound takes (#900).
+    pub(super) static CHECKPOINT_LIMIT_OVERRIDE: std::cell::Cell<Option<u64>> =
+        const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]

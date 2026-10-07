@@ -1164,7 +1164,7 @@ impl GraphConstructionSession {
         construction_failpoint("shape.after_complete_inventory");
         unlink_reconciled_shape_segments(&self.root, &retained_segments, &mut cancelled)?;
         construction_failpoint("shape.after_segment_discard");
-        replace_checkpoint_control(&self.root, &self.checkpoint)?;
+        replace_checkpoint_control(&self.root, &mut self.checkpoint)?;
         construction_failpoint("shape.after_evidence_checkpoint");
         self.shape_finish_interrupted = false;
         self.reclaim_superseded_payloads_cancellable(&mut cancelled)?;

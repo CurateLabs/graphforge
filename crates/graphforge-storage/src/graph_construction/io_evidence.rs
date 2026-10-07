@@ -73,7 +73,7 @@ impl GraphConstructionSession {
             .hydration_directory_fsync_operations
             .checked_add(hydration.directory_fsync_calls)
             .ok_or_else(|| storage("hydration directory barrier count overflows"))?;
-        replace_checkpoint_control(&self.root, &self.checkpoint)
+        replace_checkpoint_control(&self.root, &mut self.checkpoint)
     }
 }
 

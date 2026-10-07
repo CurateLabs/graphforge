@@ -17,7 +17,7 @@ fn unsupported_or_incomplete_checkpoint_is_refused_before_recovery_mutation() {
         if case == FORMAT_VERSION {
             session.checkpoint.evidence.immutable_artifacts = 0;
         }
-        replace_checkpoint_control(&session.root, &session.checkpoint).unwrap();
+        replace_checkpoint_control(&session.root, &mut session.checkpoint).unwrap();
         let private = session.root.path().to_owned();
         let temporary = private.join(control_temp(CHECKPOINT));
         std::fs::write(&temporary, b"unfinished authority").unwrap();
@@ -69,7 +69,7 @@ fn current_parent_phase_checkpoint_refuses_omission_without_rewrite() {
         assert_eq!(malformed.evidence.seal_application_read_bytes, 0);
     }
     session.checkpoint.evidence.seal_application_read_bytes = 0;
-    replace_checkpoint_control(&session.root, &session.checkpoint).unwrap();
+    replace_checkpoint_control(&session.root, &mut session.checkpoint).unwrap();
     let path = session.root.path().join(CHECKPOINT);
     let before = std::fs::read(&path).unwrap();
     drop(session);
