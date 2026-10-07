@@ -260,13 +260,56 @@ fn the_tag_manifest_still_honours_the_tag_file_limit() {
     );
 }
 
-/// Replace the payload inventory of a copy of `expanded`, and verify it.
+/// Replace the payload inventory of a copy of `expanded`, re-sign it in the
+/// tag manifest so only the inventory check can refuse it, and verify.
 fn verify_with_inventory(expanded: &Path, inventory: &[u8]) -> PortableV2Error {
     let copy = tempfile::tempdir().unwrap();
     let root = copy.path().join("tampered.gfproject");
     copy_tree(expanded, &root);
     fs::write(root.join("manifest-sha256.txt"), inventory).unwrap();
+    rewrite_tag_manifest(&root);
     verify(&root, limits()).unwrap_err()
+}
+
+/// Rewrite `tagmanifest-sha256.txt` to match the package's current tag files.
+fn rewrite_tag_manifest(root: &Path) {
+    let tag_manifest = ["bag-info.txt", "bagit.txt", "manifest-sha256.txt"]
+        .into_iter()
+        .map(|tag| {
+            let digest = sha2::Sha256::digest(fs::read(root.join(tag)).unwrap());
+            format!("{}  {tag}\n", hex(digest.into()))
+        })
+        .collect::<String>();
+    fs::write(root.join("tagmanifest-sha256.txt"), tag_manifest).unwrap();
+}
+
+#[test]
+fn bag_manifests_refuse_extra_payload_and_unmanifested_entries() {
+    let (_project, generation) = generation_with_files(3);
+    let plan = plan_complete_portable_v2(&generation, limits()).unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let expanded = output.path().join("graph.gfproject");
+    export(&plan, &expanded, PortableV2Output::Expanded, limits()).unwrap();
+    for (name, extra, detail) in [
+        (
+            "undeclared component file",
+            "data/components/graph-data/graph-tree/undeclared.bin",
+            "extra payload",
+        ),
+        (
+            "unmanifested root file",
+            "extra.txt",
+            "unmanifested extra entry",
+        ),
+    ] {
+        let copy = tempfile::tempdir().unwrap();
+        let root = copy.path().join("extra.gfproject");
+        copy_tree(&expanded, &root);
+        fs::write(root.join(extra), b"extra").unwrap();
+        let error = verify(&root, limits()).unwrap_err();
+        assert_eq!(error.code, PortableV2ErrorCode::InvalidStructure, "{name}");
+        assert!(error.to_string().ends_with(detail), "{name}: {error}");
+    }
 }
 
 fn copy_tree(from: &Path, to: &Path) {
@@ -398,17 +441,28 @@ fn a_bundle_with_a_tampered_inventory_row_is_refused() {
     let plan = plan_complete_portable_v2(&generation, limits()).unwrap();
     let output = tempfile::tempdir().unwrap();
     let bundle = output.path().join("graph.gfpb");
+    let expanded = output.path().join("graph.gfproject");
     export(&plan, &bundle, PortableV2Output::Bundle, limits()).unwrap();
+    export(&plan, &expanded, PortableV2Output::Expanded, limits()).unwrap();
     let mut bytes = fs::read(&bundle).unwrap();
+    let find = |bytes: &[u8], needle: &[u8]| {
+        bytes
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .expect("row in bundle")
+    };
     // The first inventory row names a component file; flip one digit of its
     // digest. Payload bytes are outside the tar header checksum.
-    let row = b"  data/components/";
-    let at = bytes
-        .windows(row.len())
-        .position(|window| window == row)
-        .expect("inventory row in bundle")
-        - 64;
-    bytes[at] = if bytes[at] == b'0' { b'1' } else { b'0' };
+    let at = find(&bytes, b"  data/components/") - 64;
+    let flip = |byte: u8| if byte == b'0' { b'1' } else { b'0' };
+    bytes[at] = flip(bytes[at]);
+    // Re-sign the tampered inventory in the tag manifest, as an attacker
+    // would, so only the row check against the entries can refuse it.
+    let mut inventory = fs::read(expanded.join("manifest-sha256.txt")).unwrap();
+    inventory[0] = flip(inventory[0]);
+    let signed = find(&bytes, b"  manifest-sha256.txt\n") - 64;
+    bytes[signed..signed + 64]
+        .copy_from_slice(hex(sha2::Sha256::digest(&inventory).into()).as_bytes());
     let tampered = output.path().join("tampered.gfpb");
     fs::write(&tampered, bytes).unwrap();
     let error = verify(&tampered, limits()).unwrap_err();

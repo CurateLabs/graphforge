@@ -751,3 +751,42 @@ mod preview_wire_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    /// The longest file record the writer emits, with an empty path.
+    fn longest_record_without_path() -> u64 {
+        let record = serde_json::json!({
+            "length": u64::MAX,
+            "media_type": "application/vnd.graphforge.ontology-composition+json",
+            "path": "",
+            "sha256": "0".repeat(64),
+        });
+        (serde_json::to_vec(&record).unwrap().len() + ",".len()) as u64
+    }
+
+    #[test]
+    fn default_limits_admit_a_package_of_max_entries_entries() {
+        let limits = PortableV2Limits::default();
+        // The per-entry semantic manifest budget is one record plus its path.
+        assert_eq!(longest_record_without_path(), 186);
+        let path_budget = MANIFEST_BYTES_PER_ENTRY - longest_record_without_path();
+        assert_eq!(path_budget, 326);
+        assert!(limits.max_entries * MANIFEST_BYTES_PER_ENTRY <= limits.max_manifest_bytes);
+        assert_eq!(limits.max_manifest_bytes, 512 * 1024 * 1024);
+        // S26 Graph500: 21,531 files whose paths average 169 bytes, inside
+        // the budget. S28 has about four times as many files.
+        let s26_manifest = 21_531 * (longest_record_without_path() + 169);
+        assert!(4 * s26_manifest < limits.max_manifest_bytes);
+        assert!(169 < path_budget);
+        // The tag files the tag limit bounds have a fixed size: the tag
+        // manifest has three rows whatever the entry count.
+        let tag_manifest = ["bag-info.txt", "bagit.txt", "manifest-sha256.txt"]
+            .iter()
+            .map(|path| 64 + 2 + path.len() as u64 + 1)
+            .sum::<u64>();
+        assert!(tag_manifest <= limits.max_tag_manifest_bytes);
+    }
+}
