@@ -1,7 +1,7 @@
 //! Recovery for graph construction.
 
 use super::{
-    ArtifactReceipt, BASE_IDENTITY_WIDTH, BLOCK_BYTES, BufReader, BufWriter,
+    ArtifactReceipt, BASE_IDENTITY_WIDTH, BLOCK_BYTES, BufReader, BufWriter, CHECKPOINT,
     CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, Checkpoint, ChunkIntent,
     ConstructionChunkKind, ConstructionChunkReceipt, ConstructionPublicationIntent,
     ConstructionPublicationReceipt, CountingChunkReader, DetailCodec, DetailValidator,
@@ -209,9 +209,13 @@ pub(super) fn remove_owned_directory_tree(
         return Err(storage("construction discard directory identity changed"));
     }
     let child_limit = usize::try_from(*remaining).unwrap_or(usize::MAX);
-    let names = directory
+    let mut names = directory
         .child_names_bounded(child_limit)
         .map_err(storage)?;
+    // The checkpoint goes last: until every other file is gone it still
+    // records the session as aborted, so a discard interrupted at any point
+    // reopens as an aborted session and the retry converges (#900).
+    names.sort_by_key(|child| child.as_os_str() == OsStr::new(CHECKPOINT));
     for child_name in names {
         if *remaining == 0 {
             return Err(storage(
@@ -226,6 +230,11 @@ pub(super) fn remove_owned_directory_tree(
                 directory
                     .unlink_child_if_identity(&child_name, identity)
                     .map_err(storage)?;
+                #[cfg(test)]
+                construction_failpoint(&format!(
+                    "discard.after_unlink.{}",
+                    child_name.to_string_lossy()
+                ));
             }
             Err(file_error) => {
                 let child = directory

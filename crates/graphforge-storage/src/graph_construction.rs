@@ -849,8 +849,9 @@ struct Checkpoint {
     /// Durable form only: the first chunk sequence whose staged artifacts the
     /// persisted allocation ledger omits, because the authenticated receipt
     /// journal records each one's identity and allocation (#900). Reopening
-    /// restores them, so in memory this is always `None` and the ledger is
-    /// complete. Absent in a checkpoint that omits nothing.
+    /// restores them, so in memory this is `None` and the ledger is complete,
+    /// except in an aborted session, which keeps its persisted form until the
+    /// discard removes it. Absent in a checkpoint that omits nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     staged_ledger_from_sequence: Option<u64>,
     /// In-memory index of every accepted chunk artifact, rebuilt from the
@@ -1973,6 +1974,11 @@ impl GraphConstructionSession {
             ));
         }
         self.checkpoint.state = GraphConstructionState::Aborted;
+        // An aborted checkpoint carries no publication state; a discarded
+        // sealed session that kept `Sealed` here was refused by
+        // `validate_checkpoint` on reopen, so an interrupted discard of it
+        // could never be retried (#900).
+        self.checkpoint.publication_state = None;
         replace_checkpoint_control(&self.root, &mut self.checkpoint)?;
 
         let private = self

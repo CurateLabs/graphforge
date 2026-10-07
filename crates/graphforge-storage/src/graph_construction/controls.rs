@@ -412,10 +412,32 @@ pub(super) fn replace_control<T: Serialize>(
 ///
 /// Neither the ledger nor the history is cloned: both are moved aside for the
 /// write and restored afterwards, whether or not it succeeded.
+///
+/// An aborted session opened without its receipt journal (an interrupted
+/// discard may have unlinked receipts) is rewritten with its persisted ledger
+/// and suffix exactly as read; every other state requires the restored index.
 pub(super) fn replace_checkpoint_control(
     root: &StableDirectory,
     checkpoint: &mut Checkpoint,
 ) -> Result<(), GfError> {
+    let transitions = std::mem::take(&mut checkpoint.evidence.storage_allocation_transitions);
+    let result = replace_checkpoint_with_staged_ledger(root, checkpoint);
+    checkpoint.evidence.storage_allocation_transitions = transitions;
+    result
+}
+
+fn replace_checkpoint_with_staged_ledger(
+    root: &StableDirectory,
+    checkpoint: &mut Checkpoint,
+) -> Result<(), GfError> {
+    if checkpoint.staged_index.unrestored() {
+        // An aborted session opened without its receipt journal: rewrite the
+        // persisted ledger and suffix exactly as they were read.
+        if checkpoint.state != GraphConstructionState::Aborted {
+            return Err(storage("checkpoint staged ledger was not restored"));
+        }
+        return replace_control(root, CHECKPOINT, &*checkpoint);
+    }
     if checkpoint.staged_ledger_from_sequence.is_some() {
         return Err(storage("checkpoint staged ledger was not restored"));
     }
@@ -423,7 +445,6 @@ pub(super) fn replace_checkpoint_control(
         &checkpoint.evidence.storage_active_identity_allocated_bytes,
         checkpoint.next_sequence,
     )?;
-    let transitions = std::mem::take(&mut checkpoint.evidence.storage_allocation_transitions);
     let ledger = elided.map(|(persisted, from_sequence)| {
         checkpoint.staged_ledger_from_sequence = Some(from_sequence);
         std::mem::replace(
@@ -436,7 +457,6 @@ pub(super) fn replace_checkpoint_control(
         checkpoint.evidence.storage_active_identity_allocated_bytes = ledger;
     }
     checkpoint.staged_ledger_from_sequence = None;
-    checkpoint.evidence.storage_allocation_transitions = transitions;
     result
 }
 

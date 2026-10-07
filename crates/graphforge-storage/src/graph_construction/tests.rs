@@ -1373,6 +1373,95 @@ fn discard_reclaims_open_and_sealed_session_trees() {
     }
 }
 
+#[test]
+fn discard_crash_child() {
+    let Ok(root) = std::env::var("GF_CONSTRUCTION_DISCARD_CRASH_ROOT") else {
+        return;
+    };
+    let operation = std::env::var("GF_CONSTRUCTION_DISCARD_CRASH_OPERATION")
+        .unwrap()
+        .parse::<u128>()
+        .unwrap();
+    GraphConstructionSession::open(
+        Path::new(&root),
+        Uuid::from_u128(operation),
+        0,
+        GraphConstructionBudgets::default(),
+    )
+    .unwrap()
+    .discard()
+    .unwrap();
+}
+
+/// #900. A discard interrupted partway through unlinking the session tree
+/// must be retryable. The checkpoint omits the staged ledger entries its
+/// receipts name, and the crash has already unlinked receipts, so reopening
+/// an aborted session must not require the receipt journal. The checkpoint
+/// itself is unlinked last, so the crash always leaves it recording the
+/// abort.
+#[test]
+fn interrupted_discard_reopens_aborted_and_completes() {
+    for (index, seal) in [false, true].into_iter().enumerate() {
+        let root = TempDir::new().unwrap();
+        let operation = 9_360 + index as u128;
+        let mut session = open(&root, operation);
+        for chunk in 0..3_u128 {
+            session
+                .append(
+                    ConstructionChunkKind::Node,
+                    &format!("nodes-{chunk}"),
+                    &node_batch(1 + chunk * 4, 4),
+                )
+                .unwrap();
+        }
+        if seal {
+            session.seal().unwrap();
+        }
+        drop(session);
+        let session_path = construction_session_root(&root, Uuid::from_u128(operation));
+        let failpoint = format!("discard.after_unlink.{}", receipt_name(0));
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("graph_construction::tests::discard_crash_child")
+            .arg("--nocapture")
+            .env("GF_CONSTRUCTION_DISCARD_CRASH_ROOT", root.path())
+            .env(
+                "GF_CONSTRUCTION_DISCARD_CRASH_OPERATION",
+                operation.to_string(),
+            )
+            .env(
+                "GF_CONSTRUCTION_FAILPOINT_COOKIE",
+                "graphforge-construction-test-v1",
+            )
+            .env("GF_CONSTRUCTION_FAILPOINT", &failpoint)
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(86), "seal={seal}");
+        // The positive control for the window: a receipt the omitted ledger
+        // depends on is gone, and the surviving checkpoint records the abort
+        // with that ledger still omitted.
+        assert!(!session_path.join(receipt_name(0)).exists(), "seal={seal}");
+        let control: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(session_path.join(CHECKPOINT)).unwrap()).unwrap();
+        assert_eq!(control["state"], "aborted", "seal={seal}");
+        assert_eq!(
+            control["staged_ledger_from_sequence"],
+            serde_json::json!(0),
+            "seal={seal}"
+        );
+        let reopened = GraphConstructionSession::open(
+            root.path(),
+            Uuid::from_u128(operation),
+            0,
+            GraphConstructionBudgets::default(),
+        )
+        .unwrap_or_else(|error| panic!("seal={seal}: {error}"));
+        assert_eq!(reopened.state(), GraphConstructionState::Aborted);
+        reopened.discard().unwrap();
+        assert!(!session_path.exists(), "seal={seal}");
+    }
+}
+
 pub(super) fn ordinal_append_session(
     root: &TempDir,
     generation: u64,

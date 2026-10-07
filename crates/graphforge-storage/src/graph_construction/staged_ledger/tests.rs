@@ -120,3 +120,129 @@ fn an_index_that_differs_from_the_journal_refuses_to_write() {
             .is_err()
     );
 }
+
+/// A closed session with three accepted node chunks: its directory and the
+/// ledger it held.
+fn staged_session(
+    root: &tempfile::TempDir,
+    operation: u128,
+) -> (std::path::PathBuf, BTreeMap<String, u64>) {
+    let mut session = super::super::tests::open(root, operation);
+    for chunk in 0..3_u128 {
+        session
+            .append(
+                super::super::ConstructionChunkKind::Node,
+                &format!("nodes-{chunk}"),
+                &super::super::tests::node_batch(1 + chunk * 4, 4),
+            )
+            .unwrap();
+    }
+    let ledger = session
+        .evidence()
+        .storage_active_identity_allocated_bytes
+        .clone();
+    let path = session.root.path().to_path_buf();
+    drop(session);
+    (path, ledger)
+}
+
+fn edit_json(path: &std::path::Path, edit: impl FnOnce(&mut serde_json::Value)) {
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    edit(&mut value);
+    std::fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+}
+
+/// Reopen and require the restore to refuse with `expected`, leaving the
+/// checkpoint exactly as it was.
+fn assert_restore_refuses(
+    root: &tempfile::TempDir,
+    session: &std::path::Path,
+    operation: u128,
+    expected: &str,
+) {
+    let checkpoint = std::fs::read(session.join(super::super::CHECKPOINT)).unwrap();
+    let error = super::super::GraphConstructionSession::open(
+        root.path(),
+        uuid::Uuid::from_u128(operation),
+        0,
+        super::super::GraphConstructionBudgets::default(),
+    )
+    .err()
+    .unwrap_or_else(|| panic!("reopen must refuse: {expected}"))
+    .to_string();
+    assert!(error.contains(expected), "{error}");
+    assert_eq!(
+        std::fs::read(session.join(super::super::CHECKPOINT)).unwrap(),
+        checkpoint
+    );
+}
+
+#[test]
+fn restore_refuses_a_broken_receipt_chain_link() {
+    let root = tempfile::TempDir::new().unwrap();
+    let (session, _) = staged_session(&root, 9_370);
+    // The middle receipt names another predecessor. The tail receipt is
+    // untouched, so only the per-link check can see it.
+    edit_json(
+        &session.join(super::super::intake::receipt_name(1)),
+        |receipt| {
+            receipt["prior_receipt_sha256"] = serde_json::json!("0".repeat(64));
+        },
+    );
+    assert_restore_refuses(&root, &session, 9_370, "staged receipt chain changed");
+}
+
+#[test]
+fn restore_refuses_a_journal_tail_that_differs_from_the_checkpoint() {
+    let root = tempfile::TempDir::new().unwrap();
+    let (session, _) = staged_session(&root, 9_371);
+    // The last receipt changes: every link still holds, and only its digest
+    // differs from the checkpoint's recorded tail.
+    edit_json(
+        &session.join(super::super::intake::receipt_name(2)),
+        |receipt| {
+            receipt["chunk_id"] = serde_json::json!("nodes-x");
+        },
+    );
+    assert_restore_refuses(
+        &root,
+        &session,
+        9_371,
+        "staged receipt journal tail differs from checkpoint",
+    );
+}
+
+#[test]
+fn restore_refuses_an_omitted_suffix_beyond_the_journal() {
+    let root = tempfile::TempDir::new().unwrap();
+    let (session, _) = staged_session(&root, 9_372);
+    edit_json(&session.join(super::super::CHECKPOINT), |checkpoint| {
+        assert_eq!(checkpoint["staged_ledger_from_sequence"], 0);
+        checkpoint["staged_ledger_from_sequence"] = serde_json::json!(3);
+    });
+    assert_restore_refuses(
+        &root,
+        &session,
+        9_372,
+        "checkpoint staged ledger suffix is out of range",
+    );
+}
+
+#[test]
+fn restore_refuses_an_entry_both_persisted_and_omitted() {
+    let root = tempfile::TempDir::new().unwrap();
+    let (session, ledger) = staged_session(&root, 9_373);
+    let (key, allocated) = ledger.iter().next().unwrap();
+    edit_json(&session.join(super::super::CHECKPOINT), |checkpoint| {
+        assert_eq!(checkpoint["staged_ledger_from_sequence"], 0);
+        checkpoint["evidence"]["storage_active_identity_allocated_bytes"] =
+            serde_json::json!({ key.clone(): allocated });
+    });
+    assert_restore_refuses(
+        &root,
+        &session,
+        9_373,
+        "checkpoint persisted a staged ledger entry it also omitted",
+    );
+}

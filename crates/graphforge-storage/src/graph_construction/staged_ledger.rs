@@ -26,8 +26,8 @@
 use std::collections::BTreeMap;
 
 use super::{
-    ArtifactReceipt, Checkpoint, ConstructionChunkReceipt, GfError, StableDirectory,
-    control_sha256, storage,
+    ArtifactReceipt, Checkpoint, ConstructionChunkReceipt, GfError, GraphConstructionState,
+    StableDirectory, control_sha256, storage,
 };
 
 /// The identity and allocation of every accepted chunk artifact, by ledger key.
@@ -41,6 +41,10 @@ pub(super) struct StagedIdentityIndex {
     entries: BTreeMap<String, (u64, u64)>,
     /// Artifacts each accepted sequence staged, in sequence order.
     artifacts: Vec<u8>,
+    /// Set for an aborted session opened without its receipt journal: the
+    /// checkpoint is then rewritten with its persisted ledger and suffix as
+    /// read, never re-derived (see [`restore_staged_ledger`]).
+    unrestored: bool,
 }
 
 /// The ledger entries a checkpoint persists, and the first chunk sequence
@@ -62,6 +66,11 @@ fn receipt_artifacts(receipt: &ConstructionChunkReceipt) -> impl Iterator<Item =
 }
 
 impl StagedIdentityIndex {
+    /// Whether the index was deliberately left unbuilt for an aborted session.
+    pub(super) const fn unrestored(&self) -> bool {
+        self.unrestored
+    }
+
     /// Accepted sequences the index covers.
     pub(super) fn sequences(&self) -> u64 {
         self.artifacts.len() as u64
@@ -164,10 +173,25 @@ impl StagedIdentityIndex {
 /// The receipts are authenticated as a chain ending at the checkpoint's tail
 /// digest before any of them is believed; that chain is what makes the
 /// journal, not the checkpoint, the authority for staged allocation.
+///
+/// An aborted session is the exception. Its only remaining operation is the
+/// discard that removes its tree, and nothing reads its allocation ledger. A
+/// discard interrupted by a crash has already unlinked an arbitrary subset of
+/// the receipts, so requiring the journal would make the retry impossible.
+/// Its checkpoint is therefore kept in its persisted form: the ledger as
+/// written, the omitted suffix still recorded, and any rewrite reproduces
+/// both rather than re-deriving them.
 pub(super) fn restore_staged_ledger(
     root: &StableDirectory,
     checkpoint: &mut Checkpoint,
 ) -> Result<(), GfError> {
+    if checkpoint.state == GraphConstructionState::Aborted {
+        checkpoint.staged_index = StagedIdentityIndex {
+            unrestored: true,
+            ..StagedIdentityIndex::default()
+        };
+        return Ok(());
+    }
     let mut index = StagedIdentityIndex::default();
     let mut previous = None;
     for sequence in 0..checkpoint.next_sequence {
