@@ -11,6 +11,7 @@ Choose the framework by **execution boundary**, not an arbitrary duration cutoff
 | --- | --- | --- |
 | Whole command / process tree | **BenchExec** | Certification ladder, lifecycle/GDC orchestration, external runners |
 | In-process benchmark target | **Divan** (CodSpeed optional) | Parser, storage CPU simulation, traversal/MERGE scaling |
+| One GDC query operation against a durable project | **GDC query driver clock** (`graphforge-gdc-query-clock/1`) | Per-query p50/p95 on GDC scorecards |
 | Product semantic counters | **Direct deterministic evidence** | Logical bytes, reader calls, publication counts, ingest floor gates |
 | Shared internal phase timing | **Diagnostic only** | BDD/TCK scenario timings, certify phase telemetry, construction receipts |
 
@@ -26,6 +27,51 @@ measurements.
 
 Ordinary deadlines, cancellation tests, and approved shared diagnostics remain
 allowed. `Instant` / `Duration` in product control paths are not banned globally.
+
+## GDC per-operation query latency
+
+Maintainer decision on #952, implemented by #1877. This amends the 2026-09-19
+policy, which named only BenchExec and Divan. BenchExec still owns the load
+wall time, whole-run CPU and peak RSS of a GDC rung. It cannot time one query:
+`gf query` per operation would also time process start and project open.
+
+The per-operation latency authority is the driver clock of
+`graphforge-benchmark-gdc-scorecard query` (`benchmarks/runners/gdc-scorecard`),
+recorded as `graphforge-gdc-query-clock/1`:
+
+- The driver opens an existing durable project with
+  `GraphForge::new(Some(path))` and reconciles per-label and per-type counts
+  first. A difference stops the run with `count_mismatch` before any query is
+  timed.
+- One `std::time::Instant` interval covers exactly one public API call that
+  returns a fully materialized Arrow result: `execute_with_params`, or the
+  `rank`, `cluster` or `paths` analyst verb. Argument decoding, project open
+  and result digesting are outside it.
+- Each query variant gets one warm-up call with its first binding. It is
+  excluded and records no latency. Then one measured pass runs every binding in
+  declared order.
+- A call that returns an error is a failed sample: typed cause, the product's
+  `GF_*` error code and at most 1 KiB of error text, and no latency. The pass
+  continues, so one run surfaces every failure, and the run ends with
+  `status: failed`.
+- p50 and p95 are nearest-rank over the measured samples only, in
+  nanoseconds. A variant with no measured sample has no summary.
+
+The evidence is `graphforge-gdc-query-evidence/1`
+(`benchmarks/schemas/gdc-query-evidence.json`). Each measured sample records
+the query and binding ids, latency, row count and a
+`graphforge-gdc-result-digest/1` SHA-256 over the column names, types and rows,
+for later reference checks. Each variant declares whether its row order is
+part of the answer. Rows of an unordered variant are sorted canonically before
+digesting, so row order cannot change the digest.
+`assert_query_latency_authority` in
+`benchmarks/harness/graphforge_bench/gdc_measurement_policy.py` refuses any
+per-operation latency not produced by this clock: a foreign clock or producer,
+a summary not derived from its own measured samples, a failed sample or
+warm-up that carries latency, a failure list or status that disagrees with
+the samples, an unreconciled project, or any other timing field in the
+document. These numbers are single-client engineering evidence, not LDBC
+results.
 
 ## AssertionLedger merge comparison
 

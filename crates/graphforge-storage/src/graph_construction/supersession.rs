@@ -1,5 +1,7 @@
 //! Version-nine predecessor removal under existing durable successor authority.
 //! Receipts remain installed so interruption needs no second cleanup journal.
+use std::borrow::Cow;
+
 use super::{
     ArtifactReceipt, BLOCK_BYTES, GfError, GraphConstructionEncoding, GraphConstructionEvidence,
     GraphConstructionSession, OsStr, Read, ReadWork, StableDirectory, account_cache_release,
@@ -9,6 +11,26 @@ use super::{
     record_active_identity_remove, replace_checkpoint_control, shape_receipt_name, storage,
     unlink_shape_progress,
 };
+
+/// The pinned successor inventory and its authority digest: the one the
+/// caller holds, bound to the durable file by streamed digest, or else one
+/// decoded from that file (#900).
+fn successor_inventory<'a>(
+    output: &StableDirectory,
+    held: Option<&'a GraphConstructionEncoding>,
+) -> Result<(Cow<'a, GraphConstructionEncoding>, String), GfError> {
+    if let Some(held) = held {
+        let durable = crate::graph_construction_encoding::durable_inventory_authority(output)?;
+        if crate::graph_construction_encoding::inventory_authority_sha256(held)? != durable {
+            return Err(storage("supersession encoding authority changed"));
+        }
+        return Ok((Cow::Borrowed(held), durable));
+    }
+    let decoded = crate::graph_construction_encoding::read_inventory(output)?
+        .ok_or_else(|| storage("supersession encoding inventory is absent"))?;
+    let authority = crate::graph_construction_encoding::inventory_authority_sha256(&decoded)?;
+    Ok((Cow::Owned(decoded), authority))
+}
 
 impl GraphConstructionSession {
     pub(super) fn has_encoding_successor(&self) -> bool {
@@ -21,6 +43,17 @@ impl GraphConstructionSession {
 
     pub(super) fn reclaim_superseded_payloads_cancellable(
         &mut self,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), GfError> {
+        self.reclaim_superseded_payloads_with_successor(None, cancelled)
+    }
+
+    /// Reclaim with `successor`, the pinned encoded inventory the caller
+    /// already holds, when there is one. It is bound to the durable record by
+    /// digest instead of decoding a second copy of the inventory (#900).
+    pub(super) fn reclaim_superseded_payloads_with_successor(
+        &mut self,
+        successor: Option<&GraphConstructionEncoding>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), GfError> {
         super::reject_cancelled(cancelled)?;
@@ -47,10 +80,8 @@ impl GraphConstructionSession {
                 .root
                 .open_child_directory(OsStr::new("encoded-v1"))
                 .map_err(storage)?;
-            let inventory = crate::graph_construction_encoding::read_inventory(&output)?
-                .ok_or_else(|| storage("supersession encoding inventory is absent"))?;
-            if Some(crate::graph_construction_encoding::inventory_authority_sha256(&inventory)?)
-                != self.checkpoint.encoding_inventory_sha256
+            let (inventory, authority) = successor_inventory(&output, successor)?;
+            if Some(authority) != self.checkpoint.encoding_inventory_sha256
                 || Some(&inventory.shape_authority_sha256)
                     != self.checkpoint.shape_authority_sha256.as_ref()
             {

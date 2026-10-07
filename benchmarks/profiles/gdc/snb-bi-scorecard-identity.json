@@ -1,0 +1,65 @@
+{
+  "schema": "graphforge-gdc-pinned-identity/1",
+  "suite_id": "snb-bi",
+  "disposition": "executable",
+  "spec": {
+    "name": "ldbc_snb_docs",
+    "source": "https://github.com/ldbc/ldbc_snb_docs",
+    "release": "v2.2.4",
+    "commit": "5f7956e07a214373c363b371a3b88bc83ddcd118"
+  },
+  "generator": {
+    "name": "ldbc-snb-bi-pre-generated-datasets",
+    "source": "https://datasets.ldbcouncil.org/bi-pre-audit/",
+    "release": "unversioned-pinned-by-sha256",
+    "commit": null
+  },
+  "driver": {
+    "name": "graphforge-gdc-scorecard-converter",
+    "source": "https://github.com/CurateLabs/graphforge/tree/main/benchmarks/runners/gdc-scorecard",
+    "release": "converter-v1",
+    "commit": null
+  },
+  "datasets": [
+    {
+      "id": "bi-sf1-composite-projected-fk",
+      "role": "dataset",
+      "checksum_sha256": "79c135ed3eb76369befd9952ffc8f53c3135aedd8438d86c61877410f51b300e",
+      "license": "publisher-unspecified; see https://ldbcouncil.org/benchmarks/snb/datasets/",
+      "acquisition": "download",
+      "source": "https://datasets.ldbcouncil.org/bi-pre-audit/bi-sf1-composite-projected-fk.tar.zst"
+    },
+    {
+      "id": "bi-sf10-composite-projected-fk",
+      "role": "dataset",
+      "checksum_sha256": "64c59d11e751001a0c750dad9e0b023155615403a295598f0fec46cd2a2fc776",
+      "license": "publisher-unspecified; see https://ldbcouncil.org/benchmarks/snb/datasets/",
+      "acquisition": "download",
+      "source": "https://datasets.ldbcouncil.org/bi-pre-audit/bi-sf10-composite-projected-fk.tar.zst"
+    },
+    {
+      "id": "bi-composite-projected-fk-md5sums",
+      "role": "other",
+      "checksum_sha256": "b6770dfaf7b9d5741997ff0705feaeffe10f1ee5702b4ef8e96ee977113b8c02",
+      "license": "publisher-unspecified; see https://ldbcouncil.org/benchmarks/snb/datasets/",
+      "acquisition": "download",
+      "source": "https://datasets.ldbcouncil.org/bi-pre-audit/bi-composite-projected-fk-md5sums.tar.zst"
+    },
+    {
+      "id": "ldbc-snb-bi-parameters-sf1-to-sf30000",
+      "role": "parameter",
+      "checksum_sha256": "5552f840729afa2b29e1f78a6bc58c987d081d22e077543b17ee7767d1f74445",
+      "license": "publisher-unspecified; see https://ldbcouncil.org/benchmarks/snb/datasets/",
+      "acquisition": "download",
+      "source": "https://datasets.ldbcouncil.org/snb-bi/ldbc-snb-bi-parameters-sf1-to-sf30000.zip"
+    }
+  ],
+  "references": [
+    {
+      "dataset_id": "bi-sf10-composite-projected-fk",
+      "workload_key": "umbra-validation",
+      "checksum_sha256": "b491c73deb27c53cb8a98a57c06f3fa7d71a298f1b7a34c5a80d076f7bc93dd6",
+      "source": "https://datasets.ldbcouncil.org/bi-pre-audit/output-sf10-validation-umbra.tar.zst"
+    }
+  ]
+}

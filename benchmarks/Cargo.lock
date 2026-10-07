@@ -1834,6 +1834,8 @@ name = "graphforge-benchmark-gdc-scorecard"
 version = "0.0.0"
 dependencies = [
  "arrow",
+ "flate2",
+ "graphforge-api",
  "parquet",
  "rustix 1.1.5",
  "serde",
@@ -1850,7 +1852,6 @@ dependencies = [
  "graphforge-api",
  "serde",
  "serde_json",
- "sha2",
 ]
 
 [[package]]

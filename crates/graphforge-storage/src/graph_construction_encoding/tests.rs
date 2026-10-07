@@ -246,7 +246,7 @@ fn encoded_inventory_version_precedes_required_checksums_and_current_wire_is_str
             .as_object_mut()
             .unwrap()
             .remove("xxh64");
-        let error = decode_encoding_inventory(serde_json::to_vec(&changed).unwrap().as_slice())
+        let error = decode_encoding_inventory(serde_json::to_vec(&changed).unwrap().as_slice(), 0)
             .unwrap_err();
         assert!(
             error
@@ -272,8 +272,9 @@ fn encoded_inventory_version_precedes_required_checksums_and_current_wire_is_str
                     .unwrap()
                     .remove("xxh64");
             }
-            let error = decode_encoding_inventory(serde_json::to_vec(&changed).unwrap().as_slice())
-                .unwrap_err();
+            let error =
+                decode_encoding_inventory(serde_json::to_vec(&changed).unwrap().as_slice(), 0)
+                    .unwrap_err();
             assert!(
                 !error.to_string().contains("unsupported encoded"),
                 "{error}"
@@ -281,7 +282,7 @@ fn encoded_inventory_version_precedes_required_checksums_and_current_wire_is_str
         }
     }
     assert_eq!(
-        decode_encoding_inventory(serde_json::to_vec(&original).unwrap().as_slice()).unwrap(),
+        decode_encoding_inventory(serde_json::to_vec(&original).unwrap().as_slice(), 0).unwrap(),
         inventory
     );
 }
@@ -315,5 +316,70 @@ fn encoded_final_writer_captures_identity_and_checksum_once() {
     assert_eq!(
         std::fs::read(root.path().join("graph/payload.parquet")).unwrap(),
         payload
+    );
+}
+
+/// The encoded inventory bound is the graph-file cap times the row allowance.
+/// Raising either moves the bound and the resident memory of every inventory
+/// read, which `inventory_bound.rs` states: review both, then update this pin
+/// (#900).
+#[test]
+fn inventory_bound_tracks_the_graph_file_cap() {
+    use inventory_bound::{INVENTORY_ROW_BYTES, MAX_INVENTORY_BYTES};
+
+    let cap = crate::GraphManifestLimits::default().max_entries;
+    assert_eq!(cap, 100_000);
+    assert_eq!(INVENTORY_ROW_BYTES, 512);
+    assert_eq!(MAX_INVENTORY_BYTES, cap as u64 * INVENTORY_ROW_BYTES);
+    assert_eq!(MAX_INVENTORY_BYTES, 51_200_000);
+    assert_eq!(inventory_bound(), MAX_INVENTORY_BYTES);
+
+    // The longest encoded-artifact row the encoder writes, an adjacency CSR
+    // shard (`adjacency.rs` names the shard directory and file), fits the
+    // allowance.
+    let csr =
+        crate::adjacency::csr_path(Path::new(""), "relation", crate::adjacency::Direction::Out);
+    let longest = ConstructionEncodedArtifact {
+        path: format!(
+            "indexes/adjacency/{}.shards-{}.d/{:020}.csr",
+            csr.file_name().unwrap().to_str().unwrap(),
+            "f".repeat(24),
+            u64::MAX
+        ),
+        bytes: u64::MAX,
+        sha256: "f".repeat(64),
+        xxh64: u64::MAX,
+    };
+    assert_eq!(longest.path.len(), 151);
+    let row = serde_json::to_vec(&longest).unwrap().len() as u64 + 1;
+    assert_eq!(row, 295);
+    assert!(row <= INVENTORY_ROW_BYTES);
+    // The projected S28 inventory, 86,000 rows at S26's measured 262-byte
+    // average, is admitted with more than twice its size to spare.
+    assert!(2 * 86_000 * 262 < MAX_INVENTORY_BYTES);
+}
+
+#[test]
+fn bounded_control_write_refuses_one_byte_over_and_admits_the_bound() {
+    let value = serde_json::json!({"format_version": ENCODING_FORMAT_VERSION, "root": "x"});
+    let length = serde_json::to_vec(&value).unwrap().len() as u64;
+    let mut written = Vec::new();
+    {
+        let _bound = InventoryBoundOverride::set(length);
+        inventory_bound::write_bounded_json(&mut written, INVENTORY, &value).unwrap();
+    }
+    assert_eq!(written, serde_json::to_vec(&value).unwrap());
+    let _bound = InventoryBoundOverride::set(length - 1);
+    let error =
+        inventory_bound::write_bounded_json(&mut Vec::new(), INVENTORY, &value).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            GfError::Project {
+                code: graphforge_core::ProjectErrorCode::ResourceLimit,
+                ..
+            }
+        ),
+        "{error}"
     );
 }

@@ -6,24 +6,28 @@ use std::io::{BufWriter, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use std::collections::BTreeMap;
+
 use arrow::array::{
-    Array, ArrayRef, BooleanBuilder, FixedSizeBinaryBuilder, Float64Builder, Int64Builder,
-    StringArray, StringBuilder,
+    Array, ArrayRef, BooleanBuilder, FixedSizeBinaryBuilder, Float64Builder, Int32Builder,
+    Int64Builder, ListBuilder, StringArray, StringBuilder, StructBuilder, Time64NanosecondBuilder,
 };
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Field, Fields, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::error::{Cause, ConvertError, io_error};
+use crate::glob;
 use crate::identity::{Uuid, edge_uuid, hex, node_uuid};
-use crate::mapping::{EdgeTable, Mapping, NodeTable, Property, PropertyType};
+use crate::mapping::{EdgeTable, Mapping, NodeTable, Property, PropertyType, TemporalFormat};
 use crate::source::read_table;
 use crate::spill::{
     Budget, DEFAULT_MEMORY_BUDGET_BYTES, Duplicate, Key, KeySorter, SpillDir, check_nodes,
     find_dangling,
 };
+use crate::temporal::{DateTime, parse_date, parse_datetime};
 
 pub const MANIFEST_FILE: &str = "conversion-manifest.json";
 pub const MANIFEST_SCHEMA: &str = "graphforge-gdc-conversion-manifest/1";
@@ -96,10 +100,12 @@ pub fn convert_with_budget(
 
     let mut node_keys = KeySorter::new(&spill, budget, false);
     for table in &mapping.node_tables {
-        record_inputs(&table.id, &table.files, input_root, &mut inputs)?;
+        let paths = expand_files(&table.id, &table.files, input_root)?;
+        record_inputs(&table.id, &paths, input_root, &mut inputs)?;
         let label = label_index(&table.label);
         pending.push(convert_nodes(
             table,
+            &paths,
             label,
             input_root,
             output_dir,
@@ -115,13 +121,15 @@ pub fn convert_with_budget(
 
     let mut endpoint_keys = KeySorter::new(&spill, budget, true);
     for table in &mapping.edge_tables {
-        record_inputs(&table.id, &table.files, input_root, &mut inputs)?;
+        let paths = expand_files(&table.id, &table.files, input_root)?;
+        record_inputs(&table.id, &paths, input_root, &mut inputs)?;
         let endpoints = (
             label_index(&table.source.label),
             label_index(&table.target.label),
         );
         pending.push(convert_edges(
             table,
+            &paths,
             endpoints,
             input_root,
             output_dir,
@@ -270,6 +278,29 @@ fn sha256_file(path: &Path) -> Result<(String, u64), ConvertError> {
     Ok((hex(&hasher.finalize()), total))
 }
 
+/// The table's files in read order: each mapping entry expanded in turn, its
+/// matches sorted. A file named twice would be read twice, so it is refused.
+fn expand_files(
+    table: &str,
+    patterns: &[String],
+    input_root: &Path,
+) -> Result<Vec<String>, ConvertError> {
+    let mut files = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for pattern in patterns {
+        for file in glob::expand(input_root, pattern)? {
+            if !seen.insert(file.clone()) {
+                return Err(ConvertError::new(
+                    Cause::InvalidMapping,
+                    format!("table {table} reads {file} more than once"),
+                ));
+            }
+            files.push(file);
+        }
+    }
+    Ok(files)
+}
+
 fn record_inputs(
     table: &str,
     files: &[String],
@@ -283,12 +314,70 @@ fn record_inputs(
     Ok(())
 }
 
+/// GraphForge's canonical `date` struct (`graphforge_ir::date_struct_fields`).
+fn date_fields() -> Fields {
+    Fields::from(vec![Field::new("epoch_day", DataType::Int64, true)])
+}
+
+/// GraphForge's canonical `datetime` struct
+/// (`graphforge_ir::datetime_struct_fields`): the form a Cypher `datetime()`
+/// value is stored in, so loaded values compare with Cypher literals. A UTC
+/// `Timestamp` column would load, but it does not compare equal to them.
+fn datetime_fields() -> Fields {
+    Fields::from(vec![
+        Field::new("date", DataType::Int64, true),
+        Field::new("time", DataType::Time64(TimeUnit::Nanosecond), true),
+        Field::new("offset", DataType::Int32, true),
+        Field::new("zone", DataType::Utf8, true),
+    ])
+}
+
+fn datetime_builder() -> StructBuilder {
+    StructBuilder::new(
+        datetime_fields(),
+        vec![
+            Box::new(Int64Builder::new()),
+            Box::new(Time64NanosecondBuilder::new()),
+            Box::new(Int32Builder::new()),
+            Box::new(StringBuilder::new()),
+        ],
+    )
+}
+
+fn append_datetime(builder: &mut StructBuilder, value: Option<DateTime>) {
+    builder
+        .field_builder::<Int64Builder>(0)
+        .expect("datetime date field")
+        .append_option(value.map(|value| value.epoch_days));
+    builder
+        .field_builder::<Time64NanosecondBuilder>(1)
+        .expect("datetime time field")
+        .append_option(value.map(|value| value.nanos));
+    builder
+        .field_builder::<Int32Builder>(2)
+        .expect("datetime offset field")
+        .append_option(value.map(|value| value.offset_seconds));
+    // Offset-only: an LDBC datetime never names an IANA zone.
+    builder
+        .field_builder::<StringBuilder>(3)
+        .expect("datetime zone field")
+        .append_null();
+    builder.append(value.is_some());
+}
+
+fn list_item() -> Arc<Field> {
+    Arc::new(Field::new("item", DataType::Utf8, true))
+}
+
 fn arrow_type(kind: PropertyType) -> DataType {
     match kind {
         PropertyType::String => DataType::Utf8,
         PropertyType::Int64 => DataType::Int64,
         PropertyType::Float64 => DataType::Float64,
         PropertyType::Boolean => DataType::Boolean,
+        PropertyType::Date => DataType::Struct(date_fields()),
+        PropertyType::Datetime => DataType::Struct(datetime_fields()),
+        PropertyType::List => DataType::List(list_item()),
     }
 }
 
@@ -312,19 +401,36 @@ enum Column {
     Int64(Int64Builder),
     Float64(Float64Builder),
     Boolean(BooleanBuilder),
+    Date(StructBuilder, TemporalFormat),
+    Datetime(StructBuilder, TemporalFormat),
+    List(ListBuilder<StringBuilder>, char),
 }
 
 impl Column {
-    fn new(kind: PropertyType) -> Self {
-        match kind {
+    fn new(property: &Property) -> Self {
+        match property.kind {
             PropertyType::String => Self::Text(StringBuilder::new()),
             PropertyType::Int64 => Self::Int64(Int64Builder::new()),
             PropertyType::Float64 => Self::Float64(Float64Builder::new()),
             PropertyType::Boolean => Self::Boolean(BooleanBuilder::new()),
+            PropertyType::Date => Self::Date(
+                StructBuilder::new(date_fields(), vec![Box::new(Int64Builder::new())]),
+                property.temporal_format(),
+            ),
+            PropertyType::Datetime => {
+                Self::Datetime(datetime_builder(), property.temporal_format())
+            }
+            PropertyType::List => Self::List(
+                ListBuilder::new(StringBuilder::new()).with_field(list_item()),
+                property
+                    .separator_char()
+                    .expect("mapping validation requires a list separator"),
+            ),
         }
     }
 
-    /// Empty and missing fields are null. Anything else must parse exactly.
+    /// Empty and missing fields are null. Anything else must parse exactly; a
+    /// list item must not be empty.
     fn append(&mut self, value: Option<&str>) -> Result<(), String> {
         let value = value.filter(|text| !text.is_empty());
         match self {
@@ -332,6 +438,32 @@ impl Column {
             Self::Int64(builder) => builder.append_option(parse(value)?),
             Self::Float64(builder) => builder.append_option(parse(value)?),
             Self::Boolean(builder) => builder.append_option(parse(value)?),
+            Self::Date(builder, format) => {
+                let day = value.map(|text| parse_date(text, *format)).transpose()?;
+                builder
+                    .field_builder::<Int64Builder>(0)
+                    .expect("date struct has one Int64 field")
+                    .append_option(day);
+                builder.append(day.is_some());
+            }
+            Self::Datetime(builder, format) => append_datetime(
+                builder,
+                value
+                    .map(|text| parse_datetime(text, *format))
+                    .transpose()?,
+            ),
+            Self::List(builder, separator) => match value {
+                None => builder.append_null(),
+                Some(text) => {
+                    for item in text.split(*separator) {
+                        if item.is_empty() {
+                            return Err(format!("list {text:?} has an empty item"));
+                        }
+                        builder.values().append_value(item);
+                    }
+                    builder.append(true);
+                }
+            },
         }
         Ok(())
     }
@@ -342,6 +474,9 @@ impl Column {
             Self::Int64(builder) => Arc::new(builder.finish()),
             Self::Float64(builder) => Arc::new(builder.finish()),
             Self::Boolean(builder) => Arc::new(builder.finish()),
+            Self::Date(builder, _) => Arc::new(builder.finish()),
+            Self::Datetime(builder, _) => Arc::new(builder.finish()),
+            Self::List(builder, _) => Arc::new(builder.finish()),
         }
     }
 }
@@ -404,7 +539,7 @@ fn property_arrays(
     let mut arrays = Vec::with_capacity(properties.len());
     for property in properties {
         let source = text_column(batch, &property.column);
-        let mut column = Column::new(property.kind);
+        let mut column = Column::new(property);
         for index in 0..batch.num_rows() {
             let value = (!source.is_null(index)).then(|| source.value(index));
             column.append(value).map_err(|message| {
@@ -493,6 +628,8 @@ struct Description {
     table: String,
     label_key: &'static str,
     label: String,
+    /// Rows per stored label; node tables only.
+    labels: Option<BTreeMap<String, u64>>,
 }
 
 /// A complete table still under its `.partial` name.
@@ -511,7 +648,7 @@ impl PendingTable {
         let (sha256, bytes) = sha256_file(&self.path)?;
         let relative = self.path.strip_prefix(root).unwrap_or(&self.path);
         let description = self.description;
-        Ok(json!({
+        let mut output = json!({
             "table": description.table,
             "kind": description.kind,
             description.label_key: description.label,
@@ -519,12 +656,63 @@ impl PendingTable {
             "rows": self.rows,
             "bytes": bytes,
             "sha256": sha256,
-        }))
+        });
+        if let Some(labels) = description.labels {
+            output["labels"] = json!(labels);
+        }
+        Ok(output)
+    }
+}
+
+/// Each row's stored label: the table label, or the mapped value of its
+/// `label_column`. Counts rows per stored label for the manifest.
+struct StoredLabels<'a> {
+    table: &'a NodeTable,
+    counts: BTreeMap<String, u64>,
+}
+
+impl StoredLabels<'_> {
+    fn for_batch(
+        &mut self,
+        batch: &RecordBatch,
+        path: &Path,
+        first_row: u64,
+    ) -> Result<ArrayRef, ConvertError> {
+        let rows = batch.num_rows();
+        let (Some(column), Some(values)) = (&self.table.label_column, &self.table.label_values)
+        else {
+            *self.counts.entry(self.table.label.clone()).or_insert(0) += rows as u64;
+            return Ok(Arc::new(StringArray::from(vec![
+                self.table.label.as_str();
+                rows
+            ])));
+        };
+        let source = text_column(batch, column);
+        let mut labels = StringBuilder::new();
+        for index in 0..rows {
+            let raw = (!source.is_null(index)).then(|| source.value(index));
+            let Some(label) = raw.and_then(|value| values.get(value)) else {
+                return Err(row_error(
+                    Cause::InvalidValue,
+                    path,
+                    first_row + index as u64,
+                    &format!(
+                        "label column {column} value {:?} is not one of {:?}",
+                        raw.unwrap_or(""),
+                        values.keys().collect::<Vec<_>>()
+                    ),
+                ));
+            };
+            *self.counts.entry(label.clone()).or_insert(0) += 1;
+            labels.append_value(label);
+        }
+        Ok(Arc::new(labels.finish()))
     }
 }
 
 fn convert_nodes(
     table: &NodeTable,
+    paths: &[String],
     label: u32,
     input_root: &Path,
     output_dir: &Path,
@@ -544,13 +732,18 @@ fn convert_nodes(
         Arc::new(Schema::new(fields)),
     )?;
     let mut required: Vec<&str> = vec![table.id_column.as_str()];
+    required.extend(table.label_column.as_deref());
     required.extend(
         table
             .properties
             .iter()
             .map(|property| property.column.as_str()),
     );
-    for file in &table.files {
+    let mut stored = StoredLabels {
+        table,
+        counts: BTreeMap::new(),
+    };
+    for file in paths {
         let path = input_root.join(file);
         let file = file_index(files, &table.id, &path)?;
         read_table(table.format, &path, &required, &mut |batch, first_row| {
@@ -569,7 +762,7 @@ fn convert_nodes(
             }
             let mut columns = vec![
                 uuid_array(&uuids)?,
-                Arc::new(StringArray::from(vec![table.label.as_str(); uuids.len()])) as ArrayRef,
+                stored.for_batch(batch, &path, first_row)?,
             ];
             columns.extend(property_arrays(batch, &properties, &path, first_row)?);
             writer.write(columns)
@@ -580,11 +773,13 @@ fn convert_nodes(
         table: table.id.clone(),
         label_key: "label",
         label: table.label.clone(),
+        labels: Some(stored.counts),
     })
 }
 
 fn convert_edges(
     table: &EdgeTable,
+    paths: &[String],
     (source_label, target_label): (u32, u32),
     input_root: &Path,
     output_dir: &Path,
@@ -613,7 +808,7 @@ fn convert_edges(
             .map(|property| property.column.as_str()),
     );
     let mut ordinal = 0_u64;
-    for file in &table.files {
+    for file in paths {
         let path = input_root.join(file);
         let file = file_index(files, &table.id, &path)?;
         read_table(table.format, &path, &required, &mut |batch, first_row| {
@@ -657,5 +852,6 @@ fn convert_edges(
         table: table.id.clone(),
         label_key: "rel_type",
         label: table.rel_type.clone(),
+        labels: None,
     })
 }

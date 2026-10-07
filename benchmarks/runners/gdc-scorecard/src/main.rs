@@ -3,17 +3,22 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+mod query_command;
+
 fn usage() -> ExitCode {
     eprintln!(
         "usage: graphforge-benchmark-gdc-scorecard convert --mapping FILE --input-root DIR --output-dir DIR [--memory-budget-bytes N]"
     );
+    eprintln!("       {}", query_command::USAGE);
     ExitCode::from(1)
 }
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
-    if args.next().as_deref() != Some("convert") {
-        return usage();
+    match args.next().as_deref() {
+        Some("convert") => {}
+        Some("query") => return query_command::main(args),
+        _ => return usage(),
     }
     let (mut mapping, mut input_root, mut output_dir) = (None, None, None);
     let mut budget = gdc_scorecard::DEFAULT_MEMORY_BUDGET_BYTES;

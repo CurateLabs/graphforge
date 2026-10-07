@@ -57,12 +57,21 @@ PYTHONPATH=harness GRAPHFORGE_GDC_GRAPHALYTICS_BIN=target/debug/graphforge-bench
 | Operations | Complex reads IC1–IC14, short reads IS1–IS7, updates IU1–IU8 (29 total) |
 | Runner | `graphforge-benchmark-gdc-snb-interactive` (`suites/gdc-snb-interactive.json`) |
 | Phases | Separate `load`, `warmup`, `execution`, `validation` with per-phase status/detail |
-| Fixtures | `snb-interactive-static-synthetic-v1` is static replay; `snb-interactive-live-is1-synthetic-v1` is a synthetic engineering graph, not official SF0.003 Datagen output |
-| Validation | Live IS1 normalizes real Arrow rows and uses the same exact Rust reference validator; the independently declared reference follows SNB IS1 semantics |
+| Fixtures | `snb-interactive-static-synthetic-v1` is static replay; `snb-interactive-live-is1-synthetic-v1` and `snb-interactive-query-synthetic-v1` (`fixtures/gdc/snb-interactive-queries/`) are synthetic engineering graphs, not official Datagen output |
+| Queries | `src/queries.rs` defines IC1–IC13 and IS1–IS7 as data (operation, Cypher text or IC13 `bfs` invocation, typed parameters, columns, `LIMIT`, rewrites); `list-queries` prints them as JSON |
+| Validation | Live IS1 normalizes real Arrow rows and uses the same exact Rust reference validator; `run-live-queries` runs all 20 reads on the query fixture and compares typed rows in order with results `graphforge_bench.gdc_snb_interactive_reference` derives from the fixture without GraphForge |
 | Unsupported semantics | Typed `semantic_incompatibility`: `interactive_update_stream_not_exposed` (IU1–IU8); `weighted_interaction_path_enumeration_not_exposed` (IC14) |
+| Scorecard | `profiles/gdc/snb-interactive-scorecard-identity.json` pins the v1 `CsvComposite-LongDateFormatter` SF1/SF10 archives, their substitution parameters and the Neo4j validation parameters; `profiles/gdc/snb-interactive-load-mapping.json` and `snb-interactive-scorecard-ladder.json` carry the mapping and the LDBC-published counts. The mapping keeps the v1 reference data model the queries assume (#952 decision 2026-10-07): the archives' epoch-millisecond dates load as `int64`, one label per node. See `README.md` (LDBC CSV suite pins). |
 
-Read-only complex/short reads that are ordinary graph traversals or aggregations
-map to public Cypher; IC13 uses the public `bfs` path analyst verb. Updates
+Read-only complex/short reads follow the Cypher reference implementation at the
+pinned driver commit (ordering, tie-breakers, `LIMIT`, parameter names); IC13
+uses the public `bfs` path analyst verb. Where GraphForge evaluates a reference
+construct differently (`shortestPath`, node-list `IN`,
+`datetime({epochMillis})`, pattern predicates outside `WHERE`), the query uses
+an exactly equivalent form recorded in its definition. Where the reference's
+behaviour differs from the specification prose (for example IS7's
+`CASE r WHEN null`, which never matches), the reference behaviour is kept,
+because the v1 validation set was produced by it, and labelled `spec_variance`. Updates
 require the official driver's transactional update-stream semantics,
 dependency-time ordering, and write validation, which the public property-graph +
 Cypher surface does not expose, so they fail closed with a typed cause. IC14
@@ -87,16 +96,21 @@ PYTHONPATH=harness GRAPHFORGE_GDC_SNB_INTERACTIVE_BIN=target/debug/graphforge-be
 | Official focus | LDBC SNB Business Intelligence: analytical read queries over the social-network graph plus a batch maintenance stream |
 | Queries | 20 analytical reads `BI1`..`BI20` |
 | Maintenance | Batch inserts `INS1`..`INS8` and batch deletes `DEL1`..`DEL8` |
-| Runner | `runners/gdc-snb-bi` (`gdc-snb-bi`), serde-only control plane; no product-crate dependency |
+| Runner | `runners/gdc-snb-bi` (`gdc-snb-bi`), executes reads through the public `graphforge-api` |
 | GraphForge disposition | `executable` (bounded tiny fixture only) |
 | Certification | **false** — engineering evidence only; never masquerades as an audited GDC certification |
+| Scorecard | `profiles/gdc/snb-bi-scorecard-identity.json` pins the `composite-projected-fk` SF1/SF10 archives, LDBC's member md5 lists, the SF1–SF30000 parameters and the Umbra SF10 validation output; `profiles/gdc/snb-bi-load-mapping.json` and `snb-bi-scorecard-ladder.json` carry the mapping and the LDBC-published counts. See `README.md` (LDBC CSV suite pins). |
 
 ### Query mapping
 
-Analytical reads that are ordinary traversals, aggregations, grouped counts,
-and top-k rankings map to the public GraphForge Cypher / analyst-verb surface.
-The runner records the concrete Cypher/analyst-verb shape for each compatible
-read.
+Seventeen analytical reads run as Cypher through the public API. Their texts
+live in `runners/gdc-snb-bi/src/queries.rs` and follow the LDBC SNB BI
+reference queries (`neo4j/queries/bi-N.cypher`, with semantics cross-checked
+against `umbra/queries/bi-N.sql`). Where GraphForge cannot run the upstream text
+as written, the definition records the exact rewrite and why the result is
+unchanged. `run-queries` executes them on the committed `snb-bi-queries`
+fixture and compares every result with rows derived independently from the
+fixture CSV files.
 
 ### Unsupported policy (fail closed)
 
@@ -149,6 +163,7 @@ PYTHONPATH=harness GRAPHFORGE_GDC_SNB_BI_BIN=target/debug/graphforge-benchmark-g
 | Live lane | Trusted Rust runner owns in-memory `GraphForge::new(None)` load + official TCR10 `execute_with_params` |
 | Validation | exact (ordered rows) and normalized (order-insensitive multiset) reference comparison |
 | Unsupported semantics | Typed `semantic_incompatibility`: `recursive_temporal_path_filtering_not_exposed` (TCR1–TCR2); `temporal_shortest_transfer_path_not_exposed` (TCR3); `temporal_transfer_cycle_detection_not_exposed` (TCR4); `hub_vertex_truncation_not_exposed` (TCR5); `finbench_transaction_write_semantics_not_exposed` (TW1–TW19, TRW1–TRW3) |
+| Scorecard | `profiles/gdc/finbench-transaction-scorecard-identity.json` pins the SF1/SF10 archives and their read parameters (LDBC publishes no reference output); `profiles/gdc/finbench-transaction-load-mapping.json` maps `snapshot/` and `finbench-transaction-scorecard-ladder.json` carries the LDBC-published counts. See `README.md` (LDBC CSV suite pins). |
 
 Complex and simple reads that are ordinary multi-hop traversals, temporal-window
 filters, aggregations, or top-k map to public Cypher (TCR6–TCR12, TSR1–TSR6).

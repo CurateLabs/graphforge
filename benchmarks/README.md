@@ -92,7 +92,13 @@ reference, acquisition, and identity; creates `graphforge_api::GraphForge`
 in memory; loads through the public construction API; warms and executes IS1
 with fixed typed `personId`; and normalizes and validates Arrow rows itself.
 It accepts only an evidence output path, never caller rows or identities.
-Neither fixture is official Datagen scale-factor output. Evidence records
+`run_live_queries` orchestrates the Rust `run-live-queries` command, which loads
+the committed `snb-interactive-query-synthetic-v1` fixture through public Cypher,
+runs every runnable read (IC1–IC13, IS1–IS7) from `src/queries.rs`, and
+validates the rows against expected results that
+`graphforge_bench.gdc_snb_interactive_reference` derives from the fixture data
+without GraphForge. `list_query_definitions` returns those definitions as data.
+None of these fixtures is official Datagen scale-factor output. Evidence records
 `certification: false` and never masquerades as an audited GDC certification.
 
 The FinBench Transaction suite adapter is `graphforge_bench.gdc_finbench_transaction`
@@ -130,14 +136,22 @@ PYTHONPATH=harness GRAPHFORGE_GDC_FINBENCH_TRANSACTION_BIN=target/debug/graphfor
 suite's identity profile, and renames it into place atomically. A mismatch is a
 typed `checksum_mismatch`, is never retried, and leaves no partial file; a
 cached archive that no longer matches its pin is reported the same way and left
-for inspection. Archives are extracted with system `tar --zstd`. The cache
-root must be on the same device as `/`, outside the repository, and disjoint
-from the ladder work root. The emitted `graphforge-gdc-acquisition/1` document
-is validated by `gdc_contracts.validate_acquisition` against the requested
-datasets of the selected profile.
+for inspection. LDBC publishes `.tar.zst`, `.tar.gz` and `.zip` assets: tar
+archives are extracted with system `tar`, zip archives with `zipfile` after
+every member path is checked to stay inside the destination (an escaping member
+is `extraction_failed`). The cache root must be on the same device as `/`,
+outside the repository, and disjoint from the ladder work root. A parameter set
+is a dataset pin with role `parameter`, requested by id like a dataset. A pinned
+reference is acquired, verified and extracted (once per archive, under
+`<suite>/references/`) whenever its dataset is requested. The emitted
+`graphforge-gdc-acquisition/1` document lists every acquired asset and
+reference and is validated by `gdc_contracts.validate_acquisition` against the
+requested datasets of the selected profile.
 
 ```bash
 make -C benchmarks gdc-acquire DATASET_CACHE=<cache> WORK_ROOT=<work root> DATASETS="wiki-Talk"
+make -C benchmarks gdc-acquire SUITE=snb-bi DATASET_CACHE=<cache> WORK_ROOT=<work root> \
+  DATASETS="bi-sf1-composite-projected-fk ldbc-snb-bi-parameters-sf1-to-sf30000"
 ```
 
 LDBC publishes no checksum sidecars, so the `scorecard` identity profile
@@ -157,23 +171,44 @@ relationships without direction.
 `runners/gdc-scorecard` (`graphforge-benchmark-gdc-scorecard convert`) turns
 LDBC pipe-delimited CSV and Graphalytics `.v`/`.e` files into the Parquet layout
 `gf import-session register-parquet` accepts, driven by a declarative
-`graphforge-gdc-load-mapping/1` document (see `fixtures/gdc/load-fixture/` and
-`profiles/gdc/graphalytics-*-load-mapping.json`):
+`graphforge-gdc-load-mapping/1` document (see `fixtures/gdc/load-fixture/`,
+`fixtures/gdc/ldbc-csv-fixture/` and `profiles/gdc/*-load-mapping.json`):
 
 - one node file per node table (`node_uuid`, `label`, properties) and one edge
   file per edge table (`edge_uuid`, `rel_type`, `source_uuid`, `target_uuid`,
   properties), registered nodes first;
+- a file entry may use `*` and `?` in any path component; matches are read in
+  byte order of their path, a wildcard never matches a leading `.` (Hadoop
+  `.crc` side files), a pattern matching nothing is `input_missing`, and a
+  file matched twice in one table is `invalid_mapping`. A file ending in `.gz`
+  is gzip-decompressed, so Spark's `part-*.csv.gz` files are read as written;
+- a repeated CSV header name gets a `.1`, `.2`, ... suffix on its later
+  occurrences (Interactive v1's `Person.id|Person.id` reads as `Person.id`,
+  `Person.id.1`);
 - property columns are written in lexicographic name order, which import
-  requires, and are limited to `string`, `int64`, `float64` and `boolean`
-  because storage cannot read narrower integers back; empty fields are null;
-- node UUIDs derive from SHA-256 of (label, id), shaped as UUIDv7, so the same
-  input always yields the same identities; edge UUIDs derive from (table,
-  row ordinal);
+  requires, in GraphForge's canonical persisted types: `string`, `int64`,
+  `float64`, `boolean`, `date` (`Struct{epoch_day}`), `datetime` (the struct a
+  Cypher `datetime()` is stored in: local date, time, offset, null zone) and
+  `list` (`List<Utf8>`, split on a declared one-character `separator`).
+  Narrower integers are excluded because storage cannot read them back. A date
+  or datetime declares its `format`: `iso8601` (default; a datetime needs an
+  offset), `naive-utc` (`YYYY-MM-DD HH:MM:SS[.f]`, read as UTC) or
+  `epoch-millis`; a value that does not parse exactly, a date that is not
+  midnight, and an empty list item are `invalid_value`. Empty fields are null;
+- a node table may take each row's stored label from `label_column` through a
+  closed `label_values` map (LDBC `Place.type` becomes `City`, `Country` or
+  `Continent`); a value outside the map is `invalid_value`. The table's
+  `label` stays the identity label that derives UUIDs and that edge endpoints
+  name, and is not itself stored;
+- node UUIDs derive from SHA-256 of (identity label, id), shaped as UUIDv7, so
+  the same input always yields the same identities; edge UUIDs derive from
+  (table, row ordinal);
 - a duplicate (label, id), an edge endpoint no node table defines, a malformed
   value or a missing column fails with a typed `cause` on stderr and exit code
   2, and no manifest is written;
 - `conversion-manifest.json` records every input and output with row counts and
-  SHA-256, the mapping digest, the converter version and the spill statistics.
+  SHA-256, the mapping digest, the converter version and the spill statistics;
+  a node output also records its rows per stored label (`labels`).
   Tables are written to `*.partial` and renamed only after the identity checks
   pass, and the output directory must start empty.
 
@@ -204,12 +239,96 @@ the records, records spilled, runs, peak buffered records and intermediate
 merges.
 
 ```bash
-PYTHONPATH=harness uv run --locked python -m unittest tests.test_gdc_dataset_cache tests.test_gdc_scorecard_load
+PYTHONPATH=harness uv run --locked python -m unittest tests.test_gdc_dataset_cache tests.test_gdc_scorecard_load \
+  tests.test_gdc_ldbc_csv_scorecard
 CARGO_TARGET_DIR=target cargo test --locked -p graphforge-benchmark-gdc-scorecard
 ```
 
+#### LDBC CSV suite pins
+
+The `scorecard` identity profiles of SNB BI, SNB Interactive v1 and FinBench
+Transaction pin the SF1 and SF10 archives, their parameter sets and, where LDBC
+publishes one, the reference output (BI: Umbra SF10 validation; Interactive:
+Neo4j v1 validation parameters for SF0.1-SF10; FinBench: none). Each suite's
+`profiles/gdc/<suite>-load-mapping.json` maps every entity file of the archive,
+and `profiles/gdc/<suite>-scorecard-ladder.json` (schema
+`schemas/gdc-ldbc-csv-scorecard-ladder.json`) records per mapped table the
+LDBC-published count, cited to an LDBC table at a fixed commit, and the record
+count of the pinned archive (`listed`), which the loaded graph must equal.
+Where the two differ the entry carries `held_back` (rows the archive keeps in
+its update or incremental files), `residual` and the explanation:
+
+- SNB BI: the initial-snapshot table matches the archive exactly. LDBC also
+  publishes an md5 per archive member; every extracted member of both pinned
+  archives passes `md5sum -c` against `bi-composite-projected-fk-md5sums`
+  (`member_md5_manifest`), so the SHA-256 pin and LDBC's md5 list name the
+  same bytes. The archive's own md5 is recorded as `archive_md5`.
+- SNB Interactive v1: LDBC's per-type table counts the whole generated network;
+  the archive's bulk-load files hold the initial snapshot, whose node and edge
+  totals equal LDBC's exact snapshot totals (`published_snapshot_totals`).
+- FinBench: LDBC's table counts `raw/`; the loaded graph is `snapshot/`, with
+  `incremental/` as the write workload. `snapshot/` datetimes are
+  `naive-utc` because the generator formats them in GMT
+  (`spark.sql.session.timeZone`).
+
+Reproduce `listed` by converting the extracted rung with its mapping and reading
+`rows` from `conversion-manifest.json`; reproduce `archive_md5` and the pins
+with `md5sum` and `sha256sum` on the archive.
+
 `tests.test_gdc_scorecard_load` builds `gf` and the converter when
 `GRAPHFORGE_GF_BIN` and `GRAPHFORGE_GDC_SCORECARD_BIN` are unset.
+
+### GDC per-operation query driver
+
+`graphforge-benchmark-gdc-scorecard query` runs a suite's queries against a
+loaded durable project and owns per-operation latency
+(`docs/development/benchmarking.md`, GDC per-operation query latency):
+
+```bash
+graphforge-benchmark-gdc-scorecard query --project <project> \
+  --workload <workload.json> --expected-counts <counts.json> --output <evidence.json>
+```
+
+A suite plugs in with two documents and no driver change (see
+`fixtures/gdc/query-fixture/`):
+
+- `graphforge-gdc-query-workload/1` lists query variants. Each has an `id`, an
+  `operation`, its `bindings` and `ordered`: `true` when row order is part of
+  the answer (the query sorts), `false` to digest rows order-independently. An
+  operation is `cypher` (`text`, run through
+  `execute_with_params`) or an analyst verb: `rank` or `cluster` (`label`,
+  `by`, `directed`, optional `via`), or `paths` (`by`, `directed`, optional
+  `via` and `weight`, and a `source` selecting `(:label {property: $param})`).
+  Binding `params` use the tagged `IrLiteral` JSON encoding, for example
+  `{"type": "Int", "value": 3}`.
+- `graphforge-gdc-expected-counts/1` gives the total node and edge counts,
+  every label's node count and every relationship type's edge count, and cites
+  their `source`. Type counts must sum to the edge total.
+
+The driver refuses a path without a project rather than creating one. After
+reopen it reads every count back through Cypher count probes and
+`GraphForge::labels`. Any difference, including an undeclared label, exits 2
+with `count_mismatch` before any query runs, and writes no evidence. Document
+and project refusals (`invalid_workload`, `project_missing`, ...) exit 2 the
+same way, as one JSON object on stderr.
+
+A call that fails during the measured pass does not stop the run. It is
+recorded as a failed sample, with `cause` (`query_failed` or
+`result_unrenderable`), the product's `error_code` and at most 1 KiB of error
+text, and no latency. The remaining bindings and variants still run. The
+evidence is then written with `status: failed` and every failure listed in
+`failures`, and the driver exits 3 with `query_failed` on stderr.
+
+The `graphforge-gdc-query-evidence/1` output
+(`schemas/gdc-query-evidence.json`) records the reconciliation, the declared
+clock, the run status and failures and, per variant, the excluded warm-up
+binding, each sample's binding id and outcome (latency, row count and result
+digest when measured), and nearest-rank p50/p95 over the measured samples.
+`gdc_measurement_policy.assert_query_latency_authority` validates it.
+
+```bash
+PYTHONPATH=harness uv run --locked python -m unittest tests.test_gdc_scorecard_query tests.test_gdc_measurement_policy
+```
 
 Per-suite adapters own workload semantics through their own Rust runner and
 harness module. The SNB BI suite (`gdc_snb_bi`) maps the 20 `BI*` analytical
@@ -220,23 +339,27 @@ historical `snb-bi-sf0.003` identifier is not an official SF0.003 dataset, their
 `.graph`/`.out` bytes are synthetic replay inputs, and they provide no live
 engine evidence.
 
-The explicit `snb-bi-live` lane closes that static-replay gap for BI2. It loads
-the committed deterministic seed into `GraphForge::new(None)`, executes the BI2
-shape through `graphforge_api::GraphForge::execute_with_params`, validates the
-official `diff DESC, tag.name ASC` total order in the same trusted Rust process,
-and directly constructs the evidence. The command accepts no caller result
-rows, source label, parameter digest, or producer field. `run-static-suite` is
-the separate legacy replay command and cannot emit live evidence.
+The `snb-bi-queries` lane runs every mapped BI read as real Cypher. The query
+definitions are data in `runners/gdc-snb-bi/src/queries.rs` (operation, Cypher
+text, typed parameter names, result columns, the upstream LDBC query each one
+follows, and any exact rewrite GraphForge needs), so a driver can iterate them.
+`run-queries` loads the fixture's LDBC-shaped CSV files into
+`GraphForge::new(None)` through public Cypher, runs the 17 runnable reads
+through `execute_with_params`, and compares each result with rows that
+`graphforge_bench.gdc_snb_bi_reference` derives from the CSV files with plain
+Python, following the upstream Umbra SQL rather than the Cypher text. BI15,
+BI19 and BI20 stay refused. After editing the fixture, rewrite the expected rows
+with:
 
-The expected rows are independently derived from the seed. `identity.json`
-pins the complete closed operation context, official SNB specification and BI
-query release/commit, typed parameter names/kinds/values, content-addressed
-synthetic fixture, reference, normalization, and internal Rust driver contract.
-Runner evidence binds its actual executable digest; no nonexistent GraphForge
-release or commit is used. This lane does not claim LDBC datagen, official
-parameters, SF0.003, or certification. Live resource timings and row counts
-remain separate from correctness, and unobserved spill/RSS/I/O fields are named
-rather than invented. All evidence stamps `certification: false`:
+```bash
+PYTHONPATH=benchmarks/harness python3 -m graphforge_bench.gdc_snb_bi_reference \
+  benchmarks/fixtures/gdc/snb-bi-queries --write
+```
+
+The fixture is synthetic and LDBC-shaped; this lane does not claim LDBC
+datagen output, official parameters, or certification. It replaced the earlier
+BI2-only `snb-bi-live` lane, which used integer day windows.
+All evidence stamps `certification: false`:
 
 ```bash
 PYTHONPATH=benchmarks/harness uv run python -m unittest \

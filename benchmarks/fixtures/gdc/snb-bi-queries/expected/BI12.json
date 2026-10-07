@@ -1,0 +1,9 @@
+{"schema": "graphforge-gdc-snb-bi-expected/1", "operation": "BI12", "authority": "independent_python_derivation_from_fixture_csv", "rows": [
+    [2, 7],
+    [1, 7],
+    [3, 6],
+    [7, 1],
+    [5, 1],
+    [4, 1],
+    [0, 1]
+  ]}

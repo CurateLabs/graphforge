@@ -1,17 +1,23 @@
-//! Converts LDBC pipe-delimited CSV and Graphalytics `.v`/`.e` files into the
-//! Parquet layout that `gf import-session register-parquet` accepts.
+//! Converts LDBC pipe-delimited CSV (plain or gzip-compressed, named directly
+//! or by wildcard) and Graphalytics `.v`/`.e` files into the
+//! Parquet layout that `gf import-session register-parquet` accepts, and
+//! drives a suite's queries against the loaded durable project ([`query`]).
 
 mod convert;
 mod error;
+mod glob;
 mod identity;
 mod mapping;
+pub mod query;
 mod source;
 mod spill;
+mod temporal;
 
 pub use convert::{Conversion, MANIFEST_FILE, MANIFEST_SCHEMA, convert, convert_with_budget};
 pub use error::{Cause, ConvertError};
 pub use identity::{edge_uuid, node_uuid};
-pub use mapping::{MAPPING_SCHEMA, Mapping};
+pub use mapping::{MAPPING_SCHEMA, Mapping, TemporalFormat};
 pub use spill::{
     DEFAULT_MEMORY_BUDGET_BYTES, KEY_RECORD_BYTES, MIN_MEMORY_BUDGET_BYTES, SPILL_DIR,
 };
+pub use temporal::{DateTime, parse_date, parse_datetime};

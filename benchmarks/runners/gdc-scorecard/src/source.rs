@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -36,7 +36,14 @@ pub fn read_table(
             io_error(&path.display().to_string(), &error)
         }
     })?;
-    let reader = BufReader::with_capacity(1 << 20, file);
+    // Spark writes one gzip member per part file; a multi-member reader also
+    // accepts concatenated members rather than stopping after the first.
+    let decoded: Box<dyn Read> = if is_gzip(path) {
+        Box::new(flate2::read::MultiGzDecoder::new(BufReader::new(file)))
+    } else {
+        Box::new(file)
+    };
+    let reader = BufReader::with_capacity(1 << 20, decoded);
     match format {
         Format::LdbcCsv => read_ldbc_csv(reader, path, required, visit),
         Format::GraphalyticsVertices | Format::GraphalyticsEdges => {
@@ -66,8 +73,58 @@ fn utf8_schema(header: &[String]) -> Arc<Schema> {
     ))
 }
 
+fn is_gzip(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| extension == "gz")
+}
+
+/// Undecodable bytes (bad gzip, invalid UTF-8) are malformed input, not an
+/// I/O failure of the host.
+fn read_error(path: &Path, error: &std::io::Error) -> ConvertError {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::InvalidData
+            | std::io::ErrorKind::InvalidInput
+            | std::io::ErrorKind::UnexpectedEof
+    ) {
+        ConvertError::new(
+            Cause::MalformedInput,
+            format!("{}: {error}", path.display()),
+        )
+    } else {
+        io_error(&path.display().to_string(), error)
+    }
+}
+
+/// Names a repeated column `name.1`, `name.2`, ... on its second, third, ...
+/// occurrence. A suffixed name that collides with another column is refused,
+/// so every column keeps exactly one name.
+fn disambiguate(header: Vec<String>, path: &Path) -> Result<Vec<String>, ConvertError> {
+    let mut seen: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut named = Vec::with_capacity(header.len());
+    for name in header {
+        let repeats = seen.entry(name.clone()).or_insert(0);
+        named.push(if *repeats == 0 {
+            name
+        } else {
+            format!("{name}.{repeats}")
+        });
+        *repeats += 1;
+    }
+    let unique: BTreeSet<&String> = named.iter().collect();
+    if unique.len() != named.len() {
+        return Err(ConvertError::new(
+            Cause::MalformedInput,
+            format!(
+                "{}: header repeats a column name that its .N suffix cannot disambiguate",
+                path.display()
+            ),
+        ));
+    }
+    Ok(named)
+}
+
 fn read_ldbc_csv(
-    mut reader: BufReader<File>,
+    mut reader: BufReader<Box<dyn Read>>,
     path: &Path,
     required: &[&str],
     visit: &mut dyn FnMut(&RecordBatch, u64) -> Result<(), ConvertError>,
@@ -75,7 +132,7 @@ fn read_ldbc_csv(
     let mut line = String::new();
     reader
         .read_line(&mut line)
-        .map_err(|error| io_error(&path.display().to_string(), &error))?;
+        .map_err(|error| read_error(path, &error))?;
     let header: Vec<String> = line
         .trim_end_matches(['\n', '\r'])
         .split('|')
@@ -90,13 +147,7 @@ fn read_ldbc_csv(
             ),
         ));
     }
-    let unique: BTreeSet<&String> = header.iter().collect();
-    if unique.len() != header.len() {
-        return Err(ConvertError::new(
-            Cause::MalformedInput,
-            format!("{}: header repeats a column name", path.display()),
-        ));
-    }
+    let header = disambiguate(header, path)?;
     check_required(&header, required, path)?;
     // LDBC CSV is never quoted. A control byte that cannot occur in the data
     // disables arrow-csv's quote handling so a stray `"` stays literal.
@@ -127,7 +178,7 @@ fn read_ldbc_csv(
 }
 
 fn read_graphalytics(
-    reader: BufReader<File>,
+    reader: BufReader<Box<dyn Read>>,
     format: Format,
     path: &Path,
     required: &[&str],
@@ -138,7 +189,7 @@ fn read_graphalytics(
     let mut header: Vec<String> = Vec::new();
     let mut width = 0;
     for line in lines.by_ref() {
-        let line = line.map_err(|error| io_error(&path.display().to_string(), &error))?;
+        let line = line.map_err(|error| read_error(path, &error))?;
         if line.trim().is_empty() {
             continue;
         }
@@ -189,7 +240,7 @@ fn read_graphalytics(
         visit(&batch, first_row)
     };
     for line in pending.map(Ok).into_iter().chain(lines) {
-        let line = line.map_err(|error| io_error(&path.display().to_string(), &error))?;
+        let line = line.map_err(|error| read_error(path, &error))?;
         if line.trim().is_empty() {
             continue;
         }

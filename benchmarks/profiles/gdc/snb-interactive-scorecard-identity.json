@@ -1,0 +1,71 @@
+{
+  "schema": "graphforge-gdc-pinned-identity/1",
+  "suite_id": "snb-interactive",
+  "disposition": "executable",
+  "spec": {
+    "name": "ldbc_snb_docs",
+    "source": "https://github.com/ldbc/ldbc_snb_docs",
+    "release": "v2.2.4",
+    "commit": "5f7956e07a214373c363b371a3b88bc83ddcd118"
+  },
+  "generator": {
+    "name": "ldbc-snb-interactive-v1-pre-generated-datasets",
+    "source": "https://datasets.ldbcouncil.org/snb-interactive-v1/",
+    "release": "unversioned-pinned-by-sha256",
+    "commit": null
+  },
+  "driver": {
+    "name": "graphforge-gdc-scorecard-converter",
+    "source": "https://github.com/CurateLabs/graphforge/tree/main/benchmarks/runners/gdc-scorecard",
+    "release": "converter-v1",
+    "commit": null
+  },
+  "datasets": [
+    {
+      "id": "social_network-sf1-CsvComposite-LongDateFormatter",
+      "role": "dataset",
+      "checksum_sha256": "2e3dfb9e3695592161a62ce893b9619c2566775512b7c1995c5a627277c2fb29",
+      "license": "publisher-unspecified; see https://ldbcouncil.org/benchmarks/snb/datasets/",
+      "acquisition": "download",
+      "source": "https://datasets.ldbcouncil.org/snb-interactive-v1/social_network-sf1-CsvComposite-LongDateFormatter.tar.zst"
+    },
+    {
+      "id": "social_network-sf10-CsvComposite-LongDateFormatter",
+      "role": "dataset",
+      "checksum_sha256": "99faef3d80416de678d36f3b14ed8a874e838a874b34f36ab4b53389c97496d7",
+      "license": "publisher-unspecified; see https://ldbcouncil.org/benchmarks/snb/datasets/",
+      "acquisition": "download",
+      "source": "https://datasets.ldbcouncil.org/snb-interactive-v1/social_network-sf10-CsvComposite-LongDateFormatter.tar.zst"
+    },
+    {
+      "id": "substitution_parameters-sf1",
+      "role": "parameter",
+      "checksum_sha256": "35ed6bd8d86e9911b826421a0d514a764b2141c09e6a0df087239ae0b1d595cb",
+      "license": "publisher-unspecified; see https://ldbcouncil.org/benchmarks/snb/datasets/",
+      "acquisition": "download",
+      "source": "https://datasets.ldbcouncil.org/snb-interactive-v1-parameters/substitution_parameters-sf1.tar.zst"
+    },
+    {
+      "id": "substitution_parameters-sf10",
+      "role": "parameter",
+      "checksum_sha256": "a021adc5ce9054083f1e3558ba47c5d13ed72804e838d92d49edb5b45e4b6796",
+      "license": "publisher-unspecified; see https://ldbcouncil.org/benchmarks/snb/datasets/",
+      "acquisition": "download",
+      "source": "https://datasets.ldbcouncil.org/snb-interactive-v1-parameters/substitution_parameters-sf10.tar.zst"
+    }
+  ],
+  "references": [
+    {
+      "dataset_id": "social_network-sf1-CsvComposite-LongDateFormatter",
+      "workload_key": "neo4j-validation",
+      "checksum_sha256": "1fc17c19426c2ea04e4b2119b28a8813323b8d0b4f7a6731bb7b8445dd9cf707",
+      "source": "https://datasets.ldbcouncil.org/interactive-v1/validation_params-interactive-v1.0.0-sf0.1-to-sf10.tar.zst"
+    },
+    {
+      "dataset_id": "social_network-sf10-CsvComposite-LongDateFormatter",
+      "workload_key": "neo4j-validation",
+      "checksum_sha256": "1fc17c19426c2ea04e4b2119b28a8813323b8d0b4f7a6731bb7b8445dd9cf707",
+      "source": "https://datasets.ldbcouncil.org/interactive-v1/validation_params-interactive-v1.0.0-sf0.1-to-sf10.tar.zst"
+    }
+  ]
+}

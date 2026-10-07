@@ -5,13 +5,18 @@ install:
 
 smoke: smoke-python smoke-rust
 
-# Download, pin-verify and extract GDC Graphalytics archives into DATASET_CACHE.
-# DATASETS is a space-separated list of ids pinned by the scorecard profile.
+# Download, pin-verify and extract GDC archives (SUITE, default graphalytics;
+# IDENTITY_PROFILE, default scorecard) into DATASET_CACHE.
+# DATASETS is a space-separated list of ids pinned by that profile.
 # DATASET_CACHE must be on the same device as / and outside the repository and
 # WORK_ROOT; a checksum mismatch is a typed failure and is never retried.
+SUITE ?= graphalytics
+IDENTITY_PROFILE ?= scorecard
+
 gdc-acquire: install
 	test -n "$(DATASET_CACHE)" && test -n "$(WORK_ROOT)" && test -n "$(DATASETS)"
 	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.gdc_dataset_cache \
+		--suite "$(SUITE)" --profile "$(IDENTITY_PROFILE)" \
 		--cache-root "$(DATASET_CACHE)" --work-root "$(WORK_ROOT)" \
 		$(foreach dataset,$(DATASETS),--dataset "$(dataset)")
 
