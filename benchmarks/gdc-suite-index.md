@@ -67,8 +67,11 @@ Read-only complex/short reads follow the Cypher reference implementation at the
 pinned driver commit (ordering, tie-breakers, `LIMIT`, parameter names); IC13
 uses the public `bfs` path analyst verb. Where GraphForge evaluates a reference
 construct differently (`shortestPath`, node-list `IN`,
-`datetime({epochMillis})`, `CASE x WHEN null`, pattern predicates outside
-`WHERE`), the query uses an exactly equivalent form recorded in its definition. Updates
+`datetime({epochMillis})`, pattern predicates outside `WHERE`), the query uses
+an exactly equivalent form recorded in its definition. Where the reference's
+behaviour differs from the specification prose (for example IS7's
+`CASE r WHEN null`, which never matches), the reference behaviour is kept,
+because the v1 validation set was produced by it, and labelled `spec_variance`. Updates
 require the official driver's transactional update-stream semantics,
 dependency-time ordering, and write validation, which the public property-graph +
 Cypher surface does not expose, so they fail closed with a typed cause. IC14

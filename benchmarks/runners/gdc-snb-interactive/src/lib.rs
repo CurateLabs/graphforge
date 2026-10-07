@@ -581,7 +581,7 @@ pub fn map_operation(operation: Operation) -> MappingOutcome {
             QueryInterface::Cypher(text) => PublicApiMapping {
                 interface: "cypher".into(),
                 cypher_shape: text.into(),
-                notes: definition.notes.into(),
+                notes: definition.documented_notes(),
             },
             QueryInterface::BfsPathLength {
                 label,
@@ -596,7 +596,7 @@ pub fn map_operation(operation: Operation) -> MappingOutcome {
                      target={label}{{{id_property}: ${target_parameter}}}, by=bfs, \
                      via={relationship_type}, directed=false)"
                 ),
-                notes: definition.notes.into(),
+                notes: definition.documented_notes(),
             },
         });
     }

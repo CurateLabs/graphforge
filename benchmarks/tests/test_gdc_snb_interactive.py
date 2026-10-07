@@ -329,6 +329,13 @@ class GdcSnbInteractiveSuiteTests(unittest.TestCase):
             for parameter in query["parameters"]:
                 self.assertIn(f"${parameter['name']}", query["cypher"])
         self.assertEqual([p["name"] for p in queries[0]["parameters"]], ["personId", "firstName"])
+        # Reference behaviour that differs from the spec prose is labelled.
+        variances = {q["operation"]: q["spec_variance"] for q in queries if q["spec_variance"]}
+        self.assertEqual(set(variances), {"IC1", "IC2", "IC3", "IC4", "IC12", "IS2", "IS7"})
+        for variance in variances.values():
+            self.assertTrue(
+                variance.startswith("reference behaviour, differs from spec prose: "), variance
+            )
 
     def test_python_wrapper_cannot_supply_rows_fixture_reference_or_identity(self) -> None:
         for replacement in (

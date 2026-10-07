@@ -81,6 +81,10 @@ pub struct QueryDefinition {
     pub limit: Option<usize>,
     /// Differences from the reference query text, and why they are exact.
     pub notes: &'static str,
+    /// Where the reference's behaviour, reproduced here because the LDBC v1
+    /// validation set was produced by it, differs from the specification
+    /// prose (#952 decision 2026-10-07).
+    pub spec_variance: Option<&'static str>,
 }
 
 impl QueryDefinition {
@@ -89,6 +93,14 @@ impl QueryDefinition {
         match self.interface {
             QueryInterface::Cypher(text) => Some(text),
             QueryInterface::BfsPathLength { .. } => None,
+        }
+    }
+
+    /// The rewrite notes followed by the spec variance, if any.
+    pub fn documented_notes(&self) -> String {
+        match self.spec_variance {
+            Some(variance) => format!("{}; spec_variance: {variance}", self.notes),
+            None => self.notes.to_string(),
         }
     }
 
@@ -117,22 +129,26 @@ const fn text(name: &'static str) -> QueryParameter {
 
 // Shared rewrite rationale, referenced from per-query notes.
 //
-// * GraphForge does not parse `shortestPath`; IC1 takes the minimum length over
-//   the bounded variable-length match instead. A shortest path is a simple path
-//   and therefore one of the matched trails, so the minimum is the same value.
-// * GraphForge's `IN` does not match node values inside a list, so node-list
-//   membership is expressed on the entity's unique `id`.
-// * `CASE x WHEN null` compares with `=` in openCypher and never matches null;
-//   the reference's intent (no university, no KNOWS edge) is written `IS NULL`.
-// * `datetime({epochMillis: ...})` returns the epoch in GraphForge, so IC10
-//   derives the UTC calendar month and day from the epoch milliseconds with
-//   exact integer arithmetic (Hinnant's civil-from-days algorithm).
+// * GraphForge does not parse `shortestPath` (#1888); IC1 takes the minimum
+//   length over the bounded variable-length match instead. A shortest path is a
+//   simple path and therefore one of the matched trails, so the minimum is the
+//   same value.
+// * GraphForge's `IN` never matches a node value inside a list (#1887 D1), so
+//   node-list membership is expressed on the entity's unique `id`.
+// * The reference's `CASE x WHEN null` is kept verbatim. Neo4j, openCypher and
+//   GraphForge all compare a simple CASE with `=`, so it never matches null;
+//   IC1 and IS7 record the resulting difference from the prose as a
+//   `spec_variance`.
+// * `datetime({epochMillis: ...})` returns the epoch in GraphForge (#1887 D14),
+//   so IC10 derives the UTC calendar month and day from the epoch milliseconds
+//   with exact integer arithmetic (Hinnant's civil-from-days algorithm).
 // * `:Message` becomes `(m:Post OR m:Comment)`; see the module data model.
-// * Pattern predicates are valid only in `WHERE`; a pattern used as a value is
-//   written as a pattern comprehension or a counted `OPTIONAL MATCH`.
-// * GraphForge does not apply a `WHERE` that holds an `EXISTS` predicate, and
-//   fails to plan one that tests a list membership, when it follows an
-//   `OPTIONAL MATCH`; those filters move into the pattern or a conditional sum.
+// * Pattern predicates are valid only in `WHERE` (#1888); a pattern used as a
+//   value is written as a pattern comprehension or a counted `OPTIONAL MATCH`.
+// * After an `OPTIONAL MATCH`, GraphForge ignored a `WHERE EXISTS { ... }` that
+//   refers to a variable bound before it (#1887 D15, exact shape in IC10's
+//   notes) and fails to plan a `WHERE` list membership on a `WITH` variable
+//   (#1888 D7); those filters move into the pattern or a conditional sum.
 
 const IC1: &str = "\
 MATCH path = (p:Person {id: $personId})-[:KNOWS*1..3]-(friend:Person {firstName: $firstName})
@@ -143,12 +159,12 @@ LIMIT 20
 MATCH (friend)-[:IS_LOCATED_IN]->(friendCity:City)
 OPTIONAL MATCH (friend)-[studyAt:STUDY_AT]->(uni:University)-[:IS_LOCATED_IN]->(uniCity:City)
 WITH friend, collect(
-    CASE WHEN uni IS NULL THEN null
+    CASE uni.name WHEN null THEN null
     ELSE {name: uni.name, classYear: studyAt.classYear, city: uniCity.name} END) AS unis,
     friendCity, distance
 OPTIONAL MATCH (friend)-[workAt:WORK_AT]->(company:Company)-[:IS_LOCATED_IN]->(companyCountry:Country)
 WITH friend, collect(
-    CASE WHEN company IS NULL THEN null
+    CASE company.name WHEN null THEN null
     ELSE {name: company.name, workFrom: workAt.workFrom, country: companyCountry.name} END) AS companies,
     unis, friendCity, distance
 RETURN
@@ -451,7 +467,10 @@ RETURN c.id AS commentId,
     p.id AS replyAuthorId,
     p.firstName AS replyAuthorFirstName,
     p.lastName AS replyAuthorLastName,
-    CASE WHEN r IS NULL THEN false ELSE true END AS replyAuthorKnowsOriginalMessageAuthor
+    CASE r
+        WHEN null THEN false
+        ELSE true
+    END AS replyAuthorKnowsOriginalMessageAuthor
 ORDER BY commentCreationDate DESC, replyAuthorId";
 
 static DEFINITIONS: [QueryDefinition; 20] = [
@@ -476,10 +495,16 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         ],
         unordered_list_columns: &["friendUniversities", "friendCompanies"],
         limit: Some(20),
-        notes: "shortestPath((p)-[:KNOWS*1..3]-(friend)) becomes min(length(path)) over the \
-                bounded match; university and company tuples are maps \
-                {name, classYear|workFrom, city|country} because GraphForge encodes \
-                heterogeneous lists as tagged unions; CASE x WHEN null becomes CASE WHEN x IS NULL",
+        notes: "shortestPath((p)-[:KNOWS*1..3]-(friend)) is unsupported (#1888) and becomes \
+                min(length(path)) over the bounded match, the same value because a shortest \
+                path is a simple path; the [name, year, place] tuples are maps {name, \
+                classYear|workFrom, city|country} because GraphForge encodes a heterogeneous \
+                list as a tagged union (#1888)",
+        spec_variance: Some(
+            "reference behaviour, differs from spec prose: CASE uni.name WHEN null (and \
+                company.name) never matches, as in Neo4j, so a friend with no university or \
+                company gets one all-null entry instead of an empty set",
+        ),
     },
     QueryDefinition {
         operation: Operation::Ic2,
@@ -495,8 +520,12 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         ],
         unordered_list_columns: &[],
         limit: Some(20),
-        notes: ":Message becomes (message:Post OR message:Comment); the reference keeps \
-                creationDate <= $maxDate although the specification prose says before $maxDate",
+        notes: ":Message becomes (message:Post OR message:Comment) because import sessions \
+                store one label per node",
+        spec_variance: Some(
+            "reference behaviour, differs from spec prose: keeps a message whose \
+                creationDate equals $maxDate (<=) where the prose says before $maxDate",
+        ),
     },
     QueryDefinition {
         operation: Operation::Ic3,
@@ -518,9 +547,13 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         ],
         unordered_list_columns: &[],
         limit: Some(20),
-        notes: "node-list membership (country IN [countryX, countryY], city IN cities) and \
-                node equality are expressed on the unique Place id; the reference's endDate \
-                parameter replaces the specification's durationDays",
+        notes: "node-list membership (country IN [countryX, countryY], city IN cities) is \
+                always false in GraphForge (#1887 D1), so membership and node equality use the \
+                unique Place id",
+        spec_variance: Some(
+            "reference behaviour, differs from spec prose: takes endDate where the \
+                specification takes durationDays",
+        ),
     },
     QueryDefinition {
         operation: Operation::Ic4,
@@ -529,7 +562,11 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         columns: &["tagName", "postCount"],
         unordered_list_columns: &[],
         limit: Some(10),
-        notes: "reference text unchanged; endDate replaces the specification's durationDays",
+        notes: "reference text unchanged",
+        spec_variance: Some(
+            "reference behaviour, differs from spec prose: takes endDate where the \
+                specification takes durationDays",
+        ),
     },
     QueryDefinition {
         operation: Operation::Ic5,
@@ -538,9 +575,11 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         columns: &["forumName", "postCount"],
         unordered_list_columns: &[],
         limit: Some(20),
-        notes: "friend IN friends is expressed on the unique Person id, and the filtered \
-                OPTIONAL MATCH count becomes a conditional sum over the forum's posts (GraphForge \
-                rejects that OPTIONAL MATCH ... WHERE with an unbound-variable plan error)",
+        notes: "friend IN friends is always false on nodes (#1887 D1), so it uses the unique \
+                Person id; OPTIONAL MATCH ... WHERE author.id IN friendIds fails to plan with \
+                an unbound variable (#1888 D7), so the count is a conditional sum over the \
+                forum's posts",
+        spec_variance: None,
     },
     QueryDefinition {
         operation: Operation::Ic6,
@@ -550,6 +589,7 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         unordered_list_columns: &[],
         limit: Some(10),
         notes: "reference text unchanged",
+        spec_variance: None,
     },
     QueryDefinition {
         operation: Operation::Ic7,
@@ -568,10 +608,12 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         unordered_list_columns: &[],
         limit: Some(20),
         notes: "head(collect({msg, likeTime})) after ORDER BY likeTime DESC, message.id ASC is \
-                computed as max(likeTime) then min(message.id) among likes at that time, which \
-                selects the same like without relying on aggregation input order; \
-                not((liker)-[:KNOWS]-(person)) becomes an empty pattern comprehension; \
-                :Message becomes (message:Post OR message:Comment)",
+                computed as max(likeTime), then min(message.id) among likes at that time, \
+                which selects the same like without relying on aggregation input order; \
+                not((liker)-[:KNOWS]-(person)) as a value is rejected (#1888) and becomes an \
+                empty pattern comprehension; :Message becomes (message:Post OR \
+                message:Comment)",
+        spec_variance: None,
     },
     QueryDefinition {
         operation: Operation::Ic8,
@@ -588,6 +630,7 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         unordered_list_columns: &[],
         limit: Some(20),
         notes: "(:Message) becomes a named node with (message:Post OR message:Comment)",
+        spec_variance: None,
     },
     QueryDefinition {
         operation: Operation::Ic9,
@@ -605,6 +648,7 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         limit: Some(20),
         notes: "ORDER BY message.id becomes its projected alias commentOrPostId; :Message \
                 becomes (message:Post OR message:Comment)",
+        spec_variance: None,
     },
     QueryDefinition {
         operation: Operation::Ic10,
@@ -620,11 +664,16 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         ],
         unordered_list_columns: &[],
         limit: Some(10),
-        notes: "datetime({epochMillis: birthday}).month/.day is computed with exact integer \
-                civil-from-days arithmetic in UTC; the post list comprehension with a pattern \
-                predicate becomes an OPTIONAL MATCH post count and a distinct count of posts \
-                matching the interest pattern (GraphForge ignores an EXISTS predicate in an \
-                OPTIONAL MATCH ... WHERE)",
+        notes: "datetime({epochMillis: birthday}) returns the epoch (#1887 D14), so the UTC \
+                month and day come from exact integer civil-from-days arithmetic; the post \
+                list comprehension with a pattern predicate is rejected (#1888); the first \
+                replacement, MATCH (person:Person {id: 2048}), (friend:Person {id: 2023}) \
+                OPTIONAL MATCH (friend)<-[:HAS_CREATOR]-(post:Post) WHERE EXISTS { \
+                (post)-[:HAS_TAG]->(:Tag)<-[:HAS_INTEREST]-(person) } RETURN count(post), \
+                returned 9 on the query fixture where MATCH in place of OPTIONAL MATCH \
+                returned the correct 1 (#1887 D15: the WHERE was ignored), so the interest \
+                pattern is matched directly and counted with count(DISTINCT post.id)",
+        spec_variance: None,
     },
     QueryDefinition {
         operation: Operation::Ic11,
@@ -640,6 +689,7 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         unordered_list_columns: &[],
         limit: Some(10),
         notes: "reference text unchanged",
+        spec_variance: None,
     },
     QueryDefinition {
         operation: Operation::Ic12,
@@ -654,9 +704,13 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         ],
         unordered_list_columns: &["tagNames"],
         limit: Some(20),
-        notes: "[:HAS_TYPE|IS_SUBCLASS_OF*0..] becomes [:HAS_TYPE] then [:IS_SUBCLASS_OF*0..], \
-                the only paths the SNB schema admits from a Tag to a TagClass; the reference's \
-                tag.name = $tagClassName disjunct is kept",
+        notes: "[:HAS_TYPE|IS_SUBCLASS_OF*0..] fails at execution (#1888, two-type \
+                variable-length pattern) and becomes [:HAS_TYPE] then [:IS_SUBCLASS_OF*0..], \
+                the only paths the SNB schema admits from a Tag to a TagClass",
+        spec_variance: Some(
+            "reference behaviour, differs from spec prose: also selects a Tag whose own \
+                name equals $tagClassName (the tag.name = $tagClassName disjunct)",
+        ),
     },
     QueryDefinition {
         operation: Operation::Ic13,
@@ -671,8 +725,10 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         columns: &["shortestPathLength"],
         unordered_list_columns: &[],
         limit: None,
-        notes: "paths(by=bfs, via=KNOWS, directed=false) instead of Cypher shortestPath; \
-                -1 when the verb returns no row, 0 for equal endpoints as the specification states",
+        notes: "paths(by=bfs, via=KNOWS, directed=false) instead of Cypher shortestPath \
+                (#1888); -1 when the verb returns no row, 0 for equal endpoints as the \
+                specification states",
+        spec_variance: None,
     },
     QueryDefinition {
         operation: Operation::Is1,
@@ -691,6 +747,7 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         unordered_list_columns: &[],
         limit: None,
         notes: "reference text unchanged",
+        spec_variance: None,
     },
     QueryDefinition {
         operation: Operation::Is2,
@@ -707,8 +764,11 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         ],
         unordered_list_columns: &[],
         limit: Some(10),
-        notes: "reference text unchanged; it breaks creation-date ties by messageId ascending \
-                although the specification lists descending",
+        notes: "reference text unchanged",
+        spec_variance: Some(
+            "reference behaviour, differs from spec prose: breaks creation-date ties by \
+                messageId ascending where the specification says descending",
+        ),
     },
     QueryDefinition {
         operation: Operation::Is3,
@@ -723,6 +783,7 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         unordered_list_columns: &[],
         limit: None,
         notes: "reference text unchanged",
+        spec_variance: None,
     },
     QueryDefinition {
         operation: Operation::Is4,
@@ -732,6 +793,7 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         unordered_list_columns: &[],
         limit: None,
         notes: "(m:Message {id}) becomes (m) WHERE (m:Post OR m:Comment) AND m.id",
+        spec_variance: None,
     },
     QueryDefinition {
         operation: Operation::Is5,
@@ -741,6 +803,7 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         unordered_list_columns: &[],
         limit: None,
         notes: "(m:Message {id}) becomes (m) WHERE (m:Post OR m:Comment) AND m.id",
+        spec_variance: None,
     },
     QueryDefinition {
         operation: Operation::Is6,
@@ -756,6 +819,7 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         unordered_list_columns: &[],
         limit: None,
         notes: "(m:Message {id}) becomes (m) WHERE (m:Post OR m:Comment) AND m.id",
+        spec_variance: None,
     },
     QueryDefinition {
         operation: Operation::Is7,
@@ -772,8 +836,12 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         ],
         unordered_list_columns: &[],
         limit: None,
-        notes: "CASE r WHEN null THEN false ELSE true END becomes CASE WHEN r IS NULL, the \
-                specification's knows flag; :Message {id} becomes (m:Post OR m:Comment) AND m.id",
+        notes: "(m:Message {id}) becomes (m) WHERE (m:Post OR m:Comment) AND m.id",
+        spec_variance: Some(
+            "reference behaviour, differs from spec prose: CASE r WHEN null THEN false ELSE \
+                true END never matches null, as in Neo4j, so \
+                replyAuthorKnowsOriginalMessageAuthor is always true",
+        ),
     },
 ];
 

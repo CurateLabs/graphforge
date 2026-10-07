@@ -45,6 +45,13 @@ fn definitions_cover_exactly_the_mapped_reads() {
     for definition in query_definitions() {
         assert!(!definition.columns.is_empty(), "{}", definition.operation);
         assert!(!definition.notes.is_empty(), "{}", definition.operation);
+        if let Some(variance) = definition.spec_variance {
+            assert!(
+                variance.starts_with("reference behaviour, differs from spec prose: "),
+                "{}",
+                definition.operation
+            );
+        }
         for column in definition.unordered_list_columns {
             assert!(
                 definition.columns.contains(column),
@@ -176,17 +183,17 @@ fn semantic_mutations_are_rejected() {
         // Traversal depth and limits.
         (Operation::Ic1, "[:KNOWS*1..3]", "[:KNOWS*1..2]"),
         (Operation::Ic8, "LIMIT 20", "LIMIT 21"),
-        // The reference text's simple-CASE null tests, which GraphForge (like
-        // openCypher) evaluates with `=` and so never match.
+        // The reference's simple-CASE null tests never match (as in Neo4j);
+        // the spec-prose reading `IS NULL` must disagree with the reference.
         (
             Operation::Is7,
-            "CASE WHEN r IS NULL THEN false ELSE true END",
-            "CASE r WHEN null THEN false ELSE true END",
+            "CASE r\n        WHEN null THEN false",
+            "CASE WHEN r IS NULL THEN false",
         ),
         (
             Operation::Ic1,
-            "CASE WHEN uni IS NULL THEN null",
             "CASE uni.name WHEN null THEN null",
+            "CASE WHEN uni IS NULL THEN null",
         ),
         // The reference IC12 tag-name disjunct.
         (

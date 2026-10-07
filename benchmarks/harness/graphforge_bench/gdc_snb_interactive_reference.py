@@ -527,6 +527,14 @@ def ic1(graph: Graph, params: dict[str, Any]) -> list[Row]:
             }
             for company, work in graph.outgoing(friend, "WORK_AT")
         ]
+        # Reference behaviour, differs from spec prose: the reference's
+        # `CASE uni.name WHEN null THEN null ELSE [...] END` compares with `=`
+        # and never matches (Neo4j semantics), so the OPTIONAL MATCH's single
+        # all-null row is collected as an all-null tuple, not dropped.
+        if not universities:
+            universities = [{"name": None, "classYear": None, "city": None}]
+        if not companies:
+            companies = [{"name": None, "workFrom": None, "country": None}]
         rows.append(
             [
                 graph.prop(friend, "id"),
@@ -915,8 +923,6 @@ def is6(graph: Graph, params: dict[str, Any]) -> list[Row]:
 
 def is7(graph: Graph, params: dict[str, Any]) -> list[Row]:
     message = _message_id(graph, params)
-    author = graph.creator(message)
-    author_friends = {other for other, _props in graph.knows(author)}
     rows = []
     for comment, _props in graph.incoming(message, "REPLY_OF"):
         replier = graph.creator(comment)
@@ -926,7 +932,10 @@ def is7(graph: Graph, params: dict[str, Any]) -> list[Row]:
                 graph.prop(comment, "content"),
                 graph.prop(comment, "creationDate"),
                 *_person_summary(graph, replier),
-                replier in author_friends,
+                # Reference behaviour, differs from spec prose: the reference's
+                # `CASE r WHEN null THEN false ELSE true END` never matches null
+                # (Neo4j semantics), so the knows flag is always true.
+                True,
             ]
         )
     rows.sort(key=lambda row: (-row[2], row[3]))

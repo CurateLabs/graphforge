@@ -168,6 +168,7 @@ fn queries_document() -> serde_json::Value {
                 "unordered_list_columns": definition.unordered_list_columns,
                 "limit": definition.limit,
                 "notes": definition.notes,
+                "spec_variance": definition.spec_variance,
             })
         })
         .collect();
