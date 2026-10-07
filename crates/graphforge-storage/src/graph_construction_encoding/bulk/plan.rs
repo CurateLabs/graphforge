@@ -60,15 +60,17 @@ pub struct BulkBuildPlan<'a> {
 /// Peak-RSS model of the builder, fitted to measured runs (#1883):
 /// `peak = BASE + BYTES_PER_EDGE * edges + BYTES_PER_NODE * nodes` by least
 /// squares over Graph500 S18, S20, S22 and S24 plus two S22 node sets with 8 and
-/// 24 row groups of edges, all property-free: 684 MB + 54.4 B/edge + 82.0 B/node,
-/// worst measured/fitted ratio 1.10. The constants below round the fit up.
+/// 24 row groups of edges, all property-free: 671 MB + 24.2 B/edge + 72.8 B/node,
+/// worst measured/fitted ratio 1.14 (at S20, where the base dominates). The
+/// constants below round the fit up so no measured run exceeds the model before
+/// the margin. A Graph500 rung (16 edges per node) costs about 29 B/edge.
 const BASE_BYTES: u64 = 768 << 20;
-const BYTES_PER_EDGE: u64 = 56;
-const BYTES_PER_NODE: u64 = 84;
+const BYTES_PER_EDGE: u64 = 26;
+const BYTES_PER_NODE: u64 = 76;
 /// A property-bearing kind retains its decoded batches, then a concatenated and
 /// a sorted copy per schema group. Measured at S20 with a `name` node property
-/// and a `weight` edge property: peak RSS exceeded the property-free model by
-/// 5.3 times the footers' uncompressed bytes.
+/// and a `weight` edge property: peak RSS exceeded the fitted property-free
+/// model by 5.5 times the footers' uncompressed bytes.
 const RETAINED_FACTOR: u64 = 6;
 /// Safety margin on the sum, as a fraction: 5/4.
 const MARGIN_NUMERATOR: u64 = 5;

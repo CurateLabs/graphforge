@@ -208,7 +208,7 @@ mod tests {
             (22, true, true),
             (24, true, true),
             (25, true, true),
-            (26, false, false),
+            (26, true, true),
         ] {
             let estimate = rung(scale).estimated_resident_bytes();
             assert_eq!(

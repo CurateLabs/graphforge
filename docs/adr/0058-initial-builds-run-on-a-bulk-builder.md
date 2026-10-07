@@ -111,14 +111,18 @@ serial shaping spine. The CPU the staged path spends on routing, sorting and
 spill file lifecycle is removed from initial builds.
 
 **Costs.**
-- Memory: measured peak RSS fits `684 MB + 54.4 B/edge + 82.0 B/node` for
-  property-free input (Graph500 S18-S24 and two S22 node sets with fewer edges;
-  worst measured/fitted ratio 1.10). The planner uses `768 MiB + 56 B/edge +
-  84 B/node` plus a 25% margin, so S22 plans for 6.1 GB (measured 4.7 GB), S24
-  for 21.6 GB (17.1 GB), S25 for 42.1 GB and S26 for 83.2 GB. A property-bearing
-  kind retains its decoded batches and two copies of them: six times their
-  uncompressed footer bytes, measured at 5.3. The ladder's 4 GiB RSS envelope
-  does not hold from S22 until the scratch path exists.
+- Memory: every task decodes straight into its slice of the final columns, so
+  the resident columns are the 28 bytes per edge the ranked graph needs (UUID,
+  two endpoint ranks, relation id), and only one CSR direction's 8-byte entries
+  are resident at a time. Measured peak RSS fits `671 MB + 24.2 B/edge + 72.8
+  B/node` for property-free input (Graph500 S18-S24 and two S22 node sets with
+  fewer edges; worst measured/fitted ratio 1.14): S22 peaks at 2.3 GiB and S24
+  at 7.8 GiB. The planner uses `768 MiB + 26 B/edge + 76 B/node` plus a 25%
+  margin, so S22 plans for 3.6 GB, S24 for 11.3 GB, S25 for 21.6 GB and S26 for
+  42.3 GB. A property-bearing kind retains its decoded batches and two copies of
+  them: six times their uncompressed footer bytes, measured at 5.5. A source
+  whose UUIDs arrive unsorted also needs an order array and one gathered
+  column at a time (about 20 B/edge more) while it sorts.
 - The session checkpoint records an empty shape for a builder session. The
   inventory's `shape_*` digests therefore differ from a staged build of the
   same input; they are session authority, not published bytes.
