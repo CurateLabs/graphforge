@@ -6,7 +6,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use arrow::array::Array;
 use rayon::prelude::*;
 
 use super::{

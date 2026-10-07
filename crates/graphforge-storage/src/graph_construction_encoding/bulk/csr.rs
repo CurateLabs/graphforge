@@ -27,6 +27,7 @@ fn sorted_entries(keys: &[u32]) -> Vec<u64> {
     entries
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) fn write_adjacency(
     graph_root: &Path,
     edges: &EdgeTable,
