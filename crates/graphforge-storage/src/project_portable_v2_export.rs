@@ -2674,6 +2674,11 @@ mod tests {
         };
         let error = plan_complete_portable_v2(&generation, limited).unwrap_err();
         assert_eq!(error.code, PortableV2ErrorCode::LimitExceeded);
+        // The specific reason survives into the diagnostic text (#900).
+        assert_eq!(
+            error.to_string(),
+            "portable-v2 LimitExceeded: entry count exceeds configured limit"
+        );
     }
 
     #[test]
