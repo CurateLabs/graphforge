@@ -5,6 +5,10 @@
   "suite_id": "snb-bi",
   "disposition": "executable",
   "pinned_identity": "profiles/gdc/snb-bi-identity.json",
+  "identity_profiles": {
+    "static": "profiles/gdc/snb-bi-identity.json",
+    "scorecard": "profiles/gdc/snb-bi-scorecard-identity.json"
+  },
   "runner": "gdc-snb-bi",
   "datasets": ["snb-bi-sf0.003"]
 }

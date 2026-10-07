@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-gdc-ldbc-csv-scorecard-ladder-schema/1",
+  "title": "GDC LDBC CSV scorecard ladder",
+  "description": "The pinned rungs of one LDBC CSV suite (SNB BI, SNB Interactive v1, FinBench Transaction) with, per mapped table, the LDBC-published count and the record count of the pinned archive. A published count that differs from the archive carries its explanation.",
+  "type": "object",
+  "properties": {
+    "schema": { "const": "graphforge-gdc-ldbc-csv-scorecard-ladder/1" },
+    "suite_id": { "enum": ["snb-bi", "snb-interactive", "finbench-transaction"] },
+    "identity_profile": { "const": "scorecard" },
+    "load_mapping": {
+      "type": "string",
+      "pattern": "^profiles/gdc/[A-Za-z0-9_.-]+-load-mapping\\.json$"
+    },
+    "counts_source": { "$ref": "#/$defs/source" },
+    "snapshot_totals_source": { "$ref": "#/$defs/source" },
+    "rungs": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": { "$ref": "#/$defs/rung" }
+    }
+  },
+  "required": ["schema", "suite_id", "identity_profile", "load_mapping", "counts_source", "rungs"],
+  "additionalProperties": false,
+  "$defs": {
+    "count": { "type": "integer", "minimum": 0 },
+    "source": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "pattern": "^https://github\\.com/ldbc/[A-Za-z0-9_.-]+/blob/[a-f0-9]{40}/[A-Za-z0-9_./-]+$"
+        },
+        "description": { "type": "string", "minLength": 1, "maxLength": 200 }
+      },
+      "required": ["url", "description"],
+      "additionalProperties": false
+    },
+    "totals": {
+      "type": "object",
+      "properties": {
+        "nodes": { "$ref": "#/$defs/count" },
+        "edges": { "$ref": "#/$defs/count" }
+      },
+      "required": ["nodes", "edges"],
+      "additionalProperties": false
+    },
+    "table": {
+      "type": "object",
+      "properties": {
+        "table": { "type": "string", "pattern": "^[a-z0-9_-]+$" },
+        "kind": { "enum": ["nodes", "edges"] },
+        "ldbc_name": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "published": { "$ref": "#/$defs/count" },
+        "listed": { "$ref": "#/$defs/count" },
+        "held_back": { "$ref": "#/$defs/count" },
+        "residual": { "type": "integer" },
+        "deleted_in_raw": { "$ref": "#/$defs/count" },
+        "discrepancy": { "type": "string", "minLength": 1, "maxLength": 600 }
+      },
+      "required": ["table", "kind", "ldbc_name", "published", "listed"],
+      "additionalProperties": false,
+      "dependentRequired": {
+        "held_back": ["residual", "discrepancy"],
+        "residual": ["held_back"],
+        "deleted_in_raw": ["residual"]
+      }
+    },
+    "rung": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^sf[0-9]+$" },
+        "order": { "type": "integer", "minimum": 1 },
+        "scale_factor": { "type": "string", "pattern": "^[0-9]+$" },
+        "dataset_id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$" },
+        "archive_url": {
+          "type": "string",
+          "pattern": "^https://datasets\\.ldbcouncil\\.org/[A-Za-z0-9_./-]+$"
+        },
+        "archive_bytes": { "type": "integer", "minimum": 1 },
+        "archive_md5": { "type": "string", "pattern": "^[a-f0-9]{32}$" },
+        "member_md5_manifest": {
+          "type": "object",
+          "properties": {
+            "dataset_id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$" },
+            "path": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$" },
+            "members": { "type": "integer", "minimum": 1 }
+          },
+          "required": ["dataset_id", "path", "members"],
+          "additionalProperties": false
+        },
+        "published_totals": { "$ref": "#/$defs/totals" },
+        "published_snapshot_totals": { "$ref": "#/$defs/totals" },
+        "snapshot_totals_discrepancy": { "type": "string", "minLength": 1, "maxLength": 600 },
+        "tables": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/table" }
+        }
+      },
+      "required": [
+        "id",
+        "order",
+        "scale_factor",
+        "dataset_id",
+        "archive_url",
+        "archive_bytes",
+        "archive_md5",
+        "tables"
+      ],
+      "additionalProperties": false,
+      "dependentRequired": {
+        "snapshot_totals_discrepancy": ["published_snapshot_totals"]
+      }
+    }
+  }
+}

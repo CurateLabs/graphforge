@@ -2,10 +2,14 @@
 
 Downloads land in ``<name>.partial``, are verified against the pinned SHA-256,
 and are renamed into place atomically. A mismatch is a typed
-``checksum_mismatch`` and is never retried. Archives are extracted with the
-system ``tar --zstd``. The emitted ``graphforge-gdc-acquisition/1`` document is
-validated by ``gdc_contracts`` against the suite's selected identity profile.
-Network access goes through an injectable opener so tests serve committed bytes.
+``checksum_mismatch`` and is never retried. LDBC publishes ``.tar.zst``,
+``.tar.gz`` and ``.zip`` assets: tar archives are extracted with the system
+``tar``, zip archives with ``zipfile`` after every member path is checked to
+stay inside the destination. A pinned reference is acquired with the dataset it
+belongs to. The emitted ``graphforge-gdc-acquisition/1`` document lists every
+acquired dataset, parameter and reference asset and is validated by
+``gdc_contracts`` against the suite's selected identity profile. Network access
+goes through an injectable opener so tests serve in-memory bytes.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ import sys
 from typing import Any, BinaryIO
 from urllib.parse import urlparse
 import urllib.request
+import zipfile
 
 from graphforge_bench.gdc_contracts import (
     ACQUISITION_SCHEMA,
@@ -34,6 +39,10 @@ from graphforge_bench.gdc_contracts import (
 )
 
 ALLOWED_HOST = "datasets.ldbcouncil.org"
+# Each suffix maps to the tar decompression flag; zip has its own extractor.
+TAR_SUFFIXES = {".tar.zst": "--zstd", ".tar.gz": "--gzip"}
+ZIP_SUFFIX = ".zip"
+ARCHIVE_SUFFIXES = (*TAR_SUFFIXES, ZIP_SUFFIX)
 CHUNK_BYTES = 1024 * 1024
 USER_AGENT = "graphforge-benchmarks-dataset-cache/1"
 Opener = Callable[[str], AbstractContextManager[BinaryIO]]
@@ -110,9 +119,20 @@ def _archive_name(url: str) -> str:
             "unsupported_source", f"dataset source must be https://{ALLOWED_HOST}/..., got {url}"
         )
     name = Path(parsed.path).name
-    if not name or name.startswith(".") or "/" in name or not name.endswith(".tar.zst"):
-        raise DatasetCacheError("unsupported_source", f"dataset source is not a .tar.zst: {url}")
+    if not name or name.startswith(".") or "/" in name or not name.endswith(ARCHIVE_SUFFIXES):
+        raise DatasetCacheError(
+            "unsupported_source",
+            f"dataset source is not one of {', '.join(ARCHIVE_SUFFIXES)}: {url}",
+        )
     return name
+
+
+def archive_stem(name: str) -> str:
+    """The archive name without its archive suffix."""
+    for suffix in ARCHIVE_SUFFIXES:
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    raise DatasetCacheError("unsupported_source", f"not an archive name: {name}")
 
 
 def _fsync_directory(path: Path) -> None:
@@ -171,24 +191,55 @@ def acquire_archive(pin: Mapping[str, Any], archive_dir: Path, *, opener: Opener
     return final
 
 
+def _extract_zip(archive: Path, destination: Path) -> None:
+    """Extract a zip whose every member resolves inside ``destination``."""
+    try:
+        with zipfile.ZipFile(archive) as bundle:
+            for member in bundle.infolist():
+                parts = Path(member.filename).parts
+                is_link = (member.external_attr >> 16) & 0o170000 == 0o120000
+                if member.filename.startswith(("/", "\\")) or ".." in parts or is_link:
+                    raise DatasetCacheError(
+                        "extraction_failed",
+                        f"zip member {member.filename!r} of {archive} escapes the destination",
+                    )
+            bundle.extractall(destination)
+    except (zipfile.BadZipFile, OSError) as error:
+        raise DatasetCacheError(
+            "extraction_failed", f"unzip failed for {archive}: {error}"
+        ) from error
+
+
 def extract_archive(archive: Path, destination: Path) -> Path:
-    """Extract with system ``tar --zstd`` into a partial directory, then rename."""
+    """Extract into a partial directory, then rename into place.
+
+    ``.tar.zst`` and ``.tar.gz`` use the system ``tar``; ``.zip`` uses
+    ``zipfile`` and refuses a member that would land outside the destination.
+    """
     if destination.exists():
         return destination
     partial = destination.with_name(destination.name + ".partial")
     shutil.rmtree(partial, ignore_errors=True)
     partial.mkdir(parents=True)
     try:
-        completed = subprocess.run(
-            ["tar", "--zstd", "-xf", str(archive), "-C", str(partial)],
-            check=False,
-            capture_output=True,
-            text=True,
+        tar_flag = next(
+            (flag for suffix, flag in TAR_SUFFIXES.items() if archive.name.endswith(suffix)), None
         )
-        if completed.returncode != 0:
-            raise DatasetCacheError(
-                "extraction_failed", f"tar failed for {archive}: {completed.stderr.strip()}"
+        if tar_flag is not None:
+            completed = subprocess.run(
+                ["tar", tar_flag, "-xf", str(archive), "-C", str(partial)],
+                check=False,
+                capture_output=True,
+                text=True,
             )
+            if completed.returncode != 0:
+                raise DatasetCacheError(
+                    "extraction_failed", f"tar failed for {archive}: {completed.stderr.strip()}"
+                )
+        elif archive.name.endswith(ZIP_SUFFIX):
+            _extract_zip(archive, partial)
+        else:
+            raise DatasetCacheError("unsupported_source", f"not an archive: {archive}")
         partial.replace(destination)
     except BaseException:
         shutil.rmtree(partial, ignore_errors=True)
@@ -213,9 +264,13 @@ def acquire(
 
     The result carries the ``graphforge-gdc-acquisition/1`` document, the
     ``graphforge-gdc-suite-evidence/1`` document from ``validate_acquisition``,
-    and the extracted directory of each dataset. The pin is the one the suite
-    selects as ``profile``; validation runs against the requested datasets only,
-    so a single archive can be acquired without fetching the others.
+    the extracted directory of each dataset, and the extracted directory of
+    each pinned reference whose dataset was requested, keyed
+    ``<dataset_id>:<workload_key>``. A parameter set is a dataset pin with role
+    ``parameter`` and is requested by id like any dataset. The pin is the one
+    the suite selects as ``profile``; validation runs against the requested
+    datasets and their references only, so one archive can be acquired without
+    fetching the others.
     """
     base = root or workspace_root()
     cache = require_cache_root(
@@ -251,6 +306,25 @@ def acquire(
                 "acquisition": pinned[dataset_id]["acquisition"],
             }
         )
+    pinned_references = [item for item in pin["references"] if item["dataset_id"] in dataset_ids]
+    references = []
+    extracted_references: dict[str, Path] = {}
+    for item in pinned_references:
+        key = f"{item['dataset_id']}:{item['workload_key']}"
+        archive = acquire_archive({**item, "id": key}, archive_dir, opener=opener)
+        if extract:
+            # One reference archive may serve several datasets; extract it once.
+            extracted_references[key] = extract_archive(
+                archive, suite_cache / "references" / archive_stem(archive.name)
+            )
+        references.append(
+            {
+                "dataset_id": item["dataset_id"],
+                "workload_key": item["workload_key"],
+                "path": archive.name,
+                "checksum_sha256": item["checksum_sha256"],
+            }
+        )
     acquisition = {
         "schema": ACQUISITION_SCHEMA,
         "suite_id": pin["suite_id"],
@@ -259,9 +333,13 @@ def acquire(
         "recorded_generator": pin["generator"],
         "recorded_driver": pin["driver"],
         "assets": assets,
-        "references": [],
+        "references": references,
     }
-    subset_pin = {**pin, "datasets": [pinned[dataset_id] for dataset_id in dataset_ids]}
+    subset_pin = {
+        **pin,
+        "datasets": [pinned[dataset_id] for dataset_id in dataset_ids],
+        "references": pinned_references,
+    }
     evidence = validate_acquisition(subset_pin, acquisition, archive_dir)
     document_path = suite_cache / f"acquisition-{profile}.json"
     document_path.write_text(json.dumps(acquisition, indent=2) + "\n", encoding="utf-8")
@@ -271,6 +349,7 @@ def acquire(
         "evidence": evidence,
         "archive_dir": archive_dir,
         "extracted": extracted,
+        "extracted_references": extracted_references,
     }
 
 
@@ -300,6 +379,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "acquisition": str(result["acquisition_path"]),
                 "evidence_status": result["evidence"]["status"],
                 "extracted": {key: str(value) for key, value in result["extracted"].items()},
+                "extracted_references": {
+                    key: str(value) for key, value in result["extracted_references"].items()
+                },
             },
             indent=2,
         )

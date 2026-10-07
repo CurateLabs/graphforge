@@ -60,6 +60,7 @@ PYTHONPATH=harness GRAPHFORGE_GDC_GRAPHALYTICS_BIN=target/debug/graphforge-bench
 | Fixtures | `snb-interactive-static-synthetic-v1` is static replay; `snb-interactive-live-is1-synthetic-v1` is a synthetic engineering graph, not official SF0.003 Datagen output |
 | Validation | Live IS1 normalizes real Arrow rows and uses the same exact Rust reference validator; the independently declared reference follows SNB IS1 semantics |
 | Unsupported semantics | Typed `semantic_incompatibility`: `interactive_update_stream_not_exposed` (IU1–IU8); `weighted_interaction_path_enumeration_not_exposed` (IC14) |
+| Scorecard | `profiles/gdc/snb-interactive-scorecard-identity.json` pins the v1 `CsvComposite-LongDateFormatter` SF1/SF10 archives, their substitution parameters and the Neo4j validation parameters; `profiles/gdc/snb-interactive-load-mapping.json` and `snb-interactive-scorecard-ladder.json` carry the mapping and the LDBC-published counts. See `README.md` (LDBC CSV suite pins). |
 
 Read-only complex/short reads that are ordinary graph traversals or aggregations
 map to public Cypher; IC13 uses the public `bfs` path analyst verb. Updates
@@ -90,6 +91,7 @@ PYTHONPATH=harness GRAPHFORGE_GDC_SNB_INTERACTIVE_BIN=target/debug/graphforge-be
 | Runner | `runners/gdc-snb-bi` (`gdc-snb-bi`), serde-only control plane; no product-crate dependency |
 | GraphForge disposition | `executable` (bounded tiny fixture only) |
 | Certification | **false** — engineering evidence only; never masquerades as an audited GDC certification |
+| Scorecard | `profiles/gdc/snb-bi-scorecard-identity.json` pins the `composite-projected-fk` SF1/SF10 archives, LDBC's member md5 lists, the SF1–SF30000 parameters and the Umbra SF10 validation output; `profiles/gdc/snb-bi-load-mapping.json` and `snb-bi-scorecard-ladder.json` carry the mapping and the LDBC-published counts. See `README.md` (LDBC CSV suite pins). |
 
 ### Query mapping
 
@@ -149,6 +151,7 @@ PYTHONPATH=harness GRAPHFORGE_GDC_SNB_BI_BIN=target/debug/graphforge-benchmark-g
 | Live lane | Trusted Rust runner owns in-memory `GraphForge::new(None)` load + official TCR10 `execute_with_params` |
 | Validation | exact (ordered rows) and normalized (order-insensitive multiset) reference comparison |
 | Unsupported semantics | Typed `semantic_incompatibility`: `recursive_temporal_path_filtering_not_exposed` (TCR1–TCR2); `temporal_shortest_transfer_path_not_exposed` (TCR3); `temporal_transfer_cycle_detection_not_exposed` (TCR4); `hub_vertex_truncation_not_exposed` (TCR5); `finbench_transaction_write_semantics_not_exposed` (TW1–TW19, TRW1–TRW3) |
+| Scorecard | `profiles/gdc/finbench-transaction-scorecard-identity.json` pins the SF1/SF10 archives and their read parameters (LDBC publishes no reference output); `profiles/gdc/finbench-transaction-load-mapping.json` maps `snapshot/` and `finbench-transaction-scorecard-ladder.json` carries the LDBC-published counts. See `README.md` (LDBC CSV suite pins). |
 
 Complex and simple reads that are ordinary multi-hop traversals, temporal-window
 filters, aggregations, or top-k map to public Cypher (TCR6–TCR12, TSR1–TSR6).
