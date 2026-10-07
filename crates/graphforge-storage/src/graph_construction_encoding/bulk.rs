@@ -249,7 +249,7 @@ pub(crate) fn encode_bulk(
 
     // Pass 1: nodes.
     let meter = PassMeter::start("nodes");
-    let nodes = run_pass(&pool, cancelled, &cancel, || {
+    let mut nodes = run_pass(&pool, cancelled, &cancel, || {
         tables::collect_nodes(&plan.nodes, retain_nodes, &cancel)
     })?;
     passes.extend([meter.finish()]);
@@ -278,16 +278,20 @@ pub(crate) fn encode_bulk(
         context: semantic_context.as_ref(),
         bindings: semantic_authority.map(|authority| &authority.bindings),
     };
+    // The decoded batches are released as soon as their sorted schema groups exist.
+    let node_kept = std::mem::take(&mut nodes.kept);
+    let edge_kept = std::mem::take(&mut edges.kept);
     let (node_groups, edge_groups) = run_pass(&pool, cancelled, &cancel, || {
         Ok((
             retain_nodes
-                .then(|| emit::schema_groups(&nodes.kept, "node_uuid"))
+                .then(|| emit::schema_groups(&node_kept, "node_uuid"))
                 .transpose()?,
             retain_edges
-                .then(|| emit::schema_groups(&edges.kept, "edge_uuid"))
+                .then(|| emit::schema_groups(&edge_kept, "edge_uuid"))
                 .transpose()?,
         ))
     })?;
+    drop((node_kept, edge_kept));
     let built = emit::build_catalog(
         budgets,
         &nodes,
@@ -471,7 +475,6 @@ pub(crate) fn encode_bulk(
     evidence.adjacency.source_rows = adjacency.source_rows;
     evidence.adjacency.csr_shards = adjacency.shards;
     evidence.output_write_bytes += installer.written_bytes();
-    evidence.input_read_bytes = 0;
 
     let Membership {
         index,

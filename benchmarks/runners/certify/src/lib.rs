@@ -2745,6 +2745,16 @@ mod tests {
         );
         let leaked = br#"{"contract":"graphforge-import-session/1","outcome":"committed","construction":{"project_path":"/secret"}}"#;
         assert!(parse_receipts(leaked, true).is_err());
+        // The bulk builder's per-pass report is numeric-only, so it passes the
+        // same sanitizer; a pass named by a string would not.
+        let built = br#"{"contract":"graphforge-import-session/1","outcome":"stage+seal","construction":{"configured_batch_rows":65536,"bulk_build":{"workers":15,"nodes":262144,"edges":4194304,"passes":{"edges":{"wall_ms":1046,"cpu_ms":3760,"effective_millicores":3594,"logical_write_bytes":0,"physical_write_bytes":0,"logical_read_bytes":448,"peak_rss_bytes":393216000}}}}}"#;
+        let sanitized = parse_receipts(built, true).expect("bulk build report passes");
+        assert_eq!(
+            sanitized[0]["construction"]["bulk_build"]["passes"]["edges"]["wall_ms"],
+            1046
+        );
+        let named = br#"{"contract":"graphforge-import-session/1","outcome":"stage+seal","construction":{"bulk_build":{"passes":[{"name":"edges","wall_ms":1}]}}}"#;
+        assert!(parse_receipts(named, true).is_err());
         let query = serde_json::json!({
             "contract": "graphforge-result-sink/2",
             "destination": "/secret/query.arrow",
