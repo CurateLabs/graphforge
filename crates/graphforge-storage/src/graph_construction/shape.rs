@@ -830,7 +830,7 @@ impl GraphConstructionSession {
         self.shape_finish_interrupted = stages.is_some();
         let family_finish =
             crate::concurrency_attribution::RegionScope::named("shape_family_finish");
-        let staged_identities = finish_family_stage(
+        let staged_identities = match finish_family_stage(
             &self.root,
             &mut self.checkpoint,
             stages.as_mut(),
@@ -840,8 +840,22 @@ impl GraphConstructionSession {
             final_boundary,
             self.cpu_admission.as_ref(),
             &mut cancelled,
-        )?
-        .ok_or_else(|| storage("construction contains no identities"))?;
+        )? {
+            Some(name) => name,
+            // The bulk builder supplies every row itself (#1883): its session
+            // stages nothing, and its shape is the empty one.
+            None if self.bulk_empty_shape => {
+                let receipt = super::intake::write_fixed_run::<BASE_IDENTITY_WIDTH>(
+                    &self.root,
+                    STAGED_IDENTITIES,
+                    &[],
+                    &mut self.checkpoint.evidence,
+                )?;
+                super::record_shape_artifact_install(&mut self.checkpoint.evidence, &receipt)?;
+                STAGED_IDENTITIES.to_owned()
+            }
+            None => return Err(storage("construction contains no identities")),
+        };
         let node_details = finish_family_stage(
             &self.root,
             &mut self.checkpoint,

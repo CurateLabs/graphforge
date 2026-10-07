@@ -1055,6 +1055,9 @@ pub struct GraphConstructionSession {
     /// Instance-wide construction CPU admission (#1586, ADR 0047). `None`
     /// keeps the fixed finish-time worker count, as for direct storage users.
     cpu_admission: Option<std::sync::Arc<cpu_admission::ConstructionCpuAdmission>>,
+    /// Whether shaping may complete over zero staged chunks: set only while the
+    /// bulk builder supplies the rows (#1883).
+    bulk_empty_shape: bool,
     /// Measurements of the last bulk build this session ran (#1883).
     bulk_report: std::sync::Arc<std::sync::Mutex<crate::graph_construction_encoding::BulkBuildReport>>,
     session_lock: File,
@@ -1748,6 +1751,7 @@ impl GraphConstructionSession {
             shape_boundary_retired_through: 0,
             shape_finish_interrupted: false,
             cpu_admission: None,
+            bulk_empty_shape: false,
             bulk_report: std::sync::Arc::default(),
             session_lock,
             _reservation: reservation,

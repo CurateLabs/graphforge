@@ -357,7 +357,7 @@ fn encode_construction_index_inner(
         source_volume,
         source_file_id: source_file_id.clone(),
         source_bytes: input_len,
-        source_xxh64: identities_xxh64.unwrap_or_default().to_owned(),
+        source_xxh64: identities_xxh64.unwrap_or("0000000000000000").to_owned(),
         authority_sha256: String::new(),
     };
     intent.authority_sha256 = construction_intent_digest(

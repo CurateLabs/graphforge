@@ -344,7 +344,10 @@ impl GraphConstructionSession {
         if self.checkpoint.encoding_inventory_sha256.is_some() {
             return self.prepare_canonical_encoding_with_cancellation(generation, cancelled);
         }
-        let shape = self.shape_canonical_inner(&mut cancelled)?;
+        self.bulk_empty_shape = true;
+        let shaped = self.shape_canonical_inner(&mut cancelled);
+        self.bulk_empty_shape = false;
+        let shape = shaped?;
         self.encode_canonical_inner(&shape, generation, Some(plan), cancelled)
     }
 
