@@ -57,13 +57,21 @@ PYTHONPATH=harness GRAPHFORGE_GDC_GRAPHALYTICS_BIN=target/debug/graphforge-bench
 | Operations | Complex reads IC1–IC14, short reads IS1–IS7, updates IU1–IU8 (29 total) |
 | Runner | `graphforge-benchmark-gdc-snb-interactive` (`suites/gdc-snb-interactive.json`) |
 | Phases | Separate `load`, `warmup`, `execution`, `validation` with per-phase status/detail |
-| Fixtures | `snb-interactive-static-synthetic-v1` is static replay; `snb-interactive-live-is1-synthetic-v1` is a synthetic engineering graph, not official SF0.003 Datagen output |
-| Validation | Live IS1 normalizes real Arrow rows and uses the same exact Rust reference validator; the independently declared reference follows SNB IS1 semantics |
+| Fixtures | `snb-interactive-static-synthetic-v1` is static replay; `snb-interactive-live-is1-synthetic-v1` and `snb-interactive-query-synthetic-v1` (`fixtures/gdc/snb-interactive-queries/`) are synthetic engineering graphs, not official Datagen output |
+| Queries | `src/queries.rs` defines IC1–IC13 and IS1–IS7 as data (operation, Cypher text or IC13 `bfs` invocation, typed parameters, columns, `LIMIT`, rewrites); `list-queries` prints them as JSON |
+| Validation | Live IS1 normalizes real Arrow rows and uses the same exact Rust reference validator; `run-live-queries` runs all 20 reads on the query fixture and compares typed rows in order with results `graphforge_bench.gdc_snb_interactive_reference` derives from the fixture without GraphForge |
 | Unsupported semantics | Typed `semantic_incompatibility`: `interactive_update_stream_not_exposed` (IU1–IU8); `weighted_interaction_path_enumeration_not_exposed` (IC14) |
-| Scorecard | `profiles/gdc/snb-interactive-scorecard-identity.json` pins the v1 `CsvComposite-LongDateFormatter` SF1/SF10 archives, their substitution parameters and the Neo4j validation parameters; `profiles/gdc/snb-interactive-load-mapping.json` and `snb-interactive-scorecard-ladder.json` carry the mapping and the LDBC-published counts. See `README.md` (LDBC CSV suite pins). |
+| Scorecard | `profiles/gdc/snb-interactive-scorecard-identity.json` pins the v1 `CsvComposite-LongDateFormatter` SF1/SF10 archives, their substitution parameters and the Neo4j validation parameters; `profiles/gdc/snb-interactive-load-mapping.json` and `snb-interactive-scorecard-ladder.json` carry the mapping and the LDBC-published counts. The mapping keeps the v1 reference data model the queries assume (#952 decision 2026-10-07): the archives' epoch-millisecond dates load as `int64`, one label per node. See `README.md` (LDBC CSV suite pins). |
 
-Read-only complex/short reads that are ordinary graph traversals or aggregations
-map to public Cypher; IC13 uses the public `bfs` path analyst verb. Updates
+Read-only complex/short reads follow the Cypher reference implementation at the
+pinned driver commit (ordering, tie-breakers, `LIMIT`, parameter names); IC13
+uses the public `bfs` path analyst verb. Where GraphForge evaluates a reference
+construct differently (`shortestPath`, node-list `IN`,
+`datetime({epochMillis})`, pattern predicates outside `WHERE`), the query uses
+an exactly equivalent form recorded in its definition. Where the reference's
+behaviour differs from the specification prose (for example IS7's
+`CASE r WHEN null`, which never matches), the reference behaviour is kept,
+because the v1 validation set was produced by it, and labelled `spec_variance`. Updates
 require the official driver's transactional update-stream semantics,
 dependency-time ordering, and write validation, which the public property-graph +
 Cypher surface does not expose, so they fail closed with a typed cause. IC14

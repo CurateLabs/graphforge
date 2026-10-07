@@ -1,6 +1,7 @@
 use graphforge_benchmark_gdc_snb_interactive::{
-    JOB_SCHEMA, MappingOutcome, Operation, OperationJob, OperationStatus, assemble_evidence,
-    load_result_rows, map_operation, operation_rules, run_job, run_trusted_live_is1,
+    JOB_SCHEMA, MappingOutcome, Operation, OperationJob, OperationStatus, QueryInterface,
+    assemble_evidence, load_result_rows, map_operation, operation_rules, query_definitions,
+    run_job, run_live_queries, run_trusted_live_is1,
 };
 use std::env;
 use std::fs;
@@ -12,7 +13,7 @@ fn main() -> ExitCode {
     let Some(command) = args.next() else {
         eprintln!(
             "usage: graphforge-benchmark-gdc-snb-interactive \
-             <list-operations|map-operation|run-suite|run-live-is1> ..."
+             <list-operations|list-queries|map-operation|run-suite|run-live-is1|run-live-queries> ..."
         );
         return ExitCode::from(2);
     };
@@ -23,6 +24,30 @@ fn main() -> ExitCode {
                 println!("{} {}", operation.code(), rules[operation.code()]);
             }
             ExitCode::SUCCESS
+        }
+        "list-queries" => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&queries_document()).unwrap()
+            );
+            ExitCode::SUCCESS
+        }
+        "run-live-queries" => {
+            let Some(evidence_path) = args.next() else {
+                eprintln!("usage: run-live-queries EVIDENCE.json");
+                return ExitCode::from(2);
+            };
+            if args.next().is_some() {
+                eprintln!("run-live-queries accepts only EVIDENCE.json");
+                return ExitCode::from(2);
+            }
+            match run_queries(&evidence_path) {
+                Ok(code) => code,
+                Err(error) => {
+                    eprintln!("{error}");
+                    ExitCode::FAILURE
+                }
+            }
         }
         "map-operation" => {
             let Some(path) = args.next() else {
@@ -115,6 +140,56 @@ fn run_live_is1(evidence_path: &str) -> Result<ExitCode, String> {
     let payload = serde_json::to_string_pretty(&evidence).map_err(|error| error.to_string())?;
     fs::write(evidence_path, format!("{payload}\n")).map_err(|error| error.to_string())?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// Every runnable read as data: id, interface, query text, parameters, columns.
+fn queries_document() -> serde_json::Value {
+    let queries: Vec<serde_json::Value> = query_definitions()
+        .iter()
+        .map(|definition| {
+            let (interface, text) = match definition.interface {
+                QueryInterface::Cypher(text) => ("cypher", Some(text)),
+                QueryInterface::BfsPathLength { .. } => ("analyst_verb", None),
+            };
+            let shape = match map_operation(definition.operation) {
+                MappingOutcome::Compatible(mapping) => mapping.cypher_shape,
+                MappingOutcome::SemanticIncompatibility { .. } => unreachable!("runnable read"),
+            };
+            serde_json::json!({
+                "operation": definition.operation.code(),
+                "interface": interface,
+                "cypher": text,
+                "invocation": shape,
+                "parameters": definition.parameters.iter().map(|parameter| serde_json::json!({
+                    "name": parameter.name,
+                    "data_type": parameter.data_type.name(),
+                })).collect::<Vec<_>>(),
+                "columns": definition.columns,
+                "unordered_list_columns": definition.unordered_list_columns,
+                "limit": definition.limit,
+                "notes": definition.notes,
+                "spec_variance": definition.spec_variance,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "schema": "graphforge-gdc-snb-interactive-queries/1",
+        "queries": queries,
+    })
+}
+
+fn run_queries(evidence_path: &str) -> Result<ExitCode, String> {
+    if PathBuf::from(evidence_path).exists() {
+        return Err("refusing to overwrite existing query evidence".into());
+    }
+    let evidence = run_live_queries().map_err(|error| error.to_string())?;
+    let payload = serde_json::to_string_pretty(&evidence).map_err(|error| error.to_string())?;
+    fs::write(evidence_path, format!("{payload}\n")).map_err(|error| error.to_string())?;
+    Ok(if evidence.status == OperationStatus::Failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    })
 }
 
 fn load_job(path: &str) -> Result<OperationJob, String> {

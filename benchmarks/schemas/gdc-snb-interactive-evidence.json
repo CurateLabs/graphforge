@@ -6,7 +6,7 @@
     "schema": { "const": "graphforge-gdc-snb-interactive-evidence/1" },
     "suite_id": { "const": "snb-interactive" },
     "dataset_id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$" },
-    "lane": { "enum": ["static_replay", "live_in_memory"] },
+    "lane": { "enum": ["static_replay", "live_in_memory", "live_query_fixture"] },
     "status": {
       "enum": ["passed", "failed", "semantic_incompatibility"]
     },
@@ -95,6 +95,26 @@
       ],
       "additionalProperties": false
     },
+    "query_context": {
+      "type": "object",
+      "properties": {
+        "fixture_sha256": { "$ref": "#/$defs/sha256" },
+        "expected_sha256": { "$ref": "#/$defs/sha256" },
+        "public_api": { "const": "graphforge_api::GraphForge" },
+        "mode": { "const": "in_memory" },
+        "runnable_operations": { "type": "integer", "minimum": 1, "maximum": 29 },
+        "cases": { "type": "integer", "minimum": 1 }
+      },
+      "required": [
+        "fixture_sha256",
+        "expected_sha256",
+        "public_api",
+        "mode",
+        "runnable_operations",
+        "cases"
+      ],
+      "additionalProperties": false
+    },
     "identities": { "type": "object" },
     "operations": {
       "type": "array",
@@ -163,6 +183,14 @@
       },
       "then": { "required": ["live_context"] },
       "else": { "not": { "required": ["live_context"] } }
+    },
+    {
+      "if": {
+        "properties": { "lane": { "const": "live_query_fixture" } },
+        "required": ["lane"]
+      },
+      "then": { "required": ["query_context"] },
+      "else": { "not": { "required": ["query_context"] } }
     }
   ],
   "$defs": {
