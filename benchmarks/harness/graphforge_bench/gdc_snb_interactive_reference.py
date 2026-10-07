@@ -9,7 +9,9 @@ live GraphForge output is checked against an answer derived another way.
 
 Values follow the Cypher reference implementation's data model: dates and
 datetimes are epoch milliseconds (UTC), ``email`` and ``speaks`` are string
-lists, and every Post and Comment also carries the ``Message`` label.
+lists, and every node has one label (a Message is a Post or a Comment).
+This is #952 decision 2026-10-07: Interactive follows the v1 reference data
+model (epoch-ms Int64).
 
 Regenerate the committed files with::
 
@@ -138,11 +140,9 @@ class _Builder:
         self.nodes: list[dict[str, Any]] = []
         self.edges: list[dict[str, Any]] = []
 
-    def node(self, labels: list[str], node_id: int, properties: dict[str, Any]) -> str:
-        key = f"{labels[0]}:{node_id}"
-        self.nodes.append(
-            {"key": key, "labels": labels, "properties": {"id": node_id, **properties}}
-        )
+    def node(self, label: str, node_id: int, properties: dict[str, Any]) -> str:
+        key = f"{label}:{node_id}"
+        self.nodes.append({"key": key, "label": label, "properties": {"id": node_id, **properties}})
         return key
 
     def edge(
@@ -169,37 +169,37 @@ def build_fixture() -> dict[str, Any]:
 
     continents = {9000: "Europe", 9001: "Asia"}
     for continent_id, name in continents.items():
-        out.node(["Continent"], continent_id, {"name": name})
+        out.node("Continent", continent_id, {"name": name})
     country_keys: list[str] = []
     city_keys: list[str] = []
     for index, (country_id, name, continent_id) in enumerate(COUNTRIES):
-        country = out.node(["Country"], country_id, {"name": name})
+        country = out.node("Country", country_id, {"name": name})
         country_keys.append(country)
         out.edge(country, "IS_PART_OF", f"Continent:{continent_id}")
         for offset, suffix in enumerate(("North", "South")):
-            city = out.node(["City"], 9100 + 2 * index + offset, {"name": f"{name} {suffix}"})
+            city = out.node("City", 9100 + 2 * index + offset, {"name": f"{name} {suffix}"})
             city_keys.append(city)
             out.edge(city, "IS_PART_OF", country)
 
     universities = []
     for index in range(4):
-        university = out.node(["University"], 9200 + index, {"name": f"University {index}"})
+        university = out.node("University", 9200 + index, {"name": f"University {index}"})
         out.edge(university, "IS_LOCATED_IN", city_keys[(3 * index) % len(city_keys)])
         universities.append(university)
     companies = []
     for index in range(8):
-        company = out.node(["Company"], 9300 + index, {"name": f"Company {chr(65 + index)}"})
+        company = out.node("Company", 9300 + index, {"name": f"Company {chr(65 + index)}"})
         out.edge(company, "IS_LOCATED_IN", country_keys[index % len(country_keys)])
         companies.append(company)
 
     for class_id, name, _parent in TAG_CLASSES:
-        out.node(["TagClass"], class_id, {"name": name})
+        out.node("TagClass", class_id, {"name": name})
     for class_id, _name, parent in TAG_CLASSES:
         if parent is not None:
             out.edge(f"TagClass:{class_id}", "IS_SUBCLASS_OF", f"TagClass:{parent}")
     tags = []
     for index, word in enumerate(TAG_WORDS):
-        tag = out.node(["Tag"], 9500 + index, {"name": word})
+        tag = out.node("Tag", 9500 + index, {"name": word})
         tag_class = 9404 if word == "Artist" else TAG_CLASSES[index % len(TAG_CLASSES)][0]
         out.edge(tag, "HAS_TYPE", f"TagClass:{tag_class}")
         tags.append(tag)
@@ -216,7 +216,7 @@ def build_fixture() -> dict[str, Any]:
         created = BASE + index * DAY + rng.below(DAY)
         emails = [f"p{person_id}@mail{k}.example" for k in range(1 + rng.below(2))]
         person = out.node(
-            ["Person"],
+            "Person",
             person_id,
             {
                 "firstName": "Jose" if index % 2 == 0 else rng.choice(FIRST_NAMES),
@@ -261,7 +261,7 @@ def build_fixture() -> dict[str, Any]:
     for index in range(FORUM_COUNT):
         created = BASE + 60 * DAY + index * 7 * DAY
         forum = out.node(
-            ["Forum"], 7000 + index, {"title": f"Group {index}", "creationDate": created}
+            "Forum", 7000 + index, {"title": f"Group {index}", "creationDate": created}
         )
         forums.append(forum)
         out.edge(forum, "HAS_MODERATOR", rng.choice(persons))
@@ -301,7 +301,7 @@ def build_fixture() -> dict[str, Any]:
             properties["content"] = f"post {identifier} text"
             properties["language"] = rng.choice(LANGUAGES)
             properties["length"] = len(properties["content"])
-        post = out.node(["Post", "Message"], identifier, properties)
+        post = out.node("Post", identifier, properties)
         out.edge(post, "HAS_CREATOR", persons[creator])
         out.edge(forums[forum_index], "CONTAINER_OF", post)
         out.edge(post, "IS_LOCATED_IN", rng.choice(country_keys))
@@ -323,7 +323,7 @@ def build_fixture() -> dict[str, Any]:
         identifier = message_id(sequence)
         content = f"comment {identifier} text"
         comment = out.node(
-            ["Comment", "Message"],
+            "Comment",
             identifier,
             {
                 "creationDate": created,
@@ -348,14 +348,17 @@ def build_fixture() -> dict[str, Any]:
         like_time = created + rng.below(5000) * MINUTE + rng.below(MINUTE)
         out.edge(persons[liker], "LIKES", message_key, {"creationDate": like_time})
 
+    # Ids are unique per entity type only. An unconnected University sharing a
+    # Post id makes the (m:Post OR m:Comment) label test observable in IS4.
+    out.node("University", 155_433, {"name": "Unconnected University"})
     _add_ties(out)
     return {
         "schema": FIXTURE_SCHEMA,
         "dataset_id": DATASET_ID,
         "classification": "synthetic_engineering_fixture",
-        # Compact rows: [key, labels, properties] and
+        # Compact rows: [key, label, properties] and
         # [source, type, destination, properties].
-        "nodes": [[node["key"], node["labels"], node["properties"]] for node in out.nodes],
+        "nodes": [[node["key"], node["label"], node["properties"]] for node in out.nodes],
         "edges": [
             [edge["source"], edge["type"], edge["destination"], edge["properties"]]
             for edge in out.edges
@@ -415,9 +418,9 @@ class Graph:
     def __init__(self, document: dict[str, Any]) -> None:
         self.nodes: dict[str, dict[str, Any]] = {}
         self.labels: dict[str, set[str]] = {}
-        for key, labels, properties in document["nodes"]:
+        for key, label, properties in document["nodes"]:
             self.nodes[key] = properties
-            self.labels[key] = set(labels)
+            self.labels[key] = {label}
         self.out: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = {}
         self.into: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = {}
         for source, rel_type, destination, props in document["edges"]:
@@ -874,7 +877,9 @@ def is3(graph: Graph, params: dict[str, Any]) -> list[Row]:
 
 
 def _message_id(graph: Graph, params: dict[str, Any]) -> str:
-    message = graph.by_id("Message", params["messageId"])
+    message = graph.by_id("Post", params["messageId"]) or graph.by_id(
+        "Comment", params["messageId"]
+    )
     assert message is not None, params
     return message
 

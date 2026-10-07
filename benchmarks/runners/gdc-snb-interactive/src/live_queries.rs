@@ -330,9 +330,9 @@ struct QueryFixture {
     edges: Vec<QueryFixtureEdge>,
 }
 
-/// `[key, labels, properties]`.
+/// `[key, label, properties]`.
 #[derive(Debug, Deserialize)]
-struct QueryFixtureNode(String, Vec<String>, BTreeMap<String, Value>);
+struct QueryFixtureNode(String, String, BTreeMap<String, Value>);
 
 /// `[source key, relationship type, destination key, properties]`.
 #[derive(Debug, Deserialize)]
@@ -428,56 +428,40 @@ fn count_query(forge: &GraphForge, query: &str) -> Result<i64, SuiteError> {
 
 /// Load the fixture through public Cypher.
 ///
-/// Nodes are created with one `UNWIND $rows ... CREATE` per construction label
-/// and property-key set; a node's first label is its construction label and
-/// its key is `<label>:<id>`. Further labels (the `Message` supertype) are
-/// added with `SET`, so every node of a construction label must carry the same
-/// further labels. Edges are created per (source label, type, destination
-/// label, property-key set) by matching both endpoints on their unique `id`.
-/// Per-label node counts and per-type edge counts are checked afterwards.
+/// Nodes are created with one `UNWIND $rows ... CREATE` per label and
+/// property-key set. Every node has one label, as an import session stores,
+/// and its key is `<label>:<id>`. Edges are created per (source label, type,
+/// destination label, property-key set) by matching both endpoints on their
+/// unique `id`. Per-label node counts and per-type edge counts are checked
+/// afterwards.
 fn load_query_fixture(forge: &GraphForge, fixture: QueryFixture) -> Result<(), SuiteError> {
     type NodeGroup = (String, Vec<String>);
     type EdgeGroup = (String, String, String, Vec<String>);
     let mut node_groups: BTreeMap<NodeGroup, Vec<IrLiteral>> = BTreeMap::new();
-    let mut extra_labels: BTreeMap<String, BTreeSet<Vec<String>>> = BTreeMap::new();
     let mut label_counts: BTreeMap<String, i64> = BTreeMap::new();
     let mut endpoints: HashMap<String, (String, i64)> = HashMap::new();
-    for QueryFixtureNode(key, labels, values) in fixture.nodes {
-        let Some((primary, extra)) = labels.split_first() else {
-            return Err(SuiteError::InvalidDocument(format!(
-                "node {key} has no label"
-            )));
-        };
-        identifiers(labels.iter().chain(values.keys()))?;
+    for QueryFixtureNode(key, label, values) in fixture.nodes {
+        identifiers(std::iter::once(&label).chain(values.keys()))?;
         let id = values.get("id").and_then(Value::as_i64).ok_or_else(|| {
             SuiteError::InvalidDocument(format!("node {key} lacks an integer id"))
         })?;
-        if key != format!("{primary}:{id}") {
+        if key != format!("{label}:{id}") {
             return Err(SuiteError::InvalidDocument(format!(
-                "node key {key} is not {primary}:{id}"
+                "node key {key} is not {label}:{id}"
             )));
         }
-        if endpoints
-            .insert(key.clone(), (primary.clone(), id))
-            .is_some()
-        {
+        if endpoints.insert(key.clone(), (label.clone(), id)).is_some() {
             return Err(SuiteError::InvalidDocument(format!(
                 "duplicate node key {key}"
             )));
         }
-        extra_labels
-            .entry(primary.clone())
-            .or_default()
-            .insert(extra.to_vec());
-        for label in &labels {
-            *label_counts.entry(label.clone()).or_default() += 1;
-        }
+        *label_counts.entry(label.clone()).or_default() += 1;
         let row = values
             .iter()
             .map(|(name, value)| Ok((name.clone(), literal(value)?)))
             .collect::<Result<Vec<_>, SuiteError>>()?;
         node_groups
-            .entry((primary.clone(), values.keys().cloned().collect()))
+            .entry((label, values.keys().cloned().collect()))
             .or_default()
             .push(IrLiteral::Map(row));
     }
@@ -491,18 +475,6 @@ fn load_query_fixture(forge: &GraphForge, fixture: QueryFixture) -> Result<(), S
             assignments.join(", ")
         );
         execute_rows(forge, &query, rows)?;
-    }
-    for (primary, sets) in &extra_labels {
-        let [extra] = sets.iter().collect::<Vec<_>>()[..] else {
-            return Err(SuiteError::InvalidDocument(format!(
-                "nodes labelled {primary} disagree on further labels"
-            )));
-        };
-        for label in extra {
-            forge
-                .execute(&format!("MATCH (n:{primary}) SET n:{label}"))
-                .map_err(live)?;
-        }
     }
     let mut edge_groups: BTreeMap<EdgeGroup, Vec<IrLiteral>> = BTreeMap::new();
     let mut type_counts: BTreeMap<String, i64> = BTreeMap::new();
@@ -730,8 +702,8 @@ pub fn run_live_queries() -> Result<SuiteEvidence, SuiteError> {
             phase(
                 "load",
                 PhaseStatus::Passed,
-                "synthetic SNB fixture loaded with public Cypher UNWIND/CREATE and SET for \
-                 supertype labels; per-label node and per-type edge counts checked"
+                "synthetic SNB fixture loaded with public Cypher UNWIND/CREATE, one label per \
+                 node; per-label node and per-type edge counts checked"
                     .into(),
             ),
             phase(

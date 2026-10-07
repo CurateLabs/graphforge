@@ -15,10 +15,13 @@
 //! the definition's `notes`. Nothing is approximated: an operation without an
 //! exact formulation is refused in [`crate::map_operation`] instead.
 //!
-//! Data model (the reference implementation's): dates and datetimes are
-//! epoch milliseconds (UTC) in `Int64` properties, `Person.email` and
-//! `Person.speaks` are string lists, and every `Post` and `Comment` also
-//! carries the `Message` label. `id` is unique within each entity type.
+//! Data model (#952 decision 2026-10-07: Interactive follows the v1 reference
+//! data model): dates and datetimes are epoch milliseconds (UTC) in `Int64`
+//! properties, `Person.email` and `Person.speaks` are string lists, and `id` is
+//! unique within each entity type. Every node has exactly one label, because
+//! import sessions store one label per node, so there is no `Message`
+//! supertype label: the reference's `(m:Message)` is written
+//! `(m) WHERE (m:Post OR m:Comment)`, which selects the same nodes.
 
 use crate::Operation;
 
@@ -124,6 +127,7 @@ const fn text(name: &'static str) -> QueryParameter {
 // * `datetime({epochMillis: ...})` returns the epoch in GraphForge, so IC10
 //   derives the UTC calendar month and day from the epoch milliseconds with
 //   exact integer arithmetic (Hinnant's civil-from-days algorithm).
+// * `:Message` becomes `(m:Post OR m:Comment)`; see the module data model.
 // * Pattern predicates are valid only in `WHERE`; a pattern used as a value is
 //   written as a pattern comprehension or a counted `OPTIONAL MATCH`.
 // * GraphForge does not apply a `WHERE` that holds an `EXISTS` predicate, and
@@ -165,8 +169,8 @@ ORDER BY distanceFromPerson ASC, friendLastName ASC, toInteger(friendId) ASC
 LIMIT 20";
 
 const IC2: &str = "\
-MATCH (:Person {id: $personId})-[:KNOWS]-(friend:Person)<-[:HAS_CREATOR]-(message:Message)
-WHERE message.creationDate <= $maxDate
+MATCH (:Person {id: $personId})-[:KNOWS]-(friend:Person)<-[:HAS_CREATOR]-(message)
+WHERE (message:Post OR message:Comment) AND message.creationDate <= $maxDate
 RETURN
     friend.id AS personId,
     friend.firstName AS personFirstName,
@@ -257,13 +261,14 @@ ORDER BY postCount DESC, tagName ASC
 LIMIT 10";
 
 const IC7: &str = "\
-MATCH (person:Person {id: $personId})<-[:HAS_CREATOR]-(:Message)<-[like:LIKES]-(liker:Person)
+MATCH (person:Person {id: $personId})<-[:HAS_CREATOR]-(message)<-[like:LIKES]-(liker:Person)
+WHERE message:Post OR message:Comment
 WITH person, liker, max(like.creationDate) AS likeTime
-MATCH (person)<-[:HAS_CREATOR]-(message:Message)<-[like:LIKES]-(liker)
-WHERE like.creationDate = likeTime
+MATCH (person)<-[:HAS_CREATOR]-(message)<-[like:LIKES]-(liker)
+WHERE (message:Post OR message:Comment) AND like.creationDate = likeTime
 WITH person, liker, likeTime, min(message.id) AS latestMessageId
-MATCH (person)<-[:HAS_CREATOR]-(message:Message)
-WHERE message.id = latestMessageId
+MATCH (person)<-[:HAS_CREATOR]-(message)
+WHERE (message:Post OR message:Comment) AND message.id = latestMessageId
 RETURN
     liker.id AS personId,
     liker.firstName AS personFirstName,
@@ -277,7 +282,8 @@ ORDER BY likeCreationDate DESC, toInteger(personId) ASC
 LIMIT 20";
 
 const IC8: &str = "\
-MATCH (start:Person {id: $personId})<-[:HAS_CREATOR]-(:Message)<-[:REPLY_OF]-(comment:Comment)-[:HAS_CREATOR]->(person:Person)
+MATCH (start:Person {id: $personId})<-[:HAS_CREATOR]-(message)<-[:REPLY_OF]-(comment:Comment)-[:HAS_CREATOR]->(person:Person)
+WHERE message:Post OR message:Comment
 RETURN
     person.id AS personId,
     person.firstName AS personFirstName,
@@ -293,8 +299,8 @@ MATCH (root:Person {id: $personId})-[:KNOWS*1..2]-(friend:Person)
 WHERE NOT friend = root
 WITH collect(DISTINCT friend) AS friends
 UNWIND friends AS friend
-    MATCH (friend)<-[:HAS_CREATOR]-(message:Message)
-    WHERE message.creationDate < $maxDate
+    MATCH (friend)<-[:HAS_CREATOR]-(message)
+    WHERE (message:Post OR message:Comment) AND message.creationDate < $maxDate
 RETURN
     friend.id AS personId,
     friend.firstName AS personFirstName,
@@ -411,20 +417,23 @@ RETURN
 ORDER BY friendshipCreationDate DESC, toInteger(personId) ASC";
 
 const IS4: &str = "\
-MATCH (m:Message {id: $messageId})
+MATCH (m)
+WHERE (m:Post OR m:Comment) AND m.id = $messageId
 RETURN
     m.creationDate AS messageCreationDate,
     coalesce(m.content, m.imageFile) AS messageContent";
 
 const IS5: &str = "\
-MATCH (m:Message {id: $messageId})-[:HAS_CREATOR]->(p:Person)
+MATCH (m)-[:HAS_CREATOR]->(p:Person)
+WHERE (m:Post OR m:Comment) AND m.id = $messageId
 RETURN
     p.id AS personId,
     p.firstName AS firstName,
     p.lastName AS lastName";
 
 const IS6: &str = "\
-MATCH (m:Message {id: $messageId})-[:REPLY_OF*0..]->(p:Post)<-[:CONTAINER_OF]-(f:Forum)-[:HAS_MODERATOR]->(mod:Person)
+MATCH (m)-[:REPLY_OF*0..]->(p:Post)<-[:CONTAINER_OF]-(f:Forum)-[:HAS_MODERATOR]->(mod:Person)
+WHERE (m:Post OR m:Comment) AND m.id = $messageId
 RETURN
     f.id AS forumId,
     f.title AS forumTitle,
@@ -433,7 +442,8 @@ RETURN
     mod.lastName AS moderatorLastName";
 
 const IS7: &str = "\
-MATCH (m:Message {id: $messageId})<-[:REPLY_OF]-(c:Comment)-[:HAS_CREATOR]->(p:Person)
+MATCH (m)<-[:REPLY_OF]-(c:Comment)-[:HAS_CREATOR]->(p:Person)
+WHERE (m:Post OR m:Comment) AND m.id = $messageId
 OPTIONAL MATCH (m)-[:HAS_CREATOR]->(a:Person)-[r:KNOWS]-(p)
 RETURN c.id AS commentId,
     c.content AS commentContent,
@@ -485,8 +495,8 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         ],
         unordered_list_columns: &[],
         limit: Some(20),
-        notes: "reference text unchanged; it keeps creationDate <= $maxDate although the \
-                specification prose says before $maxDate",
+        notes: ":Message becomes (message:Post OR message:Comment); the reference keeps \
+                creationDate <= $maxDate although the specification prose says before $maxDate",
     },
     QueryDefinition {
         operation: Operation::Ic3,
@@ -560,7 +570,8 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         notes: "head(collect({msg, likeTime})) after ORDER BY likeTime DESC, message.id ASC is \
                 computed as max(likeTime) then min(message.id) among likes at that time, which \
                 selects the same like without relying on aggregation input order; \
-                not((liker)-[:KNOWS]-(person)) becomes an empty pattern comprehension",
+                not((liker)-[:KNOWS]-(person)) becomes an empty pattern comprehension; \
+                :Message becomes (message:Post OR message:Comment)",
     },
     QueryDefinition {
         operation: Operation::Ic8,
@@ -576,7 +587,7 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         ],
         unordered_list_columns: &[],
         limit: Some(20),
-        notes: "reference text unchanged",
+        notes: "(:Message) becomes a named node with (message:Post OR message:Comment)",
     },
     QueryDefinition {
         operation: Operation::Ic9,
@@ -592,7 +603,8 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         ],
         unordered_list_columns: &[],
         limit: Some(20),
-        notes: "ORDER BY message.id becomes its projected alias commentOrPostId",
+        notes: "ORDER BY message.id becomes its projected alias commentOrPostId; :Message \
+                becomes (message:Post OR message:Comment)",
     },
     QueryDefinition {
         operation: Operation::Ic10,
@@ -719,7 +731,7 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         columns: &["messageCreationDate", "messageContent"],
         unordered_list_columns: &[],
         limit: None,
-        notes: "reference text unchanged",
+        notes: "(m:Message {id}) becomes (m) WHERE (m:Post OR m:Comment) AND m.id",
     },
     QueryDefinition {
         operation: Operation::Is5,
@@ -728,7 +740,7 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         columns: &["personId", "firstName", "lastName"],
         unordered_list_columns: &[],
         limit: None,
-        notes: "reference text unchanged",
+        notes: "(m:Message {id}) becomes (m) WHERE (m:Post OR m:Comment) AND m.id",
     },
     QueryDefinition {
         operation: Operation::Is6,
@@ -743,7 +755,7 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         ],
         unordered_list_columns: &[],
         limit: None,
-        notes: "reference text unchanged",
+        notes: "(m:Message {id}) becomes (m) WHERE (m:Post OR m:Comment) AND m.id",
     },
     QueryDefinition {
         operation: Operation::Is7,
@@ -761,7 +773,7 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         unordered_list_columns: &[],
         limit: None,
         notes: "CASE r WHEN null THEN false ELSE true END becomes CASE WHEN r IS NULL, the \
-                specification's knows flag",
+                specification's knows flag; :Message {id} becomes (m:Post OR m:Comment) AND m.id",
     },
 ];
 

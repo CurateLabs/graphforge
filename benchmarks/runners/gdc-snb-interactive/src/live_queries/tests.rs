@@ -197,6 +197,12 @@ fn semantic_mutations_are_rejected() {
         // Calendar arithmetic for the birthday window.
         (Operation::Ic10, "($month % 12) + 1", "$month + 1"),
         (Operation::Ic10, "birthdayDay < 22", "birthdayDay < 21"),
+        // The Message label disjunction (a University shares a Post id).
+        (
+            Operation::Is4,
+            "WHERE (m:Post OR m:Comment) AND m.id",
+            "WHERE m.id",
+        ),
     ];
     for (operation, from, to) in mutations {
         let mutant = mutated(operation, from, to);
