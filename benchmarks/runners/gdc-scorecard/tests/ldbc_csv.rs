@@ -81,7 +81,8 @@ fn fixture_reads_gzip_parts_by_wildcard_in_sorted_order_and_skips_side_files() {
             format!("{BI}/dynamic/Person/part-00001-fixture-c000.csv.gz"),
             format!("{BI}/dynamic/Person/part-00002-fixture-c000.csv.gz"),
         ],
-        "_SUCCESS and the hidden .crc side file are not inputs"
+        "_SUCCESS, the hidden .crc file and the macOS ._ AppleDouble file (as shipped in \
+         FinBench sf10.tar.gz) are not inputs"
     );
     assert_eq!(manifest["inputs"].as_array().unwrap().len(), 10);
     for (table, rows) in [
