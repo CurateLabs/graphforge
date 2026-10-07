@@ -355,7 +355,8 @@ impl GraphConstructionSession {
             self.cpu_admission.as_ref(),
             &mut cancelled,
         )?;
-        record_encoded_active_artifacts(&self.root, &encoded, &mut self.checkpoint.evidence)?;
+        let encoded_entries =
+            record_encoded_active_artifacts(&self.root, &encoded, &mut self.checkpoint.evidence)?;
         record_encoding_io_evidence(&mut self.checkpoint.evidence, &encoded)?;
         account_encoding_cache_release(
             &encoded.invocation.evidence,
@@ -363,14 +364,23 @@ impl GraphConstructionSession {
         )?;
         let inventory_authority =
             crate::graph_construction_encoding::inventory_authority_sha256(&encoded)?;
+        // Every checkpoint that pins this inventory, starting with the one
+        // below, omits these entries and carries their digest (#900).
+        let encoded_index = super::encoded_ledger::EncodedIdentityIndex::new(
+            inventory_authority.clone(),
+            encoded_entries,
+        );
         match self.checkpoint.encoding_inventory_sha256.as_deref() {
             Some(expected) if expected != inventory_authority => {
                 return Err(storage(
                     "encoded inventory differs from checkpoint authority",
                 ));
             }
-            Some(_) => {}
+            Some(_) => {
+                self.checkpoint.encoded_index = Some(encoded_index);
+            }
             None => {
+                self.checkpoint.encoded_index = Some(encoded_index);
                 self.checkpoint.encoding_inventory_sha256 = Some(inventory_authority);
                 replace_checkpoint_control(&self.root, &mut self.checkpoint)?;
             }

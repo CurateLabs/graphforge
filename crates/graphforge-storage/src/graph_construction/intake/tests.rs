@@ -1,4 +1,6 @@
-use super::super::tests::{edge_batch, fixed, node_batch, open};
+use super::super::tests::{
+    CheckpointLimit, allocation_evidence, edge_batch, fixed, node_batch, open,
+};
 use super::super::*;
 use super::*;
 use arrow::array::{BinaryArray, Int64Array, StringArray};
@@ -220,55 +222,6 @@ fn journal_is_constant_control_state_and_seal_reopens_every_artifact() {
             sealed_peaks
         );
     }
-}
-
-/// Lowers this thread's checkpoint write bound until dropped.
-struct CheckpointLimit;
-
-impl CheckpointLimit {
-    fn set(limit: u64) -> Self {
-        super::super::controls::CHECKPOINT_LIMIT_OVERRIDE.with(|cell| cell.set(Some(limit)));
-        Self
-    }
-}
-
-impl Drop for CheckpointLimit {
-    fn drop(&mut self) {
-        super::super::controls::CHECKPOINT_LIMIT_OVERRIDE.with(|cell| cell.set(None));
-    }
-}
-
-type CategoryTotals =
-    std::collections::BTreeMap<crate::ArtifactCategory, crate::ArtifactStorageTotals>;
-type CategoryPeaks = std::collections::BTreeMap<crate::ArtifactCategory, u64>;
-
-/// Ledger, its authority hash, current and authority category totals,
-/// recorded and authority peaks, and the total peak.
-type AllocationEvidence = (
-    std::collections::BTreeMap<String, u64>,
-    String,
-    CategoryTotals,
-    CategoryTotals,
-    CategoryPeaks,
-    CategoryPeaks,
-    u64,
-);
-
-/// The allocation evidence a reopen must reproduce exactly.
-fn allocation_evidence(evidence: &GraphConstructionEvidence) -> AllocationEvidence {
-    (
-        evidence.storage_active_identity_allocated_bytes.clone(),
-        crate::storage_attribution::identity_map_authority_sha256(
-            &evidence.storage_active_identity_allocated_bytes,
-        ),
-        evidence.storage_current.clone(),
-        // Category totals equal the identity union (the category==identity
-        // invariant), or this refuses.
-        evidence.storage_category_authorities().unwrap(),
-        evidence.storage_transient_peak_allocated_bytes.clone(),
-        evidence.storage_transient_peak_authorities().unwrap(),
-        evidence.storage_transient_peak_total_allocated_bytes,
-    )
 }
 
 /// #900. The staging checkpoint is rewritten on every accepted chunk, so its

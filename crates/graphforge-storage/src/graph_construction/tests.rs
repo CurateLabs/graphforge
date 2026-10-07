@@ -1745,3 +1745,52 @@ fn lane_job_claims_in_order_or_reversed() {
         [3, 2, 1, 0, 4]
     );
 }
+
+/// Lowers this thread's checkpoint write bound until dropped.
+pub(super) struct CheckpointLimit;
+
+impl CheckpointLimit {
+    pub(super) fn set(limit: u64) -> Self {
+        super::controls::CHECKPOINT_LIMIT_OVERRIDE.with(|cell| cell.set(Some(limit)));
+        Self
+    }
+}
+
+impl Drop for CheckpointLimit {
+    fn drop(&mut self) {
+        super::controls::CHECKPOINT_LIMIT_OVERRIDE.with(|cell| cell.set(None));
+    }
+}
+
+pub(super) type CategoryTotals =
+    std::collections::BTreeMap<crate::ArtifactCategory, crate::ArtifactStorageTotals>;
+pub(super) type CategoryPeaks = std::collections::BTreeMap<crate::ArtifactCategory, u64>;
+
+/// Ledger, its authority hash, current and authority category totals,
+/// recorded and authority peaks, and the total peak.
+pub(super) type AllocationEvidence = (
+    std::collections::BTreeMap<String, u64>,
+    String,
+    CategoryTotals,
+    CategoryTotals,
+    CategoryPeaks,
+    CategoryPeaks,
+    u64,
+);
+
+/// The allocation evidence a reopen must reproduce exactly.
+pub(super) fn allocation_evidence(evidence: &GraphConstructionEvidence) -> AllocationEvidence {
+    (
+        evidence.storage_active_identity_allocated_bytes.clone(),
+        crate::storage_attribution::identity_map_authority_sha256(
+            &evidence.storage_active_identity_allocated_bytes,
+        ),
+        evidence.storage_current.clone(),
+        // Category totals equal the identity union (the category==identity
+        // invariant), or this refuses.
+        evidence.storage_category_authorities().unwrap(),
+        evidence.storage_transient_peak_allocated_bytes.clone(),
+        evidence.storage_transient_peak_authorities().unwrap(),
+        evidence.storage_transient_peak_total_allocated_bytes,
+    )
+}

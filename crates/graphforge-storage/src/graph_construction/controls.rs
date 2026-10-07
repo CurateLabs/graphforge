@@ -397,7 +397,7 @@ pub(super) fn replace_control<T: Serialize>(
 }
 
 /// Persist only resumable allocation state, in a record whose size does not
-/// depend on the number of accepted chunks.
+/// depend on the number of accepted chunks or encoded artifacts.
 ///
 /// Transition history is live operation evidence; serializing it would make
 /// the fixed-size checkpoint grow with every accepted chunk. The staged-input
@@ -407,26 +407,31 @@ pub(super) fn replace_control<T: Serialize>(
 /// identity and allocation: the checkpoint records the first sequence they
 /// are omitted from, and reopening restores them (see `staged_ledger`). The
 /// omission is lossless by construction — only entries that equal their
-/// receipt are omitted, and only for a suffix of whole chunks. The numeric
-/// peaks and every other ledger entry remain durable.
+/// receipt are omitted, and only for a suffix of whole chunks. The encoded
+/// entries, one per encoded artifact, crossed the bound at S26 the same way:
+/// they are omitted as a whole while the record pins the inventory that names
+/// them, and the record carries their authority digest instead (see
+/// `encoded_ledger`). The numeric peaks and every other ledger entry remain
+/// durable.
 ///
 /// Neither the ledger nor the history is cloned: both are moved aside for the
 /// write and restored afterwards, whether or not it succeeded.
 ///
 /// An aborted session opened without its receipt journal (an interrupted
 /// discard may have unlinked receipts) is rewritten with its persisted ledger
-/// and suffix exactly as read; every other state requires the restored index.
+/// and omission markers exactly as read; every other state requires the
+/// restored ledger.
 pub(super) fn replace_checkpoint_control(
     root: &StableDirectory,
     checkpoint: &mut Checkpoint,
 ) -> Result<(), GfError> {
     let transitions = std::mem::take(&mut checkpoint.evidence.storage_allocation_transitions);
-    let result = replace_checkpoint_with_staged_ledger(root, checkpoint);
+    let result = replace_checkpoint_with_elided_ledger(root, checkpoint);
     checkpoint.evidence.storage_allocation_transitions = transitions;
     result
 }
 
-fn replace_checkpoint_with_staged_ledger(
+fn replace_checkpoint_with_elided_ledger(
     root: &StableDirectory,
     checkpoint: &mut Checkpoint,
 ) -> Result<(), GfError> {
@@ -441,12 +446,38 @@ fn replace_checkpoint_with_staged_ledger(
     if checkpoint.staged_ledger_from_sequence.is_some() {
         return Err(storage("checkpoint staged ledger was not restored"));
     }
-    let elided = checkpoint.staged_index.elide(
-        &checkpoint.evidence.storage_active_identity_allocated_bytes,
+    if checkpoint.encoded_ledger_sha256.is_some() {
+        return Err(storage("checkpoint encoded ledger was not restored"));
+    }
+    // Encoded entries first, then the staged suffix of what remains. The
+    // restore on open inserts both into the persisted remainder and refuses a
+    // duplicate, so neither can claim an entry the other omitted.
+    let encoded = checkpoint.encoded_index.as_ref().and_then(|index| {
+        index.elide(
+            checkpoint.encoding_inventory_sha256.as_deref(),
+            &checkpoint.evidence.storage_active_identity_allocated_bytes,
+        )
+    });
+    let staged = checkpoint.staged_index.elide(
+        encoded.as_ref().map_or(
+            &checkpoint.evidence.storage_active_identity_allocated_bytes,
+            |(persisted, _)| persisted,
+        ),
         checkpoint.next_sequence,
     )?;
-    let ledger = elided.map(|(persisted, from_sequence)| {
-        checkpoint.staged_ledger_from_sequence = Some(from_sequence);
+    let persisted = match (staged, encoded) {
+        (Some((persisted, from_sequence)), encoded) => {
+            checkpoint.staged_ledger_from_sequence = Some(from_sequence);
+            checkpoint.encoded_ledger_sha256 = encoded.map(|(_, digest)| digest);
+            Some(persisted)
+        }
+        (None, Some((persisted, digest))) => {
+            checkpoint.encoded_ledger_sha256 = Some(digest);
+            Some(persisted)
+        }
+        (None, None) => None,
+    };
+    let ledger = persisted.map(|persisted| {
         std::mem::replace(
             &mut checkpoint.evidence.storage_active_identity_allocated_bytes,
             persisted,
@@ -457,6 +488,7 @@ fn replace_checkpoint_with_staged_ledger(
         checkpoint.evidence.storage_active_identity_allocated_bytes = ledger;
     }
     checkpoint.staged_ledger_from_sequence = None;
+    checkpoint.encoded_ledger_sha256 = None;
     result
 }
 
