@@ -238,18 +238,24 @@ impl Drop for CheckpointLimit {
     }
 }
 
-/// The allocation evidence a reopen must reproduce exactly.
-fn allocation_evidence(
-    evidence: &GraphConstructionEvidence,
-) -> (
+type CategoryTotals =
+    std::collections::BTreeMap<crate::ArtifactCategory, crate::ArtifactStorageTotals>;
+type CategoryPeaks = std::collections::BTreeMap<crate::ArtifactCategory, u64>;
+
+/// Ledger, its authority hash, current and authority category totals,
+/// recorded and authority peaks, and the total peak.
+type AllocationEvidence = (
     std::collections::BTreeMap<String, u64>,
     String,
-    std::collections::BTreeMap<crate::ArtifactCategory, crate::ArtifactStorageTotals>,
-    std::collections::BTreeMap<crate::ArtifactCategory, crate::ArtifactStorageTotals>,
-    std::collections::BTreeMap<crate::ArtifactCategory, u64>,
-    std::collections::BTreeMap<crate::ArtifactCategory, u64>,
+    CategoryTotals,
+    CategoryTotals,
+    CategoryPeaks,
+    CategoryPeaks,
     u64,
-) {
+);
+
+/// The allocation evidence a reopen must reproduce exactly.
+fn allocation_evidence(evidence: &GraphConstructionEvidence) -> AllocationEvidence {
     (
         evidence.storage_active_identity_allocated_bytes.clone(),
         crate::storage_attribution::identity_map_authority_sha256(

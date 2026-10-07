@@ -43,6 +43,10 @@ pub(super) struct StagedIdentityIndex {
     artifacts: Vec<u8>,
 }
 
+/// The ledger entries a checkpoint persists, and the first chunk sequence
+/// whose staged entries it omits.
+pub(super) type ElidedLedger = (BTreeMap<String, u64>, u64);
+
 /// The ledger key of one staged artifact, as `advance_checkpoint` installs it.
 pub(super) fn staged_ledger_key(artifact: &ArtifactReceipt) -> String {
     format!(
@@ -103,7 +107,7 @@ impl StagedIdentityIndex {
         &self,
         ledger: &BTreeMap<String, u64>,
         next_sequence: u64,
-    ) -> Result<Option<(BTreeMap<String, u64>, u64)>, GfError> {
+    ) -> Result<Option<ElidedLedger>, GfError> {
         if self.sequences() != next_sequence {
             return Err(storage(
                 "staged allocation index differs from the receipt journal",
