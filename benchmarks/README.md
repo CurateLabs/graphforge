@@ -130,14 +130,22 @@ PYTHONPATH=harness GRAPHFORGE_GDC_FINBENCH_TRANSACTION_BIN=target/debug/graphfor
 suite's identity profile, and renames it into place atomically. A mismatch is a
 typed `checksum_mismatch`, is never retried, and leaves no partial file; a
 cached archive that no longer matches its pin is reported the same way and left
-for inspection. Archives are extracted with system `tar --zstd`. The cache
-root must be on the same device as `/`, outside the repository, and disjoint
-from the ladder work root. The emitted `graphforge-gdc-acquisition/1` document
-is validated by `gdc_contracts.validate_acquisition` against the requested
-datasets of the selected profile.
+for inspection. LDBC publishes `.tar.zst`, `.tar.gz` and `.zip` assets: tar
+archives are extracted with system `tar`, zip archives with `zipfile` after
+every member path is checked to stay inside the destination (an escaping member
+is `extraction_failed`). The cache root must be on the same device as `/`,
+outside the repository, and disjoint from the ladder work root. A parameter set
+is a dataset pin with role `parameter`, requested by id like a dataset. A pinned
+reference is acquired, verified and extracted (once per archive, under
+`<suite>/references/`) whenever its dataset is requested. The emitted
+`graphforge-gdc-acquisition/1` document lists every acquired asset and
+reference and is validated by `gdc_contracts.validate_acquisition` against the
+requested datasets of the selected profile.
 
 ```bash
 make -C benchmarks gdc-acquire DATASET_CACHE=<cache> WORK_ROOT=<work root> DATASETS="wiki-Talk"
+make -C benchmarks gdc-acquire SUITE=snb-bi DATASET_CACHE=<cache> WORK_ROOT=<work root> \
+  DATASETS="bi-sf1-composite-projected-fk ldbc-snb-bi-parameters-sf1-to-sf30000"
 ```
 
 LDBC publishes no checksum sidecars, so the `scorecard` identity profile
@@ -157,23 +165,44 @@ relationships without direction.
 `runners/gdc-scorecard` (`graphforge-benchmark-gdc-scorecard convert`) turns
 LDBC pipe-delimited CSV and Graphalytics `.v`/`.e` files into the Parquet layout
 `gf import-session register-parquet` accepts, driven by a declarative
-`graphforge-gdc-load-mapping/1` document (see `fixtures/gdc/load-fixture/` and
-`profiles/gdc/graphalytics-*-load-mapping.json`):
+`graphforge-gdc-load-mapping/1` document (see `fixtures/gdc/load-fixture/`,
+`fixtures/gdc/ldbc-csv-fixture/` and `profiles/gdc/*-load-mapping.json`):
 
 - one node file per node table (`node_uuid`, `label`, properties) and one edge
   file per edge table (`edge_uuid`, `rel_type`, `source_uuid`, `target_uuid`,
   properties), registered nodes first;
+- a file entry may use `*` and `?` in any path component; matches are read in
+  byte order of their path, a wildcard never matches a leading `.` (Hadoop
+  `.crc` side files), a pattern matching nothing is `input_missing`, and a
+  file matched twice in one table is `invalid_mapping`. A file ending in `.gz`
+  is gzip-decompressed, so Spark's `part-*.csv.gz` files are read as written;
+- a repeated CSV header name gets a `.1`, `.2`, ... suffix on its later
+  occurrences (Interactive v1's `Person.id|Person.id` reads as `Person.id`,
+  `Person.id.1`);
 - property columns are written in lexicographic name order, which import
-  requires, and are limited to `string`, `int64`, `float64` and `boolean`
-  because storage cannot read narrower integers back; empty fields are null;
-- node UUIDs derive from SHA-256 of (label, id), shaped as UUIDv7, so the same
-  input always yields the same identities; edge UUIDs derive from (table,
-  row ordinal);
+  requires, in GraphForge's canonical persisted types: `string`, `int64`,
+  `float64`, `boolean`, `date` (`Struct{epoch_day}`), `datetime` (the struct a
+  Cypher `datetime()` is stored in: local date, time, offset, null zone) and
+  `list` (`List<Utf8>`, split on a declared one-character `separator`).
+  Narrower integers are excluded because storage cannot read them back. A date
+  or datetime declares its `format`: `iso8601` (default; a datetime needs an
+  offset), `naive-utc` (`YYYY-MM-DD HH:MM:SS[.f]`, read as UTC) or
+  `epoch-millis`; a value that does not parse exactly, a date that is not
+  midnight, and an empty list item are `invalid_value`. Empty fields are null;
+- a node table may take each row's stored label from `label_column` through a
+  closed `label_values` map (LDBC `Place.type` becomes `City`, `Country` or
+  `Continent`); a value outside the map is `invalid_value`. The table's
+  `label` stays the identity label that derives UUIDs and that edge endpoints
+  name, and is not itself stored;
+- node UUIDs derive from SHA-256 of (identity label, id), shaped as UUIDv7, so
+  the same input always yields the same identities; edge UUIDs derive from
+  (table, row ordinal);
 - a duplicate (label, id), an edge endpoint no node table defines, a malformed
   value or a missing column fails with a typed `cause` on stderr and exit code
   2, and no manifest is written;
 - `conversion-manifest.json` records every input and output with row counts and
-  SHA-256, the mapping digest, the converter version and the spill statistics.
+  SHA-256, the mapping digest, the converter version and the spill statistics;
+  a node output also records its rows per stored label (`labels`).
   Tables are written to `*.partial` and renamed only after the identity checks
   pass, and the output directory must start empty.
 
@@ -204,9 +233,41 @@ the records, records spilled, runs, peak buffered records and intermediate
 merges.
 
 ```bash
-PYTHONPATH=harness uv run --locked python -m unittest tests.test_gdc_dataset_cache tests.test_gdc_scorecard_load
+PYTHONPATH=harness uv run --locked python -m unittest tests.test_gdc_dataset_cache tests.test_gdc_scorecard_load \
+  tests.test_gdc_ldbc_csv_scorecard
 CARGO_TARGET_DIR=target cargo test --locked -p graphforge-benchmark-gdc-scorecard
 ```
+
+#### LDBC CSV suite pins
+
+The `scorecard` identity profiles of SNB BI, SNB Interactive v1 and FinBench
+Transaction pin the SF1 and SF10 archives, their parameter sets and, where LDBC
+publishes one, the reference output (BI: Umbra SF10 validation; Interactive:
+Neo4j v1 validation parameters for SF0.1-SF10; FinBench: none). Each suite's
+`profiles/gdc/<suite>-load-mapping.json` maps every entity file of the archive,
+and `profiles/gdc/<suite>-scorecard-ladder.json` (schema
+`schemas/gdc-ldbc-csv-scorecard-ladder.json`) records per mapped table the
+LDBC-published count, cited to an LDBC table at a fixed commit, and the record
+count of the pinned archive (`listed`), which the loaded graph must equal.
+Where the two differ the entry carries `held_back` (rows the archive keeps in
+its update or incremental files), `residual` and the explanation:
+
+- SNB BI: the initial-snapshot table matches the archive exactly. LDBC also
+  publishes an md5 per archive member; every extracted member of both pinned
+  archives passes `md5sum -c` against `bi-composite-projected-fk-md5sums`
+  (`member_md5_manifest`), so the SHA-256 pin and LDBC's md5 list name the
+  same bytes. The archive's own md5 is recorded as `archive_md5`.
+- SNB Interactive v1: LDBC's per-type table counts the whole generated network;
+  the archive's bulk-load files hold the initial snapshot, whose node and edge
+  totals equal LDBC's exact snapshot totals (`published_snapshot_totals`).
+- FinBench: LDBC's table counts `raw/`; the loaded graph is `snapshot/`, with
+  `incremental/` as the write workload. `snapshot/` datetimes are
+  `naive-utc` because the generator formats them in GMT
+  (`spark.sql.session.timeZone`).
+
+Reproduce `listed` by converting the extracted rung with its mapping and reading
+`rows` from `conversion-manifest.json`; reproduce `archive_md5` and the pins
+with `md5sum` and `sha256sum` on the archive.
 
 `tests.test_gdc_scorecard_load` builds `gf` and the converter when
 `GRAPHFORGE_GF_BIN` and `GRAPHFORGE_GDC_SCORECARD_BIN` are unset.

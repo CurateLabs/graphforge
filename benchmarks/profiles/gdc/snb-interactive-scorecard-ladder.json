@@ -1,0 +1,627 @@
+{
+  "schema": "graphforge-gdc-ldbc-csv-scorecard-ladder/1",
+  "suite_id": "snb-interactive",
+  "identity_profile": "scorecard",
+  "load_mapping": "profiles/gdc/snb-interactive-load-mapping.json",
+  "counts_source": {
+    "url": "https://github.com/ldbc/ldbc_snb_docs/blob/b2269610f433da72e7c97041f01680aae369a903/tables/legacy/table-number-of-entities-interactive.tex",
+    "description": "LDBC SNB Interactive v1 entity counts per scale factor (whole generated network)"
+  },
+  "snapshot_totals_source": {
+    "url": "https://github.com/ldbc/ldbc_snb_docs/blob/b2269610f433da72e7c97041f01680aae369a903/tables/legacy/table-snsize-interactive.tex",
+    "description": "Exact Interactive v1 bulk-load node and edge totals, in the commented rows of the data set size table"
+  },
+  "rungs": [
+    {
+      "id": "sf1",
+      "order": 1,
+      "scale_factor": "1",
+      "dataset_id": "social_network-sf1-CsvComposite-LongDateFormatter",
+      "archive_url": "https://datasets.ldbcouncil.org/snb-interactive-v1/social_network-sf1-CsvComposite-LongDateFormatter.tar.zst",
+      "archive_bytes": 230394018,
+      "archive_md5": "16f08d152201210cb70eec02fedb7be4",
+      "published_totals": {
+        "nodes": 3966203,
+        "edges": 23031794
+      },
+      "published_snapshot_totals": {
+        "nodes": 3181724,
+        "edges": 17256038
+      },
+      "tables": [
+        {
+          "table": "organisation",
+          "kind": "nodes",
+          "ldbc_name": "organisation",
+          "published": 7955,
+          "listed": 7955
+        },
+        {
+          "table": "organisation_islocatedin_place",
+          "kind": "edges",
+          "ldbc_name": "organisation_isLocatedIn_place",
+          "published": 7955,
+          "listed": 7955
+        },
+        {
+          "table": "place",
+          "kind": "nodes",
+          "ldbc_name": "place",
+          "published": 1460,
+          "listed": 1460
+        },
+        {
+          "table": "place_ispartof_place",
+          "kind": "edges",
+          "ldbc_name": "place_isPartOf_place",
+          "published": 1454,
+          "listed": 1454
+        },
+        {
+          "table": "tag",
+          "kind": "nodes",
+          "ldbc_name": "tag",
+          "published": 16080,
+          "listed": 16080
+        },
+        {
+          "table": "tag_hastype_tagclass",
+          "kind": "edges",
+          "ldbc_name": "tag_hasType_tagclass",
+          "published": 16080,
+          "listed": 16080
+        },
+        {
+          "table": "tagclass",
+          "kind": "nodes",
+          "ldbc_name": "tagclass",
+          "published": 71,
+          "listed": 71
+        },
+        {
+          "table": "tagclass_issubclassof_tagclass",
+          "kind": "edges",
+          "ldbc_name": "tagclass_isSubclassOf_tagclass",
+          "published": 70,
+          "listed": 70
+        },
+        {
+          "table": "comment",
+          "kind": "nodes",
+          "ldbc_name": "comment",
+          "published": 2581736,
+          "listed": 2052169,
+          "held_back": 490328,
+          "residual": 39239,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "comment_hascreator_person",
+          "kind": "edges",
+          "ldbc_name": "comment_hasCreator_person",
+          "published": 2581736,
+          "listed": 2052169,
+          "held_back": 490328,
+          "residual": 39239,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "comment_hastag_tag",
+          "kind": "edges",
+          "ldbc_name": "comment_hasTag_tag",
+          "published": 3145443,
+          "listed": 2698393,
+          "held_back": 424241,
+          "residual": 22809,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "comment_islocatedin_place",
+          "kind": "edges",
+          "ldbc_name": "comment_isLocatedIn_place",
+          "published": 2581736,
+          "listed": 2052169,
+          "held_back": 490328,
+          "residual": 39239,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "comment_replyof_comment",
+          "kind": "edges",
+          "ldbc_name": "comment_replyOf_comment",
+          "published": 1310385,
+          "listed": 1040749,
+          "held_back": 248994,
+          "residual": 20642,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "comment_replyof_post",
+          "kind": "edges",
+          "ldbc_name": "comment_replyOf_post",
+          "published": 1271351,
+          "listed": 1011420,
+          "held_back": 241334,
+          "residual": 18597,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "forum",
+          "kind": "nodes",
+          "ldbc_name": "forum",
+          "published": 110347,
+          "listed": 90492,
+          "held_back": 19757,
+          "residual": 98,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "forum_containerof_post",
+          "kind": "edges",
+          "ldbc_name": "forum_containerOf_post",
+          "published": 1237554,
+          "listed": 1003605,
+          "held_back": 229614,
+          "residual": 4335,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "forum_hasmember_person",
+          "kind": "edges",
+          "ldbc_name": "forum_hasMember_person",
+          "published": 3345548,
+          "listed": 1611869,
+          "held_back": 1566914,
+          "residual": 166765,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "forum_hasmoderator_person",
+          "kind": "edges",
+          "ldbc_name": "forum_hasModerator_person",
+          "published": 110347,
+          "listed": 90492,
+          "held_back": 19757,
+          "residual": 98,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "forum_hastag_tag",
+          "kind": "edges",
+          "ldbc_name": "forum_hasTag_tag",
+          "published": 354943,
+          "listed": 309766,
+          "held_back": 45079,
+          "residual": 98,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "person",
+          "kind": "nodes",
+          "ldbc_name": "person",
+          "published": 11000,
+          "listed": 9892,
+          "held_back": 1108,
+          "residual": 0,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot; the remaining rows are additions in the archive's own update streams (updateStream_0_0_*.csv), which a read-only load does not apply."
+        },
+        {
+          "table": "person_hasinterest_tag",
+          "kind": "edges",
+          "ldbc_name": "person_hasInterest_tag",
+          "published": 255596,
+          "listed": 229166,
+          "held_back": 26430,
+          "residual": 0,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot; the remaining rows are additions in the archive's own update streams (updateStream_0_0_*.csv), which a read-only load does not apply."
+        },
+        {
+          "table": "person_islocatedin_place",
+          "kind": "edges",
+          "ldbc_name": "person_isLocatedIn_place",
+          "published": 11000,
+          "listed": 9892,
+          "held_back": 1108,
+          "residual": 0,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot; the remaining rows are additions in the archive's own update streams (updateStream_0_0_*.csv), which a read-only load does not apply."
+        },
+        {
+          "table": "person_knows_person",
+          "kind": "edges",
+          "ldbc_name": "person_knows_person",
+          "published": 226515,
+          "listed": 180623,
+          "held_back": 40124,
+          "residual": 5768,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "person_likes_comment",
+          "kind": "edges",
+          "ldbc_name": "person_likes_comment",
+          "published": 1946260,
+          "listed": 1438418,
+          "held_back": 460486,
+          "residual": 47356,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "person_likes_post",
+          "kind": "edges",
+          "ldbc_name": "person_likes_post",
+          "published": 1303778,
+          "listed": 751677,
+          "held_back": 494409,
+          "residual": 57692,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "person_studyat_organisation",
+          "kind": "edges",
+          "ldbc_name": "person_studyAt_organisation",
+          "published": 8808,
+          "listed": 7949,
+          "held_back": 859,
+          "residual": 0,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot; the remaining rows are additions in the archive's own update streams (updateStream_0_0_*.csv), which a read-only load does not apply."
+        },
+        {
+          "table": "person_workat_organisation",
+          "kind": "edges",
+          "ldbc_name": "person_workAt_organisation",
+          "published": 24079,
+          "listed": 21654,
+          "held_back": 2425,
+          "residual": 0,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot; the remaining rows are additions in the archive's own update streams (updateStream_0_0_*.csv), which a read-only load does not apply."
+        },
+        {
+          "table": "post",
+          "kind": "nodes",
+          "ldbc_name": "post",
+          "published": 1237554,
+          "listed": 1003605,
+          "held_back": 229614,
+          "residual": 4335,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "post_hascreator_person",
+          "kind": "edges",
+          "ldbc_name": "post_hasCreator_person",
+          "published": 1237554,
+          "listed": 1003605,
+          "held_back": 229614,
+          "residual": 4335,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "post_hastag_tag",
+          "kind": "edges",
+          "ldbc_name": "post_hasTag_tag",
+          "published": 816048,
+          "listed": 713258,
+          "held_back": 99132,
+          "residual": 3658,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "post_islocatedin_place",
+          "kind": "edges",
+          "ldbc_name": "post_isLocatedIn_place",
+          "published": 1237554,
+          "listed": 1003605,
+          "held_back": 229614,
+          "residual": 4335,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        }
+      ]
+    },
+    {
+      "id": "sf10",
+      "order": 2,
+      "scale_factor": "10",
+      "dataset_id": "social_network-sf10-CsvComposite-LongDateFormatter",
+      "archive_url": "https://datasets.ldbcouncil.org/snb-interactive-v1/social_network-sf10-CsvComposite-LongDateFormatter.tar.zst",
+      "archive_bytes": 2509444825,
+      "archive_md5": "54769cc09214c14dd383016d313a72e9",
+      "published_totals": {
+        "nodes": 36485761,
+        "edges": 231371359
+      },
+      "published_snapshot_totals": {
+        "nodes": 29987835,
+        "edges": 176623445
+      },
+      "tables": [
+        {
+          "table": "organisation",
+          "kind": "nodes",
+          "ldbc_name": "organisation",
+          "published": 7955,
+          "listed": 7955
+        },
+        {
+          "table": "organisation_islocatedin_place",
+          "kind": "edges",
+          "ldbc_name": "organisation_isLocatedIn_place",
+          "published": 7955,
+          "listed": 7955
+        },
+        {
+          "table": "place",
+          "kind": "nodes",
+          "ldbc_name": "place",
+          "published": 1460,
+          "listed": 1460
+        },
+        {
+          "table": "place_ispartof_place",
+          "kind": "edges",
+          "ldbc_name": "place_isPartOf_place",
+          "published": 1454,
+          "listed": 1454
+        },
+        {
+          "table": "tag",
+          "kind": "nodes",
+          "ldbc_name": "tag",
+          "published": 16080,
+          "listed": 16080
+        },
+        {
+          "table": "tag_hastype_tagclass",
+          "kind": "edges",
+          "ldbc_name": "tag_hasType_tagclass",
+          "published": 16080,
+          "listed": 16080
+        },
+        {
+          "table": "tagclass",
+          "kind": "nodes",
+          "ldbc_name": "tagclass",
+          "published": 71,
+          "listed": 71
+        },
+        {
+          "table": "tagclass_issubclassof_tagclass",
+          "kind": "edges",
+          "ldbc_name": "tagclass_isSubclassOf_tagclass",
+          "published": 70,
+          "listed": 70
+        },
+        {
+          "table": "comment",
+          "kind": "nodes",
+          "ldbc_name": "comment",
+          "published": 26540464,
+          "listed": 21865475,
+          "held_back": 4414427,
+          "residual": 260562,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "comment_hascreator_person",
+          "kind": "edges",
+          "ldbc_name": "comment_hasCreator_person",
+          "published": 26540464,
+          "listed": 21865475,
+          "held_back": 4414427,
+          "residual": 260562,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "comment_hastag_tag",
+          "kind": "edges",
+          "ldbc_name": "comment_hasTag_tag",
+          "published": 32922873,
+          "listed": 28740194,
+          "held_back": 4030254,
+          "residual": 152425,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "comment_islocatedin_place",
+          "kind": "edges",
+          "ldbc_name": "comment_isLocatedIn_place",
+          "published": 26540464,
+          "listed": 21865475,
+          "held_back": 4414427,
+          "residual": 260562,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "comment_replyof_comment",
+          "kind": "edges",
+          "ldbc_name": "comment_replyOf_comment",
+          "published": 13465094,
+          "listed": 11089373,
+          "held_back": 2238591,
+          "residual": 137130,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "comment_replyof_post",
+          "kind": "edges",
+          "ldbc_name": "comment_replyOf_post",
+          "published": 13075370,
+          "listed": 10776102,
+          "held_back": 2175836,
+          "residual": 123432,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "forum",
+          "kind": "nodes",
+          "ldbc_name": "forum",
+          "published": 727502,
+          "listed": 595453,
+          "held_back": 131439,
+          "residual": 610,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "forum_containerof_post",
+          "kind": "edges",
+          "ldbc_name": "forum_containerOf_post",
+          "published": 9119229,
+          "listed": 7435696,
+          "held_back": 1655168,
+          "residual": 28365,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "forum_hasmember_person",
+          "kind": "edges",
+          "ldbc_name": "forum_hasMember_person",
+          "published": 35510056,
+          "listed": 17168614,
+          "held_back": 16647977,
+          "residual": 1693465,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "forum_hasmoderator_person",
+          "kind": "edges",
+          "ldbc_name": "forum_hasModerator_person",
+          "published": 727502,
+          "listed": 595453,
+          "held_back": 131439,
+          "residual": 610,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "forum_hastag_tag",
+          "kind": "edges",
+          "ldbc_name": "forum_hasTag_tag",
+          "published": 2364249,
+          "listed": 2065319,
+          "held_back": 298320,
+          "residual": 610,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "person",
+          "kind": "nodes",
+          "ldbc_name": "person",
+          "published": 73000,
+          "listed": 65645,
+          "held_back": 7355,
+          "residual": 0,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot; the remaining rows are additions in the archive's own update streams (updateStream_0_0_*.csv), which a read-only load does not apply."
+        },
+        {
+          "table": "person_hasinterest_tag",
+          "kind": "edges",
+          "ldbc_name": "person_hasInterest_tag",
+          "published": 1709747,
+          "listed": 1535511,
+          "held_back": 174236,
+          "residual": 0,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot; the remaining rows are additions in the archive's own update streams (updateStream_0_0_*.csv), which a read-only load does not apply."
+        },
+        {
+          "table": "person_islocatedin_place",
+          "kind": "edges",
+          "ldbc_name": "person_isLocatedIn_place",
+          "published": 73000,
+          "listed": 65645,
+          "held_back": 7355,
+          "residual": 0,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot; the remaining rows are additions in the archive's own update streams (updateStream_0_0_*.csv), which a read-only load does not apply."
+        },
+        {
+          "table": "person_knows_person",
+          "kind": "edges",
+          "ldbc_name": "person_knows_person",
+          "published": 2431407,
+          "listed": 1938516,
+          "held_back": 431916,
+          "residual": 60975,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "person_likes_comment",
+          "kind": "edges",
+          "ldbc_name": "person_likes_comment",
+          "published": 25596818,
+          "listed": 19949351,
+          "held_back": 5210730,
+          "residual": 436737,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "person_likes_post",
+          "kind": "edges",
+          "ldbc_name": "person_likes_post",
+          "published": 14228924,
+          "listed": 8839872,
+          "held_back": 4875872,
+          "residual": 513180,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "person_studyat_organisation",
+          "kind": "edges",
+          "ldbc_name": "person_studyAt_organisation",
+          "published": 58439,
+          "listed": 52632,
+          "held_back": 5807,
+          "residual": 0,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot; the remaining rows are additions in the archive's own update streams (updateStream_0_0_*.csv), which a read-only load does not apply."
+        },
+        {
+          "table": "person_workat_organisation",
+          "kind": "edges",
+          "ldbc_name": "person_workAt_organisation",
+          "published": 159511,
+          "listed": 143553,
+          "held_back": 15958,
+          "residual": 0,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot; the remaining rows are additions in the archive's own update streams (updateStream_0_0_*.csv), which a read-only load does not apply."
+        },
+        {
+          "table": "post",
+          "kind": "nodes",
+          "ldbc_name": "post",
+          "published": 9119229,
+          "listed": 7435696,
+          "held_back": 1655168,
+          "residual": 28365,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "post_hascreator_person",
+          "kind": "edges",
+          "ldbc_name": "post_hasCreator_person",
+          "published": 9119229,
+          "listed": 7435696,
+          "held_back": 1655168,
+          "residual": 28365,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "post_hastag_tag",
+          "kind": "edges",
+          "ldbc_name": "post_hasTag_tag",
+          "published": 8584195,
+          "listed": 7599701,
+          "held_back": 960094,
+          "residual": 24400,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        },
+        {
+          "table": "post_islocatedin_place",
+          "kind": "edges",
+          "ldbc_name": "post_isLocatedIn_place",
+          "published": 9119229,
+          "listed": 7435696,
+          "held_back": 1655168,
+          "residual": 28365,
+          "discrepancy": "The pinned archive's bulk-load files hold the initial snapshot and its update streams add held_back rows; LDBC's legacy per-type table counts residual more rows than the archive contains in either. The archive's snapshot totals equal LDBC's exact Interactive snapshot totals."
+        }
+      ],
+      "snapshot_totals_discrepancy": "LDBC's exact snapshot edge total is 12 above the archive's bulk-load edge rows; every file's rows equal its line count less the header, and the node total matches exactly. The source of the difference is not recorded by LDBC."
+    }
+  ]
+}

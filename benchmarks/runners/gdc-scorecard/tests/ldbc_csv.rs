@@ -265,6 +265,24 @@ fn datetime_at(batch: &RecordBatch, name: &str, row: usize) -> Option<(i64, i64,
     ))
 }
 
+#[test]
+fn committed_suite_mappings_are_valid() {
+    let profiles = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../profiles/gdc");
+    let mut parsed = 0;
+    for entry in fs::read_dir(&profiles).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if name.ends_with("-load-mapping.json") {
+            let mapping = gdc_scorecard::Mapping::parse(&fs::read(&path).unwrap())
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert!(!mapping.node_tables.is_empty(), "{name}");
+            parsed += 1;
+        }
+    }
+    // Four Graphalytics datasets plus SNB BI, SNB Interactive and FinBench.
+    assert_eq!(parsed, 7);
+}
+
 struct Workspace {
     _dir: tempfile::TempDir,
     input: PathBuf,
