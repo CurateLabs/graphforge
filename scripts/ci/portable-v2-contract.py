@@ -167,7 +167,14 @@ def octal(value: int, width: int) -> bytes:
     return encoded
 
 
-def ustar_entry(name: str, payload: bytes, *, typeflag: bytes = b"0", prefix: str = "") -> bytes:
+def ustar_entry(
+    name: str,
+    payload: bytes,
+    *,
+    typeflag: bytes = b"0",
+    prefix: str = "",
+    size: int | None = None,
+) -> bytes:
     name_bytes, prefix_bytes = name.encode(), prefix.encode()
     if len(name_bytes) > 100 or len(prefix_bytes) > 155:
         fail("ustar name/prefix overflow")
@@ -176,7 +183,7 @@ def ustar_entry(name: str, payload: bytes, *, typeflag: bytes = b"0", prefix: st
     header[100:108] = b"0000644\0"
     header[108:116] = b"0000000\0"
     header[116:124] = b"0000000\0"
-    header[124:136] = octal(len(payload), 12)
+    header[124:136] = octal(len(payload) if size is None else size, 12)
     header[136:148] = b"00000000000\0"
     header[148:156] = b"        "
     header[156:157] = typeflag
@@ -187,8 +194,11 @@ def ustar_entry(name: str, payload: bytes, *, typeflag: bytes = b"0", prefix: st
     return bytes(header) + payload + bytes((-len(payload)) % 512)
 
 
-def pax_record(path: str) -> bytes:
-    body = f"path={path}\n".encode()
+USTAR_MAX_ENTRY_BYTES = 0o77777777777
+
+
+def pax_record(keyword: str, value: str) -> bytes:
+    body = f"{keyword}={value}\n".encode()
     length = len(body) + 2
     while True:
         record = f"{length} ".encode() + body
@@ -208,17 +218,25 @@ def split_ustar_path(path: str) -> tuple[str, str] | None:
     return None
 
 
-def canonical_tar(path: str, payload: bytes) -> bytes:
+def canonical_headers(path: str, size: int) -> bytes:
+    """Header bytes preceding one entry's payload; the payload itself is not built."""
     split = split_ustar_path(path)
-    entries = bytearray()
-    if split is not None:
+    oversized = size > USTAR_MAX_ENTRY_BYTES
+    if split is not None and not oversized:
         name, prefix = split
-        entries += ustar_entry(name, payload, prefix=prefix)
-    else:
-        suffix = hashlib.sha256(path.encode()).hexdigest()[:16]
-        entries += ustar_entry(f"PaxHeaders/{suffix}", pax_record(path), typeflag=b"x")
-        entries += ustar_entry(f"PaxFiles/{suffix}", payload)
-    return bytes(entries) + bytes(1024)
+        return ustar_entry(name, b"", prefix=prefix, size=size)
+    suffix = hashlib.sha256(path.encode()).hexdigest()[:16]
+    records = pax_record("path", path)
+    if oversized:
+        records += pax_record("size", str(size))
+    return ustar_entry(f"PaxHeaders/{suffix}", records, typeflag=b"x") + ustar_entry(
+        f"PaxFiles/{suffix}", b"", size=0 if oversized else size
+    )
+
+
+def canonical_tar(path: str, payload: bytes) -> bytes:
+    padding = bytes((-len(payload)) % 512)
+    return canonical_headers(path, len(payload)) + payload + padding + bytes(1024)
 
 
 EXPECTED_ERRORS = {
@@ -316,7 +334,7 @@ def main() -> None:
     required_rules = {
         "utf8-path-order",
         "ustar-name-prefix",
-        "local-pax-path-only",
+        "local-pax-path-and-size",
         "pax-length",
         "checksum",
         "size",
@@ -343,6 +361,14 @@ def main() -> None:
             f"{vector['name']} digest",
         )
         require(archive[-1024:] == bytes(1024), f"{vector['name']} end markers")
+    for vector in byte_vectors["header_vectors"]:
+        require(vector["declared_size"] > USTAR_MAX_ENTRY_BYTES, f"{vector['name']} size")
+        headers = canonical_headers(vector["path"], vector["declared_size"])
+        require(len(headers) == vector["header_length"], f"{vector['name']} length")
+        require(
+            hashlib.sha256(headers).hexdigest() == vector["header_sha256"],
+            f"{vector['name']} digest",
+        )
 
     vectors = load_json(FIXTURES / "positive-vectors.json")
     require(isinstance(vectors, dict), "positive vectors must be an object")

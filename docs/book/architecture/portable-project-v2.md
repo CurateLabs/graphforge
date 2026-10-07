@@ -109,9 +109,14 @@ MUST emit the same regular files as the expanded form in ascending UTF-8 path
 order; directory headers are forbidden. Each entry uses a ustar header with
 the whole path in `name` when its UTF-8 encoding is at most 100 bytes, otherwise
 with the longest slash boundary producing `prefix` at most 155 bytes and `name`
-at most 100 bytes. A path that does not fit uses exactly one preceding
-local PAX header containing only `path=<UTF-8 path>\n`, encoded with the POSIX
-decimal record-length rule. PAX header names are `PaxHeaders/<sha256(path)[:16]>`.
+at most 100 bytes. An entry uses exactly one preceding local PAX header when
+its path does not fit that split or its length exceeds `0o77777777777`
+(8 GiB - 1), the largest value of the 11-digit octal ustar `size` field, and
+never otherwise. That header holds a `path=<UTF-8 path>\n` record and, only
+when the length exceeds the ustar field, a following POSIX.1-2001
+`size=<decimal length>\n` record with no leading zeros. No other keyword is
+allowed. Records use the POSIX decimal record-length rule with the minimal
+length encoding. PAX header names are `PaxHeaders/<sha256(path)[:16]>`.
 
 Every regular header has mode `0000644`, uid/gid `0`, uname/gname empty, mtime
 `0`, decimal/ustar size encoding, typeflag `0`, and a correct checksum computed
@@ -126,8 +131,15 @@ general tar reader accepts it.
 A local PAX header uses typeflag `x` and otherwise the same mode, uid/gid,
 owner-name, mtime, size/checksum encoding, and zero-padding rules. Its ustar
 `name` is the specified `PaxHeaders/` value and its data length is exactly the
-single PAX record length. The following regular header uses the same digest
-suffix as a bounded placeholder name; the PAX `path` is authoritative.
+length of its records. The following regular header uses the same digest
+suffix as a bounded placeholder name; the PAX `path` is authoritative. When a
+`size` record is present the regular header's ustar `size` field is zero and
+the record is the entry length. Readers refuse a nonzero ustar `size` beside a
+`size` record, a `size` record whose value the ustar field can carry, a length
+above the ustar field without a `size` record, and a PAX header for an entry
+that needs none. Entries that fit the ustar fields therefore keep the same
+bytes they always had. A reader that predates the `size` record accepts only a
+single `path` record and refuses such a bundle as `InvalidStructure`.
 
 Writers process one header and a bounded copy buffer at a time. They MUST stat,
 open without following links, identity-check, stream/hash, and re-stat each

@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 /// Bound canonical uncompressed bundle bytes from verifier admission limits.
 /// Each regular entry has one 512-byte header and at most 511 padding bytes.
 /// At most one PAX header precedes it, whose payload is bounded by
-/// `max_path_bytes + 32` in the verifier, plus its header and padding.
+/// `max_path_bytes + PAX_RECORD_OVERHEAD_BYTES` in the verifier (a `path`
+/// record and, for an entry over the ustar size field, a `size` record), plus
+/// its header and padding.
 /// The verifier requires exactly two terminal blocks and rejects trailing bytes.
 pub fn portable_bundle_byte_limit(limits: PortableV2Limits) -> Result<u64, PortableV2Error> {
     let overflow = || {
@@ -23,7 +25,7 @@ pub fn portable_bundle_byte_limit(limits: PortableV2Limits) -> Result<u64, Porta
     };
     let pax_payload = u64::try_from(limits.max_path_bytes)
         .map_err(|_| overflow())?
-        .checked_add(32)
+        .checked_add(crate::project_portable_v2::pax::PAX_RECORD_OVERHEAD_BYTES as u64)
         .ok_or_else(overflow)?;
     let regular_framing = 512_u64 + 511;
     let pax_framing = 512_u64 + 511;

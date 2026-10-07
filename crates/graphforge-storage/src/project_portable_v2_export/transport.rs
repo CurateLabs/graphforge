@@ -5,6 +5,7 @@ use super::{
     PortableV2ExportProgress, err, fs, hex, identity_with_link_policy, limit,
     observed_write_result, open_source_no_follow, storage, sync_dir,
 };
+use crate::project_portable_v2::pax;
 use graphforge_core::hash_observation::{ContractSha256, ControlSha256, PortableSha256 as Sha256};
 use sha2::Digest;
 use std::fs::OpenOptions;
@@ -520,12 +521,18 @@ fn revalidate_source(planned: &PlannedFile, input: &File) -> Result<(), ExportEr
     Ok(())
 }
 
+/// Write one entry's headers. An entry whose path fits the ustar split and
+/// whose length fits the ustar `size` field keeps a single ustar header, so
+/// such bundles stay byte-identical. Otherwise one local PAX header carries
+/// the `path` record and, for an oversized entry, the POSIX.1-2001 `size`
+/// record; the regular header's ustar `size` field is then zero.
 fn header(out: &mut File, h: &mut TransportHash, path: &str, size: u64) -> Result<(), ExportError> {
-    if let Ok((name, prefix)) = split(path) {
+    let oversized = size > pax::ustar_size_limit();
+    if !oversized && let Ok((name, prefix)) = split(path) {
         return raw_header(out, h, name, prefix, size, b'0');
     }
     let suffix = &hex(ContractSha256::digest(path.as_bytes()).into())[..16];
-    let body = pax_path_record(path);
+    let body = pax::encode(path, size);
     raw_header(
         out,
         h,
@@ -536,7 +543,8 @@ fn header(out: &mut File, h: &mut TransportHash, path: &str, size: u64) -> Resul
     )?;
     emit(out, h, body.as_bytes())?;
     pad(out, h, body.len() as u64)?;
-    raw_header(out, h, &format!("PaxFiles/{suffix}"), "", size, b'0')
+    let field = if oversized { 0 } else { size };
+    raw_header(out, h, &format!("PaxFiles/{suffix}"), "", field, b'0')
 }
 fn raw_header(
     out: &mut File,
@@ -563,18 +571,6 @@ fn raw_header(
     out.write_all(&b).map_err(storage)?;
     h.update(b);
     Ok(())
-}
-fn pax_path_record(path: &str) -> String {
-    let value = format!(" path={path}\n");
-    let mut digits = 1;
-    loop {
-        let length = digits + value.len();
-        let actual_digits = length.to_string().len();
-        if actual_digits == digits {
-            return format!("{length}{value}");
-        }
-        digits = actual_digits;
-    }
 }
 fn split(p: &str) -> Result<(&str, &str), ExportError> {
     if p.len() <= 100 {
