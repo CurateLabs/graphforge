@@ -287,7 +287,9 @@ A suite plugs in with two documents and no driver change (see
 `fixtures/gdc/query-fixture/`):
 
 - `graphforge-gdc-query-workload/1` lists query variants. Each has an `id`, an
-  `operation` and its `bindings`. An operation is `cypher` (`text`, run through
+  `operation`, its `bindings` and `ordered`: `true` when row order is part of
+  the answer (the query sorts), `false` to digest rows order-independently. An
+  operation is `cypher` (`text`, run through
   `execute_with_params`) or an analyst verb: `rank` or `cluster` (`label`,
   `by`, `directed`, optional `via`), or `paths` (`by`, `directed`, optional
   `via` and `weight`, and a `source` selecting `(:label {property: $param})`).
@@ -300,13 +302,22 @@ A suite plugs in with two documents and no driver change (see
 The driver refuses a path without a project rather than creating one. After
 reopen it reads every count back through Cypher count probes and
 `GraphForge::labels`. Any difference, including an undeclared label, exits 2
-with `count_mismatch` before any query runs. Every other failure is also typed
-(`invalid_workload`, `project_missing`, `query_failed`, ...) as one JSON object
-on stderr. The first failing call stops the run, and no evidence is written.
+with `count_mismatch` before any query runs, and writes no evidence. Document
+and project refusals (`invalid_workload`, `project_missing`, ...) exit 2 the
+same way, as one JSON object on stderr.
+
+A call that fails during the measured pass does not stop the run. It is
+recorded as a failed sample, with `cause` (`query_failed` or
+`result_unrenderable`), the product's `error_code` and at most 1 KiB of error
+text, and no latency. The remaining bindings and variants still run. The
+evidence is then written with `status: failed` and every failure listed in
+`failures`, and the driver exits 3 with `query_failed` on stderr.
+
 The `graphforge-gdc-query-evidence/1` output
 (`schemas/gdc-query-evidence.json`) records the reconciliation, the declared
-clock and, per variant, the excluded warm-up binding, each sample's binding id,
-latency, row count and result digest, and nearest-rank p50/p95.
+clock, the run status and failures and, per variant, the excluded warm-up
+binding, each sample's binding id and outcome (latency, row count and result
+digest when measured), and nearest-rank p50/p95 over the measured samples.
 `gdc_measurement_policy.assert_query_latency_authority` validates it.
 
 ```bash

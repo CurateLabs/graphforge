@@ -4,6 +4,7 @@
   "variants": [
     {
       "id": "friends-of-person",
+      "ordered": true,
       "operation": {
         "kind": "cypher",
         "text": "MATCH (:Person {id: $person})-[:KNOWS]->(friend:Person) RETURN friend.id AS id, friend.first_name AS name ORDER BY id"
@@ -16,11 +17,13 @@
     },
     {
       "id": "vertex-components",
+      "ordered": false,
       "operation": {"kind": "cluster", "label": "Vertex", "by": "components", "directed": false},
       "bindings": [{"id": "all"}]
     },
     {
       "id": "vertex-bfs",
+      "ordered": false,
       "operation": {
         "kind": "paths",
         "by": "bfs",

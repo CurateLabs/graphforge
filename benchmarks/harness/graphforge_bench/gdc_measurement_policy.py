@@ -95,38 +95,69 @@ def _query_evidence_validator() -> Draft202012Validator:
     return Draft202012Validator(document)
 
 
-def _check_variant_latency(variant: Mapping[str, Any], label: str) -> None:
-    name = f"{label} variant {variant.get('query_id')!r}"
+def _check_variant_latency(variant: Mapping[str, Any], label: str) -> list[tuple[Any, ...]]:
+    """Check one variant; return its failed samples as failure-record keys."""
+    query_id = variant.get("query_id")
+    name = f"{label} variant {query_id!r}"
     warmup = variant.get("warmup")
-    if not isinstance(warmup, Mapping) or warmup.get("excluded") is not True or len(warmup) != 2:
+    if (
+        not isinstance(warmup, Mapping)
+        or warmup.get("excluded") is not True
+        or set(warmup) != {"binding_id", "excluded", "completed"}
+    ):
         raise GdcMeasurementBoundaryError(
             "warmup_latency_included",
-            f"{name}: the warm-up pass is excluded and carries only its binding id",
+            f"{name}: the warm-up pass is excluded and carries no latency",
         )
     samples = variant.get("samples")
+    if not isinstance(samples, list) or not samples:
+        raise GdcMeasurementBoundaryError(
+            "latency_not_from_samples", f"{name}: a variant records its samples"
+        )
+    latencies: list[int] = []
+    failed: list[tuple[Any, ...]] = []
+    for sample in samples:
+        if not isinstance(sample, Mapping):
+            raise GdcMeasurementBoundaryError("invalid_document", f"{name}: sample not an object")
+        if sample.get("status") == "failed":
+            if "latency_ns" in sample:
+                raise GdcMeasurementBoundaryError(
+                    "failed_sample_latency", f"{name}: a failed sample carries no latency"
+                )
+            failed.append(
+                (query_id, sample.get("binding_id"), sample.get("cause"), sample.get("error_code"))
+            )
+            continue
+        value = sample.get("latency_ns")
+        if sample.get("status") != "measured" or not (
+            isinstance(value, int) and not isinstance(value, bool)
+        ):
+            raise GdcMeasurementBoundaryError(
+                "latency_not_from_samples",
+                f"{name}: a measured sample carries integer latency_ns",
+            )
+        latencies.append(value)
+    derived = (
+        {
+            "count": len(latencies),
+            "p50_ns": nearest_rank(latencies, 50),
+            "p95_ns": nearest_rank(latencies, 95),
+        }
+        if latencies
+        else None
+    )
     summary = variant.get("summary")
-    if not isinstance(samples, list) or not samples or not isinstance(summary, Mapping):
-        raise GdcMeasurementBoundaryError(
-            "latency_not_from_samples", f"{name}: latency needs measured samples"
-        )
-    latencies = [
-        sample.get("latency_ns") if isinstance(sample, Mapping) else None for sample in samples
-    ]
-    if not all(isinstance(value, int) and not isinstance(value, bool) for value in latencies):
-        raise GdcMeasurementBoundaryError(
-            "latency_not_from_samples", f"{name}: every sample carries integer latency_ns"
-        )
-    derived = {
-        "count": len(latencies),
-        "p50_ns": nearest_rank(latencies, 50),
-        "p95_ns": nearest_rank(latencies, 95),
-    }
-    if dict(summary) != derived:
+    if (dict(summary) if isinstance(summary, Mapping) else summary) != derived:
         raise GdcMeasurementBoundaryError(
             "latency_not_from_samples",
-            f"{name}: summary {dict(summary)} is not the nearest-rank summary {derived} "
-            "of its driver-clock samples",
+            f"{name}: summary {summary} is not the nearest-rank summary {derived} "
+            "of its measured driver-clock samples",
         )
+    if variant.get("status") != ("failed" if failed else "measured"):
+        raise GdcMeasurementBoundaryError(
+            "failure_record_mismatch", f"{name}: status disagrees with its samples"
+        )
+    return failed
 
 
 def assert_query_latency_authority(
@@ -137,9 +168,11 @@ def assert_query_latency_authority(
     """Accept per-operation latency only from the declared GDC query driver clock.
 
     The evidence must come from the driver, over a reconciled project, with
-    every percentile derived from its own samples and the warm-up excluded.
-    Anything else, including a BenchExec or phase-timing number in a latency
-    field, is refused with a typed cause.
+    every percentile derived from its own measured samples and the warm-up
+    excluded. Failed samples carry no latency and are listed in `failures`;
+    a run with any failure has `status: failed`. Anything else, including a
+    BenchExec or phase-timing number in a latency field, is refused with a
+    typed cause.
     """
     assert_live_diagnostic_boundary(evidence, label=label)
     if evidence.get("schema") != QUERY_EVIDENCE_SCHEMA:
@@ -167,12 +200,25 @@ def assert_query_latency_authority(
     variants = evidence.get("variants")
     if not isinstance(variants, list) or not variants:
         raise GdcMeasurementBoundaryError("invalid_document", f"{label} has no variants")
+    failed: list[tuple[Any, ...]] = []
     for variant in variants:
         if not isinstance(variant, Mapping):
             raise GdcMeasurementBoundaryError(
                 "invalid_document", f"{label} variant is not an object"
             )
-        _check_variant_latency(variant, label)
+        failed.extend(_check_variant_latency(variant, label))
+    records = evidence.get("failures")
+    listed = [
+        (r.get("query_id"), r.get("binding_id"), r.get("cause"), r.get("error_code"))
+        if isinstance(r, Mapping)
+        else None
+        for r in (records if isinstance(records, list) else [None])
+    ]
+    if listed != failed or evidence.get("status") != ("failed" if failed else "passed"):
+        raise GdcMeasurementBoundaryError(
+            "failure_record_mismatch",
+            f"{label} status and failures must list exactly its failed samples",
+        )
     error = next(_query_evidence_validator().iter_errors(dict(evidence)), None)
     if error is not None:
         location = "/".join(str(part) for part in error.absolute_path)

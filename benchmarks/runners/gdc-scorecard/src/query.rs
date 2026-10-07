@@ -20,8 +20,8 @@ use sha2::{Digest, Sha256};
 use crate::identity::hex;
 
 pub use measure::{
-    LATENCY_CLOCK, RESULT_DIGEST, Sample, Summary, VariantMeasurement, Warmup, measure_variant,
-    nearest_rank, result_digest,
+    Failure, LATENCY_CLOCK, MAX_ERROR_BYTES, Measured, Outcome, RESULT_DIGEST, Sample, Summary,
+    VariantMeasurement, Warmup, measure_variant, nearest_rank, result_digest,
 };
 pub use reconcile::{CountPair, Reconciliation, reconcile};
 pub use workload::{
@@ -144,6 +144,10 @@ pub struct Evidence {
     pub schema: &'static str,
     pub certification: bool,
     pub suite: String,
+    /// `passed` when every binding of every variant was measured, else `failed`.
+    pub status: &'static str,
+    /// Every failed sample, in run order; empty when the run passed.
+    pub failures: Vec<FailedSample>,
     pub driver: Driver,
     pub inputs: Inputs,
     pub project: Project,
@@ -151,6 +155,15 @@ pub struct Evidence {
     pub latency_clock: LatencyClock,
     pub result_digest: &'static str,
     pub variants: Vec<VariantMeasurement>,
+}
+
+/// One failed sample, listed at the top of the evidence.
+#[derive(Debug, Serialize)]
+pub struct FailedSample {
+    pub query_id: String,
+    pub binding_id: String,
+    pub cause: &'static str,
+    pub error_code: Option<&'static str>,
 }
 
 /// Lowercase hex SHA-256 of `bytes`.
@@ -186,11 +199,14 @@ pub fn open_project(path: &Path) -> Result<GraphForge, QueryError> {
     })
 }
 
-/// Reconcile, then measure every variant in declared order, stopping at the
-/// first failure.
+/// Reconcile, then measure every variant in declared order. A failing call
+/// does not stop the run: it becomes a failed sample and the run's `status`
+/// becomes `failed`, so one pass surfaces every failure.
 ///
 /// # Errors
-/// Any [`QueryCause`]; `count_mismatch` stops the run before any query is timed.
+/// A document, project-open or reconciliation [`QueryCause`]. `count_mismatch`
+/// stops the run before any query is timed, since every later number would
+/// describe the wrong graph.
 pub fn run(
     project: &Path,
     workload: &[u8],
@@ -206,10 +222,29 @@ pub fn run(
         .iter()
         .map(|variant| measure_variant(&forge, variant))
         .collect::<Result<Vec<_>, _>>()?;
+    let failures: Vec<FailedSample> = variants
+        .iter()
+        .flat_map(|variant| {
+            variant.samples.iter().filter_map(|sample| {
+                sample.failure().map(|failure| FailedSample {
+                    query_id: variant.query_id.clone(),
+                    binding_id: sample.binding_id.clone(),
+                    cause: failure.cause,
+                    error_code: failure.error_code,
+                })
+            })
+        })
+        .collect();
     Ok(Evidence {
         schema: EVIDENCE_SCHEMA,
         certification: false,
         suite: parsed.suite,
+        status: if failures.is_empty() {
+            "passed"
+        } else {
+            "failed"
+        },
+        failures,
         driver: Driver {
             name: DRIVER,
             version: env!("CARGO_PKG_VERSION"),

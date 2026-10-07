@@ -29,6 +29,9 @@ pub struct Workload {
 pub struct Variant {
     pub id: String,
     pub operation: Operation,
+    /// Whether row order is part of the answer (the query sorts its result).
+    /// Unordered results are digested order-independently; see `result_digest`.
+    pub ordered: bool,
     pub bindings: Vec<Binding>,
 }
 
@@ -181,6 +184,9 @@ pub fn parse_workload(bytes: &[u8]) -> Result<Workload, QueryError> {
                         variant.id, binding.id
                     ));
                 }
+            }
+            if let Operation::Paths { source, .. } = &variant.operation {
+                super::measure::prop_value(&variant.id, &binding.params[&source.param])?;
             }
         }
     }

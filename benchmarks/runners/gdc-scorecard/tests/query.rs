@@ -8,7 +8,8 @@ use arrow::array::{ArrayRef, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use gdc_scorecard::query::{
-    Evidence, LATENCY_CLOCK, QueryCause, QueryError, nearest_rank, result_digest, run,
+    Evidence, LATENCY_CLOCK, Measured, QueryCause, QueryError, Sample, nearest_rank, result_digest,
+    run,
 };
 use graphforge_api::GraphForge;
 use serde_json::{Value, json};
@@ -49,9 +50,14 @@ fn workload(variants: Value) -> Value {
     json!({"schema": "graphforge-gdc-query-workload/1", "suite": "fixture", "variants": variants})
 }
 
+fn measured(sample: &Sample) -> &Measured {
+    sample.measured().expect("a measured sample")
+}
+
 fn people_by_min_id() -> Value {
     json!({
         "id": "people-by-min-id",
+        "ordered": true,
         "operation": {"kind": "cypher",
             "text": "MATCH (p:Person) WHERE p.id >= $min RETURN p.id AS id, p.name AS name ORDER BY id"},
         "bindings": [
@@ -120,18 +126,26 @@ fn durable_project_reconciles_after_reopen_and_every_binding_is_measured() {
         .map(|s| s.binding_id.as_str())
         .collect();
     assert_eq!(bindings, ["min-1", "min-2", "min-4"]);
-    let rows: Vec<_> = variant.samples.iter().map(|s| s.rows).collect();
+    let rows: Vec<_> = variant.samples.iter().map(|s| measured(s).rows).collect();
     assert_eq!(rows, [4, 3, 1]);
-    assert!(variant.samples.iter().all(|s| s.latency_ns > 0));
-    let mut latencies: Vec<_> = variant.samples.iter().map(|s| s.latency_ns).collect();
+    assert!(variant.samples.iter().all(|s| measured(s).latency_ns > 0));
+    let mut latencies: Vec<_> = variant
+        .samples
+        .iter()
+        .map(|s| measured(s).latency_ns)
+        .collect();
     latencies.sort_unstable();
-    assert_eq!(variant.summary.count, 3);
-    assert_eq!(variant.summary.p50_ns, latencies[1]);
-    assert_eq!(variant.summary.p95_ns, latencies[2]);
+    let summary = variant.summary.as_ref().unwrap();
+    assert_eq!(summary.count, 3);
+    assert_eq!(summary.p50_ns, latencies[1]);
+    assert_eq!(summary.p95_ns, latencies[2]);
+    assert_eq!(document["status"], "passed");
+    assert_eq!(document["failures"], json!([]));
+    assert_eq!(document["variants"][0]["status"], "measured");
     // The warm-up carries no latency at all.
     assert_eq!(
         document["variants"][0]["warmup"],
-        json!({"binding_id": "min-1", "excluded": true})
+        json!({"binding_id": "min-1", "excluded": true, "completed": true})
     );
 
     // The digest names the result: different answers differ, the same answer
@@ -139,7 +153,7 @@ fn durable_project_reconciles_after_reopen_and_every_binding_is_measured() {
     let digests: Vec<_> = variant
         .samples
         .iter()
-        .map(|s| s.result_sha256.clone())
+        .map(|s| measured(s).result_sha256.clone())
         .collect();
     assert_ne!(digests[0], digests[1]);
     assert_ne!(digests[1], digests[2]);
@@ -152,7 +166,7 @@ fn durable_project_reconciles_after_reopen_and_every_binding_is_measured() {
     let repeated: Vec<_> = again.variants[0]
         .samples
         .iter()
-        .map(|s| s.result_sha256.clone())
+        .map(|s| measured(s).result_sha256.clone())
         .collect();
     assert_eq!(digests, repeated);
 }
@@ -231,11 +245,11 @@ fn analyst_verbs_run_through_the_same_clock() {
     let root = tempfile::tempdir().unwrap();
     let project = durable_project(root.path());
     let variants = json!([
-        {"id": "person-components", "bindings": [{"id": "all"}],
+        {"id": "person-components", "ordered": false, "bindings": [{"id": "all"}],
          "operation": {"kind": "cluster", "label": "Person", "by": "components", "directed": false}},
-        {"id": "person-degree", "bindings": [{"id": "all"}],
+        {"id": "person-degree", "ordered": false, "bindings": [{"id": "all"}],
          "operation": {"kind": "rank", "label": "Person", "by": "degree", "directed": true}},
-        {"id": "bfs-from-person", "bindings": [
+        {"id": "bfs-from-person", "ordered": false, "bindings": [
             {"id": "from-1", "params": {"source": int(1)}},
             {"id": "from-3", "params": {"source": int(3)}}],
          "operation": {"kind": "paths", "by": "bfs", "directed": true, "via": "KNOWS",
@@ -251,15 +265,12 @@ fn analyst_verbs_run_through_the_same_clock() {
             "graphforge_api::GraphForge::paths",
         ]
     );
-    assert_eq!(evidence.variants[0].samples[0].rows, 4);
-    assert_eq!(evidence.variants[1].samples[0].rows, 4);
+    assert_eq!(evidence.status, "passed");
+    assert_eq!(measured(&evidence.variants[0].samples[0]).rows, 4);
+    assert_eq!(measured(&evidence.variants[1].samples[0]).rows, 4);
     let bfs = &evidence.variants[2].samples;
-    assert!(
-        bfs[0].rows > bfs[1].rows,
-        "{} vs {}",
-        bfs[0].rows,
-        bfs[1].rows
-    );
+    let (from_1, from_3) = (measured(&bfs[0]).rows, measured(&bfs[1]).rows);
+    assert!(from_1 > from_3, "{from_1} vs {from_3}");
 }
 
 #[test]
@@ -280,18 +291,35 @@ fn malformed_workloads_and_counts_are_refused_before_opening() {
     let mut unbound = people_by_min_id();
     unbound["bindings"] = json!([]);
     assert_eq!(refused(json!([unbound])), QueryCause::InvalidWorkload);
-    let mut untyped = people_by_min_id();
-    untyped["bindings"][0]["params"]["min"] = json!(1);
-    assert_eq!(refused(json!([untyped])), QueryCause::InvalidWorkload);
+    let mut undeclared_order = people_by_min_id();
+    undeclared_order.as_object_mut().unwrap().remove("ordered");
     assert_eq!(
-        refused(json!([{"id": "bfs", "bindings": [{"id": "none"}],
+        refused(json!([undeclared_order])),
+        QueryCause::InvalidWorkload
+    );
+    assert_eq!(
+        refused(json!([{"id": "bfs", "ordered": false,
+            "bindings": [{"id": "list", "params": {"source": {"type": "List", "value": []}}}],
             "operation": {"kind": "paths", "by": "bfs", "directed": true,
                 "source": {"label": "Person", "property": "id", "param": "source"}}}])),
         QueryCause::InvalidWorkload
     );
+    let mut untyped = people_by_min_id();
+    untyped["bindings"][0]["params"]["min"] = json!(1);
+    assert_eq!(refused(json!([untyped])), QueryCause::InvalidWorkload);
     assert_eq!(
-        refused(json!([{"id": "nope", "bindings": [{"id": "all"}],
-            "operation": {"kind": "rank", "label": "Person", "by": "no_such_rank", "directed": true}}])),
+        refused(
+            json!([{"id": "bfs", "ordered": false, "bindings": [{"id": "none"}],
+            "operation": {"kind": "paths", "by": "bfs", "directed": true,
+                "source": {"label": "Person", "property": "id", "param": "source"}}}])
+        ),
+        QueryCause::InvalidWorkload
+    );
+    assert_eq!(
+        refused(
+            json!([{"id": "nope", "ordered": false, "bindings": [{"id": "all"}],
+            "operation": {"kind": "rank", "label": "Person", "by": "no_such_rank", "directed": true}}])
+        ),
         QueryCause::InvalidWorkload
     );
 
@@ -306,17 +334,83 @@ fn malformed_workloads_and_counts_are_refused_before_opening() {
 }
 
 #[test]
-fn a_failing_query_stops_the_run_with_a_typed_cause() {
+fn a_failing_variant_between_two_good_ones_is_recorded_and_the_run_continues() {
     let root = tempfile::tempdir().unwrap();
     let project = durable_project(root.path());
-    let broken = json!([{"id": "broken", "bindings": [{"id": "only"}],
-        "operation": {"kind": "cypher", "text": "MATCH (p:Person RETURN p"}}]);
-    let (code, message) = cause(drive(&project, &workload(broken), &expected(4, 3)));
-    assert_eq!(code, QueryCause::QueryFailed);
-    assert!(
-        message.starts_with("variant broken binding only:"),
-        "{message}"
+    let variants = json!([
+        people_by_min_id(),
+        {"id": "broken", "ordered": true,
+         "bindings": [{"id": "first"}, {"id": "second"}],
+         "operation": {"kind": "cypher", "text": "MATCH (p:Person RETURN p"}},
+        {"id": "person-components", "ordered": false, "bindings": [{"id": "all"}],
+         "operation": {"kind": "cluster", "label": "Person", "by": "components", "directed": false}},
+    ]);
+    let evidence = drive(&project, &workload(variants), &expected(4, 3)).unwrap();
+    let document = serde_json::to_value(&evidence).unwrap();
+
+    assert_eq!(document["status"], "failed");
+    assert_eq!(
+        document["failures"],
+        json!([
+            {"query_id": "broken", "binding_id": "first", "cause": "query_failed", "error_code": "GF_PARSE"},
+            {"query_id": "broken", "binding_id": "second", "cause": "query_failed", "error_code": "GF_PARSE"},
+        ])
     );
+    let statuses: Vec<_> = evidence.variants.iter().map(|v| v.status).collect();
+    assert_eq!(statuses, ["measured", "failed", "measured"]);
+
+    // The variants either side were measured in full.
+    assert_eq!(evidence.variants[0].samples.len(), 3);
+    assert_eq!(evidence.variants[0].summary.as_ref().unwrap().count, 3);
+    assert_eq!(measured(&evidence.variants[2].samples[0]).rows, 4);
+
+    // The failed variant carries no latency anywhere and no summary.
+    let broken = &document["variants"][1];
+    assert_eq!(
+        broken["warmup"],
+        json!({"binding_id": "first", "excluded": true, "completed": false})
+    );
+    assert_eq!(broken["summary"], Value::Null);
+    for sample in broken["samples"].as_array().unwrap() {
+        assert_eq!(sample["status"], "failed");
+        assert!(sample.get("latency_ns").is_none(), "{sample}");
+        let error = sample["error"].as_str().unwrap();
+        assert!(!error.is_empty() && error.len() <= 1024 + 3, "{error}");
+    }
+}
+
+#[test]
+fn a_failing_binding_is_excluded_from_its_variant_percentiles() {
+    let root = tempfile::tempdir().unwrap();
+    let project = durable_project(root.path());
+    let mut variant = people_by_min_id();
+    // The middle binding omits the parameter the query needs.
+    variant["bindings"][1] = json!({"id": "unbound"});
+    let evidence = drive(&project, &workload(json!([variant])), &expected(4, 3)).unwrap();
+    let variant = &evidence.variants[0];
+    assert_eq!(evidence.status, "failed");
+    assert_eq!(variant.status, "failed");
+    assert!(variant.warmup.completed);
+    let outcomes: Vec<_> = variant
+        .samples
+        .iter()
+        .map(|s| (s.binding_id.as_str(), s.measured().is_some()))
+        .collect();
+    assert_eq!(
+        outcomes,
+        [("min-1", true), ("unbound", false), ("min-4", true)]
+    );
+    let mut latencies: Vec<_> = variant
+        .samples
+        .iter()
+        .filter_map(Sample::measured)
+        .map(|m| m.latency_ns)
+        .collect();
+    latencies.sort_unstable();
+    let summary = variant.summary.as_ref().unwrap();
+    assert_eq!(summary.count, 2);
+    assert_eq!(summary.p50_ns, latencies[0]);
+    assert_eq!(summary.p95_ns, latencies[1]);
 }
 
 #[test]
@@ -348,7 +442,7 @@ fn result_digest_separates_nulls_order_and_types_but_not_batch_boundaries() {
         )
         .unwrap()
     };
-    let digest = |batches: &[RecordBatch]| result_digest(&schema, batches).unwrap();
+    let digest = |batches: &[RecordBatch]| result_digest(&schema, batches, true).unwrap();
     let whole = digest(&[batch(&[1, 2], &[Some("a"), None])]);
     assert_eq!(
         whole,
@@ -366,5 +460,37 @@ fn result_digest_separates_nulls_order_and_types_but_not_batch_boundaries() {
         batch(&[1, 2], &[Some("a"), None]).columns().to_vec(),
     )
     .unwrap();
-    assert_ne!(whole, result_digest(&renamed, &[relabelled]).unwrap());
+    assert_ne!(whole, result_digest(&renamed, &[relabelled], true).unwrap());
+}
+
+#[test]
+fn unordered_digests_ignore_row_order_and_ordered_digests_do_not() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("name", DataType::Utf8, true),
+    ]));
+    let batch = |ids: &[i64], names: &[Option<&str>]| {
+        RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(ids.to_vec())) as ArrayRef,
+                Arc::new(StringArray::from(names.to_vec())) as ArrayRef,
+            ],
+        )
+        .unwrap()
+    };
+    let forward = [batch(&[1, 2, 3], &[Some("a"), None, Some("c")])];
+    let shuffled = [
+        batch(&[3], &[Some("c")]),
+        batch(&[1, 2], &[Some("a"), None]),
+    ];
+    let digest =
+        |batches: &[RecordBatch], ordered| result_digest(&schema, batches, ordered).unwrap();
+
+    assert_eq!(digest(&forward, false), digest(&shuffled, false));
+    assert_ne!(digest(&forward, true), digest(&shuffled, true));
+    // Unordered still distinguishes different rows, and the mode is part of the digest.
+    let other = [batch(&[1, 2, 3], &[Some("a"), Some(""), Some("c")])];
+    assert_ne!(digest(&forward, false), digest(&other, false));
+    assert_ne!(digest(&forward, false), digest(&forward, true));
 }

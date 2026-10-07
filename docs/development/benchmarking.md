@@ -50,18 +50,28 @@ recorded as `graphforge-gdc-query-clock/1`:
 - Each query variant gets one warm-up call with its first binding. It is
   excluded and records no latency. Then one measured pass runs every binding in
   declared order.
-- p50 and p95 are nearest-rank over the measured samples, in nanoseconds.
+- A call that returns an error is a failed sample: typed cause, the product's
+  `GF_*` error code and at most 1 KiB of error text, and no latency. The pass
+  continues, so one run surfaces every failure, and the run ends with
+  `status: failed`.
+- p50 and p95 are nearest-rank over the measured samples only, in
+  nanoseconds. A variant with no measured sample has no summary.
 
 The evidence is `graphforge-gdc-query-evidence/1`
-(`benchmarks/schemas/gdc-query-evidence.json`). Each sample records the query
-and binding ids, latency, row count and a `graphforge-gdc-result-digest/1`
-SHA-256 over the column names, types and rows, for later reference checks.
+(`benchmarks/schemas/gdc-query-evidence.json`). Each measured sample records
+the query and binding ids, latency, row count and a
+`graphforge-gdc-result-digest/1` SHA-256 over the column names, types and rows,
+for later reference checks. Each variant declares whether its row order is
+part of the answer. Rows of an unordered variant are sorted canonically before
+digesting, so row order cannot change the digest.
 `assert_query_latency_authority` in
 `benchmarks/harness/graphforge_bench/gdc_measurement_policy.py` refuses any
 per-operation latency not produced by this clock: a foreign clock or producer,
-a summary not derived from its own samples, a warm-up that carries latency,
-an unreconciled project, or any other timing field in the document. These
-numbers are single-client engineering evidence, not LDBC results.
+a summary not derived from its own measured samples, a failed sample or
+warm-up that carries latency, a failure list or status that disagrees with
+the samples, an unreconciled project, or any other timing field in the
+document. These numbers are single-client engineering evidence, not LDBC
+results.
 
 ## AssertionLedger merge comparison
 

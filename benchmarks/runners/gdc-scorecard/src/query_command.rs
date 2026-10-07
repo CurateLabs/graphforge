@@ -18,7 +18,7 @@ fn execute(
     workload: &Path,
     expected: &Path,
     output: &Path,
-) -> Result<(), QueryError> {
+) -> Result<usize, QueryError> {
     if output.exists() {
         return Err(QueryError::new(
             QueryCause::OutputExists,
@@ -51,7 +51,8 @@ fn execute(
         })?;
     file.write_all(&bytes)
         .and_then(|()| file.sync_all())
-        .map_err(io)
+        .map_err(io)?;
+    Ok(evidence.failures.len())
 }
 
 pub fn main(mut args: impl Iterator<Item = String>) -> ExitCode {
@@ -74,10 +75,23 @@ pub fn main(mut args: impl Iterator<Item = String>) -> ExitCode {
     else {
         return super::usage();
     };
+    // Exit 0: every binding measured. Exit 3: evidence written with
+    // `status: failed`. Exit 2: refused before or during reconciliation.
     match execute(&project, &workload, &expected, &output) {
-        Ok(()) => {
+        Ok(0) => {
             println!("{}", output.display());
             ExitCode::SUCCESS
+        }
+        Ok(failures) => {
+            println!("{}", output.display());
+            super::report(
+                QueryCause::QueryFailed.as_str(),
+                &format!(
+                    "{failures} sample(s) failed; see failures in {}",
+                    output.display()
+                ),
+            );
+            ExitCode::from(3)
         }
         Err(error) => {
             super::report(error.cause().as_str(), error.message());

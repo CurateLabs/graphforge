@@ -55,7 +55,9 @@ class ScorecardQueryTests(unittest.TestCase):
         committed = Gf(gf, cls.project).load(converted)
         assert committed["outcome"] == "committed", committed
 
-    def query(self, expected: Path, output: Path) -> subprocess.CompletedProcess[str]:
+    def query(
+        self, expected: Path, output: Path, workload: Path = QUERY_FIXTURE / "workload.json"
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
                 str(self.driver),
@@ -63,7 +65,7 @@ class ScorecardQueryTests(unittest.TestCase):
                 "--project",
                 str(self.project),
                 "--workload",
-                str(QUERY_FIXTURE / "workload.json"),
+                str(workload),
                 "--expected-counts",
                 str(expected),
                 "--output",
@@ -80,6 +82,7 @@ class ScorecardQueryTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         evidence = json.loads(output.read_text(encoding="utf-8"))
         assert_query_latency_authority(evidence)
+        self.assertEqual((evidence["status"], evidence["failures"]), ("passed", []))
 
         reconciliation = evidence["reconciliation"]
         self.assertEqual(reconciliation["nodes"], {"expected": 11, "observed": 11})
@@ -119,7 +122,8 @@ class ScorecardQueryTests(unittest.TestCase):
             variants["vertex-components"]["interface"], "graphforge_api::GraphForge::cluster"
         )
         self.assertEqual(
-            variants["vertex-bfs"]["warmup"], {"binding_id": "from-1", "excluded": True}
+            variants["vertex-bfs"]["warmup"],
+            {"binding_id": "from-1", "excluded": True, "completed": True},
         )
         # From 1, LINK reaches 2 and 3; vertex 4 has no LINK edges.
         bfs = dict(rows["vertex-bfs"])
@@ -138,6 +142,49 @@ class ScorecardQueryTests(unittest.TestCase):
         with self.assertRaises(GdcMeasurementBoundaryError) as error:
             assert_query_latency_authority(evidence)
         self.assertEqual(error.exception.cause, "latency_not_from_samples")
+
+    def test_a_failing_variant_is_recorded_and_the_run_continues(self) -> None:
+        workload = json.loads((QUERY_FIXTURE / "workload.json").read_text(encoding="utf-8"))
+        broken = {
+            "id": "broken",
+            "ordered": True,
+            "operation": {"kind": "cypher", "text": "MATCH (p:Person RETURN p"},
+            "bindings": [{"id": "only"}],
+        }
+        workload["variants"].insert(1, broken)
+        path = self.scratch / "broken-workload.json"
+        path.write_text(json.dumps(workload), encoding="utf-8")
+        output = self.scratch / "failed.json"
+        completed = self.query(QUERY_FIXTURE / "expected-counts.json", output, path)
+
+        self.assertEqual(completed.returncode, 3, completed.stderr)
+        self.assertEqual(json.loads(completed.stderr)["error"]["cause"], "query_failed")
+        evidence = json.loads(output.read_text(encoding="utf-8"))
+        assert_query_latency_authority(evidence)
+        self.assertEqual(evidence["status"], "failed")
+        self.assertEqual(
+            evidence["failures"],
+            [
+                {
+                    "query_id": "broken",
+                    "binding_id": "only",
+                    "cause": "query_failed",
+                    "error_code": "GF_PARSE",
+                }
+            ],
+        )
+        statuses = [(v["query_id"], v["status"]) for v in evidence["variants"]]
+        self.assertEqual(
+            statuses,
+            [
+                ("friends-of-person", "measured"),
+                ("broken", "failed"),
+                ("vertex-components", "measured"),
+                ("vertex-bfs", "measured"),
+            ],
+        )
+        self.assertIsNone(evidence["variants"][1]["summary"])
+        self.assertNotIn("latency_ns", evidence["variants"][1]["samples"][0])
 
     def test_deliberate_count_mismatch_fails_typed_and_writes_no_evidence(self) -> None:
         expected = json.loads((QUERY_FIXTURE / "expected-counts.json").read_text(encoding="utf-8"))

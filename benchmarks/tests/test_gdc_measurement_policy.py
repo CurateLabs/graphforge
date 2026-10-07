@@ -23,6 +23,8 @@ def query_evidence() -> dict[str, Any]:
         "schema": "graphforge-gdc-query-evidence/1",
         "certification": False,
         "suite": "fixture",
+        "status": "passed",
+        "failures": [],
         "driver": {"name": QUERY_DRIVER, "version": "0.0.0", "executable_sha256": SHA},
         "inputs": {"workload_sha256": SHA, "expected_counts_sha256": SHA},
         "project": {
@@ -52,10 +54,13 @@ def query_evidence() -> dict[str, Any]:
             {
                 "query_id": "q1",
                 "interface": "graphforge_api::GraphForge::execute_with_params",
-                "warmup": {"binding_id": "b1", "excluded": True},
+                "ordered": True,
+                "status": "measured",
+                "warmup": {"binding_id": "b1", "excluded": True, "completed": True},
                 "samples": [
                     {
                         "binding_id": f"b{index}",
+                        "status": "measured",
                         "latency_ns": latency,
                         "rows": 1,
                         "result_sha256": SHA,
@@ -118,6 +123,30 @@ class GdcMeasurementPolicyTests(unittest.TestCase):
         self.assertEqual(error.exception.cause, "caller_supplied_result")
 
 
+def failed_sample(binding_id: str) -> dict[str, Any]:
+    return {
+        "binding_id": binding_id,
+        "status": "failed",
+        "cause": "query_failed",
+        "error_code": "GF_PARSE",
+        "error": "parse error",
+    }
+
+
+def failed_evidence() -> dict[str, Any]:
+    """Binding b2 failed: it has no latency and the summary covers b1 and b3."""
+    evidence = query_evidence()
+    variant = evidence["variants"][0]
+    variant["samples"][1] = failed_sample("b2")
+    variant["status"] = "failed"
+    variant["summary"] = {"count": 2, "p50_ns": 200, "p95_ns": 300}
+    evidence["status"] = "failed"
+    evidence["failures"] = [
+        {"query_id": "q1", "binding_id": "b2", "cause": "query_failed", "error_code": "GF_PARSE"}
+    ]
+    return evidence
+
+
 class QueryLatencyAuthorityTests(unittest.TestCase):
     def refused(self, evidence: dict[str, Any]) -> str:
         with self.assertRaises(GdcMeasurementBoundaryError) as error:
@@ -160,6 +189,44 @@ class QueryLatencyAuthorityTests(unittest.TestCase):
         evidence = query_evidence()
         evidence["variants"][0]["samples"] = []
         self.assertEqual(self.refused(evidence), "latency_not_from_samples")
+
+    def test_failed_run_with_failed_samples_listed_passes(self) -> None:
+        assert_query_latency_authority(failed_evidence())
+
+    def test_failed_sample_latency_is_refused(self) -> None:
+        evidence = failed_evidence()
+        evidence["variants"][0]["samples"][1]["latency_ns"] = 150
+        self.assertEqual(self.refused(evidence), "failed_sample_latency")
+
+    def test_summary_must_exclude_failed_samples(self) -> None:
+        # The summary of all three bindings, as if the failed one had been timed.
+        evidence = failed_evidence()
+        evidence["variants"][0]["summary"] = {"count": 3, "p50_ns": 200, "p95_ns": 300}
+        self.assertEqual(self.refused(evidence), "latency_not_from_samples")
+        evidence = failed_evidence()
+        evidence["variants"][0]["samples"] = [failed_sample(f"b{index}") for index in (1, 2, 3)]
+        evidence["failures"] = [
+            {"query_id": "q1", "binding_id": f"b{index}", "cause": "query_failed",
+             "error_code": "GF_PARSE"}
+            for index in (1, 2, 3)
+        ]  # fmt: skip
+        self.assertEqual(self.refused(evidence), "latency_not_from_samples")
+        evidence["variants"][0]["summary"] = None
+        assert_query_latency_authority(evidence)
+
+    def test_failures_must_list_exactly_the_failed_samples(self) -> None:
+        evidence = failed_evidence()
+        evidence["failures"] = []
+        self.assertEqual(self.refused(evidence), "failure_record_mismatch")
+        evidence = failed_evidence()
+        evidence["status"] = "passed"
+        self.assertEqual(self.refused(evidence), "failure_record_mismatch")
+        evidence = failed_evidence()
+        evidence["variants"][0]["status"] = "measured"
+        self.assertEqual(self.refused(evidence), "failure_record_mismatch")
+        evidence = query_evidence()
+        evidence["status"] = "failed"
+        self.assertEqual(self.refused(evidence), "failure_record_mismatch")
 
     def test_warmup_latency_is_refused(self) -> None:
         evidence = query_evidence()
