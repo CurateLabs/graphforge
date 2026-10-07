@@ -210,7 +210,8 @@ mod tests {
             // Wrong declared record lengths.
             format!("{path}30 size={large}\n"),
             format!("{path}28 size={large}\n"),
-            format!("{path}028 size={large}\n"),
+            // Self-consistent but not the minimal length encoding.
+            format!("{path}020 size={large}\n"),
             format!("{path}19 size={large}"),
         ];
         for text in refused {
