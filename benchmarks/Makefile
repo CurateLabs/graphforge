@@ -1,4 +1,4 @@
-.PHONY: install gdc-acquire smoke smoke-python smoke-rust fly-adapter-static progressive-provider-attempt-static progressive-fly-transport-static local-admission progressive-qualification-list progressive-qualification-plan progressive-qualification-run progressive-qualification-project-s20 progressive-storage-qualification progressive-qualification-binaries progressive-provider-plan qualification-operator esc-readiness ingest-ladder-bundle parity-gate progressive-host-ladder-binaries progressive-host-ladder-plan progressive-host-ladder-run progressive-host-ladder-inventory progressive-host-ladder-reclaim retain-ladder-evidence
+.PHONY: install gdc-acquire smoke smoke-python smoke-rust fly-adapter-static progressive-provider-attempt-static progressive-fly-transport-static local-admission progressive-qualification-list progressive-qualification-plan progressive-qualification-run progressive-qualification-project-s20 progressive-storage-qualification progressive-qualification-binaries progressive-provider-plan qualification-operator esc-readiness ingest-ladder-bundle parity-gate progressive-host-ladder-binaries progressive-host-ladder-plan progressive-host-ladder-run progressive-host-ladder-inventory progressive-host-ladder-reclaim retain-ladder-evidence gdc-scorecard-binaries gdc-scorecard-run gdc-scorecard-render gdc-scorecard-inventory
 
 install:
 	uv sync --locked
@@ -171,6 +171,40 @@ progressive-host-ladder-reclaim: install
 	test -n "$(RUNG_SCALE)" && test -n "$(OUTPUT_DIR)" && test -n "$(WORK_ROOT)"
 	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.progressive_host_run \
 		--reclaim "$(RUNG_SCALE)" --output-dir "$(OUTPUT_DIR)" --work-root "$(WORK_ROOT)"
+
+# GDC scorecard ladders (#952) on the same host, work root and BenchExec Python
+# as the Graph500 ladder; serialize them with #900 ladder runs. LADDER is one
+# suite's graphforge-gdc-scorecard-ladder-spec/1 document. DATASET_CACHE holds
+# the pinned archives (see gdc-acquire) and is never reclaimed. Each rung runs
+# convert, load and query under BenchExec, checks the reference, reclaims its
+# workspace, and the ladder stops at the first rung that does not pass; the card
+# is rendered into OUTPUT_DIR (outside WORK_ROOT) when the ladder finishes.
+# THROUGH=<rung id> stops early, leaving the ladder open.
+gdc-scorecard-binaries:
+	CARGO_TARGET_DIR="$(HOST_TARGET_DIR)" cargo build --locked --release --manifest-path ../Cargo.toml -p graphforge-cli
+	CARGO_TARGET_DIR="$(HOST_TARGET_DIR)" cargo build --locked --release --manifest-path Cargo.toml --bin graphforge-benchmark-gdc-scorecard
+
+gdc-scorecard-run: install gdc-scorecard-binaries
+	test -n "$(LADDER)" && test -n "$(OUTPUT_DIR)" && test -n "$(WORK_ROOT)" && test -n "$(DATASET_CACHE)"
+	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.gdc_rung run \
+		--ladder "$(LADDER)" --output-dir "$(OUTPUT_DIR)" --work-root "$(WORK_ROOT)" \
+		--dataset-cache "$(DATASET_CACHE)" \
+		--gf "$(HOST_TARGET_DIR)/release/gf" \
+		--driver "$(HOST_TARGET_DIR)/release/graphforge-benchmark-gdc-scorecard" \
+		--benchexec-python "$(BENCHEXEC_PYTHON)" \
+		--reserved-headroom-bytes "$(RESERVED_HEADROOM_BYTES)" \
+		$(if $(QUIET_HOST_WAIT_SECONDS),--quiet-host-wait-seconds "$(QUIET_HOST_WAIT_SECONDS)",) \
+		$(if $(THROUGH),--through "$(THROUGH)",)
+
+gdc-scorecard-render: install
+	test -n "$(LADDER)" && test -n "$(OUTPUT_DIR)"
+	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.gdc_rung render \
+		--ladder "$(LADDER)" --output-dir "$(OUTPUT_DIR)"
+
+gdc-scorecard-inventory: install
+	test -n "$(WORK_ROOT)"
+	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.gdc_rung inventory \
+		--work-root "$(WORK_ROOT)"
 
 # #1530: retain one completed clean ladder's evidence before reporting the run.
 # DESTINATION is an out-of-tree archive directory; its path and MANIFEST.sha256
