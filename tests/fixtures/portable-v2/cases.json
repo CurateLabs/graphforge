@@ -3,7 +3,7 @@
   "positive_package_classes": ["complete", "ontology-only", "component-selective", "graph-data-subset"],
   "representations": ["expanded", "bundle"],
   "canonicalization": ["rfc8785-key-order", "unicode-nfc-path", "semantic-digest-domain-separation", "component-order", "dependency-order"],
-  "bundle_rules": ["utf8-path-order", "ustar-name-prefix", "local-pax-path-only", "pax-length", "mode-0644", "uid-gid-zero", "empty-owner-names", "mtime-zero", "octal-only", "checksum", "size", "zero-padding", "two-zero-end-blocks", "no-trailing-bytes", "uncompressed"],
+  "bundle_rules": ["utf8-path-order", "ustar-name-prefix", "local-pax-path-and-size", "pax-length", "mode-0644", "uid-gid-zero", "empty-owner-names", "mtime-zero", "octal-only", "checksum", "size", "zero-padding", "two-zero-end-blocks", "no-trailing-bytes", "uncompressed"],
   "negative_cases": [
     ["duplicate-json-member", "GF_INVALID_SEMANTIC_MANIFEST"],
     ["lone-unicode-surrogate", "GF_INVALID_SEMANTIC_MANIFEST"],

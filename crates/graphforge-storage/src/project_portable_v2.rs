@@ -14,6 +14,7 @@ pub(crate) use materialization::{
 mod authenticated_entries;
 use authenticated_entries::StreamHash;
 mod participant_files;
+pub(crate) mod pax;
 pub use participant_files::{PortableV2FileRef, PortableV2PackageIndex};
 pub(crate) mod research;
 mod semantic_validation;
@@ -414,7 +415,7 @@ fn preflight_bundle(
 ) -> Result<(), PortableV2Error> {
     let mut input = File::open(path)
         .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "cannot open bundle"))?;
-    let mut pending_pax = None;
+    let mut pending_pax: Option<pax::PaxHeader> = None;
     let mut admitted_manifest = None;
     let mut pending_composition: Option<Vec<u8>> = None;
     let mut admitted_composition = false;
@@ -429,8 +430,14 @@ fn preflight_bundle(
         if header.iter().all(|byte| *byte == 0) {
             break;
         }
-        let size = parse_octal(&header[124..136])?;
+        let field_size = parse_octal(&header[124..136])?;
         let raw_path = header_path(&header)?;
+        let pending_size = pending_pax.as_ref().and_then(|records| records.size);
+        let size = if header[156] == b'x' {
+            field_size
+        } else {
+            pax::entry_size(field_size, pending_size)?
+        };
         entries = entries.checked_add(1).ok_or_else(|| {
             PortableV2Error::new(PortableV2ErrorCode::LimitExceeded, "bundle entry count")
         })?;
@@ -450,13 +457,23 @@ fn preflight_bundle(
             ));
         }
         if header[156] == b'x' {
-            let bytes = read_unhashed_payload(&mut input, size, limits.max_path_bytes + 32)?;
-            pending_pax = Some(parse_pax(std::str::from_utf8(&bytes).map_err(|_| {
+            if pending_pax.is_some() {
+                return Err(PortableV2Error::new(
+                    PortableV2ErrorCode::InvalidStructure,
+                    "invalid PAX sequence",
+                ));
+            }
+            let bytes = read_unhashed_payload(
+                &mut input,
+                size,
+                limits.max_path_bytes + pax::PAX_RECORD_OVERHEAD_BYTES,
+            )?;
+            pending_pax = Some(pax::parse(std::str::from_utf8(&bytes).map_err(|_| {
                 PortableV2Error::new(PortableV2ErrorCode::InvalidPath, "PAX path is not UTF-8")
             })?)?);
             continue;
         }
-        let entry = pending_pax.take().unwrap_or(raw_path);
+        let entry = pending_pax.take().map_or(raw_path, |records| records.path);
         if entry == MANIFEST_PATH || entry == ONTOLOGY_COMPOSITION_PATH {
             let cap = limits.max_manifest_bytes;
             let bytes = read_unhashed_payload(
@@ -756,7 +773,7 @@ fn verify_bundle(
     );
     let mut entries = Vec::new();
     let mut total = 0u64;
-    let mut pending_pax: Option<(String, String)> = None;
+    let mut pending_pax: Option<(pax::PaxHeader, String)> = None;
     loop {
         check_cancel(cancelled)?;
         let mut header = [0u8; 512];
@@ -794,9 +811,10 @@ fn verify_bundle(
         }
         verify_header(&header)?;
         let kind = header[156];
-        let size = parse_octal(&header[124..136])?;
+        let field_size = parse_octal(&header[124..136])?;
         let raw_path = header_path(&header)?;
         if kind == b'x' {
+            let size = field_size;
             if pending_pax.is_some() || !raw_path.starts_with("PaxHeaders/") {
                 return Err(PortableV2Error::new(
                     PortableV2ErrorCode::InvalidStructure,
@@ -807,21 +825,21 @@ fn verify_bundle(
                 &mut file,
                 size,
                 &mut transport,
-                limits.max_path_bytes + 32,
+                limits.max_path_bytes + pax::PAX_RECORD_OVERHEAD_BYTES,
                 cancelled,
             )?;
             let text = std::str::from_utf8(&bytes).map_err(|_| {
                 PortableV2Error::new(PortableV2ErrorCode::InvalidPath, "PAX path is not UTF-8")
             })?;
-            let pax_path = parse_pax(text)?;
-            let suffix = &hex(&ContractSha256::digest(pax_path.as_bytes()))[..16];
+            let records = pax::parse(text)?;
+            let suffix = hex(&ContractSha256::digest(records.path.as_bytes()))[..16].to_owned();
             if raw_path != format!("PaxHeaders/{suffix}") {
                 return Err(PortableV2Error::new(
                     PortableV2ErrorCode::InvalidStructure,
                     "non-canonical PAX header name",
                 ));
             }
-            pending_pax = Some((pax_path, suffix.to_owned()));
+            pending_pax = Some((records, suffix));
             continue;
         }
         if kind != b'0' {
@@ -831,17 +849,25 @@ fn verify_bundle(
             ));
         }
         let used_pax = pending_pax.is_some();
-        let entry_path = if let Some((path, suffix)) = pending_pax.take() {
+        let (entry_path, size) = if let Some((records, suffix)) = pending_pax.take() {
             if raw_path != format!("PaxFiles/{suffix}") {
                 return Err(PortableV2Error::at(
                     PortableV2ErrorCode::InvalidStructure,
-                    &path,
+                    &records.path,
                     "non-canonical PAX placeholder",
                 ));
             }
-            path
+            if records.size.is_none() && canonical_ustar_split(&records.path).is_some() {
+                return Err(PortableV2Error::at(
+                    PortableV2ErrorCode::InvalidStructure,
+                    &records.path,
+                    "unnecessary PAX header",
+                ));
+            }
+            let size = pax::entry_size(field_size, records.size)?;
+            (records.path, size)
         } else {
-            raw_path.clone()
+            (raw_path.clone(), pax::entry_size(field_size, None)?)
         };
         verify_canonical_header_path(&header, &entry_path, used_pax)?;
         validate_path(&entry_path, limits.max_path_bytes)?;
@@ -1740,21 +1766,6 @@ fn read_padding(r: &mut File, size: u64, h: &mut StreamHash) -> Result<(), Porta
     }
     Ok(())
 }
-fn parse_pax(s: &str) -> Result<String, PortableV2Error> {
-    let space = s
-        .find(' ')
-        .ok_or_else(|| PortableV2Error::new(PortableV2ErrorCode::InvalidStructure, "PAX record"))?;
-    let n = s[..space]
-        .parse::<usize>()
-        .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::InvalidStructure, "PAX length"))?;
-    if n != s.len() || !s.ends_with('\n') || !s[space + 1..].starts_with("path=") {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::InvalidStructure,
-            "PAX record",
-        ));
-    }
-    Ok(s[space + 6..s.len() - 1].into())
-}
 fn sha(s: &str) -> bool {
     s.len() == 64
         && s.bytes()
@@ -2126,5 +2137,171 @@ mod tests {
         assert_eq!(expanded.component_count, bundled.component_count);
         assert_eq!(bundled.representation, PortableV2Representation::Bundle);
         assert_ne!(expanded.transport_digest, bundled.transport_digest);
+    }
+
+    /// One raw header with an explicit name, typeflag and `size` field.
+    fn raw_header(name: &str, kind: u8, size_field: u64) -> Vec<u8> {
+        let mut h = [0u8; 512];
+        h[..name.len()].copy_from_slice(name.as_bytes());
+        octal(&mut h[100..108], 0o644);
+        octal(&mut h[108..116], 0);
+        octal(&mut h[116..124], 0);
+        octal(&mut h[124..136], size_field);
+        octal(&mut h[136..148], 0);
+        h[148..156].fill(b' ');
+        h[156] = kind;
+        h[257..263].copy_from_slice(b"ustar\0");
+        h[263..265].copy_from_slice(b"00");
+        let sum: u64 = h.iter().map(|b| u64::from(*b)).sum();
+        h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+        h.to_vec()
+    }
+
+    fn padded(mut bytes: Vec<u8>) -> Vec<u8> {
+        bytes.resize(bytes.len().div_ceil(512) * 512, 0);
+        bytes
+    }
+
+    /// The fixture package as a bundle whose ontology payload is carried by
+    /// a local PAX header with `records` and the given ustar `size` field.
+    fn bundle_with_pax_entry(records: &str, size_field: u64) -> tempfile::NamedTempFile {
+        const PAX_PATH: &str = "data/components/ontology/core-ontology/ontology.json";
+        let root = package();
+        let mut paths = Vec::new();
+        walk(
+            root.path(),
+            root.path(),
+            &mut paths,
+            PortableV2Limits::default(),
+            None,
+        )
+        .unwrap();
+        paths.sort();
+        let mut bundle = Vec::new();
+        for path in paths {
+            let payload = fs::read(root.path().join(&path)).unwrap();
+            let length = payload.len() as u64;
+            // Every other entry keeps its canonical encoding at the current limit.
+            let (records, size_field) = if path == PAX_PATH {
+                (records.to_owned(), size_field)
+            } else if length > pax::ustar_size_limit() {
+                (pax::encode(&path, length), 0)
+            } else {
+                bundle.extend(tar_entry(&path, &payload));
+                continue;
+            };
+            let suffix = &hex(&ContractSha256::digest(path.as_bytes()))[..16];
+            bundle.extend(raw_header(
+                &format!("PaxHeaders/{suffix}"),
+                b'x',
+                records.len() as u64,
+            ));
+            bundle.extend(padded(records.as_bytes().to_vec()));
+            bundle.extend(raw_header(&format!("PaxFiles/{suffix}"), b'0', size_field));
+            bundle.extend(padded(payload));
+        }
+        bundle.extend([0u8; 1024]);
+        let file = tempfile::NamedTempFile::new().unwrap();
+        fs::write(file.path(), bundle).unwrap();
+        file
+    }
+
+    /// Run the bounded preflight census and the authenticating scan
+    /// independently, so each bundle reader is held to the refusal.
+    fn read_both(bundle: &Path) -> [Result<(), PortableV2Error>; 2] {
+        let limits = PortableV2Limits::default();
+        [
+            preflight(bundle, limits, None),
+            scan(bundle, PortableV2Mode::Full, limits, None, None, None).map(|_| ()),
+        ]
+    }
+
+    #[test]
+    fn bundle_readers_accept_a_canonical_pax_size_and_refuse_malformed_ones() {
+        const PAX_PATH: &str = "data/components/ontology/core-ontology/ontology.json";
+        let path = pax::record("path", PAX_PATH);
+        let size = |value: &str| format!("{path}{}", pax::record("size", value));
+        // The payload is `{}`; a limit of 1 makes it an oversized entry.
+        let _limit = pax::test_seam::lower_ustar_size_limit(1);
+
+        let canonical = bundle_with_pax_entry(&size("2"), 0);
+        for result in read_both(canonical.path()) {
+            result.unwrap();
+        }
+        let report = verify_portable_v2(
+            canonical.path(),
+            PortableV2Mode::Full,
+            PortableV2Limits::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(report.representation, PortableV2Representation::Bundle);
+
+        let refused = [
+            // The ustar field contradicts the size record.
+            ("contradictory field", bundle_with_pax_entry(&size("2"), 2)),
+            ("contradictory field", bundle_with_pax_entry(&size("2"), 1)),
+            // A size above the limit without a size record.
+            ("missing record", bundle_with_pax_entry(&path, 2)),
+            // A size record the ustar field could carry.
+            ("record fits field", bundle_with_pax_entry(&size("1"), 0)),
+            // Malformed or non-canonical records.
+            ("leading zero", bundle_with_pax_entry(&size("02"), 0)),
+            ("non-digit", bundle_with_pax_entry(&size("2x"), 0)),
+            (
+                "overflow",
+                bundle_with_pax_entry(&size("18446744073709551616"), 0),
+            ),
+            (
+                "wrong record length",
+                bundle_with_pax_entry(&format!("{path}8 size=2\n"), 0),
+            ),
+            (
+                "non-minimal record length",
+                bundle_with_pax_entry(&format!("{path}10 size=2\n"), 0),
+            ),
+            (
+                "size before path",
+                bundle_with_pax_entry(&format!("{}{path}", pax::record("size", "2")), 0),
+            ),
+            (
+                "unknown keyword",
+                bundle_with_pax_entry(&format!("{path}{}", pax::record("mtime", "0")), 0),
+            ),
+            (
+                "duplicate size",
+                bundle_with_pax_entry(&format!("{}{}", size("2"), pax::record("size", "2")), 0),
+            ),
+            // A declared size beyond the archive cannot be misread as payload.
+            ("beyond archive", bundle_with_pax_entry(&size("1048576"), 0)),
+        ];
+        for (case, bundle) in refused {
+            for result in read_both(bundle.path()) {
+                assert_eq!(
+                    result.unwrap_err().code,
+                    PortableV2ErrorCode::InvalidStructure,
+                    "{case}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_pax_header_for_a_path_that_fits_ustar_is_not_canonical() {
+        let records = pax::record(
+            "path",
+            "data/components/ontology/core-ontology/ontology.json",
+        );
+        let bundle = bundle_with_pax_entry(&records, 2);
+        let error = scan(
+            bundle.path(),
+            PortableV2Mode::Full,
+            PortableV2Limits::default(),
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, PortableV2ErrorCode::InvalidStructure);
     }
 }

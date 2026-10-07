@@ -22,5 +22,14 @@
       "archive_length": 3072,
       "archive_sha256": "82ad972222558c10255f9a727e7d1aa7f51de4fd796ffbc81ab638e5cac38311"
     }
+  ],
+  "header_vectors": [
+    {
+      "name": "canonical-local-pax-size-record",
+      "path": "data/components/graph-data/graph-tree/graph-objects/sha256/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "declared_size": 9964324864,
+      "header_length": 1536,
+      "header_sha256": "e35935ad366ca4e221086a294124f44f1ad2938929411ea8b3964c2f2fd4eb1a"
+    }
   ]
 }

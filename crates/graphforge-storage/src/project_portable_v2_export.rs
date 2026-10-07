@@ -16,13 +16,12 @@ mod transport;
 use planning::{inspect, package_class};
 pub use planning::{plan_complete_portable_v2, plan_selected_portable_v2};
 pub(crate) use transport::WrittenPackage;
-use transport::{bundle, entries, expanded};
+use transport::{bundle, expanded};
 
 type ExportError = PortableV2Error;
 
 const BAGIT: &[u8] = b"BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n";
 const BAG_INFO: &[u8] = b"Bag-Software-Agent: GraphForge portable-v2\nBagging-Date: 1970-01-01\n";
-const USTAR_MAX_ENTRY_BYTES: u64 = 0o77_777_777_777;
 
 /// Finite planner and streaming-writer budgets.
 pub type PortableV2ExportLimits = PortableV2Limits;
@@ -259,13 +258,6 @@ pub fn export_complete_portable_v2_with_allocation(
     operation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<PortableV2ExportReceipt, ExportError> {
     validate_limits(limits)?;
-    if output == PortableV2Output::Bundle
-        && entries(plan, limits.max_tag_manifest_bytes)?
-            .iter()
-            .any(|(_, source)| source.len() > USTAR_MAX_ENTRY_BYTES)
-    {
-        return Err(limit("bundle entry exceeds ustar size field"));
-    }
     let destination = destination.as_ref();
     let resolved = if operation.is_some() && destination.is_relative() {
         Some(std::env::current_dir().map_err(storage)?.join(destination))
@@ -722,9 +714,8 @@ fn hex(d: [u8; 32]) -> String {
             output
         })
 }
-fn limit(m: &str) -> ExportError {
-    let _ = m;
-    PortableV2Error::new(PortableV2ErrorCode::LimitExceeded, "export limit exceeded")
+fn limit(detail: &'static str) -> ExportError {
+    PortableV2Error::new(PortableV2ErrorCode::LimitExceeded, detail)
 }
 fn err(c: &str, m: &str) -> ExportError {
     let code = match c {
@@ -748,6 +739,7 @@ fn storage(e: impl std::fmt::Display) -> ExportError {
 #[cfg(test)]
 mod tests {
     mod historical_saved_queries;
+    mod large_entries;
     mod participant_files;
     mod saved_queries;
     mod semantic_refusals;
