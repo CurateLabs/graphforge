@@ -257,6 +257,18 @@ fn encoded_checkpoints_are_independent_of_encoded_artifact_count() {
         "the old record must cross the lowered bound: {} <= {bound}",
         large.old_record
     );
+    eprintln!(
+        "encoded artifacts {} -> {}; encoded checkpoint {} -> {} B; published {} -> {} B; \
+         bound {bound} B; old record {} B; smallest entry {} B",
+        small.artifacts,
+        large.artifacts,
+        small.encoded,
+        large.encoded,
+        small.published,
+        large.published,
+        large.old_record,
+        large.smallest_entry
+    );
     // The slope: 32 more encoded artifacts, and each record grows by less
     // than one ledger entry (only counter digits change).
     for (phase, small_bytes, large_bytes) in [
