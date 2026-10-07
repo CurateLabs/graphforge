@@ -49,7 +49,9 @@ about a fifth of the limit. The count roughly doubles with each Graph500
 scale step, which projects to about 86,000 files (86%) at S28 and over the
 limit at S29. Those two figures are projections, not measurements. Raising the
 limit means changing the default and any bound derived from it, then
-re-checking manifest resolution memory and work.
+re-checking manifest resolution memory and work. Construction's encoded
+inventory is one such bound: 512 bytes per graph file, 51,200,000 bytes at the
+default limit, enforced when the inventory is written and when it is read.
 
 ## Choose a workload you can measure
 
