@@ -205,7 +205,9 @@ def _extract_zip(archive: Path, destination: Path) -> None:
                     )
             bundle.extractall(destination)
     except (zipfile.BadZipFile, OSError) as error:
-        raise DatasetCacheError("extraction_failed", f"unzip failed for {archive}: {error}") from error
+        raise DatasetCacheError(
+            "extraction_failed", f"unzip failed for {archive}: {error}"
+        ) from error
 
 
 def extract_archive(archive: Path, destination: Path) -> Path:

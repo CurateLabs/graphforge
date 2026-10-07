@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::collections::BTreeMap;
 
 use arrow::array::{
-    Array, ArrayRef, BooleanBuilder, FixedSizeBinaryBuilder, Float64Builder, Int64Builder,
-    Int32Builder, ListBuilder, StringArray, StringBuilder, StructBuilder, Time64NanosecondBuilder,
+    Array, ArrayRef, BooleanBuilder, FixedSizeBinaryBuilder, Float64Builder, Int32Builder,
+    Int64Builder, ListBuilder, StringArray, StringBuilder, StructBuilder, Time64NanosecondBuilder,
 };
 use arrow::datatypes::{DataType, Field, Fields, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
@@ -23,11 +23,11 @@ use crate::glob;
 use crate::identity::{Uuid, edge_uuid, hex, node_uuid};
 use crate::mapping::{EdgeTable, Mapping, NodeTable, Property, PropertyType, TemporalFormat};
 use crate::source::read_table;
-use crate::temporal::{DateTime, parse_date, parse_datetime};
 use crate::spill::{
     Budget, DEFAULT_MEMORY_BUDGET_BYTES, Duplicate, Key, KeySorter, SpillDir, check_nodes,
     find_dangling,
 };
+use crate::temporal::{DateTime, parse_date, parse_datetime};
 
 pub const MANIFEST_FILE: &str = "conversion-manifest.json";
 pub const MANIFEST_SCHEMA: &str = "graphforge-gdc-conversion-manifest/1";
@@ -417,7 +417,9 @@ impl Column {
                 StructBuilder::new(date_fields(), vec![Box::new(Int64Builder::new())]),
                 property.temporal_format(),
             ),
-            PropertyType::Datetime => Self::Datetime(datetime_builder(), property.temporal_format()),
+            PropertyType::Datetime => {
+                Self::Datetime(datetime_builder(), property.temporal_format())
+            }
             PropertyType::List => Self::List(
                 ListBuilder::new(StringBuilder::new()).with_field(list_item()),
                 property

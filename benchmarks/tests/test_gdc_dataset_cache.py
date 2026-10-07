@@ -511,7 +511,9 @@ class LdbcCsvAssetTests(unittest.TestCase):
         url = f"{LDBC}/finbench/sf1_read_params.zip"
         for member in ("../escaped.csv", "/absolute.csv", "a/../../escaped.csv"):
             self.payloads[url] = _zip({member: b"x"})
-            self.pin["datasets"][2] = self.dataset("sf1_read_params", "finbench/sf1_read_params.zip", "parameter")
+            self.pin["datasets"][2] = self.dataset(
+                "sf1_read_params", "finbench/sf1_read_params.zip", "parameter"
+            )
             self.write_pin(self.pin)
             shutil.rmtree(self.cache_root, ignore_errors=True)
             with self.assertRaises(cache.DatasetCacheError) as raised:
@@ -526,9 +528,7 @@ class LdbcCsvAssetTests(unittest.TestCase):
             url = f"{LDBC}/{path}"
             payloads = {**self.payloads, url: b"neither gzip nor zip"}
             pin = copy.deepcopy(self.pin)
-            pin["datasets"][index]["checksum_sha256"] = hashlib.sha256(
-                payloads[url]
-            ).hexdigest()
+            pin["datasets"][index]["checksum_sha256"] = hashlib.sha256(payloads[url]).hexdigest()
             self.write_pin(pin)
             shutil.rmtree(self.cache_root, ignore_errors=True)
             with self.assertRaises(cache.DatasetCacheError) as raised:

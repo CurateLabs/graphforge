@@ -9,7 +9,6 @@ each other and to the arithmetic that explains every difference.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import unittest
 
 from graphforge_bench import gdc_dataset_cache as cache
@@ -98,9 +97,7 @@ class LdbcCsvScorecardTests(unittest.TestCase):
         for suite_id, ladder in self.ladders.items():
             self.schema.validate(ladder)
             self.assertEqual(ladder["suite_id"], suite_id)
-            self.assertEqual(
-                ladder["load_mapping"], f"profiles/gdc/{suite_id}-load-mapping.json"
-            )
+            self.assertEqual(ladder["load_mapping"], f"profiles/gdc/{suite_id}-load-mapping.json")
             pinned = {
                 item["id"]: item["source"]
                 for item in self.pins[suite_id]["datasets"]

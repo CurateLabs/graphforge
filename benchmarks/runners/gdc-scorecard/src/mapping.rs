@@ -100,7 +100,9 @@ impl Property {
     /// The list separator. [`Mapping::parse`] guarantees a list has one.
     #[must_use]
     pub fn separator_char(&self) -> Option<char> {
-        self.separator.as_deref().and_then(|text| text.chars().next())
+        self.separator
+            .as_deref()
+            .and_then(|text| text.chars().next())
     }
 }
 
@@ -277,11 +279,9 @@ fn check_property_options(table: &str, property: &Property) -> Result<(), Conver
         (Some(_), kind) if kind != PropertyType::List => Err(invalid(format!(
             "table {table} property {name}: separator applies only to a list"
         ))),
-        (Some(separator), _) if separator.chars().count() != 1 || separator == "|" => {
-            Err(invalid(format!(
-                "table {table} property {name}: separator must be one character other than |"
-            )))
-        }
+        (Some(separator), _) if separator.chars().count() != 1 || separator == "|" => Err(invalid(
+            format!("table {table} property {name}: separator must be one character other than |"),
+        )),
         _ => Ok(()),
     }
 }

@@ -86,7 +86,10 @@ fn read_error(path: &Path, error: &std::io::Error) -> ConvertError {
             | std::io::ErrorKind::InvalidInput
             | std::io::ErrorKind::UnexpectedEof
     ) {
-        ConvertError::new(Cause::MalformedInput, format!("{}: {error}", path.display()))
+        ConvertError::new(
+            Cause::MalformedInput,
+            format!("{}: {error}", path.display()),
+        )
     } else {
         io_error(&path.display().to_string(), error)
     }

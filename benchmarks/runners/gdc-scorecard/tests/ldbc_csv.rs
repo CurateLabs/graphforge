@@ -57,7 +57,8 @@ fn strings(list: &ListArray, row: usize) -> Option<Vec<String>> {
     })
 }
 
-const BI: &str = "bi-sf0-composite-projected-fk/graphs/csv/bi/composite-projected-fk/initial_snapshot";
+const BI: &str =
+    "bi-sf0-composite-projected-fk/graphs/csv/bi/composite-projected-fk/initial_snapshot";
 
 #[test]
 fn fixture_reads_gzip_parts_by_wildcard_in_sorted_order_and_skips_side_files() {
@@ -100,7 +101,11 @@ fn fixture_reads_gzip_parts_by_wildcard_in_sorted_order_and_skips_side_files() {
     );
     assert_eq!(output(&manifest, "place")["label"], "Place");
     assert_eq!(output(&manifest, "person")["labels"], json!({"Person": 3}));
-    assert!(output(&manifest, "person_knows_person").get("labels").is_none());
+    assert!(
+        output(&manifest, "person_knows_person")
+            .get("labels")
+            .is_none()
+    );
 }
 
 #[test]
@@ -254,7 +259,10 @@ fn datetime_at(batch: &RecordBatch, name: &str, row: usize) -> Option<(i64, i64,
         return None;
     }
     let field = |index: usize| array.column(index).as_any();
-    assert!(array.column(3).is_null(row), "an LDBC datetime names no zone");
+    assert!(
+        array.column(3).is_null(row),
+        "an LDBC datetime names no zone"
+    );
     Some((
         field(0).downcast_ref::<Int64Array>().unwrap().value(row),
         field(1)
@@ -335,7 +343,8 @@ fn place(rows: &str) -> Vec<(&'static str, Vec<u8>)> {
 
 #[test]
 fn gzip_input_converts_to_the_same_bytes_as_the_plain_file() {
-    let rows = "1|city|1900-01-01|2010-01-03T15:10:41.499+00:00|a;b\n2|country||2010-01-03T15:10:41Z|\n";
+    let rows =
+        "1|city|1900-01-01|2010-01-03T15:10:41.499+00:00|a;b\n2|country||2010-01-03T15:10:41Z|\n";
     let plain = PLACE.replace("Place/*.csv.gz", "Place/*.csv");
     assert_ne!(plain, PLACE);
     let from_gzip = run(&place(rows), PLACE).unwrap();
@@ -358,8 +367,14 @@ fn values_outside_the_declared_encoding_fail_typed() {
         ("1||||\n", "empty label value"),
         ("1|city|1900-02-30||\n", "date that does not exist"),
         ("1|city|1900-01-01 00:00:00||\n", "date in another format"),
-        ("1|city||2010-01-03T15:10:41.499|\n", "datetime without offset"),
-        ("1|city||2010-01-03 15:10:41.499+00:00|\n", "datetime without T"),
+        (
+            "1|city||2010-01-03T15:10:41.499|\n",
+            "datetime without offset",
+        ),
+        (
+            "1|city||2010-01-03 15:10:41.499+00:00|\n",
+            "datetime without T",
+        ),
         ("1|city|||a;;b\n", "empty list item"),
     ] {
         let error = run(&place(rows), PLACE).unwrap_err();
@@ -405,11 +420,17 @@ fn patterns_that_match_nothing_or_overlap_are_refused() {
 fn mapping_options_must_fit_their_property_type() {
     for (bad, why) in [
         (
-            PLACE.replace(r#""label_values": {"city": "City", "country": "Country"},"#, ""),
+            PLACE.replace(
+                r#""label_values": {"city": "City", "country": "Country"},"#,
+                "",
+            ),
             "label_column without label_values",
         ),
         (
-            PLACE.replace(r#""label_values": {"city": "City", "country": "Country"}"#, r#""label_values": {}"#),
+            PLACE.replace(
+                r#""label_values": {"city": "City", "country": "Country"}"#,
+                r#""label_values": {}"#,
+            ),
             "empty label_values",
         ),
         (
@@ -429,11 +450,17 @@ fn mapping_options_must_fit_their_property_type() {
             "separator on a date",
         ),
         (
-            PLACE.replace(r#""type": "list", "separator": ";""#, r#""type": "string", "format": "iso8601""#),
+            PLACE.replace(
+                r#""type": "list", "separator": ";""#,
+                r#""type": "string", "format": "iso8601""#,
+            ),
             "format on a string",
         ),
         (
-            PLACE.replace(r#""type": "datetime""#, r#""type": "datetime", "format": "rfc2822""#),
+            PLACE.replace(
+                r#""type": "datetime""#,
+                r#""type": "datetime", "format": "rfc2822""#,
+            ),
             "unknown format",
         ),
     ] {

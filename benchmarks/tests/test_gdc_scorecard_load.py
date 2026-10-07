@@ -235,8 +235,10 @@ class ScorecardLoadTests(unittest.TestCase):
             2,
         )
         self.assertEqual(
-            count("MATCH (:City)-[r:IS_PART_OF]->(:Country)-[:IS_PART_OF]->(:Continent) "
-                  "RETURN count(r)"),
+            count(
+                "MATCH (:City)-[r:IS_PART_OF]->(:Country)-[:IS_PART_OF]->(:Continent) "
+                "RETURN count(r)"
+            ),
             2,
         )
         self.assertEqual(count("MATCH ()-[r:KNOWS]->() RETURN count(r)"), 3)

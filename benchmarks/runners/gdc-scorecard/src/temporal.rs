@@ -24,8 +24,7 @@ impl DateTime {
     /// Nanoseconds since the Unix epoch of the instant this value names.
     #[must_use]
     pub fn instant_nanos(&self) -> i128 {
-        i128::from(self.epoch_days) * 86_400 * i128::from(NANOS_PER_SECOND)
-            + i128::from(self.nanos)
+        i128::from(self.epoch_days) * 86_400 * i128::from(NANOS_PER_SECOND) + i128::from(self.nanos)
             - i128::from(self.offset_seconds) * i128::from(NANOS_PER_SECOND)
     }
 }
