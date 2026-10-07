@@ -1,0 +1,10 @@
+{"schema": "graphforge-gdc-snb-bi-expected/1", "operation": "BI7", "authority": "independent_python_derivation_from_fixture_csv", "rows": [
+    ["Meryl_Streep", 4],
+    ["Slavoj_Zizek", 3],
+    ["Che_Guevara", 2],
+    ["Hank_Williams", 2],
+    ["Manuel_Noriega", 2],
+    ["Abbas_I_of_Persia", 1],
+    ["Elvis_Presley", 1],
+    ["Enrique_Iglesias", 1]
+  ]}

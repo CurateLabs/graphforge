@@ -1,0 +1,6 @@
+{"schema": "graphforge-gdc-snb-bi-expected/1", "operation": "BI2", "authority": "independent_python_derivation_from_fixture_csv", "rows": [
+    ["Frank_Sinatra", 4, 1, 3],
+    ["Elvis_Presley", 2, 1, 1],
+    ["Enrique_Iglesias", 1, 2, 1],
+    ["Hank_Williams", 1, 0, 1]
+  ]}

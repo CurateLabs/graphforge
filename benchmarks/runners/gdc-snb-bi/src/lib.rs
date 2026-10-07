@@ -12,6 +12,9 @@
 
 #![forbid(unsafe_code)]
 
+pub mod queries;
+pub mod query_fixture;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -612,148 +615,33 @@ impl std::error::Error for SuiteError {}
 
 /// Map an SNB BI operation onto the public GraphForge surface.
 ///
-/// Analytical reads that are ordinary graph traversals, aggregations, grouped
-/// counts, or top-k rankings map to Cypher. Reads that require a weighted
-/// shortest-path computation (BI15/BI19/BI20) and the entire batch maintenance
-/// stream (inserts/deletes) fail closed with a typed cause instead of silently
-/// approximating semantics the public surface does not expose.
+/// Analytical reads map to the runnable Cypher in [`queries::BI_QUERIES`].
+/// Reads that require a weighted shortest-path computation (BI15/BI19/BI20) and
+/// the entire batch maintenance stream (inserts/deletes) fail closed with a
+/// typed cause instead of silently approximating semantics the public surface
+/// does not expose.
 pub fn map_operation(operation: Operation) -> MappingOutcome {
     match operation {
-        Operation::Bi1 => compatible(
-            "cypher",
-            "MATCH (m:Message) WHERE m.creationDate<$date WITH m, m.creationDate.year AS year, \
-             (m:Comment) AS isComment, CASE ... END AS lengthCategory \
-             RETURN year, isComment, lengthCategory, count(*), sum(m.length) ORDER BY year DESC, isComment, lengthCategory",
-            "posting summary: grouped counts and length aggregation over messages before a date",
-        ),
-        Operation::Bi2 => compatible(
-            "cypher",
-            "MATCH (t:Tag)<-[:HAS_TAG]-(m:Message) WHERE m.creationDate window \
-             RETURN t.name, countWindow1, countWindow2, abs(diff) ORDER BY diff DESC, t.name ASC",
-            "tag evolution: per-tag message counts across two windows; official total order diff DESC, tag.name ASC",
-        ),
-        Operation::Bi3 => compatible(
-            "cypher",
-            "MATCH (co:Country {name:$country})<-[:IS_PART_OF]-(:City)<-[:IS_LOCATED_IN]-(p:Person)<-[:HAS_MODERATOR]-(f:Forum)-[:CONTAINER_OF]->(post)<-[:REPLY_OF*0..]-(msg)-[:HAS_TAG]->(:Tag)-[:HAS_TYPE]->(tc:TagClass {name:$class}) \
-             RETURN f.id, f.title, f.creationDate, p.id, count(DISTINCT msg) ORDER BY count DESC, f.id LIMIT 20",
-            "popular topics in a country: traversal + distinct count top-k",
-        ),
-        Operation::Bi4 => compatible(
-            "cypher",
-            "MATCH (co:Country)<-[:IS_PART_OF]-(:City)<-[:IS_LOCATED_IN]-(p:Person)<-[:HAS_MEMBER]-(f:Forum) \
-             RETURN co.name, top forum by member count, p ORDER BY ... LIMIT 100",
-            "top forum member per country: aggregation with deterministic tie-break",
-        ),
-        Operation::Bi5 => compatible(
-            "cypher",
-            "MATCH (t:Tag {name:$tag})<-[:HAS_TAG]-(msg:Message)-[:HAS_CREATOR]->(p:Person) \
-             OPTIONAL MATCH (msg)<-[l:LIKES]-() OPTIONAL MATCH (msg)<-[:REPLY_OF]-(c) \
-             RETURN p.id, count(DISTINCT l), count(DISTINCT c), count(DISTINCT msg), score ORDER BY score DESC, p.id LIMIT 100",
-            "top posters of a tag: per-person like/reply/message aggregation top-k",
-        ),
-        Operation::Bi6 => compatible(
-            "cypher",
-            "MATCH (t:Tag {name:$tag})<-[:HAS_TAG]-(msg)-[:HAS_CREATOR]->(p:Person)<-[:HAS_CREATOR]-(m2)<-[:LIKES]-(liker) \
-             RETURN p.id, sum(likes) AS authority ORDER BY authority DESC, p.id LIMIT 100",
-            "authoritative users on a topic: summed like counts as authority score",
-        ),
-        Operation::Bi7 => compatible(
-            "cypher",
-            "MATCH (t:Tag {name:$tag})<-[:HAS_TAG]-(msg)<-[:REPLY_OF]-(comment)-[:HAS_TAG]->(related:Tag) \
-             WHERE NOT (comment)-[:HAS_TAG]->(t) RETURN related.name, count(DISTINCT comment) ORDER BY count DESC, related.name LIMIT 100",
-            "related topics: co-occurring tags on replies to a tag's messages",
-        ),
-        Operation::Bi8 => compatible(
-            "cypher",
-            "MATCH (t:Tag {name:$tag}) OPTIONAL MATCH (p:Person)-[:HAS_INTEREST]->(t) \
-             OPTIONAL MATCH (p)<-[:HAS_CREATOR]-(msg)-[:HAS_TAG]->(t) WITH p, interestScore \
-             OPTIONAL MATCH (p)-[:KNOWS]-(f) RETURN p.id, score + friendScore ORDER BY total DESC, p.id LIMIT 100",
-            "central person for a tag: interest + friends' interest scoring top-k",
-        ),
-        Operation::Bi9 => compatible(
-            "cypher",
-            "MATCH (p:Person)<-[:HAS_CREATOR]-(post:Post)<-[:REPLY_OF*0..]-(reply) \
-             WHERE post.creationDate window RETURN p.id, count(DISTINCT post), count(DISTINCT reply), sum(reply.length) ORDER BY threadCount DESC, p.id LIMIT 100",
-            "top thread initiators: variable-length reply-tree traversal with aggregation",
-        ),
-        Operation::Bi10 => compatible(
-            "cypher",
-            "MATCH (p:Person {id:$id})-[:KNOWS*1..2]-(f:Person)-[:IS_LOCATED_IN]->(:City)-[:IS_PART_OF]->(:Country {name:$country}) \
-             OPTIONAL MATCH (f)<-[:HAS_CREATOR]-(msg)-[:HAS_TAG]->(:Tag)-[:HAS_TYPE]->(:TagClass {name:$class}) \
-             RETURN f.id, count(msg) AS score ORDER BY score DESC, f.id LIMIT 100",
-            "experts in a social circle: bounded KNOWS traversal + tag-class filter",
-        ),
-        Operation::Bi11 => compatible(
-            "cypher",
-            "MATCH (a:Person)-[:IS_LOCATED_IN]->(:City)-[:IS_PART_OF]->(:Country {name:$country}) \
-             MATCH (a)-[k1:KNOWS]-(b)-[k2:KNOWS]-(c)-[k3:KNOWS]-(a) WHERE dates within window AND a.id<b.id<c.id \
-             RETURN count(*)",
-            "friend triangles in a country: undirected 3-cycle pattern count",
-        ),
-        Operation::Bi12 => compatible(
-            "cypher",
-            "MATCH (p:Person) OPTIONAL MATCH (p)<-[:HAS_CREATOR]-(msg:Message) \
-             WHERE msg.content IS NOT NULL AND msg.length>$len WITH p, count(msg) AS messageCount \
-             RETURN messageCount, count(p) ORDER BY count(p) DESC, messageCount DESC",
-            "message-count histogram: persons grouped by message count; grouped set (normalized validation)",
-        ),
-        Operation::Bi13 => compatible(
-            "cypher",
-            "MATCH (co:Country {name:$country})<-[:IS_PART_OF]-(:City)<-[:IS_LOCATED_IN]-(zombie:Person) \
-             WHERE zombie.creationDate<$date WITH zombie WHERE messageCount below threshold \
-             WITH collect(zombie) AS zombies MATCH ... RETURN zombie.id, zombieScore ORDER BY zombieScore DESC, zombie.id LIMIT 100",
-            "zombies in a country: two-pass zombie-set membership then like-ratio scoring, expressible with WITH",
-        ),
-        Operation::Bi14 => compatible(
-            "cypher",
-            "MATCH (a:Person)-[:IS_LOCATED_IN]->(:City)-[:IS_PART_OF]->(c1:Country {name:$countryX}) \
-             MATCH (b:Person)-[:IS_LOCATED_IN]->(:City)-[:IS_PART_OF]->(c2:Country {name:$countryY}) \
-             MATCH (a)-[:KNOWS]-(b) RETURN a, b, symmetricInteractionScore ORDER BY score DESC, a.id, b.id LIMIT 100",
-            "international dialog: symmetric interaction scoring over cross-country friend pairs",
-        ),
-        Operation::Bi15 => MappingOutcome::SemanticIncompatibility {
-            cause: "weighted_shortest_path_not_exposed",
-            detail: "BI15 computes the minimum-weight trusted connection path between two persons where each \
-                     KNOWS edge weight is a dynamically computed interaction cost; the public surface exposes \
-                     unweighted single-path analyst verbs and pattern matching but not weighted shortest-path \
-                     search over a computed edge-weight function"
-                .into(),
-        },
-        Operation::Bi16 => compatible(
-            "cypher",
-            "MATCH (p:Person)<-[:HAS_CREATOR]-(msg)-[:HAS_TAG]->(:Tag {name:$tagA}) WHERE msg.creationDate=$dateA \
-             MATCH (p)<-[:HAS_CREATOR]-(msg2)-[:HAS_TAG]->(:Tag {name:$tagB}) WHERE msg2.creationDate=$dateB \
-             RETURN p.id, countA, countB ORDER BY countA+countB DESC, p.id",
-            "fake-news detection: per-person tagged-message counts on two days; grouped set (normalized validation)",
-        ),
-        Operation::Bi17 => compatible(
-            "cypher",
-            "MATCH (t:Tag {name:$tag}) MATCH (p1)<-[:HAS_CREATOR]-(m1)-[:HAS_TAG]->(t) \
-             MATCH (m1)<-[:REPLY_OF]-(m2)-[:HAS_CREATOR]->(p2) ... with temporal and knows constraints \
-             RETURN p1.id, count(DISTINCT structuralMatch) ORDER BY count DESC, p1.id LIMIT 10",
-            "information propagation: multi-hop message/reply pattern with temporal constraints",
-        ),
-        Operation::Bi18 => compatible(
-            "cypher",
-            "MATCH (p:Person {id:$id})-[:KNOWS]-(f)-[:KNOWS]-(fof) WHERE NOT (p)-[:KNOWS]-(fof) AND p<>fof \
-             OPTIONAL MATCH (fof)-[:HAS_INTEREST]->(t:Tag)<-[:HAS_INTEREST]-(p) \
-             RETURN fof.id, count(DISTINCT f) AS mutual, count(DISTINCT t) ORDER BY mutual DESC, fof.id LIMIT 20",
-            "friend recommendation: friends-of-friends by mutual-friend count top-k",
-        ),
-        Operation::Bi19 => MappingOutcome::SemanticIncompatibility {
-            cause: "weighted_shortest_path_not_exposed",
-            detail: "BI19 finds the minimum-cost interaction path between persons located in two cities, where \
-                     each KNOWS edge cost is derived from the reciprocal of the reply/comment interaction count; \
-                     weighted shortest-path search over a computed edge-weight function is not on the public surface"
-                .into(),
-        },
-        Operation::Bi20 => MappingOutcome::SemanticIncompatibility {
-            cause: "weighted_shortest_path_not_exposed",
-            detail: "BI20 (recruitment) computes the minimum-weight path from a person to a company's employees \
-                     over the KNOWS graph with per-person derived edge weights; the public surface exposes \
-                     unweighted path verbs only, not weighted shortest-path search over a computed weight function"
-                .into(),
-        },
+        Operation::Bi1
+        | Operation::Bi2
+        | Operation::Bi3
+        | Operation::Bi4
+        | Operation::Bi5
+        | Operation::Bi6
+        | Operation::Bi7
+        | Operation::Bi8
+        | Operation::Bi9
+        | Operation::Bi10
+        | Operation::Bi11
+        | Operation::Bi12
+        | Operation::Bi13
+        | Operation::Bi14
+        | Operation::Bi15
+        | Operation::Bi16
+        | Operation::Bi17
+        | Operation::Bi18
+        | Operation::Bi19
+        | Operation::Bi20 => map_analytical_read(operation),
         Operation::Ins1 => batch_update_incompatible("INS1 inserts a Person with dependency-time-ordered edges"),
         Operation::Ins2 => batch_update_incompatible("INS2 inserts a Person-likes-Post interaction"),
         Operation::Ins3 => batch_update_incompatible("INS3 inserts a Person-likes-Comment interaction"),
@@ -773,12 +661,26 @@ pub fn map_operation(operation: Operation) -> MappingOutcome {
     }
 }
 
-fn compatible(interface: &str, cypher_shape: &str, notes: &str) -> MappingOutcome {
-    MappingOutcome::Compatible(PublicApiMapping {
-        interface: interface.into(),
-        cypher_shape: cypher_shape.into(),
-        notes: notes.into(),
-    })
+/// Analytical reads map to their runnable Cypher in [`queries::BI_QUERIES`] or
+/// to their typed refusal in [`queries::REFUSED_READS`]; every read is in
+/// exactly one of the two.
+fn map_analytical_read(operation: Operation) -> MappingOutcome {
+    if let Some(query) = queries::bi_query(operation) {
+        return MappingOutcome::Compatible(PublicApiMapping {
+            interface: "cypher".into(),
+            cypher_shape: query.cypher.into(),
+            notes: match query.rewrite {
+                Some(rewrite) => format!("follows {}; {rewrite}", query.upstream),
+                None => format!("follows {}", query.upstream),
+            },
+        });
+    }
+    let refusal = queries::refused_read(operation)
+        .unwrap_or_else(|| panic!("{operation} is neither runnable nor refused"));
+    MappingOutcome::SemanticIncompatibility {
+        cause: refusal.cause,
+        detail: refusal.detail.into(),
+    }
 }
 
 fn batch_update_incompatible(detail: &str) -> MappingOutcome {
