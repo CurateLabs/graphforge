@@ -84,6 +84,7 @@ from graphforge_bench.progressive_host_run import (
 )
 from graphforge_bench.progressive_run import (
     ControllerError,
+    _native_authority,
     _parse_benchexec_xml,
     _resolve_executable,
     _run_benchexec,
@@ -876,6 +877,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             host_label=args.host_label,
             storage_medium=args.storage_medium,
         )
+        try:
+            # The same native BenchExec admission the Graph500 host ladder requires.
+            _native_authority()
+        except (ControllerError, OSError) as error:
+            raise LadderError("native_authority_unavailable", str(error)) from error
         results = climb(
             ladder,
             reserved_headroom_bytes=args.reserved_headroom_bytes,
@@ -890,10 +896,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             ],
             "finished": ladder_finished(ladder.spec, results),
         }
+        # A ladder ends at its first typed failure by design; that is a
+        # result, published on the card. Only a card that cannot be built
+        # (no passing rung) or a refused launch is an error.
         if summary["finished"]:
             summary["card"] = str(card.write_card(root, ladder.spec, ladder.output_dir)["text"])
         print(json.dumps(summary, sort_keys=True))
-        return 0 if results and results[-1]["status"] == "passed" else 1
+        return 0
     except (LadderError, RungInputError, card.CardError) as error:
         print(json.dumps({"error": {"cause": error.cause, "message": str(error)}}), file=sys.stderr)
         return 2
