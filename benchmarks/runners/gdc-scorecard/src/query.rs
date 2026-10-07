@@ -20,8 +20,9 @@ use sha2::{Digest, Sha256};
 use crate::identity::hex;
 
 pub use measure::{
-    Failure, LATENCY_CLOCK, MAX_ERROR_BYTES, Measured, Outcome, RESULT_DIGEST, Sample, Summary,
-    VariantMeasurement, Warmup, measure_variant, nearest_rank, result_digest,
+    Failure, LATENCY_CLOCK, MAX_ERROR_BYTES, Measured, Outcome, RESULT_DIGEST, RESULT_SCHEMA,
+    Rendered, ResultsDir, Sample, Summary, VariantMeasurement, Warmup, measure_variant,
+    nearest_rank, result_digest,
 };
 pub use reconcile::{CountPair, Reconciliation, reconcile};
 pub use workload::{
@@ -213,6 +214,21 @@ pub fn run(
     expected_counts: &[u8],
     executable_sha256: String,
 ) -> Result<Evidence, QueryError> {
+    run_with_results(project, workload, expected_counts, executable_sha256, None)
+}
+
+/// [`run`], also writing every measured result into `results` for a
+/// reference check; see [`ResultsDir`].
+///
+/// # Errors
+/// As [`run`], plus `io_error` when a result cannot be written.
+pub fn run_with_results(
+    project: &Path,
+    workload: &[u8],
+    expected_counts: &[u8],
+    executable_sha256: String,
+    results: Option<&ResultsDir>,
+) -> Result<Evidence, QueryError> {
     let parsed = parse_workload(workload)?;
     let expected = parse_expected_counts(expected_counts)?;
     let forge = open_project(project)?;
@@ -220,7 +236,7 @@ pub fn run(
     let variants = parsed
         .variants
         .iter()
-        .map(|variant| measure_variant(&forge, variant))
+        .map(|variant| measure_variant(&forge, variant, results))
         .collect::<Result<Vec<_>, _>>()?;
     let failures: Vec<FailedSample> = variants
         .iter()

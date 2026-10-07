@@ -8,8 +8,8 @@ use arrow::array::{ArrayRef, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use gdc_scorecard::query::{
-    Evidence, LATENCY_CLOCK, Measured, QueryCause, QueryError, Sample, nearest_rank, result_digest,
-    run,
+    Evidence, LATENCY_CLOCK, Measured, QueryCause, QueryError, Rendered, ResultsDir, Sample,
+    nearest_rank, result_digest, run, run_with_results,
 };
 use graphforge_api::GraphForge;
 use serde_json::{Value, json};
@@ -271,6 +271,84 @@ fn analyst_verbs_run_through_the_same_clock() {
     let bfs = &evidence.variants[2].samples;
     let (from_1, from_3) = (measured(&bfs[0]).rows, measured(&bfs[1]).rows);
     assert!(from_1 > from_3, "{from_1} vs {from_3}");
+}
+
+#[test]
+fn every_measured_result_is_written_with_the_cells_its_digest_covers() {
+    let root = tempfile::tempdir().unwrap();
+    let project = durable_project(root.path());
+    let results_path = root.path().join("results");
+    std::fs::create_dir(&results_path).unwrap();
+    let results = ResultsDir::new(&results_path).unwrap();
+    let broken = json!({"id": "broken", "ordered": true, "bindings": [{"id": "only"}],
+        "operation": {"kind": "cypher", "text": "MATCH (p:Person RETURN p"}});
+    let evidence = run_with_results(
+        &project,
+        &serde_json::to_vec(&workload(json!([people_by_min_id(), broken]))).unwrap(),
+        &serde_json::to_vec(&expected(4, 3)).unwrap(),
+        "0".repeat(64),
+        Some(&results),
+    )
+    .unwrap();
+
+    // One file per measured sample, in run order; the failed sample writes none.
+    let mut names: Vec<_> = std::fs::read_dir(&results_path)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["00000000.json", "00000001.json", "00000002.json"]);
+    let read = |name: &str| -> Value {
+        serde_json::from_slice(&std::fs::read(results_path.join(name)).unwrap()).unwrap()
+    };
+    let last = read("00000002.json");
+    assert_eq!(last["schema"], "graphforge-gdc-query-result/1");
+    assert_eq!(
+        (&last["query_id"], &last["binding_id"], &last["ordered"]),
+        (&json!("people-by-min-id"), &json!("min-4"), &json!(true))
+    );
+    assert_eq!(
+        last["columns"],
+        json!([{"name": "id", "type": "Int64"}, {"name": "name", "type": "Utf8"}])
+    );
+    assert_eq!(last["rows"], json!([["4", "Di"]]));
+    for (index, sample) in evidence.variants[0].samples.iter().enumerate() {
+        let written = read(&format!("{index:08}.json"));
+        assert_eq!(written["binding_id"], sample.binding_id.as_str());
+        assert_eq!(
+            written["result_sha256"],
+            measured(sample).result_sha256.as_str()
+        );
+        // The written cells are the digest's own input: re-rendering them
+        // reproduces the measured digest.
+        let rendered = Rendered {
+            columns: written["columns"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| {
+                    (
+                        c["name"].as_str().unwrap().into(),
+                        c["type"].as_str().unwrap().into(),
+                    )
+                })
+                .collect(),
+            rows: serde_json::from_value(written["rows"].clone()).unwrap(),
+        };
+        assert_eq!(rendered.digest(true), measured(sample).result_sha256);
+    }
+    assert_eq!(evidence.status, "failed");
+
+    // A directory that already holds results is refused, so two runs never mix.
+    let (code, message) = (
+        ResultsDir::new(&results_path).unwrap_err().cause(),
+        ResultsDir::new(&results_path)
+            .unwrap_err()
+            .message()
+            .to_owned(),
+    );
+    assert_eq!(code, QueryCause::Io);
+    assert!(message.contains("is not empty"), "{message}");
 }
 
 #[test]
