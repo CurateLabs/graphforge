@@ -18,12 +18,16 @@
 //! row: 5,650,146 bytes for 21,525 artifacts. At that average, the projected
 //! S28 inventory (about 86,000 artifacts, 22.6 MB) uses 44% of the bound, and
 //! a full 100,000-file generation uses 51%. The header and evidence take a few
-//! kilobytes.
+//! kilobytes. Retained-parent rows are longer, because they carry the parent
+//! root's path, but there is one per retained membership-index run.
 //!
-//! A reader holds the file bytes and the decoded inventory at once. At the
-//! bound, with S26-shaped rows, that is about 121 MB, of which the file bytes
-//! take 51.2 MB. The format check probes the version without first building a
-//! JSON tree of the whole inventory, which would add about 270 MB more.
+//! A reader holds the file bytes and the decoded inventory at once. Decoding
+//! an inventory at the bound peaks at 122 MB of heap with 262-byte rows
+//! (194,670 rows: a 64 MiB read buffer plus 55 MB of decoded rows) and at
+//! 134 MB with the shortest possible rows (406,335 rows of 126 bytes). The
+//! format check probes the version without first building a JSON tree of the
+//! whole inventory; building that tree first raised those peaks to 245 MB and
+//! 383 MB.
 //!
 //! The writer counts bytes as it serializes and refuses before the temporary
 //! file is installed. A refused inventory is never installed or pinned by a
