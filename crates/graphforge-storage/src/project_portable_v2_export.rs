@@ -674,6 +674,7 @@ fn validate_limits(l: PortableV2ExportLimits) -> Result<(), ExportError> {
     if l.max_components == 0
         || l.max_entries == 0
         || l.max_manifest_bytes == 0
+        || l.max_semantic_manifest_bytes == 0
         || l.max_tag_manifest_bytes == 0
         || l.max_path_bytes == 0
         || l.copy_buffer_bytes == 0

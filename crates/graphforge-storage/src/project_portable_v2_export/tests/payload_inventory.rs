@@ -349,10 +349,38 @@ fn a_streamed_inventory_refuses_every_deviation_from_the_canonical_rows() {
     overlong.extend(std::iter::repeat_n(b'a', 64 + 2 + 4096 + 1));
     let mut not_utf8 = canonical.clone();
     not_utf8[70] = 0xff;
+    let bagit_row = format!(
+        "{}  bagit.txt",
+        hex(sha2::Sha256::digest(fs::read(expanded.join("bagit.txt")).unwrap()).into())
+    );
     let cases: Vec<(&str, Vec<u8>, PortableV2ErrorCode, &str)> = vec![
         (
-            "missing row",
+            "missing first row",
             join(&rows[1..]).into_bytes(),
+            PortableV2ErrorCode::DigestMismatch,
+            "data inventory manifest",
+        ),
+        (
+            "missing last row",
+            join(&rows[..rows.len() - 1]).into_bytes(),
+            PortableV2ErrorCode::DigestMismatch,
+            "data inventory manifest",
+        ),
+        (
+            "missing last two rows",
+            join(&rows[..rows.len() - 2]).into_bytes(),
+            PortableV2ErrorCode::DigestMismatch,
+            "data inventory manifest",
+        ),
+        (
+            "a row naming a tag file before the payload rows",
+            join(&[&[bagit_row.as_str()], rows.as_slice()].concat()).into_bytes(),
+            PortableV2ErrorCode::DigestMismatch,
+            "data inventory manifest",
+        ),
+        (
+            "a row naming a tag file instead of a payload row",
+            join(&[&[bagit_row.as_str()], &rows[1..]].concat()).into_bytes(),
             PortableV2ErrorCode::DigestMismatch,
             "data inventory manifest",
         ),
@@ -395,8 +423,8 @@ fn a_streamed_inventory_refuses_every_deviation_from_the_canonical_rows() {
         (
             "CRLF rows",
             text.replace('\n', "\r\n").into_bytes(),
-            PortableV2ErrorCode::InvalidPath,
-            "unsafe/non-canonical path",
+            PortableV2ErrorCode::InvalidStructure,
+            "tag manifest line ending",
         ),
         (
             "missing final LF",
@@ -470,5 +498,202 @@ fn a_bundle_with_a_tampered_inventory_row_is_refused() {
     assert!(
         error.to_string().ends_with("data inventory manifest"),
         "{error}"
+    );
+}
+
+/// Each bundle member as `(path, start, end)` byte offsets, its PAX header
+/// included, read independently of the verifier.
+fn bundle_members(bundle: &[u8]) -> Vec<(String, usize, usize)> {
+    let octal = |field: &[u8]| {
+        let text = std::str::from_utf8(field).unwrap();
+        usize::from_str_radix(text.trim_matches(['\0', ' ']), 8).unwrap()
+    };
+    let padded = |length: usize| length.div_ceil(512) * 512;
+    let mut members = Vec::new();
+    let mut offset = 0;
+    let mut start = None;
+    let mut pax_path = None;
+    loop {
+        let header = &bundle[offset..offset + 512];
+        if header.iter().all(|byte| *byte == 0) {
+            return members;
+        }
+        let size = octal(&header[124..136]);
+        let begin = *start.get_or_insert(offset);
+        let body = offset + 512;
+        offset = body + padded(size);
+        if header[156] == b'x' {
+            let records = std::str::from_utf8(&bundle[body..body + size]).unwrap();
+            pax_path = records
+                .lines()
+                .find_map(|record| record.split_once("path=").map(|(_, path)| path.to_owned()));
+            continue;
+        }
+        let name = |range: std::ops::Range<usize>| {
+            let bytes = &header[range];
+            let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
+            String::from_utf8(bytes[..end].to_vec()).unwrap()
+        };
+        let path = pax_path.take().unwrap_or_else(|| match name(345..500) {
+            prefix if prefix.is_empty() => name(0..100),
+            prefix => format!("{prefix}/{}", name(0..100)),
+        });
+        members.push((path, begin, offset));
+        start = None;
+    }
+}
+
+/// Rebuild a bundle from `members` of `bundle` in the given order.
+fn reassemble(bundle: &[u8], members: &[&(String, usize, usize)]) -> Vec<u8> {
+    let mut output = Vec::new();
+    for (_, start, end) in members {
+        output.extend_from_slice(&bundle[*start..*end]);
+    }
+    output.extend_from_slice(&[0_u8; 1024]);
+    output
+}
+
+#[test]
+fn a_bundle_with_a_misplaced_or_repeated_inventory_is_refused() {
+    let (_project, generation) = generation_with_files(3);
+    let plan = plan_complete_portable_v2(&generation, limits()).unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let bundle = output.path().join("graph.gfpb");
+    export(&plan, &bundle, PortableV2Output::Bundle, limits()).unwrap();
+    let bytes = fs::read(&bundle).unwrap();
+    let members = bundle_members(&bytes);
+    let inventory = members
+        .iter()
+        .position(|(path, _, _)| path == "manifest-sha256.txt")
+        .unwrap();
+    // Reassembling every member in order reproduces the bundle exactly, so
+    // each refusal below is the reordering's.
+    let all = members.iter().collect::<Vec<_>>();
+    assert_eq!(reassemble(&bytes, &all), bytes);
+
+    // The inventory moved before the payload: it has no preceding rows to
+    // match, and the bundle is out of canonical order.
+    let mut early = all.clone();
+    let moved = early.remove(inventory);
+    let first_data = early
+        .iter()
+        .position(|(path, _, _)| path.starts_with("data/"))
+        .unwrap();
+    early.insert(first_data, moved);
+    // Two inventories, both correct.
+    let mut repeated = all.clone();
+    repeated.insert(inventory, &members[inventory]);
+    for (name, order) in [
+        ("inventory before payload", early),
+        ("two inventories", repeated),
+    ] {
+        let package = output.path().join(format!("{name}.gfpb"));
+        fs::write(&package, reassemble(&bytes, &order)).unwrap();
+        let error = verify(&package, limits()).unwrap_err();
+        assert_eq!(error.code, PortableV2ErrorCode::InvalidStructure, "{name}");
+        assert!(
+            error
+                .to_string()
+                .ends_with("bundle entries are not canonical order"),
+            "{name}: {error}"
+        );
+    }
+}
+
+#[test]
+fn an_oversized_semantic_manifest_is_refused_before_it_is_parsed() {
+    let (_project, generation) = generation_with_files(3);
+    // A small fixed allowance keeps the oversized manifest small.
+    let tight = PortableV2ExportLimits {
+        max_manifest_bytes: 4096,
+        ..limits()
+    };
+    let plan = plan_complete_portable_v2(&generation, tight).unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let expanded = output.path().join("graph.gfproject");
+    let bundle = output.path().join("graph.gfpb");
+    export(&plan, &expanded, PortableV2Output::Expanded, tight).unwrap();
+    export(&plan, &bundle, PortableV2Output::Bundle, tight).unwrap();
+    let entries = verify(&expanded, tight).unwrap().entry_count;
+    let bound = tight.semantic_manifest_bound(entries);
+    assert_eq!(bound, 4096 + entries * 512);
+    let refused = |error: PortableV2Error, name: &str| {
+        assert_eq!(
+            error.code,
+            PortableV2ErrorCode::LimitExceeded,
+            "{name}: {error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .ends_with("semantic manifest exceeds its entry-count bound"),
+            "{name}: {error}"
+        );
+    };
+
+    // Bytes that are not JSON at all: parsing them would report invalid
+    // JSON, so the limit result shows the manifest was never parsed.
+    for (length, parsed) in [(bound + 1, false), (bound, true)] {
+        let copy = tempfile::tempdir().unwrap();
+        let root = copy.path().join("oversized.gfproject");
+        copy_tree(&expanded, &root);
+        fs::write(
+            root.join("data/graphforge-project.json"),
+            vec![b'x'; usize::try_from(length).unwrap()],
+        )
+        .unwrap();
+        let error = verify(&root, tight).unwrap_err();
+        if parsed {
+            assert_eq!(error.code, PortableV2ErrorCode::InvalidStructure, "{error}");
+            assert!(error.to_string().ends_with("invalid JSON"), "{error}");
+        } else {
+            refused(error, "expanded");
+        }
+    }
+
+    // The ceiling applies whatever the entry count, to writer and to both
+    // readers.
+    let manifest = fs::metadata(expanded.join("data/graphforge-project.json"))
+        .unwrap()
+        .len();
+    let ceiling = PortableV2ExportLimits {
+        max_semantic_manifest_bytes: manifest - 1,
+        ..tight
+    };
+    refused(verify(&expanded, ceiling).unwrap_err(), "expanded ceiling");
+    refused(verify(&bundle, ceiling).unwrap_err(), "bundle ceiling");
+    let error = export(
+        &plan,
+        &output.path().join("ceiling.gfpb"),
+        PortableV2Output::Bundle,
+        ceiling,
+    );
+    let error = match error {
+        Err(error) => error,
+        Ok(_) => plan_complete_portable_v2(&generation, ceiling).unwrap_err(),
+    };
+    assert_eq!(error.code, PortableV2ErrorCode::LimitExceeded, "{error}");
+}
+
+#[test]
+fn json_controls_that_do_not_grow_with_entries_keep_their_own_limit() {
+    let (_project, generation) = generation_with_files(3);
+    let plan = plan_complete_portable_v2(&generation, limits()).unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let bundle = output.path().join("graph.gfpb");
+    export(&plan, &bundle, PortableV2Output::Bundle, limits()).unwrap();
+    // The runtime map is about 1 KB; a control limit below it refuses the
+    // package even though the semantic manifest ceiling is untouched.
+    let controls = PortableV2ExportLimits {
+        max_manifest_bytes: 512,
+        ..limits()
+    };
+    assert_eq!(
+        controls.max_semantic_manifest_bytes,
+        PortableV2ExportLimits::default().max_semantic_manifest_bytes
+    );
+    assert_eq!(
+        verify(&bundle, controls).unwrap_err().code,
+        PortableV2ErrorCode::LimitExceeded
     );
 }

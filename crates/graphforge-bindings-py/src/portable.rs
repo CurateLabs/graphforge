@@ -66,6 +66,9 @@ fn parse_limits(py: Python<'_>, value: Option<&Bound<'_, PyDict>>) -> PyResult<P
     if let Some(item) = dict.get_item("max_manifest_bytes")? {
         limits.max_manifest_bytes = item.extract()?;
     }
+    if let Some(item) = dict.get_item("max_semantic_manifest_bytes")? {
+        limits.max_semantic_manifest_bytes = item.extract()?;
+    }
     if let Some(item) = dict.get_item("max_tag_manifest_bytes")? {
         limits.max_tag_manifest_bytes = item.extract()?;
     }

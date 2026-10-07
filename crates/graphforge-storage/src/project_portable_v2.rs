@@ -183,7 +183,7 @@ fn preflight(
         ));
     }
     if metadata.is_dir() {
-        preflight_expanded(source, limits)?;
+        preflight_expanded(source, limits, cancelled)?;
     } else if metadata.is_file() {
         preflight_bundle(source, limits, cancelled)?;
     }
@@ -314,14 +314,28 @@ fn expected_entry(
         .transpose()
 }
 
-fn admit_manifest(bytes: &[u8], limits: PortableV2Limits) -> Result<Manifest, PortableV2Error> {
-    if bytes.len() as u64 > limits.max_manifest_bytes {
+/// Refuse a semantic manifest longer than `bound` before reading or parsing
+/// it. `bound` is [`PortableV2Limits::semantic_manifest_bound`] for the
+/// package's entry count: parsing holds the manifest as a JSON tree several
+/// times its size, so a package may present only the manifest its entries
+/// justify (#900).
+fn admit_semantic_manifest_length(length: u64, bound: u64) -> Result<(), PortableV2Error> {
+    if length > bound {
         return Err(PortableV2Error::at(
             PortableV2ErrorCode::LimitExceeded,
             MANIFEST_PATH,
-            "manifest size",
+            "semantic manifest exceeds its entry-count bound",
         ));
     }
+    Ok(())
+}
+
+fn admit_manifest(
+    bytes: &[u8],
+    bound: u64,
+    limits: PortableV2Limits,
+) -> Result<Manifest, PortableV2Error> {
+    admit_semantic_manifest_length(bytes.len() as u64, bound)?;
     let (manifest, canonical_without_digest) = parse_manifest(bytes, limits)?;
     let expected = format!(
         "sha256:{}",
@@ -382,13 +396,27 @@ fn read_bounded_file(path: &Path, limit: u64, entry: &str) -> Result<Vec<u8>, Po
     Ok(bytes)
 }
 
-fn preflight_expanded(root: &Path, limits: PortableV2Limits) -> Result<(), PortableV2Error> {
-    let manifest = read_bounded_file(
-        &root.join(MANIFEST_PATH),
-        limits.max_manifest_bytes,
-        MANIFEST_PATH,
-    )?;
-    let admitted = admit_manifest(&manifest, limits)?;
+fn preflight_expanded(
+    root: &Path,
+    limits: PortableV2Limits,
+    cancelled: Option<&AtomicBool>,
+) -> Result<(), PortableV2Error> {
+    let mut paths = Vec::new();
+    walk(root, root, &mut paths, limits, cancelled)?;
+    let bound = limits.semantic_manifest_bound(paths.len() as u64);
+    drop(paths);
+    let length = fs::symlink_metadata(root.join(MANIFEST_PATH))
+        .map_err(|_| {
+            PortableV2Error::at(
+                PortableV2ErrorCode::InvalidStructure,
+                MANIFEST_PATH,
+                "control unavailable",
+            )
+        })?
+        .len();
+    admit_semantic_manifest_length(length, bound)?;
+    let manifest = read_bounded_file(&root.join(MANIFEST_PATH), bound, MANIFEST_PATH)?;
+    let admitted = admit_manifest(&manifest, bound, limits)?;
     if admitted
         .requirements
         .capabilities
@@ -421,6 +449,7 @@ fn preflight_bundle(
     let mut pending_composition: Option<Vec<u8>> = None;
     let mut admitted_composition = false;
     let mut entries = 0_u64;
+    let mut regular_entries = 0_u64;
     let mut total = 0_u64;
     loop {
         check_cancel(cancelled)?;
@@ -475,15 +504,25 @@ fn preflight_bundle(
             continue;
         }
         let entry = pending_pax.take().map_or(raw_path, |records| records.path);
+        regular_entries += 1;
         if entry == MANIFEST_PATH || entry == ONTOLOGY_COMPOSITION_PATH {
-            let cap = limits.max_manifest_bytes;
+            // Canonical order puts every component entry before the semantic
+            // manifest and only the two tag manifests after it, so the entries
+            // seen so far, plus two, are the package's entries.
+            let semantic_bound = limits.semantic_manifest_bound(regular_entries.saturating_add(2));
+            let cap = if entry == MANIFEST_PATH {
+                admit_semantic_manifest_length(size, semantic_bound)?;
+                semantic_bound
+            } else {
+                limits.max_manifest_bytes
+            };
             let bytes = read_unhashed_payload(
                 &mut input,
                 size,
                 usize::try_from(cap).unwrap_or(usize::MAX),
             )?;
             if entry == MANIFEST_PATH {
-                let admitted = admit_manifest(&bytes, limits)?;
+                let admitted = admit_manifest(&bytes, semantic_bound, limits)?;
                 let needs_composition = admitted
                     .requirements
                     .capabilities
@@ -621,14 +660,14 @@ fn verify_expanded(
         }
         let length = before.len();
         enforce_length(path, length, &mut total, limits)?;
-        let mut check =
-            (path == inventory::INVENTORY_PATH).then(|| inventory::InventoryCheck::new(&entries));
+        let mut check = (path == inventory::INVENTORY_PATH)
+            .then(|| inventory::InventoryCheck::new(&entries, limits.max_path_bytes));
         let (digest, bytes) = hash_file(
             &full,
             path,
             length,
             limits.copy_buffer_bytes,
-            retained_limit(path, limits),
+            retained_limit(path, limits, paths.len() as u64),
             check.as_mut(),
             cancelled,
             sink.as_deref_mut(),
@@ -886,13 +925,13 @@ fn verify_bundle(
             .stream_position()
             .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "bundle position"))?;
         let mut check = (entry_path == inventory::INVENTORY_PATH)
-            .then(|| inventory::InventoryCheck::new(&entries));
+            .then(|| inventory::InventoryCheck::new(&entries, limits.max_path_bytes));
         let (digest, bytes) = hash_payload(
             &mut file,
             size,
             &mut transport,
             limits.copy_buffer_bytes,
-            retained_limit(&entry_path, limits),
+            retained_limit(&entry_path, limits, entries.len() as u64 + 3),
             check.as_mut(),
             cancelled,
             &entry_path,
@@ -981,13 +1020,10 @@ fn validate_package(
             "missing semantic manifest",
         )
     })?;
-    if manifest_entry.length > limits.max_manifest_bytes {
-        return Err(PortableV2Error::at(
-            PortableV2ErrorCode::LimitExceeded,
-            MANIFEST_PATH,
-            "manifest size",
-        ));
-    }
+    admit_semantic_manifest_length(
+        manifest_entry.length,
+        limits.semantic_manifest_bound(entries.len() as u64),
+    )?;
     let manifest_bytes = read_entry_bytes(entries, MANIFEST_PATH)?;
     let (manifest, canonical_without_digest) = parse_manifest(&manifest_bytes, limits)?;
     let expected = format!(
@@ -1123,7 +1159,10 @@ fn parse_manifest(
     bytes: &[u8],
     _limits: PortableV2Limits,
 ) -> Result<(Manifest, Vec<u8>), PortableV2Error> {
-    let value = UniqueValue::deserialize(&mut serde_json::Deserializer::from_slice(bytes))
+    // One JSON tree is resident at a time: the typed manifest is read from it
+    // by reference, then the digest member is removed in place to form the
+    // signed preimage. No clone of the tree is made (#900).
+    let mut value = UniqueValue::deserialize(&mut serde_json::Deserializer::from_slice(bytes))
         .map_err(|_| {
             PortableV2Error::at(
                 PortableV2ErrorCode::InvalidStructure,
@@ -1145,29 +1184,28 @@ fn parse_manifest(
             "manifest is not JCS canonical",
         ));
     }
-    let mut without = value.clone();
-    without
-        .as_object_mut()
-        .ok_or_else(|| {
-            PortableV2Error::at(
-                PortableV2ErrorCode::InvalidStructure,
-                MANIFEST_PATH,
-                "manifest is not object",
-            )
-        })?
-        .remove("package_digest");
-    let canonical_without = serde_json::to_vec(&without).map_err(|_| {
-        PortableV2Error::at(
+    if !value.is_object() {
+        return Err(PortableV2Error::at(
             PortableV2ErrorCode::InvalidStructure,
             MANIFEST_PATH,
-            "cannot canonicalize manifest",
-        )
-    })?;
-    let manifest: Manifest = serde_json::from_value(value).map_err(|_| {
+            "manifest is not object",
+        ));
+    }
+    let manifest = Manifest::deserialize(&value).map_err(|_| {
         PortableV2Error::at(
             PortableV2ErrorCode::InvalidStructure,
             MANIFEST_PATH,
             "manifest schema",
+        )
+    })?;
+    if let Some(object) = value.as_object_mut() {
+        object.remove("package_digest");
+    }
+    let canonical_without = serde_json::to_vec(&value).map_err(|_| {
+        PortableV2Error::at(
+            PortableV2ErrorCode::InvalidStructure,
+            MANIFEST_PATH,
+            "cannot canonicalize manifest",
         )
     })?;
     Ok((manifest, canonical_without))
@@ -1799,11 +1837,12 @@ fn hex(bytes: &[u8]) -> String {
     }
     s
 }
-fn retained_limit(path: &str, limits: PortableV2Limits) -> Option<u64> {
+/// Bytes the reader may retain of `path`, in a package of `package_entries`
+/// regular entries.
+fn retained_limit(path: &str, limits: PortableV2Limits, package_entries: u64) -> Option<u64> {
     match path {
-        MANIFEST_PATH | RUNTIME_MAP_PATH | ONTOLOGY_COMPOSITION_PATH => {
-            Some(limits.max_manifest_bytes)
-        }
+        MANIFEST_PATH => Some(limits.semantic_manifest_bound(package_entries)),
+        RUNTIME_MAP_PATH | ONTOLOGY_COMPOSITION_PATH => Some(limits.max_manifest_bytes),
         // The payload inventory, `manifest-sha256.txt`, grows with the entry
         // count and is checked as it streams instead (`inventory.rs`).
         "bagit.txt" | "bag-info.txt" | "tagmanifest-sha256.txt" => {

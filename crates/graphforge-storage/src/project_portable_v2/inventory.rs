@@ -11,19 +11,17 @@ use super::{Entry, hex, sha, validate_path};
 use graphforge_core::portable::{PortableV2Error, PortableV2ErrorCode};
 
 pub(super) const INVENTORY_PATH: &str = "manifest-sha256.txt";
-/// Paths in tag manifests are validated against this bound.
-const INVENTORY_PATH_MAX_BYTES: usize = 4096;
-/// Longest admissible row without its LF: digest, two spaces, path.
-const INVENTORY_ROW_MAX_BYTES: usize = 64 + 2 + INVENTORY_PATH_MAX_BYTES;
 
-/// Outcome of checking one streamed inventory. The failure is reported when
-/// the bag manifests are validated, after the structural checks that run
-/// before it, so error precedence does not depend on streaming.
+/// Outcome of checking one streamed inventory. It is reported when the bag
+/// manifests are validated, so the structural checks that ran before the old
+/// whole-inventory parse still run first. Within the inventory, the first bad
+/// row decides the reason.
 pub(super) type InventoryVerdict = Result<(), PortableV2Error>;
 
 /// Checks a streamed inventory against the `data/` entries that precede it.
 pub(super) struct InventoryCheck<'a> {
     preceding: &'a [Entry],
+    max_path_bytes: usize,
     next: usize,
     previous: Option<usize>,
     row: Vec<u8>,
@@ -32,10 +30,12 @@ pub(super) struct InventoryCheck<'a> {
 }
 
 impl<'a> InventoryCheck<'a> {
-    /// `preceding` is every entry read before the inventory, in read order.
-    pub(super) fn new(preceding: &'a [Entry]) -> Self {
+    /// `preceding` is every entry read before the inventory, in read order;
+    /// `max_path_bytes` is the bound those entries' paths were admitted under.
+    pub(super) fn new(preceding: &'a [Entry], max_path_bytes: usize) -> Self {
         Self {
             preceding,
+            max_path_bytes,
             next: 0,
             previous: None,
             row: Vec::new(),
@@ -47,12 +47,14 @@ impl<'a> InventoryCheck<'a> {
     /// Consume the next authenticated inventory bytes.
     pub(super) fn update(&mut self, mut bytes: &[u8]) {
         self.length = self.length.saturating_add(bytes.len() as u64);
+        // Longest admissible row without its LF: digest, two spaces, path.
+        let row_max = 64 + 2 + self.max_path_bytes;
         while self.failure.is_none() && !bytes.is_empty() {
             let (part, complete) = match bytes.iter().position(|byte| *byte == b'\n') {
                 Some(end) => (&bytes[..end], true),
                 None => (bytes, false),
             };
-            if self.row.len() + part.len() > INVENTORY_ROW_MAX_BYTES {
+            if self.row.len() + part.len() > row_max {
                 self.failure = Some(structure("tag manifest record length"));
                 return;
             }
@@ -68,11 +70,14 @@ impl<'a> InventoryCheck<'a> {
     }
 
     fn check_row(&mut self) -> Result<(), PortableV2Error> {
+        if self.row.contains(&b'\r') {
+            return Err(structure("tag manifest line ending"));
+        }
         let text = std::str::from_utf8(&self.row).map_err(|_| structure("tag manifest UTF-8"))?;
         let (digest, path) = text
             .split_once("  ")
             .ok_or_else(|| structure("tag manifest record"))?;
-        validate_path(path, INVENTORY_PATH_MAX_BYTES)?;
+        validate_path(path, self.max_path_bytes)?;
         let previous = self
             .previous
             .map(|index| self.preceding[index].path.as_str());
