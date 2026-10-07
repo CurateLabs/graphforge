@@ -1,0 +1,8 @@
+{
+  "schema": "graphforge-gdc-expected-counts/1",
+  "source": "benchmarks/fixtures/gdc/load-fixture input files",
+  "nodes": 11,
+  "edges": 7,
+  "labels": {"Organisation": 1, "Person": 3, "Place": 2, "Vertex": 5},
+  "types": {"KNOWS": 3, "LINK": 4}
+}
