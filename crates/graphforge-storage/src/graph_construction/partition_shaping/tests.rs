@@ -322,7 +322,9 @@ fn boundary_seal_on_lanes_matches_the_calling_thread() {
         (
             admission.peak(),
             receipts,
-            super::super::tests::evidence_without_file_identities(&checkpoint.evidence),
+            super::super::tests::evidence_without_file_identities_and_allocations(
+                &checkpoint.evidence,
+            ),
             work,
         )
     };
