@@ -203,7 +203,7 @@ fn semantic_mutations_are_rejected() {
         ),
         // Calendar arithmetic for the birthday window.
         (Operation::Ic10, "($month % 12) + 1", "$month + 1"),
-        (Operation::Ic10, "birthdayDay < 22", "birthdayDay < 21"),
+        (Operation::Ic10, "birthday.day < 22", "birthday.day < 21"),
         // The Message label disjunction (a University shares a Post id).
         (
             Operation::Is4,

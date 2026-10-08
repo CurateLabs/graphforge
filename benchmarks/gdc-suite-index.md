@@ -66,8 +66,8 @@ PYTHONPATH=harness GRAPHFORGE_GDC_GRAPHALYTICS_BIN=target/debug/graphforge-bench
 Read-only complex/short reads follow the Cypher reference implementation at the
 pinned driver commit (ordering, tie-breakers, `LIMIT`, parameter names); IC13
 uses the public `bfs` path analyst verb. Where GraphForge evaluates a reference
-construct differently (`shortestPath`, node-list `IN`,
-`datetime({epochMillis})`, pattern predicates outside `WHERE`), the query uses
+construct differently (`shortestPath`, pattern predicates outside `WHERE`,
+`OPTIONAL MATCH ... WHERE` over a `WITH` variable), the query uses
 an exactly equivalent form recorded in its definition. Where the reference's
 behaviour differs from the specification prose (for example IS7's
 `CASE r WHEN null`, which never matches), the reference behaviour is kept,
@@ -183,9 +183,8 @@ implements. The scorecard checks these readings against the spec-derived SF1
 reference (see "FinBench Transaction SF1 reference" below), not an LDBC
 implementation; where GPStore reads the specification differently (TCR1, TCR2,
 TCR5, TCR8, TCR9, TCR11), `reference_reading` says how, for information.
-`workarounds` cites the GraphForge defect (#1887)
-or unsupported construct (#1888) behind any Cypher that departs from the direct
-form.
+`workarounds` cites the unsupported construct (#1888) or
+the declared variance behind any Cypher that departs from the direct form.
 
 TCR1, TCR2 and TCR5 (monotonically increasing transfer timestamps along a 1–3
 hop trace) use per-vertex admissible-edge lists plus a list predicate over each

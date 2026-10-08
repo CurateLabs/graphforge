@@ -133,22 +133,15 @@ const fn text(name: &'static str) -> QueryParameter {
 //   length over the bounded variable-length match instead. A shortest path is a
 //   simple path and therefore one of the matched trails, so the minimum is the
 //   same value.
-// * GraphForge's `IN` never matches a node value inside a list (#1887 D1), so
-//   node-list membership is expressed on the entity's unique `id`.
 // * The reference's `CASE x WHEN null` is kept verbatim. Neo4j, openCypher and
 //   GraphForge all compare a simple CASE with `=`, so it never matches null;
 //   IC1 and IS7 record the resulting difference from the prose as a
 //   `spec_variance`.
-// * `datetime({epochMillis: ...})` returns the epoch in GraphForge (#1887 D14),
-//   so IC10 derives the UTC calendar month and day from the epoch milliseconds
-//   with exact integer arithmetic (Hinnant's civil-from-days algorithm).
 // * `:Message` becomes `(m:Post OR m:Comment)`; see the module data model.
 // * Pattern predicates are valid only in `WHERE` (#1888); a pattern used as a
 //   value is written as a pattern comprehension or a counted `OPTIONAL MATCH`.
-// * After an `OPTIONAL MATCH`, GraphForge ignored a `WHERE EXISTS { ... }` that
-//   refers to a variable bound before it (#1887 D15, exact shape in IC10's
-//   notes) and fails to plan a `WHERE` list membership on a `WITH` variable
-//   (#1888 D7); those filters move into the pattern or a conditional sum.
+// * `OPTIONAL MATCH ... WHERE x IN <list collected in a WITH>` returns wrong
+//   answers in GraphForge (#1919); that filter moves into a conditional sum.
 
 const IC1: &str = "\
 MATCH path = (p:Person {id: $personId})-[:KNOWS*1..3]-(friend:Person {firstName: $firstName})
@@ -204,18 +197,18 @@ MATCH (countryX:Country {name: $countryXName}),
 WITH person, countryX, countryY
 LIMIT 1
 MATCH (city:City)-[:IS_PART_OF]->(country:Country)
-WHERE country.id IN [countryX.id, countryY.id]
-WITH person, countryX, countryY, collect(city.id) AS cities
+WHERE country IN [countryX, countryY]
+WITH person, countryX, countryY, collect(city) AS cities
 MATCH (person)-[:KNOWS*1..2]-(friend)-[:IS_LOCATED_IN]->(city)
-WHERE NOT person = friend AND NOT city.id IN cities
+WHERE NOT person = friend AND NOT city IN cities
 WITH DISTINCT friend, countryX, countryY
 MATCH (friend)<-[:HAS_CREATOR]-(message),
       (message)-[:IS_LOCATED_IN]->(country)
 WHERE $endDate > message.creationDate >= $startDate AND
-      country.id IN [countryX.id, countryY.id]
+      country IN [countryX, countryY]
 WITH friend,
-     CASE WHEN country.id = countryX.id THEN 1 ELSE 0 END AS messageX,
-     CASE WHEN country.id = countryY.id THEN 1 ELSE 0 END AS messageY
+     CASE WHEN country = countryX THEN 1 ELSE 0 END AS messageX,
+     CASE WHEN country = countryY THEN 1 ELSE 0 END AS messageY
 WITH friend, sum(messageX) AS xCount, sum(messageY) AS yCount
 WHERE xCount > 0 AND yCount > 0
 RETURN friend.id AS friendId,
@@ -252,10 +245,10 @@ WHERE NOT person = friend
 WITH DISTINCT friend
 MATCH (friend)<-[membership:HAS_MEMBER]-(forum)
 WHERE membership.joinDate > $minDate
-WITH forum, collect(friend.id) AS friendIds
+WITH forum, collect(friend) AS friends
 OPTIONAL MATCH (forum)-[:CONTAINER_OF]->(post)-[:HAS_CREATOR]->(author)
 WITH forum,
-     sum(CASE WHEN post IS NOT NULL AND author.id IN friendIds THEN 1 ELSE 0 END) AS postCount
+     sum(CASE WHEN post IS NOT NULL AND author IN friends THEN 1 ELSE 0 END) AS postCount
 RETURN forum.title AS forumName, postCount
 ORDER BY postCount DESC, forum.id ASC
 LIMIT 20";
@@ -333,21 +326,9 @@ MATCH (person:Person {id: $personId})-[:KNOWS*2..2]-(friend),
 WHERE NOT friend = person AND
       NOT (friend)-[:KNOWS]-(person)
 WITH DISTINCT person, friend, city
-WITH person, friend, city,
-     CASE WHEN friend.birthday >= 0 THEN friend.birthday / 86400000
-     ELSE (friend.birthday - 86399999) / 86400000 END + 719468 AS z
-WITH person, friend, city, z,
-     CASE WHEN z >= 0 THEN z ELSE z - 146096 END / 146097 AS era
-WITH person, friend, city, z - era * 146097 AS doe
-WITH person, friend, city, doe,
-     (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365 AS yoe
-WITH person, friend, city, doe - (365 * yoe + yoe / 4 - yoe / 100) AS doy
-WITH person, friend, city, doy, (5 * doy + 2) / 153 AS mp
-WITH person, friend, city,
-     doy - (153 * mp + 2) / 5 + 1 AS birthdayDay,
-     CASE WHEN mp < 10 THEN mp + 3 ELSE mp - 9 END AS birthdayMonth
-WHERE (birthdayMonth = $month AND birthdayDay >= 21) OR
-      (birthdayMonth = ($month % 12) + 1 AND birthdayDay < 22)
+WITH person, friend, city, datetime({epochMillis: friend.birthday}) AS birthday
+WHERE (birthday.month = $month AND birthday.day >= 21) OR
+      (birthday.month = ($month % 12) + 1 AND birthday.day < 22)
 OPTIONAL MATCH (friend)<-[:HAS_CREATOR]-(post:Post)
 WITH person, friend, city, count(post) AS postCount
 OPTIONAL MATCH (friend)<-[:HAS_CREATOR]-(post:Post)-[:HAS_TAG]->(:Tag)<-[:HAS_INTEREST]-(person)
@@ -547,9 +528,7 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         ],
         unordered_list_columns: &[],
         limit: Some(20),
-        notes: "node-list membership (country IN [countryX, countryY], city IN cities) is \
-                always false in GraphForge (#1887 D1), so membership and node equality use the \
-                unique Place id",
+        notes: "reference text unchanged",
         spec_variance: Some(
             "reference behaviour, differs from spec prose: takes endDate where the \
                 specification takes durationDays",
@@ -575,10 +554,8 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         columns: &["forumName", "postCount"],
         unordered_list_columns: &[],
         limit: Some(20),
-        notes: "friend IN friends is always false on nodes (#1887 D1), so it uses the unique \
-                Person id; OPTIONAL MATCH ... WHERE author.id IN friendIds fails to plan with \
-                an unbound variable (#1888 D7), so the count is a conditional sum over the \
-                forum's posts",
+        notes: "the LDBC text's OPTIONAL MATCH ... WHERE friend IN friends returns wrong post \
+                counts (#1919), so the count is a conditional sum over the forum's posts",
         spec_variance: None,
     },
     QueryDefinition {
@@ -664,15 +641,9 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         ],
         unordered_list_columns: &[],
         limit: Some(10),
-        notes: "datetime({epochMillis: birthday}) returns the epoch (#1887 D14), so the UTC \
-                month and day come from exact integer civil-from-days arithmetic; the post \
-                list comprehension with a pattern predicate is rejected (#1888); the first \
-                replacement, MATCH (person:Person {id: 2048}), (friend:Person {id: 2023}) \
-                OPTIONAL MATCH (friend)<-[:HAS_CREATOR]-(post:Post) WHERE EXISTS { \
-                (post)-[:HAS_TAG]->(:Tag)<-[:HAS_INTEREST]-(person) } RETURN count(post), \
-                returned 9 on the query fixture where MATCH in place of OPTIONAL MATCH \
-                returned the correct 1 (#1887 D15: the WHERE was ignored), so the interest \
-                pattern is matched directly and counted with count(DISTINCT post.id)",
+        notes: "the post list comprehension with a pattern predicate is rejected (#1888), so \
+                posts are counted with OPTIONAL MATCH and the interest pattern is matched \
+                directly and counted with count(DISTINCT post.id)",
         spec_variance: None,
     },
     QueryDefinition {

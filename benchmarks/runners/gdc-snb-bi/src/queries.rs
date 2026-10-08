@@ -160,11 +160,11 @@ ORDER BY
 MATCH (tag:Tag)-[:HAS_TYPE]->(:TagClass {name: $tagClass})
 OPTIONAL MATCH (message1)-[:HAS_TAG]->(tag)
   WHERE (message1:Post OR message1:Comment) AND $date <= message1.creationDate
-    AND message1.creationDate < datetime({datetime: $date}) + duration({days: 100})
+    AND message1.creationDate < $date + duration({days: 100})
 WITH tag, count(message1) AS countWindow1
 OPTIONAL MATCH (message2)-[:HAS_TAG]->(tag)
-  WHERE (message2:Post OR message2:Comment) AND datetime({datetime: $date}) + duration({days: 100}) <= message2.creationDate
-    AND message2.creationDate < datetime({datetime: $date}) + duration({days: 200})
+  WHERE (message2:Post OR message2:Comment) AND $date + duration({days: 100}) <= message2.creationDate
+    AND message2.creationDate < $date + duration({days: 200})
 WITH
   tag,
   countWindow1,
@@ -182,12 +182,9 @@ LIMIT 100",
         columns: &["tagName", "countWindow1", "countWindow2", "diff"],
         upstream: "neo4j/queries/bi-2.cypher",
         rewrite: Some(
-            "rewrite: LDBC text hits #1887 D2 (`$date + duration(...)` fails to plan on a \
-             datetime parameter). The window bounds are written `datetime({datetime: $date}) + \
-             duration(...)`; `datetime({datetime: d})` is the identity on a datetime, so the \
-             windows are unchanged. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its \
-             WHERE, which selects the same nodes, because import sessions assign one label per \
-             node.",
+            "rewrite: LDBC text matches the `:Message` supertype label, which import sessions \
+             cannot assign (one label per node). `(m:Message)` becomes `(m)` with `(m:Post OR \
+             m:Comment)` in its WHERE, which selects the same nodes.",
         ),
     },
     BiQuery {
@@ -232,13 +229,13 @@ WITH country, forum, count(person) AS numberOfMembers
 WITH forum, max(numberOfMembers) AS maxNumberOfMembers
 ORDER BY maxNumberOfMembers DESC, forum.id ASC
 LIMIT 100
-WITH collect(forum.id) AS topForumIds
+WITH collect(forum) AS topForums
 MATCH (topForum:Forum)-[:HAS_MEMBER]->(person:Person)
-WHERE topForum.id IN topForumIds
-WITH DISTINCT topForumIds, person
+WHERE topForum IN topForums
+WITH DISTINCT topForums, person
 OPTIONAL MATCH (forum:Forum)-[:CONTAINER_OF]->(:Post)<-[:REPLY_OF*0..]-(message)-[:HAS_CREATOR]->(person)
 WHERE (message:Post OR message:Comment)
-WITH person, count(DISTINCT CASE WHEN forum.id IN topForumIds THEN message END) AS messageCount
+WITH person, count(DISTINCT CASE WHEN forum IN topForums THEN message END) AS messageCount
 RETURN
   person.id AS personId,
   person.firstName AS personFirstName,
@@ -259,14 +256,14 @@ LIMIT 100",
         ],
         upstream: "neo4j/queries/bi-4.cypher",
         rewrite: Some(
-            "rewrite: LDBC text hits #1888 D5 (CALL subquery), and the CALL-free form hits #1887 \
-             D1 (`node IN list` is false) and #1888 D7 (OPTIONAL MATCH WHERE cannot see a WITH \
-             variable). The top-100 forums are ordered by their largest per-country member count, \
-             then id, which is the order the LDBC ORDER BY + WITH DISTINCT yields and Umbra's \
-             maxNumberOfMembers. The UNION ALL of members with their messages and members with 0 \
-             becomes every member of a top forum with an OPTIONAL MATCH count of distinct \
-             messages in top-forum threads. Top-forum membership is tested on forum ids, inside \
-             the count. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its \
+            "rewrite: LDBC text hits #1888 D5 (CALL subquery). The top-100 forums are \
+             ordered by their largest per-country member count, then id, which is the order the \
+             LDBC ORDER BY + WITH DISTINCT yields and Umbra's maxNumberOfMembers. The UNION ALL \
+             of members with their messages and members with 0 becomes every member of a top \
+             forum with an OPTIONAL MATCH count of distinct messages in top-forum threads. \
+             Top-forum membership of a thread's forum is tested inside the count, not in the \
+             OPTIONAL MATCH WHERE: that shape returns wrong answers in BI13 and IC5 (#1919), \
+             though it matches the reference on BI4's own query fixture. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its \
              WHERE, which selects the same nodes, because import sessions assign one label per \
              node.",
         ),
@@ -558,27 +555,25 @@ WITH
   country,
   zombie,
   zombie.creationDate AS zombieCreationDate,
-  datetime({datetime: $endDate}) AS endDate,
   messageCount
 WITH
   country,
   zombie,
-  12 * (endDate.year  - zombieCreationDate.year )
-     + (endDate.month - zombieCreationDate.month)
+  12 * ($endDate.year  - zombieCreationDate.year )
+     + ($endDate.month - zombieCreationDate.month)
      + 1 AS months,
   messageCount
 WHERE messageCount / months < 1
 WITH
   country,
-  collect(zombie) AS zombies,
-  collect(zombie.id) AS zombieIds
+  collect(zombie) AS zombies
 UNWIND zombies AS zombie
 OPTIONAL MATCH
   (zombie)<-[:HAS_CREATOR]-(message)<-[:LIKES]-(likerZombie:Person)
 WHERE (message:Post OR message:Comment)
 WITH
   zombie,
-  count(CASE WHEN likerZombie.id IN zombieIds THEN likerZombie END) AS zombieLikeCount
+  count(CASE WHEN likerZombie IN zombies THEN likerZombie END) AS zombieLikeCount
 OPTIONAL MATCH
   (zombie)<-[:HAS_CREATOR]-(message)<-[:LIKES]-(likerPerson:Person)
 WHERE (message:Post OR message:Comment) AND likerPerson.creationDate < $endDate
@@ -602,12 +597,11 @@ LIMIT 100",
         columns: &["zombieId", "zombieLikeCount", "totalLikeCount", "zombieScore"],
         upstream: "neo4j/queries/bi-13.cypher",
         rewrite: Some(
-            "rewrite: LDBC text hits #1887 D2 (`$endDate.year` returns null), #1888 D3 \
-             (`zombie.creationDate.year` fails to plan) and #1887 D1 (`likerZombie IN zombies` is \
-             false), and the id-based form hits #1888 D7 (OPTIONAL MATCH WHERE cannot see a WITH \
-             variable). The month arithmetic reads WITH-bound aliases (`datetime({datetime: \
-             $endDate})` is the identity), and likes by zombies are counted on person ids inside \
-             the count, which counts the same like edges. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its \
+            "rewrite: LDBC text hits #1888 D3 (`zombie.creationDate.year` fails to plan) and \
+             #1919 (`OPTIONAL MATCH ... WHERE likerZombie IN zombies` returns zero like counts \
+             on the query fixture). The creation-date components are read from a WITH-bound alias of the same property, and likes by \
+             zombies are counted with a conditional count inside the aggregate, which counts \
+             the same like edges. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its \
              WHERE, which selects the same nodes, because import sessions assign one label per \
              node.",
         ),
@@ -719,15 +713,12 @@ MATCH (comment)-[:HAS_TAG]->(tag)
 MATCH (message2)-[:HAS_TAG]->(tag)
 WITH
   person1,
-  person2,
-  person3,
   message2,
   forum1,
   forum2,
   message1.creationDate AS message1CreationDate,
   message2.creationDate AS message2CreationDate
 WHERE forum1 <> forum2
-  AND person2 <> person3
   AND message2CreationDate.epochMillis > message1CreationDate.epochMillis + $delta * 3600000
   AND NOT (forum2)-[:HAS_MEMBER]->(person1)
 RETURN person1.id AS person1Id, count(DISTINCT message2) AS messageCount
@@ -738,12 +729,9 @@ LIMIT 10",
         upstream: "neo4j/queries/bi-17.cypher",
         rewrite: Some(
             "rewrite: LDBC text hits #1888 D4 (`duration({hours: $delta})` with a non-literal \
-             argument fails) and #1887 D6 (relationship uniqueness is not enforced across \
-             comma-separated patterns, so person2 = person3 matches). The delta becomes a \
-             comparison of epoch milliseconds with `$delta * 3600000` added, which is exact for \
-             whole hours on a UTC instant, and `person2 <> person3` is stated, which is what \
-             LDBC's two HAS_MEMBER edges enforce. The final WHERE moves onto a WITH carrying the \
-             compared values. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its \
+             argument fails). The delta becomes a comparison of epoch milliseconds with \
+             `$delta * 3600000` added, which is exact for whole hours on a UTC instant. The \
+             final WHERE moves onto a WITH carrying the compared values. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its \
              WHERE, which selects the same nodes, because import sessions assign one label per \
              node.",
         ),
