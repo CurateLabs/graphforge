@@ -1291,7 +1291,7 @@ fn receipt_rejection_stage(value: &serde_json::Value) -> &'static str {
                 "import-outcome"
             } else if object
                 .get("construction")
-                .is_some_and(|construction| !sanitized_construction_tree(construction))
+                .is_some_and(|construction| !sanitized_construction(construction))
             {
                 "import-construction"
             } else if object.get("operation_timings").is_some_and(|timings| {
@@ -1340,7 +1340,7 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
             }
             if object
                 .get("construction")
-                .is_some_and(|construction| !sanitized_construction_tree(construction))
+                .is_some_and(|construction| !sanitized_construction(construction))
             {
                 return None;
             }
@@ -1663,6 +1663,60 @@ fn sanitized_import_operation_timings(value: &serde_json::Value) -> bool {
                 }
                 errors <= calls && (calls != 0 || elapsed == 0)
             })
+}
+
+/// The import receipt's construction evidence: a numeric tree, plus the one
+/// non-numeric field the receipt carries, the per-source provenance (#1898).
+fn sanitized_construction(value: &serde_json::Value) -> bool {
+    let Some(items) = value.as_object() else {
+        return sanitized_construction_tree(value);
+    };
+    if !items
+        .get("source_provenance")
+        .is_none_or(sanitized_source_provenance)
+    {
+        return false;
+    }
+    let mut rest = items.clone();
+    rest.remove("source_provenance");
+    sanitized_construction_tree(&rest.into())
+}
+
+/// `[{sequence, kind, bytes, sha256?, footer_sha256?}]` and nothing else: a
+/// closed source kind and lowercase hex SHA-256 digests, never a path or a name.
+fn sanitized_source_provenance(value: &serde_json::Value) -> bool {
+    const KEYS: [&str; 5] = ["sequence", "kind", "bytes", "sha256", "footer_sha256"];
+    // `max_files` of a session is bounded well below this.
+    const MAX_SOURCES: usize = 1 << 20;
+    let is_digest = |value: &serde_json::Value| {
+        value.as_str().is_some_and(|text| {
+            text.len() == 64
+                && text
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        })
+    };
+    value.as_array().is_some_and(|sources| {
+        sources.len() <= MAX_SOURCES
+            && sources.iter().all(|source| {
+                source.as_object().is_some_and(|object| {
+                    object.keys().all(|key| KEYS.contains(&key.as_str()))
+                        && ["sequence", "bytes"].iter().all(|key| {
+                            object
+                                .get(*key)
+                                .and_then(serde_json::Value::as_u64)
+                                .is_some()
+                        })
+                        && matches!(
+                            object.get("kind").and_then(serde_json::Value::as_str),
+                            Some("arrow_nodes" | "arrow_edges" | "parquet_nodes" | "parquet_edges")
+                        )
+                        && ["sha256", "footer_sha256"]
+                            .iter()
+                            .all(|key| object.get(*key).is_none_or(is_digest))
+                })
+            })
+    })
 }
 
 fn sanitized_construction_tree(value: &serde_json::Value) -> bool {
@@ -2751,6 +2805,44 @@ mod tests {
         );
         let leaked = br#"{"contract":"graphforge-import-session/1","outcome":"committed","construction":{"project_path":"/secret"}}"#;
         assert!(parse_receipts(leaked, true).is_err());
+        // Source provenance (#1898): a closed kind and hex digests, nothing else.
+        let digest = "ab".repeat(32);
+        let with_provenance = |sources: serde_json::Value| {
+            serde_json::json!({
+                "contract": "graphforge-import-session/1",
+                "outcome": "validated",
+                "construction": {"configured_batch_rows": 65536, "source_provenance": sources},
+            })
+            .to_string()
+        };
+        let accepted = with_provenance(serde_json::json!([
+            {"sequence": 1, "kind": "parquet_nodes", "bytes": 4096, "sha256": digest, "footer_sha256": digest},
+            {"sequence": 2, "kind": "arrow_edges", "bytes": 8},
+        ]));
+        let sanitized = parse_receipts(accepted.as_bytes(), true).unwrap();
+        assert_eq!(
+            sanitized[0]["construction"]["source_provenance"][0]["sha256"],
+            digest
+        );
+        for rejected in [
+            serde_json::json!([{"sequence": 1, "kind": "parquet_nodes", "bytes": 1, "path": "/secret/nodes.parquet"}]),
+            serde_json::json!([{"sequence": 1, "kind": "/secret/nodes.parquet", "bytes": 1}]),
+            serde_json::json!([{"sequence": 1, "kind": "parquet_nodes", "bytes": 1, "sha256": "/secret"}]),
+            serde_json::json!([{"sequence": 1, "kind": "parquet_nodes", "bytes": 1, "sha256": digest.to_uppercase()}]),
+            serde_json::json!([{"sequence": 1, "kind": "parquet_nodes", "bytes": 1, "sha256": "ab"}]),
+            serde_json::json!([{"sequence": 1, "kind": "parquet_nodes"}]),
+            serde_json::json!([{"sequence": "1", "kind": "parquet_nodes", "bytes": 1}]),
+            serde_json::json!({"sequence": 1}),
+            serde_json::json!("/secret"),
+        ] {
+            assert!(
+                parse_receipts(with_provenance(rejected.clone()).as_bytes(), true).is_err(),
+                "{rejected}"
+            );
+        }
+        // Only the receipt's own construction object may carry it.
+        let nested = br#"{"contract":"graphforge-import-session/1","outcome":"validated","construction":{"bulk_build":{"source_provenance":[{"kind":"parquet_nodes"}]}}}"#;
+        assert!(parse_receipts(nested, true).is_err());
         // The bulk builder's per-pass report is numeric-only, so it passes the
         // same sanitizer; a pass named by a string would not.
         let built = br#"{"contract":"graphforge-import-session/1","outcome":"stage+seal","construction":{"configured_batch_rows":65536,"bulk_build":{"workers":15,"nodes":262144,"edges":4194304,"passes":{"edges":{"wall_ms":1046,"cpu_ms":3760,"effective_millicores":3594,"logical_write_bytes":0,"physical_write_bytes":0,"logical_read_bytes":448,"peak_rss_bytes":393216000}}}}}"#;
