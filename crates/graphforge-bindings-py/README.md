@@ -57,23 +57,8 @@ point launches the same Rust-owned repository CLI used by `gf` and
 
 ## Algorithm definitions
 
-Existing calls retain their algorithm defaults. Optional keyword controls select
-fixed rounds of PageRank (`iterations`, including zero) and its `damping` factor,
-synchronous label propagation (`synchronous_iterations`, including zero), or the
-neighbor-edge clustering coefficient (`clustering_normalization="neighbor_edges"`).
-The default clustering normalization is `"fagiolo"`.
-
-```python
-forge.rank("Person", by="pagerank", damping=0.85, iterations=20)
-forge.cluster("Person", by="label_propagation", synchronous_iterations=10,
-              initial_label_property="external_id")
-forge.rank("Person", by="clustering_coefficient", directed=True,
-           clustering_normalization="neighbor_edges")
-```
-
-`initial_label_property` requires synchronous rounds and an Int64 property on
-every selected vertex. Its values become the output labels, with ties resolved
-to the smallest label. Without the property, initial labels are selected vertex
-ordinals. Rank and cluster invocation descriptors accept the same controls,
-including descriptors prepared from resolved belief projections. Rust owns the
-algorithms and validates their semantics.
+`rank()` supports fixed PageRank `iterations` and `damping`, and directed
+`clustering_normalization="neighbor_edges"`. `cluster()` supports deterministic
+`synchronous_iterations` with an optional Int64 `initial_label_property`.
+Existing calls retain their defaults. See the API reference in the full
+documentation for definitions and invocation descriptors.
