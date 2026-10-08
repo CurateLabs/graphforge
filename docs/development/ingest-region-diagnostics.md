@@ -171,18 +171,89 @@ and above the node-table estimate for a scratch run. Run validate under
 partition counts, scratch read/write bytes, and per-pass logical writes.
 Separate `edge_refinement_write_bytes`/`edge_refinement_read_bytes` from
 `csr_spool_write_bytes`/`csr_spool_read_bytes`. Parent and child block boundaries
-can have different header counts; total successful scratch reads must equal
-total writes. Subtract refinement and spool writes to recover the base payload
+can have different header counts. For property-free builds, total successful
+scratch reads equal writes. Subtract refinement and spool writes to recover the base payload
 of 76 bytes per edge plus CRC headers. A single covering relation requires no
 CSR spool, while every usable non-covering relation adds its entries once in
 each direction. Check `peak_csr_carry_entries` against the configured shard
 limit independently of relation count. The scratch plan reserves a 512 MiB
 fixed footprint (192 MiB runtime, 256 MiB for one canonical carry/encoder, and
-64 MiB minimum working space) plus 56 bytes per node and retained properties.
+64 MiB minimum working space) plus 56 bytes per node and cached source metadata.
 Compare the encoded inventories by path, length, SHA-256, and XXH64, excluding
 only the ADR 0038 ordinal receipt's documented random nonce. Compare reopened
 query data without per-query schema metadata. Kill an active scratch build,
 rerun validate and commit, and check both artifact parity and scratch removal.
+
+For property-bearing comparisons, also record `property_scratch_write_bytes`,
+`property_scratch_read_bytes` and `property_workspace_reserved_bytes`. Property
+traffic includes initial IPC runs, every merge, catalog scans, logical window
+spools and owner/projection spools. Reads can exceed writes because sorted rows
+serve both catalog and overlay encoding. Subtract property traffic as well as
+edge refinement and CSR spools when reconciling the compact edge base.
+
+The property reservation reuses the canonical CSR workspace between stages. Its
+fixed payload/encoder allowance is eight times `max_batch_bytes`, plus 32 MiB;
+owner inventory adds `max_catalog_identifier_bytes` and
+`max_batch_rows * (8 * ceil(max_property_columns / 64) + 128)`. Cached source
+metadata, schema transients and available IPC decoder bounds are accounted
+separately. With default construction limits, property workspace is 648 MiB,
+before those source allowances. This is an admission reservation, not a measured
+RSS value. Raw registered-source Parquet decoding and normalization expansion
+remain a separate bound under #1918; report the exact physical and logical input
+batch geometry rather than extending a cohort's RSS result to arbitrary inputs.
+
+For a fixed-budget payload ladder, keep node/edge counts and source batch rows
+constant, then increase variable-width property bytes. Set
+`ImportSessionLimits.batch_rows` explicitly through the Rust facade before
+registering Parquet files, so every normalized batch remains within the unchanged
+64 MiB intake limit. Run each lifecycle phase in a fresh process, collect GNU
+`time -v` peak RSS, compare inventories at a pinned construction clock, and open
+another process to query every payload and null. Keep the generator, input schema,
+row-group and batch geometry, and input content digests with the method; attach
+raw timings, receipts and process results to the issue rather than committing them
+under `docs/`.
+
+The property payload ladder uses 4,096 nodes and 65,536 edges, with Parquet
+row groups and import batches of 1,024 rows. Write with PyArrow 24.0.0
+`ParquetWriter(compression="NONE", use_dictionary=False)`, one batch per row
+group. The node schema is `node_uuid: fixed_size_binary[16]`, non-null
+`label: utf8`, and `name: utf8`. The edge schema is
+`edge_uuid: fixed_size_binary[16]`, non-null `rel_type: utf8`, non-null
+`source_uuid: fixed_size_binary[16]`, non-null
+`target_uuid: fixed_size_binary[16]`, and `payload: utf8`. Other fields retain
+the default nullable flag.
+
+For rank `r`, construct a node UUID as six big-endian bytes of `1790000000000`,
+then hexadecimal `70008000`, then six big-endian bytes of `r`. Edge UUIDs use
+`1790000000001` in the first six bytes. Node labels are `Vertex` and names are
+`node-{r:04d}`. Edge relation names are `LINK`, source ranks are `r % 4096`,
+and target ranks are `(17*r + 1) % 4096`. Repeat the lowercase hexadecimal
+SHA-256 of UTF-8 `edge-property:{r}` and truncate to 512, 4,096 or 16,384 bytes
+for the three payload widths. Generate inputs in a separate process before
+measuring the loader. The reference generator has SHA-256
+`5b051efcc61a40fe63059c359617b5580c1977ef0d08242c1f07dd898c25b341`;
+its complete derivation is specified above.
+
+The shared node file and three edge files have these SHA-256 identities:
+
+| Property-ladder input | SHA-256 |
+| --- | --- |
+| Nodes, all widths | `cb23944db77518b331c86ba0ab218d0448f9e09f7b5f0682a6014454c78c712c` |
+| Edges, 512-byte payload | `1ecda3ec3f3e8f95f6371abea79707eb822135accf4ae2716855d38093bce08c` |
+| Edges, 4,096-byte payload | `22d62b8c729bf095915a5f79e5a480ab43f97282ff7e041acfc0cf28e07d3ca5` |
+| Edges, 16,384-byte payload | `d4b1e3164b7ca141e08c2b53f91d87b6f38eb8593c58422d9b10846dca580f87` |
+
+Use a 1 GiB `GF_BULK_BUILD_MEMORY_BUDGET_BYTES` and a pinned
+`GF_TEST_SESSION_NOW_MICROS=1790000000000000` with a release CLI built with
+`graphforge-storage/test-support`. Begin the session through the Rust facade
+with `ImportSessionLimits { batch_rows: 1024, ..Default::default() }`; then run
+CLI registration, validate and commit in separate processes. Assert the validate
+receipt selects scratch, both property traffic counters are positive, reserved
+property workspace and measured loader RSS fit the budget, and no scratch remains.
+Reopen in another process and query counts plus UUID-keyed property values;
+compare payloads with the rank-based generator. Record whether query verification
+covers all rows or a sample. Preserve commands, binary identities and raw results
+on the producing issue.
 
 Input SHA-256 identities used by the S22/S24 comparisons are:
 

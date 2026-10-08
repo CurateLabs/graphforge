@@ -90,31 +90,40 @@ fn intern_rows(
     kind: ConstructionChunkKind,
     budgets: GraphConstructionBudgets,
 ) -> Result<(), GfError> {
+    for group in groups {
+        intern_batch(catalog, &group.batch, kind, budgets)?;
+    }
+    Ok(())
+}
+
+pub(super) fn intern_batch(
+    catalog: &mut RuntimeCatalog,
+    batch: &RecordBatch,
+    kind: ConstructionChunkKind,
+    budgets: GraphConstructionBudgets,
+) -> Result<(), GfError> {
     let (required, owner_column) = match kind {
         ConstructionChunkKind::Node => (2, "label"),
         ConstructionChunkKind::Edge => (4, "rel_type"),
     };
-    for group in groups {
-        let batch = &group.batch;
-        let owners = required_string(batch, owner_column)?;
-        let schema = batch.schema();
-        for row in 0..batch.num_rows() {
-            let owner = owners.value(row);
-            match kind {
-                ConstructionChunkKind::Node => {
-                    catalog.intern_label_at(owner, 0)?;
-                }
-                ConstructionChunkKind::Edge => {
-                    catalog.intern_relation_type_at(owner, 0)?;
-                }
+    let owners = required_string(batch, owner_column)?;
+    let schema = batch.schema();
+    for row in 0..batch.num_rows() {
+        let owner = owners.value(row);
+        match kind {
+            ConstructionChunkKind::Node => {
+                catalog.intern_label_at(owner, 0)?;
             }
-            for (offset, field) in schema.fields()[required..].iter().enumerate() {
-                if !batch.column(required + offset).is_null(row) {
-                    catalog.intern_property_at(field.name(), Some(owner), 0)?;
-                }
+            ConstructionChunkKind::Edge => {
+                catalog.intern_relation_type_at(owner, 0)?;
             }
-            admit(catalog, budgets)?;
         }
+        for (offset, field) in schema.fields()[required..].iter().enumerate() {
+            if !batch.column(required + offset).is_null(row) {
+                catalog.intern_property_at(field.name(), Some(owner), 0)?;
+            }
+        }
+        admit(catalog, budgets)?;
     }
     Ok(())
 }
@@ -171,15 +180,33 @@ impl<'a> RelationStats<'a> {
 
 /// Intern in the order the staged path does: every node observation in UUID
 /// order (by schema group for property-bearing input), then every edge's.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_catalog(
     budgets: GraphConstructionBudgets,
     nodes: &NodeTable,
     edge_relations: &RelationStats<'_>,
     node_groups: Option<&[SchemaGroup]>,
     edge_groups: Option<&[SchemaGroup]>,
+    node_scratch: Option<(
+        &super::property_rows::PropertyRows<'_>,
+        &[super::property_rows::SortedGroup],
+    )>,
+    edge_scratch: Option<(
+        &super::property_rows::PropertyRows<'_>,
+        &[super::property_rows::SortedGroup],
+    )>,
+    cancel: &AtomicBool,
 ) -> Result<BuiltCatalog, GfError> {
     let mut catalog = RuntimeCatalog::new();
-    if let Some(groups) = node_groups {
+    if let Some((rows, groups)) = node_scratch {
+        for group in groups {
+            let mut reader = rows.reader(&group.path)?;
+            while let Some(batch) = reader.next()? {
+                super::tables::check_cancelled(cancel)?;
+                intern_batch(&mut catalog, &batch, ConstructionChunkKind::Node, budgets)?;
+            }
+        }
+    } else if let Some(groups) = node_groups {
         intern_rows(&mut catalog, groups, ConstructionChunkKind::Node, budgets)?;
     } else {
         {
@@ -194,7 +221,15 @@ pub(super) fn build_catalog(
             }
         }
     }
-    if let Some(groups) = edge_groups {
+    if let Some((rows, groups)) = edge_scratch {
+        for group in groups {
+            let mut reader = rows.reader(&group.path)?;
+            while let Some(batch) = reader.next()? {
+                super::tables::check_cancelled(cancel)?;
+                intern_batch(&mut catalog, &batch, ConstructionChunkKind::Edge, budgets)?;
+            }
+        }
+    } else if let Some(groups) = edge_groups {
         intern_rows(&mut catalog, groups, ConstructionChunkKind::Edge, budgets)?;
     } else {
         for rel in &edge_relations.first_appearance {

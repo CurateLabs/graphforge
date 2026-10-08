@@ -44,6 +44,8 @@ mod identities;
 mod install;
 mod ordered;
 mod plan;
+mod property_emit;
+mod property_rows;
 mod scratch;
 mod scratch_csr;
 mod scratch_edges;
@@ -53,6 +55,8 @@ mod tables;
 pub(crate) use budget::ForcedPartitions;
 pub use budget::{BulkRoute, BulkStagedReason};
 pub use plan::{BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkSource};
+#[cfg(test)]
+pub(crate) use property_rows::ForcedPropertyFrames;
 
 use budget::ScratchPlan;
 use emit::{EdgeEmitter, RelationStats, Semantics};
@@ -282,7 +286,31 @@ pub(crate) fn encode_bulk(
     // A durable bulk route cannot switch to staging after a budget drop.
     // Refuse that attempt before loading data; it can retry when memory returns.
     let scratch_plan = match (plan.route(), plan.memory_budget) {
-        (BulkRoute::Scratch, Some(budget)) => Some(ScratchPlan::derive(plan, budget, workers)),
+        (BulkRoute::Scratch, Some(budget)) => {
+            let has_properties = plan
+                .nodes
+                .iter()
+                .chain(&plan.edges)
+                .any(|source| !source.property_free);
+            let minimum = plan
+                .node_tables_resident_bytes()
+                .saturating_add(if has_properties {
+                    budget::property_extra_workspace(plan, budgets)
+                } else {
+                    0
+                });
+            if budget < minimum {
+                return Err(GfError::Project {
+                    code: graphforge_core::ProjectErrorCode::ResourceLimit,
+                    message: format!(
+                        "graph construction encoding: property scratch requires {minimum} resident bytes before decoding; budget is {budget}"
+                    ),
+                });
+            }
+            Some(ScratchPlan::derive_with_budgets(
+                plan, budget, workers, budgets,
+            ))
+        }
         (BulkRoute::Staged(reason), _) => {
             return Err(GfError::Project {
                 code: graphforge_core::ProjectErrorCode::ResourceLimit,
@@ -320,10 +348,37 @@ pub(crate) fn encode_bulk(
     let retain_edges = plan.edges.iter().any(|source| !source.property_free);
     passes.extend([meter.finish()]);
 
+    let scratch = scratch_plan
+        .as_ref()
+        .map(|_| Scratch::create(source))
+        .transpose()?;
+    let node_properties = scratch.as_ref().filter(|_| retain_nodes).map(|scratch| {
+        property_rows::PropertyRows::new(
+            scratch,
+            ConstructionChunkKind::Node,
+            budgets,
+            plan.max_source_schema_bytes(),
+        )
+    });
+    let edge_properties = scratch.as_ref().filter(|_| retain_edges).map(|scratch| {
+        property_rows::PropertyRows::new(
+            scratch,
+            ConstructionChunkKind::Edge,
+            budgets,
+            plan.max_source_schema_bytes(),
+        )
+    });
+
     // Pass 1: nodes.
     let meter = PassMeter::start("nodes");
     let mut nodes = run_pass(&pool, cancelled, &cancel, || {
-        tables::collect_nodes(&plan.nodes, retain_nodes, budgets, &cancel)
+        tables::collect_nodes(
+            &plan.nodes,
+            retain_nodes && node_properties.is_none(),
+            node_properties.as_ref(),
+            budgets,
+            &cancel,
+        )
     })?;
     passes.extend([meter.finish()]);
     crate::graph_construction::construction_failpoint("bulk.after_nodes");
@@ -332,16 +387,13 @@ pub(crate) fn encode_bulk(
     // into scratch partitions instead of landing in resident columns.
     let meter = PassMeter::start("edges");
     let index = pool.install(|| NodeIndex::build(&nodes.uuids));
-    let scratch = scratch_plan
-        .as_ref()
-        .map(|_| Scratch::create(source))
-        .transpose()?;
     let mut edge_side = match (&scratch_plan, &scratch) {
         (Some(sized), Some(scratch)) => {
             EdgeSide::Scratch(run_pass(&pool, cancelled, &cancel, || {
                 scratch_edges::scatter_edges(
                     &plan.edges,
                     budgets,
+                    edge_properties.as_ref(),
                     &nodes,
                     &index,
                     sized,
@@ -380,23 +432,45 @@ pub(crate) fn encode_bulk(
     };
     let (node_groups, edge_groups) = run_pass(&pool, cancelled, &cancel, || {
         Ok((
-            retain_nodes
+            (retain_nodes && node_properties.is_none())
                 .then(|| emit::schema_groups(&node_kept, "node_uuid"))
                 .transpose()?,
-            retain_edges
+            (retain_edges && edge_properties.is_none())
                 .then(|| emit::schema_groups(&edge_kept, "edge_uuid"))
                 .transpose()?,
         ))
     })?;
     drop((node_kept, edge_kept));
+    let (node_scratch_groups, edge_scratch_groups) = run_pass(&pool, cancelled, &cancel, || {
+        Ok((
+            node_properties
+                .as_ref()
+                .map(|rows| rows.finish(&cancel))
+                .transpose()?,
+            edge_properties
+                .as_ref()
+                .map(|rows| rows.finish(&cancel))
+                .transpose()?,
+        ))
+    })?;
+
     // The staged path admits at most `max_schema_groups` exact schemas across
     // both kinds; a property-free kind is the one bare schema.
-    let schema_groups = node_groups
-        .as_ref()
-        .map_or(usize::from(!nodes.uuids.is_empty()), Vec::len)
-        + edge_groups
-            .as_ref()
-            .map_or(usize::from(edge_count != 0), Vec::len);
+    let schema_groups = node_scratch_groups.as_ref().map_or_else(
+        || {
+            node_groups
+                .as_ref()
+                .map_or(usize::from(!nodes.uuids.is_empty()), Vec::len)
+        },
+        Vec::len,
+    ) + edge_scratch_groups.as_ref().map_or_else(
+        || {
+            edge_groups
+                .as_ref()
+                .map_or(usize::from(edge_count != 0), Vec::len)
+        },
+        Vec::len,
+    );
     if schema_groups > budgets.max_schema_groups {
         return Err(storage("construction schema-group budget exhausted"));
     }
@@ -453,13 +527,18 @@ pub(crate) fn encode_bulk(
         },
         _ => RelationStats::unused(),
     };
-    let built = emit::build_catalog(
-        budgets,
-        &nodes,
-        &relation_stats,
-        node_groups.as_deref(),
-        edge_groups.as_deref(),
-    )?;
+    let built = run_pass(&pool, cancelled, &cancel, || {
+        emit::build_catalog(
+            budgets,
+            &nodes,
+            &relation_stats,
+            node_groups.as_deref(),
+            edge_groups.as_deref(),
+            node_properties.as_ref().zip(node_scratch_groups.as_deref()),
+            edge_properties.as_ref().zip(edge_scratch_groups.as_deref()),
+            &cancel,
+        )
+    })?;
     drop(relation_stats);
     let types = emit::node_types(&nodes.label_names, &built.entity_ids, &semantics)?;
     run_pass(&pool, cancelled, &cancel, || {
@@ -536,10 +615,10 @@ pub(crate) fn encode_bulk(
     };
     passes.extend([meter.finish()]);
     crate::graph_construction::construction_failpoint("bulk.after_adjacency");
-    // Scratch is spent: report what it carried, then delete it before the
-    // remaining passes.
+    // Snapshot topology scratch traffic; property scratch remains live until
+    // the overlays finish and contributes its separately counted traffic.
     let mut scratch_report = ScratchReport::default();
-    if let (Some(scratch), Some(sized)) = (scratch, &scratch_plan) {
+    if let (Some(scratch), Some(sized)) = (&scratch, &scratch_plan) {
         scratch_report = ScratchReport {
             concurrency: sized.concurrency as u64,
             edge_partitions: match &edge_side {
@@ -578,7 +657,6 @@ pub(crate) fn encode_bulk(
                 .map_or(0, |(csr, _)| csr.peak_carry_entries()),
         };
         drop(ranked_edges);
-        scratch.remove()?;
     }
 
     // Property overlays: sequential, through the staged encoder's own writer,
@@ -589,8 +667,41 @@ pub(crate) fn encode_bulk(
     {
         let cache_window =
             graphforge_filesystem::cache_release_window_for_streams(2).map_err(storage)?;
-        let mut lanes = lanes::ParquetLanes::new(admission, budgets.max_batch_bytes);
+        let mut lanes = lanes::ParquetLanes::new(
+            if scratch.is_some() { None } else { admission },
+            budgets.max_batch_bytes,
+        );
         let mut property_evidence = GraphConstructionEncodingEvidence::default();
+        for (rows, groups, kind) in [
+            (
+                node_properties.as_ref(),
+                node_scratch_groups.as_deref(),
+                ConstructionChunkKind::Node,
+            ),
+            (
+                edge_properties.as_ref(),
+                edge_scratch_groups.as_deref(),
+                ConstructionChunkKind::Edge,
+            ),
+        ] {
+            if let (Some(rows), Some(groups)) = (rows, groups) {
+                property_emit::emit(
+                    rows,
+                    groups,
+                    kind,
+                    budgets,
+                    &semantics,
+                    &mut routes,
+                    &mut lanes,
+                    &output,
+                    cache_window,
+                    &mut property_evidence,
+                    cancelled,
+                    &mut artifacts,
+                )?;
+            }
+        }
+
         for (groups, kind) in [
             (node_groups.as_deref(), ConstructionChunkKind::Node),
             (edge_groups.as_deref(), ConstructionChunkKind::Edge),
@@ -648,6 +759,24 @@ pub(crate) fn encode_bulk(
         evidence.fsync_operations += property_evidence.fsync_operations;
     }
     passes.extend([meter.finish()]);
+    let property_scratch_write_bytes = node_properties
+        .as_ref()
+        .map_or(0, property_rows::PropertyRows::written_bytes)
+        + edge_properties
+            .as_ref()
+            .map_or(0, property_rows::PropertyRows::written_bytes);
+    let property_scratch_read_bytes = node_properties
+        .as_ref()
+        .map_or(0, property_rows::PropertyRows::read_bytes)
+        + edge_properties
+            .as_ref()
+            .map_or(0, property_rows::PropertyRows::read_bytes);
+    scratch_report.write_bytes += property_scratch_write_bytes;
+    scratch_report.read_bytes += property_scratch_read_bytes;
+    drop((node_properties, edge_properties));
+    if let Some(scratch) = scratch {
+        scratch.remove()?;
+    }
 
     // Small controls, then the inventory.
     let meter = PassMeter::start("finalize");
@@ -788,6 +917,17 @@ pub(crate) fn encode_bulk(
             csr_spool_write_bytes: scratch_report.csr_spool_write_bytes,
             csr_spool_read_bytes: scratch_report.csr_spool_read_bytes,
             peak_csr_carry_entries: scratch_report.peak_csr_carry_entries,
+            property_scratch_write_bytes,
+            property_scratch_read_bytes,
+            property_workspace_reserved_bytes: if scratch_plan.is_some()
+                && (retain_nodes || retain_edges)
+            {
+                budget::property_workspace(budgets)
+                    .saturating_add(plan.max_source_schema_bytes().saturating_mul(8))
+                    .saturating_add(plan.source_decoder_bytes())
+            } else {
+                0
+            },
         };
     }
     Ok(completed)

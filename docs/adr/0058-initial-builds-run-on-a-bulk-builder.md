@@ -4,14 +4,14 @@ adr: "0058"
 status: "Accepted"
 date: "2026-10-07"
 superseded_by: null
-revisit_when: "Node tables or edge properties must go out of core, a published artifact stops being a projection of the three ranked inputs, or a chunk-API initial build needs the same speedup"
+revisit_when: "Node identity tables must go out of core, a published artifact stops being a projection of the three ranked inputs, or a chunk-API initial build needs the same speedup"
 ---
 
 # ADR 0058: Initial builds run on a bulk builder derived from the published generation
 
 **Status:** Accepted
 
-**Implementation:** #1883 and #1900 (slices of epic #1881).
+**Implementation:** #1883, #1900 and #1916 (slices of epic #1881).
 
 **Related:**
 - ADR 0013 (project generation protocol; the `CURRENT` swap is unchanged)
@@ -84,26 +84,26 @@ functions.
   those inputs.
 - An initial build whose estimated peak memory fits the plan-time budget keeps
   everything resident. One that does not runs the same passes through scratch
-  files (below), so peak memory stays inside the budget. The budget is three
-  fifths of the process's cgroup-aware memory headroom, or the bytes in
+  files (below), bounding normalized builder workspace within its reservation.
+  The registered-source decoding and normalization boundary is described below;
+  its complete memory bound remains a prerequisite under #1918. The budget is
+  three fifths of the process's cgroup-aware memory headroom, or the bytes in
   `GF_BULK_BUILD_MEMORY_BUDGET_BYTES`. Routing is a function of the footers and
   the budget, never of the data, and the bytes are the same on every route.
 - The staged path remains for appends, chunk-API sessions, sessions an earlier
-  binary began staging, and two plan-time cases the scratch route cannot hold,
-  each recorded as a typed reason in the import manifest (`staged_reason`):
-  `node_tables_exceed_budget` (the sorted node UUIDs, labels and endpoint index
-  and the two degree arrays need a conservative 56 bytes per node and stay in memory, alongside the fixed builder workspace) and
-  `edge_properties_exceed_budget` (the builder retains property-bearing edge
-  batches). Out-of-core node handling and edge properties on scratch remain
-  open under #1881.
+  binary began staging, and `node_tables_exceed_budget`: the identity tables,
+  labels, endpoint index and degree arrays need a conservative 56 bytes per
+  node alongside the fixed workspace. Property payload size does not contribute
+  to this identity-table footprint. Out-of-core node identities remain open
+  under #1881. The historical `edge_properties_exceed_budget` manifest reason
+  remains readable but new builds do not select it.
 - The route is chosen once, by the first `validate`, and written to the import
   manifest (`build_route`); every later `validate`, in any process, reads it
   back. A refused, cancelled or killed bulk attempt therefore cannot be
   re-routed to the staged path by a change in free memory. It is never a
   retry. Whether the bulk route then runs in memory or on scratch is decided
   again on each attempt from the live budget; either produces the same bytes.
-  If that budget can no longer hold the bulk route's node tables or retained
-  edge properties, the attempt returns a resource-limit refusal before loading
+  If that budget can no longer hold the bulk route's node tables or minimum scratch workspace, the attempt returns a resource-limit refusal before loading
   data. It keeps the bulk route and can retry when the budget is sufficient.
 
 ## Scratch route
@@ -163,6 +163,53 @@ When the estimate exceeds the budget:
 - Node and edge counts are limited to 2^32 - 2 by the dense ids. A larger input
   is refused with a resource-limit error.
 
+## Bounded property scratch
+
+Property-bearing kinds on the scratch route keep no decoded source batches.
+Every admitted batch, including a bare schema in a property-bearing kind, enters
+an exact-schema group identified by the existing normalized schema digest.
+Sorted Arrow IPC runs preserve full UUID order, field order, field metadata,
+values and nulls. Two-way merges bound decoded fan-in; physical transport frames
+have a small target size, with one admitted wide row allowed its own frame.
+Scratch frames have length bounds and CRC32C, without hashing or fsync.
+
+Catalog observation streams groups in digest order and rows in UUID order,
+using the same per-row interning operations as the resident route. Overlay
+encoding preserves the existing logical `max_batch_rows` windows. A disposable
+window spool records payload while a compact owner/active-field inventory finds
+all non-null fields for each owner across that whole window. A second scan
+projects into owner/route spools. Those spools stream in owner/route order through
+the shared 4 MiB greedy fragment splitter and existing Parquet encoder. Physical
+frame boundaries therefore cannot affect published cuts or ordinals. Selected
+pieces are copied using Arrow take before being retained; slices never serve as
+memory-accounting boundaries. A binary accumulator limits retained batch headers
+and concatenation copies while assembling one canonical fragment.
+
+The property workspace includes admitted canonical Arrow buffers, two decoded merge frames,
+IPC payloads, selection/concatenation transients and one canonical fragment and
+encoder. It reuses the CSR workspace between stages, rather than reserving both
+at once. Transport admission is based on actual retained Arrow array memory, including
+nested children and dictionary buffers, rather than compressed source bytes or
+logical fragment charge. A budget below the fixed workspace is refused before
+decoding. Property scratch reads and writes are reported separately; catalog,
+window and projected-row scans all count. Cancellation and recovery discard this
+transport using the same restart policy as edge and CSR scratch.
+
+Registered-source decoding precedes this transport. Parquet dictionary/page
+expansion and the normalizer's row maps need their own bounded physical batching
+and admission (#1918); this decision does not claim that normalized-row transport
+alone bounds every source decoder. Available IPC footer/body expansion and schema
+metadata reservations are checked before creating eager source readers. Property
+traffic and fixed reservations remain distinct from measured process RSS.
+
+**Alternatives.** Reusing the staged range partitioner would retain partition
+writers, SHA receipts and fsyncs and would inherit its sorted-chunk and skew
+constraints. Re-reading registered sources for each window would amplify input
+I/O with graph size. Arrow row conversion is not an exact transport: hidden
+children of null lists or temporal structs can affect the existing fragment
+charge. IPC preserves those children. This is an internal reversible storage
+choice; no public API or published format changes.
+
 ## Restart instead of resume (amends ADR 0038 property 1)
 
 ADR 0038 property 1 said a resumed run produces the same graph as an
@@ -191,8 +238,9 @@ spill file lifecycle is removed from initial builds.
   fewer edges; worst measured/fitted ratio 1.14): S22 peaks at 2.3 GiB and S24
   at 7.8 GiB. The planner uses `768 MiB + 26 B/edge + 76 B/node` plus a 25%
   margin, so S22 plans for 3.6 GB, S24 for 11.3 GB, S25 for 21.6 GB and S26 for
-  42.3 GB. A property-bearing kind retains its decoded batches and two copies of
-  them: six times their uncompressed footer bytes, measured at 5.5. A source
+  42.3 GB. The resident route retains a property-bearing kind's decoded batches and two
+  copies of them: six times their uncompressed footer bytes, measured at 5.5.
+  The scratch route replaces those retained payloads with bounded property runs. A source
   whose UUIDs arrive unsorted also needs an order array and one gathered
   column at a time (about 20 B/edge more) while it sorts.
 - The session checkpoint records an empty shape for a builder session. The

@@ -479,6 +479,7 @@ fn missing_endpoint_error(is_edge: bool) -> GfError {
 pub(super) fn scatter_edges(
     sources: &[BulkSource<'_>],
     budgets: GraphConstructionBudgets,
+    properties: Option<&super::property_rows::PropertyRows<'_>>,
     nodes: &NodeTable,
     index: &NodeIndex<'_>,
     plan: &ScratchPlan,
@@ -570,6 +571,9 @@ pub(super) fn scatter_edges(
                     let part = partition_of(&splitters, &record.uuid);
                     observe(&mut task_bounds[part], record.uuid);
                     scatter.push(part, &record.encode())?;
+                }
+                if let Some(properties) = properties {
+                    properties.ingest(&batch, cancel)?;
                 }
                 written += count;
                 Ok(())

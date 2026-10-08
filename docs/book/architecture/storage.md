@@ -448,9 +448,23 @@ retain their authenticated CAS objects while their logical route paths change.
 
 An initial import builds this same encoded inventory without staging or shaping:
 the bulk builder ranks nodes and edges and emits each artifact once, hashed as it
-is written; over the memory budget, edges and adjacency entries pass through
-scratch files once, with a CRC32C per block and no fsync ([ADR 0058](../../adr/0058-initial-builds-run-on-a-bulk-builder.md),
-[resumable import](resumable-import.md)). Publication is unchanged.
+is written. Over budget, compact edges, adjacency entries and normalized property
+rows use disposable CRC32C scratch without SHA or fsync
+([ADR 0058](../../adr/0058-initial-builds-run-on-a-bulk-builder.md),
+[resumable import](resumable-import.md)). Property runs sort exact schemas by UUID,
+then stream the existing logical windows, owner projections and 4 MiB fragments.
+Physical scratch frames do not change catalog IDs, cuts, ordinals or published
+bytes. Node identity tables remain resident. The historical
+`edge_properties_exceed_budget` manifest reason remains readable; new plans
+route property payloads through scratch instead of retaining their batches.
+Publication and restart semantics are unchanged.
+
+This bound covers normalized property transport and overlay assembly. Registered
+source decoding and normalization can expand Parquet dictionaries, nested pages
+and row maps before those rows reach the transport; their independent source
+workspace and physical batching work remains under #1918. A property scratch
+reservation therefore describes builder workspace, not a proof that arbitrary
+registered inputs fit the complete process budget.
 
 Read sessions retain one admitted route inventory with their catalog and
 adjacency provider. Publishing a later generation replaces the facade's

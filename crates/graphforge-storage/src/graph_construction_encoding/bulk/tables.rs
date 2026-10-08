@@ -219,6 +219,7 @@ pub(super) struct NodeTable {
 pub(super) fn collect_nodes(
     sources: &[BulkSource<'_>],
     retain: bool,
+    properties: Option<&super::property_rows::PropertyRows<'_>>,
     budgets: GraphConstructionBudgets,
     cancel: &AtomicBool,
 ) -> Result<NodeTable, GfError> {
@@ -258,6 +259,9 @@ pub(super) fn collect_nodes(
                     &mut labels[written..written + count],
                 );
                 written += count;
+                if let Some(properties) = properties {
+                    properties.ingest(&batch, cancel)?;
+                }
                 if retain {
                     chunk.kept.push(batch);
                 }

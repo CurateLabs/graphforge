@@ -59,12 +59,12 @@ mod inventory;
 mod inventory_bound;
 mod lanes;
 mod properties;
-#[cfg(test)]
-pub(crate) use bulk::ForcedPartitions;
 pub use bulk::{
     BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkRoute, BulkSource,
     BulkStagedReason,
 };
+#[cfg(test)]
+pub(crate) use bulk::{ForcedPartitions, ForcedPropertyFrames};
 pub(crate) use bulk::{discard_scratch, encode_bulk};
 #[cfg(test)]
 pub(crate) use inventory::authenticate_inventory_payloads;
@@ -1094,16 +1094,37 @@ fn property_projections(
     context: Option<&CompositionBindingContext>,
     bindings: Option<&SemanticStorageBindings>,
 ) -> Result<Vec<(String, Vec<usize>)>, GfError> {
+    let active = (required..input.num_columns()).filter(|&column_index| {
+        indexes
+            .iter()
+            .any(|index| !input.column(column_index).is_null(*index as usize))
+    });
+    property_projections_for_fields(
+        input.schema().as_ref(),
+        active,
+        owner,
+        owner_kind,
+        route_kind,
+        context,
+        bindings,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn property_projections_for_fields(
+    schema: &Schema,
+    fields: impl IntoIterator<Item = usize>,
+    owner: &ResolvedOwner,
+    owner_kind: SymbolKind,
+    route_kind: SemanticRouteKind,
+    context: Option<&CompositionBindingContext>,
+    bindings: Option<&SemanticStorageBindings>,
+) -> Result<Vec<(String, Vec<usize>)>, GfError> {
     let mut projections = BTreeMap::<String, Vec<usize>>::new();
-    for column_index in required..input.num_columns() {
-        let column = input.column(column_index);
-        if !indexes.iter().any(|index| !column.is_null(*index as usize)) {
-            continue;
-        }
+    for column_index in fields {
         let route = if let (Some(context), Some(bindings), Some(_owner_symbol)) =
             (context, bindings, owner.symbol.as_ref())
         {
-            let schema = input.schema();
             let field = schema.field(column_index);
             let (binding, _) = context
                 .resolve_owned_property(owner_kind, &owner.input, field.name())
