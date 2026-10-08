@@ -64,11 +64,11 @@ pub use bulk::{BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, 
 #[cfg(test)]
 pub(crate) use inventory::authenticate_inventory_payloads;
 pub(crate) use inventory::{authenticate_inventory, authenticate_inventory_control};
-use properties::{edge_property_batch, node_property_batch};
 #[cfg(test)]
 pub(crate) use inventory_bound::InventoryBoundOverride;
 use inventory_bound::inventory_bound;
 pub(crate) use inventory_bound::{decode_encoding_inventory, inventory_authority_sha256};
+use properties::{edge_property_batch, node_property_batch};
 #[cfg(any(test, feature = "test-support"))]
 mod seam_spike;
 
