@@ -1,9 +1,15 @@
 """Fresh-wheel execution of optional Graphalytics-compatible algorithm modes."""
 
+from itertools import count
 import math
-import uuid
 
 import graphforge as g
+
+_ENTITY_ORDINALS = count(1)
+
+
+def fixture_uuid():
+    return f"018f0f4e-7b8c-7000-8000-{next(_ENTITY_ORDINALS):012x}"
 
 
 def scores(table):
@@ -36,13 +42,13 @@ def check_rank_modes():
         != forge.prepare_rank_invocation("Person", **(options | {"iterations": 2})).fingerprint
     )
     forge.enable_capability(
-        operation_uuid=str(uuid.uuid4()), capability_id="provenance", capability_version=1
+        operation_uuid=fixture_uuid(), capability_id="provenance", capability_version=1
     )
     forge.enable_capability(
-        operation_uuid=str(uuid.uuid4()), capability_id="knowledge", capability_version=1
+        operation_uuid=fixture_uuid(), capability_id="knowledge", capability_version=1
     )
     recorded = forge.invoke_recorded(
-        operation_uuid=str(uuid.uuid4()), run_uuid=str(uuid.uuid4()), descriptor=descriptor
+        operation_uuid=fixture_uuid(), run_uuid=fixture_uuid(), descriptor=descriptor
     )
     assert recorded.result.equals(result)
 
@@ -108,17 +114,17 @@ def check_projection_modes():
     forge = g.GraphForge()
     for capability in ["provenance", "knowledge", "epistemic"]:
         forge.enable_capability(
-            operation_uuid=str(uuid.uuid4()), capability_id=capability, capability_version=1
+            operation_uuid=fixture_uuid(), capability_id=capability, capability_version=1
         )
     node = forge.add_node("Person", name="A", external_id=42)
     forge.create_assertion_with_status(
-        operation_uuid=str(uuid.uuid4()),
-        assertion_uuid=str(uuid.uuid4()),
+        operation_uuid=fixture_uuid(),
+        assertion_uuid=fixture_uuid(),
         claim="A participates in the graph",
         graph_refs=[
             {"graph_uuid": node.uuid, "graph_kind": "node", "role": "subject", "ordinal": 0}
         ],
-        status_event_uuid=str(uuid.uuid4()),
+        status_event_uuid=fixture_uuid(),
         status="supported",
     )
     projection = forge.resolve_belief_projection(
@@ -155,9 +161,9 @@ def check_projection_modes():
     for descriptor, column, expected in descriptors:
         result = forge.invoke_resolved_recorded(
             projection=projection,
-            operation_uuid=str(uuid.uuid4()),
-            run_uuid=str(uuid.uuid4()),
-            attachment_uuid=str(uuid.uuid4()),
+            operation_uuid=fixture_uuid(),
+            run_uuid=fixture_uuid(),
+            attachment_uuid=fixture_uuid(),
             descriptor=descriptor,
         )
         assert result.result[column].to_pylist() == [expected]

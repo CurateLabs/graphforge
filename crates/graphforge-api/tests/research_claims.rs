@@ -540,7 +540,8 @@ fn branch_challenge_revision_and_suppression_preserve_parent_and_shared_graph() 
                     by: graphforge_core::algorithms::RankAlgorithm::Degree,
                     via: None,
                     directed: true,
-                    write_property: None..Default::default()
+                    write_property: None,
+                    ..Default::default()
                 }
             )
             .unwrap(),

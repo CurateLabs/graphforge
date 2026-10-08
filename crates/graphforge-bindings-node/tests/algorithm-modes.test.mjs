@@ -1,9 +1,15 @@
 // Fresh-native execution of optional Graphalytics-compatible algorithm modes.
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 import { tableFromIPC } from "apache-arrow";
 import { GraphForge } from "../index.js";
+
+let entityOrdinal = 0;
+
+function fixtureUUID() {
+  entityOrdinal += 1;
+  return `018f0f4e-7b8c-7000-8000-${entityOrdinal.toString(16).padStart(12, "0")}`;
+}
 
 function scores(ipc) {
   const table = tableFromIPC(ipc);
@@ -60,14 +66,14 @@ test("PageRank controls survive ordinary, descriptor and recorded dispatch", asy
   );
   for (const capabilityId of ["provenance", "knowledge"]) {
     await forge.enableCapability({
-      operationUuid: randomUUID(),
+      operationUuid: fixtureUUID(),
       capabilityId,
       capabilityVersion: 1,
     });
   }
   const recorded = await forge.invokeRecorded({
-    operationUuid: randomUUID(),
-    runUuid: randomUUID(),
+    operationUuid: fixtureUUID(),
+    runUuid: fixtureUUID(),
     descriptor,
   });
   assert.deepEqual(scores(recorded.result), scores(result));
@@ -223,20 +229,20 @@ test("resolved belief projection forwards every optional algorithm mode", async 
   const forge = new GraphForge();
   for (const capabilityId of ["provenance", "knowledge", "epistemic"]) {
     await forge.enableCapability({
-      operationUuid: randomUUID(),
+      operationUuid: fixtureUUID(),
       capabilityId,
       capabilityVersion: 1,
     });
   }
   const node = forge.addNode("Person", { name: "A", external_id: 42 });
   await forge.createAssertionWithStatus({
-    operationUuid: randomUUID(),
-    assertionUuid: randomUUID(),
+    operationUuid: fixtureUUID(),
+    assertionUuid: fixtureUUID(),
     claim: "A participates in the graph",
     graphRefs: [
       { graphUuid: node.uuid, graphKind: "node", role: "subject", ordinal: 0 },
     ],
-    statusEventUuid: randomUUID(),
+    statusEventUuid: fixtureUUID(),
     status: "supported",
   });
   const projection = await forge.resolveBeliefProjection({
@@ -290,9 +296,9 @@ test("resolved belief projection forwards every optional algorithm mode", async 
   ];
   for (const [descriptor, column, expected] of descriptors) {
     const result = await forge.invokeResolvedRecorded(projection, {
-      operationUuid: randomUUID(),
-      runUuid: randomUUID(),
-      attachmentUuid: randomUUID(),
+      operationUuid: fixtureUUID(),
+      runUuid: fixtureUUID(),
+      attachmentUuid: fixtureUUID(),
       descriptor,
     });
     assert.equal(tableFromIPC(result.result).getChild(column).get(0), expected);
