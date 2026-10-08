@@ -279,16 +279,33 @@ impl DigestState {
             self.hasher.update(&bytes[skip..]);
             self.hashed = end;
             self.drain();
-        } else if self.pending_bytes + bytes.len() <= self.pending_limit {
-            if let Some(held) = self.pending.get(&offset) {
-                if held.len() >= bytes.len() {
-                    return;
-                }
-                self.pending_bytes -= held.len();
-            }
-            self.pending_bytes += bytes.len();
-            self.pending.insert(offset, bytes.to_vec());
+        } else {
+            self.hold(offset, bytes);
         }
+    }
+
+    /// Hold a range that arrived ahead of the hashed prefix. Over the bound, the
+    /// ranges farthest from the prefix go first, since the nearest are the ones
+    /// the prefix reaches next; whatever is dropped is read again by `finish`.
+    fn hold(&mut self, offset: u64, bytes: &[u8]) {
+        if let Some(held) = self.pending.get(&offset) {
+            if held.len() >= bytes.len() {
+                return;
+            }
+            self.pending_bytes -= held.len();
+            self.pending.remove(&offset);
+        }
+        while self.pending_bytes + bytes.len() > self.pending_limit {
+            match self.pending.last_key_value() {
+                Some((&farthest, _)) if farthest > offset => {
+                    let (_, dropped) = self.pending.pop_last().expect("last entry exists");
+                    self.pending_bytes -= dropped.len();
+                }
+                _ => return,
+            }
+        }
+        self.pending_bytes += bytes.len();
+        self.pending.insert(offset, bytes.to_vec());
     }
 
     /// Hash every held range that now touches the hashed prefix.
@@ -346,6 +363,7 @@ impl SourceDigest {
             ));
         }
         let mut buffer = Vec::new();
+        let mut reread = 0_u64;
         loop {
             state.drain();
             if state.hashed >= state.length {
@@ -370,7 +388,9 @@ impl SourceDigest {
             })?;
             state.hasher.update(&buffer);
             state.hashed += want;
+            reread += want;
         }
+        RegionScope::record_work("bytes", reread);
         let hasher = std::mem::replace(&mut state.hasher, Sha256::new());
         Ok(hex(&hasher.finalize()))
     }
