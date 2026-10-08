@@ -1824,6 +1824,24 @@ fn verify_file_counted_in_domain(
     diagnostic: &Path,
     domain: graphforge_core::hash_observation::HashDomain,
 ) -> Result<ReadIoEvidence, GfError> {
+    let (io, matches) =
+        classify_file_counted_in_domain(file, digest, expected_length, diagnostic, domain, None)?;
+    if !matches {
+        return Err(validation("graph object digest does not match its address"));
+    }
+    Ok(io)
+}
+
+/// Preserve completed authentication work even when the bytes do not match.
+/// Installation can then account a repaired object without reading it twice.
+fn classify_file_counted_in_domain(
+    file: File,
+    digest: &str,
+    expected_length: u64,
+    diagnostic: &Path,
+    domain: graphforge_core::hash_observation::HashDomain,
+    expected_checksum: Option<u64>,
+) -> Result<(ReadIoEvidence, bool), GfError> {
     let metadata = file
         .metadata()
         .map_err(|error| storage("inspect graph object handle", diagnostic, error))?;
@@ -1832,13 +1850,19 @@ fn verify_file_counted_in_domain(
             "graph object handle is not the declared regular file",
         ));
     }
+    let identity = graphforge_filesystem::file_identity(&file)
+        .map_err(|error| storage("identify graph object handle", diagnostic, error))?;
     let mut file = graphforge_filesystem::FileCacheReleasingReader::new(file)
         .map_err(|error| storage("open bounded graph object handle", diagnostic, error))?;
-    let mut hasher = crate::payload_digest::PayloadSha256::for_domain(domain);
+    file.rewind()
+        .map_err(|error| storage("rewind graph object handle", diagnostic, error))?;
+    let mut hasher = expected_checksum
+        .is_none()
+        .then(|| crate::payload_digest::PayloadSha256::for_domain(domain));
     let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut io = ReadIoEvidence::default();
     let mut buffer = vec![0_u8; BUFFER_BYTES];
-    let verified = (|| -> Result<(), GfError> {
+    let verified = (|| -> Result<bool, GfError> {
         loop {
             let read = file
                 .read(&mut buffer)
@@ -1857,15 +1881,32 @@ fn verify_file_counted_in_domain(
                 .calls
                 .checked_add(1)
                 .ok_or_else(|| validation("object authentication read calls overflow"))?;
-            hasher.update(&buffer[..read]);
+            if let Some(hasher) = &mut hasher {
+                hasher.update(&buffer[..read]);
+            }
             checksum.update(&buffer[..read]);
         }
-        if hex_digest(hasher.finalize().into()) != digest {
-            return Err(validation("graph object digest does not match its address"));
+        if io.bytes != expected_length
+            || file
+                .file()
+                .metadata()
+                .map_err(|error| storage("reinspect graph object handle", diagnostic, error))?
+                .len()
+                != expected_length
+            || graphforge_filesystem::file_identity(file.file())
+                .map_err(|error| storage("reidentify graph object handle", diagnostic, error))?
+                != identity
+        {
+            return Err(validation("graph object changed during authentication"));
         }
-        io.content_xxh64 = Some(checksum.finish());
-        io.sha_bytes = io.bytes;
-        Ok(())
+        let checksum = checksum.finish();
+        io.content_xxh64 = Some(checksum);
+        if let Some(hasher) = hasher.take() {
+            io.sha_bytes = io.bytes;
+            Ok(hex_digest(hasher.finalize().into()) == digest)
+        } else {
+            Ok(Some(checksum) == expected_checksum)
+        }
     })();
     let released = file.finish().map_err(|error| {
         storage(
@@ -1875,16 +1916,16 @@ fn verify_file_counted_in_domain(
         )
     });
     match (verified, released) {
-        (Ok(()), Ok(_)) => {
+        (Ok(matches), Ok(_)) => {
             crate::lifecycle_io::record_read(
                 crate::StorageIoPhase::HydrationVerification,
                 io.bytes,
                 io.calls,
             );
             crate::lifecycle_io::record_objects(crate::StorageIoPhase::HydrationVerification, 1);
-            Ok(io)
+            Ok((io, matches))
         }
-        (Ok(()), Err(error)) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
         (Err(primary), Ok(_)) => Err(primary),
         (Err(primary), Err(release)) => Err(storage(
             "authenticate graph object and release consumed cache",

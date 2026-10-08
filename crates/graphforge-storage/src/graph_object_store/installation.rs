@@ -19,6 +19,8 @@ use super::Uuid;
 use super::Write;
 use super::begin_graph_object_publication;
 use super::checked_read_io_sum;
+#[cfg(unix)]
+use super::classify_file_counted_in_domain;
 use super::graph_object_path;
 use super::hex_digest;
 use super::returned_error_boundary;

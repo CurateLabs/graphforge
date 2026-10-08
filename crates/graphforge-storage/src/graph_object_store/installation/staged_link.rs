@@ -23,13 +23,13 @@
 //! is replaced by the correct install, never treated as permanent.
 
 use super::{
-    ExistingObjectReuse, GraphObjectInstallEvidence, GraphObjectPublicationLease, HashDomain,
-    InstalledObject, ObjectAuthentication, ReadIoEvidence, capture_installed_object,
-    immutable_commit_error, record_completed_install, seal_graph_object, try_reuse_existing_object,
-    verify_and_seal_graph_object_counted,
+    GfError, graph_object_path, returned_error_boundary, storage, validate_digest, validation,
 };
 use super::{
-    GfError, graph_object_path, returned_error_boundary, storage, validate_digest, validation,
+    GraphObjectInstallEvidence, GraphObjectPublicationLease, HashDomain, InstalledObject,
+    ObjectAuthentication, ReadIoEvidence, capture_installed_object, checked_read_io_sum,
+    classify_file_counted_in_domain, immutable_commit_error, record_completed_install,
+    seal_graph_object, verify_and_seal_graph_object_counted,
 };
 use crate::durable_commit::{acknowledge_directory, observe_barriers};
 use crate::graph_construction::{CapturedEncodedArtifact, construction_failpoint};
@@ -40,7 +40,10 @@ enum Existing {
     Absent,
     Reused(InstalledObject),
     /// An object that is provably not the bytes its address names.
-    Mismatched(FileIdentity),
+    Mismatched {
+        identity: FileIdentity,
+        io: ReadIoEvidence,
+    },
 }
 
 /// How the link attempt ended.
@@ -105,12 +108,15 @@ pub(super) fn install_staged_encoded_artifact(
         }
         existing => {
             let mut retire_barriers = 0;
-            if let Existing::Mismatched(prior) = existing {
-                retire_mismatched(lease, &bucket, digest, prior)?;
+            let mut classification_io = ReadIoEvidence::default();
+            if let Existing::Mismatched { identity, io } = existing {
+                retire_mismatched(lease, &bucket, digest, identity)?;
                 retire_barriers = 1;
+                classification_io = io;
             }
             match link_staged(lease, source, &bucket, authentication)? {
                 Linked::Installed(mut installed) => {
+                    add_authentication_work(&mut installed.evidence, classification_io)?;
                     installed.evidence.directory_fsync_calls += retire_barriers;
                     installed.evidence.fsync_calls += retire_barriers;
                     installed
@@ -127,6 +133,10 @@ pub(super) fn install_staged_encoded_artifact(
                         false,
                         cancelled,
                     )?;
+                    let mut classification = GraphObjectInstallEvidence::default();
+                    add_authentication_work(&mut classification, classification_io)?;
+                    record_completed_install(&classification, 0);
+                    add_authentication_work(&mut evidence, classification_io)?;
                     evidence.file_fsync_calls += file_fsyncs;
                     evidence.directory_fsync_calls += retire_barriers;
                     evidence.fsync_calls += file_fsyncs + retire_barriers;
@@ -153,9 +163,9 @@ fn staged_links(source: &CapturedEncodedArtifact<'_>) -> Result<u64, GfError> {
         .map_err(|error| storage("count staged encoded links", source.parent().path(), error))
 }
 
-/// Classify what is at the address. The cheap path checks length and XXH64
-/// against the staged file's captured values; only if that refuses is the
-/// object decided by SHA-256, which is what names it.
+/// Classify one opened inode, retaining the work of a failed authentication.
+/// A captured identity can use XXH64; a mismatch then needs SHA-256 before
+/// removal. An uncaptured inode goes directly through one SHA-256 pass.
 fn existing_object(
     lease: &GraphObjectPublicationLease,
     source: &CapturedEncodedArtifact<'_>,
@@ -165,26 +175,8 @@ fn existing_object(
     let cas = &lease.cas;
     let digest = source.content_sha256();
     let name = std::ffi::OsStr::new(&digest[2..]);
-    match bucket.open_child_file(name) {
-        Ok(file) => {
-            let length = file
-                .metadata()
-                .map_err(|error| {
-                    storage("inspect existing graph object", &cas.diagnostic_root, error)
-                })?
-                .len();
-            if length != source.bytes() {
-                // No SHA-256 over a different length can be the address.
-                let identity = graphforge_filesystem::file_identity(&file).map_err(|error| {
-                    storage(
-                        "identify existing graph object",
-                        &cas.diagnostic_root,
-                        error,
-                    )
-                })?;
-                return Ok(Existing::Mismatched(identity));
-            }
-        }
+    let file = match bucket.open_child_file(name) {
+        Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Existing::Absent),
         Err(error) => {
             return Err(storage(
@@ -193,48 +185,101 @@ fn existing_object(
                 error,
             ));
         }
+    };
+    let identity = graphforge_filesystem::file_identity(&file).map_err(|error| {
+        storage(
+            "identify existing graph object",
+            &cas.diagnostic_root,
+            error,
+        )
+    })?;
+    let length = file
+        .metadata()
+        .map_err(|error| storage("inspect existing graph object", &cas.diagnostic_root, error))?
+        .len();
+    if length != source.bytes() {
+        return Ok(Existing::Mismatched {
+            identity,
+            io: ReadIoEvidence::default(),
+        });
     }
-    let mut ignored = None;
-    match try_reuse_existing_object(
-        cas,
-        bucket,
-        name,
-        digest,
-        source.bytes(),
-        &mut ExistingObjectReuse {
-            authentication: cheap,
-            repair_corrupt_existing: false,
-            replace_prior: &mut ignored,
-        },
-    ) {
-        Ok(Some(reused)) => return Ok(Existing::Reused(reused)),
-        Ok(None) => return Ok(Existing::Absent),
-        Err(GfError::Validation(_)) => {}
-        Err(error) => return Err(error),
+    let path = graph_object_path(&cas.diagnostic_root, digest)?;
+    seal_graph_object(&file, &path, &cas.diagnostic_root)?;
+    let expected_checksum = match cheap {
+        ObjectAuthentication::CapturedChecksum {
+            checksum,
+            identity: Some(captured),
+        } if captured == identity => Some(checksum),
+        _ => None,
+    };
+    let classify = |expected_checksum| {
+        classify_file_counted_in_domain(
+            file.try_clone()
+                .map_err(|error| storage("clone existing graph object", &path, error))?,
+            digest,
+            source.bytes(),
+            &cas.diagnostic_root,
+            HashDomain::ArtifactPayload,
+            expected_checksum,
+        )
+    };
+    let (mut io, mut matches) = classify(expected_checksum)?;
+    if !matches && expected_checksum.is_some() {
+        let (sha_io, sha_matches) = classify(None)?;
+        io = checked_read_io_sum(io, sha_io)?;
+        matches = sha_matches;
     }
-    let mut replace_prior = None;
-    match try_reuse_existing_object(
-        cas,
-        bucket,
-        name,
-        digest,
-        source.bytes(),
-        &mut ExistingObjectReuse {
-            authentication: ObjectAuthentication::Sha(HashDomain::ArtifactPayload),
-            repair_corrupt_existing: true,
-            replace_prior: &mut replace_prior,
-        },
-    )? {
-        Some(reused) => {
-            if reused.evidence.content_xxh64 != Some(source.checksum()) {
-                return Err(validation(
-                    "staged inventory checksum differs from the object at its address",
-                ));
-            }
-            Ok(Existing::Reused(reused))
-        }
-        None => Ok(replace_prior.map_or(Existing::Absent, Existing::Mismatched)),
+    if !file
+        .metadata()
+        .map_err(|error| storage("reinspect existing graph object", &path, error))?
+        .permissions()
+        .readonly()
+    {
+        return Err(validation(
+            "graph object became writable during authentication",
+        ));
     }
+    if !matches {
+        return Ok(Existing::Mismatched { identity, io });
+    }
+    if io.content_xxh64 != Some(source.checksum()) {
+        return Err(validation(
+            "staged inventory checksum differs from the object at its address",
+        ));
+    }
+    if let Some(allocation) = &cas.allocation {
+        allocation.replace_file_at(&path, &file)?;
+    }
+    let mut evidence = GraphObjectInstallEvidence {
+        content_xxh64: io.content_xxh64,
+        reused_existing: true,
+        ..Default::default()
+    };
+    add_authentication_work(&mut evidence, io)?;
+    Ok(Existing::Reused(InstalledObject { evidence, identity }))
+}
+
+fn add_authentication_work(
+    evidence: &mut GraphObjectInstallEvidence,
+    io: ReadIoEvidence,
+) -> Result<(), GfError> {
+    evidence.bytes_hashed = evidence
+        .bytes_hashed
+        .checked_add(io.sha_bytes)
+        .ok_or_else(|| validation("CAS SHA read bytes overflow"))?;
+    let checksum_bytes = io
+        .bytes
+        .checked_sub(io.sha_bytes)
+        .ok_or_else(|| validation("CAS SHA read count exceeds native reads"))?;
+    evidence.checksum_read_bytes = evidence
+        .checksum_read_bytes
+        .checked_add(checksum_bytes)
+        .ok_or_else(|| validation("CAS checksum read bytes overflow"))?;
+    evidence.read_calls = evidence
+        .read_calls
+        .checked_add(io.calls)
+        .ok_or_else(|| validation("CAS read calls overflow"))?;
+    Ok(())
 }
 
 /// Remove an object proven not to hash to its address, so the correct install
@@ -364,11 +409,7 @@ fn link_staged(
         Err(error) => return Err(immutable_commit_error(error, cas)),
     };
     if !reused {
-        lease
-            .linked_objects
-            .lock()
-            .map_err(|_| validation("graph object installation authority poisoned"))?
-            .insert(digest.to_owned(), identity);
+        capture_linked_identity(lease, digest, identity)?;
     }
     let bytes_hashed = concurrent_io.sha_bytes;
     let checksum_read_bytes = concurrent_io
@@ -395,4 +436,18 @@ fn link_staged(
         },
         identity,
     }))
+}
+
+/// Retain authority to remove only this lease's own unadmitted object link.
+fn capture_linked_identity(
+    lease: &GraphObjectPublicationLease,
+    digest: &str,
+    identity: FileIdentity,
+) -> Result<(), GfError> {
+    lease
+        .linked_objects
+        .lock()
+        .map_err(|_| validation("graph object installation authority poisoned"))?
+        .insert(digest.to_owned(), identity);
+    Ok(())
 }

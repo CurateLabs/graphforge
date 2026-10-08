@@ -244,6 +244,21 @@ fn identical_existing_object_is_reused_and_the_staged_file_is_not_aliased() {
     // The existing object is checked in full against the address: the lease
     // holds no capture for an object it did not install.
     assert_eq!(evidence.bytes_hashed, source.bytes());
+    let capture = graphforge_core::hash_observation::operation::Capture::start();
+    let captured = install(&lease, &source).unwrap();
+    let observed = capture.snapshot();
+    assert!(captured.reused_existing);
+    assert_eq!(captured.bytes_installed, 0);
+    assert_eq!(captured.bytes_hashed, 0);
+    assert_eq!(captured.checksum_read_bytes, source.bytes());
+    assert_eq!(
+        captured.read_calls,
+        source
+            .bytes()
+            .div_ceil(crate::GRAPH_OBJECT_IO_BUFFER_BYTES as u64)
+    );
+    assert_eq!(observed.artifact_payload_sha256_bytes, 0);
+    assert_eq!(observed.checksum_bytes, source.bytes());
     let after = std::fs::metadata(staged.object_path()).unwrap();
     assert_eq!(after.ino(), existing.ino());
     assert_ne!(after.ino(), staged_inode);
@@ -257,34 +272,102 @@ fn identical_existing_object_is_reused_and_the_staged_file_is_not_aliased() {
 /// correct install; it is never permanent, and the replacement keeps `CURRENT`.
 #[test]
 fn mis_addressed_existing_object_is_replaced_by_the_correct_install() {
-    for same_length in [true, false] {
-        let staged = staged(15_005);
-        let inventory = staged.inventory();
-        let source = inventory.open(Path::new(ARTIFACT)).unwrap();
-        let bytes = std::fs::read(staged.staged_path()).unwrap();
-        crate::install_graph_object_bytes(staged.root.path(), &bytes).unwrap();
-        let mut corrupt = bytes.clone();
-        if same_length {
-            corrupt[0] ^= 0xff;
-        } else {
-            corrupt.pop();
+    for captured in [false, true] {
+        for same_length in [true, false] {
+            let staged = staged(15_005);
+            let inventory = staged.inventory();
+            let source = inventory.open(Path::new(ARTIFACT)).unwrap();
+            let bytes = std::fs::read(staged.staged_path()).unwrap();
+            crate::install_graph_object_bytes(staged.root.path(), &bytes).unwrap();
+            let lease = crate::begin_graph_object_publication(staged.root.path()).unwrap();
+            if captured {
+                assert!(install(&lease, &source).unwrap().reused_existing);
+            }
+            let mut corrupt = bytes.clone();
+            if same_length {
+                corrupt[0] ^= 0xff;
+            } else {
+                corrupt.pop();
+            }
+            crate::graph_object_store::corrupt_sealed_graph_object_for_test(
+                &staged.object_path(),
+                &corrupt,
+            );
+            let current = staged.current();
+            let capture = graphforge_core::hash_observation::operation::Capture::start();
+            let evidence = install(&lease, &source).unwrap();
+            let observed = capture.snapshot();
+            assert!(
+                !evidence.reused_existing,
+                "captured={captured}, same_length={same_length}"
+            );
+            assert_eq!(evidence.bytes_installed, source.bytes());
+            // An uncaptured inode needs one SHA pass. A captured inode whose
+            // XXH64 refuses needs SHA before removal, so both passes count.
+            // A different length is proved mismatched without reading bytes.
+            let sha_bytes = if same_length { source.bytes() } else { 0 };
+            let checksum_only_bytes = if same_length && captured {
+                source.bytes()
+            } else {
+                0
+            };
+            assert_eq!(evidence.bytes_hashed, sha_bytes);
+            assert_eq!(evidence.checksum_read_bytes, checksum_only_bytes);
+            assert_eq!(
+                evidence.read_calls,
+                sha_bytes.div_ceil(crate::GRAPH_OBJECT_IO_BUFFER_BYTES as u64)
+                    + checksum_only_bytes.div_ceil(crate::GRAPH_OBJECT_IO_BUFFER_BYTES as u64)
+            );
+            assert_eq!(observed.artifact_payload_sha256_bytes, sha_bytes);
+            assert_eq!(observed.checksum_bytes, sha_bytes + checksum_only_bytes);
+            assert_eq!(evidence.content_xxh64, Some(source.checksum()));
+            // One barrier for the removal of the bad entry, one for the new one.
+            assert_eq!(evidence.directory_fsync_calls, 2);
+            assert_eq!(evidence.fsync_calls, 3);
+            assert_eq!(std::fs::read(staged.object_path()).unwrap(), bytes);
+            object_store(staged.root.path());
+            assert_eq!(staged.current(), current);
         }
-        crate::graph_object_store::corrupt_sealed_graph_object_for_test(
-            &staged.object_path(),
-            &corrupt,
-        );
-        let current = staged.current();
-        let lease = crate::begin_graph_object_publication(staged.root.path()).unwrap();
-        let evidence = install(&lease, &source).unwrap();
-        assert!(!evidence.reused_existing, "same_length={same_length}");
-        assert_eq!(evidence.bytes_installed, source.bytes());
-        // One barrier for the removal of the bad entry, one for the new one.
-        assert_eq!(evidence.directory_fsync_calls, 2);
-        assert_eq!(evidence.fsync_calls, 3);
-        assert_eq!(std::fs::read(staged.object_path()).unwrap(), bytes);
-        object_store(staged.root.path());
-        assert_eq!(staged.current(), current);
     }
+}
+
+/// An inventory checksum disagreement cannot authorize removal of an object
+/// whose complete SHA-256 proves it already occupies the correct address.
+#[test]
+fn inventory_checksum_mismatch_preserves_a_correctly_addressed_object() {
+    let mut staged = staged(15_013);
+    let bytes = std::fs::read(staged.staged_path()).unwrap();
+    crate::install_graph_object_bytes(staged.root.path(), &bytes).unwrap();
+    let before = std::fs::metadata(staged.object_path()).unwrap().ino();
+    staged
+        .encoded
+        .artifacts
+        .iter_mut()
+        .find(|artifact| artifact.path == ARTIFACT)
+        .unwrap()
+        .xxh64 ^= 1;
+    let inventory = staged.inventory();
+    let source = inventory.open(Path::new(ARTIFACT)).unwrap();
+    let current = staged.current();
+    let lease = crate::begin_graph_object_publication(staged.root.path()).unwrap();
+    let capture = graphforge_core::hash_observation::operation::Capture::start();
+    let error = install(&lease, &source).unwrap_err();
+    let observed = capture.snapshot();
+    assert!(
+        error
+            .to_string()
+            .contains("staged inventory checksum differs"),
+        "{error}"
+    );
+    assert_eq!(observed.artifact_payload_sha256_bytes, source.bytes());
+    assert_eq!(observed.checksum_bytes, source.bytes());
+    assert_eq!(
+        std::fs::metadata(staged.object_path()).unwrap().ino(),
+        before
+    );
+    assert_eq!(std::fs::read(staged.object_path()).unwrap(), bytes);
+    assert_eq!(std::fs::metadata(staged.staged_path()).unwrap().nlink(), 1);
+    assert_eq!(staged.current(), current);
 }
 
 /// A concurrent publisher installs the same object between this install's
