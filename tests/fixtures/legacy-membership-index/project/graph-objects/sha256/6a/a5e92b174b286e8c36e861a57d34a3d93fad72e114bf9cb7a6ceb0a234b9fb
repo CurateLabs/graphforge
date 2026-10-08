@@ -1,0 +1,19 @@
+{
+  "format": "graphforge.csr-shards",
+  "version": 3,
+  "node_count": 9,
+  "edge_count": 8,
+  "shard_dir": "r-378b8a288e1c3526513898aee924f16c983083701f73c0d3d643e43d3a668fdd.out.csr.shards-312746a9f2902762689369ed.d",
+  "shards": [
+    {
+      "first_node": 1,
+      "node_count": 8,
+      "edge_count": 8,
+      "file": "00000000000000000000.csr",
+      "sha256": "c4dc71e92a7313804d090463634dc5c054599b0f764d6409999b9e2f001a1691",
+      "xxh64": "3d505128daacb6b6",
+      "encoded_bytes": 1866,
+      "decoded_bytes": 204
+    }
+  ]
+}
