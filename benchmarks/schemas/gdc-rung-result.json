@@ -178,6 +178,7 @@
           "enum": [
             "admission",
             "acquisition",
+            "inputs",
             "convert",
             "counts",
             "load",

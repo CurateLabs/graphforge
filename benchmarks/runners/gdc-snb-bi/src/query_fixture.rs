@@ -104,7 +104,7 @@ const NODE_FILES: &[NodeFile] = &[
     },
     NodeFile {
         file: "Post",
-        labels: "Message:Post",
+        labels: "Post",
         columns: &[
             Column::Int("id"),
             Column::DateTime("creationDate"),
@@ -115,7 +115,7 @@ const NODE_FILES: &[NodeFile] = &[
     },
     NodeFile {
         file: "Comment",
-        labels: "Message:Comment",
+        labels: "Comment",
         columns: &[
             Column::Int("id"),
             Column::DateTime("creationDate"),

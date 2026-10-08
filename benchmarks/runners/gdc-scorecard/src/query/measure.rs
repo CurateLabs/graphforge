@@ -124,7 +124,8 @@ enum Prepared {
     Cypher(String, HashMap<String, IrLiteral>),
     Rank(String, RankOptions),
     Cluster(String, ClusterOptions),
-    Paths(NodeSelector, Box<PathsOptions>),
+    /// Source, optional target and options, boxed to keep the variants small.
+    Paths(Box<(NodeSelector, Option<NodeSelector>, PathsOptions)>),
 }
 
 /// The clock. Its interval is exactly one public API call that returns a fully
@@ -149,9 +150,12 @@ impl Prepared {
             Self::Cluster(label, options) => forge
                 .cluster(&label, options)
                 .map(|batch| (batch.schema(), vec![batch])),
-            Self::Paths(source, options) => forge
-                .paths(&source, None, *options)
-                .map(|batch| (batch.schema(), vec![batch])),
+            Self::Paths(call) => {
+                let (source, target, options) = *call;
+                forge
+                    .paths(&source, target.as_ref(), options)
+                    .map(|batch| (batch.schema(), vec![batch]))
+            }
         }
     }
 }
@@ -253,18 +257,23 @@ fn prepare(variant: &Variant, binding: &Binding) -> Result<Prepared, QueryError>
             by,
             directed,
             source,
+            target,
             via,
             weight,
-        } => Prepared::Paths(
+        } => Prepared::Paths(Box::new((
             source_selector(id, source, &binding.params)?,
-            Box::new(PathsOptions {
+            target
+                .as_ref()
+                .map(|target| source_selector(id, target, &binding.params))
+                .transpose()?,
+            PathsOptions {
                 by: algorithm::<PathAlgorithm>(id, by)?,
                 directed: *directed,
                 via: via.clone(),
                 weight: weight.clone(),
                 ..Default::default()
-            }),
-        ),
+            },
+        ))),
     })
 }
 

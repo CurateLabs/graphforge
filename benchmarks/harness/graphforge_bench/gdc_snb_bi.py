@@ -204,6 +204,19 @@ def run_tiny_suite(
         return evidence
 
 
+def query_definitions_document(root: Path | None = None) -> dict[str, Any]:
+    """The runner's ``list-queries`` document: every runnable and refused read as data.
+
+    ``profiles/gdc/snb-bi-scorecard-queries.json`` is this document, committed
+    for the scorecard workload builder (#1904).
+    """
+    completed = _run_runner(["list-queries"], root)
+    if completed.returncode != 0:
+        raise SnbBiSuiteError("invalid_document", completed.stderr.strip())
+    document: dict[str, Any] = json.loads(completed.stdout)
+    return document
+
+
 def map_operation_file(path: Path, root: Path | None = None) -> dict[str, Any]:
     completed = _run_runner(["map-operation", str(path)], root)
     if completed.returncode == 3:

@@ -485,6 +485,59 @@ undirected weighted one (BFS, WCC, LCC, SSSP) and a directed one with one
 wrong BFS depth, where the ladder stops with `reference_mismatch`.
 `tests/test_gdc_graphalytics_scorecard.py` drives it through the rung runner.
 
+### SNB BI and Interactive v1 scorecard ladders (#1904)
+
+`profiles/gdc/snb-bi-scorecard-ladder-spec.json` (SF1 → SF3 → SF10 → SF30 →
+SF100) and `profiles/gdc/snb-interactive-scorecard-ladder-spec.json` (SF1 →
+SF3 → SF10 → SF30) declare every rung. Only SF1 and SF10 are pinned (#1878);
+the others are `not_pinned` rungs. The climb records an unpinned rung as
+`not_admitted` with cause `rung_not_pinned` and continues to the next pinned
+rung; with no pinned rung left it ends there. The card lists every unpinned
+rung among its variances (#952 decision 2026-10-08).
+
+Their workloads and references are built at rung time, before the measured
+phases, by `graphforge_bench.gdc_snb_scorecard` in a child process, and
+published as `<suite>-<rung>-inputs-{workload,reference,notes}.json`:
+
+- **Query texts** are the runners' `list-queries` output, committed as
+  `profiles/gdc/snb-{bi,interactive}-scorecard-queries.json`; a test requires
+  the committed copies to equal the runners'. Every rewrite and spec variance
+  is on the card. BI matches `:Message` as `(m:Post OR m:Comment)`, as
+  Interactive does, because import sessions store one label per node.
+- **Bindings** are the first 30 rows of each pinned LDBC parameter file, in
+  file order. BI reads `parameters-sfN/bi-<n>[a|b].csv`, one variant per file;
+  these are exactly the bindings of LDBC's Umbra SF10 validation output.
+  Interactive complex reads use `interactive_<n>_param.txt` (IC3 and IC4 bind
+  `endDate = startDate + durationDays` days). Short reads take the first 30
+  distinct ids of their kind from the pinned validation stream, excluding ids
+  that the stream's own updates create. A binding whose person or message is
+  absent from the snapshot is skipped and counted in the notes.
+- **BI reference**: Umbra's SF10 `results.csv` is converted to the driver's
+  cell text by declared column kind. Each line must carry exactly the
+  parameters of the workload binding it is paired with
+  (`reference_binding_mismatch` otherwise). Float columns match with a
+  relative 1e-9, rows in Umbra's order. BI SF1 is not reference-checked.
+- **Interactive reference**: spec-derived. `gdc_snb_interactive_reference`,
+  which never runs GraphForge, evaluates every measured binding over the
+  snapshot read straight from the archive's CSV files with the same load
+  mapping. The LDBC validation set is not used: at SF0.1, SF1 and SF10 the
+  pinned validation stream begins with an update at position 0, so none of its
+  reads describes the bulk-load snapshot. At SF1 the build takes about 5 min
+  and 8.5 GiB, outside the measured phases.
+- **Matching rules** added for these suites: `exact` with `set_columns` (IC1
+  universities and companies, IC12 tagNames compare as element sets),
+  `projection` (IC13 compares the `paths(by=bfs)` verb's `cost` with the hop
+  count; no row stands for -1), and order-preserving `epsilon` for ordered
+  results.
+
+`fixtures/gdc/snb-scorecard/` is the CI fixture, built from the two query
+fixtures by `graphforge_bench.gdc_snb_scorecard_fixture` in the real archives'
+shapes. In each suite's three-rung ladder, sf0 passes against its reference,
+sf1 is not pinned and is passed over, and sf2 runs one deliberately wrong query
+text (BI17, IC2), so its check fails naming exactly that query.
+`tests/test_gdc_snb_scorecard.py` climbs both ladders with the real converter,
+`gf`, driver and builders.
+
 ## Operator status query
 
 ```bash
