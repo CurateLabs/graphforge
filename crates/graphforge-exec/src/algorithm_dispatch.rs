@@ -113,7 +113,7 @@ impl AlgorithmControl {
             compute_pool: None,
             pagerank_options: PageRankOptions::default(),
             clustering_normalization: ClusteringNormalization::default(),
-            ..Default::default()
+            synchronous_label_propagation: None,
         }
     }
 

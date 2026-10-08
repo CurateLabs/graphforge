@@ -271,7 +271,7 @@ Full algorithm catalog: [Algorithm Verbs](../book/architecture/algorithms.md)
 
 ---
 
-### `rank(label, *, by, via=None, directed=True, write_property=None)` → `pyarrow.Table`
+### `rank(label, *, by, via=None, directed=True, write_property=None, damping=None, iterations=None, clustering_normalization=None)` → `pyarrow.Table`
 
 Score every node. Returns non-null `node_uuid: FixedSizeBinary(16)`, non-null
 `score: Float64`, then materialized node properties.
@@ -289,7 +289,7 @@ individually, and an undirected self-loop contributes two entries. `via=None`
 selects every relationship type. When `write_property` is set, all scores are
 persisted atomically only after successful execution; omitting it is read-only.
 
-PageRank is unweighted, uses damping `0.85`, uniform initialization,
+By default PageRank is unweighted, uses damping `0.85`, uniform initialization,
 teleportation, and dangling-mass redistribution, and converges when L1 delta is
 at most `selected_node_count * 1e-10`. Directed mode follows outgoing adjacency;
 undirected mode exports both endpoint directions. Parallel edges contribute
@@ -673,7 +673,7 @@ forge.rank("Person", by="degree", via="KNOWS", directed=False)
 
 ---
 
-### `cluster(label, *, by, vector_property=None, via=None, directed=False, write_property=None)` → `pyarrow.Table`
+### `cluster(label, *, by, vector_property=None, via=None, directed=False, write_property=None, synchronous_iterations=None, initial_label_property=None)` → `pyarrow.Table`
 
 Assign community membership. Returns non-null `node_uuid: FixedSizeBinary(16)`,
 non-null `community_id: Int64`, then materialized node properties.

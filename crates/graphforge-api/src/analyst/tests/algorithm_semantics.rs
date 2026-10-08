@@ -70,7 +70,7 @@ fn synchronous(iterations: u32) -> ClusterOptions {
 
 #[test]
 fn fixed_pagerank_facade_handles_sinks_filters_writeback_and_descriptors() {
-    let mut graph = GraphForge::new(None).unwrap();
+    let graph = GraphForge::new(None).unwrap();
     let nodes = vertices(&graph, &[10, 20, 30]);
     graph
         .add_edge(&nodes[0], "EDGE", &nodes[1], &HashMap::new())
@@ -107,7 +107,7 @@ fn fixed_pagerank_facade_handles_sinks_filters_writeback_and_descriptors() {
     let stored = graph
         .execute("MATCH (v:Vertex) RETURN v.fixed_score AS score ORDER BY v.id")
         .unwrap();
-    let values = stored
+    let values = stored.batches[0]
         .column_by_name("score")
         .unwrap()
         .as_any()
@@ -124,7 +124,7 @@ fn fixed_pagerank_facade_handles_sinks_filters_writeback_and_descriptors() {
 
 #[test]
 fn synchronous_cdlp_preserves_exact_labels_reciprocal_votes_and_provenance() {
-    let mut graph = GraphForge::new(None).unwrap();
+    let graph = GraphForge::new(None).unwrap();
     let large = 9_007_199_254_740_993;
     let nodes = vertices(&graph, &[large, 20, 10, 99]);
     for (source, target) in [(0, 1), (1, 0), (0, 2)] {
@@ -132,6 +132,13 @@ fn synchronous_cdlp_preserves_exact_labels_reciprocal_votes_and_provenance() {
             .add_edge(&nodes[source], "EDGE", &nodes[target], &HashMap::new())
             .unwrap();
     }
+    graph
+        .add_edge(&nodes[3], "IGNORED", &nodes[0], &HashMap::new())
+        .unwrap();
+    let outside = graph.add_node("Outside", &HashMap::new()).unwrap();
+    graph
+        .add_edge(&nodes[0], "EDGE", &outside, &HashMap::new())
+        .unwrap();
     let options = synchronous(1);
     let descriptor = graph
         .prepare_cluster_invocation("Vertex", &options)
@@ -157,7 +164,7 @@ fn synchronous_cdlp_preserves_exact_labels_reciprocal_votes_and_provenance() {
     let stored = graph
         .execute("MATCH (v:Vertex) RETURN v.synchronous_group AS group_id ORDER BY v.id")
         .unwrap();
-    let values = stored
+    let values = stored.batches[0]
         .column_by_name("group_id")
         .unwrap()
         .as_any()
@@ -215,6 +222,22 @@ fn alternate_lcc_is_distinct_and_descriptor_replays_same_formula() {
         scores(&output),
         scores(&graph.invoke_rank_descriptor(&descriptor).unwrap())
     );
+    let mut writeback = options.clone();
+    writeback.write_property = Some("neighbor_lcc".into());
+    assert_eq!(
+        scores(&output),
+        scores(&graph.rank("Vertex", writeback).unwrap())
+    );
+    let stored = graph
+        .execute("MATCH (v:Vertex) RETURN v.neighbor_lcc AS coefficient ORDER BY v.id")
+        .unwrap();
+    let values = stored.batches[0]
+        .column_by_name("coefficient")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    assert!((values.value(0) - 1.0 / 6.0).abs() < 1e-12);
     let defaults = RankOptions {
         clustering_normalization: None,
         ..options
@@ -227,7 +250,7 @@ fn alternate_lcc_is_distinct_and_descriptor_replays_same_formula() {
 
 #[test]
 fn semantic_options_fail_typed_before_writeback() {
-    let mut graph = GraphForge::new(None).unwrap();
+    let graph = GraphForge::new(None).unwrap();
     vertices(&graph, &[10]);
     for damping in [f64::NAN, f64::INFINITY, -0.1, 1.1] {
         let options = RankOptions {
@@ -275,15 +298,40 @@ fn semantic_options_fail_typed_before_writeback() {
         graph.cluster("Vertex", missing),
         Err(GfError::Validation(_))
     ));
-    graph
-        .execute("MATCH (v:Vertex) SET v.original_id = 1.5")
-        .unwrap();
-    assert!(matches!(
-        graph.cluster("Vertex", synchronous(1)),
-        Err(GfError::Validation(_))
-    ));
+    for value in [
+        PropValue::Float(1.5),
+        PropValue::Float(1.0),
+        PropValue::Null,
+        PropValue::Str("10".into()),
+    ] {
+        let invalid = GraphForge::new(None).unwrap();
+        invalid
+            .add_node("Vertex", &HashMap::from([("original_id".into(), value)]))
+            .unwrap();
+        let mut options = synchronous(1);
+        options.write_property = Some("bad_result".into());
+        let invalid_labels = invalid.cluster("Vertex", options);
+        assert!(
+            matches!(invalid_labels, Err(GfError::Validation(_))),
+            "{invalid_labels:?}"
+        );
+        let stored = invalid
+            .execute("MATCH (v:Vertex) RETURN v.bad_result AS result")
+            .unwrap();
+        assert!(
+            stored.batches[0]
+                .column_by_name("result")
+                .unwrap()
+                .is_null(0)
+        );
+    }
     let batch = graph
         .execute("MATCH (v:Vertex) RETURN v.bad_result AS result")
         .unwrap();
-    assert!(batch.column_by_name("result").unwrap().is_null(0));
+    assert!(
+        batch.batches[0]
+            .column_by_name("result")
+            .unwrap()
+            .is_null(0)
+    );
 }
