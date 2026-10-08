@@ -127,3 +127,78 @@ fn label_propagation_observes_cancellation_after_propagation_starts() {
     assert_eq!(result_rx.recv().unwrap(), Err(AlgorithmError::Cancelled));
     worker.join().unwrap();
 }
+
+#[test]
+fn synchronous_rounds_preserve_bipartite_oscillation_and_isolates() {
+    let graph = AdjacencyGraph::with_test_directed_edges(3, &[(0, 1)]);
+    let control =
+        AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default());
+    for (iterations, expected) in [
+        (0, vec![0, 1, 2]),
+        (1, vec![1, 0, 2]),
+        (2, vec![0, 1, 2]),
+        (3, vec![1, 0, 2]),
+    ] {
+        let options = graphforge_core::SynchronousLabelPropagationOptions {
+            iterations,
+            initial_label_property: None,
+        };
+        assert_eq!(
+            synchronous_labels(&graph, &options, &control).unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn synchronous_directed_votes_count_reciprocal_neighbors_twice() {
+    let graph = AdjacencyGraph::with_test_directed_edges(4, &[(0, 1), (0, 2), (2, 0)]);
+    let options = graphforge_core::SynchronousLabelPropagationOptions {
+        iterations: 1,
+        initial_label_property: None,
+    };
+    let control =
+        AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default());
+    assert_eq!(
+        synchronous_labels(&graph, &options, &control).unwrap(),
+        [2, 0, 0, 3]
+    );
+    let tied = AdjacencyGraph::with_test_directed_edges(3, &[(0, 2), (0, 1)]);
+    assert_eq!(
+        synchronous_labels(&tied, &options, &control).unwrap(),
+        [1, 0, 0]
+    );
+}
+
+#[test]
+fn synchronous_mode_preserves_cancellation_and_work_limits() {
+    let graph = AdjacencyGraph::with_test_directed_edges(2, &[(0, 1)]);
+    let options = graphforge_core::SynchronousLabelPropagationOptions {
+        iterations: 1,
+        initial_label_property: None,
+    };
+    let cancelled = AlgorithmCancellation::default();
+    cancelled.cancel();
+    assert_eq!(
+        synchronous_labels(
+            &graph,
+            &options,
+            &AlgorithmControl::new(AlgorithmLimits::default(), cancelled)
+        ),
+        Err(AlgorithmError::Cancelled)
+    );
+    assert!(matches!(
+        synchronous_labels(
+            &graph,
+            &options,
+            &AlgorithmControl::new(
+                AlgorithmLimits {
+                    iterations: 0,
+                    ..Default::default()
+                },
+                AlgorithmCancellation::default()
+            )
+        ),
+        Err(AlgorithmError::IterationLimit { .. })
+    ));
+}

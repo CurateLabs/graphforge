@@ -571,6 +571,79 @@ pub(crate) fn required_f64(
     }
 }
 
+/// Decode optional semantic configurations without changing legacy descriptors.
+pub(crate) fn rank_configuration(
+    parameters: &BTreeMap<String, InvocationParameter>,
+) -> Result<
+    (
+        Option<graphforge_core::PageRankOptions>,
+        Option<graphforge_core::ClusteringNormalization>,
+    ),
+    InvocationDescriptorError,
+> {
+    let pagerank = if parameters.contains_key("damping") || parameters.contains_key("iterations") {
+        let damping = required_f64(parameters, "damping")?;
+        if !damping.is_finite() || !(0.0..=1.0).contains(&damping) {
+            return Err(InvocationDescriptorError::Invalid(
+                "damping must be finite and in [0, 1]".into(),
+            ));
+        }
+        let iterations = optional_u64(parameters, "iterations")?
+            .map(|value| {
+                u32::try_from(value).map_err(|_| {
+                    InvocationDescriptorError::Invalid("iterations must fit UInt32".into())
+                })
+            })
+            .transpose()?;
+        Some(graphforge_core::PageRankOptions {
+            damping,
+            iterations,
+        })
+    } else {
+        None
+    };
+    let normalization = optional_utf8(parameters, "clustering_normalization")?
+        .map(|value| match value.as_str() {
+            "fagiolo" => Ok(graphforge_core::ClusteringNormalization::Fagiolo),
+            "neighbor_edges" => Ok(graphforge_core::ClusteringNormalization::NeighborEdges),
+            _ => Err(InvocationDescriptorError::Invalid(
+                "unknown clustering normalization".into(),
+            )),
+        })
+        .transpose()?;
+    Ok((pagerank, normalization))
+}
+
+pub(crate) fn synchronous_configuration(
+    parameters: &BTreeMap<String, InvocationParameter>,
+) -> Result<Option<graphforge_core::SynchronousLabelPropagationOptions>, InvocationDescriptorError>
+{
+    let property = optional_utf8(parameters, "initial_label_property")?;
+    if let Some(iterations) = optional_u64(parameters, "synchronous_iterations")? {
+        if let Some(property) = &property
+            && (property.is_empty()
+                || property.trim() != property
+                || property.chars().any(char::is_control))
+        {
+            return Err(InvocationDescriptorError::Invalid(
+                "invalid initial label property".into(),
+            ));
+        }
+        Ok(Some(graphforge_core::SynchronousLabelPropagationOptions {
+            iterations: u32::try_from(iterations).map_err(|_| {
+                InvocationDescriptorError::Invalid("synchronous_iterations must fit UInt32".into())
+            })?,
+            initial_label_property: property,
+        }))
+    } else if property.is_some() {
+        Err(InvocationDescriptorError::Invalid(
+            "initial_label_property requires synchronous_iterations".into(),
+        ))
+    } else {
+        Ok(None)
+    }
+}
+
 pub(crate) fn required_utf8_list(
     parameters: &BTreeMap<String, InvocationParameter>,
     name: &str,
@@ -712,7 +785,15 @@ fn validate_parameters(
     let names = parameters.keys().map(String::as_str).collect::<Vec<_>>();
     match algorithm {
         Algorithm::Rank(_) => {
-            require_exact_names(algorithm, &names, &["directed", "label", "via"])?;
+            let base: Vec<_> = names
+                .iter()
+                .copied()
+                .filter(|name| {
+                    !matches!(*name, "damping" | "iterations" | "clustering_normalization")
+                })
+                .collect();
+            require_exact_names(algorithm, &base, &["directed", "label", "via"])?;
+            rank_configuration(parameters)?;
         }
         Algorithm::Cluster(value) => {
             let expected = if matches!(value, ClusterAlgorithm::Hdbscan | ClusterAlgorithm::KMeans)
@@ -721,7 +802,15 @@ fn validate_parameters(
             } else {
                 &["directed", "label", "via"][..]
             };
-            require_exact_names(algorithm, &names, expected)?;
+            let base: Vec<_> = names
+                .iter()
+                .copied()
+                .filter(|name| {
+                    !matches!(*name, "synchronous_iterations" | "initial_label_property")
+                })
+                .collect();
+            require_exact_names(algorithm, &base, expected)?;
+            synchronous_configuration(parameters)?;
         }
         Algorithm::Similar(value) => {
             let expected = match value {
@@ -830,9 +919,16 @@ fn require_exact_names(
 
 fn allowed_parameter(algorithm: Algorithm, name: &str) -> bool {
     match algorithm {
-        Algorithm::Rank(_) => matches!(name, "label" | "via" | "directed"),
-        Algorithm::Cluster(_) => {
+        Algorithm::Rank(value) => {
+            matches!(name, "label" | "via" | "directed")
+                || (value == RankAlgorithm::PageRank && matches!(name, "damping" | "iterations"))
+                || (value == RankAlgorithm::ClusteringCoefficient
+                    && name == "clustering_normalization")
+        }
+        Algorithm::Cluster(value) => {
             matches!(name, "label" | "via" | "directed" | "vector_property")
+                || (value == ClusterAlgorithm::LabelPropagation
+                    && matches!(name, "synchronous_iterations" | "initial_label_property"))
         }
         Algorithm::Similar(_) => {
             matches!(name, "label" | "via" | "k" | "vector_property")
@@ -1248,9 +1344,7 @@ mod tests {
             via: Some("KNOWS".into()),
             directed: true,
             write_property: None,
-
-            pagerank: None,
-            clustering_normalization: None,
+            ..Default::default()
         };
         let descriptor = graph.prepare_rank_invocation("Person", &options).unwrap();
         let direct = graph.rank("Person", options.clone()).unwrap();
@@ -1284,8 +1378,7 @@ mod tests {
             via: Some("KNOWS".into()),
             directed: false,
             write_property: None,
-
-            synchronous_label_propagation: None,
+            ..Default::default()
         };
         let descriptor = graph
             .prepare_cluster_invocation("Person", &cluster)
@@ -1384,9 +1477,7 @@ mod tests {
                     via: Some("KNOWS".into()),
                     directed: true,
                     write_property: None,
-
-                    pagerank: None,
-                    clustering_normalization: None,
+                    ..Default::default()
                 },
             )
             .unwrap();

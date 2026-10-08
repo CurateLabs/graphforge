@@ -148,9 +148,7 @@ fn main() {
                 via: Some("SUPPLIES".into()),
                 directed: false,
                 write_property: None,
-
-                pagerank: None,
-                clustering_normalization: None,
+                ..Default::default()
             },
         )
         .unwrap();

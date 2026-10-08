@@ -6,6 +6,7 @@ use arrow::array::{
 use arrow::datatypes::DataType;
 use std::collections::HashSet;
 
+mod algorithm_semantics;
 mod analysis_directed;
 mod analysis_structural;
 mod cluster;
@@ -24,9 +25,7 @@ fn degree_options(directed: bool, via: Option<&str>) -> RankOptions {
         via: via.map(str::to_owned),
         directed,
         write_property: None,
-
-        pagerank: None,
-        clustering_normalization: None,
+        ..Default::default()
     }
 }
 
@@ -48,8 +47,7 @@ fn components_options(directed: bool, via: Option<&str>) -> ClusterOptions {
         via: via.map(str::to_owned),
         directed,
         write_property: None,
-
-        synchronous_label_propagation: None,
+        ..Default::default()
     }
 }
 

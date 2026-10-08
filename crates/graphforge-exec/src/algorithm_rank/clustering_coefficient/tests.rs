@@ -305,14 +305,16 @@ fn neighbor_edges_output(
 
 #[test]
 fn neighbor_edges_lcc_distinguishes_reciprocal_normalization_and_simplifies_edges() {
-    // Vertex 0 sees {1,2}; only 1->2 connects those neighbors. Reciprocal 0<->1
-    // changes Fagiolo's degree factors but must not change neighbor-edge counting.
-    let graph =
-        AdjacencyGraph::with_test_edges(4, &[(0, 1), (1, 0), (0, 2), (1, 2), (1, 2), (0, 0)]);
+    // Vertex 0 sees {1,2,3}; only 1->2 connects those neighbors.
+    // Its reciprocal 0<->1 arc makes Fagiolo 1/5, versus neighbor-edges 1/6.
+    let graph = AdjacencyGraph::with_test_directed_edges(
+        5,
+        &[(0, 1), (1, 0), (0, 2), (0, 3), (1, 2), (1, 2), (0, 0)],
+    );
     let output = neighbor_edges_output(&graph, 1, AlgorithmCancellation::default()).unwrap();
     assert_scores_close(
         &clustering_coefficient_output_scores(&output),
-        &[0.5, 0.5, 1.0, 0.0],
+        &[1.0 / 6.0, 0.5, 1.0, 0.0, 0.0],
     );
     let default = execute_clustering_coefficient(
         &graph,

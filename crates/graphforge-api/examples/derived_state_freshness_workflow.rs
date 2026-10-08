@@ -290,9 +290,7 @@ fn correction_evidence(graph: &GraphForge, seed: &Seed) -> ExtensionEvidence {
         via: Some("KNOWS".into()),
         directed: false,
         write_property,
-
-        pagerank: None,
-        clustering_normalization: None,
+        ..Default::default()
     };
     let rank_corrected = graph
         .rank("Person", rank_options(Some("risk_score".into())))

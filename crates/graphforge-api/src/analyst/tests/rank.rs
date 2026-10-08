@@ -10,9 +10,7 @@ fn betweenness_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
-
-        pagerank: None,
-        clustering_normalization: None,
+        ..Default::default()
     }
 }
 
@@ -26,9 +24,7 @@ fn closeness_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
-
-        pagerank: None,
-        clustering_normalization: None,
+        ..Default::default()
     }
 }
 
@@ -42,9 +38,7 @@ fn harmonic_closeness_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
-
-        pagerank: None,
-        clustering_normalization: None,
+        ..Default::default()
     }
 }
 
@@ -58,9 +52,7 @@ fn eigenvector_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
-
-        pagerank: None,
-        clustering_normalization: None,
+        ..Default::default()
     }
 }
 
@@ -74,9 +66,7 @@ fn article_rank_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
-
-        pagerank: None,
-        clustering_normalization: None,
+        ..Default::default()
     }
 }
 
@@ -90,9 +80,7 @@ fn hits_hub_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
-
-        pagerank: None,
-        clustering_normalization: None,
+        ..Default::default()
     }
 }
 
@@ -106,9 +94,7 @@ fn hits_authority_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
-
-        pagerank: None,
-        clustering_normalization: None,
+        ..Default::default()
     }
 }
 
@@ -118,9 +104,7 @@ fn celf_options(directed: bool, via: Option<&str>, write_property: Option<&str>)
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
-
-        pagerank: None,
-        clustering_normalization: None,
+        ..Default::default()
     }
 }
 
@@ -134,9 +118,7 @@ fn clustering_coefficient_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
-
-        pagerank: None,
-        clustering_normalization: None,
+        ..Default::default()
     }
 }
 
@@ -150,9 +132,7 @@ fn triangles_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
-
-        pagerank: None,
-        clustering_normalization: None,
+        ..Default::default()
     }
 }
 
@@ -162,9 +142,7 @@ fn k_core_options(directed: bool, via: Option<&str>, write_property: Option<&str
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
-
-        pagerank: None,
-        clustering_normalization: None,
+        ..Default::default()
     }
 }
 
@@ -178,9 +156,7 @@ fn preferential_attachment_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
-
-        pagerank: None,
-        clustering_normalization: None,
+        ..Default::default()
     }
 }
 
@@ -194,9 +170,7 @@ fn adamic_adar_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
-
-        pagerank: None,
-        clustering_normalization: None,
+        ..Default::default()
     }
 }
 
@@ -210,9 +184,7 @@ fn common_neighbors_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
-
-        pagerank: None,
-        clustering_normalization: None,
+        ..Default::default()
     }
 }
 
@@ -226,9 +198,7 @@ fn resource_allocation_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
-
-        pagerank: None,
-        clustering_normalization: None,
+        ..Default::default()
     }
 }
 
@@ -242,9 +212,7 @@ fn total_neighbors_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
-
-        pagerank: None,
-        clustering_normalization: None,
+        ..Default::default()
     }
 }
 

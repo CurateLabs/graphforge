@@ -115,9 +115,7 @@ fn query(graph: &GraphForge) -> Duration {
                 via: None,
                 directed: true,
                 write_property: None,
-
-                pagerank: None,
-                clustering_normalization: None,
+                ..Default::default()
             },
         )
         .unwrap();

@@ -537,9 +537,7 @@ fn main() {
                 via: Some("COMMUNICATED_WITH".into()),
                 directed: true,
                 write_property: None,
-
-                pagerank: None,
-                clustering_normalization: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -730,9 +728,7 @@ fn main() {
                     via: Some("COMMUNICATED_WITH".into()),
                     directed: true,
                     write_property: None,
-
-                    pagerank: None,
-                    clustering_normalization: None,
+                    ..Default::default()
                 }
             )
             .unwrap(),

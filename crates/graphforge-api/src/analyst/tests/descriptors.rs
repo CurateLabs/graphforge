@@ -533,8 +533,7 @@ fn vector_descriptor_preparation_requires_and_routes_declared_properties() {
             via: Some("IGNORED".into()),
             directed: true,
             write_property: None,
-
-            synchronous_label_propagation: None,
+            ..Default::default()
         };
         let error = graph
             .prepare_cluster_invocation("Person", &options)
@@ -576,8 +575,7 @@ fn vector_descriptor_preparation_requires_and_routes_declared_properties() {
                 via: None,
                 directed: true,
                 write_property: None,
-
-                synchronous_label_propagation: None,
+                ..Default::default()
             },
         )
         .unwrap();

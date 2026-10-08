@@ -299,6 +299,21 @@ normalized score mass. The shared Rust node, edge, output, iteration, and
 cancellation limits produce structured errors. Python and Node call this same
 Rust handler without an algorithm backend or fallback of their own.
 
+PageRank accepts `damping` (finite, between `0` and `1`, default `0.85`) and
+`iterations` (an exact nonnegative number of synchronous rounds). Omitting
+`iterations` retains the convergence rule above. Fixed rounds start at uniform
+`1/N` scores and redistribute sink mass uniformly, even when scores stabilize
+earlier. Zero rounds return the initial distribution. These options are valid
+only for PageRank; resource checkpoints remain a separate hard limit.
+
+```python
+scores = forge.rank("Vertex", by="pagerank", damping=0.85, iterations=10)
+```
+
+Rust sets `RankOptions.pagerank = Some(PageRankOptions { damping: 0.85,
+iterations: Some(10) })`. Node appends `damping`, `iterations`, and
+`clusteringNormalization` after the existing rank arguments.
+
 Betweenness is exact, unweighted Brandes node betweenness. For `n > 2`, scores
 are normalized by `1 / ((n - 1) * (n - 2))`; selections of at most two nodes
 score zero. Directed mode follows outgoing adjacency, while undirected mode
@@ -405,7 +420,20 @@ Directed mode applies Fagiolo's coefficient over Boolean adjacency: self-loops a
 ignored, same-direction parallel arcs collapse, reciprocal arcs remain distinct,
 and total/reciprocal degree normalize directed triangles. Undirected mode exports
 both endpoint directions and reduces to classic `2T / (k * (k - 1))` local
-transitivity. A zero denominator scores `0.0`.
+transitivity. A zero denominator scores `0.0`. This remains the default
+`clustering_normalization="fagiolo"` definition.
+
+`clustering_normalization="neighbor_edges"` selects the Graphalytics definition:
+form the unique union of incoming and outgoing neighbors, count directed edges
+between distinct members, and divide by `k * (k - 1)`. Fewer than two neighbors
+score zero. Reciprocal neighbor edges count separately; loops and duplicate arcs
+are ignored. Both definitions agree on undirected simple graphs. Rust selects
+`RankOptions.clustering_normalization = Some(ClusteringNormalization::NeighborEdges)`.
+
+```python
+lcc = forge.rank("Vertex", by="clustering_coefficient", directed=True,
+                 clustering_normalization="neighbor_edges")
+```
 
 `via` filters before simplification. Disconnected, isolated, degree-one, and empty
 selections retain stable finite behavior and topology order. The UUID-only schema,
@@ -892,8 +920,8 @@ numeric validation, structured Rust errors, and atomic opt-in
 remain thin Arrow IPC bindings with no runtime backend, fallback, packaging
 dependency, or recovery path.
 
-`by="label_propagation"` performs deterministic, unweighted classic
-asynchronous label propagation in Rust. Nodes begin with unique labels. A
+With no synchronous options, `by="label_propagation"` performs deterministic,
+unweighted classic asynchronous label propagation in Rust. Nodes begin with unique labels. A
 fixed Rust pseudo-random stream shuffles each sweep and uniformly resolves
 ties among the most frequent neighbor labels while updates take effect
 immediately. The stream is not a public seed option. Execution stops when
@@ -912,6 +940,35 @@ original node in each community. Shared Rust limits, bounded cancellation
 checkpoints, structured errors, UUID-only identity, and atomic opt-in
 `write_property` apply. Python and Node remain thin Arrow IPC bindings with no
 algorithm backend, fallback, packaging dependency, or recovery path.
+
+Set `synchronous_iterations` to select synchronous, deterministic fixed rounds.
+Every round reads only the previous labels; ties select the smallest numeric
+label, and isolates retain their labels. Directed graphs count incoming and
+outgoing neighbors separately, so reciprocal neighbors vote twice. Undirected
+graphs count each unique neighbor once. Self-loops and repeated arcs are ignored.
+Zero rounds return initial labels; there is no convergence shortcut or partition
+renumbering. The returned `community_id` and opt-in writeback retain exact labels.
+
+`initial_label_property` selects an exact Int64 property on every selected node.
+Missing, null, noninteger, or conflicting values fail typed. This property requires
+`synchronous_iterations`. When omitted, initial labels are selected-node ordinals
+in topology order. Supply original IDs when numeric tie-breaks must be independent
+of insertion order, as in Graphalytics.
+
+```python
+labels = forge.cluster("Vertex", by="label_propagation", directed=True,
+                       synchronous_iterations=10,
+                       initial_label_property="original_id")
+```
+
+Rust sets `ClusterOptions.synchronous_label_propagation =
+Some(SynchronousLabelPropagationOptions { iterations: 10,
+initial_label_property: Some("original_id".into()) })`. Node appends
+`synchronousIterations` and `initialLabelProperty` after the existing cluster
+arguments. All new options also apply to invocation preparation and recorded
+analysis. Descriptors retain the semantic parameters and fingerprint loaded label
+values; editing that input makes replay return `GF_PROJECTION_CHANGED`. Default
+invocation bytes remain compatible.
 
 `by="speaker_listener"` performs deterministic classic Speaker-Listener Label
 Propagation in Rust. Unique labels initialize node memories. A fixed Rust

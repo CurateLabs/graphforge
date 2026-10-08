@@ -517,9 +517,7 @@ fn main() {
                 via: None,
                 directed: false,
                 write_property: None,
-
-                pagerank: None,
-                clustering_normalization: None,
+                ..Default::default()
             },
         )
         .unwrap();

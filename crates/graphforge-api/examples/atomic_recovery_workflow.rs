@@ -519,9 +519,7 @@ fn main() {
                 via: Some("SUPPORTS".into()),
                 directed: true,
                 write_property: None,
-
-                pagerank: None,
-                clustering_normalization: None,
+                ..Default::default()
             },
         )
         .unwrap();
