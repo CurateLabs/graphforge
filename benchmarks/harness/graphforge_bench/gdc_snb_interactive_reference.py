@@ -421,6 +421,8 @@ class Graph:
         for key, label, properties in document["nodes"]:
             self.nodes[key] = properties
             self.labels[key] = {label}
+        self._with_label: dict[str, list[str]] = {}
+        self._by_id: dict[str, dict[int, str]] = {}
         self.out: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = {}
         self.into: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = {}
         for source, rel_type, destination, props in document["edges"]:
@@ -428,12 +430,24 @@ class Graph:
             self.into.setdefault((destination, rel_type), []).append((source, props))
 
     def with_label(self, label: str) -> list[str]:
-        return [key for key, labels in self.labels.items() if label in labels]
+        # The graph is read-only, so each label's node list is computed once;
+        # a scorecard rung evaluates many bindings over millions of nodes.
+        cached = self._with_label.get(label)
+        if cached is None:
+            cached = [key for key, labels in self.labels.items() if label in labels]
+            self._with_label[label] = cached
+        return cached
 
     def by_id(self, label: str, node_id: int) -> str | None:
-        matches = [key for key in self.with_label(label) if self.nodes[key]["id"] == node_id]
-        assert len(matches) <= 1, (label, node_id)
-        return matches[0] if matches else None
+        index = self._by_id.get(label)
+        if index is None:
+            index = {}
+            for key in self.with_label(label):
+                identity = self.nodes[key]["id"]
+                assert identity not in index, (label, identity)
+                index[identity] = key
+            self._by_id[label] = index
+        return index.get(node_id)
 
     def outgoing(self, key: str, rel_type: str) -> list[tuple[str, dict[str, Any]]]:
         return self.out.get((key, rel_type), [])

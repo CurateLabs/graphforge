@@ -125,9 +125,15 @@ fn rewrites_are_labelled_variances_that_cite_their_cause() {
         [
             Operation::Bi1,
             Operation::Bi2,
+            Operation::Bi3,
             Operation::Bi4,
+            Operation::Bi5,
+            Operation::Bi6,
+            Operation::Bi7,
             Operation::Bi8,
+            Operation::Bi9,
             Operation::Bi10,
+            Operation::Bi12,
             Operation::Bi13,
             Operation::Bi14,
             Operation::Bi16,
@@ -144,7 +150,25 @@ fn rewrites_are_labelled_variances_that_cite_their_cause() {
             query.operation
         );
         let cites_defect = rewrite.contains("#1887 D") || rewrite.contains("#1888 D");
-        let not_a_defect = matches!(query.operation, Operation::Bi10 | Operation::Bi14);
+        // The `:Message` label rewrite is a data-model variance, not a defect.
+        let not_a_defect = matches!(
+            query.operation,
+            Operation::Bi3
+                | Operation::Bi5
+                | Operation::Bi6
+                | Operation::Bi7
+                | Operation::Bi9
+                | Operation::Bi10
+                | Operation::Bi12
+                | Operation::Bi14
+        );
+        let message_label = query.cypher.contains(":Post OR ");
+        assert_eq!(
+            message_label,
+            rewrite.contains("`:Message` supertype label"),
+            "{}",
+            query.operation
+        );
         assert_eq!(cites_defect, !not_a_defect, "{}", query.operation);
     }
 }

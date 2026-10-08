@@ -1,0 +1,755 @@
+{
+  "schema": "graphforge-gdc-load-mapping/1",
+  "node_tables": [
+    {
+      "id": "organisation",
+      "format": "ldbc-csv",
+      "files": [
+        "*/graphs/csv/bi/composite-projected-fk/initial_snapshot/static/Organisation/*.csv.gz"
+      ],
+      "label": "Organisation",
+      "label_column": "type",
+      "label_values": {
+        "Company": "Company",
+        "University": "University"
+      },
+      "id_column": "id",
+      "properties": [
+        {
+          "column": "id",
+          "type": "int64"
+        },
+        {
+          "column": "name",
+          "type": "string"
+        },
+        {
+          "column": "url",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "id": "place",
+      "format": "ldbc-csv",
+      "files": [
+        "*/graphs/csv/bi/composite-projected-fk/initial_snapshot/static/Place/*.csv.gz"
+      ],
+      "label": "Place",
+      "label_column": "type",
+      "label_values": {
+        "City": "City",
+        "Country": "Country",
+        "Continent": "Continent"
+      },
+      "id_column": "id",
+      "properties": [
+        {
+          "column": "id",
+          "type": "int64"
+        },
+        {
+          "column": "name",
+          "type": "string"
+        },
+        {
+          "column": "url",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "id": "tag",
+      "format": "ldbc-csv",
+      "files": [
+        "*/graphs/csv/bi/composite-projected-fk/initial_snapshot/static/Tag/*.csv.gz"
+      ],
+      "label": "Tag",
+      "id_column": "id",
+      "properties": [
+        {
+          "column": "id",
+          "type": "int64"
+        },
+        {
+          "column": "name",
+          "type": "string"
+        },
+        {
+          "column": "url",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "id": "tagclass",
+      "format": "ldbc-csv",
+      "files": [
+        "*/graphs/csv/bi/composite-projected-fk/initial_snapshot/static/TagClass/*.csv.gz"
+      ],
+      "label": "TagClass",
+      "id_column": "id",
+      "properties": [
+        {
+          "column": "id",
+          "type": "int64"
+        },
+        {
+          "column": "name",
+          "type": "string"
+        },
+        {
+          "column": "url",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "id": "comment",
+      "format": "ldbc-csv",
+      "files": [
+        "*/graphs/csv/bi/composite-projected-fk/initial_snapshot/dynamic/Comment/*.csv.gz"
+      ],
+      "label": "Comment",
+      "id_column": "id",
+      "properties": [
+        {
+          "column": "id",
+          "type": "int64"
+        },
+        {
+          "column": "creationDate",
+          "type": "datetime"
+        },
+        {
+          "column": "locationIP",
+          "type": "string"
+        },
+        {
+          "column": "browserUsed",
+          "type": "string"
+        },
+        {
+          "column": "content",
+          "type": "string"
+        },
+        {
+          "column": "length",
+          "type": "int64"
+        }
+      ]
+    },
+    {
+      "id": "forum",
+      "format": "ldbc-csv",
+      "files": [
+        "*/graphs/csv/bi/composite-projected-fk/initial_snapshot/dynamic/Forum/*.csv.gz"
+      ],
+      "label": "Forum",
+      "id_column": "id",
+      "properties": [
+        {
+          "column": "id",
+          "type": "int64"
+        },
+        {
+          "column": "creationDate",
+          "type": "datetime"
+        },
+        {
+          "column": "title",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "id": "person",
+      "format": "ldbc-csv",
+      "files": [
+        "*/graphs/csv/bi/composite-projected-fk/initial_snapshot/dynamic/Person/*.csv.gz"
+      ],
+      "label": "Person",
+      "id_column": "id",
+      "properties": [
+        {
+          "column": "id",
+          "type": "int64"
+        },
+        {
+          "column": "creationDate",
+          "type": "datetime"
+        },
+        {
+          "column": "firstName",
+          "type": "string"
+        },
+        {
+          "column": "lastName",
+          "type": "string"
+        },
+        {
+          "column": "gender",
+          "type": "string"
+        },
+        {
+          "column": "birthday",
+          "type": "date"
+        },
+        {
+          "column": "locationIP",
+          "type": "string"
+        },
+        {
+          "column": "browserUsed",
+          "type": "string"
+        },
+        {
+          "column": "language",
+          "name": "speaks",
+          "type": "list",
+          "separator": ";"
+        },
+        {
+          "column": "email",
+          "type": "list",
+          "separator": ";"
+        }
+      ]
+    },
+    {
+      "id": "post",
+      "format": "ldbc-csv",
+      "files": [
+        "*/graphs/csv/bi/composite-projected-fk/initial_snapshot/dynamic/Post/*.csv.gz"
+      ],
+      "label": "Post",
+      "id_column": "id",
+      "properties": [
+        {
+          "column": "id",
+          "type": "int64"
+        },
+        {
+          "column": "creationDate",
+          "type": "datetime"
+        },
+        {
+          "column": "imageFile",
+          "type": "string"
+        },
+        {
+          "column": "locationIP",
+          "type": "string"
+        },
+        {
+          "column": "browserUsed",
+          "type": "string"
+        },
+        {
+          "column": "language",
+          "type": "string"
+        },
+        {
+          "column": "content",
+          "type": "string"
+        },
+        {
+          "column": "length",
+          "type": "int64"
+        }
+      ]
+    }
+  ],
+  "edge_tables": [
+    {
+      "id": "organisation_islocatedin_place",
+      "format": "ldbc-csv",
+      "files": [
+        "*/graphs/csv/bi/composite-projected-fk/initial_snapshot/static/Organisation_isLocatedIn_Place/*.csv.gz"
+      ],
+      "rel_type": "IS_LOCATED_IN",
+      "source": {
+        "label": "Organisation",
+        "column": "OrganisationId"
+      },
+      "target": {
+        "label": "Place",
+        "column": "PlaceId"
+      }
+    },
+    {
+      "id": "place_ispartof_place",
+      "format": "ldbc-csv",
+      "files": [
+        "*/graphs/csv/bi/composite-projected-fk/initial_snapshot/static/Place_isPartOf_Place/*.csv.gz"
+      ],
+      "rel_type": "IS_PART_OF",
+      "source": {
+        "label": "Place",
+        "column": "Place1Id"
+      },
+      "target": {
+        "label": "Place",
+        "column": "Place2Id"
+      }
+    },
+    {
+      "id": "tag_hastype_tagclass",
+      "format": "ldbc-csv",
+      "files": [
+        "*/graphs/csv/bi/composite-projected-fk/initial_snapshot/static/Tag_hasType_TagClass/*.csv.gz"
+      ],
+      "rel_type": "HAS_TYPE",
+      "source": {
+        "label": "Tag",
+        "column": "TagId"
+      },
+      "target": {
+        "label": "TagClass",
+        "column": "TagClassId"
+      }
+    },
+    {
+      "id": "tagclass_issubclassof_tagclass",
+      "format": "ldbc-csv",
+      "files": [
+        "*/graphs/csv/bi/composite-projected-fk/initial_snapshot/static/TagClass_isSubclassOf_TagClass/*.csv.gz"
+      ],
+      "rel_type": "IS_SUBCLASS_OF",
+      "source": {
+        "label": "TagClass",
+        "column": "TagClass1Id"
+      },
+      "target": {
+        "label": "TagClass",
+        "column": "TagClass2Id"
+      }
+    },
+    {
+      "id": "comment_hascreator_person",
+      "format": "ldbc-csv",
+      "files": [
+        "*/graphs/csv/bi/composite-projected-fk/initial_snapshot/dynamic/Comment_hasCreator_Person/*.csv.gz"
+      ],
+      "rel_type": "HAS_CREATOR",
+      "source": {
+        "label": "Comment",
+        "column": "CommentId"
+      },
+      "target": {
+        "label": "Person",
+        "column": "PersonId"
+      },
+      "properties": [
+        {
+          "column": "creationDate",
+          "type": "datetime"
+        }
+      ]
+    },
+    {
+      "id": "comment_hastag_tag",
+      "format": "ldbc-csv",
+      "files": [
+        "*/graphs/csv/bi/composite-projected-fk/initial_snapshot/dynamic/Comment_hasTag_Tag/*.csv.gz"
+      ],
+      "rel_type": "HAS_TAG",
+      "source": {
+        "label": "Comment",
+        "column": "CommentId"
+      },
+      "target": {
+        "label": "Tag",
+        "column": "TagId"
+      },
+      "properties": [
+        {
+          "column": "creationDate",
+          "type": "datetime"
+        }
+      ]
+    },
+    {
+      "id": "comment_islocatedin_country",
+      "format": "ldbc-csv",
+      "files": [
+        "*/graphs/csv/bi/composite-projected-fk/initial_snapshot/dynamic/Comment_isLocatedIn_Country/*.csv.gz"
+      ],
+      "rel_type": "IS_LOCATED_IN",
+      "source": {
+        "label": "Comment",
+        "column": "CommentId"
+      },
+      "target": {
+        "label": "Place",
+        "column": "CountryId"
+      },
+      "properties": [
+        {
+          "column": "creationDate",
+          "type": "datetime"
+        }
+      ]
+    },
+    {
+      "id": "comment_replyof_comment",
+      "format": "ldbc-csv",
+      "files": [
+        "*/graphs/csv/bi/composite-projected-fk/initial_snapshot/dynamic/Comment_replyOf_Comment/*.csv.gz"
+      ],
+      "rel_type": "REPLY_OF",
+      "source": {
+        "label": "Comment",
+        "column": "Comment1Id"
+      },
+      "target": {
+        "label": "Comment",
+        "column": "Comment2Id"
+      },
+      "properties": [
+        {
+          "column": "creationDate",
+          "type": "datetime"
+        }
+      ]
+    },
+    {
+      "id": "comment_replyof_post",
+      "format": "ldbc-csv",
+      "files": [
+        "*/graphs/csv/bi/composite-projected-fk/initial_snapshot/dynamic/Comment_replyOf_Post/*.csv.gz"
+      ],
+      "rel_type": "REPLY_OF",
+      "source": {
+        "label": "Comment",
+        "column": "CommentId"
+      },
+      "target": {
+        "label": "Post",
+        "column": "PostId"
+      },
+      "properties": [
+        {
+          "column": "creationDate",
+          "type": "datetime"
+        }
+      ]
+    },
+    {
+      "id": "forum_containerof_post",
+      "format": "ldbc-csv",
+      "files": [
+        "*/graphs/csv/bi/composite-projected-fk/initial_snapshot/dynamic/Forum_containerOf_Post/*.csv.gz"
+      ],
+      "rel_type": "CONTAINER_OF",
+      "source": {
+        "label": "Forum",
+        "column": "ForumId"
+      },
+      "target": {
+        "label": "Post",
+        "column": "PostId"
+      },
+      "properties": [
+        {
+          "column": "creationDate",
+          "type": "datetime"
+        }
+      ]
+    },
+    {
+      "id": "forum_hasmember_person",
+      "format": "ldbc-csv",
+      "files": [
+        "*/graphs/csv/bi/composite-projected-fk/initial_snapshot/dynamic/Forum_hasMember_Person/*.csv.gz"
+      ],
+      "rel_type": "HAS_MEMBER",
+      "source": {
+        "label": "Forum",
+        "column": "ForumId"
+      },
+      "target": {
+        "label": "Person",
+        "column": "PersonId"
+      },
+      "properties": [
+        {
+          "column": "creationDate",
+          "type": "datetime"
+        }
+      ]
+    },
+    {
+      "id": "forum_hasmoderator_person",
+      "format": "ldbc-csv",
+      "files": [
+        "*/graphs/csv/bi/composite-projected-fk/initial_snapshot/dynamic/Forum_hasModerator_Person/*.csv.gz"
+      ],
+      "rel_type": "HAS_MODERATOR",
+      "source": {
+        "label": "Forum",
+        "column": "ForumId"
+      },
+      "target": {
+        "label": "Person",
+        "column": "PersonId"
+      },
+      "properties": [
+        {
+          "column": "creationDate",
+          "type": "datetime"
+        }
+      ]
+    },
+    {
+      "id": "forum_hastag_tag",
+      "format": "ldbc-csv",
+      "files": [
+        "*/graphs/csv/bi/composite-projected-fk/initial_snapshot/dynamic/Forum_hasTag_Tag/*.csv.gz"
+      ],
+      "rel_type": "HAS_TAG",
+      "source": {
+        "label": "Forum",
+        "column": "ForumId"
+      },
+      "target": {
+        "label": "Tag",
+        "column": "TagId"
+      },
+      "properties": [
+        {
+          "column": "creationDate",
+          "type": "datetime"
+        }
+      ]
+    },
+    {
+      "id": "person_hasinterest_tag",
+      "format": "ldbc-csv",
+      "files": [
+        "*/graphs/csv/bi/composite-projected-fk/initial_snapshot/dynamic/Person_hasInterest_Tag/*.csv.gz"
+      ],
+      "rel_type": "HAS_INTEREST",
+      "source": {
+        "label": "Person",
+        "column": "personId"
+      },
+      "target": {
+        "label": "Tag",
+        "column": "interestId"
+      },
+      "properties": [
+        {
+          "column": "creationDate",
+          "type": "datetime"
+        }
+      ]
+    },
+    {
+      "id": "person_islocatedin_city",
+      "format": "ldbc-csv",
+      "files": [
+        "*/graphs/csv/bi/composite-projected-fk/initial_snapshot/dynamic/Person_isLocatedIn_City/*.csv.gz"
+      ],
+      "rel_type": "IS_LOCATED_IN",
+      "source": {
+        "label": "Person",
+        "column": "PersonId"
+      },
+      "target": {
+        "label": "Place",
+        "column": "CityId"
+      },
+      "properties": [
+        {
+          "column": "creationDate",
+          "type": "datetime"
+        }
+      ]
+    },
+    {
+      "id": "person_knows_person",
+      "format": "ldbc-csv",
+      "files": [
+        "*/graphs/csv/bi/composite-projected-fk/initial_snapshot/dynamic/Person_knows_Person/*.csv.gz"
+      ],
+      "rel_type": "KNOWS",
+      "source": {
+        "label": "Person",
+        "column": "Person1Id"
+      },
+      "target": {
+        "label": "Person",
+        "column": "Person2Id"
+      },
+      "properties": [
+        {
+          "column": "creationDate",
+          "type": "datetime"
+        }
+      ]
+    },
+    {
+      "id": "person_likes_comment",
+      "format": "ldbc-csv",
+      "files": [
+        "*/graphs/csv/bi/composite-projected-fk/initial_snapshot/dynamic/Person_likes_Comment/*.csv.gz"
+      ],
+      "rel_type": "LIKES",
+      "source": {
+        "label": "Person",
+        "column": "PersonId"
+      },
+      "target": {
+        "label": "Comment",
+        "column": "CommentId"
+      },
+      "properties": [
+        {
+          "column": "creationDate",
+          "type": "datetime"
+        }
+      ]
+    },
+    {
+      "id": "person_likes_post",
+      "format": "ldbc-csv",
+      "files": [
+        "*/graphs/csv/bi/composite-projected-fk/initial_snapshot/dynamic/Person_likes_Post/*.csv.gz"
+      ],
+      "rel_type": "LIKES",
+      "source": {
+        "label": "Person",
+        "column": "PersonId"
+      },
+      "target": {
+        "label": "Post",
+        "column": "PostId"
+      },
+      "properties": [
+        {
+          "column": "creationDate",
+          "type": "datetime"
+        }
+      ]
+    },
+    {
+      "id": "person_studyat_university",
+      "format": "ldbc-csv",
+      "files": [
+        "*/graphs/csv/bi/composite-projected-fk/initial_snapshot/dynamic/Person_studyAt_University/*.csv.gz"
+      ],
+      "rel_type": "STUDY_AT",
+      "source": {
+        "label": "Person",
+        "column": "PersonId"
+      },
+      "target": {
+        "label": "Organisation",
+        "column": "UniversityId"
+      },
+      "properties": [
+        {
+          "column": "creationDate",
+          "type": "datetime"
+        },
+        {
+          "column": "classYear",
+          "type": "int64"
+        }
+      ]
+    },
+    {
+      "id": "person_workat_company",
+      "format": "ldbc-csv",
+      "files": [
+        "*/graphs/csv/bi/composite-projected-fk/initial_snapshot/dynamic/Person_workAt_Company/*.csv.gz"
+      ],
+      "rel_type": "WORK_AT",
+      "source": {
+        "label": "Person",
+        "column": "PersonId"
+      },
+      "target": {
+        "label": "Organisation",
+        "column": "CompanyId"
+      },
+      "properties": [
+        {
+          "column": "creationDate",
+          "type": "datetime"
+        },
+        {
+          "column": "workFrom",
+          "type": "int64"
+        }
+      ]
+    },
+    {
+      "id": "post_hascreator_person",
+      "format": "ldbc-csv",
+      "files": [
+        "*/graphs/csv/bi/composite-projected-fk/initial_snapshot/dynamic/Post_hasCreator_Person/*.csv.gz"
+      ],
+      "rel_type": "HAS_CREATOR",
+      "source": {
+        "label": "Post",
+        "column": "PostId"
+      },
+      "target": {
+        "label": "Person",
+        "column": "PersonId"
+      },
+      "properties": [
+        {
+          "column": "creationDate",
+          "type": "datetime"
+        }
+      ]
+    },
+    {
+      "id": "post_hastag_tag",
+      "format": "ldbc-csv",
+      "files": [
+        "*/graphs/csv/bi/composite-projected-fk/initial_snapshot/dynamic/Post_hasTag_Tag/*.csv.gz"
+      ],
+      "rel_type": "HAS_TAG",
+      "source": {
+        "label": "Post",
+        "column": "PostId"
+      },
+      "target": {
+        "label": "Tag",
+        "column": "TagId"
+      },
+      "properties": [
+        {
+          "column": "creationDate",
+          "type": "datetime"
+        }
+      ]
+    },
+    {
+      "id": "post_islocatedin_country",
+      "format": "ldbc-csv",
+      "files": [
+        "*/graphs/csv/bi/composite-projected-fk/initial_snapshot/dynamic/Post_isLocatedIn_Country/*.csv.gz"
+      ],
+      "rel_type": "IS_LOCATED_IN",
+      "source": {
+        "label": "Post",
+        "column": "PostId"
+      },
+      "target": {
+        "label": "Place",
+        "column": "CountryId"
+      },
+      "properties": [
+        {
+          "column": "creationDate",
+          "type": "datetime"
+        }
+      ]
+    }
+  ]
+}

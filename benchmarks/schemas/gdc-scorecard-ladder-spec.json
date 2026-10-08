@@ -15,7 +15,12 @@
     "variance_line": { "type": "string", "minLength": 1, "maxLength": 200 },
     "attribution": { "type": "string", "minLength": 1, "maxLength": 400 },
     "variances": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/variance" } },
-    "rungs": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "$ref": "#/$defs/rung" } }
+    "rungs": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": { "oneOf": [{ "$ref": "#/$defs/rung" }, { "$ref": "#/$defs/unpinnedRung" }] }
+    }
   },
   "required": [
     "schema",
@@ -48,6 +53,49 @@
       "required": ["kind", "subject", "text"],
       "additionalProperties": false
     },
+    "workloadBuilder": {
+      "description": "A workload built at rung time from pinned LDBC parameters: the first per_variant rows of each parameter file (graphforge_bench.gdc_snb_scorecard). Interactive short reads take their ids from the validation stream acquired with the dataset.",
+      "type": "object",
+      "properties": {
+        "builder": { "enum": ["snb-bi", "snb-interactive"] },
+        "queries": { "$ref": "#/$defs/relativePath" },
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset_id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$" },
+            "path": { "$ref": "#/$defs/relativePath" }
+          },
+          "required": ["dataset_id", "path"],
+          "additionalProperties": false
+        },
+        "short_reads": {
+          "type": "object",
+          "properties": {
+            "workload_key": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,40}$" },
+            "path": { "$ref": "#/$defs/relativePath" }
+          },
+          "required": ["workload_key", "path"],
+          "additionalProperties": false
+        },
+        "per_variant": { "type": "integer", "minimum": 1, "maximum": 1000 }
+      },
+      "required": ["builder", "queries", "parameters", "per_variant"],
+      "additionalProperties": false,
+      "if": { "properties": { "builder": { "const": "snb-interactive" } } },
+      "then": { "required": ["short_reads"] },
+      "else": { "not": { "required": ["short_reads"] } }
+    },
+    "unpinnedRung": {
+      "description": "A rung of the suite's declared ladder whose dataset is not pinned. The ladder records it as not_admitted (rung_not_pinned) and keeps climbing when a later rung is pinned; the card lists it.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$" },
+        "label": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "not_pinned": { "type": "string", "minLength": 1, "maxLength": 300 }
+      },
+      "required": ["id", "label", "not_pinned"],
+      "additionalProperties": false
+    },
     "refusal": {
       "type": "object",
       "properties": {
@@ -66,7 +114,9 @@
         "input_subdir": {
           "oneOf": [{ "$ref": "#/$defs/relativePath" }, { "type": "null" }]
         },
-        "workload": { "$ref": "#/$defs/relativePath" },
+        "workload": {
+          "oneOf": [{ "$ref": "#/$defs/relativePath" }, { "$ref": "#/$defs/workloadBuilder" }]
+        },
         "refused": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/refusal" } },
         "reference": {
           "oneOf": [
@@ -85,6 +135,23 @@
                 "archive_outputs": { "const": "graphalytics" }
               },
               "required": ["archive_outputs"],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "builder": { "const": "snb-bi-umbra" },
+                "workload_key": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,40}$" },
+                "path": { "$ref": "#/$defs/relativePath" },
+                "source": { "type": "string", "minLength": 1, "maxLength": 200 }
+              },
+              "required": ["builder", "workload_key", "path", "source"],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": { "builder": { "const": "snb-interactive-spec-derived" } },
+              "required": ["builder"],
               "additionalProperties": false
             },
             { "type": "null" }

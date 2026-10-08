@@ -63,12 +63,15 @@ pub enum Operation {
         #[serde(default)]
         via: Option<String>,
     },
-    /// `GraphForge::paths(source, None, PathsOptions { by, directed, via, weight })`,
-    /// where the source node is selected by UUID or by `(:label {property: $param})`.
+    /// `GraphForge::paths(source, target, PathsOptions { by, directed, via, weight })`,
+    /// where the source node is selected by UUID or by `(:label {property: $param})`,
+    /// and the optional target node the same way (`None` when absent).
     Paths {
         by: String,
         directed: bool,
         source: SourceSelector,
+        #[serde(default)]
+        target: Option<SourceSelector>,
         #[serde(default)]
         via: Option<String>,
         #[serde(default)]
@@ -151,7 +154,11 @@ impl Operation {
         match self {
             Self::Cypher { .. } => None,
             Self::Rank { .. } | Self::Cluster { .. } => Some(BTreeSet::new()),
-            Self::Paths { source, .. } => Some(BTreeSet::from([source.param()])),
+            Self::Paths { source, target, .. } => Some(
+                std::iter::once(source.param())
+                    .chain(target.iter().map(SourceSelector::param))
+                    .collect(),
+            ),
         }
     }
 }
@@ -228,8 +235,10 @@ pub fn parse_workload(bytes: &[u8]) -> Result<Workload, QueryError> {
                     ));
                 }
             }
-            if let Operation::Paths { source, .. } = &variant.operation {
-                super::measure::source_selector(&variant.id, source, &binding.params)?;
+            if let Operation::Paths { source, target, .. } = &variant.operation {
+                for selector in std::iter::once(source).chain(target) {
+                    super::measure::source_selector(&variant.id, selector, &binding.params)?;
+                }
             }
         }
     }

@@ -63,8 +63,19 @@ class CardError(ValueError):
         self.cause = cause
 
 
+NOT_PINNED = "rung_not_pinned"
+
+
+def _unpinned(result: Mapping[str, Any]) -> bool:
+    return result["status"] == "not_admitted" and result["failure"]["cause"] == NOT_PINNED
+
+
 def _results(spec: LadderSpec, output_dir: Path) -> list[Mapping[str, Any]]:
-    """The ladder's results in rung order, up to and including the first non-pass."""
+    """The ladder's results in rung order, up to and including the first non-pass.
+
+    A rung recorded as not pinned is passed over: the climb continues past it
+    to the next pinned rung (#952 decision 2026-10-08).
+    """
     results: list[Mapping[str, Any]] = []
     for rung in spec.document["rungs"]:
         path = output_dir / f"{spec.suite_id}-{rung['id']}-result.json"
@@ -73,7 +84,7 @@ def _results(spec: LadderSpec, output_dir: Path) -> list[Mapping[str, Any]]:
         result = read_json(path)
         validate_schema(spec.root, "gdc-rung-result.json", result)
         results.append(result)
-        if result["status"] != "passed":
+        if result["status"] != "passed" and not _unpinned(result):
             break
     return results
 
@@ -167,13 +178,21 @@ def _graphalytics(
 def _next_rung(
     spec: LadderSpec, index: int, results: Sequence[Mapping[str, Any]]
 ) -> dict[str, Any]:
+    """The first rung after the headline that ran, or failed to be admitted.
+
+    Unpinned rungs the climb passed over are skipped here; the card lists
+    every unpinned rung among its variances instead.
+    """
     rungs = spec.document["rungs"]
-    if index + 1 >= len(rungs):
+    following = index + 1
+    while following + 1 < len(results) and _unpinned(results[following]):
+        following += 1
+    if following >= len(rungs):
         return {"label": None, "outcome": "top_of_ladder", "cause": None}
-    label = rungs[index + 1]["label"]
-    if index + 1 >= len(results):
+    label = rungs[following]["label"]
+    if following >= len(results):
         return {"label": label, "outcome": "not_attempted", "cause": None}
-    result = results[index + 1]
+    result = results[following]
     if result["status"] == "not_admitted":
         return {"label": label, "outcome": "not_admitted", "cause": result["failure"]["cause"]}
     return {"label": label, "outcome": "typed_failure", "cause": result["failure"]["cause"]}
@@ -185,7 +204,7 @@ def build_card(spec: LadderSpec, output_dir: Path) -> dict[str, Any]:
     if not passed:
         raise CardError("no_passing_rung", f"{spec.suite_id} has no passing rung to headline")
     headline = passed[-1]
-    index = len(passed) - 1
+    index = results.index(headline)
     rung = spec.rung(headline["rung_id"])
     prefix = f"{spec.suite_id}-{headline['rung_id']}"
     documents = _documents(output_dir, headline)
@@ -200,7 +219,10 @@ def build_card(spec: LadderSpec, output_dir: Path) -> dict[str, Any]:
     reconciliation = evidence["reconciliation"]
     nodes, edges = reconciliation["nodes"]["observed"], reconciliation["edges"]["observed"]
     counts = headline["counts"]
-    workload = read_json(spec.resolve(rung["workload"]))
+    if isinstance(rung["workload"], Mapping):
+        workload = documents[f"{prefix}-inputs-workload.json"]
+    else:
+        workload = read_json(spec.resolve(rung["workload"]))
     load_wall = float(load["authority"]["wall_seconds"])
     latency, throughput = _latency(evidence)
     graphalytics = None
@@ -254,6 +276,15 @@ def build_card(spec: LadderSpec, output_dir: Path) -> dict[str, Any]:
             *spec.document["variances"],
             *rung["variances"],
             *counts["discrepancies"],
+            *(
+                {
+                    "kind": "scope",
+                    "subject": f"{other['label']} not pinned",
+                    "text": other["not_pinned"],
+                }
+                for other in spec.document["rungs"]
+                if "not_pinned" in other
+            ),
         ],
         "attribution": spec.document["attribution"],
         "metric_sources": dict(CARD_METRIC_SOURCES),

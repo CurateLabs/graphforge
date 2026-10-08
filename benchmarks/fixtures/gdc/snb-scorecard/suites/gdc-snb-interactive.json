@@ -1,0 +1,17 @@
+{
+  "schema": "graphforge-benchmark-suite/1",
+  "id": "gdc-snb-interactive",
+  "family": "gdc",
+  "suite_id": "snb-interactive",
+  "disposition": "executable",
+  "pinned_identity": "profiles/gdc/snb-interactive-fixture-identity.json",
+  "identity_profiles": {
+    "scorecard": "profiles/gdc/snb-interactive-fixture-identity.json"
+  },
+  "runner": "gdc-snb-interactive",
+  "datasets": [
+    "interactive-fixture-sf0",
+    "interactive-fixture-sf2",
+    "interactive-fixture-substitution"
+  ]
+}

@@ -273,6 +273,63 @@ fn analyst_verbs_run_through_the_same_clock() {
     assert!(from_1 > from_3, "{from_1} vs {from_3}");
 }
 
+/// A `paths` target selects the path's far end: the verb returns the one
+/// shortest path between the two persons, or no row when none exists (#1904
+/// IC13). A binding must supply both selectors' parameters.
+#[test]
+fn paths_with_a_target_measure_the_path_between_two_selected_nodes() {
+    let root = tempfile::tempdir().unwrap();
+    let project = durable_project(root.path());
+    let between = |bindings: Value| {
+        json!([{"id": "bfs-between", "ordered": true, "bindings": bindings,
+            "operation": {"kind": "paths", "by": "bfs", "directed": false, "via": "KNOWS",
+                "source": {"label": "Person", "property": "id", "param": "from"},
+                "target": {"label": "Person", "property": "id", "param": "to"}}}])
+    };
+    let results_path = root.path().join("results");
+    std::fs::create_dir(&results_path).unwrap();
+    let results = ResultsDir::new(&results_path).unwrap();
+    let evidence = run_with_results(
+        &project,
+        &serde_json::to_vec(&workload(between(json!([
+            {"id": "a-to-d", "params": {"from": int(1), "to": int(4)}},
+            {"id": "d-to-a", "params": {"from": int(4), "to": int(1)}},
+        ]))))
+        .unwrap(),
+        &serde_json::to_vec(&expected(4, 3)).unwrap(),
+        "0".repeat(64),
+        Some(&results),
+    )
+    .unwrap();
+    assert_eq!(evidence.status, "passed");
+    for sample in &evidence.variants[0].samples {
+        assert_eq!(measured(sample).rows, 1, "{}", sample.binding_id);
+    }
+    let first: Value =
+        serde_json::from_slice(&std::fs::read(results_path.join("00000000.json")).unwrap())
+            .unwrap();
+    let columns: Vec<&str> = first["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|column| column["name"].as_str().unwrap())
+        .collect();
+    let cost = columns.iter().position(|name| *name == "cost").unwrap();
+    assert_eq!(first["rows"][0][cost], "3.0");
+    // Without the target parameter the binding is refused before any call.
+    let refused = run(
+        &project,
+        &serde_json::to_vec(&workload(between(json!([
+            {"id": "no-target", "params": {"from": int(1)}}
+        ]))))
+        .unwrap(),
+        &serde_json::to_vec(&expected(4, 3)).unwrap(),
+        "0".repeat(64),
+    )
+    .unwrap_err();
+    assert_eq!(refused.cause(), QueryCause::InvalidWorkload);
+}
+
 #[test]
 fn every_measured_result_is_written_with_the_cells_its_digest_covers() {
     let root = tempfile::tempdir().unwrap();

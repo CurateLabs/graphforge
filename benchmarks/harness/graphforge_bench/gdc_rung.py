@@ -63,6 +63,7 @@ from graphforge_bench.gdc_rung_inputs import (
     RungInputError,
     check_reference,
     expected_counts,
+    is_unpinned,
     load_ladder_spec,
     read_json,
     read_results,
@@ -279,6 +280,8 @@ class Rung:
     documents: dict[str, str] = field(default_factory=dict)
     phases: dict[str, Any] = field(default_factory=dict)
     counts: dict[str, Any] | None = None
+    references: dict[str, Path] = field(default_factory=dict)
+    built: dict[str, Path] = field(default_factory=dict)
 
     @property
     def prefix(self) -> str:
@@ -500,8 +503,110 @@ def _acquire(rung: Rung) -> Path:
         opener=ladder.opener,
     )
     extracted = Path(acquired["extracted"][spec["dataset_id"]])
+    rung.references = {key: Path(path) for key, path in acquired["extracted_references"].items()}
     subdir = spec.get("input_subdir")
     return extracted / subdir if subdir else extracted
+
+
+def _reference_key(rung: Rung) -> str | None:
+    """The pinned reference archive a built workload or reference reads, if any."""
+    workload, reference = rung.spec["workload"], rung.spec["reference"]
+    key = None
+    if isinstance(workload, Mapping) and "short_reads" in workload:
+        key = workload["short_reads"]["workload_key"]
+    if isinstance(reference, Mapping) and "workload_key" in reference:
+        key = reference["workload_key"]
+    return None if key is None else f"{rung.spec['dataset_id']}:{key}"
+
+
+def _build_inputs(rung: Rung, input_root: Path) -> bool:
+    """Build a declared workload (and reference) from pinned LDBC inputs.
+
+    The builder runs as a child process (``gdc_snb_scorecard``), so the
+    Interactive snapshot index it holds is returned before any measured phase.
+    The workload, reference and build notes are published as rung documents.
+    """
+    ladder, spec = rung.ladder, rung.spec
+    workload = spec["workload"]
+    try:
+        parameters = gdc_dataset_cache.acquire(
+            suite_path=ladder.spec.suite_declaration,
+            profile=str(ladder.spec.document["identity_profile"]),
+            dataset_ids=[workload["parameters"]["dataset_id"]],
+            cache_root=ladder.cache_root,
+            work_root=ladder.work_root,
+            root=ladder.spec.profile_root,
+            repo_root=ladder.root.parent,
+            opener=ladder.opener,
+        )
+    except (gdc_dataset_cache.DatasetCacheError, GdcContractError) as error:
+        rung.fail("inputs", error.cause, str(error))
+        return False
+    key = _reference_key(rung)
+    reference_root = rung.references.get(key) if key is not None else None
+    if key is not None and reference_root is None:
+        rung.fail("inputs", "reference_missing", f"no pinned reference {key}")
+        return False
+    directory = rung.workspace / "inputs"
+    directory.mkdir()
+    request = {
+        "workload": workload,
+        "reference": spec["reference"],
+        "profile_root": str(ladder.spec.profile_root.resolve()),
+        "input_root": str(input_root.resolve()),
+        "parameters_root": str(
+            Path(parameters["extracted"][workload["parameters"]["dataset_id"]]).resolve()
+        ),
+        "reference_root": str(reference_root.resolve()) if reference_root else None,
+        "suite_id": ladder.spec.suite_id,
+        "rung_id": spec["id"],
+        "mapping": str(_mapping_path(ladder.spec, spec["id"]).resolve()),
+    }
+    (directory / "request.json").write_text(json.dumps(request, indent=2), encoding="utf-8")
+    harness = Path(__file__).resolve().parents[1]
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "graphforge_bench.gdc_snb_scorecard",
+            "--request",
+            str(directory / "request.json"),
+            "--output-dir",
+            str(directory),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "PYTHONPATH": str(harness)},
+    )
+    if completed.returncode != 0:
+        try:
+            error = json.loads(completed.stderr.strip().splitlines()[-1])
+            cause, message = str(error["cause"]), str(error["message"])
+        except (IndexError, KeyError, TypeError, json.JSONDecodeError):
+            cause, message = "inputs_build_failed", completed.stderr.strip()[-2048:]
+        rung.fail("inputs", cause, message)
+        return False
+    for name in ("workload", "reference", "notes"):
+        path = directory / f"{name}.json"
+        if path.is_file():
+            document = read_json(path)
+            if name == "reference":
+                try:
+                    validate_schema(ladder.root, "gdc-rung-reference.json", document)
+                except RungInputError as invalid:
+                    rung.fail("inputs", invalid.cause, str(invalid))
+                    return False
+            rung.built[name] = ladder.output_dir / rung.publish(f"inputs-{name}", document)
+    if "workload" not in rung.built:
+        rung.fail("inputs", "inputs_build_failed", "the builder wrote no workload")
+        return False
+    return True
+
+
+def _workload_path(rung: Rung) -> Path:
+    built = rung.built.get("workload")
+    return built if built is not None else rung.ladder.spec.resolve(rung.spec["workload"])
 
 
 def _execute(rung: Rung) -> None:
@@ -522,6 +627,8 @@ def _execute(rung: Rung) -> None:
             return
     workspace = rung.workspace
     workspace.mkdir(parents=True)
+    if isinstance(spec["workload"], Mapping) and not _build_inputs(rung, input_root):
+        return
     remaining = MAXIMUM_WALL_SECONDS
 
     def phase(name: str, task: dict[str, Any]) -> PhaseRun | None:
@@ -585,7 +692,7 @@ def _execute(rung: Rung) -> None:
             "gf": "gf",
             "driver": DRIVER_NAME,
             "project": str(project),
-            "workload": str(ladder.spec.resolve(spec["workload"]).resolve()),
+            "workload": str(_workload_path(rung).resolve()),
             "expected_counts": str((ladder.output_dir / expected_name).resolve()),
             "evidence": str(evidence_path),
             "results_dir": str(results_dir) if reference is not None else None,
@@ -630,7 +737,13 @@ def _check(rung: Rung, evidence: Mapping[str, Any], results_dir: Path, input_roo
                 rung.ladder.spec, rung.spec, input_root
             )
         elif reference_spec is not None:
-            path = rung.ladder.spec.resolve(reference_spec["path"])
+            if "builder" in reference_spec:
+                built = rung.built.get("reference")
+                if built is None:
+                    raise RungInputError("reference_missing", "the builder wrote no reference")
+                path = built
+            else:
+                path = rung.ladder.spec.resolve(reference_spec["path"])
             reference = read_json(path)
             validate_schema(rung.ladder.root, "gdc-rung-reference.json", reference)
             if (reference["suite_id"], reference["rung_id"]) != (
@@ -750,6 +863,22 @@ def not_admitted(
     return _publish_result(rung, result)
 
 
+NOT_PINNED = "rung_not_pinned"
+
+
+def not_pinned(ladder: Ladder, rung_spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Record a declared rung whose dataset is not pinned; nothing is launched."""
+    rung = Rung(ladder, rung_spec)
+    rung.fail("admission", NOT_PINNED, str(rung_spec["not_pinned"]))
+    inventory = _teardown(rung)
+    result = _result(rung, "not_admitted", launch_host=None, capacity=None, inventory=inventory)
+    return _publish_result(rung, result)
+
+
+def skipped_unpinned(result: Mapping[str, Any]) -> bool:
+    return result["status"] == "not_admitted" and result["failure"]["cause"] == NOT_PINNED
+
+
 def _existing_result(ladder: Ladder, rung_spec: Mapping[str, Any]) -> dict[str, Any] | None:
     prefix = f"{ladder.spec.suite_id}-{rung_spec['id']}"
     path = ladder.output_dir / f"{prefix}-result.json"
@@ -782,8 +911,17 @@ def climb(
             raise LadderError("unknown_rung", through)
         rungs = rungs[: ids.index(through) + 1]
     results: list[dict[str, Any]] = []
-    for rung_spec in rungs:
+    for position, rung_spec in enumerate(rungs):
         result = _existing_result(ladder, rung_spec)
+        if result is None and is_unpinned(rung_spec):
+            result = not_pinned(ladder, rung_spec)
+        if result is not None and skipped_unpinned(result):
+            results.append(result)
+            # #952 decision 2026-10-08: an unpinned rung is recorded and the
+            # climb continues to the next pinned rung; with none left it ends.
+            if any(not is_unpinned(later) for later in rungs[position + 1 :]):
+                continue
+            break
         if result is None:
             try:
                 launch_host = quiet_host(quiet_host_wait_seconds)

@@ -1,0 +1,63 @@
+{
+  "schema": "graphforge-gdc-pinned-identity/1",
+  "suite_id": "snb-interactive",
+  "disposition": "executable",
+  "spec": {
+    "name": "ldbc_snb_docs",
+    "source": "https://github.com/ldbc/ldbc_snb_docs",
+    "release": "v2.2.4",
+    "commit": "5f7956e07a214373c363b371a3b88bc83ddcd118"
+  },
+  "generator": {
+    "name": "graphforge-gdc-snb-scorecard-fixture",
+    "source": "https://github.com/CurateLabs/graphforge/tree/main/benchmarks/harness/graphforge_bench/gdc_snb_scorecard_fixture.py",
+    "release": "snb-scorecard-fixture-v1",
+    "commit": null
+  },
+  "driver": {
+    "name": "graphforge-gdc-scorecard-converter",
+    "source": "https://github.com/CurateLabs/graphforge/tree/main/benchmarks/runners/gdc-scorecard",
+    "release": "converter-v1",
+    "commit": null
+  },
+  "datasets": [
+    {
+      "id": "interactive-fixture-sf0",
+      "role": "dataset",
+      "checksum_sha256": "438af0eb81c9c372b070b126557f3966081e757d8a0c2e348ef192ee76cec962",
+      "license": "Apache-2.0",
+      "acquisition": "download",
+      "source": "https://datasets.ldbcouncil.org/graphforge-fixture/snb-interactive-fixture-sf0.tar.zst"
+    },
+    {
+      "id": "interactive-fixture-sf2",
+      "role": "dataset",
+      "checksum_sha256": "438af0eb81c9c372b070b126557f3966081e757d8a0c2e348ef192ee76cec962",
+      "license": "Apache-2.0",
+      "acquisition": "download",
+      "source": "https://datasets.ldbcouncil.org/graphforge-fixture/snb-interactive-fixture-sf0.tar.zst"
+    },
+    {
+      "id": "interactive-fixture-substitution",
+      "role": "parameter",
+      "checksum_sha256": "99656893f1a64fe4e3faa82096088696dd7c64b180c029c3a0bdce8ba289790e",
+      "license": "Apache-2.0",
+      "acquisition": "download",
+      "source": "https://datasets.ldbcouncil.org/graphforge-fixture/snb-interactive-fixture-substitution.tar.zst"
+    }
+  ],
+  "references": [
+    {
+      "dataset_id": "interactive-fixture-sf0",
+      "workload_key": "neo4j-validation",
+      "checksum_sha256": "585d1c37e27bebee61eea2113db34d6b5534135444cc588035a0ca2c2953b8ba",
+      "source": "https://datasets.ldbcouncil.org/graphforge-fixture/snb-interactive-fixture-validation.tar.zst"
+    },
+    {
+      "dataset_id": "interactive-fixture-sf2",
+      "workload_key": "neo4j-validation",
+      "checksum_sha256": "585d1c37e27bebee61eea2113db34d6b5534135444cc588035a0ca2c2953b8ba",
+      "source": "https://datasets.ldbcouncil.org/graphforge-fixture/snb-interactive-fixture-validation.tar.zst"
+    }
+  ]
+}

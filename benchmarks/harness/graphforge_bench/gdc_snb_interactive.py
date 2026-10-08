@@ -244,6 +244,19 @@ def list_query_definitions(root: Path | None = None) -> list[dict[str, Any]]:
     return queries
 
 
+def query_definitions_document(root: Path | None = None) -> dict[str, Any]:
+    """The runner's whole ``list-queries`` document.
+
+    ``profiles/gdc/snb-interactive-scorecard-queries.json`` is this document,
+    committed for the scorecard workload builder (#1904).
+    """
+    completed = _run_runner(["list-queries"], root)
+    if completed.returncode != 0:
+        raise SnbInteractiveSuiteError("invalid_document", completed.stderr.strip())
+    document: dict[str, Any] = json.loads(completed.stdout)
+    return document
+
+
 def map_operation_file(path: Path, root: Path | None = None) -> dict[str, Any]:
     completed = _run_runner(["map-operation", str(path)], root)
     if completed.returncode == 3:

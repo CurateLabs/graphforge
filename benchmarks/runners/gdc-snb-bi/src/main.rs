@@ -1,3 +1,6 @@
+use graphforge_benchmark_gdc_snb_bi::queries::{
+    BI_QUERIES, REFUSED_READS, UPSTREAM_QUERY_COMMIT, UPSTREAM_QUERY_SOURCE,
+};
 use graphforge_benchmark_gdc_snb_bi::query_fixture::run_query_fixture;
 use graphforge_benchmark_gdc_snb_bi::{
     JOB_SCHEMA, MappingOutcome, Operation, OperationJob, OperationStatus, assemble_evidence,
@@ -13,7 +16,7 @@ fn main() -> ExitCode {
     let Some(command) = args.next() else {
         eprintln!(
             "usage: graphforge-benchmark-gdc-snb-bi \
-             <list-operations|map-operation|run-queries|run-static-suite> ..."
+             <list-operations|list-queries|map-operation|run-queries|run-static-suite> ..."
         );
         return ExitCode::from(2);
     };
@@ -23,6 +26,17 @@ fn main() -> ExitCode {
             for operation in Operation::ALL {
                 println!("{} {}", operation.code(), rules[operation.code()]);
             }
+            ExitCode::SUCCESS
+        }
+        "list-queries" => {
+            if args.next().is_some() {
+                eprintln!("list-queries takes no arguments");
+                return ExitCode::from(2);
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&queries_document()).unwrap()
+            );
             ExitCode::SUCCESS
         }
         "map-operation" => {
@@ -122,6 +136,43 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// Every runnable read and every refused read as data, for a scorecard
+/// workload builder (`graphforge_bench.gdc_snb_scorecard`).
+fn queries_document() -> serde_json::Value {
+    let queries: Vec<serde_json::Value> = BI_QUERIES
+        .iter()
+        .map(|query| {
+            serde_json::json!({
+                "operation": query.operation.code(),
+                "cypher": query.cypher,
+                "parameters": query.parameters.iter().map(|parameter| serde_json::json!({
+                    "name": parameter.name,
+                    "kind": parameter.kind.name(),
+                    "fixed": parameter.fixed,
+                })).collect::<Vec<_>>(),
+                "columns": query.columns,
+                "upstream": query.upstream,
+                "rewrite": query.rewrite,
+            })
+        })
+        .collect();
+    let refused: Vec<serde_json::Value> = REFUSED_READS
+        .iter()
+        .map(|refusal| {
+            serde_json::json!({
+                "operation": refusal.operation.code(),
+                "cause": refusal.cause,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "schema": "graphforge-gdc-snb-bi-queries/1",
+        "upstream": {"source": UPSTREAM_QUERY_SOURCE, "commit": UPSTREAM_QUERY_COMMIT},
+        "queries": queries,
+        "refused": refused,
+    })
 }
 
 fn load_job(path: &str) -> Result<OperationJob, String> {

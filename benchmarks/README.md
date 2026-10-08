@@ -355,7 +355,11 @@ make -C benchmarks gdc-scorecard-inventory WORK_ROOT=<work root>
 ```
 
 `OUTPUT_DIR` must be outside `WORK_ROOT`. Raw output attaches to #952, not the
-repository.
+repository. The SNB ladders are
+`LADDER=profiles/gdc/snb-bi-scorecard-ladder-spec.json` and
+`LADDER=profiles/gdc/snb-interactive-scorecard-ladder-spec.json`; their
+workloads and references are built at rung time from the pinned parameters
+([`gdc-suite-index.md`](gdc-suite-index.md#snb-bi-and-interactive-v1-scorecard-ladders-1904)).
 
 Per-suite adapters own workload semantics through their own Rust runner and
 harness module. The SNB BI suite (`gdc_snb_bi`) maps the 20 `BI*` analytical
