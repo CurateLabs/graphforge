@@ -113,6 +113,7 @@ pub(crate) struct AdjacencyGraph {
     /// Flat adjacency entries in CSR order.
     neighbor_edges: Vec<AlgorithmEdge>,
     node_vectors: HashMap<u64, Vec<f64>>,
+    node_initial_labels: HashMap<u64, i64>,
     inventory: Option<std::sync::Arc<graphforge_storage::AuthenticatedPropertyInventory>>,
 }
 
@@ -228,6 +229,7 @@ impl AdjacencyGraph {
             neighbor_offsets,
             neighbor_edges,
             node_vectors: HashMap::new(),
+            node_initial_labels: HashMap::new(),
             inventory: None,
         }
     }
@@ -362,6 +364,27 @@ impl AdjacencyGraph {
                 digest.update(value.to_bits().to_be_bytes());
             }
         }
+        if !self.node_initial_labels.is_empty() {
+            let mut labels = self
+                .node_initial_labels
+                .iter()
+                .map(|(&node, &label)| {
+                    self.node_uuid(node)
+                        .map(|uuid| (uuid, label))
+                        .ok_or_else(|| {
+                            GfError::Execution(
+                                "initial label projection has no UUID identity".into(),
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            labels.sort_unstable_by_key(|(uuid, _)| *uuid);
+            digest.update(b"initial_int64_labels");
+            for (uuid, label) in labels {
+                digest.update(uuid);
+                digest.update(label.to_be_bytes());
+            }
+        }
         Ok(AlgorithmProjectionFingerprint(digest.finalize().into()))
     }
 
@@ -462,6 +485,7 @@ impl AdjacencyGraph {
             neighbor_offsets,
             neighbor_edges,
             node_vectors: HashMap::new(),
+            node_initial_labels: HashMap::new(),
             inventory: None,
         })
     }
@@ -512,6 +536,11 @@ impl AdjacencyGraph {
     #[must_use]
     pub(crate) fn node_id(&self, node_uuid: &[u8; 16]) -> Option<u64> {
         self.node_id_by_uuid.get(node_uuid).copied()
+    }
+
+    /// Exact graph-native label, loaded only for synchronous label propagation.
+    pub(crate) fn initial_label(&self, node_id: u64) -> Option<i64> {
+        self.node_initial_labels.get(&node_id).copied()
     }
 
     /// Validated feature vector for one selected node.
@@ -586,6 +615,7 @@ impl AdjacencyGraph {
             neighbor_offsets,
             neighbor_edges,
             node_vectors: HashMap::new(),
+            node_initial_labels: HashMap::new(),
             inventory: None,
         }
     }
@@ -621,6 +651,7 @@ impl AdjacencyGraph {
             neighbor_offsets,
             neighbor_edges,
             node_vectors: HashMap::new(),
+            node_initial_labels: HashMap::new(),
             inventory: None,
         }
     }
@@ -687,6 +718,7 @@ impl AdjacencyGraph {
             neighbor_offsets,
             neighbor_edges,
             node_vectors: HashMap::new(),
+            node_initial_labels: HashMap::new(),
             inventory: None,
         }
     }
@@ -732,6 +764,7 @@ pub(crate) fn export_node_selection_from_files(
         neighbor_offsets: vec![0],
         neighbor_edges: Vec::new(),
         node_vectors: HashMap::new(),
+        node_initial_labels: HashMap::new(),
         inventory: None,
     })
 }
@@ -830,6 +863,7 @@ pub(crate) fn export_adjacency(
         neighbor_offsets,
         neighbor_edges,
         node_vectors: HashMap::new(),
+        node_initial_labels: HashMap::new(),
         inventory,
     })
 }
@@ -889,6 +923,52 @@ pub(crate) fn load_node_vectors(
         vectors.insert(node_id, vector);
     }
     graph.replace_node_vectors(vectors)
+}
+
+/// Load exact integer labels without passing through a floating-point matrix.
+pub(crate) fn load_node_initial_labels(
+    graph: &mut AdjacencyGraph,
+    dir: &Path,
+    property: &str,
+) -> Result<(), GfError> {
+    let mut labels = HashMap::new();
+    for stem in graph.property_routes(dir, false) {
+        for (uuid, row) in graph
+            .node_property_rows(dir, &stem)
+            .map_err(storage_error)?
+        {
+            let Some(&node_id) = graph.node_id_by_uuid.get(&uuid) else {
+                continue;
+            };
+            let Some(value) = row.get(property) else {
+                continue;
+            };
+            let IrLiteral::Int(label) = value else {
+                return Err(GfError::Validation(format!(
+                    "node {} initial label property {property:?} must be Int64",
+                    uuid_text(&uuid)
+                )));
+            };
+            if let Some(previous) = labels.insert(node_id, *label)
+                && previous != *label
+            {
+                return Err(GfError::Validation(format!(
+                    "node {} has conflicting initial label property {property:?}",
+                    uuid_text(&uuid)
+                )));
+            }
+        }
+    }
+    for &node in graph.node_ids() {
+        if !labels.contains_key(&node) {
+            return Err(GfError::Validation(format!(
+                "node {} is missing initial label property {property:?}",
+                uuid_text(&graph.node_uuid_by_id[&node])
+            )));
+        }
+    }
+    graph.node_initial_labels = labels;
+    Ok(())
 }
 
 /// Load one strict graph-native numeric property for every selected node.
@@ -2459,6 +2539,7 @@ mod tests {
                 neighbor_offsets,
                 neighbor_edges,
                 node_vectors: HashMap::new(),
+                node_initial_labels: HashMap::new(),
                 inventory: None,
             }
         };

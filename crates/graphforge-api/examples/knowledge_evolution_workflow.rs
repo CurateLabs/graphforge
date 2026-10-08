@@ -268,6 +268,7 @@ fn main() {
                 via: Some("SUPPORTED_BY".into()),
                 directed: false,
                 write_property: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -495,6 +496,7 @@ fn main() {
                 via: Some("SUPPORTED_BY".into()),
                 directed: false,
                 write_property: None,
+                ..Default::default()
             },
         )
         .unwrap();

@@ -519,6 +519,7 @@ fn main() {
                 via: Some("SUPPORTS".into()),
                 directed: true,
                 write_property: None,
+                ..Default::default()
             },
         )
         .unwrap();

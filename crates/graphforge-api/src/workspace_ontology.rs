@@ -1105,6 +1105,7 @@ mod tests {
             via: Some("KNOWS".into()),
             directed: false,
             write_property: None,
+            ..Default::default()
         };
         let exploratory = graph.rank("Person", options.clone()).unwrap();
         let exploratory_descriptor = graph

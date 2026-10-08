@@ -157,8 +157,72 @@ pub(super) fn parse_seed(value: BigInt) -> Result<u64> {
     }
 }
 
+pub(super) fn parse_algorithm_iterations(value: Option<f64>) -> Result<Option<u32>> {
+    value
+        .map(|value| {
+            if !value.is_finite()
+                || value < 0.0
+                || value > f64::from(u32::MAX)
+                || value.fract() != 0.0
+            {
+                return Err(napi_validation(
+                    "algorithm iterations must be an unsigned 32-bit integer",
+                ));
+            }
+            // The finite, integral value is in range after the checks above.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            Ok(value as u32)
+        })
+        .transpose()
+}
+
+pub(super) fn pagerank_options(
+    damping: Option<f64>,
+    iterations: Option<f64>,
+) -> Result<Option<graphforge_api::PageRankOptions>> {
+    let iterations = parse_algorithm_iterations(iterations)?;
+    if damping.is_none() && iterations.is_none() {
+        Ok(None)
+    } else {
+        Ok(Some(graphforge_api::PageRankOptions {
+            damping: damping.unwrap_or_else(|| graphforge_api::PageRankOptions::default().damping),
+            iterations,
+        }))
+    }
+}
+
+pub(super) fn parse_clustering_normalization(
+    normalization: Option<&str>,
+) -> Result<Option<graphforge_api::ClusteringNormalization>> {
+    match normalization {
+        None => Ok(None),
+        Some("fagiolo") => Ok(Some(graphforge_api::ClusteringNormalization::Fagiolo)),
+        Some("neighbor_edges") => Ok(Some(graphforge_api::ClusteringNormalization::NeighborEdges)),
+        Some(_) => Err(napi_validation(
+            "clustering_normalization must be 'fagiolo' or 'neighbor_edges'",
+        )),
+    }
+}
+
+pub(super) fn synchronous_label_propagation_options(
+    iterations: Option<f64>,
+    initial_label_property: Option<String>,
+) -> Result<Option<graphforge_api::SynchronousLabelPropagationOptions>> {
+    match parse_algorithm_iterations(iterations)? {
+        Some(iterations) => Ok(Some(graphforge_api::SynchronousLabelPropagationOptions {
+            iterations,
+            initial_label_property,
+        })),
+        None if initial_label_property.is_some() => Err(napi_validation(
+            "initial_label_property requires synchronous_iterations",
+        )),
+        None => Ok(None),
+    }
+}
+
 #[napi]
 impl GraphForge {
+    #[allow(clippy::too_many_arguments)] // Append controls without shifting existing arguments.
     /// Rank nodes through the Rust registry. Returns an Arrow IPC `Buffer`.
     #[napi]
     pub fn rank(
@@ -168,6 +232,9 @@ impl GraphForge {
         via: Option<String>,
         directed: Option<bool>,
         write_property: Option<String>,
+        damping: Option<f64>,
+        iterations: Option<f64>,
+        clustering_normalization: Option<String>,
     ) -> Result<Buffer> {
         let g = self.open_guard()?;
         let options = graphforge_api::RankOptions {
@@ -175,6 +242,11 @@ impl GraphForge {
             via,
             directed: directed.unwrap_or(true),
             write_property,
+
+            pagerank: pagerank_options(damping, iterations)?,
+            clustering_normalization: parse_clustering_normalization(
+                clustering_normalization.as_deref(),
+            )?,
         };
         let batch = g
             .rank(&label, options)
@@ -184,6 +256,7 @@ impl GraphForge {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)] // Append controls without shifting existing arguments.
     /// Prepare a Rust-owned neutral rank invocation without executing it.
     #[napi]
     pub fn prepare_rank_invocation(
@@ -192,6 +265,9 @@ impl GraphForge {
         by: String,
         via: Option<String>,
         directed: Option<bool>,
+        damping: Option<f64>,
+        iterations: Option<f64>,
+        clustering_normalization: Option<String>,
     ) -> Result<InvocationDescriptorHandle> {
         let graph = self.open_guard()?;
         let options = graphforge_api::RankOptions {
@@ -199,6 +275,11 @@ impl GraphForge {
             via,
             directed: directed.unwrap_or(true),
             write_property: None,
+
+            pagerank: pagerank_options(damping, iterations)?,
+            clustering_normalization: parse_clustering_normalization(
+                clustering_normalization.as_deref(),
+            )?,
         };
         graph
             .prepare_rank_invocation(&label, &options)
@@ -206,6 +287,7 @@ impl GraphForge {
             .map_err(|error| to_napi_invocation_err(&error))
     }
 
+    #[allow(clippy::too_many_arguments)] // Append controls without shifting existing arguments.
     /// Prepare clustering without executing it.
     #[napi]
     pub fn prepare_cluster_invocation(
@@ -215,6 +297,8 @@ impl GraphForge {
         via: Option<String>,
         directed: Option<bool>,
         vector_property: Option<String>,
+        synchronous_iterations: Option<f64>,
+        initial_label_property: Option<String>,
     ) -> Result<InvocationDescriptorHandle> {
         let graph = self.open_guard()?;
         let options = graphforge_api::ClusterOptions {
@@ -223,6 +307,11 @@ impl GraphForge {
             via,
             directed: directed.unwrap_or(false),
             write_property: None,
+
+            synchronous_label_propagation: synchronous_label_propagation_options(
+                synchronous_iterations,
+                initial_label_property,
+            )?,
         };
         graph
             .prepare_cluster_invocation(&label, &options)
@@ -373,6 +462,7 @@ impl GraphForge {
             .map_err(|error| to_napi_err(&error))
     }
 
+    #[allow(clippy::too_many_arguments)] // Append controls without shifting existing arguments.
     /// Detect communities/components. Returns an Arrow IPC `Buffer`.
     #[napi]
     pub fn cluster(
@@ -383,6 +473,8 @@ impl GraphForge {
         directed: Option<bool>,
         write_property: Option<String>,
         vector_property: Option<String>,
+        synchronous_iterations: Option<f64>,
+        initial_label_property: Option<String>,
     ) -> Result<Buffer> {
         let g = self.open_guard()?;
         let options = graphforge_api::ClusterOptions {
@@ -391,6 +483,11 @@ impl GraphForge {
             via,
             directed: directed.unwrap_or(false),
             write_property,
+
+            synchronous_label_propagation: synchronous_label_propagation_options(
+                synchronous_iterations,
+                initial_label_property,
+            )?,
         };
         let batch = g
             .cluster(&label, options)

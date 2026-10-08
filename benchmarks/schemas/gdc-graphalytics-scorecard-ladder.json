@@ -65,7 +65,9 @@
             "type": "array",
             "minItems": 1,
             "uniqueItems": true,
-            "items": { "enum": ["bfs", "cdlp", "lcc", "pr", "sssp", "wcc"] }
+            "items": {
+              "enum": ["bfs", "cdlp", "lcc", "pr", "sssp", "wcc"]
+            }
           },
           "bfs_source_vertex": {
             "description": "The archive's .properties `bfs.source-vertex`.",
@@ -76,6 +78,24 @@
             "description": "The archive's .properties `sssp.source-vertex`; null when the archive has no SSSP.",
             "type": ["integer", "null"],
             "minimum": 0
+          },
+          "pr_damping": {
+            "description": "The archive's .properties PageRank damping; null when PR is absent.",
+            "type": ["number", "null"],
+            "minimum": 0,
+            "maximum": 1
+          },
+          "pr_iterations": {
+            "description": "The archive's .properties PageRank maxIterations; null when PR is absent.",
+            "type": ["integer", "null"],
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "cdlp_iterations": {
+            "description": "The archive's .properties CDLP maxIterations; null when CDLP is absent.",
+            "type": ["integer", "null"],
+            "minimum": 0,
+            "maximum": 4294967295
           }
         },
         "required": [
@@ -92,7 +112,50 @@
           "bfs_source_vertex",
           "sssp_source_vertex"
         ],
-        "additionalProperties": false
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "algorithms": {
+                  "contains": {
+                    "const": "pr"
+                  }
+                }
+              }
+            },
+            "then": {
+              "required": ["pr_damping", "pr_iterations"],
+              "properties": {
+                "pr_damping": {
+                  "type": "number"
+                },
+                "pr_iterations": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "algorithms": {
+                  "contains": {
+                    "const": "cdlp"
+                  }
+                }
+              }
+            },
+            "then": {
+              "required": ["cdlp_iterations"],
+              "properties": {
+                "cdlp_iterations": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        ]
       }
     },
     "counts_note": {

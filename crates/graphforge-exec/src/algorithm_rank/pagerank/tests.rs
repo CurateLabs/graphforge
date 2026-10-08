@@ -334,7 +334,15 @@ fn pagerank_pull_matches_serial_scatter_contribution_order() {
         let scores = vec![1.0 / graph.node_ids().len() as f64; graph.node_ids().len()];
         let base = 0.15 / graph.node_ids().len() as f64;
         let mut scatter = vec![base; scores.len()];
-        pagerank_scatter_serial(graph, &prepared.indices, &scores, &mut scatter).unwrap();
+        pagerank_scatter_serial(
+            graph,
+            &prepared.indices,
+            &scores,
+            &mut scatter,
+            0.85,
+            &AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default()),
+        )
+        .unwrap();
         let mut pull = vec![0.0; scores.len()];
         for dest in 0..scores.len() {
             pull[dest] = pagerank_pull_destination(
@@ -342,6 +350,7 @@ fn pagerank_pull_matches_serial_scatter_contribution_order() {
                 &prepared.outdegrees,
                 &scores,
                 base,
+                0.85,
                 dest,
             );
         }
@@ -351,4 +360,106 @@ fn pagerank_pull_matches_serial_scatter_contribution_order() {
             "pull must apply contributions in serial source/edge order"
         );
     }
+}
+
+fn fixed_pagerank(
+    graph: &AdjacencyGraph,
+    damping: f64,
+    iterations: u32,
+    threads: usize,
+) -> AlgorithmOutput {
+    let options = RankOptions {
+        by: RankAlgorithm::PageRank,
+        pagerank: Some(graphforge_core::PageRankOptions {
+            damping,
+            iterations: Some(iterations),
+        }),
+        ..RankOptions::default()
+    };
+    let control =
+        AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default())
+            .with_rank_options(&options)
+            .with_compute_pool(Arc::new(crate::ComputePool::new(threads).unwrap()));
+    PageRank.execute(graph, &control).unwrap()
+}
+
+#[test]
+fn fixed_pagerank_rounds_and_damping_include_dangling_mass() {
+    let graph = AdjacencyGraph::with_test_edges(2, &[(0, 1)]);
+    for (rounds, expected) in [
+        (0, [0.5, 0.5]),
+        (1, [0.3, 0.7]),
+        (2, [0.38, 0.62]),
+        (3, [0.348, 0.652]),
+    ] {
+        let scores = pagerank_scores(&fixed_pagerank(&graph, 0.8, rounds, 1));
+        for (actual, expected) in scores.iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-12, "{actual} != {expected}");
+        }
+    }
+    assert_eq!(
+        pagerank_scores(&fixed_pagerank(&graph, 0.0, 5, 1)),
+        [0.5, 0.5]
+    );
+    assert_eq!(
+        pagerank_scores(&fixed_pagerank(&graph, 1.0, 1, 1)),
+        [0.25, 0.75]
+    );
+    let sinks = AdjacencyGraph::with_test_edges(2, &[]);
+    assert_eq!(
+        pagerank_scores(&fixed_pagerank(&sinks, 1.0, 5, 1)),
+        [0.5, 0.5]
+    );
+}
+
+#[test]
+fn fixed_pagerank_parallel_rounds_preserve_bits_with_sinks_and_uneven_degrees() {
+    let edges = (0..448_u64)
+        .flat_map(|source| {
+            (0..(12 + source % 17)).map(move |hop| (source, (source + hop + 1) % 512))
+        })
+        .collect::<Vec<_>>();
+    let graph = AdjacencyGraph::with_test_edges(512, &edges);
+    assert!(graph.edge_entry_count() >= PAGERANK_PARALLEL_CROSSOVER_EDGES);
+    for rounds in [0, 1, 7] {
+        let serial = fixed_pagerank(&graph, 0.7, rounds, 1);
+        for threads in [2, 4, 8] {
+            assert_eq!(
+                pagerank_bits(&fixed_pagerank(&graph, 0.7, rounds, threads)),
+                pagerank_bits(&serial)
+            );
+        }
+    }
+}
+
+#[test]
+fn fixed_pagerank_rounds_are_distinct_from_cooperative_output_checkpoints() {
+    let options = RankOptions {
+        pagerank: Some(graphforge_core::PageRankOptions {
+            damping: 0.85,
+            iterations: Some(0),
+        }),
+        ..RankOptions::default()
+    };
+    let control = AlgorithmControl::new(
+        AlgorithmLimits {
+            iterations: 1,
+            ..AlgorithmLimits::default()
+        },
+        AlgorithmCancellation::default(),
+    )
+    .with_rank_options(&options);
+    let graph = AdjacencyGraph::with_test_edges(2, &[(0, 1)]);
+    assert_eq!(
+        pagerank_scores(&PageRank.execute(&graph, &control).unwrap()),
+        [0.5, 0.5]
+    );
+    let cancelled = AlgorithmCancellation::default();
+    cancelled.cancel();
+    let control =
+        AlgorithmControl::new(AlgorithmLimits::default(), cancelled).with_rank_options(&options);
+    assert_eq!(
+        PageRank.execute(&graph, &control),
+        Err(AlgorithmError::Cancelled)
+    );
 }

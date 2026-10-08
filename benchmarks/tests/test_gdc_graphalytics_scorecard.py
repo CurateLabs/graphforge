@@ -216,11 +216,29 @@ class ArchiveCheckTests(unittest.TestCase):
                 algorithms=("bfs", "cdlp", "lcc", "pr", "sssp", "wcc"),
                 bfs_source=10,
                 sssp_source=10,
+                pr_damping=0.85,
+                pr_iterations=10,
+                cdlp_iterations=10,
             ),
         )
         with self.assertRaises(RungInputError) as error:
             graphalytics.parse_properties("graph.x.directed true\n")
         self.assertEqual(error.exception.cause, "archive_properties_invalid")
+
+    def test_algorithm_parameters_are_required_and_validate_before_execution(self) -> None:
+        for old, new in (
+            ("pr.damping-factor = 0.85", "pr.damping-factor = nan"),
+            ("pr.damping-factor = 0.85", "pr.damping-factor = 1.1"),
+            ("pr.num-iterations = 10", "pr.num-iterations = -1"),
+            ("cdlp.max-iterations = 10", "cdlp.max-iterations = 4294967296"),
+            ("pr.num-iterations = 10", "other.num-iterations = 10"),
+        ):
+            with self.subTest(parameter=new):
+                archive = copied_archive(self, "ga-undirected")
+                edit(archive / "ga-undirected.properties", old, new)
+                with self.assertRaises(RungInputError) as error:
+                    graphalytics.read_properties(archive)
+                self.assertEqual(error.exception.cause, "archive_properties_invalid")
 
     def test_the_archive_must_agree_with_the_ladder_and_workload(self) -> None:
         spec = fixture_spec()
@@ -281,6 +299,16 @@ class ArchiveCheckTests(unittest.TestCase):
 
 
 class ReferenceTests(unittest.TestCase):
+    def test_new_modes_preserve_graphalytics_matching_rules(self) -> None:
+        rule, columns, cells = graphalytics.convert_reference("cdlp", [(99, "10")], "V")
+        self.assertEqual(rule, {"matching": "exact", "key": ["id"]})
+        self.assertEqual(columns, ["id", "community_id"])
+        self.assertEqual(cells, [["99", "10"]])
+        rule, columns, cells = graphalytics.convert_reference("pr", [(99, "1.5e-01")], "V")
+        self.assertEqual(rule, {"matching": "epsilon", "epsilon": 0.0001, "key": ["id"]})
+        self.assertEqual(columns, ["id", "score"])
+        self.assertEqual(cells, [["99", "1.5e-01"]])
+
     def test_node_uuid_reproduces_the_converters_identity(self) -> None:
         # identity.rs: SHA-256 prefix of ("graphforge.gdc.node.v1\0", label, \0, id BE)
         # with UUIDv7 version and variant bits; checked end to end by the BFS key match.
@@ -464,12 +492,11 @@ class RealLadderTests(unittest.TestCase):
             graph = graphalytics.ladder_graph(spec, rung["id"])
             graphalytics.check_workload(spec, rung, graph)
             self.assertEqual(rung["reference"], {"archive_outputs": "graphalytics"})
-            refused = {item["query_id"]: item["cause"] for item in rung["refused"]}
-            self.assertEqual(refused.pop("pr"), "fixed_iteration_pagerank_not_exposed")
-            self.assertEqual(refused.pop("cdlp"), "synchronous_cdlp_not_exposed")
-            if graph.directed:
-                self.assertEqual(refused.pop("lcc"), "directed_lcc_semantics_not_exposed")
-            self.assertEqual(refused, {})
+            self.assertEqual(rung["refused"], [])
+            workload = json.loads(spec.resolve(rung["workload"]).read_text())
+            self.assertEqual(
+                {variant["id"] for variant in workload["variants"]}, set(graph.algorithms)
+            )
 
 
 if __name__ == "__main__":

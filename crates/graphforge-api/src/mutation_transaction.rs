@@ -253,6 +253,7 @@ mod tests {
                         via: Some("KNOWS".into()),
                         directed: true,
                         write_property: property.map(str::to_owned),
+                        ..Default::default()
                     },
                 )
                 .unwrap()

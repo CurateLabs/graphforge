@@ -399,10 +399,12 @@ pub use graphforge_core::uuid::{
     portable_v2_import_generation,
 };
 pub use graphforge_core::{
-    AlgorithmError, AnalyzeOptions, ApiErrorCode, ClusterOptions, EdgeHandle, ExplainStage,
-    FindOptions, GfError, LoweringError, NodeHandle, NodeSelector, OntologyFormat, OntologyMode,
-    ParseErrorKind, PathsOptions, ProjectErrorCode, PropValue, RankOptions, SimilarOptions, Span,
-    SpatialCoordinates, SpatialCrs, SpatialGeometryType, SpatialType, SpatialValue, TemporalValue,
+    AlgorithmError, AnalyzeOptions, ApiErrorCode, ClusterOptions, ClusteringNormalization,
+    EdgeHandle, ExplainStage, FindOptions, GfError, LoweringError, NodeHandle, NodeSelector,
+    OntologyFormat, OntologyMode, PageRankOptions, ParseErrorKind, PathsOptions, ProjectErrorCode,
+    PropValue, RankOptions, SimilarOptions, Span, SpatialCoordinates, SpatialCrs,
+    SpatialGeometryType, SpatialType, SpatialValue, SynchronousLabelPropagationOptions,
+    TemporalValue,
 };
 pub use import_session::{
     GraphImportSession, ImportCallTiming, ImportConstructionEvidence, ImportOperationTimings,

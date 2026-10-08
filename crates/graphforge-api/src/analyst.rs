@@ -44,22 +44,36 @@ impl GraphForge {
             label_id,
             options,
         )?;
-        InvocationDescriptor::new(
-            Algorithm::Rank(options.by),
-            projection,
-            std::collections::BTreeMap::from([
-                (
-                    "directed".into(),
-                    InvocationParameter::Bool(options.directed),
-                ),
-                ("label".into(), InvocationParameter::Utf8(label.to_owned())),
-                (
-                    "via".into(),
-                    InvocationParameter::Utf8(options.via.clone().unwrap_or_else(|| "*".into())),
-                ),
-            ]),
-        )
-        .map_err(Into::into)
+        let mut parameters = std::collections::BTreeMap::from([
+            (
+                "directed".into(),
+                InvocationParameter::Bool(options.directed),
+            ),
+            ("label".into(), InvocationParameter::Utf8(label.to_owned())),
+            (
+                "via".into(),
+                InvocationParameter::Utf8(options.via.clone().unwrap_or_else(|| "*".into())),
+            ),
+        ]);
+        if let Some(pagerank) = options.pagerank
+            && pagerank != crate::PageRankOptions::default()
+        {
+            parameters.insert("damping".into(), InvocationParameter::F64(pagerank.damping));
+            if let Some(iterations) = pagerank.iterations {
+                parameters.insert(
+                    "iterations".into(),
+                    InvocationParameter::U64(u64::from(iterations)),
+                );
+            }
+        }
+        if options.clustering_normalization == Some(crate::ClusteringNormalization::NeighborEdges) {
+            parameters.insert(
+                "clustering_normalization".into(),
+                InvocationParameter::Utf8("neighbor_edges".into()),
+            );
+        }
+        InvocationDescriptor::new(Algorithm::Rank(options.by), projection, parameters)
+            .map_err(Into::into)
     }
 
     /// Dispatch a prepared rank descriptor through the same executor as [`Self::rank`].
@@ -87,6 +101,9 @@ impl GraphForge {
             via: (via != "*").then(|| via.to_owned()),
             directed: invocation_descriptor::required_bool(parameters, "directed")?,
             write_property: None,
+
+            pagerank: invocation_descriptor::rank_configuration(parameters)?.0,
+            clustering_normalization: invocation_descriptor::rank_configuration(parameters)?.1,
         };
         let current = self.prepare_rank_invocation(label, &options)?;
         if current.projection_fingerprint() != descriptor.projection_fingerprint() {
@@ -132,7 +149,11 @@ impl GraphForge {
         let mut parameters = std::collections::BTreeMap::from([
             (
                 "directed".into(),
-                InvocationParameter::Bool(options.directed && options.by.respects_direction()),
+                InvocationParameter::Bool(
+                    options.directed
+                        && (options.by.respects_direction()
+                            || options.synchronous_label_propagation.is_some()),
+                ),
             ),
             ("label".into(), InvocationParameter::Utf8(label.to_owned())),
         ]);
@@ -155,6 +176,18 @@ impl GraphForge {
                 "via".into(),
                 InvocationParameter::Utf8(options.via.clone().unwrap_or_else(|| "*".into())),
             );
+        }
+        if let Some(synchronous) = &options.synchronous_label_propagation {
+            parameters.insert(
+                "synchronous_iterations".into(),
+                InvocationParameter::U64(u64::from(synchronous.iterations)),
+            );
+            if let Some(property) = &synchronous.initial_label_property {
+                parameters.insert(
+                    "initial_label_property".into(),
+                    InvocationParameter::Utf8(property.clone()),
+                );
+            }
         }
         InvocationDescriptor::new(Algorithm::Cluster(options.by), projection, parameters)
             .map_err(Into::into)
@@ -185,6 +218,10 @@ impl GraphForge {
             via: via.filter(|value| value != "*"),
             directed: invocation_descriptor::required_bool(parameters, "directed")?,
             write_property: None,
+
+            synchronous_label_propagation: invocation_descriptor::synchronous_configuration(
+                parameters,
+            )?,
         };
         let current = self.prepare_cluster_invocation(label, &options)?;
         if current.projection_fingerprint() != descriptor.projection_fingerprint() {
@@ -953,12 +990,16 @@ impl GraphForge {
             via,
             directed,
             write_property,
+            pagerank,
+            clustering_normalization,
         } = options;
         let dispatch_options = RankOptions {
             by,
             via,
             directed,
             write_property: None,
+            pagerank,
+            clustering_normalization,
         };
         let _graph_visibility = write_property
             .as_ref()
@@ -1015,6 +1056,7 @@ impl GraphForge {
             via,
             directed,
             write_property,
+            synchronous_label_propagation,
         } = options;
         let dispatch_options = ClusterOptions {
             by,
@@ -1022,6 +1064,7 @@ impl GraphForge {
             via,
             directed,
             write_property: None,
+            synchronous_label_propagation,
         };
         let _graph_visibility = write_property
             .as_ref()

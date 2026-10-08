@@ -956,6 +956,7 @@ fn run_rank(
         via,
         directed,
         write_property,
+        ..Default::default()
     };
     let result = world
         .forge

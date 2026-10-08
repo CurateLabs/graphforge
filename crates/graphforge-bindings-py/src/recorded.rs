@@ -1,5 +1,8 @@
 //! Recorded Python binding methods and conversions.
 
+use super::analyst::{
+    pagerank_options, parse_clustering_normalization, synchronous_label_propagation_options,
+};
 use super::{
     GraphForge, PyCancellationToken, PyInvocationDescriptor, canonical_operation_id, hex_bytes,
     parse_algorithm_id, parse_terminal_uuids, py_to_node_selector, result_to_pyarrow,
@@ -136,7 +139,8 @@ impl PyResolvedBeliefProjection {
         self.inner.valid_time_micros()
     }
 
-    #[pyo3(signature = (label, *, by, via=None, directed=true))]
+    #[allow(clippy::too_many_arguments)] // Optional analyst controls remain keyword-only.
+    #[pyo3(signature = (label, *, by, via=None, directed=true, damping=None, iterations=None, clustering_normalization=None))]
     fn prepare_rank_invocation(
         &self,
         py: Python<'_>,
@@ -144,12 +148,19 @@ impl PyResolvedBeliefProjection {
         by: &str,
         via: Option<&str>,
         directed: bool,
+        damping: Option<f64>,
+        iterations: Option<u32>,
+        clustering_normalization: Option<&str>,
     ) -> PyResult<PyInvocationDescriptor> {
         let options = graphforge_api::RankOptions {
             by: by.parse().map_err(|error| to_pyerr(py, &error))?,
             via: via.map(str::to_owned),
             directed,
             write_property: None,
+
+            pagerank: pagerank_options(damping, iterations),
+            clustering_normalization: parse_clustering_normalization(clustering_normalization)
+                .map_err(|error| to_pyerr(py, &error))?,
         };
         let label = label.to_owned();
         py.detach(|| self.inner.prepare_rank_invocation(&label, &options))
@@ -157,7 +168,8 @@ impl PyResolvedBeliefProjection {
             .map_err(|error| to_py_invocation_error(py, &error))
     }
 
-    #[pyo3(signature = (label, *, by, vector_property=None, via=None, directed=false))]
+    #[allow(clippy::too_many_arguments)] // Optional analyst controls remain keyword-only.
+    #[pyo3(signature = (label, *, by, vector_property=None, via=None, directed=false, synchronous_iterations=None, initial_label_property=None))]
     fn prepare_cluster_invocation(
         &self,
         py: Python<'_>,
@@ -166,6 +178,8 @@ impl PyResolvedBeliefProjection {
         vector_property: Option<&str>,
         via: Option<&str>,
         directed: bool,
+        synchronous_iterations: Option<u32>,
+        initial_label_property: Option<&str>,
     ) -> PyResult<PyInvocationDescriptor> {
         let options = graphforge_api::ClusterOptions {
             by: by.parse().map_err(|error| to_pyerr(py, &error))?,
@@ -173,6 +187,12 @@ impl PyResolvedBeliefProjection {
             via: via.map(str::to_owned),
             directed,
             write_property: None,
+
+            synchronous_label_propagation: synchronous_label_propagation_options(
+                synchronous_iterations,
+                initial_label_property.map(str::to_owned),
+            )
+            .map_err(|error| to_pyerr(py, &error))?,
         };
         let label = label.to_owned();
         py.detach(|| self.inner.prepare_cluster_invocation(&label, &options))

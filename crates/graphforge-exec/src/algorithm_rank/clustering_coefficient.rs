@@ -8,6 +8,8 @@ use super::{
     exact_u64_as_f64, execution, has_arc, rank_scores_output,
 };
 
+use graphforge_core::ClusteringNormalization;
+
 pub(super) struct ClusteringCoefficient;
 
 const CLUSTERING_COEFFICIENT_CHECKPOINT_WORK: usize = 1_024;
@@ -217,6 +219,35 @@ fn clustering_coefficient_score_node(
     neighbors.extend_from_slice(&incoming[node]);
     neighbors.sort_unstable();
     neighbors.dedup();
+
+    if control.clustering_normalization() == ClusteringNormalization::NeighborEdges {
+        let degree = u64::try_from(neighbors.len())
+            .map_err(|_| execution("clustering coefficient degree exceeds supported range"))?;
+        let denominator = degree
+            .checked_mul(degree.saturating_sub(1))
+            .ok_or_else(|| {
+                execution("clustering coefficient denominator exceeds supported range")
+            })?;
+        let mut edges = 0_u64;
+        for &first in &neighbors {
+            for &second in &neighbors {
+                clustering_coefficient_checkpoint(control, work)?;
+                if first != second && has_arc(outgoing, first, second) {
+                    edges = edges.checked_add(1).ok_or_else(|| {
+                        execution("clustering coefficient edge count exceeds supported range")
+                    })?;
+                }
+            }
+        }
+        return if denominator == 0 {
+            Ok(0.0)
+        } else {
+            Ok(
+                exact_u64_as_f64(edges, "clustering coefficient edge count")?
+                    / exact_u64_as_f64(denominator, "clustering coefficient denominator")?,
+            )
+        };
+    }
 
     let total_degree = outgoing[node]
         .len()
