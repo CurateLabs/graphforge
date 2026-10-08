@@ -1,9 +1,9 @@
 # Resumable graph import
 
 `GraphForge::begin_import_session` creates a Rust-owned, durable import pinned
-to the current project generation. Arrow batches are copied to Arrow IPC and
-Parquet files are copied into session ownership; callers may then checkpoint,
-drop the handle, and resume by UUID.
+to the current project generation. Arrow batches are encoded as Arrow IPC inside
+the session; callers may then checkpoint, drop the handle, and resume by UUID.
+A registered Parquet file stays where it is: see "In-place Parquet sources".
 
 Resumable construction rows do not supply observation timestamps. Their catalog observations
 use the greatest `last_seen` in the authenticated parent runtime catalog across
@@ -157,6 +157,31 @@ publication and every validation or staging error leave `CURRENT` unchanged.
 manifest; cleanup failures are marked `quarantined`. Operators can call
 `cleanup_stale_import_sessions` with an age threshold to abort abandoned
 non-terminal sessions deterministically.
+
+## In-place Parquet sources
+
+`register_parquet` copies and writes nothing under the session. It records the
+source's canonical path, native file identity (device and inode on Unix), size,
+modification time and Parquet footer length and SHA-256, and refuses a file that
+is not plain Parquet. Every later read re-establishes that identity first, checks
+the open file and its name again before each batch and at the end of the pass, and
+refuses with a typed error if the source is missing (`GF_NOT_FOUND`) or was
+replaced, resized, modified or rewritten (`GF_IDENTITY_CONFLICT`).
+
+The build's own read pass computes the whole-file SHA-256: bytes the Parquet
+decode reads in file order are hashed as they arrive, ranges that arrive early
+wait (bounded) for the bytes before them, and bytes the decode never asks for,
+such as the leading magic, are read once at the end. The first complete pass
+records the digest in the session manifest and, once every source is staged, in
+the import receipt (`source_provenance`); any later complete read of the same
+source must produce the same digest. The digest is provenance for what was
+read. It does not detect a rewrite that preserves size, modification time and
+the footer before the first complete read, because there is nothing earlier to
+compare against; the receipt then names the bytes that were actually read.
+
+Arrow batches passed to `append_arrow` are not an external file, so they are
+still encoded into the session. `abort` removes only session-owned artifacts and
+never touches a registered source.
 
 Registered paths may not contain `..`; the source itself may not be a symlink
 and must be a regular file. Schema, corrupt-file, UUID, endpoint, resource,
