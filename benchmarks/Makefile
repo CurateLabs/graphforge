@@ -1,4 +1,4 @@
-.PHONY: install gdc-acquire smoke smoke-python smoke-rust fly-adapter-static progressive-provider-attempt-static progressive-fly-transport-static local-admission progressive-qualification-list progressive-qualification-plan progressive-qualification-run progressive-qualification-project-s20 progressive-storage-qualification progressive-qualification-binaries progressive-provider-plan qualification-operator esc-readiness ingest-ladder-bundle parity-gate progressive-host-ladder-binaries progressive-host-ladder-plan progressive-host-ladder-run progressive-host-ladder-inventory progressive-host-ladder-reclaim retain-ladder-evidence gdc-scorecard-binaries gdc-scorecard-run gdc-scorecard-render gdc-scorecard-inventory
+.PHONY: install gdc-acquire gdc-finbench-reference smoke smoke-python smoke-rust fly-adapter-static progressive-provider-attempt-static progressive-fly-transport-static local-admission progressive-qualification-list progressive-qualification-plan progressive-qualification-run progressive-qualification-project-s20 progressive-storage-qualification progressive-qualification-binaries progressive-provider-plan qualification-operator esc-readiness ingest-ladder-bundle parity-gate progressive-host-ladder-binaries progressive-host-ladder-plan progressive-host-ladder-run progressive-host-ladder-inventory progressive-host-ladder-reclaim retain-ladder-evidence gdc-scorecard-binaries gdc-scorecard-run gdc-scorecard-render gdc-scorecard-inventory
 
 install:
 	uv sync --locked
@@ -19,6 +19,26 @@ gdc-acquire: install
 		--suite "$(SUITE)" --profile "$(IDENTITY_PROFILE)" \
 		--cache-root "$(DATASET_CACHE)" --work-root "$(WORK_ROOT)" \
 		$(foreach dataset,$(DATASETS),--dataset "$(dataset)")
+
+# Derive the FinBench Transaction rung reference for one published scale factor
+# (FINBENCH_RUNG, default sf1) with the spec-derived module, which never runs
+# GraphForge. Reads the snapshot/ and read parameters `gdc-acquire` extracted
+# into DATASET_CACHE and writes a new OUTPUT, never overwritten, plus
+# OUTPUT.sha256 for the module, every input file and the output.
+FINBENCH_RUNG ?= sf1
+FINBENCH_EXTRACTED = $(DATASET_CACHE)/finbench-transaction/extracted
+FINBENCH_SNAPSHOT = $(FINBENCH_EXTRACTED)/$(FINBENCH_RUNG)/$(FINBENCH_RUNG)/snapshot
+FINBENCH_PARAMS = $(FINBENCH_EXTRACTED)/$(FINBENCH_RUNG)_read_params/$(FINBENCH_RUNG)_read_params
+FINBENCH_REFERENCE_MODULE = harness/graphforge_bench/gdc_finbench_transaction_reference.py
+
+gdc-finbench-reference: install
+	test -n "$(DATASET_CACHE)" && test -n "$(OUTPUT)"
+	test ! -e "$(OUTPUT)" && test ! -e "$(OUTPUT).sha256"
+	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.gdc_finbench_transaction_reference ldbc \
+		--snapshot "$(FINBENCH_SNAPSHOT)" --params "$(FINBENCH_PARAMS)" \
+		--rung "$(FINBENCH_RUNG)" --output "$(OUTPUT)"
+	sha256sum "$(FINBENCH_REFERENCE_MODULE)" "$(FINBENCH_SNAPSHOT)"/*.csv \
+		"$(FINBENCH_PARAMS)"/complex_*_param.csv "$(OUTPUT)" > "$(OUTPUT).sha256"
 
 parity-gate: install
 	PYTHONPATH=harness uv run --locked python -m graphforge_bench.parity_gate_cli

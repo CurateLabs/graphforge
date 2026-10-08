@@ -179,10 +179,11 @@ truncated definition labels this as an accepted variance (`tie_break_variance`).
 The LDBC parameter generator emits limit 500 and `TIMESTAMP_DESCENDING`; other
 orders are refused, never reordered. Each query definition names the steps it
 truncates, and its `semantics` field states the specification reading it
-implements. The scorecard's reference implementation is GPStore, chosen because
-it implements newest-first truncation; where a reading differs from GPStore's
-(TCR1, TCR2, TCR5, TCR8, TCR9, TCR11), `reference_reading` says how and that the
-reading may change to match it. `workarounds` cites the GraphForge defect (#1887)
+implements. The scorecard checks these readings against the spec-derived SF1
+reference (see "FinBench Transaction SF1 reference" below), not an LDBC
+implementation; where GPStore reads the specification differently (TCR1, TCR2,
+TCR5, TCR8, TCR9, TCR11), `reference_reading` says how, for information.
+`workarounds` cites the GraphForge defect (#1887)
 or unsupported construct (#1888) behind any Cypher that departs from the direct
 form.
 
