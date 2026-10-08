@@ -96,8 +96,9 @@ impl UuidProbeMetrics {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct FileKey {
-    device: u64,
-    inode: u64,
+    /// Native volume and file identity, portable across Unix and Windows.
+    volume_serial: u64,
+    file_id: [u8; 16],
     length: u64,
     modified_nanos: i128,
 }
@@ -165,21 +166,27 @@ fn footer_cache() -> &'static Mutex<HashMap<FileKey, Arc<Fragment>>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn key_of(metadata: &std::fs::Metadata) -> FileKey {
-    use std::os::unix::fs::MetadataExt;
-    FileKey {
-        device: metadata.dev(),
-        inode: metadata.ino(),
+/// The identity of an open file: who it is, how long it is and when it changed.
+fn key_of(file: &std::fs::File) -> std::io::Result<FileKey> {
+    let identity = graphforge_filesystem::file_identity(file)?;
+    let metadata = file.metadata()?;
+    let modified = metadata.modified()?;
+    let modified_nanos = match modified.duration_since(std::time::UNIX_EPOCH) {
+        Ok(after) => i128::try_from(after.as_nanos()).unwrap_or(i128::MAX),
+        Err(before) => -i128::try_from(before.duration().as_nanos()).unwrap_or(i128::MAX),
+    };
+    Ok(FileKey {
+        volume_serial: identity.volume_serial,
+        file_id: identity.file_id,
         length: metadata.len(),
-        modified_nanos: i128::from(metadata.mtime()) * 1_000_000_000
-            + i128::from(metadata.mtime_nsec()),
-    }
+        modified_nanos,
+    })
 }
 
 fn file_key(path: &Path) -> Result<FileKey, GfError> {
-    let metadata = std::fs::symlink_metadata(path)
+    let file = std::fs::File::open(path)
         .map_err(|error| GfError::Storage(format!("topology fragment: {error}")))?;
-    Ok(key_of(&metadata))
+    key_of(&file).map_err(|error| GfError::Storage(format!("topology fragment: {error}")))
 }
 
 fn storage(message: impl std::fmt::Display) -> GfError {
@@ -458,10 +465,9 @@ impl Fragment {
         // The footer this probe pruned by describes one file. Decoding another
         // one with it would misread or miss rows, so a fragment replaced since
         // the footer was read is refused rather than trusted.
-        let opened = file
-            .metadata()
-            .map_err(|error| storage(format!("{}: {error}", self.path.display())))?;
-        if key_of(&opened) != self.key {
+        let opened =
+            key_of(&file).map_err(|error| storage(format!("{}: {error}", self.path.display())))?;
+        if opened != self.key {
             return Err(storage(format!(
                 "{} changed since its footer was read",
                 self.path.display()

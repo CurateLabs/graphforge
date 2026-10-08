@@ -631,14 +631,7 @@ fn an_initial_import_reports_its_bulk_build_across_cli_processes() {
         (Some(2), Some(0))
     );
     assert_eq!(validated["construction"]["accepted_chunks"], 0);
-    for pass in [
-        "plan",
-        "nodes",
-        "edges",
-        "tables",
-        "membership",
-        "adjacency",
-    ] {
+    for pass in ["plan", "nodes", "edges", "tables", "ordinal", "adjacency"] {
         assert!(built["passes"][pass]["wall_ms"].is_u64(), "{pass}");
     }
     let committed = json(&gf(
