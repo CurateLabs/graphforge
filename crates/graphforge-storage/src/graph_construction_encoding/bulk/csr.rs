@@ -35,6 +35,7 @@ pub(super) fn write_adjacency(
     generation: u64,
     built_at_micros: i64,
     allocation: Option<&crate::StorageAllocationOperation>,
+    options: &crate::adjacency::AdjacencyBuildOptions,
     cancel: &AtomicBool,
 ) -> Result<AdjacencyOutput, GfError> {
     let adjacency = crate::adjacency::adjacency_dir(graph_root);
@@ -42,7 +43,6 @@ pub(super) fn write_adjacency(
         std::fs::remove_dir_all(&adjacency).map_err(storage)?;
     }
     std::fs::create_dir_all(&adjacency).map_err(storage)?;
-    let options = crate::adjacency::AdjacencyBuildOptions::default().effective();
 
     // Relation groups in name order, then the union: the staged builder's order.
     let mut names = std::collections::BTreeMap::<&str, u32>::new();

@@ -36,6 +36,8 @@
 //! row. Only the current versioned shard representation is supported.
 
 mod builder;
+#[cfg(test)]
+pub(crate) use builder::TEST_SHARD_LIMITS;
 mod codec;
 mod installation;
 pub use builder::{

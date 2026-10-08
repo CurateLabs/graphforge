@@ -286,3 +286,223 @@ fn row_groups_that_straddle_task_boundaries_publish_the_staged_bytes() {
     }
     assert_eq!(inventories[0], inventories[1]);
 }
+
+fn two_batch_import_with_a_cross_batch_duplicate(graph: &GraphForge) -> (GraphImportSession, Uuid) {
+    let (a, b, c) = (v7(1), v7(2), v7(3));
+    let mut session = graph
+        .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
+        .unwrap();
+    session
+        .append_arrow(
+            BulkInputKind::Node,
+            &[node_rows(&[a, b], "Person"), node_rows(&[b, c], "Person")],
+        )
+        .unwrap();
+    let id = session.session_uuid();
+    (session, id)
+}
+
+#[test]
+fn a_refused_bulk_attempt_stays_on_the_bulk_route_when_memory_drops() {
+    let (_directory, _project, graph) = fixture();
+    let (mut session, id) = two_batch_import_with_a_cross_batch_duplicate(&graph);
+    // The first attempt fits in memory, seals the storage session and is refused.
+    let first = session.validate(&graph).unwrap_err().to_string();
+    assert!(first.contains("duplicate"), "{first}");
+    assert_eq!(session.manifest.build_route, Some(BuildRoute::Bulk));
+    // The route is durable: the same session, reopened or not, on a host whose
+    // memory has since shrunk, is refused identically instead of being sent to
+    // a staged path that no longer accepts chunks.
+    for reopen in [false, true] {
+        bulk_source::TEST_BUDGET.with(|cell| cell.set(Some(1)));
+        let second = if reopen {
+            graph
+                .resume_import_session(id)
+                .unwrap()
+                .validate(&graph)
+                .unwrap_err()
+                .to_string()
+        } else {
+            session.validate(&graph).unwrap_err().to_string()
+        };
+        bulk_source::TEST_BUDGET.with(|cell| cell.set(None));
+        assert_eq!(first, second);
+        assert!(!second.contains("not accepting chunks"), "{second}");
+    }
+    let manifest = read_manifest(&session.root).unwrap();
+    assert_eq!(manifest.build_route, Some(BuildRoute::Bulk));
+}
+
+#[test]
+fn a_staged_route_is_durable_too() {
+    let (_directory, _project, graph) = fixture();
+    let (mut session, _) = two_batch_import_with_a_cross_batch_duplicate(&graph);
+    bulk_source::TEST_BUDGET.with(|cell| cell.set(Some(1)));
+    let first = session.validate(&graph);
+    bulk_source::TEST_BUDGET.with(|cell| cell.set(None));
+    assert!(first.is_err());
+    assert_eq!(session.manifest.build_route, Some(BuildRoute::Staged));
+    // Plenty of memory now, but the session already chose to stage.
+    let again = session.validate(&graph).unwrap_err().to_string();
+    assert!(again.contains("duplicate"), "{again}");
+    assert_eq!(session.manifest.build_route, Some(BuildRoute::Staged));
+    assert!(
+        session
+            .manifest
+            .progress
+            .construction
+            .as_ref()
+            .is_some_and(|construction| construction.bulk_build.is_none()
+                && construction.accepted_chunks > 0)
+    );
+}
+
+#[test]
+fn a_second_validate_of_a_built_session_reports_its_rows() {
+    let (_directory, _project, graph) = fixture();
+    let (a, b) = (v7(1), v7(2));
+    let mut session = graph
+        .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
+        .unwrap();
+    session
+        .append_arrow(BulkInputKind::Node, &[node_rows(&[a, b], "Person")])
+        .unwrap();
+    session
+        .append_arrow(
+            BulkInputKind::Edge,
+            &[edge_rows(&[v7(100)], "KNOWS", &[a], &[b])],
+        )
+        .unwrap();
+    let first = session.validate(&graph).unwrap();
+    // Reuse of the pinned inventory builds nothing, and still says what it holds.
+    let second = session.validate(&graph).unwrap();
+    assert_eq!((first.rows_accepted, second.rows_accepted), (3, 3));
+    let built = second.construction.unwrap().bulk_build.unwrap();
+    assert_eq!((built.nodes, built.edges), (2, 1));
+    session.commit(&graph, None).unwrap();
+    assert_eq!(graph.node_count("Person").unwrap(), 2);
+}
+
+#[test]
+fn a_refused_batch_counts_as_rejected_rows_as_in_the_staged_path() {
+    // Three rows that are not UUIDv7: the batch is refused by name.
+    let (_directory, _project, graph) = fixture();
+    let mut session = graph
+        .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
+        .unwrap();
+    let bad = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+    session
+        .append_arrow(BulkInputKind::Node, &[node_rows(&bad, "Person")])
+        .unwrap();
+    session.validate(&graph).unwrap_err();
+    assert_eq!(session.manifest.progress.rows_rejected, 3);
+    // The count is durable, not just in memory.
+    assert_eq!(
+        read_manifest(&session.root).unwrap().progress.rows_rejected,
+        3
+    );
+
+    // A refusal that names no batch (a duplicate across batches) rejects no rows.
+    let (mut session, _) = two_batch_import_with_a_cross_batch_duplicate(&graph);
+    session.validate(&graph).unwrap_err();
+    assert_eq!(session.manifest.progress.rows_rejected, 0);
+}
+
+const STRICT_ONTOLOGY: &str = "ontology_id: bulk\nversion: \"1\"\nentity_types:\n  - name: Host\n    abstract: false\nrelation_types:\n  - name: CONNECTS\n    src: Host\n    dst: Host\nproperties: []\n";
+
+/// The bulk reader runs the same owner check as the staged path: under a strict
+/// ontology an undeclared entity or relation type is refused before storage
+/// sees the row, and the refused batch is the one counted as rejected. (A strict
+/// single-ontology project cannot open a construction at all, so the reader is
+/// driven directly.)
+#[test]
+fn the_bulk_reader_refuses_undeclared_types_under_a_strict_ontology() {
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join("project");
+    fs::create_dir(&project).unwrap();
+    let ontology = directory.path().join("strict.yaml");
+    fs::write(&ontology, STRICT_ONTOLOGY).unwrap();
+    let mut graph = GraphForge::new(project.to_str()).unwrap();
+    graph
+        .adopt_ontology(crate::AdoptOntologyRequest {
+            context: crate::WriteContext {
+                operation_uuid: OperationId(v7(7)),
+                actor_uuid: None,
+            },
+            path: ontology,
+            mode: crate::OntologyMode::Strict,
+        })
+        .unwrap();
+
+    let write = |name: &str, batch: &RecordBatch| {
+        let path = directory.path().join(name);
+        let mut writer = parquet::arrow::ArrowWriter::try_new(
+            File::create(&path).unwrap(),
+            batch.schema(),
+            None,
+        )
+        .unwrap();
+        writer.write(batch).unwrap();
+        writer.close().unwrap();
+        path
+    };
+    let refuse = |kind: BulkInputKind, path: &Path| {
+        let mut session = graph
+            .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
+            .unwrap();
+        session.register_parquet(kind, path).unwrap();
+        let refusals = bulk_source::Refusals::default();
+        let plan = session.plan_bulk_build(&graph, None, &refusals).unwrap();
+        let source = match kind {
+            BulkInputKind::Node => &plan.nodes[0],
+            BulkInputKind::Edge => &plan.edges[0],
+        };
+        let error = source
+            .reader
+            .read_task(0, &mut |_| Ok(()))
+            .unwrap_err()
+            .to_string();
+        (error, refusals.take_rows())
+    };
+
+    let unknown_node = write(
+        "unknown-nodes.parquet",
+        &node_rows(&[v7(1), v7(2)], "Unknown"),
+    );
+    let (error, rows) = refuse(BulkInputKind::Node, &unknown_node);
+    assert!(
+        error.contains("unknown strict ontology entity type"),
+        "{error}"
+    );
+    assert_eq!(rows, Some(2));
+
+    let hosts = write("host-nodes.parquet", &node_rows(&[v7(1), v7(2)], "Host"));
+    let (error, rows) = {
+        let mut session = graph
+            .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
+            .unwrap();
+        session
+            .register_parquet(BulkInputKind::Node, &hosts)
+            .unwrap();
+        let refusals = bulk_source::Refusals::default();
+        let plan = session.plan_bulk_build(&graph, None, &refusals).unwrap();
+        let mut batches = 0;
+        let result = plan.nodes[0].reader.read_task(0, &mut |_| {
+            batches += 1;
+            Ok(())
+        });
+        (result.map(|()| batches), refusals.take_rows())
+    };
+    assert_eq!((error.unwrap(), rows), (1, None));
+
+    let unknown_edge = write(
+        "unknown-edges.parquet",
+        &edge_rows(&[v7(100)], "UNDECLARED", &[v7(1)], &[v7(2)]),
+    );
+    let (error, rows) = refuse(BulkInputKind::Edge, &unknown_edge);
+    assert!(
+        error.contains("unknown strict ontology relationship type"),
+        "{error}"
+    );
+    assert_eq!(rows, Some(1));
+}

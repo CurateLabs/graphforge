@@ -352,6 +352,20 @@ struct SessionManifest {
     construction_session_uuid: Option<Uuid>,
     #[serde(default)]
     updated_unix_millis: u64,
+    /// How `validate` builds this session's generation, fixed by its first call
+    /// and read back by every later one (ADR 0058). `None` until then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    build_route: Option<BuildRoute>,
+}
+
+/// The two ways `validate` builds a generation (ADR 0058).
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum BuildRoute {
+    /// The bulk builder reads the registered sources and stages nothing.
+    Bulk,
+    /// Chunk-by-chunk staging, shaping and encoding.
+    Staged,
 }
 
 /// Monotonic wall time and process CPU for attempted calls, including returned
@@ -504,6 +518,7 @@ impl GraphForge {
             sources: Vec::new(),
             construction_session_uuid: None,
             updated_unix_millis: unix_millis()?,
+            build_route: None,
         };
         let journal = journal::Journal::open(&root, &manifest, self.allocation_operation.as_ref())?;
         write_manifest_with_allocation(&root, &manifest, self.allocation_operation.as_ref())?;
@@ -889,26 +904,50 @@ impl GraphImportSession {
         let mut construction = self.open_construction(graph)?;
         let session_root = self.root.clone();
         let batch_rows = self.manifest.limits.batch_rows;
-        // Pass 0 routing, decided here from durable state and the footers and
-        // never by retry: an initial build that has staged nothing, and whose
-        // estimated memory fits, runs on the bulk builder (ADR 0058). An
-        // append, a session an earlier binary began staging, and an initial
-        // build larger than memory keep the staged path.
-        let initial = {
-            let progress = construction.progress();
-            progress.parent_topology_generation == 0
-                && progress.accepted_chunks == 0
+        // Pass 0 routing. The route is a function of durable state: the first
+        // `validate` decides it from the session and the footers, writes it to
+        // the manifest, and every later call reads it back. Live memory is
+        // consulted exactly once, so a refused, cancelled or killed bulk
+        // attempt followed by a memory drop cannot send a sealed session to
+        // the staged path, which would refuse every retry. An initial build
+        // that has staged nothing and whose estimated memory fits runs on the
+        // bulk builder (ADR 0058); an append, a session an earlier binary
+        // began staging, and an initial build larger than memory stage.
+        let refusals = bulk_source::Refusals::default();
+        let route = if let Some(route) = self.manifest.build_route {
+            route
+        } else {
+            let initial = {
+                let progress = construction.progress();
+                progress.parent_topology_generation == 0
+                    && progress.accepted_chunks == 0
+                    && self
+                        .manifest
+                        .sources
+                        .iter()
+                        .all(|source| !source.staged && source.batches_staged == 0)
+            };
+            let route = if initial
                 && self
-                    .manifest
-                    .sources
-                    .iter()
-                    .all(|source| !source.staged && source.batches_staged == 0)
+                    .plan_bulk_build(graph, cancellation, &refusals)?
+                    .estimated_resident_bytes()
+                    <= bulk_source::bulk_build_memory_budget()
+            {
+                BuildRoute::Bulk
+            } else {
+                BuildRoute::Staged
+            };
+            self.manifest.build_route = Some(route);
+            self.persist_manifest()?;
+            route
         };
-        if initial {
-            let plan = self.plan_bulk_build(graph, cancellation)?;
-            if plan.estimated_resident_bytes() <= bulk_source::bulk_build_memory_budget() {
-                return self.build_initial(&mut construction, &plan, cancellation);
+        if route == BuildRoute::Bulk {
+            let plan = self.plan_bulk_build(graph, cancellation, &refusals)?;
+            let built = self.build_initial(&mut construction, &plan, cancellation);
+            if built.is_err() {
+                self.record_bulk_refusal(&refusals)?;
             }
+            return built;
         }
         for input_kind in [BulkInputKind::Node, BulkInputKind::Edge] {
             for source_index in 0..self.manifest.sources.len() {
@@ -948,11 +987,32 @@ impl GraphImportSession {
         self.seal_construction(&mut construction, cancellation)
     }
 
+    /// Count the refused batch's rows as rejected, as the staged path does.
+    fn record_bulk_refusal(&mut self, refusals: &bulk_source::Refusals) -> Result<(), GfError> {
+        let Some(rows) = refusals.take_rows() else {
+            return Ok(());
+        };
+        let remaining = self
+            .manifest
+            .limits
+            .max_rejected_rows
+            .saturating_sub(self.manifest.progress.rows_rejected);
+        self.manifest.progress.rows_rejected = self
+            .manifest
+            .progress
+            .rows_rejected
+            .saturating_add(rows.min(remaining));
+        // A refusal is an explicit operation boundary: retain diagnostics even
+        // if the caller never checkpoints.
+        self.persist_manifest()
+    }
+
     /// Pass 0: plan every registered source from its footer.
     fn plan_bulk_build<'a>(
         &self,
         graph: &'a GraphForge,
         cancellation: Option<&'a CancellationToken>,
+        refusals: &'a bulk_source::Refusals,
     ) -> Result<graphforge_storage::BulkBuildPlan<'a>, GfError> {
         let mut plan = graphforge_storage::BulkBuildPlan::default();
         for source in &self.manifest.sources {
@@ -963,6 +1023,7 @@ impl GraphImportSession {
                 self.manifest.limits.batch_rows,
                 self.manifest.operation_uuid,
                 cancellation,
+                refusals,
             )?;
             match source.kind.input_kind() {
                 BulkInputKind::Node => plan.nodes.push(planned),

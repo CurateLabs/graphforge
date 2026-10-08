@@ -75,13 +75,13 @@ mod bulk_builder {
     }
 
     fn pinned(root: &TempDir) -> GraphConstructionSession {
-        let mut session = GraphConstructionSession::open(
-            root.path(),
-            Uuid::from_u128(OPERATION),
-            0,
-            GraphConstructionBudgets::default(),
-        )
-        .unwrap();
+        pinned_with(root, GraphConstructionBudgets::default())
+    }
+
+    fn pinned_with(root: &TempDir, budgets: GraphConstructionBudgets) -> GraphConstructionSession {
+        let mut session =
+            GraphConstructionSession::open(root.path(), Uuid::from_u128(OPERATION), 0, budgets)
+                .unwrap();
         session.checkpoint.session_now_micros = CLOCK;
         session
     }
@@ -96,21 +96,38 @@ mod bulk_builder {
     }
 
     fn staged(nodes: &[RecordBatch], edges: &[RecordBatch]) -> Inventory {
+        staged_with(GraphConstructionBudgets::default(), nodes, edges).unwrap()
+    }
+
+    /// The staged path's result or its first refusal.
+    fn staged_with(
+        budgets: GraphConstructionBudgets,
+        nodes: &[RecordBatch],
+        edges: &[RecordBatch],
+    ) -> Result<Inventory, GfError> {
         let root = TempDir::new().unwrap();
-        let mut session = pinned(&root);
+        let mut session = pinned_with(&root, budgets);
         for (index, batch) in nodes.iter().enumerate() {
-            session
-                .append(ConstructionChunkKind::Node, &format!("n{index}"), batch)
-                .unwrap();
+            session.append(ConstructionChunkKind::Node, &format!("n{index}"), batch)?;
         }
         for (index, batch) in edges.iter().enumerate() {
-            session
-                .append(ConstructionChunkKind::Edge, &format!("e{index}"), batch)
-                .unwrap();
+            session.append(ConstructionChunkKind::Edge, &format!("e{index}"), batch)?;
         }
-        session.seal().unwrap();
-        let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
-        inventory(&session.encode_canonical(&shape, 1).unwrap())
+        session.seal()?;
+        let shape = session.shape_canonical_with_cancellation(|| false)?;
+        Ok(inventory(&session.encode_canonical(&shape, 1)?))
+    }
+
+    fn bulk_budgeted(
+        budgets: GraphConstructionBudgets,
+        nodes: &[RecordBatch],
+        edges: &[RecordBatch],
+    ) -> Result<Inventory, GfError> {
+        let root = TempDir::new().unwrap();
+        let mut session = pinned_with(&root, budgets);
+        session
+            .prepare_bulk_encoding(1, &plan(nodes, edges, 2), || false)
+            .map(|encoding| inventory(&encoding))
     }
 
     fn bulk_with(
@@ -440,6 +457,7 @@ mod bulk_builder {
             "bulk.after_edges",
             "bulk.after_tables",
             "bulk.after_adjacency",
+            "encode.after_inventory_pinned",
             "uuid_encode.after_intent",
             "uuid_encode.after_delta_runs",
             "uuid_encode.after_manifest",
@@ -518,5 +536,221 @@ mod bulk_builder {
             .prepare_bulk_encoding(1, &plan(&nodes, &edges, 1), || false)
             .unwrap();
         assert_same(&expected, &inventory(&built));
+    }
+
+    /// Rows of `width` bytes of text no compressor can shrink.
+    fn wide_text(start: u64, rows: usize, width: usize) -> StringArray {
+        StringArray::from(
+            (0..rows as u64)
+                .map(|row| {
+                    let mut state = (start + row).wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+                    (0..width)
+                        .map(|_| {
+                            state ^= state << 13;
+                            state ^= state >> 7;
+                            state ^= state << 17;
+                            char::from(b'a' + (state % 26) as u8)
+                        })
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn wide_nodes(uuids: &[[u8; 16]], first: u64) -> RecordBatch {
+        let mut fields = CONSTRUCTION_NODE_SCHEMA.fields().to_vec();
+        fields.push(Arc::new(Field::new("bio", DataType::Utf8, true)));
+        RecordBatch::try_new(
+            Arc::new(Schema::new(fields)),
+            vec![
+                Arc::new(fixed(uuids)),
+                Arc::new(StringArray::from(vec!["Person"; uuids.len()])),
+                Arc::new(wide_text(first, uuids.len(), 5_000)),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn wide_edges(
+        uuids: &[[u8; 16]],
+        src: &[[u8; 16]],
+        dst: &[[u8; 16]],
+        first: u64,
+    ) -> RecordBatch {
+        let mut fields = CONSTRUCTION_EDGE_SCHEMA.fields().to_vec();
+        fields.push(Arc::new(Field::new("note", DataType::Utf8, true)));
+        RecordBatch::try_new(
+            Arc::new(Schema::new(fields)),
+            vec![
+                Arc::new(fixed(uuids)),
+                Arc::new(StringArray::from(vec!["KNOWS"; uuids.len()])),
+                Arc::new(fixed(src)),
+                Arc::new(fixed(dst)),
+                Arc::new(wide_text(first, uuids.len(), 5_000)),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// Several `max_batch_rows` windows, each wider than one property fragment
+    /// (4 MiB), so every overlay is split into fragments and the ordinals run on
+    /// across windows and across batches.
+    #[test]
+    fn property_overlays_spanning_windows_and_fragments_match_the_staged_encoder() {
+        let budgets = GraphConstructionBudgets {
+            max_batch_rows: 1_024,
+            max_run_records: 4 * 1_024,
+            ..GraphConstructionBudgets::default()
+        };
+        let node_uuids = (0..3_000_u64).map(|i| uuid(0x10, i)).collect::<Vec<_>>();
+        let edge_uuids = (0..2_500_u64).map(|i| uuid(0x20, i)).collect::<Vec<_>>();
+        let nodes = node_uuids
+            .chunks(1_000)
+            .enumerate()
+            .map(|(index, window)| wide_nodes(window, index as u64 * 1_000))
+            .collect::<Vec<_>>();
+        let edges = edge_uuids
+            .chunks(1_000)
+            .enumerate()
+            .map(|(index, window)| {
+                let from = |i: usize| node_uuids[(index * 1_000 + i) * 7 % 3_000];
+                let to = |i: usize| node_uuids[(index * 1_000 + i) * 11 % 3_000];
+                let src = (0..window.len()).map(from).collect::<Vec<_>>();
+                let dst = (0..window.len()).map(to).collect::<Vec<_>>();
+                wide_edges(window, &src, &dst, 50_000 + index as u64 * 1_000)
+            })
+            .collect::<Vec<_>>();
+        let expected = staged_with(budgets, &nodes, &edges).unwrap();
+        let fragments = |prefix: &str| {
+            expected
+                .iter()
+                .filter(|entry| entry.0.starts_with(prefix))
+                .count()
+        };
+        assert!(fragments("properties/") > 4, "{expected:?}");
+        assert!(fragments("edge_properties/") > 4, "{expected:?}");
+        assert_same(&expected, &bulk_budgeted(budgets, &nodes, &edges).unwrap());
+    }
+
+    /// Resets the thread's CSR shard limits when dropped.
+    struct ShardLimits;
+
+    impl ShardLimits {
+        fn set(edges: usize, nodes: usize) -> Self {
+            crate::adjacency::TEST_SHARD_LIMITS.with(|limits| limits.set(Some((edges, nodes))));
+            Self
+        }
+    }
+
+    impl Drop for ShardLimits {
+        fn drop(&mut self) {
+            crate::adjacency::TEST_SHARD_LIMITS.with(|limits| limits.set(None));
+        }
+    }
+
+    /// A small graph on small shard limits: every CSR splits into shards by
+    /// entries and by node span, and a high-degree node spans consecutive shards.
+    #[test]
+    fn a_graph_with_several_csr_shards_matches_the_staged_encoder() {
+        let _limits = ShardLimits::set(300, 64);
+        let (nodes, edges) = graph(257, 2_000, 700, scattered);
+        let expected = staged(&nodes, &edges);
+        let shards = expected
+            .iter()
+            .filter(|entry| entry.0.ends_with(".csr"))
+            .count();
+        // Eight CSRs (three relation groups and the union, each in both
+        // directions), most of them in several shards.
+        assert!(shards >= 40, "{shards} shards");
+        assert_same(&expected, &bulk(&nodes, &edges));
+    }
+
+    /// The staged path's per-chunk and per-session admission, on the same input.
+    #[test]
+    fn the_staged_admission_budgets_refuse_on_the_bulk_path_too() {
+        let (nodes, edges) = graph(100, 200, 100, identity_order);
+        let two_properties = [property_nodes(
+            &(0..10).map(|i| uuid(0x10, i)).collect::<Vec<_>>(),
+            true,
+        )];
+        let defaults = GraphConstructionBudgets::default;
+        let cases: Vec<(&str, GraphConstructionBudgets, &[RecordBatch], &[RecordBatch])> = vec![
+            (
+                "construction property-column budget exhausted",
+                GraphConstructionBudgets {
+                    max_property_columns: 1,
+                    ..defaults()
+                },
+                &two_properties,
+                &[],
+            ),
+            (
+                "construction resource window exhausted",
+                GraphConstructionBudgets {
+                    max_batch_bytes: 1_024,
+                    ..defaults()
+                },
+                &nodes,
+                &[],
+            ),
+            (
+                "construction resource window exhausted",
+                GraphConstructionBudgets {
+                    max_batch_rows: 50,
+                    max_run_records: 200,
+                    ..defaults()
+                },
+                &nodes,
+                &[],
+            ),
+            (
+                "construction schema-group budget exhausted",
+                GraphConstructionBudgets {
+                    max_schema_groups: 1,
+                    ..defaults()
+                },
+                &nodes,
+                &edges,
+            ),
+        ];
+        for (message, budgets, node_batches, edge_batches) in cases {
+            let staged = staged_with(budgets, node_batches, edge_batches)
+                .unwrap_err()
+                .to_string();
+            assert!(staged.contains(message), "staged: {staged}");
+            let bulk = bulk_budgeted(budgets, node_batches, edge_batches)
+                .unwrap_err()
+                .to_string();
+            assert!(bulk.contains(message), "bulk: {bulk}");
+        }
+    }
+
+    /// A crash after the checkpoint pinned the inventory leaves nothing to build:
+    /// the rerun reuses it and reports the rows it holds, not zeros.
+    #[test]
+    fn a_rerun_that_reuses_the_pinned_inventory_reports_its_rows() {
+        let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
+        let expected = bulk_with(&nodes, &edges, 2, 4).unwrap();
+        let root = TempDir::new().unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("graph_construction::tests::bulk_builder::bulk_crash_child")
+            .arg("--nocapture")
+            .env(CRASH_ROOT, root.path())
+            .env(
+                "GF_CONSTRUCTION_FAILPOINT_COOKIE",
+                "graphforge-construction-test-v1",
+            )
+            .env("GF_CONSTRUCTION_FAILPOINT", "encode.after_inventory_pinned")
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(86));
+        let mut session = pinned(&root);
+        let reused = session
+            .prepare_bulk_encoding(1, &plan(&nodes, &edges, 2), || false)
+            .unwrap();
+        assert_eq!(expected, inventory(&reused));
+        let report = session.bulk_build_report();
+        assert_eq!((report.nodes, report.edges), (1_021, 3_001));
     }
 }

@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use rayon::prelude::*;
 
 use super::{
-    BulkSource, ConstructionChunkKind, FixedSizeBinaryArray, GfError, RecordBatch, StringArray,
-    required_string, storage,
+    BulkSource, ConstructionChunkKind, FixedSizeBinaryArray, GfError, GraphConstructionBudgets,
+    RecordBatch, StringArray, required_string, storage,
 };
 
 /// Largest node or edge count the dense `u32` ranks can address.
@@ -143,6 +143,29 @@ fn remap_in_place(tasks: &Tasks, column: &mut [u32], maps: &[Vec<u32>]) {
         });
 }
 
+/// The staged path's per-chunk admission, applied to every decoded batch: the
+/// property-column, row and byte windows. (Its run window is implied: a budget
+/// set validates `max_run_records >= 4 * max_batch_rows`.)
+fn admit_batch(
+    kind: ConstructionChunkKind,
+    batch: &RecordBatch,
+    budgets: GraphConstructionBudgets,
+) -> Result<(), GfError> {
+    let required = match kind {
+        ConstructionChunkKind::Node => 2,
+        ConstructionChunkKind::Edge => 4,
+    };
+    if batch.num_columns().saturating_sub(required) > budgets.max_property_columns {
+        return Err(storage("construction property-column budget exhausted"));
+    }
+    if batch.num_rows() > budgets.max_batch_rows
+        || batch.get_array_memory_size() > budgets.max_batch_bytes
+    {
+        return Err(storage("construction resource window exhausted"));
+    }
+    Ok(())
+}
+
 fn short_source() -> GfError {
     storage("a source emitted a different row count than its footer")
 }
@@ -196,6 +219,7 @@ pub(super) struct NodeTable {
 pub(super) fn collect_nodes(
     sources: &[BulkSource<'_>],
     retain: bool,
+    budgets: GraphConstructionBudgets,
     cancel: &AtomicBool,
 ) -> Result<NodeTable, GfError> {
     let tasks = Tasks::plan(sources, "nodes")?;
@@ -217,6 +241,7 @@ pub(super) fn collect_nodes(
                     ConstructionChunkKind::Node,
                     &batch,
                 )?;
+                admit_batch(ConstructionChunkKind::Node, &batch, budgets)?;
                 let count = batch.num_rows();
                 if written + count > rows {
                     return Err(short_source());
@@ -347,6 +372,7 @@ pub(super) struct EdgeTable {
 pub(super) fn collect_edges(
     sources: &[BulkSource<'_>],
     retain: bool,
+    budgets: GraphConstructionBudgets,
     nodes: &NodeTable,
     index: &NodeIndex<'_>,
     cancel: &AtomicBool,
@@ -374,6 +400,7 @@ pub(super) fn collect_edges(
                     ConstructionChunkKind::Edge,
                     &batch,
                 )?;
+                admit_batch(ConstructionChunkKind::Edge, &batch, budgets)?;
                 let count = batch.num_rows();
                 if written + count > rows {
                     return Err(short_source());

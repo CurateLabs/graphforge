@@ -344,7 +344,20 @@ impl GraphConstructionSession {
             self.seal_inner(false)?;
         }
         if self.checkpoint.encoding_inventory_sha256.is_some() {
-            return self.prepare_canonical_encoding_with_cancellation(generation, cancelled);
+            // The checkpoint already pins an inventory, so this call builds
+            // nothing: report the rows that inventory holds, not zeros.
+            let encoding =
+                self.prepare_canonical_encoding_with_cancellation(generation, cancelled)?;
+            let nodes = encoding.evidence.ordinal_records;
+            let edges = encoding.evidence.membership_records.saturating_sub(nodes);
+            if let Ok(mut report) = self.bulk_report.lock() {
+                *report = crate::graph_construction_encoding::BulkBuildReport {
+                    nodes,
+                    edges,
+                    ..Default::default()
+                };
+            }
+            return Ok(encoding);
         }
         self.bulk_empty_shape = true;
         let shaped = self.shape_canonical_inner(&mut cancelled);
@@ -444,6 +457,7 @@ impl GraphConstructionSession {
                 self.checkpoint.encoded_index = Some(encoded_index);
                 self.checkpoint.encoding_inventory_sha256 = Some(inventory_authority);
                 replace_checkpoint_control(&self.root, &mut self.checkpoint)?;
+                construction_failpoint("encode.after_inventory_pinned");
             }
         }
         self.reclaim_superseded_payloads_with_successor(Some(&encoded), &mut cancelled)?;

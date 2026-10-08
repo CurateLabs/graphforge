@@ -87,6 +87,29 @@ fn ipc_batch_rows(path: &Path) -> Result<Vec<u64>, GfError> {
         .collect()
 }
 
+/// The first batch a build refused, in the staged path's processing order (node
+/// sources before edge sources, then source sequence, then batch index), with its
+/// row count. Tasks run in parallel, so the lowest key is kept, not the first
+/// to fail. A refusal that names no batch, such as a duplicate across batches,
+/// leaves it empty, as in the staged path.
+#[derive(Default)]
+pub(super) struct Refusals(std::sync::Mutex<Option<((u8, u64, u64), u64)>>);
+
+impl Refusals {
+    fn record(&self, key: (u8, u64, u64), rows: u64) {
+        if let Ok(mut slot) = self.0.lock()
+            && slot.as_ref().is_none_or(|(held, _)| key < *held)
+        {
+            *slot = Some((key, rows));
+        }
+    }
+
+    /// Rows of the refused batch, once.
+    pub(super) fn take_rows(&self) -> Option<u64> {
+        self.0.lock().ok()?.take().map(|(_, rows)| rows)
+    }
+}
+
 struct SourceReader<'a> {
     graph: &'a GraphForge,
     path: PathBuf,
@@ -96,6 +119,7 @@ struct SourceReader<'a> {
     batch_rows: usize,
     format: Format,
     cancellation: Option<&'a CancellationToken>,
+    refusals: &'a Refusals,
 }
 
 impl SourceReader<'_> {
@@ -111,24 +135,42 @@ impl SourceReader<'_> {
         {
             return Err(cancelled());
         }
-        let batch = match self.format {
-            Format::Parquet { .. } => canonicalize_parquet_batch(self.kind, &batch)?,
-            Format::Arrow { .. } => batch,
-        };
-        let normalized = normalize_batch(
-            self.graph,
-            import_batch_operation(self.operation_uuid, self.sequence, index),
-            self.kind,
-            &batch,
-        )?;
-        let canonical = crate::resumable_construction::canonical_property_columns(
-            match self.kind {
-                BulkInputKind::Node => graphforge_storage::ConstructionChunkKind::Node,
-                BulkInputKind::Edge => graphforge_storage::ConstructionChunkKind::Edge,
-            },
-            &normalized,
-        )?;
-        sink(canonical)
+        let rows = batch.num_rows() as u64;
+        let refused = (|| {
+            let batch = match self.format {
+                Format::Parquet { .. } => canonicalize_parquet_batch(self.kind, &batch)?,
+                Format::Arrow { .. } => batch,
+            };
+            let normalized = normalize_batch(
+                self.graph,
+                import_batch_operation(self.operation_uuid, self.sequence, index),
+                self.kind,
+                &batch,
+            )?;
+            let canonical = crate::resumable_construction::canonical_property_columns(
+                match self.kind {
+                    BulkInputKind::Node => graphforge_storage::ConstructionChunkKind::Node,
+                    BulkInputKind::Edge => graphforge_storage::ConstructionChunkKind::Edge,
+                },
+                &normalized,
+            )?;
+            sink(canonical)
+        })();
+        if refused.is_err()
+            && !self
+                .cancellation
+                .is_some_and(CancellationToken::is_cancelled)
+        {
+            self.refusals.record(
+                (
+                    u8::from(self.kind == BulkInputKind::Edge),
+                    self.sequence,
+                    index,
+                ),
+                rows,
+            );
+        }
+        refused
     }
 }
 
@@ -258,6 +300,7 @@ pub(super) fn plan<'a>(
     batch_rows: usize,
     operation_uuid: Uuid,
     cancellation: Option<&'a CancellationToken>,
+    refusals: &'a Refusals,
 ) -> Result<BulkSource<'a>, GfError> {
     let path = root.join("sources").join(&source.name);
     let kind = source.kind.input_kind();
@@ -313,6 +356,7 @@ pub(super) fn plan<'a>(
             batch_rows,
             format,
             cancellation,
+            refusals,
         }),
         tasks: usize::try_from(batches.div_ceil(BATCHES_PER_TASK)).map_err(storage)?,
         rows,

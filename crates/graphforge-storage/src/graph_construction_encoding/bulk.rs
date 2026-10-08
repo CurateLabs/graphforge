@@ -250,7 +250,7 @@ pub(crate) fn encode_bulk(
     // Pass 1: nodes.
     let meter = PassMeter::start("nodes");
     let mut nodes = run_pass(&pool, cancelled, &cancel, || {
-        tables::collect_nodes(&plan.nodes, retain_nodes, &cancel)
+        tables::collect_nodes(&plan.nodes, retain_nodes, budgets, &cancel)
     })?;
     passes.extend([meter.finish()]);
     crate::graph_construction::construction_failpoint("bulk.after_nodes");
@@ -259,7 +259,7 @@ pub(crate) fn encode_bulk(
     let meter = PassMeter::start("edges");
     let index = pool.install(|| NodeIndex::build(&nodes.uuids));
     let mut edges = run_pass(&pool, cancelled, &cancel, || {
-        tables::collect_edges(&plan.edges, retain_edges, &nodes, &index, &cancel)
+        tables::collect_edges(&plan.edges, retain_edges, budgets, &nodes, &index, &cancel)
     })?;
     drop(index);
     if nodes.uuids.is_empty() && edges.uuids.is_empty() {
@@ -292,6 +292,17 @@ pub(crate) fn encode_bulk(
         ))
     })?;
     drop((node_kept, edge_kept));
+    // The staged path admits at most `max_schema_groups` exact schemas across
+    // both kinds; a property-free kind is the one bare schema.
+    let schema_groups = node_groups
+        .as_ref()
+        .map_or(usize::from(!nodes.uuids.is_empty()), Vec::len)
+        + edge_groups
+            .as_ref()
+            .map_or(usize::from(!edges.uuids.is_empty()), Vec::len);
+    if schema_groups > budgets.max_schema_groups {
+        return Err(storage("construction schema-group budget exhausted"));
+    }
     let built = emit::build_catalog(
         budgets,
         &nodes,
@@ -343,6 +354,8 @@ pub(crate) fn encode_bulk(
     edges.uuids = Vec::new();
 
     let meter = PassMeter::start("adjacency");
+    // Built here, on the calling thread, as the staged encoder builds its own.
+    let adjacency_options = crate::adjacency::AdjacencyBuildOptions::default().effective();
     let adjacency = run_pass(&pool, cancelled, &cancel, || {
         csr::write_adjacency(
             &output.path().join("graph"),
@@ -351,6 +364,7 @@ pub(crate) fn encode_bulk(
             generation,
             now,
             output.allocation(),
+            &adjacency_options,
             &cancel,
         )
     })?;
