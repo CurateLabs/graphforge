@@ -115,16 +115,6 @@ ALLOWED = {
         "one_physical_identity_is_counted_once_for_shared_references",
         "observed_sync_all",
     ): 1,
-    (
-        "crates/graphforge-storage/src/uuid_membership/probing/tests.rs",
-        "retained_snapshot_rehashes_manifest_and_authenticates_only_candidate_blocks",
-        "sync_all",
-    ): 1,
-    (
-        "crates/graphforge-storage/src/uuid_membership/tests.rs",
-        "readonly_shared_runs_preserve_uuid_snapshot_authentication",
-        "sync_all",
-    ): 1,
 }
 METHOD = re.compile(
     r"\.\s*(observed_sync_all|observed_sync_data|sync_all|sync_data|sync|sync_all_and_release|sync_all_retained|sync_parent_dir)\b"

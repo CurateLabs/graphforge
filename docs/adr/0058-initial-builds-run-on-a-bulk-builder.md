@@ -62,8 +62,9 @@ the builds apart.
    that names an edge, an edge UUID that equals a node UUID, and a repeated edge
    UUID are refused.
 3. **Emit.** Catalog, node and edge Parquet windows, property overlays, the
-   UUID membership index, the v4 ordinal artifacts and the adjacency CSR are
-   built from the ranked arrays. Windows and CSR shards are independent once
+   v4 ordinal artifacts and the adjacency CSR are built from the ranked arrays.
+   No UUID membership index is emitted (#1902): a later append asks the
+   published Parquet instead. Windows and CSR shards are independent once
    ranks exist and encode in parallel. Each entry of a CSR direction is
    `key << 32 | edge_id`; sorting those orders every node's list by `edge_id`.
    Shard boundaries follow the streamed writer's rule, so shard bytes match.
@@ -127,9 +128,8 @@ When the estimate exceeds the budget:
   fanout. Already-fitting initial ranges keep their original scratch files.
 - Pass 3 builds the partitions in order, several at a time. Sorting a partition
   ranks its edges (the first `edge_id` is the number of earlier edges plus
-  one). It checks identities, writes its canonical edge files, keeps its sorted
-  UUIDs for the membership index, and scatters its adjacency entries once into
-  node-range partitions bounded by exact node degrees. A node larger than a
+  one). It checks identities, writes its canonical edge files, and scatters
+  its adjacency entries once into node-range partitions bounded by exact node degrees. A node larger than a
   partition spans consecutive partitions split by its increasing edge occurrence ordinal, so a hub
   cannot force all of its adjacency into one resident partition.
   Canonical edge files cover fixed windows of `edge_id`s that can straddle two

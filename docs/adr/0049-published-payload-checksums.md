@@ -95,7 +95,8 @@ boundaries retain required authentication. Internal snapshots used for live
 construction rollback remain an implementation detail.
 
 The same mandatory-checksum policy applies to the other persisted payload
-readers: CSR shard manifests use version 3, UUID membership manifests version 7,
+readers: CSR shard manifests use version 3, UUID membership manifests (version 7,
+retired by #1902; legacy files are ignored),
 the logical ordinal-v4 facet descriptor uses wire version 6, GFDR run envelopes
 and records use version 2, and embedding generation manifests use version 2.
 These versions bind exact payload lengths and required file/block checksums;
