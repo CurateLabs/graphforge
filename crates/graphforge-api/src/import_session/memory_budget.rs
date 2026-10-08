@@ -125,6 +125,15 @@ mod tests {
     }
 
     #[test]
+    fn a_pinned_budget_must_be_a_positive_number_of_bytes() {
+        assert_eq!(parse_override(" 1073741824\n").unwrap(), GIB);
+        for bad in ["", "0", "-1", "1G", "1.5", "abc"] {
+            let error = parse_override(bad).unwrap_err().to_string();
+            assert!(error.contains(BUDGET_ENV), "{bad:?}: {error}");
+        }
+    }
+
+    #[test]
     fn a_nested_cgroup_limit_is_read_from_the_process_own_directory() {
         // The root has no memory.max; BenchExec's run cgroup carries the limit.
         let read = files(&[
@@ -212,6 +221,7 @@ mod tests {
             BulkBuildPlan {
                 nodes: vec![source(1 << scale)],
                 edges: vec![source(16 << scale)],
+                memory_budget: None,
             }
         };
         let under_benchexec = budget_for(claimable_bytes(

@@ -182,6 +182,7 @@ impl Partitions {
         self.paths.len()
     }
 
+    #[cfg(test)]
     pub(super) fn path(&self, index: usize) -> &Path {
         &self.paths[index]
     }

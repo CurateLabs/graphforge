@@ -62,6 +62,7 @@ mod bulk_builder {
         BulkBuildPlan {
             nodes: vec![source(nodes, 2, per_task)],
             edges: vec![source(edges, 4, per_task)],
+            memory_budget: None,
         }
     }
 
@@ -752,5 +753,351 @@ mod bulk_builder {
         assert_eq!(expected, inventory(&reused));
         let report = session.bulk_build_report();
         assert_eq!((report.nodes, report.edges), (1_021, 3_001));
+    }
+
+    // ------------------------------------------------------------------
+    // The over-budget route (#1900): the same bytes, through scratch files.
+    // ------------------------------------------------------------------
+
+    /// Too small for the in-memory estimate of any test graph, large enough for
+    /// its node tables: the plan routes to scratch.
+    const SCRATCH_BUDGET: u64 = 800 << 20;
+
+    fn scratch_plan(
+        nodes: &[RecordBatch],
+        edges: &[RecordBatch],
+        per_task: usize,
+    ) -> BulkBuildPlan<'static> {
+        let mut plan = plan(nodes, edges, per_task);
+        plan.memory_budget = Some(SCRATCH_BUDGET);
+        assert_eq!(plan.route(), crate::BulkRoute::Scratch);
+        plan
+    }
+
+    fn scratch_dir(session: &GraphConstructionSession) -> std::path::PathBuf {
+        session.root.path().join("bulk-scratch")
+    }
+
+    /// One scratch build: its inventory, its report, and whether any scratch remained.
+    struct ScratchRun {
+        inventory: Inventory,
+        report: crate::BulkBuildReport,
+        scratch_left: bool,
+    }
+
+    fn scratch_run(
+        nodes: &[RecordBatch],
+        edges: &[RecordBatch],
+        per_task: usize,
+        workers: usize,
+        (edge_partitions, csr_partitions): (usize, usize),
+    ) -> Result<ScratchRun, GfError> {
+        let _forced =
+            crate::graph_construction_encoding::ForcedPartitions::set(edge_partitions, csr_partitions);
+        let root = TempDir::new().unwrap();
+        let mut session = pinned(&root);
+        session.set_cpu_admission(Some(Arc::new(cpu_admission::ConstructionCpuAdmission::new(
+            std::num::NonZeroUsize::new(workers).unwrap(),
+        ))));
+        let encoding =
+            session.prepare_bulk_encoding(1, &scratch_plan(nodes, edges, per_task), || false)?;
+        Ok(ScratchRun {
+            inventory: inventory(&encoding),
+            report: session.bulk_build_report(),
+            scratch_left: scratch_dir(&session).exists(),
+        })
+    }
+
+    /// Every scratch byte is written once and read once: the route costs the
+    /// published bytes plus one scratch pass, and nothing is rewritten.
+    fn assert_one_scratch_pass(report: &crate::BulkBuildReport, edges: u64) {
+        // 28-byte edge records, two 16-byte adjacency entries and a 16-byte
+        // identity per edge, plus an 8-byte header per block.
+        let payload = edges * (28 + 2 * 16 + 16);
+        assert!(
+            report.scratch_write_bytes >= payload
+                && report.scratch_write_bytes <= payload + payload / 64 + 64 * 1024,
+            "wrote {} for {payload} bytes of records",
+            report.scratch_write_bytes
+        );
+        assert_eq!(report.scratch_read_bytes, report.scratch_write_bytes);
+    }
+
+    #[test]
+    fn the_over_budget_route_publishes_the_in_memory_bytes_at_any_partition_count() {
+        let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
+        let expected = bulk_with(&nodes, &edges, 2, 4).unwrap();
+        assert_same(&staged(&nodes, &edges), &expected);
+        for (partitions, per_task, workers) in [
+            ((1, 1), 2, 1),
+            ((2, 3), 2, 4),
+            ((7, 5), 3, 2),
+            ((16, 16), 1, 8),
+            ((33, 2), 4, 3),
+        ] {
+            let run = scratch_run(&nodes, &edges, per_task, workers, partitions).unwrap();
+            assert_eq!(expected, run.inventory, "partitions {partitions:?} workers {workers}");
+            assert!(!run.scratch_left, "scratch must be deleted on completion");
+            assert_eq!(run.report.csr_partitions, partitions.1 as u64);
+            assert!(run.report.scratch_concurrency >= 1);
+            if partitions.0 > 1 {
+                assert!(run.report.edge_partitions > 1, "{:?}", run.report);
+            }
+            assert_one_scratch_pass(&run.report, 3_001);
+            assert_eq!((run.report.nodes, run.report.edges), (1_021, 3_001));
+        }
+    }
+
+    #[test]
+    fn edge_windows_that_straddle_partitions_publish_the_in_memory_files() {
+        // Several canonical edge files, and partition boundaries that fall
+        // inside them: the rows after a partition's last whole window carry on.
+        let (nodes, edges) = graph(70_001, 140_003, 20_000, scattered);
+        let expected = bulk_with(&nodes, &edges, 2, 4).unwrap();
+        let files = expected
+            .iter()
+            .filter(|entry| entry.0.starts_with("topology/edges/"))
+            .count();
+        assert!(files >= 3, "{files} edge files");
+        for partitions in [(2, 2), (5, 3), (64, 9)] {
+            let run = scratch_run(&nodes, &edges, 2, 4, partitions).unwrap();
+            assert_same(&expected, &run.inventory);
+        }
+    }
+
+    #[test]
+    fn csr_shards_that_span_partitions_publish_the_in_memory_shards() {
+        // Small shards and a hub: shard boundaries fall mid-node and across
+        // partition boundaries, in every relation group and both directions.
+        let _limits = ShardLimits::set(7, 3);
+        let (nodes, edges) = graph(257, 2_000, 700, scattered);
+        let expected = bulk_with(&nodes, &edges, 2, 4).unwrap();
+        let shards = expected
+            .iter()
+            .filter(|entry| entry.0.ends_with(".csr"))
+            .count();
+        assert!(shards >= 200, "{shards} shards");
+        for partitions in [(1, 1), (3, 2), (6, 5), (9, 40)] {
+            let run = scratch_run(&nodes, &edges, 2, 4, partitions).unwrap();
+            assert_same(&expected, &run.inventory);
+        }
+        assert_same(&staged(&nodes, &edges), &expected);
+    }
+
+    #[test]
+    fn a_hub_and_empty_partitions_publish_the_in_memory_bytes() {
+        let _limits = ShardLimits::set(5, 100);
+        let node_uuids = (0..40_u64).map(|i| uuid(0x10, i)).collect::<Vec<_>>();
+        let nodes = vec![node_batch_of(&node_uuids, &vec!["Person"; 40])];
+        // Every edge leaves node 0 or enters node 1: two keys hold all entries.
+        let edge_uuids = (0..60_u64).map(|i| uuid(0x20, i)).collect::<Vec<_>>();
+        let src = (0..60).map(|i| if i % 2 == 0 { node_uuids[0] } else { node_uuids[2 + i % 30] });
+        let dst = (0..60).map(|i| if i % 2 == 0 { node_uuids[3 + i % 30] } else { node_uuids[1] });
+        let edges = vec![edge_batch_of(
+            &edge_uuids,
+            &vec!["KNOWS"; 60],
+            &src.collect::<Vec<_>>(),
+            &dst.collect::<Vec<_>>(),
+        )];
+        let expected = bulk_with(&nodes, &edges, 1, 2).unwrap();
+        // Far more partitions than edges: most are empty.
+        for partitions in [(2, 2), (64, 64), (200, 1)] {
+            let run = scratch_run(&nodes, &edges, 1, 2, partitions).unwrap();
+            assert_same(&expected, &run.inventory);
+        }
+        // No edges at all.
+        let expected = bulk_with(&nodes, &[], 1, 2).unwrap();
+        let run = scratch_run(&nodes, &[], 1, 2, (4, 4)).unwrap();
+        assert_same(&expected, &run.inventory);
+        assert_eq!(run.report.edges, 0);
+    }
+
+    #[test]
+    fn every_global_refusal_fires_identically_on_the_over_budget_route() {
+        let a = uuid(0x10, 1);
+        let b = uuid(0x10, 2);
+        let e = uuid(0x20, 1);
+        let f = uuid(0x20, 2);
+        let node = |uuids: &[[u8; 16]]| node_batch_of(uuids, &vec!["Person"; uuids.len()]);
+        let edge = |id: [u8; 16], from: [u8; 16], to: [u8; 16]| {
+            edge_batch_of(&[id], &["KNOWS"], &[from], &[to])
+        };
+        let cases: Vec<(Vec<RecordBatch>, Vec<RecordBatch>)> = vec![
+            // A node UUID repeated across batches.
+            (vec![node(&[a, b]), node(&[a])], vec![]),
+            // An edge UUID repeated across batches.
+            (vec![node(&[a, b])], vec![edge(e, a, b), edge(e, b, a)]),
+            // An edge UUID equal to a node UUID.
+            (vec![node(&[a, b])], vec![edge(a, a, b)]),
+            // An endpoint that names no UUID at all.
+            (vec![node(&[a])], vec![edge(e, a, b)]),
+            // An endpoint that names an edge, not a node.
+            (vec![node(&[a])], vec![edge(e, a, e), edge(f, a, a)]),
+            // An identity error outranks a missing endpoint, as in memory.
+            (vec![node(&[a])], vec![edge(e, a, b), edge(e, a, a)]),
+            (vec![node(&[a])], vec![edge(a, a, b)]),
+            // A label that is not an identifier.
+            (vec![node_batch_of(&[a], &["not an identifier"])], vec![]),
+        ];
+        for (index, (nodes, edges)) in cases.iter().enumerate() {
+            let in_memory = refusal(nodes, edges);
+            for partitions in [(1, 1), (4, 3)] {
+                let error = scratch_run(nodes, edges, 2, 4, partitions)
+                    .err()
+                    .unwrap_or_else(|| panic!("case {index} was accepted"))
+                    .to_string();
+                assert_eq!(in_memory, error, "case {index} partitions {partitions:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_cancelled_over_budget_build_leaves_no_scratch_and_the_rerun_is_identical() {
+        let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
+        let expected = bulk_with(&nodes, &edges, 2, 4).unwrap();
+        let _forced = crate::graph_construction_encoding::ForcedPartitions::set(6, 4);
+        for polls_before_cancel in [0_usize, 1, 40, 400, 2_000] {
+            let root = TempDir::new().unwrap();
+            let mut session = pinned(&root);
+            let calls = std::cell::Cell::new(0_usize);
+            let cancelled =
+                session.prepare_bulk_encoding(1, &scratch_plan(&nodes, &edges, 2), || {
+                    calls.set(calls.get() + 1);
+                    calls.get() > polls_before_cancel
+                });
+            if let Err(error) = cancelled {
+                assert!(error.to_string().contains("cancelled"), "{error}");
+                assert!(!scratch_dir(&session).exists(), "cancelled after {polls_before_cancel}");
+            }
+            let rerun = session
+                .prepare_bulk_encoding(1, &scratch_plan(&nodes, &edges, 2), || false)
+                .unwrap();
+            assert_eq!(expected, inventory(&rerun), "cancelled after {polls_before_cancel} polls");
+            assert!(!scratch_dir(&session).exists());
+        }
+    }
+
+    const CRASH_PARTITIONS: &str = "GF_BULK_CRASH_PARTITIONS";
+
+    /// The killed process of the over-budget route.
+    #[test]
+    fn bulk_scratch_crash_child() {
+        let (Ok(path), Ok(partitions)) = (std::env::var(CRASH_ROOT), std::env::var(CRASH_PARTITIONS))
+        else {
+            return;
+        };
+        let (edge, csr) = partitions.split_once(',').unwrap();
+        let _forced = crate::graph_construction_encoding::ForcedPartitions::set(
+            edge.parse().unwrap(),
+            csr.parse().unwrap(),
+        );
+        let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
+        let mut session = GraphConstructionSession::open(
+            Path::new(&path),
+            Uuid::from_u128(OPERATION),
+            0,
+            GraphConstructionBudgets::default(),
+        )
+        .unwrap();
+        session.checkpoint.session_now_micros = CLOCK;
+        session
+            .prepare_bulk_encoding(1, &scratch_plan(&nodes, &edges, 2), || false)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_process_killed_over_budget_leaves_scratch_that_recovery_deletes_and_the_rerun_is_identical()
+    {
+        let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
+        let expected = bulk_with(&nodes, &edges, 2, 4).unwrap();
+        // Scratch is live between the edge scatter and the end of the adjacency pass.
+        let mut left_scratch = 0;
+        for failpoint in [
+            "bulk.after_nodes",
+            "bulk.after_edges",
+            "bulk.after_ranks",
+            "bulk.after_tables",
+            "bulk.after_membership",
+            "bulk.after_adjacency",
+            "bulk.before_inventory",
+        ] {
+            let root = TempDir::new().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("graph_construction::tests::bulk_builder::bulk_scratch_crash_child")
+                .arg("--nocapture")
+                .env(CRASH_ROOT, root.path())
+                .env(CRASH_PARTITIONS, "7,5")
+                .env(
+                    "GF_CONSTRUCTION_FAILPOINT_COOKIE",
+                    "graphforge-construction-test-v1",
+                )
+                .env("GF_CONSTRUCTION_FAILPOINT", failpoint)
+                .status()
+                .unwrap();
+            assert_eq!(status.code(), Some(86), "{failpoint}");
+            // Recovery: opening the session deletes what the killed attempt left.
+            let session_root = std::fs::read_dir(root.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .find(|path| path.join("bulk-scratch").exists());
+            left_scratch += usize::from(session_root.is_some());
+            let mut session = pinned(&root);
+            assert!(!scratch_dir(&session).exists(), "recovery kept scratch after {failpoint}");
+            let _forced = crate::graph_construction_encoding::ForcedPartitions::set(7, 5);
+            let rerun = session
+                .prepare_bulk_encoding(1, &scratch_plan(&nodes, &edges, 2), || false)
+                .unwrap();
+            assert_eq!(expected, inventory(&rerun), "killed at {failpoint}");
+            assert!(!scratch_dir(&session).exists());
+        }
+        assert!(left_scratch >= 2, "a killed attempt must have left scratch behind");
+    }
+
+    #[test]
+    fn routing_is_decided_from_the_footers_and_the_budget() {
+        let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
+        let mut plan = plan(&nodes, &edges, 2);
+        // No budget, or one the estimate fits: in memory.
+        assert_eq!(plan.route(), crate::BulkRoute::Memory);
+        plan.memory_budget = Some(plan.estimated_resident_bytes());
+        assert_eq!(plan.route(), crate::BulkRoute::Memory);
+        // One byte short, with room for the node tables: scratch.
+        plan.memory_budget = Some(plan.estimated_resident_bytes() - 1);
+        assert_eq!(plan.route(), crate::BulkRoute::Scratch);
+        // The node tables do not fit: staged, with the reason.
+        plan.memory_budget = Some(plan.node_tables_resident_bytes() - 1);
+        assert_eq!(
+            plan.route(),
+            crate::BulkRoute::Staged(crate::BulkStagedReason::NodeTablesExceedBudget)
+        );
+        plan.memory_budget = Some(1);
+        assert_eq!(
+            plan.route(),
+            crate::BulkRoute::Staged(crate::BulkStagedReason::NodeTablesExceedBudget)
+        );
+        // Edge properties are retained in memory, so they cannot go to scratch.
+        let node_uuids = (0..600_u64).map(|i| uuid(0x10, i)).collect::<Vec<_>>();
+        let edge_uuids = (0..900_u64).map(|i| uuid(0x20, i)).collect::<Vec<_>>();
+        let src = (0..900).map(|i| node_uuids[(i * 3) % 600]).collect::<Vec<_>>();
+        let dst = (0..900).map(|i| node_uuids[(i * 5 + 1) % 600]).collect::<Vec<_>>();
+        let with_properties = [property_edges(&edge_uuids, &src, &dst)];
+        let mut plan = super::bulk_builder::plan(
+            &[node_batch_of(&node_uuids, &vec!["Person"; 600])],
+            &with_properties,
+            2,
+        );
+        plan.memory_budget = Some(SCRATCH_BUDGET);
+        assert_eq!(
+            plan.route(),
+            crate::BulkRoute::Staged(crate::BulkStagedReason::EdgePropertiesExceedBudget)
+        );
+        // The node tables are checked first.
+        plan.memory_budget = Some(1);
+        assert_eq!(
+            plan.route(),
+            crate::BulkRoute::Staged(crate::BulkStagedReason::NodeTablesExceedBudget)
+        );
     }
 }

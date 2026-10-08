@@ -187,10 +187,20 @@ fn encoded_inventory(root: &Path) -> BTreeMap<String, (u64, String)> {
         .collect()
 }
 
+/// Too small for the in-memory estimate, large enough for the node tables.
+const SCRATCH_BUDGET: u64 = 800 << 20;
+
 #[test]
-fn an_initial_import_larger_than_the_memory_budget_keeps_the_staged_path() {
+fn routing_is_memory_then_scratch_then_staged_with_a_typed_reason() {
     let ids = (1..=30).map(v7).collect::<Vec<_>>();
-    for (budget, builder) in [(None, true), (Some(1), false)] {
+    let edge_ids = (100..=160).map(v7).collect::<Vec<_>>();
+    let from = (0..61).map(|i| ids[i % 30]).collect::<Vec<_>>();
+    let to = (0..61).map(|i| ids[(i * 7 + 1) % 30]).collect::<Vec<_>>();
+    for (budget, scratch, staged) in [
+        (None, false, false),
+        (Some(SCRATCH_BUDGET), true, false),
+        (Some(1), false, true),
+    ] {
         bulk_source::TEST_BUDGET.with(|cell| cell.set(budget));
         let (_directory, _project, graph) = fixture();
         let mut session = graph
@@ -199,13 +209,28 @@ fn an_initial_import_larger_than_the_memory_budget_keeps_the_staged_path() {
         session
             .append_arrow(BulkInputKind::Node, &[nodes(&ids)])
             .unwrap();
+        session
+            .append_arrow(
+                BulkInputKind::Edge,
+                &[edge_rows(&edge_ids, "KNOWS", &from, &to)],
+            )
+            .unwrap();
         let progress = session.validate(&graph);
         bulk_source::TEST_BUDGET.with(|cell| cell.set(None));
         let construction = progress.unwrap().construction.unwrap();
         // The route is decided once, at plan time, from the footers: the same
-        // bytes either way.
-        assert_eq!(construction.bulk_build.is_some(), builder);
-        assert_eq!(construction.accepted_chunks, u64::from(!builder));
+        // bytes on every route.
+        assert_eq!(construction.bulk_build.is_some(), !staged, "{budget:?}");
+        assert_eq!(construction.accepted_chunks == 0, !staged);
+        if let Some(report) = &construction.bulk_build {
+            assert_eq!(report.edge_partitions > 0, scratch, "{report:?}");
+            assert_eq!(report.scratch_write_bytes > 0, scratch, "{report:?}");
+            assert_eq!(report.scratch_read_bytes, report.scratch_write_bytes);
+        }
+        assert_eq!(
+            session.manifest.staged_reason,
+            staged.then_some(graphforge_storage::BulkStagedReason::NodeTablesExceedBudget)
+        );
         session.commit(&graph, None).unwrap();
         assert_eq!(graph.node_count("Person").unwrap(), 30);
     }
@@ -241,7 +266,7 @@ fn row_groups_that_straddle_task_boundaries_publish_the_staged_bytes() {
     // task boundary falls inside a row group.
     let batch = null_uuid_nodes(300);
     let mut inventories = Vec::new();
-    for budget in [None, Some(1)] {
+    for budget in [None, Some(SCRATCH_BUDGET), Some(1)] {
         bulk_source::TEST_BUDGET.with(|cell| cell.set(budget));
         let source_dir = tempfile::tempdir().unwrap();
         let parquet = source_dir.path().join("nodes.parquet");
@@ -279,12 +304,13 @@ fn row_groups_that_straddle_task_boundaries_publish_the_staged_bytes() {
         let progress = session.validate(&graph);
         bulk_source::TEST_BUDGET.with(|cell| cell.set(None));
         let construction = progress.unwrap().construction.unwrap();
-        assert_eq!(construction.bulk_build.is_some(), budget.is_none());
+        assert_eq!(construction.bulk_build.is_some(), budget != Some(1));
         session.commit(&graph, None).unwrap();
         assert_eq!(graph.node_count("Person").unwrap(), 300);
         inventories.push(encoded_inventory(&root));
     }
     assert_eq!(inventories[0], inventories[1]);
+    assert_eq!(inventories[0], inventories[2]);
 }
 
 fn two_batch_import_with_a_cross_batch_duplicate(graph: &GraphForge) -> (GraphImportSession, Uuid) {
