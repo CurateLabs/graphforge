@@ -168,16 +168,27 @@ the open file and its name again before each batch and at the end of the pass, a
 refuses with a typed error if the source is missing (`GF_NOT_FOUND`) or was
 replaced, resized, modified or rewritten (`GF_IDENTITY_CONFLICT`).
 
-The build's own read pass computes the whole-file SHA-256: bytes the Parquet
-decode reads in file order are hashed as they arrive, ranges that arrive early
-wait (bounded) for the bytes before them, and bytes the decode never asks for,
-such as the leading magic, are read once at the end. The first complete pass
-records the digest in the session manifest and, once every source is staged, in
-the import receipt (`source_provenance`); any later complete read of the same
-source must produce the same digest. The digest is provenance for what was
-read. It does not detect a rewrite that preserves size, modification time and
-the footer before the first complete read, because there is nothing earlier to
-compare against; the receipt then names the bytes that were actually read.
+Both construction paths read the source in place and digest it. The staged path
+decodes a source sequentially, so the SHA-256 is folded from the bytes the decode
+reads: those arriving in file order are hashed as they are read, ranges that
+arrive early wait (bounded) for the bytes before them, and bytes the decode never
+asks for, such as the leading magic, are read once at the end (4 bytes of a
+9.6 MB source in the test). The bulk builder decodes row groups in parallel, and
+the fastest workers run about a worker count of row groups ahead of the slowest,
+so an ordered digest cannot be folded from their reads without holding that lead
+in memory or reading most of the file again (measured: 90% and 96% of the bytes
+at S20 and S22 with a 64 MiB bound). It therefore runs one thread per source that
+reads it front to back while the workers decode; the pages it reads are the ones
+the workers read next, and the build waits for it only if it is still behind
+when the last task ends.
+
+The first complete pass records the digest in the session manifest and, once every
+source is staged, in the import receipt (`source_provenance`); any later complete
+read of the same source must produce the same digest. The digest is provenance
+for what was read. It does not detect a rewrite that preserves size, modification
+time and the footer before the first complete read, because there is nothing
+earlier to compare against; the receipt then names the bytes that were actually
+read.
 
 Arrow batches passed to `append_arrow` are not an external file, so they are
 still encoded into the session. `abort` removes only session-owned artifacts and
