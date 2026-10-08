@@ -282,8 +282,39 @@ impl ValidatedBulkEdges {
     }
 }
 
-/// The identity probe for the committed topology generation, cached on the
-/// facade until the generation moves.
+impl GraphForge {
+    /// The identity probe for the committed topology generation, cached on the
+    /// facade until the generation moves. It reads the published node and edge
+    /// Parquet, so a lookup is bounded by the candidates, not the graph.
+    pub(crate) fn cached_identity_probe(
+        &self,
+    ) -> Result<
+        std::sync::MutexGuard<'_, Option<graphforge_storage::TopologyIdentityProbe>>,
+        graphforge_core::GfError,
+    > {
+        let current_generation = graphforge_storage::read_topology_generation(&self.dir())?;
+        let mut cached = self.identity_probe.lock().map_err(|_| {
+            graphforge_core::GfError::Storage("identity probe lock poisoned".into())
+        })?;
+        if cached
+            .as_ref()
+            .is_some_and(|probe| probe.topology_generation() != current_generation)
+        {
+            *cached = None;
+        }
+        if cached.is_none() {
+            let dir = self.dir();
+            let files = dir.topology_files()?;
+            *cached = Some(graphforge_storage::TopologyIdentityProbe::open(
+                &dir,
+                &files,
+                current_generation,
+            )?);
+        }
+        Ok(cached)
+    }
+}
+
 fn open_identity_probe(
     graph: &GraphForge,
     input_kind: BulkInputKind,
@@ -291,36 +322,13 @@ fn open_identity_probe(
     std::sync::MutexGuard<'_, Option<graphforge_storage::TopologyIdentityProbe>>,
     BulkValidationError,
 > {
-    let project_state = |error: &dyn std::fmt::Display| {
+    graph.cached_identity_probe().map_err(|error| {
         contract_error(
             input_kind,
             BulkValidationReason::ProjectState,
             &error.to_string(),
         )
-    };
-    let current_generation = graphforge_storage::read_topology_generation(&graph.dir())
-        .map_err(|error| project_state(&error))?;
-    let mut cached = graph
-        .identity_probe
-        .lock()
-        .map_err(|error| project_state(&error))?;
-    if cached
-        .as_ref()
-        .is_some_and(|probe| probe.topology_generation() != current_generation)
-    {
-        *cached = None;
-    }
-    if cached.is_none() {
-        let dir = graph.dir();
-        let files = dir
-            .topology_files()
-            .map_err(|error| project_state(&error))?;
-        *cached = Some(
-            graphforge_storage::TopologyIdentityProbe::open(&dir, &files, current_generation)
-                .map_err(|error| project_state(&error))?,
-        );
-    }
-    Ok(cached)
+    })
 }
 
 fn existing_edge_context(
