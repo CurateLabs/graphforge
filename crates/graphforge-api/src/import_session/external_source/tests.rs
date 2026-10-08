@@ -1176,19 +1176,21 @@ fn capture_refuses_a_symlink_itself_so_a_swap_after_any_precheck_cannot_register
     assert!(super::ExternalSource::capture(&source.path).is_ok());
 }
 
+/// Overwrite bytes in place, keeping the file's size.
+fn overwrite_at(path: &Path, offset: u64, bytes: &[u8]) {
+    use std::io::{Seek as _, SeekFrom};
+    let mut file = OpenOptions::new().write(true).open(path).unwrap();
+    file.seek(SeekFrom::Start(offset)).unwrap();
+    file.write_all(bytes).unwrap();
+}
+
 #[test]
 fn a_footer_corrupted_after_the_open_is_reported_as_the_change_it_is() {
     for corrupt in [
         // The closing magic.
-        |path: &Path, length: u64| {
-            let file = OpenOptions::new().write(true).open(path).unwrap();
-            std::os::unix::fs::FileExt::write_all_at(&file, b"XXXX", length - 4).unwrap();
-        },
+        |path: &Path, length: u64| overwrite_at(path, length - 4, b"XXXX"),
         // The footer length, now beyond the file.
-        |path: &Path, length: u64| {
-            let file = OpenOptions::new().write(true).open(path).unwrap();
-            std::os::unix::fs::FileExt::write_all_at(&file, &[0xff; 4], length - 8).unwrap();
-        },
+        |path: &Path, length: u64| overwrite_at(path, length - 8, &[0xff; 4]),
     ] {
         let source = source();
         let external = super::ExternalSource::capture(&source.path).unwrap();
