@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <benchmark tool="graphforge_bench.tools.graphforge_gdc_phase" walltimelimit="14400 s"
-           memlimit="4 GB" cpuCores="16">
+           cpuCores="16">
   <rundefinition name="graphforge-gdc-rung-phase-v1">
     <tasks name="phase"><include>phase.json</include></tasks>
   </rundefinition>

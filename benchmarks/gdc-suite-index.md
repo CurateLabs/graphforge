@@ -407,13 +407,18 @@ One rung:
    the work root. The dataset cache is outside the work root and is kept.
 
 A rung passes only with no failure and an empty inventory. Typed causes include
-`rung_wall_exceeded`, `memory_limit_exceeded` (a phase's largest
-single-process peak RSS above 4 GiB, or BenchExec's memory stop),
+`rung_wall_exceeded`, `memory_limit_exceeded` (BenchExec's memory stop at
+the rung's 4 GiB limit, or a phase's largest single-process peak RSS above 4 GiB),
 `host_swapped`, `convert_failed`, `load_failed`, `count_mismatch`,
 `query_failed`, `reference_mismatch`, `result_digest_mismatch` and
 `teardown_incomplete`. A query that fails at runtime or answers wrongly fails
 the rung, but every query still runs, so the result lists every failure. A
 refused query counts against coverage and is never checked.
+
+Every GDC phase runs with the 4 GiB envelope (`MEMORY_LIMIT_BYTES`) as
+BenchExec's memory limit, unlike the Graph500 ladder's 96 GB ceiling. The
+bulk builder reads its cgroup's limit, so it plans a build that fits; a
+phase BenchExec stops records the limit and the measured peaks in its detail.
 
 `host_swapped` means the host's `pswpout` counter rose while a phase ran. A
 `pswpin` rise alone does not fail the phase: new phase processes cannot have

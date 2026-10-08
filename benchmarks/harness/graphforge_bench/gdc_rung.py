@@ -109,6 +109,9 @@ BUILDER_MODULES = {
     "snb-interactive": "gdc_snb_scorecard",
     "finbench-transaction": "gdc_finbench_transaction_scorecard",
 }
+# The one declaration of the rung's memory envelope (the result schema pins the same
+# value): BenchExec's memory limit for every phase, and the second guard on a
+# phase's largest single-process peak RSS.
 MEMORY_LIMIT_BYTES = 4 * 1024**3
 CORES = 16
 SHARED_IDENTITY_KEYS = (
@@ -144,7 +147,13 @@ BenchExecRunner = Callable[[Path, GdcExecutables, Mapping[str, Any], Path], int]
 def host_benchexec(
     stage: Path, executables: GdcExecutables, identities: Mapping[str, Any], work_root: Path
 ) -> int:
-    """The host's BenchExec, through the progressive host run's own launcher."""
+    """The host's BenchExec, through the progressive host run's own launcher.
+
+    Every phase runs under the rung's declared memory envelope as BenchExec's own
+    memory limit (a cgroup `memory.max`), not the progressive ladder's 96 GB
+    ceiling. GraphForge's bulk builder reads the cgroup it runs in, so it plans a
+    build that fits the envelope.
+    """
     return _run_benchexec(
         stage,
         executables,
@@ -152,6 +161,7 @@ def host_benchexec(
         durable_root=work_root,
         home=work_root,
         rundefinition=DEFINITION,
+        memory_limit=f"{MEMORY_LIMIT_BYTES}B",
     )
 
 
@@ -421,7 +431,14 @@ def classify_phase(
     if measured.get("timed_out") or measured.get("termination_reason") == "walltime":
         return "rung_wall_exceeded", "BenchExec stopped the phase at the rung wall"
     if measured.get("termination_reason") == "memory":
-        return "memory_limit_exceeded", "BenchExec stopped the phase at its memory limit"
+        peaks = [f"BenchExec memory {measured.get('peak_rss_bytes')}"]
+        if telemetry is not None and telemetry.get("peak_rss_bytes"):
+            peaks.append(f"process peak RSS {telemetry['peak_rss_bytes']}")
+        return (
+            "memory_limit_exceeded",
+            f"BenchExec stopped the phase at its {MEMORY_LIMIT_BYTES} byte memory limit; "
+            + ", ".join(peaks),
+        )
     if measured.get("termination_reason") not in (None, ""):
         return "benchexec_failed", f"terminated: {measured.get('termination_reason')}"
     if telemetry is None:

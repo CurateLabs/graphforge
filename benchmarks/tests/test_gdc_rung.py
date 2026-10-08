@@ -54,6 +54,7 @@ from graphforge_bench.progressive_host_run import (
     reclaim_rung_workspace,
     reclaim_workspace,
 )
+from graphforge_bench.progressive_run import _run_benchexec
 from graphforge_bench.tools.graphforge_gdc_phase import EXECUTABLE, Tool
 from jsonschema import Draft202012Validator
 
@@ -82,6 +83,10 @@ def serve_fixture_archives(url: str) -> contextlib.AbstractContextManager[io.Byt
     """The dataset cache's opener, serving the committed archives with no network."""
     name = url.rsplit("/", 1)[1]
     return contextlib.closing(io.BytesIO((FIXTURE / "archives" / name).read_bytes()))
+
+
+# BenchExec's run status for a run it stopped at a limit.
+TERMINATED_STATUS = {"walltime": "TIMEOUT", "memory": "OUT OF MEMORY"}
 
 
 class FakeBenchExec:
@@ -116,7 +121,7 @@ class FakeBenchExec:
         )
         status = "DONE" if completed.returncode == 0 else "ERROR"
         columns = {
-            "status": status if self.termination is None else "TIMEOUT",
+            "status": status if self.termination is None else TERMINATED_STATUS[self.termination],
             "walltime": f"{wall:.6f}s",
             "cputime": f"{cpu:.6f}s",
             "memory": f"{after.ru_maxrss * 1024}B",
@@ -377,6 +382,24 @@ class TinyLadderEndToEndTests(Scratch):
         self.assertEqual(results[0]["status"], "passed")
         self.assertEqual(list(self.output.glob("*host-swap.json")), [])
 
+    def test_a_phase_stopped_at_the_memory_limit_fails_typed_with_the_peak(self) -> None:
+        ladder = self.ladder(self.executables, FakeBenchExec(termination="memory"))
+        results = gdc_rung.climb(
+            ladder,
+            reserved_headroom_bytes=0,
+            quiet_host_wait_seconds=0,
+            quiet_host=lambda _wait: QUIET,
+        )
+        self.assertEqual(len(results), 1)
+        failure = results[0]["failure"]
+        self.assertEqual((failure["phase"], failure["cause"]), ("convert", "memory_limit_exceeded"))
+        self.assertRegex(
+            failure["detail"],
+            r"^BenchExec stopped the phase at its 4294967296 byte memory limit; "
+            r"BenchExec memory \d+, process peak RSS \d+$",
+        )
+        self.assertTrue(results[0]["inventory"]["empty"])
+
     def test_a_phase_stopped_at_the_wall_fails_typed_and_still_tears_down(self) -> None:
         ladder = self.ladder(self.executables, FakeBenchExec(termination="walltime"))
         results = gdc_rung.climb(
@@ -581,6 +604,46 @@ class HostSwapDetailTests(unittest.TestCase):
             "host paged out during the phase: pswpout +7 (830053 -> 830060), pswpin +3; "
             "see host-swap.json",
         )
+
+
+class BenchExecMemoryLimitTests(unittest.TestCase):
+    """Each GDC phase runs under the rung envelope; the Graph500 ladder keeps its ceiling."""
+
+    def run_benchexec(self, runner: Any) -> list[str]:
+        with tempfile.TemporaryDirectory(prefix="gdc-limit-") as raw:
+            stage = Path(raw)
+            (stage / "bin").mkdir()
+            executables = SimpleNamespace(benchexec_python=Path(sys.executable))
+            identities = {"benchexec_python_sha256": digest_of(Path(sys.executable))}
+            with patch("graphforge_bench.progressive_run.subprocess.run") as execute:
+                execute.return_value.returncode = 0
+                runner(stage, executables, identities, Path(raw))
+            return list(execute.call_args.args[0])
+
+    def test_a_gdc_phase_runs_under_the_declared_envelope(self) -> None:
+        command = self.run_benchexec(gdc_rung.host_benchexec)
+        self.assertEqual(
+            command[command.index("--memorylimit") + 1], str(gdc_rung.MEMORY_LIMIT_BYTES) + "B"
+        )
+        self.assertEqual(gdc_rung.MEMORY_LIMIT_BYTES, 4 * 1024**3)
+        schema = json.loads((ROOT / "schemas/gdc-rung-result.json").read_text())
+        self.assertEqual(
+            schema["properties"]["limits"]["properties"]["memory_bytes"]["const"],
+            gdc_rung.MEMORY_LIMIT_BYTES,
+        )
+        # The phase definition declares no second memory limit.
+        self.assertNotIn(
+            "memlimit", (ROOT / "definitions" / f"{gdc_rung.DEFINITION}.xml").read_text()
+        )
+
+    def test_the_progressive_ladder_keeps_its_ceiling(self) -> None:
+        command = self.run_benchexec(
+            lambda stage, executables, identities, root: _run_benchexec(
+                stage, executables, identities, durable_root=root, home=root
+            )
+        )
+        self.assertEqual(command[command.index("--memorylimit") + 1], "96GB")
+        self.assertEqual(command.count("--memorylimit"), 1)
 
 
 class ExpectedCountsTests(unittest.TestCase):
