@@ -133,37 +133,44 @@ impl RelationCache<'_> {
 
 // ------------------------------------------------------------- splitters
 
-/// Bits of a UUID's leading bytes that place it in a histogram bucket.
+/// Histogram resolution of the footer-bound splitters, as a power of two.
 const BOUND_BUCKET_BITS: u32 = 20;
 
 /// Boundaries from the tasks' footer bounds, when every task states them: each
-/// task's rows are spread evenly over the buckets between its bounds, which is
-/// exact for UUIDs that arrive in order and uniform for UUIDs that do not.
+/// task's rows are spread evenly between its bounds, which is exact for UUIDs
+/// that arrive in order and uniform for UUIDs that do not. The histogram spans
+/// the smallest to the largest bound, not the whole UUID space: time-ordered
+/// identities share their leading bytes.
 fn splitters_from_bounds(
     sources: &[BulkSource<'_>],
     tasks: &Tasks,
     wanted: usize,
 ) -> Option<Vec<[u8; 16]>> {
-    let buckets = 1_usize << BOUND_BUCKET_BITS;
-    let bucket = |uuid: &[u8; 16]| {
-        (u32::from_be_bytes(uuid[..4].try_into().expect("4 bytes")) >> (32 - BOUND_BUCKET_BITS))
-            as usize
-    };
+    let mut stated = Vec::with_capacity(tasks.items.len());
+    for &(source, task, rows) in &tasks.items {
+        if rows > 0 {
+            let (low, high) = sources[source].reader.uuid_bounds(task)?;
+            let (low, high) = (u128::from_be_bytes(low), u128::from_be_bytes(high));
+            if high < low {
+                return None;
+            }
+            stated.push((rows as f64, low, high));
+        }
+    }
+    let origin = stated.iter().map(|(_, low, _)| *low).min()?;
+    let end = stated.iter().map(|(_, _, high)| *high).max()?;
+    // Buckets of `1 << shift` UUIDs, at most `1 << BOUND_BUCKET_BITS` of them.
+    let shift = (128 - (end - origin).leading_zeros()).saturating_sub(BOUND_BUCKET_BITS);
+    let buckets = usize::try_from((end - origin) >> shift).ok()? + 1;
+    let bucket = |value: u128| usize::try_from((value - origin) >> shift).ok();
     let mut slope = vec![0.0_f64; buckets + 1];
     let mut total = 0.0_f64;
-    for &(source, task, rows) in &tasks.items {
-        if rows == 0 {
-            continue;
-        }
-        let (low, high) = sources[source].reader.uuid_bounds(task)?;
-        let (first, last) = (bucket(&low), bucket(&high));
-        if last < first {
-            return None;
-        }
-        let rate = rows as f64 / (last - first + 1) as f64;
+    for (rows, low, high) in stated {
+        let (first, last) = (bucket(low)?, bucket(high)?);
+        let rate = rows / (last - first + 1) as f64;
         slope[first] += rate;
         slope[last + 1] -= rate;
-        total += rows as f64;
+        total += rows;
     }
     let mut splitters = Vec::new();
     let (mut rate, mut cumulative, mut next) = (0.0_f64, 0.0_f64, 1_usize);
@@ -173,7 +180,7 @@ fn splitters_from_bounds(
         while next < wanted && cumulative >= total * next as f64 / wanted as f64 {
             // Everything up to this bucket sorts below the boundary.
             if index + 1 < buckets {
-                splitters.push((((index + 1) as u128) << (128 - BOUND_BUCKET_BITS)).to_be_bytes());
+                splitters.push((origin + (((index + 1) as u128) << shift)).to_be_bytes());
             }
             next += 1;
         }

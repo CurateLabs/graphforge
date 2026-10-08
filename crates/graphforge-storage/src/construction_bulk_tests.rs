@@ -1105,4 +1105,81 @@ mod bulk_builder {
             crate::BulkRoute::Staged(crate::BulkStagedReason::NodeTablesExceedBudget)
         );
     }
+
+    /// A reader that states its tasks' identity bounds, as a Parquet footer does.
+    struct Bounded(Memory);
+
+    impl BulkBatchReader for Bounded {
+        fn task_rows(&self, task: usize) -> usize {
+            self.0.task_rows(task)
+        }
+
+        fn read_task(
+            &self,
+            task: usize,
+            sink: &mut dyn FnMut(RecordBatch) -> Result<(), GfError>,
+        ) -> Result<(), GfError> {
+            self.0.read_task(task, sink)
+        }
+
+        fn uuid_bounds(&self, task: usize) -> Option<([u8; 16], [u8; 16])> {
+            let mut all = Vec::new();
+            for batch in self.0.batches.iter().skip(task * self.0.per_task).take(self.0.per_task) {
+                let column = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<FixedSizeBinaryArray>()
+                    .unwrap();
+                all.extend((0..column.len()).map(|row| <[u8; 16]>::try_from(column.value(row)).unwrap()));
+            }
+            Some((*all.iter().min()?, *all.iter().max()?))
+        }
+    }
+
+    /// An identity that grows with `index`, as a time-ordered UUID does.
+    fn clustered(index: u64) -> [u8; 16] {
+        let mut value = [0_u8; 16];
+        value[..6].copy_from_slice(&index.to_be_bytes()[2..]);
+        value[6] = 0x70;
+        value[8] = 0x80;
+        value[9] = 1;
+        value
+    }
+
+    #[test]
+    fn identities_that_arrive_in_order_split_evenly_with_or_without_footer_bounds() {
+        let node_uuids = (0..500_u64).map(|i| uuid(0x10, i)).collect::<Vec<_>>();
+        let nodes = vec![node_batch_of(&node_uuids, &vec!["Person"; 500])];
+        let edges = (0..40_u64)
+            .map(|chunk| {
+                let ids = (chunk * 1_000..(chunk + 1) * 1_000).map(clustered).collect::<Vec<_>>();
+                let src = (0..1_000).map(|i| node_uuids[(i * 7) % 500]).collect::<Vec<_>>();
+                let dst = (0..1_000).map(|i| node_uuids[(i * 11 + 3) % 500]).collect::<Vec<_>>();
+                edge_batch_of(&ids, &vec!["KNOWS"; 1_000], &src, &dst)
+            })
+            .collect::<Vec<_>>();
+        let expected = bulk_with(&nodes, &edges, 2, 4).unwrap();
+        for bounded in [false, true] {
+            let _forced = crate::graph_construction_encoding::ForcedPartitions::set(8, 4);
+            let mut plan = scratch_plan(&nodes, &edges, 2);
+            if bounded {
+                plan.edges[0].reader = Arc::new(Bounded(Memory {
+                    batches: edges.clone(),
+                    per_task: 2,
+                }));
+            }
+            let root = TempDir::new().unwrap();
+            let mut session = pinned(&root);
+            let encoding = session.prepare_bulk_encoding(1, &plan, || false).unwrap();
+            assert_eq!(expected, inventory(&encoding), "bounded={bounded}");
+            let report = session.bulk_build_report();
+            // 40,000 edges over eight partitions: 5,000 each when balanced.
+            assert!(report.edge_partitions >= 6, "bounded={bounded} {report:?}");
+            assert!(
+                report.largest_edge_partition <= 8_000,
+                "bounded={bounded}: largest partition {} of 40000",
+                report.largest_edge_partition
+            );
+        }
+    }
 }
