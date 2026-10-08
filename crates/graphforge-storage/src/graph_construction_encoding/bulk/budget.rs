@@ -19,7 +19,10 @@ const FIXED_BYTES: u64 = 192 << 20;
 /// Peak bytes per node while the node tables exist: the sorted UUIDs (16), the
 /// label ids (4), and the larger of the sort's working set (order array plus
 /// gathered copy, 20) and the endpoint index (8 to 16).
-const NODE_TABLE_BYTES: u64 = 40;
+// Exact out/in degrees add 8 B/node beside the endpoint index during scatter.
+// After dropping the endpoint index, resident tables (20), degrees (8),
+// partition maps (16), and at most two heavy counters (8) total 52 B/node.
+const NODE_TABLE_BYTES: u64 = 56;
 /// Bytes one decoding task holds in flight: a row group of input plus its
 /// decoded batches.
 const DECODE_WINDOW_BYTES: u64 = 48 << 20;
@@ -137,6 +140,7 @@ thread_local! {
     /// Forces the partition counts of a test build (edge, CSR).
     static FORCED_PARTITIONS: std::cell::Cell<Option<(usize, usize)>> =
         const { std::cell::Cell::new(None) };
+    static FORCED_GATE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
 
 /// Forces the partition counts of the builds the current test thread runs,
@@ -146,6 +150,11 @@ pub(crate) struct ForcedPartitions;
 
 #[cfg(test)]
 impl ForcedPartitions {
+    pub(crate) fn with_gate(bytes: u64) -> Self {
+        FORCED_GATE.with(|forced| forced.set(Some(bytes)));
+        Self
+    }
+
     pub(crate) fn set(edge: usize, csr: usize) -> Self {
         FORCED_PARTITIONS.with(|forced| forced.set(Some((edge, csr))));
         Self
@@ -156,6 +165,7 @@ impl ForcedPartitions {
 impl Drop for ForcedPartitions {
     fn drop(&mut self) {
         FORCED_PARTITIONS.with(|forced| forced.set(None));
+        FORCED_GATE.with(|forced| forced.set(None));
     }
 }
 
@@ -168,6 +178,8 @@ impl ScratchPlan {
         // Three quarters of the working set hold partitions; the rest stages
         // scatter buffers and decoded input.
         let gate_bytes = working / 4 * 3;
+        #[cfg(test)]
+        let gate_bytes = FORCED_GATE.with(std::cell::Cell::get).unwrap_or(gate_bytes);
         let staging_total = working / 8;
         let ceil = |bytes: u64, per: u64| bytes.div_ceil(per.max(1));
         let mut best = None;

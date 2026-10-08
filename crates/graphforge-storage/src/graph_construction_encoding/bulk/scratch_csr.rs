@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use super::budget::ScratchPlan;
 use super::csr::{AdjacencyGroups, AdjacencyOutput, assemble, reset_adjacency_directory};
@@ -69,110 +69,101 @@ impl CsrRecord {
 
 // ------------------------------------------------------------- histogram
 
-/// Entries per node-rank bucket, for choosing node-range partitions that
-/// hold about the same number of entries.
+/// Exact degree counts choose bounded consecutive `(node, edge)` ranges.
 pub(super) struct KeyHistogram {
-    buckets: usize,
-    nodes: u64,
-    out: Vec<AtomicU64>,
-    inn: Vec<AtomicU64>,
-}
-
-/// One task's counts, merged into the shared histogram when the task ends.
-pub(super) struct LocalHistogram {
-    out: Vec<u64>,
-    inn: Vec<u64>,
-}
-
-const HISTOGRAM_BUCKETS: u64 = 1 << 16;
-
-fn bucket_of(rank: u32, nodes: u64, buckets: usize) -> usize {
-    usize::try_from((u64::from(rank) - 1) * buckets as u64 / nodes).unwrap_or(0)
+    out: Vec<AtomicU32>,
+    inn: Vec<AtomicU32>,
+    edges: u64,
+    max_entries: u64,
 }
 
 impl KeyHistogram {
-    pub(super) fn new(nodes: u64) -> Self {
-        let buckets = usize::try_from(nodes.clamp(1, HISTOGRAM_BUCKETS)).unwrap_or(1);
-        let zeroed = || (0..buckets).map(|_| AtomicU64::new(0)).collect();
+    pub(super) fn new(nodes: u64, edges: u64, max_entries: u64) -> Self {
+        let zeroed = || (0..nodes).map(|_| AtomicU32::new(0)).collect();
         Self {
-            buckets,
-            nodes: nodes.max(1),
             out: zeroed(),
             inn: zeroed(),
+            edges,
+            max_entries: max_entries.max(1),
         }
     }
 
-    pub(super) fn local(&self) -> LocalHistogram {
-        LocalHistogram {
-            out: vec![0; self.buckets],
-            inn: vec![0; self.buckets],
-        }
+    pub(super) fn add(&self, src: u32, dst: u32) {
+        self.out[src as usize - 1].fetch_add(1, Ordering::Relaxed);
+        self.inn[dst as usize - 1].fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Count an edge from `src` to `dst` (node ranks, one-based).
-    pub(super) fn add(&self, local: &mut LocalHistogram, src: u32, dst: u32) {
-        local.out[bucket_of(src, self.nodes, self.buckets)] += 1;
-        local.inn[bucket_of(dst, self.nodes, self.buckets)] += 1;
-    }
-
-    pub(super) fn merge(&self, local: &LocalHistogram) {
-        for (total, count) in self.out.iter().zip(&local.out) {
-            total.fetch_add(*count, Ordering::Relaxed);
-        }
-        for (total, count) in self.inn.iter().zip(&local.inn) {
-            total.fetch_add(*count, Ordering::Relaxed);
-        }
-    }
-
-    fn counts(side: &[AtomicU64]) -> Vec<u64> {
-        side.iter()
-            .map(|count| count.load(Ordering::Relaxed))
-            .collect()
-    }
-
-    pub(super) fn partitioner(&self, direction: Direction, partitions: usize) -> KeyPartitioner {
-        let counts = Self::counts(match direction {
+    pub(super) fn partitioner(&self, direction: Direction, wanted: usize) -> KeyPartitioner {
+        let degrees = match direction {
             Direction::Out => &self.out,
             Direction::In => &self.inn,
-        });
-        let total = counts.iter().sum::<u64>();
-        let mut before = 0_u64;
-        let table = counts
+        };
+        let limit = self
+            .max_entries
+            .min(self.edges.div_ceil(wanted.max(1) as u64).max(1));
+        let mut table = Vec::with_capacity(degrees.len());
+        let heavy_count = degrees
             .iter()
-            .map(|count| {
-                // The bucket's midpoint position in the cumulative count picks
-                // its partition: monotone in the key, balanced by entries.
-                let middle = u128::from(before) + u128::from(*count) / 2;
-                before += count;
-                if total == 0 {
-                    0
-                } else {
-                    u32::try_from(
-                        (middle * partitions as u128 / u128::from(total))
-                            .min(partitions as u128 - 1),
-                    )
-                    .unwrap_or(0)
+            .filter(|degree| u64::from(degree.load(Ordering::Relaxed)) > limit)
+            .count();
+        let mut seen = Vec::with_capacity(heavy_count);
+        let (mut part, mut used) = (0_u32, 0_u64);
+        for degree in degrees {
+            let degree = u64::from(degree.load(Ordering::Relaxed));
+            if degree > limit {
+                if used != 0 {
+                    part += 1;
+                    used = 0;
                 }
-            })
-            .collect();
+                let counter = u32::try_from(seen.len() + 1).expect("dense node ids");
+                table.push((part, counter));
+                seen.push(AtomicU32::new(0));
+                // Ranking visits edge partitions in order when there is a
+                // heavy node, so its own occurrence ordinal orders its edges.
+                part += u32::try_from(degree.div_ceil(limit)).expect("dense edge ids");
+            } else {
+                if used + degree > limit {
+                    part += 1;
+                    used = 0;
+                }
+                table.push((part, 0));
+                used += degree;
+            }
+        }
+        let count = (part as usize + 1).max(wanted);
         KeyPartitioner {
             table,
-            nodes: self.nodes,
-            buckets: self.buckets,
+            span: limit,
+            count,
+            seen,
         }
     }
 }
 
-/// Maps a node rank to its node-range partition.
+/// A light node shares one partition with consecutive light nodes. A heavy
+/// node occupies consecutive partitions split by increasing occurrence ordinal.
 pub(super) struct KeyPartitioner {
-    table: Vec<u32>,
-    nodes: u64,
-    buckets: usize,
+    table: Vec<(u32, u32)>,
+    span: u64,
+    count: usize,
+    seen: Vec<AtomicU32>,
 }
 
 impl KeyPartitioner {
+    pub(super) fn has_heavy(&self) -> bool {
+        !self.seen.is_empty()
+    }
+
+    /// Heavy nodes require calls in increasing edge-id order.
     pub(super) fn partition(&self, key: u32) -> usize {
-        self.table[bucket_of(key, self.nodes, self.buckets)] as usize
+        let (base, counter) = self.table[key as usize - 1];
+        base as usize
+            + if counter == 0 {
+                0
+            } else {
+                let ordinal = self.seen[counter as usize - 1].fetch_add(1, Ordering::Relaxed);
+                usize::try_from(u64::from(ordinal) / self.span).expect("dense edge ids")
+            }
     }
 }
 
@@ -192,11 +183,13 @@ impl CsrScratch {
         histogram: &KeyHistogram,
         partitions: usize,
     ) -> Result<Self, GfError> {
+        let out_keys = histogram.partitioner(Direction::Out, partitions);
+        let in_keys = histogram.partitioner(Direction::In, partitions);
         Ok(Self {
-            out: Partitions::create(scratch, "csr-out", partitions, CSR_RECORD)?,
-            inn: Partitions::create(scratch, "csr-in", partitions, CSR_RECORD)?,
-            out_keys: histogram.partitioner(Direction::Out, partitions),
-            in_keys: histogram.partitioner(Direction::In, partitions),
+            out: Partitions::create(scratch, "csr-out", out_keys.count, CSR_RECORD)?,
+            inn: Partitions::create(scratch, "csr-in", in_keys.count, CSR_RECORD)?,
+            out_keys,
+            in_keys,
         })
     }
 }
@@ -530,29 +523,58 @@ mod tests {
     }
 
     #[test]
+    fn many_heavy_nodes_need_only_their_own_degree_partitions() {
+        let histogram = KeyHistogram::new(100, 10_100, 100);
+        for key in 1..=100 {
+            for _ in 0..101 {
+                histogram.add(key, key);
+            }
+        }
+        let partitioner = histogram.partitioner(Direction::Out, 1);
+        assert_eq!(partitioner.count, 201);
+        let mut counts = vec![0; partitioner.count];
+        // Edge ids can be interleaved across nodes; each node's occurrence
+        // ordinal still creates ordered, bounded ranges in the final CSR.
+        for _ in 0..101 {
+            for key in 1..=100 {
+                counts[partitioner.partition(key)] += 1;
+            }
+        }
+        assert!(counts.iter().all(|count| *count <= 100));
+        for key in 0..100 {
+            assert_eq!(&counts[2 * key..2 * key + 2], &[100, 1]);
+            assert_eq!(partitioner.table[key].0 as usize, 2 * key);
+        }
+    }
+
+    #[test]
     fn key_partitions_are_monotone_and_balanced_by_entries() {
-        let histogram = KeyHistogram::new(1000);
-        let mut local = histogram.local();
+        let histogram = KeyHistogram::new(1000, 1400, 500);
         // A hot node near the front and a flat tail.
         for _ in 0..400 {
-            histogram.add(&mut local, 5, 900);
+            histogram.add(5, 900);
         }
         for node in 1..=1000_u32 {
-            histogram.add(&mut local, node, node);
+            histogram.add(node, node);
         }
-        histogram.merge(&local);
         let partitioner = histogram.partitioner(Direction::Out, 4);
         let mut previous = 0;
-        let mut sizes = [0_u32; 4];
+        let mut sizes = vec![0_u32; partitioner.count];
         for key in 1..=1000_u32 {
-            let part = partitioner.partition(key);
-            assert!(
-                part >= previous,
-                "partition ids never decrease with the key"
-            );
-            previous = part;
-            sizes[part] += 1;
+            for _ in 0..if key == 5 { 401 } else { 1 } {
+                let part = partitioner.partition(key);
+                assert!(
+                    part >= previous,
+                    "partition ids never decrease with the key"
+                );
+                previous = part;
+                sizes[part] += 1;
+            }
         }
-        assert!(sizes.iter().all(|size| *size > 0), "{sizes:?}");
+        assert_eq!(sizes.iter().sum::<u32>(), 1400);
+        assert!(
+            sizes.iter().all(|size| *size > 0 && *size <= 350),
+            "{sizes:?}"
+        );
     }
 }

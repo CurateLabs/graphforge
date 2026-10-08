@@ -291,7 +291,11 @@ pub(super) fn scatter_edges(
     let splitters = edge_splitters(sources, &tasks, plan.edge_partitions, cancel)?;
     let partitions = Partitions::create(scratch, "edges", splitters.len() + 1, EDGE_RECORD)?;
     let dictionary = SharedDictionary::default();
-    let histogram = KeyHistogram::new(nodes.uuids.len() as u64);
+    let histogram = KeyHistogram::new(
+        nodes.uuids.len() as u64,
+        tasks.total as u64,
+        plan.gate_bytes / (2 * plan.concurrency as u64) / 40,
+    );
     let miss = Mutex::new(None::<[u8; 16]>);
     tasks
         .items
@@ -303,7 +307,6 @@ pub(super) fn scatter_edges(
                 shared: &dictionary,
                 ids: HashMap::new(),
             };
-            let mut local = histogram.local();
             let mut written = 0;
             let mut uuids = Vec::new();
             let mut sources_ranks = Vec::new();
@@ -360,7 +363,7 @@ pub(super) fn scatter_edges(
                         rel: rels[row],
                     };
                     if record.src != 0 && record.dst != 0 {
-                        histogram.add(&mut local, record.src, record.dst);
+                        histogram.add(record.src, record.dst);
                     }
                     scatter.push(partition_of(&splitters, &record.uuid), &record.encode())?;
                 }
@@ -371,7 +374,6 @@ pub(super) fn scatter_edges(
                 return Err(short_source());
             }
             scatter.finish()?;
-            histogram.merge(&local);
             if let Some(endpoint) = task_miss {
                 miss.lock()
                     .map_err(|_| storage("endpoint lock poisoned"))?
@@ -399,15 +401,22 @@ pub(super) fn scatter_edges(
         .into_inner()
         .map_err(|_| storage("endpoint lock poisoned"))?;
     if let Some(endpoint) = miss {
+        let owner = partition_of(&scattered.splitters, &endpoint);
+        let ordered = Ordered::new(plan.gate_bytes, 0, cancel);
+        let mut is_edge = false;
         for part in 0..scattered.partitions.len() {
             check_cancelled(cancel)?;
-            scattered.load_sorted(scratch, part, &nodes.uuids)?;
+            let cost = ScratchPlan::edge_cost(scattered.counts[part]);
+            ordered.acquire(part, cost)?;
+            let records = scattered.load_sorted(scratch, part, &nodes.uuids)?;
+            if part == owner {
+                is_edge = records
+                    .binary_search_by(|record| record.uuid.cmp(&endpoint))
+                    .is_ok();
+            }
+            drop(records);
+            ordered.release(cost);
         }
-        let owner = partition_of(&scattered.splitters, &endpoint);
-        let records = scattered.load_sorted(scratch, owner, &nodes.uuids)?;
-        let is_edge = records
-            .binary_search_by(|record| record.uuid.cmp(&endpoint))
-            .is_ok();
         return Err(missing_endpoint_error(is_edge));
     }
     Ok(scattered)
@@ -543,7 +552,8 @@ pub(super) fn rank_partitions(context: &RankContext<'_>) -> Result<RankedEdges, 
         .map(|_| Mutex::new(None::<PartitionStats>))
         .collect::<Vec<_>>();
     let carry = Mutex::new(Vec::<EdgeRecord>::new());
-    let ordered = Ordered::new(plan.gate_bytes, 1, cancel);
+    let ordered_scatter = csr.out_keys.has_heavy() || csr.in_keys.has_heavy();
+    let ordered = Ordered::new(plan.gate_bytes, 2, cancel);
     run_ordered(
         partitions,
         plan.concurrency,
@@ -555,8 +565,16 @@ pub(super) fn rank_partitions(context: &RankContext<'_>) -> Result<RankedEdges, 
             let mut counts = vec![0_u64; relation_count];
             let mut first = Vec::new();
             let mut uuids = Appender::create(scratch, &uuid_files[part], 1 << 20)?;
-            let mut out = Scatter::new(scratch, &csr.out, plan.staging_bytes);
-            let mut inn = Scatter::new(scratch, &csr.inn, plan.staging_bytes);
+            let staging = plan.staging_bytes.saturating_mul(2 * plan.csr_partitions)
+                / (csr.out.len() + csr.inn.len()).max(1);
+            let mut out = Scatter::new(scratch, &csr.out, staging);
+            let mut inn = Scatter::new(scratch, &csr.inn, staging);
+            // Per-node occurrence ordinals must see globally ranked edges in
+            // order. Sorting and canonical emission still overlap; builds
+            // without heavy nodes retain parallel CSR scatter.
+            if ordered_scatter {
+                ordered.wait_turn(1, part)?;
+            }
             for (position, record) in records.iter().enumerate() {
                 if position % 8192 == 0 {
                     check_cancelled(cancel)?;
@@ -591,6 +609,9 @@ pub(super) fn rank_partitions(context: &RankContext<'_>) -> Result<RankedEdges, 
             uuids.finish()?;
             out.finish()?;
             inn.finish()?;
+            if ordered_scatter {
+                ordered.pass_turn(1);
+            }
             *stats[part]
                 .lock()
                 .map_err(|_| storage("stats lock poisoned"))? =

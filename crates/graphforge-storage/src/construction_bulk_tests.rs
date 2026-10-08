@@ -838,7 +838,7 @@ mod bulk_builder {
             let run = scratch_run(&nodes, &edges, per_task, workers, partitions).unwrap();
             assert_eq!(expected, run.inventory, "partitions {partitions:?} workers {workers}");
             assert!(!run.scratch_left, "scratch must be deleted on completion");
-            assert_eq!(run.report.csr_partitions, partitions.1 as u64);
+            assert!(run.report.csr_partitions >= partitions.1 as u64);
             assert!(run.report.scratch_concurrency >= 1);
             if partitions.0 > 1 {
                 assert!(run.report.edge_partitions > 1, "{:?}", run.report);
@@ -882,6 +882,28 @@ mod bulk_builder {
             assert_same(&expected, &run.inventory);
         }
         assert_same(&staged(&nodes, &edges), &expected);
+    }
+
+    #[test]
+    fn a_hub_larger_than_the_gate_splits_by_edge_id_without_rewriting_scratch() {
+        let _limits = ShardLimits::set(17, 100);
+        let node_uuids = [uuid(0x10, 0), uuid(0x10, 1)];
+        let nodes = vec![node_batch_of(&node_uuids, &["Person", "Person"])];
+        let edge_uuids = (0..3001).map(|i| uuid(0x20, i)).collect::<Vec<_>>();
+        let edges = vec![edge_batch_of(
+            &edge_uuids,
+            &vec!["KNOWS"; 3001],
+            &vec![node_uuids[0]; 3001],
+            &vec![node_uuids[1]; 3001],
+        )];
+        let expected = bulk_with(&nodes, &edges, 1, 2).unwrap();
+        // All 3,001 entries at a key used to require 120,040 bytes from
+        // this 32 KiB gate. Edge partitions themselves fit the gate.
+        let _gate = crate::graph_construction_encoding::ForcedPartitions::with_gate(32 << 10);
+        let run = scratch_run(&nodes, &edges, 1, 2, (16, 2)).unwrap();
+        assert_same(&expected, &run.inventory);
+        assert_one_scratch_pass(&run.report, 3001);
+        assert!(!run.scratch_left);
     }
 
     #[test]
@@ -968,6 +990,20 @@ mod bulk_builder {
             if let Err(error) = cancelled {
                 assert!(error.to_string().contains("cancelled"), "{error}");
                 assert!(!scratch_dir(&session).exists(), "cancelled after {polls_before_cancel}");
+                // A live budget drop cannot make this fixed bulk route build
+                // resident tables it no longer has room for. Restoring the
+                // budget below still completes the same valid input.
+                let mut reduced = scratch_plan(&nodes, &edges, 2);
+                reduced.memory_budget = Some(1);
+                let error = session.prepare_bulk_encoding(1, &reduced, || false).unwrap_err();
+                assert!(matches!(
+                    error,
+                    GfError::Project {
+                        code: graphforge_core::ProjectErrorCode::ResourceLimit,
+                        ..
+                    }
+                ));
+                assert!(!scratch_dir(&session).exists());
             }
             let rerun = session
                 .prepare_bulk_encoding(1, &scratch_plan(&nodes, &edges, 2), || false)

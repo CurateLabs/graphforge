@@ -273,10 +273,19 @@ pub(crate) fn encode_bulk(
         |lease| lease.lanes().get(),
     );
     // The route is a function of the footers and the budget (ADR 0058). A
-    // plan the staged path should build, reaching here anyway because the
-    // session's route was fixed earlier, builds in memory.
+    // A durable bulk route cannot switch to staging after a budget drop.
+    // Refuse that attempt before loading data; it can retry when memory returns.
     let scratch_plan = match (plan.route(), plan.memory_budget) {
         (BulkRoute::Scratch, Some(budget)) => Some(ScratchPlan::derive(plan, budget, workers)),
+        (BulkRoute::Staged(reason), _) => {
+            return Err(GfError::Project {
+                code: graphforge_core::ProjectErrorCode::ResourceLimit,
+                message: format!(
+                    "graph construction encoding: the fixed bulk route cannot fit the current \
+                     memory budget ({reason:?}); retry with an adequate budget"
+                ),
+            });
+        }
         _ => None,
     };
     let pool = rayon::ThreadPoolBuilder::new()
@@ -531,7 +540,9 @@ pub(crate) fn encode_bulk(
                 EdgeSide::Scratch(scattered) => scattered.partitions.len() as u64,
                 EdgeSide::Memory(_) => 0,
             },
-            csr_partitions: sized.csr_partitions as u64,
+            csr_partitions: ranked_edges
+                .as_ref()
+                .map_or(0, |(csr, _)| csr.out.len().max(csr.inn.len()) as u64),
             write_bytes: scratch.written_bytes(),
             read_bytes: scratch.read_bytes(),
             largest_partition: match &edge_side {

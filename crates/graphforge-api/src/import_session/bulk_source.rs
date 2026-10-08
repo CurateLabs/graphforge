@@ -29,6 +29,21 @@ use crate::{BulkInputKind, CancellationToken, GraphForge};
 /// the Graph500 generator and of the Parquet writer's default.
 const BATCHES_PER_TASK: u64 = 16;
 
+/// Only exact, non-null identity bounds can describe a task's UUID range.
+fn exact_uuid_bounds(
+    statistics: &parquet::file::statistics::Statistics,
+) -> Option<([u8; 16], [u8; 16])> {
+    if statistics.null_count_opt() != Some(0)
+        || !statistics.min_is_exact()
+        || !statistics.max_is_exact()
+    {
+        return None;
+    }
+    let low = <[u8; 16]>::try_from(statistics.min_bytes_opt()?).ok()?;
+    let high = <[u8; 16]>::try_from(statistics.max_bytes_opt()?).ok()?;
+    (low <= high).then_some((low, high))
+}
+
 enum Format {
     Parquet {
         metadata: ArrowReaderMetadata,
@@ -214,11 +229,7 @@ impl BulkBatchReader for SourceReader<'_> {
             let group_end = group_start + u64::try_from(group.num_rows()).ok()?;
             if group_end > start && group_start < end {
                 let statistics = group.column(0).statistics()?;
-                if statistics.null_count_opt() != Some(0) {
-                    return None;
-                }
-                let low = <[u8; 16]>::try_from(statistics.min_bytes_opt()?).ok()?;
-                let high = <[u8; 16]>::try_from(statistics.max_bytes_opt()?).ok()?;
+                let (low, high) = exact_uuid_bounds(statistics)?;
                 bounds =
                     Some(bounds.map_or((low, high), |(min, max)| (min.min(low), max.max(high))));
             }
@@ -395,4 +406,42 @@ pub(super) fn plan<'a>(
         property_free: columns == required,
         decoded_bytes,
     })
+}
+
+#[cfg(test)]
+mod bounds_tests {
+    use parquet::data_type::FixedLenByteArray;
+    use parquet::file::statistics::{Statistics, ValueStatistics};
+
+    use super::exact_uuid_bounds;
+
+    #[test]
+    fn inexact_or_nullable_footer_bounds_require_sampling() {
+        let bounds = |min_exact, max_exact, nulls| {
+            Statistics::from(
+                ValueStatistics::new(
+                    Some(FixedLenByteArray::from(vec![1; 16])),
+                    Some(FixedLenByteArray::from(vec![2; 16])),
+                    None,
+                    nulls,
+                    false,
+                )
+                .with_min_is_exact(min_exact)
+                .with_max_is_exact(max_exact),
+            )
+        };
+        assert_eq!(
+            exact_uuid_bounds(&bounds(true, true, Some(0))),
+            Some(([1; 16], [2; 16]))
+        );
+        for (low, high, nulls) in [
+            (false, true, Some(0)),
+            (true, false, Some(0)),
+            (false, false, Some(0)),
+            (true, true, Some(1)),
+            (true, true, None),
+        ] {
+            assert_eq!(exact_uuid_bounds(&bounds(low, high, nulls)), None);
+        }
+    }
 }

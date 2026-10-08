@@ -384,8 +384,8 @@ fn a_refused_bulk_attempt_stays_on_the_bulk_route_when_memory_drops() {
     assert!(first.contains("duplicate"), "{first}");
     assert_eq!(session.manifest.build_route, Some(BuildRoute::Bulk));
     // The route is durable: the same session, reopened or not, on a host whose
-    // memory has since shrunk, is refused identically instead of being sent to
-    // a staged path that no longer accepts chunks.
+    // memory has since shrunk, refuses the resource shortage before loading
+    // data instead of staging a sealed session or ignoring the smaller budget.
     for reopen in [false, true] {
         bulk_source::TEST_BUDGET.with(|cell| cell.set(Some(1)));
         let second = if reopen {
@@ -394,13 +394,30 @@ fn a_refused_bulk_attempt_stays_on_the_bulk_route_when_memory_drops() {
                 .unwrap()
                 .validate(&graph)
                 .unwrap_err()
-                .to_string()
         } else {
-            session.validate(&graph).unwrap_err().to_string()
+            session.validate(&graph).unwrap_err()
         };
         bulk_source::TEST_BUDGET.with(|cell| cell.set(None));
-        assert_eq!(first, second);
-        assert!(!second.contains("not accepting chunks"), "{second}");
+        assert!(matches!(
+            second,
+            GfError::Project {
+                code: graphforge_core::ProjectErrorCode::ResourceLimit,
+                ..
+            }
+        ));
+        assert!(
+            !second.to_string().contains("not accepting chunks"),
+            "{second}"
+        );
+        // Restoring memory retries the original sealed bulk build and proves
+        // the original intake refusal is unchanged.
+        let restored = graph
+            .resume_import_session(id)
+            .unwrap()
+            .validate(&graph)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(first, restored);
     }
     let manifest = read_manifest(&session.root).unwrap();
     assert_eq!(manifest.build_route, Some(BuildRoute::Bulk));

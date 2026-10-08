@@ -92,7 +92,7 @@ functions.
   binary began staging, and two plan-time cases the scratch route cannot hold,
   each recorded as a typed reason in the import manifest (`staged_reason`):
   `node_tables_exceed_budget` (the sorted node UUIDs, labels and endpoint index
-  need about 40 bytes per node and stay in memory) and
+  and the two degree arrays need a conservative 56 bytes per node and stay in memory) and
   `edge_properties_exceed_budget` (the builder retains property-bearing edge
   batches). Out-of-core node handling and edge properties on scratch remain
   open under #1881.
@@ -102,6 +102,9 @@ functions.
   re-routed to the staged path by a change in free memory. It is never a
   retry. Whether the bulk route then runs in memory or on scratch is decided
   again on each attempt from the live budget; either produces the same bytes.
+  If that budget can no longer hold the bulk route's node tables or retained
+  edge properties, the attempt returns a resource-limit refusal before loading
+  data. It keeps the bulk route and can retry when the budget is sufficient.
 
 ## Scratch route
 
@@ -109,14 +112,17 @@ When the estimate exceeds the budget:
 
 - Pass 2 decodes the edges once, resolves endpoints through the node index and
   scatters a 28-byte record (UUID, source rank, target rank, relation id) into
-  edge-UUID range partitions. Boundaries come from a sample of evenly spread
-  tasks; row-group statistics cannot give them, because the minimum and
-  maximum of unordered UUIDs say nothing about their distribution.
+  edge-UUID range partitions. Exact, non-null Parquet row-group bounds feed a
+  histogram over the stated UUID span; otherwise boundaries come from a sample
+  of up to 64 evenly spread tasks. Bounds describe a range, so the histogram
+  estimates the distribution between its endpoints.
 - Pass 3 builds the partitions in order, several at a time. Sorting a partition
   ranks its edges (the first `edge_id` is the number of earlier edges plus
   one). It checks identities, writes its canonical edge files, keeps its sorted
   UUIDs for the membership index, and scatters its adjacency entries once into
-  node-range partitions chosen from a histogram of entries per node-rank bucket.
+  node-range partitions bounded by exact node degrees. A node larger than a
+  partition spans consecutive partitions split by its increasing edge occurrence ordinal, so a hub
+  cannot force all of its adjacency into one resident partition.
   Canonical edge files cover fixed windows of `edge_id`s that can straddle two
   partitions; the rows after a partition's last whole window carry to the next,
   one partition at a time.
