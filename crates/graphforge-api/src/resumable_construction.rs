@@ -1364,6 +1364,10 @@ mod tests {
         // ordinal identity runs are hard-linked, not copied and verified, so
         // its reads are the small controls and may not grow with the rows.
         let mut hydration_reads = Vec::new();
+        // CAS install reads, by staged payload bytes. Windows copies every
+        // object so they follow the payload; elsewhere the install links the
+        // encoder's file and they are only the small manifest controls (#1899).
+        let mut cas_reads = Vec::new();
         // Each node retains 16 identity bytes and at least 18 compact detail bytes.
         // 4,096 rows therefore exceed 100,000 payload bytes before Parquet/control
         // overhead; retain the same dominance threshold and every phase ceiling.
@@ -1413,7 +1417,17 @@ mod tests {
                 );
             }
             let cas = &evidence.cas_publication_io;
-            assert_eq!(cas.payload.read_bytes, evidence.canonical_output_bytes);
+            if cfg!(windows) {
+                // Windows copies each encoded file into the object store, reading
+                // the source once.
+                assert_eq!(cas.payload.read_bytes, evidence.canonical_output_bytes);
+            } else {
+                // Elsewhere the install links the encoder's file (#1899): a fresh
+                // store has no existing object to authenticate, so nothing is read.
+                assert_eq!(cas.payload.read_bytes, 0);
+                assert_eq!(cas.payload.write_bytes, 0);
+                assert_eq!(cas.payload.installed_bytes, evidence.canonical_output_bytes);
+            }
             assert!(cas.manifest_reads.read_bytes > 0);
             assert!(cas.manifest_reads.read_calls > 0);
             let measured_cas_reads = [
@@ -1431,12 +1445,28 @@ mod tests {
                 [
                     evidence.shape_application_read_bytes,
                     evidence.encode_application_read_bytes,
-                    evidence.cas_application_read_bytes,
+                    if cfg!(windows) {
+                        evidence.cas_application_read_bytes
+                    } else {
+                        0
+                    },
                     evidence.recovery_application_read_bytes,
                     reconciled,
                 ],
             ));
+            cas_reads.push((payload, evidence.cas_application_read_bytes));
             hydration_reads.push((scale as u64, evidence.hydration_application_read_bytes));
+        }
+        if !cfg!(windows) {
+            for adjacent in cas_reads.windows(2) {
+                let ((prior_payload, prior), (next_payload, next)) = (adjacent[0], adjacent[1]);
+                assert!(next_payload * 10 >= prior_payload * 17);
+                assert!(
+                    next * 10 < prior * 15,
+                    "CAS install reads followed the payload: {prior} -> {next} bytes while \
+                     payload went {prior_payload} -> {next_payload}"
+                );
+            }
         }
         for adjacent in hydration_reads.windows(2) {
             let ((prior_rows, prior), (next_rows, next)) = (adjacent[0], adjacent[1]);

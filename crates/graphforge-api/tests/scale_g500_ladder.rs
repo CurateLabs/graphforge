@@ -4429,6 +4429,8 @@ struct LifecycleLinearityObservation {
     shape_merge_bytes: [u64; 2],
     shape_block_components: [u64; 2],
     canonical_artifact_objects: u64,
+    /// Bytes of every canonical artifact the publication installed or reused.
+    canonical_output_bytes: u64,
     cas_publication_io: graphforge_storage::GraphPublicationIo,
     encode_fsync_components: [u64; 4],
     hydration_files_copied: u64,
@@ -4586,6 +4588,9 @@ fn lifecycle_linearity_observation(evidence: &Value) -> LifecycleLinearityObserv
     let canonical_artifact_objects = construction["canonical_artifact_objects"]
         .as_u64()
         .expect("canonical artifact inventory");
+    let canonical_output_bytes = construction["canonical_output_bytes"]
+        .as_u64()
+        .expect("canonical output bytes");
     let encode_fsync_components = [
         construction["encode_output_fsync_operations"]
             .as_u64()
@@ -4753,6 +4758,7 @@ fn lifecycle_linearity_observation(evidence: &Value) -> LifecycleLinearityObserv
         shape_merge_bytes: [merge_read_bytes, merge_write_bytes],
         shape_block_components,
         canonical_artifact_objects,
+        canonical_output_bytes,
         cas_publication_io: serde_json::from_value(construction["cas_publication_io"].clone())
             .expect("native CAS component evidence"),
         encode_fsync_components,
@@ -5429,6 +5435,15 @@ enum PhaseMetricPolicy {
     EncodeWriteComponentCalls,
     AppendObjectInventory,
     ShapeBlockInventory,
+    /// Unix links the encoder's file into the object store instead of copying
+    /// it. Payload read bytes are then only the authentication of objects that
+    /// already existed, and together with the bytes installed they account for
+    /// every canonical output byte exactly once.
+    LinkedPayloadReadBytes,
+    /// Payload write bytes are zero: the encoder wrote each object once and the
+    /// object store wrote none of them. What the phase still writes is the
+    /// manifest's control nodes, which the fresh-publication bound polices.
+    LinkedPayloadWriteBytes,
     CasFsyncInventory,
     CasReadComponentCalls,
     CasWriteComponentCalls,
@@ -5461,6 +5476,8 @@ impl PhaseMetricPolicy {
             | Self::ShapeWriteComponentCalls
             | Self::EncodeWriteComponentCalls
             | Self::ShapeBlockInventory
+            | Self::LinkedPayloadReadBytes
+            | Self::LinkedPayloadWriteBytes
             | Self::CasFsyncInventory
             | Self::CasReadComponentCalls
             | Self::CasWriteComponentCalls
@@ -5478,6 +5495,19 @@ struct PhasePolicyRow {
 
 const ZERO: PhaseMetricPolicy = PhaseMetricPolicy::StructurallyZero;
 const SCALE: PhaseMetricPolicy = PhaseMetricPolicy::ScaleBearing;
+/// Windows copies each encoded file into the object store, so its bytes follow
+/// the data. Everywhere else the install links the encoder's file (#1899) and
+/// the invariant is that the object store writes no payload byte at all.
+const CAS_PAYLOAD_READ_BYTES: PhaseMetricPolicy = if cfg!(windows) {
+    SCALE
+} else {
+    PhaseMetricPolicy::LinkedPayloadReadBytes
+};
+const CAS_PAYLOAD_WRITE_BYTES: PhaseMetricPolicy = if cfg!(windows) {
+    SCALE
+} else {
+    PhaseMetricPolicy::LinkedPayloadWriteBytes
+};
 const ENCODING_BUFFER_BYTES: u64 =
     graphforge_storage::GRAPH_CONSTRUCTION_ENCODING_BUFFER_BYTES as u64;
 const OBJECT_BUFFER_BYTES: u64 = graphforge_storage::GRAPH_OBJECT_IO_BUFFER_BYTES as u64;
@@ -5544,8 +5574,12 @@ const HYDRATION_ROUTE_TABLE_CONTROL_BYTES: u64 = 2 * 1024;
 // publication_preauthentication: the encoded-inventory control read is
 //   structure-bounded by one encoding buffer, and its call count derives from
 //   those bytes; every other field is zero.
-// cas_install_read_write: bytes are data-proportional; calls and fsyncs
-//   reconcile to the CAS publication components and the one-publication,
+// cas_install_read_write: Windows copies, so bytes are data-proportional.
+//   Elsewhere the install links the encoder's file (#1899): the object store
+//   writes no payload byte, its payload reads are only the authentication of
+//   objects that already existed, and installed bytes plus those reads equal
+//   the canonical output bytes. Calls and fsyncs reconcile to the CAS
+//   publication components and the one-publication,
 //   every-path-installed-or-reused inventory; payload calls are bounded by
 //   the payload bytes.
 // hydration_verification: read_bytes is a conservation law over the copy
@@ -5630,8 +5664,8 @@ const PHASE_METRIC_POLICIES: [PhasePolicyRow; 9] = [
     PhasePolicyRow {
         phase: "cas_install_read_write",
         fields: [
-            SCALE,
-            SCALE,
+            CAS_PAYLOAD_READ_BYTES,
+            CAS_PAYLOAD_WRITE_BYTES,
             PhaseMetricPolicy::CasReadComponentCalls,
             PhaseMetricPolicy::CasWriteComponentCalls,
             ZERO,
@@ -5800,6 +5834,33 @@ fn validate_buffered_calls(
     for (rung, (calls, bytes)) in calls.into_iter().zip(bytes).enumerate() {
         if bytes == 0 || calls == 0 {
             return Err(format!("{name} rung {rung} lacks paired buffered evidence"));
+        }
+        let minimum_calls = checked_ceil_div(name, bytes, max_bytes_per_call)?;
+        if calls < minimum_calls || calls > bytes {
+            return Err(format!(
+                "{name} rung {rung} violates buffered bounds {minimum_calls}..={bytes}: calls={calls}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Per-rung buffered bounds for a component that may do no I/O at all: a rung
+/// with no bytes has no calls, and a rung with bytes stays inside the
+/// `ceil(bytes / max_bytes_per_call)..=bytes` envelope. No monotonicity: what
+/// is read is whatever already existed.
+fn validate_buffered_calls_or_idle(
+    name: &str,
+    calls: [u64; 3],
+    bytes: [u64; 3],
+    max_bytes_per_call: u64,
+) -> Result<(), String> {
+    for (rung, (calls, bytes)) in calls.into_iter().zip(bytes).enumerate() {
+        if bytes == 0 {
+            if calls != 0 {
+                return Err(format!("{name} rung {rung} has calls without bytes"));
+            }
+            continue;
         }
         let minimum_calls = checked_ceil_div(name, bytes, max_bytes_per_call)?;
         if calls < minimum_calls || calls > bytes {
@@ -6511,6 +6572,37 @@ fn validate_lifecycle_metric_policies_for_axis(
                         validate_shape_block_inventory(&name, values[rung], observation, rung)?;
                     }
                 }
+                PhaseMetricPolicy::LinkedPayloadReadBytes => {
+                    for (rung, observation) in observations.iter().enumerate() {
+                        let payload = &observation.cas_publication_io.payload;
+                        let accounted = payload
+                            .installed_bytes
+                            .checked_add(payload.read_bytes)
+                            .ok_or_else(|| format!("{name} payload byte total overflows"))?;
+                        if accounted != observation.canonical_output_bytes {
+                            return Err(format!(
+                                "{name} payload installed plus authenticated bytes differ from the canonical output at rung {rung}: {accounted} vs {}",
+                                observation.canonical_output_bytes
+                            ));
+                        }
+                        // Only an object that already existed is read.
+                        if (payload.reused_objects == 0) != (payload.read_bytes == 0) {
+                            return Err(format!(
+                                "{name} payload reads do not match reused objects at rung {rung}"
+                            ));
+                        }
+                    }
+                }
+                PhaseMetricPolicy::LinkedPayloadWriteBytes => {
+                    for (rung, observation) in observations.iter().enumerate() {
+                        let payload = &observation.cas_publication_io.payload;
+                        if payload.write_bytes != 0 {
+                            return Err(format!(
+                                "{name} payload bytes were written by the object store at rung {rung}"
+                            ));
+                        }
+                    }
+                }
                 PhaseMetricPolicy::CasReadComponentCalls
                 | PhaseMetricPolicy::CasWriteComponentCalls => {
                     let read = policy == PhaseMetricPolicy::CasReadComponentCalls;
@@ -6530,12 +6622,21 @@ fn validate_lifecycle_metric_policies_for_axis(
                             payload.write_bytes
                         }
                     });
-                    validate_buffered_calls(
-                        &format!("{name}.payload"),
-                        payload_calls,
-                        payload_bytes,
-                        OBJECT_BUFFER_BYTES,
-                    )?;
+                    if cfg!(windows) {
+                        validate_buffered_calls(
+                            &format!("{name}.payload"),
+                            payload_calls,
+                            payload_bytes,
+                            OBJECT_BUFFER_BYTES,
+                        )?;
+                    } else {
+                        validate_buffered_calls_or_idle(
+                            &format!("{name}.payload"),
+                            payload_calls,
+                            payload_bytes,
+                            OBJECT_BUFFER_BYTES,
+                        )?;
+                    }
                     for observation in observations {
                         validate_fresh_cas_control_bound(observation)?;
                     }
@@ -6601,12 +6702,21 @@ fn validate_lifecycle_metric_policies_for_axis(
                                     "{name} {kind} installs nothing in a fresh publication at rung {rung}"
                                 ));
                             }
+                            // A linked payload (non-Windows) gets one file barrier
+                            // per attempt and one bucket barrier per request,
+                            // installed or reused. Copied bytes and manifest
+                            // nodes also retire a temporary: two per attempt.
+                            let linked = kind == "payload" && !cfg!(windows);
+                            let directory_barriers = if linked {
+                                Some(requests)
+                            } else {
+                                component.install_attempts.checked_mul(2)
+                            };
                             if component.install_attempts < component.installed_objects
                                 || component.install_attempts > requests
-                                || component.install_attempts.checked_mul(2)
-                                    != Some(component.directory_fsync_calls)
+                                || directory_barriers != Some(component.directory_fsync_calls)
                                 || component.file_fsync_calls < component.install_attempts
-                                || (kind == "manifest"
+                                || ((kind == "manifest" || linked)
                                     && component.file_fsync_calls != component.install_attempts)
                             {
                                 return Err(format!(
@@ -6888,15 +6998,19 @@ fn synthetic_linearity_observations_for_axis(
                 ),
                 (
                     "cas_install_read_write".into(),
-                    [
-                        119 + 900 * factor,
-                        100 + 800 * factor,
-                        19 * factor + 39,
-                        19 * factor + 1,
-                        0,
-                        0,
-                        60,
-                    ],
+                    if cfg!(windows) {
+                        [
+                            119 + 900 * factor,
+                            100 + 800 * factor,
+                            19 * factor + 39,
+                            19 * factor + 1,
+                            0,
+                            0,
+                            60,
+                        ]
+                    } else {
+                        [119, 100, 39, 1, 0, 0, 41]
+                    },
                 ),
                 ("hydration_verification".into(), {
                     // Only the small mutable controls are copied; the identity
@@ -6973,21 +7087,40 @@ fn synthetic_linearity_observations_for_axis(
             shape_merge_bytes: [100 + 900 * factor, 100 + 800 * factor],
             shape_block_components: [3 + factor, 3 + factor],
             canonical_artifact_objects: 19,
+            canonical_output_bytes: if cfg!(windows) {
+                900 * factor
+            } else {
+                800 * factor
+            },
             cas_publication_io: graphforge_storage::GraphPublicationIo {
                 publications: 1,
                 initial_entries: 0,
                 changed_paths: 19,
-                payload: graphforge_storage::GraphObjectIoTotals {
-                    read_bytes: 900 * factor,
-                    read_calls: 19 * factor,
-                    write_bytes: 800 * factor,
-                    write_calls: 19 * factor,
-                    file_fsync_calls: 19,
-                    directory_fsync_calls: 38,
-                    installed_objects: 19,
-                    install_attempts: 19,
-                    installed_bytes: 800 * factor,
-                    ..Default::default()
+                payload: if cfg!(windows) {
+                    // Copied: the source is read once and written once.
+                    graphforge_storage::GraphObjectIoTotals {
+                        read_bytes: 900 * factor,
+                        read_calls: 19 * factor,
+                        write_bytes: 800 * factor,
+                        write_calls: 19 * factor,
+                        file_fsync_calls: 19,
+                        directory_fsync_calls: 38,
+                        installed_objects: 19,
+                        install_attempts: 19,
+                        installed_bytes: 800 * factor,
+                        ..Default::default()
+                    }
+                } else {
+                    // Linked: nothing is read or written, one file barrier and
+                    // one bucket barrier per object.
+                    graphforge_storage::GraphObjectIoTotals {
+                        file_fsync_calls: 19,
+                        directory_fsync_calls: 19,
+                        installed_objects: 19,
+                        install_attempts: 19,
+                        installed_bytes: 800 * factor,
+                        ..Default::default()
+                    }
                 },
                 manifest: graphforge_storage::GraphObjectIoTotals {
                     read_bytes: 100,
@@ -7806,6 +7939,12 @@ fn cas_fsync_inventory_rejects_a_fresh_publication_that_installed_nothing() {
                 } else {
                     &mut observation.cas_publication_io.manifest
                 };
+                if kind == "payload" && !cfg!(windows) {
+                    // A reused object is authenticated by reading it, so the
+                    // mutation stays coherent with the byte conservation law.
+                    component.read_bytes += component.installed_bytes;
+                    component.read_calls += component.installed_objects;
+                }
                 component.reused_objects += component.installed_objects;
                 component.installed_objects = 0;
                 component.install_attempts = 0;
@@ -7829,6 +7968,47 @@ fn cas_fsync_inventory_rejects_a_fresh_publication_that_installed_nothing() {
                 "{axis:?} {kind}: {error}"
             );
         }
+    }
+}
+
+/// The linked-install invariant, proven by mutation. Re-introducing the copy
+/// (the object store writing payload bytes) or the read-back (authenticating
+/// objects it just installed) must fail even when the aggregate reconciles to
+/// its components, because the bytes are no longer accounted exactly once.
+#[test]
+#[cfg(not(windows))]
+fn linked_payload_policies_reject_a_reintroduced_copy_or_read_back() {
+    for axis in [LinearityAxis::Nodes, LinearityAxis::Edges] {
+        let baseline = synthetic_linearity_observations_for_axis(axis);
+        validate_lifecycle_metric_policies_for_axis(axis, &baseline).expect("linked baseline");
+        let mut copied = baseline.clone();
+        for observation in &mut copied {
+            let payload = &mut observation.cas_publication_io.payload;
+            payload.write_bytes = payload.installed_bytes;
+            payload.write_calls = payload.installed_objects;
+            reconcile_cas_phase_aggregate(observation);
+        }
+        let error = validate_lifecycle_metric_policies_for_axis(axis, &copied)
+            .expect_err("a copy of the payload must fail");
+        assert!(
+            error.contains("cas_install_read_write.write_bytes")
+                && error.contains("written by the object store"),
+            "{axis:?}: {error}"
+        );
+        let mut read_back = baseline.clone();
+        for observation in &mut read_back {
+            let payload = &mut observation.cas_publication_io.payload;
+            payload.read_bytes = payload.installed_bytes;
+            payload.read_calls = payload.installed_objects;
+            reconcile_cas_phase_aggregate(observation);
+        }
+        let error = validate_lifecycle_metric_policies_for_axis(axis, &read_back)
+            .expect_err("reading back what was just installed must fail");
+        assert!(
+            error.contains("cas_install_read_write.read_bytes")
+                && error.contains("differ from the canonical output"),
+            "{axis:?}: {error}"
+        );
     }
 }
 
