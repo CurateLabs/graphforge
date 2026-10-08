@@ -964,6 +964,23 @@ pub fn render_datetime_value(
     out
 }
 
+/// `datetime({epochSeconds | epochMillis, [nanosecond], [timezone]})`: the
+/// instant `seconds` + `nanos` after the Unix epoch, as local date-time in
+/// `timezone` (an offset or named IANA zone), or UTC when absent (#1887 D14).
+/// `None` when the instant or zone cannot be represented.
+#[must_use]
+pub fn datetime_from_epoch(
+    seconds: i64,
+    nanos: i64,
+    timezone: Option<&str>,
+) -> Option<DateTimeParts> {
+    const DAY_NANOS: i128 = 86_400_000_000_000;
+    let instant = i128::from(seconds) * 1_000_000_000 + i128::from(nanos);
+    let days = i64::try_from(instant.div_euclid(DAY_NANOS)).ok()?;
+    let nanos_of_day = i64::try_from(instant.rem_euclid(DAY_NANOS)).ok()?;
+    project_datetime(days, nanos_of_day, Some(0), None, timezone)
+}
+
 /// Project a `datetime` (`Temporal3` [8]-[11]): apply the source's zone to the
 /// local `(date, nanos)` after component overrides. With a new `timezone`: a
 /// numeric offset or named zone SHIFTS the instant when the source already had

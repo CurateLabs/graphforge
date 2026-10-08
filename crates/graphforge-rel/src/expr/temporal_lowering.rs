@@ -3,12 +3,13 @@
 //! Lowering state and dispatch remain in the parent; runtime semantics use existing adapters.
 
 use super::{
-    CYPHER_DATE_PROJECT, CYPHER_DATE_TRUNCATE, CYPHER_DATETIME_PROJECT, CYPHER_DATETIME_TRUNCATE,
-    CYPHER_DURATION_BETWEEN, CYPHER_DURATION_PARSE, CYPHER_LOCALDATETIME_PROJECT,
-    CYPHER_LOCALDATETIME_TRUNCATE, CYPHER_LOCALTIME_PROJECT, CYPHER_LOCALTIME_TRUNCATE,
-    CYPHER_TIME_PROJECT, CYPHER_TIME_TRUNCATE, DfExpr, ExprId, ExprLowerer, IrExpr, IrLiteral,
-    LoweringError, ScalarValue, date_scalar, datetime_scalar, duration_scalar, lit,
-    localdatetime_scalar, render_temporal, resolve_builtin, temporal_null_scalar, time_scalar,
+    CYPHER_DATE_PROJECT, CYPHER_DATE_TRUNCATE, CYPHER_DATETIME_FROM_EPOCH, CYPHER_DATETIME_PROJECT,
+    CYPHER_DATETIME_TRUNCATE, CYPHER_DURATION_BETWEEN, CYPHER_DURATION_PARSE,
+    CYPHER_LOCALDATETIME_PROJECT, CYPHER_LOCALDATETIME_TRUNCATE, CYPHER_LOCALTIME_PROJECT,
+    CYPHER_LOCALTIME_TRUNCATE, CYPHER_TIME_PROJECT, CYPHER_TIME_TRUNCATE, DfExpr, ExprId,
+    ExprLowerer, IrExpr, IrLiteral, LoweringError, ScalarValue, date_scalar, datetime_scalar,
+    duration_scalar, lit, localdatetime_scalar, render_temporal, resolve_builtin,
+    temporal_null_scalar, time_scalar,
 };
 
 impl ExprLowerer<'_> {
@@ -66,6 +67,12 @@ impl ExprLowerer<'_> {
         // `localdatetime()`/`datetime()` (#1007). `duration()` has no clock form.
         if args.is_empty() && name != "duration" {
             return Ok(self.lower_clock_now(name));
+        }
+        if let [arg] = args
+            && let IrExpr::MapLiteral(entries) = self.arena.get(*arg)
+            && let Some(epoch) = self.lower_temporal_map_admission(name, entries)?
+        {
+            return Ok(epoch);
         }
         if let [arg] = args {
             // `date` is a typed `Struct{epoch_day: Int64}` value (ADR 0009/0012). A
@@ -438,6 +445,103 @@ impl ExprLowerer<'_> {
             }
             _ => None,
         }
+    }
+
+    /// Admit a temporal constructor's map form. A key outside the
+    /// constructor's field set was silently ignored, so
+    /// `datetime({epochMillis: x})` returned the epoch (#1887 D14); unknown keys
+    /// are refused instead. Returns the lowered value for the epoch form of
+    /// `datetime`, which no other path handles, else `None`.
+    fn lower_temporal_map_admission(
+        &self,
+        name: &str,
+        entries: &[(String, ExprId)],
+    ) -> Result<Option<DfExpr>, LoweringError> {
+        if let Some((key, _)) = entries
+            .iter()
+            .find(|(key, _)| !temporal_map_key_allowed(name, key))
+        {
+            return Err(LoweringError::InvalidType(format!(
+                "{name}() does not accept the map key `{key}`"
+            )));
+        }
+        if name == "datetime"
+            && entries
+                .iter()
+                .any(|(key, _)| matches!(key.as_str(), "epochSeconds" | "epochMillis"))
+        {
+            return self.lower_datetime_from_epoch(entries).map(Some);
+        }
+        if let [(key, zone)] = entries
+            && key == "timezone"
+        {
+            return self.lower_clock_now_in_zone(name, *zone).map(Some);
+        }
+        Ok(None)
+    }
+
+    /// `<type>({timezone: z})`: the current value in zone `z`, from the same
+    /// `now` as the zero-argument clock forms. Without this the map form built
+    /// a value from no fields and returned midnight or the epoch.
+    fn lower_clock_now_in_zone(&self, name: &str, zone: ExprId) -> Result<DfExpr, LoweringError> {
+        let IrExpr::Literal(IrLiteral::Str(zone)) = self.arena.get(zone) else {
+            return Err(LoweringError::UnsupportedExpr(format!(
+                "{name}({{timezone: …}}) requires a literal time zone"
+            )));
+        };
+        let now = *self.now.get_or_init(|| chrono::Utc::now().naive_utc());
+        let utc = now.and_utc();
+        let (days, nanos, offset, label) = crate::temporal::datetime_from_epoch(
+            utc.timestamp(),
+            i64::from(utc.timestamp_subsec_nanos()),
+            Some(zone),
+        )
+        .ok_or_else(|| {
+            LoweringError::InvalidType(format!("{name}(): unknown time zone `{zone}`"))
+        })?;
+        Ok(lit(match name {
+            "date" => date_scalar(Some(days)),
+            "localtime" => ScalarValue::Time64Nanosecond(Some(nanos)),
+            "localdatetime" => localdatetime_scalar(Some((days, nanos))),
+            "time" => time_scalar(Some((nanos, offset))),
+            _ => datetime_scalar(Some((days, nanos, offset, label))),
+        }))
+    }
+
+    /// Lower `datetime({epochSeconds | epochMillis, [nanosecond], [timezone]})`
+    /// to a `cypher_datetime_from_epoch` call (constant-folded for literal
+    /// fields). An epoch instant fixes every date and time component, so it
+    /// combines only with a sub-second `nanosecond` and a display `timezone`.
+    fn lower_datetime_from_epoch(
+        &self,
+        entries: &[(String, ExprId)],
+    ) -> Result<DfExpr, LoweringError> {
+        let field = |name: &str| entries.iter().find(|(k, _)| k == name).map(|(_, v)| *v);
+        if let Some((key, _)) = entries.iter().find(|(key, _)| {
+            !matches!(
+                key.as_str(),
+                "epochSeconds" | "epochMillis" | "nanosecond" | "timezone"
+            )
+        }) {
+            return Err(LoweringError::InvalidType(format!(
+                "datetime() epoch fields cannot be combined with `{key}`"
+            )));
+        }
+        if field("epochSeconds").is_some() && field("epochMillis").is_some() {
+            return Err(LoweringError::InvalidType(
+                "datetime() accepts only one of `epochSeconds` and `epochMillis`".into(),
+            ));
+        }
+        let lower_or = |name: &str, default: ScalarValue| match field(name) {
+            Some(id) => self.lower(id),
+            None => Ok(DfExpr::Literal(default, None)),
+        };
+        Ok(CYPHER_DATETIME_FROM_EPOCH.call(vec![
+            lower_or("epochSeconds", ScalarValue::Int64(None))?,
+            lower_or("epochMillis", ScalarValue::Int64(None))?,
+            lower_or("nanosecond", ScalarValue::Int64(None))?,
+            lower_or("timezone", ScalarValue::Utf8(None))?,
+        ]))
     }
 
     /// Lower a runtime `datetime(<arg>)` to a `cypher_datetime_project` call
@@ -854,5 +958,60 @@ impl ExprLowerer<'_> {
             IrExpr::Literal(IrLiteral::Int(n)) => Some(*n),
             _ => None,
         }
+    }
+}
+
+const DATE_MAP_KEYS: &[&str] = &[
+    "year",
+    "month",
+    "day",
+    "week",
+    "dayOfWeek",
+    "ordinalDay",
+    "quarter",
+    "dayOfQuarter",
+];
+const TIME_MAP_KEYS: &[&str] = &[
+    "hour",
+    "minute",
+    "second",
+    "millisecond",
+    "microsecond",
+    "nanosecond",
+];
+const DURATION_MAP_KEYS: &[&str] = &[
+    "years",
+    "quarters",
+    "months",
+    "weeks",
+    "days",
+    "hours",
+    "minutes",
+    "seconds",
+    "milliseconds",
+    "microseconds",
+    "nanoseconds",
+];
+
+/// Whether `key` is a field of the `name` temporal constructor's map form.
+/// Every instant-like constructor accepts `timezone`; for the local types it
+/// names the zone whose current value `{timezone: …}` reads.
+fn temporal_map_key_allowed(name: &str, key: &str) -> bool {
+    let date = || key == "date" || DATE_MAP_KEYS.contains(&key);
+    let time = || key == "time" || TIME_MAP_KEYS.contains(&key);
+    let zone = || key == "timezone";
+    match name {
+        "date" => date() || zone(),
+        "localtime" | "time" => time() || zone(),
+        "localdatetime" => key == "datetime" || date() || time() || zone(),
+        "datetime" => {
+            key == "datetime"
+                || date()
+                || time()
+                || zone()
+                || matches!(key, "epochSeconds" | "epochMillis")
+        }
+        "duration" => DURATION_MAP_KEYS.contains(&key),
+        _ => true,
     }
 }

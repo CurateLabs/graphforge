@@ -5,9 +5,9 @@ use crate::expr::lower_literal;
 use crate::expr::{
     const_map_scalar, date_scalar, date_struct_value, datetime_scalar, datetime_struct_parts,
     decode_het_scalar, dur_secs_nanos, duration_scalar, duration_struct_parts,
-    duration_value_to_ir, is_date_struct, is_datetime_struct, is_duration_struct,
-    is_localdatetime_struct, is_time_struct, localdatetime_scalar, localdatetime_struct_parts,
-    time_scalar, time_struct_parts,
+    duration_value_to_ir, heterogeneous_list_scalar, is_date_struct, is_datetime_struct,
+    is_duration_struct, is_localdatetime_struct, is_time_struct, localdatetime_scalar,
+    localdatetime_struct_parts, time_scalar, time_struct_parts,
 };
 use datafusion::arrow::datatypes::DataType;
 use datafusion::scalar::ScalarValue;
@@ -20,9 +20,32 @@ use std::sync::Arc;
 /// The single source of truth for the IR-literal → Arrow-scalar mapping, used
 /// both for literal expression lowering ([`lower_literal`]) and for binding
 /// query parameters to placeholder values (`$param` injection, #584).
+///
+/// # Panics
+/// When `lit_val` holds a list no Arrow list value can represent (see
+/// [`try_ir_literal_to_scalar`]). Query parameters reach execution only after
+/// the facade has admitted them with [`try_ir_literal_to_scalar`], so this
+/// cannot fire for a public query.
 #[must_use]
 pub fn ir_literal_to_scalar(lit_val: &IrLiteral) -> ScalarValue {
-    match lit_val {
+    try_ir_literal_to_scalar(lit_val)
+        .expect("IR literal must be admitted with try_ir_literal_to_scalar before execution")
+}
+
+/// Convert an [`IrLiteral`] to a DataFusion [`ScalarValue`], refusing values
+/// with no Arrow representation instead of panicking.
+///
+/// A list whose elements share one Arrow type is a plain `List<T>`. A list of
+/// maps with differing keys, or with a `null` value where another map holds a
+/// typed one, is padded to one map shape; other mixed lists use the tagged
+/// heterogeneous encoding — the same folding an inline list literal gets
+/// (#1887 D10).
+///
+/// # Errors
+/// [`LoweringError::InvalidType`] for a list mixing element types that no list
+/// encoding holds together (for example a temporal value beside a number).
+pub fn try_ir_literal_to_scalar(lit_val: &IrLiteral) -> Result<ScalarValue, LoweringError> {
+    Ok(match lit_val {
         IrLiteral::Null => ScalarValue::Null,
         IrLiteral::Bool(b) => ScalarValue::Boolean(Some(*b)),
         IrLiteral::Int(n) => ScalarValue::Int64(Some(*n)),
@@ -56,7 +79,10 @@ pub fn ir_literal_to_scalar(lit_val: &IrLiteral) -> ScalarValue {
         // inner type is the first element's (re-typing untyped nulls to it so the
         // array stays homogeneous, as the list-literal lowering does). (#1006)
         IrLiteral::List(items) => {
-            let scalars: Vec<ScalarValue> = items.iter().map(ir_literal_to_scalar).collect();
+            let scalars = items
+                .iter()
+                .map(try_ir_literal_to_scalar)
+                .collect::<Result<Vec<_>, _>>()?;
             let elem_type = scalars
                 .iter()
                 .find(|s| !s.is_null())
@@ -71,16 +97,26 @@ pub fn ir_literal_to_scalar(lit_val: &IrLiteral) -> ScalarValue {
                     }
                 })
                 .collect();
-            ScalarValue::List(ScalarValue::new_list(&typed, &elem_type, true))
+            if typed.iter().all(|s| s.data_type() == elem_type) {
+                ScalarValue::List(ScalarValue::new_list(&typed, &elem_type, true))
+            } else {
+                heterogeneous_list_scalar(&scalars).ok_or_else(|| {
+                    LoweringError::InvalidType(
+                        "list value mixes element types that cannot be held in one list".into(),
+                    )
+                })?
+            }
         }
         IrLiteral::Map(entries) => {
-            let scalars: Vec<(String, ScalarValue)> = entries
+            let scalars = entries
                 .iter()
-                .map(|(key, value)| (key.clone(), ir_literal_to_scalar(value)))
-                .collect();
-            const_map_scalar(&scalars).expect("IR map literal should lower to an Arrow struct")
+                .map(|(key, value)| Ok((key.clone(), try_ir_literal_to_scalar(value)?)))
+                .collect::<Result<Vec<(String, ScalarValue)>, LoweringError>>()?;
+            const_map_scalar(&scalars).ok_or_else(|| {
+                LoweringError::InvalidType("map value cannot be represented as a struct".into())
+            })?
         }
-    }
+    })
 }
 
 pub(in crate::expr) fn spatial_scalar(value: &graphforge_core::SpatialValue) -> ScalarValue {

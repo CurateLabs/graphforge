@@ -48,6 +48,7 @@ pub(super) fn build_duration_map(f: &Fields) -> Option<DurationValue> {
     let mut any = false;
     for (key, factor_secs, into) in [
         ("years", YEAR_SECS, Unit::Month(12)),
+        ("quarters", MONTH_SECS * 3.0, Unit::Month(3)),
         ("months", MONTH_SECS, Unit::Month(1)),
         ("weeks", DAY_SECS * 7.0, Unit::Day(7)),
         ("days", DAY_SECS, Unit::Day(1)),

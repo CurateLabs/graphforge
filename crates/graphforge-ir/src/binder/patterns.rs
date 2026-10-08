@@ -42,8 +42,10 @@ impl Binder {
                 existential_depth: s.existential_depth,
                 standalone_call: false,
             };
+            // Relationship isomorphism spans every pattern of one MATCH.
+            let mut match_edges = Vec::new();
             for pat in &m.patterns {
-                self.lower_path_pattern(pat, &mut sub_state);
+                self.lower_match_path_pattern(pat, &mut match_edges, &mut sub_state);
             }
             if let Some(w) = &m.where_clause {
                 self.lower_where(w, &mut sub_state);
@@ -79,45 +81,19 @@ impl Binder {
             // values are a node-value-completeness follow-up (#889).
             s.errors.extend(sub_state.errors);
             s.warnings.extend(sub_state.warnings);
-            let mut child = sub_state.builder.build();
-            let referenced_vars = (0..child.exprs.len())
-                .filter_map(|index| {
-                    let index = u32::try_from(index).ok()?;
-                    match child.exprs.get(ExprId(index)) {
-                        IrExpr::VarRef(var) => Some(*var),
-                        _ => None,
-                    }
-                })
-                .collect::<HashSet<_>>();
-            let bound_vars = child
-                .ops
-                .iter()
-                .flat_map(graph_op_bound_vars)
-                .collect::<HashSet<_>>();
-            let mut correlated_scans = referenced_vars
-                .difference(&bound_vars)
-                .filter(|var| s.node_vars.contains_key(var))
-                .copied()
-                .collect::<Vec<_>>();
-            correlated_scans.sort_by_key(|var| var.0);
-            for var in correlated_scans.into_iter().rev() {
-                child.ops.insert(0, GraphOp::NodeScan { var, ty: None });
-            }
-            let mut correlated_edges = referenced_vars
-                .difference(&bound_vars)
-                .filter(|var| s.edge_rel_names.contains_key(var))
-                .copied()
-                .collect::<Vec<_>>();
-            correlated_edges.sort_by_key(|var| var.0);
-            for var in correlated_edges.into_iter().rev() {
-                child.ops.insert(0, GraphOp::EdgeScan { var, ty: None });
-            }
+            // Outer variables the child uses but its pattern does not bind
+            // (in its WHERE or a nested subquery) are not scanned here: the
+            // relational lowering seeds the child with the outer rows, so a
+            // null outer value is evaluated rather than dropped (#1887 D15).
+            let child = sub_state.builder.build();
             s.builder.push_op_mut(GraphOp::Optional {
                 child: Box::new(child),
             });
         } else {
+            // Relationship isomorphism spans every pattern of one MATCH.
+            let mut match_edges = Vec::new();
             for pat in &m.patterns {
-                self.lower_path_pattern(pat, s);
+                self.lower_match_path_pattern(pat, &mut match_edges, s);
             }
             if let Some(w) = &m.where_clause {
                 self.lower_where(w, s);
@@ -148,8 +124,24 @@ impl Binder {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
+    /// Lower one standalone path pattern (a pattern predicate, existential
+    /// subquery or pattern comprehension): its relationships are unique among
+    /// themselves only.
     fn lower_path_pattern(&self, pat: &PathPattern, s: &mut BinderState) {
+        self.lower_match_path_pattern(pat, &mut Vec::new(), s);
+    }
+
+    /// Lower one path pattern of a MATCH clause. `match_edges` carries the
+    /// relationship variables bound by the clause's earlier comma-separated
+    /// patterns: openCypher relationship isomorphism holds across the whole
+    /// clause, so every new relationship must differ from all of them (#1887).
+    #[allow(clippy::too_many_lines)]
+    fn lower_match_path_pattern(
+        &self,
+        pat: &PathPattern,
+        match_edges: &mut Vec<VarId>,
+        s: &mut BinderState,
+    ) {
         let mut prev_node_var: Option<VarId> = None;
         let mut iter = pat.elements.iter().peekable();
         // A node that follows a relationship IS that relationship's destination:
@@ -161,7 +153,6 @@ impl Binder {
         let mut pending_dst: Option<VarId> = None;
         let mut path_nodes: Vec<VarId> = Vec::new();
         let mut path_segments: Vec<PathSegment> = Vec::new();
-        let mut path_edges: Vec<VarId> = Vec::new();
 
         while let Some(elem) = iter.next() {
             match elem {
@@ -266,8 +257,8 @@ impl Binder {
                             .lower_relationship_type_predicate(edge_var, &rel.types, rel.span, s);
                         s.builder.push_op_mut(GraphOp::Filter { predicate });
                     }
-                    let prior_edges = path_edges.clone();
-                    if path_edges.contains(&edge_var) {
+                    let prior_edges = match_edges.clone();
+                    if match_edges.contains(&edge_var) {
                         s.errors.push(BindError::new(
                             BindErrorKind::InvalidArgument,
                             rel.span,
@@ -280,7 +271,7 @@ impl Binder {
                             prior_edges,
                         });
                     }
-                    path_edges.push(edge_var);
+                    match_edges.push(edge_var);
                     if bound_rel_type_conflict {
                         push_false_filter(s);
                     }
@@ -1648,16 +1639,6 @@ fn plan_references_any_var(plan: &GraphPlan, vars: &HashSet<VarId>) -> bool {
                 .any(|input| plan_references_any_var(input, vars)),
             _ => false,
         })
-}
-
-fn graph_op_bound_vars(op: &GraphOp) -> Vec<VarId> {
-    match op {
-        GraphOp::NodeScan { var, .. }
-        | GraphOp::EdgeScan { var, .. }
-        | GraphOp::TypedEdgeScan { var, .. } => vec![*var],
-        GraphOp::Expand { src, edge, dst, .. } => vec![*src, *edge, *dst],
-        _ => Vec::new(),
-    }
 }
 
 fn pattern_references_bound_var(pattern: &PathPattern, s: &BinderState) -> bool {

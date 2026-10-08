@@ -379,7 +379,8 @@ impl GraphForge {
     ) -> Result<ExecutionResult, GfError> {
         use graphforge_exec::ExecutionSession;
 
-        let plan = materialize_row_count_params(plan, params)?;
+        let mut plan = bind_plan_parameters(plan, params)?;
+        materialize_row_count_ops(&mut plan.ops, params)?;
 
         // Route every supported write shape through the clause-ordered statement driver.
         let write_ops = plan
@@ -640,6 +641,7 @@ impl GraphForge {
         };
         validate_call_params(&plan, params)?;
         validate_stream_read_only(&plan)?;
+        let plan = bind_plan_parameters(&plan, params)?;
 
         // Pin every generation-coupled session participant while publication is
         // excluded. `install_property_generation` replaces the authenticated
@@ -887,16 +889,75 @@ impl GraphForge {
     }
 }
 
-fn materialize_row_count_params(
+/// Bind the supplied `$name` values into an executable copy of `plan`.
+///
+/// Every parameter is first admitted as an Arrow value, so a value with no
+/// list representation is a typed error rather than a panic (#1887 D10).
+///
+/// Parameters stay DataFusion placeholders, typed when their values bind, so a
+/// type error that depends on a parameter's value is a runtime error, as
+/// openCypher requires. Two kinds of value are bound as literals before
+/// lowering instead:
+/// - temporal values (and lists or maps holding them) and maps: their
+///   accessors, arithmetic and comparisons have no SQL-native form and are
+///   chosen from the operand type while lowering, which a placeholder does not
+///   carry — `$d.year` and `$m.key` read null from a placeholder (#1887 D2);
+/// - every parameter of a plan that aggregates.
+///
+/// A parameter with no supplied value stays a placeholder and fails at plan time.
+fn bind_plan_parameters(
     plan: &GraphPlan,
     params: &HashMap<String, IrLiteral>,
 ) -> Result<GraphPlan, GfError> {
+    for (name, value) in params {
+        graphforge_rel::try_ir_literal_to_scalar(value).map_err(|error| {
+            GfError::Lowering(graphforge_core::LoweringError::InvalidType(format!(
+                "parameter ${name}: {}",
+                lowering_error_detail(&error)
+            )))
+        })?;
+    }
     let mut plan = plan.clone();
     if plan_contains_aggregate(&plan) {
-        plan.exprs.substitute_parameters(params);
+        substitute_plan_parameters(&mut plan, params);
+    } else {
+        let temporal = params
+            .iter()
+            .filter(|(_, value)| literal_needs_type_at_lowering(value))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect::<HashMap<_, _>>();
+        if !temporal.is_empty() {
+            substitute_plan_parameters(&mut plan, &temporal);
+        }
     }
-    materialize_row_count_ops(&mut plan.ops, params)?;
     Ok(plan)
+}
+
+fn literal_needs_type_at_lowering(value: &IrLiteral) -> bool {
+    matches!(value, IrLiteral::Map(_)) || literal_holds_temporal(value)
+}
+
+fn literal_holds_temporal(value: &IrLiteral) -> bool {
+    match value {
+        IrLiteral::Duration { .. }
+        | IrLiteral::DateTime(_)
+        | IrLiteral::Date(_)
+        | IrLiteral::LocalDateTime { .. }
+        | IrLiteral::Time(_)
+        | IrLiteral::ZonedTime { .. }
+        | IrLiteral::ZonedDateTime { .. } => true,
+        IrLiteral::List(items) => items.iter().any(literal_holds_temporal),
+        IrLiteral::Map(entries) => entries
+            .iter()
+            .any(|(_, value)| literal_holds_temporal(value)),
+        IrLiteral::Null
+        | IrLiteral::Bool(_)
+        | IrLiteral::Int(_)
+        | IrLiteral::Float(_)
+        | IrLiteral::Str(_)
+        | IrLiteral::Uuid(_)
+        | IrLiteral::Spatial(_) => false,
+    }
 }
 
 fn plan_contains_aggregate(plan: &GraphPlan) -> bool {
@@ -909,6 +970,37 @@ fn plan_contains_aggregate(plan: &GraphPlan) -> bool {
         GraphOp::Union { inputs, .. } => inputs.iter().any(plan_contains_aggregate),
         _ => false,
     })
+}
+
+fn lowering_error_detail(error: &graphforge_core::LoweringError) -> String {
+    match error {
+        graphforge_core::LoweringError::InvalidType(detail)
+        | graphforge_core::LoweringError::UnsupportedExpr(detail)
+        | graphforge_core::LoweringError::UnknownFunction(detail) => detail.clone(),
+        other @ graphforge_core::LoweringError::UnboundVar(_) => other.to_string(),
+    }
+}
+
+/// Substitute `params` into every expression arena of `plan`, including the
+/// child plans of OPTIONAL MATCH, subqueries, comprehensions and UNION arms.
+fn substitute_plan_parameters(plan: &mut GraphPlan, params: &HashMap<String, IrLiteral>) {
+    plan.exprs.substitute_parameters(params);
+    for op in &mut plan.ops {
+        match op {
+            GraphOp::Optional { child }
+            | GraphOp::Exists { child, .. }
+            | GraphOp::PatternComprehension { child, .. }
+            | GraphOp::ListElementPatternComprehension { child, .. } => {
+                substitute_plan_parameters(child, params);
+            }
+            GraphOp::Union { inputs, .. } => {
+                for input in inputs {
+                    substitute_plan_parameters(input, params);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn materialize_row_count_ops(

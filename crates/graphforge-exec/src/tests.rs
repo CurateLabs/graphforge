@@ -202,6 +202,7 @@ fn wave11_low_level_expand_and_optional_schema_guards_fail_closed() {
     let optional = OptionalConfig {
         join_keys: vec![(0, 0)],
         inner_keep_idx: vec![],
+        null_safe_keys: false,
         out_schema: short_schema.clone(),
         outer_schema: short_schema.clone(),
         inner_schema: short_schema,

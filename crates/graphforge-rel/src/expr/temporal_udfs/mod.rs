@@ -26,8 +26,8 @@ use duration::{
 };
 use graphforge_ir::expr::IrLiteral;
 pub(super) use project::{
-    CYPHER_DATE_PROJECT, CYPHER_DATETIME_PROJECT, CYPHER_LOCALDATETIME_PROJECT,
-    CYPHER_LOCALTIME_PROJECT, CYPHER_TIME_PROJECT,
+    CYPHER_DATE_PROJECT, CYPHER_DATETIME_FROM_EPOCH, CYPHER_DATETIME_PROJECT,
+    CYPHER_LOCALDATETIME_PROJECT, CYPHER_LOCALTIME_PROJECT, CYPHER_TIME_PROJECT,
 };
 #[cfg(test)]
 use project::{
@@ -63,6 +63,43 @@ fn cast_argument_arrays(
         .collect()
 }
 
+/// Field-metadata key marking the fields of a Cypher map whose keys and value
+/// types happen to match a temporal struct (`{epoch_day: 15340}` has the
+/// `date` shape). Temporal values never carry it, so a map is never mistaken
+/// for a temporal (#1887 D18).
+pub(in crate::expr) const CYPHER_MAP_FIELD: &str = "graphforge.cypher_map";
+
+fn is_cypher_map_fields(fields: &datafusion::arrow::datatypes::Fields) -> bool {
+    fields
+        .iter()
+        .any(|field| field.metadata().contains_key(CYPHER_MAP_FIELD))
+}
+
+/// For a map value of type `dt`: the same struct type with marked fields when
+/// its shape would otherwise read as a temporal, else `None`.
+pub(in crate::expr) fn cypher_map_type(dt: &DataType) -> Option<DataType> {
+    let DataType::Struct(fields) = dt else {
+        return None;
+    };
+    let temporal_shaped = is_date_struct(dt)
+        || is_localdatetime_struct(dt)
+        || is_duration_struct(dt)
+        || is_time_struct(dt)
+        || is_datetime_struct(dt);
+    temporal_shaped.then(|| {
+        DataType::Struct(
+            fields
+                .iter()
+                .map(|field| {
+                    let mut metadata = field.metadata().clone();
+                    metadata.insert(CYPHER_MAP_FIELD.to_owned(), "true".to_owned());
+                    field.as_ref().clone().with_metadata(metadata)
+                })
+                .collect(),
+        )
+    })
+}
+
 /// The Arrow fields of a standalone `date` value — `Struct{epoch_day: Int64}`
 /// (ADR 0012). A one-field struct (not a bare `Int64`) so a `date` is
 /// self-describing on storage decode — a plain integer property would be
@@ -77,7 +114,8 @@ pub(super) fn is_date_struct(dt: &DataType) -> bool {
     matches!(dt, DataType::Struct(fields)
         if fields.len() == 1
             && fields[0].name() == "epoch_day"
-            && *fields[0].data_type() == DataType::Int64)
+            && *fields[0].data_type() == DataType::Int64
+            && !is_cypher_map_fields(fields))
 }
 
 /// Build a standalone `date` struct array from per-row i64 epoch-days (`None` ⇒ a
@@ -139,7 +177,8 @@ pub(super) fn is_localdatetime_struct(dt: &DataType) -> bool {
             && fields[0].name() == "date"
             && *fields[0].data_type() == DataType::Int64
             && fields[1].name() == "time"
-            && *fields[1].data_type() == DataType::Time64(TimeUnit::Nanosecond))
+            && *fields[1].data_type() == DataType::Time64(TimeUnit::Nanosecond)
+            && !is_cypher_map_fields(fields))
 }
 
 /// Build a `localdatetime` struct array from per-row `(date_days, nanos_of_day)`
@@ -172,7 +211,8 @@ pub(super) fn is_duration_struct(dt: &DataType) -> bool {
             && fields[0].name() == "months"
             && fields[1].name() == "days"
             && fields[2].name() == "seconds"
-            && fields[3].name() == "nanos")
+            && fields[3].name() == "nanos"
+            && !is_cypher_map_fields(fields))
 }
 
 /// Whether a function name is a temporal clock accessor —
@@ -315,7 +355,8 @@ pub(super) fn is_time_struct(dt: &DataType) -> bool {
             && fields[0].name() == "time"
             && *fields[0].data_type() == DataType::Time64(TimeUnit::Nanosecond)
             && fields[1].name() == "offset"
-            && *fields[1].data_type() == DataType::Int32)
+            && *fields[1].data_type() == DataType::Int32
+            && !is_cypher_map_fields(fields))
 }
 
 /// Build a `time` struct array from per-row `(nanos_of_day, offset_seconds)`
@@ -377,7 +418,8 @@ pub(super) fn is_datetime_struct(dt: &DataType) -> bool {
             && fields[1].name() == "time"
             && *fields[1].data_type() == DataType::Time64(TimeUnit::Nanosecond)
             && fields[2].name() == "offset" && *fields[2].data_type() == DataType::Int32
-            && fields[3].name() == "zone" && *fields[3].data_type() == DataType::Utf8)
+            && fields[3].name() == "zone" && *fields[3].data_type() == DataType::Utf8
+            && !is_cypher_map_fields(fields))
 }
 
 /// Build a `datetime` struct array from per-row `(date_days, nanos_of_day,
@@ -388,12 +430,13 @@ fn build_datetime_struct(rows: &[DateTimeRow]) -> datafusion::arrow::array::Stru
     let days: Int64Array = rows.iter().map(|r| r.as_ref().map(|t| t.0)).collect();
     let nanos: Time64NanosecondArray = rows.iter().map(|r| r.as_ref().map(|t| t.1)).collect();
     let offset: Int32Array = rows.iter().map(|r| r.as_ref().map(|t| t.2)).collect();
-    // The zone field is empty (NOT null) when there is no named zone, so two
-    // offset-only datetimes compare equal — `cypher_struct_eq` propagates null,
-    // and a null=null field would make the whole equality null (Temporal7 [5]).
+    // An offset-only datetime has a NULL zone child, the encoding stored
+    // properties use, so computed and stored datetimes are one value under
+    // DISTINCT, grouping and joins (#1887 D11). Equality reads the zone through
+    // `datetime_struct_parts`, which treats an absent zone as a value.
     let zone: StringArray = rows
         .iter()
-        .map(|r| r.as_ref().map(|t| t.3.clone().unwrap_or_default()))
+        .map(|r| r.as_ref().and_then(|t| t.3.clone()))
         .collect();
     let nulls = rows.iter().map(Option::is_some).collect::<NullBuffer>();
     datafusion::arrow::array::StructArray::new(

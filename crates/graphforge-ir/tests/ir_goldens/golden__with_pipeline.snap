@@ -39,7 +39,7 @@ source: crates/graphforge-ir/tests/golden.rs
       "Project": {
         "items": [
           {
-            "expr": 6,
+            "expr": 7,
             "alias": "nm",
             "out_var": null
           }
@@ -87,6 +87,14 @@ source: crates/graphforge-ir/tests/golden.rs
       },
       {
         "VarRef": 1
+      },
+      {
+        "FunctionCall": {
+          "name": "_runtime_value",
+          "args": [
+            6
+          ]
+        }
       }
     ]
   }
