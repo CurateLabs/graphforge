@@ -630,7 +630,11 @@ def check_reference(
             checked += 1
             tally["checked"] += 1
             if sample.get("status") != "measured":
-                mismatches.append(_mismatch(key, "query_failed", str(sample.get("error_code"))))
+                mismatches.append(
+                    _mismatch(
+                        key, "query_failed", f"{sample.get('error_code')}: {sample.get('error')}"
+                    )
+                )
                 continue
             if key not in matched_keys:  # no written result: already result_missing
                 continue

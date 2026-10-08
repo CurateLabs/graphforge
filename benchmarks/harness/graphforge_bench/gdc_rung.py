@@ -109,6 +109,9 @@ BUILDER_MODULES = {
     "snb-interactive": "gdc_snb_scorecard",
     "finbench-transaction": "gdc_finbench_transaction_scorecard",
 }
+# The one declaration of the rung's memory envelope (the result schema pins the same
+# value): BenchExec's memory limit for every phase, and the second guard on a
+# phase's largest single-process peak RSS.
 MEMORY_LIMIT_BYTES = 4 * 1024**3
 CORES = 16
 SHARED_IDENTITY_KEYS = (
@@ -144,7 +147,13 @@ BenchExecRunner = Callable[[Path, GdcExecutables, Mapping[str, Any], Path], int]
 def host_benchexec(
     stage: Path, executables: GdcExecutables, identities: Mapping[str, Any], work_root: Path
 ) -> int:
-    """The host's BenchExec, through the progressive host run's own launcher."""
+    """The host's BenchExec, through the progressive host run's own launcher.
+
+    Every phase runs under the rung's declared memory envelope as BenchExec's own
+    memory limit (a cgroup `memory.max`), not the progressive ladder's 96 GB
+    ceiling. GraphForge's bulk builder reads the cgroup it runs in, so it plans a
+    build that fits the envelope.
+    """
     return _run_benchexec(
         stage,
         executables,
@@ -152,6 +161,7 @@ def host_benchexec(
         durable_root=work_root,
         home=work_root,
         rundefinition=DEFINITION,
+        memory_limit=f"{MEMORY_LIMIT_BYTES}B",
     )
 
 
@@ -421,7 +431,14 @@ def classify_phase(
     if measured.get("timed_out") or measured.get("termination_reason") == "walltime":
         return "rung_wall_exceeded", "BenchExec stopped the phase at the rung wall"
     if measured.get("termination_reason") == "memory":
-        return "memory_limit_exceeded", "BenchExec stopped the phase at its memory limit"
+        peaks = [f"BenchExec memory {measured.get('peak_rss_bytes')}"]
+        if telemetry is not None and telemetry.get("peak_rss_bytes"):
+            peaks.append(f"process peak RSS {telemetry['peak_rss_bytes']}")
+        return (
+            "memory_limit_exceeded",
+            f"BenchExec stopped the phase at its {MEMORY_LIMIT_BYTES} byte memory limit; "
+            + ", ".join(peaks),
+        )
     if measured.get("termination_reason") not in (None, ""):
         return "benchexec_failed", f"terminated: {measured.get('termination_reason')}"
     if telemetry is None:
@@ -435,10 +452,56 @@ def classify_phase(
     if peak > MEMORY_LIMIT_BYTES:
         return "memory_limit_exceeded", f"process peak RSS {peak} exceeds {MEMORY_LIMIT_BYTES}"
     if swapped:
-        return "host_swapped", "host swap counters rose during the phase"
+        return "host_swapped", "the host paged out during the phase"
     if benchexec is None or benchexec.get("outcome") != "passed":
         return "benchexec_failed", f"BenchExec outcome {benchexec and benchexec.get('outcome')}"
     return None
+
+
+def swapped_out(before: Mapping[str, int], after: Mapping[str, int]) -> bool:
+    """Whether the host paged anything out while the phase ran.
+
+    Only a rise in `pswpout` marks the phase as swap-exposed. Phase processes are
+    new, so any page of theirs that reaches swap goes out inside the window; a
+    `pswpin` rise with `pswpout` flat reads pages that left memory before the phase
+    began, which are some other process's. Measured on this host (#1914): a daemon
+    such as systemd-journald, woken by the scope BenchExec starts for every phase,
+    reads its cold pages back, so counting `pswpin` fails short phases at random.
+    """
+    return after["pswpout"] > before["pswpout"]
+
+
+def swap_detail(before: Mapping[str, int], after: Mapping[str, int]) -> str:
+    """What the host's swap counters did, so a `host_swapped` rung says what moved."""
+    return (
+        "host paged out during the phase: "
+        f"pswpout +{after['pswpout'] - before['pswpout']} "
+        f"({before['pswpout']} -> {after['pswpout']}), "
+        f"pswpin +{after['pswpin'] - before['pswpin']}; see host-swap.json"
+    )
+
+
+def describe_failed_samples(evidence: Mapping[str, Any]) -> str:
+    """Each distinct failed-sample error with its bindings, from the query evidence.
+
+    The driver's own exit message only counts the failures and points at a
+    workspace the teardown deletes; the per-sample error text is what diagnoses them.
+    """
+    grouped: dict[tuple[str, str, str], list[str]] = {}
+    for variant in evidence.get("variants", []):
+        for sample in variant.get("samples", []):
+            if sample.get("status") == "failed":
+                key = (
+                    str(variant.get("query_id")),
+                    str(sample.get("error_code")),
+                    str(sample.get("error")),
+                )
+                grouped.setdefault(key, []).append(str(sample.get("binding_id")))
+    parts = [
+        f"{query_id} ({', '.join(bindings)}): {code}: {message}"
+        for (query_id, code, message), bindings in grouped.items()
+    ]
+    return "; ".join(parts)[:2048]
 
 
 def run_phase(rung: Rung, name: str, task: dict[str, Any], wall_seconds: int) -> PhaseRun:
@@ -450,8 +513,15 @@ def run_phase(rung: Rung, name: str, task: dict[str, Any], wall_seconds: int) ->
         swap_before = _host_swap_counters()
         status = ladder.benchexec(stage, ladder.executables, ladder.identities, ladder.work_root)
         swap_after = _host_swap_counters()
-        swapped = any(swap_after[key] > value for key, value in swap_before.items())
+        swapped = swapped_out(swap_before, swap_after)
         raw = stage / "raw"
+        if swapped and raw.is_dir():
+            # Retain the counters beside the failed raw output (#1727), even when a
+            # known phase failure stays the primary cause: they record the interference.
+            (raw / "host-swap.json").write_text(
+                json.dumps({"before": swap_before, "after": swap_after}, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
         telemetry = _phase_telemetry(raw) if raw.is_dir() else None
         measured: dict[str, Any] | None
         try:
@@ -470,6 +540,8 @@ def run_phase(rung: Rung, name: str, task: dict[str, Any], wall_seconds: int) ->
             except (EvidenceError, RungInputError) as error:
                 document, invalid = None, str(error)
         cause = classify_phase(measured, telemetry, document, swapped=swapped)
+        if cause is not None and cause[0] == "host_swapped":
+            cause = (cause[0], swap_detail(swap_before, swap_after))
         if invalid is not None:
             cause = ("benchexec_evidence_invalid", invalid)
         elif cause is None and status != 0:
@@ -715,6 +787,8 @@ def _execute(rung: Rung) -> None:
         rung.fail("query", "query_evidence_missing", str(error))
         return
     rung.publish("query-evidence", evidence)
+    if query.failure is not None and (described := describe_failed_samples(evidence)):
+        query.failure["detail"] = described
     try:
         assert_query_latency_authority(evidence)
     except GdcMeasurementBoundaryError as error:
