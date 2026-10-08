@@ -218,19 +218,6 @@ fn encoded_inventory_version_precedes_required_checksums_and_current_wire_is_str
         shape_inputs_sha256: "b".repeat(64),
         shape_authority_sha256: "c".repeat(64),
         artifacts: vec![artifact],
-        retained_artifacts: vec![ConstructionRetainedArtifact {
-            source_root: "parent".into(),
-            source_root_volume: 1,
-            source_root_file_id: "0".repeat(32),
-            source_path: "object".into(),
-            source_volume: 1,
-            source_file_id: "0".repeat(32),
-            target_path: "target".into(),
-            bytes: 2,
-            sha256: "d".repeat(64),
-            xxh64: crate::corruption_checksum::checksum(b"{}"),
-            parent_manifest_sha256: "e".repeat(64),
-        }],
         evidence: GraphConstructionEncodingEvidence::default(),
         invocation: GraphConstructionEncodingInvocationEvidence::default(),
     };
@@ -255,7 +242,7 @@ fn encoded_inventory_version_precedes_required_checksums_and_current_wire_is_str
             "{error}"
         );
     }
-    for collection in ["artifacts", "retained_artifacts"] {
+    for collection in ["artifacts"] {
         for invalid in [
             None,
             Some(""),

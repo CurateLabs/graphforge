@@ -75,7 +75,7 @@ impl GraphConstructionSession {
         {
             return Err(storage("supersession private authority changed"));
         }
-        let _retained_successor_leases = if self.has_encoding_successor() {
+        if self.has_encoding_successor() {
             let output = self
                 .root
                 .open_child_directory(OsStr::new("encoded-v1"))
@@ -108,7 +108,6 @@ impl GraphConstructionSession {
                 &self.checkpoint.evidence,
                 cancelled,
             )?;
-            self.authenticate_retained_successors(&inventory, cancelled)?
         } else {
             // The shape manifest is the successor authority here. Its retained
             // payloads were verified at the replay/recovery boundary by
@@ -121,8 +120,7 @@ impl GraphConstructionSession {
             for receipt in read_completed_shape_outputs(&self.root, &self.checkpoint)? {
                 authenticate_retained_identity(&self.root, &receipt)?;
             }
-            None
-        };
+        }
 
         // Authenticate the complete immutable receipt chain BEFORE any removal.
         let mut previous = None;
@@ -230,97 +228,6 @@ impl GraphConstructionSession {
         Ok(())
     }
 
-    fn authenticate_retained_successors(
-        &mut self,
-        encoding: &GraphConstructionEncoding,
-        cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<
-        Option<(
-            crate::ResolvedProjectGeneration,
-            crate::graph_object_store::GraphObjectReadLease,
-        )>,
-        GfError,
-    > {
-        if encoding.retained_artifacts.is_empty() {
-            if encoding.evidence.retained_index_runs != 0 {
-                return Err(storage("retained-index evidence lacks references"));
-            }
-            return Ok(None);
-        }
-        let parent = crate::resolve_generation_by_uuid(
-            &self.project_path,
-            self.checkpoint.parent_generation_uuid,
-        )?;
-        if hex(&parent.manifest_sha256()) != self.checkpoint.parent_generation_manifest_sha256 {
-            return Err(storage("supersession parent manifest changed"));
-        }
-        let lease = crate::graph_object_store::begin_graph_object_read(&self.project_path)?;
-        let (inventory, work) = compact_parent_inventory(&parent)?;
-        self.record_supersession_reads(work.bytes, work.operations)?;
-        let inventory =
-            inventory.ok_or_else(|| storage("supersession compact parent is absent"))?;
-        let manifest = inventory
-            .files
-            .iter()
-            .find(|entry| entry.relative_path == "topology/uuid-membership/manifest.json")
-            .ok_or_else(|| storage("supersession parent UUID manifest is absent"))?;
-        let (_manifest, work, released) = lease.open_for_construction(
-            &manifest.content_sha256,
-            manifest.byte_length,
-            manifest.content_xxh64,
-            cancelled,
-        )?;
-        self.record_supersession_reads(work.read_bytes, work.read_calls)?;
-        account_cache_release(released, &mut self.checkpoint.evidence)?;
-        let mut previous = None;
-        for retained in &encoding.retained_artifacts {
-            if previous.is_some_and(|name: &str| name >= retained.target_path.as_str())
-                || !retained
-                    .target_path
-                    .starts_with("topology/uuid-membership/")
-                || retained.source_root != self.project_path.to_string_lossy()
-                || retained.source_root_volume != self.project.identity().volume_serial
-                || retained.source_root_file_id != hex(&self.project.identity().file_id)
-                || retained.parent_manifest_sha256 != manifest.content_sha256
-            {
-                return Err(storage("supersession retained parent authority changed"));
-            }
-            previous = Some(retained.target_path.as_str());
-            let entry = inventory
-                .files
-                .iter()
-                .find(|entry| entry.relative_path == retained.target_path)
-                .ok_or_else(|| storage("supersession retained parent artifact is absent"))?;
-            let source = crate::graph_object_path(&self.project_path, &entry.content_sha256)?;
-            if entry.content_sha256 != retained.sha256
-                || entry.content_xxh64 != retained.xxh64
-                || entry.byte_length != retained.bytes
-                || source
-                    .strip_prefix(&self.project_path)
-                    .map_err(storage)?
-                    .to_string_lossy()
-                    != retained.source_path
-            {
-                return Err(storage("supersession retained parent artifact changed"));
-            }
-            let (file, work, released) = lease.open_for_construction(
-                &entry.content_sha256,
-                entry.byte_length,
-                entry.content_xxh64,
-                cancelled,
-            )?;
-            let identity = file_identity(file.as_ref()).map_err(storage)?;
-            if identity.volume_serial != retained.source_volume
-                || hex(&identity.file_id) != retained.source_file_id
-            {
-                return Err(storage("supersession retained parent identity changed"));
-            }
-            self.record_supersession_reads(work.read_bytes, work.read_calls)?;
-            account_cache_release(released, &mut self.checkpoint.evidence)?;
-        }
-        Ok(Some((parent, lease)))
-    }
-
     fn checkpoint_supersession(&mut self) -> Result<(), GfError> {
         let mut next = self.checkpoint.clone();
         next.evidence.recovery_checkpoint_fsync_operations = next
@@ -330,24 +237,6 @@ impl GraphConstructionSession {
             .ok_or_else(|| storage("supersession checkpoint synchronization count overflow"))?;
         replace_checkpoint_control(&self.root, &mut next)?;
         self.checkpoint = next;
-        Ok(())
-    }
-
-    fn record_supersession_reads(&mut self, bytes: u64, operations: u64) -> Result<(), GfError> {
-        self.checkpoint.evidence.recovery_application_read_bytes = self
-            .checkpoint
-            .evidence
-            .recovery_application_read_bytes
-            .checked_add(bytes)
-            .ok_or_else(|| storage("supersession read bytes overflow"))?;
-        self.checkpoint
-            .evidence
-            .recovery_application_read_operations = self
-            .checkpoint
-            .evidence
-            .recovery_application_read_operations
-            .checked_add(operations)
-            .ok_or_else(|| storage("supersession read operations overflow"))?;
         Ok(())
     }
 

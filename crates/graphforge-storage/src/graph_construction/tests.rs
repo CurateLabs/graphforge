@@ -891,22 +891,17 @@ fn publication_crash_after_current_finalizes_same_target_on_reopen() {
     let graph = materialized.path().join("graph");
     std::fs::create_dir(&graph).unwrap();
     crate::materialize_graph_objects(root.path(), &inventory, &graph).unwrap();
-    let uuid_index = crate::UuidMembershipIndex::open(&graph).unwrap();
+    let uuid_index = crate::TopologyIdentityProbe::open_dir(&graph).unwrap();
     assert_eq!(uuid_index.count(crate::UuidIndexKind::Node), 2);
 }
 
 #[test]
-fn uuid_encoding_crashes_recover_every_durable_boundary() {
+fn ordinal_encoding_crashes_recover_every_durable_boundary() {
     for failpoint in [
         "encode.parquet.after_temp_fsync.topology/nodes/00000000000000000001-00000000000000000008.parquet",
         "encode.parquet.after_install.topology/nodes/00000000000000000001-00000000000000000008.parquet",
         "encode.copy.after_temp_fsync.topology/runtime_catalog.parquet",
         "encode.copy.after_install.topology/runtime_catalog.parquet",
-        "uuid_encode.after_intent",
-        "uuid_encode.after_temps",
-        "uuid_encode.after_delta_runs",
-        "uuid_encode.after_manifest",
-        "uuid_encode.after_intent_removal",
         "v4_publish.after_artifacts",
         "v4_publish.after_artifacts_fsync",
         "v4_publish.after_receipt_temp_fsync",
@@ -943,7 +938,11 @@ fn uuid_encoding_crashes_recover_every_durable_boundary() {
         .unwrap();
         let shape = resumed.shape_canonical_with_cancellation(|| false).unwrap();
         let encoded = resumed.encode_canonical(&shape, 1).unwrap();
-        assert_eq!(encoded.evidence.membership_records, 8, "{failpoint}");
+        assert_eq!(
+            encoded.evidence.ordinal_records + encoded.evidence.edge_records,
+            8,
+            "{failpoint}"
+        );
         let membership = root
             .path()
             .join(PRIVATE_ROOT)
@@ -1048,7 +1047,10 @@ fn over_bound_encoded_inventory_is_refused_before_pinning_and_resumes() {
         resumed.checkpoint.encoding_inventory_sha256,
         Some(crate::graph_construction_encoding::inventory_authority_sha256(&encoding).unwrap())
     );
-    assert_eq!(encoding.evidence.membership_records, 8);
+    assert_eq!(
+        encoding.evidence.ordinal_records + encoding.evidence.edge_records,
+        8
+    );
     drop(resumed);
 
     let encoded = StableDirectory::open(&encoded_root).unwrap();
@@ -1106,7 +1108,7 @@ fn over_bound_encoded_inventory_is_refused_before_pinning_and_resumes() {
         assert_eq!(io.read_bytes, inventory_bytes);
     }
     let mut changed = encoding.clone();
-    changed.evidence.membership_records += 1;
+    changed.evidence.edge_records += 1;
     let error = open()
         .reclaim_superseded_payloads_with_successor(Some(&changed), &mut || false)
         .unwrap_err();

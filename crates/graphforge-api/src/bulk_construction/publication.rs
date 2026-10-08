@@ -4,8 +4,8 @@ use super::{
     Arc, BTreeSet, BulkEdgePublicationError, BulkEdgeRow, BulkInputKind, BulkNodePublicationError,
     BulkNodeRow, BulkValidationReason, DataType, Digest, Field, FixedSizeBinaryArray, GraphForge,
     HashMap, OperationId, RecordBatch, Schema, SchemaRef, Sha256, StringArray, UInt64Array, Uuid,
-    ValidatedBulkNodes, contract_metadata, indexed_existing, open_membership_index,
-    register_existing_endpoints, row_error,
+    ValidatedBulkNodes, contract_metadata, open_identity_probe, register_existing_endpoints,
+    row_error, taken_identities,
 };
 
 fn bulk_node_generation_uuid(operation_uuid: OperationId, rows: &[BulkNodeRow]) -> Uuid {
@@ -221,19 +221,8 @@ impl GraphForge {
         let mut candidates = normalized.identities().collect::<Vec<_>>();
         candidates.sort_unstable();
         candidates.dedup();
-        let mut index = open_membership_index(self, BulkInputKind::Node)?;
-        let mut existing = indexed_existing(
-            index.as_mut(),
-            &candidates,
-            graphforge_storage::UuidIndexKind::Node,
-            BulkInputKind::Node,
-        )?;
-        existing.extend(indexed_existing(
-            index.as_mut(),
-            &candidates,
-            graphforge_storage::UuidIndexKind::Edge,
-            BulkInputKind::Node,
-        )?);
+        let mut probe = open_identity_probe(self, BulkInputKind::Node)?;
+        let existing = taken_identities(probe.as_mut(), &candidates, BulkInputKind::Node)?;
         if normalized
             .rows
             .iter()
@@ -408,19 +397,8 @@ impl GraphForge {
             .collect::<Vec<_>>();
         candidates.sort_unstable();
         candidates.dedup();
-        let mut index = open_membership_index(self, BulkInputKind::Edge)?;
-        let mut existing = indexed_existing(
-            index.as_mut(),
-            &candidates,
-            graphforge_storage::UuidIndexKind::Edge,
-            BulkInputKind::Edge,
-        )?;
-        existing.extend(indexed_existing(
-            index.as_mut(),
-            &candidates,
-            graphforge_storage::UuidIndexKind::Node,
-            BulkInputKind::Edge,
-        )?);
+        let mut probe = open_identity_probe(self, BulkInputKind::Edge)?;
+        let existing = taken_identities(probe.as_mut(), &candidates, BulkInputKind::Edge)?;
         if let Some(row) = normalized
             .rows
             .iter()
@@ -457,7 +435,7 @@ impl GraphForge {
             .iter()
             .flat_map(|row| [row.source_uuid, row.target_uuid])
             .collect::<BTreeSet<_>>();
-        register_existing_endpoints(&mut writer, &self.dir(), &endpoints)?;
+        register_existing_endpoints(&mut writer, &endpoints)?;
         for row in &normalized.rows {
             next_catalog.intern_relation_type(&row.rel_type)?;
             writer.create_edge(

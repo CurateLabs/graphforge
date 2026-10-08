@@ -1,23 +1,15 @@
 //! Authenticated identity authority and orphan maintenance.
 
 use super::INDEX_DIR;
-use super::MANIFEST;
-use super::MAX_MANIFEST_BYTES;
-use super::Manifest;
-use super::TOPOLOGY_RECEIPT;
 use super::TopologyIndexReceipt;
 use super::UuidIndexOrphanGcWork;
 use super::V4_ORDINAL_MANIFEST;
 use super::V4_ORDINAL_RECEIPT;
-use super::decode_manifest;
 use super::storage_err;
 use super::topology_delta::hex_sha256;
 use super::topology_delta::read_bounded;
-use super::validate_run_descriptors;
 use graphforge_core::GfError;
 use std::collections::BTreeSet;
-#[cfg(test)]
-use std::fs;
 use std::path::Path;
 
 /// Reclaim a bounded number of unreachable immutable UUID runs under the
@@ -32,84 +24,11 @@ pub fn maintain_uuid_membership_orphans(
         .map(crate::ResolvedProjectGeneration::authenticated_v4_ordinal_authority)
         .transpose()?
         .flatten();
-    let membership_authority = selected
-        .as_ref()
-        .map(authenticated_v3_membership_authority)
-        .transpose()?
-        .flatten();
     maintain_uuid_membership_orphans_with_authorities(
         project_dir,
         maximum,
-        membership_authority.as_ref(),
         ordinal_authority.as_ref(),
     )
-}
-
-#[derive(Clone, Debug)]
-pub(super) struct AuthenticatedV3MembershipAuthority {
-    topology_generation: u64,
-    manifest_sha256: String,
-}
-
-pub(super) fn authenticated_v3_membership_authority(
-    selected: &crate::ResolvedProjectGeneration,
-) -> Result<Option<AuthenticatedV3MembershipAuthority>, GfError> {
-    let mut state = crate::graph_manifest::GraphManifestTargetedState::default();
-    let receipt = selected.authenticated_graph_file_bytes_with_state(
-        &format!("{INDEX_DIR}/{TOPOLOGY_RECEIPT}"),
-        MAX_MANIFEST_BYTES,
-        Some(&mut state),
-    )?;
-    let manifest = selected.authenticated_graph_file_bytes_with_state(
-        &format!("{INDEX_DIR}/{MANIFEST}"),
-        MAX_MANIFEST_BYTES,
-        Some(&mut state),
-    )?;
-    match (receipt, manifest) {
-        (None, None) => Ok(None),
-        (None, Some(_)) | (Some(_), None) => Err(storage_err(
-            "selected UUID membership facet has incomplete authority residue",
-        )),
-        (Some((_, receipt_bytes)), Some((manifest_entry, manifest_bytes))) => {
-            let receipt: TopologyIndexReceipt =
-                serde_json::from_slice(&receipt_bytes).map_err(storage_err)?;
-            let generation = selected
-                .authenticated_graph_file_bytes_with_state(
-                    "topology/generation.json",
-                    MAX_MANIFEST_BYTES,
-                    Some(&mut state),
-                )?
-                .ok_or_else(|| storage_err("selected topology generation authority is absent"))?;
-            let generation: serde_json::Value =
-                serde_json::from_slice(&generation.1).map_err(storage_err)?;
-            let topology_generation = generation
-                .get("topology_generation")
-                .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| storage_err("selected topology generation is missing"))?;
-            let manifest_sha256 = hex_sha256(&manifest_bytes);
-            let canonical_hex = |value: &str, length: usize| {
-                value.len() == length
-                    && value
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-            };
-            if !canonical_hex(&receipt.nonce, 32)
-                || !canonical_hex(&receipt.topology_delta_sha256, 64)
-                || !canonical_hex(&receipt.manifest_sha256, 64)
-                || receipt.expected_generation != topology_generation
-                || receipt.manifest_sha256 != manifest_entry.content_sha256
-                || receipt.manifest_sha256 != manifest_sha256
-            {
-                return Err(storage_err(
-                    "selected UUID membership receipt does not authenticate its manifest",
-                ));
-            }
-            Ok(Some(AuthenticatedV3MembershipAuthority {
-                topology_generation,
-                manifest_sha256,
-            }))
-        }
-    }
 }
 
 /// Retain the selected project generation whenever `graph_root` is its
@@ -220,35 +139,16 @@ pub(crate) fn maintain_uuid_membership_orphans_with_ordinal_authority(
     maximum: usize,
     ordinal_authority: Option<&crate::AuthenticatedV4OrdinalIdentityAuthority>,
 ) -> Result<UuidIndexOrphanGcWork, GfError> {
-    let manifest_bytes =
-        fs::read(project_dir.join(INDEX_DIR).join(MANIFEST)).map_err(storage_err)?;
-    let manifest = decode_manifest(&manifest_bytes)?;
-    let membership_authority = AuthenticatedV3MembershipAuthority {
-        topology_generation: manifest.current_generation,
-        manifest_sha256: hex_sha256(&manifest_bytes),
-    };
-    maintain_uuid_membership_orphans_with_authorities(
-        project_dir,
-        maximum,
-        Some(&membership_authority),
-        ordinal_authority,
-    )
+    maintain_uuid_membership_orphans_with_authorities(project_dir, maximum, ordinal_authority)
 }
 
 fn maintain_uuid_membership_orphans_with_authorities(
     project_dir: &Path,
     maximum: usize,
-    membership_authority: Option<&AuthenticatedV3MembershipAuthority>,
     ordinal_authority: Option<&crate::AuthenticatedV4OrdinalIdentityAuthority>,
 ) -> Result<UuidIndexOrphanGcWork, GfError> {
     crate::durable_rewrite::with_rewrite_lock(project_dir, |project| {
-        collect_uuid_orphans_locked(
-            project,
-            project_dir,
-            maximum,
-            membership_authority,
-            ordinal_authority,
-        )
+        collect_uuid_orphans_locked(project, project_dir, maximum, ordinal_authority)
     })
 }
 
@@ -256,7 +156,6 @@ pub(super) fn collect_uuid_orphans_locked(
     project: &graphforge_filesystem::StableDirectory,
     project_root: &Path,
     maximum: usize,
-    membership_authority: Option<&AuthenticatedV3MembershipAuthority>,
     ordinal_authority: Option<&crate::AuthenticatedV4OrdinalIdentityAuthority>,
 ) -> Result<UuidIndexOrphanGcWork, GfError> {
     let topology = match project.open_child_directory(std::ffi::OsStr::new("topology")) {
@@ -273,30 +172,9 @@ pub(super) fn collect_uuid_orphans_locked(
         }
         Err(error) => return Err(storage_err(error)),
     };
-    let mut manifest_file = index
-        .open_child_file(std::ffi::OsStr::new(MANIFEST))
-        .map_err(storage_err)?;
-    let manifest_bytes = read_bounded(&mut manifest_file, MAX_MANIFEST_BYTES)?;
-    let membership_authority = membership_authority.ok_or_else(|| {
-        storage_err("UUID membership orphan maintenance requires selected generation authority")
-    })?;
-    if hex_sha256(&manifest_bytes) != membership_authority.manifest_sha256 {
-        return Err(storage_err(
-            "UUID membership manifest differs from selected generation authority",
-        ));
-    }
-    let manifest = decode_manifest(&manifest_bytes)?;
-    if manifest.current_generation != membership_authority.topology_generation {
-        return Err(storage_err(
-            "UUID membership generation differs from selected generation authority",
-        ));
-    }
-    validate_run_descriptors(&manifest)?;
-    let mut referenced = manifest_file_names(&manifest);
-    referenced.extend(authenticated_v4_references(
-        project_root,
-        ordinal_authority,
-    )?);
+    // Legacy membership runs (`identities-v5-*`, `node-surrogates-v5-*`) are
+    // not authority any more; they are never candidates for collection.
+    let referenced = authenticated_v4_references(project_root, ordinal_authority)?;
     let mut names = index.child_names().map_err(storage_err)?;
     names.sort();
     let mut work = UuidIndexOrphanGcWork::default();
@@ -393,15 +271,11 @@ fn is_canonical_run_name(name: &str) -> bool {
         return false;
     };
     let is_v4 = is_canonical_v4_artifact_prefix(prefix);
-    ((prefix.starts_with("identities-v5") || prefix.starts_with("node-surrogates-v5")) || is_v4)
+    is_v4
         && digest.len() == 16
-        && if is_v4 {
-            digest
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-        } else {
-            digest.bytes().all(|byte| byte.is_ascii_hexdigit())
-        }
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn is_canonical_v4_artifact_prefix(prefix: &str) -> bool {
@@ -410,41 +284,6 @@ fn is_canonical_v4_artifact_prefix(prefix: &str) -> bool {
     };
     matches!(kind, "forward-v4" | "ordinal-v4" | "tombstones-v4")
         && generation.parse::<u64>().is_ok_and(|value| value != 0)
-}
-
-pub(super) fn manifest_file_names(manifest: &Manifest) -> BTreeSet<String> {
-    manifest
-        .runs
-        .iter()
-        .flat_map(|run| {
-            [
-                run.identities.name.clone(),
-                run.node_surrogates.name.clone(),
-            ]
-        })
-        .collect()
-}
-
-#[cfg(test)]
-pub(super) fn cleanup_superseded_files(
-    root: &Path,
-    prior: BTreeSet<String>,
-    manifest: &Manifest,
-) -> Result<(), GfError> {
-    let retained = manifest_file_names(manifest);
-    let directory = graphforge_filesystem::StableDirectory::open(root).map_err(storage_err)?;
-    let mut retirement =
-        crate::durable_commit::RetirementBatch::new(&directory).map_err(storage_err)?;
-    for name in prior.difference(&retained) {
-        let file = directory
-            .open_child_file(std::ffi::OsStr::new(name))
-            .map_err(storage_err)?;
-        let identity = graphforge_filesystem::file_identity(&file).map_err(storage_err)?;
-        retirement
-            .unlink(std::ffi::OsStr::new(name), identity)
-            .map_err(storage_err)?;
-    }
-    retirement.acknowledge().map_err(storage_err)
 }
 
 #[cfg(test)]

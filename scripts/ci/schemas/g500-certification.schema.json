@@ -715,13 +715,11 @@
         "canonical_artifact_objects",
         "encode_output_fsync_operations",
         "encode_source_spool_fsync_operations",
-        "encode_membership_fsync_operations",
         "encode_ordinal_fsync_operations",
         "hydration_files_copied",
         "hydration_file_fsync_operations",
         "hydration_directory_fsync_operations",
         "encode_output_write_operations",
-        "encode_membership_write_operations",
         "encode_source_spool_write_operations",
         "encode_ordinal_artifact_write_operations",
         "encode_ordinal_publication_write_operations",
@@ -1012,9 +1010,6 @@
         "encode_source_spool_fsync_operations": {
           "$ref": "#/$defs/nonNegative"
         },
-        "encode_membership_fsync_operations": {
-          "$ref": "#/$defs/nonNegative"
-        },
         "encode_ordinal_fsync_operations": {
           "$ref": "#/$defs/nonNegative"
         },
@@ -1028,9 +1023,6 @@
           "$ref": "#/$defs/nonNegative"
         },
         "encode_output_write_operations": {
-          "$ref": "#/$defs/nonNegative"
-        },
-        "encode_membership_write_operations": {
           "$ref": "#/$defs/nonNegative"
         },
         "encode_source_spool_write_operations": {

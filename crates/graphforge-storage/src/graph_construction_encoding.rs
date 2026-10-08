@@ -48,9 +48,7 @@ use crate::property_overlay::{
 use crate::schemas::{
     TOPOLOGY_NODES_SCHEMA, TYPED_EDGE_SCHEMA, uuid_field, with_semantic_route_metadata,
 };
-use crate::uuid_membership::{
-    AuthenticatedUuidIndexSnapshot, ConstructionIndexOutput, ConstructionIndexReference,
-};
+use crate::uuid_membership::ConstructionIndexOutput;
 use crate::{SemanticRouteKind, SemanticStorageBindings};
 
 mod adjacency;
@@ -354,35 +352,6 @@ pub struct ConstructionEncodedArtifact {
     pub xxh64: u64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-/// Exact authenticated parent object that a publisher must structurally retain.
-pub struct ConstructionRetainedArtifact {
-    /// Stable authenticated parent directory supplied to the publisher.
-    pub source_root: String,
-    /// Device identity of the authenticated parent directory.
-    pub source_root_volume: u64,
-    /// File identity of the authenticated parent directory.
-    pub source_root_file_id: String,
-    /// Parent-root-relative immutable object name.
-    pub source_path: String,
-    /// Device identity of the retained immutable object.
-    pub source_volume: u64,
-    /// File identity of the retained immutable object.
-    pub source_file_id: String,
-    /// Generation-root-relative target name for structural installation.
-    pub target_path: String,
-    /// Exact retained object length.
-    pub bytes: u64,
-    /// Exact retained object digest.
-    pub sha256: String,
-    /// Required seed-zero checksum of the exact artifact bytes.
-    #[serde(with = "crate::corruption_checksum::wire_hex")]
-    pub xxh64: u64,
-    /// Authenticated parent index manifest that authorized this reference.
-    pub parent_manifest_sha256: String,
-}
-
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 /// Measured bounded work for canonical encoding.
 pub struct GraphConstructionEncodingEvidence {
@@ -418,22 +387,6 @@ pub struct GraphConstructionEncodingEvidence {
     pub peak_batch_bytes: u64,
     /// Largest number of simultaneously live durable Parquet writers. Always one.
     pub peak_open_writers: u64,
-    /// New identity records streamed into the v3 index.
-    pub membership_records: u64,
-    /// New v3 membership bytes written.
-    pub membership_write_bytes: u64,
-    /// Retained v3 run descriptors structurally reused.
-    pub retained_index_runs: u64,
-    /// Retained v3 payload bytes read only for required binary-carry compaction.
-    pub retained_index_payload_bytes: u64,
-    /// Actual block reads performed by v3 construction encoding and carry.
-    pub membership_read_bytes: u64,
-    /// Actual block reads performed by v3 construction encoding and carry.
-    pub membership_read_operations: u64,
-    /// Actual block writes, including outputs superseded by carry.
-    pub membership_write_operations: u64,
-    /// All v3 bytes written, including superseded carry inputs.
-    pub membership_total_write_bytes: u64,
     /// Largest number of decoded shaped-row readers simultaneously live.
     pub peak_open_input_readers: u64,
     /// Authenticated source bytes written to one private random-access spool.
@@ -448,17 +401,12 @@ pub struct GraphConstructionEncodingEvidence {
     pub source_spool_fsync_operations: u64,
     /// Peak owned authenticated source spool bytes (one source at a time).
     pub source_spool_peak_temporary_bytes: u64,
-    /// v3 durability barriers.
-    pub membership_fsync_operations: u64,
-    /// Newly created immutable v3 runs, including superseded carry inputs.
-    pub membership_created_runs: u64,
-    /// Peak live v3 transform/merge buffer bytes.
-    pub membership_peak_buffer_bytes: u64,
-    /// Peak bytes in owned temporary v3 outputs.
-    pub membership_peak_temporary_bytes: u64,
     /// Canonical node identities streamed into the v4 ordinal index.
     #[serde(default)]
     pub ordinal_records: u64,
+    /// Canonical edge identities encoded into the edge topology.
+    #[serde(default)]
+    pub edge_records: u64,
     /// Immutable v4 payload bytes written before publication metadata.
     #[serde(default)]
     pub ordinal_artifact_write_bytes: u64,
@@ -510,8 +458,6 @@ pub struct GraphConstructionEncoding {
     pub shape_authority_sha256: String,
     /// Sorted, unique canonical artifact records.
     pub artifacts: Vec<ConstructionEncodedArtifact>,
-    /// Authenticated retained-parent objects required to assemble this graph.
-    pub retained_artifacts: Vec<ConstructionRetainedArtifact>,
     /// Measured bounded work.
     pub evidence: GraphConstructionEncodingEvidence,
     /// Work performed by the invocation that returned this inventory.
@@ -549,7 +495,7 @@ pub(crate) fn encode(
     shape: &ConstructionShape,
     generation: u64,
     ontology_mode: OntologyMode,
-    parent_index: Option<&AuthenticatedUuidIndexSnapshot>,
+    parent_nodes: u64,
     parent_generation: Option<&crate::ResolvedProjectGeneration>,
     semantic_authority: Option<&ConstructionSemanticAuthority>,
     shape_outputs: &[ArtifactReceipt],
@@ -604,7 +550,7 @@ pub(crate) fn encode(
         let actual_authority = inventory_authority_sha256(&existing)?;
         match expected_inventory_sha256 {
             Some(expected) if expected == actual_authority => {
-                let authentication = authenticate_inventory(&output, &existing, parent_index)?;
+                let authentication = authenticate_inventory(&output, &existing)?;
                 remove_encoding_intent(&output)?;
                 existing.invocation = GraphConstructionEncodingInvocationEvidence {
                     performed: false,
@@ -717,26 +663,15 @@ pub(crate) fn encode(
         "ordinal control calls",
     )?;
 
-    let identities_xxh64 = shaped_output_xxh64(shape_outputs, &shape.identities)?;
-    let membership_region =
-        crate::concurrency_attribution::RegionScope::named("membership_encoding");
-    let mut index = crate::uuid_membership::encode_construction_index(
-        crate::uuid_membership::ConstructionIdentityInput::Shaped {
-            source: source.physical(),
-            name: &shape.identities,
-            xxh64: identities_xxh64,
-        },
-        output.physical(),
-        generation,
-        shape.parent_topology_generation,
-        parent_index,
-        shape.node_count,
-        shape.edge_count,
-        cancelled,
-        output.allocation(),
-    )?;
-
-    drop(membership_region);
+    let _identities_xxh64 = shaped_output_xxh64(shape_outputs, &shape.identities)?;
+    // The ordinal node-identity facet is published under uuid-membership/. A
+    // crashed attempt's private residue goes first.
+    crate::uuid_membership::clear_private_ordinal_residue(&output)?;
+    output
+        .create_child_directory(OsStr::new("graph"))
+        .and_then(|graph| graph.create_child_directory(OsStr::new("topology")))
+        .and_then(|topology| topology.create_child_directory(OsStr::new("uuid-membership")))
+        .map_err(storage)?;
     let nodes_region = crate::concurrency_attribution::RegionScope::named("node_encoding");
     let mut encoding_lanes = lanes::ParquetLanes::new(admission, budgets.max_batch_bytes);
     let v4 = encode_nodes(
@@ -762,7 +697,7 @@ pub(crate) fn encode(
         let metrics = &bundle.metrics;
         let expected_delta_nodes = shape
             .node_count
-            .checked_sub(parent_index.map_or(0, |parent| parent.count(crate::UuidIndexKind::Node)))
+            .checked_sub(parent_nodes)
             .ok_or_else(|| storage("shaped node count is smaller than parent"))?;
         if metrics.input_records != expected_delta_nodes {
             return Err(storage("v4 construction count differs from shaped nodes"));
@@ -779,7 +714,6 @@ pub(crate) fn encode(
                 output.physical(),
                 bundle,
                 generation,
-                &index.source_sha256,
                 parent_ordinal
                     .as_ref()
                     .and_then(|(_, manifest)| parent_generation.map(|parent| (parent, manifest))),
@@ -810,7 +744,7 @@ pub(crate) fn encode(
             .max(publication.peak_temporary_bytes);
         account_cache_release(metrics.cache_release, &mut evidence)?;
         crate::graph_construction::construction_failpoint("encode.after_v4_before_inventory");
-        index.artifacts.extend(v4_artifacts);
+        artifacts.extend(v4_artifacts.into_iter().map(index_artifact));
     }
     drop(nodes_region);
     let edges_region = crate::concurrency_attribution::RegionScope::named("edge_encoding");
@@ -874,26 +808,7 @@ pub(crate) fn encode(
     )?;
     drop(adjacency_region);
 
-    evidence.membership_records = index.input_records;
-    evidence.membership_read_bytes = index.read_bytes;
-    evidence.membership_write_bytes = index.final_write_bytes;
-    evidence.membership_total_write_bytes = index.write_bytes;
-    evidence.membership_read_operations = index.read_operations;
-    evidence.membership_write_operations = index.write_operations;
-    evidence.membership_fsync_operations = index.fsync_operations;
-    evidence.membership_created_runs = index.created_runs;
-    evidence.membership_peak_buffer_bytes = index.peak_buffer_bytes;
-    evidence.membership_peak_temporary_bytes = index.peak_temporary_bytes;
-    account_cache_release(index.cache_release, &mut evidence)?;
-    evidence.retained_index_runs = index.retained_runs;
-    evidence.retained_index_payload_bytes = index.retained_payload_bytes;
-    let retained_artifacts = index
-        .retained_references
-        .into_iter()
-        .map(retained_artifact)
-        .collect();
-    artifacts.extend(index.artifacts.into_iter().map(index_artifact));
-
+    evidence.edge_records = shape.edge_count;
     artifacts.sort_unstable_by(|left, right| left.path.cmp(&right.path));
     if artifacts
         .windows(2)
@@ -910,12 +825,11 @@ pub(crate) fn encode(
         shape_inputs_sha256: shape.runtime_catalog_inputs_sha256.clone(),
         shape_authority_sha256: shape_authority_sha256.to_owned(),
         artifacts,
-        retained_artifacts,
         evidence,
         invocation: GraphConstructionEncodingInvocationEvidence::default(),
     };
     install_json(&output, INVENTORY, &completed)?;
-    authenticate_inventory_control(&completed, parent_index)?;
+    authenticate_inventory_control(&completed)?;
     remove_encoding_intent(&output)?;
     let invocation = completed.evidence.clone();
     completed.invocation = GraphConstructionEncodingInvocationEvidence {
@@ -1001,22 +915,6 @@ fn construction_parent_routes(
         "parent route read calls",
     )?;
     Ok(table)
-}
-
-fn retained_artifact(value: ConstructionIndexReference) -> ConstructionRetainedArtifact {
-    ConstructionRetainedArtifact {
-        source_root: value.source_root,
-        source_root_volume: value.source_root_volume,
-        source_root_file_id: value.source_root_file_id,
-        source_path: value.source_path,
-        source_volume: value.source_volume,
-        source_file_id: value.source_file_id,
-        target_path: value.target_path,
-        bytes: value.bytes,
-        sha256: value.sha256,
-        xxh64: value.xxh64,
-        parent_manifest_sha256: value.parent_manifest_sha256,
-    }
 }
 
 fn index_artifact(value: ConstructionIndexOutput) -> ConstructionEncodedArtifact {

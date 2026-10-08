@@ -131,8 +131,8 @@ pub fn establish_label_membership_counts(
     ))
 }
 
-/// Read labels for named nodes through the authenticated UUID-to-surrogate
-/// index, decoding only rows selected for those node IDs.
+/// Read labels for named nodes through the topology Parquet's UUID-to-surrogate
+/// pairs, decoding only rows selected for those node IDs.
 pub fn read_node_labels_for_uuids(
     dir: &Path,
     files: &crate::TopologyFiles,
@@ -145,7 +145,8 @@ pub fn read_node_labels_for_uuids(
         .iter()
         .map(|bytes| graphforge_core::uuid::Uuid::from_bytes(*bytes))
         .collect::<Vec<_>>();
-    let mut index = crate::UuidMembershipIndex::open(dir)?;
+    let mut index =
+        crate::TopologyIdentityProbe::open(dir, files, crate::read_topology_generation(dir)?)?;
     let (surrogates, _) = index.lookup_node_surrogates(&uuids)?;
     let mut node_ids = std::collections::HashSet::new();
     for (uuid, surrogate) in uuids.iter().zip(surrogates) {

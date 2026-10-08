@@ -55,12 +55,6 @@ fn incorporate_with_policy(
             return Err(conflict());
         }
     }
-    if !graphforge_storage::uuid_membership_index_present(&destination.dir()) {
-        graphforge_storage::rebuild_uuid_membership_indexes(
-            &destination.dir(),
-            graphforge_storage::UuidIndexBuildLimits::default(),
-        )?;
-    }
     let mut labels = BTreeMap::<String, Vec<IrLiteral>>::new();
     for (kind, query) in [
         (

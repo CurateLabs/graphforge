@@ -1,164 +1,18 @@
 use super::super::INDEX_DIR;
-use super::super::MANIFEST;
-use super::super::Manifest;
 use super::super::TopologyIndexReceipt;
 use super::super::UuidIndexBuildLimits;
-use super::super::UuidIndexKind;
-use super::super::UuidMembershipIndex;
 use super::super::V4_ORDINAL_BLOCK_BYTES;
 use super::super::V4_ORDINAL_MANIFEST;
 use super::super::V4_ORDINAL_RECEIPT;
 use super::super::V4OrdinalRebuildDisposition;
 use super::super::tests::fixture;
-use super::super::tests::make_installed_manifest_stale;
-use super::super::tests::receipt_manifest_digest;
-use super::super::tests::write_node_parquet;
 use super::super::tests::write_node_parquet_with_ids;
-use super::super::tests::write_uuid_parquet;
 use super::super::topology_delta::hex_sha256;
 use super::V4RebuildScratchAccounting;
-use super::rebuild_uuid_membership_indexes;
 use super::rebuild_v4_ordinal_identity;
 use super::rebuild_v4_ordinal_identity_with_evidence;
 use std::fs;
-use std::sync::Arc;
-use std::sync::Barrier;
 use uuid::Uuid;
-
-#[test]
-fn forced_rebuild_receipt_binds_newly_staged_manifest() {
-    let (dir, _, _) = fixture();
-    rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default()).unwrap();
-    let stale_digest = make_installed_manifest_stale(dir.path());
-    rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default()).unwrap();
-    let installed_digest = receipt_manifest_digest(dir.path());
-    assert_ne!(installed_digest, stale_digest);
-}
-
-#[test]
-fn unpublished_build_artifacts_do_not_change_concurrent_readers() {
-    let (dir, nodes, _) = fixture();
-    rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default()).unwrap();
-    let barrier = Arc::new(Barrier::new(2));
-    let reader_root = dir.path().to_path_buf();
-    let reader_barrier = barrier.clone();
-    let expected = nodes[0];
-    let reader = std::thread::spawn(move || {
-        let mut index = UuidMembershipIndex::open(&reader_root).unwrap();
-        reader_barrier.wait();
-        index.probe(UuidIndexKind::Node, &[expected]).unwrap().0
-    });
-    fs::write(
-        dir.path().join(INDEX_DIR).join("nodes-unpublished.uuidx"),
-        [7_u8; 16],
-    )
-    .unwrap();
-    barrier.wait();
-    assert_eq!(reader.join().unwrap(), vec![true]);
-    let mut reopened = UuidMembershipIndex::open(dir.path()).unwrap();
-    assert_eq!(
-        reopened.probe(UuidIndexKind::Node, &[expected]).unwrap().0,
-        vec![true]
-    );
-}
-
-#[test]
-fn concurrent_rebuilds_publish_one_authenticated_snapshot() {
-    let (dir, _, _) = fixture();
-    let root = Arc::new(dir.path().to_path_buf());
-    let barrier = Arc::new(Barrier::new(3));
-    let workers = (0..2)
-        .map(|_| {
-            let root = root.clone();
-            let barrier = barrier.clone();
-            std::thread::spawn(move || {
-                barrier.wait();
-                rebuild_uuid_membership_indexes(
-                    &root,
-                    UuidIndexBuildLimits {
-                        scan_batch_rows: 1,
-                        run_records: 1,
-                        merge_fan_in: 2,
-                    },
-                )
-            })
-        })
-        .collect::<Vec<_>>();
-    barrier.wait();
-    for worker in workers {
-        worker.join().unwrap().unwrap();
-    }
-    let index = UuidMembershipIndex::open(&root).unwrap();
-    assert_eq!(index.count(UuidIndexKind::Node), 3);
-    assert_eq!(index.count(UuidIndexKind::Edge), 2);
-    let names = fs::read_dir(root.join(INDEX_DIR))
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-    assert!(names.iter().all(|name| !name.ends_with(".tmp")));
-}
-
-#[test]
-fn duplicate_and_cross_kind_identities_fail_closed() {
-    let dir = tempfile::tempdir().unwrap();
-    let repeated = Uuid::from_u128(7);
-    write_node_parquet(
-        &dir.path().join("topology/nodes.parquet"),
-        &[repeated, repeated],
-    );
-    let duplicate = rebuild_uuid_membership_indexes(
-        dir.path(),
-        UuidIndexBuildLimits {
-            scan_batch_rows: 1,
-            run_records: 1,
-            merge_fan_in: 2,
-        },
-    )
-    .unwrap_err();
-    assert!(duplicate.to_string().contains("duplicate"));
-
-    let dir = tempfile::tempdir().unwrap();
-    write_node_parquet(&dir.path().join("topology/nodes.parquet"), &[repeated]);
-    write_uuid_parquet(
-        &dir.path().join("topology/edges/R.parquet"),
-        "edge_uuid",
-        &[repeated],
-    );
-    let cross_kind =
-        rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default()).unwrap_err();
-    assert!(cross_kind.to_string().contains("both node and edge"));
-}
-
-#[test]
-fn duplicate_and_zero_node_surrogates_fail_closed_across_bounded_runs() {
-    let limits = UuidIndexBuildLimits {
-        scan_batch_rows: 1,
-        run_records: 1,
-        merge_fan_in: 2,
-    };
-    let dir = tempfile::tempdir().unwrap();
-    let nodes = [Uuid::from_u128(1), Uuid::from_u128(2)];
-    write_node_parquet_with_ids(&dir.path().join("topology/nodes.parquet"), &nodes, &[7, 7]);
-    assert!(
-        rebuild_uuid_membership_indexes(dir.path(), limits)
-            .unwrap_err()
-            .to_string()
-            .contains("duplicate node surrogate")
-    );
-
-    let dir = tempfile::tempdir().unwrap();
-    write_node_parquet_with_ids(
-        &dir.path().join("topology/nodes.parquet"),
-        &[Uuid::from_u128(3)],
-        &[0],
-    );
-    assert!(
-        rebuild_uuid_membership_indexes(dir.path(), limits)
-            .unwrap_err()
-            .to_string()
-            .contains("invalid node surrogate")
-    );
-}
 
 #[test]
 fn explicit_v4_rebuild_uses_topology_and_independent_projection_orders() {
@@ -229,18 +83,19 @@ fn explicit_v4_rebuild_uses_topology_and_independent_projection_orders() {
 }
 
 #[test]
-fn explicit_v4_rebuild_does_not_trust_corrupt_v3_reverse_state() {
+fn explicit_v4_rebuild_ignores_legacy_membership_files() {
     let (dir, _, _) = fixture();
     fs::write(
         dir.path().join("topology/generation.json"),
         b"{\"topology_generation\":3,\"search_generation\":0,\"property_generation\":0}\n",
     )
     .unwrap();
-    rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default()).unwrap();
     let root = dir.path().join(INDEX_DIR);
-    let v3: Manifest = serde_json::from_slice(&fs::read(root.join(MANIFEST)).unwrap()).unwrap();
+    // A project built before #1902 carries the membership index. Whatever its
+    // bytes are, the rebuild reads canonical topology and never them.
+    fs::write(root.join("manifest.json"), b"planted-corrupt-manifest").unwrap();
     fs::write(
-        root.join(&v3.runs[0].node_surrogates.name),
+        root.join("node-surrogates-v5-3-0000000000000000.uuidx"),
         b"planted-corrupt-v3-reverse",
     )
     .unwrap();

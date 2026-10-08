@@ -7,18 +7,18 @@
 //! reads a forward run: the commit that builds the next identity generation on
 //! it does, and refuses a flipped one.
 //!
-//! The small UUID-membership controls (the manifests, the receipts, the
-//! tombstone runs and the lock) are different: hydration copies each into a
+//! The small ordinal controls (the manifest, the receipt, the tombstone runs
+//! and the lock) are different: hydration copies each into a
 //! private single-link file and checks the copy against the manifest, so the
 //! open is the operation that touches them, and it refuses a flipped one. The
 //! lock is published empty, so it has no byte to flip; it is opened and
 //! flocked, never read.
 //!
-//! The UUID-membership (v3) runs, `identities-v5-*` and `node-surrogates-v5-*`,
-//! are hard-linked like the ordinal runs and read by no query. Every topology
-//! commit pins the authenticated UUID snapshot it builds the next generation
-//! on, which checks every block of every run against the manifest, so the
-//! commit refuses a flipped one.
+//! Append validation reads the node and edge Parquet that identity is answered
+//! from (#1902). Those objects are hard-linked like the ordinal runs and read by
+//! no query that does not need their columns; the commit's identity probe is the
+//! operation that touches them, and it refuses a flipped one before it names a
+//! new digest.
 
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -417,8 +417,8 @@ fn inert_swap(relative: &str, bytes: &[u8]) -> (u64, fn(u8) -> u8) {
     ((digest + 63) as u64, other_hex_digit)
 }
 
-/// The copied UUID-membership controls of a project that has been mutated, so
-/// that a topology receipt and a non-empty tombstone run are published too.
+/// The copied ordinal controls of a project that has been mutated, so that a
+/// non-empty tombstone run is published too.
 #[test]
 fn flipped_identity_controls_are_refused_by_the_open_that_copies_them() {
     let (_root, path) = project(2_048);
@@ -447,10 +447,16 @@ fn flipped_identity_controls_are_refused_by_the_open_that_copies_them() {
         })
         .expect("a DELETE publishes a non-empty tombstone run")
         .clone();
+    // The membership manifest and topology receipt are no longer published.
+    for retired in ["manifest.json", "topology-receipt.json"] {
+        let relative = format!("topology/uuid-membership/{retired}");
+        assert!(
+            objects.iter().all(|(path, ..)| *path != relative),
+            "{relative} must not be published"
+        );
+    }
     let cases = [
-        control("manifest.json"),
         control("ordinal-v4-manifest.json"),
-        control("topology-receipt.json"),
         control("ordinal-v4-receipt.json"),
         tombstones,
     ];
@@ -484,132 +490,41 @@ fn flipped_identity_controls_are_refused_by_the_open_that_copies_them() {
     assert_eq!(rows(&forge, ORDERED), Ok(3));
 }
 
-/// The descriptor of one v3 run, from the project's published UUID manifest:
-/// `(offset, length)` of each block.
-fn v3_run_blocks(path: &Path, run: &str) -> Vec<(usize, usize)> {
-    let manifest = objects(path)
-        .into_iter()
-        .find(|(relative, ..)| relative == "topology/uuid-membership/manifest.json")
-        .expect("a published UUID manifest")
-        .1;
-    let manifest: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(manifest).unwrap()).unwrap();
-    let record = manifest["runs"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .flat_map(|descriptor| [&descriptor["identities"], &descriptor["node_surrogates"]])
-        .find(|record| record["name"] == run)
-        .unwrap_or_else(|| panic!("{run} is not in the UUID manifest"));
-    record["blocks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|block| {
-            (
-                usize::try_from(block["offset"].as_u64().unwrap()).unwrap(),
-                usize::try_from(block["len"].as_u64().unwrap()).unwrap(),
-            )
-        })
-        .collect()
-}
-
-/// Record boundaries of an identity block: `UUID[16] kind[1]`, then a
-/// surrogate[8] unless the record is a live edge (kind 1).
-fn identity_records(block: &[u8]) -> Vec<(usize, u8)> {
-    let mut records = Vec::new();
-    let mut at = 0;
-    while at < block.len() {
-        let kind = block[at + 16];
-        records.push((at, kind));
-        at += if kind == 1 { 17 } else { 25 };
-    }
-    assert_eq!(at, block.len(), "identity records tile the block");
-    records
-}
-
-/// A byte of a v3 run no structural check reads, so that only a checksum can
-/// refuse its change. Neither the first nor the last record of a block (their
-/// keys are the block's fences) is touched, and nothing the decoder validates
-/// (UUID order, kind, nonzero node surrogate, surrogate order) changes:
-///
-/// - identities: the high byte of a middle node record's surrogate, which
-///   stays nonzero;
-/// - node surrogates (`surrogate[8] UUID[16]`): the last UUID byte of a middle
-///   record.
-fn inert_v3_flip(path: &Path, prefix: &str) -> (PathBuf, u64) {
-    let (relative, object, ..) = objects(path)
+/// The commit that appends builds its identity probe over the published node
+/// Parquet. The objects are hard-linked from the content store, so a flipped byte
+/// is visible through the workspace; the probe's first touch checks the whole
+/// object against its inventory checksum and refuses the commit before it names
+/// a new digest.
+#[test]
+fn flipped_node_parquet_is_refused_by_the_commit_that_probes_it() {
+    let (_root, path) = project(NODES);
+    let (relative, object, _, length) = objects(&path)
         .into_iter()
         .find(|(relative, .., length)| {
-            relative.starts_with(&format!("topology/uuid-membership/{prefix}")) && *length > 0
+            relative.starts_with("topology/nodes/") && relative.ends_with(".parquet") && *length > 0
         })
-        .unwrap_or_else(|| panic!("no non-empty {prefix} run"));
-    let run = relative.rsplit('/').next().unwrap();
-    let bytes = std::fs::read(&object).unwrap();
-    let (offset, length) = v3_run_blocks(path, run)[0];
-    let block = &bytes[offset..offset + length];
-    let at = if prefix.starts_with("identities") {
-        let records = identity_records(block);
-        let inner = &records[1..records.len() - 1];
-        let middle = inner[inner.len() / 2..]
-            .iter()
-            .chain(inner)
-            .find(|(_, kind)| *kind == 0)
-            .expect("a live node record inside the block")
-            .0;
-        middle + 17
-    } else {
-        assert_eq!(length % 24, 0, "node surrogate records are 24 bytes");
-        (length / 24 / 2) * 24 + 23
-    };
-    (object, (offset + at) as u64)
-}
+        .expect("a published node fragment");
+    // Inside the UUID column pages, well clear of the footer a reader parses.
+    let _swap = ByteSwap::apply(&object, length / 4, |byte| byte ^ 0x80);
+    let published = generation_uuid(&path);
 
-/// No query reads a v3 run; the commit that builds the next topology
-/// generation authenticates every block of every run, and refuses a flipped
-/// one before it names a new digest.
-#[test]
-fn flipped_uuid_membership_run_is_refused_by_the_commit_that_builds_on_it() {
-    // Every class is tried before asserting, so one run reports each run the
-    // commit fails to refuse.
-    let mut unrefused = Vec::new();
-    for prefix in ["identities-v5-", "node-surrogates-v5-"] {
-        let (_root, path) = project(NODES);
-        let (object, offset) = inert_v3_flip(&path, prefix);
-        let _swap = ByteSwap::apply(&object, offset, |byte| byte ^ 0x80);
-        let published = generation_uuid(&path);
-
-        let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
-        // Open and reads never touch a v3 run.
-        assert_eq!(rows(&forge, HEALTHY), Ok(3), "{prefix}");
-        assert_eq!(rows(&forge, ORDERED), Ok(3), "{prefix}");
-        assert_eq!(rows(&forge, WHOLE), Ok(NODES * 4), "{prefix}");
-        // The v3 reader reports the refusal as `GF_IO`; the message is the
-        // integrity check's own, which no decoder emits.
-        match forge.execute("CREATE (:Entity)") {
-            Ok(_) => unrefused.push(format!("{prefix}: the commit was served")),
-            Err(error)
-                if error
-                    .to_string()
-                    .contains("UUID run block authentication failed") =>
-            {
-                eprintln!("{prefix}: refused: {} {error}", error.code());
-            }
-            Err(error) => unrefused.push(format!(
-                "{prefix}: refused for the wrong reason: {} {error}",
-                error.code()
-            )),
-        }
-        drop(forge);
-        assert_eq!(
-            generation_uuid(&path),
-            published,
-            "{prefix}: a refused commit published a generation"
-        );
-    }
+    let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    let refused = forge
+        .execute("CREATE (:Entity)")
+        .map(drop)
+        .map_err(|error| format!("{} {error}", error.code()))
+        .expect_err("a commit probing a flipped node fragment must be refused");
+    eprintln!("{relative}: refused: {refused}");
     assert!(
-        unrefused.is_empty(),
-        "the commit that builds on a flipped UUID-membership run must refuse it:\n{}",
-        unrefused.join("\n")
+        refused.to_lowercase().contains("checksum")
+            || refused.to_lowercase().contains("do not match")
+            || refused.to_lowercase().contains("authenticat"),
+        "refused for the wrong reason: {refused}"
+    );
+    drop(forge);
+    assert_eq!(
+        generation_uuid(&path),
+        published,
+        "a refused commit published a generation"
     );
 }

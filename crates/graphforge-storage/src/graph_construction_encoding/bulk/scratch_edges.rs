@@ -699,8 +699,6 @@ pub(super) struct RankedEdges {
     pub(super) first_appearance: Vec<u32>,
     /// Edges per relation id.
     pub(super) counts: Vec<u64>,
-    /// The sorted edge UUIDs, one scratch file per partition, in order.
-    pub(super) uuid_files: Vec<PathBuf>,
 }
 
 pub(super) struct RankContext<'a> {
@@ -767,9 +765,6 @@ pub(super) fn rank_partitions(context: &RankContext<'_>) -> Result<RankedEdges, 
         running += count;
     }
     let relation_count = scattered.rel_names.len();
-    let uuid_files = (0..partitions)
-        .map(|part| scratch.file(&format!("edge-uuids-{part:06}.blocks")))
-        .collect::<Vec<_>>();
     // One pair of counters per relation, independent of the leaf count.
     let relation_counts = (0..relation_count)
         .map(|_| AtomicU64::new(0))
@@ -790,7 +785,6 @@ pub(super) fn rank_partitions(context: &RankContext<'_>) -> Result<RankedEdges, 
             let records = scattered.load_sorted(scratch, part, &nodes.uuids)?;
             let mut run_relation = None::<u32>;
             let mut run_count = 0_u64;
-            let mut uuids = Appender::create(scratch, &uuid_files[part], 1 << 20)?;
             let staging = plan.staging_bytes.saturating_mul(2 * plan.csr_partitions)
                 / (csr.out.len() + csr.inn.len()).max(1);
             let mut out = Scatter::new(scratch, &csr.out, staging);
@@ -818,7 +812,6 @@ pub(super) fn rank_partitions(context: &RankContext<'_>) -> Result<RankedEdges, 
                     }
                 }
                 run_count += 1;
-                uuids.push(&record.uuid)?;
                 out.push(
                     csr.out_keys.partition(record.src),
                     &CsrRecord {
@@ -843,7 +836,6 @@ pub(super) fn rank_partitions(context: &RankContext<'_>) -> Result<RankedEdges, 
             if let Some(relation) = run_relation {
                 relation_counts[relation as usize].fetch_add(run_count, Ordering::Relaxed);
             }
-            uuids.finish()?;
             out.finish()?;
             inn.finish()?;
             if ordered_scatter {
@@ -901,7 +893,6 @@ pub(super) fn rank_partitions(context: &RankContext<'_>) -> Result<RankedEdges, 
     Ok(RankedEdges {
         first_appearance,
         counts,
-        uuid_files,
     })
 }
 

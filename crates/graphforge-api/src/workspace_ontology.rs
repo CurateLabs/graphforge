@@ -341,7 +341,7 @@ impl GraphForge {
             self.replace_workspace_owner(crate::GraphWorkspace::new(dir, workspace, &inventory)?);
             self.graph_open_evidence = evidence;
             *self
-                .uuid_membership_index
+                .identity_probe
                 .lock()
                 .expect("UUID membership index lock poisoned") = None;
         } else {

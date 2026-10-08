@@ -376,7 +376,7 @@ impl GraphConstructionSession {
             let encoding =
                 self.prepare_canonical_encoding_with_cancellation(generation, cancelled)?;
             let nodes = encoding.evidence.ordinal_records;
-            let edges = encoding.evidence.membership_records.saturating_sub(nodes);
+            let edges = encoding.evidence.edge_records;
             if let Ok(mut report) = self.bulk_report.lock() {
                 *report = crate::graph_construction_encoding::BulkBuildReport {
                     nodes,
@@ -445,7 +445,7 @@ impl GraphConstructionSession {
                 shape,
                 generation,
                 self.checkpoint.ontology_mode,
-                self.base_snapshot.as_ref(),
+                self.checkpoint.base_work.live_nodes,
                 parent.as_ref(),
                 self.semantic_authority.as_ref(),
                 &shape_outputs,
@@ -650,19 +650,6 @@ impl GraphConstructionSession {
             .publication_application_read_operations
             .checked_add(manifest_read_calls)
             .ok_or_else(|| storage("publication manifest read call count overflows"))?;
-        for retained in &encoding.retained_artifacts {
-            let entry = manifest_state
-                .entries()
-                .find(|entry| entry.relative_path == retained.target_path)
-                .ok_or_else(|| storage("retained construction object is absent from parent"))?;
-            if entry.byte_length != retained.bytes
-                || entry.content_sha256 != retained.sha256
-                || entry.content_xxh64 != retained.xxh64
-            {
-                return Err(storage("retained construction object authority changed"));
-            }
-        }
-
         let workspace = self
             .project_path
             .join(PRIVATE_ROOT)

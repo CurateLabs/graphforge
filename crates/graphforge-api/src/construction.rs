@@ -539,7 +539,9 @@ mod tests {
                 "{name} hydration verification reads"
             );
             assert!(work.io.rewrite_commits > 0, "{name} topology rewrite work");
-            assert!(work.io.uuid_files_synced > 0, "{name} UUID sync work");
+            // Identity is answered from the published Parquet: appending an
+            // edge stages and syncs no identity file (#1902).
+            assert_eq!(work.io.uuid_files_synced, 0, "{name} UUID sync work");
         }
     }
 

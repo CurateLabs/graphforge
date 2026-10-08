@@ -8,7 +8,7 @@ use arrow::record_batch::RecordBatch;
 use graphforge_core::portable::{
     PortableV2Limits, PortableV2Mode, PortableV2Output, PortableV2SelectionProfile,
 };
-use graphforge_storage::UuidMembershipIndex;
+use graphforge_storage::TopologyIdentityProbe;
 use uuid::Uuid;
 
 use crate::{
@@ -91,7 +91,7 @@ fn graph_rows(graph: &GraphForge) -> (Vec<NodeRow>, Vec<EdgeRow>) {
 }
 
 fn ordinals(graph: &GraphForge, ids: &[Uuid]) -> Vec<Option<u64>> {
-    UuidMembershipIndex::open(&graph.dir())
+    TopologyIdentityProbe::open_dir(&graph.dir())
         .unwrap()
         .lookup_node_surrogates(ids)
         .unwrap()

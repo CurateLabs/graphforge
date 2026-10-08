@@ -249,7 +249,7 @@ fn canonical_encoder_outputs_feed_ordinary_readers_index_and_adjacency() {
     let encoding = session.encode_canonical(&shape, 1).unwrap();
     assert_eq!(encoding.evidence.prior_topology_rows_decoded, 0);
     assert_eq!(encoding.evidence.retained_topology_bytes_copied, 0);
-    assert_eq!(encoding.evidence.membership_records, 5);
+    assert_eq!(encoding.evidence.edge_records, 2);
     assert_eq!(encoding.evidence.ordinal_records, 3);
     assert_eq!(encoding.evidence.ordinal_artifact_write_bytes, 120);
     assert_eq!(encoding.evidence.ordinal_artifact_write_operations, 2);
@@ -350,7 +350,7 @@ fn canonical_encoder_outputs_feed_ordinary_readers_index_and_adjacency() {
             .sum::<usize>(),
         2
     );
-    let index = crate::UuidMembershipIndex::open(&graph).unwrap();
+    let index = crate::TopologyIdentityProbe::open_dir(&graph).unwrap();
     assert_eq!(index.count(crate::UuidIndexKind::Node), 3);
     assert_eq!(index.count(crate::UuidIndexKind::Edge), 2);
     // ADR 0037: the encoder publishes the adjacency CSR with the generation, so
@@ -838,7 +838,6 @@ fn canonical_encoder_reuse_accounts_only_second_invocation_io() {
     assert!(!second.invocation.performed);
     assert!(second.invocation.reused);
     assert_eq!(second.invocation.evidence.output_write_bytes, 0);
-    assert_eq!(second.invocation.evidence.membership_total_write_bytes, 0);
     assert_eq!(
         session.evidence().encode_application_write_bytes,
         writes_after_first
@@ -1417,11 +1416,8 @@ fn canonical_routing_is_checkpoint_bound_in_all_ontology_modes() {
 }
 
 #[test]
-fn generation_two_parent_index_is_structurally_referenced_without_payload_copy() {
+fn generation_two_encoding_publishes_no_membership_index() {
     let project = nonempty_project_generation_two();
-    assert!(crate::has_runtime_entity_label_encoding_marker(
-        &project.path().join("fixture-graph")
-    ));
     let operation = Uuid::from_u128(9_340);
     let mut session = GraphConstructionSession::open(
         project.path(),
@@ -1436,41 +1432,17 @@ fn generation_two_parent_index_is_structurally_referenced_without_payload_copy()
     session.seal().unwrap();
     let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
     let encoded = session.encode_canonical(&shape, 3).unwrap();
-    assert_eq!(encoded.evidence.retained_index_payload_bytes, 0);
     assert_eq!(encoded.evidence.retained_topology_bytes_copied, 0);
     assert_eq!(encoded.evidence.prior_topology_rows_decoded, 0);
-    assert_eq!(encoded.evidence.retained_index_runs, 2);
-    let index_outputs = encoded
-        .artifacts
-        .iter()
-        .filter(|artifact| {
-            artifact.path.contains("uuid-membership")
-                && !artifact.path.contains("ordinal-v4")
-                && !artifact.path.contains("forward-v4")
-                && !artifact.path.contains("tombstones-v4")
-        })
-        .count();
-    // New identity + reverse runs and the new manifest. The retained base
-    // and level-one descriptors remain structural references.
-    assert_eq!(index_outputs, 3);
-    assert!(!encoded.retained_artifacts.is_empty());
-    let assembled = project
-        .path()
-        .join(PRIVATE_ROOT)
-        .join(operation.simple().to_string())
-        .join(&encoded.root)
-        .join("graph");
-    for retained in &encoded.retained_artifacts {
-        let target = assembled.join(&retained.target_path);
-        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-        std::fs::hard_link(
-            std::path::Path::new(&retained.source_root).join(&retained.source_path),
-            target,
-        )
-        .unwrap();
-    }
-    let opened = crate::UuidMembershipIndex::open(&assembled).unwrap();
-    assert_eq!(opened.count(crate::UuidIndexKind::Node), 4);
+    // Only the ordinal node-identity facet lives under uuid-membership/; the
+    // membership index (manifest, runs, receipt) is no longer encoded.
+    assert!(encoded.artifacts.iter().all(|artifact| {
+        !artifact.path.contains("uuid-membership")
+            || ["ordinal-v4", "forward-v4", "tombstones-v4"]
+                .iter()
+                .any(|facet| artifact.path.contains(facet))
+    }));
+    let _ = (operation, PRIVATE_ROOT);
 }
 
 #[test]
@@ -1574,118 +1546,7 @@ fn parent_phase_observations_survive_staging_sealed_and_shaped_resumes() {
 }
 
 #[test]
-fn completed_encoding_replay_reauthenticates_retained_parent_payload() {
-    let project = nonempty_project_generation_two();
-    let operation = Uuid::from_u128(9_343);
-    let mut session = GraphConstructionSession::open(
-        project.path(),
-        operation,
-        2,
-        GraphConstructionBudgets::default(),
-    )
-    .unwrap();
-    session
-        .append(ConstructionChunkKind::Node, "delta", &node_batch(4, 1))
-        .unwrap();
-    session.seal().unwrap();
-    let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
-    let encoded = session.encode_canonical(&shape, 3).unwrap();
-    let retained = encoded
-        .retained_artifacts
-        .iter()
-        .find(|artifact| artifact.bytes > 0)
-        .unwrap();
-    let path = std::path::Path::new(&retained.source_root).join(&retained.source_path);
-    let original_metadata = std::fs::metadata(&path).unwrap();
-    let original_identity =
-        graphforge_filesystem::file_identity(&std::fs::File::open(&path).unwrap()).unwrap();
-    let original_permissions = original_metadata.permissions();
-    let mut permissions = original_permissions.clone();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        permissions.set_mode(0o600);
-    }
-    #[cfg(not(unix))]
-    permissions.set_readonly(false);
-    std::fs::set_permissions(&path, permissions).unwrap();
-    let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-    use std::io::{Seek as _, SeekFrom};
-    file.seek(SeekFrom::Start(0)).unwrap();
-    file.write_all(&[0xff]).unwrap();
-    file.sync_all().unwrap();
-    drop(file);
-    std::fs::set_permissions(&path, original_permissions).unwrap();
-    assert_eq!(
-        std::fs::metadata(&path).unwrap().len(),
-        original_metadata.len()
-    );
-    assert_eq!(
-        graphforge_filesystem::file_identity(&std::fs::File::open(&path).unwrap()).unwrap(),
-        original_identity,
-    );
-    let error = session.encode_canonical(&shape, 3).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("graph payload XXH64 checksum does not match its inventory"),
-        "{error}"
-    );
-}
-
-#[test]
-fn generation_one_parent_uses_streamed_binary_carry_and_authenticates_result() {
-    let project = nonempty_project_with_nodes(2);
-    let operation = Uuid::from_u128(9_341);
-    let mut session = GraphConstructionSession::open(
-        project.path(),
-        operation,
-        1,
-        GraphConstructionBudgets::default(),
-    )
-    .unwrap();
-    session
-        .append(ConstructionChunkKind::Node, "delta", &node_batch(3, 1))
-        .unwrap();
-    session.seal().unwrap();
-    let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
-    let encoded = session.encode_canonical(&shape, 2).unwrap();
-    assert!(encoded.evidence.retained_index_payload_bytes > 0);
-    assert!(encoded.evidence.membership_read_bytes > 0);
-    assert!(
-        encoded.evidence.membership_total_write_bytes > encoded.evidence.membership_write_bytes
-    );
-
-    let graph = project
-        .path()
-        .join(PRIVATE_ROOT)
-        .join(operation.simple().to_string())
-        .join(&encoded.root)
-        .join("graph");
-    let parent_index = project
-        .path()
-        .join("fixture-graph/topology/uuid-membership");
-    let encoded_index = graph.join("topology/uuid-membership");
-    let parent_manifest: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(parent_index.join("manifest.json")).unwrap())
-            .unwrap();
-    for run in parent_manifest["runs"].as_array().unwrap() {
-        if !run["base"].as_bool().unwrap() {
-            continue;
-        }
-        for field in ["identities", "node_surrogates"] {
-            let name = run[field]["name"].as_str().unwrap();
-            assert_eq!(std::fs::metadata(parent_index.join(name)).unwrap().len(), 0);
-            std::fs::copy(parent_index.join(name), encoded_index.join(name)).unwrap();
-        }
-    }
-    let index = crate::UuidMembershipIndex::open(&graph).unwrap();
-    assert_eq!(index.count(crate::UuidIndexKind::Node), 3);
-    assert_eq!(index.count(crate::UuidIndexKind::Edge), 1);
-}
-
-#[test]
-fn parent_uuid_path_substitution_is_rejected_before_encoding() {
+fn parent_topology_path_substitution_is_rejected_before_encoding() {
     let project = nonempty_project_with_nodes(2);
     let operation = Uuid::from_u128(9_342);
     let mut session = GraphConstructionSession::open(
@@ -1708,14 +1569,17 @@ fn parent_uuid_path_substitution_is_rejected_before_encoding() {
     let victim = inventory
         .files
         .iter()
-        .find(|entry| entry.relative_path.contains("/identities-") && entry.byte_length != 0)
+        .find(|entry| entry.relative_path.starts_with("topology/nodes/") && entry.byte_length != 0)
         .unwrap();
     let victim = crate::graph_object_path(project.path(), &victim.content_sha256).unwrap();
-    let saved = victim.with_extension("uuidx.saved");
+    let saved = victim.with_extension("saved");
     std::fs::rename(&victim, &saved).unwrap();
     std::fs::copy(&saved, &victim).unwrap();
     let error = session.encode_canonical(&shape, 2).unwrap_err();
-    assert!(error.to_string().contains("identity changed"));
+    assert!(
+        error.to_string().contains("changed under a retained probe"),
+        "{error}"
+    );
 }
 
 fn encoded_publication_session(root: &TempDir, operation: Uuid) -> GraphConstructionSession {
@@ -1930,7 +1794,7 @@ fn construction_append_publishes_current_complete_ordinal_authority() {
                 .map(|id| Some(Uuid::from_u128(u128::from(*id))))
                 .collect::<Vec<_>>()
         );
-        let mut membership = crate::UuidMembershipIndex::open(&graph).unwrap();
+        let mut membership = crate::TopologyIdentityProbe::open_dir(&graph).unwrap();
         let uuids = ids
             .iter()
             .map(|id| Uuid::from_u128(u128::from(*id)))
@@ -2122,12 +1986,15 @@ fn canonical_publication_installs_compact_graph_and_advances_current_once() {
             .iter()
             .any(|entry| entry.relative_path.starts_with("topology/nodes/"))
     );
-    assert!(
-        inventory
-            .files
-            .iter()
-            .any(|entry| { entry.relative_path == "topology/uuid-membership/manifest.json" })
-    );
+    assert!(inventory.files.iter().any(|entry| {
+        entry.relative_path == "topology/uuid-membership/ordinal-v4-manifest.json"
+    }));
+    // The membership index (manifest, receipt, runs) is not published.
+    assert!(inventory.files.iter().all(|entry| {
+        entry.relative_path != "topology/uuid-membership/manifest.json"
+            && entry.relative_path != "topology/uuid-membership/topology-receipt.json"
+            && !entry.relative_path.contains("-v5-")
+    }));
     let current_path = root.path().join("CURRENT");
     let current_bytes = std::fs::read(&current_path).unwrap();
     std::fs::write(&current_path, b"concurrently-advanced-current\n").unwrap();
@@ -2141,7 +2008,7 @@ fn canonical_publication_installs_compact_graph_and_advances_current_once() {
     let materialized_graph = materialized.path().join("graph");
     std::fs::create_dir(&materialized_graph).unwrap();
     crate::materialize_graph_objects(root.path(), &inventory, &materialized_graph).unwrap();
-    let uuid_index = crate::UuidMembershipIndex::open(&materialized_graph).unwrap();
+    let uuid_index = crate::TopologyIdentityProbe::open_dir(&materialized_graph).unwrap();
     assert_eq!(uuid_index.count(crate::UuidIndexKind::Node), 2);
     assert_eq!(uuid_index.count(crate::UuidIndexKind::Edge), 0);
     drop(current);

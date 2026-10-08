@@ -363,7 +363,7 @@ where
         return Err(error);
     }
     *source_bytes = admitted;
-    identity.finish(topology_rows, checkpoint)?;
+    identity.finish(checkpoint)?;
     Ok(eligible)
 }
 

@@ -17,7 +17,10 @@ fn param(id: Uuid) -> HashMap<String, IrLiteral> {
 
 fn delete_node(graph: &GraphForge, id: Uuid) {
     graph
-        .execute_with_params("MATCH (n) WHERE n.node_uuid = $id DETACH DELETE n", &param(id))
+        .execute_with_params(
+            "MATCH (n) WHERE n.node_uuid = $id DETACH DELETE n",
+            &param(id),
+        )
         .unwrap();
 }
 
@@ -54,13 +57,22 @@ fn probe_outcomes_for_deleted_and_live_identities() {
     graph
         .publish_bulk_nodes(
             operation(10),
-            &[node_batch(&[a, b, c], &["P", "P", "P"], &[None, None, None])],
+            &[node_batch(
+                &[a, b, c],
+                &["P", "P", "P"],
+                &[None, None, None],
+            )],
         )
         .unwrap();
     graph
         .publish_bulk_edges(
             operation(11),
-            &[edge_batch(&[e1, e2, e3], &["R", "R", "R"], &[a, b, b], &[b, c, a])],
+            &[edge_batch(
+                &[e1, e2, e3],
+                &["R", "R", "R"],
+                &[a, b, b],
+                &[b, c, a],
+            )],
         )
         .unwrap();
     delete_edge(&graph, a, b);
@@ -109,11 +121,15 @@ fn probe_outcomes_for_deleted_and_live_identities() {
         ),
         (
             "node uuid == live edge",
-            outcome(graph.validate_bulk_nodes(operation(19), &[node_batch(&[e3], &["P"], &[None])])),
+            outcome(
+                graph.validate_bulk_nodes(operation(19), &[node_batch(&[e3], &["P"], &[None])]),
+            ),
         ),
         (
             "node uuid == deleted edge",
-            outcome(graph.validate_bulk_nodes(operation(20), &[node_batch(&[e1], &["P"], &[None])])),
+            outcome(
+                graph.validate_bulk_nodes(operation(20), &[node_batch(&[e1], &["P"], &[None])]),
+            ),
         ),
         (
             "edge re-add cascade-deleted by DETACH",
@@ -151,14 +167,14 @@ fn probe_outcomes_for_deleted_and_live_identities() {
         )
     };
     let expected = [
-        ("deleted node re-add", "accepted".to_owned()),
+        ("deleted node re-add", conflict("node", "node_uuid")),
         ("live node dup", conflict("node", "node_uuid")),
-        ("deleted edge re-add", "accepted".to_owned()),
+        ("deleted edge re-add", conflict("edge", "edge_uuid")),
         ("live edge dup", conflict("edge", "edge_uuid")),
         ("edge uuid == live node", conflict("edge", "edge_uuid")),
-        ("edge uuid == deleted node", "accepted".to_owned()),
+        ("edge uuid == deleted node", conflict("edge", "edge_uuid")),
         ("node uuid == live edge", conflict("node", "node_uuid")),
-        ("node uuid == deleted edge", "accepted".to_owned()),
+        ("node uuid == deleted edge", conflict("node", "node_uuid")),
         ("edge to deleted node", missing("target_uuid")),
         ("edge from never-seen node", missing("source_uuid")),
     ];
@@ -172,10 +188,16 @@ fn probe_outcomes_for_deleted_and_live_identities() {
         assert_eq!(name, expected_name);
         assert_eq!(got, want, "{name}");
     }
+    let cascaded = rows
+        .iter()
+        .find(|(name, _)| *name == "edge re-add cascade-deleted by DETACH")
+        .unwrap();
+    assert_eq!(cascaded.1, conflict("edge", "edge_uuid"));
 }
 
-/// Validation looks at live state only, but the commit refuses to reuse the
-/// identity of a deleted entity: the UUID is spent for good.
+/// A UUID is spent for good once an entity holds it: validation refuses the
+/// identity of a deleted entity with the same typed conflict the commit gives,
+/// so validation never accepts what the commit rejects.
 #[test]
 fn deleted_identities_are_not_reused_at_commit() {
     let (_directory, graph) = project();
@@ -184,7 +206,11 @@ fn deleted_identities_are_not_reused_at_commit() {
     graph
         .publish_bulk_nodes(
             operation(10),
-            &[node_batch(&[a, b, c], &["P", "P", "P"], &[None, None, None])],
+            &[node_batch(
+                &[a, b, c],
+                &["P", "P", "P"],
+                &[None, None, None],
+            )],
         )
         .unwrap();
     graph
@@ -201,5 +227,21 @@ fn deleted_identities_are_not_reused_at_commit() {
     assert!(edge.is_err(), "deleted edge UUID must stay spent");
     let cascaded =
         graph.publish_bulk_edges(operation(24), &[edge_batch(&[e2], &["R"], &[a], &[b])]);
-    assert!(cascaded.is_err(), "cascade-deleted edge UUID must stay spent");
+    assert!(
+        cascaded.is_err(),
+        "cascade-deleted edge UUID must stay spent"
+    );
+    // The refusal is durable: a fresh open sees the same spent identities.
+    drop(graph);
+    let reopened = GraphForge::new(Some(_directory.path().to_str().unwrap())).unwrap();
+    assert!(
+        reopened
+            .publish_bulk_nodes(operation(25), &[node_batch(&[c], &["P"], &[None])])
+            .is_err()
+    );
+    assert!(
+        reopened
+            .publish_bulk_edges(operation(26), &[edge_batch(&[e1], &["R"], &[a], &[b])])
+            .is_err()
+    );
 }

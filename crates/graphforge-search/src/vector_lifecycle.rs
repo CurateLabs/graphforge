@@ -396,7 +396,7 @@ where
     if let Some(error) = failure {
         return Err(error);
     }
-    identity.finish(rows, &mut checkpoint)?;
+    identity.finish(&mut checkpoint)?;
     let snapshot = SearchSourceSnapshot::from_admitted_files(
         project_dir,
         source_generation,

@@ -827,10 +827,7 @@ mod bulk_builder {
             "bulk.after_tables",
             "bulk.after_adjacency",
             "encode.after_inventory_pinned",
-            "uuid_encode.after_intent",
-            "uuid_encode.after_delta_runs",
-            "uuid_encode.after_manifest",
-            "bulk.after_membership",
+            "bulk.after_ordinal",
             "bulk.before_inventory",
             "bulk.after_inventory_before_intent_removal",
         ] {
@@ -1204,9 +1201,10 @@ mod bulk_builder {
     /// Base scatter plus explicitly accounted bounded refinement/spools.
     /// Every successful scratch block is consumed exactly once.
     fn assert_scratch_traffic(report: &crate::BulkBuildReport, edges: u64) {
-        // 28-byte edge records, two 16-byte adjacency entries and a 16-byte
-        // identity per edge, plus an 8-byte header per block.
-        let payload = edges * (28 + 2 * 16 + 16);
+        // 28-byte edge records and two 16-byte adjacency entries per edge,
+        // plus an 8-byte header per block. Edge UUIDs are not spilled: no
+        // index is built from them (#1902).
+        let payload = edges * (28 + 2 * 16);
         let extra = report.edge_refinement_write_bytes + report.csr_spool_write_bytes;
         let base = report.scratch_write_bytes - extra;
         assert!(
@@ -1257,6 +1255,36 @@ mod bulk_builder {
                     <= 3_001 * 32 + run.report.csr_partitions * 3 * 2 * 8
             );
             assert_eq!((run.report.nodes, run.report.edges), (1_021, 3_001));
+        }
+    }
+
+    /// The membership index duplicated the published Parquet UUID columns and
+    /// is no longer produced (#1902). The ordinal node facet beside it is.
+    #[test]
+    fn neither_bulk_route_publishes_a_membership_index() {
+        let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
+        let memory = bulk_with(&nodes, &edges, 2, 4).unwrap();
+        let scratch = scratch_run(&nodes, &edges, 2, 4, (7, 5)).unwrap().inventory;
+        for (route, inventory) in [("memory", &memory), ("scratch", &scratch)] {
+            let paths = inventory
+                .iter()
+                .map(|(path, _, _)| path.as_str())
+                .collect::<Vec<_>>();
+            assert!(
+                paths.contains(&"topology/uuid-membership/ordinal-v4-manifest.json"),
+                "{route}: the ordinal facet is the one artifact kept: {paths:?}"
+            );
+            let index = paths
+                .iter()
+                .filter(|path| {
+                    path.starts_with("topology/uuid-membership/")
+                        && (path.ends_with("/manifest.json")
+                            || path.ends_with("/topology-receipt.json")
+                            || path.contains("identities-v5")
+                            || path.contains("node-surrogates-v5"))
+                })
+                .collect::<Vec<_>>();
+            assert!(index.is_empty(), "{route} published {index:?}");
         }
     }
 
@@ -1504,7 +1532,7 @@ mod bulk_builder {
             "bulk.after_edges",
             "bulk.after_ranks",
             "bulk.after_tables",
-            "bulk.after_membership",
+            "bulk.after_ordinal",
             "bulk.after_adjacency",
             "bulk.before_inventory",
         ] {

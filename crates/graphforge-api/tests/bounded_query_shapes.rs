@@ -1054,15 +1054,17 @@ fn undeclared_topology_files_do_not_change_readers_or_writes() {
                 return Ok("search feature disabled".into());
             }
             "uuid" => {
-                let metrics = graphforge_storage::rebuild_uuid_membership_indexes_with_topology(
-                    &workspace,
-                    graphforge_storage::UuidIndexBuildLimits::default(),
-                    topology,
-                )
-                .map_err(|error| error.to_string())?;
+                let files = graphforge_storage::enumerate_topology_files(&topology, None)
+                    .map_err(|error| error.to_string())?;
+                let generation = graphforge_storage::read_topology_generation(&workspace)
+                    .map_err(|error| error.to_string())?;
+                let probe =
+                    graphforge_storage::TopologyIdentityProbe::open(&workspace, &files, generation)
+                        .map_err(|error| error.to_string())?;
                 return Ok(format!(
                     "nodes={}, edges={}",
-                    metrics.node_count, metrics.edge_count
+                    probe.count(graphforge_storage::UuidIndexKind::Node),
+                    probe.count(graphforge_storage::UuidIndexKind::Edge)
                 ));
             }
             _ => unreachable!(),

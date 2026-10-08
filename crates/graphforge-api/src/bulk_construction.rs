@@ -282,64 +282,42 @@ impl ValidatedBulkEdges {
     }
 }
 
-fn open_membership_index(
+/// The identity probe for the committed topology generation, cached on the
+/// facade until the generation moves.
+fn open_identity_probe(
     graph: &GraphForge,
     input_kind: BulkInputKind,
 ) -> Result<
-    std::sync::MutexGuard<'_, Option<graphforge_storage::UuidMembershipIndex>>,
+    std::sync::MutexGuard<'_, Option<graphforge_storage::TopologyIdentityProbe>>,
     BulkValidationError,
 > {
-    let current_generation =
-        graphforge_storage::read_topology_generation(&graph.dir()).map_err(|error| {
-            contract_error(
-                input_kind,
-                BulkValidationReason::ProjectState,
-                &error.to_string(),
-            )
-        })?;
-    let mut cached = graph.uuid_membership_index.lock().map_err(|error| {
+    let project_state = |error: &dyn std::fmt::Display| {
         contract_error(
             input_kind,
             BulkValidationReason::ProjectState,
             &error.to_string(),
         )
-    })?;
+    };
+    let current_generation = graphforge_storage::read_topology_generation(&graph.dir())
+        .map_err(|error| project_state(&error))?;
+    let mut cached = graph
+        .identity_probe
+        .lock()
+        .map_err(|error| project_state(&error))?;
     if cached
         .as_ref()
-        .is_some_and(|index| index.topology_generation() != current_generation)
+        .is_some_and(|probe| probe.topology_generation() != current_generation)
     {
         *cached = None;
     }
-    if !graphforge_storage::uuid_membership_index_present(&graph.dir()) {
-        let has_nodes =
-            graphforge_storage::node_topology_present(&graph.dir()).map_err(|error| {
-                contract_error(
-                    input_kind,
-                    BulkValidationReason::ProjectState,
-                    &error.to_string(),
-                )
-            })?;
-        let has_edges = std::fs::read_dir(graph.dir().join("topology/edges"))
-            .ok()
-            .is_some_and(|mut entries| entries.any(|entry| entry.is_ok()));
-        if has_nodes || has_edges {
-            return Err(contract_error(
-                input_kind,
-                BulkValidationReason::ProjectState,
-                "UUID membership index is missing; run the bounded storage rebuild before ingest",
-            ));
-        }
-        return Ok(cached);
-    }
     if cached.is_none() {
+        let dir = graph.dir();
+        let files = dir
+            .topology_files()
+            .map_err(|error| project_state(&error))?;
         *cached = Some(
-            graphforge_storage::UuidMembershipIndex::open(&graph.dir()).map_err(|error| {
-                contract_error(
-                    input_kind,
-                    BulkValidationReason::ProjectState,
-                    &error.to_string(),
-                )
-            })?,
+            graphforge_storage::TopologyIdentityProbe::open(&dir, &files, current_generation)
+                .map_err(|error| project_state(&error))?,
         );
     }
     Ok(cached)
@@ -350,55 +328,65 @@ fn existing_edge_context(
     endpoint_candidates: &[Uuid],
     edge_candidates: Option<&[Uuid]>,
 ) -> Result<(HashSet<Uuid>, HashSet<Uuid>), BulkValidationError> {
-    let mut index = open_membership_index(graph, BulkInputKind::Edge)?;
-    let known_nodes = indexed_existing(
-        index.as_mut(),
-        endpoint_candidates,
-        graphforge_storage::UuidIndexKind::Node,
-        BulkInputKind::Edge,
-    )?;
+    let mut probe = open_identity_probe(graph, BulkInputKind::Edge)?;
+    let known_nodes = live_nodes(probe.as_mut(), endpoint_candidates, BulkInputKind::Edge)?;
     let Some(edge_candidates) = edge_candidates else {
         return Ok((known_nodes, HashSet::new()));
     };
-    let mut existing = indexed_existing(
-        index.as_mut(),
-        edge_candidates,
-        graphforge_storage::UuidIndexKind::Edge,
-        BulkInputKind::Edge,
-    )?;
-    existing.extend(indexed_existing(
-        index.as_mut(),
-        edge_candidates,
-        graphforge_storage::UuidIndexKind::Node,
-        BulkInputKind::Edge,
-    )?);
+    let existing = taken_identities(probe.as_mut(), edge_candidates, BulkInputKind::Edge)?;
     Ok((known_nodes, existing))
 }
 
-/// Probe `candidates` (sorted, deduplicated) and return the subset the index
-/// already holds. Membership only: callers never iterate the result.
-fn indexed_existing(
-    index: Option<&mut graphforge_storage::UuidMembershipIndex>,
+/// Probe `candidates` (sorted, deduplicated) and return the live nodes among
+/// them. Membership only: callers never iterate the result.
+fn live_nodes(
+    probe: Option<&mut graphforge_storage::TopologyIdentityProbe>,
     candidates: &[Uuid],
-    index_kind: graphforge_storage::UuidIndexKind,
     input_kind: BulkInputKind,
 ) -> Result<HashSet<Uuid>, BulkValidationError> {
-    let Some(index) = index else {
+    let Some(probe) = probe else {
         return Ok(HashSet::new());
     };
-    let (found, _) = index.probe(index_kind, candidates).map_err(|error| {
+    let (found, _) = probe
+        .probe(graphforge_storage::UuidIndexKind::Node, candidates)
+        .map_err(|error| {
+            contract_error(
+                input_kind,
+                BulkValidationReason::ProjectState,
+                &error.to_string(),
+            )
+        })?;
+    Ok(selected(candidates, &found))
+}
+
+/// The subset of `candidates` that is already spent: a live node, a live edge
+/// or a deleted entity. Node and edge UUIDs share one namespace and a deleted
+/// UUID is never reused, exactly as the commit enforces.
+fn taken_identities(
+    probe: Option<&mut graphforge_storage::TopologyIdentityProbe>,
+    candidates: &[Uuid],
+    input_kind: BulkInputKind,
+) -> Result<HashSet<Uuid>, BulkValidationError> {
+    let Some(probe) = probe else {
+        return Ok(HashSet::new());
+    };
+    let (found, _) = probe.taken(candidates).map_err(|error| {
         contract_error(
             input_kind,
             BulkValidationReason::ProjectState,
             &error.to_string(),
         )
     })?;
-    Ok(candidates
+    Ok(selected(candidates, &found))
+}
+
+fn selected(candidates: &[Uuid], found: &[bool]) -> HashSet<Uuid> {
+    candidates
         .iter()
         .copied()
         .zip(found)
         .filter_map(|(uuid, present)| present.then_some(uuid))
-        .collect())
+        .collect()
 }
 
 /// Non-null UUIDs of `field`, sorted and deduplicated: the same set, in the
@@ -444,27 +432,21 @@ fn candidate_endpoint_uuids(batches: &[RecordBatch]) -> Result<Vec<Uuid>, BulkVa
 
 #[cfg(test)]
 fn indexed_uuid_count(graph: &GraphForge, kind: graphforge_storage::UuidIndexKind) -> u64 {
-    graphforge_storage::UuidMembershipIndex::open(&graph.dir())
-        .expect("published graph has an authenticated UUID membership index")
-        .count(kind)
+    let dir = graph.dir();
+    let files = dir.topology_files().expect("published topology files");
+    graphforge_storage::TopologyIdentityProbe::open(
+        &dir,
+        &files,
+        graphforge_storage::read_topology_generation(&dir).expect("topology generation"),
+    )
+    .expect("published graph has readable topology")
+    .count(kind)
 }
 
 pub(crate) fn register_existing_endpoints(
     writer: &mut graphforge_storage::GraphWriter,
-    dir: &std::path::Path,
     endpoints: &BTreeSet<Uuid>,
 ) -> Result<(), super::GfError> {
-    if !graphforge_storage::uuid_membership_index_present(dir) {
-        graphforge_storage::rebuild_uuid_membership_indexes(
-            dir,
-            graphforge_storage::UuidIndexBuildLimits::default(),
-        )?;
-    }
-    if !graphforge_storage::uuid_membership_index_is_fresh(dir)? {
-        return Err(super::GfError::Storage(
-            "bulk endpoint UUID index is stale".into(),
-        ));
-    }
     let requested = endpoints.iter().copied().collect::<Vec<_>>();
     writer
         .register_existing_endpoints(&requested)
@@ -580,8 +562,7 @@ mod tests {
         .unwrap();
         let missing = uuid(70_001);
         let failure =
-            register_existing_endpoints(&mut writer, &graph.dir(), &BTreeSet::from([missing]))
-                .unwrap_err();
+            register_existing_endpoints(&mut writer, &BTreeSet::from([missing])).unwrap_err();
         assert_eq!(
             failure.to_string(),
             "validation error: bulk edge endpoint disappeared before publication"

@@ -479,7 +479,6 @@ fn nonempty_base_rejects_duplicate_cross_kind_and_missing_endpoint_without_copy(
     );
     assert!(!operation_root.join("staged-identities.run").exists());
     assert_eq!(shape.parent_topology_generation, 1);
-    assert!(shape.parent_uuid_manifest_sha256.is_some());
 
     drop(delta);
     let mut retained_endpoints =

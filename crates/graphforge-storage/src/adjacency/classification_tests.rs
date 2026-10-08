@@ -51,7 +51,7 @@ fn unusable_index_objects_are_classified_by_cause() {
 
     // Authenticated bytes (the manifest records their checksum) that are
     // not a shard: a correct writer never produces them.
-    let (_dir, path, mut reader, shard) = fixture();
+    let (_dir, _path, mut reader, shard) = fixture();
     let length = std::fs::metadata(&shard).unwrap().len() as usize;
     let garbage = vec![7_u8; length];
     std::fs::write(&shard, &garbage).unwrap();

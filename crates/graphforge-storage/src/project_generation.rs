@@ -227,20 +227,6 @@ impl ResolvedProjectGeneration {
         Ok(Some(pinned))
     }
 
-    pub(crate) fn authenticated_graph_file_bytes_with_state(
-        &self,
-        relative_path: &str,
-        maximum: u64,
-        targeted_state: Option<&mut crate::graph_manifest::GraphManifestTargetedState>,
-    ) -> Result<Option<(crate::GraphFileEntry, Vec<u8>)>, GfError> {
-        self.authenticated_graph_file_bytes_counted(
-            relative_path,
-            maximum,
-            targeted_state,
-            &mut crate::GraphObjectIoTotals::default(),
-        )
-    }
-
     pub(crate) fn authenticated_graph_file_bytes_counted(
         &self,
         relative_path: &str,
@@ -2369,8 +2355,6 @@ mod tests {
         if include_v4 && omit_receipt {
             fs::remove_file(index.join("ordinal-v4-receipt.json")).unwrap();
         }
-        crate::rebuild_uuid_membership_indexes(&graph, crate::UuidIndexBuildLimits::default())
-            .unwrap();
         let (inventory, expanded) = crate::capture_graph_files(&graph).unwrap();
         let participant = if compact {
             let lease = crate::begin_graph_object_publication(root).unwrap();
@@ -2588,7 +2572,7 @@ mod tests {
     }
 
     #[test]
-    fn public_orphan_maintenance_rejects_selected_v3_manifest_substitution() {
+    fn public_orphan_maintenance_ignores_a_legacy_membership_manifest() {
         let root = tempfile::tempdir().unwrap();
         fs::write(root.path().join(FORMAT_FILE), PROJECT_FORMAT_BYTES).unwrap();
         fs::create_dir(root.path().join("generations")).unwrap();
@@ -2603,7 +2587,10 @@ mod tests {
             .graph_tree_root()
             .join("topology/uuid-membership/manifest.json");
         fs::write(&manifest, b"substituted").unwrap();
-        assert!(crate::maintain_uuid_membership_orphans(&selected.graph_tree_root(), 16).is_err());
+        // The membership index is not authority any more: whatever a legacy
+        // project left in its manifest is neither read nor collected.
+        crate::maintain_uuid_membership_orphans(&selected.graph_tree_root(), 16).unwrap();
+        assert_eq!(fs::read(&manifest).unwrap(), b"substituted");
     }
 
     #[cfg(unix)]

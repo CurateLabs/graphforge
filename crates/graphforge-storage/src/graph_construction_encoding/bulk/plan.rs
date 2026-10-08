@@ -182,7 +182,7 @@ pub struct BulkBuildReport {
     /// Edges built.
     pub edges: u64,
     /// Per-pass measurements by pass name (`plan`, `nodes`, `edges`, `catalog`,
-    /// `tables`, `adjacency`, `membership`, `properties`, `finalize`). Keys and
+    /// `tables`, `ordinal`, `adjacency`, `properties`, `finalize`). Keys and
     /// values are numeric-only so receipts stay within the certification
     /// runner's sanitizer.
     pub passes: std::collections::BTreeMap<String, BulkPassReport>,
