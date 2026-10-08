@@ -415,9 +415,11 @@ impl Drop for Digests {
 /// Read one source front to back, hashing it, and confirm it is still the file
 /// registration recorded.
 fn hash_source(external: &ExternalSource, stop: &AtomicBool) -> Result<String, GfError> {
-    use std::io::Read as _;
+    use std::io::{Read as _, Seek as _, SeekFrom};
 
     let mut file = external.open()?;
+    // Opening read the footer through this handle; start from the first byte.
+    file.seek(SeekFrom::Start(0)).map_err(storage)?;
     let mut hasher = ObservedSha256::new();
     let mut buffer = vec![0_u8; 1 << 20];
     let mut total = 0_u64;
