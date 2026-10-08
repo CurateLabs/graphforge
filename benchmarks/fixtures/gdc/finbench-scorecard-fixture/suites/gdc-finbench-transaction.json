@@ -1,0 +1,16 @@
+{
+  "schema": "graphforge-benchmark-suite/1",
+  "id": "gdc-finbench-transaction",
+  "family": "gdc",
+  "suite_id": "finbench-transaction",
+  "disposition": "executable",
+  "pinned_identity": "profiles/gdc/finbench-fixture-identity.json",
+  "identity_profiles": {
+    "scorecard": "profiles/gdc/finbench-fixture-identity.json"
+  },
+  "runner": "gdc-finbench-transaction",
+  "datasets": [
+    "finbench-fixture-sf1",
+    "finbench-fixture-sf3"
+  ]
+}
