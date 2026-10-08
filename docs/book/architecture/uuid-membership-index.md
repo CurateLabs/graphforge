@@ -62,11 +62,22 @@ Validation refuses what the commit refuses. Before #1902, `validate_bulk_*`
 accepted a deleted UUID and the commit rejected it later; both now consult the
 same probe.
 
-Nodes are additionally covered by the ordinal facet, whose forward runs retain
-every node UUID that was ever appended, tombstones included. A project that
-deleted entities before #1902 has those deletions only in its ignored membership
-index (edges) or in the forward runs (nodes): a deleted node UUID stays refused
-at commit, and a deleted edge UUID from before the upgrade becomes reusable.
+## Projects that predate the removal
+
+Two behaviours differ for a project written before #1902. Both are accepted
+under the pre-v1 policy, which changes the format in place without a migration:
+
+- **Deleted edge UUIDs become reusable.** A project that deleted edges before
+  the upgrade holds those deletions only in its ignored membership index, so the
+  UUID of an edge deleted before the upgrade can be appended again. Entities
+  deleted after the upgrade are recorded in `deleted_identities.parquet` and stay
+  spent. Deleted node UUIDs from before the upgrade were not separately tested.
+- **Search verifies nodes by repeat-check when there is no ordinal facet.**
+  `NodeIdentityCheck` used the ordinal facet when a project had one and the
+  membership index otherwise. With the index gone, a project without an ordinal
+  facet checks only that the rows it reads do not repeat a node UUID; it no longer
+  cross-checks each row's `node_id` against a separate authority. A project with
+  the ordinal facet is unchanged.
 
 ## Node ordinal facet
 

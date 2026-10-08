@@ -106,7 +106,7 @@ GraphForge uses a **dual-key pattern** for all first-class objects:
 
 ### Why UUIDv7
 
-UUIDv7 (RFC 9562) is time-ordered within a millisecond, globally unique without coordination, fits in Arrow `FixedSizeBinary(16)`, and supports offline generation on mobile devices or air-gapped systems. See [UUID identity authority](uuid-membership-index.md) for identity lookup.
+UUIDv7 (RFC 9562) is time-ordered within a millisecond, globally unique without coordination, fits in Arrow `FixedSizeBinary(16)`, and supports offline generation on mobile devices or air-gapped systems. See [UUID identity authority](uuid-membership-index.md) for identity lookup, including what changed for projects written before the membership index was removed.
 
 UUID byte order, accepted text form, content-derived UUIDv8 records, canonical
 Arrow bytes, and domain-separated SHA-256 fingerprints follow the frozen
