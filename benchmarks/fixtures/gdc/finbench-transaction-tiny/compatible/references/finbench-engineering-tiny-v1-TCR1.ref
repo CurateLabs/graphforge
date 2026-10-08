@@ -1,0 +1,8 @@
+# TCR1 rows for binding 0 of finbench-engineering-queries-v1, from
+# graphforge_bench.gdc_finbench_transaction_reference. Static replay only.
+102 1 304 MAC
+112 1 304 MAC
+106 2 301 POS
+108 2 303 IP
+108 3 303 IP
+111 3 301 POS

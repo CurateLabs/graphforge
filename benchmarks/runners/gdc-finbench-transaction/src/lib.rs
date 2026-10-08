@@ -17,8 +17,19 @@
 //!
 //! Results here are engineering evidence only. They never masquerade as an
 //! audited GDC certification (`SuiteEvidence::certification` is always `false`).
+//!
+//! Every read (TCR1–TCR12, TSR1–TSR6) is a [`queries::QueryDefinition`]: Cypher
+//! text, parameters, result columns and truncation, iterable as data through
+//! [`queries::query_catalog`]. [`query_fixture`] runs them live over a committed
+//! fixture against independently derived rows.
 
 #![forbid(unsafe_code)]
+
+pub mod queries;
+pub mod query_fixture;
+
+pub use queries::{QueryCatalog, QueryDefinition, query_catalog, query_definition};
+pub use query_fixture::{QueryEvidence, run_query_fixture};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -44,6 +55,9 @@ pub const BOUNDED_TINY_DATASET: &str = "finbench-engineering-tiny-v1";
 
 /// Typed cause emitted when a write / read-write transaction fails closed.
 pub const WRITE_CAUSE: &str = "finbench_transaction_write_semantics_not_exposed";
+
+/// Typed cause for a read without an exact Cypher query definition.
+pub const UNMAPPED_READ_CAUSE: &str = "finbench_read_without_exact_cypher";
 
 /// FinBench Transaction workload category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -311,14 +325,13 @@ impl Operation {
         }
     }
 
-    /// The validation mode a read *would* use if compatible. Reads with a
-    /// spec-mandated total order use `Exact`; ratio/similarity aggregations
-    /// whose ties are not totally ordered use `Normalized`.
+    /// The validation mode the read's query definition declares. Reads with a
+    /// total result order use `Exact`; single-row ratio/similarity reads use
+    /// `Normalized`.
     fn intended_validation(self) -> ValidationMode {
-        match self {
-            Self::Tcr7 | Self::Tcr9 | Self::Tcr10 => ValidationMode::Normalized,
-            _ => ValidationMode::Exact,
-        }
+        query_definition(self)
+            .map(QueryDefinition::validation_mode)
+            .unwrap_or(ValidationMode::Exact)
     }
 }
 
@@ -784,178 +797,58 @@ impl std::error::Error for SuiteError {}
 
 /// Map a FinBench Transaction operation onto the public GraphForge surface.
 ///
-/// Read-only complex/simple reads that are ordinary graph traversals,
-/// temporal-window filters, aggregations, or top-k map to public Cypher.
-/// Operations that require semantics the public property-graph + Cypher surface
-/// does not expose fail closed with a typed cause instead of silently
-/// approximating:
-///
-/// * recursive temporal path filtering (paths whose transfer timestamps must be
-///   monotonically ordered) — TCR1, TCR2;
-/// * temporally filtered shortest transfer path — TCR3;
-/// * transfer-cycle detection under temporal constraints — TCR4;
-/// * hub-vertex truncation (native truncation-limit ordering by timestamp
-///   windows that changes the reference result) — TCR5;
-/// * write and read-write transaction semantics (ACID transactions, insert /
-///   delete / in-place update streams, truncation, and read-before-write risk
-///   checks) — TW1..TW19, TRW1..TRW3.
+/// Every read (TCR1–TCR12, TSR1–TSR6) maps to the Cypher of its
+/// [`QueryDefinition`], including `truncationLimit`. Write and read-write
+/// transactions fail closed with a typed cause instead of silently
+/// approximating: they need ACID transactions, insert / delete / in-place
+/// update streams, and read-before-write risk checks — TW1..TW19, TRW1..TRW3.
 pub fn map_operation(operation: Operation) -> MappingOutcome {
-    match operation {
-        Operation::Tcr1 => recursive_path_incompatible(
-            "TCR1 traces downstream transfer paths whose transfer timestamps must be strictly \
-             increasing along the path",
-        ),
-        Operation::Tcr2 => recursive_path_incompatible(
-            "TCR2 traces the fund-flow paths reaching an account with transfer timestamps ordered \
-             monotonically along each path",
-        ),
-        Operation::Tcr3 => MappingOutcome::SemanticIncompatibility {
-            cause: "temporal_shortest_transfer_path_not_exposed",
-            detail: "TCR3 computes the shortest transfer path length between two accounts using \
-                     only transfer edges inside a [startTime,endTime] window; the public bfs path \
-                     verb runs over the whole graph and cannot restrict shortest-path search to a \
-                     per-edge temporal predicate"
-                .into(),
-        },
-        Operation::Tcr4 => MappingOutcome::SemanticIncompatibility {
-            cause: "temporal_transfer_cycle_detection_not_exposed",
-            detail:
-                "TCR4 detects transfer cycles whose edges satisfy temporal ordering constraints \
-                     within a time window; the public surface exposes pattern matching and single \
-                     path verbs but not temporally constrained cycle enumeration"
-                    .into(),
-        },
-        Operation::Tcr5 => MappingOutcome::SemanticIncompatibility {
-            cause: "hub_vertex_truncation_not_exposed",
-            detail: "TCR5's reference result depends on FinBench native hub-vertex truncation \
-                     (truncationLimit edges kept per vertex ordered by timestamp window); public \
-                     Cypher has no mid-traversal truncation operator, so the untruncated result \
-                     would silently disagree with the reference"
-                .into(),
-        },
-        Operation::Tcr6 => compatible(
-            "cypher",
-            "MATCH (src:Account {id:$id})-[t:transfer]->(mid:Account)-[w:withdraw]->(dst:Account) \
-             WHERE t.createTime>=$start AND t.createTime<$end RETURN dst.id, sum(w.amount) AS amount \
-             ORDER BY amount DESC, dst.id LIMIT $topk",
-            "two-hop transfer-then-withdraw neighborhood with temporal filter and ordered top-k",
-        ),
-        Operation::Tcr7 => compatible(
-            "cypher",
-            "MATCH (src:Account {id:$id})<-[in:transfer]-(a:Account) \
-             WHERE in.createTime>=$start AND in.createTime<$end \
-             OPTIONAL MATCH (src)-[out:transfer]->(b:Account) \
-             RETURN count(DISTINCT a) AS senders, sum(in.amount) AS in_amt, sum(out.amount) AS out_amt",
-            "transfer-in versus transfer-out aggregate ratio over a time window; unordered ratio set (normalized validation)",
-        ),
-        Operation::Tcr8 => compatible(
-            "cypher",
-            "MATCH (loan:Loan {id:$id})-[d:deposit]->(a:Account)-[t:transfer*1..3]->(dst:Account) \
-             WHERE ALL(e IN t WHERE e.createTime>=$start AND e.createTime<$end) \
-             RETURN dst.id, count(*) AS hops ORDER BY hops DESC, dst.id LIMIT $topk",
-            "loan-money bounded multi-hop transfer reachability with a per-edge time-window filter and ordered top-k",
-        ),
-        Operation::Tcr9 => compatible(
-            "cypher",
-            "MATCH (a:Account {id:$id}) \
-             OPTIONAL MATCH (a)-[r:repay]->(:Loan) WHERE r.createTime>=$start AND r.createTime<$end \
-             OPTIONAL MATCH (a)<-[dep:deposit]-(:Loan) WHERE dep.createTime>=$start AND dep.createTime<$end \
-             RETURN sum(r.amount) AS repaid, sum(dep.amount) AS received",
-            "repay-to-deposit ratio aggregation over a time window; unordered ratio set (normalized validation)",
-        ),
-        Operation::Tcr10 => compatible(
-            "cypher",
-            LIVE_TCR10_QUERY,
-            "official TCR10 investor-relationship Jaccard with open startTime < timestamp < endTime \
-             window and 3-decimal rounding; single-row similarity (normalized validation)",
-        ),
-        Operation::Tcr11 => compatible(
-            "cypher",
-            "MATCH (a:Account {id:$id})-[g:guarantee*1..3]->(other:Account)-[:apply]->(loan:Loan) \
-             WHERE ALL(e IN g WHERE e.createTime>=$start AND e.createTime<$end) \
-             RETURN sum(loan.amount) AS total, count(DISTINCT loan) AS loans",
-            "guarantee-chain bounded traversal summing downstream loan exposure with a time-window filter",
-        ),
-        Operation::Tcr12 => compatible(
-            "cypher",
-            "MATCH (p:Person {id:$id})-[:own]->(a:Account)-[t:transfer]->(:Account)<-[:own]-(c:Company) \
-             WHERE t.createTime>=$start AND t.createTime<$end \
-             RETURN c.id, sum(t.amount) AS amount ORDER BY amount DESC, c.id LIMIT $topk",
-            "person-to-company transfer aggregation over owned accounts with temporal filter and ordered top-k",
-        ),
-        Operation::Tsr1 => compatible(
-            "cypher",
-            "MATCH (a:Account {id:$id}) RETURN a.id, a.type, a.nickname, a.isBlocked, a.createTime",
-            "single-account property lookup by id",
-        ),
-        Operation::Tsr2 => compatible(
-            "cypher",
-            "MATCH (a:Account {id:$id})-[t:transfer]->(dst:Account) \
-             WHERE t.createTime>=$start AND t.createTime<$end \
-             RETURN count(t) AS edges, max(t.amount) AS max_amount, sum(t.amount) AS sum_amount",
-            "one-hop outgoing transfer summary for an account within a time window",
-        ),
-        Operation::Tsr3 => compatible(
-            "cypher",
-            "MATCH (a:Account {id:$id})<-[t:transfer]-(src:Account) \
-             WHERE t.createTime>=$start AND t.createTime<$end \
-             RETURN count(t) AS edges, max(t.amount) AS max_amount, sum(t.amount) AS sum_amount",
-            "one-hop incoming transfer summary for an account within a time window",
-        ),
-        Operation::Tsr4 => compatible(
-            "cypher",
-            "MATCH (src:Account {id:$id})-[t:transfer]->(dst:Account {id:$dst}) \
-             RETURN count(t) AS edges, sum(t.amount) AS sum_amount ORDER BY edges DESC",
-            "transfer messages between a fixed source and destination account pair",
-        ),
-        Operation::Tsr5 => compatible(
-            "cypher",
-            "MATCH (src:Account {id:$src})-[t:transfer]->(dst:Account {id:$id}) \
-             RETURN count(t) AS edges, sum(t.amount) AS sum_amount ORDER BY edges DESC",
-            "transfer messages received by a fixed destination account from a source",
-        ),
-        Operation::Tsr6 => compatible(
-            "cypher",
-            "MATCH (a:Account {id:$id})-[:own]-(p:Person) RETURN p.id, p.name, p.isBlocked",
-            "owner lookup for an account",
-        ),
-        Operation::Tw1 => write_incompatible("TW1 inserts a Person vertex with its properties"),
-        Operation::Tw2 => write_incompatible("TW2 inserts a Company vertex with its properties"),
-        Operation::Tw3 => write_incompatible("TW3 inserts a Medium vertex with its properties"),
-        Operation::Tw4 => write_incompatible("TW4 inserts an Account owned by a Person"),
-        Operation::Tw5 => write_incompatible("TW5 inserts an Account owned by a Company"),
-        Operation::Tw6 => write_incompatible("TW6 inserts a Loan applied for by a Person"),
-        Operation::Tw7 => write_incompatible("TW7 inserts a Loan applied for by a Company"),
-        Operation::Tw8 => write_incompatible("TW8 inserts a Person-invest-Company edge"),
-        Operation::Tw9 => write_incompatible("TW9 inserts a Company-invest-Company edge"),
-        Operation::Tw10 => write_incompatible("TW10 inserts a Person-guarantee-Person edge"),
-        Operation::Tw11 => write_incompatible("TW11 inserts a Company-guarantee-Company edge"),
-        Operation::Tw12 => write_incompatible("TW12 inserts an Account-transfer-Account edge"),
-        Operation::Tw13 => write_incompatible("TW13 inserts an Account-withdraw-Account edge"),
-        Operation::Tw14 => write_incompatible("TW14 inserts an Account-repay-Loan edge"),
-        Operation::Tw15 => write_incompatible("TW15 inserts a Loan-deposit-Account edge"),
-        Operation::Tw16 => write_incompatible("TW16 inserts a Person/Company-signIn-Medium edge"),
-        Operation::Tw17 => {
-            write_incompatible("TW17 deletes an Account and all of its adjacent edges")
+    let detail = match operation {
+        Operation::Tw1 => "TW1 inserts a Person vertex with its properties",
+        Operation::Tw2 => "TW2 inserts a Company vertex with its properties",
+        Operation::Tw3 => "TW3 inserts a Medium vertex with its properties",
+        Operation::Tw4 => "TW4 inserts an Account owned by a Person",
+        Operation::Tw5 => "TW5 inserts an Account owned by a Company",
+        Operation::Tw6 => "TW6 inserts a Loan applied for by a Person",
+        Operation::Tw7 => "TW7 inserts a Loan applied for by a Company",
+        Operation::Tw8 => "TW8 inserts a Person-invest-Company edge",
+        Operation::Tw9 => "TW9 inserts a Company-invest-Company edge",
+        Operation::Tw10 => "TW10 inserts a Person-guarantee-Person edge",
+        Operation::Tw11 => "TW11 inserts a Company-guarantee-Company edge",
+        Operation::Tw12 => "TW12 inserts an Account-transfer-Account edge",
+        Operation::Tw13 => "TW13 inserts an Account-withdraw-Account edge",
+        Operation::Tw14 => "TW14 inserts an Account-repay-Loan edge",
+        Operation::Tw15 => "TW15 inserts a Loan-deposit-Account edge",
+        Operation::Tw16 => "TW16 inserts a Person/Company-signIn-Medium edge",
+        Operation::Tw17 => "TW17 deletes an Account and all of its adjacent edges",
+        Operation::Tw18 => "TW18 marks an Account as blocked (in-place state update)",
+        Operation::Tw19 => "TW19 marks a Person as blocked (in-place state update)",
+        Operation::Trw1 => {
+            "TRW1 checks a risky transfer pattern and, only if the check passes, writes the \
+             transfer inside one transaction"
         }
-        Operation::Tw18 => {
-            write_incompatible("TW18 marks an Account as blocked (in-place state update)")
+        Operation::Trw2 => {
+            "TRW2 checks a guarantee-and-loan risk pattern before conditionally writing edges \
+             inside one transaction"
         }
-        Operation::Tw19 => {
-            write_incompatible("TW19 marks a Person as blocked (in-place state update)")
-        }
-        Operation::Trw1 => write_incompatible(
-            "TRW1 checks a risky transfer pattern and, only if the check passes, writes the transfer \
-             inside one transaction",
-        ),
-        Operation::Trw2 => write_incompatible(
-            "TRW2 checks a guarantee-and-loan risk pattern before conditionally writing edges inside \
-             one transaction",
-        ),
-        Operation::Trw3 => write_incompatible(
+        Operation::Trw3 => {
             "TRW3 checks a transfer-cycle risk pattern before conditionally writing the transfer \
-             inside one transaction",
-        ),
+             inside one transaction"
+        }
+        read => return read_mapping(read),
+    };
+    write_incompatible(detail)
+}
+
+/// A read maps to its query definition's Cypher. A read without one fails
+/// closed; `every_read_has_an_exact_query_definition` keeps that set empty.
+fn read_mapping(operation: Operation) -> MappingOutcome {
+    match query_definition(operation) {
+        Some(definition) => compatible("cypher", definition.cypher, definition.semantics),
+        None => MappingOutcome::SemanticIncompatibility {
+            cause: UNMAPPED_READ_CAUSE,
+            detail: format!("{operation} has no exact Cypher query definition"),
+        },
     }
 }
 
@@ -965,17 +858,6 @@ fn compatible(interface: &str, cypher_shape: &str, notes: &str) -> MappingOutcom
         cypher_shape: cypher_shape.into(),
         notes: notes.into(),
     })
-}
-
-fn recursive_path_incompatible(detail: &str) -> MappingOutcome {
-    MappingOutcome::SemanticIncompatibility {
-        cause: "recursive_temporal_path_filtering_not_exposed",
-        detail: format!(
-            "{detail}; standard Cypher variable-length matching cannot enforce a monotonically \
-             increasing per-edge timestamp constraint along the traversed path (FinBench recursive \
-             path filtering choke point), so the public surface cannot reproduce the reference result"
-        ),
-    }
 }
 
 fn write_incompatible(detail: &str) -> MappingOutcome {
@@ -1554,16 +1436,6 @@ pub fn run_live_fixture(fixture: &Path, executable: &Path) -> Result<SuiteEviden
         Ok(_) => None,
     };
     let tcr10 = live_tcr10_outcome(&context.reference, rows, mapping);
-    let tcr1 = run_job(
-        &OperationJob {
-            schema: JOB_SCHEMA.into(),
-            suite_id: SUITE_ID.into(),
-            dataset_id: LIVE_DATASET_ID.into(),
-            operation: Operation::Tcr1,
-        },
-        None,
-        None,
-    );
     let tw1 = run_job(
         &OperationJob {
             schema: JOB_SCHEMA.into(),
@@ -1577,7 +1449,7 @@ pub fn run_live_fixture(fixture: &Path, executable: &Path) -> Result<SuiteEviden
     let mut evidence = assemble_evidence_with_context(
         LIVE_DATASET_ID,
         live_identities(&context.identity, executable_sha256),
-        vec![tcr10, tcr1, tw1],
+        vec![tcr10, tw1],
         "live_graphforge",
         ValidatorEvidence {
             interface: validator.interface().into(),
@@ -1784,35 +1656,29 @@ mod tests {
     }
 
     #[test]
-    fn compatible_reads_map_to_public_api() {
-        let compatible_reads = [
-            Operation::Tcr6,
-            Operation::Tcr7,
-            Operation::Tcr8,
-            Operation::Tcr9,
-            Operation::Tcr10,
-            Operation::Tcr11,
-            Operation::Tcr12,
-            Operation::Tsr1,
-            Operation::Tsr2,
-            Operation::Tsr3,
-            Operation::Tsr4,
-            Operation::Tsr5,
-            Operation::Tsr6,
-        ];
-        for operation in compatible_reads {
-            assert!(
-                matches!(map_operation(operation), MappingOutcome::Compatible(_)),
-                "{operation} should be compatible"
-            );
-        }
-        // All simple reads are compatible.
-        for operation in Operation::ALL {
-            if operation.category() == Category::SimpleRead {
-                assert!(
-                    matches!(map_operation(operation), MappingOutcome::Compatible(_)),
-                    "{operation}"
-                );
+    fn every_read_has_an_exact_query_definition() {
+        let reads: Vec<Operation> = Operation::ALL
+            .into_iter()
+            .filter(|operation| {
+                matches!(
+                    operation.category(),
+                    Category::ComplexRead | Category::SimpleRead
+                )
+            })
+            .collect();
+        assert_eq!(reads.len(), 18);
+        for operation in reads {
+            let definition =
+                query_definition(operation).unwrap_or_else(|| panic!("{operation} has no query"));
+            match map_operation(operation) {
+                MappingOutcome::Compatible(mapping) => {
+                    assert_eq!(mapping.interface, "cypher", "{operation}");
+                    assert_eq!(mapping.cypher_shape, definition.cypher, "{operation}");
+                    assert_eq!(mapping.notes, definition.semantics, "{operation}");
+                }
+                MappingOutcome::SemanticIncompatibility { cause, .. } => {
+                    panic!("{operation} must be runnable, refused with {cause}")
+                }
             }
         }
     }
@@ -1828,37 +1694,6 @@ mod tests {
                     MappingOutcome::Compatible(_) => panic!("{operation} must fail closed"),
                 },
                 _ => {}
-            }
-        }
-    }
-
-    #[test]
-    fn unsupported_reads_fail_closed_with_specific_causes() {
-        let cases = [
-            (
-                Operation::Tcr1,
-                "recursive_temporal_path_filtering_not_exposed",
-            ),
-            (
-                Operation::Tcr2,
-                "recursive_temporal_path_filtering_not_exposed",
-            ),
-            (
-                Operation::Tcr3,
-                "temporal_shortest_transfer_path_not_exposed",
-            ),
-            (
-                Operation::Tcr4,
-                "temporal_transfer_cycle_detection_not_exposed",
-            ),
-            (Operation::Tcr5, "hub_vertex_truncation_not_exposed"),
-        ];
-        for (operation, expected) in cases {
-            match map_operation(operation) {
-                MappingOutcome::SemanticIncompatibility { cause, .. } => {
-                    assert_eq!(cause, expected, "{operation}");
-                }
-                MappingOutcome::Compatible(_) => panic!("{operation} must fail closed"),
             }
         }
     }
@@ -2260,10 +2095,7 @@ mod tests {
                 .map(|item| item.status.clone())
         };
         assert_eq!(status_of(Operation::Tcr10), Some(OperationStatus::Passed));
-        assert_eq!(
-            status_of(Operation::Tcr1),
-            Some(OperationStatus::SemanticIncompatibility)
-        );
+        assert_eq!(evidence.operations.len(), 2);
         assert_eq!(
             status_of(Operation::Tw1),
             Some(OperationStatus::SemanticIncompatibility)

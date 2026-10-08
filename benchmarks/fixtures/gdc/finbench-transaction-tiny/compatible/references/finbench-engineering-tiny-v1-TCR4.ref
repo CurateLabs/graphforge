@@ -1,0 +1,4 @@
+# TCR4 rows for binding 0 of finbench-engineering-queries-v1, from
+# graphforge_bench.gdc_finbench_transaction_reference. Static replay only.
+138 2 31.250 30.000 1 5.000 5.000
+137 1 30.000 30.000 2 30.500 20.500

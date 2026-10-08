@@ -1,7 +1,7 @@
 use graphforge_benchmark_gdc_finbench_transaction::{
     ExecutionSignal, JOB_SCHEMA, MappingOutcome, Operation, OperationJob, OperationStatus,
-    assemble_evidence, load_result_rows, map_operation, operation_rules, run_job, run_live_fixture,
-    validate_live_fixture_context,
+    assemble_evidence, load_result_rows, map_operation, operation_rules, query_catalog, run_job,
+    run_live_fixture, run_query_fixture, validate_live_fixture_context,
 };
 use std::env;
 use std::fs;
@@ -13,7 +13,8 @@ fn main() -> ExitCode {
     let Some(command) = args.next() else {
         eprintln!(
             "usage: graphforge-benchmark-gdc-finbench-transaction \
-             <list-operations|map-operation|run-suite|validate-live-context|run-live> ..."
+             <list-operations|list-queries|map-operation|run-suite|run-queries|\
+             validate-live-context|run-live> ..."
         );
         return ExitCode::from(2);
     };
@@ -78,6 +79,39 @@ fn main() -> ExitCode {
                 &evidence_path,
             ) {
                 Ok(code) => code,
+                Err(error) => {
+                    eprintln!("{error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "list-queries" => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&query_catalog()).expect("query catalog serializes")
+            );
+            ExitCode::SUCCESS
+        }
+        "run-queries" => {
+            let (Some(fixture_path), Some(evidence_path), None) =
+                (args.next(), args.next(), args.next())
+            else {
+                eprintln!("usage: run-queries FIXTURE_DIR EVIDENCE.json");
+                return ExitCode::from(2);
+            };
+            match run_query_fixture(&PathBuf::from(fixture_path)) {
+                Ok(evidence) => {
+                    let payload = serde_json::to_string_pretty(&evidence).unwrap();
+                    if let Err(error) = fs::write(evidence_path, format!("{payload}\n")) {
+                        eprintln!("failed to write query evidence: {error}");
+                        return ExitCode::FAILURE;
+                    }
+                    if evidence.status == OperationStatus::Passed {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::FAILURE
+                    }
+                }
                 Err(error) => {
                     eprintln!("{error}");
                     ExitCode::FAILURE

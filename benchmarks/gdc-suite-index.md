@@ -160,23 +160,52 @@ PYTHONPATH=harness GRAPHFORGE_GDC_SNB_BI_BIN=target/debug/graphforge-benchmark-g
 | Runner | `graphforge-benchmark-gdc-finbench-transaction` (`suites/gdc-finbench-transaction.json`) |
 | Phases | Separate `load`, `warmup`, `execution`, `validation` (see evidence `phases`) |
 | Bounded fixture | `finbench-engineering-tiny-v1` (synthetic engineering data; not an official scale factor) |
-| Live lane | Trusted Rust runner owns in-memory `GraphForge::new(None)` load + official TCR10 `execute_with_params` |
+| Live lane | Trusted Rust runner owns in-memory `GraphForge::new(None)` load; `run-queries` executes every read over `finbench-engineering-queries-v1`, `run-live` the pinned TCR10 seed |
+| Query catalog | `list-queries`: per read, Cypher text, typed parameters, result columns, ordering and truncation (`queries.rs`) |
 | Validation | exact (ordered rows) and normalized (order-insensitive multiset) reference comparison |
-| Unsupported semantics | Typed `semantic_incompatibility`: `recursive_temporal_path_filtering_not_exposed` (TCR1–TCR2); `temporal_shortest_transfer_path_not_exposed` (TCR3); `temporal_transfer_cycle_detection_not_exposed` (TCR4); `hub_vertex_truncation_not_exposed` (TCR5); `finbench_transaction_write_semantics_not_exposed` (TW1–TW19, TRW1–TRW3) |
+| Unsupported semantics | Typed `semantic_incompatibility`: `finbench_transaction_write_semantics_not_exposed` (TW1–TW19, TRW1–TRW3); `truncation_order_not_supported` for any `truncationOrder` other than `TIMESTAMP_DESCENDING` |
 | Scorecard | `profiles/gdc/finbench-transaction-scorecard-identity.json` pins the SF1/SF10 archives and their read parameters (LDBC publishes no reference output); `profiles/gdc/finbench-transaction-load-mapping.json` maps `snapshot/` and `finbench-transaction-scorecard-ladder.json` carries the LDBC-published counts. See `README.md` (LDBC CSV suite pins). |
 
-Complex and simple reads that are ordinary multi-hop traversals, temporal-window
-filters, aggregations, or top-k map to public Cypher (TCR6–TCR12, TSR1–TSR6).
-Reads whose reference result depends on FinBench choke points the public surface
-does not expose fail closed with a specific typed cause: recursive temporal path
-filtering (monotonically increasing transfer timestamps along a path, TCR1–TCR2),
-temporally filtered shortest transfer path (TCR3), temporally constrained
-transfer-cycle detection (TCR4), and native hub-vertex truncation (TCR5). Write
-queries (TW1–TW19) and read-write transactions (TRW1–TRW3) require the official
-driver's ACID transaction, insert/delete/in-place-update stream, truncation, and
-read-before-write risk semantics, which the public property-graph + Cypher
+Every read (TCR1–TCR12, TSR1–TSR6) is exact public Cypher, including the
+specification's `truncationLimit`. Time windows are open
+(`startTime < timestamp < endTime`), amount thresholds strict, and calculated
+floats rounded to three decimals. Truncation follows the FinBench specification
+and the 2026-10-07 decision on #952: when a step expands from a vertex, only the
+`truncationLimit` newest edges of that type and direction at the vertex are
+traversed, before the window and amount filters, so truncation is a property of
+the vertex rather than of the path. Ties on `timestamp` are broken by the far
+endpoint's id ascending; the specification leaves ties undefined, so every
+truncated definition labels this as an accepted variance (`tie_break_variance`).
+The LDBC parameter generator emits limit 500 and `TIMESTAMP_DESCENDING`; other
+orders are refused, never reordered. Each query definition names the steps it
+truncates, and its `semantics` field states the specification reading it
+implements. The scorecard's reference implementation is GPStore, chosen because
+it implements newest-first truncation; where a reading differs from GPStore's
+(TCR1, TCR2, TCR5, TCR8, TCR9, TCR11), `reference_reading` says how and that the
+reading may change to match it. `workarounds` cites the GraphForge defect (#1887)
+or unsupported construct (#1888) behind any Cypher that departs from the direct
+form.
+
+TCR1, TCR2 and TCR5 (monotonically increasing transfer timestamps along a 1–3
+hop trace) use per-vertex admissible-edge lists plus a list predicate over each
+path's hops. TCR3 (temporally filtered shortest path) is an unbounded
+variable-length match with a window predicate; its minimum length is the
+shortest path. TCR4 is plain
+pattern matching and aggregation. TCR3 and TCR11 enumerate edge-distinct paths
+of unbounded length, which is exact but may exceed the rung envelope on large
+graphs; the scorecard lane reports that as a resource failure, never a wrong
+answer. Write queries (TW1–TW19) and read-write transactions (TRW1–TRW3) require
+the official driver's ACID transaction, insert/delete/in-place-update stream,
+and read-before-write risk semantics, which the public property-graph + Cypher
 surface does not expose, so they fail closed with
 `finbench_transaction_write_semantics_not_exposed`.
+
+The query fixture `fixtures/gdc/finbench-transaction-queries` holds a
+FinBench-shaped graph, parameter bindings per read (including bindings where
+truncation changes the answer), and `expected.json`, which
+`graphforge_bench.gdc_finbench_transaction_reference` derives procedurally from
+the graph without running GraphForge. The benchmark unittest regenerates it and
+fails on drift, then runs every binding live and compares rows.
 
 The suite pins the upstream FinBench specification tag `v0.1.0` at
 `d3ec7036bf6919df8cd3eeaa3a986048e779ea02`, DataGen `0.1.0` at
@@ -192,7 +221,7 @@ committed seed, and executes official TCR10 (`pid1`, `pid2`, open
 `startTime < timestamp < endTime` window, single `jaccardSimilarity` column
 rounded to three decimals). A static JSON envelope or `.out` file cannot claim
 live execution. The reference `0.667` is independently derived from the seed
-(`|{10,11} ∩ {10,11,12}| / |union| = 2/3`). TCR1 and TW1 remain typed
+(`|{10,11} ∩ {10,11,12}| / |union| = 2/3`). TW1 remains typed
 unsupported in the same evidence document, and correctness, resource, and
 harness lanes stay distinct. The older `run-suite` command is retained only as
 an explicitly marked `static_replay` regression lane and cannot satisfy live

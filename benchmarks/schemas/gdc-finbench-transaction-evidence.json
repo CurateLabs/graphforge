@@ -41,7 +41,7 @@
     "identities": { "type": "object" },
     "operations": {
       "type": "array",
-      "minItems": 3,
+      "minItems": 2,
       "maxItems": 40,
       "items": {
         "type": "object",
