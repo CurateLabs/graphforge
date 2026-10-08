@@ -153,6 +153,9 @@ class ResolvedBeliefProjection:
         by: str,
         via: str | None = None,
         directed: bool = True,
+        damping: float | None = None,
+        iterations: int | None = None,
+        clustering_normalization: str | None = None,
     ) -> InvocationDescriptor: ...
     def prepare_cluster_invocation(
         self,
@@ -162,6 +165,8 @@ class ResolvedBeliefProjection:
         vector_property: str | None = None,
         via: str | None = None,
         directed: bool = False,
+        synchronous_iterations: int | None = None,
+        initial_label_property: str | None = None,
     ) -> InvocationDescriptor: ...
     def prepare_paths_invocation(
         self,
@@ -1200,6 +1205,9 @@ class GraphForge:
         via: str | None = None,
         directed: bool = True,
         write_property: str | None = None,
+        damping: float | None = None,
+        iterations: int | None = None,
+        clustering_normalization: str | None = None,
     ) -> pyarrow.Table: ...
     def prepare_rank_invocation(
         self,
@@ -1208,6 +1216,9 @@ class GraphForge:
         by: str,
         via: str | None = None,
         directed: bool = True,
+        damping: float | None = None,
+        iterations: int | None = None,
+        clustering_normalization: str | None = None,
     ) -> InvocationDescriptor: ...
     def invoke_descriptor(self, descriptor: InvocationDescriptor) -> pyarrow.Table: ...
     def invoke_descriptor_bytes(self, descriptor: bytes) -> pyarrow.Table: ...
@@ -1295,7 +1306,20 @@ class GraphForge:
         via: str | None = None,
         directed: bool = False,
         write_property: str | None = None,
+        synchronous_iterations: int | None = None,
+        initial_label_property: str | None = None,
     ) -> pyarrow.Table: ...
+    def prepare_cluster_invocation(
+        self,
+        label: str,
+        *,
+        by: str,
+        vector_property: str | None = None,
+        via: str | None = None,
+        directed: bool = False,
+        synchronous_iterations: int | None = None,
+        initial_label_property: str | None = None,
+    ) -> InvocationDescriptor: ...
     def paths(
         self,
         source: str | NodeHandle | dict[str, Any] | None = None,

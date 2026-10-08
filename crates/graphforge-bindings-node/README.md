@@ -118,3 +118,25 @@ clears an ontology.
 
 GraphForge is open source under the Apache License 2.0. See the
 included `LICENSE` and `NOTICE` files for terms and attribution.
+
+## Algorithm definitions
+
+Optional positional controls are appended after existing arguments, preserving
+existing calls. Rank accepts `damping`, `iterations` (including zero), and
+`clusteringNormalization` (`"fagiolo"` or `"neighbor_edges"`). Cluster accepts
+`synchronousIterations` (including zero) and `initialLabelProperty`.
+
+```js
+forge.rank("Person", "pagerank", undefined, true, undefined, 0.85, 20);
+forge.cluster("Person", "label_propagation", undefined, false,
+  undefined, undefined, 10, "external_id");
+forge.rank("Person", "clustering_coefficient", undefined, true,
+  undefined, undefined, undefined, "neighbor_edges");
+```
+
+`initialLabelProperty` requires synchronous rounds and an Int64 property on
+every selected vertex. Its values become the output labels, with ties resolved
+to the smallest label. Without the property, initial labels are selected vertex
+ordinals. Rank and cluster invocation descriptors accept the same controls,
+including descriptors prepared from resolved belief projections. Rust owns the
+algorithms and validates their semantics.

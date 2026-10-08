@@ -54,3 +54,26 @@ point launches the same Rust-owned repository CLI used by `gf` and
 - [Installation](https://docs.graphforge.sh/guide/installation/)
 - [Repository integration](https://docs.graphforge.sh/guide/repository-integration/)
 - [Full documentation](https://docs.graphforge.sh/)
+
+## Algorithm definitions
+
+Existing calls retain their algorithm defaults. Optional keyword controls select
+fixed rounds of PageRank (`iterations`, including zero) and its `damping` factor,
+synchronous label propagation (`synchronous_iterations`, including zero), or the
+neighbor-edge clustering coefficient (`clustering_normalization="neighbor_edges"`).
+The default clustering normalization is `"fagiolo"`.
+
+```python
+forge.rank("Person", by="pagerank", damping=0.85, iterations=20)
+forge.cluster("Person", by="label_propagation", synchronous_iterations=10,
+              initial_label_property="external_id")
+forge.rank("Person", by="clustering_coefficient", directed=True,
+           clustering_normalization="neighbor_edges")
+```
+
+`initial_label_property` requires synchronous rounds and an Int64 property on
+every selected vertex. Its values become the output labels, with ties resolved
+to the smallest label. Without the property, initial labels are selected vertex
+ordinals. Rank and cluster invocation descriptors accept the same controls,
+including descriptors prepared from resolved belief projections. Rust owns the
+algorithms and validates their semantics.

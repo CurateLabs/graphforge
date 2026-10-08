@@ -49,6 +49,49 @@ pub struct PyGraphScaleIndexProfile {
     pub(super) inner: GraphScaleIndexProfile,
 }
 
+pub(super) fn pagerank_options(
+    damping: Option<f64>,
+    iterations: Option<u32>,
+) -> Option<graphforge_api::PageRankOptions> {
+    if damping.is_none() && iterations.is_none() {
+        None
+    } else {
+        Some(graphforge_api::PageRankOptions {
+            damping: damping.unwrap_or_else(|| graphforge_api::PageRankOptions::default().damping),
+            iterations,
+        })
+    }
+}
+
+pub(super) fn parse_clustering_normalization(
+    normalization: Option<&str>,
+) -> Result<Option<graphforge_api::ClusteringNormalization>, GfError> {
+    match normalization {
+        None => Ok(None),
+        Some("fagiolo") => Ok(Some(graphforge_api::ClusteringNormalization::Fagiolo)),
+        Some("neighbor_edges") => Ok(Some(graphforge_api::ClusteringNormalization::NeighborEdges)),
+        Some(_) => Err(GfError::Validation(
+            "clustering_normalization must be 'fagiolo' or 'neighbor_edges'".into(),
+        )),
+    }
+}
+
+pub(super) fn synchronous_label_propagation_options(
+    iterations: Option<u32>,
+    initial_label_property: Option<String>,
+) -> Result<Option<graphforge_api::SynchronousLabelPropagationOptions>, GfError> {
+    match iterations {
+        Some(iterations) => Ok(Some(graphforge_api::SynchronousLabelPropagationOptions {
+            iterations,
+            initial_label_property,
+        })),
+        None if initial_label_property.is_some() => Err(GfError::Validation(
+            "initial_label_property requires synchronous_iterations".into(),
+        )),
+        None => Ok(None),
+    }
+}
+
 #[pymethods]
 impl PyGraphScaleIndexProfile {
     #[getter]
@@ -147,9 +190,10 @@ pub(super) fn parse_algorithm_id(value: &str) -> Result<graphforge_api::Algorith
 
 #[pymethods]
 impl GraphForge {
+    #[allow(clippy::too_many_arguments)] // Optional analyst controls remain keyword-only.
     /// Rank nodes by a centrality/structural algorithm (`by=`). Returns a
     /// `pyarrow.Table`.
-    #[pyo3(signature = (label, *, by, via=None, directed=true, write_property=None))]
+    #[pyo3(signature = (label, *, by, via=None, directed=true, write_property=None, damping=None, iterations=None, clustering_normalization=None))]
     fn rank(
         &self,
         py: Python<'_>,
@@ -158,6 +202,9 @@ impl GraphForge {
         via: Option<&str>,
         directed: bool,
         write_property: Option<&str>,
+        damping: Option<f64>,
+        iterations: Option<u32>,
+        clustering_normalization: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
         let native = self.ensure_open()?;
         let opts = graphforge_api::RankOptions {
@@ -166,15 +213,17 @@ impl GraphForge {
             directed,
             write_property: write_property.map(str::to_owned),
 
-            pagerank: None,
-            clustering_normalization: None,
+            pagerank: pagerank_options(damping, iterations),
+            clustering_normalization: parse_clustering_normalization(clustering_normalization)
+                .map_err(|error| to_pyerr(py, &error))?,
         };
         let label = label.to_owned();
         algorithm_result(py, py.detach(|| native.rank(&label, opts)))
     }
 
+    #[allow(clippy::too_many_arguments)] // Optional analyst controls remain keyword-only.
     /// Prepare a Rust-owned neutral rank invocation without executing it.
-    #[pyo3(signature = (label, *, by, via=None, directed=true))]
+    #[pyo3(signature = (label, *, by, via=None, directed=true, damping=None, iterations=None, clustering_normalization=None))]
     fn prepare_rank_invocation(
         &self,
         py: Python<'_>,
@@ -182,6 +231,9 @@ impl GraphForge {
         by: &str,
         via: Option<&str>,
         directed: bool,
+        damping: Option<f64>,
+        iterations: Option<u32>,
+        clustering_normalization: Option<&str>,
     ) -> PyResult<PyInvocationDescriptor> {
         let native = self.ensure_open()?;
         let options = graphforge_api::RankOptions {
@@ -190,8 +242,9 @@ impl GraphForge {
             directed,
             write_property: None,
 
-            pagerank: None,
-            clustering_normalization: None,
+            pagerank: pagerank_options(damping, iterations),
+            clustering_normalization: parse_clustering_normalization(clustering_normalization)
+                .map_err(|error| to_pyerr(py, &error))?,
         };
         let label = label.to_owned();
         py.detach(|| native.prepare_rank_invocation(&label, &options))
@@ -225,7 +278,7 @@ impl GraphForge {
 
     /// Detect communities/components (`by=`). Returns a `pyarrow.Table`.
     #[allow(clippy::too_many_arguments)] // kwarg-rich v0.5 cluster() signature
-    #[pyo3(signature = (label, *, by, vector_property=None, via=None, directed=false, write_property=None))]
+    #[pyo3(signature = (label, *, by, vector_property=None, via=None, directed=false, write_property=None, synchronous_iterations=None, initial_label_property=None))]
     fn cluster(
         &self,
         py: Python<'_>,
@@ -235,6 +288,8 @@ impl GraphForge {
         via: Option<&str>,
         directed: bool,
         write_property: Option<&str>,
+        synchronous_iterations: Option<u32>,
+        initial_label_property: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
         let native = self.ensure_open()?;
         let opts = graphforge_api::ClusterOptions {
@@ -244,10 +299,47 @@ impl GraphForge {
             directed,
             write_property: write_property.map(str::to_owned),
 
-            synchronous_label_propagation: None,
+            synchronous_label_propagation: synchronous_label_propagation_options(
+                synchronous_iterations,
+                initial_label_property.map(str::to_owned),
+            )
+            .map_err(|error| to_pyerr(py, &error))?,
         };
         let label = label.to_owned();
         algorithm_result(py, py.detach(|| native.cluster(&label, opts)))
+    }
+
+    #[allow(clippy::too_many_arguments)] // Optional analyst controls remain keyword-only.
+    #[pyo3(signature = (label, *, by, vector_property=None, via=None, directed=false, synchronous_iterations=None, initial_label_property=None))]
+    fn prepare_cluster_invocation(
+        &self,
+        py: Python<'_>,
+        label: &str,
+        by: &str,
+        vector_property: Option<&str>,
+        via: Option<&str>,
+        directed: bool,
+        synchronous_iterations: Option<u32>,
+        initial_label_property: Option<&str>,
+    ) -> PyResult<PyInvocationDescriptor> {
+        let native = self.ensure_open()?;
+        let options = graphforge_api::ClusterOptions {
+            by: by.parse().map_err(|error| to_pyerr(py, &error))?,
+            vector_property: vector_property.map(str::to_owned),
+            via: via.map(str::to_owned),
+            directed,
+            write_property: None,
+
+            synchronous_label_propagation: synchronous_label_propagation_options(
+                synchronous_iterations,
+                initial_label_property.map(str::to_owned),
+            )
+            .map_err(|error| to_pyerr(py, &error))?,
+        };
+        let label = label.to_owned();
+        py.detach(|| native.prepare_cluster_invocation(&label, &options))
+            .map(|inner| PyInvocationDescriptor { inner })
+            .map_err(|error| to_py_invocation_error(py, &error))
     }
 
     /// Path-finding / flow between nodes (`by=`). Returns a `pyarrow.Table`.

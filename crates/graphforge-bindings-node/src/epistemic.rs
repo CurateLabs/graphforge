@@ -26,6 +26,9 @@ use crate::StatuslessPolicyV1;
 use crate::SupersessionBranchPolicyV1;
 use crate::Task;
 use crate::WriteContext;
+use crate::analyst::{
+    pagerank_options, parse_clustering_normalization, synchronous_label_propagation_options,
+};
 use crate::assertion_status;
 use crate::cancelled_error;
 use crate::canonical_operation_id;
@@ -449,6 +452,7 @@ impl ResolvedBeliefProjectionHandle {
             .collect()
     }
 
+    #[allow(clippy::too_many_arguments)] // Append controls without shifting existing arguments.
     /// Prepare rank without executing it.
     #[napi]
     pub fn prepare_rank_invocation(
@@ -457,6 +461,9 @@ impl ResolvedBeliefProjectionHandle {
         by: String,
         via: Option<String>,
         directed: Option<bool>,
+        damping: Option<f64>,
+        iterations: Option<f64>,
+        clustering_normalization: Option<String>,
     ) -> Result<InvocationDescriptorHandle> {
         let options = graphforge_api::RankOptions {
             by: by.parse().map_err(|error| to_napi_err(&error))?,
@@ -464,8 +471,10 @@ impl ResolvedBeliefProjectionHandle {
             directed: directed.unwrap_or(true),
             write_property: None,
 
-            pagerank: None,
-            clustering_normalization: None,
+            pagerank: pagerank_options(damping, iterations)?,
+            clustering_normalization: parse_clustering_normalization(
+                clustering_normalization.as_deref(),
+            )?,
         };
         self.inner
             .prepare_rank_invocation(&label, &options)
@@ -473,6 +482,7 @@ impl ResolvedBeliefProjectionHandle {
             .map_err(|error| to_napi_invocation_err(&error))
     }
 
+    #[allow(clippy::too_many_arguments)] // Append controls without shifting existing arguments.
     /// Prepare clustering without executing it.
     #[napi]
     pub fn prepare_cluster_invocation(
@@ -482,6 +492,8 @@ impl ResolvedBeliefProjectionHandle {
         via: Option<String>,
         directed: Option<bool>,
         vector_property: Option<String>,
+        synchronous_iterations: Option<f64>,
+        initial_label_property: Option<String>,
     ) -> Result<InvocationDescriptorHandle> {
         let options = graphforge_api::ClusterOptions {
             by: by.parse().map_err(|error| to_napi_err(&error))?,
@@ -490,7 +502,10 @@ impl ResolvedBeliefProjectionHandle {
             directed: directed.unwrap_or(false),
             write_property: None,
 
-            synchronous_label_propagation: None,
+            synchronous_label_propagation: synchronous_label_propagation_options(
+                synchronous_iterations,
+                initial_label_property,
+            )?,
         };
         self.inner
             .prepare_cluster_invocation(&label, &options)
