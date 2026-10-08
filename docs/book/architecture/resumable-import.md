@@ -168,27 +168,41 @@ the open file and its name again before each batch and at the end of the pass, a
 refuses with a typed error if the source is missing (`GF_NOT_FOUND`) or was
 replaced, resized, modified or rewritten (`GF_IDENTITY_CONFLICT`).
 
-Both construction paths read the source in place and digest it. The staged path
-decodes a source sequentially, so the SHA-256 is folded from the bytes the decode
-reads: those arriving in file order are hashed as they are read, ranges that
-arrive early wait (bounded) for the bytes before them, and bytes the decode never
-asks for, such as the leading magic, are read once at the end (4 bytes of a
-9.6 MB source in the test). The bulk builder decodes row groups in parallel, and
-the fastest workers run about a worker count of row groups ahead of the slowest,
-so an ordered digest cannot be folded from their reads without holding that lead
-in memory or reading most of the file again (measured: 90% and 96% of the bytes
-at S20 and S22 with a 64 MiB bound). It therefore runs one thread per source that
-reads it front to back while the workers decode; the pages it reads are the ones
-the workers read next, and the build waits for it only if it is still behind
-when the last task ends.
+Both construction paths read the source in place, and the read that decodes a
+source is the read that digests it. A custom Parquet `ChunkReader` offers every
+range the decoder asks for, including the footer, to the source's digest as it is
+read. SHA-256 is sequential, so bytes that arrive in file order are hashed at once;
+bytes that arrive early are held (the held `Vec`s coalesce a streamed column chunk)
+until the gap before them is filled. The bulk builder claims a source's tasks in
+file order (`claim_in_order` in `graphforge-storage`), so at most one task per
+worker is in flight and the lead over the hashed prefix is bounded by the workers
+times the largest task, with a 64 MiB floor and a 1 GiB ceiling. A range beyond
+the bound is dropped and read again, and so is anything the decode never asks for
+(the page index of a file that has one); `source_read` reports those as
+`reread_bytes`, and every byte offered as `observed_bytes`. A static split of the
+tasks across workers would start each at a far-apart position and defeat this, and
+`tasks_are_claimed_in_index_order_on_every_pass` fails if the claim order regresses.
+The staged path decodes a source sequentially, so its digest holds at most the row
+group being decoded: the columns of a row group are read side by side, and all but
+the first wait for the one before them.
 
-The first complete pass records the digest in the session manifest and, once every
-source is staged, in the import receipt (`source_provenance`); any later complete
-read of the same source must produce the same digest. The digest is provenance
-for what was read. It does not detect a rewrite that preserves size, modification
-time and the footer before the first complete read, because there is nothing
-earlier to compare against; the receipt then names the bytes that were actually
-read.
+The digest therefore names the bytes that were decoded. The first complete pass
+records it in the session manifest and, once every source is staged, in the import
+receipt (`source_provenance`); any later complete read of the same source must
+produce the same digest. It does not detect a rewrite that preserves size,
+modification time and the footer before the first complete read, because there is
+nothing earlier to compare against; the receipt then names the bytes that were
+actually read.
+
+### Sessions an earlier version began
+
+A session written before sources stayed in place (manifest format 2) holds its own
+copy of each Parquet source under `sources/` and recorded no identity or digest
+for it. It resumes, validates and appends as before, reading the copy it owns:
+nothing outside the session can refuse that build, `abort` removes the copy with
+the session, and the receipt has no digest for it. Registering an in-place source
+into such a session raises its manifest to format 3, which an earlier version
+refuses.
 
 Arrow batches passed to `append_arrow` are not an external file, so they are
 still encoded into the session. `abort` removes only session-owned artifacts and

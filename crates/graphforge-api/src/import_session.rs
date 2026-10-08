@@ -28,7 +28,12 @@ mod journal;
 mod memory_budget;
 mod normalization;
 
+/// Written by this version: a session may register Parquet sources that stay
+/// where they are (#1898).
 const FORMAT_VERSION: u32 = 3;
+/// Sessions an earlier version began copied Parquet sources into the session;
+/// they still resume, validate and append.
+const OLDEST_FORMAT_VERSION: u32 = 2;
 const SESSION_DIR: &str = "import-sessions";
 const MANIFEST: &str = "manifest.json";
 
@@ -546,7 +551,7 @@ impl GraphForge {
         let _region = RegionScope::named("resume_import");
         let root = import_root(self, session_uuid)?;
         let manifest = read_manifest(&root)?;
-        if manifest.format_version != FORMAT_VERSION || manifest.session_uuid != session_uuid {
+        if !supported_format(manifest.format_version) || manifest.session_uuid != session_uuid {
             return Err(validation("incompatible or mismatched import manifest"));
         }
         if matches!(
@@ -572,7 +577,7 @@ impl GraphForge {
     ) -> Result<(ImportPhase, ImportProgress), GfError> {
         let root = import_root(self, session_uuid)?;
         let manifest = read_manifest(&root)?;
-        if manifest.format_version != FORMAT_VERSION || manifest.session_uuid != session_uuid {
+        if !supported_format(manifest.format_version) || manifest.session_uuid != session_uuid {
             return Err(validation("incompatible or mismatched import manifest"));
         }
         Ok((manifest.phase, manifest.progress))
@@ -1473,6 +1478,16 @@ impl GraphImportSession {
             external,
             sha256: None,
         });
+        if self
+            .manifest
+            .sources
+            .last()
+            .is_some_and(|source| source.external.is_some())
+        {
+            // A session an earlier version began cannot be read by that version
+            // once it holds a source that stays where it is.
+            self.manifest.format_version = FORMAT_VERSION;
+        }
         self.manifest.phase = ImportPhase::Open;
         self.manifest.progress.bytes_accepted = total;
         self.manifest.progress.files_accepted += 1;
@@ -1529,16 +1544,36 @@ fn for_each_source_batch(
             Ok(None)
         }
         ImportSourceKind::ParquetNodes | ImportSourceKind::ParquetEdges => {
-            let external = source.external.as_ref().ok_or_else(|| {
-                storage("Parquet import source has no registered identity; register it again")
-            })?;
             let result = (|| {
-                let file = external.open()?;
+                // A source registered before sources stayed in place was copied
+                // into the session, which owns it: nothing to pin or digest.
+                let Some(external) = source.external.as_ref() else {
+                    let file =
+                        File::open(root.join("sources").join(&source.name)).map_err(storage)?;
+                    let chunk_reader = ImportChunkReader::new(file, tracker.clone(), None)?;
+                    let reader = ParquetRecordBatchReaderBuilder::try_new(chunk_reader)
+                        .map_err(storage)?
+                        .with_batch_size(batch_rows)
+                        .build()
+                        .map_err(storage)?;
+                    consume_source_batches(
+                        reader.map(|batch| {
+                            canonicalize_parquet_batch(
+                                source.kind.input_kind(),
+                                &batch.map_err(storage)?,
+                            )
+                        }),
+                        &mut consume,
+                    )?;
+                    return Ok(None);
+                };
+                let digest = external_source::SourceDigest::new(external.size);
+                let file = external.open_observed(&digest)?;
                 #[cfg(test)]
                 external_source::pass_hook(&external.path, "opened", 0);
-                let digest = external_source::SourceDigest::new(external.size);
                 let guard = file.try_clone().map_err(storage)?;
-                let chunk_reader = ImportChunkReader::new(file, tracker.clone(), digest.clone())?;
+                let chunk_reader =
+                    ImportChunkReader::new(file, tracker.clone(), Some(digest.clone()))?;
                 let reader = ParquetRecordBatchReaderBuilder::try_new(chunk_reader)
                     .map_err(storage)?
                     .with_batch_size(batch_rows)
@@ -1602,14 +1637,15 @@ struct ImportChunkReader {
     file: std::sync::Arc<File>,
     length: u64,
     tracker: graphforge_filesystem::FileCacheReleaseTracker,
-    digest: external_source::SourceDigest,
+    /// The digest an in-place source's reads feed; none for a session-owned copy.
+    digest: Option<external_source::SourceDigest>,
 }
 
 impl ImportChunkReader {
     fn new(
         file: File,
         tracker: graphforge_filesystem::FileCacheReleaseTracker,
-        digest: external_source::SourceDigest,
+        digest: Option<external_source::SourceDigest>,
     ) -> Result<Self, GfError> {
         let length = file.metadata().map_err(storage)?.len();
         Ok(Self {
@@ -1639,11 +1675,10 @@ impl ChunkReader for ImportChunkReader {
             self.tracker.clone(),
         )?;
         reader.seek(SeekFrom::Start(start))?;
-        Ok(BufReader::new(external_source::DigestingReader::new(
-            reader,
-            start,
-            self.digest.clone(),
-        )))
+        Ok(BufReader::with_capacity(
+            external_source::PAGE_HEADER_BUFFER_BYTES,
+            external_source::DigestingReader::new(reader, start, self.digest.clone()),
+        ))
     }
 
     fn get_bytes(&self, start: u64, length: usize) -> parquet::errors::Result<Bytes> {
@@ -1656,7 +1691,9 @@ impl ChunkReader for ImportChunkReader {
         let mut bytes = vec![0_u8; length];
         reader.read_exact(&mut bytes)?;
         reader.finish()?;
-        self.digest.observe(start, &bytes);
+        if let Some(digest) = &self.digest {
+            digest.observe(start, &bytes);
+        }
         Ok(Bytes::from(bytes))
     }
 }
@@ -1719,12 +1756,16 @@ fn write_manifest_with_allocation(
     journal::write_checkpoint(root, manifest, allocation, &mut false)
 }
 
+const fn supported_format(version: u32) -> bool {
+    version >= OLDEST_FORMAT_VERSION && version <= FORMAT_VERSION
+}
+
 fn read_manifest(root: &Path) -> Result<SessionManifest, GfError> {
     let mut manifest: SessionManifest = serde_json::from_reader(BufReader::new(
         File::open(root.join(MANIFEST)).map_err(storage)?,
     ))
     .map_err(storage)?;
-    if manifest.format_version != FORMAT_VERSION {
+    if !supported_format(manifest.format_version) {
         return Err(validation("incompatible import manifest format"));
     }
     journal::replay(root, &mut manifest)?;

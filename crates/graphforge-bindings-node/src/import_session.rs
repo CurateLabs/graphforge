@@ -237,7 +237,8 @@ impl GraphImportSession {
         self.with_mut(|session| session.append_arrow(kind, &batches))
     }
 
-    /// Register a local Parquet source by copying it into durable ownership.
+    /// Register a local Parquet source. It stays where it is: registration records its
+    /// identity and copies nothing, and each read refuses a file that has changed.
     #[napi]
     pub fn register_parquet(&self, kind: String, path: String) -> Result<()> {
         let kind = parse_kind(&kind)?;
