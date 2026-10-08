@@ -82,57 +82,14 @@ pub(super) fn install_staged_encoded_artifact(
         identity: captured_identity,
     };
     let (bucket, bucket_barriers) = cas.ensure_digest_bucket(digest)?;
-    let mut carried = ReadIoEvidence::default();
-    let mut existing = existing_object(lease, source, &bucket, authentication)?;
-    // Retiring a mis-addressed entry and installing its replacement must not
-    // interleave with another repair of the same digest: an identity-checked
-    // unlink is two steps, so a second repairer could remove the correct
-    // object the first one just installed. Ordinary installs only ever link,
-    // never unlink, so they stay on shared authority. The lock is per bucket
-    // and held to the end of this install; the classification is checked again
-    // once it is held.
-    let mut _repair_lock = None;
-    if let Existing::Mismatched { identity, io, .. } = &existing {
-        carried = *io;
-        let classified = *identity;
-        returned_error_boundary("repair:before-lock")?;
-        _repair_lock = Some(RepairLock::acquire(&bucket, &cas.diagnostic_root)?);
-        returned_error_boundary("repair:locked")?;
-        if address_identity(&bucket, digest, &cas.diagnostic_root)? != Some(classified) {
-            // Another installer changed the entry while this one waited.
-            existing = existing_object(lease, source, &bucket, authentication)?;
-            if let Existing::Mismatched { io, .. } = &existing {
-                carried = checked_read_io_sum(carried, *io)?;
-            }
-        }
-    }
+    let first = existing_object(lease, source, &bucket, authentication)?;
+    let (existing, carried, _repair_lock) =
+        settle_under_repair_lock(lease, source, &bucket, authentication, first)?;
     let installed = match existing {
         Existing::Reused(mut reused) => {
             add_authentication_work(&mut reused.evidence, carried)?;
             add_bucket_barriers(&mut reused.evidence, bucket_barriers);
-            // A second name on the staged inode must be this very object-store
-            // entry. Any other alias is not something this install created.
-            if staged_links(source)? > 1 && reused.identity != source.identity() {
-                return Err(validation(
-                    "staged encoded source has an alias that is not its content address",
-                ));
-            }
-            construction_failpoint(&format!(
-                "cas.install.after_dedupe.{}",
-                source.relative_path()
-            ));
-            // The entry may be one an earlier attempt linked and crashed
-            // before acknowledging. ADR 0013 requires its namespace barrier
-            // before anything can reference it.
-            acknowledge_directory(&bucket).map_err(|error| {
-                storage(
-                    "acknowledge reused graph object",
-                    &cas.diagnostic_root,
-                    error,
-                )
-            })?;
-            reused.evidence.directory_fsync_calls += 1;
-            reused.evidence.fsync_calls += 1;
+            accept_reused(source, &bucket, &mut reused, &cas.diagnostic_root)?;
             reused
         }
         existing => {
@@ -193,6 +150,69 @@ pub(super) fn install_staged_encoded_artifact(
     )?;
     record_completed_install(&evidence, 0);
     Ok(evidence)
+}
+
+/// A dedupe hit: check the staged inode's aliases and make the reused entry's
+/// namespace durable before anything can reference it.
+fn accept_reused(
+    source: &CapturedEncodedArtifact<'_>,
+    bucket: &StableDirectory,
+    reused: &mut InstalledObject,
+    diagnostic_root: &std::path::Path,
+) -> Result<(), GfError> {
+    // A second name on the staged inode must be this very object-store
+    // entry. Any other alias is not something this install created.
+    if staged_links(source)? > 1 && reused.identity != source.identity() {
+        return Err(validation(
+            "staged encoded source has an alias that is not its content address",
+        ));
+    }
+    construction_failpoint(&format!(
+        "cas.install.after_dedupe.{}",
+        source.relative_path()
+    ));
+    // The entry may be one an earlier attempt linked and crashed before
+    // acknowledging. ADR 0013 requires its namespace barrier before anything
+    // can reference it.
+    acknowledge_directory(bucket)
+        .map_err(|error| storage("acknowledge reused graph object", diagnostic_root, error))?;
+    reused.evidence.directory_fsync_calls += 1;
+    reused.evidence.fsync_calls += 1;
+    Ok(())
+}
+
+/// Retiring a mis-addressed entry and installing its replacement must not
+/// interleave with another repair of the same digest: an identity-checked
+/// unlink is two steps, so a second repairer could remove the correct object
+/// the first one just installed. Ordinary installs only ever link, never
+/// unlink, so they stay on shared authority. The lock is per bucket and held
+/// by the returned guard to the end of the install; the classification is
+/// checked again once it is held. Also returns the authentication reads the
+/// classifications performed, which the install's evidence must carry.
+fn settle_under_repair_lock<'a>(
+    lease: &GraphObjectPublicationLease,
+    source: &CapturedEncodedArtifact<'_>,
+    bucket: &'a StableDirectory,
+    authentication: ObjectAuthentication,
+    first: Existing,
+) -> Result<(Existing, ReadIoEvidence, Option<RepairLock<'a>>), GfError> {
+    let Existing::Mismatched { identity, io, .. } = &first else {
+        return Ok((first, ReadIoEvidence::default(), None));
+    };
+    let (classified, mut carried) = (*identity, *io);
+    let root = &lease.cas.diagnostic_root;
+    returned_error_boundary("repair:before-lock")?;
+    let lock = RepairLock::acquire(bucket, root)?;
+    returned_error_boundary("repair:locked")?;
+    if address_identity(bucket, source.content_sha256(), root)? == Some(classified) {
+        return Ok((first, carried, Some(lock)));
+    }
+    // Another installer changed the entry while this one waited.
+    let second = existing_object(lease, source, bucket, authentication)?;
+    if let Existing::Mismatched { io, .. } = &second {
+        carried = checked_read_io_sum(carried, *io)?;
+    }
+    Ok((second, carried, Some(lock)))
 }
 
 fn staged_links(source: &CapturedEncodedArtifact<'_>) -> Result<u64, GfError> {
@@ -307,13 +327,18 @@ fn existing_object(
     if let Some(allocation) = &cas.allocation {
         allocation.replace_file_at(&path, &file)?;
     }
+    Ok(Existing::Reused(reused_object(io, identity)?))
+}
+
+/// The dedupe receipt for an object authenticated by `io`.
+fn reused_object(io: ReadIoEvidence, identity: FileIdentity) -> Result<InstalledObject, GfError> {
     let mut evidence = GraphObjectInstallEvidence {
         content_xxh64: io.content_xxh64,
         reused_existing: true,
         ..Default::default()
     };
     add_authentication_work(&mut evidence, io)?;
-    Ok(Existing::Reused(InstalledObject { evidence, identity }))
+    Ok(InstalledObject { evidence, identity })
 }
 
 fn add_authentication_work(
