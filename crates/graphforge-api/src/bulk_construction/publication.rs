@@ -547,3 +547,6 @@ impl GraphForge {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod deleted_identity_tests;
