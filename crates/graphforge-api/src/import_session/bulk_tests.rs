@@ -236,6 +236,53 @@ fn routing_is_memory_then_scratch_then_staged_with_a_typed_reason() {
     }
 }
 
+#[test]
+fn edge_properties_over_the_budget_stage_with_a_typed_reason() {
+    use arrow::array::Float64Array;
+    use arrow::datatypes::{DataType, Field};
+
+    let ids = (1..=30).map(v7).collect::<Vec<_>>();
+    let edge_ids = (100..=129).map(v7).collect::<Vec<_>>();
+    let from = ids.clone();
+    let to = (0..30).map(|i| ids[(i + 1) % 30]).collect::<Vec<_>>();
+    let schema =
+        bulk_edge_input_schema(vec![Field::new("weight", DataType::Float64, true)]).unwrap();
+    let edges = RecordBatch::try_new(
+        schema,
+        vec![
+            uuids(&edge_ids),
+            Arc::new(StringArray::from(vec!["KNOWS"; 30])),
+            uuids(&from),
+            uuids(&to),
+            Arc::new(Float64Array::from(vec![0.5; 30])),
+        ],
+    )
+    .unwrap();
+    for (budget, staged) in [(None, false), (Some(SCRATCH_BUDGET), true)] {
+        bulk_source::TEST_BUDGET.with(|cell| cell.set(budget));
+        let (_directory, _project, graph) = fixture();
+        let mut session = graph
+            .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
+            .unwrap();
+        session
+            .append_arrow(BulkInputKind::Node, &[nodes(&ids)])
+            .unwrap();
+        session
+            .append_arrow(BulkInputKind::Edge, std::slice::from_ref(&edges))
+            .unwrap();
+        let progress = session.validate(&graph);
+        bulk_source::TEST_BUDGET.with(|cell| cell.set(None));
+        let construction = progress.unwrap().construction.unwrap();
+        assert_eq!(construction.bulk_build.is_none(), staged, "{budget:?}");
+        assert_eq!(
+            session.manifest.staged_reason,
+            staged.then_some(graphforge_storage::BulkStagedReason::EdgePropertiesExceedBudget)
+        );
+        session.commit(&graph, None).unwrap();
+        assert_eq!(graph.node_count("Person").unwrap(), 30);
+    }
+}
+
 /// Rows whose UUID is null get a deterministic UUID derived from the operation,
 /// the source sequence and the batch index, so a task boundary that moved a
 /// batch boundary would change the published bytes.
