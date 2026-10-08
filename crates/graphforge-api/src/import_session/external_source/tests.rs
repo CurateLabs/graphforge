@@ -749,3 +749,49 @@ fn edge_sources_are_read_in_place_too() {
         edge_sources_are_read_in_place_too_on(route);
     }
 }
+
+#[test]
+fn a_staged_read_hashes_what_it_reads_and_rereads_almost_nothing() {
+    use parquet::file::properties::WriterProperties;
+
+    // Several row groups, so the decode reads footer-first and then each column
+    // chunk in file order, as every Parquet read does.
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("nodes.parquet");
+    let ids = (0..600_000).map(|_| Uuid::now_v7()).collect::<Vec<_>>();
+    let batch = nodes(&ids);
+    let properties = WriterProperties::builder()
+        .set_max_row_group_size(100_000)
+        .build();
+    let mut writer = ArrowWriter::try_new(
+        File::create(&path).unwrap(),
+        batch.schema(),
+        Some(properties),
+    )
+    .unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+    let size = fs::metadata(&path).unwrap().len();
+
+    let (_directory, _project, graph) = fixture();
+    let mut session = begin(&graph);
+    session
+        .register_parquet(BulkInputKind::Node, &path)
+        .unwrap();
+    let record = session.manifest.sources[0].clone();
+
+    let capture = graphforge_storage::concurrency_attribution::RegionCapture::start("test");
+    let digest =
+        crate::import_session::for_each_source_batch(&session.root, &record, 65_536, |_| Ok(()))
+            .unwrap();
+    let snapshot = capture.finish();
+    assert_eq!(
+        digest.as_deref(),
+        Some(sha256(&fs::read(&path).unwrap()).as_str())
+    );
+    let reread = snapshot.regions["test/source_read"].work["bytes"];
+    assert!(
+        reread * 100 < size,
+        "re-read {reread} of {size} bytes for a sequential staged decode"
+    );
+}

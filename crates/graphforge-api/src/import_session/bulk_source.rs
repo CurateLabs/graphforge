@@ -343,10 +343,13 @@ impl Refusals {
 /// bytes at S20 and S22 with a 64 MiB bound). So each source gets one thread that
 /// reads it front to back while the workers decode. The pages it reads are the
 /// ones the workers read next, and the digest costs no time after the last task.
+/// A source's digest reader.
+type Hasher = std::thread::JoinHandle<Result<String, GfError>>;
+
 #[derive(Default)]
 pub(super) struct Digests {
     stop: Arc<AtomicBool>,
-    hashers: Mutex<Vec<(u64, std::thread::JoinHandle<Result<String, GfError>>)>>,
+    hashers: Mutex<Vec<(u64, Hasher)>>,
 }
 
 impl Digests {
