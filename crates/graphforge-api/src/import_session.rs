@@ -356,6 +356,10 @@ struct SessionManifest {
     /// and read back by every later one (ADR 0058). `None` until then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     build_route: Option<BuildRoute>,
+    /// Why an initial build staged instead of running on the bulk builder, when
+    /// the plan said so (ADR 0058). `None` for builds that did not stage on a plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    staged_reason: Option<graphforge_storage::BulkStagedReason>,
 }
 
 /// The two ways `validate` builds a generation (ADR 0058).
@@ -519,6 +523,7 @@ impl GraphForge {
             construction_session_uuid: None,
             updated_unix_millis: unix_millis()?,
             build_route: None,
+            staged_reason: None,
         };
         let journal = journal::Journal::open(&root, &manifest, self.allocation_operation.as_ref())?;
         write_manifest_with_allocation(&root, &manifest, self.allocation_operation.as_ref())?;
@@ -910,9 +915,11 @@ impl GraphImportSession {
         // consulted exactly once, so a refused, cancelled or killed bulk
         // attempt followed by a memory drop cannot send a sealed session to
         // the staged path, which would refuse every retry. An initial build
-        // that has staged nothing and whose estimated memory fits runs on the
-        // bulk builder (ADR 0058); an append, a session an earlier binary
-        // began staging, and an initial build larger than memory stage.
+        // that has staged nothing runs on the bulk builder, in memory or, when
+        // its estimate exceeds the budget, on scratch files (ADR 0058). An
+        // append, a session an earlier binary began staging, and an initial
+        // build the builder cannot hold the node tables or edge properties of
+        // stage; the last records its typed reason.
         let refusals = bulk_source::Refusals::default();
         let route = if let Some(route) = self.manifest.build_route {
             route
@@ -927,13 +934,18 @@ impl GraphImportSession {
                         .iter()
                         .all(|source| !source.staged && source.batches_staged == 0)
             };
-            let route = if initial
-                && self
+            let route = if initial {
+                match self
                     .plan_bulk_build(graph, cancellation, &refusals)?
-                    .estimated_resident_bytes()
-                    <= bulk_source::bulk_build_memory_budget()
-            {
-                BuildRoute::Bulk
+                    .route()
+                {
+                    graphforge_storage::BulkRoute::Staged(reason) => {
+                        self.manifest.staged_reason = Some(reason);
+                        BuildRoute::Staged
+                    }
+                    graphforge_storage::BulkRoute::Memory
+                    | graphforge_storage::BulkRoute::Scratch => BuildRoute::Bulk,
+                }
             } else {
                 BuildRoute::Staged
             };
@@ -1014,7 +1026,10 @@ impl GraphImportSession {
         cancellation: Option<&'a CancellationToken>,
         refusals: &'a bulk_source::Refusals,
     ) -> Result<graphforge_storage::BulkBuildPlan<'a>, GfError> {
-        let mut plan = graphforge_storage::BulkBuildPlan::default();
+        let mut plan = graphforge_storage::BulkBuildPlan {
+            memory_budget: Some(bulk_source::bulk_build_memory_budget()?),
+            ..Default::default()
+        };
         for source in &self.manifest.sources {
             let planned = bulk_source::plan(
                 graph,

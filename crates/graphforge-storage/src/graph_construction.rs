@@ -736,9 +736,9 @@ impl ConstructionSemanticAuthority {
 }
 
 pub use crate::graph_construction_encoding::{
-    BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkSource,
-    ConstructionRetainedArtifact, GraphConstructionEncoding, GraphConstructionEncodingEvidence,
-    GraphConstructionEncodingInvocationEvidence,
+    BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkRoute, BulkSource,
+    BulkStagedReason, ConstructionRetainedArtifact, GraphConstructionEncoding,
+    GraphConstructionEncodingEvidence, GraphConstructionEncodingInvocationEvidence,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1790,6 +1790,9 @@ impl GraphConstructionSession {
             recover_shape_intent(&session.root, &mut session.checkpoint)?;
         session.shape_outputs_verified = shape_outputs_verified;
         session.shape_boundary_retired_through = shape_boundary_retired_through;
+        // Over-budget bulk scratch is never resumed: whatever a killed attempt
+        // left is deleted here, and again when the next attempt starts (#1900).
+        crate::graph_construction_encoding::discard_scratch(session.root.path())?;
         session.recover_intent()?;
         if session
             .checkpoint

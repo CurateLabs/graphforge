@@ -27,7 +27,117 @@ fn sorted_entries(keys: &[u32]) -> Vec<u64> {
     entries
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+/// The CSR files an edge set produces: one per relation group in name order,
+/// then the union of all relations (the staged builder's order).
+pub(super) struct AdjacencyGroups {
+    /// Group stems, relation groups first, the union last.
+    pub(super) stems: Vec<String>,
+    /// Group of every relation id, or `u32::MAX` when its edges are in the union only.
+    pub(super) relation_group: Vec<u32>,
+    /// Whether every edge belongs to the group, so its entries equal the union's.
+    covering: Vec<bool>,
+}
+
+impl AdjacencyGroups {
+    pub(super) fn new(relations: &[RelationRoute]) -> Result<Self, GfError> {
+        let mut names = std::collections::BTreeSet::<&str>::new();
+        for relation in relations {
+            let name = relation.adjacency_group();
+            if crate::adjacency::usable_stem(name) {
+                names.insert(name);
+            }
+        }
+        let mut stems = names
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>();
+        let rank = names
+            .iter()
+            .enumerate()
+            .map(|(rank, name)| (*name, rank))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let relation_group = relations
+            .iter()
+            .map(|relation| {
+                rank.get(relation.adjacency_group())
+                    .map_or(Ok(u32::MAX), |rank| u32::try_from(*rank))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage)?;
+        stems.push(crate::adjacency::ALL_RELATIONS_STEM.to_owned());
+        let covering = (0..stems.len())
+            .map(|group| {
+                relation_group
+                    .iter()
+                    .filter(|rank| **rank == u32::try_from(group).unwrap_or(u32::MAX))
+                    .count()
+                    == relations.len()
+            })
+            .collect();
+        Ok(Self {
+            stems,
+            relation_group,
+            covering,
+        })
+    }
+
+    /// Index of the union group.
+    pub(super) fn union(&self) -> usize {
+        self.stems.len() - 1
+    }
+
+    /// Whether the group's entries are exactly the union's.
+    pub(super) fn is_whole(&self, group: usize) -> bool {
+        group == self.union() || self.covering[group]
+    }
+}
+
+/// Write every group's manifest row, in the staged order, and gather the outcomes.
+pub(super) fn assemble(
+    graph_root: &Path,
+    groups: &AdjacencyGroups,
+    outcomes: std::collections::BTreeMap<(usize, bool), crate::adjacency::SortedCsrOutcome>,
+    generation: u64,
+    built_at_micros: i64,
+    total_edges: u64,
+    allocation: Option<&crate::StorageAllocationOperation>,
+) -> Result<AdjacencyOutput, GfError> {
+    let mut manifest = Vec::with_capacity(groups.stems.len() * 2);
+    let mut output = AdjacencyOutput {
+        captured: Vec::new(),
+        shards: 0,
+        source_rows: total_edges,
+    };
+    for ((group, incoming), outcome) in outcomes {
+        manifest.push(AdjacencyManifestRow {
+            relation_type: groups.stems[group].clone(),
+            direction: if incoming {
+                Direction::In
+            } else {
+                Direction::Out
+            },
+            topology_generation: generation,
+            built_at_micros,
+            node_count: outcome.node_count,
+            edge_count: outcome.edge_count,
+        });
+        output.shards += outcome.shards;
+        output.captured.extend(outcome.captured);
+    }
+    crate::adjacency::write_manifest_observed(graph_root, &manifest, allocation)?;
+    Ok(output)
+}
+
+/// A fresh adjacency directory below `graph_root`.
+pub(super) fn reset_adjacency_directory(graph_root: &Path) -> Result<(), GfError> {
+    let adjacency = crate::adjacency::adjacency_dir(graph_root);
+    if adjacency.exists() {
+        std::fs::remove_dir_all(&adjacency).map_err(storage)?;
+    }
+    std::fs::create_dir_all(&adjacency).map_err(storage)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) fn write_adjacency(
     graph_root: &Path,
     edges: &EdgeTable,
@@ -38,79 +148,28 @@ pub(super) fn write_adjacency(
     options: &crate::adjacency::AdjacencyBuildOptions,
     cancel: &AtomicBool,
 ) -> Result<AdjacencyOutput, GfError> {
-    let adjacency = crate::adjacency::adjacency_dir(graph_root);
-    if adjacency.exists() {
-        std::fs::remove_dir_all(&adjacency).map_err(storage)?;
-    }
-    std::fs::create_dir_all(&adjacency).map_err(storage)?;
-
-    // Relation groups in name order, then the union: the staged builder's order.
-    let mut names = std::collections::BTreeMap::<&str, u32>::new();
-    for relation in relations {
-        let name = relation.adjacency_group();
-        if crate::adjacency::usable_stem(name) {
-            let next = u32::try_from(names.len()).map_err(storage)?;
-            names.entry(name).or_insert(next);
-        }
-    }
-    let total = edges.src.len();
-    let mut ordered = names
-        .keys()
-        .map(|name| (*name).to_owned())
-        .collect::<Vec<_>>();
-    // `names` assigned ids in first-seen order; map each relation to its group's rank in name order.
-    let rank = names
-        .keys()
-        .enumerate()
-        .map(|(rank, name)| {
-            (
-                *name,
-                u32::try_from(rank).expect("bounded by relation count"),
-            )
-        })
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let relation_group = relations
-        .iter()
-        .map(|relation| {
-            let name = relation.adjacency_group();
-            rank.get(name).copied().unwrap_or(u32::MAX)
-        })
-        .collect::<Vec<_>>();
-    ordered.push(crate::adjacency::ALL_RELATIONS_STEM.to_owned());
-    let union = ordered.len() - 1;
-
-    let mut manifest = Vec::with_capacity(ordered.len() * 2);
-    let mut output = AdjacencyOutput {
-        captured: Vec::new(),
-        shards: 0,
-        source_rows: total as u64,
-    };
+    reset_adjacency_directory(graph_root)?;
+    let groups = AdjacencyGroups::new(relations)?;
     // One direction's sorted entries are resident at a time; outcomes are
     // collected by (stem, direction) and the manifest keeps the staged order.
     let mut outcomes = std::collections::BTreeMap::new();
-    let covering = |group: usize| {
-        relation_group
-            .iter()
-            .filter(|rank| **rank == u32::try_from(group).unwrap_or(u32::MAX))
-            .count()
-            == relations.len()
-    };
     for (direction, keys, neighbors) in [
         (Direction::Out, &edges.src, &edges.dst),
         (Direction::In, &edges.dst, &edges.src),
     ] {
         let entries = sorted_entries(keys);
-        for (group, stem) in ordered.iter().enumerate() {
+        for (group, stem) in groups.stems.iter().enumerate() {
             check_cancelled(cancel)?;
             let selected;
             let group_rank = u32::try_from(group).expect("bounded by relation count");
-            let slice = if group == union || covering(group) {
+            let slice = if groups.is_whole(group) {
                 entries.as_slice()
             } else {
                 selected = entries
                     .par_iter()
                     .filter(|entry| {
-                        relation_group[edges.rels[(**entry & 0xffff_ffff) as usize - 1] as usize]
+                        groups.relation_group
+                            [edges.rels[(**entry & 0xffff_ffff) as usize - 1] as usize]
                             == group_rank
                     })
                     .copied()
@@ -130,22 +189,13 @@ pub(super) fn write_adjacency(
             );
         }
     }
-    for ((group, incoming), outcome) in outcomes {
-        manifest.push(AdjacencyManifestRow {
-            relation_type: ordered[group].clone(),
-            direction: if incoming {
-                Direction::In
-            } else {
-                Direction::Out
-            },
-            topology_generation: generation,
-            built_at_micros,
-            node_count: outcome.node_count,
-            edge_count: outcome.edge_count,
-        });
-        output.shards += outcome.shards;
-        output.captured.extend(outcome.captured);
-    }
-    crate::adjacency::write_manifest_observed(graph_root, &manifest, allocation)?;
-    Ok(output)
+    assemble(
+        graph_root,
+        &groups,
+        outcomes,
+        generation,
+        built_at_micros,
+        edges.src.len() as u64,
+        allocation,
+    )
 }

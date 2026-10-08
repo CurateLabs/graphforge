@@ -29,6 +29,21 @@ use crate::{BulkInputKind, CancellationToken, GraphForge};
 /// the Graph500 generator and of the Parquet writer's default.
 const BATCHES_PER_TASK: u64 = 16;
 
+/// Only exact, non-null identity bounds can describe a task's UUID range.
+fn exact_uuid_bounds(
+    statistics: &parquet::file::statistics::Statistics,
+) -> Option<([u8; 16], [u8; 16])> {
+    if statistics.null_count_opt() != Some(0)
+        || !statistics.min_is_exact()
+        || !statistics.max_is_exact()
+    {
+        return None;
+    }
+    let low = <[u8; 16]>::try_from(statistics.min_bytes_opt()?).ok()?;
+    let high = <[u8; 16]>::try_from(statistics.max_bytes_opt()?).ok()?;
+    (low <= high).then_some((low, high))
+}
+
 enum Format {
     Parquet {
         metadata: ArrowReaderMetadata,
@@ -198,6 +213,31 @@ impl BulkBatchReader for SourceReader<'_> {
         usize::try_from(rows).unwrap_or(0)
     }
 
+    /// The identity column's bounds over the row groups the task reads, when
+    /// the footer states them exactly: Parquet only, and only without nulls
+    /// (a null identity is derived, so it is not in the column's range).
+    fn uuid_bounds(&self, task: usize) -> Option<([u8; 16], [u8; 16])> {
+        let Format::Parquet { metadata, rows } = &self.format else {
+            return None;
+        };
+        let task_rows = BATCHES_PER_TASK * self.batch_rows as u64;
+        let start = task as u64 * task_rows;
+        let end = (start + task_rows).min(*rows);
+        let mut bounds: Option<([u8; 16], [u8; 16])> = None;
+        let mut group_start = 0_u64;
+        for group in metadata.metadata().row_groups() {
+            let group_end = group_start + u64::try_from(group.num_rows()).ok()?;
+            if group_end > start && group_start < end {
+                let statistics = group.column(0).statistics()?;
+                let (low, high) = exact_uuid_bounds(statistics)?;
+                bounds =
+                    Some(bounds.map_or((low, high), |(min, max)| (min.min(low), max.max(high))));
+            }
+            group_start = group_end;
+        }
+        bounds
+    }
+
     fn read_task(
         &self,
         task: usize,
@@ -278,13 +318,13 @@ impl BulkBatchReader for SourceReader<'_> {
 
 /// Resident bytes an initial build may plan to use (see `memory_budget`).
 ///
-/// This chooses between two builds of the same bytes, never what is built: an
-/// initial build whose estimate exceeds it takes the staged path, which holds a
-/// fixed window of memory (ADR 0058).
-pub(super) fn bulk_build_memory_budget() -> u64 {
+/// This chooses between builds of the same bytes, never what is built: an
+/// initial build whose estimate exceeds it runs through scratch files that keep
+/// its peak inside the budget (ADR 0058).
+pub(super) fn bulk_build_memory_budget() -> Result<u64, GfError> {
     #[cfg(test)]
     if let Some(budget) = TEST_BUDGET.with(std::cell::Cell::get) {
-        return budget;
+        return Ok(budget);
     }
     super::memory_budget::bulk_build_memory_budget()
 }
@@ -366,4 +406,42 @@ pub(super) fn plan<'a>(
         property_free: columns == required,
         decoded_bytes,
     })
+}
+
+#[cfg(test)]
+mod bounds_tests {
+    use parquet::data_type::FixedLenByteArray;
+    use parquet::file::statistics::{Statistics, ValueStatistics};
+
+    use super::exact_uuid_bounds;
+
+    #[test]
+    fn inexact_or_nullable_footer_bounds_require_sampling() {
+        let bounds = |min_exact, max_exact, nulls| {
+            Statistics::from(
+                ValueStatistics::new(
+                    Some(FixedLenByteArray::from(vec![1; 16])),
+                    Some(FixedLenByteArray::from(vec![2; 16])),
+                    None,
+                    nulls,
+                    false,
+                )
+                .with_min_is_exact(min_exact)
+                .with_max_is_exact(max_exact),
+            )
+        };
+        assert_eq!(
+            exact_uuid_bounds(&bounds(true, true, Some(0))),
+            Some(([1; 16], [2; 16]))
+        );
+        for (low, high, nulls) in [
+            (false, true, Some(0)),
+            (true, false, Some(0)),
+            (false, false, Some(0)),
+            (true, true, Some(1)),
+            (true, true, None),
+        ] {
+            assert_eq!(exact_uuid_bounds(&bounds(low, high, nulls)), None);
+        }
+    }
 }

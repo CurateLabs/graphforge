@@ -4,14 +4,14 @@ adr: "0058"
 status: "Accepted"
 date: "2026-10-07"
 superseded_by: null
-revisit_when: "An initial build must exceed the in-memory budget before the scratch path lands, a published artifact stops being a projection of the three ranked inputs, or a chunk-API initial build needs the same speedup"
+revisit_when: "Node tables or edge properties must go out of core, a published artifact stops being a projection of the three ranked inputs, or a chunk-API initial build needs the same speedup"
 ---
 
 # ADR 0058: Initial builds run on a bulk builder derived from the published generation
 
 **Status:** Accepted
 
-**Implementation:** #1883 (slice of epic #1881).
+**Implementation:** #1883 and #1900 (slices of epic #1881).
 
 **Related:**
 - ADR 0013 (project generation protocol; the `CURRENT` swap is unchanged)
@@ -82,15 +82,84 @@ functions.
   sources). Appends keep the staged path, as do initial builds made through the
   chunk API (`GraphConstructionSession::append_*`), until the builder takes
   those inputs.
-- The builder is in-memory. An initial build whose estimated peak memory
-  exceeds the plan-time budget takes the staged path instead, which holds a
-  fixed window of memory and produces the same bytes. The route is chosen once,
-  by the first `validate`, from the footers and the process's cgroup-aware
-  memory headroom (three fifths of it), and written to the import manifest
-  (`build_route`); every later `validate`, in any process, reads it back. A
-  refused, cancelled or killed bulk attempt therefore cannot be re-routed to the
-  staged path by a change in free memory. It is never a retry. The scratch path of #1881 replaces
-  this routing for large inputs, and must land before the ladder slice.
+- An initial build whose estimated peak memory fits the plan-time budget keeps
+  everything resident. One that does not runs the same passes through scratch
+  files (below), so peak memory stays inside the budget. The budget is three
+  fifths of the process's cgroup-aware memory headroom, or the bytes in
+  `GF_BULK_BUILD_MEMORY_BUDGET_BYTES`. Routing is a function of the footers and
+  the budget, never of the data, and the bytes are the same on every route.
+- The staged path remains for appends, chunk-API sessions, sessions an earlier
+  binary began staging, and two plan-time cases the scratch route cannot hold,
+  each recorded as a typed reason in the import manifest (`staged_reason`):
+  `node_tables_exceed_budget` (the sorted node UUIDs, labels and endpoint index
+  and the two degree arrays need a conservative 56 bytes per node and stay in memory, alongside the fixed builder workspace) and
+  `edge_properties_exceed_budget` (the builder retains property-bearing edge
+  batches). Out-of-core node handling and edge properties on scratch remain
+  open under #1881.
+- The route is chosen once, by the first `validate`, and written to the import
+  manifest (`build_route`); every later `validate`, in any process, reads it
+  back. A refused, cancelled or killed bulk attempt therefore cannot be
+  re-routed to the staged path by a change in free memory. It is never a
+  retry. Whether the bulk route then runs in memory or on scratch is decided
+  again on each attempt from the live budget; either produces the same bytes.
+  If that budget can no longer hold the bulk route's node tables or retained
+  edge properties, the attempt returns a resource-limit refusal before loading
+  data. It keeps the bulk route and can retry when the budget is sufficient.
+
+## Scratch route
+
+When the estimate exceeds the budget:
+
+- Pass 2 decodes the edges once, resolves endpoints through the node index and
+  scatters a 28-byte record (UUID, source rank, target rank, relation id) into
+  edge-UUID range partitions. Exact, non-null Parquet row-group bounds feed a
+  histogram over the stated UUID span; otherwise boundaries come from a sample
+  of up to 64 evenly spread tasks. These are initial estimates. The scatter
+  also observes each partition’s actual UUID bounds. An oversized partition
+  streams once into radix children at the first byte where its observed bounds
+  differ, skipping any shared prefix. Oversized children repeat that step;
+  leaves appear in UUID order and each fits its worker’s reservation. Equal
+  bounds on an oversized range prove a duplicate identity. The source is never
+  reread for refinement, and a chain has at most sixteen radix steps.
+  Consecutive small child ranges coalesce through one streaming output, so
+  bookkeeping follows the number of bounded partitions rather than the radix
+  fanout. Already-fitting initial ranges keep their original scratch files.
+- Pass 3 builds the partitions in order, several at a time. Sorting a partition
+  ranks its edges (the first `edge_id` is the number of earlier edges plus
+  one). It checks identities, writes its canonical edge files, keeps its sorted
+  UUIDs for the membership index, and scatters its adjacency entries once into
+  node-range partitions bounded by exact node degrees. A node larger than a
+  partition spans consecutive partitions split by its increasing edge occurrence ordinal, so a hub
+  cannot force all of its adjacency into one resident partition.
+  Canonical edge files cover fixed windows of `edge_id`s that can straddle two
+  partitions; the rows after a partition's last whole window carry to the next,
+  one partition at a time.
+- The adjacency pass sorts each node-range partition in order and feeds the
+  union into one canonical shard carry. Covering relation groups encode from
+  that same carry, one encoder at a time. Other relation entries append to
+  ordered CRC-protected scratch spools through one capped block buffer. After
+  the union finishes, one relation spool at a time reuses the same carry and
+  encoder. The published greedy shard cuts are unchanged; unfinished shards
+  no longer retain edge-bearing memory for every relation simultaneously.
+- Scratch has no fsync and no SHA-256. Every block carries a CRC32C that the
+  reader checks. The base scatter writes and reads each record once. Adaptive
+  edge refinement adds one write/read of the affected records per radix level.
+  Each usable non-covering relation adds one sequential write/read of its CSR
+  entries (at most another 32 bytes per edge across both directions, plus block
+  headers). Every successful written block is consumed once; the report names
+  refinement and spool bytes separately. Scratch is deleted on completion,
+  on error, and when a session is opened for recovery, and a rerun starts from
+  the sources.
+- Partition count and the partitions in flight come from the budget. A memory
+  gate grants reservations in partition order, so the bytes in flight never
+  exceed the gate and a waiting partition is not starved. The fixed footprint
+  reserves 192 MiB for runtime/allocator overhead, 256 MiB for one bounded
+  canonical CSR carry and Arrow IPC encoder, and a reusable minimum 64 MiB
+  decoding/scatter/sort working set. The remaining budget expands that working
+  set; the planner does not invent headroom after exhausting the budget.
+  Relation metadata and published artifact inventories remain proportional to
+  the number of output groups and files; edge-bearing CSR workspace is fixed.
+
 - Node and edge counts are limited to 2^32 - 2 by the dense ids. A larger input
   is refused with a resource-limit error.
 

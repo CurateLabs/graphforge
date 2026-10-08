@@ -143,6 +143,59 @@ currently has no public per-stage worker override; use the existing controlled
 worker experiment harness when supplying such pairs. N independent processes
 cannot satisfy this comparison.
 
+## Bulk-builder scratch comparisons
+
+Measure the same registered Parquet inputs on the resident and forced-scratch
+routes. Use a separate project per run and the same import operation UUID. The
+complete ingest boundary is begin, both registrations, validate, and commit;
+report reopen and queries separately. Label measurements quiet or contended
+from the recorded host load, rather than interpreting unmatched wall times as
+a speedup.
+
+Byte comparisons also require the same construction clock. Build the CLI with
+storage selected explicitly so its `test-support` feature is active in the
+normal dependency graph; selecting only the CLI enables its storage dev
+dependency without enabling the clock hook in the executable:
+
+```bash
+CARGO_TARGET_DIR=/path/to/isolated-target cargo build --release --locked \
+  -p graphforge-cli -p graphforge-storage --features graphforge-storage/test-support
+export GF_TEST_SESSION_NOW_MICROS=1789000000000000
+```
+
+Verify `session_now_micros` in the construction checkpoint equals the requested
+clock before comparing results. Unset `GF_BULK_BUILD_MEMORY_BUDGET_BYTES` for
+the resident run; set it to a positive byte count below the resident estimate
+and above the node-table estimate for a scratch run. Run validate under
+`/usr/bin/time -v`, retain its maximum RSS, and check the receipt's `bulk_build`
+partition counts, scratch read/write bytes, and per-pass logical writes.
+Separate `edge_refinement_write_bytes`/`edge_refinement_read_bytes` from
+`csr_spool_write_bytes`/`csr_spool_read_bytes`. Parent and child block boundaries
+can have different header counts; total successful scratch reads must equal
+total writes. Subtract refinement and spool writes to recover the base payload
+of 76 bytes per edge plus CRC headers. A single covering relation requires no
+CSR spool, while every usable non-covering relation adds its entries once in
+each direction. Check `peak_csr_carry_entries` against the configured shard
+limit independently of relation count. The scratch plan reserves a 512 MiB
+fixed footprint (192 MiB runtime, 256 MiB for one canonical carry/encoder, and
+64 MiB minimum working space) plus 56 bytes per node and retained properties.
+Compare the encoded inventories by path, length, SHA-256, and XXH64, excluding
+only the ADR 0038 ordinal receipt's documented random nonce. Compare reopened
+query data without per-query schema metadata. Kill an active scratch build,
+rerun validate and commit, and check both artifact parity and scratch removal.
+
+Input SHA-256 identities used by the S22/S24 comparisons are:
+
+| Input | SHA-256 |
+| --- | --- |
+| S22 nodes | `bcbcbea526e61ceb63f6006ee5f56de6bb4f74cffdd68dc6eff6d230d3897f06` |
+| S22 edges | `1c0ff75485f75e904cbd59b6f5d42da1d8b1af6ddac59ee6c495a4948a428d13` |
+| S24 nodes | `5dd28ba402b182ec152ea80aab7a9f012d1ea772bcbbfeec0200515dbdb5a270` |
+| S24 edges | `807843377cd7f90b055bac51195a54d7d362fbfcbf24bab4fd38aed91739b454` |
+
+Raw receipts, artifact comparison output, timings, and recovery observations
+belong on the producing issue or PR, outside this documentation tree.
+
 ## Calibration
 
 Deterministic tests cover nesting, guard misuse, unavailable counters, old/new

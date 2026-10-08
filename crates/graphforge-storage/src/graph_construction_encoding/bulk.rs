@@ -37,19 +37,32 @@ use super::{
     storage, with_route_metadata_batch, write_surrogate_tails,
 };
 
+mod budget;
 mod csr;
 mod emit;
 mod identities;
 mod install;
+mod ordered;
 mod plan;
+mod scratch;
+mod scratch_csr;
+mod scratch_edges;
 mod tables;
 
+#[cfg(test)]
+pub(crate) use budget::ForcedPartitions;
+pub use budget::{BulkRoute, BulkStagedReason};
 pub use plan::{BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkSource};
 
-use emit::Semantics;
+use budget::ScratchPlan;
+use emit::{EdgeEmitter, RelationStats, Semantics};
+use identities::EdgeUuids;
 use install::Installer;
 use plan::PassMeter;
-use tables::{NodeIndex, NodeTable, check_cancelled};
+use scratch::Scratch;
+pub(crate) use scratch::discard_scratch;
+use scratch_csr::CsrScratch;
+use tables::{EdgeTable, NodeIndex, NodeTable, check_cancelled};
 
 /// Run `work` on `pool` while the calling thread polls `cancelled`.
 fn run_pass<T: Send>(
@@ -97,6 +110,45 @@ fn wipe_encoded_root(output: &StableDirectory) -> Result<(), GfError> {
     output.acknowledge().map_err(storage)
 }
 
+/// The ranked edges: resident columns, or scattered partitions on scratch.
+enum EdgeSide {
+    Memory(EdgeTable),
+    Scratch(scratch_edges::ScatteredEdges),
+}
+
+impl EdgeSide {
+    fn count(&self) -> u64 {
+        match self {
+            Self::Memory(edges) => edges.uuids.len() as u64,
+            Self::Scratch(scattered) => scattered.total,
+        }
+    }
+
+    fn rel_names(&self) -> &[String] {
+        match self {
+            Self::Memory(edges) => &edges.rel_names,
+            Self::Scratch(scattered) => &scattered.rel_names,
+        }
+    }
+}
+
+/// What a scratch build reports about its scratch files.
+#[derive(Default)]
+struct ScratchReport {
+    concurrency: u64,
+    edge_partitions: u64,
+    csr_partitions: u64,
+    write_bytes: u64,
+    read_bytes: u64,
+    largest_partition: u64,
+    refinement_steps: u64,
+    refinement_write_bytes: u64,
+    refinement_read_bytes: u64,
+    csr_spool_write_bytes: u64,
+    csr_spool_read_bytes: u64,
+    peak_csr_carry_entries: u64,
+}
+
 struct Membership {
     index: crate::uuid_membership::ConstructionIndexEncoding,
     v4_artifacts: Vec<crate::uuid_membership::ConstructionIndexOutput>,
@@ -109,12 +161,13 @@ struct Membership {
 fn build_membership(
     output: &StableDirectory,
     nodes: &NodeTable,
-    edge_uuids: &[[u8; 16]],
+    edge_uuids: EdgeUuids<'_>,
+    edge_count: u64,
     generation: u64,
     cancel: &AtomicBool,
 ) -> Result<Membership, GfError> {
     let mut cancelled = || cancel.load(Ordering::Acquire);
-    let stream = identities::IdentityStream::new(&nodes.uuids, edge_uuids);
+    let stream = identities::IdentityStream::new(&nodes.uuids, edge_uuids, edge_count);
     let len = stream.byte_len();
     let index = crate::uuid_membership::encode_construction_index(
         crate::uuid_membership::ConstructionIdentityInput::Stream {
@@ -126,7 +179,7 @@ fn build_membership(
         0,
         None,
         nodes.uuids.len() as u64,
-        edge_uuids.len() as u64,
+        edge_count,
         &mut cancelled,
         output.allocation(),
     )?;
@@ -225,8 +278,28 @@ pub(crate) fn encode_bulk(
         || std::thread::available_parallelism().map_or(1, usize::from),
         |lease| lease.lanes().get(),
     );
+    // The route is a function of the footers and the budget (ADR 0058). A
+    // A durable bulk route cannot switch to staging after a budget drop.
+    // Refuse that attempt before loading data; it can retry when memory returns.
+    let scratch_plan = match (plan.route(), plan.memory_budget) {
+        (BulkRoute::Scratch, Some(budget)) => Some(ScratchPlan::derive(plan, budget, workers)),
+        (BulkRoute::Staged(reason), _) => {
+            return Err(GfError::Project {
+                code: graphforge_core::ProjectErrorCode::ResourceLimit,
+                message: format!(
+                    "graph construction encoding: the fixed bulk route cannot fit the current \
+                     memory budget ({reason:?}); retry with an adequate budget"
+                ),
+            });
+        }
+        _ => None,
+    };
     let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(workers)
+        .num_threads(
+            scratch_plan
+                .as_ref()
+                .map_or(workers, |sized| sized.concurrency),
+        )
         .thread_name(|index| format!("gf-bulk-{index}"))
         .build()
         .map_err(storage)?;
@@ -255,20 +328,41 @@ pub(crate) fn encode_bulk(
     passes.extend([meter.finish()]);
     crate::graph_construction::construction_failpoint("bulk.after_nodes");
 
-    // Pass 2: edges and endpoint resolution.
+    // Pass 2: edges and endpoint resolution. Over budget, the edges scatter
+    // into scratch partitions instead of landing in resident columns.
     let meter = PassMeter::start("edges");
     let index = pool.install(|| NodeIndex::build(&nodes.uuids));
-    let mut edges = run_pass(&pool, cancelled, &cancel, || {
-        tables::collect_edges(&plan.edges, retain_edges, budgets, &nodes, &index, &cancel)
-    })?;
+    let scratch = scratch_plan
+        .as_ref()
+        .map(|_| Scratch::create(source))
+        .transpose()?;
+    let mut edge_side = match (&scratch_plan, &scratch) {
+        (Some(sized), Some(scratch)) => {
+            EdgeSide::Scratch(run_pass(&pool, cancelled, &cancel, || {
+                scratch_edges::scatter_edges(
+                    &plan.edges,
+                    budgets,
+                    &nodes,
+                    &index,
+                    sized,
+                    scratch,
+                    &cancel,
+                )
+            })?)
+        }
+        _ => EdgeSide::Memory(run_pass(&pool, cancelled, &cancel, || {
+            tables::collect_edges(&plan.edges, retain_edges, budgets, &nodes, &index, &cancel)
+        })?),
+    };
     drop(index);
-    if nodes.uuids.is_empty() && edges.uuids.is_empty() {
+    let edge_count = edge_side.count();
+    if nodes.uuids.is_empty() && edge_count == 0 {
         return Err(storage("construction contains no identities"));
     }
     passes.extend([meter.finish()]);
     crate::graph_construction::construction_failpoint("bulk.after_edges");
 
-    // Pass 3: catalog and ranked tables.
+    // The catalog's schema groups, routes and windows.
     let meter = PassMeter::start("catalog");
     let semantic_context = semantic_authority
         .map(ConstructionSemanticAuthority::context)
@@ -280,7 +374,10 @@ pub(crate) fn encode_bulk(
     };
     // The decoded batches are released as soon as their sorted schema groups exist.
     let node_kept = std::mem::take(&mut nodes.kept);
-    let edge_kept = std::mem::take(&mut edges.kept);
+    let edge_kept = match &mut edge_side {
+        EdgeSide::Memory(edges) => std::mem::take(&mut edges.kept),
+        EdgeSide::Scratch(_) => Vec::new(),
+    };
     let (node_groups, edge_groups) = run_pass(&pool, cancelled, &cancel, || {
         Ok((
             retain_nodes
@@ -299,19 +396,11 @@ pub(crate) fn encode_bulk(
         .map_or(usize::from(!nodes.uuids.is_empty()), Vec::len)
         + edge_groups
             .as_ref()
-            .map_or(usize::from(!edges.uuids.is_empty()), Vec::len);
+            .map_or(usize::from(edge_count != 0), Vec::len);
     if schema_groups > budgets.max_schema_groups {
         return Err(storage("construction schema-group budget exhausted"));
     }
-    let built = emit::build_catalog(
-        budgets,
-        &nodes,
-        &edges,
-        node_groups.as_deref(),
-        edge_groups.as_deref(),
-    )?;
-    let types = emit::node_types(&nodes.label_names, &built.entity_ids, &semantics)?;
-    let relations = emit::relation_routes(&edges.rel_names, &semantics)?;
+    let relations = emit::relation_routes(edge_side.rel_names(), &semantics)?;
     let mut routes = crate::route_component::RouteTable::default();
     let components = emit::register_routes(&mut routes, &relations)?;
     passes.extend([meter.finish()]);
@@ -320,25 +409,69 @@ pub(crate) fn encode_bulk(
     let node_window = emit::window_rows(budgets, 128);
     let edge_window = emit::window_rows(budgets, 192);
     let now = shape.runtime_catalog_now_micros;
+    let emitter = EdgeEmitter {
+        installer: &installer,
+        nodes: &nodes,
+        relations: &relations,
+        components: &components,
+        semantics: &semantics,
+        now,
+    };
+
+    // Pass 3 over budget: rank each edge partition, write its canonical edge
+    // files, and stage its adjacency entries.
+    let ranked_edges = match (&edge_side, &scratch_plan, &scratch) {
+        (EdgeSide::Scratch(scattered), Some(sized), Some(scratch)) => {
+            let meter = PassMeter::start("ranks");
+            let csr = CsrScratch::create(scratch, &scattered.histogram, sized.csr_partitions)?;
+            let ranked = run_pass(&pool, cancelled, &cancel, || {
+                scratch_edges::rank_partitions(&scratch_edges::RankContext {
+                    scratch,
+                    scattered,
+                    csr: &csr,
+                    nodes: &nodes,
+                    emitter: &emitter,
+                    plan: sized,
+                    window: edge_window,
+                    cancel: &cancel,
+                })
+            })?;
+            passes.extend([meter.finish()]);
+            crate::graph_construction::construction_failpoint("bulk.after_ranks");
+            Some((csr, ranked))
+        }
+        _ => None,
+    };
 
     let meter = PassMeter::start("tables");
+    let relation_stats = match (&edge_side, &ranked_edges) {
+        (EdgeSide::Memory(edges), _) if edge_groups.is_none() => RelationStats::from_ranked(edges),
+        (EdgeSide::Scratch(scattered), Some((_, ranked))) => RelationStats {
+            names: &scattered.rel_names,
+            first_appearance: ranked.first_appearance.clone(),
+            counts: ranked.counts.clone(),
+        },
+        _ => RelationStats::unused(),
+    };
+    let built = emit::build_catalog(
+        budgets,
+        &nodes,
+        &relation_stats,
+        node_groups.as_deref(),
+        edge_groups.as_deref(),
+    )?;
+    drop(relation_stats);
+    let types = emit::node_types(&nodes.label_names, &built.entity_ids, &semantics)?;
     run_pass(&pool, cancelled, &cancel, || {
         installer.install_parquet(
             "topology/runtime_catalog.parquet",
             &built.catalog.to_record_batch(),
         )?;
         emit::emit_nodes(&installer, &nodes, &types, node_window, now, &cancel)?;
-        emit::emit_edges(
-            &installer,
-            &nodes,
-            &edges,
-            &relations,
-            &components,
-            &semantics,
-            edge_window,
-            now,
-            &cancel,
-        )
+        if let EdgeSide::Memory(edges) = &edge_side {
+            emit::emit_edges(&emitter, edges, edge_window, &cancel)?;
+        }
+        Ok(())
     })?;
     passes.extend([meter.finish()]);
     crate::graph_construction::construction_failpoint("bulk.after_tables");
@@ -346,30 +479,107 @@ pub(crate) fn encode_bulk(
     // Membership streams the sorted UUIDs; once it has, the edge UUIDs (16 B per
     // edge) are released before the adjacency pass sorts its entries.
     let meter = PassMeter::start("membership");
-    let membership = build_membership(&output, &nodes, &edges.uuids, generation, &cancel)?;
+    let edge_uuids = match (&edge_side, &ranked_edges, &scratch) {
+        (EdgeSide::Scratch(_), Some((_, ranked)), Some(scratch)) => {
+            EdgeUuids::scratch(scratch, ranked.uuid_files.clone())
+        }
+        (EdgeSide::Memory(edges), _, _) => EdgeUuids::memory(&edges.uuids),
+        _ => return Err(storage("the over-budget build lost its scratch state")),
+    };
+    let membership =
+        build_membership(&output, &nodes, edge_uuids, edge_count, generation, &cancel)?;
     check_cancelled(&cancel)?;
     passes.extend([meter.finish()]);
     crate::graph_construction::construction_failpoint("bulk.after_membership");
-    let edge_count = edges.uuids.len() as u64;
-    edges.uuids = Vec::new();
+    if let EdgeSide::Memory(edges) = &mut edge_side {
+        edges.uuids = Vec::new();
+    }
 
     let meter = PassMeter::start("adjacency");
     // Built here, on the calling thread, as the staged encoder builds its own.
     let adjacency_options = crate::adjacency::AdjacencyBuildOptions::default().effective();
-    let adjacency = run_pass(&pool, cancelled, &cancel, || {
-        csr::write_adjacency(
-            &output.path().join("graph"),
-            &edges,
-            &relations,
-            generation,
-            now,
-            output.allocation(),
-            &adjacency_options,
-            &cancel,
-        )
-    })?;
+    let adjacency = match (&edge_side, &ranked_edges, &scratch, &scratch_plan) {
+        (EdgeSide::Memory(edges), _, _, _) => run_pass(&pool, cancelled, &cancel, || {
+            csr::write_adjacency(
+                &output.path().join("graph"),
+                edges,
+                &relations,
+                generation,
+                now,
+                output.allocation(),
+                &adjacency_options,
+                &cancel,
+            )
+        })?,
+        (EdgeSide::Scratch(_), Some((csr, _)), Some(scratch), Some(sized)) => {
+            let groups = csr::AdjacencyGroups::new(&relations)?;
+            let graph_root = output.path().join("graph");
+            run_pass(&pool, cancelled, &cancel, || {
+                scratch_csr::write_scratch_adjacency(
+                    &scratch_csr::AdjacencyContext {
+                        scratch,
+                        plan: sized,
+                        graph_root: &graph_root,
+                        groups: &groups,
+                        generation,
+                        built_at_micros: now,
+                        total_edges: edge_count,
+                        allocation: output.allocation(),
+                        options: &adjacency_options,
+                        cancel: &cancel,
+                    },
+                    csr,
+                )
+            })?
+        }
+        _ => return Err(storage("the over-budget build lost its scratch state")),
+    };
     passes.extend([meter.finish()]);
     crate::graph_construction::construction_failpoint("bulk.after_adjacency");
+    // Scratch is spent: report what it carried, then delete it before the
+    // remaining passes.
+    let mut scratch_report = ScratchReport::default();
+    if let (Some(scratch), Some(sized)) = (scratch, &scratch_plan) {
+        scratch_report = ScratchReport {
+            concurrency: sized.concurrency as u64,
+            edge_partitions: match &edge_side {
+                EdgeSide::Scratch(scattered) => scattered.partitions.len() as u64,
+                EdgeSide::Memory(_) => 0,
+            },
+            csr_partitions: ranked_edges
+                .as_ref()
+                .map_or(0, |(csr, _)| csr.out.len().max(csr.inn.len()) as u64),
+            write_bytes: scratch.written_bytes(),
+            read_bytes: scratch.read_bytes(),
+            largest_partition: match &edge_side {
+                EdgeSide::Scratch(scattered) => scattered.counts.iter().copied().max().unwrap_or(0),
+                EdgeSide::Memory(_) => 0,
+            },
+            refinement_steps: match &edge_side {
+                EdgeSide::Scratch(scattered) => scattered.refinement_steps,
+                EdgeSide::Memory(_) => 0,
+            },
+            refinement_write_bytes: match &edge_side {
+                EdgeSide::Scratch(scattered) => scattered.refinement_write_bytes,
+                EdgeSide::Memory(_) => 0,
+            },
+            refinement_read_bytes: match &edge_side {
+                EdgeSide::Scratch(scattered) => scattered.refinement_read_bytes,
+                EdgeSide::Memory(_) => 0,
+            },
+            csr_spool_write_bytes: ranked_edges
+                .as_ref()
+                .map_or(0, |(csr, _)| csr.csr_spool_write_bytes()),
+            csr_spool_read_bytes: ranked_edges
+                .as_ref()
+                .map_or(0, |(csr, _)| csr.csr_spool_read_bytes()),
+            peak_csr_carry_entries: ranked_edges
+                .as_ref()
+                .map_or(0, |(csr, _)| csr.peak_carry_entries()),
+        };
+        drop(ranked_edges);
+        scratch.remove()?;
+    }
 
     // Property overlays: sequential, through the staged encoder's own writer,
     // which leases its own compression lanes. Return ours first.
@@ -476,7 +686,7 @@ pub(crate) fn encode_bulk(
         &mut evidence,
     )?;
     let node_count = nodes.uuids.len() as u64;
-    drop((nodes, edges, node_groups, edge_groups));
+    drop((nodes, edge_side, node_groups, edge_groups));
 
     installer_extend_adjacency(
         &installer,
@@ -566,6 +776,18 @@ pub(crate) fn encode_bulk(
             nodes: node_count,
             edges: edge_count,
             passes,
+            scratch_concurrency: scratch_report.concurrency,
+            edge_partitions: scratch_report.edge_partitions,
+            csr_partitions: scratch_report.csr_partitions,
+            scratch_write_bytes: scratch_report.write_bytes,
+            scratch_read_bytes: scratch_report.read_bytes,
+            largest_edge_partition: scratch_report.largest_partition,
+            edge_refinement_steps: scratch_report.refinement_steps,
+            edge_refinement_write_bytes: scratch_report.refinement_write_bytes,
+            edge_refinement_read_bytes: scratch_report.refinement_read_bytes,
+            csr_spool_write_bytes: scratch_report.csr_spool_write_bytes,
+            csr_spool_read_bytes: scratch_report.csr_spool_read_bytes,
+            peak_csr_carry_entries: scratch_report.peak_csr_carry_entries,
         };
     }
     Ok(completed)
