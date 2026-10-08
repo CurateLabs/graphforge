@@ -7,6 +7,7 @@
 //! sealing path. A generation-last publisher consumes the sealed inventory.
 
 mod intake;
+mod spool;
 use intake::{
     ReceiptPointer, artifact_stem, property_free_schema_sha256, receipt_from_intent, receipt_name,
     uuid_column, uuid_value, validate_artifact_name, validate_intent, validate_parquet_metadata,
@@ -16,6 +17,8 @@ pub(crate) use intake::{
     normalized_schema_digest, uuid_column as batch_uuid_column,
     validate_schema as validate_canonical_batch,
 };
+pub use spool::SealRoute;
+use spool::{ChunkPreference, ChunkRoute, SpoolArtifact, SpoolState, SpoolTotals};
 mod io_evidence;
 pub(crate) use io_evidence::{
     ConstructionFileHandle, CountingChunkReader, CountingRead, IoCounter,
@@ -834,6 +837,11 @@ pub struct ConstructionChunkReceipt {
     identities: ArtifactReceipt,
     endpoints: Option<ArtifactReceipt>,
     details: ArtifactReceipt,
+    /// The one self-describing file a spooled chunk occupies. A spooled chunk
+    /// has no staged artifacts: the four fields above then hold the absent
+    /// placeholder, which staged validation refuses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    spool: Option<SpoolArtifact>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -867,6 +875,16 @@ struct Checkpoint {
     shape_authority_sha256: Option<String>,
     #[serde(default)]
     encoding_inventory_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "ChunkRoute::is_undecided")]
+    chunk_route: ChunkRoute,
+    /// How a spooled session builds, decided once before any build or replay
+    /// work starts and read back on resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    seal_route: Option<SealRoute>,
+    /// What the spooled chunks amounted to, recorded with the seal route (no
+    /// chunk is accepted after it) so the input counters outlive the spool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    spool_totals: Option<SpoolTotals>,
     #[serde(default)]
     inputs_retired: bool,
     #[serde(default)]
@@ -1061,6 +1079,10 @@ pub struct GraphConstructionSession {
     /// Whether shaping may complete over zero staged chunks: set only while the
     /// bulk builder supplies the rows (#1883).
     bulk_empty_shape: bool,
+    /// Whether this process asked for chunk spooling before the first chunk.
+    chunk_preference: ChunkPreference,
+    /// Accepted chunks of a spooled session, rebuilt from the spool on open.
+    spool: Option<SpoolState>,
     /// Measurements of the last bulk build this session ran (#1883).
     bulk_report:
         std::sync::Arc<std::sync::Mutex<crate::graph_construction_encoding::BulkBuildReport>>,
@@ -1705,6 +1727,9 @@ impl GraphConstructionSession {
                 edge_schema_sha256: BTreeSet::new(),
                 shape_authority_sha256: None,
                 encoding_inventory_sha256: None,
+                chunk_route: ChunkRoute::Undecided,
+                seal_route: None,
+                spool_totals: None,
                 inputs_retired: false,
                 shape_retired: false,
                 base_work,
@@ -1756,6 +1781,8 @@ impl GraphConstructionSession {
             shape_finish_interrupted: false,
             cpu_admission: None,
             bulk_empty_shape: false,
+            chunk_preference: ChunkPreference::Stage,
+            spool: None,
             bulk_report: std::sync::Arc::default(),
             session_lock,
             _reservation: reservation,
@@ -1794,6 +1821,7 @@ impl GraphConstructionSession {
         // left is deleted here, and again when the next attempt starts (#1900).
         crate::graph_construction_encoding::discard_scratch(session.root.path())?;
         session.recover_intent()?;
+        session.restore_spool()?;
         if session
             .checkpoint
             .evidence
@@ -1925,8 +1953,17 @@ impl GraphConstructionSession {
 
     /// Number of durably accepted chunks.
     #[must_use]
-    pub const fn accepted_chunks(&self) -> u64 {
-        self.checkpoint.next_sequence
+    pub fn accepted_chunks(&self) -> u64 {
+        if let Some(spool) = &self.spool {
+            spool.len()
+        } else if self.checkpoint.chunk_route == spool::ChunkRoute::Spool {
+            // The spool is spent; the totals recorded with the seal route remain.
+            self.checkpoint
+                .spool_totals
+                .map_or(0, |totals| totals.chunks())
+        } else {
+            self.checkpoint.next_sequence
+        }
     }
 
     /// Independently reopen and authenticate every sealed artifact once, then
@@ -1942,6 +1979,13 @@ impl GraphConstructionSession {
         self.recover_intent()?;
         if self.checkpoint.state != GraphConstructionState::Staging {
             return Err(storage("only a staging session can be sealed"));
+        }
+        if self.checkpoint.chunk_route == spool::ChunkRoute::Spool
+            && self.checkpoint.seal_route != Some(SealRoute::Bulk)
+        {
+            // Sealing a spooled session through the staged lifecycle stages
+            // its chunks first; the bulk builder reaches this over no chunks.
+            self.replay_spool_to_staged(|| false)?;
         }
         let mut prior_digest = None;
         let mut saw_edge = false;

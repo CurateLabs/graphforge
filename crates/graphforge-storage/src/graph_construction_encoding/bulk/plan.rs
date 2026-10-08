@@ -57,6 +57,15 @@ pub trait BulkBatchReader: Send + Sync {
     fn uuid_bounds(&self, _task: usize) -> Option<([u8; 16], [u8; 16])> {
         None
     }
+
+    /// Whether every batch this source emits already passed canonical-schema
+    /// validation and the construction admission windows when it was accepted,
+    /// so the builder need not repeat them. A decoded copy can be larger than
+    /// the batch that was admitted (buffers shared by one IPC body count once
+    /// per column), so repeating the byte window would refuse an admitted batch.
+    fn admitted(&self) -> bool {
+        false
+    }
 }
 
 /// One planned input source (pass 0).

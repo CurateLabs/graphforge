@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "47ffb81ad3b9872364cd050b0e7761bc9fcf57c909447484a9f64fedef85ea0c",
+  "public_method_digest": "b163156aa96a6519472b411a966839592cc48989550459291574b2ce77900d49",
   "method_policy": {
     "receiver_defaults": {
       "PortableV2ImportResult": "release-tested",
@@ -376,9 +376,14 @@
         "GraphConstructionSession.seal_and_publish",
         "GraphConstructionSession.seal_and_publish_with_cancellation",
         "GraphForge.begin_graph_construction",
+        "GraphForge.begin_staged_graph_construction",
         "GraphForge.resume_graph_construction"
       ],
       "test_refs": [
+        {
+          "path": "crates/graphforge-api/src/resumable_construction.rs",
+          "symbol": "chunk_api_initial_builds_take_the_bulk_path"
+        },
         {
           "path": "crates/graphforge-api/src/resumable_construction.rs",
           "symbol": "cancelled_public_construction_preserves_current"

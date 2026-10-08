@@ -51,7 +51,29 @@ pub struct GraphConstructionSession<'a> {
 
 impl GraphForge {
     /// Begin a bounded construction pinned to the current committed graph.
+    ///
+    /// On an empty project the accepted chunks are spooled, each as one
+    /// durable Arrow IPC file, and sealing builds the generation from them
+    /// with the bulk builder. An accepted chunk survives a crash and resumes
+    /// either way. A construction pinned to a non-empty graph stages its chunks.
     pub fn begin_graph_construction(
+        &self,
+        budgets: GraphConstructionBudgets,
+    ) -> Result<GraphConstructionSession<'_>, GfError> {
+        let mut session = self.open_graph_construction(Uuid::now_v7(), budgets, false)?;
+        session.inner.spool_chunks();
+        Ok(session)
+    }
+
+    /// Begin a construction whose chunks are staged rather than spooled: each
+    /// accepted chunk becomes durable, authenticated Parquet and sorted runs,
+    /// and sealing shapes and encodes them in a fixed window of memory, however
+    /// large the graph. [`Self::begin_graph_construction`] builds an initial
+    /// graph on the bulk builder, in memory or on bounded scratch files when it
+    /// exceeds the memory budget, and stages only a build whose node tables
+    /// alone exceed that budget. Use this to measure the staged lifecycle
+    /// itself. Appends to a non-empty graph always stage.
+    pub fn begin_staged_graph_construction(
         &self,
         budgets: GraphConstructionBudgets,
     ) -> Result<GraphConstructionSession<'_>, GfError> {
@@ -295,7 +317,7 @@ impl GraphConstructionSession<'_> {
             parent_topology_generation: self.inner.parent_topology_generation(),
             accepted_chunks: self.inner.accepted_chunks(),
             publication_committed: self.inner.publication_committed(),
-            evidence: self.inner.evidence().clone(),
+            evidence: self.inner.reported_evidence(),
         }
     }
 
@@ -521,6 +543,30 @@ impl GraphConstructionSession<'_> {
         cancellation: Option<&crate::CancellationToken>,
     ) -> Result<graphforge_storage::GraphConstructionEncoding, GfError> {
         let topology_generation = self.inner.parent_topology_generation().saturating_add(1);
+        if self.inner.is_spooled() {
+            // The route is recorded before any work and read back on every
+            // retry: a retry never re-decides from live memory.
+            let budget = crate::import_session::bulk_source::bulk_build_memory_budget()?;
+            let route = if let Some(route) = self.inner.seal_route() {
+                route
+            } else {
+                let route = self.inner.spool_seal_route(budget)?;
+                self.inner.record_seal_route(route)?
+            };
+            let cancelled = || cancellation.is_some_and(crate::CancellationToken::is_cancelled);
+            match route {
+                graphforge_storage::SealRoute::Bulk => {
+                    return self.inner.prepare_spooled_bulk_encoding(
+                        topology_generation,
+                        budget,
+                        cancelled,
+                    );
+                }
+                graphforge_storage::SealRoute::ReplayStaged => {
+                    self.inner.replay_spool_to_staged(cancelled)?;
+                }
+            }
+        }
         if self.inner.state() == GraphConstructionState::Staging {
             self.inner
                 .seal_and_prepare_canonical_encoding_with_cancellation(topology_generation, || {
@@ -1373,7 +1419,11 @@ mod tests {
         // overhead; retain the same dominance threshold and every phase ceiling.
         for scale in [4_096_usize, 8_192, 16_384] {
             let graph = GraphForge::new(None).unwrap();
-            let mut session = graph.begin_graph_construction(Default::default()).unwrap();
+            // The staged lifecycle's phase reads are what this measures; the
+            // staged path still serves appends and over-budget builds.
+            let mut session = graph
+                .begin_staged_graph_construction(Default::default())
+                .unwrap();
             let ids = (0..scale).map(|_| Uuid::now_v7()).collect::<Vec<_>>();
             session.append_nodes("nodes", &nodes(&ids)).unwrap();
             session.seal_and_publish().unwrap();
@@ -1496,5 +1546,163 @@ mod tests {
                 assert!(next_normalized <= prior_normalized.saturating_mul(2));
             }
         }
+    }
+
+    /// The same four nodes and three edges as chunks, accepted by `session`.
+    fn accept_chain(session: &mut GraphConstructionSession<'_>) -> ([Uuid; 4], [Uuid; 3]) {
+        let node_ids: [Uuid; 4] = std::array::from_fn(|_| Uuid::now_v7());
+        let edge_ids: [Uuid; 3] = std::array::from_fn(|_| Uuid::now_v7());
+        session
+            .append_nodes("nodes-a", &nodes(&node_ids[..2]))
+            .unwrap();
+        session
+            .append_nodes("nodes-b", &nodes(&node_ids[2..]))
+            .unwrap();
+        session
+            .append_edges(
+                "edges",
+                &edges(
+                    &edge_ids,
+                    &[
+                        (node_ids[0], node_ids[1]),
+                        (node_ids[1], node_ids[2]),
+                        (node_ids[2], node_ids[3]),
+                    ],
+                ),
+            )
+            .unwrap();
+        (node_ids, edge_ids)
+    }
+
+    fn chain_relationships(nodes: &[Uuid; 4], edges: &[Uuid; 3]) -> Vec<[Uuid; 3]> {
+        (0..3).map(|i| [nodes[i], edges[i], nodes[i + 1]]).collect()
+    }
+
+    /// An initial build through the chunk API runs on the bulk builder: the
+    /// builder reports the rows it built and no chunk was staged. The same
+    /// chunks pinned to the staged path stage them and the builder builds
+    /// nothing, and both publish the same graph.
+    #[test]
+    fn chunk_api_initial_builds_take_the_bulk_path() {
+        let spooled = GraphForge::new(None).unwrap();
+        let mut session = spooled
+            .begin_graph_construction(Default::default())
+            .unwrap();
+        let (node_ids, edge_ids) = accept_chain(&mut session);
+        assert_eq!(session.progress().accepted_chunks, 3);
+        session.seal_and_publish().unwrap();
+        let report = session.inner.bulk_build_report();
+        assert_eq!((report.nodes, report.edges), (4, 3));
+        assert!(report.passes.contains_key("nodes") && report.passes.contains_key("edges"));
+        assert_eq!(session.progress().evidence.input_batches, 3);
+        assert_eq!(session.progress().evidence.parquet_shards, 0);
+        assert_construction_relationships(&spooled, &chain_relationships(&node_ids, &edge_ids));
+
+        let staged = GraphForge::new(None).unwrap();
+        let mut session = staged
+            .begin_staged_graph_construction(Default::default())
+            .unwrap();
+        let (node_ids, edge_ids) = accept_chain(&mut session);
+        session.seal_and_publish().unwrap();
+        let report = session.inner.bulk_build_report();
+        assert_eq!((report.nodes, report.edges), (0, 0));
+        assert_eq!(session.progress().evidence.input_batches, 3);
+        assert_construction_relationships(&staged, &chain_relationships(&node_ids, &edge_ids));
+    }
+
+    /// A construction pinned to a non-empty graph is an append: it stages.
+    #[test]
+    fn chunk_api_appends_stage() {
+        let graph = GraphForge::new(None).unwrap();
+        let mut first = graph.begin_graph_construction(Default::default()).unwrap();
+        accept_chain(&mut first);
+        first.seal_and_publish().unwrap();
+        let mut append = graph.begin_graph_construction(Default::default()).unwrap();
+        append
+            .append_nodes("more", &nodes(&[Uuid::now_v7()]))
+            .unwrap();
+        append.seal_and_publish().unwrap();
+        assert_eq!(append.progress().evidence.input_batches, 1);
+        assert_eq!(append.inner.bulk_build_report().nodes, 0);
+    }
+
+    fn force_budget(budget: Option<u64>) {
+        crate::import_session::bulk_source::TEST_BUDGET.with(|slot| slot.set(budget));
+    }
+
+    /// Resident budget small enough that the in-memory estimate of any test
+    /// graph exceeds it, large enough for its node tables: the scratch route.
+    const SCRATCH_BUDGET: u64 = 800 << 20;
+
+    /// The seal route is decided once and stored with the session. A seal that
+    /// is interrupted under one memory condition is completed under another
+    /// without re-deciding: a build that recorded the bulk route keeps it and
+    /// runs on scratch when memory shrank; one that recorded the staged replay
+    /// keeps it when memory grew.
+    #[test]
+    fn a_retried_seal_keeps_the_route_it_recorded_whatever_the_budget_now_says() {
+        for (first_budget, second_budget, expected) in [
+            (0, u64::MAX, graphforge_storage::SealRoute::ReplayStaged),
+            (
+                u64::MAX,
+                SCRATCH_BUDGET,
+                graphforge_storage::SealRoute::Bulk,
+            ),
+        ] {
+            let graph = GraphForge::new(None).unwrap();
+            let mut session = graph.begin_graph_construction(Default::default()).unwrap();
+            let (node_ids, edge_ids) = accept_chain(&mut session);
+            let cancelled = crate::CancellationToken::new();
+            cancelled.cancel();
+            force_budget(Some(first_budget));
+            let interrupted = session.validate_and_seal(Some(&cancelled)).unwrap_err();
+            assert!(
+                interrupted.to_string().contains("cancelled"),
+                "{interrupted}"
+            );
+            assert_eq!(session.inner.seal_route(), Some(expected));
+            force_budget(Some(second_budget));
+            session.seal_and_publish().unwrap();
+            force_budget(None);
+            assert_eq!(session.inner.seal_route(), Some(expected));
+            let built = session.inner.bulk_build_report();
+            match expected {
+                graphforge_storage::SealRoute::Bulk => {
+                    assert_eq!((built.nodes, built.edges), (4, 3));
+                    assert!(built.scratch_write_bytes > 0, "{built:?}");
+                }
+                graphforge_storage::SealRoute::ReplayStaged => {
+                    assert_eq!((built.nodes, built.edges), (0, 0));
+                    assert_eq!(session.progress().evidence.input_batches, 3);
+                }
+            }
+            assert_construction_relationships(&graph, &chain_relationships(&node_ids, &edge_ids));
+        }
+    }
+
+    /// An over-budget initial build through the chunk API runs the bulk
+    /// builder's scratch route over the spool. It neither stages nor refuses,
+    /// and publishes the graph the in-memory route does.
+    #[test]
+    fn an_over_budget_chunk_api_build_runs_on_scratch_without_staging() {
+        let graph = GraphForge::new(None).unwrap();
+        let mut session = graph.begin_graph_construction(Default::default()).unwrap();
+        let (node_ids, edge_ids) = accept_chain(&mut session);
+        force_budget(Some(SCRATCH_BUDGET));
+        let sealed = session.seal_and_publish();
+        force_budget(None);
+        sealed.unwrap();
+        assert_eq!(
+            session.inner.seal_route(),
+            Some(graphforge_storage::SealRoute::Bulk)
+        );
+        let report = session.inner.bulk_build_report();
+        assert_eq!((report.nodes, report.edges), (4, 3));
+        assert!(
+            report.scratch_write_bytes > 0 && report.scratch_read_bytes > 0,
+            "{report:?}"
+        );
+        assert_eq!(session.progress().evidence.parquet_shards, 0);
+        assert_construction_relationships(&graph, &chain_relationships(&node_ids, &edge_ids));
     }
 }

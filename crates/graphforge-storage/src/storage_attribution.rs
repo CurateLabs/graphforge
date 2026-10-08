@@ -188,7 +188,7 @@ impl ConstructionPhaseAttribution {
                 write_bytes: evidence.write_bytes,
                 read_calls: evidence.replay_validation_read_operations,
                 write_calls: evidence.write_operations,
-                object_count: evidence.parquet_shards,
+                object_count: checked_add(evidence.parquet_shards, evidence.spooled_chunks)?,
                 ..Default::default()
             },
         );

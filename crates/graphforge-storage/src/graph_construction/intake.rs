@@ -27,15 +27,22 @@ impl GraphConstructionSession {
         self.append_with_cancellation(kind, chunk_id, batch, || false)
     }
 
-    /// Append while polling a caller-owned cancellation signal at durable
-    /// artifact boundaries. Cancellation leaves an intent that the next open
-    /// authenticates and rolls back without changing public authority.
+    /// Append through the staged path: every artifact of the chunk is a
+    /// durable, authenticated file. Cancellation leaves an intent that the
+    /// next open authenticates and rolls back without changing public
+    /// authority.
+    ///
+    /// `admitted_bytes` is the batch size the chunk was admitted at when it
+    /// was first accepted, for a chunk replayed from the spool: an IPC-decoded
+    /// copy reports more memory than the original arrays, so measuring it again
+    /// could refuse a chunk the session already accepted.
     #[allow(clippy::too_many_lines)]
-    pub fn append_with_cancellation(
+    pub(super) fn append_staged(
         &mut self,
         kind: ConstructionChunkKind,
         chunk_id: &str,
         batch: &RecordBatch,
+        admitted_bytes: Option<usize>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ConstructionChunkReceipt, GfError> {
         self.revalidate_authority()?;
@@ -44,31 +51,15 @@ impl GraphConstructionSession {
         if self.checkpoint.state != GraphConstructionState::Staging {
             return Err(storage("session is not accepting chunks"));
         }
-        validate_chunk_id(chunk_id)?;
-        validate_schema(kind, batch)?;
-        if batch.num_rows() == 0 {
-            return Err(storage("empty construction chunk"));
-        }
-        let input_bytes = batch.get_array_memory_size();
-        let required_columns = if kind == ConstructionChunkKind::Node {
-            2
-        } else {
-            4
-        };
-        if batch.num_columns().saturating_sub(required_columns)
-            > self.checkpoint.budgets.max_property_columns
-        {
-            return Err(storage("construction property-column budget exhausted"));
-        }
-        if batch.num_rows() > self.checkpoint.budgets.max_batch_rows
-            || input_bytes > self.checkpoint.budgets.max_batch_bytes
-            || self.checkpoint.next_sequence >= self.checkpoint.budgets.max_chunks
-        {
-            return Err(storage("construction resource window exhausted"));
-        }
-        if kind == ConstructionChunkKind::Node && self.checkpoint.saw_edge {
-            return Err(storage("node chunk cannot follow edge staging"));
-        }
+        let input_bytes = precheck_chunk(
+            &self.checkpoint.budgets,
+            self.checkpoint.next_sequence,
+            self.checkpoint.saw_edge,
+            kind,
+            chunk_id,
+            batch,
+            admitted_bytes,
+        )?;
         let input_sha256 = logical_batch_digest(kind, batch)?;
         let schema_sha256 = normalized_schema_digest(batch.schema().as_ref());
         let key_name = chunk_key_name(chunk_id);
@@ -501,6 +492,90 @@ fn extract_runs(kind: ConstructionChunkKind, batch: &RecordBatch) -> Result<RunA
     })
 }
 
+/// Every refusal that needs only the chunk and the session's counters: the
+/// staged path and the spool both run it, at the same API call.
+pub(super) fn precheck_chunk(
+    budgets: &GraphConstructionBudgets,
+    next_sequence: u64,
+    saw_edge: bool,
+    kind: ConstructionChunkKind,
+    chunk_id: &str,
+    batch: &RecordBatch,
+    admitted_bytes: Option<usize>,
+) -> Result<usize, GfError> {
+    validate_chunk_id(chunk_id)?;
+    validate_schema(kind, batch)?;
+    if batch.num_rows() == 0 {
+        return Err(storage("empty construction chunk"));
+    }
+    let input_bytes = admitted_bytes.unwrap_or_else(|| batch.get_array_memory_size());
+    let required_columns = if kind == ConstructionChunkKind::Node {
+        2
+    } else {
+        4
+    };
+    if batch.num_columns().saturating_sub(required_columns) > budgets.max_property_columns {
+        return Err(storage("construction property-column budget exhausted"));
+    }
+    if batch.num_rows() > budgets.max_batch_rows
+        || input_bytes > budgets.max_batch_bytes
+        || next_sequence >= budgets.max_chunks
+    {
+        return Err(storage("construction resource window exhausted"));
+    }
+    if kind == ConstructionChunkKind::Node && saw_edge {
+        return Err(storage("node chunk cannot follow edge staging"));
+    }
+    Ok(input_bytes)
+}
+
+/// The content refusals `extract_runs` raises, without building the runs.
+pub(super) fn validate_chunk_content(
+    kind: ConstructionChunkKind,
+    batch: &RecordBatch,
+) -> Result<(), GfError> {
+    let identity = uuid_column(
+        batch,
+        if kind == ConstructionChunkKind::Node {
+            "node_uuid"
+        } else {
+            "edge_uuid"
+        },
+    )?;
+    let mut identities = (0..batch.num_rows())
+        .map(|row| uuid_value(identity, row))
+        .collect::<Result<Vec<_>, _>>()?;
+    identities.sort_unstable();
+    if identities.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(storage("duplicate identity inside chunk"));
+    }
+    let names = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| {
+            storage(if kind == ConstructionChunkKind::Node {
+                "canonical node label is not Utf8"
+            } else {
+                "canonical edge route is not Utf8"
+            })
+        })?;
+    let too_long = names
+        .iter()
+        .flatten()
+        .any(|name| u8::try_from(name.len()).is_err());
+    if kind == ConstructionChunkKind::Edge {
+        uuid_column(batch, "source_uuid")?;
+        uuid_column(batch, "target_uuid")?;
+        if too_long {
+            return Err(storage("canonical edge route exceeds identifier bound"));
+        }
+    } else if too_long {
+        return Err(storage("canonical node label exceeds identifier bound"));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_schema(
     kind: ConstructionChunkKind,
     batch: &RecordBatch,
@@ -596,7 +671,7 @@ fn is_construction_identifier(value: &str) -> bool {
     }
 }
 
-fn logical_batch_digest(
+pub(super) fn logical_batch_digest(
     kind: ConstructionChunkKind,
     batch: &RecordBatch,
 ) -> Result<String, GfError> {
@@ -650,20 +725,138 @@ fn logical_batch_digest(
     {
         digest.update((field.name().len() as u64).to_be_bytes());
         digest.update(field.name().as_bytes());
-        digest.update(column.data_type().to_string().as_bytes());
-        for row in 0..column.len() {
-            if column.is_null(row) {
-                digest.update([0]);
-            } else {
-                digest.update([1]);
-                let value = arrow::util::display::array_value_to_string(column.as_ref(), row)
-                    .map_err(storage)?;
-                digest.update((value.len() as u64).to_be_bytes());
-                digest.update(value.as_bytes());
-            }
-        }
+        hash_column(&mut digest, column.as_ref())?;
     }
     Ok(hex(&digest.finalize()))
+}
+
+/// Hash one property column by its typed values, never by their display text.
+///
+/// Every value is prefixed by a validity marker and every variable-width value
+/// by its length, and nested values recurse, so two columns hash alike only
+/// when they hold the same values. Display text does not have that property: a
+/// `List<Utf8>` of `["a, b", "c"]` and one of `["a", "b, c"]` both print as
+/// `[a, b, c]`. The chunk digest authenticates spooled chunks, so it must be
+/// injective over the canonical property types (`property_data_type_canonical`
+/// plus the widths `property_data_type_supported` normalizes).
+#[allow(clippy::too_many_lines)]
+fn hash_column(digest: &mut Sha256, column: &dyn Array) -> Result<(), GfError> {
+    use arrow::array::{
+        BooleanArray, LargeListArray, LargeStringArray, ListArray, StructArray, cast::AsArray,
+    };
+    use arrow::datatypes::DataType;
+
+    let data_type = format!("{:?}", column.data_type());
+    digest.update((data_type.len() as u64).to_be_bytes());
+    digest.update(data_type.as_bytes());
+    digest.update((column.len() as u64).to_be_bytes());
+    let mut validity = Vec::with_capacity(column.len());
+    validity.extend((0..column.len()).map(|row| u8::from(!column.is_null(row))));
+    digest.update(&validity);
+    let mut values: Vec<u8> = Vec::new();
+    match column.data_type() {
+        DataType::Boolean => {
+            let column = column.as_any().downcast_ref::<BooleanArray>();
+            let column = column.ok_or_else(|| storage("property column is not Boolean"))?;
+            values.extend(
+                (0..column.len())
+                    .filter(|row| column.is_valid(*row))
+                    .map(|row| u8::from(column.value(row))),
+            );
+        }
+        DataType::Int8
+        | DataType::Int16
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::UInt8
+        | DataType::UInt16
+        | DataType::UInt32
+        | DataType::Float32
+        | DataType::Float64
+        | DataType::Time64(_)
+        | DataType::Timestamp(_, _) => {
+            let data = column.to_data();
+            let width = column
+                .data_type()
+                .primitive_width()
+                .ok_or_else(|| storage("property column has no fixed width"))?;
+            let buffer = data
+                .buffers()
+                .first()
+                .ok_or_else(|| storage("property column has no value buffer"))?
+                .as_slice();
+            for row in (0..column.len()).filter(|row| column.is_valid(*row)) {
+                let at = (data.offset() + row) * width;
+                values.extend_from_slice(
+                    buffer
+                        .get(at..at + width)
+                        .ok_or_else(|| storage("property column buffer is short"))?,
+                );
+            }
+        }
+        DataType::Utf8 => {
+            let column = column.as_string::<i32>();
+            for row in (0..column.len()).filter(|row| column.is_valid(*row)) {
+                let value = column.value(row).as_bytes();
+                values.extend_from_slice(&(value.len() as u64).to_be_bytes());
+                values.extend_from_slice(value);
+            }
+        }
+        DataType::LargeUtf8 => {
+            let column = column
+                .as_any()
+                .downcast_ref::<LargeStringArray>()
+                .ok_or_else(|| storage("property column is not LargeUtf8"))?;
+            for row in (0..column.len()).filter(|row| column.is_valid(*row)) {
+                let value = column.value(row).as_bytes();
+                values.extend_from_slice(&(value.len() as u64).to_be_bytes());
+                values.extend_from_slice(value);
+            }
+        }
+        DataType::List(_) | DataType::LargeList(_) => {
+            for row in (0..column.len()).filter(|row| column.is_valid(*row)) {
+                let element = if let Some(list) = column.as_any().downcast_ref::<ListArray>() {
+                    list.value(row)
+                } else if let Some(list) = column.as_any().downcast_ref::<LargeListArray>() {
+                    list.value(row)
+                } else {
+                    return Err(storage("property column is not a list"));
+                };
+                hash_column(digest, element.as_ref())?;
+            }
+            return Ok(());
+        }
+        DataType::Struct(fields) => {
+            let column = column
+                .as_any()
+                .downcast_ref::<StructArray>()
+                .ok_or_else(|| storage("property column is not a struct"))?;
+            digest.update((fields.len() as u64).to_be_bytes());
+            for (field, child) in fields.iter().zip(column.columns()) {
+                digest.update((field.name().len() as u64).to_be_bytes());
+                digest.update(field.name().as_bytes());
+                if column.null_count() == 0 {
+                    hash_column(digest, child.as_ref())?;
+                } else {
+                    // A null struct's children are unspecified: hash only the
+                    // rows that exist.
+                    for row in 0..column.len() {
+                        if column.is_valid(row) {
+                            hash_column(digest, child.slice(row, 1).as_ref())?;
+                        }
+                    }
+                }
+            }
+            return Ok(());
+        }
+        other => {
+            return Err(storage(format!(
+                "property column type {other} has no canonical digest"
+            )));
+        }
+    }
+    digest.update(&values);
+    Ok(())
 }
 
 /// Digest of the bare canonical construction schema for `kind`: the exact
@@ -961,6 +1154,7 @@ pub(super) fn receipt_from_intent(
             .details
             .clone()
             .ok_or_else(|| storage("intent lacks detail run"))?,
+        spool: None,
     })
 }
 

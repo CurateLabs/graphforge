@@ -1557,7 +1557,7 @@ fn open_persisted_construction<'a>(
             .expect("resume persisted construction session");
     }
     let session = graph
-        .begin_graph_construction(budgets)
+        .begin_staged_graph_construction(budgets)
         .expect("begin persisted construction session");
     let parent = path.parent().expect("construction session parent");
     fs::create_dir_all(parent).expect("construction session parent");
@@ -3551,8 +3551,10 @@ fn run_integrated_certification_config(
     let initial_generation = graphforge_storage::resolve_project_generation(&source)
         .expect("resolve initial source generation");
     journal.replace_project_owner("source_project", &initial_generation);
+    // The staged lifecycle is what the phase metric policies certify; the
+    // chunk API's default spools and builds with the bulk builder instead.
     let mut construction = graph
-        .begin_graph_construction(Default::default())
+        .begin_staged_graph_construction(Default::default())
         .expect("begin certification construction");
     let node_count = (1_u64 << scale)
         .checked_mul(u64::from(preflight_node_factor))
@@ -8837,7 +8839,7 @@ fn million_edge_sink_uses_sixteen_durable_chunks_and_replays_stably() {
     let budgets = GraphConstructionBudgets::default();
     assert_eq!(CONSTRUCTION_BATCH_ROWS, budgets.max_batch_rows);
     let mut session = graph
-        .begin_graph_construction(budgets)
+        .begin_staged_graph_construction(budgets)
         .expect("begin million-edge construction");
     publish_nodes(&mut session, 2, None);
     let session_uuid = session.session_uuid();
@@ -8872,6 +8874,61 @@ fn million_edge_sink_uses_sixteen_durable_chunks_and_replays_stably() {
     assert_eq!(replayed.evidence.immutable_artifacts, 67);
     assert_eq!(replayed.evidence.replayed_chunks, 16);
     assert_eq!(submitted_chunk_count(&replayed.evidence), 33);
+}
+
+#[test]
+fn million_edge_spool_keeps_sixteen_durable_chunks_and_replays_stably() {
+    let project = TempDir::new().expect("million-edge spool project");
+    let graph = GraphForge::new(project.path().to_str()).expect("open million-edge spool project");
+    let budgets = GraphConstructionBudgets::default();
+    let mut session = graph
+        .begin_graph_construction(budgets)
+        .expect("begin million-edge spool construction");
+    publish_nodes(&mut session, 2, None);
+    let session_uuid = session.session_uuid();
+    let mut sink = EdgeSink::new(&mut session, None);
+    for _ in 0..1_048_576 {
+        sink.push(0, 1);
+    }
+    sink.flush();
+    let first_digest = sink.finish();
+    let first = session.progress();
+    assert_eq!(
+        first.accepted_chunks, 17,
+        "one node plus sixteen edge chunks"
+    );
+    assert_eq!(first.evidence.input_batches, 17);
+    // Spooled, not staged: one file per chunk and none of the staged artifacts.
+    assert_eq!(first.evidence.spooled_chunks, 17);
+    assert_eq!(first.evidence.parquet_shards, 0);
+    assert_eq!(first.evidence.immutable_artifacts, 0);
+    assert!(first.evidence.write_bytes > 0 && first.evidence.write_operations > 0);
+    assert!(first.evidence.fsync_operations >= 2 * 17);
+    let spool = project
+        .path()
+        .join(".graphforge-construction")
+        .join(session_uuid.simple().to_string())
+        .join("chunk-spool");
+    assert_eq!(fs::read_dir(&spool).expect("spool").count(), 17);
+    drop(session);
+
+    // A resumed process finds every accepted chunk and answers a replay of the
+    // same input from them, accepting nothing new.
+    let mut replay = graph
+        .resume_graph_construction(session_uuid, budgets)
+        .expect("resume million-edge spool construction");
+    assert_eq!(replay.progress().accepted_chunks, 17);
+    let mut sink = EdgeSink::new(&mut replay, None);
+    for _ in 0..1_048_576 {
+        sink.push(0, 1);
+    }
+    sink.flush();
+    assert_eq!(sink.finish(), first_digest);
+    let replayed = replay.progress();
+    assert_eq!(replayed.accepted_chunks, 17);
+    assert_eq!(replayed.evidence.input_batches, 17);
+    assert_eq!(replayed.evidence.replayed_chunks, 16);
+    assert_eq!(fs::read_dir(&spool).expect("spool").count(), 17);
 }
 
 fn submitted_chunk_count(evidence: &graphforge_storage::GraphConstructionEvidence) -> u64 {

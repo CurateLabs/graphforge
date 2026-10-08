@@ -124,11 +124,18 @@ The first `validate` chooses the route once and records it in the manifest, so
 later calls (and reruns after a crash) never re-decide it from live memory. Nothing
 is staged, so there is no durable prefix: a crash, cancellation or error
 discards the attempt and the next `validate` reruns from the sources. Appends,
-sessions that already staged chunks, and initial builds made through
-`GraphConstructionSession::append_*` keep the staged path described below. The
-builder holds the ranked graph in memory; an initial build that does not fit
-needs the scratch path planned in #1881. Node and edge counts are limited to
-2^32 - 2.
+and sessions that already staged chunks keep the staged path described below.
+Initial builds made through `GraphConstructionSession::append_*` (the Rust
+facade; the bindings' `add_nodes`/`add_edges` publish atomically and import
+sessions register sources) spool each accepted chunk as one Arrow IPC file,
+synced and renamed into place, which survives a crash and resumes; sealing
+builds from the spool with the same builder, in memory or, when the estimate
+exceeds the budget, on scratch files. Every spooled chunk is authenticated
+against the digests acknowledged at acceptance before it is read, so a file
+that changed afterwards, even at the same size and still valid Arrow IPC, fails
+the build. Only a build whose node tables alone exceed the budget replays the
+spool through the staged path. The route is recorded before any work and read
+back on retry. Node and edge counts are limited to 2^32 - 2.
 
 Validation processes node sources before edge sources. Each batch is normalized
 through the public bulk contract and flushed into a private graph tree. A

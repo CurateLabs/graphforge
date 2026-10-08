@@ -1899,4 +1899,6 @@ mod bulk_builder {
             }
         }
     }
+
+    include!("construction_chunk_spool_tests.rs");
 }
