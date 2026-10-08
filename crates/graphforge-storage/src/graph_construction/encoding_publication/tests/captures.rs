@@ -43,7 +43,13 @@ fn captured_encoded_copy_and_known_reuse_do_not_repeat_payload_sha_but_unknown_c
         assert_eq!(evidence.bytes_hashed, 0);
         assert_eq!(observed.artifact_payload_sha256_bytes, 0);
         assert_eq!(observed.unclassified_sha256_bytes, 0);
-        let passes = if cfg!(windows) && !reused { 2 } else { 1 };
+        // Unix links the encoder's file, so a first install reads nothing; Windows copies
+        // it and reads it once back, and a reuse reads the existing object once.
+        let passes = match (cfg!(windows), reused) {
+            (true, false) => 2,
+            (false, false) => 0,
+            (_, true) => 1,
+        };
         assert_eq!(observed.checksum_bytes, passes * source.bytes());
         assert_eq!(evidence.checksum_read_bytes, passes * source.bytes());
         assert_eq!(evidence.content_xxh64, Some(source.checksum()));
@@ -67,6 +73,9 @@ fn captured_encoded_copy_and_known_reuse_do_not_repeat_payload_sha_but_unknown_c
     assert_eq!(observed.unclassified_sha256_bytes, 0);
 }
 
+// Only Windows still copies an encoded source; unix links the encoder's file and
+// has no copy pass to mutate (see `direct_install`).
+#[cfg(windows)]
 #[test]
 fn captured_encoded_copy_refuses_valid_same_inode_mutate_read_restore_and_preserves_current() {
     let root = TempDir::new().unwrap();

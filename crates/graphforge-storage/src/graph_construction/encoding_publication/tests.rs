@@ -2824,4 +2824,6 @@ fn property_encoding_lanes_preserve_heterogeneous_artifacts_and_evidence() {
 }
 
 mod captures;
+#[cfg(unix)]
+mod direct_install;
 mod property_fragment_cap;

@@ -70,6 +70,10 @@ pub(super) fn install_staged_encoded_artifact(
                 "staged encoded source has an alias that is not its content address",
             ));
         }
+        construction_failpoint(&format!(
+            "cas.install.after_dedupe.{}",
+            source.relative_path()
+        ));
         reused
     } else {
         link_staged(lease, source, &bucket, authentication)?

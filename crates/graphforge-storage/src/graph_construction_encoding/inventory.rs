@@ -179,13 +179,24 @@ fn open_artifact_directory(
     Ok((directory, name))
 }
 
+/// An encoded artifact has one name until publication links the same inode
+/// into the object store (unix), and two afterwards. A publication that
+/// stopped after that link is retried by reopening this inventory, so the
+/// object-store name must not make the artifact unreadable. The installer
+/// proves the second name is this artifact's content address before it
+/// reuses it.
+pub(crate) fn staged_links_admitted(file: &File) -> Result<bool, GfError> {
+    let links = file_link_count(file).map_err(storage)?;
+    Ok(links == 1 || (cfg!(unix) && links == 2))
+}
+
 fn authenticate_encoded_checksum(
     file: File,
     expected: &ConstructionEncodedArtifact,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(graphforge_filesystem::FileCacheReleaseEvidence, u64), GfError> {
     let identity = file_identity(&file).map_err(storage)?;
-    if file_link_count(&file).map_err(storage)? != 1
+    if !staged_links_admitted(&file)?
         || file.metadata().map_err(storage)?.len() != expected.bytes
     {
         return Err(storage("canonical artifact identity or length changed"));
@@ -212,7 +223,7 @@ fn authenticate_encoded_checksum(
         if bytes != expected.bytes
             || checksum.finish() != expected.xxh64
             || file_identity(reader.file()).map_err(storage)? != identity
-            || file_link_count(reader.file()).map_err(storage)? != 1
+            || !staged_links_admitted(reader.file())?
             || reader.file().metadata().map_err(storage)?.len() != expected.bytes
         {
             return Err(storage(

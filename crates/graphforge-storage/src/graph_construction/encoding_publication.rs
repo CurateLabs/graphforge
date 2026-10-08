@@ -120,7 +120,7 @@ impl CapturedEncodedArtifact<'_> {
             || metadata.len() != self.bytes()
             || graphforge_filesystem::file_identity(&self.file).map_err(storage)? != self.identity
             || graphforge_filesystem::file_identity(&named).map_err(storage)? != self.identity
-            || !self.has_expected_links()?
+            || !crate::graph_construction_encoding::staged_links_admitted(&self.file)?
             || graphforge_filesystem::file_space_usage(&self.file)
                 .map_err(storage)?
                 .allocated_bytes
@@ -131,17 +131,6 @@ impl CapturedEncodedArtifact<'_> {
             ));
         }
         Ok(())
-    }
-}
-
-impl CapturedEncodedArtifact<'_> {
-    /// A staged source has one name until publication links it into the object
-    /// store, and two afterwards. The installer proves the second name is the
-    /// object-store entry for this inode, so a retried publication, which
-    /// reopens the staged name, is still admitted.
-    fn has_expected_links(&self) -> Result<bool, GfError> {
-        let links = graphforge_filesystem::file_link_count(&self.file).map_err(storage)?;
-        Ok(links == 1 || (cfg!(unix) && links == 2))
     }
 }
 

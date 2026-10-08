@@ -68,7 +68,7 @@ pub(crate) use bulk::{ForcedPartitions, ForcedPropertyFrames};
 pub(crate) use bulk::{discard_scratch, encode_bulk};
 #[cfg(test)]
 pub(crate) use inventory::authenticate_inventory_payloads;
-pub(crate) use inventory::{authenticate_inventory, authenticate_inventory_control};
+pub(crate) use inventory::{authenticate_inventory, authenticate_inventory_control, staged_links_admitted};
 #[cfg(test)]
 pub(crate) use inventory_bound::InventoryBoundOverride;
 use inventory_bound::inventory_bound;

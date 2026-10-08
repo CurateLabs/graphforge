@@ -55,6 +55,18 @@ fn returned_error_boundary(name: &str) -> Result<(), GfError> {
     Ok(())
 }
 
+/// Fail the next install that reaches `boundary` with an injected error.
+#[cfg(test)]
+pub(crate) fn inject_returned_error_at(boundary: Option<&str>) {
+    RETURNED_ERROR_BOUNDARY.with(|current| *current.borrow_mut() = boundary.map(str::to_owned));
+}
+
+/// Run `hook` once, after an object is sealed and before it gains its address.
+#[cfg(test)]
+pub(crate) fn set_before_object_link_hook(hook: Option<Box<dyn FnOnce()>>) {
+    BEFORE_OBJECT_LINK.with(|current| *current.borrow_mut() = hook);
+}
+
 #[cfg(not(test))]
 #[allow(clippy::unnecessary_wraps)]
 fn returned_error_boundary(_name: &str) -> Result<(), GfError> {
