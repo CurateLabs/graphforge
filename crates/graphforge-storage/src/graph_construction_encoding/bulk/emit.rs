@@ -392,6 +392,7 @@ pub(super) fn emit_edges(
 
 impl EdgeEmitter<'_> {
     /// Encode one window into its canonical file or files, one per route.
+    #[allow(clippy::too_many_lines)]
     pub(super) fn emit_window(&self, window: &EdgeWindow<'_>) -> Result<(), GfError> {
         let Self {
             installer,

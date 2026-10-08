@@ -115,14 +115,15 @@ impl RelationCache<'_> {
             let value = values.value(row);
             let id = match previous {
                 Some((text, id)) if text == value => id,
-                _ => match self.ids.get(value) {
-                    Some(id) => *id,
-                    None => {
+                _ => {
+                    if let Some(id) = self.ids.get(value) {
+                        *id
+                    } else {
                         let id = self.shared.id(value)?;
                         self.ids.insert(value.to_owned(), id);
                         id
                     }
-                },
+                }
             };
             previous = Some((value, id));
             *slot = id;
@@ -141,6 +142,7 @@ const BOUND_BUCKET_BITS: u32 = 20;
 /// that arrive in order and uniform for UUIDs that do not. The histogram spans
 /// the smallest to the largest bound, not the whole UUID space: time-ordered
 /// identities share their leading bytes.
+#[allow(clippy::cast_precision_loss)] // row counts are estimates here
 fn splitters_from_bounds(
     sources: &[BulkSource<'_>],
     tasks: &Tasks,
@@ -427,7 +429,7 @@ impl ScatteredEdges {
         if records.len() as u64 != self.counts[part] {
             return Err(storage("an edge scratch partition lost records"));
         }
-        records.sort_unstable_by(|left, right| left.uuid.cmp(&right.uuid));
+        records.sort_unstable_by_key(|record| record.uuid);
         if records.windows(2).any(|pair| pair[0].uuid == pair[1].uuid) {
             return Err(storage(
                 "duplicate identity across construction runs (edge)",

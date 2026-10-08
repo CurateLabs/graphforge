@@ -26,6 +26,7 @@ const HEADER: usize = 8;
 // ---------------------------------------------------------------- CRC32C
 
 /// Slicing-by-8 tables of the Castagnoli polynomial (reflected).
+#[allow(clippy::cast_possible_truncation)] // `index` is below 256
 const fn crc_tables() -> [[u32; 256]; 8] {
     const POLY: u32 = 0x82F6_3B78;
     let mut tables = [[0_u32; 256]; 8];

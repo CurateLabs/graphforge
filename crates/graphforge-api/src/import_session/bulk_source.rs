@@ -219,7 +219,8 @@ impl BulkBatchReader for SourceReader<'_> {
                 }
                 let low = <[u8; 16]>::try_from(statistics.min_bytes_opt()?).ok()?;
                 let high = <[u8; 16]>::try_from(statistics.max_bytes_opt()?).ok()?;
-                bounds = Some(bounds.map_or((low, high), |(min, max)| (min.min(low), max.max(high))));
+                bounds =
+                    Some(bounds.map_or((low, high), |(min, max)| (min.min(low), max.max(high))));
             }
             group_start = group_end;
         }

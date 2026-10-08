@@ -15,7 +15,7 @@ use super::plan::BulkBuildPlan;
 
 /// Resident bytes outside the data the scratch passes hold: allocator, thread
 /// stacks, the Parquet and Arrow runtime.
-const FIXED_BYTES: u64 = 512 << 20;
+const FIXED_BYTES: u64 = 192 << 20;
 /// Peak bytes per node while the node tables exist: the sorted UUIDs (16), the
 /// label ids (4), and the larger of the sort's working set (order array plus
 /// gathered copy, 20) and the endpoint index (8 to 16).
@@ -295,7 +295,10 @@ mod tests {
                 );
                 // A smaller budget reserves no more in flight.
                 if let Some(larger) = previous {
-                    assert!(sized.gate_bytes <= larger.gate_bytes, "{sized:?} {larger:?}");
+                    assert!(
+                        sized.gate_bytes <= larger.gate_bytes,
+                        "{sized:?} {larger:?}"
+                    );
                 }
                 previous = Some(sized);
             }
