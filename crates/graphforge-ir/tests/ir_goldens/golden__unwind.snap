@@ -22,7 +22,7 @@ source: crates/graphforge-ir/tests/golden.rs
       "Project": {
         "items": [
           {
-            "expr": 4,
+            "expr": 5,
             "alias": "x",
             "out_var": null
           }
@@ -60,6 +60,14 @@ source: crates/graphforge-ir/tests/golden.rs
       },
       {
         "VarRef": 0
+      },
+      {
+        "FunctionCall": {
+          "name": "_runtime_value",
+          "args": [
+            4
+          ]
+        }
       }
     ]
   }

@@ -101,7 +101,9 @@ fn fixed_pattern_predicate_lowers_to_exists() {
 }
 
 #[test]
-fn relationship_uniqueness_is_scoped_to_each_path_pattern() {
+fn relationship_uniqueness_spans_every_pattern_of_one_match() {
+    // openCypher relationship isomorphism holds across the comma-separated
+    // patterns of one MATCH clause, not just within each path (#1887 D6).
     let (binder, _catalog) = make_binder(OntologyMode::Exploratory);
     let ast = parse("MATCH (a)-[r1]->(b)-[r2]->(c), (x)-[r3]->(y) RETURN a").unwrap();
     let plan = binder.bind(&ast).expect("pattern binds");
@@ -114,8 +116,38 @@ fn relationship_uniqueness_is_scoped_to_each_path_pattern() {
             _ => None,
         })
         .collect();
-    assert_eq!(constraints.len(), 1);
+    assert_eq!(constraints.len(), 2);
     assert_eq!(constraints[0].1.len(), 1);
+    assert_eq!(constraints[1].1.len(), 2, "r3 must differ from r1 and r2");
+}
+
+#[test]
+fn relationship_uniqueness_restarts_at_each_match_clause() {
+    let (binder, _catalog) = make_binder(OntologyMode::Exploratory);
+    let ast = parse("MATCH (a)-[r1]->(b) MATCH (x)-[r2]->(y) RETURN a").unwrap();
+    let plan = binder.bind(&ast).expect("pattern binds");
+    assert!(
+        !plan
+            .ops
+            .iter()
+            .any(|op| matches!(op, GraphOp::RelationshipUnique { .. })),
+        "separate MATCH clauses do not constrain each other"
+    );
+}
+
+#[test]
+fn reusing_a_relationship_variable_across_patterns_of_one_match_is_rejected() {
+    let (binder, _catalog) = make_binder(OntologyMode::Exploratory);
+    let ast = parse("MATCH (a)-[r]->(b), (b)-[r]->(c) RETURN a").unwrap();
+    let errors = binder
+        .bind(&ast)
+        .expect_err("one relationship cannot bind two pattern positions");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.message.contains("RelationshipUniquenessViolation")),
+        "{errors:?}"
+    );
 }
 
 #[test]

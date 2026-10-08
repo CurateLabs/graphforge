@@ -20,6 +20,9 @@ impl ExprLowerer<'_> {
                 .var_map
                 .get(*var_id)
                 .ok_or(LoweringError::UnboundVar(var_id.0))?;
+            if let Some(value) = self.spread_entity_value(base) {
+                return Ok(value);
+            }
             if self.node_shapes.contains_key(&var_id.0) || self.is_node_var(base) {
                 let prop_names = self
                     .node_shapes
@@ -277,7 +280,12 @@ impl ExprLowerer<'_> {
                     .var_map
                     .get(*var_id)
                     .ok_or(LoweringError::UnboundVar(var_id.0))?;
-                if self.is_node_var(base) {
+                if self.is_spread_entity(base, "node_uuid", "type_ids") {
+                    Ok(null_unless(
+                        col(format!("{base}.node_uuid")).is_not_null(),
+                        qualified_col(base, "labels"),
+                    ))
+                } else if self.is_node_var(base) {
                     Ok(null_unless(
                         col(format!("{base}.node_uuid")).is_not_null(),
                         node_labels_list(base, None, &self.type_id_to_entity_name),
@@ -292,6 +300,57 @@ impl ExprLowerer<'_> {
                 Ok(CYPHER_LABELS.call(vec![value]))
             }
         }
+    }
+
+    /// Whether `base` is an entity bound by UNWIND over entity values: its
+    /// value struct's fields are spread under its qualifier (`identity`
+    /// present) without the storage topology column `topology` a scanned
+    /// entity carries.
+    fn is_spread_entity(&self, base: &str, identity: &str, topology: &str) -> bool {
+        let Some(schema) = self.input_schema.as_ref() else {
+            return false;
+        };
+        let qual = datafusion::common::TableReference::bare(base);
+        schema
+            .index_of_column_by_name(Some(&qual), identity)
+            .is_some()
+            && schema
+                .index_of_column_by_name(Some(&qual), topology)
+                .is_none()
+    }
+
+    /// The whole node or relationship value of a spread UNWIND entity, rebuilt
+    /// from its qualified columns (#1887 D16); `None` for any other variable.
+    fn spread_entity_value(&self, base: &str) -> Option<DfExpr> {
+        use datafusion::functions::core::expr_fn::named_struct;
+        let identity = if self.is_spread_entity(base, "node_uuid", "type_ids") {
+            "node_uuid"
+        } else if self.is_spread_entity(base, "edge_uuid", "rel_type_name") {
+            "edge_uuid"
+        } else {
+            return None;
+        };
+        let schema = self.input_schema.as_ref()?;
+        let fields = schema
+            .iter()
+            .filter(|(qualifier, field)| {
+                qualifier.is_some_and(|q| q.table() == base)
+                    && !matches!(
+                        field.name().as_str(),
+                        "node_id" | "type_id" | "edge_id" | "src_id" | "dst_id"
+                    )
+            })
+            .flat_map(|(_, field)| {
+                [
+                    lit(field.name().as_str()),
+                    qualified_col(base, field.name()),
+                ]
+            })
+            .collect::<Vec<_>>();
+        Some(null_unless(
+            qualified_col(base, identity).is_not_null(),
+            named_struct(fields),
+        ))
     }
 
     pub(super) fn is_edge_var(&self, base: &str) -> bool {

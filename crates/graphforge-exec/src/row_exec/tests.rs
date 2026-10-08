@@ -42,6 +42,7 @@ fn optional_join_preserves_left_rows_matches_duplicate_keys_and_null_shapes_miss
     let cfg = OptionalConfig {
         join_keys: vec![(0, 0)],
         inner_keep_idx: vec![1],
+        null_safe_keys: false,
         out_schema,
         outer_schema,
         inner_schema,
@@ -96,6 +97,7 @@ fn optional_join_handles_cartesian_empty_uuid_and_invalid_key_contracts() {
     let cfg = OptionalConfig {
         join_keys: vec![],
         inner_keep_idx: vec![0],
+        null_safe_keys: false,
         out_schema: out_schema.clone(),
         outer_schema: outer_schema.clone(),
         inner_schema: inner_schema.clone(),
@@ -122,6 +124,7 @@ fn optional_join_handles_cartesian_empty_uuid_and_invalid_key_contracts() {
     let uuid_cfg = OptionalConfig {
         join_keys: vec![(0, 0)],
         inner_keep_idx: vec![],
+        null_safe_keys: false,
         out_schema: uuid_schema.clone(),
         outer_schema: uuid_schema.clone(),
         inner_schema: uuid_schema,
@@ -136,6 +139,7 @@ fn optional_join_handles_cartesian_empty_uuid_and_invalid_key_contracts() {
     let bad_key_cfg = OptionalConfig {
         join_keys: vec![(0, 0)],
         inner_keep_idx: vec![],
+        null_safe_keys: false,
         out_schema: outer_schema.clone(),
         outer_schema: outer_schema.clone(),
         inner_schema: outer_schema.clone(),
@@ -151,6 +155,7 @@ fn optional_join_handles_cartesian_empty_uuid_and_invalid_key_contracts() {
 
     let bad_keep_cfg = OptionalConfig {
         inner_keep_idx: vec![9],
+        null_safe_keys: false,
         ..cfg
     };
     let outer = RecordBatch::try_new(

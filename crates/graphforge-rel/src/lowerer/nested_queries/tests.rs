@@ -396,8 +396,8 @@ fn exact_zero_recursive_plan_reference_and_binding_analysis() {
 
     let mut outer = VarMap::new();
     outer.insert(wanted, "outer");
-    assert!(!full_subquery_needs_outer_input(&unrelated, &outer));
-    assert!(full_subquery_needs_outer_input(&referenced, &outer));
+    assert!(!child_reads_outer_rows(&unrelated, &outer));
+    assert!(child_reads_outer_rows(&referenced, &outer));
     let mut locally_bound_builder = GraphPlan::builder("openCypher");
     locally_bound_builder.push_op_mut(GraphOp::NodeScan {
         var: wanted,
@@ -405,7 +405,7 @@ fn exact_zero_recursive_plan_reference_and_binding_analysis() {
     });
     locally_bound_builder.push_expr(IrExpr::VarRef(wanted));
     let locally_bound = locally_bound_builder.build();
-    assert!(!full_subquery_needs_outer_input(&locally_bound, &outer));
+    assert!(!child_reads_outer_rows(&locally_bound, &outer));
 }
 
 #[test]

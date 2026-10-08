@@ -847,6 +847,53 @@ impl GraphPlanLowerer {
                 // a nullable Int64 when it can't be determined pre-execution.
                 let element_field =
                     unwind_element_field(&df_expr, input.schema(), self.prop_names().values());
+                // An unwound node or relationship spreads its value's fields under
+                // the alias qualifier. An unqualified input column with one of
+                // those names (a WITH alias such as `l` beside a property `l`)
+                // would make the schema ambiguous, so it moves to an internal
+                // name first (#1887 D17).
+                let collisions = unwind_spread_collisions(&element_field, &input);
+                let (input, df_expr) = if collisions.is_empty() {
+                    (input, df_expr)
+                } else {
+                    let renamed: HashMap<String, String> = collisions
+                        .into_iter()
+                        .map(|name| {
+                            let internal = format!("__gf_unwind_{}_{name}", alias.0);
+                            (name, internal)
+                        })
+                        .collect();
+                    let projection = input
+                        .schema()
+                        .iter()
+                        .map(|(qualifier, field)| {
+                            let column = DfExpr::Column(datafusion::common::Column::new(
+                                qualifier.cloned(),
+                                field.name(),
+                            ));
+                            match (qualifier, renamed.get(field.name())) {
+                                (None, Some(internal)) => column.alias(internal),
+                                _ => column,
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    let input = LogicalPlanBuilder::from(input)
+                        .project(projection)
+                        .and_then(LogicalPlanBuilder::build)
+                        .map_unsupported_expr()?;
+                    for var in var_map.var_ids().collect::<Vec<_>>() {
+                        if let Some(internal) = var_map.get(var).and_then(|name| renamed.get(name))
+                        {
+                            let internal = internal.clone();
+                            var_map.insert(var, internal);
+                        }
+                    }
+                    let df_expr = self
+                        .expr_lowerer(exprs, var_map)
+                        .with_input_schema(input.schema().clone())
+                        .lower(*list_expr)?;
+                    (input, df_expr)
+                };
                 let node =
                     UnwindNode::new(Arc::new(input), df_expr, var_alias(*alias), &element_field);
                 // Register the unwound variable so downstream ops can refer to it.
@@ -1189,10 +1236,11 @@ impl GraphPlanLowerer {
                     return None;
                 };
                 let prefix = var_map.get(*v)?;
-                let is_relationship = input.schema().iter().any(|(qualifier, field)| {
-                    qualifier.is_some_and(|q| q.table() == prefix) && field.name() == "edge_uuid"
+                let is_entity = input.schema().iter().any(|(qualifier, field)| {
+                    qualifier.is_some_and(|q| q.table() == prefix)
+                        && matches!(field.name().as_str(), "edge_uuid" | "node_uuid")
                 });
-                (node_shapes.contains_key(&v.0) || is_relationship).then(|| prefix.to_owned())
+                (node_shapes.contains_key(&v.0) || is_entity).then(|| prefix.to_owned())
             })
             .collect();
         let physical_names: HashMap<VarId, String> = items
@@ -1247,11 +1295,14 @@ impl GraphPlanLowerer {
                         .get(*v)
                         .ok_or(LoweringError::UnboundVar(v.0))?
                         .to_string();
-                    let is_relationship = input.schema().iter().any(|(qualifier, field)| {
+                    // A node bound by UNWIND over nodes has no pattern shape but
+                    // carries its spread value columns under its qualifier
+                    // (#1887 D16); forward those like a pattern-bound entity.
+                    let is_entity = input.schema().iter().any(|(qualifier, field)| {
                         qualifier.is_some_and(|q| q.table() == prefix)
-                            && field.name() == "edge_uuid"
+                            && matches!(field.name().as_str(), "edge_uuid" | "node_uuid")
                     });
-                    if node_shapes.contains_key(&v.0) || is_relationship {
+                    if node_shapes.contains_key(&v.0) || is_entity {
                         let output_var = item.out_var.unwrap_or(*v);
                         let output_prefix = if output_var == *v {
                             prefix.clone()
@@ -1527,6 +1578,34 @@ fn lower_filter(
         .map_unsupported_expr()
 }
 
+/// The unqualified columns of `input` whose names an unwound entity element
+/// would also spread under its qualifier (see `UnwindNode`).
+fn unwind_spread_collisions(
+    element_field: &datafusion::arrow::datatypes::Field,
+    input: &LogicalPlan,
+) -> Vec<String> {
+    let datafusion::arrow::datatypes::DataType::Struct(fields) = element_field.data_type() else {
+        return Vec::new();
+    };
+    let spreads = fields.iter().any(|field| {
+        matches!(
+            field.name().as_str(),
+            "node_uuid" | "edge_uuid" | "src_uuid" | "dst_uuid" | "nodes" | "relationships"
+        )
+    });
+    if !spreads {
+        return Vec::new();
+    }
+    input
+        .schema()
+        .iter()
+        .filter(|(qualifier, field)| {
+            qualifier.is_none() && fields.iter().any(|spread| spread.name() == field.name())
+        })
+        .map(|(_, field)| field.name().clone())
+        .collect()
+}
+
 fn lower_project(
     items: &[ProjectItem],
     distinct: bool,
@@ -1723,7 +1802,15 @@ fn lower_aggregate(
         .aggregate(group_exprs, aggr_exprs?)
         .and_then(LogicalPlanBuilder::build)
         .map_unsupported_expr()?;
-    if row_marker_aliases.is_empty() {
+    // openCypher `sum` over no (non-null) values is `0`, where SQL `SUM` is
+    // null (#1887 D13). Every other aggregate keeps SQL's empty-input result:
+    // `count` is 0, `collect` is `[]`, and `avg`/`min`/`max`/percentiles are null.
+    let sum_aliases = aggs
+        .iter()
+        .filter(|a| matches!(a.func, AggFunc::Sum | AggFunc::SumDistinct))
+        .map(|a| a.alias.as_str())
+        .collect::<Vec<_>>();
+    if row_marker_aliases.is_empty() && sum_aliases.is_empty() {
         return Ok(aggregate);
     }
 
@@ -1732,12 +1819,28 @@ fn lower_aggregate(
         .iter()
         .filter(|(_, field)| !row_marker_aliases.iter().any(|alias| alias == field.name()))
         .map(|(qualifier, field)| {
-            DfExpr::Column(datafusion::common::Column::new(
+            let column = DfExpr::Column(datafusion::common::Column::new(
                 qualifier.cloned(),
                 field.name(),
-            ))
+            ));
+            if !sum_aliases.contains(&field.name().as_str()) {
+                return Ok(column);
+            }
+            let zero = match field.data_type() {
+                datafusion::arrow::datatypes::DataType::Null => {
+                    datafusion::scalar::ScalarValue::Int64(Some(0))
+                }
+                data_type => datafusion::scalar::ScalarValue::new_zero(data_type).map_err(|e| {
+                    LoweringError::UnsupportedExpr(format!("sum over {data_type}: {e}"))
+                })?,
+            };
+            Ok(datafusion::functions::core::expr_fn::coalesce(vec![
+                column,
+                datafusion::logical_expr::lit(zero),
+            ])
+            .alias(field.name()))
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, LoweringError>>()?;
     LogicalPlanBuilder::from(aggregate)
         .project(visible_columns)
         .and_then(LogicalPlanBuilder::build)
@@ -1790,6 +1893,33 @@ fn lower_skip(count: u64, input: LogicalPlan) -> Result<LogicalPlan, LoweringErr
         .map_unsupported_expr()
 }
 
+/// `sum` / `sum(DISTINCT …)`. `sum(null)` sums no values (0 after the
+/// empty-input coalesce in the aggregate lowering, #1887 D13); the untyped null
+/// argument is given a numeric type DataFusion can sum.
+fn lower_sum(
+    distinct: bool,
+    arg: Option<DfExpr>,
+    arg_type: Option<&datafusion::arrow::datatypes::DataType>,
+) -> Result<DfExpr, LoweringError> {
+    let arg = arg.ok_or_else(|| {
+        LoweringError::UnsupportedExpr(if distinct {
+            "SUM DISTINCT requires an argument".into()
+        } else {
+            "SUM requires an argument".into()
+        })
+    })?;
+    let arg = if matches!(arg_type, Some(datafusion::arrow::datatypes::DataType::Null)) {
+        datafusion::logical_expr::expr_fn::cast(arg, datafusion::arrow::datatypes::DataType::Int64)
+    } else {
+        arg
+    };
+    Ok(if distinct {
+        sum_distinct(arg)
+    } else {
+        sum(arg)
+    })
+}
+
 fn lower_agg_func(
     func: AggFunc,
     arg: Option<DfExpr>,
@@ -1807,12 +1937,9 @@ fn lower_agg_func(
         AggFunc::CountDistinct => Ok(count_distinct(arg.ok_or_else(|| {
             LoweringError::UnsupportedExpr("COUNT DISTINCT requires an argument".into())
         })?)),
-        AggFunc::Sum => Ok(sum(arg.ok_or_else(|| {
-            LoweringError::UnsupportedExpr("SUM requires an argument".into())
-        })?)),
-        AggFunc::SumDistinct => Ok(sum_distinct(arg.ok_or_else(|| {
-            LoweringError::UnsupportedExpr("SUM DISTINCT requires an argument".into())
-        })?)),
+        AggFunc::Sum | AggFunc::SumDistinct => {
+            lower_sum(func == AggFunc::SumDistinct, arg, arg_type)
+        }
         AggFunc::Avg => {
             let arg = arg
                 .ok_or_else(|| LoweringError::UnsupportedExpr("AVG requires an argument".into()))?;

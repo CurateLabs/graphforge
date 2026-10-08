@@ -60,7 +60,13 @@ pub(super) fn const_map_scalar(entries: &[(String, ScalarValue)]) -> Option<Scal
         fields.push(Field::new(k, arr.data_type().clone(), true));
         arrays.push(arr);
     }
-    let s = StructArray::try_new(Fields::from(fields), arrays, None).ok()?;
+    let fields = Fields::from(fields);
+    // A map shaped like a temporal struct is marked as a map (#1887 D18).
+    let fields = match super::cypher_map_type(&DataType::Struct(fields.clone())) {
+        Some(DataType::Struct(marked)) => marked,
+        _ => fields,
+    };
+    let s = StructArray::try_new(fields, arrays, None).ok()?;
     Some(ScalarValue::Struct(Arc::new(s)))
 }
 
@@ -376,25 +382,8 @@ pub(super) fn lower_list_literal(
             let list = ScalarValue::new_list(&typed, &elem_type, true);
             return DfExpr::Literal(ScalarValue::List(list), None);
         }
-        // A list whose elements are ALL maps (with any nulls) keeps each element a
-        // PLAIN map so `x.field` access in a quantifier resolves (#1004): a
-        // DIFFERENT-shape all-map list is padded to the union of keys (missing key
-        // → null) into a homogeneous `List<Struct>` literal — which `make_array`
-        // itself cannot unify. Only a genuinely MIXED list (maps alongside
-        // scalars/lists) uses the tagged het path, where map elements carry no
-        // accessible fields. (#1005)
-        let all_maps = scalars
-            .iter()
-            .any(|s| matches!(s, ScalarValue::Struct(a) if is_plain_map_struct(a)))
-            && scalars.iter().all(|s| {
-                s.is_null() || matches!(s, ScalarValue::Struct(a) if is_plain_map_struct(a))
-            });
-        if all_maps {
-            if let Some(padded) = all_map_union_list(&scalars) {
-                return padded;
-            }
-        } else if let Some(tagged) = tagged_numeric_list(&scalars) {
-            return tagged;
+        if let Some(list) = heterogeneous_list_scalar(&scalars) {
+            return DfExpr::Literal(list, None);
         }
     }
     if let Some(schema) = input_schema
@@ -407,6 +396,38 @@ pub(super) fn lower_list_literal(
         return CYPHER_DYNAMIC_HET_LIST.call(elems);
     }
     datafusion::functions_nested::expr_fn::make_array(elems)
+}
+
+/// Fold constant list elements whose Arrow types differ into one list value,
+/// or `None` when no list representation holds them all.
+///
+/// A list whose elements are ALL maps (with any nulls) keeps each element a
+/// PLAIN map so `x.field` access in a quantifier resolves (#1004): a
+/// DIFFERENT-shape all-map list is padded to the union of keys (missing key
+/// → null, a null-typed value widening to the other maps' type) into a
+/// homogeneous `List<Struct>` — which `make_array` itself cannot unify. Maps
+/// whose shared keys hold conflicting types, and genuinely MIXED lists (maps
+/// alongside scalars/lists), use the tagged het encoding (ADR 0011), where
+/// map elements carry no accessible fields. (#1005)
+///
+/// Shared by list-literal lowering and list query parameters, so a `$param`
+/// list folds exactly like the same list written inline (#1887 D10).
+pub(super) fn heterogeneous_list_scalar(scalars: &[ScalarValue]) -> Option<ScalarValue> {
+    let all_maps = scalars
+        .iter()
+        .any(|s| matches!(s, ScalarValue::Struct(a) if is_plain_map_struct(a)))
+        && scalars
+            .iter()
+            .all(|s| s.is_null() || matches!(s, ScalarValue::Struct(a) if is_plain_map_struct(a)));
+    let folded = if all_maps {
+        all_map_union_list(scalars).or_else(|| tagged_numeric_list(scalars))
+    } else {
+        tagged_numeric_list(scalars)
+    };
+    match folded {
+        Some(DfExpr::Literal(list, _)) => Some(list),
+        _ => None,
+    }
 }
 
 pub(super) static CYPHER_LIST_PLUS: LazyLock<ScalarUDF> =
@@ -1119,6 +1140,10 @@ fn all_map_union_list(scalars: &[ScalarValue]) -> Option<DfExpr> {
         .map(|n| Field::new(n, types.get(n).cloned().unwrap_or(DataType::Null), true))
         .collect::<Vec<_>>()
         .into();
+    let union_fields = match super::cypher_map_type(&DataType::Struct(union_fields.clone())) {
+        Some(DataType::Struct(marked)) => marked,
+        _ => union_fields,
+    };
 
     // One concatenated column per union key (each row cast to the union type, a
     // missing key or a null-list-element → a typed null).

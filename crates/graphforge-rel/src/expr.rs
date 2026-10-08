@@ -19,8 +19,8 @@ mod list_values;
 #[cfg(test)]
 use list_values::het_depth;
 use list_values::{
-    CYPHER_LIST_PLUS, build_het_struct, const_map_scalar, het_fields, is_plain_map_struct_type,
-    lower_list_literal, unwrap_het,
+    CYPHER_LIST_PLUS, build_het_struct, const_map_scalar, het_fields, heterogeneous_list_scalar,
+    is_plain_map_struct_type, lower_list_literal, unwrap_het,
 };
 mod list_execution;
 pub use list_execution::rewrite_embedded_expressions;
@@ -41,22 +41,22 @@ use scalar_adapters::{
 };
 #[cfg(test)]
 use scalar_adapters::{CypherToString, cypher_float_string};
-pub use scalar_adapters::{ir_literal_to_scalar, scalar_to_ir_literal};
+pub use scalar_adapters::{ir_literal_to_scalar, scalar_to_ir_literal, try_ir_literal_to_scalar};
 
 mod spatial_lowering;
 mod temporal_lowering;
 mod temporal_udfs;
 use temporal_udfs::{
-    CYPHER_DATE_COMPONENT, CYPHER_DATE_PROJECT, CYPHER_DATE_TRUNCATE, CYPHER_DATETIME_PROJECT,
-    CYPHER_DATETIME_TRUNCATE, CYPHER_DURATION_ADD, CYPHER_DURATION_BETWEEN,
-    CYPHER_DURATION_COMPONENT, CYPHER_DURATION_PARSE, CYPHER_DURATION_SCALE,
-    CYPHER_LOCALDATETIME_PROJECT, CYPHER_LOCALDATETIME_TRUNCATE, CYPHER_LOCALTIME_PROJECT,
-    CYPHER_LOCALTIME_TRUNCATE, CYPHER_TEMPORAL_ARITH, CYPHER_TEMPORAL_COMPONENT,
-    CYPHER_TEMPORAL_ZONE_STR, CYPHER_TIME_PROJECT, CYPHER_TIME_TRUNCATE, date_scalar,
-    date_struct_value, datetime_scalar, datetime_struct_parts, dur_secs_nanos, duration_scalar,
-    duration_struct_parts, duration_value_to_ir, is_date_struct, is_datetime_struct,
-    is_duration_struct, is_localdatetime_struct, is_temporal_clock_fn, is_time_struct,
-    localdatetime_scalar, localdatetime_struct_parts, temporal_accessor_valid,
+    CYPHER_DATE_COMPONENT, CYPHER_DATE_PROJECT, CYPHER_DATE_TRUNCATE, CYPHER_DATETIME_FROM_EPOCH,
+    CYPHER_DATETIME_PROJECT, CYPHER_DATETIME_TRUNCATE, CYPHER_DURATION_ADD,
+    CYPHER_DURATION_BETWEEN, CYPHER_DURATION_COMPONENT, CYPHER_DURATION_PARSE,
+    CYPHER_DURATION_SCALE, CYPHER_LOCALDATETIME_PROJECT, CYPHER_LOCALDATETIME_TRUNCATE,
+    CYPHER_LOCALTIME_PROJECT, CYPHER_LOCALTIME_TRUNCATE, CYPHER_TEMPORAL_ARITH,
+    CYPHER_TEMPORAL_COMPONENT, CYPHER_TEMPORAL_ZONE_STR, CYPHER_TIME_PROJECT, CYPHER_TIME_TRUNCATE,
+    cypher_map_type, date_scalar, date_struct_value, datetime_scalar, datetime_struct_parts,
+    dur_secs_nanos, duration_scalar, duration_struct_parts, duration_value_to_ir, is_date_struct,
+    is_datetime_struct, is_duration_struct, is_localdatetime_struct, is_temporal_clock_fn,
+    is_time_struct, localdatetime_scalar, localdatetime_struct_parts, temporal_accessor_valid,
     temporal_null_scalar, time_scalar, time_struct_parts,
 };
 mod value_access;
@@ -356,7 +356,7 @@ impl<'a> ExprLowerer<'a> {
     )]
     pub fn lower(&self, id: ExprId) -> Result<DfExpr, LoweringError> {
         match self.arena.get(id) {
-            IrExpr::Literal(lit_val) => Ok(lower_literal(lit_val)),
+            IrExpr::Literal(lit_val) => lower_literal(lit_val),
 
             IrExpr::VarRef(var_id) => {
                 let col_name = self
@@ -433,55 +433,24 @@ impl<'a> ExprLowerer<'a> {
                         return Ok(lit(ScalarValue::Null));
                     }
                 }
-                // Temporal component accessor (#920): `d.year` where `d` is a
-                // date-struct-typed column (`Struct{epoch_day}`, ADR 0012) lowers to
-                // component extraction, not a property column. Dispatch needs the
-                // base's type, so it only fires when the input schema is known and
-                // the base is a var whose column is the date struct. (Other types'
-                // accessors follow once those types are typed.)
-                if let IrExpr::VarRef(v) = self.arena.get(*base)
-                    && let Some(col_name) = self.var_map.get(*v)
-                    && let Some(prop_name) = self.prop_names.get(prop)
-                    && crate::temporal::is_date_accessor(prop_name)
-                    && let Some(schema) = self.input_schema.as_ref()
-                    && let Ok(field) = schema.field_with_unqualified_name(col_name)
-                    && is_date_struct(field.data_type())
-                {
-                    return Ok(CYPHER_DATE_COMPONENT
-                        .call(vec![col_literal(col_name), lit(prop_name.as_str())]));
-                }
-                // Duration component accessor (#920): `d.days`/`d.seconds`/… where
-                // `d` is a typed `duration` struct column.
-                if let IrExpr::VarRef(v) = self.arena.get(*base)
-                    && let Some(col_name) = self.var_map.get(*v)
-                    && let Some(prop_name) = self.prop_names.get(prop)
-                    && crate::temporal::is_duration_accessor(prop_name)
-                    && let Some(schema) = self.input_schema.as_ref()
-                    && let Ok(field) = schema.field_with_unqualified_name(col_name)
-                    && is_duration_struct(field.data_type())
-                {
-                    return Ok(CYPHER_DURATION_COMPONENT
-                        .call(vec![col_literal(col_name), lit(prop_name.as_str())]));
-                }
-                // Other typed-temporal component accessors (#1008): `localtime`
-                // (`Time64`), `time`/`localdatetime`/`datetime` (structs). `Date32`
-                // and duration are handled above; here we extract time-of-day, date
-                // (for localdatetime/datetime), zone, and epoch (datetime)
-                // components. Zone strings (`timezone`/`offset`) → `Utf8`, all else
-                // `Int64`; the UDFs inspect the column's Arrow type to pick the field.
+                // Temporal component accessors (#920/#1008): `d.year`,
+                // `d.days`, `d.hour`, `d.timezone`, … where `d` is a typed
+                // temporal column lower to component extraction, not a
+                // property column. Non-variable bases (literals, bound
+                // parameters, function results) take the same dispatch in
+                // `lower_struct_static_field` (#1887 D2).
                 if let IrExpr::VarRef(v) = self.arena.get(*base)
                     && let Some(col_name) = self.var_map.get(*v)
                     && let Some(prop_name) = self.prop_names.get(prop)
                     && let Some(schema) = self.input_schema.as_ref()
                     && let Ok(field) = schema.field_with_unqualified_name(col_name)
-                    && temporal_accessor_valid(field.data_type(), prop_name)
+                    && let Some(access) = temporal_component_access(
+                        &col_literal(col_name),
+                        field.data_type(),
+                        prop_name,
+                    )
                 {
-                    let args = vec![col_literal(col_name), lit(prop_name.as_str())];
-                    return Ok(if crate::temporal::is_zone_str_accessor(prop_name) {
-                        CYPHER_TEMPORAL_ZONE_STR.call(args)
-                    } else {
-                        CYPHER_TEMPORAL_COMPONENT.call(args)
-                    });
+                    return Ok(access);
                 }
                 // Struct-field access on a plain-map column (#1017): a variable bound
                 // to a map value — `UNWIND [{k: …}] AS m` then `m.k`, or `WITH {…} AS
@@ -541,6 +510,14 @@ impl<'a> ExprLowerer<'a> {
                 self.lower_node_struct_list(args)
             }
 
+            IrExpr::FunctionCall { name, args } if name == "_runtime_value" => {
+                match args.as_slice() {
+                    [value] => self.lower_value(*value),
+                    _ => Err(LoweringError::UnsupportedExpr(
+                        "_runtime_value expects one argument".into(),
+                    )),
+                }
+            }
             IrExpr::FunctionCall { name, args } if name == "_rel_struct" => {
                 self.lower_rel_struct(args)
             }
@@ -902,6 +879,9 @@ impl<'a> ExprLowerer<'a> {
 
     fn lower_struct_static_field(&self, base_expr: DfExpr, key: &str) -> Option<DfExpr> {
         let dt = self.expr_data_type(&base_expr)?;
+        if let Some(access) = temporal_component_access(&base_expr, &dt, key) {
+            return Some(access);
+        }
         match dt {
             DataType::Null => Some(lit(ScalarValue::Null)),
             dt if is_het_struct_type(Some(&dt)) => Some(
@@ -1314,7 +1294,19 @@ impl<'a> ExprLowerer<'a> {
             args.push(lit(key.as_str()));
             args.push(self.lower_value(*value)?);
         }
-        Ok(named_struct(args))
+        let map = named_struct(args);
+        // A map shaped like a temporal struct is marked as a map (#1887 D18).
+        Ok(
+            match self
+                .expr_data_type(&map)
+                .or_else(|| map.get_type(&datafusion::common::DFSchema::empty()).ok())
+                .as_ref()
+                .and_then(cypher_map_type)
+            {
+                Some(marked) => cast(map, marked),
+                None => map,
+            },
+        )
     }
 
     // -----------------------------------------------------------------------
@@ -2308,8 +2300,30 @@ fn unify_graph_value_nullability(left: &DataType, right: &DataType) -> Option<Da
 }
 
 /// Lower an [`IrLiteral`] to a DataFusion [`Expr::Literal`].
-fn lower_literal(lit_val: &IrLiteral) -> DfExpr {
-    lit(ir_literal_to_scalar(lit_val))
+/// Component extraction for a temporal value of Arrow type `dt` (`date.year`,
+/// `duration.days`, `datetime.timezone`, …), or `None` when `dt` is not a
+/// temporal type or `key` is not one of its accessors.
+fn temporal_component_access(base: &DfExpr, dt: &DataType, key: &str) -> Option<DfExpr> {
+    let args = || vec![base.clone(), lit(key)];
+    if is_date_struct(dt) {
+        return crate::temporal::is_date_accessor(key).then(|| CYPHER_DATE_COMPONENT.call(args()));
+    }
+    if is_duration_struct(dt) {
+        return crate::temporal::is_duration_accessor(key)
+            .then(|| CYPHER_DURATION_COMPONENT.call(args()));
+    }
+    if !temporal_accessor_valid(dt, key) {
+        return None;
+    }
+    Some(if crate::temporal::is_zone_str_accessor(key) {
+        CYPHER_TEMPORAL_ZONE_STR.call(args())
+    } else {
+        CYPHER_TEMPORAL_COMPONENT.call(args())
+    })
+}
+
+fn lower_literal(lit_val: &IrLiteral) -> Result<DfExpr, LoweringError> {
+    try_ir_literal_to_scalar(lit_val).map(lit)
 }
 
 fn empty_map_struct() -> DfExpr {
