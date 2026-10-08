@@ -22,7 +22,10 @@
         "wcc"
       ],
       "bfs_source_vertex": 1,
-      "sssp_source_vertex": null
+      "sssp_source_vertex": null,
+      "pr_damping": 0.85,
+      "pr_iterations": 10,
+      "cdlp_iterations": 10
     },
     {
       "id": "ga-undirected",
@@ -43,7 +46,10 @@
         "wcc"
       ],
       "bfs_source_vertex": 10,
-      "sssp_source_vertex": 10
+      "sssp_source_vertex": 10,
+      "pr_damping": 0.85,
+      "pr_iterations": 10,
+      "cdlp_iterations": 10
     },
     {
       "id": "ga-wrong",
@@ -63,7 +69,10 @@
         "wcc"
       ],
       "bfs_source_vertex": 1,
-      "sssp_source_vertex": null
+      "sssp_source_vertex": null,
+      "pr_damping": 0.85,
+      "pr_iterations": 10,
+      "cdlp_iterations": 10
     }
   ],
   "counts_note": "Fixture: counts are the committed archives' records."

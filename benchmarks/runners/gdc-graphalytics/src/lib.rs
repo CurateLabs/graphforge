@@ -9,8 +9,9 @@
 use arrow::array::{Array, FixedSizeBinaryArray, Float64Array, Int64Array};
 use arrow::record_batch::RecordBatch;
 use graphforge_api::{
-    ClusterAlgorithm, ClusterOptions, GraphForge, NodeHandle, NodeSelector, PathAlgorithm,
-    PathsOptions, PropValue, RankAlgorithm, RankOptions,
+    ClusterAlgorithm, ClusterOptions, ClusteringNormalization, GraphForge, NodeHandle,
+    NodeSelector, PageRankOptions, PathAlgorithm, PathsOptions, PropValue, RankAlgorithm,
+    RankOptions, SynchronousLabelPropagationOptions,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -315,47 +316,47 @@ pub fn map_algorithm(job: &AlgorithmJob) -> Result<MappingOutcome, SuiteError> {
             }))
         }
         Algorithm::Pr => {
-            // Graphalytics PR is fixed-iteration; GraphForge pagerank converges
-            // with opaque iteration control and no public max_iterations knob.
-            if job.max_iterations.is_some() {
-                return Ok(MappingOutcome::SemanticIncompatibility {
-                    cause: "fixed_iteration_pagerank_not_exposed",
-                    detail: "Graphalytics PR requires max_iterations; GraphForge rank(by=pagerank) uses convergence without a public iteration bound".into(),
-                });
-            }
-            if job.damping.is_some_and(|damping| (damping - 0.85).abs() > f64::EPSILON) {
-                return Ok(MappingOutcome::SemanticIncompatibility {
-                    cause: "pagerank_damping_not_configurable",
-                    detail: "GraphForge rank(by=pagerank) fixes damping at 0.85".into(),
-                });
-            }
-            Ok(MappingOutcome::SemanticIncompatibility {
-                cause: "fixed_iteration_pagerank_not_exposed",
-                detail: "Graphalytics PR is iteration-bounded; GraphForge exposes only convergent pagerank".into(),
-            })
+            let iterations = required_iterations(job)?;
+            let damping = required_damping(job)?;
+            Ok(MappingOutcome::Compatible(PublicApiMapping {
+                verb: "rank".into(),
+                by: "pagerank".into(),
+                directed: job.directed,
+                weight_property: None,
+                notes: format!(
+                    "fixed synchronous iterations={iterations}, damping={damping}; dangling mass redistributed uniformly"
+                ),
+            }))
         }
         Algorithm::Wcc => Ok(MappingOutcome::Compatible(PublicApiMapping {
             verb: "cluster".into(),
             by: "components".into(),
             directed: false,
             weight_property: None,
-            notes: "weak connectivity via cluster(by=components); validation uses equivalence match"
-                .into(),
+            notes:
+                "weak connectivity via cluster(by=components); validation uses equivalence match"
+                    .into(),
         })),
-        Algorithm::Cdlp => Ok(MappingOutcome::SemanticIncompatibility {
-            cause: "synchronous_cdlp_not_exposed",
-            detail: "Graphalytics CDLP is synchronous with max_iterations and min-label ties; GraphForge cluster(by=label_propagation) is asynchronous without a public iteration bound".into(),
-        }),
-        Algorithm::Lcc if job.directed => Ok(MappingOutcome::SemanticIncompatibility {
-            cause: "directed_lcc_semantics_not_exposed",
-            detail: "Graphalytics v1.0.5 counts directed edges among unique direction-agnostic neighbors; GraphForge rank(by=clustering_coefficient) uses reciprocal-degree/Fagiolo normalization and fails the official directed validation vector".into(),
-        }),
+        Algorithm::Cdlp => {
+            let iterations = required_iterations(job)?;
+            Ok(MappingOutcome::Compatible(PublicApiMapping {
+                verb: "cluster".into(),
+                by: "label_propagation".into(),
+                directed: job.directed,
+                weight_property: None,
+                notes: format!(
+                    "synchronous iterations={iterations}; graphalytics_id initial labels; smallest-label ties; labels are not renumbered"
+                ),
+            }))
+        }
         Algorithm::Lcc => Ok(MappingOutcome::Compatible(PublicApiMapping {
             verb: "rank".into(),
             by: "clustering_coefficient".into(),
-            directed: false,
+            directed: job.directed,
             weight_property: None,
-            notes: "undirected rank(by=clustering_coefficient) with Graphalytics epsilon match".into(),
+            notes:
+                "neighbor_edges normalization; unique in/out neighbors; Graphalytics epsilon match"
+                    .into(),
         })),
         Algorithm::Sssp => {
             let Some(source) = job.source_vertex else {
@@ -378,6 +379,24 @@ pub fn map_algorithm(job: &AlgorithmJob) -> Result<MappingOutcome, SuiteError> {
             }))
         }
     }
+}
+
+fn required_iterations(job: &AlgorithmJob) -> Result<u32, SuiteError> {
+    job.max_iterations.ok_or_else(|| {
+        SuiteError::InvalidDocument(format!("{} requires max_iterations", job.algorithm))
+    })
+}
+
+fn required_damping(job: &AlgorithmJob) -> Result<f64, SuiteError> {
+    let damping = job
+        .damping
+        .ok_or_else(|| SuiteError::InvalidDocument("pr requires damping".into()))?;
+    if !damping.is_finite() || !(0.0..=1.0).contains(&damping) {
+        return Err(SuiteError::InvalidDocument(
+            "pr damping must be finite and in [0, 1]".into(),
+        ));
+    }
+    Ok(damping)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -490,6 +509,15 @@ pub struct LiveGraph {
 
 /// Load a committed edge-list fixture through the published in-memory facade.
 pub fn load_live_graph(path: &Path) -> Result<LiveGraph, SuiteError> {
+    load_live_graph_with_vertices(path, None)
+}
+
+/// Load a separate vertex source as well as edges, retaining isolates. Every
+/// edge endpoint must occur in the explicit vertex source when one is supplied.
+pub fn load_live_graph_with_vertices(
+    path: &Path,
+    vertices: Option<&Path>,
+) -> Result<LiveGraph, SuiteError> {
     let text = fs::read_to_string(path).map_err(|error| {
         SuiteError::InvalidDocument(format!("failed to read {}: {error}", path.display()))
     })?;
@@ -513,6 +541,35 @@ pub fn load_live_graph(path: &Path) -> Result<LiveGraph, SuiteError> {
         ids.insert(target);
         edges.push((source, target));
     }
+    if let Some(vertices) = vertices {
+        let text = fs::read_to_string(vertices).map_err(|error| {
+            SuiteError::InvalidDocument(format!("failed to read {}: {error}", vertices.display()))
+        })?;
+        let mut declared = BTreeSet::new();
+        for (index, line) in text.lines().enumerate() {
+            if line.trim().is_empty() || line.trim().starts_with('#') {
+                continue;
+            }
+            let mut tokens = line.split_whitespace();
+            let id = parse_edge_vertex(tokens.next(), index + 1, "declared")?;
+            if tokens.next().is_some() || !declared.insert(id) {
+                return Err(SuiteError::InvalidDocument(format!(
+                    "vertex line {}: duplicate id or trailing tokens",
+                    index + 1
+                )));
+            }
+        }
+        if !ids.is_subset(&declared) {
+            return Err(SuiteError::InvalidDocument(
+                "edge endpoint absent from vertex source".into(),
+            ));
+        }
+        ids = declared;
+    }
+    build_live_graph(ids, edges)
+}
+
+fn build_live_graph(ids: BTreeSet<u64>, edges: Vec<(u64, u64)>) -> Result<LiveGraph, SuiteError> {
     if ids.is_empty() {
         return Err(SuiteError::InvalidDocument(
             "live edge fixture contains no vertices".into(),
@@ -650,6 +707,7 @@ fn execute_live_output(live: &LiveGraph, job: &AlgorithmJob) -> Result<VertexMap
                     RankOptions {
                         by: RankAlgorithm::ClusteringCoefficient,
                         directed: job.directed,
+                        clustering_normalization: Some(ClusteringNormalization::NeighborEdges),
                         ..Default::default()
                     },
                 )
@@ -674,10 +732,42 @@ fn execute_live_output(live: &LiveGraph, job: &AlgorithmJob) -> Result<VertexMap
                 .map_err(live_api_error)?;
             normalize_paths(live, &batch, false)
         }
-        Algorithm::Pr | Algorithm::Cdlp => Err(SuiteError::SemanticIncompatibility {
-            cause: "unsupported_live_dispatch".into(),
-            detail: "unsupported jobs must fail in semantic mapping before dispatch".into(),
-        }),
+        Algorithm::Pr => {
+            let batch = live
+                .graph
+                .rank(
+                    "Vertex",
+                    RankOptions {
+                        by: RankAlgorithm::PageRank,
+                        directed: job.directed,
+                        pagerank: Some(PageRankOptions {
+                            damping: required_damping(job)?,
+                            iterations: Some(required_iterations(job)?),
+                        }),
+                        ..Default::default()
+                    },
+                )
+                .map_err(live_api_error)?;
+            normalize_float_column(live, &batch, "score")
+        }
+        Algorithm::Cdlp => {
+            let batch = live
+                .graph
+                .cluster(
+                    "Vertex",
+                    ClusterOptions {
+                        by: ClusterAlgorithm::LabelPropagation,
+                        directed: job.directed,
+                        synchronous_label_propagation: Some(SynchronousLabelPropagationOptions {
+                            iterations: required_iterations(job)?,
+                            initial_label_property: Some("graphalytics_id".into()),
+                        }),
+                        ..Default::default()
+                    },
+                )
+                .map_err(live_api_error)?;
+            normalize_int_column(live, &batch, "community_id")
+        }
     }
 }
 
@@ -1037,7 +1127,7 @@ pub fn determinism_rules() -> BTreeMap<&'static str, &'static str> {
         ),
         (
             "pr",
-            "epsilon=1e-4 on 64-bit IEEE-754 values; GraphForge mapping fails closed on fixed-iteration jobs",
+            "epsilon=1e-4 on 64-bit IEEE-754 values; fixed iteration count and configurable damping; uniform dangling redistribution",
         ),
         (
             "wcc",
@@ -1045,7 +1135,7 @@ pub fn determinism_rules() -> BTreeMap<&'static str, &'static str> {
         ),
         (
             "cdlp",
-            "exact match in Graphalytics; GraphForge mapping fails closed (async label_propagation ≠ sync CDLP)",
+            "exact original labels; synchronous fixed rounds; smallest-label ties",
         ),
         (
             "lcc",
@@ -1085,6 +1175,120 @@ mod tests {
     }
 
     #[test]
+    fn all_six_algorithms_execute_tiny_fixture_without_reference_changes() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/gdc/graphalytics-tiny/compatible");
+        let live = load_live_graph(&fixture.join("ga-tiny.edges")).unwrap();
+        for algorithm in Algorithm::ALL {
+            let job: AlgorithmJob = serde_json::from_str(
+                &fs::read_to_string(fixture.join(format!("jobs/{algorithm}.json"))).unwrap(),
+            )
+            .unwrap();
+            let reference = load_vertex_value_file(
+                &fixture.join(format!("references/ga-tiny-{algorithm}.ref")),
+            )
+            .unwrap();
+            let outcome = run_live_job(&live, &job, &reference);
+            assert_eq!(
+                outcome.status,
+                AlgorithmStatus::Passed,
+                "{algorithm}: {:?}",
+                outcome.cause
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_vertex_set_retains_isolates_and_zero_iteration_labels() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/gdc/graphalytics-validation");
+        let live = load_live_graph_with_vertices(
+            &fixture.join("isolates.edges"),
+            Some(&fixture.join("isolates.vertices")),
+        )
+        .unwrap();
+        for (algorithm, reference) in [
+            (
+                Algorithm::Pr,
+                "10 0.3333333333333333\n20 0.3333333333333333\n99 0.3333333333333333",
+            ),
+            (Algorithm::Cdlp, "10 10\n20 20\n99 99"),
+            (Algorithm::Lcc, "10 0.0\n20 0.0\n99 0.0"),
+        ] {
+            let mut job = sample_job(algorithm);
+            job.max_iterations = Some(0);
+            let outcome = run_live_job(&live, &job, &parse_vertex_value_file(reference).unwrap());
+            assert_eq!(
+                outcome.status,
+                AlgorithmStatus::Passed,
+                "{algorithm}: {:?}",
+                outcome.cause
+            );
+        }
+    }
+
+    #[test]
+    fn official_validation_vectors_execute_through_public_facade() {
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/gdc/graphalytics-validation");
+        for (algorithm, key, directed, iterations) in [
+            (Algorithm::Pr, "pr", true, 14),
+            (Algorithm::Pr, "pr", false, 26),
+            (Algorithm::Cdlp, "cdlp", true, 5),
+            (Algorithm::Cdlp, "cdlp", false, 5),
+            (Algorithm::Lcc, "lcc", true, 0),
+            (Algorithm::Lcc, "lcc", false, 0),
+        ] {
+            let direction = if directed { "dir" } else { "undir" };
+            let input =
+                fs::read_to_string(fixtures.join(format!("{key}-{direction}-input"))).unwrap();
+            let mut ids = BTreeSet::new();
+            let mut edges = BTreeSet::new();
+            for line in input.lines() {
+                let mut tokens = line
+                    .split_whitespace()
+                    .map(|token| token.parse::<u64>().unwrap());
+                let source = tokens.next().unwrap();
+                ids.insert(source);
+                for target in tokens {
+                    ids.insert(target);
+                    // Upstream undirected adjacency lists contain both orientations.
+                    edges.insert(if directed || source < target {
+                        (source, target)
+                    } else {
+                        (target, source)
+                    });
+                }
+            }
+            let live = build_live_graph(ids, edges.into_iter().collect()).unwrap();
+            let mut job = sample_job(algorithm);
+            job.directed = directed;
+            job.max_iterations = Some(iterations);
+            let reference =
+                load_vertex_value_file(&fixtures.join(format!("{key}-{direction}-output")))
+                    .unwrap();
+            let outcome = run_live_job(&live, &job, &reference);
+            assert_eq!(
+                outcome.status,
+                AlgorithmStatus::Passed,
+                "{key}-{direction}: {:?}",
+                outcome.cause
+            );
+            let mut incorrect = reference.clone();
+            let value = incorrect.values_mut().next().unwrap();
+            *value = match value {
+                VertexValue::Int(v) => VertexValue::Int(*v + 1),
+                VertexValue::Float(v) => VertexValue::Float(*v + 1.0),
+            };
+            assert_eq!(
+                run_live_job(&live, &job, &incorrect).status,
+                AlgorithmStatus::Failed,
+                "wrong answer must be visible: {key}-{direction}"
+            );
+        }
+    }
+
+    #[test]
     fn compatible_algorithms_map_to_public_api() {
         for algorithm in [Algorithm::Bfs, Algorithm::Wcc, Algorithm::Sssp] {
             let outcome = map_algorithm(&sample_job(algorithm)).unwrap();
@@ -1102,34 +1306,35 @@ mod tests {
     }
 
     #[test]
-    fn pr_and_cdlp_fail_closed_on_unsupported_semantics() {
-        let pr = map_algorithm(&sample_job(Algorithm::Pr)).unwrap();
-        assert!(matches!(
-            pr,
-            MappingOutcome::SemanticIncompatibility {
-                cause: "fixed_iteration_pagerank_not_exposed",
-                ..
+    fn all_compatible_modes_map_and_missing_parameters_fail() {
+        for algorithm in [Algorithm::Pr, Algorithm::Cdlp, Algorithm::Lcc] {
+            let mut job = sample_job(algorithm);
+            assert!(matches!(
+                map_algorithm(&job).unwrap(),
+                MappingOutcome::Compatible(_)
+            ));
+            if algorithm != Algorithm::Lcc {
+                job.max_iterations = None;
+                assert!(matches!(
+                    map_algorithm(&job),
+                    Err(SuiteError::InvalidDocument(_))
+                ));
             }
-        ));
-        let cdlp = map_algorithm(&sample_job(Algorithm::Cdlp)).unwrap();
-        assert!(matches!(
-            cdlp,
-            MappingOutcome::SemanticIncompatibility {
-                cause: "synchronous_cdlp_not_exposed",
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn directed_lcc_fails_closed_on_official_semantic_difference() {
-        assert!(matches!(
-            map_algorithm(&sample_job(Algorithm::Lcc)).unwrap(),
-            MappingOutcome::SemanticIncompatibility {
-                cause: "directed_lcc_semantics_not_exposed",
-                ..
-            }
-        ));
+        }
+        for damping in [
+            None,
+            Some(-0.1),
+            Some(1.1),
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+        ] {
+            let mut job = sample_job(Algorithm::Pr);
+            job.damping = damping;
+            assert!(matches!(
+                map_algorithm(&job),
+                Err(SuiteError::InvalidDocument(_))
+            ));
+        }
     }
 
     #[test]

@@ -116,12 +116,9 @@ class GdcGraphalyticsSuiteTests(unittest.TestCase):
         self.assertIn("driver", evidence["identities"])
         by_key = {item["workload_key"]: item for item in evidence["algorithms"]}
         self.assertEqual(set(by_key), set(ALGORITHMS))
-        for key in ("bfs", "wcc", "sssp"):
+        for key in ALGORITHMS:
             self.assertEqual(by_key[key]["status"], "passed", key)
             self.assertIsNotNone(by_key[key].get("public_api"))
-        for key in ("pr", "cdlp", "lcc"):
-            self.assertEqual(by_key[key]["status"], "semantic_incompatibility", key)
-            self.assertIsNotNone(by_key[key].get("cause"))
         Draft202012Validator(
             json.loads(
                 (self.root / "schemas" / "gdc-graphalytics-evidence.json").read_text(
@@ -130,26 +127,11 @@ class GdcGraphalyticsSuiteTests(unittest.TestCase):
             )
         ).validate(evidence)
 
-    def test_unsupported_semantics_fail_visibly(self) -> None:
-        pr_job = (
-            self.root / "fixtures" / "gdc" / "graphalytics-tiny" / "compatible" / "jobs" / "pr.json"
-        )
-        with self.assertRaises(GraphalyticsSuiteError) as raised:
-            map_job_file(pr_job)
-        self.assertEqual(raised.exception.cause, "semantic_incompatibility")
-        self.assertIn("fixed_iteration_pagerank_not_exposed", str(raised.exception))
-
-        cdlp_job = pr_job.with_name("cdlp.json")
-        with self.assertRaises(GraphalyticsSuiteError) as raised_cdlp:
-            map_job_file(cdlp_job)
-        self.assertEqual(raised_cdlp.exception.cause, "semantic_incompatibility")
-        self.assertIn("synchronous_cdlp_not_exposed", str(raised_cdlp.exception))
-
-        lcc_job = pr_job.with_name("lcc.json")
-        with self.assertRaises(GraphalyticsSuiteError) as raised_lcc:
-            map_job_file(lcc_job)
-        self.assertEqual(raised_lcc.exception.cause, "semantic_incompatibility")
-        self.assertIn("directed_lcc_semantics_not_exposed", str(raised_lcc.exception))
+    def test_compatible_modes_map_to_public_api(self) -> None:
+        directory = self.root / "fixtures" / "gdc" / "graphalytics-tiny" / "compatible" / "jobs"
+        for algorithm, verb in (("pr", "rank"), ("cdlp", "cluster"), ("lcc", "rank")):
+            mapping = map_job_file(directory / f"{algorithm}.json")
+            self.assertEqual(mapping["verb"], verb)
 
     def test_live_public_api_executes_tiny_fixture_and_fails_closed(self) -> None:
         evidence = run_tiny_live_suite()
@@ -165,11 +147,9 @@ class GdcGraphalyticsSuiteTests(unittest.TestCase):
         self.assertIsNone(evidence["identities"]["driver"]["commit"])
         self.assertEqual(evidence["identities"]["datasets"][0]["id"], "ga-tiny")
         by_key = {item["workload_key"]: item for item in evidence["algorithms"]}
-        for key in ("bfs", "wcc", "sssp"):
+        for key in ALGORITHMS:
             self.assertEqual(by_key[key]["status"], "passed", key)
             self.assertIsNotNone(by_key[key]["public_api"], key)
-        for key in ("pr", "cdlp", "lcc"):
-            self.assertEqual(by_key[key]["status"], "semantic_incompatibility", key)
         Draft202012Validator(
             json.loads(
                 (self.root / "schemas" / "gdc-graphalytics-evidence.json").read_text(

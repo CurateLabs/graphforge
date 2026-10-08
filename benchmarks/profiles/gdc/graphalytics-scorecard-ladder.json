@@ -22,7 +22,10 @@
         "wcc"
       ],
       "bfs_source_vertex": 2,
-      "sssp_source_vertex": null
+      "sssp_source_vertex": null,
+      "pr_damping": 0.85,
+      "pr_iterations": 10,
+      "cdlp_iterations": 10
     },
     {
       "id": "cit-Patents",
@@ -43,7 +46,10 @@
         "wcc"
       ],
       "bfs_source_vertex": 6009541,
-      "sssp_source_vertex": null
+      "sssp_source_vertex": null,
+      "pr_damping": 0.85,
+      "pr_iterations": 10,
+      "cdlp_iterations": 10
     },
     {
       "id": "datagen-7_5-fb",
@@ -64,7 +70,10 @@
         "wcc"
       ],
       "bfs_source_vertex": 6,
-      "sssp_source_vertex": 6
+      "sssp_source_vertex": 6,
+      "pr_damping": 0.85,
+      "pr_iterations": 10,
+      "cdlp_iterations": 10
     },
     {
       "id": "graph500-22",
@@ -84,7 +93,10 @@
         "wcc"
       ],
       "bfs_source_vertex": 248533,
-      "sssp_source_vertex": null
+      "sssp_source_vertex": null,
+      "pr_damping": 0.85,
+      "pr_iterations": 10,
+      "cdlp_iterations": 10
     }
   ],
   "counts_note": "edges is the LDBC-published count; listed_edges is the number of lines in the archive's .e file, which is what a faithful load stores."
