@@ -179,17 +179,32 @@ impl Partitions {
         })
     }
 
+    /// Reuse existing verified-block files in the caller's logical order.
+    /// Construction does not read or rewrite their records.
+    pub(super) fn from_inventory(inventory: Vec<(PathBuf, u64)>, width: usize) -> Self {
+        let (paths, counts): (Vec<_>, Vec<_>) = inventory.into_iter().unzip();
+        Self {
+            paths,
+            state: counts.into_iter().map(Mutex::new).collect(),
+            width,
+        }
+    }
+
     pub(super) fn len(&self) -> usize {
         self.paths.len()
     }
 
-    #[cfg(test)]
     pub(super) fn path(&self, index: usize) -> &Path {
         &self.paths[index]
     }
 
     /// Append one block. `block` holds [`HEADER`] reserved bytes, then records.
-    fn append(&self, scratch: &Scratch, index: usize, block: &mut [u8]) -> Result<(), GfError> {
+    pub(super) fn append(
+        &self,
+        scratch: &Scratch,
+        index: usize,
+        block: &mut [u8],
+    ) -> Result<(), GfError> {
         let payload = block.len() - HEADER;
         debug_assert!(payload.is_multiple_of(self.width));
         let length = u32::try_from(payload).map_err(storage)?;

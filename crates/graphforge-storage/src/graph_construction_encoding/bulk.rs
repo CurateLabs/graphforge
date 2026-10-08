@@ -141,6 +141,12 @@ struct ScratchReport {
     write_bytes: u64,
     read_bytes: u64,
     largest_partition: u64,
+    refinement_steps: u64,
+    refinement_write_bytes: u64,
+    refinement_read_bytes: u64,
+    csr_spool_write_bytes: u64,
+    csr_spool_read_bytes: u64,
+    peak_csr_carry_entries: u64,
 }
 
 struct Membership {
@@ -549,6 +555,27 @@ pub(crate) fn encode_bulk(
                 EdgeSide::Scratch(scattered) => scattered.counts.iter().copied().max().unwrap_or(0),
                 EdgeSide::Memory(_) => 0,
             },
+            refinement_steps: match &edge_side {
+                EdgeSide::Scratch(scattered) => scattered.refinement_steps,
+                EdgeSide::Memory(_) => 0,
+            },
+            refinement_write_bytes: match &edge_side {
+                EdgeSide::Scratch(scattered) => scattered.refinement_write_bytes,
+                EdgeSide::Memory(_) => 0,
+            },
+            refinement_read_bytes: match &edge_side {
+                EdgeSide::Scratch(scattered) => scattered.refinement_read_bytes,
+                EdgeSide::Memory(_) => 0,
+            },
+            csr_spool_write_bytes: ranked_edges
+                .as_ref()
+                .map_or(0, |(csr, _)| csr.csr_spool_write_bytes()),
+            csr_spool_read_bytes: ranked_edges
+                .as_ref()
+                .map_or(0, |(csr, _)| csr.csr_spool_read_bytes()),
+            peak_csr_carry_entries: ranked_edges
+                .as_ref()
+                .map_or(0, |(csr, _)| csr.peak_carry_entries()),
         };
         drop(ranked_edges);
         scratch.remove()?;
@@ -755,6 +782,12 @@ pub(crate) fn encode_bulk(
             scratch_write_bytes: scratch_report.write_bytes,
             scratch_read_bytes: scratch_report.read_bytes,
             largest_edge_partition: scratch_report.largest_partition,
+            edge_refinement_steps: scratch_report.refinement_steps,
+            edge_refinement_write_bytes: scratch_report.refinement_write_bytes,
+            edge_refinement_read_bytes: scratch_report.refinement_read_bytes,
+            csr_spool_write_bytes: scratch_report.csr_spool_write_bytes,
+            csr_spool_read_bytes: scratch_report.csr_spool_read_bytes,
+            peak_csr_carry_entries: scratch_report.peak_csr_carry_entries,
         };
     }
     Ok(completed)

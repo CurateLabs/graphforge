@@ -167,6 +167,24 @@ pub struct BulkBuildReport {
     /// Edges in the largest edge-UUID range partition of the over-budget route.
     #[serde(default)]
     pub largest_edge_partition: u64,
+    /// Radix refinements of oversized UUID ranges (zero for balanced input).
+    #[serde(default)]
+    pub edge_refinement_steps: u64,
+    /// Additional scratch writes needed to refine skewed edge UUID ranges.
+    #[serde(default)]
+    pub edge_refinement_write_bytes: u64,
+    /// Scratch reads performed by adaptive edge refinement.
+    #[serde(default)]
+    pub edge_refinement_read_bytes: u64,
+    /// Additional scratch writes for relation CSR spools.
+    #[serde(default)]
+    pub csr_spool_write_bytes: u64,
+    /// Scratch reads from relation CSR spools.
+    #[serde(default)]
+    pub csr_spool_read_bytes: u64,
+    /// Largest single unfinished CSR shard. Relation count does not multiply it.
+    #[serde(default)]
+    pub peak_csr_carry_entries: u64,
 }
 
 #[derive(Clone, Copy, Default)]

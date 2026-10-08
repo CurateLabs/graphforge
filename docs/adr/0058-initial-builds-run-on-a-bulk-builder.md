@@ -92,7 +92,7 @@ functions.
   binary began staging, and two plan-time cases the scratch route cannot hold,
   each recorded as a typed reason in the import manifest (`staged_reason`):
   `node_tables_exceed_budget` (the sorted node UUIDs, labels and endpoint index
-  and the two degree arrays need a conservative 56 bytes per node and stay in memory) and
+  and the two degree arrays need a conservative 56 bytes per node and stay in memory, alongside the fixed builder workspace) and
   `edge_properties_exceed_budget` (the builder retains property-bearing edge
   batches). Out-of-core node handling and edge properties on scratch remain
   open under #1881.
@@ -114,8 +114,16 @@ When the estimate exceeds the budget:
   scatters a 28-byte record (UUID, source rank, target rank, relation id) into
   edge-UUID range partitions. Exact, non-null Parquet row-group bounds feed a
   histogram over the stated UUID span; otherwise boundaries come from a sample
-  of up to 64 evenly spread tasks. Bounds describe a range, so the histogram
-  estimates the distribution between its endpoints.
+  of up to 64 evenly spread tasks. These are initial estimates. The scatter
+  also observes each partition’s actual UUID bounds. An oversized partition
+  streams once into radix children at the first byte where its observed bounds
+  differ, skipping any shared prefix. Oversized children repeat that step;
+  leaves appear in UUID order and each fits its worker’s reservation. Equal
+  bounds on an oversized range prove a duplicate identity. The source is never
+  reread for refinement, and a chain has at most sixteen radix steps.
+  Consecutive small child ranges coalesce through one streaming output, so
+  bookkeeping follows the number of bounded partitions rather than the radix
+  fanout. Already-fitting initial ranges keep their original scratch files.
 - Pass 3 builds the partitions in order, several at a time. Sorting a partition
   ranks its edges (the first `edge_id` is the number of earlier edges plus
   one). It checks identities, writes its canonical edge files, keeps its sorted
@@ -126,18 +134,31 @@ When the estimate exceeds the budget:
   Canonical edge files cover fixed windows of `edge_id`s that can straddle two
   partitions; the rows after a partition's last whole window carry to the next,
   one partition at a time.
-- The adjacency pass sorts each node-range partition and cuts it into shards.
-  The published shard boundaries are a greedy walk over the whole sorted
-  sequence of a relation group, so each group keeps its open shard between
-  partitions. That step runs in partition order; sorting and encoding overlap.
+- The adjacency pass sorts each node-range partition in order and feeds the
+  union into one canonical shard carry. Covering relation groups encode from
+  that same carry, one encoder at a time. Other relation entries append to
+  ordered CRC-protected scratch spools through one capped block buffer. After
+  the union finishes, one relation spool at a time reuses the same carry and
+  encoder. The published greedy shard cuts are unchanged; unfinished shards
+  no longer retain edge-bearing memory for every relation simultaneously.
 - Scratch has no fsync and no SHA-256. Every block carries a CRC32C that the
-  reader checks. Scratch is written once and read once, deleted on completion,
+  reader checks. The base scatter writes and reads each record once. Adaptive
+  edge refinement adds one write/read of the affected records per radix level.
+  Each usable non-covering relation adds one sequential write/read of its CSR
+  entries (at most another 32 bytes per edge across both directions, plus block
+  headers). Every successful written block is consumed once; the report names
+  refinement and spool bytes separately. Scratch is deleted on completion,
   on error, and when a session is opened for recovery, and a rerun starts from
   the sources.
 - Partition count and the partitions in flight come from the budget. A memory
   gate grants reservations in partition order, so the bytes in flight never
-  exceed the gate and a waiting partition is not starved. A partition larger
-  than the gate (an extreme skew) is refused with a resource-limit error.
+  exceed the gate and a waiting partition is not starved. The fixed footprint
+  reserves 192 MiB for runtime/allocator overhead, 256 MiB for one bounded
+  canonical CSR carry and Arrow IPC encoder, and a reusable minimum 64 MiB
+  decoding/scatter/sort working set. The remaining budget expands that working
+  set; the planner does not invent headroom after exhausting the budget.
+  Relation metadata and published artifact inventories remain proportional to
+  the number of output groups and files; edge-bearing CSR workspace is fixed.
 
 - Node and edge counts are limited to 2^32 - 2 by the dense ids. A larger input
   is refused with a resource-limit error.

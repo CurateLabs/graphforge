@@ -58,7 +58,11 @@ mod bulk_builder {
         }
     }
 
-    fn plan(nodes: &[RecordBatch], edges: &[RecordBatch], per_task: usize) -> BulkBuildPlan<'static> {
+    fn plan(
+        nodes: &[RecordBatch],
+        edges: &[RecordBatch],
+        per_task: usize,
+    ) -> BulkBuildPlan<'static> {
         BulkBuildPlan {
             nodes: vec![source(nodes, 2, per_task)],
             edges: vec![source(edges, 4, per_task)],
@@ -71,7 +75,9 @@ mod bulk_builder {
         value[0] = kind;
         value[6] = 0x70;
         value[8] = 0x80;
-        value[8..].copy_from_slice(&(index.wrapping_mul(0x9e37_79b9_7f4a_7c15) | (1 << 63)).to_be_bytes());
+        value[8..].copy_from_slice(
+            &(index.wrapping_mul(0x9e37_79b9_7f4a_7c15) | (1 << 63)).to_be_bytes(),
+        );
         value
     }
 
@@ -92,7 +98,13 @@ mod bulk_builder {
             .artifacts
             .iter()
             .filter(|artifact| artifact.path != NONCE_BEARING)
-            .map(|artifact| (artifact.path.clone(), artifact.bytes, artifact.sha256.clone()))
+            .map(|artifact| {
+                (
+                    artifact.path.clone(),
+                    artifact.bytes,
+                    artifact.sha256.clone(),
+                )
+            })
             .collect()
     }
 
@@ -139,9 +151,11 @@ mod bulk_builder {
     ) -> Result<Inventory, GfError> {
         let root = TempDir::new().unwrap();
         let mut session = pinned(&root);
-        session.set_cpu_admission(Some(Arc::new(cpu_admission::ConstructionCpuAdmission::new(
-            std::num::NonZeroUsize::new(workers).unwrap(),
-        ))));
+        session.set_cpu_admission(Some(Arc::new(
+            cpu_admission::ConstructionCpuAdmission::new(
+                std::num::NonZeroUsize::new(workers).unwrap(),
+            ),
+        )));
         session
             .prepare_bulk_encoding(1, &plan(nodes, edges, per_task), || false)
             .map(|encoding| inventory(&encoding))
@@ -306,11 +320,7 @@ mod bulk_builder {
         RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
     }
 
-    fn property_edges(
-        uuids: &[[u8; 16]],
-        src: &[[u8; 16]],
-        dst: &[[u8; 16]],
-    ) -> RecordBatch {
+    fn property_edges(uuids: &[[u8; 16]], src: &[[u8; 16]], dst: &[[u8; 16]]) -> RecordBatch {
         let mut fields = CONSTRUCTION_EDGE_SCHEMA.fields().to_vec();
         fields.push(Arc::new(Field::new("weight", DataType::Float64, true)));
         RecordBatch::try_new(
@@ -382,11 +392,11 @@ mod bulk_builder {
         let message = refusal(&[node(&[a, b]), node(&[a])], &[]);
         assert!(message.contains("duplicate identity across construction runs"), "{message}");
         // An edge UUID repeated across batches.
-        let message = refusal(
-            &[node(&[a, b])],
-            &[edge(e, a, b), edge(e, b, a)],
+        let message = refusal(&[node(&[a, b])], &[edge(e, a, b), edge(e, b, a)]);
+        assert!(
+            message.contains("duplicate identity across construction runs"),
+            "{message}"
         );
-        assert!(message.contains("duplicate identity across construction runs"), "{message}");
         // An edge UUID equal to a node UUID.
         let message = refusal(&[node(&[a, b])], &[edge(a, a, b)]);
         assert!(message.contains("duplicate identity across construction runs"), "{message}");
@@ -397,11 +407,11 @@ mod bulk_builder {
         let message = refusal(&[node(&[a])], &[edge(e, a, e)]);
         assert!(message.contains("edge endpoint is not a node UUID"), "{message}");
         // A label that is not an identifier.
-        let message = refusal(
-            &[node_batch_of(&[a], &["not an identifier"])],
-            &[],
+        let message = refusal(&[node_batch_of(&[a], &["not an identifier"])], &[]);
+        assert!(
+            message.contains("invalid canonical label or relation"),
+            "{message}"
         );
-        assert!(message.contains("invalid canonical label or relation"), "{message}");
     }
 
     #[test]
@@ -675,7 +685,12 @@ mod bulk_builder {
             true,
         )];
         let defaults = GraphConstructionBudgets::default;
-        let cases: Vec<(&str, GraphConstructionBudgets, &[RecordBatch], &[RecordBatch])> = vec![
+        let cases: Vec<(
+            &str,
+            GraphConstructionBudgets,
+            &[RecordBatch],
+            &[RecordBatch],
+        )> = vec![
             (
                 "construction property-column budget exhausted",
                 GraphConstructionBudgets {
@@ -792,13 +807,17 @@ mod bulk_builder {
         workers: usize,
         (edge_partitions, csr_partitions): (usize, usize),
     ) -> Result<ScratchRun, GfError> {
-        let _forced =
-            crate::graph_construction_encoding::ForcedPartitions::set(edge_partitions, csr_partitions);
+        let _forced = crate::graph_construction_encoding::ForcedPartitions::set(
+            edge_partitions,
+            csr_partitions,
+        );
         let root = TempDir::new().unwrap();
         let mut session = pinned(&root);
-        session.set_cpu_admission(Some(Arc::new(cpu_admission::ConstructionCpuAdmission::new(
-            std::num::NonZeroUsize::new(workers).unwrap(),
-        ))));
+        session.set_cpu_admission(Some(Arc::new(
+            cpu_admission::ConstructionCpuAdmission::new(
+                std::num::NonZeroUsize::new(workers).unwrap(),
+            ),
+        )));
         let encoding =
             session.prepare_bulk_encoding(1, &scratch_plan(nodes, edges, per_task), || false)?;
         Ok(ScratchRun {
@@ -808,19 +827,28 @@ mod bulk_builder {
         })
     }
 
-    /// Every scratch byte is written once and read once: the route costs the
-    /// published bytes plus one scratch pass, and nothing is rewritten.
-    fn assert_one_scratch_pass(report: &crate::BulkBuildReport, edges: u64) {
+    /// Base scatter plus explicitly accounted bounded refinement/spools.
+    /// Every successful scratch block is consumed exactly once.
+    fn assert_scratch_traffic(report: &crate::BulkBuildReport, edges: u64) {
         // 28-byte edge records, two 16-byte adjacency entries and a 16-byte
         // identity per edge, plus an 8-byte header per block.
         let payload = edges * (28 + 2 * 16 + 16);
+        let extra = report.edge_refinement_write_bytes + report.csr_spool_write_bytes;
+        let base = report.scratch_write_bytes - extra;
         assert!(
-            report.scratch_write_bytes >= payload
-                && report.scratch_write_bytes <= payload + payload / 64 + 64 * 1024,
+            base >= payload && base <= payload + payload / 64 + 64 * 1024,
             "wrote {} for {payload} bytes of records",
             report.scratch_write_bytes
         );
         assert_eq!(report.scratch_read_bytes, report.scratch_write_bytes);
+        // A refinement reads parent blocks and writes child blocks. Their
+        // payloads match, but different block boundaries have different CRC
+        // header counts; only total successful scratch traffic is identical.
+        assert_eq!(
+            report.edge_refinement_read_bytes > 0,
+            report.edge_refinement_write_bytes > 0
+        );
+        assert_eq!(report.csr_spool_read_bytes, report.csr_spool_write_bytes);
     }
 
     #[test]
@@ -843,7 +871,14 @@ mod bulk_builder {
             if partitions.0 > 1 {
                 assert!(run.report.edge_partitions > 1, "{:?}", run.report);
             }
-            assert_one_scratch_pass(&run.report, 3_001);
+            assert_scratch_traffic(&run.report, 3_001);
+            // All three relations have distinct usable stems: each entry in
+            // both directions goes through exactly one relation spool.
+            assert!(run.report.csr_spool_write_bytes >= 3_001 * 32);
+            assert!(
+                run.report.csr_spool_write_bytes
+                    <= 3_001 * 32 + run.report.csr_partitions * 3 * 2 * 8
+            );
             assert_eq!((run.report.nodes, run.report.edges), (1_021, 3_001));
         }
     }
@@ -902,7 +937,9 @@ mod bulk_builder {
         let _gate = crate::graph_construction_encoding::ForcedPartitions::with_gate(32 << 10);
         let run = scratch_run(&nodes, &edges, 1, 2, (16, 2)).unwrap();
         assert_same(&expected, &run.inventory);
-        assert_one_scratch_pass(&run.report, 3001);
+        assert_scratch_traffic(&run.report, 3001);
+        assert_eq!(run.report.edge_refinement_write_bytes, 0);
+        assert_eq!(run.report.csr_spool_write_bytes, 0);
         assert!(!run.scratch_left);
     }
 
@@ -913,8 +950,20 @@ mod bulk_builder {
         let nodes = vec![node_batch_of(&node_uuids, &vec!["Person"; 40])];
         // Every edge leaves node 0 or enters node 1: two keys hold all entries.
         let edge_uuids = (0..60_u64).map(|i| uuid(0x20, i)).collect::<Vec<_>>();
-        let src = (0..60).map(|i| if i % 2 == 0 { node_uuids[0] } else { node_uuids[2 + i % 30] });
-        let dst = (0..60).map(|i| if i % 2 == 0 { node_uuids[3 + i % 30] } else { node_uuids[1] });
+        let src = (0..60).map(|i| {
+            if i % 2 == 0 {
+                node_uuids[0]
+            } else {
+                node_uuids[2 + i % 30]
+            }
+        });
+        let dst = (0..60).map(|i| {
+            if i % 2 == 0 {
+                node_uuids[3 + i % 30]
+            } else {
+                node_uuids[1]
+            }
+        });
         let edges = vec![edge_batch_of(
             &edge_uuids,
             &vec!["KNOWS"; 60],
@@ -975,6 +1024,7 @@ mod bulk_builder {
 
     #[test]
     fn a_cancelled_over_budget_build_leaves_no_scratch_and_the_rerun_is_identical() {
+        let _gate = crate::graph_construction_encoding::ForcedPartitions::with_gate(32 << 10);
         let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
         let expected = bulk_with(&nodes, &edges, 2, 4).unwrap();
         let _forced = crate::graph_construction_encoding::ForcedPartitions::set(6, 4);
@@ -1035,6 +1085,7 @@ mod bulk_builder {
             edge.parse().unwrap(),
             csr.parse().unwrap(),
         );
+        let _gate = crate::graph_construction_encoding::ForcedPartitions::with_gate(32 << 10);
         let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
         let mut session = GraphConstructionSession::open(
             Path::new(&path),
@@ -1058,6 +1109,7 @@ mod bulk_builder {
         let mut left_scratch = 0;
         for failpoint in [
             "bulk.after_nodes",
+            "bulk.during_edge_refinement",
             "bulk.after_edges",
             "bulk.after_ranks",
             "bulk.after_tables",
@@ -1087,10 +1139,14 @@ mod bulk_builder {
             let mut session = pinned(&root);
             assert!(!scratch_dir(&session).exists(), "recovery kept scratch after {failpoint}");
             let _forced = crate::graph_construction_encoding::ForcedPartitions::set(7, 5);
+            let _gate = crate::graph_construction_encoding::ForcedPartitions::with_gate(32 << 10);
             let rerun = session
                 .prepare_bulk_encoding(1, &scratch_plan(&nodes, &edges, 2), || false)
                 .unwrap();
             assert_eq!(expected, inventory(&rerun), "killed at {failpoint}");
+            let report = session.bulk_build_report();
+            assert!(report.edge_refinement_write_bytes > 0, "{report:?}");
+            assert_scratch_traffic(&report, 3001);
             assert!(!scratch_dir(&session).exists());
         }
         assert!(left_scratch >= 2, "a killed attempt must have left scratch behind");
@@ -1166,7 +1222,9 @@ mod bulk_builder {
                     .as_any()
                     .downcast_ref::<FixedSizeBinaryArray>()
                     .unwrap();
-                all.extend((0..column.len()).map(|row| <[u8; 16]>::try_from(column.value(row)).unwrap()));
+                all.extend(
+                    (0..column.len()).map(|row| <[u8; 16]>::try_from(column.value(row)).unwrap()),
+                );
             }
             Some((*all.iter().min()?, *all.iter().max()?))
         }
@@ -1216,6 +1274,128 @@ mod bulk_builder {
                 "bounded={bounded}: largest partition {} of 40000",
                 report.largest_edge_partition
             );
+        }
+    }
+
+    #[test]
+    fn clustered_uuid_ranges_refine_with_footer_bounds_or_sampling_and_publish_identical_bytes() {
+        let _limits = ShardLimits::set(31, 100);
+        let ids = [uuid(0x10, 0), uuid(0x10, 1)];
+        let nodes = vec![node_batch_of(&ids, &["Person", "Person"])];
+        let mut edge_ids = (0..3000_u16)
+            .map(|index| {
+                let mut value = [0x20; 16];
+                value[14..].copy_from_slice(&index.to_be_bytes());
+                value
+            })
+            .collect::<Vec<_>>();
+        // Every task's exact min/max looks almost uniform across the UUID
+        // space even though practically all identities share fourteen bytes.
+        edge_ids.push([0xee; 16]);
+        let edges = vec![edge_batch_of(
+            &edge_ids,
+            &vec!["KNOWS"; 3001],
+            &vec![ids[0]; 3001],
+            &vec![ids[1]; 3001],
+        )];
+        let expected = bulk_with(&nodes, &edges, 1, 2).unwrap();
+        assert_same(&staged(&nodes, &edges), &expected);
+        for bounded in [false, true] {
+            for (gate, parts) in [(32 << 10, 4), (64 << 10, 1)] {
+                let _gate = crate::graph_construction_encoding::ForcedPartitions::with_gate(gate);
+                let _parts = crate::graph_construction_encoding::ForcedPartitions::set(parts, 2);
+                let mut plan = scratch_plan(&nodes, &edges, 1);
+                if bounded {
+                    plan.edges[0].reader = Arc::new(Bounded(Memory {
+                        batches: edges.clone(),
+                        per_task: 1,
+                    }));
+                }
+                let root = TempDir::new().unwrap();
+                let mut session = pinned(&root);
+                let encoding = session.prepare_bulk_encoding(1, &plan, || false).unwrap();
+                assert_same(&expected, &inventory(&encoding));
+                let report = session.bulk_build_report();
+                assert!(report.edge_refinement_write_bytes > 0, "{report:?}");
+                assert!(
+                    report.largest_edge_partition * 44 <= gate / (2 * report.scratch_concurrency),
+                    "{report:?}"
+                );
+                assert_eq!(report.csr_spool_write_bytes, 0);
+                assert_scratch_traffic(&report, 3001);
+                assert!(!scratch_dir(&session).exists());
+            }
+        }
+        for endpoint in [edge_ids[1000], uuid(0x30, 0)] {
+            let mut sources = vec![ids[0]; 3001];
+            sources[0] = endpoint;
+            let refused = vec![edge_batch_of(
+                &edge_ids,
+                &vec!["KNOWS"; 3001],
+                &sources,
+                &vec![ids[1]; 3001],
+            )];
+            let expected = bulk_with(&nodes, &refused, 1, 1).err().unwrap();
+            let _gate = crate::graph_construction_encoding::ForcedPartitions::with_gate(32 << 10);
+            let _parts = crate::graph_construction_encoding::ForcedPartitions::set(1, 2);
+            let root = TempDir::new().unwrap();
+            let mut session = pinned(&root);
+            let actual = session
+                .prepare_bulk_encoding(1, &scratch_plan(&nodes, &refused, 1), || false)
+                .err()
+                .unwrap();
+            assert_eq!(expected.to_string(), actual.to_string());
+            assert!(!scratch_dir(&session).exists());
+        }
+        // A duplicate inside the large cluster must keep the resident route's
+        // identity refusal rather than being mistaken for partition overflow.
+        edge_ids[2999] = edge_ids[0];
+        let edges = vec![edge_batch_of(
+            &edge_ids,
+            &vec!["KNOWS"; 3001],
+            &vec![ids[0]; 3001],
+            &vec![ids[1]; 3001],
+        )];
+        let _gate = crate::graph_construction_encoding::ForcedPartitions::with_gate(32 << 10);
+        let error = scratch_run(&nodes, &edges, 1, 1, (1, 2)).err().unwrap();
+        assert!(error.to_string().contains("duplicate identity"), "{error}");
+    }
+
+    #[test]
+    fn many_interleaved_relations_reuse_one_canonical_shard_carry() {
+        let _limits = ShardLimits::set(1000, 100);
+        let ids = [uuid(0x10, 0), uuid(0x10, 1)];
+        let nodes = vec![node_batch_of(&ids, &["Person", "Person"])];
+        let names = (0..32)
+            .map(|index| format!("REL_{index:02}"))
+            .collect::<Vec<_>>();
+        let edge_ids = (0..6400).map(|index| uuid(0x20, index)).collect::<Vec<_>>();
+        let rels = (0..6400)
+            .map(|index| names[index % names.len()].as_str())
+            .collect::<Vec<_>>();
+        let edges = vec![edge_batch_of(
+            &edge_ids,
+            &rels,
+            &vec![ids[0]; 6400],
+            &vec![ids[1]; 6400],
+        )];
+        let expected = bulk_with(&nodes, &edges, 1, 4).unwrap();
+        assert_same(&staged(&nodes, &edges), &expected);
+        for (gate, parts, workers) in [(32 << 10, (16, 2), 1), (64 << 10, (7, 5), 4)] {
+            // Previously each relation retained its 200-record tail while
+            // partitions advanced: 102,400 bytes outside either sort gate.
+            assert!(32 * 200 * 16 > gate);
+            let _gate = crate::graph_construction_encoding::ForcedPartitions::with_gate(gate);
+            let run = scratch_run(&nodes, &edges, 1, workers, parts).unwrap();
+            assert_same(&expected, &run.inventory);
+            assert_eq!(run.report.peak_csr_carry_entries, 1000);
+            assert!(run.report.csr_spool_write_bytes >= 6400 * 32);
+            assert!(
+                run.report.csr_spool_write_bytes
+                    <= 6400 * 32 + run.report.csr_partitions * 32 * 2 * 8
+            );
+            assert_scratch_traffic(&run.report, 6400);
+            assert!(!run.scratch_left);
         }
     }
 }

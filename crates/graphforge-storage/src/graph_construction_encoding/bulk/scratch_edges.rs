@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use arrow::array::StringArray;
 use rayon::prelude::*;
@@ -28,7 +28,7 @@ use rayon::prelude::*;
 use super::budget::ScratchPlan;
 use super::emit::{EdgeEmitter, EdgeWindow};
 use super::ordered::{Ordered, run_ordered};
-use super::scratch::{Appender, Partitions, Scatter, Scratch};
+use super::scratch::{Appender, Partitions, Scatter, Scratch, read_blocks};
 use super::scratch_csr::{CsrRecord, CsrScratch, KeyHistogram};
 use super::tables::{
     NodeIndex, NodeTable, Tasks, admit_batch, check_cancelled, copy_uuids, short_source,
@@ -257,12 +257,210 @@ fn partition_of(splitters: &[[u8; 16]], uuid: &[u8; 16]) -> usize {
     splitters.partition_point(|splitter| splitter <= uuid)
 }
 
+// -------------------------------------------------------- skew refinement
+
+type UuidBounds = Option<([u8; 16], [u8; 16])>;
+
+fn observe(bounds: &mut UuidBounds, uuid: [u8; 16]) {
+    *bounds = Some(bounds.map_or((uuid, uuid), |(low, high)| (low.min(uuid), high.max(uuid))));
+}
+
+/// Only oversized UUID ranges take extra scratch passes. A radix step splits
+/// at the first differing byte of the observed bounds, skipping common UUID
+/// prefixes without rereading them. Equal UUIDs always follow the same leaf.
+struct Refinement<'a> {
+    scratch: &'a Scratch,
+    limit: u64,
+    staging_bytes: usize,
+    cancel: &'a AtomicBool,
+    steps: u64,
+    leaves: Vec<(PathBuf, u64)>,
+    pending: Option<PendingLeaf<'a>>,
+    outputs: u64,
+}
+
+struct PendingLeaf<'a> {
+    writer: Appender<'a>,
+    path: PathBuf,
+    rows: u64,
+}
+
+impl Refinement<'_> {
+    fn finish_pending(&mut self) -> Result<(), GfError> {
+        if let Some(PendingLeaf { writer, path, rows }) = self.pending.take() {
+            writer.finish()?;
+            self.leaves.push((path, rows));
+        }
+        Ok(())
+    }
+
+    /// Greedily pack adjacent radix leaves without ever retaining their path
+    /// inventory. One open output consumes each tiny leaf once; it never
+    /// recopies the accumulated output when a subsequent leaf arrives.
+    fn leaf(&mut self, path: PathBuf, rows: u64, coalesce: bool) -> Result<(), GfError> {
+        if !coalesce {
+            self.finish_pending()?;
+            self.leaves.push((path, rows));
+            return Ok(());
+        }
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.rows + rows > self.limit)
+        {
+            self.finish_pending()?;
+        }
+        if rows == self.limit && self.pending.is_none() {
+            self.leaves.push((path, rows));
+            return Ok(());
+        }
+        if self.pending.is_none() {
+            let output = self
+                .scratch
+                .file(&format!("edge-coalesced-{:06}.blocks", self.outputs));
+            self.outputs += 1;
+            self.pending = Some(PendingLeaf {
+                writer: Appender::create(self.scratch, &output, self.staging_bytes)?,
+                path: output,
+                rows: 0,
+            });
+        }
+        let pending = self.pending.as_mut().expect("an output is open");
+        let mut copied = 0_u64;
+        read_blocks(self.scratch, &path, |payload| {
+            check_cancelled(self.cancel)?;
+            if !payload.len().is_multiple_of(EDGE_RECORD) {
+                return Err(storage("an edge scratch block has a partial record"));
+            }
+            for record in payload.chunks_exact(EDGE_RECORD) {
+                pending.writer.push(record)?;
+                copied += 1;
+            }
+            Ok(())
+        })?;
+        if copied != rows {
+            return Err(storage("an edge scratch partition lost records"));
+        }
+        pending.rows += copied;
+        std::fs::remove_file(path).map_err(storage)?;
+        if pending.rows == self.limit {
+            self.finish_pending()?;
+        }
+        Ok(())
+    }
+
+    fn partition(
+        &mut self,
+        path: PathBuf,
+        rows: u64,
+        bounds: UuidBounds,
+        coalesce: bool,
+    ) -> Result<(), GfError> {
+        check_cancelled(self.cancel)?;
+        if rows <= self.limit {
+            return self.leaf(path, rows, coalesce);
+        }
+        let (low, high) =
+            bounds.ok_or_else(|| storage("an edge partition lost its UUID bounds"))?;
+        let Some(byte) = low.iter().zip(high).position(|(low, high)| *low != high) else {
+            return Err(storage(
+                "duplicate identity across construction runs (edge)",
+            ));
+        };
+        let prefix = format!("edge-refinement-{:06}", self.steps);
+        self.steps += 1;
+        let children = Partitions::create(self.scratch, &prefix, 256, EDGE_RECORD)?;
+        let mut scatter = Scatter::new(self.scratch, &children, self.staging_bytes);
+        let mut bounds = vec![None; 256];
+        let mut read = 0_u64;
+        read_blocks(self.scratch, &path, |payload| {
+            check_cancelled(self.cancel)?;
+            if !payload.len().is_multiple_of(EDGE_RECORD) {
+                return Err(storage("an edge scratch block has a partial record"));
+            }
+            for bytes in payload.chunks_exact(EDGE_RECORD) {
+                let uuid: [u8; 16] = bytes[..16].try_into().expect("16-byte identity");
+                let child = usize::from(uuid[byte]);
+                observe(&mut bounds[child], uuid);
+                scatter.push(child, bytes)?;
+                read += 1;
+            }
+            crate::graph_construction::construction_failpoint("bulk.during_edge_refinement");
+            Ok(())
+        })?;
+        if read != rows {
+            return Err(storage("an edge scratch partition lost records"));
+        }
+        scatter.finish()?;
+        let counts = children.counts()?;
+        std::fs::remove_file(path).map_err(storage)?;
+        for (child, count) in counts.into_iter().enumerate() {
+            let path = children.path(child).to_path_buf();
+            if count == 0 {
+                std::fs::remove_file(path).map_err(storage)?;
+            } else {
+                self.partition(path, count, bounds[child], true)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Return a globally UUID-ordered inventory whose nonempty leaves all fit a
+/// worker's reservation. Every refinement reads a parent once and writes its
+/// children once. Streaming coalescing then packs small adjacent children to
+/// keep the final inventory proportional to total rows divided by the limit;
+/// it does not reopen the registered input source.
+fn refine_partitions(
+    partitions: &Partitions,
+    bounds: &[UuidBounds],
+    plan: &ScratchPlan,
+    scratch: &Scratch,
+    cancel: &AtomicBool,
+) -> Result<(Partitions, u64, u64, u64), GfError> {
+    let written = scratch.written_bytes();
+    let read = scratch.read_bytes();
+    // Sequential refinement shares one total scatter allowance across all 256
+    // children. Each child's capacity is rounded down to a whole record.
+    let staging = usize::try_from((plan.gate_bytes / 16 / 256).max(EDGE_RECORD as u64))
+        .unwrap_or(EDGE_RECORD)
+        .min(8 << 10);
+    let mut refinement = Refinement {
+        scratch,
+        limit: (plan.gate_bytes / (2 * plan.concurrency as u64) / 44).max(1),
+        staging_bytes: staging,
+        cancel,
+        steps: 0,
+        leaves: Vec::new(),
+        pending: None,
+        outputs: 0,
+    };
+    let counts = partitions.counts()?;
+    for (part, count) in counts.into_iter().enumerate() {
+        refinement.partition(
+            partitions.path(part).to_path_buf(),
+            count,
+            bounds[part],
+            false,
+        )?;
+    }
+    refinement.finish_pending()?;
+    Ok((
+        Partitions::from_inventory(refinement.leaves, EDGE_RECORD),
+        scratch.written_bytes() - written,
+        scratch.read_bytes() - read,
+        refinement.steps,
+    ))
+}
+
 // ------------------------------------------------------------------ pass 2
 
 /// The edges after pass 2: scattered, unranked.
 pub(super) struct ScatteredEdges {
     pub(super) partitions: Partitions,
-    splitters: Vec<[u8; 16]>,
+    pub(super) refinement_write_bytes: u64,
+    pub(super) refinement_read_bytes: u64,
+    pub(super) refinement_steps: u64,
     pub(super) counts: Vec<u64>,
     pub(super) rel_names: Vec<String>,
     pub(super) histogram: KeyHistogram,
@@ -290,6 +488,9 @@ pub(super) fn scatter_edges(
     let tasks = Tasks::plan(sources, "edges")?;
     let splitters = edge_splitters(sources, &tasks, plan.edge_partitions, cancel)?;
     let partitions = Partitions::create(scratch, "edges", splitters.len() + 1, EDGE_RECORD)?;
+    let bounds = (0..partitions.len())
+        .map(|_| Mutex::new(None::<([u8; 16], [u8; 16])>))
+        .collect::<Vec<_>>();
     let dictionary = SharedDictionary::default();
     let histogram = KeyHistogram::new(
         nodes.uuids.len() as u64,
@@ -314,6 +515,7 @@ pub(super) fn scatter_edges(
             let mut rels = Vec::new();
             let mut endpoints = Vec::new();
             let mut task_miss = None::<[u8; 16]>;
+            let mut task_bounds = vec![None; partitions.len()];
             sources[source].reader.read_task(task, &mut |batch| {
                 check_cancelled(cancel)?;
                 crate::graph_construction::validate_canonical_batch(
@@ -365,7 +567,9 @@ pub(super) fn scatter_edges(
                     if record.src != 0 && record.dst != 0 {
                         histogram.add(record.src, record.dst);
                     }
-                    scatter.push(partition_of(&splitters, &record.uuid), &record.encode())?;
+                    let part = partition_of(&splitters, &record.uuid);
+                    observe(&mut task_bounds[part], record.uuid);
+                    scatter.push(part, &record.encode())?;
                 }
                 written += count;
                 Ok(())
@@ -374,6 +578,15 @@ pub(super) fn scatter_edges(
                 return Err(short_source());
             }
             scatter.finish()?;
+            for (part, bounds_of_task) in task_bounds.into_iter().enumerate() {
+                if let Some((low, high)) = bounds_of_task {
+                    let mut shared = bounds[part]
+                        .lock()
+                        .map_err(|_| storage("UUID bounds lock poisoned"))?;
+                    observe(&mut shared, low);
+                    observe(&mut shared, high);
+                }
+            }
             if let Some(endpoint) = task_miss {
                 miss.lock()
                     .map_err(|_| storage("endpoint lock poisoned"))?
@@ -381,14 +594,27 @@ pub(super) fn scatter_edges(
             }
             Ok(())
         })?;
-    let counts = partitions.counts()?;
-    let total = counts.iter().sum::<u64>();
+    let initial_counts = partitions.counts()?;
+    let total = initial_counts.iter().sum::<u64>();
     if total != tasks.total as u64 {
         return Err(short_source());
     }
+    let bounds = bounds
+        .into_iter()
+        .map(|bounds| {
+            bounds
+                .into_inner()
+                .map_err(|_| storage("UUID bounds lock poisoned"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let (partitions, refinement_write_bytes, refinement_read_bytes, refinement_steps) =
+        refine_partitions(&partitions, &bounds, plan, scratch, cancel)?;
+    let counts = partitions.counts()?;
     let scattered = ScatteredEdges {
         partitions,
-        splitters,
+        refinement_write_bytes,
+        refinement_read_bytes,
+        refinement_steps,
         counts,
         rel_names: dictionary.into_names()?,
         histogram,
@@ -401,7 +627,6 @@ pub(super) fn scatter_edges(
         .into_inner()
         .map_err(|_| storage("endpoint lock poisoned"))?;
     if let Some(endpoint) = miss {
-        let owner = partition_of(&scattered.splitters, &endpoint);
         let ordered = Ordered::new(plan.gate_bytes, 0, cancel);
         let mut is_edge = false;
         for part in 0..scattered.partitions.len() {
@@ -409,11 +634,9 @@ pub(super) fn scatter_edges(
             let cost = ScratchPlan::edge_cost(scattered.counts[part]);
             ordered.acquire(part, cost)?;
             let records = scattered.load_sorted(scratch, part, &nodes.uuids)?;
-            if part == owner {
-                is_edge = records
-                    .binary_search_by(|record| record.uuid.cmp(&endpoint))
-                    .is_ok();
-            }
+            is_edge |= records
+                .binary_search_by(|record| record.uuid.cmp(&endpoint))
+                .is_ok();
             drop(records);
             ordered.release(cost);
         }
@@ -474,11 +697,6 @@ pub(super) struct RankedEdges {
     pub(super) counts: Vec<u64>,
     /// The sorted edge UUIDs, one scratch file per partition, in order.
     pub(super) uuid_files: Vec<PathBuf>,
-}
-
-struct PartitionStats {
-    first: Vec<u32>,
-    counts: Vec<u64>,
 }
 
 pub(super) struct RankContext<'a> {
@@ -548,8 +766,12 @@ pub(super) fn rank_partitions(context: &RankContext<'_>) -> Result<RankedEdges, 
     let uuid_files = (0..partitions)
         .map(|part| scratch.file(&format!("edge-uuids-{part:06}.blocks")))
         .collect::<Vec<_>>();
-    let stats = (0..partitions)
-        .map(|_| Mutex::new(None::<PartitionStats>))
+    // One pair of counters per relation, independent of the leaf count.
+    let relation_counts = (0..relation_count)
+        .map(|_| AtomicU64::new(0))
+        .collect::<Vec<_>>();
+    let first_edges = (0..relation_count)
+        .map(|_| AtomicU64::new(u64::MAX))
         .collect::<Vec<_>>();
     let carry = Mutex::new(Vec::<EdgeRecord>::new());
     let ordered_scatter = csr.out_keys.has_heavy() || csr.in_keys.has_heavy();
@@ -562,8 +784,8 @@ pub(super) fn rank_partitions(context: &RankContext<'_>) -> Result<RankedEdges, 
         |part| {
             let base = bases[part];
             let records = scattered.load_sorted(scratch, part, &nodes.uuids)?;
-            let mut counts = vec![0_u64; relation_count];
-            let mut first = Vec::new();
+            let mut run_relation = None::<u32>;
+            let mut run_count = 0_u64;
             let mut uuids = Appender::create(scratch, &uuid_files[part], 1 << 20)?;
             let staging = plan.staging_bytes.saturating_mul(2 * plan.csr_partitions)
                 / (csr.out.len() + csr.inn.len()).max(1);
@@ -580,10 +802,18 @@ pub(super) fn rank_partitions(context: &RankContext<'_>) -> Result<RankedEdges, 
                     check_cancelled(cancel)?;
                 }
                 let edge = u32::try_from(base + position as u64 + 1).map_err(storage)?;
-                if counts[record.rel as usize] == 0 {
-                    first.push(record.rel);
+                if run_relation != Some(record.rel) {
+                    if let Some(relation) = run_relation {
+                        relation_counts[relation as usize].fetch_add(run_count, Ordering::Relaxed);
+                    }
+                    run_relation = Some(record.rel);
+                    run_count = 0;
+                    let first = &first_edges[record.rel as usize];
+                    if u64::from(edge) < first.load(Ordering::Relaxed) {
+                        first.fetch_min(u64::from(edge), Ordering::Relaxed);
+                    }
                 }
-                counts[record.rel as usize] += 1;
+                run_count += 1;
                 uuids.push(&record.uuid)?;
                 out.push(
                     csr.out_keys.partition(record.src),
@@ -606,17 +836,15 @@ pub(super) fn rank_partitions(context: &RankContext<'_>) -> Result<RankedEdges, 
                     .encode(),
                 )?;
             }
+            if let Some(relation) = run_relation {
+                relation_counts[relation as usize].fetch_add(run_count, Ordering::Relaxed);
+            }
             uuids.finish()?;
             out.finish()?;
             inn.finish()?;
             if ordered_scatter {
                 ordered.pass_turn(1);
             }
-            *stats[part]
-                .lock()
-                .map_err(|_| storage("stats lock poisoned"))? =
-                Some(PartitionStats { first, counts });
-
             // Windows are fixed ranges of edge ids. This partition completes
             // the windows that end inside it; the rest carries to the next.
             ordered.wait_turn(0, part)?;
@@ -653,29 +881,230 @@ pub(super) fn rank_partitions(context: &RankContext<'_>) -> Result<RankedEdges, 
             tail.iter().copied(),
         )?;
     }
-    let mut first_appearance = Vec::new();
-    let mut counts = vec![0_u64; relation_count];
-    let mut seen = vec![false; relation_count];
-    for slot in stats {
-        let part = slot
-            .into_inner()
-            .map_err(|_| storage("stats lock poisoned"))?
-            .ok_or_else(|| storage("a scratch partition produced no statistics"))?;
-        for relation in part.first {
-            if !seen[relation as usize] {
-                seen[relation as usize] = true;
-                first_appearance.push(relation);
-            }
-        }
-        for (total, count) in counts.iter_mut().zip(part.counts) {
-            *total += count;
-        }
-    }
+    let counts = relation_counts
+        .iter()
+        .map(|count| count.load(Ordering::Relaxed))
+        .collect::<Vec<_>>();
+    let mut first_appearance = counts
+        .iter()
+        .enumerate()
+        .filter(|(_, count)| **count != 0)
+        .map(|(relation, _)| u32::try_from(relation).expect("bounded relation dictionary"))
+        .collect::<Vec<_>>();
+    first_appearance
+        .sort_unstable_by_key(|relation| first_edges[*relation as usize].load(Ordering::Relaxed));
     check_cancelled(cancel)?;
-    let _ = Ordering::Relaxed;
     Ok(RankedEdges {
         first_appearance,
         counts,
         uuid_files,
     })
+}
+
+#[cfg(test)]
+mod refinement_tests {
+    use super::*;
+    use crate::graph_construction_encoding::StableDirectory;
+
+    fn initial(scratch: &Scratch, uuids: &[[u8; 16]]) -> (Partitions, Vec<UuidBounds>) {
+        let partitions = Partitions::create(scratch, "initial", 1, EDGE_RECORD).unwrap();
+        let mut scatter = Scatter::new(scratch, &partitions, 28 * 20);
+        let mut bounds = None;
+        for (index, uuid) in uuids.iter().copied().enumerate() {
+            observe(&mut bounds, uuid);
+            scatter
+                .push(
+                    0,
+                    &EdgeRecord {
+                        uuid,
+                        src: u32::try_from(index + 1).unwrap(),
+                        dst: 3,
+                        rel: 7,
+                    }
+                    .encode(),
+                )
+                .unwrap();
+        }
+        scatter.finish().unwrap();
+        (partitions, vec![bounds])
+    }
+
+    fn plan(limit: u64) -> ScratchPlan {
+        ScratchPlan {
+            concurrency: 1,
+            edge_partitions: 1,
+            csr_partitions: 1,
+            gate_bytes: limit * 44 * 2,
+            staging_bytes: 4096,
+        }
+    }
+
+    #[test]
+    fn clustered_uuids_and_outliers_refine_into_bounded_ordered_ranges() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = StableDirectory::open(root.path()).unwrap();
+        let scratch = Scratch::create(&directory).unwrap();
+        let mut uuids = (0..600_u16)
+            .rev()
+            .map(|index| {
+                let mut uuid = [0x77; 16];
+                uuid[14..].copy_from_slice(&index.to_be_bytes());
+                uuid
+            })
+            .collect::<Vec<_>>();
+        uuids.extend([[0; 16], [0xff; 16]]);
+        let (partitions, bounds) = initial(&scratch, &uuids);
+        let original = partitions.path(0).to_path_buf();
+        let cancel = AtomicBool::new(false);
+        let (partitions, written, read, steps) =
+            refine_partitions(&partitions, &bounds, &plan(40), &scratch, &cancel).unwrap();
+        assert!(!original.exists());
+        assert!(steps >= 3);
+        assert!(written > 0 && read > 0);
+        assert!(
+            partitions
+                .counts()
+                .unwrap()
+                .iter()
+                .all(|count| *count <= 40)
+        );
+        let mut got = Vec::new();
+        for part in 0..partitions.len() {
+            let mut records = Vec::new();
+            partitions
+                .read(&scratch, part, |payload| {
+                    records.extend(payload.chunks_exact(EDGE_RECORD).map(EdgeRecord::decode));
+                    Ok(())
+                })
+                .unwrap();
+            records.sort_unstable_by_key(|record| record.uuid);
+            got.extend(
+                records
+                    .into_iter()
+                    .map(|record| (record.uuid, record.src, record.dst, record.rel)),
+            );
+        }
+        let mut expected = uuids
+            .into_iter()
+            .enumerate()
+            .map(|(index, uuid)| (uuid, u32::try_from(index + 1).unwrap(), 3, 7))
+            .collect::<Vec<_>>();
+        expected.sort_unstable_by_key(|record| record.0);
+        assert_eq!(got, expected);
+        assert_eq!(scratch.read_bytes(), scratch.written_bytes());
+    }
+
+    #[test]
+    fn repeated_radix_fanout_coalesces_small_children_as_they_arrive() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = StableDirectory::open(root.path()).unwrap();
+        let scratch = Scratch::create(&directory).unwrap();
+        let mut uuids = Vec::new();
+        // Every group is one row over the limit, yet a byte split yields
+        // 255 singleton outliers and one two-row child.
+        for group in 0..8_u8 {
+            for child in 0..=255_u8 {
+                let mut uuid = [0x66; 16];
+                uuid[1] = group;
+                uuid[2] = child;
+                uuid[15] = 0;
+                uuids.push(uuid);
+                if child == 0 {
+                    uuid[15] = 1;
+                    uuids.push(uuid);
+                }
+            }
+        }
+        let expected = uuids
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        let rows = uuids.len() as u64;
+        let (partitions, bounds) = initial(&scratch, &uuids);
+        let cancel = AtomicBool::new(false);
+        let (partitions, _, _, _) =
+            refine_partitions(&partitions, &bounds, &plan(256), &scratch, &cancel).unwrap();
+        assert!(partitions.len() as u64 <= 1 + 2 * rows.div_ceil(256));
+        assert!(
+            partitions
+                .counts()
+                .unwrap()
+                .iter()
+                .all(|count| *count <= 256)
+        );
+        let mut got = Vec::new();
+        for part in 0..partitions.len() {
+            let mut local = Vec::new();
+            partitions
+                .read(&scratch, part, |payload| {
+                    local.extend(
+                        payload
+                            .chunks_exact(EDGE_RECORD)
+                            .map(|bytes| EdgeRecord::decode(bytes).uuid),
+                    );
+                    Ok(())
+                })
+                .unwrap();
+            local.sort_unstable();
+            got.extend(local);
+        }
+        assert_eq!(got, expected.into_iter().collect::<Vec<_>>());
+        assert_eq!(scratch.read_bytes(), scratch.written_bytes());
+    }
+
+    #[test]
+    fn a_shared_fifteen_byte_prefix_is_skipped_in_one_refinement() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = StableDirectory::open(root.path()).unwrap();
+        let scratch = Scratch::create(&directory).unwrap();
+        let uuids = (0..200_u8)
+            .map(|last| {
+                let mut uuid = [0x44; 16];
+                uuid[15] = last;
+                uuid
+            })
+            .collect::<Vec<_>>();
+        let (partitions, bounds) = initial(&scratch, &uuids);
+        let cancel = AtomicBool::new(false);
+        let (_, _, _, steps) =
+            refine_partitions(&partitions, &bounds, &plan(10), &scratch, &cancel).unwrap();
+        assert_eq!(steps, 1);
+    }
+
+    #[test]
+    fn refinement_checks_the_parent_block_crc_before_using_records() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = StableDirectory::open(root.path()).unwrap();
+        let scratch = Scratch::create(&directory).unwrap();
+        let uuids = (0..100_u8)
+            .map(|last| {
+                let mut uuid = [0x44; 16];
+                uuid[15] = last;
+                uuid
+            })
+            .collect::<Vec<_>>();
+        let (partitions, bounds) = initial(&scratch, &uuids);
+        let path = partitions.path(0);
+        let mut bytes = std::fs::read(path).unwrap();
+        bytes[8] ^= 1;
+        std::fs::write(path, bytes).unwrap();
+        let cancel = AtomicBool::new(false);
+        let error = refine_partitions(&partitions, &bounds, &plan(10), &scratch, &cancel)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("CRC32C"), "{error}");
+    }
+
+    #[test]
+    fn an_oversized_equal_uuid_range_is_refused_without_recursion() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = StableDirectory::open(root.path()).unwrap();
+        let scratch = Scratch::create(&directory).unwrap();
+        let (partitions, bounds) = initial(&scratch, &[[0x44; 16]; 100]);
+        let cancel = AtomicBool::new(false);
+        let error = refine_partitions(&partitions, &bounds, &plan(10), &scratch, &cancel)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("duplicate identity"), "{error}");
+    }
 }

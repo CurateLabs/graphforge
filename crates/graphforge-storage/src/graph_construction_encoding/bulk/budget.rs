@@ -13,9 +13,17 @@ use serde::{Deserialize, Serialize};
 
 use super::plan::BulkBuildPlan;
 
-/// Resident bytes outside the data the scratch passes hold: allocator, thread
-/// stacks, the Parquet and Arrow runtime.
-const FIXED_BYTES: u64 = 192 << 20;
+/// Allocator, thread stacks, and the Parquet and Arrow runtime.
+const RUNTIME_BYTES: u64 = 192 << 20;
+/// One canonical CSR shard, its carried records and Arrow IPC encoder. The
+/// published format caps both nodes and entries at 1,048,576 per shard. Only
+/// one encoder and carry are live on the scratch adjacency path, regardless
+/// of the number of relation types.
+const CSR_WORKSPACE_BYTES: u64 = 256 << 20;
+/// Minimum reusable scatter/sort working set. It is included in the route's
+/// fixed footprint, rather than manufactured after the budget is exhausted.
+const MIN_WORKING_BYTES: u64 = 64 << 20;
+const FIXED_BYTES: u64 = RUNTIME_BYTES + CSR_WORKSPACE_BYTES + MIN_WORKING_BYTES;
 /// Peak bytes per node while the node tables exist: the sorted UUIDs (16), the
 /// label ids (4), and the larger of the sort's working set (order array plus
 /// gathered copy, 20) and the endpoint index (8 to 16).
@@ -90,7 +98,8 @@ impl BulkBuildPlan<'_> {
         self.edges.iter().any(|source| !source.property_free)
     }
 
-    /// The bytes the node tables need whatever route builds the edges.
+    /// The node tables and minimum fixed builder workspace. In particular,
+    /// this includes one bounded canonical CSR encoder, not one per relation.
     #[must_use]
     pub fn node_tables_resident_bytes(&self) -> u64 {
         FIXED_BYTES
@@ -174,7 +183,7 @@ impl ScratchPlan {
         let edges = plan.edge_rows();
         let working = budget
             .saturating_sub(plan.node_tables_resident_bytes())
-            .max(64 << 20);
+            .saturating_add(MIN_WORKING_BYTES);
         // Three quarters of the working set hold partitions; the rest stages
         // scatter buffers and decoded input.
         let gate_bytes = working / 4 * 3;
@@ -200,8 +209,9 @@ impl ScratchPlan {
                 break;
             }
         }
-        // Even one worker cannot stage at the minimum: take the smallest
-        // buffers and let the memory gate refuse a partition that cannot fit.
+        // If even one worker cannot stage at the preferred minimum, smaller
+        // blocks preserve the same total buffer reservation. Radix refinement
+        // will bound sorting independently of the initial partition cap.
         let (concurrency, edge_partitions, csr_partitions, staging) = best.unwrap_or_else(|| {
             let per_partition = gate_bytes / 2;
             (
@@ -210,7 +220,7 @@ impl ScratchPlan {
                     .clamp(1, MAX_PARTITIONS),
                 ceil(edges.saturating_mul(CSR_PARTITION_BYTES), per_partition)
                     .clamp(1, MAX_PARTITIONS),
-                MIN_STAGING_BYTES,
+                (staging_total / (2 * MAX_PARTITIONS)).max(32),
             )
         });
         #[cfg(test)]
@@ -293,7 +303,19 @@ mod tests {
                 }
                 let sized = ScratchPlan::derive(&plan, budget, 16);
                 assert!((1..=16).contains(&sized.concurrency), "{sized:?}");
-                assert!(sized.staging_bytes as u64 >= MIN_STAGING_BYTES, "{sized:?}");
+                assert!(sized.staging_bytes >= 32, "{sized:?}");
+                let working = budget - plan.node_tables_resident_bytes() + MIN_WORKING_BYTES;
+                let buffers = sized.concurrency as u64
+                    * (sized.edge_partitions.max(2 * sized.csr_partitions) as u64)
+                    * sized.staging_bytes as u64;
+                assert!(buffers <= working / 8, "{sized:?}");
+                assert!(
+                    plan.node_tables_resident_bytes() - MIN_WORKING_BYTES
+                        + sized.gate_bytes
+                        + working / 4
+                        <= budget,
+                    "{sized:?}"
+                );
                 // The partitions in flight reserve at most half the gate, so a
                 // partition twice its share still fits.
                 let edges = 16_u64 << scale;

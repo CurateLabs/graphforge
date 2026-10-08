@@ -169,6 +169,16 @@ the resident run; set it to a positive byte count below the resident estimate
 and above the node-table estimate for a scratch run. Run validate under
 `/usr/bin/time -v`, retain its maximum RSS, and check the receipt's `bulk_build`
 partition counts, scratch read/write bytes, and per-pass logical writes.
+Separate `edge_refinement_write_bytes`/`edge_refinement_read_bytes` from
+`csr_spool_write_bytes`/`csr_spool_read_bytes`. Parent and child block boundaries
+can have different header counts; total successful scratch reads must equal
+total writes. Subtract refinement and spool writes to recover the base payload
+of 76 bytes per edge plus CRC headers. A single covering relation requires no
+CSR spool, while every usable non-covering relation adds its entries once in
+each direction. Check `peak_csr_carry_entries` against the configured shard
+limit independently of relation count. The scratch plan reserves a 512 MiB
+fixed footprint (192 MiB runtime, 256 MiB for one canonical carry/encoder, and
+64 MiB minimum working space) plus 56 bytes per node and retained properties.
 Compare the encoded inventories by path, length, SHA-256, and XXH64, excluding
 only the ADR 0038 ordinal receipt's documented random nonce. Compare reopened
 query data without per-query schema metadata. Kill an active scratch build,

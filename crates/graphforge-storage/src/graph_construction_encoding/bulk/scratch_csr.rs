@@ -3,25 +3,25 @@
 //! Every edge contributes one entry per direction, `(key, edge_id, neighbor,
 //! relation)`, scattered once into node-range partitions while the edge
 //! partitions are built. A direction's partitions are then sorted one at a
-//! time (several in flight, within the memory gate) and cut into shards.
+//! time within the memory gate. The union is encoded directly; relation
+//! entries are spooled in sorted order, then encoded one relation at a time.
 //!
 //! The published shard boundaries are a greedy walk over the whole sorted
 //! entry sequence of a relation group: a shard closes when it holds
 //! `max_edges` entries or when the next entry's key is `max_nodes` or more past
 //! the shard's first key. A partition boundary is not a shard boundary, so each
-//! relation group keeps the open shard between partitions. That one step runs
-//! in partition order (a turn per group); sorting, filtering, and encoding the
-//! shards overlap freely. The cuts are the ones the in-memory build makes, so
-//! the shards are byte-identical.
+//! stream keeps its open shard between partitions or spool blocks. Only one
+//! carry and one shard encoder exist at once, independent of relation count.
+//! Relation spooling adds one scratch write/read for each non-covering usable
+//! relation entry; covering groups share the union's carry. The cuts are the
+//! ones the in-memory build makes, so the shards are byte-identical.
 
 use std::collections::BTreeMap;
-use std::ops::Range;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use super::budget::ScratchPlan;
 use super::csr::{AdjacencyGroups, AdjacencyOutput, assemble, reset_adjacency_directory};
-use super::ordered::{Ordered, run_ordered};
+use super::ordered::Ordered;
 use super::scratch::{Partitions, Scratch};
 use super::tables::check_cancelled;
 use super::{GfError, Path, storage};
@@ -175,9 +175,24 @@ pub(super) struct CsrScratch {
     pub(super) inn: Partitions,
     pub(super) out_keys: KeyPartitioner,
     pub(super) in_keys: KeyPartitioner,
+    pub(super) peak_carry_entries: AtomicU64,
+    pub(super) spool_write_bytes: AtomicU64,
+    pub(super) spool_read_bytes: AtomicU64,
 }
 
 impl CsrScratch {
+    pub(super) fn peak_carry_entries(&self) -> u64 {
+        self.peak_carry_entries.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn csr_spool_write_bytes(&self) -> u64 {
+        self.spool_write_bytes.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn csr_spool_read_bytes(&self) -> u64 {
+        self.spool_read_bytes.load(Ordering::Relaxed)
+    }
+
     pub(super) fn create(
         scratch: &Scratch,
         histogram: &KeyHistogram,
@@ -190,89 +205,130 @@ impl CsrScratch {
             inn: Partitions::create(scratch, "csr-in", in_keys.count, CSR_RECORD)?,
             out_keys,
             in_keys,
+            peak_carry_entries: AtomicU64::new(0),
+            spool_write_bytes: AtomicU64::new(0),
+            spool_read_bytes: AtomicU64::new(0),
         })
     }
 }
 
 // -------------------------------------------------------------- shard cuts
 
-/// The open shard of one relation group between partitions.
-#[derive(Default)]
-struct GroupState {
-    carry: Vec<CsrRecord>,
-    ordinal: usize,
+/// One reusable canonical shard: relation streams run consecutively, so neither
+/// the carry nor its encoder multiplies with the number of relation groups.
+struct ShardCarry {
+    records: Vec<CsrRecord>,
+    max_edges: usize,
+    max_nodes: u64,
     entries: u64,
     last_key: Option<u32>,
+    peak_entries: usize,
 }
 
-/// A closed shard: the carried entries, then `view[range]`.
-struct Job {
-    ordinal: usize,
-    prefix: Vec<CsrRecord>,
-    range: Range<usize>,
-}
-
-/// Advance `state` over the sorted `view` and return the shards it closes.
-fn cut(state: &mut GroupState, view: &[CsrRecord], max_edges: usize, max_nodes: u64) -> Vec<Job> {
-    let mut jobs = Vec::new();
-    if let Some(last) = view.last() {
-        state.last_key = Some(last.key);
-    }
-    state.entries += view.len() as u64;
-    let mut position = 0;
-    while position < view.len() {
-        let (first, room) = match state.carry.first() {
-            None => (u64::from(view[position].key), max_edges),
-            Some(head) => (u64::from(head.key), max_edges - state.carry.len()),
-        };
-        let by_nodes = position
-            + view[position..].partition_point(|record| u64::from(record.key) - first < max_nodes);
-        let end = by_nodes.min(position + room);
-        if end == view.len() {
-            // Whether the shard is full is decided by the next entry, which
-            // may be in the next partition.
-            state.carry.extend_from_slice(&view[position..end]);
-            break;
+impl ShardCarry {
+    fn new(max_edges: usize, max_nodes: u64) -> Self {
+        Self {
+            // Exact capacity prevents geometric growth from exceeding the
+            // separately reserved one-shard workspace.
+            records: Vec::with_capacity(max_edges),
+            max_edges,
+            max_nodes,
+            entries: 0,
+            last_key: None,
+            peak_entries: 0,
         }
-        jobs.push(Job {
-            ordinal: state.ordinal,
-            prefix: std::mem::take(&mut state.carry),
-            range: position..end,
-        });
-        state.ordinal += 1;
-        position = end;
     }
-    jobs
+
+    fn push(
+        &mut self,
+        entry: CsrRecord,
+        emit: &mut impl FnMut(&[CsrRecord]) -> Result<(), GfError>,
+    ) -> Result<(), GfError> {
+        if self.records.len() == self.max_edges
+            || self
+                .records
+                .first()
+                .is_some_and(|first| u64::from(entry.key) - u64::from(first.key) >= self.max_nodes)
+        {
+            self.flush(emit)?;
+        }
+        self.records.push(entry);
+        self.peak_entries = self.peak_entries.max(self.records.len());
+        self.entries += 1;
+        self.last_key = Some(entry.key);
+        Ok(())
+    }
+
+    fn flush(
+        &mut self,
+        emit: &mut impl FnMut(&[CsrRecord]) -> Result<(), GfError>,
+    ) -> Result<(), GfError> {
+        if !self.records.is_empty() {
+            emit(&self.records)?;
+            self.records.clear();
+        }
+        Ok(())
+    }
+
+    fn node_count(&self) -> u64 {
+        self.last_key.map_or(0, |key| u64::from(key) + 1)
+    }
+
+    fn reset(&mut self) {
+        debug_assert!(self.records.is_empty());
+        self.entries = 0;
+        self.last_key = None;
+    }
 }
 
-fn encode_job(
+fn encode_shard(
     set: &ShardSetWriter,
-    job: &Job,
-    view: &[CsrRecord],
-) -> Result<(usize, CsrShardRecord), GfError> {
-    let body = &view[job.range.clone()];
-    let first = job
-        .prefix
-        .first()
-        .or(body.first())
-        .expect("a shard has entries");
-    let last = body
-        .last()
-        .or(job.prefix.last())
-        .expect("a shard has entries");
-    let record = set.write_shard(
-        job.ordinal,
-        u64::from(first.key),
-        u64::from(last.key),
-        job.prefix.iter().chain(body).map(|entry| {
+    ordinal: usize,
+    entries: &[CsrRecord],
+) -> Result<CsrShardRecord, GfError> {
+    set.write_shard(
+        ordinal,
+        u64::from(entries.first().expect("a shard has entries").key),
+        u64::from(entries.last().expect("a shard has entries").key),
+        entries.iter().map(|entry| {
             (
                 u64::from(entry.key),
                 u64::from(entry.edge),
                 u64::from(entry.neighbor),
             )
         }),
-    )?;
-    Ok((job.ordinal, record))
+    )
+}
+
+/// Append sorted relation segments through one bounded staging block. Files
+/// open only for an append; no relation owns a persistent buffer or fd.
+fn spool_relations(
+    context: &AdjacencyContext<'_>,
+    spools: &Partitions,
+    sorted: &mut [CsrRecord],
+    block: &mut Vec<u8>,
+) -> Result<(), GfError> {
+    let group_of = |record: &CsrRecord| context.groups.relation_group[record.rel as usize];
+    sorted.sort_unstable_by_key(|record| (group_of(record), record.order()));
+    let capacity = block.capacity();
+    let mut from = 0;
+    while from < sorted.len() {
+        let group = group_of(&sorted[from]);
+        let to = from + sorted[from..].partition_point(|record| group_of(record) == group);
+        if group != u32::MAX && !context.groups.is_whole(group as usize) {
+            for segment in sorted[from..to].chunks((capacity - 8) / CSR_RECORD) {
+                check_cancelled(context.cancel)?;
+                block.clear();
+                block.extend_from_slice(&[0; 8]);
+                for entry in segment {
+                    block.extend_from_slice(&entry.encode());
+                }
+                spools.append(context.scratch, group as usize, block)?;
+            }
+        }
+        from = to;
+    }
+    Ok(())
 }
 
 /// What the adjacency pass needs besides the partitions.
@@ -313,6 +369,7 @@ fn write_direction(
     partitions: &Partitions,
     direction: Direction,
     outcomes: &mut BTreeMap<(usize, bool), SortedCsrOutcome>,
+    csr: &CsrScratch,
 ) -> Result<(), GfError> {
     let groups = context.groups;
     let sets = groups
@@ -328,77 +385,97 @@ fn write_direction(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let (max_edges, max_nodes) = (sets[0].max_edges(), sets[0].max_nodes());
+    let spools = Partitions::create(
+        context.scratch,
+        &format!("csr-{}-relations", direction.as_str()),
+        sets.len(),
+        CSR_RECORD,
+    )?;
     let counts = partitions.counts()?;
-    let states = (0..sets.len())
-        .map(|_| Mutex::new(GroupState::default()))
+    let mut records = (0..sets.len()).map(|_| Vec::new()).collect::<Vec<_>>();
+    let mut carry = ShardCarry::new(max_edges, max_nodes);
+    let block_bytes = context.plan.staging_bytes.clamp(CSR_RECORD, 64 << 10);
+    let mut block = Vec::with_capacity(8 + block_bytes / CSR_RECORD * CSR_RECORD);
+    let ordered = Ordered::new(context.plan.gate_bytes, 1, context.cancel);
+    let whole_groups = (0..sets.len())
+        .filter(|group| groups.is_whole(*group))
         .collect::<Vec<_>>();
-    let records = (0..sets.len())
-        .map(|_| Mutex::new(Vec::<(usize, CsrShardRecord)>::new()))
-        .collect::<Vec<_>>();
-    let ordered = Ordered::new(context.plan.gate_bytes, sets.len(), context.cancel);
-    run_ordered(
-        partitions.len(),
-        context.plan.concurrency,
-        &ordered,
-        |index| ScratchPlan::csr_cost(counts[index]),
-        |index| {
-            let sorted = load_sorted(context.scratch, partitions, index, counts[index])?;
-            for group in 0..sets.len() {
+    let mut emit_whole = |entries: &[CsrRecord]| {
+        // Covering groups and the union share the SAME carry. Encode their
+        // identical shard sequentially, keeping only one encoder alive.
+        for &group in &whole_groups {
+            check_cancelled(context.cancel)?;
+            let record = encode_shard(&sets[group], records[group].len(), entries)?;
+            records[group].push(record);
+        }
+        Ok(())
+    };
+    for (index, count) in counts.into_iter().enumerate() {
+        check_cancelled(context.cancel)?;
+        let cost = ScratchPlan::csr_cost(count);
+        ordered.acquire(index, cost)?;
+        let outcome = (|| {
+            let mut sorted = load_sorted(context.scratch, partitions, index, count)?;
+            for chunk in sorted.chunks(4096) {
                 check_cancelled(context.cancel)?;
-                let filtered;
-                let view: &[CsrRecord] = if groups.is_whole(group) {
-                    &sorted
-                } else {
-                    let wanted = u32::try_from(group).map_err(storage)?;
-                    filtered = sorted
-                        .iter()
-                        .filter(|record| groups.relation_group[record.rel as usize] == wanted)
-                        .copied()
-                        .collect::<Vec<_>>();
-                    &filtered
-                };
-                ordered.wait_turn(group, index)?;
-                let jobs = {
-                    let mut state = states[group]
-                        .lock()
-                        .map_err(|_| storage("CSR group lock poisoned"))?;
-                    cut(&mut state, view, max_edges, max_nodes)
-                };
-                ordered.pass_turn(group);
-                for job in &jobs {
-                    let written = encode_job(&sets[group], job, view)?;
-                    records[group]
-                        .lock()
-                        .map_err(|_| storage("CSR record lock poisoned"))?
-                        .push(written);
+                for entry in chunk {
+                    carry.push(*entry, &mut emit_whole)?;
                 }
             }
-            Ok(())
-        },
-    )?;
-    let no_entries: &[CsrRecord] = &[];
-    for (group, set) in sets.into_iter().enumerate() {
+            let before = context.scratch.written_bytes();
+            spool_relations(context, &spools, &mut sorted, &mut block)?;
+            csr.spool_write_bytes
+                .fetch_add(context.scratch.written_bytes() - before, Ordering::Relaxed);
+            Ok::<_, GfError>(())
+        })();
+        ordered.release(cost);
+        outcome?;
+    }
+    carry.flush(&mut emit_whole)?;
+    let (whole_edges, whole_nodes) = (carry.entries, carry.node_count());
+    let mut totals = vec![(whole_edges, whole_nodes); sets.len()];
+    let spool_read_before = context.scratch.read_bytes();
+    let spool_counts = spools.counts()?;
+    // Only relation metadata remains resident. Stream each ordered spool
+    // through the reused carry, checking every scratch block's CRC32C.
+    for (group, set) in sets
+        .iter()
+        .enumerate()
+        .filter(|(group, _)| !groups.is_whole(*group))
+    {
         check_cancelled(context.cancel)?;
-        let state = states[group]
-            .lock()
-            .map_err(|_| storage("CSR group lock poisoned"))?;
-        let mut written = records[group]
-            .lock()
-            .map_err(|_| storage("CSR record lock poisoned"))?;
-        if !state.carry.is_empty() {
-            let last = Job {
-                ordinal: state.ordinal,
-                prefix: state.carry.clone(),
-                range: 0..0,
-            };
-            written.push(encode_job(&set, &last, no_entries)?);
+        carry.reset();
+        let mut emit = |entries: &[CsrRecord]| {
+            check_cancelled(context.cancel)?;
+            let record = encode_shard(set, records[group].len(), entries)?;
+            records[group].push(record);
+            Ok(())
+        };
+        spools.read(context.scratch, group, |payload| {
+            check_cancelled(context.cancel)?;
+            for entry in payload.chunks_exact(CSR_RECORD).map(CsrRecord::decode) {
+                carry.push(entry, &mut emit)?;
+            }
+            Ok(())
+        })?;
+        if carry.entries != spool_counts[group] {
+            return Err(storage("a CSR relation spool lost entries"));
         }
-        written.sort_unstable_by_key(|(ordinal, _)| *ordinal);
-        let shard_records = written.drain(..).map(|(_, record)| record).collect();
-        let node_count = state.last_key.map_or(0, |key| u64::from(key) + 1);
+        carry.flush(&mut emit)?;
+        totals[group] = (carry.entries, carry.node_count());
+    }
+    csr.spool_read_bytes.fetch_add(
+        context.scratch.read_bytes() - spool_read_before,
+        Ordering::Relaxed,
+    );
+    csr.peak_carry_entries
+        .fetch_max(carry.peak_entries as u64, Ordering::Relaxed);
+    for (group, (set, shard_records)) in sets.into_iter().zip(records).enumerate() {
+        check_cancelled(context.cancel)?;
+        let (edges, nodes) = totals[group];
         outcomes.insert(
             (group, matches!(direction, Direction::In)),
-            set.finish(shard_records, state.entries, node_count)?,
+            set.finish(shard_records, edges, nodes)?,
         );
     }
     Ok(())
@@ -412,8 +489,8 @@ pub(super) fn write_scratch_adjacency(
 ) -> Result<AdjacencyOutput, GfError> {
     reset_adjacency_directory(context.graph_root)?;
     let mut outcomes = BTreeMap::new();
-    write_direction(context, &csr.out, Direction::Out, &mut outcomes)?;
-    write_direction(context, &csr.inn, Direction::In, &mut outcomes)?;
+    write_direction(context, &csr.out, Direction::Out, &mut outcomes, csr)?;
+    write_direction(context, &csr.inn, Direction::In, &mut outcomes, csr)?;
     assemble(
         context.graph_root,
         context.groups,
@@ -445,25 +522,20 @@ mod tests {
         max_edges: usize,
         max_nodes: u64,
     ) -> Vec<Vec<u32>> {
-        let mut state = GroupState::default();
+        let mut state = ShardCarry::new(max_edges, max_nodes);
         let mut closed = Vec::new();
+        let mut emit = |entries: &[CsrRecord]| {
+            closed.push(entries.iter().map(|entry| entry.edge).collect());
+            Ok(())
+        };
         let mut from = 0;
         for to in split.iter().copied().chain([entries.len()]) {
-            let view = &entries[from..to];
-            for job in cut(&mut state, view, max_edges, max_nodes) {
-                closed.push(
-                    job.prefix
-                        .iter()
-                        .chain(&view[job.range])
-                        .map(|entry| entry.edge)
-                        .collect(),
-                );
+            for entry in &entries[from..to] {
+                state.push(*entry, &mut emit).unwrap();
             }
             from = to;
         }
-        if !state.carry.is_empty() {
-            closed.push(state.carry.iter().map(|entry| entry.edge).collect());
-        }
+        state.flush(&mut emit).unwrap();
         closed
     }
 
@@ -520,6 +592,148 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Exercises the real spool reader and canonical encoder, including groups
+    /// whose unfinished shards would otherwise remain resident simultaneously.
+    #[allow(clippy::too_many_lines)]
+    fn assert_spool_artifact_parity(group_count: usize, max_nodes: usize) {
+        use super::super::StableDirectory;
+        use super::super::emit::RelationRoute;
+        use super::super::scratch::Scatter;
+
+        let root = tempfile::tempdir().unwrap();
+        let directory = StableDirectory::open(root.path()).unwrap();
+        let scratch = Scratch::create(&directory).unwrap();
+        let relations = (0..group_count)
+            .map(|group| RelationRoute {
+                logical: format!("relation_{group:03}"),
+                topology_route: format!("relation_{group:03}"),
+                qualified: false,
+                exploratory: false,
+            })
+            .collect::<Vec<_>>();
+        let groups = AdjacencyGroups::new(&relations).unwrap();
+        let mut entries = Vec::new();
+        for key in [1, 2, 3, 8, 9, 17, 18, 40, 41] {
+            for rel in 0..group_count {
+                for _ in 0..4 {
+                    let edge = u32::try_from(entries.len() + 1).unwrap();
+                    entries.push(CsrRecord {
+                        key,
+                        edge,
+                        neighbor: edge % 17 + 1,
+                        rel: u32::try_from(rel).unwrap(),
+                    });
+                }
+            }
+        }
+        let partitions =
+            Partitions::create(&scratch, "input", entries.len().div_ceil(21), CSR_RECORD).unwrap();
+        let mut scatter = Scatter::new(&scratch, &partitions, 64);
+        for (index, partition) in entries.chunks(21).enumerate() {
+            // Arrival order within a partition has no effect on the output.
+            for entry in partition.iter().rev() {
+                scatter.push(index, &entry.encode()).unwrap();
+            }
+        }
+        scatter.finish().unwrap();
+        let histogram = KeyHistogram::new(41, entries.len() as u64, 21);
+        let csr = CsrScratch::create(&scratch, &histogram, 1).unwrap();
+        let plan = ScratchPlan {
+            concurrency: 1,
+            edge_partitions: 1,
+            csr_partitions: partitions.len(),
+            gate_bytes: ScratchPlan::csr_cost(21),
+            staging_bytes: 64,
+        };
+        let cancel = AtomicBool::new(false);
+        let options = AdjacencyBuildOptions {
+            shard_max_edges: 64,
+            shard_max_nodes: max_nodes,
+            ..AdjacencyBuildOptions::default()
+        };
+        let actual_root = root.path().join("actual");
+        let context = AdjacencyContext {
+            scratch: &scratch,
+            plan: &plan,
+            graph_root: &actual_root,
+            groups: &groups,
+            generation: 1,
+            built_at_micros: 0,
+            total_edges: entries.len() as u64,
+            allocation: None,
+            options: &options,
+            cancel: &cancel,
+        };
+        let mut outcomes = BTreeMap::new();
+        write_direction(&context, &partitions, Direction::Out, &mut outcomes, &csr).unwrap();
+        let neighbors = entries
+            .iter()
+            .map(|entry| entry.neighbor)
+            .collect::<Vec<_>>();
+        for group in 0..groups.stems.len() {
+            let sorted = entries
+                .iter()
+                .filter(|entry| {
+                    groups.is_whole(group)
+                        || groups.relation_group[entry.rel as usize] as usize == group
+                })
+                .map(CsrRecord::order)
+                .collect::<Vec<_>>();
+            let expected = crate::adjacency::write_sharded_csr_from_sorted(
+                &crate::adjacency::csr_path(
+                    &root.path().join("expected"),
+                    &groups.stems[group],
+                    Direction::Out,
+                ),
+                &sorted,
+                &neighbors,
+                options.shard_max_edges,
+                options.shard_max_nodes,
+                None,
+            )
+            .unwrap();
+            let actual = &outcomes[&(group, false)];
+            assert_eq!(
+                (actual.edge_count, actual.node_count, actual.shards),
+                (expected.edge_count, expected.node_count, expected.shards)
+            );
+            assert_eq!(actual.captured.len(), expected.captured.len());
+            for (actual, expected) in actual.captured.iter().zip(&expected.captured) {
+                assert_eq!(
+                    std::fs::read(&actual.path).unwrap(),
+                    std::fs::read(&expected.path).unwrap(),
+                    "group {group}"
+                );
+            }
+        }
+        assert_eq!(csr.csr_spool_read_bytes(), csr.csr_spool_write_bytes());
+        assert!(csr.peak_carry_entries() <= options.shard_max_edges as u64);
+        if group_count == 1 {
+            assert_eq!(
+                csr.csr_spool_write_bytes(),
+                0,
+                "a covering group shares the union carry"
+            );
+        } else {
+            assert!(csr.csr_spool_write_bytes() >= (entries.len() * CSR_RECORD) as u64);
+            assert!(
+                entries.len() > options.shard_max_edges * 10,
+                "aggregate tails exceed one shard"
+            );
+        }
+    }
+
+    #[test]
+    fn many_relation_spools_preserve_canonical_bytes_with_one_carry() {
+        assert_spool_artifact_parity(32, 64);
+        assert_spool_artifact_parity(32, 5);
+    }
+
+    #[test]
+    fn covering_relation_reuses_union_carry_without_spooling() {
+        assert_spool_artifact_parity(1, 64);
     }
 
     #[test]
