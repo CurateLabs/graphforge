@@ -11,7 +11,10 @@ BenchExec runs on the work root, one per phase:
 
 The expected counts come from the suite's count ladder (``gdc_rung_inputs``).
 The driver's written results are then checked against the pinned reference
-with the suite's matching rule. Finally the rung workspace is reclaimed by
+with the suite's matching rule. A Graphalytics rung also holds the archive's
+``.properties`` to the ladder before converting, and derives its reference
+from the archive's own reference outputs (``gdc_graphalytics_scorecard``).
+Finally the rung workspace is reclaimed by
 path and the work root is inventoried; a rung only passes with an empty
 inventory.
 
@@ -47,6 +50,7 @@ import uuid
 import xml.etree.ElementTree as ET
 
 from graphforge_bench import gdc_dataset_cache
+from graphforge_bench import gdc_graphalytics_scorecard as graphalytics
 from graphforge_bench.benchexec_authority import EvidenceError, Limits, normalize_run
 from graphforge_bench.gdc_contracts import GdcContractError
 from graphforge_bench.gdc_measurement_policy import (
@@ -508,6 +512,14 @@ def _execute(rung: Rung) -> None:
     except (gdc_dataset_cache.DatasetCacheError, GdcContractError) as error:
         rung.fail("acquisition", error.cause, str(error))
         return
+    if ladder.spec.document["metric_shape"] == "graphalytics":
+        try:
+            # The archive's .properties must agree with the committed ladder and
+            # workload (counts, direction, algorithms, source vertices).
+            graphalytics.check_archive(ladder.spec, spec, input_root)
+        except RungInputError as error:
+            rung.fail("acquisition", error.cause, str(error))
+            return
     workspace = rung.workspace
     workspace.mkdir(parents=True)
     remaining = MAXIMUM_WALL_SECONDS
@@ -595,7 +607,7 @@ def _execute(rung: Rung) -> None:
     except GdcMeasurementBoundaryError as error:
         rung.fail("query", "latency_authority_refused", f"{error.cause}: {error}")
         return
-    _check(rung, evidence, results_dir)
+    _check(rung, evidence, results_dir, input_root)
 
 
 def _mapping_path(spec: LadderSpec, rung_id: str) -> Path:
@@ -606,12 +618,18 @@ def _mapping_path(spec: LadderSpec, rung_id: str) -> Path:
     return spec.resolve(ladder["load_mapping"])
 
 
-def _check(rung: Rung, evidence: Mapping[str, Any], results_dir: Path) -> None:
+def _check(rung: Rung, evidence: Mapping[str, Any], results_dir: Path, input_root: Path) -> None:
     reference_spec = rung.spec["reference"]
     reference = None
     reference_sha256 = None
     try:
-        if reference_spec is not None:
+        if reference_spec is not None and "archive_outputs" in reference_spec:
+            # Millions of rows at the real rungs: built by code from the
+            # archive's reference outputs, not schema-validated row by row.
+            reference, reference_sha256 = graphalytics.archive_reference(
+                rung.ladder.spec, rung.spec, input_root
+            )
+        elif reference_spec is not None:
             path = rung.ladder.spec.resolve(reference_spec["path"])
             reference = read_json(path)
             validate_schema(rung.ladder.root, "gdc-rung-reference.json", reference)

@@ -42,7 +42,12 @@ from graphforge_bench.gdc_rung_inputs import (
     read_results,
     result_digest,
 )
-from graphforge_bench.gdc_scorecard_card import CardError, render_card, write_card
+from graphforge_bench.gdc_scorecard_card import (
+    MAKESPAN_NOT_MEASURED,
+    CardError,
+    render_card,
+    write_card,
+)
 from graphforge_bench.progressive_host_run import (
     HostRunError,
     reclaim_rung_workspace,
@@ -736,6 +741,7 @@ class CardRenderingTests(unittest.TestCase):
             "latency": None,
             "graphalytics": {
                 "tl_seconds": 61.25,
+                "makespan_not_measured": MAKESPAN_NOT_MEASURED,
                 "algorithms": [
                     {
                         "algorithm": "bfs",
@@ -787,11 +793,11 @@ class CardRenderingTests(unittest.TestCase):
             text,
         )
         self.assertIn("Tp:           bfs 2.0 s (mean of 3 driver-clock runs)\n", text)
-        self.assertIn("Makespan:     not measured\n", text)
+        self.assertIn(f"Makespan:     not measured ({MAKESPAN_NOT_MEASURED})\n", text)
         self.assertIn("EVPS:         bfs 1.01e+07\n", text)
         self.assertNotIn("Latency:", text)
         self.assertIn(
-            "Coverage:     4/6 queries; refused: pr (fixed_iteration_pagerank_not_exposed); "
+            "Coverage:     4/6 algorithms; refused: pr (fixed_iteration_pagerank_not_exposed); "
             "cdlp (synchronous_cdlp_not_exposed)\n",
             text,
         )

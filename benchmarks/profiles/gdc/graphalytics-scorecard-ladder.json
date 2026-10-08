@@ -13,7 +13,16 @@
       "vertices": 2394385,
       "edges": 5021410,
       "listed_edges": 5021410,
-      "load_mapping": "profiles/gdc/graphalytics-wiki-Talk-load-mapping.json"
+      "load_mapping": "profiles/gdc/graphalytics-wiki-Talk-load-mapping.json",
+      "algorithms": [
+        "bfs",
+        "cdlp",
+        "lcc",
+        "pr",
+        "wcc"
+      ],
+      "bfs_source_vertex": 2,
+      "sssp_source_vertex": null
     },
     {
       "id": "cit-Patents",
@@ -25,7 +34,16 @@
       "edges": 16518948,
       "listed_edges": 16518947,
       "load_mapping": "profiles/gdc/graphalytics-cit-Patents-load-mapping.json",
-      "discrepancy": "The archive's .e file lists 16,518,947 edges while LDBC publishes (and its .properties file states) 16,518,948; a loaded graph reconciles to listed_edges, one fewer than the published count."
+      "discrepancy": "The archive's .e file lists 16,518,947 edges while LDBC publishes (and its .properties file states) 16,518,948; a loaded graph reconciles to listed_edges, one fewer than the published count.",
+      "algorithms": [
+        "bfs",
+        "cdlp",
+        "lcc",
+        "pr",
+        "wcc"
+      ],
+      "bfs_source_vertex": 6009541,
+      "sssp_source_vertex": null
     },
     {
       "id": "datagen-7_5-fb",
@@ -36,7 +54,17 @@
       "vertices": 633432,
       "edges": 34185747,
       "listed_edges": 34185747,
-      "load_mapping": "profiles/gdc/graphalytics-datagen-7_5-fb-load-mapping.json"
+      "load_mapping": "profiles/gdc/graphalytics-datagen-7_5-fb-load-mapping.json",
+      "algorithms": [
+        "bfs",
+        "cdlp",
+        "lcc",
+        "pr",
+        "sssp",
+        "wcc"
+      ],
+      "bfs_source_vertex": 6,
+      "sssp_source_vertex": 6
     },
     {
       "id": "graph500-22",
@@ -47,7 +75,16 @@
       "vertices": 2396657,
       "edges": 64155735,
       "listed_edges": 64155735,
-      "load_mapping": "profiles/gdc/graphalytics-graph500-22-load-mapping.json"
+      "load_mapping": "profiles/gdc/graphalytics-graph500-22-load-mapping.json",
+      "algorithms": [
+        "bfs",
+        "cdlp",
+        "lcc",
+        "pr",
+        "wcc"
+      ],
+      "bfs_source_vertex": 248533,
+      "sssp_source_vertex": null
     }
   ],
   "counts_note": "edges is the LDBC-published count; listed_edges is the number of lines in the archive's .e file, which is what a faithful load stores."

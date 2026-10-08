@@ -1,0 +1,70 @@
+{
+  "schema": "graphforge-gdc-graphalytics-scorecard-ladder/1",
+  "suite_id": "graphalytics",
+  "counts_source": "https://ldbcouncil.org/benchmarks/graphalytics/datasets/",
+  "edge_storage": "one_edge_per_listed_pair",
+  "datasets": [
+    {
+      "id": "ga-directed",
+      "order": 1,
+      "archive_url": "https://datasets.ldbcouncil.org/graphalytics/ga-directed.tar.zst",
+      "directed": true,
+      "weighted": false,
+      "vertices": 9,
+      "edges": 8,
+      "listed_edges": 8,
+      "load_mapping": "profiles/gdc/ga-directed-load-mapping.json",
+      "algorithms": [
+        "bfs",
+        "cdlp",
+        "lcc",
+        "pr",
+        "wcc"
+      ],
+      "bfs_source_vertex": 1,
+      "sssp_source_vertex": null
+    },
+    {
+      "id": "ga-undirected",
+      "order": 2,
+      "archive_url": "https://datasets.ldbcouncil.org/graphalytics/ga-undirected.tar.zst",
+      "directed": false,
+      "weighted": true,
+      "vertices": 6,
+      "edges": 6,
+      "listed_edges": 6,
+      "load_mapping": "profiles/gdc/ga-undirected-load-mapping.json",
+      "algorithms": [
+        "bfs",
+        "cdlp",
+        "lcc",
+        "pr",
+        "sssp",
+        "wcc"
+      ],
+      "bfs_source_vertex": 10,
+      "sssp_source_vertex": 10
+    },
+    {
+      "id": "ga-wrong",
+      "order": 3,
+      "archive_url": "https://datasets.ldbcouncil.org/graphalytics/ga-wrong.tar.zst",
+      "directed": true,
+      "weighted": false,
+      "vertices": 9,
+      "edges": 8,
+      "listed_edges": 8,
+      "load_mapping": "profiles/gdc/ga-wrong-load-mapping.json",
+      "algorithms": [
+        "bfs",
+        "cdlp",
+        "lcc",
+        "pr",
+        "wcc"
+      ],
+      "bfs_source_vertex": 1,
+      "sssp_source_vertex": null
+    }
+  ],
+  "counts_note": "Fixture: counts are the committed archives' records."
+}

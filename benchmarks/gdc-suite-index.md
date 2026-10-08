@@ -36,7 +36,7 @@ without sharing workload semantics.
 | Execution | Explicit `run-live` in-memory public API proof; `run-suite` is static replay |
 | Unsupported semantics | Typed `semantic_incompatibility` (fixed-iteration PR; synchronous CDLP; directed LCC normalization) |
 | Identity | Distinct pins: `profiles/gdc/graphalytics-static-identity.json` (historical `wiki-Talk` markers) and `profiles/gdc/graphalytics-live-identity.json` (`ga-tiny` proof). Suite/acquisition select the profile; cross-use is `identity_drift`. |
-| Scorecard | `profiles/gdc/graphalytics-scorecard-identity.json` pins the `wiki-Talk`, `cit-Patents`, `datagen-7_5-fb` and `graph500-22` archives; `profiles/gdc/graphalytics-scorecard-ladder.json` carries the LDBC-published counts and load mappings. Acquisition and conversion are described in `README.md` (GDC dataset acquisition and conversion). |
+| Scorecard | `profiles/gdc/graphalytics-scorecard-identity.json` pins the `wiki-Talk`, `cit-Patents`, `datagen-7_5-fb` and `graph500-22` archives; `profiles/gdc/graphalytics-scorecard-ladder.json` carries the LDBC-published counts, load mappings and each archive's `.properties` facts; `profiles/gdc/graphalytics-scorecard-ladder-spec.json` is the rung runner's ladder (see Scorecard ladders). Acquisition and conversion are described in `README.md` (GDC dataset acquisition and conversion). |
 | Authority | Synthetic `ga-tiny` engineering evidence only (edges-only fixture; isolated vertices out of scope); `certification=false`; legacy `wiki-Talk` stub excluded |
 
 Profiles, validation, and evidence stay under the GDC Graphalytics suite and are
@@ -399,10 +399,11 @@ One rung:
    records of the pinned archive's loaded snapshot (the #952 reconciliation
    rule). A column-labelled node table's per-label split is the converter's,
    accepted only when it sums to the ladder's table count.
-5. **Check** every referenced result against the reference: `exact`,
-   `epsilon` (relative tolerance on numeric cells, rows paired by key columns)
-   or `equivalence` (the same partition up to relabelling). A written result
-   must reproduce its measured digest first.
+5. **Check** every referenced result against the reference: `exact` (every
+   cell, or with key columns every reference cell in the row with the same
+   key), `epsilon` (Graphalytics' `|r - s| <= epsilon * |r|` on numeric cells,
+   rows paired by key columns) or `equivalence` (the same partition up to
+   relabelling). A written result must reproduce its measured digest first.
 6. **Tear down**: reclaim `workspace/gdc-<suite>-<rung>` by path and inventory
    the work root. The dataset cache is outside the work root and is kept.
 
@@ -430,13 +431,59 @@ cache on the host's full-access mounts, as for the Graph500 ladder); on-disk
 bytes are the storage-attribution receipt's allocated bytes; graph counts are
 the driver's reconciliation after reopen. Graphalytics cards report `Tl`, `Tp`
 (the mean of three driver-clock runs per algorithm) and EVPS instead of
-throughput and latency; makespan is not measured yet and says so.
+throughput and latency; makespan is labelled not measured, with the reason
+below.
 
 `fixtures/gdc/rung-fixture/` is a three-rung CI ladder in the SNB Interactive
 v1 CSV shape: sf0 passes, sf1 fails (one query fails at runtime and one
 reference answer is wrong) and sf2 is never attempted.
 `tests/test_gdc_rung.py` drives it with the real converter, `gf` and driver;
 only BenchExec is replaced, because CI runners cannot delegate cgroups.
+
+### Graphalytics scorecard ladder
+
+`profiles/gdc/graphalytics-scorecard-ladder-spec.json` climbs wiki-Talk (2XS),
+cit-Patents (XS), datagen-7_5-fb (S) and graph500-22 (S) from the pinned
+archives (`graphforge_bench.gdc_graphalytics_scorecard`):
+
+- **Archive check.** Before converting, the archive's `<graph>.properties` must
+  agree with the count ladder (`graphalytics-scorecard-ladder.json`: vertices,
+  published edges, direction, weight, the `algorithms` list and the BFS and
+  SSSP source vertices) and with the rung's workload: every listed algorithm is
+  run or refused, and each run is dispatched as the graph needs. Otherwise the
+  rung fails with `archive_properties_mismatch`.
+- **Algorithms** (`graphalytics-scorecard-workload-<graph>.json`), each run
+  three times after one excluded warm-up: BFS as `paths(by=bfs)` and SSSP as
+  `paths(by=dijkstra, weight=weight)`, each from the source vertex selected by
+  `NodeSelector::Uuid` (the converter's node UUID for that vertex); WCC as
+  `cluster(by=components)`; LCC, on undirected graphs only, as
+  `rank(by=clustering_coefficient)`. Each variant keeps only its answer
+  columns (`target_uuid, cost` or `id, <value>`); the call is timed whole.
+  PR (`fixed_iteration_pagerank_not_exposed`), CDLP
+  (`synchronous_cdlp_not_exposed`) and directed LCC
+  (`directed_lcc_semantics_not_exposed`) are refused and count against
+  coverage.
+- **Reference.** The rung spec's `{"archive_outputs": "graphalytics"}` derives
+  the reference at check time from the archive's `<graph>-<ALGORITHM>` files.
+  Each must list every vertex exactly once (`reference_invalid` otherwise).
+  BFS matches exactly and SSSP within epsilon 1e-4, keyed by target UUID;
+  `paths` returns only reached vertices, so a vertex the reference marks
+  unreachable (`9223372036854775807`, `infinity`) matches by its absence. WCC
+  matches by equivalence and LCC within epsilon 1e-4, keyed by vertex id. The
+  correctness record's `reference_sha256` covers the `.properties` file and
+  every reference output used.
+- **Metrics.** `Tp` is the mean of the three measured runs and EVPS is
+  `(vertices + edges) / Tp`. Makespan is labelled not measured: Graphalytics
+  defines it as the time from issuing one algorithm job to its output for a
+  cold system started for that job, and the driver runs every job warm in one
+  process after one project open, so no such interval exists; the query
+  phase's BenchExec wall spans all jobs together.
+
+`fixtures/gdc/graphalytics-rung-fixture/` holds three tiny archives in the same
+format with hand-derived references: a directed graph (BFS, WCC), an
+undirected weighted one (BFS, WCC, LCC, SSSP) and a directed one with one
+wrong BFS depth, where the ladder stops with `reference_mismatch`.
+`tests/test_gdc_graphalytics_scorecard.py` drives it through the rung runner.
 
 ## Operator status query
 

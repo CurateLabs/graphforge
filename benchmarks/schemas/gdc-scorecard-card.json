@@ -107,6 +107,7 @@
           "type": "object",
           "properties": {
             "tl_seconds": { "type": "number", "minimum": 0 },
+            "makespan_not_measured": { "description": "Why the card has no Graphalytics makespan (Tm).", "type": "string", "minLength": 1, "maxLength": 400 },
             "algorithms": {
               "type": "array",
               "minItems": 1,
@@ -117,14 +118,14 @@
                   "tp_seconds": { "type": "number", "exclusiveMinimum": 0 },
                   "runs": { "const": 3 },
                   "evps": { "type": "number", "minimum": 0 },
-                  "makespan_seconds": { "type": ["number", "null"], "minimum": 0 }
+                  "makespan_seconds": { "description": "Null: no measurement authority sources a Graphalytics makespan; see makespan_not_measured.", "type": "null" }
                 },
                 "required": ["algorithm", "tp_seconds", "runs", "evps", "makespan_seconds"],
                 "additionalProperties": false
               }
             }
           },
-          "required": ["tl_seconds", "algorithms"],
+          "required": ["tl_seconds", "makespan_not_measured", "algorithms"],
           "additionalProperties": false
         },
         { "type": "null" }

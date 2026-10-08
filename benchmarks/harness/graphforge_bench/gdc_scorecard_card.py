@@ -12,8 +12,9 @@ specification, every variance (rewrites, spec variances, reference readings,
 count discrepancies) and the CC-BY 4.0 attribution.
 
 Graphalytics has its own metric shape: per-algorithm processing time ``Tp``
-(the mean of three driver-clock runs), the shared load time ``Tl``, and EVPS.
-Makespan is not measured yet, and the card says so.
+(the mean of three driver-clock runs), the shared load time ``Tl``, and EVPS,
+``(vertices + edges) / Tp``. Makespan is labelled not measured, with the
+reason (``MAKESPAN_NOT_MEASURED``).
 """
 
 from __future__ import annotations
@@ -43,6 +44,14 @@ from graphforge_bench.progressive_run import publish_json_no_clobber
 CARD_SCHEMA = "graphforge-gdc-scorecard-card/1"
 FAIR_USE_LABEL = "These are not LDBC Benchmark Results."
 GRAPHALYTICS_RUNS = 3
+# Graphalytics (definition.tex, Metrics) defines makespan Tm as the time from the
+# driver issuing one algorithm job on an uploaded graph to its output being
+# available, for a cold system started for that one job and then shut down.
+MAKESPAN_NOT_MEASURED = (
+    "the query driver opens the project once and runs every algorithm job warm in "
+    "that one process, so no cold start-to-output interval per job exists; the "
+    "query phase's BenchExec wall spans all jobs together and is not a makespan"
+)
 LABEL_WIDTH = 14
 
 
@@ -148,7 +157,11 @@ def _graphalytics(
                 "makespan_seconds": None,
             }
         )
-    return {"tl_seconds": load_wall, "algorithms": algorithms}
+    return {
+        "tl_seconds": load_wall,
+        "makespan_not_measured": MAKESPAN_NOT_MEASURED,
+        "algorithms": algorithms,
+    }
 
 
 def _next_rung(
@@ -292,12 +305,12 @@ def _graph_line(graph: Mapping[str, Any]) -> str:
     return text + "; reconciled to the pinned archive's records, see variances)"
 
 
-def _coverage_line(coverage: Mapping[str, Any]) -> str:
+def _coverage_line(coverage: Mapping[str, Any], unit: str) -> str:
     by_cause: dict[str, list[str]] = {}
     for refusal in coverage["refused"]:
         by_cause.setdefault(refusal["cause"], []).append(refusal["query_id"])
     refused = "; ".join(f"{', '.join(ids)} ({cause})" for cause, ids in by_cause.items())
-    return f"{coverage['supported']}/{coverage['total']} queries; refused: {refused or 'none'}"
+    return f"{coverage['supported']}/{coverage['total']} {unit}; refused: {refused or 'none'}"
 
 
 def _correctness_line(correctness: Mapping[str, Any]) -> str:
@@ -348,7 +361,12 @@ def render_card(card: Mapping[str, Any]) -> str:
             f"separately: {_seconds(card['load']['conversion_wall_seconds'])})",
         ),
         _line("On disk", _bytes(card["on_disk_bytes"])),
-        _line("Coverage", _coverage_line(card["coverage"])),
+        _line(
+            "Coverage",
+            _coverage_line(
+                card["coverage"], "queries" if card["graphalytics"] is None else "algorithms"
+            ),
+        ),
     ]
     graphalytics = card["graphalytics"]
     if graphalytics is None:
@@ -378,7 +396,7 @@ def render_card(card: Mapping[str, Any]) -> str:
                 ", ".join(f"{a['algorithm']} {_seconds(a['tp_seconds'])}" for a in algorithms)
                 + f" (mean of {GRAPHALYTICS_RUNS} driver-clock runs)",
             ),
-            _line("Makespan", "not measured"),
+            _line("Makespan", f"not measured ({graphalytics['makespan_not_measured']})"),
             _line("EVPS", ", ".join(f"{a['algorithm']} {a['evps']:.3g}" for a in algorithms)),
         ]
     lines += [

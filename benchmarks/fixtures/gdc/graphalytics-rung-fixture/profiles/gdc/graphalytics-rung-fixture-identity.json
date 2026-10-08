@@ -1,0 +1,50 @@
+{
+  "schema": "graphforge-gdc-pinned-identity/1",
+  "suite_id": "graphalytics",
+  "disposition": "executable",
+  "spec": {
+    "name": "ldbc-graphalytics-specification",
+    "source": "https://github.com/ldbc/ldbc_graphalytics_docs",
+    "release": "v1.0.5",
+    "commit": "5cf6ae65d26c809f2e3e0dac4716f153c71dc639"
+  },
+  "generator": {
+    "name": "graphforge-gdc-graphalytics-rung-fixture",
+    "source": "https://github.com/CurateLabs/graphforge/tree/main/benchmarks/fixtures/gdc/graphalytics-rung-fixture",
+    "release": "graphalytics-rung-fixture-v1",
+    "commit": null
+  },
+  "driver": {
+    "name": "graphforge-gdc-scorecard-converter",
+    "source": "https://github.com/CurateLabs/graphforge/tree/main/benchmarks/runners/gdc-scorecard",
+    "release": "converter-v1",
+    "commit": null
+  },
+  "datasets": [
+    {
+      "id": "ga-directed",
+      "role": "dataset",
+      "checksum_sha256": "2c07a19fb40d27497763db183a5fd522df03ddb734d696b4c4e20165b33bd84b",
+      "license": "Apache-2.0",
+      "acquisition": "download",
+      "source": "https://datasets.ldbcouncil.org/graphalytics/ga-directed.tar.zst"
+    },
+    {
+      "id": "ga-undirected",
+      "role": "dataset",
+      "checksum_sha256": "7db2fa755cfd11d625eb2f17543d8f691d33af1ef57834190ad76bc08a951495",
+      "license": "Apache-2.0",
+      "acquisition": "download",
+      "source": "https://datasets.ldbcouncil.org/graphalytics/ga-undirected.tar.zst"
+    },
+    {
+      "id": "ga-wrong",
+      "role": "dataset",
+      "checksum_sha256": "f8e8defb399814a5908d22bb7e7d36210cd5fa90e3569b06e1cfe268929548b9",
+      "license": "Apache-2.0",
+      "acquisition": "download",
+      "source": "https://datasets.ldbcouncil.org/graphalytics/ga-wrong.tar.zst"
+    }
+  ],
+  "references": []
+}

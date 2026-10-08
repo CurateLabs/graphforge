@@ -18,7 +18,7 @@ to relabelling).
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
 import json
@@ -302,18 +302,43 @@ def result_digest(
     return digest.hexdigest()
 
 
-def read_results(results_dir: Path) -> dict[tuple[str, str], Mapping[str, Any]]:
+def _read_result(path: Path) -> Mapping[str, Any]:
+    document = read_json(path)
+    if not isinstance(document, Mapping) or document.get("schema") != QUERY_RESULT_SCHEMA:
+        raise RungInputError("invalid_document", f"{path.name} is not a query result")
+    return document
+
+
+class ResultFiles(Mapping[tuple[str, str], Mapping[str, Any]]):
+    """The driver's written results by (query id, binding id), read from disk on access.
+
+    A Graphalytics result has one row per vertex, millions at the larger rungs,
+    so results are not all held in memory at once: each access reads its file.
+    """
+
+    def __init__(self, paths: Mapping[tuple[str, str], Path]) -> None:
+        self._paths = dict(paths)
+
+    def __getitem__(self, key: tuple[str, str]) -> Mapping[str, Any]:
+        return _read_result(self._paths[key])
+
+    def __iter__(self) -> Iterator[tuple[str, str]]:
+        return iter(self._paths)
+
+    def __len__(self) -> int:
+        return len(self._paths)
+
+
+def read_results(results_dir: Path) -> ResultFiles:
     """Every result the driver wrote, keyed by (query id, binding id)."""
-    results: dict[tuple[str, str], Mapping[str, Any]] = {}
+    paths: dict[tuple[str, str], Path] = {}
     for path in sorted(results_dir.glob("*.json")):
-        document = read_json(path)
-        if not isinstance(document, Mapping) or document.get("schema") != QUERY_RESULT_SCHEMA:
-            raise RungInputError("invalid_document", f"{path.name} is not a query result")
+        document = _read_result(path)
         key = (str(document["query_id"]), str(document["binding_id"]))
-        if key in results:
+        if key in paths:
             raise RungInputError("invalid_document", f"result {key} is written twice")
-        results[key] = document
-    return results
+        paths[key] = path
+    return ResultFiles(paths)
 
 
 def _sort_key(row: Sequence[Any]) -> list[tuple[bool, str]]:
@@ -352,6 +377,18 @@ def _keyed(columns: Sequence[str], rows: list[list[Any]], key: Sequence[str]) ->
     return keyed
 
 
+def within_epsilon(value: float, reference: float, epsilon: float) -> bool:
+    """Graphalytics' epsilon match: ``|r - s| <= epsilon * |r|`` for reference ``r``.
+
+    The bound is relative to the reference value alone (the specification's
+    rule, not a symmetric tolerance), so a zero reference demands exactly zero.
+    An infinite value matches only the same infinity; NaN matches nothing.
+    """
+    if math.isinf(value) or math.isinf(reference):
+        return value == reference
+    return abs(reference - value) <= epsilon * abs(reference)
+
+
 def _match_epsilon(left: Keyed, right: Keyed, values: Sequence[str], epsilon: float) -> bool:
     """A numeric cell may differ from the reference by `epsilon`, relative; others exactly."""
     for identity, cells in left.items():
@@ -362,9 +399,16 @@ def _match_epsilon(left: Keyed, right: Keyed, values: Sequence[str], epsilon: fl
             if number is None or reference_number is None:
                 if value != reference:
                     return False
-            elif not math.isclose(number, reference_number, rel_tol=epsilon, abs_tol=0.0):
+            elif not within_epsilon(number, reference_number, epsilon):
                 return False
     return True
+
+
+def _match_keyed_exact(left: Keyed, right: Keyed, values: Sequence[str]) -> bool:
+    """Every reference cell is identical in the row with the same key."""
+    return all(
+        cells[name] == right[identity][name] for identity, cells in left.items() for name in values
+    )
 
 
 def _match_equivalence(left: Keyed, right: Keyed, label: str) -> bool:
@@ -385,15 +429,16 @@ def matches(
 ) -> bool:
     """Whether one written result matches its reference under the query's rule.
 
-    ``exact`` compares every column and every cell, in order when the variant is
-    ordered. ``epsilon`` and ``equivalence`` compare the result projected onto
-    the reference's columns, with rows paired by the rule's key columns, so an
-    analyst verb's extra node columns do not take part.
+    ``exact`` without a key compares every column and every cell, in order when
+    the variant is ordered. ``exact`` with a key, ``epsilon`` and
+    ``equivalence`` compare the result projected onto the reference's columns,
+    with rows paired by the rule's key columns, so an analyst verb's extra node
+    columns do not take part; both sides must hold exactly the same keys.
     """
     names = [column["name"] for column in result["columns"]]
     wanted = list(reference["columns"])
     actual, expected = list(result["rows"]), list(reference["rows"])
-    if rule["matching"] == "exact":
+    if rule["matching"] == "exact" and "key" not in rule:
         return names == wanted and _match_exact(actual, expected, bool(result["ordered"]))
     key = list(rule["key"])
     if not set(wanted) <= set(names) or not set(key) <= set(wanted):
@@ -401,8 +446,10 @@ def matches(
     left, right = _keyed(names, actual, key), _keyed(wanted, expected, key)
     if left is None or right is None or left.keys() != right.keys():
         return False
+    values = [name for name in wanted if name not in key]
+    if rule["matching"] == "exact":
+        return _match_keyed_exact(left, right, values)
     if rule["matching"] == "epsilon":
-        values = [name for name in wanted if name not in key]
         return _match_epsilon(left, right, values, float(rule["epsilon"]))
     label = str(rule["label"])
     return set(wanted) == {*key, label} and _match_equivalence(left, right, label)
@@ -432,6 +479,9 @@ def check_reference(
     """
     samples = _samples(evidence)
     mismatches: list[dict[str, Any]] = []
+    # Each written result is read once: its digest is checked and, when the
+    # reference has an entry for it, its match is decided in the same pass.
+    matched_keys: dict[tuple[str, str], bool] = {}
     for key, sample in samples.items():
         if sample.get("status") != "measured":
             continue
@@ -447,6 +497,10 @@ def check_reference(
                     key, "result_digest_mismatch", "written cells are not the measured result"
                 )
             )
+        rule = reference["queries"].get(key[0]) if reference is not None else None
+        if rule is not None and key[1] in rule["bindings"]:
+            matched_keys[key] = matches(rule, written, rule["bindings"][key[1]])
+        del written
     if reference is None:
         return {
             "schema": CORRECTNESS_SCHEMA,
@@ -466,7 +520,7 @@ def check_reference(
         tally = queries.setdefault(
             query_id, {"matching": rule["matching"], "checked": 0, "matched": 0}
         )
-        for binding_id, expected in rule["bindings"].items():
+        for binding_id in rule["bindings"]:
             key = (query_id, binding_id)
             referenced.add(key)
             sample = samples.get(key)
@@ -480,10 +534,9 @@ def check_reference(
             if sample.get("status") != "measured":
                 mismatches.append(_mismatch(key, "query_failed", str(sample.get("error_code"))))
                 continue
-            written = results.get(key)
-            if written is None:
+            if key not in matched_keys:  # no written result: already result_missing
                 continue
-            if matches(rule, written, expected):
+            if matched_keys[key]:
                 matched += 1
                 tally["matched"] += 1
             else:

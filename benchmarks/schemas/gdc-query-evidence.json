@@ -241,6 +241,16 @@
         "ordered": {
           "type": "boolean"
         },
+        "columns": {
+          "description": "The result columns digested and written, when the variant keeps only these; the call itself is timed whole.",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
         "status": {
           "enum": [
             "measured",

@@ -32,6 +32,12 @@ pub struct Variant {
     /// Whether row order is part of the answer (the query sorts its result).
     /// Unordered results are digested order-independently; see `result_digest`.
     pub ordered: bool,
+    /// The result columns that form the answer, in order. The call is timed
+    /// whole; only these columns are digested and written, after the clock
+    /// stops. `None` keeps every column. A Graphalytics BFS answer is each
+    /// target's depth, so the `path` column `paths` also returns is left out.
+    #[serde(default)]
+    pub columns: Option<Vec<String>>,
     pub bindings: Vec<Binding>,
 }
 
@@ -58,7 +64,7 @@ pub enum Operation {
         via: Option<String>,
     },
     /// `GraphForge::paths(source, None, PathsOptions { by, directed, via, weight })`,
-    /// where the source node is `(:label {property: $param})`.
+    /// where the source node is selected by UUID or by `(:label {property: $param})`.
     Paths {
         by: String,
         directed: bool,
@@ -70,13 +76,41 @@ pub enum Operation {
     },
 }
 
-/// Selects the unique source node by one property whose value is a binding parameter.
+/// Selects a `paths` source node from one binding parameter.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum SourceSelector {
+    /// `NodeSelector::Uuid`: the parameter is the node's canonical UUID string.
+    Uuid(UuidSource),
+    /// `NodeSelector::Match`: the unique node `(:label {property: $param})`.
+    Match(MatchSource),
+}
+
+/// The source node's UUID is the string parameter `uuid_param`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SourceSelector {
+pub struct UuidSource {
+    pub uuid_param: String,
+}
+
+/// The unique node of `label` whose `property` equals the parameter `param`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MatchSource {
     pub label: String,
     pub property: String,
     pub param: String,
+}
+
+impl SourceSelector {
+    /// The binding parameter that selects the source.
+    #[must_use]
+    pub fn param(&self) -> &str {
+        match self {
+            Self::Uuid(source) => &source.uuid_param,
+            Self::Match(source) => &source.param,
+        }
+    }
 }
 
 /// One parameter binding. Values use `IrLiteral`'s tagged JSON encoding,
@@ -117,7 +151,7 @@ impl Operation {
         match self {
             Self::Cypher { .. } => None,
             Self::Rank { .. } | Self::Cluster { .. } => Some(BTreeSet::new()),
-            Self::Paths { source, .. } => Some(BTreeSet::from([source.param.as_str()])),
+            Self::Paths { source, .. } => Some(BTreeSet::from([source.param()])),
         }
     }
 }
@@ -168,6 +202,15 @@ pub fn parse_workload(bytes: &[u8]) -> Result<Workload, QueryError> {
         if let Err(error) = variant.operation.check_algorithm() {
             return fail(format!("variant {}: {error}", variant.id));
         }
+        if let Some(columns) = &variant.columns {
+            let unique: BTreeSet<&str> = columns.iter().map(String::as_str).collect();
+            if columns.is_empty() || unique.len() != columns.len() || unique.contains("") {
+                return fail(format!(
+                    "variant {} columns must be non-empty, unique names",
+                    variant.id
+                ));
+            }
+        }
         let mut binding_ids = BTreeSet::new();
         for binding in &variant.bindings {
             if binding.id.is_empty() || !binding_ids.insert(binding.id.as_str()) {
@@ -186,7 +229,7 @@ pub fn parse_workload(bytes: &[u8]) -> Result<Workload, QueryError> {
                 }
             }
             if let Operation::Paths { source, .. } = &variant.operation {
-                super::measure::prop_value(&variant.id, &binding.params[&source.param])?;
+                super::measure::source_selector(&variant.id, source, &binding.params)?;
             }
         }
     }
