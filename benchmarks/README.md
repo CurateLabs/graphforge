@@ -104,18 +104,18 @@ None of these fixtures is official Datagen scale-factor output. Evidence records
 The FinBench Transaction suite adapter is `graphforge_bench.gdc_finbench_transaction`
 (runner `graphforge-benchmark-gdc-finbench-transaction`). It maps LDBC FinBench
 Transaction operations (complex reads TCR1–TCR12, simple reads TSR1–TSR6, writes
-TW1–TW19, read-writes TRW1–TRW3) onto the public Cypher / analyst-verb surface,
-separates load/warmup/execution/validation phases, validates read outputs (exact
-and normalized) against pinned references, and fails closed with typed causes on
-recursive temporal path filtering, temporal shortest transfer path, temporal
-transfer-cycle detection, hub-vertex truncation, and write/read-write transaction
-semantics the public surface does not expose. Its evidence keeps correctness,
-resource, and harness failures in distinct statuses and sections, records
-`certification: false`, and never masquerades as an audited GDC certification. The
-`run-live` Rust command loads the pinned synthetic seed and executes parameterized
-TCR10 through the public GraphForge facade, comparing Jaccard similarity with an
-independent seed-derived reference. TCR10 is the bounded live proof; other mapped
-reads retain explicitly labeled static replay coverage.
+TW1–TW19, read-writes TRW1–TRW3) onto the public Cypher surface, separates
+load/warmup/execution/validation phases, validates read outputs (exact and
+normalized) against pinned references, and fails closed with typed causes on
+write/read-write transaction semantics the public surface does not expose. Every
+read, `truncationLimit` included, is a query definition the `list-queries`
+command prints as data. Its evidence keeps correctness, resource, and harness
+failures in distinct statuses and sections, records `certification: false`, and
+never masquerades as an audited GDC certification. The `run-queries` Rust
+command loads `fixtures/gdc/finbench-transaction-queries` through the public
+GraphForge facade and runs every read's bindings against rows that
+`graphforge_bench.gdc_finbench_transaction_reference` derives from the fixture
+without GraphForge; `run-live` keeps the pinned TCR10 seed lane.
 
 ```bash
 PYTHONPATH=harness uv run --locked python -m unittest tests.test_gdc_contracts

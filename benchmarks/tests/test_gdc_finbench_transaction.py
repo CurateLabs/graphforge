@@ -11,29 +11,36 @@ import unittest
 from graphforge_bench.gdc_contracts import list_gdc_suites, workspace_root
 from graphforge_bench.gdc_finbench_transaction import (
     COMPATIBLE_READS,
+    DEFAULT_TRUNCATION_LIMIT,
     EVIDENCE_SCHEMA,
     LIVE_DATASET_ID,
     OPERATIONS,
+    QUERY_DATASET_ID,
     READ_WRITES,
     SIMPLE_READS,
-    UNSUPPORTED_READ_CAUSES,
+    TRUNCATED_READS,
+    TRUNCATION_ORDER,
     WRITE_CAUSE,
     WRITES,
     FinBenchTransactionSuiteError,
     assert_separate_from_other_suites,
     list_operation_rules,
+    list_query_catalog,
     map_operation_file,
+    query_fixture_path,
     run_live_suite,
+    run_query_fixture,
     run_tiny_suite,
     validate_live_fixture,
 )
+from graphforge_bench.gdc_finbench_transaction_reference import derive_expected, render
 from jsonschema import Draft202012Validator
 
 
 def _ensure_runner_built(root: Path) -> Path:
+    # Always invoke cargo: it is a no-op when the binary is current, and an
+    # existing binary may be stale (CI mounts a persistent benchmarks/target).
     binary = root / "target" / "debug" / "graphforge-benchmark-gdc-finbench-transaction"
-    if binary.is_file():
-        return binary
     target_dir = root / "target"
     completed = subprocess.run(
         [
@@ -96,11 +103,10 @@ class GdcFinBenchTransactionSuiteTests(unittest.TestCase):
         self.assertEqual(rules["TCR10"]["validation"], "normalized")
         self.assertEqual(rules["TCR6"]["validation"], "exact")
         self.assertEqual(rules["TSR1"]["validation"], "exact")
-        # Unsupported reads fail closed with their specific typed causes.
-        for read, cause in UNSUPPORTED_READ_CAUSES.items():
-            self.assertTrue(rules[read]["mapping"].startswith("semantic_incompatibility"), read)
-            self.assertTrue(rules[read]["mapping"].endswith(cause), read)
-            self.assertEqual(rules[read]["validation"], "none", read)
+        # Every read, TCR1-TCR5 included, maps to exact Cypher.
+        self.assertEqual(len(COMPATIBLE_READS), 18)
+        for read in ("TCR1", "TCR2", "TCR3", "TCR4", "TCR5"):
+            self.assertEqual(rules[read]["validation"], "exact", read)
         # Writes and read-writes fail closed with the write cause.
         for write in list(WRITES) + list(READ_WRITES):
             self.assertTrue(rules[write]["mapping"].startswith("semantic_incompatibility"), write)
@@ -149,7 +155,7 @@ class GdcFinBenchTransactionSuiteTests(unittest.TestCase):
         self.assertEqual(tcr10_out.strip(), "0.667")
         self.assertNotIn("company-", tcr10_ref)
         self.assertNotIn("company-", tcr10_out)
-        incompatible = list(UNSUPPORTED_READ_CAUSES) + list(WRITES) + list(READ_WRITES)
+        incompatible = list(WRITES) + list(READ_WRITES)
         for op in incompatible:
             self.assertEqual(by_op[op]["status"], "semantic_incompatibility", op)
             self.assertIsNotNone(by_op[op].get("cause"))
@@ -175,8 +181,7 @@ class GdcFinBenchTransactionSuiteTests(unittest.TestCase):
         self.assertIn("$startTime", by_op["TCR10"]["public_api"]["cypher_shape"])
         self.assertIn("$endTime", by_op["TCR10"]["public_api"]["cypher_shape"])
         self.assertIn("jaccardSimilarity", by_op["TCR10"]["public_api"]["cypher_shape"])
-        self.assertEqual(by_op["TCR1"]["status"], "semantic_incompatibility")
-        self.assertIn("recursive_temporal_path_filtering_not_exposed", by_op["TCR1"]["cause"])
+        self.assertEqual(set(by_op), {"TCR10", "TW1"})
         self.assertEqual(by_op["TW1"]["status"], "semantic_incompatibility")
         self.assertIn(WRITE_CAUSE, by_op["TW1"]["cause"])
         self.assertEqual(evidence["resource_events"], [])
@@ -330,12 +335,106 @@ class GdcFinBenchTransactionSuiteTests(unittest.TestCase):
         with self.assertRaises(FinBenchTransactionSuiteError) as raised_rw:
             map_operation_file(jobs / "TRW1.json")
         self.assertIn(WRITE_CAUSE, str(raised_rw.exception))
-        # Unsupported reads fail closed with their specific typed causes.
-        for read, cause in UNSUPPORTED_READ_CAUSES.items():
-            with self.assertRaises(FinBenchTransactionSuiteError) as raised_read:
-                map_operation_file(jobs / f"{read}.json")
-            self.assertEqual(raised_read.exception.cause, "semantic_incompatibility", read)
-            self.assertIn(cause, str(raised_read.exception), read)
+        # The reads this suite used to refuse now map to their Cypher.
+        for read in ("TCR1", "TCR2", "TCR3", "TCR4", "TCR5"):
+            mapping = map_operation_file(jobs / f"{read}.json")
+            self.assertEqual(mapping["interface"], "cypher", read)
+            self.assertIn("MATCH", mapping["cypher_shape"], read)
+
+    def test_query_catalog_exposes_every_read_as_data(self) -> None:
+        catalog = list_query_catalog()
+        self.assertEqual(catalog["suite_id"], "finbench-transaction")
+        queries = {query["operation"]: query for query in catalog["queries"]}
+        self.assertEqual(list(queries), list(COMPATIBLE_READS))
+        for operation, query in queries.items():
+            self.assertEqual(
+                map_operation_file(self._job(operation))["cypher_shape"], query["cypher"]
+            )
+            names = [parameter["name"] for parameter in query["parameters"]]
+            self.assertTrue(query["columns"], operation)
+            truncation = query["truncation"]
+            if operation in TRUNCATED_READS:
+                self.assertEqual(truncation["default_limit"], DEFAULT_TRUNCATION_LIMIT, operation)
+                self.assertEqual(truncation["order"], TRUNCATION_ORDER, operation)
+                self.assertTrue(truncation["truncated_steps"], operation)
+                self.assertIn("truncationLimit", names, operation)
+                self.assertIn("truncationOrder", names, operation)
+                self.assertIn("$truncationLimit", query["cypher"], operation)
+            else:
+                self.assertIsNone(truncation, operation)
+                self.assertNotIn("truncationLimit", names, operation)
+
+    def _job(self, operation: str) -> Path:
+        return (
+            self.root
+            / "fixtures"
+            / "gdc"
+            / "finbench-transaction-tiny"
+            / "compatible"
+            / "jobs"
+            / f"{operation}.json"
+        )
+
+    def test_expected_rows_are_derived_independently_and_are_current(self) -> None:
+        fixture = query_fixture_path()
+        derived = derive_expected(fixture)
+        committed = (fixture / "expected.json").read_text(encoding="utf-8")
+        self.assertEqual(committed, render(derived))
+        self.assertEqual(derived["dataset_id"], QUERY_DATASET_ID)
+        self.assertEqual(set(derived["results"]), set(COMPATIBLE_READS))
+        # Truncation must change the answer somewhere for every truncated read.
+        for operation in TRUNCATED_READS:
+            results = derived["results"][operation]
+
+            def rest(result: dict[str, object]) -> dict[str, object]:
+                return {k: v for k, v in result["binding"].items() if k != "truncationLimit"}
+
+            self.assertTrue(
+                any(
+                    truncated["binding"]["truncationLimit"] < DEFAULT_TRUNCATION_LIMIT
+                    and any(
+                        full["binding"]["truncationLimit"] == DEFAULT_TRUNCATION_LIMIT
+                        and rest(full) == rest(truncated)
+                        and full["rows"] != truncated["rows"]
+                        for full in results
+                    )
+                    for truncated in results
+                ),
+                operation,
+            )
+
+    def test_every_read_runs_live_against_independent_rows(self) -> None:
+        evidence = run_query_fixture()
+        self.assertEqual(evidence["status"], "passed")
+        self.assertIs(evidence["certification"], False)
+        self.assertEqual(evidence["execution_mode"], "live_graphforge")
+        self.assertEqual(
+            evidence["reference_derivation"],
+            "graphforge_bench.gdc_finbench_transaction_reference",
+        )
+        expected = json.loads((query_fixture_path() / "expected.json").read_text(encoding="utf-8"))[
+            "results"
+        ]
+        self.assertEqual(
+            len(evidence["outcomes"]), sum(len(results) for results in expected.values())
+        )
+        for outcome in evidence["outcomes"]:
+            operation, index = outcome["operation"], outcome["binding_index"]
+            self.assertEqual(outcome["status"], "passed", (operation, index, outcome.get("cause")))
+            self.assertEqual(outcome["rows"], expected[operation][index]["rows"])
+        self.assertEqual({o["operation"] for o in evidence["outcomes"]}, set(COMPATIBLE_READS))
+
+    def test_live_query_run_fails_on_a_wrong_expected_row(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="finbench-query-mismatch-") as tmp:
+            fixture = Path(tmp) / "fixture"
+            shutil.copytree(query_fixture_path(), fixture)
+            expected = json.loads((fixture / "expected.json").read_text(encoding="utf-8"))
+            expected["results"]["TCR12"][1]["rows"][0][1] = "300.500"
+            (fixture / "expected.json").write_text(json.dumps(expected), encoding="utf-8")
+            with self.assertRaises(FinBenchTransactionSuiteError) as raised:
+                run_query_fixture(fixture=fixture)
+        self.assertEqual(raised.exception.cause, "correctness_failed")
+        self.assertIn("TCR12", str(raised.exception))
 
     def test_reference_mismatch_is_visible_in_correctness_lane_only(self) -> None:
         evidence = run_tiny_suite(fixture_name="reference-mismatch")

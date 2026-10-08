@@ -44,24 +44,21 @@ LIVE_DATASET_ID = "finbench-engineering-live-tcr10-v1"
 LIVE_FIXTURE = "finbench-transaction-live"
 
 WRITE_CAUSE = "finbench_transaction_write_semantics_not_exposed"
-RECURSIVE_PATH_CAUSE = "recursive_temporal_path_filtering_not_exposed"
-TEMPORAL_SHORTEST_PATH_CAUSE = "temporal_shortest_transfer_path_not_exposed"
-TEMPORAL_CYCLE_CAUSE = "temporal_transfer_cycle_detection_not_exposed"
-TRUNCATION_CAUSE = "hub_vertex_truncation_not_exposed"
+TRUNCATION_ORDER_CAUSE = "truncation_order_not_supported"
 
-# Reads this suite fails closed on, with their specific typed causes.
-UNSUPPORTED_READ_CAUSES = {
-    "TCR1": RECURSIVE_PATH_CAUSE,
-    "TCR2": RECURSIVE_PATH_CAUSE,
-    "TCR3": TEMPORAL_SHORTEST_PATH_CAUSE,
-    "TCR4": TEMPORAL_CYCLE_CAUSE,
-    "TCR5": TRUNCATION_CAUSE,
-}
+# Every read maps to exact public Cypher, truncation included; only writes and
+# read-write transactions fail closed.
+COMPATIBLE_READS = COMPLEX_READS + SIMPLE_READS
 
-# Compatible reads that map to the public Cypher surface.
-COMPATIBLE_READS = tuple(
-    op for op in COMPLEX_READS + SIMPLE_READS if op not in UNSUPPORTED_READ_CAUSES
-)
+# Reads whose specification takes truncationLimit / truncationOrder.
+TRUNCATED_READS = ("TCR1", "TCR2", "TCR5", "TCR6", "TCR7", "TCR8", "TCR9", "TCR11", "TCR12")
+DEFAULT_TRUNCATION_LIMIT = 500
+TRUNCATION_ORDER = "TIMESTAMP_DESCENDING"
+
+QUERY_CATALOG_SCHEMA = "graphforge-gdc-finbench-query-catalog/1"
+QUERY_EVIDENCE_SCHEMA = "graphforge-gdc-finbench-query-evidence/1"
+QUERY_DATASET_ID = "finbench-engineering-queries-v1"
+QUERY_FIXTURE = "finbench-transaction-queries"
 
 
 class FinBenchTransactionSuiteError(ValueError):
@@ -251,6 +248,48 @@ def run_live_suite(
         return evidence
 
 
+def list_query_catalog(root: Path | None = None) -> dict[str, Any]:
+    """The runner's read query definitions (Cypher, parameters, truncation) as data."""
+    completed = _run_runner(["list-queries"], root)
+    if completed.returncode != 0:
+        raise FinBenchTransactionSuiteError("invalid_document", completed.stderr.strip())
+    catalog = json.loads(completed.stdout)
+    if catalog.get("schema") != QUERY_CATALOG_SCHEMA:
+        raise FinBenchTransactionSuiteError("invalid_document", "unexpected query catalog schema")
+    return catalog
+
+
+def query_fixture_path(root: Path | None = None) -> Path:
+    return (root or workspace_root()) / "fixtures" / "gdc" / QUERY_FIXTURE
+
+
+def run_query_fixture(
+    *,
+    root: Path | None = None,
+    fixture: Path | None = None,
+    evidence_path: Path | None = None,
+) -> dict[str, Any]:
+    """Run every read live over the query fixture and validate against its expected rows."""
+    source = fixture or query_fixture_path(root)
+    with tempfile.TemporaryDirectory(prefix="gdc-finbench-queries-") as tmp:
+        out_evidence = evidence_path or (Path(tmp) / "evidence.json")
+        completed = _run_runner(["run-queries", str(source), str(out_evidence)], root)
+        if not out_evidence.is_file():
+            raise FinBenchTransactionSuiteError(
+                "harness_error", completed.stderr.strip() or "query runner wrote no evidence"
+            )
+        evidence = json.loads(out_evidence.read_text(encoding="utf-8"))
+    if evidence.get("schema") != QUERY_EVIDENCE_SCHEMA:
+        raise FinBenchTransactionSuiteError("invalid_document", "unexpected query evidence schema")
+    _enforce_measurement_boundary(evidence, label="finbench-transaction query evidence")
+    if completed.returncode != 0:
+        raise FinBenchTransactionSuiteError(
+            evidence.get("status", "harness_error"),
+            json.dumps([o for o in evidence.get("outcomes", []) if o.get("status") != "passed"]),
+        )
+    return evidence
+
+
 def map_operation_file(path: Path, root: Path | None = None) -> dict[str, Any]:
     completed = _run_runner(["map-operation", str(path)], root)
     if completed.returncode == 3:
@@ -288,19 +327,22 @@ def assert_separate_from_other_suites(root: Path | None = None) -> None:
 __all__ = [
     "COMPATIBLE_READS",
     "COMPLEX_READS",
+    "DEFAULT_TRUNCATION_LIMIT",
     "EVIDENCE_SCHEMA",
     "JOB_SCHEMA",
     "LIVE_DATASET_ID",
     "LIVE_EXECUTION_MODE",
     "LIVE_FIXTURE",
     "OPERATIONS",
+    "QUERY_CATALOG_SCHEMA",
+    "QUERY_DATASET_ID",
+    "QUERY_EVIDENCE_SCHEMA",
+    "QUERY_FIXTURE",
     "READ_WRITES",
-    "RECURSIVE_PATH_CAUSE",
     "SIMPLE_READS",
-    "TEMPORAL_CYCLE_CAUSE",
-    "TEMPORAL_SHORTEST_PATH_CAUSE",
-    "TRUNCATION_CAUSE",
-    "UNSUPPORTED_READ_CAUSES",
+    "TRUNCATED_READS",
+    "TRUNCATION_ORDER",
+    "TRUNCATION_ORDER_CAUSE",
     "WRITES",
     "WRITE_CAUSE",
     "FinBenchTransactionSuiteError",
@@ -308,8 +350,11 @@ __all__ = [
     "assert_separate_from_other_suites",
     "identity_path",
     "list_operation_rules",
+    "list_query_catalog",
     "map_operation_file",
+    "query_fixture_path",
     "run_live_suite",
+    "run_query_fixture",
     "run_tiny_suite",
     "validate_live_fixture",
 ]
