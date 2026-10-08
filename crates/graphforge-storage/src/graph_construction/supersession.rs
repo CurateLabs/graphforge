@@ -92,14 +92,17 @@ impl GraphConstructionSession {
             // the checkpoint's active-identity ledger, which the encoder wrote
             // in the same checkpoint that pinned `encoding_inventory_sha256`.
             // Their *content* is authenticated by the boundary that consumes
-            // it: the CAS install at publication copies and hashes every
-            // artifact against this inventory and refuses a mismatch
-            // (`install_graph_object_file_with_lease`). A full re-read here
+            // it: the publication commit boundary admits every installed
+            // object by exact length and XXH64 against this inventory and
+            // refuses a mismatch (`admit_graph_object_with_lease`; the
+            // install links the encoder's file and no longer re-reads it,
+            // #1899). A full re-read here
             // ran up to three times per ingest (encode exit, session reopen,
             // prepare) on the same bytes and named no failure the install
             // does not already refuse (#1384; the reasoning #1392 applied to
             // the shape branch below).
             authenticate_encoded_artifact_identities(
+                &self.project_path,
                 &output,
                 &inventory,
                 &self.checkpoint.evidence,
@@ -558,9 +561,10 @@ pub(super) fn set_returned_failure(point: Option<&str>) {
 /// read. The ledger entry was recorded by `record_encoded_active_artifacts`
 /// in the same checkpoint write that pinned the inventory authority, so a
 /// replaced inode, an extra link, or a length change is refused here with its
-/// own message; a same-inode, same-length content mutation is refused by the
-/// CAS install at publication, which hashes every artifact it copies.
+/// own message; a same-inode, same-length content mutation is refused at the
+/// publication commit boundary, which admits every installed object by XXH64.
 fn authenticate_encoded_artifact_identities(
+    project: &std::path::Path,
     output: &StableDirectory,
     inventory: &GraphConstructionEncoding,
     evidence: &GraphConstructionEvidence,
@@ -598,13 +602,34 @@ fn authenticate_encoded_artifact_identities(
             .storage_active_identity_allocated_bytes
             .get(&key)
             .is_none_or(|allocated| *allocated != usage.allocated_bytes)
-            || file_link_count(&file).map_err(storage)? != 1
+            || !links_are_expected(project, expected, &file, identity)?
             || usage.logical_bytes != expected.bytes
         {
             return Err(storage("supersession encoded artifact identity changed"));
         }
     }
     Ok(())
+}
+
+/// An encoded artifact has one name. Once publication links it into the object
+/// store (unix) it has a second, which must be exactly its content address, so
+/// a publication that stopped after installing can be retried; reader
+/// workspaces hydrated from that address add more. Extra names with no content
+/// address on this inode are refused.
+fn links_are_expected(
+    project: &std::path::Path,
+    expected: &crate::graph_construction_encoding::ConstructionEncodedArtifact,
+    file: &std::fs::File,
+    identity: graphforge_filesystem::FileIdentity,
+) -> Result<bool, GfError> {
+    match file_link_count(file).map_err(storage)? {
+        1 => Ok(true),
+        2.. if cfg!(unix) => {
+            let address = crate::graph_object_path(project, &expected.sha256)?;
+            Ok(graphforge_filesystem::path_identity(&address).ok() == Some(identity))
+        }
+        _ => Ok(false),
+    }
 }
 
 /// Identity, link count and length of a retained payload that this session

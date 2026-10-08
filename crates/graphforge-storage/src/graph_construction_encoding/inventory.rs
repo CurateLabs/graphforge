@@ -180,14 +180,15 @@ fn open_artifact_directory(
 }
 
 /// An encoded artifact has one name until publication links the same inode
-/// into the object store (unix), and two afterwards. A publication that
+/// into the object store (unix); a published project can then hydrate it into
+/// reader workspaces, so any later link count is the object store's. A publication that
 /// stopped after that link is retried by reopening this inventory, so the
 /// object-store name must not make the artifact unreadable. The installer
 /// proves the second name is this artifact's content address before it
 /// reuses it.
 pub(crate) fn staged_links_admitted(file: &File) -> Result<bool, GfError> {
     let links = file_link_count(file).map_err(storage)?;
-    Ok(links == 1 || (cfg!(unix) && links == 2))
+    Ok(links == 1 || (cfg!(unix) && links > 1))
 }
 
 fn authenticate_encoded_checksum(
@@ -196,9 +197,7 @@ fn authenticate_encoded_checksum(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(graphforge_filesystem::FileCacheReleaseEvidence, u64), GfError> {
     let identity = file_identity(&file).map_err(storage)?;
-    if !staged_links_admitted(&file)?
-        || file.metadata().map_err(storage)?.len() != expected.bytes
-    {
+    if !staged_links_admitted(&file)? || file.metadata().map_err(storage)?.len() != expected.bytes {
         return Err(storage("canonical artifact identity or length changed"));
     }
     let mut reader = graphforge_filesystem::FileCacheReleasingReader::new(file).map_err(storage)?;

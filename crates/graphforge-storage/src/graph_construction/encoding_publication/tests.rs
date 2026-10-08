@@ -963,7 +963,7 @@ fn flip_first_byte_in_place(path: &std::path::Path) {
 /// `validate` ends with reclaim, `commit` reopens the session (reclaim),
 /// prepares the encoding (reclaim) and publishes — with a same-inode,
 /// same-length mutation between the two processes. The refusal must fire at
-/// the CAS install, by its own message, and the two reclaim sites must have
+/// publication, by its own message, and the two reclaim sites must have
 /// charged no payload bytes to recovery on the way there.
 #[test]
 fn ladder_path_refuses_same_inode_encoded_corruption_at_cas_install() {
@@ -1012,15 +1012,15 @@ fn ladder_path_refuses_same_inode_encoded_corruption_at_cas_install() {
         encoded_bytes
     );
 
-    // Site 4 is never reached: the CAS install owns the refusal.
+    // Site 4 is never reached: publication owns the refusal.
     let error = resumed
         .publish_canonical(&prepared, Uuid::from_u128(9_451), Uuid::from_u128(9_452))
         .unwrap_err();
     assert!(
         error
             .to_string()
-            .contains("captured encoded source checksum or length changed during copy"),
-        "expected the CAS install boundary to refuse the mutation, got: {error}"
+            .contains(crate::graph_object_store::SAME_INODE_CORRUPTION_REFUSAL),
+        "expected publication to refuse the mutation, got: {error}"
     );
     assert_ne!(
         resumed.checkpoint.publication_state,
@@ -2736,8 +2736,8 @@ fn publication_refuses_same_inode_encoded_payload_corruption_at_cas_install() {
     assert!(
         error
             .to_string()
-            .contains("captured encoded source checksum or length changed during copy"),
-        "expected the CAS install boundary to refuse the mutation, got: {error}"
+            .contains(crate::graph_object_store::SAME_INODE_CORRUPTION_REFUSAL),
+        "expected publication to refuse the mutation, got: {error}"
     );
     assert_ne!(
         session.checkpoint.publication_state,

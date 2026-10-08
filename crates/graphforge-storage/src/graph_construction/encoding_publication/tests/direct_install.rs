@@ -75,7 +75,7 @@ impl Staged {
 fn install(
     lease: &crate::GraphObjectPublicationLease,
     source: &CapturedEncodedArtifact<'_>,
-) -> Result<crate::GraphObjectInstallEvidence, GfError> {
+) -> Result<crate::graph_object_store::GraphObjectInstallEvidence, GfError> {
     crate::graph_object_store::install_captured_encoded_artifact_with_lease(
         lease,
         source,
@@ -160,6 +160,7 @@ fn installed_object_is_the_staged_inode_and_nothing_is_written() {
 #[test]
 fn staged_files_and_the_object_store_share_one_filesystem() {
     let staged = staged(15_002);
+    let _lease = crate::begin_graph_object_publication(staged.root.path()).unwrap();
     let objects = std::fs::metadata(staged.root.path().join("graph-objects")).unwrap();
     let encoded = std::fs::metadata(staged.graph.path()).unwrap();
     assert_eq!(objects.dev(), encoded.dev());
@@ -193,13 +194,25 @@ fn publication_writes_only_the_control_objects_it_authors() {
     // encoder did not already write (manifest nodes), not a second copy.
     assert!(store_bytes > encoder_bytes);
     assert_eq!(
-        staged.session.checkpoint.evidence.cas_application_write_bytes,
+        staged
+            .session
+            .checkpoint
+            .evidence
+            .cas_application_write_bytes,
         store_bytes - encoder_bytes
     );
     eprintln!(
         "cas read bytes {} write bytes {} encoder bytes {encoder_bytes}",
-        staged.session.checkpoint.evidence.cas_application_read_bytes,
-        staged.session.checkpoint.evidence.cas_application_write_bytes,
+        staged
+            .session
+            .checkpoint
+            .evidence
+            .cas_application_read_bytes,
+        staged
+            .session
+            .checkpoint
+            .evidence
+            .cas_application_write_bytes,
     );
 }
 
@@ -254,7 +267,10 @@ fn corrupt_existing_object_is_refused_and_the_staged_file_is_left_alone() {
         );
         let current = staged.current();
         let lease = crate::begin_graph_object_publication(staged.root.path()).unwrap();
-        assert!(install(&lease, &source).is_err(), "same_length={same_length}");
+        assert!(
+            install(&lease, &source).is_err(),
+            "same_length={same_length}"
+        );
         assert_eq!(std::fs::read(staged.object_path()).unwrap(), corrupt);
         assert_eq!(std::fs::read(staged.staged_path()).unwrap(), bytes);
         assert_eq!(std::fs::metadata(staged.staged_path()).unwrap().nlink(), 1);
@@ -282,7 +298,10 @@ fn lost_link_race_authenticates_the_winner_and_leaves_the_staged_file_unaliased(
     assert!(evidence.reused_existing);
     assert_eq!(evidence.bytes_installed, 0);
     let object = std::fs::metadata(staged.object_path()).unwrap();
-    assert_ne!(object.ino(), std::fs::metadata(staged.staged_path()).unwrap().ino());
+    assert_ne!(
+        object.ino(),
+        std::fs::metadata(staged.staged_path()).unwrap().ino()
+    );
     assert_eq!(object.nlink(), 1);
     assert_eq!(std::fs::read(staged.object_path()).unwrap(), bytes);
 }
@@ -309,7 +328,10 @@ fn returned_error_at_each_install_boundary_leaves_the_staged_file_and_retries() 
         let error = failed.unwrap_err();
         assert!(error.to_string().contains(boundary), "{boundary}: {error}");
         assert_eq!(std::fs::read(staged.staged_path()).unwrap(), bytes);
-        assert_eq!(std::fs::metadata(staged.staged_path()).unwrap().ino(), inode);
+        assert_eq!(
+            std::fs::metadata(staged.staged_path()).unwrap().ino(),
+            inode
+        );
         assert_eq!(staged.current(), current);
         assert_eq!(
             staged.object_path().exists(),
@@ -342,7 +364,9 @@ fn source_that_changed_length_is_refused_before_linking() {
     let inventory = staged.inventory();
     let source = inventory.open(Path::new(ARTIFACT)).unwrap();
     let current = staged.current();
-    let mut permissions = std::fs::metadata(staged.staged_path()).unwrap().permissions();
+    let mut permissions = std::fs::metadata(staged.staged_path())
+        .unwrap()
+        .permissions();
     std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o600);
     std::fs::set_permissions(staged.staged_path(), permissions).unwrap();
     let file = std::fs::OpenOptions::new()
@@ -357,29 +381,182 @@ fn source_that_changed_length_is_refused_before_linking() {
     assert_eq!(staged.current(), current);
 }
 
+fn edit_in_place(path: &Path) {
+    let mut edited = std::fs::read(path).unwrap();
+    let middle = edited.len() / 2;
+    edited[middle] ^= 0xff;
+    let mut permissions = std::fs::metadata(path).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o600);
+    std::fs::set_permissions(path, permissions).unwrap();
+    std::fs::write(path, &edited).unwrap();
+}
+
+fn file_entry(source: &CapturedEncodedArtifact<'_>) -> crate::GraphFileEntry {
+    crate::GraphFileEntry {
+        content_xxh64: source.checksum(),
+        relative_path: ARTIFACT.to_owned(),
+        byte_length: source.bytes(),
+        content_sha256: source.content_sha256().to_owned(),
+        role: crate::graph_files::infer_role(Path::new(ARTIFACT)),
+    }
+}
+
 /// The install no longer reads the file back, so a same-length edit of the
 /// staged file between the encoder's write and publication is not caught at
-/// install. It is caught wherever the address is authenticated: the object
-/// never reads as the content its address names.
+/// install. The first read of the installed object refuses it, by exact length
+/// and XXH64 (ADR 0049), and by SHA-256 where the address is authenticated.
 #[test]
-fn edited_staged_file_never_authenticates_as_its_address() {
+fn edited_staged_file_is_refused_on_first_read_of_the_installed_object() {
     let staged = staged(15_010);
     let inventory = staged.inventory();
     let source = inventory.open(Path::new(ARTIFACT)).unwrap();
-    let path = staged.staged_path();
-    let mut edited = std::fs::read(&path).unwrap();
-    edited[0] ^= 0xff;
-    let mut permissions = std::fs::metadata(&path).unwrap().permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o600);
-    std::fs::set_permissions(&path, permissions).unwrap();
-    std::fs::write(&path, &edited).unwrap();
+    edit_in_place(&staged.staged_path());
     let lease = crate::begin_graph_object_publication(staged.root.path()).unwrap();
-    let _ = install(&lease, &source);
-    if staged.object_path().exists() {
-        assert!(
-            crate::read_graph_object(staged.root.path(), source.content_sha256(), source.bytes())
-                .is_err()
-        );
+    install(&lease, &source).unwrap();
+    drop(lease);
+    assert!(staged.object_path().exists());
+    let error =
+        crate::graph_object_store::admit_graph_object(staged.root.path(), &file_entry(&source))
+            .unwrap_err();
+    assert!(error.to_string().contains("checksum"), "{error}");
+    assert!(
+        crate::read_graph_object(staged.root.path(), source.content_sha256(), source.bytes())
+            .is_err()
+    );
+}
+
+/// The same edit through a whole publication: the commit boundary admits every
+/// installed object by XXH64 before `CURRENT` can move, so the edit leaves the
+/// prior generation intact.
+#[test]
+fn edited_staged_file_fails_publication_and_preserves_current() {
+    let mut staged = staged(15_011);
+    let current = staged.current();
+    edit_in_place(&staged.staged_path());
+    let error = staged
+        .session
+        .publish_canonical(
+            &staged.encoded,
+            Uuid::from_u128(TARGET),
+            Uuid::from_u128(TRANSACTION),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("checksum"), "{error}");
+    assert_eq!(staged.current(), current);
+    assert_ne!(
+        crate::resolve_project_generation(staged.root.path())
+            .unwrap()
+            .generation_uuid(),
+        Uuid::from_u128(TARGET)
+    );
+}
+
+/// The object store is not on the encoder's filesystem: the install says so by
+/// copying, and the published object is a separate inode with the same bytes.
+#[test]
+fn cross_filesystem_link_falls_back_to_an_explicit_copy() {
+    // The kernel's EXDEV is what reports this to the installer.
+    assert_eq!(
+        std::io::Error::from_raw_os_error(18).kind(),
+        std::io::ErrorKind::CrossesDevices
+    );
+    let staged = staged(15_012);
+    let inventory = staged.inventory();
+    let source = inventory.open(Path::new(ARTIFACT)).unwrap();
+    let bytes = std::fs::read(staged.staged_path()).unwrap();
+    let current = staged.current();
+    let lease = crate::begin_graph_object_publication(staged.root.path()).unwrap();
+    crate::graph_object_store::force_cross_device_link(true);
+    let installed = install(&lease, &source);
+    crate::graph_object_store::force_cross_device_link(false);
+    let evidence = installed.unwrap();
+    assert!(!evidence.reused_existing);
+    assert_eq!(evidence.write_bytes, source.bytes());
+    assert_eq!(evidence.bytes_installed, source.bytes());
+    let object = std::fs::metadata(staged.object_path()).unwrap();
+    assert_ne!(
+        object.ino(),
+        std::fs::metadata(staged.staged_path()).unwrap().ino()
+    );
+    assert_eq!(object.nlink(), 1);
+    assert_eq!(std::fs::read(staged.object_path()).unwrap(), bytes);
+    assert_eq!(std::fs::read(staged.staged_path()).unwrap(), bytes);
+    assert_eq!(staged.current(), current);
+}
+
+/// After the link the encoded name and the object are one inode. No writer of
+/// the encoded tree may rewrite a file in place: every one creates a fresh
+/// file exclusively and swaps it in, or unlinks. Pin the two guards that hold
+/// that line, then show a reopen and a publication leave installed bytes alone.
+#[test]
+fn encoded_names_cannot_be_rewritten_in_place_once_installed() {
+    let staged = staged(15_013);
+    let inventory = staged.inventory();
+    let source = inventory.open(Path::new(ARTIFACT)).unwrap();
+    let lease = crate::begin_graph_object_publication(staged.root.path()).unwrap();
+    install(&lease, &source).unwrap();
+    let bytes = std::fs::read(staged.object_path()).unwrap();
+    // Exclusive creation: an encoder writing this name again fails.
+    let parent = staged
+        .graph
+        .open_child_directory(OsStr::new("topology"))
+        .unwrap();
+    let error = parent
+        .create_replaceable_child_file(OsStr::new("runtime_catalog.parquet"))
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    // The shared inode is sealed read-only: a truncating open is refused
+    // (a superuser bypasses permission bits, so skip the check for one).
+    let superuser = std::fs::metadata("/proc/self").unwrap().uid() == 0;
+    if !superuser {
+        let error = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(staged.staged_path())
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+    assert_eq!(std::fs::read(staged.object_path()).unwrap(), bytes);
+}
+
+type ObjectSnapshot = BTreeMap<String, (u64, Vec<u8>)>;
+
+fn object_snapshot(root: &Path) -> ObjectSnapshot {
+    object_store(root)
+        .into_keys()
+        .map(|name| {
+            let path = crate::graph_object_path(root, &name).unwrap();
+            let inode = std::fs::metadata(&path).unwrap().ino();
+            (name, (inode, std::fs::read(path).unwrap()))
+        })
+        .collect()
+}
+
+#[test]
+fn reopening_and_publishing_after_install_leaves_installed_objects_untouched() {
+    let mut staged = staged(15_014);
+    {
+        let inventory = staged.inventory();
+        let lease = crate::begin_graph_object_publication(staged.root.path()).unwrap();
+        for artifact in &staged.encoded.artifacts {
+            let source = inventory.open(Path::new(&artifact.path)).unwrap();
+            install(&lease, &source).unwrap();
+        }
+    }
+    let before = object_snapshot(staged.root.path());
+    assert!(before.len() >= staged.encoded.artifacts.len() / 2);
+    let reopened = staged.session.prepare_canonical_encoding(1).unwrap();
+    staged
+        .session
+        .publish_canonical(
+            &reopened,
+            Uuid::from_u128(TARGET),
+            Uuid::from_u128(TRANSACTION),
+        )
+        .unwrap();
+    let after = object_snapshot(staged.root.path());
+    for (name, installed) in &before {
+        assert_eq!(after.get(name), Some(installed), "{name} changed");
     }
 }
 
@@ -509,13 +686,48 @@ fn assert_parent_current_and_no_staging_residue(root: &Path) {
     object_store(root);
 }
 
+/// The encoder's bytes for every artifact its inventory lists, by content
+/// address, read from the staged files a crash leaves behind.
+fn staged_artifacts(root: &Path) -> BTreeMap<String, (String, Vec<u8>)> {
+    let encoding: GraphConstructionEncoding = serde_json::from_slice(
+        &std::fs::read(
+            private_encoded_graph(root)
+                .parent()
+                .unwrap()
+                .join("inventory.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    encoding
+        .artifacts
+        .into_iter()
+        .map(|artifact| {
+            let bytes = std::fs::read(private_encoded_graph(root).join(&artifact.path)).unwrap();
+            assert_eq!(bytes.len() as u64, artifact.bytes, "{}", artifact.path);
+            (artifact.sha256, (artifact.path, bytes))
+        })
+        .collect()
+}
+
+/// Every artifact is published at its address with exactly the bytes the
+/// encoder wrote before the crash: the rerun published identical bytes.
+fn assert_published(root: &Path, staged: &BTreeMap<String, (String, Vec<u8>)>, context: &str) {
+    // `object_store` proves each entry hashes to its own address.
+    let store = object_store(root);
+    for (digest, (path, bytes)) in staged {
+        assert_eq!(
+            store.get(digest),
+            Some(&(bytes.len() as u64)),
+            "{context}: {path} {digest}"
+        );
+        let object = crate::graph_object_path(root, digest).unwrap();
+        assert_eq!(&std::fs::read(object).unwrap(), bytes, "{context}: {path}");
+    }
+}
+
 #[test]
 fn publication_crashed_at_each_install_boundary_resumes_to_identical_bytes() {
-    let reference = TempDir::new().unwrap();
-    assert_eq!(crash_publication_child(reference.path(), None), Some(0));
-    let expected = object_store(reference.path());
-    assert!(!expected.is_empty());
-
     for (point, visible) in [
         ("after_object_sync", false),
         ("after_link", true),
@@ -534,6 +746,8 @@ fn publication_crashed_at_each_install_boundary_resumes_to_identical_bytes() {
             private_encoded_graph(root.path()).join(ARTIFACT).is_file(),
             "{point}: the staged file survives for the rerun"
         );
+        let staged = staged_artifacts(root.path());
+        assert!(!staged.is_empty());
 
         let receipt = resume_publication(root.path()).unwrap();
         assert_eq!(receipt.generation_uuid, Uuid::from_u128(TARGET));
@@ -543,7 +757,7 @@ fn publication_crashed_at_each_install_boundary_resumes_to_identical_bytes() {
                 .generation_uuid(),
             Uuid::from_u128(TARGET)
         );
-        assert_eq!(object_store(root.path()), expected, "{point}");
+        assert_published(root.path(), &staged, point);
     }
 }
 
@@ -552,10 +766,6 @@ fn publication_crashed_at_each_install_boundary_resumes_to_identical_bytes() {
 /// publication on the third attempt.
 #[test]
 fn crash_in_the_dedupe_of_an_already_installed_object_resumes_to_identical_bytes() {
-    let reference = TempDir::new().unwrap();
-    assert_eq!(crash_publication_child(reference.path(), None), Some(0));
-    let expected = object_store(reference.path());
-
     let root = TempDir::new().unwrap();
     assert_eq!(
         crash_publication_child(
@@ -564,18 +774,17 @@ fn crash_in_the_dedupe_of_an_already_installed_object_resumes_to_identical_bytes
         ),
         Some(86)
     );
+    let staged = staged_artifacts(root.path());
     assert_eq!(
-        resume_child(
-            root.path(),
-            &format!("cas.install.after_dedupe.{ARTIFACT}")
-        ),
+        resume_child(root.path(), &format!("cas.install.after_dedupe.{ARTIFACT}")),
         Some(86),
         "the resumed install must reach the dedupe of the installed object"
     );
     assert_parent_current_and_no_staging_residue(root.path());
     assert!(artifact_address(root.path()).exists());
+    assert_eq!(staged_artifacts(root.path()), staged);
 
     let receipt = resume_publication(root.path()).unwrap();
     assert_eq!(receipt.generation_uuid, Uuid::from_u128(TARGET));
-    assert_eq!(object_store(root.path()), expected);
+    assert_published(root.path(), &staged, "after the second crash");
 }

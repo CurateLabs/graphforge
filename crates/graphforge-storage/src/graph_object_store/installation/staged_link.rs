@@ -65,7 +65,7 @@ pub(super) fn install_staged_encoded_artifact(
     )? {
         // A second name on the staged inode must be this very object-store
         // entry. Any other alias is not something this install created.
-        if staged_links(source)? == 2 && reused.identity != source.identity() {
+        if staged_links(source)? > 1 && reused.identity != source.identity() {
             return Err(validation(
                 "staged encoded source has an alias that is not its content address",
             ));
@@ -76,7 +76,21 @@ pub(super) fn install_staged_encoded_artifact(
         ));
         reused
     } else {
-        link_staged(lease, source, &bucket, authentication)?
+        match link_staged(lease, source, &bucket, authentication)? {
+            Some(installed) => installed,
+            // The object store is not on the encoder's filesystem (a bind
+            // mount, say), so the inode cannot take a second name there. Say
+            // so by copying through the ordinary install, whose copy,
+            // authentication and barriers are unchanged.
+            None => {
+                return super::install_captured_source_with_lease(
+                    lease,
+                    &super::CapturedSource::Encoded(source),
+                    false,
+                    cancelled,
+                );
+            }
+        }
     };
     source.revalidate()?;
     let InstalledObject { evidence, identity } = installed;
@@ -101,17 +115,15 @@ fn link_staged(
     source: &CapturedEncodedArtifact<'_>,
     bucket: &graphforge_filesystem::StableDirectory,
     authentication: ObjectAuthentication,
-) -> Result<InstalledObject, GfError> {
+) -> Result<Option<InstalledObject>, GfError> {
     let cas = &lease.cas;
     let digest = source.content_sha256();
     let relative = source.relative_path();
     // Linking needs the staged name and the object store on one filesystem.
-    // ADR 0013 puts the whole project on one admitted volume, so a mismatch is
-    // a violated invariant, never a reason to copy.
+    // ADR 0013 puts the project on one admitted volume, so this is the normal
+    // case; `None` reports the exception to the caller instead of failing.
     if source.parent().identity().volume_serial != bucket.identity().volume_serial {
-        return Err(validation(
-            "staged encoded source and the object store are on different filesystems",
-        ));
+        return Ok(None);
     }
     if staged_links(source)? != 1 {
         return Err(validation(
@@ -139,44 +151,54 @@ fn link_staged(
     let destination_name = std::ffi::OsStr::new(&digest[2..]);
     let object_path = graph_object_path(&cas.diagnostic_root, digest)?;
     let mut concurrent_io = ReadIoEvidence::default();
-    let (_file, identity, reused) = crate::durable_commit::link_immutable(
-        &staged,
-        bucket,
-        destination_name,
-        |existing, _identity| {
-            concurrent_io = verify_and_seal_graph_object_counted(
-                existing,
-                digest,
-                source.bytes(),
-                &object_path,
-                &cas.diagnostic_root,
-                authentication,
-            )
-            .map_err(std::io::Error::other)?;
-            Ok(())
-        },
-        |_reused, file| {
-            if let Some(allocation) = &cas.allocation {
-                allocation
-                    .replace_file_at(&object_path, file)
-                    .map_err(std::io::Error::other)?;
-            }
-            construction_failpoint(&format!("cas.install.after_link.{relative}"));
-            returned_error_boundary("install:final-linked").map_err(std::io::Error::other)
-        },
-        |_reused, _file| {
-            returned_error_boundary("install:bucket-synced").map_err(std::io::Error::other)?;
-            construction_failpoint(&format!("cas.install.after_bucket_sync.{relative}"));
-            Ok(())
-        },
-    )
-    .map_err(|error| immutable_commit_error(error, cas))?;
+    let linked = if super::super::cross_device_link_forced() {
+        Err(std::io::Error::from(std::io::ErrorKind::CrossesDevices))
+    } else {
+        crate::durable_commit::link_immutable(
+            &staged,
+            bucket,
+            destination_name,
+            |existing, _identity| {
+                concurrent_io = verify_and_seal_graph_object_counted(
+                    existing,
+                    digest,
+                    source.bytes(),
+                    &object_path,
+                    &cas.diagnostic_root,
+                    authentication,
+                )
+                .map_err(std::io::Error::other)?;
+                Ok(())
+            },
+            |_reused, file| {
+                if let Some(allocation) = &cas.allocation {
+                    allocation
+                        .replace_file_at(&object_path, file)
+                        .map_err(std::io::Error::other)?;
+                }
+                construction_failpoint(&format!("cas.install.after_link.{relative}"));
+                returned_error_boundary("install:final-linked").map_err(std::io::Error::other)
+            },
+            |_reused, _file| {
+                returned_error_boundary("install:bucket-synced").map_err(std::io::Error::other)?;
+                construction_failpoint(&format!("cas.install.after_bucket_sync.{relative}"));
+                Ok(())
+            },
+        )
+    };
+    let (_file, identity, reused) = match linked {
+        Ok(linked) => linked,
+        // The kernel is the authority on whether a link can cross: a mount
+        // can share a device number and still refuse.
+        Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => return Ok(None),
+        Err(error) => return Err(immutable_commit_error(error, cas)),
+    };
     let bytes_hashed = concurrent_io.sha_bytes;
     let checksum_read_bytes = concurrent_io
         .bytes
         .checked_sub(bytes_hashed)
         .ok_or_else(|| validation("CAS SHA read count exceeds native reads"))?;
-    Ok(InstalledObject {
+    Ok(Some(InstalledObject {
         evidence: GraphObjectInstallEvidence {
             // Computed from the exact bytes the encoder wrote.
             content_xxh64: Some(source.checksum()),
@@ -194,5 +216,5 @@ fn link_staged(
             fsync_calls: 2,
         },
         identity,
-    })
+    }))
 }

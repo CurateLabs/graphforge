@@ -36,6 +36,8 @@ const BUFFER_BYTES: usize = GRAPH_OBJECT_IO_BUFFER_BYTES;
 #[cfg(test)]
 thread_local! {
     static RETURNED_ERROR_BOUNDARY: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    #[cfg_attr(windows, allow(dead_code))]
+    static CROSS_DEVICE_LINK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static BEFORE_OBJECT_LINK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
@@ -54,6 +56,34 @@ fn returned_error_boundary(name: &str) -> Result<(), GfError> {
     }
     Ok(())
 }
+
+/// Make every staged-object link fail as if it crossed filesystems.
+#[cfg(test)]
+#[cfg_attr(windows, allow(dead_code))]
+pub(crate) fn force_cross_device_link(on: bool) {
+    CROSS_DEVICE_LINK.with(|forced| forced.set(on));
+}
+
+#[cfg(all(test, unix))]
+fn cross_device_link_forced() -> bool {
+    CROSS_DEVICE_LINK.with(std::cell::Cell::get)
+}
+
+#[cfg(all(not(test), unix))]
+fn cross_device_link_forced() -> bool {
+    false
+}
+
+/// What refuses a same-inode, same-length edit of an encoded payload between
+/// the encoder's write and publication. Windows copies the file and checksums
+/// the copy; unix links it, so the commit boundary's XXH64 admission refuses
+/// it before `CURRENT` can move.
+#[cfg(test)]
+pub(crate) const SAME_INODE_CORRUPTION_REFUSAL: &str = if cfg!(unix) {
+    "graph payload XXH64 checksum does not match its inventory"
+} else {
+    "captured encoded source checksum or length changed during copy"
+};
 
 /// Fail the next install that reaches `boundary` with an injected error.
 #[cfg(test)]
