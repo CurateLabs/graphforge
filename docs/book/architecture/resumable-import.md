@@ -172,27 +172,40 @@ Both construction paths read the source in place, and the read that decodes a
 source is the read that digests it. A custom Parquet `ChunkReader` offers every
 range the decoder asks for, including the footer, to the source's digest as it is
 read. SHA-256 is sequential, so bytes that arrive in file order are hashed at once;
-bytes that arrive early are held (the held `Vec`s coalesce a streamed column chunk)
-until the gap before them is filled. The bulk builder claims a source's tasks in
-file order (`claim_in_order` in `graphforge-storage`), so at most one task per
-worker is in flight and the lead over the hashed prefix is bounded by the workers
-times the largest task, with a 64 MiB floor and a 1 GiB ceiling. A range beyond
-the bound is dropped and read again, and so is anything the decode never asks for
-(the page index of a file that has one); `source_read` reports those as
-`reread_bytes`, and every byte offered as `observed_bytes`. A static split of the
-tasks across workers would start each at a far-apart position and defeat this, and
-`tasks_are_claimed_in_index_order_on_every_pass` fails if the claim order regresses.
-The staged path decodes a source sequentially, so its digest holds at most the row
-group being decoded: the columns of a row group are read side by side, and all but
-the first wait for the one before them.
+bytes that arrive early are held (the held runs coalesce a streamed column chunk)
+until the gap before them is filled. The bulk builder starts a source's tasks in
+file order (`claim_in_order` in `graphforge-storage`), where a static split would
+start each worker at a far-apart position. That keeps the lead over the hashed
+prefix small in the usual case, which `pending_limit` sizes as the workers times
+the largest task, with a 64 MiB floor and a 1 GiB ceiling. It does not bound the
+lead: a slow task holds the prefix back while the others run ahead, and a range
+beyond the bound is dropped and read again. Bytes the decode never asks for (the
+page index of a file that has one) are read once when the digest completes;
+`source_read` reports those as `reread_bytes`, and every byte offered as
+`observed_bytes`. `tasks_are_claimed_in_index_order_on_every_pass` fails if the
+claim order regresses. The staged path decodes a source sequentially, so its digest
+holds at most the row group being decoded: the columns of a row group are read side
+by side, and all but the first wait for the one before them.
 
-The digest therefore names the bytes that were decoded. The first complete pass
-records it in the session manifest and, once every source is staged, in the import
-receipt (`source_provenance`); any later complete read of the same source must
-produce the same digest. It does not detect a rewrite that preserves size,
-modification time and the footer before the first complete read, because there is
-nothing earlier to compare against; the receipt then names the bytes that were
-actually read.
+The identity pin (device, inode, size, modification time) is the change detector;
+the digest is provenance. What the receipt's `sha256` guarantees is the SHA-256 of
+the file content read under that pin: the bytes the decode consumed, plus any range
+the bound dropped or the decode never asked for, read from the file when the digest
+completes. The first complete pass records it in the session manifest and, once
+every source is staged, in the import receipt (`source_provenance`); a later
+complete read of the same source must produce the same digest. A rewrite that
+preserves device, inode, size and modification time is not detected, and the
+digest then describes whatever was read. Two consequences are deliberate:
+
+- The pin is re-checked whenever progress is reused. A resumed staged import opens
+  the source through the pin before it skips the batches already staged, so an
+  edit between a stop and the resume is refused. The batches staged earlier and
+  the digest of the final pass are not tied to each other beyond that pin.
+- An initial bulk build restarts rather than resumes. A sealed construction
+  session is reused only if the digest of every in-place source it was built from
+  is already recorded; otherwise it is discarded and the build runs again, so a
+  stop between pinning the encoded inventory and recording the digests cannot pair
+  one file's graph with another's digest.
 
 ### Sessions an earlier version began
 

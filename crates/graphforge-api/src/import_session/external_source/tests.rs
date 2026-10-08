@@ -962,3 +962,216 @@ fn a_historical_copied_source_ignores_the_original_and_is_removed_by_abort() {
         assert!(!root.join("sources").exists());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Resume, coverage and classification (review of #1923)
+// ---------------------------------------------------------------------------
+
+/// Leave a bulk session where a crash between pinning the encoded inventory and
+/// recording the source digests would: the inventory is pinned, the manifest has
+/// no digest, and the session is closed.
+fn crash_after_inventory_pin(graph: &GraphForge, path: &Path) -> Uuid {
+    let mut session = begin(graph);
+    session.register_parquet(BulkInputKind::Node, path).unwrap();
+    session.manifest.build_route = Some(BuildRoute::Bulk);
+    session.persist_manifest().unwrap();
+    let mut construction = session.open_construction(graph).unwrap();
+    let refusals = crate::import_session::bulk_source::Refusals::default();
+    let digests = crate::import_session::bulk_source::Digests::default();
+    let plan = session
+        .plan_bulk_build(graph, None, &refusals, &digests)
+        .unwrap();
+    construction.build_initial(&plan, None).unwrap();
+    assert_eq!(session.manifest.sources[0].sha256, None);
+    session.session_uuid()
+}
+
+/// A staged session that has durably staged its first batch and then stopped.
+fn stop_after_first_staged_batch(graph: &GraphForge, path: &Path) -> Uuid {
+    let mut session = begin(graph);
+    session.register_parquet(BulkInputKind::Node, path).unwrap();
+    // The first batch is accepted and its progress appended; the process then
+    // stops before the journal is flushed or any digest exists.
+    crate::import_session::journal::inject("completed_before_fsync");
+    assert!(session.validate(graph).is_err());
+    assert!(session.manifest.sources[0].batches_staged >= 1);
+    assert_eq!(session.manifest.sources[0].sha256, None);
+    session.session_uuid()
+}
+
+#[test]
+fn a_normal_edit_between_a_crash_and_resume_is_refused_before_progress_is_reused() {
+    for (route, stop) in [
+        (
+            Route::Bulk,
+            crash_after_inventory_pin as fn(&GraphForge, &Path) -> Uuid,
+        ),
+        (Route::Staged, stop_after_first_staged_batch),
+    ] {
+        for change in &CHANGES[1..] {
+            let (_directory, _project, graph) = fixture_for(route);
+            let source = source();
+            let id = stop(&graph, &source.path);
+            (change.apply)(&source.path);
+            let mut session = graph.resume_import_session(id).unwrap();
+            let staged = session.manifest.sources[0].batches_staged;
+            let error = session.validate(&graph).unwrap_err();
+            assert_refusal(&error, change, &format!("{route:?} resume"));
+            assert_eq!(session.manifest.sources[0].batches_staged, staged);
+            assert_eq!(session.manifest.sources[0].sha256, None);
+        }
+    }
+}
+
+/// Rewrite one label byte keeping device, inode, size and modification time.
+#[cfg(unix)]
+fn graph_label_counts(graph: &GraphForge) -> (u64, u64) {
+    (
+        graph.node_count("Person").unwrap(),
+        graph.node_count("Qerson").unwrap(),
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn a_bulk_inventory_pinned_before_its_digest_is_never_published_with_another_files_digest() {
+    let (_directory, _project, graph) = fixture_for(Route::Bulk);
+    let source = source();
+    let id = crash_after_inventory_pin(&graph, &source.path);
+    rewrite_label_in_place(&source.path);
+
+    let mut session = graph.resume_import_session(id).unwrap();
+    let progress = session.validate(&graph).unwrap();
+    session.commit(&graph, None).unwrap();
+    let recorded = progress.construction.unwrap().source_provenance[0]
+        .sha256
+        .clone()
+        .unwrap();
+    // The digest names the file that was read, and the published graph is the
+    // graph of that same file.
+    assert_eq!(recorded, sha256(&fs::read(&source.path).unwrap()));
+    assert_eq!(
+        graph_label_counts(&graph),
+        (0, NODE_ROWS as u64),
+        "the graph is the one the digest describes"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_bulk_build_whose_digest_is_recorded_reuses_its_inventory_and_keeps_that_digest() {
+    let (_directory, _project, graph) = fixture_for(Route::Bulk);
+    let source = source();
+    let mut session = begin(&graph);
+    session
+        .register_parquet(BulkInputKind::Node, &source.path)
+        .unwrap();
+    session.validate(&graph).unwrap();
+    let recorded = session.manifest.sources[0].sha256.clone().unwrap();
+    let id = session.session_uuid();
+    drop(session);
+
+    // The same pinned file, validated again after a reopen: nothing is decoded
+    // again and the recorded digest stands.
+    let mut session = graph.resume_import_session(id).unwrap();
+    let _region = graphforge_storage::concurrency_attribution::RegionCapture::start("again");
+    session.validate(&graph).unwrap();
+    assert_eq!(
+        session.manifest.sources[0].sha256.as_deref(),
+        Some(recorded.as_str())
+    );
+    session.commit(&graph, None).unwrap();
+    assert_eq!(graph_label_counts(&graph), (NODE_ROWS as u64, 0));
+}
+
+/// A rewrite that keeps device, inode, size and modification time defeats the
+/// pin. It is not detected between a crash and a resume of the staged route: the
+/// receipt names the file's content as read under the pin, which is the whole
+/// guarantee (see `ImportSourceProvenance::sha256`).
+#[cfg(unix)]
+#[test]
+fn a_rewrite_that_preserves_the_whole_pin_is_digested_not_detected_when_staged_work_resumes() {
+    let (_directory, _project, graph) = fixture_for(Route::Staged);
+    let source = source();
+    let id = stop_after_first_staged_batch(&graph, &source.path);
+    rewrite_label_in_place(&source.path);
+    let mut session = graph.resume_import_session(id).unwrap();
+    let progress = session.validate(&graph).unwrap();
+    let provenance = progress.construction.unwrap().source_provenance;
+    assert_eq!(
+        provenance[0].sha256.as_deref(),
+        Some(sha256(&fs::read(&source.path).unwrap()).as_str())
+    );
+}
+
+#[test]
+fn a_range_the_bound_dropped_is_hashed_from_the_file_not_from_what_was_decoded() {
+    let original = (0..(256 << 10))
+        .map(|index: u32| index as u8)
+        .collect::<Vec<u8>>();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("blob");
+    fs::write(&path, &original).unwrap();
+    let identity = fake_source(&path, original.len() as u64);
+    // Room for one 64 KiB range: of the three read ahead, the nearest is kept and
+    // the others are dropped to be read again.
+    let digest = SourceDigest::with_pending_limit(original.len() as u64, 64 << 10);
+    for start in [64 << 10, 128 << 10, 192 << 10] {
+        digest.observe(start as u64, &original[start..start + (64 << 10)]);
+    }
+    digest.observe(0, &original[..64 << 10]);
+    // The file changes after the decode and before the digest completes.
+    let mut rewritten = original.clone();
+    rewritten[200 << 10] ^= 0xff;
+    fs::write(&path, &rewritten).unwrap();
+    let file = File::open(&path).unwrap();
+    let hashed = digest.finish(&identity, &file).unwrap();
+    assert_ne!(hashed, sha256(&original));
+    assert_eq!(hashed, sha256(&rewritten));
+    assert_eq!(digest.reread_bytes(), 128 << 10);
+}
+
+fn truncate_to_half(path: &Path) {
+    let length = fs::metadata(path).unwrap().len();
+    OpenOptions::new()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_len(length / 2)
+        .unwrap();
+}
+
+#[test]
+fn a_truncation_during_the_read_keeps_its_typed_classification() {
+    for route in ROUTES {
+        let (_directory, _project, graph) = fixture_for(route);
+        let source = source();
+        let mut session = begin(&graph);
+        session
+            .register_parquet(BulkInputKind::Node, &source.path)
+            .unwrap();
+        let path = source.path.clone();
+        super::set_pass_hook(&source.path, move |stage, _| {
+            if stage == "opened" {
+                truncate_to_half(&path);
+            }
+        });
+        let error = session.validate(&graph).unwrap_err();
+        super::clear_pass_hook(&source.path);
+        let (code, message) = api_error(&error);
+        assert_eq!(code, ApiErrorCode::IdentityConflict, "{route:?}: {message}");
+        assert!(message.contains("was resized"), "{route:?}: {message}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn capture_refuses_a_symlink_itself_so_a_swap_after_any_precheck_cannot_register_its_target() {
+    let source = source();
+    let link = source.path.with_file_name("link.parquet");
+    std::os::unix::fs::symlink(&source.path, &link).unwrap();
+    assert!(super::ExternalSource::capture(&link).is_err());
+    let directory = source.path.parent().unwrap();
+    assert!(super::ExternalSource::capture(directory).is_err());
+    assert!(super::ExternalSource::capture(&source.path).is_ok());
+}

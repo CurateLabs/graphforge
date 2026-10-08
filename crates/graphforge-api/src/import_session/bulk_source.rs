@@ -517,7 +517,10 @@ impl SourceReader<'_> {
         guard: &File,
         sink: &mut dyn FnMut(RecordBatch) -> Result<(), GfError>,
     ) -> Result<(), GfError> {
-        let reader = self.parquet_reader(input, metadata, rows, first_batch)?;
+        let changed = |error: GfError| in_place.external.reclassify(guard, error);
+        let reader = self
+            .parquet_reader(input, metadata, rows, first_batch)
+            .map_err(changed)?;
         for (offset, batch) in reader.enumerate() {
             #[cfg(test)]
             super::external_source::pass_hook(
@@ -527,7 +530,8 @@ impl SourceReader<'_> {
             );
             // The source can change between any two batches.
             in_place.external.check(guard)?;
-            self.emit(first_batch + offset as u64, batch.map_err(storage)?, sink)?;
+            let batch = batch.map_err(|error| changed(storage(error)))?;
+            self.emit(first_batch + offset as u64, batch, sink)?;
         }
         in_place.external.check(guard)
     }
@@ -732,9 +736,10 @@ pub(super) fn plan<'a>(
                 // The footer is read once through the digest, which keeps it.
                 let digest = SourceDigest::new(external.size);
                 let file = external.open_observed(&digest)?;
+                let guard = file.try_clone().map_err(storage)?;
                 let input = ObservedFile::new(file, digest.clone())?;
                 let metadata = ArrowReaderMetadata::load(&input, ArrowReaderOptions::new())
-                    .map_err(storage)?;
+                    .map_err(|error| external.reclassify(&guard, storage(error)))?;
                 digest.set_pending_limit(external_source::pending_limit(
                     std::thread::available_parallelism().map_or(1, usize::from),
                     largest_task_bytes(&metadata, batch_rows),

@@ -4,9 +4,10 @@
 //! file identity, size, modification time and Parquet footer. Nothing is copied
 //! into the session. Every read re-establishes that identity before and during
 //! the pass, and the whole-file SHA-256 is folded from the bytes the build's own
-//! read pass decodes, so a source that is deleted, replaced, resized, rewritten
-//! or touched is refused rather than read, and the digest names the bytes that
-//! were decoded.
+//! read pass decodes, so a source that is deleted, replaced, resized or touched
+//! is refused rather than read. The pin (device, inode, size, modification time)
+//! is the change detector; the digest is provenance: the content read under it.
+//! A rewrite that preserves the whole pin is not detected.
 
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
@@ -41,11 +42,12 @@ const GAP_READ_BYTES: u64 = 1 << 20;
 /// start of every page twice.
 pub(super) const PAGE_HEADER_BUFFER_BYTES: usize = 1 << 10;
 
-/// How many bytes ahead of the hashed prefix a source's decode can be.
+/// How many bytes ahead of the hashed prefix a source's decode is expected to be.
 ///
-/// Tasks are claimed in file order, so at most one worker count of them is in
-/// flight and each reads at most its own span of the file: the lead is bounded by
-/// the workers times the largest task.
+/// Tasks are claimed in file order, so in the usual case the tasks in flight are
+/// the lowest unfinished ones and each reads at most its own span of the file: the
+/// lead is about the workers times the largest task. A straggler can exceed that;
+/// the bound is then enforced by dropping ranges, not by the claim order.
 pub(super) fn pending_limit(workers: usize, largest_task_bytes: u64) -> usize {
     let lead = largest_task_bytes.saturating_mul(workers as u64);
     usize::try_from(lead.clamp(PENDING_FLOOR_BYTES, PENDING_CEILING_BYTES)).unwrap_or(usize::MAX)
@@ -136,10 +138,25 @@ fn read_exact_at(file: &File, offset: u64, bytes: &mut [u8]) -> std::io::Result<
 /// Length and SHA-256 of the Parquet footer, refusing a file that is not
 /// plain (unencrypted) Parquet. Every byte read is also offered to `digest`.
 fn footer_identity(
+    path: &Path,
     file: &File,
     size: u64,
     digest: Option<&SourceDigest>,
 ) -> Result<(u64, String), GfError> {
+    // A file that ends early has been resized, whatever the read says.
+    let read = |offset: u64, bytes: &mut [u8]| {
+        read_exact_at(file, offset, bytes).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                source_changed(
+                    path,
+                    SourceChange::Resized,
+                    "the file ended before its registered size",
+                )
+            } else {
+                storage(error)
+            }
+        })
+    };
     if size < 2 * PARQUET_MAGIC.len() as u64 + 4 {
         return Err(validation(
             "Parquet source is too short to be a Parquet file",
@@ -151,10 +168,10 @@ fn footer_identity(
         }
     };
     let mut head = [0_u8; 4];
-    read_exact_at(file, 0, &mut head).map_err(storage)?;
+    read(0, &mut head)?;
     observe(0, &head);
     let mut trailer = [0_u8; PARQUET_TRAILER_LEN];
-    read_exact_at(file, size - PARQUET_TRAILER, &mut trailer).map_err(storage)?;
+    read(size - PARQUET_TRAILER, &mut trailer)?;
     observe(size - PARQUET_TRAILER, &trailer);
     if &head != PARQUET_MAGIC || &trailer[4..] != PARQUET_MAGIC {
         return Err(validation(
@@ -169,21 +186,39 @@ fn footer_identity(
     }
     let mut footer = vec![0_u8; usize::try_from(footer_len).map_err(storage)?];
     let footer_start = size - PARQUET_TRAILER - footer_len;
-    read_exact_at(file, footer_start, &mut footer).map_err(storage)?;
+    read(footer_start, &mut footer)?;
     observe(footer_start, &footer);
     Ok((footer_len, hex(&Sha256::digest(&footer))))
 }
 
 impl ExternalSource {
-    /// Record the identity of `source`, which registration has already checked is
-    /// a regular, non-symlink file under a path without `..`.
+    /// Record the identity of `source`, which must be a regular file reached
+    /// without `..` and not a symlink.
+    ///
+    /// The file is opened once, without following links, and everything recorded
+    /// comes from that handle: there is no earlier check of the name for a swap
+    /// to slip between. Only the directory is canonicalized, so a link in the
+    /// directory path resolves as usual while a link as the file itself is
+    /// refused.
     pub(super) fn capture(source: &Path) -> Result<Self, GfError> {
-        let path = fs::canonicalize(source).map_err(storage)?;
-        let file = open_named(&path)?;
+        let directory = source
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let name = source
+            .file_name()
+            .ok_or_else(|| validation("Parquet source must have a file name"))?;
+        let path = fs::canonicalize(directory).map_err(storage)?.join(name);
+        let file = open_named(&path).map_err(|error| match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                validation("Parquet source must be a regular non-symlink file")
+            }
+            _ => error,
+        })?;
         let metadata = file.metadata().map_err(storage)?;
         let identity = graphforge_filesystem::file_identity(&file).map_err(storage)?;
         let (mtime_secs, mtime_nanos) = modified(&metadata)?;
-        let (footer_len, footer_sha256) = footer_identity(&file, metadata.len(), None)?;
+        let (footer_len, footer_sha256) = footer_identity(&path, &file, metadata.len(), None)?;
         Ok(Self {
             path,
             volume_serial: identity.volume_serial,
@@ -204,7 +239,8 @@ impl ExternalSource {
     /// its footer, offering the footer bytes it reads to `digest`.
     pub(super) fn open_observed(&self, digest: &SourceDigest) -> Result<File, GfError> {
         let file = self.reopen()?;
-        let (footer_len, footer_sha256) = footer_identity(&file, self.size, Some(digest))?;
+        let (footer_len, footer_sha256) =
+            footer_identity(&self.path, &file, self.size, Some(digest))?;
         if footer_len != self.footer_len || footer_sha256 != self.footer_sha256 {
             return Err(source_changed(
                 &self.path,
@@ -224,6 +260,12 @@ impl ExternalSource {
         };
         self.check(&file)?;
         Ok(file)
+    }
+
+    /// The typed change a failed read was caused by, if the file no longer
+    /// matches its registration; otherwise `error` unchanged.
+    pub(super) fn reclassify(&self, file: &File, error: GfError) -> GfError {
+        self.check(file).err().unwrap_or(error)
     }
 
     fn classify_open_failure(&self, error: GfError) -> GfError {
@@ -294,12 +336,20 @@ fn open_named(path: &Path) -> Result<File, GfError> {
 /// arrive in order are hashed as they are read; bytes that arrive early wait
 /// (bounded) for the gap before them; whatever the decode never asked for, such
 /// as the page index, is read from the file at the end. The digest therefore
-/// costs no read pass of its own beyond those gaps, and it names the bytes the
-/// decode consumed.
+/// costs no read pass of its own beyond those gaps.
 ///
-/// Workers claim a source's tasks in file order, so the lead is bounded by one
-/// task per worker (see [`pending_limit`]); ranges beyond the bound are dropped
-/// and read again at the end rather than held.
+/// What it covers, precisely: the SHA-256 of the file as read under the identity
+/// pin. Bytes the decode read are hashed as it read them (the first read of a byte
+/// wins; a repeat is ignored). Bytes the decode did not read, or whose held range
+/// the bound dropped, are read from the file when the digest completes. So the
+/// digest equals the decoded bytes only while nothing was dropped and the file was
+/// not rewritten under the pin; `reread_bytes` reports how much came from the
+/// completion read.
+///
+/// Workers claim a source's tasks in file order, which keeps the lead over the
+/// hashed prefix small in the usual case (see [`pending_limit`]). It does not
+/// bound it: one slow task holds the prefix back while the others advance, and
+/// ranges beyond the bound are dropped and read again at the end rather than held.
 #[derive(Clone)]
 pub(super) struct SourceDigest(Arc<Mutex<DigestState>>);
 

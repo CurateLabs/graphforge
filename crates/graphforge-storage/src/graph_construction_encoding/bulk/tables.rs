@@ -116,13 +116,14 @@ impl Tasks {
 
 /// Run `work` on every job on the rayon pool, handing jobs out in index order.
 ///
-/// A worker that finishes takes the lowest job nobody has claimed, so at any
-/// moment the jobs in flight are the lowest unfinished ones and the reads of a
-/// source start in file order, at most one worker count apart. A static split
-/// (`par_iter`) starts a worker at each of several far-apart positions instead,
-/// and a consumer that needs the bytes in order, such as the whole-file digest
-/// of a registered source (#1898), would have to hold the bytes read ahead of the
-/// gap or read them again. Results come back in job order.
+/// A worker that finishes takes the lowest job nobody has claimed, so jobs *start*
+/// in index order: the reads of a source begin in file order rather than at
+/// several far-apart positions, as a static split (`par_iter`) would have them. It
+/// does not keep the jobs in flight close together, since a slow job leaves the
+/// others free to run ahead of it. A consumer that needs the bytes in order, such
+/// as the whole-file digest of a registered source (#1898), is therefore helped in
+/// the usual case and must still bound what it holds. Results come back in job
+/// order.
 pub(super) fn claim_in_order<J: Send, R: Send>(
     jobs: Vec<J>,
     work: impl Fn(J) -> Result<R, GfError> + Sync + Send,
