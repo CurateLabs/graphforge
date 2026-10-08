@@ -602,34 +602,17 @@ fn authenticate_encoded_artifact_identities(
             .storage_active_identity_allocated_bytes
             .get(&key)
             .is_none_or(|allocated| *allocated != usage.allocated_bytes)
-            || !links_are_expected(project, expected, &file, identity)?
+            || !crate::graph_construction_encoding::encoded_links_expected(
+                project,
+                &expected.sha256,
+                &file,
+            )?
             || usage.logical_bytes != expected.bytes
         {
             return Err(storage("supersession encoded artifact identity changed"));
         }
     }
     Ok(())
-}
-
-/// An encoded artifact has one name. Once publication links it into the object
-/// store (unix) it has a second, which must be exactly its content address, so
-/// a publication that stopped after installing can be retried; reader
-/// workspaces hydrated from that address add more. Extra names with no content
-/// address on this inode are refused.
-fn links_are_expected(
-    project: &std::path::Path,
-    expected: &crate::graph_construction_encoding::ConstructionEncodedArtifact,
-    file: &std::fs::File,
-    identity: graphforge_filesystem::FileIdentity,
-) -> Result<bool, GfError> {
-    match file_link_count(file).map_err(storage)? {
-        1 => Ok(true),
-        2.. if cfg!(unix) => {
-            let address = crate::graph_object_path(project, &expected.sha256)?;
-            Ok(graphforge_filesystem::path_identity(&address).ok() == Some(identity))
-        }
-        _ => Ok(false),
-    }
 }
 
 /// Identity, link count and length of a retained payload that this session

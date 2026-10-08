@@ -110,6 +110,11 @@ pub struct GraphObjectPublicationLease {
     lease_identity: graphforge_filesystem::FileIdentity,
     file: Option<File>,
     installed_objects: std::sync::Mutex<BTreeMap<String, CapturedGraphObject>>,
+    /// Objects this lease gave a content address by linking a staged file. If
+    /// commit-boundary admission refuses one, it must not stay at an address
+    /// its bytes do not hash to.
+    #[cfg(unix)]
+    linked_objects: std::sync::Mutex<BTreeMap<String, graphforge_filesystem::FileIdentity>>,
     // Only explicit adjacency rebuilding mints this capability. It is consumed
     // by compact replay for files under the adjacency index namespace only.
     pub(crate) repair_corrupt_adjacency: bool,
@@ -574,8 +579,39 @@ impl GraphObjectPublicationLease {
         {
             return Err(validation("captured graph object identity changed"));
         }
-        admit_checksum_file(file, entry, &self.cas.diagnostic_root)?;
+        let admitted = admit_checksum_file(file, entry, &self.cas.diagnostic_root);
+        self.retire_if_refused(&entry.content_sha256, capture.identity, admitted)?;
         Ok(true)
+    }
+
+    /// A refusal means the bytes at this address are not the bytes it names.
+    /// Leave no object there that this lease linked from a staged file.
+    #[cfg(unix)]
+    fn retire_if_refused(
+        &self,
+        digest: &str,
+        identity: graphforge_filesystem::FileIdentity,
+        admitted: Result<(), GfError>,
+    ) -> Result<(), GfError> {
+        if let Err(GfError::Validation(message)) = &admitted
+            && let Err(retire) = installation::retire_unadmitted_link(self, digest, identity)
+        {
+            return Err(validation(format!(
+                "{message}; retiring the mis-addressed object also failed: {retire}"
+            )));
+        }
+        admitted
+    }
+
+    #[cfg(not(unix))]
+    #[allow(clippy::unused_self)]
+    fn retire_if_refused(
+        &self,
+        _digest: &str,
+        _identity: graphforge_filesystem::FileIdentity,
+        admitted: Result<(), GfError>,
+    ) -> Result<(), GfError> {
+        admitted
     }
 
     pub(crate) fn revalidate_for_root(&self, root: &Path) -> Result<(), GfError> {
@@ -649,6 +685,8 @@ pub fn begin_graph_object_publication(root: &Path) -> Result<GraphObjectPublicat
         lease_identity,
         file: Some(file),
         installed_objects: std::sync::Mutex::new(BTreeMap::new()),
+        #[cfg(unix)]
+        linked_objects: std::sync::Mutex::new(BTreeMap::new()),
         repair_corrupt_adjacency: false,
     })
 }
@@ -1112,11 +1150,16 @@ pub(crate) fn admit_graph_object_with_lease(
     entry: &crate::GraphFileEntry,
 ) -> Result<(), GfError> {
     lease.cas.revalidate_named()?;
-    admit_checksum_file(
-        lease.cas.open_digest(&entry.content_sha256)?,
-        entry,
-        &lease.cas.diagnostic_root,
-    )
+    let file = lease.cas.open_digest(&entry.content_sha256)?;
+    let identity = graphforge_filesystem::file_identity(&file).map_err(|error| {
+        storage(
+            "identify graph object for admission",
+            &lease.cas.diagnostic_root,
+            error,
+        )
+    })?;
+    let admitted = admit_checksum_file(file, entry, &lease.cas.diagnostic_root);
+    lease.retire_if_refused(&entry.content_sha256, identity, admitted)
 }
 
 fn admit_checksum_file(

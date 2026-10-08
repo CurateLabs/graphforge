@@ -120,7 +120,11 @@ impl CapturedEncodedArtifact<'_> {
             || metadata.len() != self.bytes()
             || graphforge_filesystem::file_identity(&self.file).map_err(storage)? != self.identity
             || graphforge_filesystem::file_identity(&named).map_err(storage)? != self.identity
-            || !crate::graph_construction_encoding::staged_links_admitted(&self.file)?
+            || !crate::graph_construction_encoding::staged_links_admitted(
+                self.root.path(),
+                self.artifact.sha256.as_str(),
+                &self.file,
+            )?
             || graphforge_filesystem::file_space_usage(&self.file)
                 .map_err(storage)?
                 .allocated_bytes

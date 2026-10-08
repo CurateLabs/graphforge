@@ -11,14 +11,17 @@ const TARGET: u128 = 9_471;
 const TRANSACTION: u128 = 9_472;
 
 struct Staged {
-    root: TempDir,
+    root: std::rc::Rc<TempDir>,
     session: GraphConstructionSession,
     encoded: GraphConstructionEncoding,
     graph: StableDirectory,
 }
 
 fn staged(operation: u128) -> Staged {
-    let root = TempDir::new().unwrap();
+    staged_in(std::rc::Rc::new(TempDir::new().unwrap()), operation)
+}
+
+fn staged_in(root: std::rc::Rc<TempDir>, operation: u128) -> Staged {
     let mut session = open(&root, operation);
     session
         .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 4))
@@ -233,6 +236,11 @@ fn identical_existing_object_is_reused_and_the_staged_file_is_not_aliased() {
     assert!(evidence.reused_existing);
     assert_eq!(evidence.bytes_installed, 0);
     assert_eq!(evidence.write_bytes, 0);
+    // ADR 0013: the reused dirent gets its namespace barrier here, because a
+    // crashed earlier attempt may have linked it without one.
+    assert_eq!(evidence.file_fsync_calls, 0);
+    assert_eq!(evidence.directory_fsync_calls, 1);
+    assert_eq!(evidence.fsync_calls, 1);
     // The existing object is checked in full against the address: the lease
     // holds no capture for an object it did not install.
     assert_eq!(evidence.bytes_hashed, source.bytes());
@@ -244,11 +252,11 @@ fn identical_existing_object_is_reused_and_the_staged_file_is_not_aliased() {
     assert_eq!(std::fs::read(staged.staged_path()).unwrap(), bytes);
 }
 
-/// Dedupe never trusts the address: a same-length corrupt object and a
-/// wrong-length object are both refused, left in place, and the staged file
-/// is not aliased to either.
+/// Dedupe never trusts the address. An existing object that is not the bytes
+/// its address names, whether the same length or not, is replaced by the
+/// correct install; it is never permanent, and the replacement keeps `CURRENT`.
 #[test]
-fn corrupt_existing_object_is_refused_and_the_staged_file_is_left_alone() {
+fn mis_addressed_existing_object_is_replaced_by_the_correct_install() {
     for same_length in [true, false] {
         let staged = staged(15_005);
         let inventory = staged.inventory();
@@ -267,13 +275,14 @@ fn corrupt_existing_object_is_refused_and_the_staged_file_is_left_alone() {
         );
         let current = staged.current();
         let lease = crate::begin_graph_object_publication(staged.root.path()).unwrap();
-        assert!(
-            install(&lease, &source).is_err(),
-            "same_length={same_length}"
-        );
-        assert_eq!(std::fs::read(staged.object_path()).unwrap(), corrupt);
-        assert_eq!(std::fs::read(staged.staged_path()).unwrap(), bytes);
-        assert_eq!(std::fs::metadata(staged.staged_path()).unwrap().nlink(), 1);
+        let evidence = install(&lease, &source).unwrap();
+        assert!(!evidence.reused_existing, "same_length={same_length}");
+        assert_eq!(evidence.bytes_installed, source.bytes());
+        // One barrier for the removal of the bad entry, one for the new one.
+        assert_eq!(evidence.directory_fsync_calls, 2);
+        assert_eq!(evidence.fsync_calls, 3);
+        assert_eq!(std::fs::read(staged.object_path()).unwrap(), bytes);
+        object_store(staged.root.path());
         assert_eq!(staged.current(), current);
     }
 }
@@ -391,6 +400,13 @@ fn edit_in_place(path: &Path) {
     std::fs::write(path, &edited).unwrap();
 }
 
+fn write_in_place(path: &Path, bytes: &[u8]) {
+    let mut permissions = std::fs::metadata(path).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o600);
+    std::fs::set_permissions(path, permissions).unwrap();
+    std::fs::write(path, bytes).unwrap();
+}
+
 fn file_entry(source: &CapturedEncodedArtifact<'_>) -> crate::GraphFileEntry {
     crate::GraphFileEntry {
         content_xxh64: source.checksum(),
@@ -402,32 +418,47 @@ fn file_entry(source: &CapturedEncodedArtifact<'_>) -> crate::GraphFileEntry {
 }
 
 /// The install no longer reads the file back, so a same-length edit of the
-/// staged file between the encoder's write and publication is not caught at
-/// install. The first read of the installed object refuses it, by exact length
-/// and XXH64 (ADR 0049), and by SHA-256 where the address is authenticated.
+/// staged file between the encoder's write and publication is linked at its
+/// claimed address. The first read refuses it by exact length and XXH64
+/// (ADR 0049). The commit boundary refuses it too, and then retires the object
+/// this lease linked: no object stays at an address its bytes do not hash to,
+/// and a later correct install of the same digest succeeds.
 #[test]
-fn edited_staged_file_is_refused_on_first_read_of_the_installed_object() {
+fn edited_staged_file_is_refused_at_admission_and_leaves_no_mis_addressed_object() {
     let staged = staged(15_010);
     let inventory = staged.inventory();
     let source = inventory.open(Path::new(ARTIFACT)).unwrap();
+    let good = std::fs::read(staged.staged_path()).unwrap();
     edit_in_place(&staged.staged_path());
     let lease = crate::begin_graph_object_publication(staged.root.path()).unwrap();
     install(&lease, &source).unwrap();
-    drop(lease);
     assert!(staged.object_path().exists());
+    let entry = file_entry(&source);
     let error =
-        crate::graph_object_store::admit_graph_object(staged.root.path(), &file_entry(&source))
-            .unwrap_err();
+        crate::graph_object_store::admit_graph_object(staged.root.path(), &entry).unwrap_err();
+    assert!(error.to_string().contains("checksum"), "{error}");
+
+    let error =
+        crate::graph_object_store::admit_graph_object_with_lease(&lease, &entry).unwrap_err();
     assert!(error.to_string().contains("checksum"), "{error}");
     assert!(
-        crate::read_graph_object(staged.root.path(), source.content_sha256(), source.bytes())
-            .is_err()
+        !staged.object_path().exists(),
+        "a refused object must not stay at its claimed address"
     );
+    object_store(staged.root.path());
+
+    // The encoder's file is correct again (a rerun re-encodes it); installing
+    // the same digest now succeeds and admits.
+    write_in_place(&staged.staged_path(), &good);
+    install(&lease, &source).unwrap();
+    crate::graph_object_store::admit_graph_object_with_lease(&lease, &entry).unwrap();
+    assert_eq!(std::fs::read(staged.object_path()).unwrap(), good);
+    object_store(staged.root.path());
 }
 
 /// The same edit through a whole publication: the commit boundary admits every
 /// installed object by XXH64 before `CURRENT` can move, so the edit leaves the
-/// prior generation intact.
+/// prior generation intact and no object at a wrong address.
 #[test]
 fn edited_staged_file_fails_publication_and_preserves_current() {
     let mut staged = staged(15_011);
@@ -449,6 +480,65 @@ fn edited_staged_file_fails_publication_and_preserves_current() {
             .generation_uuid(),
         Uuid::from_u128(TARGET)
     );
+    assert!(!staged.object_path().exists());
+    object_store(staged.root.path());
+}
+
+/// A crash between the link and admission leaves the edited object at its
+/// address with nothing to unlink it. A later correct publication of the same
+/// digest (a fresh encode of the same input, so another inode) replaces it
+/// instead of failing on it forever.
+#[test]
+fn object_left_mis_addressed_by_a_crash_is_replaced_by_a_later_correct_publication() {
+    let a = staged(15_021);
+    // The same project encodes the same input again in a second session.
+    let b = staged_in(std::rc::Rc::clone(&a.root), 15_022);
+    // Two encodes of one input agree on at least one non-trivial artifact.
+    let path = a
+        .encoded
+        .artifacts
+        .iter()
+        .find(|artifact| {
+            artifact.bytes > 64
+                && b.encoded
+                    .artifacts
+                    .iter()
+                    .any(|other| other.path == artifact.path && other.sha256 == artifact.sha256)
+        })
+        .map(|artifact| artifact.path.clone())
+        .expect("two encodes of one input share an artifact");
+    let digest = a
+        .encoded
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.path == path)
+        .unwrap()
+        .sha256
+        .clone();
+    let address = crate::graph_object_path(a.root.path(), &digest).unwrap();
+    let good = std::fs::read(b.graph.path().join(&path)).unwrap();
+
+    // A's staged file is edited and linked; the process "crashes" before
+    // admission, so nothing retires the object.
+    let inventory_a = a.inventory();
+    let source_a = inventory_a.open(Path::new(&path)).unwrap();
+    edit_in_place(&a.graph.path().join(&path));
+    let lease = crate::begin_graph_object_publication(a.root.path()).unwrap();
+    install(&lease, &source_a).unwrap();
+    drop(lease);
+    assert_ne!(sha256_hex(&std::fs::read(&address).unwrap()), digest);
+
+    // The correct bytes arrive on another inode (B is on the same filesystem).
+    let inventory_b = b.inventory();
+    let source_b = inventory_b.open(Path::new(&path)).unwrap();
+    let current = a.current();
+    let lease = crate::begin_graph_object_publication(a.root.path()).unwrap();
+    let evidence = install(&lease, &source_b).unwrap();
+    assert!(!evidence.reused_existing);
+    assert_eq!(std::fs::read(&address).unwrap(), good);
+    assert_eq!(sha256_hex(&good), digest);
+    object_store(a.root.path());
+    assert_eq!(a.current(), current);
 }
 
 /// The object store is not on the encoder's filesystem: the install says so by
@@ -561,17 +651,15 @@ fn reopening_and_publishing_after_install_leaves_installed_objects_untouched() {
 }
 
 /// A second name on the staged inode that is not the content address is
-/// refused: it is not something this install created.
+/// refused when the source is captured: it is not something an install made.
 #[test]
 fn foreign_alias_of_the_staged_file_is_refused() {
     let staged = staged(15_009);
     let alias = staged.root.path().join("foreign-alias");
     std::fs::hard_link(staged.staged_path(), &alias).unwrap();
     let inventory = staged.inventory();
-    let source = inventory.open(Path::new(ARTIFACT)).unwrap();
-    let lease = crate::begin_graph_object_publication(staged.root.path()).unwrap();
-    let error = install(&lease, &source).unwrap_err();
-    assert!(error.to_string().contains("alias"), "{error}");
+    let error = inventory.open(Path::new(ARTIFACT)).err().unwrap();
+    assert!(error.to_string().contains("identity"), "{error}");
     assert!(!staged.object_path().exists());
     assert_eq!(std::fs::metadata(&alias).unwrap().nlink(), 2);
 }

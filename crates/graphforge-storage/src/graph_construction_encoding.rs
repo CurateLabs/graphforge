@@ -69,7 +69,8 @@ pub(crate) use bulk::{discard_scratch, encode_bulk};
 #[cfg(test)]
 pub(crate) use inventory::authenticate_inventory_payloads;
 pub(crate) use inventory::{
-    authenticate_inventory, authenticate_inventory_control, staged_links_admitted,
+    authenticate_inventory, authenticate_inventory_control, encoded_links_expected,
+    staged_links_admitted,
 };
 #[cfg(test)]
 pub(crate) use inventory_bound::InventoryBoundOverride;

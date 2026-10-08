@@ -1598,5 +1598,7 @@ fn seal_graph_object(file: &File, object_path: &Path, diagnostic: &Path) -> Resu
 mod repair_tests;
 #[cfg(unix)]
 mod staged_link;
+#[cfg(unix)]
+pub(super) use staged_link::retire_unadmitted_link;
 #[cfg(test)]
 mod tests;
