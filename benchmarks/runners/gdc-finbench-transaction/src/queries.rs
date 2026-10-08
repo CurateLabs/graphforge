@@ -30,8 +30,8 @@
 //! `graphforge_bench.gdc_finbench_transaction_reference` module, run at SF1
 //! (decision on #952). Where GPStore, an LDBC reference implementation, reads
 //! the specification differently, `reference_reading` records that for
-//! information only; `workarounds` names the GraphForge defect
-//! (#1887) or gap (#1888) behind any departure from the most direct Cypher.
+//! information only; `workarounds` names the GraphForge gap (#1888) or the declared
+//! variance behind any departure from the most direct Cypher.
 
 use crate::{Operation, SuiteError, ValidationMode};
 use graphforge_api::IrLiteral;
@@ -253,15 +253,13 @@ const fn truncation(truncated_steps: &'static [&'static str]) -> Option<Truncati
 }
 
 /// Truncation and path rules compare `[id, id, timestamp]` keys, not edges.
-const W_EDGE_KEYS: &str = "edges are identified by [endpoint id, timestamp] keys because \
-`rel IN list` is always false (#1887 D12) and startNode/endNode/id are unsupported (#1888)";
+const W_EDGE_KEYS: &str = "edges are identified by [endpoint id, timestamp] keys because the \
+declared tie-break variance keeps or drops edges sharing both together, which an edge \
+identity would not, and startNode/endNode/id are unsupported for path hops (#1888)";
 /// Path hop rules use a list comprehension in a second `WITH`.
 const W_HOP_LIST: &str = "hop rules are a list comprehension over id and timestamp lists in a \
 separate WITH because ALL(i IN range(...)) over path relationships, a path-node comprehension \
 with WHERE in the same WITH, and reduce() fail or are unsupported (#1888)";
-/// Empty sums are coalesced to zero.
-const W_EMPTY_SUM: &str = "sums over possibly empty matches are coalesced to 0.0 because sum() \
-over no rows returns null, not 0 (#1887 D13)";
 /// Optional truncated steps aggregate admitted rows.
 const W_OPTIONAL_WHERE: &str = "truncated optional steps keep every OPTIONAL MATCH row and \
 aggregate only CASE-admitted ones because OPTIONAL MATCH ... WHERE cannot reference a WITH \
@@ -414,7 +412,7 @@ const TCR7: &str = concat!(
     "AND $startTime < edge1.timestamp AND edge1.timestamp < $endTime ",
     "AND edge1.amount > $threshold) AS admitted ",
     "WITH mid, keptOut, count(DISTINCT CASE WHEN admitted THEN src.id END) AS numSrc, ",
-    "coalesce(sum(CASE WHEN admitted THEN edge1.amount END), 0.0) AS sumIn ",
+    "sum(CASE WHEN admitted THEN edge1.amount END) AS sumIn ",
     "OPTIONAL MATCH (mid)-[edge2:transfer]->(dst:Account) ",
     "WITH numSrc, sumIn, dst, edge2, ([dst.id, edge2.timestamp] IN keptOut ",
     "AND $startTime < edge2.timestamp AND edge2.timestamp < $endTime ",
@@ -433,7 +431,7 @@ const TCR8: &str = concat!(
     "WITH DISTINCT loan, v ",
     "OPTIONAL MATCH (v)<-[i:transfer]-(:Account) ",
     "WHERE $startTime < i.timestamp AND i.timestamp < $endTime ",
-    "WITH loan, v, coalesce(sum(i.amount), 0.0) AS upstream ",
+    "WITH loan, v, sum(i.amount) AS upstream ",
     "MATCH (v)-[e]->(w:Account) WHERE type(e) IN ['transfer', 'withdraw'] ",
     "WITH loan, v, upstream, e, w ORDER BY e.timestamp DESC, w.id ASC ",
     "WITH loan, v, upstream, collect([w.id, e.timestamp])[0..$truncationLimit] AS kept ",
@@ -472,7 +470,7 @@ const TCR9: &str = concat!(
     "OPTIONAL MATCH (mid)<-[edge1:deposit]-(:Loan) ",
     "WHERE edge1.amount > $threshold ",
     "AND $startTime < edge1.timestamp AND edge1.timestamp < $endTime ",
-    "WITH mid, keptIn, keptOut, coalesce(sum(edge1.amount), 0.0) AS sum1 ",
+    "WITH mid, keptIn, keptOut, sum(edge1.amount) AS sum1 ",
     "OPTIONAL MATCH (mid)-[edge2:repay]->(:Loan) ",
     "WHERE edge2.amount > $threshold ",
     "AND $startTime < edge2.timestamp AND edge2.timestamp < $endTime ",
@@ -482,7 +480,7 @@ const TCR9: &str = concat!(
     "AND edge3.amount > $threshold ",
     "AND $startTime < edge3.timestamp AND edge3.timestamp < $endTime) AS admitted ",
     "WITH mid, keptOut, sum1, numEdge2, sum2, ",
-    "coalesce(sum(CASE WHEN admitted THEN edge3.amount END), 0.0) AS sum3 ",
+    "sum(CASE WHEN admitted THEN edge3.amount END) AS sum3 ",
     "OPTIONAL MATCH (mid)-[edge4:transfer]->(down:Account) ",
     "WITH sum1, numEdge2, sum2, sum3, edge4, ([down.id, edge4.timestamp] IN keptOut ",
     "AND edge4.amount > $threshold ",
@@ -514,7 +512,7 @@ const TCR11: &str = concat!(
     "WITH DISTINCT reachedId ",
     "MATCH (:Person {id: reachedId})-[:apply]->(loan:Loan) ",
     "WITH DISTINCT loan ",
-    "RETURN round(coalesce(sum(loan.loanAmount), 0.0) * 1000) / 1000 AS sumLoanAmount, ",
+    "RETURN round(sum(loan.loanAmount) * 1000) / 1000 AS sumLoanAmount, ",
     "count(loan) AS numLoans"
 );
 
@@ -538,11 +536,11 @@ const TSR2: &str = concat!(
     "MATCH (account:Account {id: $id}) ",
     "OPTIONAL MATCH (account)-[edge1:transfer]->(:Account) ",
     "WHERE $startTime < edge1.timestamp AND edge1.timestamp < $endTime ",
-    "WITH account, coalesce(sum(edge1.amount), 0.0) AS sum1, ",
+    "WITH account, sum(edge1.amount) AS sum1, ",
     "coalesce(max(edge1.amount), -1.0) AS max1, count(edge1) AS numEdge1 ",
     "OPTIONAL MATCH (account)<-[edge2:transfer]-(:Account) ",
     "WHERE $startTime < edge2.timestamp AND edge2.timestamp < $endTime ",
-    "WITH sum1, max1, numEdge1, coalesce(sum(edge2.amount), 0.0) AS sum2, ",
+    "WITH sum1, max1, numEdge1, sum(edge2.amount) AS sum2, ",
     "coalesce(max(edge2.amount), -1.0) AS max2, count(edge2) AS numEdge2 ",
     "RETURN round(sum1 * 1000) / 1000 AS sumEdge1Amount, ",
     "round(max1 * 1000) / 1000 AS maxEdge1Amount, numEdge1, ",
@@ -753,7 +751,7 @@ pub static QUERIES: &[QueryDefinition] = &[
         semantics: "Distinct senders and receivers of transfers above the threshold in the window, \
                     and the transfer-in over transfer-out amount ratio, -1 without a transfer-out.",
         reference_reading: None,
-        workarounds: &[W_EDGE_KEYS, W_OPTIONAL_WHERE, W_EMPTY_SUM],
+        workarounds: &[W_EDGE_KEYS, W_OPTIONAL_WHERE],
     },
     QueryDefinition {
         operation: Operation::Tcr8,
@@ -788,7 +786,7 @@ pub static QUERIES: &[QueryDefinition] = &[
              transfer-ins (the upstream GPStore also uses). The spec does not define inflow \
              further.",
         ),
-        workarounds: &[W_EDGE_KEYS, W_HOP_LIST, W_MULTI_TYPE, W_EMPTY_SUM],
+        workarounds: &[W_EDGE_KEYS, W_HOP_LIST, W_MULTI_TYPE],
     },
     QueryDefinition {
         operation: Operation::Tcr9,
@@ -819,7 +817,7 @@ pub static QUERIES: &[QueryDefinition] = &[
              this reference follows the spec, which does not name the truncated steps, by \
              truncating only the transfer expansions (edge3, edge4), as Galaxybase does.",
         ),
-        workarounds: &[W_EDGE_KEYS, W_OPTIONAL_WHERE, W_EMPTY_SUM],
+        workarounds: &[W_EDGE_KEYS, W_OPTIONAL_WHERE],
     },
     QueryDefinition {
         operation: Operation::Tcr10,
@@ -855,7 +853,7 @@ pub static QUERIES: &[QueryDefinition] = &[
              983 SF1 bindings; that is the reference's only disagreement with a third-party \
              result.",
         ),
-        workarounds: &[W_EDGE_KEYS, W_HOP_LIST, W_EMPTY_SUM],
+        workarounds: &[W_EDGE_KEYS, W_HOP_LIST],
     },
     QueryDefinition {
         operation: Operation::Tcr12,
@@ -897,7 +895,7 @@ pub static QUERIES: &[QueryDefinition] = &[
         semantics: "Sum, max (-1 if none) and count of the account's transfer-outs (edge1) and \
                     transfer-ins (edge2) in the window.",
         reference_reading: None,
-        workarounds: &[W_EMPTY_SUM],
+        workarounds: &[],
     },
     QueryDefinition {
         operation: Operation::Tsr3,
@@ -1081,17 +1079,19 @@ mod tests {
         for query in QUERIES {
             for workaround in query.workarounds {
                 assert!(
-                    workaround.contains("#1887") || workaround.contains("#1888"),
+                    workaround.contains("#1888"),
                     "{}: {workaround}",
                     query.operation
                 );
+                assert!(!workaround.contains("#1887"), "{}", query.operation);
             }
             let cites = |text: &str| query.workarounds.iter().any(|w| w.contains(text));
-            if query.cypher.contains("coalesce(sum(") {
-                assert!(cites("#1887 D13"), "{} coalesces a sum", query.operation);
-            }
             if query.cypher.contains("] IN ") {
-                assert!(cites("#1887 D12"), "{} compares edge keys", query.operation);
+                assert!(
+                    cites("tie-break variance"),
+                    "{} compares edge keys",
+                    query.operation
+                );
             }
             if query.cypher.contains("WHERE NOT ([ids[i]") {
                 assert!(cites("reduce()"), "{} checks hops by list", query.operation);

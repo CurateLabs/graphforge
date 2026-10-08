@@ -57,7 +57,7 @@
     {
       "kind": "rewrite",
       "subject": "TCR1-TCR12",
-      "text": "The Cypher departs from the most direct form where GraphForge has a defect or gap (#1887, #1888): edges are identified by [endpoint id, timestamp] keys, path hop rules are list comprehensions, shortestPath is min(size(r)), and empty sums are coalesced to 0.0. The query catalog names each workaround."
+      "text": "The Cypher departs from the most direct form where GraphForge has a gap (#1888) or the declared tie-break variance applies: edges are identified by [endpoint id, timestamp] keys, path hop rules are list comprehensions, and shortestPath is min(size(r)). The query catalog names each workaround."
     },
     {
       "kind": "discrepancy",

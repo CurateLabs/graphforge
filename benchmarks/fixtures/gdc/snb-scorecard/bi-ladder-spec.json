@@ -32,7 +32,7 @@
     {
       "kind": "rewrite",
       "subject": "BI2",
-      "text": "rewrite: LDBC text hits #1887 D2 (`$date + duration(...)` fails to plan on a datetime parameter). The window bounds are written `datetime({datetime: $date}) + duration(...)`; `datetime({datetime: d})` is the identity on a datetime, so the windows are unchanged. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node."
+      "text": "rewrite: LDBC text matches the `:Message` supertype label, which import sessions cannot assign (one label per node). `(m:Message)` becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes."
     },
     {
       "kind": "rewrite",
@@ -42,7 +42,7 @@
     {
       "kind": "rewrite",
       "subject": "BI4",
-      "text": "rewrite: LDBC text hits #1888 D5 (CALL subquery), and the CALL-free form hits #1887 D1 (`node IN list` is false) and #1888 D7 (OPTIONAL MATCH WHERE cannot see a WITH variable). The top-100 forums are ordered by their largest per-country member count, then id, which is the order the LDBC ORDER BY + WITH DISTINCT yields and Umbra's maxNumberOfMembers. The UNION ALL of members with their messages and members with 0 becomes every member of a top forum with an OPTIONAL MATCH count of distinct messages in top-forum threads. Top-forum membership is tested on forum ids, inside the count. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node."
+      "text": "rewrite: LDBC text hits #1888 D5 (CALL subquery), and the CALL-free form hits #1888 D7 (OPTIONAL MATCH WHERE cannot see a WITH variable). The top-100 forums are ordered by their largest per-country member count, then id, which is the order the LDBC ORDER BY + WITH DISTINCT yields and Umbra's maxNumberOfMembers. The UNION ALL of members with their messages and members with 0 becomes every member of a top forum with an OPTIONAL MATCH count of distinct messages in top-forum threads. Top-forum membership of a thread's forum is tested inside the count. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node."
     },
     {
       "kind": "rewrite",
@@ -82,7 +82,7 @@
     {
       "kind": "rewrite",
       "subject": "BI13",
-      "text": "rewrite: LDBC text hits #1887 D2 (`$endDate.year` returns null), #1888 D3 (`zombie.creationDate.year` fails to plan) and #1887 D1 (`likerZombie IN zombies` is false), and the id-based form hits #1888 D7 (OPTIONAL MATCH WHERE cannot see a WITH variable). The month arithmetic reads WITH-bound aliases (`datetime({datetime: $endDate})` is the identity), and likes by zombies are counted on person ids inside the count, which counts the same like edges. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node."
+      "text": "rewrite: LDBC text hits #1888 D3 (`zombie.creationDate.year` fails to plan) and #1888 D7 (`OPTIONAL MATCH ... WHERE likerZombie IN zombies`, a WHERE over a WITH variable, returns zero like counts on the query fixture). The creation-date components are read from a WITH-bound alias of the same property, and likes by zombies are counted with a conditional count inside the aggregate, which counts the same like edges. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node."
     },
     {
       "kind": "rewrite",
@@ -97,7 +97,7 @@
     {
       "kind": "rewrite",
       "subject": "BI17",
-      "text": "rewrite: LDBC text hits #1888 D4 (`duration({hours: $delta})` with a non-literal argument fails) and #1887 D6 (relationship uniqueness is not enforced across comma-separated patterns, so person2 = person3 matches). The delta becomes a comparison of epoch milliseconds with `$delta * 3600000` added, which is exact for whole hours on a UTC instant, and `person2 <> person3` is stated, which is what LDBC's two HAS_MEMBER edges enforce. The final WHERE moves onto a WITH carrying the compared values. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node."
+      "text": "rewrite: LDBC text hits #1888 D4 (`duration({hours: $delta})` with a non-literal argument fails). The delta becomes a comparison of epoch milliseconds with `$delta * 3600000` added, which is exact for whole hours on a UTC instant. The final WHERE moves onto a WITH carrying the compared values. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node."
     }
   ],
   "rungs": [

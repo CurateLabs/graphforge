@@ -45,11 +45,6 @@
       "text": "reference behaviour, differs from spec prose: keeps a message whose creationDate equals $maxDate (<=) where the prose says before $maxDate"
     },
     {
-      "kind": "rewrite",
-      "subject": "IC3",
-      "text": "node-list membership (country IN [countryX, countryY], city IN cities) is always false in GraphForge (#1887 D1), so membership and node equality use the unique Place id"
-    },
-    {
       "kind": "spec_variance",
       "subject": "IC3",
       "text": "reference behaviour, differs from spec prose: takes endDate where the specification takes durationDays"
@@ -62,7 +57,7 @@
     {
       "kind": "rewrite",
       "subject": "IC5",
-      "text": "friend IN friends is always false on nodes (#1887 D1), so it uses the unique Person id; OPTIONAL MATCH ... WHERE author.id IN friendIds fails to plan with an unbound variable (#1888 D7), so the count is a conditional sum over the forum's posts"
+      "text": "OPTIONAL MATCH ... WHERE author IN friends fails to plan with an unbound variable (#1888 D7), so the count is a conditional sum over the forum's posts"
     },
     {
       "kind": "rewrite",
@@ -82,7 +77,7 @@
     {
       "kind": "rewrite",
       "subject": "IC10",
-      "text": "datetime({epochMillis: birthday}) returns the epoch (#1887 D14), so the UTC month and day come from exact integer civil-from-days arithmetic; the post list comprehension with a pattern predicate is rejected (#1888); the first replacement, MATCH (person:Person {id: 2048}), (friend:Person {id: 2023}) OPTIONAL MATCH (friend)<-[:HAS_CREATOR]-(post:Post) WHERE EXISTS { (post)-[:HAS_TAG]->(:Tag)<-[:HAS_INTEREST]-(person) } RETURN count(post), returned 9 on the query fixture where MATCH in place of OPTIONAL MATCH returned the correct 1 (#1887 D15: the WHERE was ignored), so the interest pattern is matched directly and counted with count(DISTINCT post.id)"
+      "text": "the post list comprehension with a pattern predicate is rejected (#1888), so posts are counted with OPTIONAL MATCH and the interest pattern is matched directly and counted with count(DISTINCT post.id)"
     },
     {
       "kind": "rewrite",

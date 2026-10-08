@@ -501,8 +501,9 @@ def interactive_validation_files() -> Files:
 # Each mutation makes GraphForge return a wrong answer on the fixture, so the
 # rung that runs it must fail its reference check, naming exactly this query.
 # Wrong under any correct engine: the reply must now sit in person1's own
-# forum. (Dropping `person2 <> person3` is not a mutation: one MATCH binds the
-# two HAS_MEMBER relationships to different edges, so it already holds, #1887.)
+# forum. (The LDBC text has no `person2 <> person3`: one MATCH binds the two
+# HAS_MEMBER relationships to different edges, so it holds without being
+# written.)
 BI_MUTATION = ("BI17", "WHERE forum1 <> forum2\n", "WHERE forum1 = forum2\n")
 INTERACTIVE_MUTATION = (
     "IC2",
