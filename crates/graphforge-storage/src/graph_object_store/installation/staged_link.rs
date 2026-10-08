@@ -224,6 +224,16 @@ fn existing_object(
         )
     };
     let (mut io, mut matches) = classify(expected_checksum)?;
+    if !matches && identity == source.identity() {
+        // The object is the encoder's own inode, rewritten in place after it
+        // was linked. Removing it and linking the staged name again would
+        // reinstall the same bad bytes, so nothing here can repair it.
+        return Err(validation(if expected_checksum.is_some() {
+            "staged inventory checksum differs from the object at its address"
+        } else {
+            "staged encoded source is not the content its address names"
+        }));
+    }
     if !matches && expected_checksum.is_some() {
         let (sha_io, sha_matches) = classify(None)?;
         io = checked_read_io_sum(io, sha_io)?;

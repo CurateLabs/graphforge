@@ -539,6 +539,44 @@ fn edited_staged_file_is_refused_at_admission_and_leaves_no_mis_addressed_object
     object_store(staged.root.path());
 }
 
+/// A rerun with no capture finds the encoder's own inode at the address,
+/// rewritten in place. Replacing it would link the same bad bytes again, so the
+/// install refuses and leaves the object where it is; restoring the bytes
+/// lets the same install pass.
+#[test]
+fn uncaptured_object_that_is_the_rewritten_staged_inode_is_refused_not_relinked() {
+    let staged = staged(15_012);
+    let inventory = staged.inventory();
+    let source = inventory.open(Path::new(ARTIFACT)).unwrap();
+    let good = std::fs::read(staged.staged_path()).unwrap();
+    let first = crate::begin_graph_object_publication(staged.root.path()).unwrap();
+    install(&first, &source).unwrap();
+    drop(first);
+    let inode = std::fs::metadata(staged.object_path()).unwrap().ino();
+    edit_in_place(&staged.staged_path());
+    let current = staged.current();
+
+    let lease = crate::begin_graph_object_publication(staged.root.path()).unwrap();
+    let capture = graphforge_core::hash_observation::operation::Capture::start();
+    let error = install(&lease, &source).unwrap_err();
+    let observed = capture.snapshot();
+    assert!(
+        error.to_string().contains("not the content its address"),
+        "{error}"
+    );
+    assert_eq!(observed.artifact_payload_sha256_bytes, source.bytes());
+    assert_eq!(
+        std::fs::metadata(staged.object_path()).unwrap().ino(),
+        inode
+    );
+    assert_eq!(std::fs::metadata(staged.staged_path()).unwrap().nlink(), 2);
+    assert_eq!(staged.current(), current);
+
+    write_in_place(&staged.staged_path(), &good);
+    assert!(install(&lease, &source).unwrap().reused_existing);
+    assert_eq!(std::fs::read(staged.object_path()).unwrap(), good);
+}
+
 /// The same edit through a whole publication: the commit boundary admits every
 /// installed object by XXH64 before `CURRENT` can move, so the edit leaves the
 /// prior generation intact and no object at a wrong address.
