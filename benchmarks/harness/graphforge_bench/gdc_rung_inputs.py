@@ -562,8 +562,13 @@ def check_reference(
     reference_sha256: str | None,
     evidence: Mapping[str, Any],
     results: Mapping[tuple[str, str], Mapping[str, Any]],
+    complete: bool = False,
 ) -> dict[str, Any]:
     """Check every referenced result; never count a refused or failed query as correct.
+
+    A ``complete`` reference is the suite's whole answer key: a binding the
+    workload ran that the reference has no entry for is a mismatch, not an
+    unchecked result.
 
     A written result must reproduce the digest the driver measured, so the
     checked cells are the measured answer. A reference binding the workload
@@ -636,6 +641,12 @@ def check_reference(
                 mismatches.append(
                     _mismatch(key, "reference_mismatch", f"{rule['matching']} match failed")
                 )
+    if complete:
+        mismatches += [
+            _mismatch(key, "reference_binding_missing", "the reference has no entry for it")
+            for key in samples
+            if key not in referenced
+        ]
     return {
         "schema": CORRECTNESS_SCHEMA,
         "status": "passed" if not mismatches and checked > 0 else "failed",

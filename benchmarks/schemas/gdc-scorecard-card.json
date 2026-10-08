@@ -179,7 +179,7 @@
         "additionalProperties": false
       }
     },
-    "attribution": { "type": "string", "pattern": "CC-BY 4\\.0" },
+    "attribution": { "type": "string", "pattern": "CC-BY 4\\.0|Apache-2\\.0" },
     "metric_sources": { "type": "object" },
     "evidence": {
       "type": "object",

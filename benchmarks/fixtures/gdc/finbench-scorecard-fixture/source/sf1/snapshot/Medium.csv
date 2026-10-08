@@ -1,0 +1,5 @@
+mediumId|mediumType|isBlocked|createTime|lastLoginTime|riskLevel
+301|POS|true|||
+302|IP|false|||
+303|IP|true|||
+304|MAC|true|||

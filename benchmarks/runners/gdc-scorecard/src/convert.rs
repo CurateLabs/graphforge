@@ -27,7 +27,7 @@ use crate::spill::{
     Budget, DEFAULT_MEMORY_BUDGET_BYTES, Duplicate, Key, KeySorter, SpillDir, check_nodes,
     find_dangling,
 };
-use crate::temporal::{DateTime, parse_date, parse_datetime};
+use crate::temporal::{DateTime, parse_date, parse_datetime, parse_epoch_millis};
 
 pub const MANIFEST_FILE: &str = "conversion-manifest.json";
 pub const MANIFEST_SCHEMA: &str = "graphforge-gdc-conversion-manifest/1";
@@ -399,6 +399,8 @@ fn property_fields(properties: &[Property]) -> Vec<Field> {
 enum Column {
     Text(StringBuilder),
     Int64(Int64Builder),
+    /// An `int64` property with a temporal format: the instant as epoch milliseconds.
+    EpochMillis(Int64Builder, TemporalFormat),
     Float64(Float64Builder),
     Boolean(BooleanBuilder),
     Date(StructBuilder, TemporalFormat),
@@ -410,7 +412,10 @@ impl Column {
     fn new(property: &Property) -> Self {
         match property.kind {
             PropertyType::String => Self::Text(StringBuilder::new()),
-            PropertyType::Int64 => Self::Int64(Int64Builder::new()),
+            PropertyType::Int64 => match property.format {
+                None => Self::Int64(Int64Builder::new()),
+                Some(format) => Self::EpochMillis(Int64Builder::new(), format),
+            },
             PropertyType::Float64 => Self::Float64(Float64Builder::new()),
             PropertyType::Boolean => Self::Boolean(BooleanBuilder::new()),
             PropertyType::Date => Self::Date(
@@ -436,6 +441,11 @@ impl Column {
         match self {
             Self::Text(builder) => builder.append_option(value),
             Self::Int64(builder) => builder.append_option(parse(value)?),
+            Self::EpochMillis(builder, format) => builder.append_option(
+                value
+                    .map(|text| parse_epoch_millis(text, *format))
+                    .transpose()?,
+            ),
             Self::Float64(builder) => builder.append_option(parse(value)?),
             Self::Boolean(builder) => builder.append_option(parse(value)?),
             Self::Date(builder, format) => {
@@ -471,7 +481,7 @@ impl Column {
     fn finish(&mut self) -> ArrayRef {
         match self {
             Self::Text(builder) => Arc::new(builder.finish()),
-            Self::Int64(builder) => Arc::new(builder.finish()),
+            Self::Int64(builder) | Self::EpochMillis(builder, _) => Arc::new(builder.finish()),
             Self::Float64(builder) => Arc::new(builder.finish()),
             Self::Boolean(builder) => Arc::new(builder.finish()),
             Self::Date(builder, _) => Arc::new(builder.finish()),

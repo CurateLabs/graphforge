@@ -1,0 +1,286 @@
+{
+  "schema": "graphforge-gdc-ldbc-csv-scorecard-ladder/1",
+  "suite_id": "finbench-transaction",
+  "identity_profile": "scorecard",
+  "load_mapping": "profiles/gdc/finbench-transaction-load-mapping.json",
+  "counts_source": {
+    "url": "https://github.com/ldbc/ldbc_finbench_docs/blob/aebdb298a7496484dad5321211c8d3486295395f/tables/number-of-entities-transaction.tex",
+    "description": "Fixture: counts are the committed rung fixture's records; the URL is the table the real ladder cites"
+  },
+  "rungs": [
+    {
+      "id": "sf1",
+      "order": 1,
+      "scale_factor": "1",
+      "dataset_id": "finbench-fixture-sf1",
+      "archive_url": "https://datasets.ldbcouncil.org/finbench/finbench-fixture-sf1.tar.zst",
+      "archive_bytes": 2612,
+      "archive_md5": "112344366464735155aafd66026a834f",
+      "tables": [
+        {
+          "table": "account",
+          "kind": "nodes",
+          "ldbc_name": "account",
+          "published": 81,
+          "listed": 81
+        },
+        {
+          "table": "company",
+          "kind": "nodes",
+          "ldbc_name": "company",
+          "published": 4,
+          "listed": 4
+        },
+        {
+          "table": "loan",
+          "kind": "nodes",
+          "ldbc_name": "loan",
+          "published": 18,
+          "listed": 18
+        },
+        {
+          "table": "medium",
+          "kind": "nodes",
+          "ldbc_name": "medium",
+          "published": 4,
+          "listed": 4
+        },
+        {
+          "table": "person",
+          "kind": "nodes",
+          "ldbc_name": "person",
+          "published": 6,
+          "listed": 6
+        },
+        {
+          "table": "account_repay_loan",
+          "kind": "edges",
+          "ldbc_name": "repay",
+          "published": 2,
+          "listed": 2
+        },
+        {
+          "table": "account_transfer_account",
+          "kind": "edges",
+          "ldbc_name": "transfer",
+          "published": 90,
+          "listed": 90
+        },
+        {
+          "table": "account_withdraw_account",
+          "kind": "edges",
+          "ldbc_name": "withdraw",
+          "published": 8,
+          "listed": 8
+        },
+        {
+          "table": "company_apply_loan",
+          "kind": "edges",
+          "ldbc_name": "apply",
+          "published": 1,
+          "listed": 1
+        },
+        {
+          "table": "company_guarantee_company",
+          "kind": "edges",
+          "ldbc_name": "guarantee",
+          "published": 0,
+          "listed": 0
+        },
+        {
+          "table": "company_invest_company",
+          "kind": "edges",
+          "ldbc_name": "invest",
+          "published": 0,
+          "listed": 0
+        },
+        {
+          "table": "company_own_account",
+          "kind": "edges",
+          "ldbc_name": "own",
+          "published": 2,
+          "listed": 2
+        },
+        {
+          "table": "loan_deposit_account",
+          "kind": "edges",
+          "ldbc_name": "deposit",
+          "published": 13,
+          "listed": 13
+        },
+        {
+          "table": "medium_signin_account",
+          "kind": "edges",
+          "ldbc_name": "signIn",
+          "published": 7,
+          "listed": 7
+        },
+        {
+          "table": "person_apply_loan",
+          "kind": "edges",
+          "ldbc_name": "apply",
+          "published": 6,
+          "listed": 6
+        },
+        {
+          "table": "person_guarantee_person",
+          "kind": "edges",
+          "ldbc_name": "guarantee",
+          "published": 5,
+          "listed": 5
+        },
+        {
+          "table": "person_invest_company",
+          "kind": "edges",
+          "ldbc_name": "invest",
+          "published": 6,
+          "listed": 6
+        },
+        {
+          "table": "person_own_account",
+          "kind": "edges",
+          "ldbc_name": "own",
+          "published": 7,
+          "listed": 7
+        }
+      ]
+    },
+    {
+      "id": "sf3",
+      "order": 3,
+      "scale_factor": "3",
+      "dataset_id": "finbench-fixture-sf3",
+      "archive_url": "https://datasets.ldbcouncil.org/finbench/finbench-fixture-sf1.tar.zst",
+      "archive_bytes": 2612,
+      "archive_md5": "112344366464735155aafd66026a834f",
+      "tables": [
+        {
+          "table": "account",
+          "kind": "nodes",
+          "ldbc_name": "account",
+          "published": 81,
+          "listed": 81
+        },
+        {
+          "table": "company",
+          "kind": "nodes",
+          "ldbc_name": "company",
+          "published": 4,
+          "listed": 4
+        },
+        {
+          "table": "loan",
+          "kind": "nodes",
+          "ldbc_name": "loan",
+          "published": 18,
+          "listed": 18
+        },
+        {
+          "table": "medium",
+          "kind": "nodes",
+          "ldbc_name": "medium",
+          "published": 4,
+          "listed": 4
+        },
+        {
+          "table": "person",
+          "kind": "nodes",
+          "ldbc_name": "person",
+          "published": 6,
+          "listed": 6
+        },
+        {
+          "table": "account_repay_loan",
+          "kind": "edges",
+          "ldbc_name": "repay",
+          "published": 2,
+          "listed": 2
+        },
+        {
+          "table": "account_transfer_account",
+          "kind": "edges",
+          "ldbc_name": "transfer",
+          "published": 90,
+          "listed": 90
+        },
+        {
+          "table": "account_withdraw_account",
+          "kind": "edges",
+          "ldbc_name": "withdraw",
+          "published": 8,
+          "listed": 8
+        },
+        {
+          "table": "company_apply_loan",
+          "kind": "edges",
+          "ldbc_name": "apply",
+          "published": 1,
+          "listed": 1
+        },
+        {
+          "table": "company_guarantee_company",
+          "kind": "edges",
+          "ldbc_name": "guarantee",
+          "published": 0,
+          "listed": 0
+        },
+        {
+          "table": "company_invest_company",
+          "kind": "edges",
+          "ldbc_name": "invest",
+          "published": 0,
+          "listed": 0
+        },
+        {
+          "table": "company_own_account",
+          "kind": "edges",
+          "ldbc_name": "own",
+          "published": 2,
+          "listed": 2
+        },
+        {
+          "table": "loan_deposit_account",
+          "kind": "edges",
+          "ldbc_name": "deposit",
+          "published": 13,
+          "listed": 13
+        },
+        {
+          "table": "medium_signin_account",
+          "kind": "edges",
+          "ldbc_name": "signIn",
+          "published": 7,
+          "listed": 7
+        },
+        {
+          "table": "person_apply_loan",
+          "kind": "edges",
+          "ldbc_name": "apply",
+          "published": 6,
+          "listed": 6
+        },
+        {
+          "table": "person_guarantee_person",
+          "kind": "edges",
+          "ldbc_name": "guarantee",
+          "published": 5,
+          "listed": 5
+        },
+        {
+          "table": "person_invest_company",
+          "kind": "edges",
+          "ldbc_name": "invest",
+          "published": 6,
+          "listed": 6
+        },
+        {
+          "table": "person_own_account",
+          "kind": "edges",
+          "ldbc_name": "own",
+          "published": 7,
+          "listed": 7
+        }
+      ]
+    }
+  ]
+}

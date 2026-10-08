@@ -741,7 +741,9 @@ impl PhaseExecutor for PublicProcessExecutor {
                             self.lifecycle.last_observation_stage,
                             self.lifecycle.allocation.current_allocated_bytes(),
                             self.lifecycle.transient_peak_storage_bytes,
-                            self.lifecycle.source_project_current_allocated_bytes.is_some(),
+                            self.lifecycle
+                                .source_project_current_allocated_bytes
+                                .is_some(),
                             result.receipts.len(),
                         ));
                     }
@@ -791,7 +793,9 @@ impl PhaseExecutor for PublicProcessExecutor {
                         self.lifecycle.last_observation_stage,
                         self.lifecycle.allocation.current_allocated_bytes(),
                         self.lifecycle.transient_peak_storage_bytes,
-                        self.lifecycle.source_project_current_allocated_bytes.is_some(),
+                        self.lifecycle
+                            .source_project_current_allocated_bytes
+                            .is_some(),
                         result.receipts.len(),
                     ));
                 }
@@ -941,9 +945,8 @@ fn execute_process_with_allocation(
                         peak_rss_bytes,
                         failure: Some(FailureKind::EvidenceInvalid),
                         cleanup_failure: None,
-                        error_tail: error_tail.or_else(|| {
-                            Some(receipt_validation_detail(&stdout, &receipt_error))
-                        }),
+                        error_tail: error_tail
+                            .or_else(|| Some(receipt_validation_detail(&stdout, &receipt_error))),
                         receipts: Vec::new(),
                     });
                 }
@@ -2620,7 +2623,10 @@ mod tests {
             "read_path_scan",
         ] {
             let mut missing_phase = lifecycle_application_io();
-            missing_phase["phases"].as_object_mut().unwrap().remove(phase);
+            missing_phase["phases"]
+                .as_object_mut()
+                .unwrap()
+                .remove(phase);
             assert!(
                 !super::sanitized_lifecycle_application_io(&missing_phase),
                 "missing phase {phase} must be refused"

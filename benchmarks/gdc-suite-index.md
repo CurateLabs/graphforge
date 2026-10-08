@@ -538,6 +538,57 @@ text (BI17, IC2), so its check fails naming exactly that query.
 `tests/test_gdc_snb_scorecard.py` climbs both ladders with the real converter,
 `gf`, driver and builders.
 
+### FinBench Transaction scorecard ladder (#1909)
+
+`profiles/gdc/finbench-transaction-scorecard-ladder-spec.json` declares SF1,
+SF3 and SF10:
+
+- **Rungs.** SF1 and SF10 are pinned (#1878). SF3 is declared but not pinned
+  and sits below the top pinned rung, so the ladder records it as
+  `not_admitted` (`rung_not_pinned`) and continues to SF10; the card lists it.
+- **Queries.** TCR1–TCR12 run as the Cypher of the Rust query catalog (#1890)
+  through `gdc-scorecard query`, one driver clock per binding.
+  `profiles/gdc/finbench-transaction-scorecard-queries.json` is a copy of
+  `graphforge-benchmark-gdc-finbench-transaction list-queries`, because the
+  rung runner does not call that binary; a test fails when the copy drifts.
+  The workload is built at rung time by
+  `graphforge_bench.gdc_finbench_transaction_scorecard` (a `finbench-transaction`
+  workload builder, run as the SNB builders are) from the rung's pinned
+  read-parameter archive with `read_ldbc_parameters`: every published binding
+  (10,689 at SF1) runs under its `line-<n>` id, the id the reference uses.
+  TSR1–TSR6 have no published parameters (LDBC's driver derives them during a
+  run) and are refused with `no_published_parameters`; TW1–TW19 and TRW1–TRW3
+  are refused with `finbench_transaction_write_semantics_not_exposed`. All
+  count against coverage.
+- **Reference.** The SF1 rung pins the spec-derived reference
+  (`finbench-reference/sf1-reference.json`, see "FinBench Transaction SF1
+  reference") as `{"cache_path": ..., "sha256": ...}`: the path is relative to
+  `DATASET_CACHE`, the 44 MB file is never copied into the repository, and a
+  different digest fails the rung (`reference_digest_mismatch`). The reference
+  is complete: a binding it lacks is `reference_binding_missing`, and one the
+  workload never ran is `reference_unmatched`. SF10 carries `reference: null`
+  and is labelled "not reference-checked". The card states that the reference
+  is spec-derived and its readings (TCR6 counts edges, TCR11 is unbounded,
+  truncation follows the Neo4j example); GPStore's readings are for
+  information only.
+- **Load mapping against the Cypher.** The Cypher compares `e.timestamp` and
+  `account.createTime` with epoch-millisecond integers, as LDBC's parameters
+  are. The mapping therefore stores every edge's `createTime` column as an
+  `int64` named `timestamp` and every node's `createTime` as an `int64`, with
+  the converter's `int64` plus `format` (naive-UTC text becomes whole epoch
+  milliseconds; a sub-millisecond value is `invalid_value`). The builder
+  checks this before any query (`mapping_drift`).
+
+`fixtures/gdc/finbench-scorecard-fixture/` is the query fixture's graph and
+bindings in LDBC's published shape (`snapshot/` CSV, `complex_<n>_param.csv`,
+archives), rendered by `tests/finbench_scorecard_fixture.py`.
+`tests/test_gdc_finbench_transaction_scorecard.py` runs the ladder through the
+rung runner with the production mapping and Cypher, derives the reference with
+the spec-derived module, and proves the matching by mutation: a wrong cell, a
+binding the reference lacks or has extra, a query it lacks, different reference
+bytes, a mapping whose `timestamp` was renamed or retyped, and a window start
+that became inclusive. Real SF1 and SF10 cards come from slice 8 (#952).
+
 ## Operator status query
 
 ```bash
