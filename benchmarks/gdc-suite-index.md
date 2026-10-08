@@ -179,10 +179,11 @@ truncated definition labels this as an accepted variance (`tie_break_variance`).
 The LDBC parameter generator emits limit 500 and `TIMESTAMP_DESCENDING`; other
 orders are refused, never reordered. Each query definition names the steps it
 truncates, and its `semantics` field states the specification reading it
-implements. The scorecard's reference implementation is GPStore, chosen because
-it implements newest-first truncation; where a reading differs from GPStore's
-(TCR1, TCR2, TCR5, TCR8, TCR9, TCR11), `reference_reading` says how and that the
-reading may change to match it. `workarounds` cites the GraphForge defect (#1887)
+implements. The scorecard checks these readings against the spec-derived SF1
+reference (see "FinBench Transaction SF1 reference" below), not an LDBC
+implementation; where GPStore reads the specification differently (TCR1, TCR2,
+TCR5, TCR8, TCR9, TCR11), `reference_reading` says how, for information.
+`workarounds` cites the GraphForge defect (#1887)
 or unsupported construct (#1888) behind any Cypher that departs from the direct
 form.
 
@@ -248,6 +249,87 @@ CARGO_TARGET_DIR=target cargo build --locked --manifest-path Cargo.toml -p graph
 PYTHONPATH=harness GRAPHFORGE_GDC_FINBENCH_TRANSACTION_BIN=target/debug/graphforge-benchmark-gdc-finbench-transaction \
   uv run --locked python -m unittest tests.test_gdc_finbench_transaction
 ```
+
+### FinBench Transaction SF1 reference
+
+LDBC publishes no FinBench reference output, and the third-party validation
+files interleave writes. Per the #952 decision (revised 2026-10-08), the SF1
+reference comes from the spec-derived module
+`graphforge_bench.gdc_finbench_transaction_reference`, which never runs
+GraphForge. The card says "checked against a spec-derived reference, not an
+LDBC implementation" (#1894).
+
+```bash
+make -C benchmarks gdc-finbench-reference DATASET_CACHE=/home/ubuntu/gdc-cache \
+  OUTPUT=/home/ubuntu/gdc-cache/finbench-reference/sf1-reference.json
+```
+
+The target reads the `snapshot/` CSV and `sf1_read_params/` that `gdc-acquire`
+extracted from the pinned archives. It writes a new
+`graphforge-gdc-rung-reference/1` document, which is never overwritten, and
+`OUTPUT.sha256` with the digests of the module, all 30 input files and the
+output. The output stays out of the repository; its digest and the manifest
+are recorded on #1894.
+
+- **Bindings.** These are the twelve `complex_<n>_param.csv` files, TCR1–TCR12
+  (10,689 bindings). They have no header: eleven start with a literal `...`
+  line, which is not a binding. Binding ids are `line-<n>`, the line in the
+  file. A scorecard workload must use `read_ldbc_parameters` so the ids agree.
+  No simple-read (TSR) parameters are published, because the LDBC driver
+  derives them during a run, so the reference covers the complex reads only.
+  Every published binding uses threshold `0.0`, limit 500 and the window
+  `1627020616747..1669690342640`.
+- **Vertices** are keyed by label and id, because LDBC ids repeat across labels
+  (Person and Company share 1,376; Account and Loan share 190). Timestamps are
+  naive-UTC `createTime` values converted to epoch milliseconds.
+- **Cells** use the query driver's form: Arrow display text. Float64 cells use
+  ryu's shortest round-trip layout, as arrow-cast does. Matching is `exact`.
+  Sums are exactly rounded (`math.fsum`) before half-up rounding to three
+  decimals, so no answer depends on summation or hash order.
+- **Pins.**
+
+  | Item | SHA-256 |
+  |---|---|
+  | `sf1.tar.gz` (identity profile) | `598d82e0bc442150629f3db7b6c6942a3f1bf6414cbc2f4e8ac6d2da89884636` |
+  | `sf1_read_params.zip` (identity profile) | `ca624fc25ef56b22819739e9ee34c49944fc902dd5a7eb8b6f24819e558c50bf` |
+  | module at generation | `0e3af90f494faa5bd53d7b9696ec8bf057083d70ae7c5c9dd4528e0c97146241` |
+  | `sf1-reference.json` (43,860,695 bytes) | `9c73fb5baa71136696fc598f42852505595b1f2b9ea25ae8ae8e5644ec0f822a` |
+
+  The run used Python 3.13.12 from `uv.lock`. Two runs, each in a separate
+  process with its own hash seed, produced byte-identical output. Each run took
+  about 40 s of wall time on one core, with a peak RSS of 1.5 GiB.
+- **Scope.** The reference covers `snapshot/` only. It excludes the
+  `incremental/` rows, consistent with the load mapping.
+- **Readings worth stating**, at SF1, for information only:
+  - TCR6 counts "more than 3 transfer-ins" as transfer edges, not distinct
+    source accounts. Galaxybase, GPStore and Ultipa read it the same way;
+    counting distinct sources would change 901 of 905 bindings.
+  - TCR11 follows guarantee chains of any length ("until end", as GPStore
+    does). Galaxybase, TuGraph and Ultipa stop at 5 hops, which changes 27 of
+    983 bindings (the deepest chain is 11). This is the reference's only
+    disagreement with a third-party result.
+  - Truncation changes 12 answers: TCR6 lines 99, 118, 262, 374 and 686, and
+    TCR8 lines 101, 278, 360, 392, 779, 848 and 903. TCR6 lines 262 and 686
+    also depend on truncating the adjacency before the window and amount
+    filters. No vertex has a timestamp tie at the 500-edge cut-off, so the
+    far-endpoint-id tie-break variance changes no answer. None of the 12 is in
+    Ultipa's validation set, so the truncation reading has no independent
+    corroboration at SF1. It does agree with the Neo4j truncation example,
+    which computes cut-offs before filtering.
+  - TCR1: GPStore reports each account once, at its first breadth-first
+    distance. 6 of 737 bindings have an account at several trace lengths.
+  - TCR5: GPStore keeps traces that revisit an account. 43 of 1,000 bindings
+    have one.
+  - TCR8: GPStore counts every in-window edge from an expanded account into the
+    destination as inflow and expands each account once. This difference is
+    not quantified.
+  - GPStore's extra truncations of own, deposit, repay and apply edges cannot
+    apply at SF1, because those adjacencies have at most 22 edges.
+- **Independent review of #1906.** Against Ultipa's `validation_params.csv`
+  (821 complex-read bindings, with its interleaved writes replayed), 818 match;
+  the 3 misses are TCR11 bindings that the 5-hop cap explains exactly. A
+  separate Decimal re-implementation of TCR1–5, 7, 9, 10 and 12 matched all
+  7,801 of its bindings.
 
 ## SPB (Semantic Publishing Benchmark)
 

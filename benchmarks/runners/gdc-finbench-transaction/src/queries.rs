@@ -727,7 +727,13 @@ pub static QUERIES: &[QueryDefinition] = &[
         semantics: "For a card account (type ends with 'card'), each mid account that withdrew to it \
                     above threshold2 in the window and received more than 3 transfers above \
                     threshold1 in the window.",
-        reference_reading: None,
+        reference_reading: Some(
+            "Galaxybase, GPStore and Ultipa read \"more than 3 transfer-ins\" as more than 3 \
+             edges; this reference follows the spec the same way and counts transfer edges, not \
+             distinct source accounts. Counting distinct sources would change 901 of the 905 SF1 \
+             bindings. Two SF1 bindings (lines 262 and 686) also depend on truncating each \
+             adjacency before the window and amount filters.",
+        ),
         workarounds: &[W_EDGE_KEYS],
     },
     QueryDefinition {
@@ -844,8 +850,10 @@ pub static QUERIES: &[QueryDefinition] = &[
         reference_reading: Some(
             "GPStore reads each reached person's apply edges as truncated too; this \
              reference follows the spec: guarantee chains of any length (\"until end\", as \
-             GPStore also reads it; Galaxybase and TuGraph stop at 5 hops), with only the \
-             guarantee steps truncated and every applied loan counted.",
+             GPStore also reads it), with only the guarantee steps truncated and every applied \
+             loan counted. Galaxybase, TuGraph and Ultipa stop at 5 hops, which changes 27 of the \
+             983 SF1 bindings; that is the reference's only disagreement with a third-party \
+             result.",
         ),
         workarounds: &[W_EDGE_KEYS, W_HOP_LIST, W_EMPTY_SUM],
     },
@@ -1045,13 +1053,18 @@ mod tests {
             .filter(|query| query.reference_reading.is_some())
             .map(|query| query.operation.code())
             .collect();
-        let expected: BTreeSet<&str> = ["TCR1", "TCR2", "TCR5", "TCR8", "TCR9", "TCR11"]
+        let expected: BTreeSet<&str> = ["TCR1", "TCR2", "TCR5", "TCR6", "TCR8", "TCR9", "TCR11"]
             .into_iter()
             .collect();
         assert_eq!(noted, expected);
         for query in QUERIES {
             if let Some(reading) = query.reference_reading {
-                assert!(reading.starts_with("GPStore reads"), "{}", query.operation);
+                assert!(
+                    reading.starts_with("GPStore reads")
+                        || reading.starts_with("Galaxybase, GPStore and Ultipa read"),
+                    "{}",
+                    query.operation
+                );
                 assert!(
                     reading.contains("this reference follows the spec"),
                     "{}",
