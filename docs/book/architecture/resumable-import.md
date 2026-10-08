@@ -120,7 +120,9 @@ other session. The builder's receipt (`construction.bulk_build`) reports wall
 time, process CPU, effective cores, logical and physical write bytes and peak
 RSS per pass.
 
-Nothing is staged, so there is no durable prefix: a crash, cancellation or error
+The first `validate` chooses the route once and records it in the manifest, so
+later calls (and reruns after a crash) never re-decide it from live memory. Nothing
+is staged, so there is no durable prefix: a crash, cancellation or error
 discards the attempt and the next `validate` reruns from the sources. Appends,
 sessions that already staged chunks, and initial builds made through
 `GraphConstructionSession::append_*` keep the staged path described below. The

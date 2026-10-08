@@ -85,8 +85,11 @@ functions.
 - The builder is in-memory. An initial build whose estimated peak memory
   exceeds the plan-time budget takes the staged path instead, which holds a
   fixed window of memory and produces the same bytes. The route is chosen once,
-  in pass 0, from the footers and the process's cgroup-aware memory headroom
-  (three fifths of it). It is never a retry. The scratch path of #1881 replaces
+  by the first `validate`, from the footers and the process's cgroup-aware
+  memory headroom (three fifths of it), and written to the import manifest
+  (`build_route`); every later `validate`, in any process, reads it back. A
+  refused, cancelled or killed bulk attempt therefore cannot be re-routed to the
+  staged path by a change in free memory. It is never a retry. The scratch path of #1881 replaces
   this routing for large inputs, and must land before the ladder slice.
 - Node and edge counts are limited to 2^32 - 2 by the dense ids. A larger input
   is refused with a resource-limit error.

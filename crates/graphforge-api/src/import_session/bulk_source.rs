@@ -93,10 +93,13 @@ fn ipc_batch_rows(path: &Path) -> Result<Vec<u64>, GfError> {
 /// to fail. A refusal that names no batch, such as a duplicate across batches,
 /// leaves it empty, as in the staged path.
 #[derive(Default)]
-pub(super) struct Refusals(std::sync::Mutex<Option<((u8, u64, u64), u64)>>);
+pub(super) struct Refusals(std::sync::Mutex<Option<(RefusalKey, u64)>>);
+
+/// Node-or-edge, source sequence, batch index.
+type RefusalKey = (u8, u64, u64);
 
 impl Refusals {
-    fn record(&self, key: (u8, u64, u64), rows: u64) {
+    fn record(&self, key: RefusalKey, rows: u64) {
         if let Ok(mut slot) = self.0.lock()
             && slot.as_ref().is_none_or(|(held, _)| key < *held)
         {

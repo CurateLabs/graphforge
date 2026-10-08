@@ -308,8 +308,10 @@ def validate_operation_timings(evidence: dict[str, object]) -> None:
     ]
     if [receipt["outcome"] for receipt in receipts] != ["stage+seal", "committed"]:
         raise SystemExit("tiny lifecycle omitted stage+seal/publication timing receipts")
+    # An initial build runs on the bulk builder (ADR 0058): it stages no chunk,
+    # so `validate` records no append and one seal around the whole build.
     expected_calls = (
-        {"begin": 1, "resume": 0, "append": None, "seal": 1, "publish": 0},
+        {"begin": 1, "resume": 0, "append": 0, "seal": 1, "publish": 0},
         {"begin": 0, "resume": 1, "append": 0, "seal": 0, "publish": 1},
     )
     for receipt, expected in zip(receipts, expected_calls, strict=True):
