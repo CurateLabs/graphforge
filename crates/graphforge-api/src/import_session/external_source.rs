@@ -24,6 +24,7 @@ use super::{storage, validation};
 const PARQUET_MAGIC: &[u8; 4] = b"PAR1";
 /// Trailer: little-endian footer length, then the closing magic.
 const PARQUET_TRAILER: u64 = 8;
+const PARQUET_TRAILER_LEN: usize = 8;
 const FOOTER_READ_LIMIT: u64 = 1 << 30;
 /// Out-of-order bytes held while waiting for the gap before them. A source whose
 /// decode order exceeds this re-reads the dropped ranges once at the end.
@@ -122,7 +123,7 @@ fn footer_identity(file: &File, size: u64) -> Result<(u64, String), GfError> {
     }
     let mut head = [0_u8; 4];
     read_exact_at(file, 0, &mut head).map_err(storage)?;
-    let mut trailer = [0_u8; PARQUET_TRAILER as usize];
+    let mut trailer = [0_u8; PARQUET_TRAILER_LEN];
     read_exact_at(file, size - PARQUET_TRAILER, &mut trailer).map_err(storage)?;
     if &head != PARQUET_MAGIC || &trailer[4..] != PARQUET_MAGIC {
         return Err(validation(

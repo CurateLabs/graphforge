@@ -650,6 +650,10 @@ fn schema_owned_bytes(schema: &arrow::datatypes::Schema) -> u64 {
 }
 
 /// Plan one registered source from its footer (pass 0).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the build's shared observers travel with the plan's inputs"
+)]
 pub(super) fn plan<'a>(
     graph: &'a GraphForge,
     root: &Path,
