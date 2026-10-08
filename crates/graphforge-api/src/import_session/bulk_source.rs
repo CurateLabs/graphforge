@@ -278,13 +278,13 @@ impl BulkBatchReader for SourceReader<'_> {
 
 /// Resident bytes an initial build may plan to use (see `memory_budget`).
 ///
-/// This chooses between two builds of the same bytes, never what is built: an
-/// initial build whose estimate exceeds it takes the staged path, which holds a
-/// fixed window of memory (ADR 0058).
-pub(super) fn bulk_build_memory_budget() -> u64 {
+/// This chooses between builds of the same bytes, never what is built: an
+/// initial build whose estimate exceeds it runs through scratch files that keep
+/// its peak inside the budget (ADR 0058).
+pub(super) fn bulk_build_memory_budget() -> Result<u64, GfError> {
     #[cfg(test)]
     if let Some(budget) = TEST_BUDGET.with(std::cell::Cell::get) {
-        return budget;
+        return Ok(budget);
     }
     super::memory_budget::bulk_build_memory_budget()
 }

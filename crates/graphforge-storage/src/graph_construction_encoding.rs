@@ -59,8 +59,13 @@ mod inventory;
 mod inventory_bound;
 mod lanes;
 mod properties;
-pub(crate) use bulk::encode_bulk;
-pub use bulk::{BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkSource};
+#[cfg(test)]
+pub(crate) use bulk::ForcedPartitions;
+pub(crate) use bulk::{discard_scratch, encode_bulk};
+pub use bulk::{
+    BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkRoute, BulkSource,
+    BulkStagedReason,
+};
 #[cfg(test)]
 pub(crate) use inventory::authenticate_inventory_payloads;
 pub(crate) use inventory::{authenticate_inventory, authenticate_inventory_control};

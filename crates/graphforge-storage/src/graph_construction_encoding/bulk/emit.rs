@@ -120,7 +120,7 @@ fn intern_rows(
 }
 
 /// Rows per name: the observation count the staged path's per-row interning leaves.
-fn observation_counts(values: &[u32], names: usize) -> Vec<u64> {
+pub(super) fn observation_counts(values: &[u32], names: usize) -> Vec<u64> {
     values
         .par_chunks(1 << 20)
         .map(|chunk| {
@@ -141,12 +141,40 @@ fn observation_counts(values: &[u32], names: usize) -> Vec<u64> {
         )
 }
 
+/// What the catalog needs to know about the edges' relation types: names, the
+/// order they first appear in UUID order, and how many edges carry each.
+pub(super) struct RelationStats<'a> {
+    pub(super) names: &'a [String],
+    pub(super) first_appearance: Vec<u32>,
+    pub(super) counts: Vec<u64>,
+}
+
+impl<'a> RelationStats<'a> {
+    /// From the ranked edge table (the in-memory build).
+    pub(super) fn from_ranked(edges: &'a EdgeTable) -> Self {
+        Self {
+            names: &edges.rel_names,
+            first_appearance: first_appearance(&edges.rels, edges.rel_names.len()),
+            counts: observation_counts(&edges.rels, edges.rel_names.len()),
+        }
+    }
+
+    /// No statistics: the edge kind carries properties and interns row by row.
+    pub(super) fn unused() -> Self {
+        Self {
+            names: &[],
+            first_appearance: Vec::new(),
+            counts: Vec::new(),
+        }
+    }
+}
+
 /// Intern in the order the staged path does: every node observation in UUID
 /// order (by schema group for property-bearing input), then every edge's.
 pub(super) fn build_catalog(
     budgets: GraphConstructionBudgets,
     nodes: &NodeTable,
-    edges: &EdgeTable,
+    edge_relations: &RelationStats<'_>,
     node_groups: Option<&[SchemaGroup]>,
     edge_groups: Option<&[SchemaGroup]>,
 ) -> Result<BuiltCatalog, GfError> {
@@ -169,16 +197,13 @@ pub(super) fn build_catalog(
     if let Some(groups) = edge_groups {
         intern_rows(&mut catalog, groups, ConstructionChunkKind::Edge, budgets)?;
     } else {
-        {
-            let counts = observation_counts(&edges.rels, edges.rel_names.len());
-            for rel in first_appearance(&edges.rels, edges.rel_names.len()) {
-                catalog.intern_relation_type_observed_at(
-                    &edges.rel_names[rel as usize],
-                    0,
-                    counts[rel as usize],
-                )?;
-                admit(&catalog, budgets)?;
-            }
+        for rel in &edge_relations.first_appearance {
+            catalog.intern_relation_type_observed_at(
+                &edge_relations.names[*rel as usize],
+                0,
+                edge_relations.counts[*rel as usize],
+            )?;
+            admit(&catalog, budgets)?;
         }
     }
     let entity_ids = catalog
@@ -324,16 +349,30 @@ pub(super) fn relation_routes(
         .collect()
 }
 
-#[allow(clippy::too_many_arguments)]
+/// A run of consecutive ranked edges that one canonical edge file holds.
+pub(super) struct EdgeWindow<'a> {
+    /// `edge_id` of the first edge.
+    pub(super) first_id: u64,
+    pub(super) uuids: &'a [[u8; 16]],
+    pub(super) src: &'a [u32],
+    pub(super) dst: &'a [u32],
+    pub(super) rels: &'a [u32],
+}
+
+/// Everything an edge window needs besides its edges.
+pub(super) struct EdgeEmitter<'a> {
+    pub(super) installer: &'a Installer<'a>,
+    pub(super) nodes: &'a NodeTable,
+    pub(super) relations: &'a [RelationRoute],
+    pub(super) components: &'a BTreeMap<String, String>,
+    pub(super) semantics: &'a Semantics<'a>,
+    pub(super) now: i64,
+}
+
 pub(super) fn emit_edges(
-    installer: &Installer<'_>,
-    nodes: &NodeTable,
+    emitter: &EdgeEmitter<'_>,
     edges: &EdgeTable,
-    relations: &[RelationRoute],
-    components: &BTreeMap<String, String>,
-    semantics: &Semantics<'_>,
     window: usize,
-    now: i64,
     cancel: &AtomicBool,
 ) -> Result<(), GfError> {
     let windows = edges.uuids.len().div_ceil(window);
@@ -341,25 +380,51 @@ pub(super) fn emit_edges(
         super::tables::check_cancelled(cancel)?;
         let start = index * window;
         let end = (start + window).min(edges.uuids.len());
-        let ids = (start as u64 + 1..=end as u64).collect::<Vec<_>>();
-        let src_ids = edges.src[start..end]
+        emitter.emit_window(&EdgeWindow {
+            first_id: start as u64 + 1,
+            uuids: &edges.uuids[start..end],
+            src: &edges.src[start..end],
+            dst: &edges.dst[start..end],
+            rels: &edges.rels[start..end],
+        })
+    })
+}
+
+impl EdgeEmitter<'_> {
+    /// Encode one window into its canonical file or files, one per route.
+    pub(super) fn emit_window(&self, window: &EdgeWindow<'_>) -> Result<(), GfError> {
+        let Self {
+            installer,
+            nodes,
+            relations,
+            components,
+            semantics,
+            now,
+        } = *self;
+        let count = window.uuids.len() as u64;
+        let ids = (window.first_id..window.first_id + count).collect::<Vec<_>>();
+        let src_ids = window
+            .src
             .iter()
             .map(|rank| u64::from(*rank))
             .collect::<Vec<_>>();
-        let dst_ids = edges.dst[start..end]
+        let dst_ids = window
+            .dst
             .iter()
             .map(|rank| u64::from(*rank))
             .collect::<Vec<_>>();
-        let src_uuids = edges.src[start..end]
+        let src_uuids = window
+            .src
             .iter()
             .map(|rank| nodes.uuids[*rank as usize - 1])
             .collect::<Vec<_>>();
-        let dst_uuids = edges.dst[start..end]
+        let dst_uuids = window
+            .dst
             .iter()
             .map(|rank| nodes.uuids[*rank as usize - 1])
             .collect::<Vec<_>>();
         let canonical = edge_batch(
-            &edges.uuids[start..end],
+            window.uuids,
             &src_uuids,
             &dst_uuids,
             &ids,
@@ -367,7 +432,7 @@ pub(super) fn emit_edges(
             &dst_ids,
             now,
         )?;
-        let rels = &edges.rels[start..end];
+        let rels = window.rels;
         let mut groups = BTreeMap::<(String, bool, bool), Vec<u32>>::new();
         let uniform = rels.iter().all(|rel| *rel == rels[0]);
         if uniform {
@@ -429,7 +494,7 @@ pub(super) fn emit_edges(
             installer.install_parquet(&path, &selected)?;
         }
         Ok(())
-    })
+    }
 }
 
 /// The distinct physical routes edges are stored under, as route components.

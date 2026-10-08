@@ -68,7 +68,7 @@ impl LocalDictionary {
     }
 }
 
-fn copy_uuids(array: &FixedSizeBinaryArray, out: &mut [[u8; 16]]) {
+pub(super) fn copy_uuids(array: &FixedSizeBinaryArray, out: &mut [[u8; 16]]) {
     for (slot, bytes) in out.iter_mut().zip(array.value_data().chunks_exact(16)) {
         *slot = <[u8; 16]>::try_from(bytes).expect("16-byte chunk");
     }
@@ -77,14 +77,14 @@ fn copy_uuids(array: &FixedSizeBinaryArray, out: &mut [[u8; 16]]) {
 /// The exact rows each task will emit, from the footers, and where they land in
 /// the assembled columns. Every task decodes straight into its own slice of the
 /// final arrays, so a decoded copy and an assembled copy never coexist.
-struct Tasks {
+pub(super) struct Tasks {
     /// `(source, task, rows)` in input order.
-    items: Vec<(usize, usize, usize)>,
-    total: usize,
+    pub(super) items: Vec<(usize, usize, usize)>,
+    pub(super) total: usize,
 }
 
 impl Tasks {
-    fn plan(sources: &[BulkSource<'_>], what: &str) -> Result<Self, GfError> {
+    pub(super) fn plan(sources: &[BulkSource<'_>], what: &str) -> Result<Self, GfError> {
         let mut items = Vec::new();
         let mut total = 0_usize;
         for (source, planned) in sources.iter().enumerate() {
@@ -146,7 +146,7 @@ fn remap_in_place(tasks: &Tasks, column: &mut [u32], maps: &[Vec<u32>]) {
 /// The staged path's per-chunk admission, applied to every decoded batch: the
 /// property-column, row and byte windows. (Its run window is implied: a budget
 /// set validates `max_run_records >= 4 * max_batch_rows`.)
-fn admit_batch(
+pub(super) fn admit_batch(
     kind: ConstructionChunkKind,
     batch: &RecordBatch,
     budgets: GraphConstructionBudgets,
@@ -166,7 +166,7 @@ fn admit_batch(
     Ok(())
 }
 
-fn short_source() -> GfError {
+pub(super) fn short_source() -> GfError {
     storage("a source emitted a different row count than its footer")
 }
 

@@ -55,6 +55,10 @@ pub struct BulkBuildPlan<'a> {
     pub nodes: Vec<BulkSource<'a>>,
     /// Edge sources in registration order.
     pub edges: Vec<BulkSource<'a>>,
+    /// Resident bytes the build may plan to use, or `None` for no limit. A
+    /// build whose in-memory estimate exceeds it runs on scratch files
+    /// (ADR 0058, #1900).
+    pub memory_budget: Option<u64>,
 }
 
 /// Peak-RSS model of the builder, fitted to measured runs (#1883):
@@ -71,7 +75,7 @@ const BYTES_PER_NODE: u64 = 76;
 /// a sorted copy per schema group. Measured at S20 with a `name` node property
 /// and a `weight` edge property: peak RSS exceeded the fitted property-free
 /// model by 5.5 times the footers' uncompressed bytes.
-const RETAINED_FACTOR: u64 = 6;
+pub(super) const RETAINED_FACTOR: u64 = 6;
 /// Safety margin on the sum, as a fraction: 5/4.
 const MARGIN_NUMERATOR: u64 = 5;
 const MARGIN_DENOMINATOR: u64 = 4;
@@ -137,6 +141,21 @@ pub struct BulkBuildReport {
     /// values are numeric-only so receipts stay within the certification
     /// runner's sanitizer.
     pub passes: std::collections::BTreeMap<String, BulkPassReport>,
+    /// Partitions in flight on the over-budget route; zero when the build ran in memory.
+    #[serde(default)]
+    pub scratch_concurrency: u64,
+    /// Edge-UUID range partitions of the over-budget route.
+    #[serde(default)]
+    pub edge_partitions: u64,
+    /// Node-range partitions per direction of the over-budget route.
+    #[serde(default)]
+    pub csr_partitions: u64,
+    /// Bytes the over-budget route wrote to scratch files, block headers included.
+    #[serde(default)]
+    pub scratch_write_bytes: u64,
+    /// Bytes it read back.
+    #[serde(default)]
+    pub scratch_read_bytes: u64,
 }
 
 #[derive(Clone, Copy, Default)]
