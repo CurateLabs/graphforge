@@ -84,8 +84,10 @@ functions.
   those inputs.
 - An initial build whose estimated peak memory fits the plan-time budget keeps
   everything resident. One that does not runs the same passes through scratch
-  files (below), so peak memory stays inside the budget. The budget is three
-  fifths of the process's cgroup-aware memory headroom, or the bytes in
+  files (below), bounding normalized builder workspace within its reservation.
+  The registered-source decoding and normalization boundary is described below;
+  its complete memory bound remains a prerequisite under #1918. The budget is
+  three fifths of the process's cgroup-aware memory headroom, or the bytes in
   `GF_BULK_BUILD_MEMORY_BUDGET_BYTES`. Routing is a function of the footers and
   the budget, never of the data, and the bytes are the same on every route.
 - The staged path remains for appends, chunk-API sessions, sessions an earlier
