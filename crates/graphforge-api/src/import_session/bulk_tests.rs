@@ -199,7 +199,7 @@ fn routing_is_memory_then_scratch_then_staged_with_a_typed_reason() {
     for (budget, scratch, staged) in [
         (None, false, false),
         (Some(SCRATCH_BUDGET), true, false),
-        (Some(1), false, true),
+        (Some(512 << 10), false, true),
     ] {
         bulk_source::TEST_BUDGET.with(|cell| cell.set(budget));
         let (_directory, _project, graph) = fixture();
@@ -237,7 +237,7 @@ fn routing_is_memory_then_scratch_then_staged_with_a_typed_reason() {
 }
 
 #[test]
-fn edge_properties_over_the_budget_stage_with_a_typed_reason() {
+fn edge_properties_use_scratch_and_reopen_with_their_values() {
     use arrow::array::Float64Array;
     use arrow::datatypes::{DataType, Field};
 
@@ -258,9 +258,9 @@ fn edge_properties_over_the_budget_stage_with_a_typed_reason() {
         ],
     )
     .unwrap();
-    for (budget, staged) in [(None, false), (Some(SCRATCH_BUDGET), true)] {
+    for budget in [None, Some(920 << 20), Some(944 << 20)] {
         bulk_source::TEST_BUDGET.with(|cell| cell.set(budget));
-        let (_directory, _project, graph) = fixture();
+        let (_directory, project, graph) = fixture();
         let mut session = graph
             .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
             .unwrap();
@@ -272,15 +272,66 @@ fn edge_properties_over_the_budget_stage_with_a_typed_reason() {
             .unwrap();
         let progress = session.validate(&graph);
         bulk_source::TEST_BUDGET.with(|cell| cell.set(None));
-        let construction = progress.unwrap().construction.unwrap();
-        assert_eq!(construction.bulk_build.is_none(), staged, "{budget:?}");
+        let report = progress.unwrap().construction.unwrap().bulk_build.unwrap();
         assert_eq!(
-            session.manifest.staged_reason,
-            staged.then_some(graphforge_storage::BulkStagedReason::EdgePropertiesExceedBudget)
+            report.property_scratch_write_bytes > 0,
+            budget.is_some(),
+            "{report:?}"
         );
+        assert!(session.manifest.staged_reason.is_none());
         session.commit(&graph, None).unwrap();
         assert_eq!(graph.node_count("Person").unwrap(), 30);
+        drop(session);
+        drop(graph);
+        let reopened = GraphForge::new(project.to_str()).unwrap();
+        let queried = reopened
+            .execute("MATCH ()-[r:KNOWS]->() RETURN r.weight AS weight")
+            .unwrap();
+        let values = queried
+            .batches
+            .iter()
+            .flat_map(|batch| {
+                let values = batch
+                    .column_by_name("weight")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                (0..values.len())
+                    .map(|row| values.value(row).to_bits())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(values, vec![0.5_f64.to_bits(); 30]);
     }
+}
+
+#[test]
+fn an_unallocatable_ipc_footer_refuses_before_route_selection() {
+    let (_directory, _project, graph) = fixture();
+    let before = *graph.current_generation_uuid.lock().unwrap();
+    let mut session = graph
+        .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
+        .unwrap();
+    session
+        .append_arrow(BulkInputKind::Node, &[nodes(&[v7(1)])])
+        .unwrap();
+    bulk_source::TEST_BUDGET.with(|cell| cell.set(Some(1)));
+    let error = session.validate(&graph).unwrap_err();
+    bulk_source::TEST_BUDGET.with(|cell| cell.set(None));
+    assert!(matches!(
+        error,
+        GfError::Project {
+            code: graphforge_core::ProjectErrorCode::ResourceLimit,
+            ..
+        }
+    ));
+    assert!(error.to_string().contains("footer"));
+    assert_eq!(session.manifest.build_route, None);
+    assert_eq!(*graph.current_generation_uuid.lock().unwrap(), before);
+    session.validate(&graph).unwrap();
+    session.commit(&graph, None).unwrap();
+    assert_eq!(graph.node_count("Person").unwrap(), 1);
 }
 
 /// Rows whose UUID is null get a deterministic UUID derived from the operation,
@@ -313,7 +364,7 @@ fn row_groups_that_straddle_task_boundaries_publish_the_staged_bytes() {
     // task boundary falls inside a row group.
     let batch = null_uuid_nodes(300);
     let mut inventories = Vec::new();
-    for budget in [None, Some(SCRATCH_BUDGET), Some(1)] {
+    for budget in [None, Some(SCRATCH_BUDGET), Some(512 << 10)] {
         bulk_source::TEST_BUDGET.with(|cell| cell.set(budget));
         let source_dir = tempfile::tempdir().unwrap();
         let parquet = source_dir.path().join("nodes.parquet");
@@ -351,7 +402,7 @@ fn row_groups_that_straddle_task_boundaries_publish_the_staged_bytes() {
         let progress = session.validate(&graph);
         bulk_source::TEST_BUDGET.with(|cell| cell.set(None));
         let construction = progress.unwrap().construction.unwrap();
-        assert_eq!(construction.bulk_build.is_some(), budget != Some(1));
+        assert_eq!(construction.bulk_build.is_some(), budget != Some(512 << 10));
         session.commit(&graph, None).unwrap();
         assert_eq!(graph.node_count("Person").unwrap(), 300);
         inventories.push(encoded_inventory(&root));
@@ -427,7 +478,7 @@ fn a_refused_bulk_attempt_stays_on_the_bulk_route_when_memory_drops() {
 fn a_staged_route_is_durable_too() {
     let (_directory, _project, graph) = fixture();
     let (mut session, _) = two_batch_import_with_a_cross_batch_duplicate(&graph);
-    bulk_source::TEST_BUDGET.with(|cell| cell.set(Some(1)));
+    bulk_source::TEST_BUDGET.with(|cell| cell.set(Some(512 << 10)));
     let first = session.validate(&graph);
     bulk_source::TEST_BUDGET.with(|cell| cell.set(None));
     assert!(first.is_err());

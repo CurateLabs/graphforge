@@ -31,6 +31,25 @@ pub trait BulkBatchReader: Send + Sync {
     /// number of rows fails the build.
     fn task_rows(&self, task: usize) -> usize;
 
+    /// Owned bytes of the source's cached Arrow schema, including nested
+    /// fields and metadata. Readers retaining schema buffers report them here
+    /// so the scratch builder reserves them before decoding. A reader with no
+    /// retained schema may use the default.
+    fn schema_resident_bytes(&self) -> u64 {
+        0
+    }
+
+    /// Cached footer/schema memory retained while the plan exists.
+    fn retained_metadata_bytes(&self) -> u64 {
+        self.schema_resident_bytes()
+    }
+
+    /// Maximum raw decoder workspace, including retained dictionaries and
+    /// compressed-message expansion, known without decoding payload arrays.
+    fn decoded_workspace_bytes(&self) -> u64 {
+        0
+    }
+
     /// The smallest and largest identity UUID among `task`'s rows, when the
     /// source's footer states them exactly (no nulls, so no derived UUIDs). The
     /// over-budget route uses them to split edges into UUID ranges of equal
@@ -51,8 +70,8 @@ pub struct BulkSource<'a> {
     pub rows: u64,
     /// Whether the source carries only the required columns.
     pub property_free: bool,
-    /// Decoded size of the source's rows, from its footer. Only a
-    /// property-bearing source retains its decoded batches.
+    /// Decoded size of the source's rows, from its footer. The resident peak
+    /// model charges retained batches only for property-bearing kinds.
     pub decoded_bytes: u64,
 }
 
@@ -111,6 +130,15 @@ impl BulkBuildPlan<'_> {
             .saturating_add(rows(&self.edges).saturating_mul(BYTES_PER_EDGE))
             .saturating_add(retained(&self.nodes))
             .saturating_add(retained(&self.edges))
+            .saturating_add(
+                self.nodes
+                    .iter()
+                    .chain(&self.edges)
+                    .map(|source| source.reader.retained_metadata_bytes())
+                    .fold(0_u64, u64::saturating_add),
+            )
+            .saturating_add(self.max_source_schema_bytes().saturating_mul(8))
+            .saturating_add(self.source_decoder_bytes())
             .saturating_mul(MARGIN_NUMERATOR)
             / MARGIN_DENOMINATOR
     }
@@ -185,6 +213,15 @@ pub struct BulkBuildReport {
     /// Largest single unfinished CSR shard. Relation count does not multiply it.
     #[serde(default)]
     pub peak_csr_carry_entries: u64,
+    /// Property IPC frames written, including CRC headers and temporary runs.
+    #[serde(default)]
+    pub property_scratch_write_bytes: u64,
+    /// Property IPC frames read; repeated catalog/window scans are included.
+    #[serde(default)]
+    pub property_scratch_read_bytes: u64,
+    /// Fixed property workspace reserved before decoding any source.
+    #[serde(default)]
+    pub property_workspace_reserved_bytes: u64,
 }
 
 #[derive(Clone, Copy, Default)]

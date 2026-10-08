@@ -5,7 +5,8 @@
 //! - which route builds the generation: in memory, on scratch files, or on the
 //!   staged path (a typed reason says why not);
 //! - for the scratch route, how many partitions and how many partitions in
-//!   flight keep the process inside the budget.
+//!   flight fit the normalized builder workspace inside the budget. Registered
+//!   source decoding and normalization require the separate bound in #1918.
 //!
 //! The constants are fitted to measured runs (see ADR 0058) and rounded up.
 
@@ -53,11 +54,11 @@ const MAX_PARTITIONS: u64 = 4096;
 #[serde(rename_all = "snake_case")]
 pub enum BulkStagedReason {
     /// The node tables (sorted UUIDs, labels, endpoint index, and any retained
-    /// node properties) do not fit the budget. External node handling is not
+    /// cached source metadata) do not fit the budget. External node handling is not
     /// implemented (#1881).
     NodeTablesExceedBudget,
-    /// The edge kind carries properties, which the builder retains in memory.
-    /// Edge properties on scratch are not implemented (#1881).
+    /// Historical reason retained for manifest decoding. New property-bearing
+    /// plans use bounded property scratch instead of selecting this reason.
     EdgePropertiesExceedBudget,
 }
 
@@ -81,21 +82,22 @@ impl BulkBuildPlan<'_> {
         self.edges.iter().map(|source| source.rows).sum()
     }
 
-    /// Decoded bytes of the node kind when it retains properties, else zero.
-    fn retained_node_bytes(&self) -> u64 {
-        if self.nodes.iter().all(|source| source.property_free) {
-            0
-        } else {
-            self.nodes
-                .iter()
-                .map(|source| source.decoded_bytes)
-                .sum::<u64>()
-                .saturating_mul(super::plan::RETAINED_FACTOR)
-        }
+    pub(super) fn max_source_schema_bytes(&self) -> u64 {
+        self.nodes
+            .iter()
+            .chain(&self.edges)
+            .map(|source| source.reader.schema_resident_bytes())
+            .max()
+            .unwrap_or(0)
     }
 
-    fn edges_retain_properties(&self) -> bool {
-        self.edges.iter().any(|source| !source.property_free)
+    pub(super) fn source_decoder_bytes(&self) -> u64 {
+        self.nodes
+            .iter()
+            .chain(&self.edges)
+            .map(|source| source.reader.decoded_workspace_bytes())
+            .max()
+            .unwrap_or(0)
     }
 
     /// The node tables and minimum fixed builder workspace. In particular,
@@ -104,7 +106,13 @@ impl BulkBuildPlan<'_> {
     pub fn node_tables_resident_bytes(&self) -> u64 {
         FIXED_BYTES
             .saturating_add(self.node_rows().saturating_mul(NODE_TABLE_BYTES))
-            .saturating_add(self.retained_node_bytes())
+            .saturating_add(
+                self.nodes
+                    .iter()
+                    .chain(&self.edges)
+                    .map(|source| source.reader.retained_metadata_bytes())
+                    .fold(0_u64, u64::saturating_add),
+            )
     }
 
     /// Route the plan for `budget` resident bytes.
@@ -114,8 +122,6 @@ impl BulkBuildPlan<'_> {
             BulkRoute::Memory
         } else if self.node_tables_resident_bytes() > budget {
             BulkRoute::Staged(BulkStagedReason::NodeTablesExceedBudget)
-        } else if self.edges_retain_properties() {
-            BulkRoute::Staged(BulkStagedReason::EdgePropertiesExceedBudget)
         } else {
             BulkRoute::Scratch
         }
@@ -127,6 +133,32 @@ impl BulkBuildPlan<'_> {
         self.memory_budget
             .map_or(BulkRoute::Memory, |budget| self.route_for(budget))
     }
+}
+
+/// Decoded payload, IPC and encoder transients plus the logical window's
+/// owner bitsets and identifier inventory. The CSR workspace is reusable.
+pub(super) fn property_workspace(budgets: super::GraphConstructionBudgets) -> u64 {
+    (budgets.max_batch_bytes as u64)
+        .saturating_mul(8)
+        .saturating_add(budgets.max_catalog_identifier_bytes as u64)
+        .saturating_add(
+            (budgets.max_batch_rows as u64).saturating_mul(
+                (budgets.max_property_columns.div_ceil(64) as u64)
+                    .saturating_mul(8)
+                    .saturating_add(128),
+            ),
+        )
+        .saturating_add(32 << 20)
+}
+
+pub(super) fn property_extra_workspace(
+    plan: &BulkBuildPlan<'_>,
+    budgets: super::GraphConstructionBudgets,
+) -> u64 {
+    property_workspace(budgets)
+        .saturating_add(plan.max_source_schema_bytes().saturating_mul(8))
+        .saturating_add(plan.source_decoder_bytes())
+        .saturating_sub(CSR_WORKSPACE_BYTES)
 }
 
 /// Sizes of one scratch build.
@@ -179,10 +211,37 @@ impl Drop for ForcedPartitions {
 }
 
 impl ScratchPlan {
+    #[cfg(test)]
     pub(super) fn derive(plan: &BulkBuildPlan<'_>, budget: u64, workers: usize) -> Self {
+        Self::derive_with_budgets(
+            plan,
+            budget,
+            workers,
+            super::GraphConstructionBudgets::default(),
+        )
+    }
+
+    pub(super) fn derive_with_budgets(
+        plan: &BulkBuildPlan<'_>,
+        budget: u64,
+        workers: usize,
+        budgets: super::GraphConstructionBudgets,
+    ) -> Self {
         let edges = plan.edge_rows();
+        let properties = plan
+            .nodes
+            .iter()
+            .chain(&plan.edges)
+            .any(|source| !source.property_free);
+        let fixed = plan
+            .node_tables_resident_bytes()
+            .saturating_add(if properties {
+                property_extra_workspace(plan, budgets)
+            } else {
+                0
+            });
         let working = budget
-            .saturating_sub(plan.node_tables_resident_bytes())
+            .saturating_sub(fixed)
             .saturating_add(MIN_WORKING_BYTES);
         // Three quarters of the working set hold partitions; the rest stages
         // scatter buffers and decoded input.
@@ -192,7 +251,7 @@ impl ScratchPlan {
         let staging_total = working / 8;
         let ceil = |bytes: u64, per: u64| bytes.div_ceil(per.max(1));
         let mut best = None;
-        for concurrency in (1..=workers.max(1) as u64).rev() {
+        for concurrency in (1..=if properties { 1 } else { workers.max(1) as u64 }).rev() {
             // Decoding tasks in flight must fit beside the staging buffers.
             if concurrency > 1 && concurrency * DECODE_WINDOW_BYTES > working / 4 {
                 continue;
