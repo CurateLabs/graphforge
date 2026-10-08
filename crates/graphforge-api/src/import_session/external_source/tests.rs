@@ -258,6 +258,14 @@ fn digest_rereads_ranges_dropped_beyond_the_pending_bound() {
     }
     assert!(digest.state().pending_bytes <= 128 << 10);
     assert_eq!(digest.finish(&identity, &file).unwrap(), sha256(&bytes));
+    // Ranges kept near the prefix were hashed in order; only the dropped ones
+    // were read again, and nothing more.
+    let reread = digest.reread_bytes();
+    assert!(
+        reread > 0 && reread < bytes.len() as u64,
+        "re-read {reread} of {} bytes",
+        bytes.len()
+    );
 }
 
 #[test]

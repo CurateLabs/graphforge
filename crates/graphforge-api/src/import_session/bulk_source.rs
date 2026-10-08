@@ -337,18 +337,27 @@ impl Refusals {
 /// Whole-file SHA-256 of each in-place source, produced by the read that
 /// completed it. A source appears only once every one of its tasks was read.
 #[derive(Default)]
-pub(super) struct Digests(std::sync::Mutex<BTreeMap<u64, String>>);
+pub(super) struct Digests {
+    held: std::sync::Mutex<BTreeMap<u64, String>>,
+    reread: std::sync::atomic::AtomicU64,
+}
 
 impl Digests {
-    fn insert(&self, sequence: u64, sha256: String) {
-        if let Ok(mut held) = self.0.lock() {
+    /// Bytes read again, across all sources, to complete their digests.
+    pub(super) fn reread_bytes(&self) -> u64 {
+        self.reread.load(Ordering::Acquire)
+    }
+
+    fn insert(&self, sequence: u64, sha256: String, reread: u64) {
+        self.reread.fetch_add(reread, Ordering::AcqRel);
+        if let Ok(mut held) = self.held.lock() {
             held.insert(sequence, sha256);
         }
     }
 
     /// The digest the build read for the source with this sequence.
     pub(super) fn take(&self, sequence: u64) -> Option<String> {
-        self.0.lock().ok()?.remove(&sequence)
+        self.held.lock().ok()?.remove(&sequence)
     }
 }
 
@@ -387,7 +396,8 @@ impl InPlace<'_> {
                 &format!("recorded {expected}, read {sha256}"),
             ));
         }
-        self.digests.insert(sequence, sha256);
+        self.digests
+            .insert(sequence, sha256, self.digest.reread_bytes());
         Ok(())
     }
 }

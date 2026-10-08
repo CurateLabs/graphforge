@@ -265,6 +265,8 @@ struct DigestState {
     pending_bytes: usize,
     pending_limit: usize,
     overrun: bool,
+    /// Bytes `finish` read again because the decode had not.
+    reread: u64,
 }
 
 impl DigestState {
@@ -343,11 +345,18 @@ impl SourceDigest {
             pending_bytes: 0,
             pending_limit,
             overrun: false,
+            reread: 0,
         })))
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, DigestState> {
         self.0.lock().expect("source digest lock poisoned")
+    }
+
+    /// Bytes `finish` had to read again, the cost of the digest beyond the
+    /// decode's own reads. Zero until `finish` has run.
+    pub(super) fn reread_bytes(&self) -> u64 {
+        self.state().reread
     }
 
     pub(super) fn observe(&self, offset: u64, bytes: &[u8]) {
@@ -393,6 +402,7 @@ impl SourceDigest {
             state.hashed += want;
             reread += want;
         }
+        state.reread = reread;
         RegionScope::record_work("bytes", reread);
         let hasher = std::mem::replace(&mut state.hasher, Sha256::new());
         Ok(hex(&hasher.finalize()))

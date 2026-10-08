@@ -1061,6 +1061,11 @@ impl GraphImportSession {
         }
         drop(region);
         let report = built?;
+        {
+            // Bytes the workers' decode did not read, read again to digest.
+            let _region = RegionScope::named("source_read");
+            RegionScope::record_work("bytes", digests.reread_bytes());
+        }
         let (nodes, edges) = (report.nodes, report.edges);
         for source_index in 0..self.manifest.sources.len() {
             if self.manifest.sources[source_index].external.is_some() {
