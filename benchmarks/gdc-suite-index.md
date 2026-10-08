@@ -415,6 +415,16 @@ single-process peak RSS above 4 GiB, or BenchExec's memory stop),
 the rung, but every query still runs, so the result lists every failure. A
 refused query counts against coverage and is never checked.
 
+`host_swapped` means the host's `pswpout` counter rose while a phase ran. A
+`pswpin` rise alone does not fail the phase: new phase processes cannot have
+had pages swapped out before the window, so swap-ins with a flat `pswpout` are
+other processes' cold pages (measured on OVHC-AGENCY: `systemd-journald`
+reading its pages back when BenchExec's scope logs). A swapped phase publishes
+`<suite>-<rung>-<phase>-benchexec-raw/host-swap.json` with both counters
+before and after, and its failure detail names what moved. A `query_failed`
+rung's detail lists each distinct failed-sample error with its bindings; the
+same text is in `query-evidence.json` and the correctness mismatches.
+
 Each rung publishes, under `<suite>-<rung>-`: three `*-benchexec.json`
 documents (`graphforge-benchexec-run/1`), `expected-counts.json`,
 `query-evidence.json`, `correctness.json`, `inventory.json` and

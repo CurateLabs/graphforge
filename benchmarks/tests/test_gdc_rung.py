@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import itertools
 import json
 import os
 from pathlib import Path
@@ -336,7 +337,7 @@ class TinyLadderEndToEndTests(Scratch):
 
     def test_a_swap_rise_fails_the_phase_naming_and_retaining_the_counters(self) -> None:
         readings = iter(
-            [{"pswpin": 10, "pswpout": 20}, {"pswpin": 12, "pswpout": 20}]  # before, after
+            [{"pswpin": 10, "pswpout": 20}, {"pswpin": 12, "pswpout": 25}]  # before, after
         )
         ladder = self.ladder(self.executables, FakeBenchExec())
         with patch.object(gdc_rung, "_host_swap_counters", side_effect=lambda: next(readings)):
@@ -351,15 +352,30 @@ class TinyLadderEndToEndTests(Scratch):
             {
                 "phase": "convert",
                 "cause": "host_swapped",
-                "detail": "host swap counters rose during the phase: pswpin +2 (10 -> 12); "
+                "detail": "host paged out during the phase: pswpout +5 (20 -> 25), pswpin +2; "
                 "see host-swap.json",
             },
         )
         retained = self.output / "snb-interactive-sf0-convert-benchexec-raw" / "host-swap.json"
         self.assertEqual(
             json.loads(retained.read_text()),
-            {"before": {"pswpin": 10, "pswpout": 20}, "after": {"pswpin": 12, "pswpout": 20}},
+            {"before": {"pswpin": 10, "pswpout": 20}, "after": {"pswpin": 12, "pswpout": 25}},
         )
+
+    def test_a_swap_in_alone_does_not_fail_the_phase(self) -> None:
+        readings = itertools.cycle(
+            [{"pswpin": 10, "pswpout": 20}, {"pswpin": 30, "pswpout": 20}]  # before, after
+        )
+        ladder = self.ladder(self.executables, FakeBenchExec())
+        with patch.object(gdc_rung, "_host_swap_counters", side_effect=lambda: next(readings)):
+            results = gdc_rung.climb(
+                ladder,
+                reserved_headroom_bytes=0,
+                quiet_host_wait_seconds=0,
+                quiet_host=lambda _wait: QUIET,
+            )
+        self.assertEqual(results[0]["status"], "passed")
+        self.assertEqual(list(self.output.glob("*host-swap.json")), [])
 
     def test_a_phase_stopped_at_the_wall_fails_typed_and_still_tears_down(self) -> None:
         ladder = self.ladder(self.executables, FakeBenchExec(termination="walltime"))
@@ -547,16 +563,22 @@ class FailedSampleDescriptionTests(unittest.TestCase):
 class HostSwapDetailTests(unittest.TestCase):
     """A `host_swapped` phase names the counters that moved."""
 
-    def test_the_detail_names_the_counters_that_rose(self) -> None:
+    def test_only_a_page_out_marks_the_phase(self) -> None:
         before = {"pswpin": 503592, "pswpout": 830053}
-        self.assertEqual(
-            gdc_rung.swap_detail(before, {"pswpin": 503594, "pswpout": 830053}),
-            "host swap counters rose during the phase: pswpin +2 (503592 -> 503594); "
-            "see host-swap.json",
+        # Swap-ins with no swap-out are other processes' cold pages (systemd-journald
+        # waking to log the phase's own scope): not this phase's memory.
+        self.assertFalse(
+            gdc_rung.swapped_out(before, {"pswpin": 503611, "pswpout": 830053}),
         )
+        self.assertTrue(gdc_rung.swapped_out(before, {"pswpin": 503592, "pswpout": 830054}))
+        self.assertTrue(gdc_rung.swapped_out(before, {"pswpin": 503700, "pswpout": 830060}))
+
+    def test_the_detail_names_both_counters(self) -> None:
         self.assertEqual(
-            gdc_rung.swap_detail(before, {"pswpin": 503592, "pswpout": 830060}),
-            "host swap counters rose during the phase: pswpout +7 (830053 -> 830060); "
+            gdc_rung.swap_detail(
+                {"pswpin": 503592, "pswpout": 830053}, {"pswpin": 503595, "pswpout": 830060}
+            ),
+            "host paged out during the phase: pswpout +7 (830053 -> 830060), pswpin +3; "
             "see host-swap.json",
         )
 
@@ -758,7 +780,8 @@ class MatchingTests(unittest.TestCase):
                             "status": "failed",
                             "cause": "query_failed",
                             "error_code": "GF_VALIDATION",
-                            "error": "validation error: node selector topology scan exceeds row limit",
+                            "error": "validation error: node selector topology scan "
+                            "exceeds row limit",
                         }
                     ],
                 }

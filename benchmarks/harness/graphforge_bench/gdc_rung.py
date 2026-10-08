@@ -435,20 +435,33 @@ def classify_phase(
     if peak > MEMORY_LIMIT_BYTES:
         return "memory_limit_exceeded", f"process peak RSS {peak} exceeds {MEMORY_LIMIT_BYTES}"
     if swapped:
-        return "host_swapped", "host swap counters rose during the phase"
+        return "host_swapped", "the host paged out during the phase"
     if benchexec is None or benchexec.get("outcome") != "passed":
         return "benchexec_failed", f"BenchExec outcome {benchexec and benchexec.get('outcome')}"
     return None
 
 
+def swapped_out(before: Mapping[str, int], after: Mapping[str, int]) -> bool:
+    """Whether the host paged anything out while the phase ran.
+
+    Only a rise in `pswpout` marks the phase as swap-exposed. Phase processes are
+    new, so any page of theirs that reaches swap goes out inside the window; a
+    `pswpin` rise with `pswpout` flat reads pages that left memory before the phase
+    began, which are some other process's. Measured on this host (#1914): a daemon
+    such as systemd-journald, woken by the scope BenchExec starts for every phase,
+    reads its cold pages back, so counting `pswpin` fails short phases at random.
+    """
+    return after["pswpout"] > before["pswpout"]
+
+
 def swap_detail(before: Mapping[str, int], after: Mapping[str, int]) -> str:
-    """The host swap counters' rise, so a `host_swapped` rung says what moved."""
-    moved = ", ".join(
-        f"{key} +{after[key] - before[key]} ({before[key]} -> {after[key]})"
-        for key in sorted(before)
-        if after[key] > before[key]
+    """What the host's swap counters did, so a `host_swapped` rung says what moved."""
+    return (
+        "host paged out during the phase: "
+        f"pswpout +{after['pswpout'] - before['pswpout']} "
+        f"({before['pswpout']} -> {after['pswpout']}), "
+        f"pswpin +{after['pswpin'] - before['pswpin']}; see host-swap.json"
     )
-    return f"host swap counters rose during the phase: {moved}; see host-swap.json"
 
 
 def describe_failed_samples(evidence: Mapping[str, Any]) -> str:
@@ -483,7 +496,7 @@ def run_phase(rung: Rung, name: str, task: dict[str, Any], wall_seconds: int) ->
         swap_before = _host_swap_counters()
         status = ladder.benchexec(stage, ladder.executables, ladder.identities, ladder.work_root)
         swap_after = _host_swap_counters()
-        swapped = any(swap_after[key] > value for key, value in swap_before.items())
+        swapped = swapped_out(swap_before, swap_after)
         raw = stage / "raw"
         if swapped and raw.is_dir():
             # Retain the counters beside the failed raw output (#1727), even when a
