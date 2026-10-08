@@ -102,7 +102,7 @@ const WORK_UNITS_V2: [&str; 9] = [
     "participant_reused_bytes",
     "participant_payload_read_bytes",
 ];
-const REGIONS: [&str; 61] = [
+const REGIONS: [&str; 62] = [
     "import_command",
     "begin_import",
     "resume_import",
@@ -110,6 +110,7 @@ const REGIONS: [&str; 61] = [
     "register_parquet",
     "checkpoint",
     "stage+seal",
+    "bulk_build",
     "append_nodes",
     "append_edges",
     "source_read",
@@ -434,6 +435,22 @@ mod tests {
                 "{name} missing from the capture"
             );
         }
+    }
+
+    #[test]
+    fn snapshot_contract_accepts_the_bulk_build_region_below_stage_and_seal() {
+        use graphforge_storage::concurrency_attribution::{RegionCapture, RegionScope};
+
+        let capture = RegionCapture::start("import_command");
+        {
+            let _stage = RegionScope::named("stage+seal");
+            let _build = RegionScope::named("bulk_build");
+            RegionScope::record_work("nodes", 3);
+            RegionScope::record_work("edges", 5);
+        }
+        let value = serde_json::to_value(capture.finish()).unwrap();
+        assert!(valid_snapshot(&value));
+        assert!(value["regions"]["import_command/stage+seal/bulk_build"].is_object());
     }
 
     #[test]

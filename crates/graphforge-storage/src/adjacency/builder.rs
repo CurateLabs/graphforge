@@ -84,16 +84,34 @@ pub struct AdjacencyBuildOptions {
     pub merge_fan_in: usize,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Shard limits a test substitutes for the defaults on its own thread, so a
+    /// small graph spans several CSR shards. Only the thread that builds the
+    /// options sees it.
+    pub(crate) static TEST_SHARD_LIMITS: std::cell::Cell<Option<(usize, usize)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn default_shard_limits() -> (usize, usize) {
+    #[cfg(test)]
+    if let Some(limits) = TEST_SHARD_LIMITS.with(std::cell::Cell::get) {
+        return limits;
+    }
+    (DEFAULT_CSR_SHARD_EDGES, DEFAULT_CSR_SHARD_NODES)
+}
+
 impl Default for AdjacencyBuildOptions {
     fn default() -> Self {
+        let (shard_max_edges, shard_max_nodes) = default_shard_limits();
         Self {
             chunk_rows: DEFAULT_ADJACENCY_CHUNK_ROWS,
             batch_size: DEFAULT_ADJACENCY_BATCH_SIZE,
             spill_dir: None,
             spill_max_bytes: None,
             memory_budget_bytes: None,
-            shard_max_edges: DEFAULT_CSR_SHARD_EDGES,
-            shard_max_nodes: DEFAULT_CSR_SHARD_NODES,
+            shard_max_edges,
+            shard_max_nodes,
             merge_fan_in: DEFAULT_ADJACENCY_MERGE_FAN_IN,
         }
     }

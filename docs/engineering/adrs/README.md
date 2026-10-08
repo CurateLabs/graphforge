@@ -110,6 +110,7 @@ the CI Lint job (#1390).
 | 0055 | Research Versions are commits | Proposed | A head-moving operation needs more than one merge parent, a host needs identity that free-form signatures cannot express, or revision 6 Projects no longer need to be read | [`../../adr/0055-versions-are-commits.md`](../../adr/0055-versions-are-commits.md) |
 | 0056 | Shaping stays serial within stages until one sub-phase dominates | Accepted | A stock region capture at S20 or S22 shows one shaping sub-phase above half of shaping wall, or shape_routing's calling-thread CPU above 20% of complete-ingest wall | [`../../adr/0056-stage-internal-parallelism.md`](../../adr/0056-stage-internal-parallelism.md) |
 | 0057 | Initial builds resolve edge endpoints by a node-surrogate index instead of two endpoint sorts | Accepted | The tracer's laned probe cost exceeds a third of the endpoint work it removes at S20, an append onto a large base needs the same saving, or new-node count outgrows the recorded index budget on a supported workload | [`../../adr/0057-endpoint-resolution-by-node-index.md`](../../adr/0057-endpoint-resolution-by-node-index.md) |
+| 0058 | Initial builds run on a bulk builder derived from the published generation | Accepted | An initial build must exceed the in-memory budget before the scratch path lands, a published artifact stops being a projection of the three ranked inputs, or a chunk-API initial build needs the same speedup | [`../../adr/0058-initial-builds-run-on-a-bulk-builder.md`](../../adr/0058-initial-builds-run-on-a-bulk-builder.md) |
 
 ### Superseded
 

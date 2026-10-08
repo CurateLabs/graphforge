@@ -97,6 +97,39 @@ bounded by `io_concurrency`. Status reports accepted and rejected rows, bytes,
 accepted and pending files, elapsed work, the peak decoded batch, and the
 configured concurrency bound.
 
+## Initial builds use the bulk builder
+
+When `validate` runs on a session pinned to an empty project and nothing is yet
+staged, it does not stage anything. Sources are read in place, by row group and
+in parallel; each construction batch passes the same intake normalization an
+append gets, then the builder (ADR 0058) ranks nodes and edges in memory and
+emits the whole encoded generation:
+
+1. **Plan** from the source footers.
+2. **Nodes** are decoded, validated, ordered (a source already in UUID order
+   skips the sort), checked for duplicates and ranked: `node_id` is the rank.
+3. **Edges** resolve endpoints through a node-UUID index, then order and rank:
+   `edge_id` is the rank. A missing endpoint, an endpoint that is an edge, an
+   edge UUID that equals a node UUID and a repeated UUID are refused.
+4. **Emit** writes the runtime catalog, node and edge Parquet windows, property
+   overlays, the UUID membership and v4 ordinal artifacts, and the CSR shards.
+   Each artifact is hashed (SHA-256, XXH64) from the bytes written once.
+
+`commit` then installs and publishes the encoded inventory exactly as for any
+other session. The builder's receipt (`construction.bulk_build`) reports wall
+time, process CPU, effective cores, logical and physical write bytes and peak
+RSS per pass.
+
+The first `validate` chooses the route once and records it in the manifest, so
+later calls (and reruns after a crash) never re-decide it from live memory. Nothing
+is staged, so there is no durable prefix: a crash, cancellation or error
+discards the attempt and the next `validate` reruns from the sources. Appends,
+sessions that already staged chunks, and initial builds made through
+`GraphConstructionSession::append_*` keep the staged path described below. The
+builder holds the ranked graph in memory; an initial build that does not fit
+needs the scratch path planned in #1881. Node and edge counts are limited to
+2^32 - 2.
+
 Validation processes node sources before edge sources. Each batch is normalized
 through the public bulk contract and flushed into a private graph tree. A
 session-owned sorted UUID index is merged once per bounded batch; candidate

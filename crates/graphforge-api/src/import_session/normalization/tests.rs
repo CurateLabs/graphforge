@@ -272,7 +272,7 @@ fn cancellation_after_first_consumed_result_never_appends_later_results() {
 }
 
 #[test]
-fn failed_parallel_import_keeps_the_same_durable_prefix_after_reopen() {
+fn failed_parallel_initial_import_refuses_identically_and_restarts_after_reopen() {
     for workers in [1, 4] {
         let directory = tempfile::tempdir().unwrap();
         let graph = graph_at(directory.path().to_str(), workers);
@@ -292,9 +292,13 @@ fn failed_parallel_import_keeps_the_same_durable_prefix_after_reopen() {
                 ],
             )
             .unwrap();
+        // An initial import runs on the bulk builder: the refusal is the same
+        // at every worker count and nothing is staged, so there is no durable
+        // prefix to resume. The next attempt reruns from the sources.
         let first_error = session.validate(&graph).unwrap_err().to_string();
-        assert_eq!(session.manifest.sources[0].batches_staged, 2);
-        assert_eq!(session.manifest.progress.rows_accepted, 2);
+        assert!(first_error.contains("duplicate"), "{first_error}");
+        assert_eq!(session.manifest.sources[0].batches_staged, 0);
+        assert_eq!(session.manifest.progress.rows_accepted, 0);
         assert_eq!(session.manifest.sources[0].inflight_batch, None);
         drop(session);
         drop(graph);
@@ -304,8 +308,8 @@ fn failed_parallel_import_keeps_the_same_durable_prefix_after_reopen() {
             resumed.validate(&graph).unwrap_err().to_string(),
             first_error
         );
-        assert_eq!(resumed.manifest.sources[0].batches_staged, 2);
-        assert_eq!(resumed.manifest.progress.rows_accepted, 2);
+        assert_eq!(resumed.manifest.sources[0].batches_staged, 0);
+        assert_eq!(resumed.manifest.progress.rows_accepted, 0);
     }
 }
 
@@ -420,40 +424,8 @@ fn serial_and_parallel_import_publish_identical_payloads_with_recorded_clock_fix
             root.join("encoded-v1/graph/topology/uuid-membership/ordinal-v4-receipt.json")
                 .exists()
         );
-        let mut fingerprint = payload_digests(&root.join("encoded-v1/graph"));
+        let fingerprint = payload_digests(&root.join("encoded-v1/graph"));
         assert!(fingerprint.len() > 20);
-        // An initial build resolves endpoints by the node index and shapes no
-        // edge-endpoint family (ADR 0057); its surrogates are in the encoded
-        // payload digests above.
-        for name in [
-            "shaped-identities.run",
-            "shaped-node-details.run",
-            "shaped-edge-details.run",
-        ] {
-            // Encoding retires shaped payloads after authenticating their
-            // successor. Compare the retained content-addressing receipts.
-            let receipt = std::fs::read_dir(&root)
-                .unwrap()
-                .map(Result::unwrap)
-                .filter(|entry| {
-                    entry
-                        .file_name()
-                        .to_string_lossy()
-                        .starts_with("shape-receipt-")
-                })
-                .map(|entry| {
-                    serde_json::from_slice::<serde_json::Value>(
-                        &std::fs::read(entry.path()).unwrap(),
-                    )
-                    .unwrap()
-                })
-                .find(|receipt| receipt["name"] == name)
-                .unwrap_or_else(|| panic!("missing receipt for {name}"));
-            assert!(receipt["bytes"].as_u64().unwrap() > 0, "{name}");
-            let digest = receipt["xxh64"].as_str().unwrap();
-            assert_eq!(digest.len(), 16);
-            fingerprint.insert(format!("shape/{name}"), digest.as_bytes().to_vec());
-        }
         session.commit(&graph, None).unwrap();
         drop(session);
         drop(graph);

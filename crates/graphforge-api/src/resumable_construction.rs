@@ -500,6 +500,22 @@ impl GraphConstructionSession<'_> {
         })
     }
 
+    /// Build the generation from the planned sources with the bulk builder
+    /// (#1883) and seal it. Equivalent to staging every row and calling
+    /// [`Self::validate_and_seal`], without staging.
+    pub(crate) fn build_initial(
+        &mut self,
+        plan: &graphforge_storage::BulkBuildPlan<'_>,
+        cancellation: Option<&crate::CancellationToken>,
+    ) -> Result<graphforge_storage::BulkBuildReport, GfError> {
+        let topology_generation = self.inner.parent_topology_generation().saturating_add(1);
+        self.inner
+            .prepare_bulk_encoding(topology_generation, plan, || {
+                cancellation.is_some_and(crate::CancellationToken::is_cancelled)
+            })?;
+        Ok(self.inner.bulk_build_report())
+    }
+
     fn prepare_encoding(
         &mut self,
         cancellation: Option<&crate::CancellationToken>,
@@ -590,7 +606,7 @@ thread_local! {
 /// nulls, field names, nullability and metadata. Columns that are already
 /// canonical, required topology columns, and columns no canonical form exists
 /// for are passed through unchanged, so storage refuses the last.
-fn canonical_property_columns(
+pub(crate) fn canonical_property_columns(
     kind: graphforge_storage::ConstructionChunkKind,
     batch: &RecordBatch,
 ) -> Result<RecordBatch, GfError> {

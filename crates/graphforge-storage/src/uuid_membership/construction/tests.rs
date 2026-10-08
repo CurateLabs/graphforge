@@ -17,6 +17,7 @@ use super::super::topology_delta::plan_uuid_membership_delta;
 use super::super::topology_delta::write_identity_records;
 use super::cleanup_private_construction_index;
 use super::encode_construction_index;
+use crate::uuid_membership::ConstructionIdentityInput;
 use std::fs;
 use std::fs::File;
 use std::io::BufWriter;
@@ -79,10 +80,13 @@ fn packed_construction_index_preserves_full_width_surrogates_and_refuses_invalid
         fs::write(source_dir.path().join("identities.run"), &bytes).unwrap();
         let source = graphforge_filesystem::StableDirectory::open(source_dir.path()).unwrap();
         let encoded = graphforge_filesystem::StableDirectory::open(encoded_dir.path()).unwrap();
+        let xxh64 = crate::corruption_checksum::hex(crate::corruption_checksum::checksum(&bytes));
         let result = encode_construction_index(
-            &source,
-            "identities.run",
-            &crate::corruption_checksum::hex(crate::corruption_checksum::checksum(&bytes)),
+            ConstructionIdentityInput::Shaped {
+                source: &source,
+                name: "identities.run",
+                xxh64: &xxh64,
+            },
             &encoded,
             1,
             0,
@@ -153,9 +157,11 @@ fn construction_encoder_io_geometry_is_block_bounded() {
         let source_xxh64 =
             crate::corruption_checksum::hex(crate::corruption_checksum::checksum(&source_bytes));
         let result = encode_construction_index(
-            &source,
-            "identities.run",
-            &source_xxh64,
+            ConstructionIdentityInput::Shaped {
+                source: &source,
+                name: "identities.run",
+                xxh64: &source_xxh64,
+            },
             &encoded,
             1,
             0,

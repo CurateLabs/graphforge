@@ -446,6 +446,11 @@ retained parent routes with newly emitted routes and verifies the complete
 mapping before installing the version-4 manifest. Legacy parent payloads can
 retain their authenticated CAS objects while their logical route paths change.
 
+An initial import builds this same encoded inventory without staging or shaping:
+the bulk builder ranks nodes and edges in memory and emits each artifact once,
+hashed as it is written ([ADR 0058](../../adr/0058-initial-builds-run-on-a-bulk-builder.md),
+[resumable import](resumable-import.md)). Publication is unchanged.
+
 Read sessions retain one admitted route inventory with their catalog and
 adjacency provider. Publishing a later generation replaces the facade's
 provider; an existing lazy stream keeps its original inventory and private

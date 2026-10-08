@@ -151,11 +151,26 @@ impl RuntimeCatalogData {
 
     /// Interns an entity label at a caller-authoritative timestamp.
     pub fn intern_label_at(&mut self, name: &str, now: i64) -> Result<RuntimeEntityId, GfError> {
+        self.intern_label_observed_at(name, now, 1)
+    }
+
+    /// Interns an entity label and records `observations` sightings of it at
+    /// once: the catalog `observation_count` an equal number of single
+    /// [`Self::intern_label_at`] calls would leave. `observations` is at least one.
+    pub fn intern_label_observed_at(
+        &mut self,
+        name: &str,
+        now: i64,
+        observations: u64,
+    ) -> Result<RuntimeEntityId, GfError> {
         if let Some(&idx) = self.entity_types.get(name) {
             let entry = &mut self.entries[idx];
-            entry.observation_count = entry.observation_count.checked_add(1).ok_or_else(|| {
-                GfError::Storage("runtime_catalog observation count overflow".to_owned())
-            })?;
+            entry.observation_count = entry
+                .observation_count
+                .checked_add(observations)
+                .ok_or_else(|| {
+                    GfError::Storage("runtime_catalog observation count overflow".to_owned())
+                })?;
             entry.last_seen = now;
             let CatalogIdentity::Entity(id) = entry.identity else {
                 unreachable!("catalog index matches identity kind")
@@ -170,7 +185,7 @@ impl RuntimeCatalogData {
         self.entries.push(CatalogEntry {
             identity: CatalogIdentity::Entity(id),
             name: name.to_owned(),
-            observation_count: 1,
+            observation_count: observations,
             first_seen: now,
             last_seen: now,
             owner_label: None,
@@ -185,11 +200,25 @@ impl RuntimeCatalogData {
         name: &str,
         now: i64,
     ) -> Result<RuntimeRelationId, GfError> {
+        self.intern_relation_type_observed_at(name, now, 1)
+    }
+
+    /// Interns a relation type and records `observations` sightings of it at
+    /// once, as an equal number of [`Self::intern_relation_type_at`] calls would.
+    pub fn intern_relation_type_observed_at(
+        &mut self,
+        name: &str,
+        now: i64,
+        observations: u64,
+    ) -> Result<RuntimeRelationId, GfError> {
         if let Some(&idx) = self.relation_types.get(name) {
             let entry = &mut self.entries[idx];
-            entry.observation_count = entry.observation_count.checked_add(1).ok_or_else(|| {
-                GfError::Storage("runtime_catalog observation count overflow".to_owned())
-            })?;
+            entry.observation_count = entry
+                .observation_count
+                .checked_add(observations)
+                .ok_or_else(|| {
+                    GfError::Storage("runtime_catalog observation count overflow".to_owned())
+                })?;
             entry.last_seen = now;
             let CatalogIdentity::Relation(id) = entry.identity else {
                 unreachable!("catalog index matches identity kind")
@@ -204,7 +233,7 @@ impl RuntimeCatalogData {
         self.entries.push(CatalogEntry {
             identity: CatalogIdentity::Relation(id),
             name: name.to_owned(),
-            observation_count: 1,
+            observation_count: observations,
             first_seen: now,
             last_seen: now,
             owner_label: None,

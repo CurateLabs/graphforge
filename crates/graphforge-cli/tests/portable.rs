@@ -512,6 +512,152 @@ fn shared_verification_golden_matches_real_facade_and_cli() {
     }
 }
 
+/// Write `ids` as a Parquet node source labelled `label`.
+fn write_nodes(path: &Path, ids: &[uuid::Uuid], label: &str) {
+    use arrow::array::{FixedSizeBinaryArray, StringArray};
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::ArrowWriter;
+    use std::sync::Arc;
+    let batch = RecordBatch::try_new(
+        graphforge_api::bulk_node_input_schema(Vec::new()).unwrap(),
+        vec![
+            Arc::new(
+                FixedSizeBinaryArray::try_from_iter(ids.iter().map(|id| id.as_bytes().as_slice()))
+                    .unwrap(),
+            ),
+            Arc::new(StringArray::from(vec![label; ids.len()])),
+        ],
+    )
+    .unwrap();
+    let mut writer =
+        ArrowWriter::try_new(fs::File::create(path).unwrap(), batch.schema(), None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+}
+
+/// Commit one `Seed` node through the five import commands.
+fn seed_project(scratch: &Path, project: &Path) {
+    let source = scratch.join("seed.parquet");
+    write_nodes(&source, &[uuid::Uuid::now_v7()], "Seed");
+    let begun = json(&gf(
+        project,
+        &[
+            "--json",
+            "import-session",
+            "begin",
+            "--operation-uuid",
+            &uuid::Uuid::now_v7().to_string(),
+        ],
+    ));
+    let session = begun["session_uuid"].as_str().unwrap().to_owned();
+    for args in [
+        vec![
+            "register-parquet",
+            "--kind",
+            "nodes",
+            "--path",
+            source.to_str().unwrap(),
+        ],
+        vec!["validate"],
+        vec!["commit"],
+    ] {
+        let mut command = vec![
+            "--json",
+            "import-session",
+            args[0],
+            "--session-uuid",
+            &session,
+        ];
+        command.extend_from_slice(&args[1..]);
+        json(&gf(project, &command));
+    }
+}
+
+#[test]
+fn an_initial_import_reports_its_bulk_build_across_cli_processes() {
+    let root = TempDir::new().unwrap();
+    let project = root.path().join("project");
+    fs::create_dir(&project).unwrap();
+    let input = root.path().join("nodes.parquet");
+    write_nodes(
+        &input,
+        &[uuid::Uuid::now_v7(), uuid::Uuid::now_v7()],
+        "Person",
+    );
+    let begun = json(&gf(
+        &project,
+        &[
+            "--json",
+            "import-session",
+            "begin",
+            "--operation-uuid",
+            &uuid::Uuid::now_v7().to_string(),
+        ],
+    ));
+    let session = begun["session_uuid"].as_str().unwrap();
+    json(&gf(
+        &project,
+        &[
+            "--json",
+            "import-session",
+            "register-parquet",
+            "--session-uuid",
+            session,
+            "--kind",
+            "nodes",
+            "--path",
+            input.to_str().unwrap(),
+        ],
+    ));
+    let validated = json(&gf(
+        &project,
+        &[
+            "--json",
+            "--diagnostics",
+            "import-session",
+            "validate",
+            "--session-uuid",
+            session,
+        ],
+    ));
+    assert_eq!(validated["outcome"], "stage+seal");
+    assert_eq!(validated["region_diagnostics"]["complete"], true);
+    let regions = &validated["region_diagnostics"]["regions"];
+    assert!(regions["import_command/stage+seal/bulk_build"].is_object());
+    assert!(regions["import_command/stage+seal/append_nodes"].is_null());
+    let built = &validated["construction"]["bulk_build"];
+    assert_eq!(
+        (built["nodes"].as_u64(), built["edges"].as_u64()),
+        (Some(2), Some(0))
+    );
+    assert_eq!(validated["construction"]["accepted_chunks"], 0);
+    for pass in [
+        "plan",
+        "nodes",
+        "edges",
+        "tables",
+        "membership",
+        "adjacency",
+    ] {
+        assert!(built["passes"][pass]["wall_ms"].is_u64(), "{pass}");
+    }
+    let committed = json(&gf(
+        &project,
+        &[
+            "--json",
+            "import-session",
+            "commit",
+            "--session-uuid",
+            session,
+        ],
+    ));
+    assert_eq!(committed["outcome"], "committed");
+    assert_eq!(
+        committed["construction"]["bulk_build"]["nodes"],
+        built["nodes"]
+    );
+}
+
 #[test]
 fn import_operation_timings_survive_separate_cli_processes() {
     use arrow::array::{FixedSizeBinaryArray, StringArray};
@@ -521,6 +667,9 @@ fn import_operation_timings_survive_separate_cli_processes() {
     let root = TempDir::new().unwrap();
     let project = root.path().join("project");
     fs::create_dir(&project).unwrap();
+    // An initial import runs on the bulk builder and stages nothing. This test
+    // measures the staged path, which appends use, so import on a generation.
+    seed_project(root.path(), &project);
     let input = root.path().join("nodes.parquet");
     let ids = [uuid::Uuid::now_v7(), uuid::Uuid::now_v7()];
     let batch = RecordBatch::try_new(

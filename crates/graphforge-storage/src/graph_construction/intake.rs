@@ -501,7 +501,10 @@ fn extract_runs(kind: ConstructionChunkKind, batch: &RecordBatch) -> Result<RunA
     })
 }
 
-fn validate_schema(kind: ConstructionChunkKind, batch: &RecordBatch) -> Result<(), GfError> {
+pub(crate) fn validate_schema(
+    kind: ConstructionChunkKind,
+    batch: &RecordBatch,
+) -> Result<(), GfError> {
     let expected = match kind {
         ConstructionChunkKind::Node => &*CONSTRUCTION_NODE_SCHEMA,
         ConstructionChunkKind::Edge => &*CONSTRUCTION_EDGE_SCHEMA,
@@ -681,7 +684,7 @@ pub(super) fn property_free_schema_sha256(kind: ConstructionChunkKind) -> &'stat
     }
 }
 
-pub(super) fn normalized_schema_digest(schema: &Schema) -> String {
+pub(crate) fn normalized_schema_digest(schema: &Schema) -> String {
     let mut digest = Sha256::new();
     for field in schema.fields() {
         digest.update((field.name().len() as u64).to_be_bytes());
@@ -750,7 +753,7 @@ fn expected_property_columns(
     batch.columns()[required..].iter()
 }
 
-pub(super) fn uuid_column<'a>(
+pub(crate) fn uuid_column<'a>(
     batch: &'a RecordBatch,
     name: &str,
 ) -> Result<&'a FixedSizeBinaryArray, GfError> {

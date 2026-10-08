@@ -36,8 +36,9 @@ use sha2::Digest;
 use uuid::Uuid;
 
 use crate::graph_construction::{
-    ArtifactReceipt, ConstructionSemanticAuthority, ConstructionShape, CountingChunkReader,
-    GraphConstructionBudgets, IoCounter, open_authenticated_shape_source, shaped_output_xxh64,
+    ArtifactReceipt, ConstructionChunkKind, ConstructionSemanticAuthority, ConstructionShape,
+    CountingChunkReader, GraphConstructionBudgets, IoCounter, open_authenticated_shape_source,
+    shaped_output_xxh64,
 };
 use crate::property_overlay::{
     PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY, PROPERTY_ORDINAL_KEY, PROPERTY_OVERLAY_FORMAT,
@@ -53,9 +54,13 @@ use crate::uuid_membership::{
 use crate::{SemanticRouteKind, SemanticStorageBindings};
 
 mod adjacency;
+mod bulk;
 mod inventory;
 mod inventory_bound;
 mod lanes;
+mod properties;
+pub(crate) use bulk::encode_bulk;
+pub use bulk::{BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkSource};
 #[cfg(test)]
 pub(crate) use inventory::authenticate_inventory_payloads;
 pub(crate) use inventory::{authenticate_inventory, authenticate_inventory_control};
@@ -63,6 +68,7 @@ pub(crate) use inventory::{authenticate_inventory, authenticate_inventory_contro
 pub(crate) use inventory_bound::InventoryBoundOverride;
 use inventory_bound::inventory_bound;
 pub(crate) use inventory_bound::{decode_encoding_inventory, inventory_authority_sha256};
+use properties::{edge_property_batch, node_property_batch};
 #[cfg(any(test, feature = "test-support"))]
 mod seam_spike;
 
@@ -707,9 +713,11 @@ pub(crate) fn encode(
     let membership_region =
         crate::concurrency_attribution::RegionScope::named("membership_encoding");
     let mut index = crate::uuid_membership::encode_construction_index(
-        source.physical(),
-        &shape.identities,
-        identities_xxh64,
+        crate::uuid_membership::ConstructionIdentityInput::Shaped {
+            source: source.physical(),
+            name: &shape.identities,
+            xxh64: identities_xxh64,
+        },
         output.physical(),
         generation,
         shape.parent_topology_generation,
@@ -1388,84 +1396,21 @@ fn encode_node_properties(
                 if input.num_columns() == 2 {
                     continue;
                 }
-                let labels = required_string(&input, "label")?;
-                let mut groups = BTreeMap::<String, Vec<u32>>::new();
-                for row in 0..input.num_rows() {
-                    groups
-                        .entry(labels.value(row).to_owned())
-                        .or_default()
-                        .push(u32::try_from(row).map_err(storage)?);
-                }
-                for (label, indexes) in groups {
-                    let runtime_route = if ontology_mode == OntologyMode::Exploratory {
-                        "_untyped"
-                    } else {
-                        label.as_str()
-                    };
-                    let owner = resolve_owner(
-                        semantic_context,
-                        semantic_bindings,
-                        SymbolKind::Entity,
-                        SemanticRouteKind::Entity,
-                        &label,
-                        runtime_route,
-                    )?;
-                    let projections = property_projections(
-                        &input,
-                        2,
-                        &indexes,
-                        &owner,
-                        SymbolKind::Entity,
-                        SemanticRouteKind::NodeProperty,
-                        semantic_context,
-                        semantic_bindings,
-                    )?;
-                    for (route, fields) in projections {
-                        let ordinal = ordinals.entry(route.clone()).or_default();
-                        let property = property_batch(
-                            &input,
-                            "node_uuid",
-                            "graphforge.entity_type",
-                            &owner.topology_route,
-                            &indexes,
-                            &fields,
-                            PropertyRouteKind::Node,
-                            &route,
-                            shape.parent_topology_generation + 1,
-                            *ordinal,
-                        )?;
-                        let property = if owner.symbol.is_some() {
-                            with_route_metadata_batch(
-                                &property,
-                                &route,
-                                semantic_context
-                                    .expect("qualified owner has context")
-                                    .fingerprint(),
-                            )?
-                        } else {
-                            property
-                        };
-                        for fragment in split_into_fragments(&property, *ordinal)? {
-                            let path = format!(
-                                "properties/{}/{:020}-{ordinal:020}.parquet",
-                                encoded_route_component(route_table, &route)?,
-                                shape.parent_topology_generation + 1
-                            );
-                            encoding_lanes.push(
-                                output,
-                                &path,
-                                &fragment,
-                                cache_window,
-                                evidence,
-                                cancelled,
-                                artifacts,
-                            )?;
-                            *ordinal = ordinal
-                                .checked_add(1)
-                                .ok_or_else(|| storage("encoded ordinal overflows"))?;
-                        }
-                    }
-                }
+                node_property_batch(
+                    &input,
+                    &mut ordinals,
+                    shape.parent_topology_generation,
+                    ontology_mode,
+                    semantic_context,
+                    semantic_bindings,
+                    route_table,
+                    encoding_lanes,
+                    output,
+                    cache_window,
+                    evidence,
+                    cancelled,
+                    artifacts,
+                )?;
             }
             Ok(())
         })();
@@ -1853,84 +1798,21 @@ fn encode_edge_properties(
                 if input.num_columns() == 4 {
                     continue;
                 }
-                let routes = required_string(&input, "rel_type")?;
-                let mut groups = BTreeMap::<String, Vec<u32>>::new();
-                for row in 0..input.num_rows() {
-                    groups
-                        .entry(routes.value(row).to_owned())
-                        .or_default()
-                        .push(u32::try_from(row).map_err(storage)?);
-                }
-                for (route, indexes) in groups {
-                    let runtime_route = if ontology_mode == OntologyMode::Exploratory {
-                        "_exploratory"
-                    } else {
-                        route.as_str()
-                    };
-                    let owner = resolve_owner(
-                        semantic_context,
-                        semantic_bindings,
-                        SymbolKind::Relation,
-                        SemanticRouteKind::Relation,
-                        &route,
-                        runtime_route,
-                    )?;
-                    let projections = property_projections(
-                        &input,
-                        4,
-                        &indexes,
-                        &owner,
-                        SymbolKind::Relation,
-                        SemanticRouteKind::EdgeProperty,
-                        semantic_context,
-                        semantic_bindings,
-                    )?;
-                    for (property_route, fields) in projections {
-                        let ordinal = ordinals.entry(property_route.clone()).or_default();
-                        let property = property_batch(
-                            &input,
-                            "edge_uuid",
-                            "graphforge.rel_type",
-                            &owner.topology_route,
-                            &indexes,
-                            &fields,
-                            PropertyRouteKind::Edge,
-                            &property_route,
-                            shape.parent_topology_generation + 1,
-                            *ordinal,
-                        )?;
-                        let property = if owner.symbol.is_some() {
-                            with_route_metadata_batch(
-                                &property,
-                                &property_route,
-                                semantic_context
-                                    .expect("qualified owner has context")
-                                    .fingerprint(),
-                            )?
-                        } else {
-                            property
-                        };
-                        for fragment in split_into_fragments(&property, *ordinal)? {
-                            let path = format!(
-                                "edge_properties/{}/{:020}-{ordinal:020}.parquet",
-                                encoded_route_component(route_table, &property_route)?,
-                                shape.parent_topology_generation + 1
-                            );
-                            encoding_lanes.push(
-                                output,
-                                &path,
-                                &fragment,
-                                cache_window,
-                                evidence,
-                                cancelled,
-                                artifacts,
-                            )?;
-                            *ordinal = ordinal
-                                .checked_add(1)
-                                .ok_or_else(|| storage("encoded ordinal overflows"))?;
-                        }
-                    }
-                }
+                edge_property_batch(
+                    &input,
+                    &mut ordinals,
+                    shape.parent_topology_generation,
+                    ontology_mode,
+                    semantic_context,
+                    semantic_bindings,
+                    route_table,
+                    encoding_lanes,
+                    output,
+                    cache_window,
+                    evidence,
+                    cancelled,
+                    artifacts,
+                )?;
             }
             Ok(())
         })();

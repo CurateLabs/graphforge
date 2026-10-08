@@ -63,6 +63,7 @@ Roadmap-only ADRs are not retained in this tree.
 | 0055 | [Research Versions are commits](0055-versions-are-commits.md) | `0055-versions-are-commits.md` |
 | 0056 | [Shaping stays serial within stages until one sub-phase dominates](0056-stage-internal-parallelism.md) | `0056-stage-internal-parallelism.md` |
 | 0057 | [Initial builds resolve edge endpoints by a node-surrogate index instead of two endpoint sorts](0057-endpoint-resolution-by-node-index.md) | `0057-endpoint-resolution-by-node-index.md` |
+| 0058 | [Initial builds run on a bulk builder derived from the published generation](0058-initial-builds-run-on-a-bulk-builder.md) | `0058-initial-builds-run-on-a-bulk-builder.md` |
 
 ## Superseded records
 

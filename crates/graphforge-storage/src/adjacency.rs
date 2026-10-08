@@ -36,6 +36,8 @@
 //! row. Only the current versioned shard representation is supported.
 
 mod builder;
+#[cfg(test)]
+pub(crate) use builder::TEST_SHARD_LIMITS;
 mod codec;
 mod installation;
 pub use builder::{
@@ -678,6 +680,89 @@ impl Drop for ShardedCsrWriter {
     }
 }
 
+/// Outcome of [`write_sharded_csr_from_sorted`].
+pub(crate) struct SortedCsrOutcome {
+    /// CSR rows: the largest key plus one, or zero without entries.
+    pub(crate) node_count: u64,
+    /// Adjacency entries written.
+    pub(crate) edge_count: u64,
+    /// Shards written.
+    pub(crate) shards: u64,
+    /// Digests of every shard, computed while it was written.
+    pub(crate) captured: Vec<CapturedAdjacencyArtifact>,
+}
+
+/// Write one sharded CSR from entries already ordered by `(key, edge)`.
+///
+/// Each entry is `key << 32 | edge_id`; its neighbor is `neighbors[edge_id - 1]`.
+/// Shard boundaries are exactly those [`ShardedCsrWriter::emit`] produces for
+/// the same sequence, so the published bytes equal a streamed build's. Shards
+/// are independent once the boundaries are fixed and are encoded in parallel
+/// on the current rayon pool.
+pub(crate) fn write_sharded_csr_from_sorted(
+    path: &Path,
+    sorted: &[u64],
+    neighbors: &[u32],
+    max_edges: usize,
+    max_nodes: usize,
+    allocation: Option<&crate::StorageAllocationOperation>,
+) -> Result<SortedCsrOutcome, GfError> {
+    use rayon::prelude::*;
+
+    let mut writer = ShardedCsrWriter::create(path, max_edges, max_nodes)?;
+    writer.allocation = allocation.cloned();
+    let (max_edges, max_nodes) = (writer.max_edges, writer.max_nodes as u64);
+    let key = |entry: u64| entry >> 32;
+    let mut bounds = Vec::new();
+    let mut start = 0;
+    while start < sorted.len() {
+        let first = key(sorted[start]);
+        let by_nodes =
+            start + sorted[start..].partition_point(|entry| key(*entry) - first < max_nodes);
+        let end = by_nodes.min(start.saturating_add(max_edges));
+        bounds.push((start, end));
+        start = end;
+    }
+    let root = writer.root.clone();
+    let records = bounds
+        .par_iter()
+        .enumerate()
+        .map(|(ordinal, &(from, to))| {
+            let slice = &sorted[from..to];
+            let first = key(slice[0]);
+            let local =
+                usize::try_from(key(slice[slice.len() - 1]) - first + 1).map_err(storage_err)?;
+            let mut offsets = vec![0_u64; local + 1];
+            for entry in slice {
+                offsets[usize::try_from(key(*entry) - first).map_err(storage_err)? + 1] += 1;
+            }
+            for row in 0..local {
+                offsets[row + 1] += offsets[row];
+            }
+            let shard = CsrIndex {
+                offsets,
+                edge_ids: slice.iter().map(|entry| entry & 0xffff_ffff).collect(),
+                neighbor_ids: slice
+                    .iter()
+                    .map(|entry| u64::from(neighbors[(entry & 0xffff_ffff) as usize - 1]))
+                    .collect(),
+            };
+            write_csr_shard(&root, first, &shard, ordinal, allocation)
+        })
+        .collect::<Result<Vec<_>, GfError>>()?;
+    writer.records = records;
+    writer.edge_count = sorted.len() as u64;
+    let node_count = sorted.last().map_or(0, |entry| key(*entry) + 1);
+    let edge_count = writer.edge_count;
+    let (shards, _, _, captured) = writer.finish(node_count)?;
+    Ok(SortedCsrOutcome {
+        node_count,
+        edge_count,
+        shards,
+        captured,
+    })
+}
+
 fn shard_set_matches(root: &Path, records: &[CsrShardRecord]) -> bool {
     for record in records {
         let path = root.join(&record.file);
@@ -1233,7 +1318,7 @@ pub fn write_manifest(project_dir: &Path, rows: &[AdjacencyManifestRow]) -> Resu
     write_manifest_observed(project_dir, rows, None)
 }
 
-fn write_manifest_observed(
+pub(crate) fn write_manifest_observed(
     project_dir: &Path,
     rows: &[AdjacencyManifestRow],
     allocation: Option<&crate::StorageAllocationOperation>,

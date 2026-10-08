@@ -22,9 +22,11 @@ use uuid::Uuid;
 
 use crate::{BulkInputKind, CancellationToken, GraphConstructionBudgets, GraphForge, OperationId};
 
+mod bulk_source;
 #[cfg(test)]
 mod cpu_budget_report;
 mod journal;
+mod memory_budget;
 mod normalization;
 
 const FORMAT_VERSION: u32 = 2;
@@ -177,6 +179,10 @@ pub struct ImportConstructionEvidence {
     /// Versioned named publication work, derived from the phase counters above.
     #[serde(default)]
     pub publication_work: PublicationWorkComponents,
+    /// Passes of the bulk builder when the generation was built from the
+    /// registered sources rather than staged chunk by chunk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bulk_build: Option<graphforge_storage::BulkBuildReport>,
     /// Exact accepted input rows.
     pub input_rows: u64,
     /// Exact non-replay input batches.
@@ -346,6 +352,20 @@ struct SessionManifest {
     construction_session_uuid: Option<Uuid>,
     #[serde(default)]
     updated_unix_millis: u64,
+    /// How `validate` builds this session's generation, fixed by its first call
+    /// and read back by every later one (ADR 0058). `None` until then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    build_route: Option<BuildRoute>,
+}
+
+/// The two ways `validate` builds a generation (ADR 0058).
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum BuildRoute {
+    /// The bulk builder reads the registered sources and stages nothing.
+    Bulk,
+    /// Chunk-by-chunk staging, shaping and encoding.
+    Staged,
 }
 
 /// Monotonic wall time and process CPU for attempted calls, including returned
@@ -498,6 +518,7 @@ impl GraphForge {
             sources: Vec::new(),
             construction_session_uuid: None,
             updated_unix_millis: unix_millis()?,
+            build_route: None,
         };
         let journal = journal::Journal::open(&root, &manifest, self.allocation_operation.as_ref())?;
         write_manifest_with_allocation(&root, &manifest, self.allocation_operation.as_ref())?;
@@ -883,6 +904,51 @@ impl GraphImportSession {
         let mut construction = self.open_construction(graph)?;
         let session_root = self.root.clone();
         let batch_rows = self.manifest.limits.batch_rows;
+        // Pass 0 routing. The route is a function of durable state: the first
+        // `validate` decides it from the session and the footers, writes it to
+        // the manifest, and every later call reads it back. Live memory is
+        // consulted exactly once, so a refused, cancelled or killed bulk
+        // attempt followed by a memory drop cannot send a sealed session to
+        // the staged path, which would refuse every retry. An initial build
+        // that has staged nothing and whose estimated memory fits runs on the
+        // bulk builder (ADR 0058); an append, a session an earlier binary
+        // began staging, and an initial build larger than memory stage.
+        let refusals = bulk_source::Refusals::default();
+        let route = if let Some(route) = self.manifest.build_route {
+            route
+        } else {
+            let initial = {
+                let progress = construction.progress();
+                progress.parent_topology_generation == 0
+                    && progress.accepted_chunks == 0
+                    && self
+                        .manifest
+                        .sources
+                        .iter()
+                        .all(|source| !source.staged && source.batches_staged == 0)
+            };
+            let route = if initial
+                && self
+                    .plan_bulk_build(graph, cancellation, &refusals)?
+                    .estimated_resident_bytes()
+                    <= bulk_source::bulk_build_memory_budget()
+            {
+                BuildRoute::Bulk
+            } else {
+                BuildRoute::Staged
+            };
+            self.manifest.build_route = Some(route);
+            self.persist_manifest()?;
+            route
+        };
+        if route == BuildRoute::Bulk {
+            let plan = self.plan_bulk_build(graph, cancellation, &refusals)?;
+            let built = self.build_initial(&mut construction, &plan, cancellation);
+            if built.is_err() {
+                self.record_bulk_refusal(&refusals)?;
+            }
+            return built;
+        }
         for input_kind in [BulkInputKind::Node, BulkInputKind::Edge] {
             for source_index in 0..self.manifest.sources.len() {
                 let source = self.manifest.sources[source_index].clone();
@@ -919,6 +985,89 @@ impl GraphImportSession {
             }
         }
         self.seal_construction(&mut construction, cancellation)
+    }
+
+    /// Count the refused batch's rows as rejected, as the staged path does.
+    fn record_bulk_refusal(&mut self, refusals: &bulk_source::Refusals) -> Result<(), GfError> {
+        let Some(rows) = refusals.take_rows() else {
+            return Ok(());
+        };
+        let remaining = self
+            .manifest
+            .limits
+            .max_rejected_rows
+            .saturating_sub(self.manifest.progress.rows_rejected);
+        self.manifest.progress.rows_rejected = self
+            .manifest
+            .progress
+            .rows_rejected
+            .saturating_add(rows.min(remaining));
+        // A refusal is an explicit operation boundary: retain diagnostics even
+        // if the caller never checkpoints.
+        self.persist_manifest()
+    }
+
+    /// Pass 0: plan every registered source from its footer.
+    fn plan_bulk_build<'a>(
+        &self,
+        graph: &'a GraphForge,
+        cancellation: Option<&'a CancellationToken>,
+        refusals: &'a bulk_source::Refusals,
+    ) -> Result<graphforge_storage::BulkBuildPlan<'a>, GfError> {
+        let mut plan = graphforge_storage::BulkBuildPlan::default();
+        for source in &self.manifest.sources {
+            let planned = bulk_source::plan(
+                graph,
+                &self.root,
+                source,
+                self.manifest.limits.batch_rows,
+                self.manifest.operation_uuid,
+                cancellation,
+                refusals,
+            )?;
+            match source.kind.input_kind() {
+                BulkInputKind::Node => plan.nodes.push(planned),
+                BulkInputKind::Edge => plan.edges.push(planned),
+            }
+        }
+        Ok(plan)
+    }
+
+    /// Build an initial generation from every registered source (#1883).
+    ///
+    /// Sources are read in place and in parallel; nothing is staged, so a
+    /// crash leaves nothing to resume and the next `validate` reruns the build.
+    fn build_initial(
+        &mut self,
+        construction: &mut crate::GraphConstructionSession<'_>,
+        plan: &graphforge_storage::BulkBuildPlan<'_>,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<ImportProgress, GfError> {
+        let region = RegionScope::named("bulk_build");
+        let started = CallStart::now();
+        let built = construction.build_initial(plan, cancellation);
+        if let (Some(timings), Some(started)) = (&mut self.operation_timings, started) {
+            timings.seal.record(started, built.is_err());
+        }
+        drop(region);
+        let report = built?;
+        let (nodes, edges) = (report.nodes, report.edges);
+        for source in &mut self.manifest.sources {
+            source.staged = true;
+        }
+        self.manifest.progress.rows_accepted = nodes.saturating_add(edges);
+        self.manifest.progress.files_pending = 0;
+        self.manifest.progress.peak_batch_rows = self
+            .manifest
+            .progress
+            .peak_batch_rows
+            .max(self.manifest.limits.batch_rows as u64);
+        self.update_construction_progress(&construction.progress())?;
+        if let Some(evidence) = self.manifest.progress.construction.as_mut() {
+            evidence.bulk_build = Some(report);
+        }
+        self.manifest.phase = ImportPhase::Validated;
+        self.checkpoint()
     }
 
     fn append_source_batch(
@@ -1188,6 +1337,12 @@ impl GraphImportSession {
             publication_committed: progress.publication_committed,
             application_io,
             publication_work,
+            bulk_build: self
+                .manifest
+                .progress
+                .construction
+                .as_ref()
+                .and_then(|evidence| evidence.bulk_build.clone()),
             input_rows: progress.evidence.input_rows,
             input_batches: progress.evidence.input_batches,
             immutable_artifacts: progress.evidence.immutable_artifacts,
@@ -1716,7 +1871,33 @@ mod test_fixtures {
         let graph = GraphForge::new(project.to_str()).unwrap();
         (directory, project, graph)
     }
+
+    /// A project with one committed generation. An initial import runs on the
+    /// bulk builder, so tests of the staged path (journal replay, chunk
+    /// receipts, per-batch progress) import on top of this generation: an
+    /// append stages chunk by chunk.
+    pub(super) fn seeded_fixture() -> (tempfile::TempDir, PathBuf, GraphForge) {
+        let (directory, project, graph) = fixture();
+        let mut session = graph
+            .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
+            .unwrap();
+        let seed = RecordBatch::try_new(
+            bulk_node_input_schema(Vec::new()).unwrap(),
+            vec![
+                uuid_array(&[Uuid::now_v7()]),
+                Arc::new(StringArray::from(vec!["Seed"])),
+            ],
+        )
+        .unwrap();
+        session.append_arrow(BulkInputKind::Node, &[seed]).unwrap();
+        session.validate(&graph).unwrap();
+        session.commit(&graph, None).unwrap();
+        (directory, project, graph)
+    }
 }
+
+#[cfg(all(test, feature = "portable"))]
+mod bulk_tests;
 
 #[cfg(all(test, feature = "portable"))]
 mod tests {
@@ -1725,7 +1906,7 @@ mod tests {
     use arrow::datatypes::DataType;
     use parquet::arrow::ArrowWriter;
 
-    use super::test_fixtures::{edges, fixture, nodes};
+    use super::test_fixtures::{edges, fixture, nodes, seeded_fixture};
     use super::*;
     use crate::{bulk_edge_input_schema, bulk_node_input_schema};
 
@@ -1771,7 +1952,7 @@ mod tests {
         let _capture = graphforge_storage::lifecycle_io::CaptureScope::install();
         // Real import operations carry process CPU in ordinary receipts;
         // CPU/wall is effective cores, never an inferred serial fraction.
-        let (_directory, _project, graph) = fixture();
+        let (_directory, _project, graph) = seeded_fixture();
         let mut session = graph
             .begin_import_session(
                 OperationId(Uuid::now_v7()),
@@ -1822,7 +2003,7 @@ mod tests {
     #[test]
     fn operation_timings_are_scoped_non_durable_and_preserve_cancelled_commit() {
         let _capture = graphforge_storage::lifecycle_io::CaptureScope::install();
-        let (_directory, _project, graph) = fixture();
+        let (_directory, _project, graph) = seeded_fixture();
         let mut session = graph
             .begin_import_session(
                 OperationId(Uuid::now_v7()),
@@ -2565,7 +2746,11 @@ mod tests {
         let progress = session.validate(&graph).unwrap();
         assert_eq!(progress.rows_accepted, 1);
         assert_eq!(progress.files_pending, 0);
-        assert_eq!(progress.construction.as_ref().unwrap().accepted_chunks, 1);
+        // The bulk builder stages no chunk; it reports its passes instead.
+        let construction = progress.construction.as_ref().unwrap();
+        assert_eq!(construction.accepted_chunks, 0);
+        let built = construction.bulk_build.as_ref().unwrap();
+        assert_eq!((built.nodes, built.edges), (1, 0));
         let generation = session.commit(&graph, None).unwrap();
 
         drop(graph);
@@ -2638,7 +2823,7 @@ mod tests {
         assert_eq!(ImportSessionLimits::default().batch_rows, 65_536);
 
         fn run(multiplier: usize) -> ImportConstructionEvidence {
-            let (_directory, project, graph) = fixture();
+            let (_directory, project, graph) = seeded_fixture();
             let source_dir = tempfile::tempdir().unwrap();
             let parquet = source_dir.path().join("nodes.parquet");
             let ids = (0..(4 * multiplier))

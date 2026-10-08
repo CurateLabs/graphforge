@@ -540,6 +540,10 @@ export default defineConfig({
                   label: '0057 — Initial builds resolve edge endpoints by a node-surrogate index instead of two endpoint sorts',
                   slug: 'adr/0057-endpoint-resolution-by-node-index',
                 },
+                {
+                  label: '0058 — Initial builds run on a bulk builder derived from the published generation',
+                  slug: 'adr/0058-initial-builds-run-on-a-bulk-builder',
+                },
                 // END generated ADR records
               ],
             },
