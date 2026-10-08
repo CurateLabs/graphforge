@@ -336,7 +336,7 @@ fn transitivity_dispatches_exact_scalar_and_shared_controls() {
         ),
         Err(AlgorithmError::OutputLimit { .. })
     ));
-    assert!(matches!(
+    assert!(
         execute(
             &graph,
             AnalyzeAlgorithm::Transitivity,
@@ -346,9 +346,10 @@ fn transitivity_dispatches_exact_scalar_and_shared_controls() {
                 ..AlgorithmLimits::default()
             },
             AlgorithmCancellation::default(),
-        ),
-        Err(AlgorithmError::IterationLimit { .. })
-    ));
+        )
+        .is_ok(),
+        "a single-pass algorithm never consumes the iteration budget"
+    );
     let cancellation = AlgorithmCancellation::default();
     cancellation.cancel();
     assert_eq!(

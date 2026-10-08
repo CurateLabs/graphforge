@@ -181,6 +181,12 @@ impl AlgorithmControl {
     }
 
     /// Check cancellation and consume one cooperative iteration.
+    ///
+    /// Only an iterative algorithm may call this, once per round or sweep: the
+    /// `iterations` limit counts rounds. A single-pass algorithm polls
+    /// [`Self::check_cancelled`] instead, because its work is bounded by the node
+    /// and edge limits and a per-node or per-edge charge would refuse ordinary
+    /// graphs (#1922).
     pub(crate) fn checkpoint(&self) -> Result<u64, AlgorithmError> {
         self.check_cancelled()?;
         let observed = self.iterations.fetch_add(1, Ordering::AcqRel) + 1;
@@ -200,6 +206,7 @@ impl AlgorithmControl {
         }
     }
 
+    /// Poll cancellation without consuming the iteration budget.
     pub(crate) fn check_cancelled(&self) -> Result<(), AlgorithmError> {
         if self.cancellation.is_cancelled() {
             Err(AlgorithmError::Cancelled)

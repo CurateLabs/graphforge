@@ -172,7 +172,7 @@ fn adamic_adar_obeys_undirected_and_boundary_contracts() {
 #[test]
 fn adamic_adar_uses_shared_controls_and_dependency_metadata() {
     let graph = AdjacencyGraph::with_test_edges(3, &[(0, 2), (1, 2)]);
-    assert!(matches!(
+    assert!(
         execute_adamic_adar(
             &graph,
             AlgorithmLimits {
@@ -180,9 +180,10 @@ fn adamic_adar_uses_shared_controls_and_dependency_metadata() {
                 ..AlgorithmLimits::default()
             },
             AlgorithmCancellation::default(),
-        ),
-        Err(AlgorithmError::IterationLimit { .. })
-    ));
+        )
+        .is_ok(),
+        "a single-pass algorithm never consumes the iteration budget"
+    );
     assert!(matches!(
         execute_adamic_adar(
             &graph,
@@ -347,7 +348,7 @@ fn adamic_adar_parallel_limits_and_cancellation_return_structured() {
         execute_adamic_adar_with_pool(&graph, 4, AlgorithmLimits::default(), cancellation),
         Err(AlgorithmError::Cancelled)
     );
-    assert!(matches!(
+    assert!(
         execute_adamic_adar_with_pool(
             &graph,
             4,
@@ -356,9 +357,10 @@ fn adamic_adar_parallel_limits_and_cancellation_return_structured() {
                 ..AlgorithmLimits::default()
             },
             AlgorithmCancellation::default()
-        ),
-        Err(AlgorithmError::IterationLimit { .. })
-    ));
+        )
+        .is_ok(),
+        "a single-pass algorithm never consumes the iteration budget"
+    );
     assert!(matches!(
         execute_adamic_adar_with_pool(
             &graph,

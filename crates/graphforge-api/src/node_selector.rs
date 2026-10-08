@@ -35,12 +35,46 @@ impl GraphForge {
         }
     }
 
+    /// Confirm one node UUID exists. A selector that names one node resolves by
+    /// identity lookup in the authenticated UUID membership index (ADR 0057), so
+    /// it is not bounded by the graph's node count. Only a graph with no index at
+    /// its topology generation falls back to the bounded topology scan.
     fn require_node(&self, uuid: Uuid) -> Result<Uuid, GfError> {
-        if self.node_uuids(None)?.contains(&uuid) {
+        let present = match self.indexed_node_membership(uuid)? {
+            Some(present) => present,
+            None => self.node_uuids(None)?.contains(&uuid),
+        };
+        if present {
             Ok(uuid)
         } else {
             Err(validation("node selector matched no nodes"))
         }
+    }
+
+    /// Whether the membership index holds `uuid` as a live node, or `None` when
+    /// no index exists at the current topology generation.
+    fn indexed_node_membership(&self, uuid: Uuid) -> Result<Option<bool>, GfError> {
+        let dir = self.dir();
+        let generation = graphforge_storage::read_topology_generation(&dir)?;
+        let mut cached = self
+            .uuid_membership_index
+            .lock()
+            .map_err(|_| GfError::Storage("UUID membership index lock poisoned".into()))?;
+        if cached
+            .as_ref()
+            .is_some_and(|index| index.topology_generation() != generation)
+        {
+            *cached = None;
+        }
+        if cached.is_none() {
+            if !graphforge_storage::uuid_membership_index_is_fresh(&dir)? {
+                return Ok(None);
+            }
+            *cached = Some(graphforge_storage::UuidMembershipIndex::open(&dir)?);
+        }
+        let index = cached.as_mut().expect("membership index was just opened");
+        let (found, _) = index.probe(graphforge_storage::UuidIndexKind::Node, &[uuid])?;
+        Ok(Some(found.first().copied().unwrap_or(false)))
     }
 
     fn resolve_property_match(
@@ -263,6 +297,38 @@ mod tests {
             })
             .unwrap();
         assert_ne!(upper, lower);
+    }
+
+    #[test]
+    fn uuid_selector_resolves_through_the_membership_index_or_scans_without_one() {
+        let graph = GraphForge::new(None).unwrap();
+        graph.execute("CREATE (:Person {name: 'Alice'})").unwrap();
+        let uuid = first_uuid(&graph);
+        assert!(graphforge_storage::uuid_membership_index_is_fresh(&graph.dir()).unwrap());
+        assert!(graph.uuid_membership_index.lock().unwrap().is_none());
+        assert_eq!(
+            graph
+                .resolve_node_selector(&NodeSelector::Uuid(uuid))
+                .unwrap(),
+            uuid
+        );
+        // The identity lookup opened the index; no topology scan was needed.
+        assert!(graph.uuid_membership_index.lock().unwrap().is_some());
+        assert_validation(graph.resolve_node_selector(&NodeSelector::Uuid(Uuid::now_v7())));
+
+        // A graph written without an index has no identity authority but topology.
+        let bare = GraphForge::new(None).unwrap();
+        bare.execute("CREATE (:Person {name: 'Bob'})").unwrap();
+        let bare_uuid = first_uuid(&bare);
+        std::fs::remove_dir_all(bare.dir().join("topology/uuid-membership")).unwrap();
+        assert!(!graphforge_storage::uuid_membership_index_is_fresh(&bare.dir()).unwrap());
+        assert_eq!(
+            bare.resolve_node_selector(&NodeSelector::Uuid(bare_uuid))
+                .unwrap(),
+            bare_uuid
+        );
+        assert!(bare.uuid_membership_index.lock().unwrap().is_none());
+        assert_validation(bare.resolve_node_selector(&NodeSelector::Uuid(Uuid::now_v7())));
     }
 
     #[test]

@@ -5,7 +5,6 @@ use rayon::prelude::*;
 
 use crate::algorithm_dispatch::{AlgorithmControl, AlgorithmError};
 
-const CHECKPOINT_INTERVAL: usize = 4_096;
 /// Wedges below this count stay serial to avoid private-pool scheduling tax.
 pub(crate) const TRANSITIVITY_PARALLEL_CROSSOVER_WEDGES: u64 = 32_768;
 
@@ -38,7 +37,7 @@ pub(crate) fn transitivity(
     edges: &[TransitivityEdge],
     control: &AlgorithmControl,
 ) -> Result<f64, AlgorithmError> {
-    control.checkpoint()?;
+    control.check_cancelled()?;
     control.check_output_rows(1)?;
     let mut work = 0_usize;
     let index = index_nodes(nodes, control, &mut work)?;
@@ -261,12 +260,7 @@ where
 
 fn checkpoint(control: &AlgorithmControl, work: &mut usize) -> Result<(), AlgorithmError> {
     *work = work.saturating_add(1);
-    if work.is_multiple_of(CHECKPOINT_INTERVAL) {
-        control.checkpoint()?;
-    } else {
-        control.check_cancelled()?;
-    }
-    Ok(())
+    control.check_cancelled()
 }
 
 fn execution(message: impl Into<String>) -> AlgorithmError {
@@ -481,9 +475,9 @@ mod tests {
             },
             AlgorithmCancellation::default(),
         );
-        assert!(matches!(
-            transitivity(&[], &[], &no_iterations),
-            Err(AlgorithmError::IterationLimit { .. })
-        ));
+        assert!(
+            transitivity(&[], &[], &no_iterations).is_ok(),
+            "a single-pass algorithm never consumes the iteration budget"
+        );
     }
 }

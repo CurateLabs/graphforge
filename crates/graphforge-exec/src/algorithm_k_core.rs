@@ -30,7 +30,7 @@ pub(crate) fn k_core_numbers(
     let mut processed_entries = 0_usize;
     while let Some(Reverse((degree, node))) = queue.pop() {
         if processed_entries.is_multiple_of(1024) {
-            control.checkpoint()?;
+            control.check_cancelled()?;
         }
         processed_entries += 1;
         if removed[node] || degrees[node] != degree {
@@ -40,7 +40,7 @@ pub(crate) fn k_core_numbers(
         cores[node] = degree;
         for &neighbor in &neighbors[node] {
             if visited_neighbors.is_multiple_of(1024) {
-                control.checkpoint()?;
+                control.check_cancelled()?;
             }
             visited_neighbors += 1;
             if !removed[neighbor] && degrees[neighbor] > degree {

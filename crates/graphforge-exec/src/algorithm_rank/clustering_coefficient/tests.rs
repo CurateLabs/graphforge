@@ -246,7 +246,7 @@ fn clustering_coefficient_parallel_cancels_and_worker_panics_are_structured() {
 #[test]
 fn clustering_coefficient_uses_shared_controls_and_canonical_metadata() {
     let graph = AdjacencyGraph::with_test_edges(3, &[(0, 1), (1, 2), (2, 0)]);
-    assert!(matches!(
+    assert!(
         execute_clustering_coefficient(
             &graph,
             AlgorithmLimits {
@@ -254,9 +254,10 @@ fn clustering_coefficient_uses_shared_controls_and_canonical_metadata() {
                 ..AlgorithmLimits::default()
             },
             AlgorithmCancellation::default()
-        ),
-        Err(AlgorithmError::IterationLimit { .. })
-    ));
+        )
+        .is_ok(),
+        "a single-pass algorithm never consumes the iteration budget"
+    );
     let cancellation = AlgorithmCancellation::default();
     cancellation.cancel();
     assert_eq!(
@@ -361,4 +362,233 @@ fn neighbor_edges_lcc_uses_private_pool_with_identical_bits_and_cancellation() {
         neighbor_edges_output(&graph, 4, cancellation),
         Err(AlgorithmError::Cancelled)
     );
+}
+
+/// More nodes than the default iteration budget of 10,000 (#1922).
+const LARGE_NODES: usize = 20_000;
+
+/// A ring where each node links to the next two, so every node closes a triangle.
+fn large_ring_graph() -> AdjacencyGraph {
+    let edges = (0..LARGE_NODES)
+        .flat_map(|node| [1, 2].map(move |hop| (node as u64, ((node + hop) % LARGE_NODES) as u64)))
+        .collect::<Vec<_>>();
+    AdjacencyGraph::with_test_edges(LARGE_NODES as u64, &edges)
+}
+
+/// One hub linked both ways to `leaves` leaves, which also form a two-way
+/// chain: the hub's pair loop alone is `leaves^2` units of work, far past any
+/// per-1,024 charge.
+fn hub_graph(leaves: usize) -> AdjacencyGraph {
+    let leaves = leaves as u64;
+    let edges = (1..=leaves)
+        .flat_map(|leaf| [(0, leaf), (leaf, 0)])
+        .chain((1..leaves).flat_map(|leaf| [(leaf, leaf + 1), (leaf + 1, leaf)]))
+        .collect::<Vec<_>>();
+    AdjacencyGraph::with_test_edges(leaves + 1, &edges)
+}
+
+fn lcc_control(
+    limits: AlgorithmLimits,
+    normalization: ClusteringNormalization,
+    cancellation: AlgorithmCancellation,
+) -> AlgorithmControl {
+    AlgorithmControl::new(limits, cancellation).with_rank_options(&RankOptions {
+        by: RankAlgorithm::ClusteringCoefficient,
+        clustering_normalization: Some(normalization),
+        ..RankOptions::default()
+    })
+}
+
+const NORMALIZATIONS: [ClusteringNormalization; 2] = [
+    ClusteringNormalization::Fagiolo,
+    ClusteringNormalization::NeighborEdges,
+];
+
+#[test]
+fn clustering_coefficient_is_single_pass_and_ignores_the_iteration_budget() {
+    let graph = large_ring_graph();
+    for normalization in NORMALIZATIONS {
+        let mut by_budget = Vec::new();
+        for iterations in [AlgorithmLimits::default().iterations, 0] {
+            let control = lcc_control(
+                AlgorithmLimits {
+                    iterations,
+                    ..AlgorithmLimits::default()
+                },
+                normalization,
+                AlgorithmCancellation::default(),
+            );
+            let output = ClusteringCoefficient
+                .execute(&graph, &control)
+                .unwrap_or_else(|error| {
+                    panic!("{normalization:?} iterations={iterations}: {error:?}")
+                });
+            assert_eq!(output.num_rows(), LARGE_NODES);
+            // Every node closes triangles, so the scores are not vacuous.
+            assert!(
+                clustering_coefficient_output_scores(&output)
+                    .iter()
+                    .all(|score| *score > 0.0)
+            );
+            by_budget.push(clustering_coefficient_bits(&output));
+        }
+        // The budget never reaches the result.
+        assert_eq!(by_budget[0], by_budget[1]);
+    }
+}
+
+#[test]
+fn clustering_coefficient_hub_pair_work_never_consumes_the_iteration_budget() {
+    // 3,000 leaves is 9,000,000 hub pairs: 8,789 per-1,024 charges for the hub alone.
+    let graph = hub_graph(3_000);
+    for normalization in NORMALIZATIONS {
+        let control = lcc_control(
+            AlgorithmLimits {
+                iterations: 0,
+                ..AlgorithmLimits::default()
+            },
+            normalization,
+            AlgorithmCancellation::default(),
+        );
+        let output = ClusteringCoefficient.execute(&graph, &control).unwrap();
+        let scores = clustering_coefficient_output_scores(&output);
+        assert_eq!(scores.len(), 3_001);
+        // The hub closes one triangle per chain link; a chain leaf closes one
+        // per chain neighbour; the chain ends see just the hub and one leaf.
+        assert_eq!(scores[0], 2.0 / 3_000.0);
+        assert_eq!(scores[1], 1.0);
+        assert_eq!(scores[3_000], 1.0);
+        assert!(scores[2..3_000].iter().all(|score| *score == 2.0 / 3.0));
+    }
+}
+
+/// Run `execute` while another thread cancels it after `delay`; the work is
+/// sized to run for seconds, so only an in-loop poll can end it sooner.
+fn cancelled_midway(
+    graph: &AdjacencyGraph,
+    normalization: ClusteringNormalization,
+    threads: usize,
+) -> (Result<AlgorithmOutput, AlgorithmError>, std::time::Duration) {
+    let cancellation = AlgorithmCancellation::default();
+    let mut control = lcc_control(
+        AlgorithmLimits::default().with_compute_threads(threads),
+        normalization,
+        cancellation.clone(),
+    );
+    if threads > 1 {
+        control = control.with_compute_pool(Arc::new(crate::ComputePool::new(threads).unwrap()));
+    }
+    let canceller = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        cancellation.cancel();
+    });
+    let started = std::time::Instant::now();
+    let result = ClusteringCoefficient.execute(graph, &control);
+    let elapsed = started.elapsed();
+    canceller.join().unwrap();
+    (result, elapsed)
+}
+
+#[test]
+fn clustering_coefficient_cancels_inside_a_large_hub_pair_loop() {
+    // 12,000 leaves is 144,000,000 hub pairs, and 12,001 nodes exceed the
+    // iteration budget: cancellation must still end the run promptly.
+    let graph = hub_graph(12_000);
+    for normalization in NORMALIZATIONS {
+        for threads in [1, 4] {
+            let (result, elapsed) = cancelled_midway(&graph, normalization, threads);
+            assert_eq!(
+                result,
+                Err(AlgorithmError::Cancelled),
+                "{normalization:?} threads={threads} ran {elapsed:?}"
+            );
+            assert!(
+                elapsed < std::time::Duration::from_secs(5),
+                "{normalization:?} threads={threads} took {elapsed:?} to observe cancellation"
+            );
+        }
+    }
+}
+
+#[test]
+fn clustering_coefficient_cancels_while_preparing_a_large_graph() {
+    let graph = large_ring_graph();
+    let cancellation = AlgorithmCancellation::default();
+    cancellation.cancel();
+    let control = lcc_control(
+        AlgorithmLimits::default(),
+        ClusteringNormalization::Fagiolo,
+        cancellation,
+    );
+    assert_eq!(
+        prepare_clustering_coefficient(&graph, &control).err(),
+        Some(AlgorithmError::Cancelled)
+    );
+}
+
+#[test]
+fn clustering_coefficient_polls_cancellation_for_every_node() {
+    // Isolated nodes have no pairs, so the per-node poll is the only one that can fire.
+    let graph = AdjacencyGraph::with_test_edges(LARGE_NODES as u64, &[]);
+    let prepared = prepare_clustering_coefficient(
+        &graph,
+        &lcc_control(
+            AlgorithmLimits::default(),
+            ClusteringNormalization::Fagiolo,
+            AlgorithmCancellation::default(),
+        ),
+    )
+    .unwrap();
+    let cancellation = AlgorithmCancellation::default();
+    cancellation.cancel();
+    let control = lcc_control(
+        AlgorithmLimits::default(),
+        ClusteringNormalization::Fagiolo,
+        cancellation,
+    );
+    assert!(
+        matches!(
+            clustering_coefficient_scores_serial(&prepared, &control),
+            Err(AlgorithmError::Cancelled)
+        ),
+        "a cancelled run must stop at the first node"
+    );
+}
+
+#[test]
+fn clustering_coefficient_keeps_node_edge_and_output_limits_on_large_graphs() {
+    let graph = large_ring_graph();
+    let mut registry = AlgorithmRegistry::default();
+    register_rank_algorithms(&mut registry).unwrap();
+    let dispatched = |limits: AlgorithmLimits| {
+        registry
+            .execute(
+                Algorithm::Rank(RankAlgorithm::ClusteringCoefficient),
+                &graph,
+                &AlgorithmControl::new(limits, AlgorithmCancellation::default()),
+            )
+            .map(|_| ())
+    };
+    assert!(matches!(
+        dispatched(AlgorithmLimits {
+            nodes: 19_999,
+            ..AlgorithmLimits::default()
+        }),
+        Err(AlgorithmError::NodeLimit { .. })
+    ));
+    assert!(matches!(
+        dispatched(AlgorithmLimits {
+            edges: 39_999,
+            ..AlgorithmLimits::default()
+        }),
+        Err(AlgorithmError::EdgeLimit { .. })
+    ));
+    assert!(matches!(
+        dispatched(AlgorithmLimits {
+            output_rows: 19_999,
+            ..AlgorithmLimits::default()
+        }),
+        Err(AlgorithmError::OutputLimit { .. })
+    ));
+    assert_eq!(dispatched(AlgorithmLimits::default()), Ok(()));
 }
