@@ -114,6 +114,29 @@ impl Tasks {
     }
 }
 
+/// Run `work` on every job on the rayon pool, handing jobs out in index order.
+///
+/// A worker that finishes takes the lowest job nobody has claimed, so at any
+/// moment the jobs in flight are the lowest unfinished ones and the reads of a
+/// source start in file order, at most one worker count apart. A static split
+/// (`par_iter`) starts a worker at each of several far-apart positions instead,
+/// and a consumer that needs the bytes in order, such as the whole-file digest
+/// of a registered source (#1898), would have to hold the bytes read ahead of the
+/// gap or read them again. Results come back in job order.
+pub(super) fn claim_in_order<J: Send, R: Send>(
+    jobs: Vec<J>,
+    work: impl Fn(J) -> Result<R, GfError> + Sync + Send,
+) -> Result<Vec<R>, GfError> {
+    let mut finished = jobs
+        .into_iter()
+        .enumerate()
+        .par_bridge()
+        .map(|(index, job)| work(job).map(|result| (index, result)))
+        .collect::<Result<Vec<_>, GfError>>()?;
+    finished.sort_unstable_by_key(|(index, _)| *index);
+    Ok(finished.into_iter().map(|(_, result)| result).collect())
+}
+
 /// Merge the tasks' local dictionaries into one and return each task's
 /// local-to-global id map.
 fn global_dictionary(dictionaries: &[&LocalDictionary]) -> (Vec<String>, Vec<Vec<u32>>) {
@@ -227,52 +250,53 @@ pub(super) fn collect_nodes(
     // Zero-allocated: pages become resident only as tasks write them.
     let mut uuids = vec![[0_u8; 16]; tasks.total];
     let mut labels = vec![0_u32; tasks.total];
-    let chunks = tasks
+    let jobs = tasks
         .items
-        .par_iter()
+        .iter()
+        .copied()
         .zip(tasks.carve(&mut uuids))
         .zip(tasks.carve(&mut labels))
-        .map(|((&(source, task, rows), uuids), labels)| {
+        .collect::<Vec<_>>();
+    let chunks = claim_in_order(jobs, |(((source, task, rows), uuids), labels)| {
+        check_cancelled(cancel)?;
+        let mut chunk = NodeChunk::default();
+        let mut written = 0;
+        sources[source].reader.read_task(task, &mut |batch| {
             check_cancelled(cancel)?;
-            let mut chunk = NodeChunk::default();
-            let mut written = 0;
-            sources[source].reader.read_task(task, &mut |batch| {
-                check_cancelled(cancel)?;
-                crate::graph_construction::validate_canonical_batch(
-                    ConstructionChunkKind::Node,
-                    &batch,
-                )?;
-                admit_batch(ConstructionChunkKind::Node, &batch, budgets)?;
-                let count = batch.num_rows();
-                if written + count > rows {
-                    return Err(short_source());
-                }
-                if count == 0 {
-                    return Ok(());
-                }
-                copy_uuids(
-                    crate::graph_construction::batch_uuid_column(&batch, "node_uuid")?,
-                    &mut uuids[written..written + count],
-                );
-                chunk.dictionary.column(
-                    required_string(&batch, "label")?,
-                    &mut labels[written..written + count],
-                );
-                written += count;
-                if let Some(properties) = properties {
-                    properties.ingest(&batch, cancel)?;
-                }
-                if retain {
-                    chunk.kept.push(batch);
-                }
-                Ok(())
-            })?;
-            if written != rows {
+            crate::graph_construction::validate_canonical_batch(
+                ConstructionChunkKind::Node,
+                &batch,
+            )?;
+            admit_batch(ConstructionChunkKind::Node, &batch, budgets)?;
+            let count = batch.num_rows();
+            if written + count > rows {
                 return Err(short_source());
             }
-            Ok(chunk)
-        })
-        .collect::<Result<Vec<_>, GfError>>()?;
+            if count == 0 {
+                return Ok(());
+            }
+            copy_uuids(
+                crate::graph_construction::batch_uuid_column(&batch, "node_uuid")?,
+                &mut uuids[written..written + count],
+            );
+            chunk.dictionary.column(
+                required_string(&batch, "label")?,
+                &mut labels[written..written + count],
+            );
+            written += count;
+            if let Some(properties) = properties {
+                properties.ingest(&batch, cancel)?;
+            }
+            if retain {
+                chunk.kept.push(batch);
+            }
+            Ok(())
+        })?;
+        if written != rows {
+            return Err(short_source());
+        }
+        Ok(chunk)
+    })?;
     let dictionaries = chunks
         .iter()
         .map(|chunk| &chunk.dictionary)
@@ -386,14 +410,18 @@ pub(super) fn collect_edges(
     let mut src = vec![0_u32; tasks.total];
     let mut dst = vec![0_u32; tasks.total];
     let mut rels = vec![0_u32; tasks.total];
-    let chunks = tasks
+    let jobs = tasks
         .items
-        .par_iter()
+        .iter()
+        .copied()
         .zip(tasks.carve(&mut uuids))
         .zip(tasks.carve(&mut src))
         .zip(tasks.carve(&mut dst))
         .zip(tasks.carve(&mut rels))
-        .map(|((((&(source, task, rows), uuids), src), dst), rels)| {
+        .collect::<Vec<_>>();
+    let chunks = claim_in_order(
+        jobs,
+        |(((((source, task, rows), uuids), src), dst), rels)| {
             check_cancelled(cancel)?;
             let mut chunk = EdgeChunk::default();
             let mut written = 0;
@@ -445,8 +473,8 @@ pub(super) fn collect_edges(
                 return Err(short_source());
             }
             Ok(chunk)
-        })
-        .collect::<Result<Vec<_>, GfError>>()?;
+        },
+    )?;
     let miss = chunks.iter().find_map(|chunk| chunk.miss);
     let dictionaries = chunks
         .iter()
