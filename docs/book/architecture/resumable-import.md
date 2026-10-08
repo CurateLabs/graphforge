@@ -195,12 +195,19 @@ completes. The first complete pass records it in the session manifest and, once
 every source is staged, in the import receipt (`source_provenance`); a later
 complete read of the same source must produce the same digest. A rewrite that
 preserves device, inode, size and modification time is not detected, and the
-digest then describes whatever was read. Two consequences are deliberate:
+digest then describes whatever was read. Three consequences are deliberate:
 
 - The pin is re-checked whenever progress is reused. A resumed staged import opens
   the source through the pin before it skips the batches already staged, so an
   edit between a stop and the resume is refused. The batches staged earlier and
   the digest of the final pass are not tied to each other beyond that pin.
+- A source is pinned until it is fully consumed. The frame that marks a source
+  staged also carries its complete SHA-256, so a source whose staging a stop
+  interrupted is re-opened through the pin, while one that finished is not read
+  again: its staged rows are exactly the bytes its digest names, and an edit or
+  deletion afterwards changes nothing that is published. The same holds for
+  `commit` after `validate`, which publishes artifacts already built and reads no
+  source.
 - An initial bulk build restarts rather than resumes. A sealed construction
   session is reused only if the digest of every in-place source it was built from
   is already recorded; otherwise it is discarded and the build runs again, so a

@@ -239,8 +239,17 @@ impl ExternalSource {
     /// its footer, offering the footer bytes it reads to `digest`.
     pub(super) fn open_observed(&self, digest: &SourceDigest) -> Result<File, GfError> {
         let file = self.reopen()?;
+        self.verify_footer(&file, digest)?;
+        Ok(file)
+    }
+
+    /// Read the footer through `file` and require it to be the registered one. A
+    /// footer that is unreadable or malformed because the file changed after it
+    /// was opened is that change, not a format error.
+    pub(super) fn verify_footer(&self, file: &File, digest: &SourceDigest) -> Result<(), GfError> {
         let (footer_len, footer_sha256) =
-            footer_identity(&self.path, &file, self.size, Some(digest))?;
+            footer_identity(&self.path, file, self.size, Some(digest))
+                .map_err(|error| self.reclassify(file, error))?;
         if footer_len != self.footer_len || footer_sha256 != self.footer_sha256 {
             return Err(source_changed(
                 &self.path,
@@ -248,7 +257,7 @@ impl ExternalSource {
                 "Parquet footer differs from registration",
             ));
         }
-        Ok(file)
+        Ok(())
     }
 
     /// Open the source for a task of a pass that already verified its footer:

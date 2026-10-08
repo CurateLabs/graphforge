@@ -1175,3 +1175,110 @@ fn capture_refuses_a_symlink_itself_so_a_swap_after_any_precheck_cannot_register
     assert!(super::ExternalSource::capture(directory).is_err());
     assert!(super::ExternalSource::capture(&source.path).is_ok());
 }
+
+#[test]
+fn a_footer_corrupted_after_the_open_is_reported_as_the_change_it_is() {
+    for corrupt in [
+        // The closing magic.
+        |path: &Path, length: u64| {
+            let file = OpenOptions::new().write(true).open(path).unwrap();
+            std::os::unix::fs::FileExt::write_all_at(&file, b"XXXX", length - 4).unwrap();
+        },
+        // The footer length, now beyond the file.
+        |path: &Path, length: u64| {
+            let file = OpenOptions::new().write(true).open(path).unwrap();
+            std::os::unix::fs::FileExt::write_all_at(&file, &[0xff; 4], length - 8).unwrap();
+        },
+    ] {
+        let source = source();
+        let external = super::ExternalSource::capture(&source.path).unwrap();
+        let digest = SourceDigest::new(external.size);
+        // The pin holds when the file is opened ...
+        let file = external.reopen().unwrap();
+        // ... and the same-size edit lands after it, moving the modification time.
+        corrupt(&source.path, external.size);
+        set_mtime(&source.path, 5);
+        let error = external.verify_footer(&file, &digest).unwrap_err();
+        let (code, message) = api_error(&error);
+        assert_eq!(code, ApiErrorCode::IdentityConflict, "{message}");
+        assert!(message.contains("was modified"), "{message}");
+    }
+}
+
+/// A source is pinned until it is fully consumed: once it has been read to the end
+/// and its digest recorded, an edit or deletion before the session resumes changes
+/// nothing that is published.
+#[test]
+fn a_fully_staged_source_edited_before_resume_publishes_its_original_rows_and_digest() {
+    for change in [&CHANGES[0], &CHANGES[4]] {
+        let (_directory, _project, graph) = fixture_for(Route::Staged);
+        let (first, second) = (source(), source());
+        let original = sha256(&fs::read(&first.path).unwrap());
+        let mut session = begin(&graph);
+        for source in [&first, &second] {
+            session
+                .register_parquet(BulkInputKind::Node, &source.path)
+                .unwrap();
+        }
+        // Stop inside the second source, after the first is complete.
+        super::set_pass_hook(&second.path, |stage, _| {
+            if stage == "opened" {
+                crate::import_session::journal::inject("completed_before_fsync");
+            }
+        });
+        assert!(session.validate(&graph).is_err());
+        super::clear_pass_hook(&second.path);
+        assert!(session.manifest.sources[0].staged);
+        assert_eq!(
+            session.manifest.sources[0].sha256.as_deref(),
+            Some(original.as_str())
+        );
+        assert!(!session.manifest.sources[1].staged);
+        assert!(session.manifest.sources[1].batches_staged >= 1);
+        let id = session.session_uuid();
+        drop(session);
+
+        (change.apply)(&first.path);
+        let mut session = graph.resume_import_session(id).unwrap();
+        let progress = session
+            .validate(&graph)
+            .unwrap_or_else(|error| panic!("{}: {error}", change.name));
+        session.commit(&graph, None).unwrap();
+        assert_eq!(graph.node_count("Person").unwrap(), (2 * NODE_ROWS) as u64);
+        let provenance = progress.construction.unwrap().source_provenance;
+        assert_eq!(provenance[0].sha256.as_deref(), Some(original.as_str()));
+        assert_eq!(
+            provenance[1].sha256.as_deref(),
+            Some(sha256(&fs::read(&second.path).unwrap()).as_str())
+        );
+    }
+}
+
+/// Everything commit publishes was built and its digests recorded by validate, so
+/// commit after a resume reads no source and needs no pin.
+#[test]
+fn a_validated_session_commits_after_its_sources_are_edited_or_deleted() {
+    for route in ROUTES {
+        for change in [&CHANGES[0], &CHANGES[4]] {
+            let (_directory, _project, graph) = fixture_for(route);
+            let source = source();
+            let original = sha256(&fs::read(&source.path).unwrap());
+            let mut session = begin(&graph);
+            session
+                .register_parquet(BulkInputKind::Node, &source.path)
+                .unwrap();
+            session.validate(&graph).unwrap();
+            let id = session.session_uuid();
+            drop(session);
+            (change.apply)(&source.path);
+
+            let mut session = graph.resume_import_session(id).unwrap();
+            assert_eq!(
+                session.manifest.sources[0].sha256.as_deref(),
+                Some(original.as_str())
+            );
+            session.commit(&graph, None).unwrap();
+            assert_eq!(graph.node_count("Person").unwrap(), NODE_ROWS as u64);
+        }
+    }
+}
