@@ -33,7 +33,14 @@ from graphforge_bench.gdc_finbench_transaction import (
     run_tiny_suite,
     validate_live_fixture,
 )
-from graphforge_bench.gdc_finbench_transaction_reference import derive_expected, render
+from graphforge_bench.gdc_finbench_transaction_reference import (
+    COLUMNS as REFERENCE_COLUMNS,
+)
+from graphforge_bench.gdc_finbench_transaction_reference import (
+    LDBC_PARAMETERS,
+    derive_expected,
+    render,
+)
 from jsonschema import Draft202012Validator
 
 
@@ -363,6 +370,24 @@ class GdcFinBenchTransactionSuiteTests(unittest.TestCase):
             else:
                 self.assertIsNone(truncation, operation)
                 self.assertNotIn("truncationLimit", names, operation)
+
+    def test_reference_columns_and_ldbc_parameters_match_the_query_catalog(self) -> None:
+        catalog = {query["operation"]: query for query in list_query_catalog()["queries"]}
+        self.assertEqual(list(REFERENCE_COLUMNS), list(catalog))
+        for operation, query in catalog.items():
+            self.assertEqual(
+                [(column["name"], column["kind"]) for column in query["columns"]],
+                list(REFERENCE_COLUMNS[operation]),
+                operation,
+            )
+        # The published read parameters exist for the complex reads only.
+        self.assertEqual(list(LDBC_PARAMETERS), [op for op in catalog if op.startswith("TCR")])
+        for operation, names in LDBC_PARAMETERS.items():
+            self.assertEqual(
+                [parameter["name"] for parameter in catalog[operation]["parameters"]],
+                list(names),
+                operation,
+            )
 
     def _job(self, operation: str) -> Path:
         return (
