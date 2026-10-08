@@ -1,0 +1,5 @@
+companyId|companyName|isBlocked|createTime|country|city|business|description|url
+11|Alpha|false||||||
+12|Beta|false||||||
+13|Gamma|false||||||
+14|Delta|true||||||

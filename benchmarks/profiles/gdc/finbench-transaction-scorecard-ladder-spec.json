@@ -1,0 +1,339 @@
+{
+  "schema": "graphforge-gdc-scorecard-ladder-spec/1",
+  "suite_id": "finbench-transaction",
+  "description": "FinBench Transaction scorecard ladder SF1 -> SF3 -> SF10 on the pinned snapshot archives. The complex reads TCR1-TCR12 run as Cypher over every published binding; SF1 is checked against a spec-derived reference. Unpinned rungs are recorded as not admitted.",
+  "profile_root": ".",
+  "identity_profile": "scorecard",
+  "counts_ladder": "profiles/gdc/finbench-transaction-scorecard-ladder.json",
+  "metric_shape": "queries",
+  "variance_line": "Read-only complex reads TCR1-TCR12 over the bulk-load snapshot; simple reads and writes are not measured.",
+  "attribution": "Data and read parameters from the LDBC Financial Benchmark (FinBench) Transaction workload (https://ldbcouncil.org/benchmarks/finbench/); the specification documents are Apache-2.0 and the publisher states no dataset license.",
+  "variances": [
+    {
+      "kind": "reference_reading",
+      "subject": "reference",
+      "text": "Checked against a spec-derived reference (graphforge_bench.gdc_finbench_transaction_reference, which never runs GraphForge, over the loaded snapshot read from the archive's CSV files), not an LDBC implementation: LDBC publishes no FinBench reference output (#952 decision 2026-10-08)."
+    },
+    {
+      "kind": "reference_reading",
+      "subject": "TCR6",
+      "text": "counts 'more than 3 transfer-ins' as transfer edges, not distinct source accounts, as Galaxybase, GPStore and Ultipa do; counting distinct sources would change 901 of 905 SF1 bindings."
+    },
+    {
+      "kind": "reference_reading",
+      "subject": "TCR11",
+      "text": "follows guarantee chains of any length ('until end', as GPStore does); Galaxybase, TuGraph and Ultipa stop at 5 hops, which would change 27 of 983 SF1 bindings (the deepest chain is 11)."
+    },
+    {
+      "kind": "reference_reading",
+      "subject": "truncation",
+      "text": "follows the Neo4j example: a vertex keeps its truncationLimit newest edges of the expanded type and direction before the window and amount filters apply. It changes 12 SF1 answers (TCR6 lines 99, 118, 262, 374, 686; TCR8 lines 101, 278, 360, 392, 779, 848, 903), none corroborated by Ultipa's validation set."
+    },
+    {
+      "kind": "spec_variance",
+      "subject": "truncation ties",
+      "text": "the specification leaves ties at the cut-off undefined; edges with equal timestamp are ordered by far-endpoint id ascending. No SF1 vertex has a tie at the cut-off, so no SF1 answer depends on it."
+    },
+    {
+      "kind": "reference_reading",
+      "subject": "GPStore",
+      "text": "GPStore, an LDBC reference implementation, reads TCR1 (6 of 737 SF1 bindings), TCR5 (43 of 1,000) and TCR8 differently. Its readings are for information only and decide no match."
+    },
+    {
+      "kind": "scope",
+      "subject": "bindings",
+      "text": "Every published binding of TCR1-TCR12 runs, once, under the id line-<n> of its line in the parameter file, so the reference and the workload name the same binding."
+    },
+    {
+      "kind": "scope",
+      "subject": "TSR1-TSR6",
+      "text": "Not measured: LDBC publishes no simple-read parameters, because its driver derives them during a run. They count against coverage."
+    },
+    {
+      "kind": "scope",
+      "subject": "TW1-TW19, TRW1-TRW3",
+      "text": "Not measured: the write and read-write transactions are outside this read scorecard and count against coverage."
+    },
+    {
+      "kind": "rewrite",
+      "subject": "TCR1-TCR12",
+      "text": "The Cypher departs from the most direct form where GraphForge has a defect or gap (#1887, #1888): edges are identified by [endpoint id, timestamp] keys, path hop rules are list comprehensions, shortestPath is min(size(r)), and empty sums are coalesced to 0.0. The query catalog names each workaround."
+    },
+    {
+      "kind": "discrepancy",
+      "subject": "createTime",
+      "text": "The snapshot's naive-UTC createTime text is stored as whole epoch milliseconds in an int64 (edges as timestamp, entities as createTime), so the Cypher windows compare integers as the specification's parameters are."
+    }
+  ],
+  "rungs": [
+    {
+      "id": "sf1",
+      "label": "SF1",
+      "dataset_id": "sf1",
+      "input_subdir": null,
+      "workload": {
+        "builder": "finbench-transaction",
+        "queries": "profiles/gdc/finbench-transaction-scorecard-queries.json",
+        "parameters": {
+          "dataset_id": "sf1_read_params",
+          "path": "sf1_read_params"
+        }
+      },
+      "refused": [
+        {
+          "query_id": "TSR1",
+          "cause": "no_published_parameters"
+        },
+        {
+          "query_id": "TSR2",
+          "cause": "no_published_parameters"
+        },
+        {
+          "query_id": "TSR3",
+          "cause": "no_published_parameters"
+        },
+        {
+          "query_id": "TSR4",
+          "cause": "no_published_parameters"
+        },
+        {
+          "query_id": "TSR5",
+          "cause": "no_published_parameters"
+        },
+        {
+          "query_id": "TSR6",
+          "cause": "no_published_parameters"
+        },
+        {
+          "query_id": "TW1",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW2",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW3",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW4",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW5",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW6",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW7",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW8",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW9",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW10",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW11",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW12",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW13",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW14",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW15",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW16",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW17",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW18",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW19",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TRW1",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TRW2",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TRW3",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        }
+      ],
+      "reference": {
+        "cache_path": "finbench-reference/sf1-reference.json",
+        "sha256": "9c73fb5baa71136696fc598f42852505595b1f2b9ea25ae8ae8e5644ec0f822a"
+      },
+      "variances": []
+    },
+    {
+      "id": "sf3",
+      "label": "SF3",
+      "not_pinned": "#1878 pins SF1 and SF10 only; SF3 needs a pinned archive, read parameters and a count-ladder entry"
+    },
+    {
+      "id": "sf10",
+      "label": "SF10",
+      "dataset_id": "sf10",
+      "input_subdir": null,
+      "workload": {
+        "builder": "finbench-transaction",
+        "queries": "profiles/gdc/finbench-transaction-scorecard-queries.json",
+        "parameters": {
+          "dataset_id": "sf10_read_params",
+          "path": "sf10_read_params"
+        }
+      },
+      "refused": [
+        {
+          "query_id": "TSR1",
+          "cause": "no_published_parameters"
+        },
+        {
+          "query_id": "TSR2",
+          "cause": "no_published_parameters"
+        },
+        {
+          "query_id": "TSR3",
+          "cause": "no_published_parameters"
+        },
+        {
+          "query_id": "TSR4",
+          "cause": "no_published_parameters"
+        },
+        {
+          "query_id": "TSR5",
+          "cause": "no_published_parameters"
+        },
+        {
+          "query_id": "TSR6",
+          "cause": "no_published_parameters"
+        },
+        {
+          "query_id": "TW1",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW2",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW3",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW4",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW5",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW6",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW7",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW8",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW9",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW10",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW11",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW12",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW13",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW14",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW15",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW16",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW17",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW18",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TW19",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TRW1",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TRW2",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        },
+        {
+          "query_id": "TRW3",
+          "cause": "finbench_transaction_write_semantics_not_exposed"
+        }
+      ],
+      "reference": null,
+      "reference_note": "the spec-derived reference covers SF1 only",
+      "variances": []
+    }
+  ]
+}

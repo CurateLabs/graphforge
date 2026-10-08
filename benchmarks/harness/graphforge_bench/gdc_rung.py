@@ -103,6 +103,12 @@ DEFINITION = "graphforge-gdc-rung-phase-v1"
 DRIVER_NAME = "graphforge-benchmark-gdc-scorecard"
 LAUNCHER_NAME = "graphforge-gdc-phase"
 PHASES = ("convert", "load", "query")
+# The module that builds a declared workload (and reference) in a child process.
+BUILDER_MODULES = {
+    "snb-bi": "gdc_snb_scorecard",
+    "snb-interactive": "gdc_snb_scorecard",
+    "finbench-transaction": "gdc_finbench_transaction_scorecard",
+}
 MEMORY_LIMIT_BYTES = 4 * 1024**3
 CORES = 16
 SHARED_IDENTITY_KEYS = (
@@ -568,7 +574,7 @@ def _build_inputs(rung: Rung, input_root: Path) -> bool:
         [
             sys.executable,
             "-m",
-            "graphforge_bench.gdc_snb_scorecard",
+            f"graphforge_bench.{BUILDER_MODULES[workload['builder']]}",
             "--request",
             str(directory / "request.json"),
             "--output-dir",
@@ -742,6 +748,17 @@ def _check(rung: Rung, evidence: Mapping[str, Any], results_dir: Path, input_roo
                 if built is None:
                     raise RungInputError("reference_missing", "the builder wrote no reference")
                 path = built
+            elif "cache_path" in reference_spec:
+                # A reference too large for the repository lives in the dataset
+                # cache; the spec pins its bytes.
+                path = rung.ladder.cache_root / reference_spec["cache_path"]
+                if not path.is_file():
+                    raise RungInputError("reference_missing", f"no reference at {path}")
+                if sha256_file(path) != reference_spec["sha256"]:
+                    raise RungInputError(
+                        "reference_digest_mismatch",
+                        f"{path} is not the reference the rung spec pins",
+                    )
             else:
                 path = rung.ladder.spec.resolve(reference_spec["path"])
             reference = read_json(path)
@@ -761,6 +778,8 @@ def _check(rung: Rung, evidence: Mapping[str, Any], results_dir: Path, input_roo
         reference_sha256=reference_sha256,
         evidence=evidence,
         results=results,
+        # A pinned cache reference is the suite's whole answer key.
+        complete=reference_spec is not None and "cache_path" in reference_spec,
     )
     rung.publish("correctness", correctness)
     for mismatch in correctness["mismatches"]:

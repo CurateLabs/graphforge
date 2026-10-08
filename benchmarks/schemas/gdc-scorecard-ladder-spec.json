@@ -54,10 +54,10 @@
       "additionalProperties": false
     },
     "workloadBuilder": {
-      "description": "A workload built at rung time from pinned LDBC parameters: the first per_variant rows of each parameter file (graphforge_bench.gdc_snb_scorecard). Interactive short reads take their ids from the validation stream acquired with the dataset.",
+      "description": "A workload built at rung time from pinned LDBC parameters: the first per_variant rows of each parameter file (graphforge_bench.gdc_snb_scorecard), or, for finbench-transaction, every published binding (graphforge_bench.gdc_finbench_transaction_scorecard). Interactive short reads take their ids from the validation stream acquired with the dataset.",
       "type": "object",
       "properties": {
-        "builder": { "enum": ["snb-bi", "snb-interactive"] },
+        "builder": { "enum": ["snb-bi", "snb-interactive", "finbench-transaction"] },
         "queries": { "$ref": "#/$defs/relativePath" },
         "parameters": {
           "type": "object",
@@ -79,11 +79,22 @@
         },
         "per_variant": { "type": "integer", "minimum": 1, "maximum": 1000 }
       },
-      "required": ["builder", "queries", "parameters", "per_variant"],
+      "required": ["builder", "queries", "parameters"],
       "additionalProperties": false,
-      "if": { "properties": { "builder": { "const": "snb-interactive" } } },
-      "then": { "required": ["short_reads"] },
-      "else": { "not": { "required": ["short_reads"] } }
+      "allOf": [
+        {
+          "if": { "properties": { "builder": { "const": "snb-interactive" } } },
+          "then": { "required": ["short_reads", "per_variant"] }
+        },
+        {
+          "if": { "properties": { "builder": { "const": "snb-bi" } } },
+          "then": { "required": ["per_variant"], "not": { "required": ["short_reads"] } }
+        },
+        {
+          "if": { "properties": { "builder": { "const": "finbench-transaction" } } },
+          "then": { "not": { "anyOf": [{ "required": ["short_reads"] }, { "required": ["per_variant"] }] } }
+        }
+      ]
     },
     "unpinnedRung": {
       "description": "A rung of the suite's declared ladder whose dataset is not pinned. The ladder records it as not_admitted (rung_not_pinned) and keeps climbing when a later rung is pinned; the card lists it.",
@@ -135,6 +146,16 @@
                 "archive_outputs": { "const": "graphalytics" }
               },
               "required": ["archive_outputs"],
+              "additionalProperties": false
+            },
+            {
+              "description": "A complete reference file in the dataset cache, not the repository, pinned by its SHA-256 (graphforge_bench.gdc_finbench_transaction_reference). cache_path is relative to the dataset cache root.",
+              "type": "object",
+              "properties": {
+                "cache_path": { "$ref": "#/$defs/relativePath" },
+                "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+              },
+              "required": ["cache_path", "sha256"],
               "additionalProperties": false
             },
             {

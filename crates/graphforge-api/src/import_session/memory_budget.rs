@@ -1,6 +1,7 @@
 //! Plan-time memory budget of the bulk builder (ADR 0058).
 //!
-//! The budget chooses between two builds of the same bytes. It is the memory the
+//! The budget chooses between two builds of the same bytes: all resident, or
+//! through scratch files that keep the peak inside it (#1900). It is the memory the
 //! process can still claim, read from `/proc/meminfo` and from the cgroup the
 //! process actually runs in, scaled by [`BUDGET_NUMERATOR`] / [`BUDGET_DENOMINATOR`].
 //!
@@ -9,6 +10,8 @@
 //! process in a nested cgroup whose limit sits in that cgroup's own directory or
 //! in an ancestor's. Every level from the process's cgroup to the root bounds the
 //! process, so the tightest remaining limit wins.
+
+use graphforge_core::GfError;
 
 /// Share of the claimable memory the builder may plan to use; the rest covers
 /// the page cache the encoded files fill, the publisher, and other tenants.
@@ -67,15 +70,38 @@ pub(super) fn budget_for(claimable: Option<u64>) -> u64 {
     })
 }
 
+/// Environment variable that pins the budget, in bytes, in place of the one
+/// derived from the host. It lets an operator keep a build inside a share of
+/// memory the cgroup walk cannot see, and lets a measurement force the
+/// over-budget route on a small input.
+pub(super) const BUDGET_ENV: &str = "GF_BULK_BUILD_MEMORY_BUDGET_BYTES";
+
+/// The budget a pinned `value` asks for.
+pub(super) fn parse_override(value: &str) -> Result<u64, GfError> {
+    value
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|bytes| *bytes > 0)
+        .ok_or_else(|| {
+            GfError::Storage(format!(
+                "{BUDGET_ENV} must be a positive number of bytes, got {value:?}"
+            ))
+        })
+}
+
 /// The budget on this host, for this process.
-pub(super) fn bulk_build_memory_budget() -> u64 {
+pub(super) fn bulk_build_memory_budget() -> Result<u64, GfError> {
+    if let Some(value) = std::env::var_os(BUDGET_ENV) {
+        return parse_override(&value.to_string_lossy());
+    }
     let meminfo = std::fs::read_to_string("/proc/meminfo").ok();
     let cgroup = std::fs::read_to_string("/proc/self/cgroup").ok();
-    budget_for(claimable_bytes(
+    Ok(budget_for(claimable_bytes(
         meminfo.as_deref(),
         cgroup.as_deref(),
         &|path| std::fs::read_to_string(path).ok(),
-    ))
+    )))
 }
 
 #[cfg(test)]
@@ -96,6 +122,15 @@ mod tests {
 
     fn meminfo(gib: u64) -> String {
         format!("MemTotal: 1 kB\nMemAvailable:   {} kB\n", gib * GIB / 1024)
+    }
+
+    #[test]
+    fn a_pinned_budget_must_be_a_positive_number_of_bytes() {
+        assert_eq!(parse_override(" 1073741824\n").unwrap(), GIB);
+        for bad in ["", "0", "-1", "1G", "1.5", "abc"] {
+            let error = parse_override(bad).unwrap_err().to_string();
+            assert!(error.contains(BUDGET_ENV), "{bad:?}: {error}");
+        }
     }
 
     #[test]
@@ -186,6 +221,7 @@ mod tests {
             BulkBuildPlan {
                 nodes: vec![source(1 << scale)],
                 edges: vec![source(16 << scale)],
+                memory_budget: None,
             }
         };
         let under_benchexec = budget_for(claimable_bytes(

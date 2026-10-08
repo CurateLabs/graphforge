@@ -1,0 +1,50 @@
+{
+  "schema": "graphforge-gdc-pinned-identity/1",
+  "suite_id": "finbench-transaction",
+  "disposition": "executable",
+  "spec": {
+    "name": "ldbc-finbench",
+    "source": "https://github.com/ldbc/ldbc_finbench_docs",
+    "release": "v0.1.0",
+    "commit": "d3ec7036bf6919df8cd3eeaa3a986048e779ea02"
+  },
+  "generator": {
+    "name": "graphforge-gdc-finbench-rung-fixture",
+    "source": "https://github.com/CurateLabs/graphforge/tree/main/benchmarks/fixtures/gdc/finbench-scorecard-fixture",
+    "release": "finbench-rung-fixture-v1",
+    "commit": null
+  },
+  "driver": {
+    "name": "graphforge-gdc-scorecard-converter",
+    "source": "https://github.com/CurateLabs/graphforge/tree/main/benchmarks/runners/gdc-scorecard",
+    "release": "converter-v1",
+    "commit": null
+  },
+  "datasets": [
+    {
+      "id": "finbench-fixture-sf1",
+      "role": "dataset",
+      "checksum_sha256": "cff656e6a9b779a54e75d1c80a7db8e1408a2d4494abb18a12fe8ceb531cc2ae",
+      "license": "Apache-2.0",
+      "acquisition": "download",
+      "source": "https://datasets.ldbcouncil.org/finbench/finbench-fixture-sf1.tar.zst"
+    },
+    {
+      "id": "finbench-fixture-sf3",
+      "role": "dataset",
+      "checksum_sha256": "cff656e6a9b779a54e75d1c80a7db8e1408a2d4494abb18a12fe8ceb531cc2ae",
+      "license": "Apache-2.0",
+      "acquisition": "download",
+      "source": "https://datasets.ldbcouncil.org/finbench/finbench-fixture-sf1.tar.zst"
+    },
+    {
+      "id": "finbench-fixture-read-params",
+      "role": "parameter",
+      "checksum_sha256": "5b37721a7a6a1f120940e6ebff5e1ef4f724c28c78fc6ecffef4aca74dfecf80",
+      "license": "Apache-2.0",
+      "acquisition": "download",
+      "source": "https://datasets.ldbcouncil.org/finbench/finbench-fixture-read-params.zip"
+    }
+  ],
+  "references": []
+}
