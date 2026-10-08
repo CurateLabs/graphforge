@@ -8,22 +8,22 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use arrow::ipc::reader::FileReader as ArrowFileReader;
 use arrow::record_batch::RecordBatch;
 use graphforge_core::GfError;
+use graphforge_storage::concurrency_attribution::ObservedSha256;
 use graphforge_storage::{BulkBatchReader, BulkSource};
 use parquet::arrow::arrow_reader::{
     ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder, RowSelection,
     RowSelector,
 };
+use sha2::Digest as _;
 use uuid::Uuid;
 
-use super::external_source::{
-    DigestingFile, ExternalSource, SourceChange, SourceDigest, source_changed,
-};
+use super::external_source::{self, ExternalSource, SourceChange, source_changed};
 use super::{
     ImportSourceKind, SourceRecord, cancelled, canonicalize_parquet_batch, import_batch_operation,
     normalize_batch, storage, validation,
@@ -334,71 +334,128 @@ impl Refusals {
     }
 }
 
-/// Whole-file SHA-256 of each in-place source, produced by the read that
-/// completed it. A source appears only once every one of its tasks was read.
+/// Whole-file SHA-256 of each in-place source in a bulk build.
+///
+/// SHA-256 is sequential, and the build decodes row groups in parallel: the
+/// fastest workers run a full worker count of row groups ahead of the slowest,
+/// so folding their reads into one ordered digest would hold that lead in memory
+/// or read most of the file again afterwards (measured: 90% and 96% of the
+/// bytes at S20 and S22 with a 64 MiB bound). So each source gets one thread that
+/// reads it front to back while the workers decode. The pages it reads are the
+/// ones the workers read next, and the digest costs no time after the last task.
 #[derive(Default)]
 pub(super) struct Digests {
-    held: std::sync::Mutex<BTreeMap<u64, String>>,
-    reread: std::sync::atomic::AtomicU64,
+    stop: Arc<AtomicBool>,
+    hashers: Mutex<Vec<(u64, std::thread::JoinHandle<Result<String, GfError>>)>>,
 }
 
 impl Digests {
-    /// Bytes read again, across all sources, to complete their digests.
-    pub(super) fn reread_bytes(&self) -> u64 {
-        self.reread.load(Ordering::Acquire)
-    }
-
-    fn insert(&self, sequence: u64, sha256: String, reread: u64) {
-        self.reread.fetch_add(reread, Ordering::AcqRel);
-        if let Ok(mut held) = self.held.lock() {
-            held.insert(sequence, sha256);
+    fn start(&self, sequence: u64, external: ExternalSource) {
+        let stop = self.stop.clone();
+        let hasher = std::thread::Builder::new()
+            .name("gf-source-digest".into())
+            .spawn(move || hash_source(&external, &stop));
+        match hasher {
+            Ok(hasher) => self
+                .hashers
+                .lock()
+                .expect("source digest registry lock poisoned")
+                .push((sequence, hasher)),
+            Err(error) => {
+                // Surface it when the digests are collected; never skip the digest.
+                let message = error.to_string();
+                let failed = std::thread::spawn(move || Err(storage(message)));
+                self.hashers
+                    .lock()
+                    .expect("source digest registry lock poisoned")
+                    .push((sequence, failed));
+            }
         }
     }
 
-    /// The digest the build read for the source with this sequence.
-    pub(super) fn take(&self, sequence: u64) -> Option<String> {
-        self.held.lock().ok()?.remove(&sequence)
+    /// Wait for every source's digest, keyed by source sequence.
+    pub(super) fn finish(&self) -> Result<BTreeMap<u64, String>, GfError> {
+        let hashers = std::mem::take(
+            &mut *self
+                .hashers
+                .lock()
+                .expect("source digest registry lock poisoned"),
+        );
+        let mut digests = BTreeMap::new();
+        let mut failure = None;
+        for (sequence, hasher) in hashers {
+            match hasher
+                .join()
+                .map_err(|_| storage("source digest thread panicked"))?
+            {
+                Ok(sha256) => {
+                    digests.insert(sequence, sha256);
+                }
+                Err(error) => {
+                    failure.get_or_insert(error);
+                }
+            }
+        }
+        failure.map_or(Ok(digests), Err)
     }
 }
 
-/// An in-place Parquet source: its registration, the digest being assembled from
-/// the bytes the tasks read, and how many tasks remain.
+impl Drop for Digests {
+    /// A build that ended early leaves no thread reading a source.
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Ok(hashers) = self.hashers.get_mut() {
+            for (_, hasher) in std::mem::take(hashers) {
+                let _ = hasher.join();
+            }
+        }
+    }
+}
+
+/// Read one source front to back, hashing it, and confirm it is still the file
+/// registration recorded.
+fn hash_source(external: &ExternalSource, stop: &AtomicBool) -> Result<String, GfError> {
+    use std::io::Read as _;
+
+    let mut file = external.open()?;
+    let mut hasher = ObservedSha256::new();
+    let mut buffer = vec![0_u8; 1 << 20];
+    let mut total = 0_u64;
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return Err(cancelled());
+        }
+        let read = file.read(&mut buffer).map_err(storage)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        total += read as u64;
+    }
+    if total != external.size {
+        return Err(source_changed(
+            &external.path,
+            SourceChange::Resized,
+            &format!("read {total} bytes, registered {}", external.size),
+        ));
+    }
+    external.check(&file)?;
+    Ok(external_source::hex(&hasher.finalize()))
+}
+
+/// An in-place Parquet source and whether its digest reader has started.
 struct InPlace<'a> {
     external: ExternalSource,
-    digest: SourceDigest,
-    /// Digest an earlier complete read recorded, which this one must match.
-    expected: Option<String>,
-    tasks: usize,
-    finished: AtomicUsize,
     digests: &'a Digests,
+    started: AtomicBool,
 }
 
 impl InPlace<'_> {
-    /// Called when a task has read all its batches. The task that completes the
-    /// source finishes the digest, reading again any range the tasks did not.
-    fn task_done(&self, sequence: u64, guard: &File) -> Result<(), GfError> {
-        self.external.check(guard)?;
-        if self.finished.fetch_add(1, Ordering::AcqRel) + 1 != self.tasks {
-            return Ok(());
+    /// Start the digest reader once, when the first task has the source open.
+    fn start_digest(&self, sequence: u64) {
+        if !self.started.swap(true, Ordering::AcqRel) {
+            self.digests.start(sequence, self.external.clone());
         }
-        self.complete(sequence, guard)
-    }
-
-    fn complete(&self, sequence: u64, guard: &File) -> Result<(), GfError> {
-        let sha256 = self.digest.finish(&self.external, guard)?;
-        self.external.check(guard)?;
-        if let Some(expected) = &self.expected
-            && *expected != sha256
-        {
-            return Err(source_changed(
-                &self.external.path,
-                SourceChange::DigestChanged,
-                &format!("recorded {expected}, read {sha256}"),
-            ));
-        }
-        self.digests
-            .insert(sequence, sha256, self.digest.reread_bytes());
-        Ok(())
     }
 }
 
@@ -543,9 +600,8 @@ impl BulkBatchReader for SourceReader<'_> {
                 let file = in_place.external.open()?;
                 #[cfg(test)]
                 super::external_source::pass_hook(&in_place.external.path, "opened", task as u64);
+                in_place.start_digest(self.sequence);
                 let guard = file.try_clone().map_err(storage)?;
-                let file =
-                    DigestingFile::new(file, in_place.external.size, in_place.digest.clone());
                 let batch_rows = self.batch_rows as u64;
                 let start = first_batch * batch_rows;
                 let end = (start + BATCHES_PER_TASK * batch_rows).min(*rows);
@@ -603,7 +659,7 @@ impl BulkBatchReader for SourceReader<'_> {
                     in_place.external.check(&guard)?;
                     self.emit(first_batch + offset as u64, batch.map_err(storage)?, sink)?;
                 }
-                in_place.task_done(self.sequence, &guard)?;
+                in_place.external.check(&guard)?;
             }
             Format::Arrow { .. } => {
                 let file = File::open(&self.path).map_err(storage)?;
@@ -739,16 +795,14 @@ pub(super) fn plan<'a>(
     let tasks = usize::try_from(batches.div_ceil(BATCHES_PER_TASK)).map_err(storage)?;
     let in_place = source.external.as_ref().map(|external| InPlace {
         external: external.clone(),
-        digest: SourceDigest::new(external.size),
-        expected: source.sha256.clone(),
-        tasks,
-        finished: AtomicUsize::new(0),
         digests,
+        started: AtomicBool::new(false),
     });
-    if let Some(in_place) = in_place.as_ref().filter(|in_place| in_place.tasks == 0) {
-        // No task will read it, so the footer pass is the whole read.
-        let file = in_place.external.open()?;
-        in_place.complete(source.sequence, &file)?;
+    if tasks == 0
+        && let Some(in_place) = &in_place
+    {
+        // No task will open it, so nothing else would digest it.
+        in_place.start_digest(source.sequence);
     }
     Ok(BulkSource {
         reader: Arc::new(SourceReader {

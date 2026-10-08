@@ -87,7 +87,7 @@ pub(super) fn source_changed(path: &Path, change: SourceChange, detail: &str) ->
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(super) fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     bytes.iter().fold(String::new(), |mut text, byte| {
         let _ = write!(text, "{byte:02x}");
@@ -355,6 +355,7 @@ impl SourceDigest {
 
     /// Bytes `finish` had to read again, the cost of the digest beyond the
     /// decode's own reads. Zero until `finish` has run.
+    #[cfg(test)]
     pub(super) fn reread_bytes(&self) -> u64 {
         self.state().reread
     }
@@ -406,47 +407,6 @@ impl SourceDigest {
         RegionScope::record_work("bytes", reread);
         let hasher = std::mem::replace(&mut state.hasher, Sha256::new());
         Ok(hex(&hasher.finalize()))
-    }
-}
-
-/// A Parquet file whose every read is reported to a [`SourceDigest`], for
-/// readers that decode row groups in parallel from separate handles.
-pub(super) struct DigestingFile {
-    file: File,
-    size: u64,
-    digest: SourceDigest,
-}
-
-impl DigestingFile {
-    pub(super) const fn new(file: File, size: u64, digest: SourceDigest) -> Self {
-        Self { file, size, digest }
-    }
-}
-
-impl parquet::file::reader::Length for DigestingFile {
-    fn len(&self) -> u64 {
-        self.size
-    }
-}
-
-impl parquet::file::reader::ChunkReader for DigestingFile {
-    type T = std::io::BufReader<DigestingReader<File>>;
-
-    fn get_read(&self, start: u64) -> parquet::errors::Result<Self::T> {
-        let mut file = self.file.try_clone()?;
-        file.seek(SeekFrom::Start(start))?;
-        Ok(std::io::BufReader::new(DigestingReader::new(
-            file,
-            start,
-            self.digest.clone(),
-        )))
-    }
-
-    fn get_bytes(&self, start: u64, length: usize) -> parquet::errors::Result<bytes::Bytes> {
-        let mut bytes = vec![0_u8; length];
-        read_exact_at(&self.file, start, &mut bytes)?;
-        self.digest.observe(start, &bytes);
-        Ok(bytes::Bytes::from(bytes))
     }
 }
 
