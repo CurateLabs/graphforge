@@ -57,7 +57,7 @@
     {
       "kind": "rewrite",
       "subject": "IC5",
-      "text": "OPTIONAL MATCH ... WHERE author IN friends fails to plan with an unbound variable (#1888 D7), so the count is a conditional sum over the forum's posts"
+      "text": "the LDBC text's OPTIONAL MATCH ... WHERE friend IN friends returns wrong post counts (#1919), so the count is a conditional sum over the forum's posts"
     },
     {
       "kind": "rewrite",

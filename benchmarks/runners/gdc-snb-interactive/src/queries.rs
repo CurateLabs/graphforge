@@ -140,8 +140,8 @@ const fn text(name: &'static str) -> QueryParameter {
 // * `:Message` becomes `(m:Post OR m:Comment)`; see the module data model.
 // * Pattern predicates are valid only in `WHERE` (#1888); a pattern used as a
 //   value is written as a pattern comprehension or a counted `OPTIONAL MATCH`.
-// * After an `OPTIONAL MATCH`, GraphForge fails to plan a `WHERE` list membership
-//   on a `WITH` variable (#1888 D7); that filter moves into a conditional sum.
+// * `OPTIONAL MATCH ... WHERE x IN <list collected in a WITH>` returns wrong
+//   answers in GraphForge (#1919); that filter moves into a conditional sum.
 
 const IC1: &str = "\
 MATCH path = (p:Person {id: $personId})-[:KNOWS*1..3]-(friend:Person {firstName: $firstName})
@@ -554,8 +554,8 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         columns: &["forumName", "postCount"],
         unordered_list_columns: &[],
         limit: Some(20),
-        notes: "OPTIONAL MATCH ... WHERE author IN friends fails to plan with an unbound \
-                variable (#1888 D7), so the count is a conditional sum over the forum's posts",
+        notes: "the LDBC text's OPTIONAL MATCH ... WHERE friend IN friends returns wrong post \
+                counts (#1919), so the count is a conditional sum over the forum's posts",
         spec_variance: None,
     },
     QueryDefinition {

@@ -143,7 +143,7 @@
       "interface": "cypher",
       "invocation": "MATCH (person:Person {id: $personId})-[:KNOWS*1..2]-(friend)\nWHERE NOT person = friend\nWITH DISTINCT friend\nMATCH (friend)<-[membership:HAS_MEMBER]-(forum)\nWHERE membership.joinDate > $minDate\nWITH forum, collect(friend) AS friends\nOPTIONAL MATCH (forum)-[:CONTAINER_OF]->(post)-[:HAS_CREATOR]->(author)\nWITH forum,\n     sum(CASE WHEN post IS NOT NULL AND author IN friends THEN 1 ELSE 0 END) AS postCount\nRETURN forum.title AS forumName, postCount\nORDER BY postCount DESC, forum.id ASC\nLIMIT 20",
       "limit": 20,
-      "notes": "OPTIONAL MATCH ... WHERE author IN friends fails to plan with an unbound variable (#1888 D7), so the count is a conditional sum over the forum's posts",
+      "notes": "the LDBC text's OPTIONAL MATCH ... WHERE friend IN friends returns wrong post counts (#1919), so the count is a conditional sum over the forum's posts",
       "operation": "IC5",
       "parameters": [
         {
