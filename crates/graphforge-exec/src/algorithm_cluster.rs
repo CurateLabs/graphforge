@@ -602,24 +602,8 @@ fn cluster_projection(
             "invalid cluster relationship selector {via:?}"
         )));
     }
-    let direction = if options.synchronous_label_propagation.is_some() && options.directed {
-        Direction::Out
-    } else if options.directed
-        && !vector_algorithm
-        && !matches!(
-            options.by,
-            ClusterAlgorithm::Louvain
-                | ClusterAlgorithm::Leiden
-                | ClusterAlgorithm::LabelPropagation
-                | ClusterAlgorithm::SpeakerListener
-                | ClusterAlgorithm::GirvanNewman
-                | ClusterAlgorithm::ModularityOptimization
-                | ClusterAlgorithm::FastGreedy
-                | ClusterAlgorithm::Spinglass
-                | ClusterAlgorithm::ApproximateMaxKCut
-                | ClusterAlgorithm::Biconnected
-                | ClusterAlgorithm::KCoreDecomposition
-        )
+    let direction = if options.directed
+        && (options.synchronous_label_propagation.is_some() || options.by.respects_direction())
     {
         Direction::Out
     } else {

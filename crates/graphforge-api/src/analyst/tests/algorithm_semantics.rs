@@ -318,20 +318,12 @@ fn semantic_options_fail_typed_before_writeback() {
         let stored = invalid
             .execute("MATCH (v:Vertex) RETURN v.bad_result AS result")
             .unwrap();
-        assert!(
-            stored.batches[0]
-                .column_by_name("result")
-                .unwrap()
-                .is_null(0)
-        );
+        let result = stored.batches[0].column_by_name("result").unwrap();
+        assert_eq!(result.logical_null_count(), result.len());
     }
     let batch = graph
         .execute("MATCH (v:Vertex) RETURN v.bad_result AS result")
         .unwrap();
-    assert!(
-        batch.batches[0]
-            .column_by_name("result")
-            .unwrap()
-            .is_null(0)
-    );
+    let result = batch.batches[0].column_by_name("result").unwrap();
+    assert_eq!(result.logical_null_count(), result.len());
 }
