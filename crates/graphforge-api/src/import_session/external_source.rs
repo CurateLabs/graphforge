@@ -453,12 +453,6 @@ impl SourceDigest {
         self.state().reread
     }
 
-    /// Bytes held waiting for the gap before them.
-    #[cfg(test)]
-    pub(super) fn pending_bytes(&self) -> usize {
-        self.state().pending_bytes
-    }
-
     pub(super) fn observe(&self, offset: u64, bytes: &[u8]) {
         self.state().observe(offset, bytes);
     }

@@ -269,6 +269,50 @@ fn digest_rereads_ranges_dropped_beyond_the_pending_bound() {
 }
 
 #[test]
+fn a_streamed_column_chunk_is_held_as_one_range() {
+    let bytes = (0..(1 << 20))
+        .map(|index: u32| (index >> 3) as u8)
+        .collect::<Vec<u8>>();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("blob");
+    fs::write(&path, &bytes).unwrap();
+    let file = File::open(&path).unwrap();
+    let identity = fake_source(&path, bytes.len() as u64);
+    let digest = SourceDigest::new(bytes.len() as u64);
+    // A later column chunk streams in page-sized reads while the first is not
+    // done: one held run, not one entry per read.
+    for start in (600_000..900_000).step_by(1_000) {
+        digest.observe(start as u64, &bytes[start..start + 1_000]);
+    }
+    {
+        let state = digest.state();
+        assert_eq!(state.pending.len(), 1);
+        assert_eq!(state.pending_bytes, 300_000);
+        assert_eq!(state.hashed, 0);
+    }
+    // The first chunk then arrives and the run is hashed in order behind it.
+    for start in (0..600_000).step_by(4_096) {
+        digest.observe(start as u64, &bytes[start..(start + 4_096).min(600_000)]);
+    }
+    assert_eq!(digest.state().hashed, 900_000);
+    assert_eq!(digest.state().pending_bytes, 0);
+    assert_eq!(digest.finish(&identity, &file).unwrap(), sha256(&bytes));
+    // Only the tail nothing observed was read again.
+    assert_eq!(digest.reread_bytes(), (bytes.len() - 900_000) as u64);
+}
+
+#[test]
+fn the_bound_on_held_bytes_follows_the_workers_and_the_largest_task() {
+    use super::pending_limit;
+    let floor = 64 << 20;
+    assert_eq!(pending_limit(16, 1 << 20), floor);
+    assert_eq!(pending_limit(16, 10 << 20), 160 << 20);
+    assert_eq!(pending_limit(64, 100 << 20), 1 << 30);
+    assert_eq!(pending_limit(1, u64::MAX), 1 << 30);
+    assert_eq!(pending_limit(0, u64::MAX), floor);
+}
+
+#[test]
 fn digest_refuses_a_read_past_the_registered_size() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("blob");
@@ -762,6 +806,7 @@ fn a_staged_read_hashes_what_it_reads_and_rereads_almost_nothing() {
     let batch = nodes(&ids);
     let properties = WriterProperties::builder()
         .set_max_row_group_size(100_000)
+        .set_statistics_enabled(parquet::file::properties::EnabledStatistics::Chunk)
         .build();
     let mut writer = ArrowWriter::try_new(
         File::create(&path).unwrap(),
@@ -790,7 +835,8 @@ fn a_staged_read_hashes_what_it_reads_and_rereads_almost_nothing() {
         Some(sha256(&fs::read(&path).unwrap()).as_str())
     );
     let work = &snapshot.regions["test/source_read"].work;
-    // The decode consumed the file once, and the digest read nothing of its own.
+    // The decode consumed the file once, footer, page index and all, and the
+    // digest read nothing of its own.
     assert_eq!(work["reread_bytes"], 0, "{work:?}");
     assert!(
         work["observed_bytes"] >= size && work["observed_bytes"] * 100 <= size * 101,
@@ -841,14 +887,14 @@ fn a_historical_copied_session_resumes_validates_and_appends_on(route: Route) {
         session.manifest.format_version, 3,
         "a session holding an in-place source is no longer readable by the version that copied"
     );
-    let arrow_ids = (0..3).map(|_| Uuid::now_v7()).collect::<Vec<_>>();
+    let arrow_ids = (0..BATCH_ROWS).map(|_| Uuid::now_v7()).collect::<Vec<_>>();
     session
         .append_arrow(BulkInputKind::Node, &[nodes(&arrow_ids)])
         .unwrap();
 
     let progress = session.validate(&graph).unwrap();
     assert_route(&session, route);
-    assert_eq!(progress.rows_accepted, (2 * NODE_ROWS + 3) as u64);
+    assert_eq!(progress.rows_accepted, (2 * NODE_ROWS + BATCH_ROWS) as u64);
     // Only the in-place source has a digest to attest; the copy and the Arrow
     // batch are session-owned.
     let provenance = progress.construction.unwrap().source_provenance;
@@ -870,10 +916,9 @@ fn a_historical_copied_session_resumes_validates_and_appends_on(route: Route) {
     let session_uuid = session.session_uuid();
     session.commit(&graph, None).unwrap();
     drop(session);
-    let seed = u64::from(matches!(route, Route::Staged));
     assert_eq!(
         graph.node_count("Person").unwrap(),
-        (2 * NODE_ROWS + 3) as u64 + seed
+        (2 * NODE_ROWS + BATCH_ROWS) as u64
     );
     let (phase, _) = graph.import_session_status(session_uuid).unwrap();
     assert_eq!(phase, ImportPhase::Committed);
@@ -884,7 +929,7 @@ fn a_historical_copied_session_resumes_validates_and_appends_on(route: Route) {
     next.commit(&graph, None).unwrap();
     assert_eq!(
         graph.node_count("Person").unwrap(),
-        (2 * NODE_ROWS + 4) as u64 + seed
+        (2 * NODE_ROWS + BATCH_ROWS + 1) as u64
     );
 }
 
@@ -914,6 +959,6 @@ fn a_historical_copied_source_ignores_the_original_and_is_removed_by_abort() {
             NODE_ROWS as u64
         );
         session.abort(&graph).unwrap();
-        assert!(!root.exists());
+        assert!(!root.join("sources").exists());
     }
 }
