@@ -313,6 +313,8 @@ scores = forge.rank("Vertex", by="pagerank", damping=0.85, iterations=10)
 Rust sets `RankOptions.pagerank = Some(PageRankOptions { damping: 0.85,
 iterations: Some(10) })`. Node appends `damping`, `iterations`, and
 `clusteringNormalization` after the existing rank arguments.
+Rust callers that enumerate every field in `RankOptions` or `ClusterOptions`
+must add the new option fields or finish the literal with `..Default::default()`.
 
 Betweenness is exact, unweighted Brandes node betweenness. For `n > 2`, scores
 are normalized by `1 / ((n - 1) * (n - 2))`; selections of at most two nodes
