@@ -258,6 +258,12 @@ class TinyLadderEndToEndTests(Scratch):
             [("query", "query_failed"), ("check", "reference_mismatch")],
         )
         self.assertIn("people-per-city/all", failed["failures"][1]["detail"])
+        # The rung says what failed, not only that something did: the driver's own
+        # exit message counts failures and names a workspace the teardown deletes.
+        self.assertEqual(
+            failed["failures"][0]["detail"],
+            "unparsable (only): GF_PARSE: parse error at 21..27: expected RParen, found Return",
+        )
         failed_evidence = json.loads(
             (self.output / "snb-interactive-sf1-query-evidence.json").read_text()
         )
@@ -327,6 +333,33 @@ class TinyLadderEndToEndTests(Scratch):
         self.assertEqual(len(benchexec.stages), 6)
         with self.assertRaises(FileExistsError):
             write_card(ROOT, ladder.spec, self.output)
+
+    def test_a_swap_rise_fails_the_phase_naming_and_retaining_the_counters(self) -> None:
+        readings = iter(
+            [{"pswpin": 10, "pswpout": 20}, {"pswpin": 12, "pswpout": 20}]  # before, after
+        )
+        ladder = self.ladder(self.executables, FakeBenchExec())
+        with patch.object(gdc_rung, "_host_swap_counters", side_effect=lambda: next(readings)):
+            results = gdc_rung.climb(
+                ladder,
+                reserved_headroom_bytes=0,
+                quiet_host_wait_seconds=0,
+                quiet_host=lambda _wait: QUIET,
+            )
+        self.assertEqual(
+            results[0]["failure"],
+            {
+                "phase": "convert",
+                "cause": "host_swapped",
+                "detail": "host swap counters rose during the phase: pswpin +2 (10 -> 12); "
+                "see host-swap.json",
+            },
+        )
+        retained = self.output / "snb-interactive-sf0-convert-benchexec-raw" / "host-swap.json"
+        self.assertEqual(
+            json.loads(retained.read_text()),
+            {"before": {"pswpin": 10, "pswpout": 20}, "after": {"pswpin": 12, "pswpout": 20}},
+        )
 
     def test_a_phase_stopped_at_the_wall_fails_typed_and_still_tears_down(self) -> None:
         ladder = self.ladder(self.executables, FakeBenchExec(termination="walltime"))
@@ -481,6 +514,51 @@ class PhaseClassificationTests(unittest.TestCase):
         self.assertIsNone(self.classify(telemetry={"failure": None, "peak_rss_bytes": 4 * 1024**3}))
         self.assertEqual(cause(swapped=True), "host_swapped")
         self.assertEqual(cause(document={"outcome": "exit"}), "benchexec_failed")
+
+
+class FailedSampleDescriptionTests(unittest.TestCase):
+    def test_each_distinct_error_lists_its_bindings_and_stays_bounded(self) -> None:
+        def failed(binding: str, code: str, error: str) -> dict[str, Any]:
+            return {"binding_id": binding, "status": "failed", "error_code": code, "error": error}
+
+        evidence = {
+            "variants": [
+                {"query_id": "bfs", "samples": [failed("run-1", "GF_VALIDATION", "too big")] * 1},
+                {
+                    "query_id": "lcc",
+                    "samples": [
+                        failed("run-1", "GF_EXECUTION", "iteration limit"),
+                        {"binding_id": "run-2", "status": "measured"},
+                        failed("run-3", "GF_EXECUTION", "iteration limit"),
+                    ],
+                },
+            ]
+        }
+        self.assertEqual(
+            gdc_rung.describe_failed_samples(evidence),
+            "bfs (run-1): GF_VALIDATION: too big; "
+            "lcc (run-1, run-3): GF_EXECUTION: iteration limit",
+        )
+        evidence["variants"][0]["samples"][0]["error"] = "x" * 5000
+        self.assertEqual(len(gdc_rung.describe_failed_samples(evidence)), 2048)
+        self.assertEqual(gdc_rung.describe_failed_samples({"variants": []}), "")
+
+
+class HostSwapDetailTests(unittest.TestCase):
+    """A `host_swapped` phase names the counters that moved."""
+
+    def test_the_detail_names_the_counters_that_rose(self) -> None:
+        before = {"pswpin": 503592, "pswpout": 830053}
+        self.assertEqual(
+            gdc_rung.swap_detail(before, {"pswpin": 503594, "pswpout": 830053}),
+            "host swap counters rose during the phase: pswpin +2 (503592 -> 503594); "
+            "see host-swap.json",
+        )
+        self.assertEqual(
+            gdc_rung.swap_detail(before, {"pswpin": 503592, "pswpout": 830060}),
+            "host swap counters rose during the phase: pswpout +7 (830053 -> 830060); "
+            "see host-swap.json",
+        )
 
 
 class ExpectedCountsTests(unittest.TestCase):
@@ -668,6 +746,45 @@ class MatchingTests(unittest.TestCase):
             results={("q", "b"): written},
         )
         self.assertEqual([m["cause"] for m in unmatched["mismatches"]], ["reference_unmatched"])
+
+    def test_a_failed_referenced_sample_reports_its_error_text(self) -> None:
+        evidence = {
+            "variants": [
+                {
+                    "query_id": "q",
+                    "samples": [
+                        {
+                            "binding_id": "b",
+                            "status": "failed",
+                            "cause": "query_failed",
+                            "error_code": "GF_VALIDATION",
+                            "error": "validation error: node selector topology scan exceeds row limit",
+                        }
+                    ],
+                }
+            ]
+        }
+        reference = {
+            "source": "test",
+            "queries": {
+                "q": {"matching": "exact", "bindings": {"b": {"columns": ["id"], "rows": []}}}
+            },
+        }
+        failed = check_reference(
+            reference=reference, reference_sha256=None, evidence=evidence, results={}
+        )
+        self.assertEqual(
+            failed["mismatches"],
+            [
+                {
+                    "query_id": "q",
+                    "binding_id": "b",
+                    "cause": "query_failed",
+                    "detail": "GF_VALIDATION: validation error: node selector topology scan "
+                    "exceeds row limit",
+                }
+            ],
+        )
 
     def test_results_written_twice_are_refused(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

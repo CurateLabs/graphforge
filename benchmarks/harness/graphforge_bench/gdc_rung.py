@@ -441,6 +441,39 @@ def classify_phase(
     return None
 
 
+def swap_detail(before: Mapping[str, int], after: Mapping[str, int]) -> str:
+    """The host swap counters' rise, so a `host_swapped` rung says what moved."""
+    moved = ", ".join(
+        f"{key} +{after[key] - before[key]} ({before[key]} -> {after[key]})"
+        for key in sorted(before)
+        if after[key] > before[key]
+    )
+    return f"host swap counters rose during the phase: {moved}; see host-swap.json"
+
+
+def describe_failed_samples(evidence: Mapping[str, Any]) -> str:
+    """Each distinct failed-sample error with its bindings, from the query evidence.
+
+    The driver's own exit message only counts the failures and points at a
+    workspace the teardown deletes; the per-sample error text is what diagnoses them.
+    """
+    grouped: dict[tuple[str, str, str], list[str]] = {}
+    for variant in evidence.get("variants", []):
+        for sample in variant.get("samples", []):
+            if sample.get("status") == "failed":
+                key = (
+                    str(variant.get("query_id")),
+                    str(sample.get("error_code")),
+                    str(sample.get("error")),
+                )
+                grouped.setdefault(key, []).append(str(sample.get("binding_id")))
+    parts = [
+        f"{query_id} ({', '.join(bindings)}): {code}: {message}"
+        for (query_id, code, message), bindings in grouped.items()
+    ]
+    return "; ".join(parts)[:2048]
+
+
 def run_phase(rung: Rung, name: str, task: dict[str, Any], wall_seconds: int) -> PhaseRun:
     ladder = rung.ladder
     with tempfile.TemporaryDirectory(prefix=".gf-gdc-authority-", dir=ladder.work_root) as parent:
@@ -452,6 +485,13 @@ def run_phase(rung: Rung, name: str, task: dict[str, Any], wall_seconds: int) ->
         swap_after = _host_swap_counters()
         swapped = any(swap_after[key] > value for key, value in swap_before.items())
         raw = stage / "raw"
+        if swapped and raw.is_dir():
+            # Retain the counters beside the failed raw output (#1727), even when a
+            # known phase failure stays the primary cause: they record the interference.
+            (raw / "host-swap.json").write_text(
+                json.dumps({"before": swap_before, "after": swap_after}, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
         telemetry = _phase_telemetry(raw) if raw.is_dir() else None
         measured: dict[str, Any] | None
         try:
@@ -470,6 +510,8 @@ def run_phase(rung: Rung, name: str, task: dict[str, Any], wall_seconds: int) ->
             except (EvidenceError, RungInputError) as error:
                 document, invalid = None, str(error)
         cause = classify_phase(measured, telemetry, document, swapped=swapped)
+        if cause is not None and cause[0] == "host_swapped":
+            cause = (cause[0], swap_detail(swap_before, swap_after))
         if invalid is not None:
             cause = ("benchexec_evidence_invalid", invalid)
         elif cause is None and status != 0:
@@ -715,6 +757,8 @@ def _execute(rung: Rung) -> None:
         rung.fail("query", "query_evidence_missing", str(error))
         return
     rung.publish("query-evidence", evidence)
+    if query.failure is not None and (described := describe_failed_samples(evidence)):
+        query.failure["detail"] = described
     try:
         assert_query_latency_authority(evidence)
     except GdcMeasurementBoundaryError as error:
