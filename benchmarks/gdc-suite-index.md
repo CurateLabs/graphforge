@@ -298,21 +298,38 @@ are recorded on #1894.
   The run used Python 3.13.12 from `uv.lock`. Two runs, each in a separate
   process with its own hash seed, produced byte-identical output. Each run took
   about 40 s of wall time on one core, with a peak RSS of 1.5 GiB.
-- **Readings other implementations differ on**, at SF1, for information only:
-  - Truncation ties: no vertex has a timestamp tie at the 500-edge cut-off, so
-    the far-endpoint-id tie-break variance changes no SF1 answer. Truncation
-    itself changes 5 TCR6 and 7 TCR8 answers.
+- **Scope.** The reference covers `snapshot/` only. It excludes the
+  `incremental/` rows, consistent with the load mapping.
+- **Readings worth stating**, at SF1, for information only:
+  - TCR6 counts "more than 3 transfer-ins" as transfer edges, not distinct
+    source accounts. Galaxybase, GPStore and Ultipa read it the same way;
+    counting distinct sources would change 901 of 905 bindings.
+  - TCR11 follows guarantee chains of any length ("until end", as GPStore
+    does). Galaxybase, TuGraph and Ultipa stop at 5 hops, which changes 27 of
+    983 bindings (the deepest chain is 11). This is the reference's only
+    disagreement with a third-party result.
+  - Truncation changes 12 answers: TCR6 lines 99, 118, 262, 374 and 686, and
+    TCR8 lines 101, 278, 360, 392, 779, 848 and 903. TCR6 lines 262 and 686
+    also depend on truncating the adjacency before the window and amount
+    filters. No vertex has a timestamp tie at the 500-edge cut-off, so the
+    far-endpoint-id tie-break variance changes no answer. None of the 12 is in
+    Ultipa's validation set, so the truncation reading has no independent
+    corroboration at SF1. It does agree with the Neo4j truncation example,
+    which computes cut-offs before filtering.
   - TCR1: GPStore reports each account once, at its first breadth-first
     distance. 6 of 737 bindings have an account at several trace lengths.
   - TCR5: GPStore keeps traces that revisit an account. 43 of 1,000 bindings
     have one.
-  - TCR11: Galaxybase and TuGraph stop at 5 hops. 27 of 983 bindings reach a
-    person only beyond 5 hops (the deepest chain is 11).
   - TCR8: GPStore counts every in-window edge from an expanded account into the
     destination as inflow and expands each account once. This difference is
     not quantified.
   - GPStore's extra truncations of own, deposit, repay and apply edges cannot
     apply at SF1, because those adjacencies have at most 22 edges.
+- **Independent review of #1906.** Against Ultipa's `validation_params.csv`
+  (821 complex-read bindings, with its interleaved writes replayed), 818 match;
+  the 3 misses are TCR11 bindings that the 5-hop cap explains exactly. A
+  separate Decimal re-implementation of TCR1–5, 7, 9, 10 and 12 matched all
+  7,801 of its bindings.
 
 ## SPB (Semantic Publishing Benchmark)
 

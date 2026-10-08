@@ -17,14 +17,21 @@ from graphforge_bench.gdc_finbench_transaction_reference import (
     REFERENCE_SCHEMA,
     Edge,
     Graph,
+    _arrow_cell,
     arrow_float,
     derive_ldbc_reference,
     ldbc_epoch_millis,
     load_ldbc_snapshot,
     main,
     read_ldbc_parameters,
+    render_rows,
     shortest_transfer_path,
     shortest_transfer_path_forward,
+    tcr1,
+    tcr2,
+    tcr5,
+    tcr6,
+    tcr12,
 )
 from jsonschema import Draft202012Validator
 
@@ -318,6 +325,143 @@ class ShortestPathTests(unittest.TestCase):
                     shortest_transfer_path_forward(graph, binding),
                     (trial, binding),
                 )
+
+
+def hand_graph(
+    nodes: dict[str, list[tuple[int, dict[str, object]]]],
+    edges: list[tuple[str, str, int, str, int, int, float]],
+) -> Graph:
+    """A hand-written graph; edges are (kind, src label, src, dst label, dst, ts, amount)."""
+    graph = Graph()
+    for label, entries in nodes.items():
+        for node_id, props in entries:
+            graph.add_node(label, node_id, props)
+    for index, (kind, src_label, src, dst_label, dst, timestamp, amount) in enumerate(edges):
+        graph.add_edge(Edge(kind, index, src_label, src, dst_label, dst, timestamp, amount))
+    return graph
+
+
+def accounts(*ids: int, kind: str = "debit account") -> list[tuple[int, dict[str, object]]]:
+    return [(account, {"isBlocked": False, "type": kind, "createTime": 0}) for account in ids]
+
+
+SPEC_WINDOW = {"startTime": 0, "endTime": 1000}
+SPEC_LIMIT = {"truncationLimit": 500, "truncationOrder": "TIMESTAMP_DESCENDING"}
+
+
+class SpecReadingTests(unittest.TestCase):
+    """Hand fixtures for readings the committed query fixture does not pin."""
+
+    def test_trace_hops_must_be_strictly_later(self) -> None:
+        # 1 -> 2 -> 3 with equal timestamps: the spec admits only a greater timestamp.
+        graph = hand_graph(
+            {
+                "Account": accounts(1, 2, 3),
+                "Person": [(7, {"isBlocked": False})],
+                "Medium": [(9, {"isBlocked": True, "type": "POS"})],
+                "Loan": [(50, {"loanAmount": 10.0, "balance": 1.0})],
+            },
+            [
+                ("transfer", "Account", 1, "Account", 2, 100, 5.0),
+                ("transfer", "Account", 2, "Account", 3, 100, 5.0),
+                ("signIn", "Medium", 9, "Account", 3, 50, 0.0),
+                ("own", "Person", 7, "Account", 1, 1, 0.0),
+                ("deposit", "Loan", 50, "Account", 1, 60, 10.0),
+            ],
+        )
+        self.assertEqual(tcr1(graph, {"id": 1, **SPEC_WINDOW, **SPEC_LIMIT}), [])
+        self.assertEqual(tcr5(graph, {"id": 7, **SPEC_WINDOW, **SPEC_LIMIT}), [((1, 2),)])
+        # Upstream from 3 (owned below): 2 -> 3 at 100, then 1 -> 2 must be older than 100.
+        upstream = hand_graph(
+            {
+                "Account": accounts(1, 2, 3),
+                "Person": [(7, {"isBlocked": False})],
+                "Loan": [
+                    (50, {"loanAmount": 10.0, "balance": 1.0}),
+                    (51, {"loanAmount": 20.0, "balance": 2.0}),
+                ],
+            },
+            [
+                ("transfer", "Account", 1, "Account", 2, 100, 5.0),
+                ("transfer", "Account", 2, "Account", 3, 100, 5.0),
+                ("own", "Person", 7, "Account", 3, 1, 0.0),
+                ("deposit", "Loan", 50, "Account", 2, 60, 10.0),
+                ("deposit", "Loan", 51, "Account", 1, 60, 20.0),
+            ],
+        )
+        self.assertEqual(tcr2(upstream, {"id": 7, **SPEC_WINDOW, **SPEC_LIMIT}), [(2, 10.0, 1.0)])
+
+    def test_tcr5_traces_stop_at_three_transfers(self) -> None:
+        graph = hand_graph(
+            {"Account": accounts(1, 2, 3, 4, 5), "Person": [(7, {"isBlocked": False})]},
+            [
+                ("own", "Person", 7, "Account", 1, 1, 0.0),
+                ("transfer", "Account", 1, "Account", 2, 10, 1.0),
+                ("transfer", "Account", 2, "Account", 3, 20, 1.0),
+                ("transfer", "Account", 3, "Account", 4, 30, 1.0),
+                ("transfer", "Account", 4, "Account", 5, 40, 1.0),
+            ],
+        )
+        self.assertEqual(
+            tcr5(graph, {"id": 7, **SPEC_WINDOW, **SPEC_LIMIT}),
+            [((1, 2, 3, 4),), ((1, 2, 3),), ((1, 2),)],
+        )
+
+    def _tcr6_graph(self, transfer_sources: list[int], transfer_amount: float) -> Graph:
+        transfers = [
+            ("transfer", "Account", source, "Account", 10, 100 + index, transfer_amount)
+            for index, source in enumerate(transfer_sources)
+        ]
+        return hand_graph(
+            {
+                "Account": accounts(10, 21, 22, 23, 24) + accounts(100, kind="debit card"),
+            },
+            [("withdraw", "Account", 10, "Account", 100, 50, 50.0), *transfers],
+        )
+
+    def test_tcr6_applies_each_threshold_to_its_own_edges(self) -> None:
+        binding = {"id": 100, "threshold1": 100.0, "threshold2": 40.0, **SPEC_WINDOW, **SPEC_LIMIT}
+        # Withdraw 50 > threshold2 40; transfers 500 > threshold1 100.
+        graph = self._tcr6_graph([21, 22, 23, 24], 500.0)
+        self.assertEqual(tcr6(graph, binding), [(10, 2000.0, 50.0)])
+        # Transfers 70 fail threshold1 100 although they pass threshold2 40.
+        graph = self._tcr6_graph([21, 22, 23, 24], 70.0)
+        self.assertEqual(tcr6(graph, binding), [])
+
+    def test_tcr6_counts_transfer_edges_not_distinct_sources(self) -> None:
+        binding = {"id": 100, "threshold1": 0.0, "threshold2": 0.0, **SPEC_WINDOW, **SPEC_LIMIT}
+        graph = self._tcr6_graph([21, 21, 22, 22], 5.0)
+        self.assertEqual(tcr6(graph, binding), [(10, 20.0, 50.0)])
+
+    def _tcr12(self, amounts: list[float]) -> list[list[str]]:
+        graph = hand_graph(
+            {
+                "Account": accounts(1, 2),
+                "Person": [(7, {"isBlocked": False})],
+                "Company": [(8, {"isBlocked": False})],
+            },
+            [
+                ("own", "Person", 7, "Account", 1, 1, 0.0),
+                ("own", "Company", 8, "Account", 2, 1, 0.0),
+                *(
+                    ("transfer", "Account", 1, "Account", 2, 10 + index, amount)
+                    for index, amount in enumerate(amounts)
+                ),
+            ],
+        )
+        rows = tcr12(graph, {"id": 7, **SPEC_WINDOW, **SPEC_LIMIT})
+        return render_rows("TCR12", rows, _arrow_cell)
+
+    def test_rounding_is_half_up(self) -> None:
+        # 1.0625 is exact in binary: half-up gives 1.063, half-even 1.062.
+        self.assertEqual(self._tcr12([1.0625]), [["2", "1.063"]])
+
+    def test_sums_are_exactly_rounded(self) -> None:
+        # The exact sum is 1e16 + 1.00000000000000005, just above the midpoint
+        # between 1e16 and the next float, 1e16 + 2. Python's built-in sum()
+        # (compensated since 3.12) still returns 1e16; math.fsum rounds correctly.
+        amounts = [1e16, 0.7000000000000001, 0.30000000000000004]
+        self.assertEqual(self._tcr12(amounts), [["2", "1.0000000000000002e16"]])
 
 
 if __name__ == "__main__":
