@@ -79,7 +79,8 @@ use crate::algorithm_dispatch::{
     AlgorithmOutput, AlgorithmRegistry, AlgorithmValue, DependencyReview, RustAlgorithm,
 };
 use crate::algorithm_graph::{
-    AdjacencyGraph, AdjacencySelection, export_adjacency, load_node_vectors,
+    AdjacencyGraph, AdjacencySelection, export_adjacency, load_node_initial_labels,
+    load_node_vectors,
 };
 #[cfg(feature = "algorithms-extended")]
 use crate::algorithm_k_core::k_core_numbers;
@@ -502,7 +503,13 @@ pub fn cluster_algorithm_with_compute(
 ) -> Result<RecordBatch, GfError> {
     let graph = cluster_projection(provider, dir, mode, label, property_stems, options)?;
     let algorithm = Algorithm::Cluster(options.by);
-    let output = execute_cluster_with_compute(&graph, algorithm, limits, compute)?;
+    let output = execute_cluster_configured(
+        &graph,
+        algorithm,
+        limits,
+        compute,
+        options.synchronous_label_propagation.clone(),
+    )?;
     let batch = shape_algorithm_output(algorithm, &output)?;
     crate::algorithm_output::materialize_node_properties_with_batch_size(
         dir,
@@ -538,6 +545,22 @@ fn cluster_projection(
     property_stems: &[String],
     options: &ClusterOptions,
 ) -> Result<AdjacencyGraph, GfError> {
+    if let Some(synchronous) = &options.synchronous_label_propagation {
+        if options.by != ClusterAlgorithm::LabelPropagation {
+            return Err(GfError::Validation(
+                "synchronous_label_propagation requires by=label_propagation".into(),
+            ));
+        }
+        if let Some(property) = &synchronous.initial_label_property
+            && (property.is_empty()
+                || property.trim() != property
+                || property.chars().any(char::is_control))
+        {
+            return Err(GfError::Validation(format!(
+                "invalid initial label property {property:?}"
+            )));
+        }
+    }
     let vector_property = options.vector_property.as_deref();
     if let Some(property) = vector_property
         && (property.is_empty()
@@ -580,21 +603,8 @@ fn cluster_projection(
         )));
     }
     let direction = if options.directed
-        && !vector_algorithm
-        && !matches!(
-            options.by,
-            ClusterAlgorithm::Louvain
-                | ClusterAlgorithm::Leiden
-                | ClusterAlgorithm::LabelPropagation
-                | ClusterAlgorithm::SpeakerListener
-                | ClusterAlgorithm::GirvanNewman
-                | ClusterAlgorithm::ModularityOptimization
-                | ClusterAlgorithm::FastGreedy
-                | ClusterAlgorithm::Spinglass
-                | ClusterAlgorithm::ApproximateMaxKCut
-                | ClusterAlgorithm::Biconnected
-                | ClusterAlgorithm::KCoreDecomposition
-        ) {
+        && (options.synchronous_label_propagation.is_some() || options.by.respects_direction())
+    {
         Direction::Out
     } else {
         Direction::Undirected
@@ -610,6 +620,13 @@ fn cluster_projection(
             weight: None,
         },
     )?;
+    if let Some(property) = options
+        .synchronous_label_propagation
+        .as_ref()
+        .and_then(|options| options.initial_label_property.as_deref())
+    {
+        load_node_initial_labels(&mut graph, dir, property)?;
+    }
     if let Some(property) = vector_property {
         load_node_vectors(&mut graph, dir, property_stems, property)?;
     }
@@ -625,15 +642,27 @@ fn execute_cluster(
     execute_cluster_with_compute(graph, algorithm, limits, None)
 }
 
+#[cfg(test)]
 fn execute_cluster_with_compute(
     graph: &AdjacencyGraph,
     algorithm: Algorithm,
     limits: AlgorithmLimits,
     compute: Option<crate::SharedComputePool>,
 ) -> Result<AlgorithmOutput, AlgorithmError> {
+    execute_cluster_configured(graph, algorithm, limits, compute, None)
+}
+
+fn execute_cluster_configured(
+    graph: &AdjacencyGraph,
+    algorithm: Algorithm,
+    limits: AlgorithmLimits,
+    compute: Option<crate::SharedComputePool>,
+    synchronous: Option<graphforge_core::SynchronousLabelPropagationOptions>,
+) -> Result<AlgorithmOutput, AlgorithmError> {
     let mut registry = AlgorithmRegistry::default();
     register_cluster_algorithms(&mut registry)?;
-    let mut control = AlgorithmControl::new(limits, AlgorithmCancellation::default());
+    let mut control = AlgorithmControl::new(limits, AlgorithmCancellation::default())
+        .with_synchronous_label_propagation(synchronous);
     if let Some(pool) = compute {
         control = control.with_compute_pool(pool);
     }

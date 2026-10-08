@@ -94,7 +94,8 @@
         "kind": "rank",
         "label": "Vertex",
         "by": "clustering_coefficient",
-        "directed": false
+        "directed": false,
+        "clustering_normalization": "neighbor_edges"
       }
     },
     {

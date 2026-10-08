@@ -560,6 +560,33 @@ class ScorecardProfileTests(unittest.TestCase):
             self.assertEqual(item["acquisition"], "download")
         self.assertEqual(len({item["checksum_sha256"] for item in by_id.values()}), 4)
 
+    def test_algorithm_parameters_are_required_for_declared_reference_algorithms(self) -> None:
+        schema = json.loads(
+            (ROOT / "schemas/gdc-graphalytics-scorecard-ladder.json").read_text(encoding="utf-8")
+        )
+        validator = Draft202012Validator(schema)
+        for name, value in [
+            ("pr_damping", None),
+            ("pr_damping", -0.1),
+            ("pr_damping", 1.1),
+            ("pr_iterations", 1.5),
+            ("pr_iterations", 2**32),
+            ("cdlp_iterations", -1),
+            ("cdlp_iterations", None),
+        ]:
+            with self.subTest(parameter=name, value=value):
+                invalid = copy.deepcopy(self.ladder)
+                invalid["datasets"][0][name] = value
+                self.assertFalse(validator.is_valid(invalid))
+        for name in ["pr_damping", "pr_iterations", "cdlp_iterations"]:
+            with self.subTest(missing=name):
+                invalid = copy.deepcopy(self.ladder)
+                del invalid["datasets"][0][name]
+                self.assertFalse(validator.is_valid(invalid))
+        endpoints = copy.deepcopy(self.ladder)
+        endpoints["datasets"][0].update(pr_damping=0, pr_iterations=0, cdlp_iterations=0)
+        validator.validate(endpoints)
+
     def test_ladder_validates_and_carries_the_published_counts(self) -> None:
         schema = json.loads(
             (ROOT / "schemas/gdc-graphalytics-scorecard-ladder.json").read_text(encoding="utf-8")

@@ -819,6 +819,44 @@ impl fmt::Display for EdgeHandle {
 // Option structs for analyst verbs and find
 // ---------------------------------------------------------------------------
 
+/// PageRank semantics. Omitted iterations use the existing convergence rule.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PageRankOptions {
+    /// Finite teleport damping in the inclusive range `[0, 1]`.
+    pub damping: f64,
+    /// Exactly this many synchronous rounds, including zero; `None` converges.
+    pub iterations: Option<u32>,
+}
+
+impl Default for PageRankOptions {
+    fn default() -> Self {
+        Self {
+            damping: 0.85,
+            iterations: None,
+        }
+    }
+}
+
+/// Definition of the local clustering coefficient.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ClusteringNormalization {
+    /// Existing reciprocal-degree (Fagiolo) normalization.
+    #[default]
+    Fagiolo,
+    /// Directed edges among unique in/out neighbors divided by `k * (k - 1)`.
+    NeighborEdges,
+}
+
+/// Deterministic synchronous label propagation, separate from the default
+/// asynchronous community optimizer. Returned labels are never renumbered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SynchronousLabelPropagationOptions {
+    /// Exactly this many previous-round label updates, including zero.
+    pub iterations: u32,
+    /// Exact Int64 initial label property. If absent, use selected node ordinals.
+    pub initial_label_property: Option<String>,
+}
+
 /// Options for `GraphForge::rank`.
 #[derive(Debug, Clone)]
 pub struct RankOptions {
@@ -830,6 +868,10 @@ pub struct RankOptions {
     pub directed: bool,
     /// Optional property name to write scores back to nodes.
     pub write_property: Option<String>,
+    /// PageRank configuration; valid only for `by=pagerank`.
+    pub pagerank: Option<PageRankOptions>,
+    /// LCC definition; valid only for `by=clustering_coefficient`.
+    pub clustering_normalization: Option<ClusteringNormalization>,
 }
 
 impl Default for RankOptions {
@@ -839,6 +881,8 @@ impl Default for RankOptions {
             via: None,
             directed: true,
             write_property: None,
+            pagerank: None,
+            clustering_normalization: None,
         }
     }
 }
@@ -856,6 +900,8 @@ pub struct ClusterOptions {
     pub directed: bool,
     /// Optional property name to write community IDs back to nodes.
     pub write_property: Option<String>,
+    /// Fixed-round synchronous mode; valid only for `by=label_propagation`.
+    pub synchronous_label_propagation: Option<SynchronousLabelPropagationOptions>,
 }
 
 /// Options for `GraphForge::find`.

@@ -6,7 +6,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use graphforge_api::{ClusterAlgorithm, GfError, IrLiteral, PathAlgorithm, RankAlgorithm};
+use graphforge_api::{
+    ClusterAlgorithm, ClusteringNormalization, GfError, IrLiteral, PageRankOptions, PathAlgorithm,
+    RankAlgorithm, SynchronousLabelPropagationOptions,
+};
 use serde::Deserialize;
 
 use super::{QueryCause, QueryError};
@@ -47,21 +50,27 @@ pub struct Variant {
 pub enum Operation {
     /// `GraphForge::execute_with_params(text, params)`.
     Cypher { text: String },
-    /// `GraphForge::rank(label, RankOptions { by, directed, via })`.
+    /// `GraphForge::rank(label, RankOptions { .. })`.
     Rank {
         label: String,
         by: String,
         directed: bool,
         #[serde(default)]
         via: Option<String>,
+        #[serde(default)]
+        pagerank: Option<PageRankCallOptions>,
+        #[serde(default)]
+        clustering_normalization: Option<ClusteringNormalizationName>,
     },
-    /// `GraphForge::cluster(label, ClusterOptions { by, directed, via })`.
+    /// `GraphForge::cluster(label, ClusterOptions { .. })`.
     Cluster {
         label: String,
         by: String,
         directed: bool,
         #[serde(default)]
         via: Option<String>,
+        #[serde(default)]
+        synchronous_label_propagation: Option<SynchronousLabelPropagationCallOptions>,
     },
     /// `GraphForge::paths(source, target, PathsOptions { by, directed, via, weight })`,
     /// where the source node is selected by UUID or by `(:label {property: $param})`,
@@ -77,6 +86,52 @@ pub enum Operation {
         #[serde(default)]
         weight: Option<String>,
     },
+}
+
+/// Serializable public PageRank options; behavior is owned by the facade.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PageRankCallOptions {
+    pub damping: f64,
+    pub iterations: u32,
+}
+impl PageRankCallOptions {
+    pub fn options(&self) -> PageRankOptions {
+        PageRankOptions {
+            damping: self.damping,
+            iterations: Some(self.iterations),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum ClusteringNormalizationName {
+    Fagiolo,
+    NeighborEdges,
+}
+impl ClusteringNormalizationName {
+    pub fn normalization(self) -> ClusteringNormalization {
+        match self {
+            Self::Fagiolo => ClusteringNormalization::Fagiolo,
+            Self::NeighborEdges => ClusteringNormalization::NeighborEdges,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SynchronousLabelPropagationCallOptions {
+    pub iterations: u32,
+    pub initial_label_property: Option<String>,
+}
+impl SynchronousLabelPropagationCallOptions {
+    pub fn options(&self) -> SynchronousLabelPropagationOptions {
+        SynchronousLabelPropagationOptions {
+            iterations: self.iterations,
+            initial_label_property: self.initial_label_property.clone(),
+        }
+    }
 }
 
 /// Selects a `paths` source node from one binding parameter.

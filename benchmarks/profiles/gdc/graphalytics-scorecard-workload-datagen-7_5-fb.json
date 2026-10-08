@@ -94,7 +94,8 @@
         "kind": "rank",
         "label": "Vertex",
         "by": "clustering_coefficient",
-        "directed": false
+        "directed": false,
+        "clustering_normalization": "neighbor_edges"
       }
     },
     {
@@ -140,6 +141,64 @@
         "weight": "weight",
         "source": {
           "uuid_param": "source"
+        }
+      }
+    },
+    {
+      "id": "pr",
+      "ordered": false,
+      "columns": [
+        "id",
+        "score"
+      ],
+      "bindings": [
+        {
+          "id": "run-1"
+        },
+        {
+          "id": "run-2"
+        },
+        {
+          "id": "run-3"
+        }
+      ],
+      "operation": {
+        "kind": "rank",
+        "label": "Vertex",
+        "by": "pagerank",
+        "directed": false,
+        "pagerank": {
+          "damping": 0.85,
+          "iterations": 10
+        }
+      }
+    },
+    {
+      "id": "cdlp",
+      "ordered": false,
+      "columns": [
+        "id",
+        "community_id"
+      ],
+      "bindings": [
+        {
+          "id": "run-1"
+        },
+        {
+          "id": "run-2"
+        },
+        {
+          "id": "run-3"
+        }
+      ],
+      "operation": {
+        "kind": "cluster",
+        "label": "Vertex",
+        "by": "label_propagation",
+        "directed": false,
+        "synchronous_label_propagation": {
+          "iterations": 10,
+          "initial_label_property": "id"
         }
       }
     }

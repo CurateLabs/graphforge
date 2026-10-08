@@ -116,7 +116,7 @@ type. Directed mode is the default and follows outgoing adjacency. Undirected mo
 both endpoint directions. Parallel edges contribute independently and self-loops remain in
 the transition distribution.
 
-The implementation uses damping `0.85`, uniform initial scores, uniform teleportation, and
+By default the implementation uses damping `0.85`, uniform initial scores, uniform teleportation, and
 uniform redistribution of dangling-node mass. Iteration stops when the L1 score delta is at
 most `selected_node_count * 1e-10`. Rows and floating-point accumulation follow stable
 topology order, so identical graph state and options produce identical results. Destination
@@ -138,6 +138,21 @@ cancellation. Invalid labels or relationship selectors, unavailable catalog valu
 violations, cancellation, adjacency/storage failures, and shaping/write-back failures remain
 structured Rust errors. Python and Node only translate arguments and Arrow IPC around this
 same handler; neither binding contains an algorithm or fallback.
+
+`RankOptions.pagerank` can configure finite damping in `[0, 1]` and an exact
+iteration count. Fixed rounds never stop early on convergence. The same serial
+scatter/private-pool pull kernels execute both modes; semantic rounds are
+separate from cooperative resource checkpoints. `clustering_normalization`
+selects the existing Fagiolo or unique-neighbor edge-count definition of LCC.
+
+Synchronous label propagation is opt-in through
+`ClusterOptions.synchronous_label_propagation`. Its projection preserves directed
+arcs, and its double-buffered rounds count incoming and outgoing votes separately.
+Exact Int64 initial labels load through the admitted property inventory and are
+included in the UUID-ordered projection fingerprint. Neither float-vector
+conversion nor partition renumbering is used. Existing asynchronous behavior,
+result schemas, and default descriptor bytes are retained. The
+[API reference](../../reference/api.md) defines these options and their defaults.
 
 ### Implemented betweenness contract
 

@@ -1,12 +1,12 @@
 {
   "schema": "graphforge-gdc-scorecard-ladder-spec/1",
   "suite_id": "graphalytics",
-  "description": "The Graphalytics scorecard ladder (#952, #1903): wiki-Talk, cit-Patents, datagen-7_5-fb and graph500-22 from the pinned LDBC archives. BFS, WCC, undirected LCC and SSSP run through the public analyst verbs on the durable project; every run is checked against the archive's own reference outputs with the Graphalytics matching rules.",
+  "description": "The Graphalytics scorecard ladder (#952, #1903): wiki-Talk, cit-Patents, datagen-7_5-fb and graph500-22 from the pinned LDBC archives. All listed algorithms run through the public analyst verbs on the durable project; every run is checked against the archive's own reference outputs with the Graphalytics matching rules.",
   "profile_root": ".",
   "identity_profile": "scorecard",
   "counts_ladder": "profiles/gdc/graphalytics-scorecard-ladder.json",
   "metric_shape": "graphalytics",
-  "variance_line": "Graphalytics algorithms run through GraphForge analyst verbs; PR, CDLP and directed LCC are refused and makespan is not measured.",
+  "variance_line": "Graphalytics algorithms run through GraphForge analyst verbs with explicit compatibility modes; makespan is not measured.",
   "attribution": "Datasets, reference outputs and specification from LDBC Graphalytics (https://ldbcouncil.org/benchmarks/graphalytics/); LDBC materials are used under CC-BY 4.0.",
   "variances": [
     {
@@ -37,20 +37,7 @@
       "dataset_id": "wiki-Talk",
       "input_subdir": null,
       "workload": "profiles/gdc/graphalytics-scorecard-workload-wiki-Talk.json",
-      "refused": [
-        {
-          "query_id": "pr",
-          "cause": "fixed_iteration_pagerank_not_exposed"
-        },
-        {
-          "query_id": "cdlp",
-          "cause": "synchronous_cdlp_not_exposed"
-        },
-        {
-          "query_id": "lcc",
-          "cause": "directed_lcc_semantics_not_exposed"
-        }
-      ],
+      "refused": [],
       "reference": {
         "archive_outputs": "graphalytics"
       },
@@ -62,20 +49,7 @@
       "dataset_id": "cit-Patents",
       "input_subdir": null,
       "workload": "profiles/gdc/graphalytics-scorecard-workload-cit-Patents.json",
-      "refused": [
-        {
-          "query_id": "pr",
-          "cause": "fixed_iteration_pagerank_not_exposed"
-        },
-        {
-          "query_id": "cdlp",
-          "cause": "synchronous_cdlp_not_exposed"
-        },
-        {
-          "query_id": "lcc",
-          "cause": "directed_lcc_semantics_not_exposed"
-        }
-      ],
+      "refused": [],
       "reference": {
         "archive_outputs": "graphalytics"
       },
@@ -87,16 +61,7 @@
       "dataset_id": "datagen-7_5-fb",
       "input_subdir": null,
       "workload": "profiles/gdc/graphalytics-scorecard-workload-datagen-7_5-fb.json",
-      "refused": [
-        {
-          "query_id": "pr",
-          "cause": "fixed_iteration_pagerank_not_exposed"
-        },
-        {
-          "query_id": "cdlp",
-          "cause": "synchronous_cdlp_not_exposed"
-        }
-      ],
+      "refused": [],
       "reference": {
         "archive_outputs": "graphalytics"
       },
@@ -108,16 +73,7 @@
       "dataset_id": "graph500-22",
       "input_subdir": null,
       "workload": "profiles/gdc/graphalytics-scorecard-workload-graph500-22.json",
-      "refused": [
-        {
-          "query_id": "pr",
-          "cause": "fixed_iteration_pagerank_not_exposed"
-        },
-        {
-          "query_id": "cdlp",
-          "cause": "synchronous_cdlp_not_exposed"
-        }
-      ],
+      "refused": [],
       "reference": {
         "archive_outputs": "graphalytics"
       },

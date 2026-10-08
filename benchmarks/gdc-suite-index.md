@@ -34,10 +34,10 @@ without sharing workload semantics.
 | Ladder | `profiles/gdc/graphalytics-ladder.json` (begins with bounded `ga-tiny`) |
 | Validation | exact (BFS/CDLP), equivalence (WCC), epsilon=1e-4 (PR/LCC/SSSP) |
 | Execution | Explicit `run-live` in-memory public API proof; `run-suite` is static replay |
-| Unsupported semantics | Typed `semantic_incompatibility` (fixed-iteration PR; synchronous CDLP; directed LCC normalization) |
+| Compatibility modes | Fixed-iteration PageRank with dataset damping, synchronous CDLP with original vertex labels, and neighbor-edge LCC normalization; existing public defaults remain unchanged |
 | Identity | Distinct pins: `profiles/gdc/graphalytics-static-identity.json` (historical `wiki-Talk` markers) and `profiles/gdc/graphalytics-live-identity.json` (`ga-tiny` proof). Suite/acquisition select the profile; cross-use is `identity_drift`. |
 | Scorecard | `profiles/gdc/graphalytics-scorecard-identity.json` pins the `wiki-Talk`, `cit-Patents`, `datagen-7_5-fb` and `graph500-22` archives; `profiles/gdc/graphalytics-scorecard-ladder.json` carries the LDBC-published counts, load mappings and each archive's `.properties` facts; `profiles/gdc/graphalytics-scorecard-ladder-spec.json` is the rung runner's ladder (see Scorecard ladders). Acquisition and conversion are described in `README.md` (GDC dataset acquisition and conversion). |
-| Authority | Synthetic `ga-tiny` engineering evidence only (edges-only fixture; isolated vertices out of scope); `certification=false`; legacy `wiki-Talk` stub excluded |
+| Authority | Synthetic `ga-tiny` engineering evidence (edges-only fixture) plus unchanged upstream bounded validation vectors with explicit vertex rows, including sinks; `certification=false`; legacy `wiki-Talk` stub excluded |
 
 Profiles, validation, and evidence stay under the GDC Graphalytics suite and are
 not shared with Graph500 orchestration.
@@ -440,6 +440,21 @@ reference answer is wrong) and sf2 is never attempted.
 `tests/test_gdc_rung.py` drives it with the real converter, `gf` and driver;
 only BenchExec is replaced, because CI runners cannot delegate cgroups.
 
+### Graphalytics bounded algorithm validation
+
+Run `make test-rust ARGS="-p graphforge-benchmark-gdc-graphalytics"` to execute
+all six unchanged `ga-tiny` references through the public Rust facade and the
+upstream PR, CDLP and LCC directed/undirected validation vectors. The inputs and
+outputs under `fixtures/gdc/graphalytics-validation/` are copied unchanged from
+LDBC's v1.0.0 driver resources, identified by commit, upstream paths and SHA-256
+in `README.txt`; semantics remain the pinned v1.0.5 specification. The official
+parameters are PR damping 0.85 with 14 directed or 26 undirected rounds, and
+CDLP with 5 rounds. Vertex-based inputs retain declared sinks instead of
+inferring the vertex set from outgoing edges. Separate sparse-ID isolate and
+zero-round fixtures check vertex coverage; perturbed reference values must fail
+validation with the existing exact/epsilon rules. These tests use product
+algorithms through `graphforge-api`, with no runner implementation or fallback.
+
 ### Graphalytics scorecard ladder
 
 `profiles/gdc/graphalytics-scorecard-ladder-spec.json` climbs wiki-Talk (2XS),
@@ -449,27 +464,30 @@ archives (`graphforge_bench.gdc_graphalytics_scorecard`):
 - **Archive check.** Before converting, the archive's `<graph>.properties` must
   agree with the count ladder (`graphalytics-scorecard-ladder.json`: vertices,
   published edges, direction, weight, the `algorithms` list and the BFS and
-  SSSP source vertices) and with the rung's workload: every listed algorithm is
+  SSSP source vertices, PR damping and iteration count, and CDLP iteration count) and with the rung's workload: every listed algorithm is
   run or refused, and each run is dispatched as the graph needs. Otherwise the
   rung fails with `archive_properties_mismatch`.
 - **Algorithms** (`graphalytics-scorecard-workload-<graph>.json`), each run
   three times after one excluded warm-up: BFS as `paths(by=bfs)` and SSSP as
   `paths(by=dijkstra, weight=weight)`, each from the source vertex selected by
   `NodeSelector::Uuid` (the converter's node UUID for that vertex); WCC as
-  `cluster(by=components)`; LCC, on undirected graphs only, as
-  `rank(by=clustering_coefficient)`. Each variant keeps only its answer
+  `cluster(by=components)`; PR as `rank(by=pagerank)` with the archive's
+  damping factor and exact iteration count; CDLP as
+  `cluster(by=label_propagation)` with synchronous rounds, the archive's
+  iteration count, and initial labels from the imported Int64 `id` property;
+  LCC as `rank(by=clustering_coefficient)` with `neighbor_edges` normalization
+  on both directed and undirected graphs. Each variant keeps only its answer
   columns (`target_uuid, cost` or `id, <value>`); the call is timed whole.
-  PR (`fixed_iteration_pagerank_not_exposed`), CDLP
-  (`synchronous_cdlp_not_exposed`) and directed LCC
-  (`directed_lcc_semantics_not_exposed`) are refused and count against
-  coverage.
+  The real ladder runs every listed algorithm. Refusals remain explicit and
+  count against coverage in fixtures or future unsupported mappings.
 - **Reference.** The rung spec's `{"archive_outputs": "graphalytics"}` derives
   the reference at check time from the archive's `<graph>-<ALGORITHM>` files.
   Each must list every vertex exactly once (`reference_invalid` otherwise).
-  BFS matches exactly and SSSP within epsilon 1e-4, keyed by target UUID;
+  BFS and CDLP match exactly; PR, LCC and SSSP use epsilon 1e-4.
+  BFS and SSSP are keyed by target UUID;
   `paths` returns only reached vertices, so a vertex the reference marks
   unreachable (`9223372036854775807`, `infinity`) matches by its absence. WCC
-  matches by equivalence and LCC within epsilon 1e-4, keyed by vertex id. The
+  matches by equivalence. PR, CDLP, LCC and WCC are keyed by vertex id. The
   correctness record's `reference_sha256` covers the `.properties` file and
   every reference output used.
 - **Metrics.** `Tp` is the mean of the three measured runs and EVPS is

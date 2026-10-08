@@ -36,6 +36,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -115,6 +116,9 @@ class GraphProperties:
     algorithms: tuple[str, ...]
     bfs_source: int | None
     sssp_source: int | None
+    pr_damping: float | None = None
+    pr_iterations: int | None = None
+    cdlp_iterations: int | None = None
 
 
 def _integer(values: Mapping[str, str], key: str) -> int:
@@ -122,6 +126,24 @@ def _integer(values: Mapping[str, str], key: str) -> int:
         return int(values[key])
     except (KeyError, ValueError) as error:
         raise RungInputError("archive_properties_invalid", f"{key}: {error}") from error
+
+
+def _iterations(values: Mapping[str, str], key: str) -> int:
+    iterations = _integer(values, key)
+    if not 0 <= iterations <= 2**32 - 1:
+        raise RungInputError("archive_properties_invalid", f"{key} must fit UInt32")
+    return iterations
+
+
+def _damping(values: Mapping[str, str]) -> float:
+    key = "pr.damping-factor"
+    try:
+        damping = float(values[key])
+    except (KeyError, ValueError) as error:
+        raise RungInputError("archive_properties_invalid", f"{key}: {error}") from error
+    if not math.isfinite(damping) or not 0.0 <= damping <= 1.0:
+        raise RungInputError("archive_properties_invalid", f"{key} must be finite and in [0, 1]")
+    return damping
 
 
 def read_properties(input_root: Path) -> GraphProperties:
@@ -161,6 +183,9 @@ def read_properties(input_root: Path) -> GraphProperties:
         algorithms=algorithms,
         bfs_source=_integer(get, "bfs.source-vertex") if "bfs" in algorithms else None,
         sssp_source=_integer(get, "sssp.source-vertex") if "sssp" in algorithms else None,
+        pr_damping=_damping(get) if "pr" in algorithms else None,
+        pr_iterations=_iterations(get, "pr.num-iterations") if "pr" in algorithms else None,
+        cdlp_iterations=_iterations(get, "cdlp.max-iterations") if "cdlp" in algorithms else None,
     )
 
 
@@ -201,12 +226,34 @@ def expectation(algorithm: str, graph: GraphProperties, label: str) -> Expectati
     if algorithm == "wcc":
         operation = {"kind": "cluster", "label": label, "by": "components", "directed": False}
         return Expectation(operation, None, ["id", "community_id"])
-    if algorithm == "lcc" and not graph.directed:
+    if algorithm == "pr":
+        operation = {
+            "kind": "rank",
+            "label": label,
+            "by": "pagerank",
+            "directed": graph.directed,
+            "pagerank": {"damping": graph.pr_damping, "iterations": graph.pr_iterations},
+        }
+        return Expectation(operation, None, ["id", "score"])
+    if algorithm == "cdlp":
+        operation = {
+            "kind": "cluster",
+            "label": label,
+            "by": "label_propagation",
+            "directed": graph.directed,
+            "synchronous_label_propagation": {
+                "iterations": graph.cdlp_iterations,
+                "initial_label_property": "id",
+            },
+        }
+        return Expectation(operation, None, ["id", "community_id"])
+    if algorithm == "lcc":
         operation = {
             "kind": "rank",
             "label": label,
             "by": "clustering_coefficient",
-            "directed": False,
+            "directed": graph.directed,
+            "clustering_normalization": "neighbor_edges",
         }
         return Expectation(operation, None, ["id", "score"])
     raise RungInputError("archive_properties_mismatch", f"{algorithm} has no supported mapping")
@@ -229,6 +276,9 @@ def check_archive(spec: LadderSpec, rung: Mapping[str, Any], input_root: Path) -
         "algorithms": (sorted(graph.algorithms), sorted(entry["algorithms"])),
         "bfs source": (graph.bfs_source, entry["bfs_source_vertex"]),
         "sssp source": (graph.sssp_source, entry["sssp_source_vertex"]),
+        "pr damping": (graph.pr_damping, entry.get("pr_damping")),
+        "pr iterations": (graph.pr_iterations, entry.get("pr_iterations")),
+        "cdlp iterations": (graph.cdlp_iterations, entry.get("cdlp_iterations")),
         "vertex file": ([graph.vertex_file], tables["node"]["files"]),
         "edge file": ([graph.edge_file], tables["edge"]["files"]),
     }
@@ -258,6 +308,9 @@ def ladder_graph(spec: LadderSpec, rung_id: str) -> GraphProperties:
         algorithms=tuple(entry["algorithms"]),
         bfs_source=entry["bfs_source_vertex"],
         sssp_source=entry["sssp_source_vertex"],
+        pr_damping=entry.get("pr_damping"),
+        pr_iterations=entry.get("pr_iterations"),
+        cdlp_iterations=entry.get("cdlp_iterations"),
     )
 
 
@@ -366,7 +419,10 @@ def convert_reference(
         cells = [[str(vertex), str(int(token))] for vertex, token in rows]
         rule = {"matching": "equivalence", "key": ["id"], "label": "community_id"}
         return rule, ["id", "community_id"], cells
-    if algorithm == "lcc":
+    if algorithm == "cdlp":
+        cells = [[str(vertex), str(int(token))] for vertex, token in rows]
+        return {"matching": "exact", "key": ["id"]}, ["id", "community_id"], cells
+    if algorithm in ("pr", "lcc"):
         cells = [[str(vertex), token] for vertex, token in rows]
         return {"matching": "epsilon", "epsilon": EPSILON, "key": ["id"]}, ["id", "score"], cells
     raise RungInputError("invalid_rung_spec", f"no reference conversion for {algorithm}")

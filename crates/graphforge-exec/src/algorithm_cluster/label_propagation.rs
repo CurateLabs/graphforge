@@ -23,6 +23,15 @@ impl RustAlgorithm for LabelPropagation {
         graph: &AdjacencyGraph,
         control: &AlgorithmControl,
     ) -> Result<AlgorithmOutput, AlgorithmError> {
+        if let Some(options) = control.synchronous_label_propagation() {
+            let labels = synchronous_labels(graph, options, control)?;
+            return super::label_output(
+                graph,
+                &labels,
+                ClusterAlgorithm::LabelPropagation,
+                control,
+            );
+        }
         let communities = label_propagation_communities(graph, control)?;
         community_output(
             graph,
@@ -105,3 +114,77 @@ fn dominant_neighbor_labels(
 
 #[cfg(test)]
 mod tests;
+
+/// Build distinct directional neighbor votes without collapsing reciprocal arcs.
+fn synchronous_labels(
+    graph: &AdjacencyGraph,
+    options: &graphforge_core::SynchronousLabelPropagationOptions,
+    control: &AlgorithmControl,
+) -> Result<Vec<i64>, AlgorithmError> {
+    let indices: std::collections::HashMap<_, _> = graph
+        .node_ids()
+        .iter()
+        .enumerate()
+        .map(|(index, &node)| (node, index))
+        .collect();
+    let mut labels = graph
+        .node_ids()
+        .iter()
+        .enumerate()
+        .map(|(index, &node)| {
+            if options.initial_label_property.is_some() {
+                graph
+                    .initial_label(node)
+                    .ok_or_else(|| execution("selected node has no initial label"))
+            } else {
+                i64::try_from(index).map_err(|_| execution("initial label exceeds Int64 range"))
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut votes = vec![Vec::new(); labels.len()];
+    let mut work = 0;
+    for (source, &node) in graph.node_ids().iter().enumerate() {
+        let mut targets = std::collections::BTreeSet::new();
+        for edge in graph.neighbors(node) {
+            checkpoint_chunk(control, &mut work)?;
+            let target = indices
+                .get(&edge.neighbor_id)
+                .copied()
+                .ok_or_else(|| execution("adjacency references an unselected node"))?;
+            if target != source {
+                targets.insert(target);
+            }
+        }
+        for target in targets {
+            votes[source].push(target);
+            if graph.is_directed() {
+                votes[target].push(source);
+            }
+        }
+    }
+    for _ in 0..options.iterations {
+        control.checkpoint()?;
+        let mut next = labels.clone();
+        for (node, neighbors) in votes.iter().enumerate() {
+            checkpoint_chunk(control, &mut work)?;
+            let mut counts = BTreeMap::<i64, usize>::new();
+            for &neighbor in neighbors {
+                checkpoint_chunk(control, &mut work)?;
+                let count = counts.entry(labels[neighbor]).or_default();
+                *count = count
+                    .checked_add(1)
+                    .ok_or_else(|| execution("label frequency overflow"))?;
+            }
+            // Iteration in ascending label order preserves the first maximum.
+            let mut maximum = 0;
+            for (label, count) in counts {
+                if count > maximum {
+                    maximum = count;
+                    next[node] = label;
+                }
+            }
+        }
+        labels = next;
+    }
+    Ok(labels)
+}

@@ -229,6 +229,8 @@ fn prepare(variant: &Variant, binding: &Binding) -> Result<Prepared, QueryError>
             by,
             directed,
             via,
+            pagerank,
+            clustering_normalization,
         } => Prepared::Rank(
             label.clone(),
             RankOptions {
@@ -236,6 +238,8 @@ fn prepare(variant: &Variant, binding: &Binding) -> Result<Prepared, QueryError>
                 via: via.clone(),
                 directed: *directed,
                 write_property: None,
+                pagerank: pagerank.as_ref().map(|options| options.options()),
+                clustering_normalization: clustering_normalization.map(|mode| mode.normalization()),
             },
         ),
         Operation::Cluster {
@@ -243,6 +247,7 @@ fn prepare(variant: &Variant, binding: &Binding) -> Result<Prepared, QueryError>
             by,
             directed,
             via,
+            synchronous_label_propagation,
         } => Prepared::Cluster(
             label.clone(),
             ClusterOptions {
@@ -251,6 +256,9 @@ fn prepare(variant: &Variant, binding: &Binding) -> Result<Prepared, QueryError>
                 via: via.clone(),
                 directed: *directed,
                 write_property: None,
+                synchronous_label_propagation: synchronous_label_propagation
+                    .as_ref()
+                    .map(|options| options.options()),
             },
         ),
         Operation::Paths {

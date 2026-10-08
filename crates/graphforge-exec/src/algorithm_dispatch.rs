@@ -12,6 +12,9 @@ use arrow::record_batch::RecordBatch;
 #[cfg(test)]
 use graphforge_core::GfError;
 use graphforge_core::algorithms::{Algorithm, AlgorithmResultSchema};
+use graphforge_core::{
+    ClusteringNormalization, PageRankOptions, RankOptions, SynchronousLabelPropagationOptions,
+};
 
 use crate::algorithm_arrow_sink::{AlgorithmArrowSink, decode_logical_rows};
 use crate::algorithm_graph::AdjacencyGraph;
@@ -95,6 +98,9 @@ pub(crate) struct AlgorithmControl {
     states: AtomicU64,
     /// Optional private compute pool from the owning GraphForge instance (#342).
     compute_pool: Option<crate::SharedComputePool>,
+    pagerank_options: PageRankOptions,
+    clustering_normalization: ClusteringNormalization,
+    synchronous_label_propagation: Option<SynchronousLabelPropagationOptions>,
 }
 
 impl AlgorithmControl {
@@ -105,7 +111,38 @@ impl AlgorithmControl {
             iterations: AtomicU64::new(0),
             states: AtomicU64::new(0),
             compute_pool: None,
+            pagerank_options: PageRankOptions::default(),
+            clustering_normalization: ClusteringNormalization::default(),
+            synchronous_label_propagation: None,
         }
+    }
+
+    pub(crate) fn with_rank_options(mut self, options: &RankOptions) -> Self {
+        self.pagerank_options = options.pagerank.unwrap_or_default();
+        self.clustering_normalization = options.clustering_normalization.unwrap_or_default();
+        self
+    }
+
+    pub(crate) fn pagerank_options(&self) -> PageRankOptions {
+        self.pagerank_options
+    }
+
+    pub(crate) fn clustering_normalization(&self) -> ClusteringNormalization {
+        self.clustering_normalization
+    }
+
+    pub(crate) fn with_synchronous_label_propagation(
+        mut self,
+        options: Option<SynchronousLabelPropagationOptions>,
+    ) -> Self {
+        self.synchronous_label_propagation = options;
+        self
+    }
+
+    pub(crate) fn synchronous_label_propagation(
+        &self,
+    ) -> Option<&SynchronousLabelPropagationOptions> {
+        self.synchronous_label_propagation.as_ref()
     }
 
     /// Attach the instance-owned private CPU pool (#337 / #342).
