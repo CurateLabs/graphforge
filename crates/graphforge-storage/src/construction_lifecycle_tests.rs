@@ -290,8 +290,7 @@ mod lifecycle_budget {
                 // A same-inode, same-length encoded payload mutation is not
                 // the reclaim sweep's to refuse: it checks identity, link
                 // count and length only (the #1392 pattern applied to the
-                // encoded branch). Preparation succeeds; the CAS install at
-                // publication checksums the actual copied bytes and refuses it there.
+                // encoded branch). Preparation succeeds; publication refuses it there.
                 let prepared = session.prepare_canonical_encoding(1).unwrap();
                 session
                     .publish_canonical(
@@ -308,7 +307,7 @@ mod lifecycle_budget {
                     // #1392: the completed-shape trust boundary refuses this
                     // deliberately now, instead of incidentally at retirement.
                     "shape" => "shape manifest output payload changed",
-                    "encoding" => "captured encoded source checksum or length changed during copy",
+                    "encoding" => crate::graph_object_store::SAME_INODE_CORRUPTION_REFUSAL,
                     "replacement" => "predecessor identity changed",
                     "receipt_chain" => "receipt tail changed",
                     _ => unreachable!(),

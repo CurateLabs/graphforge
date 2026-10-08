@@ -661,7 +661,12 @@ fn publication_components_measure_fresh_reuse_and_path_copy_work() {
     assert_eq!(fresh.publication_io.manifest.installed_objects, 3);
     assert_eq!(fresh.publication_io.manifest.reused_objects, 0);
     assert_eq!(fresh.publication_io.manifest_reads.read_calls, 2);
-    assert_eq!(fresh.fsync_calls, 12);
+    // Every object here lands in a bucket the fresh store does not have yet;
+    // each creation adds the barrier that makes the bucket durable.
+    let created = fresh.publication_io.payload.bucket_creations
+        + fresh.publication_io.manifest.bucket_creations;
+    assert!(created > 0);
+    assert_eq!(fresh.fsync_calls, 12 + created);
 
     let (_, replay) = append_authenticated_graph_files_v2(
         &lease,
@@ -686,7 +691,11 @@ fn publication_components_measure_fresh_reuse_and_path_copy_work() {
     assert_eq!(update.publication_io.payload.installed_objects, 1);
     assert_eq!(update.publication_io.manifest.installed_objects, 1);
     assert_eq!(update.publication_io.manifest_reads.read_calls, 1);
-    assert_eq!(update.fsync_calls, 6);
+    // The update's two new objects may land in buckets the store lacks, each
+    // of which adds the barrier that makes it durable.
+    let created = update.publication_io.payload.bucket_creations
+        + update.publication_io.manifest.bucket_creations;
+    assert_eq!(update.fsync_calls, 6 + created);
     assert_ne!(first_root, second_root);
     for (root, expected) in [
         (first_root, b"first".as_slice()),

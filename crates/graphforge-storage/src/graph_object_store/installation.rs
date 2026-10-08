@@ -19,6 +19,8 @@ use super::Uuid;
 use super::Write;
 use super::begin_graph_object_publication;
 use super::checked_read_io_sum;
+#[cfg(unix)]
+use super::classify_file_counted_in_domain;
 use super::graph_object_path;
 use super::hex_digest;
 use super::returned_error_boundary;
@@ -412,7 +414,24 @@ pub(crate) fn install_captured_encoded_artifact_with_lease(
     source: &crate::graph_construction::CapturedEncodedArtifact<'_>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<GraphObjectInstallEvidence, GfError> {
-    install_captured_source_with_lease(lease, &CapturedSource::Encoded(source), false, cancelled)
+    // The encoder already wrote, hashed and (for the staged path) synchronized
+    // this file on the project filesystem, so unix links it into place instead
+    // of copying it, and copies only if the filesystem cannot link. Windows
+    // needs write-through, ACL-sealed handles that a finished file cannot be
+    // given, so it always copies.
+    #[cfg(unix)]
+    {
+        staged_link::install_staged_encoded_artifact(lease, source, cancelled)
+    }
+    #[cfg(windows)]
+    {
+        install_captured_source_with_lease(
+            lease,
+            &CapturedSource::Encoded(source),
+            false,
+            cancelled,
+        )
+    }
 }
 
 /// Install a workspace file that a capture hashed and kept open, checking the
@@ -902,10 +921,10 @@ where
     F: FnOnce(&mut CasTemporaryWriter) -> Result<(u64, crate::durable_commit::FileSeal), GfError>,
 {
     validate_digest(digest)?;
-    let bucket = cas.digest_bucket(digest, true)?;
+    let (bucket, bucket_barriers) = cas.ensure_digest_bucket(digest)?;
     let destination_name = std::ffi::OsStr::new(&digest[2..]);
     let mut replace_prior = None;
-    if let Some(evidence) = try_reuse_existing_object(
+    if let Some(mut reused) = try_reuse_existing_object(
         cas,
         &bucket,
         destination_name,
@@ -917,7 +936,8 @@ where
             replace_prior: &mut replace_prior,
         },
     )? {
-        return Ok(evidence);
+        add_bucket_barriers(&mut reused.evidence, bucket_barriers);
+        return Ok(reused);
     }
     let temporary_name = std::ffi::OsString::from(Uuid::new_v4().hyphenated().to_string());
     #[cfg(unix)]
@@ -983,17 +1003,23 @@ where
         authentication,
         replace_prior,
     )?;
-    Ok(InstalledObject {
-        evidence: installation_evidence(
-            expected_length,
-            installed,
-            bytes_hashed,
-            authentication,
-            preseal_io,
-            concurrent_io,
-        )?,
-        identity,
-    })
+    let mut evidence = installation_evidence(
+        expected_length,
+        installed,
+        bytes_hashed,
+        authentication,
+        preseal_io,
+        concurrent_io,
+    )?;
+    add_bucket_barriers(&mut evidence, bucket_barriers);
+    Ok(InstalledObject { evidence, identity })
+}
+
+/// Count the barrier that made a newly created bucket durable in this install.
+fn add_bucket_barriers(evidence: &mut GraphObjectInstallEvidence, barriers: u64) {
+    evidence.bucket_creations += barriers;
+    evidence.directory_fsync_calls += barriers;
+    evidence.fsync_calls += barriers;
 }
 
 fn installation_evidence(
@@ -1579,5 +1605,9 @@ fn seal_graph_object(file: &File, object_path: &Path, diagnostic: &Path) -> Resu
 
 #[cfg(test)]
 mod repair_tests;
+#[cfg(unix)]
+mod staged_link;
+#[cfg(unix)]
+pub(super) use staged_link::retire_unadmitted_link;
 #[cfg(test)]
 mod tests;

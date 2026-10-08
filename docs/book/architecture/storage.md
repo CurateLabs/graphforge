@@ -466,6 +466,19 @@ workspace and physical batching work remains under #1918. A property scratch
 reservation therefore describes builder workspace, not a proof that arbitrary
 registered inputs fit the complete process budget.
 
+Publication does not copy those files. On unix it syncs each encoded file, links the same inode to
+`graph-objects/sha256/<2>/<62>`, and acknowledges the bucket directory, so each
+published byte is written once (ADR 0013 barriers unchanged). The encoded name
+stays until the session's private tree is retired, so a publication that stopped
+at any point reruns by deduplicating against the existing object. Nothing reads
+the file back at install: exact length and XXH64 are checked on first read
+([ADR 0049](../../adr/0049-published-payload-checksums.md)) and at the
+commit boundary before `CURRENT` moves. If the object store cannot take a link
+(`EXDEV`), the install copies explicitly; Windows always copies. Every writer of
+the encoded tree creates a fresh file exclusively or by temp-and-rename, and
+the shared inode is sealed read-only, so no later write reaches a published
+object.
+
 Read sessions retain one admitted route inventory with their catalog and
 adjacency provider. Publishing a later generation replaces the facade's
 provider; an existing lazy stream keeps its original inventory and private

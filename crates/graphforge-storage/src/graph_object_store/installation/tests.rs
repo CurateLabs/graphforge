@@ -485,7 +485,11 @@ fn concurrent_winner_reuse_retains_the_losing_install_work() {
                 let (_, winner) = install_graph_object_bytes(&winner_root, payload).unwrap();
                 assert!(!winner.reused_existing);
                 assert!(winner.attempted_install);
-                assert_eq!(winner.fsync_calls, 3);
+                // The loser created the bucket before this hook ran, but nothing
+                // is linked into it yet, so it may still be unacknowledged and
+                // the winner runs that barrier too.
+                assert_eq!(winner.bucket_creations, 1);
+                assert_eq!(winner.fsync_calls, 3 + winner.bucket_creations);
             }));
         });
         let loser = if file_backed {
@@ -501,8 +505,11 @@ fn concurrent_winner_reuse_retains_the_losing_install_work() {
         assert_eq!(loser.write_bytes, payload.len() as u64);
         assert_eq!(loser.write_calls, 1);
         assert_eq!(loser.file_fsync_calls, 1);
-        assert_eq!(loser.directory_fsync_calls, 2);
-        assert_eq!(loser.fsync_calls, 3);
+        // The loser's own store has no bucket yet, so it also runs the barrier
+        // that makes the new bucket durable.
+        assert_eq!(loser.bucket_creations, 1);
+        assert_eq!(loser.directory_fsync_calls, 2 + loser.bucket_creations);
+        assert_eq!(loser.fsync_calls, 3 + loser.bucket_creations);
         // Reuse verifies the concurrent winner once. A file source adds its
         // copy pass. Windows authenticates the protected sealed handle after
         // closing the writable handle. Resident bytes named in memory are not
@@ -552,12 +559,16 @@ fn file_install_receipts_count_actual_cache_window_synchronizations() {
         let rollovers = u64::from(cfg!(target_os = "linux") && bytes > window);
         assert_eq!(
             installed.fsync_calls,
-            3 + rollovers,
+            3 + rollovers + installed.bucket_creations,
             "payload bytes {bytes}"
         );
         assert!(!installed.reused_existing);
         assert_eq!(installed.file_fsync_calls, 1 + rollovers);
-        assert_eq!(installed.directory_fsync_calls, 2);
+        assert_eq!(installed.bucket_creations, 1);
+        assert_eq!(
+            installed.directory_fsync_calls,
+            2 + installed.bucket_creations
+        );
         assert_eq!(installed.bytes_installed, bytes);
         assert_eq!(
             read_graph_object(root.path(), &digest, bytes).unwrap(),
@@ -595,7 +606,10 @@ fn installs_once_reuses_exact_object_and_rejects_tampering() {
     assert_eq!(first.read_calls, sealed_reads);
     assert_eq!(first.write_bytes, 7);
     assert_eq!(first.write_calls, 1);
-    assert_eq!(first.fsync_calls, 3);
+    // A fresh store creates the bucket, whose creation is made durable by one
+    // more namespace barrier on the `sha256` directory.
+    assert_eq!(first.bucket_creations, 1);
+    assert_eq!(first.fsync_calls, 3 + first.bucket_creations);
     assert!(
         root.path()
             .join(GRAPH_OBJECTS_DIR)
@@ -765,4 +779,61 @@ fn unsuccessful_installation_does_not_mint_capture_authority() {
             "{boundary}"
         );
     }
+}
+
+/// A new digest bucket is a name in the `sha256` directory until that directory
+/// is acknowledged (ADR 0013). Creating one runs exactly one barrier, an
+/// existing populated bucket none, and an empty bucket (creation interrupted
+/// before the barrier) runs it again. The barrier count is observed from the
+/// barriers that ran, not from the evidence.
+#[cfg(unix)]
+#[test]
+fn creating_a_digest_bucket_acknowledges_the_digest_root_once() {
+    let root = tempfile::tempdir().unwrap();
+    let lease = begin_graph_object_publication(root.path()).unwrap();
+    let digest = hex_digest(Sha256::digest(b"bucket").into());
+
+    let ((bucket, reported), ran) = crate::durable_commit::observe_barriers(|| {
+        lease.cas.ensure_digest_bucket(&digest).unwrap()
+    });
+    assert_eq!((reported, ran), (1, 1));
+
+    // Empty: creation may have stopped before its barrier, so it runs again.
+    let ((_, reported), ran) = crate::durable_commit::observe_barriers(|| {
+        lease.cas.ensure_digest_bucket(&digest).unwrap()
+    });
+    assert_eq!((reported, ran), (1, 1));
+
+    // Populated: the barrier that made the name durable already ran.
+    bucket
+        .create_child_file(std::ffi::OsStr::new("entry"))
+        .unwrap();
+    let ((_, reported), ran) = crate::durable_commit::observe_barriers(|| {
+        lease.cas.ensure_digest_bucket(&digest).unwrap()
+    });
+    assert_eq!((reported, ran), (0, 0));
+}
+
+/// A failure between creating the bucket and its barrier leaves an empty
+/// bucket; the retry runs the barrier rather than trusting the name.
+#[cfg(unix)]
+#[test]
+fn bucket_creation_interrupted_before_its_barrier_is_finished_by_the_retry() {
+    let root = tempfile::tempdir().unwrap();
+    let lease = begin_graph_object_publication(root.path()).unwrap();
+    let digest = hex_digest(Sha256::digest(b"interrupted").into());
+    crate::graph_object_store::inject_returned_error_at(Some("install:bucket-created"));
+    lease.cas.ensure_digest_bucket(&digest).err().unwrap();
+    crate::graph_object_store::inject_returned_error_at(None);
+    assert!(
+        root.path()
+            .join(GRAPH_OBJECTS_DIR)
+            .join(SHA256_DIR)
+            .join(&digest[..2])
+            .is_dir()
+    );
+    let ((_, reported), ran) = crate::durable_commit::observe_barriers(|| {
+        lease.cas.ensure_digest_bucket(&digest).unwrap()
+    });
+    assert_eq!((reported, ran), (1, 1));
 }

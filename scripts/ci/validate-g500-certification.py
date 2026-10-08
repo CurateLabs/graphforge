@@ -224,9 +224,18 @@ def validate_cas_publication_components(storage: dict[str, Any]) -> None:
         requests = total(component["installed_objects"], component["reused_objects"])
         if not component["installed_objects"] <= component["install_attempts"] <= requests:
             raise EvidenceError(f"CAS {name} install attempts differ from request inventory")
-        if component["directory_fsync_calls"] != total(
-            component["install_attempts"], component["install_attempts"]
-        ):
+        # Each digest bucket an install created adds the one barrier that makes
+        # it durable. Copied objects retire a temporary, so two barriers per
+        # attempt; a payload the encoder wrote once is linked instead (#1899), so
+        # one bucket barrier per request, installed or reused.
+        created = component["bucket_creations"]
+        if created > requests:
+            raise EvidenceError(f"CAS {name} created more buckets than it had requests")
+        copied = total(component["install_attempts"], component["install_attempts"])
+        accepted = {total(copied, created)}
+        if name == "payload":
+            accepted.add(total(requests, created))
+        if component["directory_fsync_calls"] not in accepted:
             raise EvidenceError(f"CAS {name} namespace synchronization differs from installs")
         if component["file_fsync_calls"] < component["install_attempts"]:
             raise EvidenceError(f"CAS {name} lacks mandatory file synchronization")

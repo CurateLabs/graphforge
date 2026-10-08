@@ -131,7 +131,8 @@ pub(crate) fn authenticate_inventory_payloads(
             .open_child_file(OsStr::new(&name))
             .map_err(storage)?;
         let identity = file_identity(&file).map_err(storage)?;
-        let (released, operations) = authenticate_encoded_checksum(file, expected, cancelled)?;
+        let (released, operations) =
+            authenticate_encoded_checksum(file, expected, directory.path(), cancelled)?;
         directory.revalidate_named().map_err(storage)?;
         let named = directory
             .open_child_file(OsStr::new(&name))
@@ -179,13 +180,53 @@ fn open_artifact_directory(
     Ok((directory, name))
 }
 
+/// An encoded artifact has one name until publication links the same inode
+/// into the object store (unix). A publication that stopped after that link is
+/// retried by reopening this inventory, and a published project can hydrate
+/// the object into reader workspaces, so more names are legitimate, but only
+/// when the artifact's content address resolves to this very inode. Any other
+/// extra name is refused.
+pub(crate) fn staged_links_admitted(
+    encoded: &std::path::Path,
+    sha256: &str,
+    file: &File,
+) -> Result<bool, GfError> {
+    let project = encoded.ancestors().find_map(|ancestor| {
+        (ancestor.file_name() == Some(OsStr::new(".graphforge-construction")))
+            .then(|| ancestor.parent())
+            .flatten()
+    });
+    match project {
+        Some(project) => encoded_links_expected(project, sha256, file),
+        None => Ok(file_link_count(file).map_err(storage)? == 1),
+    }
+}
+
+/// [`staged_links_admitted`] once the project root is known.
+pub(crate) fn encoded_links_expected(
+    project: &std::path::Path,
+    sha256: &str,
+    file: &File,
+) -> Result<bool, GfError> {
+    match file_link_count(file).map_err(storage)? {
+        1 => Ok(true),
+        2.. if cfg!(unix) => {
+            let address = crate::graph_object_path(project, sha256)?;
+            Ok(graphforge_filesystem::path_identity(&address).ok()
+                == Some(file_identity(file).map_err(storage)?))
+        }
+        _ => Ok(false),
+    }
+}
+
 fn authenticate_encoded_checksum(
     file: File,
     expected: &ConstructionEncodedArtifact,
+    encoded: &std::path::Path,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(graphforge_filesystem::FileCacheReleaseEvidence, u64), GfError> {
     let identity = file_identity(&file).map_err(storage)?;
-    if file_link_count(&file).map_err(storage)? != 1
+    if !staged_links_admitted(encoded, &expected.sha256, &file)?
         || file.metadata().map_err(storage)?.len() != expected.bytes
     {
         return Err(storage("canonical artifact identity or length changed"));
@@ -212,7 +253,7 @@ fn authenticate_encoded_checksum(
         if bytes != expected.bytes
             || checksum.finish() != expected.xxh64
             || file_identity(reader.file()).map_err(storage)? != identity
-            || file_link_count(reader.file()).map_err(storage)? != 1
+            || !staged_links_admitted(encoded, &expected.sha256, reader.file())?
             || reader.file().metadata().map_err(storage)?.len() != expected.bytes
         {
             return Err(storage(
