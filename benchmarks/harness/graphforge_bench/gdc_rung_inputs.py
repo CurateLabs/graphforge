@@ -113,7 +113,18 @@ def load_ladder_spec(root: Path, path: Path) -> LadderSpec:
     if ladder.get("suite_id") != spec.suite_id:
         raise RungInputError("invalid_rung_spec", "count ladder belongs to another suite")
     for rung in document["rungs"]:
+        if is_unpinned(rung):
+            continue
         _ladder_entry(ladder, rung["id"])
+        if isinstance(rung["workload"], Mapping):
+            # Built at rung time from pinned parameters (gdc_snb_scorecard);
+            # the builder refuses a variant that is also refused here.
+            queries = read_json(spec.resolve(rung["workload"]["queries"]))
+            if not isinstance(queries, Mapping) or not queries.get("queries"):
+                raise RungInputError(
+                    "invalid_rung_spec", f"rung {rung['id']} query definitions are empty"
+                )
+            continue
         workload = read_json(spec.resolve(rung["workload"]))
         variants = workload.get("variants") if isinstance(workload, Mapping) else None
         if not isinstance(variants, list) or not variants:
@@ -125,6 +136,11 @@ def load_ladder_spec(root: Path, path: Path) -> LadderSpec:
                 "invalid_rung_spec", f"rung {rung['id']} both runs and refuses {sorted(both)}"
             )
     return spec
+
+
+def is_unpinned(rung: Mapping[str, Any]) -> bool:
+    """A declared rung whose dataset is not pinned (recorded, never run)."""
+    return "not_pinned" in rung
 
 
 def _ladder_entry(ladder: Mapping[str, Any], rung_id: str) -> Mapping[str, Any]:
@@ -360,6 +376,60 @@ def _match_exact(actual: list[list[Any]], expected: list[list[Any]], ordered: bo
     return sorted(actual, key=_sort_key) == sorted(expected, key=_sort_key)
 
 
+def list_elements(text: str) -> list[str] | None:
+    """The top-level elements of an Arrow list's display text, ``[a, {b: 1, c: 2}]``.
+
+    Elements split at ``", "`` outside brackets and braces. An element whose
+    own text contains ``", "`` at top level splits further, so a set compared
+    this way can only fail on such an element, never match wrongly.
+    """
+    if len(text) < 2 or text[0] != "[" or text[-1] != "]":
+        return None
+    body, depth, start, elements = text[1:-1], 0, 0, []
+    if not body:
+        return []
+    for index, character in enumerate(body):
+        if character in "[{":
+            depth += 1
+        elif character in "]}":
+            depth -= 1
+            if depth < 0:
+                return None
+        elif depth == 0 and body.startswith(", ", index):
+            elements.append(body[start:index])
+            start = index + 2
+    if depth != 0:
+        return None
+    elements.append(body[start:])
+    return elements
+
+
+def _set_cells_equal(actual: Any, expected: Any) -> bool:
+    """A set-valued list cell: the same elements, in any order."""
+    if actual is None or expected is None:
+        return actual is expected
+    mine, theirs = list_elements(actual), list_elements(expected)
+    return mine is not None and theirs is not None and sorted(mine) == sorted(theirs)
+
+
+def _match_rows_with_sets(
+    actual: list[list[Any]], expected: list[list[Any]], set_positions: set[int]
+) -> bool:
+    """Ordered rows, equal cell by cell; cells in ``set_positions`` compare as sets."""
+    if len(actual) != len(expected):
+        return False
+    for mine, theirs in zip(actual, expected):
+        if len(mine) != len(theirs):
+            return False
+        for position, (left, right) in enumerate(zip(mine, theirs)):
+            if position in set_positions:
+                if not _set_cells_equal(left, right):
+                    return False
+            elif left != right:
+                return False
+    return True
+
+
 Keyed = dict[tuple[Any, ...], dict[str, Any]]
 
 
@@ -430,16 +500,36 @@ def matches(
     """Whether one written result matches its reference under the query's rule.
 
     ``exact`` without a key compares every column and every cell, in order when
-    the variant is ordered. ``exact`` with a key, ``epsilon`` and
-    ``equivalence`` compare the result projected onto the reference's columns,
-    with rows paired by the rule's key columns, so an analyst verb's extra node
-    columns do not take part; both sides must hold exactly the same keys.
+    the variant is ordered; its ``set_columns`` (ordered results only) compare
+    as sets of list elements. ``projection`` compares the result's cells in the
+    reference's columns exactly, so an analyst verb's other columns do not take
+    part. ``exact`` with a key, ``epsilon`` and ``equivalence`` compare the
+    result projected onto the reference's columns, with rows paired by the
+    rule's key columns, so an analyst verb's extra node columns do not take
+    part; both sides must hold exactly the same keys, and an ordered
+    ``epsilon`` result must also keep the reference's row order.
     """
     names = [column["name"] for column in result["columns"]]
     wanted = list(reference["columns"])
     actual, expected = list(result["rows"]), list(reference["rows"])
+    ordered = bool(result["ordered"])
     if rule["matching"] == "exact" and "key" not in rule:
-        return names == wanted and _match_exact(actual, expected, bool(result["ordered"]))
+        if names != wanted:
+            return False
+        set_columns = list(rule.get("set_columns", []))
+        if not set_columns:
+            return _match_exact(actual, expected, ordered)
+        if not ordered or not set(set_columns) <= set(names):
+            return False
+        return _match_rows_with_sets(actual, expected, {names.index(n) for n in set_columns})
+    if rule["matching"] == "projection":
+        if not set(wanted) <= set(names) or len(set(names)) != len(names):
+            return False
+        if any(len(row) != len(names) for row in actual):
+            return False
+        positions = [names.index(name) for name in wanted]
+        projected = [[row[position] for position in positions] for row in actual]
+        return _match_exact(projected, expected, ordered)
     key = list(rule["key"])
     if not set(wanted) <= set(names) or not set(key) <= set(wanted):
         return False
@@ -450,6 +540,9 @@ def matches(
     if rule["matching"] == "exact":
         return _match_keyed_exact(left, right, values)
     if rule["matching"] == "epsilon":
+        # An ordered result keeps the reference's row order as well.
+        if ordered and list(left) != list(right):
+            return False
         return _match_epsilon(left, right, values, float(rule["epsilon"]))
     label = str(rule["label"])
     return set(wanted) == {*key, label} and _match_equivalence(left, right, label)

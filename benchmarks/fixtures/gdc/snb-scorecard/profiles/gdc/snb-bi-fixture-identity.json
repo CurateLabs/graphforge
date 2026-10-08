@@ -1,0 +1,63 @@
+{
+  "schema": "graphforge-gdc-pinned-identity/1",
+  "suite_id": "snb-bi",
+  "disposition": "executable",
+  "spec": {
+    "name": "ldbc_snb_docs",
+    "source": "https://github.com/ldbc/ldbc_snb_docs",
+    "release": "v2.2.4",
+    "commit": "5f7956e07a214373c363b371a3b88bc83ddcd118"
+  },
+  "generator": {
+    "name": "graphforge-gdc-snb-scorecard-fixture",
+    "source": "https://github.com/CurateLabs/graphforge/tree/main/benchmarks/harness/graphforge_bench/gdc_snb_scorecard_fixture.py",
+    "release": "snb-scorecard-fixture-v1",
+    "commit": null
+  },
+  "driver": {
+    "name": "graphforge-gdc-scorecard-converter",
+    "source": "https://github.com/CurateLabs/graphforge/tree/main/benchmarks/runners/gdc-scorecard",
+    "release": "converter-v1",
+    "commit": null
+  },
+  "datasets": [
+    {
+      "id": "bi-fixture-sf0",
+      "role": "dataset",
+      "checksum_sha256": "0c318bca6041e87950c385d3521d728ab0c0c6e59437eda215abb7106e417a85",
+      "license": "Apache-2.0",
+      "acquisition": "download",
+      "source": "https://datasets.ldbcouncil.org/graphforge-fixture/snb-bi-fixture-sf0.tar.zst"
+    },
+    {
+      "id": "bi-fixture-sf2",
+      "role": "dataset",
+      "checksum_sha256": "0c318bca6041e87950c385d3521d728ab0c0c6e59437eda215abb7106e417a85",
+      "license": "Apache-2.0",
+      "acquisition": "download",
+      "source": "https://datasets.ldbcouncil.org/graphforge-fixture/snb-bi-fixture-sf0.tar.zst"
+    },
+    {
+      "id": "bi-fixture-parameters",
+      "role": "parameter",
+      "checksum_sha256": "e32d4d8de67baa6b3f04876c98a399715bf97c14fec41cf9f7beae282569f78b",
+      "license": "Apache-2.0",
+      "acquisition": "download",
+      "source": "https://datasets.ldbcouncil.org/graphforge-fixture/snb-bi-fixture-parameters.tar.zst"
+    }
+  ],
+  "references": [
+    {
+      "dataset_id": "bi-fixture-sf0",
+      "workload_key": "umbra-validation",
+      "checksum_sha256": "4e83143e15e58fbdc5af7c3299d0b1fc5a432dd5e7452b97a1f62da5695bf3f8",
+      "source": "https://datasets.ldbcouncil.org/graphforge-fixture/snb-bi-fixture-umbra.tar.zst"
+    },
+    {
+      "dataset_id": "bi-fixture-sf2",
+      "workload_key": "umbra-validation",
+      "checksum_sha256": "4e83143e15e58fbdc5af7c3299d0b1fc5a432dd5e7452b97a1f62da5695bf3f8",
+      "source": "https://datasets.ldbcouncil.org/graphforge-fixture/snb-bi-fixture-umbra.tar.zst"
+    }
+  ]
+}

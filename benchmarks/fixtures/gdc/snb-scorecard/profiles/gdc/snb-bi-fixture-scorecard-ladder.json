@@ -1,0 +1,468 @@
+{
+  "schema": "graphforge-gdc-ldbc-csv-scorecard-ladder/1",
+  "suite_id": "snb-bi",
+  "identity_profile": "scorecard",
+  "load_mapping": "profiles/gdc/snb-bi-load-mapping.json",
+  "counts_source": {
+    "url": "https://github.com/CurateLabs/graphforge/tree/main/benchmarks/fixtures/gdc/snb-scorecard",
+    "description": "Fixture: counts are the committed fixture archives' records"
+  },
+  "rungs": [
+    {
+      "id": "sf0",
+      "order": 1,
+      "scale_factor": "0",
+      "dataset_id": "bi-fixture-sf0",
+      "archive_url": "https://datasets.ldbcouncil.org/graphforge-fixture/snb-bi-fixture-sf0.tar.zst",
+      "archive_bytes": 19617,
+      "archive_md5": "19840507f6ae477c52c58045eec36ad0",
+      "tables": [
+        {
+          "table": "organisation",
+          "kind": "nodes",
+          "ldbc_name": "organisation",
+          "published": 2,
+          "listed": 2
+        },
+        {
+          "table": "place",
+          "kind": "nodes",
+          "ldbc_name": "place",
+          "published": 9,
+          "listed": 9
+        },
+        {
+          "table": "tag",
+          "kind": "nodes",
+          "ldbc_name": "tag",
+          "published": 10,
+          "listed": 10
+        },
+        {
+          "table": "tagclass",
+          "kind": "nodes",
+          "ldbc_name": "tagclass",
+          "published": 3,
+          "listed": 3
+        },
+        {
+          "table": "comment",
+          "kind": "nodes",
+          "ldbc_name": "comment",
+          "published": 95,
+          "listed": 95
+        },
+        {
+          "table": "forum",
+          "kind": "nodes",
+          "ldbc_name": "forum",
+          "published": 10,
+          "listed": 10
+        },
+        {
+          "table": "person",
+          "kind": "nodes",
+          "ldbc_name": "person",
+          "published": 24,
+          "listed": 24
+        },
+        {
+          "table": "post",
+          "kind": "nodes",
+          "ldbc_name": "post",
+          "published": 59,
+          "listed": 59
+        },
+        {
+          "table": "organisation_islocatedin_place",
+          "kind": "edges",
+          "ldbc_name": "organisation_islocatedin_place",
+          "published": 2,
+          "listed": 2
+        },
+        {
+          "table": "place_ispartof_place",
+          "kind": "edges",
+          "ldbc_name": "place_ispartof_place",
+          "published": 6,
+          "listed": 6
+        },
+        {
+          "table": "tag_hastype_tagclass",
+          "kind": "edges",
+          "ldbc_name": "tag_hastype_tagclass",
+          "published": 10,
+          "listed": 10
+        },
+        {
+          "table": "tagclass_issubclassof_tagclass",
+          "kind": "edges",
+          "ldbc_name": "tagclass_issubclassof_tagclass",
+          "published": 1,
+          "listed": 1
+        },
+        {
+          "table": "comment_hascreator_person",
+          "kind": "edges",
+          "ldbc_name": "comment_hascreator_person",
+          "published": 95,
+          "listed": 95
+        },
+        {
+          "table": "comment_hastag_tag",
+          "kind": "edges",
+          "ldbc_name": "comment_hastag_tag",
+          "published": 121,
+          "listed": 121
+        },
+        {
+          "table": "comment_islocatedin_country",
+          "kind": "edges",
+          "ldbc_name": "comment_islocatedin_country",
+          "published": 95,
+          "listed": 95
+        },
+        {
+          "table": "comment_replyof_comment",
+          "kind": "edges",
+          "ldbc_name": "comment_replyof_comment",
+          "published": 36,
+          "listed": 36
+        },
+        {
+          "table": "comment_replyof_post",
+          "kind": "edges",
+          "ldbc_name": "comment_replyof_post",
+          "published": 59,
+          "listed": 59
+        },
+        {
+          "table": "forum_containerof_post",
+          "kind": "edges",
+          "ldbc_name": "forum_containerof_post",
+          "published": 59,
+          "listed": 59
+        },
+        {
+          "table": "forum_hasmember_person",
+          "kind": "edges",
+          "ldbc_name": "forum_hasmember_person",
+          "published": 52,
+          "listed": 52
+        },
+        {
+          "table": "forum_hasmoderator_person",
+          "kind": "edges",
+          "ldbc_name": "forum_hasmoderator_person",
+          "published": 10,
+          "listed": 10
+        },
+        {
+          "table": "forum_hastag_tag",
+          "kind": "edges",
+          "ldbc_name": "forum_hastag_tag",
+          "published": 100,
+          "listed": 100
+        },
+        {
+          "table": "person_hasinterest_tag",
+          "kind": "edges",
+          "ldbc_name": "person_hasinterest_tag",
+          "published": 33,
+          "listed": 33
+        },
+        {
+          "table": "person_islocatedin_city",
+          "kind": "edges",
+          "ldbc_name": "person_islocatedin_city",
+          "published": 24,
+          "listed": 24
+        },
+        {
+          "table": "person_knows_person",
+          "kind": "edges",
+          "ldbc_name": "person_knows_person",
+          "published": 53,
+          "listed": 53
+        },
+        {
+          "table": "person_likes_comment",
+          "kind": "edges",
+          "ldbc_name": "person_likes_comment",
+          "published": 72,
+          "listed": 72
+        },
+        {
+          "table": "person_likes_post",
+          "kind": "edges",
+          "ldbc_name": "person_likes_post",
+          "published": 37,
+          "listed": 37
+        },
+        {
+          "table": "person_studyat_university",
+          "kind": "edges",
+          "ldbc_name": "person_studyat_university",
+          "published": 1,
+          "listed": 1
+        },
+        {
+          "table": "person_workat_company",
+          "kind": "edges",
+          "ldbc_name": "person_workat_company",
+          "published": 1,
+          "listed": 1
+        },
+        {
+          "table": "post_hascreator_person",
+          "kind": "edges",
+          "ldbc_name": "post_hascreator_person",
+          "published": 59,
+          "listed": 59
+        },
+        {
+          "table": "post_hastag_tag",
+          "kind": "edges",
+          "ldbc_name": "post_hastag_tag",
+          "published": 81,
+          "listed": 81
+        },
+        {
+          "table": "post_islocatedin_country",
+          "kind": "edges",
+          "ldbc_name": "post_islocatedin_country",
+          "published": 59,
+          "listed": 59
+        }
+      ]
+    },
+    {
+      "id": "sf2",
+      "order": 2,
+      "scale_factor": "2",
+      "dataset_id": "bi-fixture-sf2",
+      "archive_url": "https://datasets.ldbcouncil.org/graphforge-fixture/snb-bi-fixture-sf0.tar.zst",
+      "archive_bytes": 19617,
+      "archive_md5": "19840507f6ae477c52c58045eec36ad0",
+      "tables": [
+        {
+          "table": "organisation",
+          "kind": "nodes",
+          "ldbc_name": "organisation",
+          "published": 2,
+          "listed": 2
+        },
+        {
+          "table": "place",
+          "kind": "nodes",
+          "ldbc_name": "place",
+          "published": 9,
+          "listed": 9
+        },
+        {
+          "table": "tag",
+          "kind": "nodes",
+          "ldbc_name": "tag",
+          "published": 10,
+          "listed": 10
+        },
+        {
+          "table": "tagclass",
+          "kind": "nodes",
+          "ldbc_name": "tagclass",
+          "published": 3,
+          "listed": 3
+        },
+        {
+          "table": "comment",
+          "kind": "nodes",
+          "ldbc_name": "comment",
+          "published": 95,
+          "listed": 95
+        },
+        {
+          "table": "forum",
+          "kind": "nodes",
+          "ldbc_name": "forum",
+          "published": 10,
+          "listed": 10
+        },
+        {
+          "table": "person",
+          "kind": "nodes",
+          "ldbc_name": "person",
+          "published": 24,
+          "listed": 24
+        },
+        {
+          "table": "post",
+          "kind": "nodes",
+          "ldbc_name": "post",
+          "published": 59,
+          "listed": 59
+        },
+        {
+          "table": "organisation_islocatedin_place",
+          "kind": "edges",
+          "ldbc_name": "organisation_islocatedin_place",
+          "published": 2,
+          "listed": 2
+        },
+        {
+          "table": "place_ispartof_place",
+          "kind": "edges",
+          "ldbc_name": "place_ispartof_place",
+          "published": 6,
+          "listed": 6
+        },
+        {
+          "table": "tag_hastype_tagclass",
+          "kind": "edges",
+          "ldbc_name": "tag_hastype_tagclass",
+          "published": 10,
+          "listed": 10
+        },
+        {
+          "table": "tagclass_issubclassof_tagclass",
+          "kind": "edges",
+          "ldbc_name": "tagclass_issubclassof_tagclass",
+          "published": 1,
+          "listed": 1
+        },
+        {
+          "table": "comment_hascreator_person",
+          "kind": "edges",
+          "ldbc_name": "comment_hascreator_person",
+          "published": 95,
+          "listed": 95
+        },
+        {
+          "table": "comment_hastag_tag",
+          "kind": "edges",
+          "ldbc_name": "comment_hastag_tag",
+          "published": 121,
+          "listed": 121
+        },
+        {
+          "table": "comment_islocatedin_country",
+          "kind": "edges",
+          "ldbc_name": "comment_islocatedin_country",
+          "published": 95,
+          "listed": 95
+        },
+        {
+          "table": "comment_replyof_comment",
+          "kind": "edges",
+          "ldbc_name": "comment_replyof_comment",
+          "published": 36,
+          "listed": 36
+        },
+        {
+          "table": "comment_replyof_post",
+          "kind": "edges",
+          "ldbc_name": "comment_replyof_post",
+          "published": 59,
+          "listed": 59
+        },
+        {
+          "table": "forum_containerof_post",
+          "kind": "edges",
+          "ldbc_name": "forum_containerof_post",
+          "published": 59,
+          "listed": 59
+        },
+        {
+          "table": "forum_hasmember_person",
+          "kind": "edges",
+          "ldbc_name": "forum_hasmember_person",
+          "published": 52,
+          "listed": 52
+        },
+        {
+          "table": "forum_hasmoderator_person",
+          "kind": "edges",
+          "ldbc_name": "forum_hasmoderator_person",
+          "published": 10,
+          "listed": 10
+        },
+        {
+          "table": "forum_hastag_tag",
+          "kind": "edges",
+          "ldbc_name": "forum_hastag_tag",
+          "published": 100,
+          "listed": 100
+        },
+        {
+          "table": "person_hasinterest_tag",
+          "kind": "edges",
+          "ldbc_name": "person_hasinterest_tag",
+          "published": 33,
+          "listed": 33
+        },
+        {
+          "table": "person_islocatedin_city",
+          "kind": "edges",
+          "ldbc_name": "person_islocatedin_city",
+          "published": 24,
+          "listed": 24
+        },
+        {
+          "table": "person_knows_person",
+          "kind": "edges",
+          "ldbc_name": "person_knows_person",
+          "published": 53,
+          "listed": 53
+        },
+        {
+          "table": "person_likes_comment",
+          "kind": "edges",
+          "ldbc_name": "person_likes_comment",
+          "published": 72,
+          "listed": 72
+        },
+        {
+          "table": "person_likes_post",
+          "kind": "edges",
+          "ldbc_name": "person_likes_post",
+          "published": 37,
+          "listed": 37
+        },
+        {
+          "table": "person_studyat_university",
+          "kind": "edges",
+          "ldbc_name": "person_studyat_university",
+          "published": 1,
+          "listed": 1
+        },
+        {
+          "table": "person_workat_company",
+          "kind": "edges",
+          "ldbc_name": "person_workat_company",
+          "published": 1,
+          "listed": 1
+        },
+        {
+          "table": "post_hascreator_person",
+          "kind": "edges",
+          "ldbc_name": "post_hascreator_person",
+          "published": 59,
+          "listed": 59
+        },
+        {
+          "table": "post_hastag_tag",
+          "kind": "edges",
+          "ldbc_name": "post_hastag_tag",
+          "published": 81,
+          "listed": 81
+        },
+        {
+          "table": "post_islocatedin_country",
+          "kind": "edges",
+          "ldbc_name": "post_islocatedin_country",
+          "published": 59,
+          "listed": 59
+        }
+      ]
+    }
+  ]
+}
