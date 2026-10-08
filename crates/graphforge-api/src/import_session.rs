@@ -1534,7 +1534,7 @@ fn for_each_source_batch(
             let result = (|| {
                 let file = external.open()?;
                 #[cfg(test)]
-                external_source::pass_hook("opened", 0);
+                external_source::pass_hook(&external.path, "opened", 0);
                 let digest = external_source::SourceDigest::new(external.size);
                 let guard = file.try_clone().map_err(storage)?;
                 let chunk_reader = ImportChunkReader::new(file, tracker.clone(), digest.clone())?;
@@ -1549,7 +1549,7 @@ fn for_each_source_batch(
                     reader.map(|batch| {
                         #[cfg(test)]
                         {
-                            external_source::pass_hook("batch", seen);
+                            external_source::pass_hook(&external.path, "batch", seen);
                             seen += 1;
                         }
                         // The source can change between any two batches.
@@ -2479,8 +2479,22 @@ mod tests {
                 .register_parquet(BulkInputKind::Node, Path::new("../escape.parquet"))
                 .is_err()
         );
+        assert!(
+            session
+                .register_parquet(BulkInputKind::Node, &corrupt)
+                .is_err(),
+            "registration reads the footer, so a non-Parquet file is refused up front"
+        );
+        // A file with Parquet's framing but an undecodable footer registers and
+        // is refused when it is read.
+        let framed = source_dir.path().join("framed.parquet");
+        let mut bytes = b"PAR1".to_vec();
+        bytes.extend_from_slice(&[0xff; 16]);
+        bytes.extend_from_slice(&10_u32.to_le_bytes());
+        bytes.extend_from_slice(b"PAR1");
+        fs::write(&framed, bytes).unwrap();
         session
-            .register_parquet(BulkInputKind::Node, &corrupt)
+            .register_parquet(BulkInputKind::Node, &framed)
             .unwrap();
         assert!(session.validate(&graph).is_err());
 

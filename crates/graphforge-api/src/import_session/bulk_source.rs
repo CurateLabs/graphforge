@@ -532,7 +532,7 @@ impl BulkBatchReader for SourceReader<'_> {
                     .ok_or_else(|| storage("Parquet import source has no registered identity"))?;
                 let file = in_place.external.open()?;
                 #[cfg(test)]
-                super::external_source::pass_hook("opened", task as u64);
+                super::external_source::pass_hook(&in_place.external.path, "opened", task as u64);
                 let guard = file.try_clone().map_err(storage)?;
                 let file =
                     DigestingFile::new(file, in_place.external.size, in_place.digest.clone());
@@ -584,7 +584,11 @@ impl BulkBatchReader for SourceReader<'_> {
                 let reader = builder.build().map_err(storage)?;
                 for (offset, batch) in reader.enumerate() {
                     #[cfg(test)]
-                    super::external_source::pass_hook("batch", first_batch + offset as u64);
+                    super::external_source::pass_hook(
+                        &in_place.external.path,
+                        "batch",
+                        first_batch + offset as u64,
+                    );
                     // The source can change between any two batches.
                     in_place.external.check(&guard)?;
                     self.emit(first_batch + offset as u64, batch.map_err(storage)?, sink)?;

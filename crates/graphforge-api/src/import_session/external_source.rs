@@ -467,31 +467,43 @@ impl<R: Read> Read for DigestingReader<R> {
 }
 
 // Test-only seam between steps of a read pass, so a test can change the source
-// at an exact point: `("opened", 0)` once the source is open, `("batch", n)`
-// before batch `n` is checked.
+// at an exact point: `("opened", n)` once the source is open for task `n`,
+// `("batch", n)` before batch `n` is checked. Hooks are keyed by the source's
+// canonical path, and a pass can run on any thread.
 #[cfg(test)]
-thread_local! {
-    static PASS_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(&'static str, u64)>>> =
-        std::cell::RefCell::new(None);
+type PassHook = Box<dyn FnMut(&'static str, u64) + Send>;
+
+#[cfg(test)]
+static PASS_HOOKS: Mutex<Vec<(PathBuf, PassHook)>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(super) fn set_pass_hook(path: &Path, hook: impl FnMut(&'static str, u64) + Send + 'static) {
+    let path = fs::canonicalize(path).unwrap();
+    let mut hooks = PASS_HOOKS.lock().unwrap();
+    hooks.retain(|(held, _)| *held != path);
+    hooks.push((path, Box::new(hook)));
 }
 
 #[cfg(test)]
-pub(super) fn set_pass_hook(hook: impl FnMut(&'static str, u64) + 'static) {
-    PASS_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+pub(super) fn clear_pass_hook(path: &Path) {
+    let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    PASS_HOOKS.lock().unwrap().retain(|(held, _)| *held != path);
 }
 
 #[cfg(test)]
-pub(super) fn clear_pass_hook() {
-    PASS_HOOK.with(|slot| *slot.borrow_mut() = None);
-}
-
-#[cfg(test)]
-pub(super) fn pass_hook(stage: &'static str, index: u64) {
-    PASS_HOOK.with(|slot| {
-        if let Some(hook) = slot.borrow_mut().as_mut() {
-            hook(stage, index);
-        }
-    });
+pub(super) fn pass_hook(path: &Path, stage: &'static str, index: u64) {
+    // A hook may change the source, so it runs outside the registry lock.
+    let taken = {
+        let mut hooks = PASS_HOOKS.lock().unwrap();
+        hooks
+            .iter()
+            .position(|(held, _)| held == path)
+            .map(|position| hooks.remove(position))
+    };
+    if let Some((held, mut hook)) = taken {
+        hook(stage, index);
+        PASS_HOOKS.lock().unwrap().push((held, hook));
+    }
 }
 
 #[cfg(test)]

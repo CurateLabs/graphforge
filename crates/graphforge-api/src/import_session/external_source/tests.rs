@@ -224,10 +224,10 @@ fn digest_equals_sha256_for_any_read_order() {
     );
     // Reversed, overlapping, repeated and entirely unobserved: all still exact.
     assert_eq!(
-        digest_of(&|d| ranges(70_001)
-            .iter()
-            .rev()
-            .for_each(|&(a, b)| d.observe(a as u64, &bytes[a.saturating_sub(10)..b]))),
+        digest_of(&|d| ranges(70_001).iter().rev().for_each(|&(a, b)| {
+            let from = a.saturating_sub(10);
+            d.observe(from as u64, &bytes[from..b]);
+        })),
         expected
     );
     assert_eq!(digest_of(&|_| ()), expected);
@@ -304,7 +304,9 @@ fn registration_copies_and_writes_no_source_bytes_on(route: Route) {
         "fixture is too small to distinguish a copy"
     );
 
-    let mut session = begin(&graph);
+    let mut session = graph
+        .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
+        .unwrap();
     let capture = graphforge_storage::concurrency_attribution::RegionCapture::start("test");
     session
         .register_parquet(BulkInputKind::Node, &path)
@@ -531,13 +533,13 @@ fn each_change_during_the_build_is_refused_on(route: Route) {
             .unwrap();
         let path = source.path.clone();
         let apply = change.apply;
-        super::set_pass_hook(move |stage, index| {
+        super::set_pass_hook(&source.path, move |stage, index| {
             if stage == "batch" && index == 1 {
                 apply(&path);
             }
         });
         let error = session.validate(&graph).unwrap_err();
-        super::clear_pass_hook();
+        super::clear_pass_hook(&source.path);
         assert_refusal(&error, change, "during the build");
         assert!(
             session.manifest.sources[0].sha256.is_none(),
@@ -625,7 +627,7 @@ fn a_digest_that_differs_from_the_recorded_one_is_refused_on(route: Route) {
         session.manifest.sources[0].sha256 = Some(recorded.clone());
         if during_build {
             let path = source.path.clone();
-            super::set_pass_hook(move |stage, _| {
+            super::set_pass_hook(&source.path, move |stage, _| {
                 if stage == "opened" {
                     rewrite_label_in_place(&path);
                 }
@@ -634,7 +636,7 @@ fn a_digest_that_differs_from_the_recorded_one_is_refused_on(route: Route) {
             rewrite_label_in_place(&source.path);
         }
         let error = session.validate(&graph).unwrap_err();
-        super::clear_pass_hook();
+        super::clear_pass_hook(&source.path);
         let (code, message) = api_error(&error);
         assert_eq!(code, ApiErrorCode::IdentityConflict, "{message}");
         assert!(message.contains("digest changed"), "{message}");
