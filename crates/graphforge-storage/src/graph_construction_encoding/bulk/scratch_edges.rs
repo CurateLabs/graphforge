@@ -227,86 +227,92 @@ pub(super) fn scatter_edges(
     let dictionary = SharedDictionary::default();
     let histogram = KeyHistogram::new(nodes.uuids.len() as u64);
     let miss = Mutex::new(None::<[u8; 16]>);
-    tasks.items.par_iter().try_for_each(|&(source, task, rows)| {
-        check_cancelled(cancel)?;
-        let mut scatter = Scatter::new(scratch, &partitions, plan.staging_bytes);
-        let mut cache = RelationCache {
-            shared: &dictionary,
-            ids: HashMap::new(),
-        };
-        let mut local = histogram.local();
-        let mut written = 0;
-        let mut uuids = Vec::new();
-        let mut sources_ranks = Vec::new();
-        let mut targets = Vec::new();
-        let mut rels = Vec::new();
-        let mut endpoints = Vec::new();
-        let mut task_miss = None::<[u8; 16]>;
-        sources[source].reader.read_task(task, &mut |batch| {
+    tasks
+        .items
+        .par_iter()
+        .try_for_each(|&(source, task, rows)| {
             check_cancelled(cancel)?;
-            crate::graph_construction::validate_canonical_batch(ConstructionChunkKind::Edge, &batch)?;
-            admit_batch(ConstructionChunkKind::Edge, &batch, budgets)?;
-            let count = batch.num_rows();
-            if written + count > rows {
+            let mut scatter = Scatter::new(scratch, &partitions, plan.staging_bytes);
+            let mut cache = RelationCache {
+                shared: &dictionary,
+                ids: HashMap::new(),
+            };
+            let mut local = histogram.local();
+            let mut written = 0;
+            let mut uuids = Vec::new();
+            let mut sources_ranks = Vec::new();
+            let mut targets = Vec::new();
+            let mut rels = Vec::new();
+            let mut endpoints = Vec::new();
+            let mut task_miss = None::<[u8; 16]>;
+            sources[source].reader.read_task(task, &mut |batch| {
+                check_cancelled(cancel)?;
+                crate::graph_construction::validate_canonical_batch(
+                    ConstructionChunkKind::Edge,
+                    &batch,
+                )?;
+                admit_batch(ConstructionChunkKind::Edge, &batch, budgets)?;
+                let count = batch.num_rows();
+                if written + count > rows {
+                    return Err(short_source());
+                }
+                if count == 0 {
+                    return Ok(());
+                }
+                uuids.clear();
+                uuids.resize(count, [0_u8; 16]);
+                copy_uuids(
+                    crate::graph_construction::batch_uuid_column(&batch, "edge_uuid")?,
+                    &mut uuids,
+                );
+                rels.clear();
+                rels.resize(count, 0);
+                cache.column(required_string(&batch, "rel_type")?, &mut rels)?;
+                for (name, ranks) in [
+                    ("source_uuid", &mut sources_ranks),
+                    ("target_uuid", &mut targets),
+                ] {
+                    endpoints.clear();
+                    endpoints.resize(count, [0_u8; 16]);
+                    copy_uuids(
+                        crate::graph_construction::batch_uuid_column(&batch, name)?,
+                        &mut endpoints,
+                    );
+                    ranks.clear();
+                    ranks.extend(endpoints.iter().map(|endpoint| {
+                        index.find(endpoint).unwrap_or_else(|| {
+                            task_miss.get_or_insert(*endpoint);
+                            0
+                        })
+                    }));
+                }
+                for row in 0..count {
+                    let record = EdgeRecord {
+                        uuid: uuids[row],
+                        src: sources_ranks[row],
+                        dst: targets[row],
+                        rel: rels[row],
+                    };
+                    if record.src != 0 && record.dst != 0 {
+                        histogram.add(&mut local, record.src, record.dst);
+                    }
+                    scatter.push(partition_of(&splitters, &record.uuid), &record.encode())?;
+                }
+                written += count;
+                Ok(())
+            })?;
+            if written != rows {
                 return Err(short_source());
             }
-            if count == 0 {
-                return Ok(());
+            scatter.finish()?;
+            histogram.merge(&local);
+            if let Some(endpoint) = task_miss {
+                miss.lock()
+                    .map_err(|_| storage("endpoint lock poisoned"))?
+                    .get_or_insert(endpoint);
             }
-            uuids.clear();
-            uuids.resize(count, [0_u8; 16]);
-            copy_uuids(
-                crate::graph_construction::batch_uuid_column(&batch, "edge_uuid")?,
-                &mut uuids,
-            );
-            rels.clear();
-            rels.resize(count, 0);
-            cache.column(required_string(&batch, "rel_type")?, &mut rels)?;
-            for (name, ranks) in [
-                ("source_uuid", &mut sources_ranks),
-                ("target_uuid", &mut targets),
-            ] {
-                endpoints.clear();
-                endpoints.resize(count, [0_u8; 16]);
-                copy_uuids(
-                    crate::graph_construction::batch_uuid_column(&batch, name)?,
-                    &mut endpoints,
-                );
-                ranks.clear();
-                ranks.extend(endpoints.iter().map(|endpoint| {
-                    index.find(endpoint).unwrap_or_else(|| {
-                        task_miss.get_or_insert(*endpoint);
-                        0
-                    })
-                }));
-            }
-            for row in 0..count {
-                let record = EdgeRecord {
-                    uuid: uuids[row],
-                    src: sources_ranks[row],
-                    dst: targets[row],
-                    rel: rels[row],
-                };
-                if record.src != 0 && record.dst != 0 {
-                    histogram.add(&mut local, record.src, record.dst);
-                }
-                scatter.push(partition_of(&splitters, &record.uuid), &record.encode())?;
-            }
-            written += count;
             Ok(())
         })?;
-        if written != rows {
-            return Err(short_source());
-        }
-        scatter.finish()?;
-        histogram.merge(&local);
-        if let Some(endpoint) = task_miss {
-            miss.lock()
-                .map_err(|_| storage("endpoint lock poisoned"))?
-                .get_or_insert(endpoint);
-        }
-        Ok(())
-    })?;
     let counts = partitions.counts()?;
     let total = counts.iter().sum::<u64>();
     if total != tasks.total as u64 {
@@ -359,7 +365,9 @@ impl ScatteredEdges {
         }
         records.sort_unstable_by(|left, right| left.uuid.cmp(&right.uuid));
         if records.windows(2).any(|pair| pair[0].uuid == pair[1].uuid) {
-            return Err(storage("duplicate identity across construction runs (edge)"));
+            return Err(storage(
+                "duplicate identity across construction runs (edge)",
+            ));
         }
         if let Some(first) = records.first() {
             let mut position = node_uuids.partition_point(|node| node < &first.uuid);
@@ -465,7 +473,9 @@ pub(super) fn rank_partitions(context: &RankContext<'_>) -> Result<RankedEdges, 
     let uuid_files = (0..partitions)
         .map(|part| scratch.file(&format!("edge-uuids-{part:06}.blocks")))
         .collect::<Vec<_>>();
-    let stats = (0..partitions).map(|_| Mutex::new(None::<PartitionStats>)).collect::<Vec<_>>();
+    let stats = (0..partitions)
+        .map(|_| Mutex::new(None::<PartitionStats>))
+        .collect::<Vec<_>>();
     let carry = Mutex::new(Vec::<EdgeRecord>::new());
     let ordered = Ordered::new(plan.gate_bytes, 1, cancel);
     run_ordered(
@@ -515,7 +525,9 @@ pub(super) fn rank_partitions(context: &RankContext<'_>) -> Result<RankedEdges, 
             uuids.finish()?;
             out.finish()?;
             inn.finish()?;
-            *stats[part].lock().map_err(|_| storage("stats lock poisoned"))? =
+            *stats[part]
+                .lock()
+                .map_err(|_| storage("stats lock poisoned"))? =
                 Some(PartitionStats { first, counts });
 
             // Windows are fixed ranges of edge ids. This partition completes
@@ -544,7 +556,9 @@ pub(super) fn rank_partitions(context: &RankContext<'_>) -> Result<RankedEdges, 
         },
     )?;
     // The rows after the last whole window are the final, short window.
-    let tail = carry.into_inner().map_err(|_| storage("carry lock poisoned"))?;
+    let tail = carry
+        .into_inner()
+        .map_err(|_| storage("carry lock poisoned"))?;
     if !tail.is_empty() {
         emit_rows(
             emitter,

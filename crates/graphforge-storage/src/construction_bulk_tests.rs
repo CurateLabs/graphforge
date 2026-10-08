@@ -977,6 +977,14 @@ mod bulk_builder {
         }
     }
 
+    /// Whether a directory called `name` exists anywhere below `root`.
+    fn walkdir_has(root: &Path, name: &str) -> bool {
+        std::fs::read_dir(root).into_iter().flatten().flatten().any(|entry| {
+            entry.file_name() == name
+                || (entry.path().is_dir() && walkdir_has(&entry.path(), name))
+        })
+    }
+
     const CRASH_PARTITIONS: &str = "GF_BULK_CRASH_PARTITIONS";
 
     /// The killed process of the over-budget route.
@@ -1037,12 +1045,9 @@ mod bulk_builder {
                 .unwrap();
             assert_eq!(status.code(), Some(86), "{failpoint}");
             // Recovery: opening the session deletes what the killed attempt left.
-            let session_root = std::fs::read_dir(root.path())
-                .unwrap()
-                .filter_map(Result::ok)
-                .map(|entry| entry.path())
-                .find(|path| path.join("bulk-scratch").exists());
-            left_scratch += usize::from(session_root.is_some());
+            let leftover = root.path().join("bulk-scratch").exists()
+                || walkdir_has(root.path(), "bulk-scratch");
+            left_scratch += usize::from(leftover);
             let mut session = pinned(&root);
             assert!(!scratch_dir(&session).exists(), "recovery kept scratch after {failpoint}");
             let _forced = crate::graph_construction_encoding::ForcedPartitions::set(7, 5);

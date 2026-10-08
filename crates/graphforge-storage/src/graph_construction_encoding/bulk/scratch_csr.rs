@@ -125,7 +125,9 @@ impl KeyHistogram {
     }
 
     fn counts(side: &[AtomicU64]) -> Vec<u64> {
-        side.iter().map(|count| count.load(Ordering::Relaxed)).collect()
+        side.iter()
+            .map(|count| count.load(Ordering::Relaxed))
+            .collect()
     }
 
     pub(super) fn partitioner(&self, direction: Direction, partitions: usize) -> KeyPartitioner {
@@ -145,8 +147,11 @@ impl KeyHistogram {
                 if total == 0 {
                     0
                 } else {
-                    u32::try_from((middle * partitions as u128 / u128::from(total)).min(partitions as u128 - 1))
-                        .unwrap_or(0)
+                    u32::try_from(
+                        (middle * partitions as u128 / u128::from(total))
+                            .min(partitions as u128 - 1),
+                    )
+                    .unwrap_or(0)
                 }
             })
             .collect();
@@ -227,8 +232,8 @@ fn cut(state: &mut GroupState, view: &[CsrRecord], max_edges: usize, max_nodes: 
             None => (u64::from(view[position].key), max_edges),
             Some(head) => (u64::from(head.key), max_edges - state.carry.len()),
         };
-        let by_nodes =
-            position + view[position..].partition_point(|record| u64::from(record.key) - first < max_nodes);
+        let by_nodes = position
+            + view[position..].partition_point(|record| u64::from(record.key) - first < max_nodes);
         let end = by_nodes.min(position + room);
         if end == view.len() {
             // Whether the shard is full is decided by the next entry, which
@@ -253,16 +258,26 @@ fn encode_job(
     view: &[CsrRecord],
 ) -> Result<(usize, CsrShardRecord), GfError> {
     let body = &view[job.range.clone()];
-    let first = job.prefix.first().or(body.first()).expect("a shard has entries");
-    let last = body.last().or(job.prefix.last()).expect("a shard has entries");
+    let first = job
+        .prefix
+        .first()
+        .or(body.first())
+        .expect("a shard has entries");
+    let last = body
+        .last()
+        .or(job.prefix.last())
+        .expect("a shard has entries");
     let record = set.write_shard(
         job.ordinal,
         u64::from(first.key),
         u64::from(last.key),
-        job.prefix
-            .iter()
-            .chain(body)
-            .map(|entry| (u64::from(entry.key), u64::from(entry.edge), u64::from(entry.neighbor))),
+        job.prefix.iter().chain(body).map(|entry| {
+            (
+                u64::from(entry.key),
+                u64::from(entry.edge),
+                u64::from(entry.neighbor),
+            )
+        }),
     )?;
     Ok((job.ordinal, record))
 }
@@ -431,7 +446,12 @@ mod tests {
     }
 
     /// The cuts of one pass over `entries`, however they are split into partitions.
-    fn shards(entries: &[CsrRecord], split: &[usize], max_edges: usize, max_nodes: u64) -> Vec<Vec<u32>> {
+    fn shards(
+        entries: &[CsrRecord],
+        split: &[usize],
+        max_edges: usize,
+        max_nodes: u64,
+    ) -> Vec<Vec<u32>> {
         let mut state = GroupState::default();
         let mut closed = Vec::new();
         let mut from = 0;
@@ -459,7 +479,16 @@ mod tests {
         // Keys with a hub (key 3 has 7 entries), gaps, and a long tail.
         let mut entries = Vec::new();
         let mut edge = 0;
-        for (key, degree) in [(1, 2), (2, 1), (3, 7), (6, 3), (7, 1), (40, 4), (41, 5), (90, 2)] {
+        for (key, degree) in [
+            (1, 2),
+            (2, 1),
+            (3, 7),
+            (6, 3),
+            (7, 1),
+            (40, 4),
+            (41, 5),
+            (90, 2),
+        ] {
             for _ in 0..degree {
                 edge += 1;
                 entries.push(record(key, edge));
@@ -480,8 +509,17 @@ mod tests {
                 }
                 expected.last_mut().unwrap().push(entry.edge);
             }
-            assert_eq!(whole, expected, "max_edges={max_edges} max_nodes={max_nodes}");
-            for split in [vec![1], vec![5], vec![3, 3, 9], vec![2, 4, 6, 8, 10, 12, 20], vec![0, 25]] {
+            assert_eq!(
+                whole, expected,
+                "max_edges={max_edges} max_nodes={max_nodes}"
+            );
+            for split in [
+                vec![1],
+                vec![5],
+                vec![3, 3, 9],
+                vec![2, 4, 6, 8, 10, 12, 20],
+                vec![0, 25],
+            ] {
                 assert_eq!(
                     shards(&entries, &split, max_edges, max_nodes),
                     expected,
@@ -508,7 +546,10 @@ mod tests {
         let mut sizes = [0_u32; 4];
         for key in 1..=1000_u32 {
             let part = partitioner.partition(key);
-            assert!(part >= previous, "partition ids never decrease with the key");
+            assert!(
+                part >= previous,
+                "partition ids never decrease with the key"
+            );
             previous = part;
             sizes[part] += 1;
         }

@@ -819,11 +819,7 @@ pub(crate) fn write_sharded_csr_from_sorted(
                 key(slice[slice.len() - 1]),
                 slice.iter().map(|entry| {
                     let edge = entry & 0xffff_ffff;
-                    (
-                        key(*entry),
-                        edge,
-                        u64::from(neighbors[edge as usize - 1]),
-                    )
+                    (key(*entry), edge, u64::from(neighbors[edge as usize - 1]))
                 }),
             )
         })

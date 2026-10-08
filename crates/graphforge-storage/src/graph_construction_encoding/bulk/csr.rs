@@ -47,7 +47,10 @@ impl AdjacencyGroups {
                 names.insert(name);
             }
         }
-        let mut stems = names.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>();
+        let mut stems = names
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>();
         let rank = names
             .iter()
             .enumerate()
@@ -165,7 +168,8 @@ pub(super) fn write_adjacency(
                 selected = entries
                     .par_iter()
                     .filter(|entry| {
-                        groups.relation_group[edges.rels[(**entry & 0xffff_ffff) as usize - 1] as usize]
+                        groups.relation_group
+                            [edges.rels[(**entry & 0xffff_ffff) as usize - 1] as usize]
                             == group_rank
                     })
                     .copied()

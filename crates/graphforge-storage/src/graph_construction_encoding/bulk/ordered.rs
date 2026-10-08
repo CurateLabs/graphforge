@@ -53,10 +53,7 @@ impl<'a> Ordered<'a> {
         }
     }
 
-    fn wait<T>(
-        &self,
-        mut ready: impl FnMut(&mut State) -> Option<T>,
-    ) -> Result<T, GfError> {
+    fn wait<T>(&self, mut ready: impl FnMut(&mut State) -> Option<T>) -> Result<T, GfError> {
         let mut state = self
             .state
             .lock()
@@ -149,10 +146,11 @@ pub(super) fn run_ordered(
                     }
                     let reserved = cost(index);
                     let outcome = ordered.acquire(index, reserved).and_then(|()| {
-                        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                            || body(index),
-                        ))
-                        .unwrap_or_else(|_| Err(storage("a scratch partition worker panicked")));
+                        let outcome =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(index)))
+                                .unwrap_or_else(|_| {
+                                    Err(storage("a scratch partition worker panicked"))
+                                });
                         ordered.release(reserved);
                         outcome
                     });
@@ -160,7 +158,9 @@ pub(super) fn run_ordered(
                         if let Ok(mut slot) = first_error.lock() {
                             // A cancellation seen by a bystander must not mask the cause.
                             let bystander = error.to_string().contains("cancelled");
-                            if slot.is_none() || (!bystander && slot.as_ref().is_some_and(is_cancelled)) {
+                            if slot.is_none()
+                                || (!bystander && slot.as_ref().is_some_and(is_cancelled))
+                            {
                                 *slot = Some(error);
                             }
                         }

@@ -177,10 +177,10 @@ impl ScratchPlan {
                 continue;
             }
             let per_partition = gate_bytes / (2 * concurrency);
-            let edge_partitions =
-                ceil(edges.saturating_mul(EDGE_PARTITION_BYTES), per_partition).clamp(1, MAX_PARTITIONS);
-            let csr_partitions =
-                ceil(edges.saturating_mul(CSR_PARTITION_BYTES), per_partition).clamp(1, MAX_PARTITIONS);
+            let edge_partitions = ceil(edges.saturating_mul(EDGE_PARTITION_BYTES), per_partition)
+                .clamp(1, MAX_PARTITIONS);
+            let csr_partitions = ceil(edges.saturating_mul(CSR_PARTITION_BYTES), per_partition)
+                .clamp(1, MAX_PARTITIONS);
             let widest = edge_partitions.max(2 * csr_partitions);
             let staging = (staging_total / (concurrency * widest)).min(MAX_STAGING_BYTES);
             if staging >= MIN_STAGING_BYTES {
@@ -194,8 +194,10 @@ impl ScratchPlan {
             let per_partition = gate_bytes / 2;
             (
                 1,
-                ceil(edges.saturating_mul(EDGE_PARTITION_BYTES), per_partition).clamp(1, MAX_PARTITIONS),
-                ceil(edges.saturating_mul(CSR_PARTITION_BYTES), per_partition).clamp(1, MAX_PARTITIONS),
+                ceil(edges.saturating_mul(EDGE_PARTITION_BYTES), per_partition)
+                    .clamp(1, MAX_PARTITIONS),
+                ceil(edges.saturating_mul(CSR_PARTITION_BYTES), per_partition)
+                    .clamp(1, MAX_PARTITIONS),
                 MIN_STAGING_BYTES,
             )
         });
@@ -222,5 +224,90 @@ impl ScratchPlan {
     /// Bytes a CSR partition of `entries` adjacency entries reserves.
     pub(super) fn csr_cost(entries: u64) -> u64 {
         entries.saturating_mul(CSR_PARTITION_BYTES)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use arrow::record_batch::RecordBatch;
+    use graphforge_core::GfError;
+
+    use super::*;
+    use crate::graph_construction_encoding::{BulkBatchReader, BulkSource};
+
+    struct Never;
+
+    impl BulkBatchReader for Never {
+        fn task_rows(&self, _: usize) -> usize {
+            unreachable!("planning only")
+        }
+
+        fn read_task(
+            &self,
+            _: usize,
+            _: &mut dyn FnMut(RecordBatch) -> Result<(), GfError>,
+        ) -> Result<(), GfError> {
+            unreachable!("planning only")
+        }
+    }
+
+    fn rung(scale: u32) -> BulkBuildPlan<'static> {
+        let source = |rows: u64| BulkSource {
+            reader: Arc::new(Never),
+            tasks: 1,
+            rows,
+            property_free: true,
+            decoded_bytes: 0,
+        };
+        BulkBuildPlan {
+            nodes: vec![source(1 << scale)],
+            edges: vec![source(16 << scale)],
+            memory_budget: None,
+        }
+    }
+
+    const GIB: u64 = 1 << 30;
+
+    #[test]
+    fn partition_sizes_and_concurrency_follow_the_budget() {
+        for scale in [22, 24, 26] {
+            let plan = rung(scale);
+            let mut previous = None::<ScratchPlan>;
+            for budget in [8 * GIB, 4 * GIB, 2 * GIB, GIB + GIB / 2] {
+                if budget < plan.node_tables_resident_bytes() {
+                    continue;
+                }
+                let sized = ScratchPlan::derive(&plan, budget, 16);
+                assert!((1..=16).contains(&sized.concurrency), "{sized:?}");
+                assert!(sized.staging_bytes as u64 >= MIN_STAGING_BYTES, "{sized:?}");
+                // The partitions in flight reserve at most half the gate, so a
+                // partition twice its share still fits.
+                let edges = 16_u64 << scale;
+                let in_flight =
+                    ScratchPlan::edge_cost(edges.div_ceil(sized.edge_partitions as u64))
+                        * sized.concurrency as u64;
+                assert!(
+                    sized.edge_partitions as u64 == MAX_PARTITIONS
+                        || in_flight <= sized.gate_bytes / 2,
+                    "S{scale} budget {budget}: {sized:?} reserves {in_flight}"
+                );
+                // A smaller budget reserves no more in flight.
+                if let Some(larger) = previous {
+                    assert!(sized.gate_bytes <= larger.gate_bytes, "{sized:?} {larger:?}");
+                }
+                previous = Some(sized);
+            }
+        }
+    }
+
+    #[test]
+    fn a_tiny_input_is_one_partition_and_the_largest_is_bounded() {
+        let tiny = ScratchPlan::derive(&rung(4), GIB, 16);
+        assert_eq!((tiny.edge_partitions, tiny.csr_partitions), (1, 1));
+        let huge = ScratchPlan::derive(&rung(30), 4 * GIB, 16);
+        assert!(huge.edge_partitions as u64 <= MAX_PARTITIONS);
+        assert!(huge.csr_partitions as u64 <= MAX_PARTITIONS);
     }
 }

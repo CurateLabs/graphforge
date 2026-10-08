@@ -737,8 +737,8 @@ impl ConstructionSemanticAuthority {
 
 pub use crate::graph_construction_encoding::{
     BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkRoute, BulkSource,
-    BulkStagedReason, ConstructionRetainedArtifact, GraphConstructionEncoding, GraphConstructionEncodingEvidence,
-    GraphConstructionEncodingInvocationEvidence,
+    BulkStagedReason, ConstructionRetainedArtifact, GraphConstructionEncoding,
+    GraphConstructionEncodingEvidence, GraphConstructionEncodingInvocationEvidence,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

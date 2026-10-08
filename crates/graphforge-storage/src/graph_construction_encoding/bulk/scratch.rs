@@ -205,7 +205,9 @@ impl Partitions {
             .write_all(block)
             .map_err(storage)?;
         *records += (payload / self.width) as u64;
-        scratch.written.fetch_add(block.len() as u64, Ordering::Relaxed);
+        scratch
+            .written
+            .fetch_add(block.len() as u64, Ordering::Relaxed);
         Ok(())
     }
 
@@ -346,7 +348,11 @@ pub(super) struct Appender<'a> {
 }
 
 impl<'a> Appender<'a> {
-    pub(super) fn create(scratch: &'a Scratch, path: &Path, capacity: usize) -> Result<Self, GfError> {
+    pub(super) fn create(
+        scratch: &'a Scratch,
+        path: &Path,
+        capacity: usize,
+    ) -> Result<Self, GfError> {
         Ok(Self {
             scratch,
             file: File::create(path).map_err(storage)?,
@@ -407,7 +413,9 @@ mod tests {
         let partitions = Partitions::create(&scratch, "p", 2, 4).unwrap();
         let mut scatter = Scatter::new(&scratch, &partitions, 16);
         for value in 0_u32..10 {
-            scatter.push((value % 2) as usize, &value.to_le_bytes()).unwrap();
+            scatter
+                .push((value % 2) as usize, &value.to_le_bytes())
+                .unwrap();
         }
         scatter.finish().unwrap();
         assert_eq!(partitions.counts().unwrap(), vec![5, 5]);

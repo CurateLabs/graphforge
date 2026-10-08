@@ -279,7 +279,11 @@ pub(crate) fn encode_bulk(
         _ => None,
     };
     let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(scratch_plan.as_ref().map_or(workers, |sized| sized.concurrency))
+        .num_threads(
+            scratch_plan
+                .as_ref()
+                .map_or(workers, |sized| sized.concurrency),
+        )
         .thread_name(|index| format!("gf-bulk-{index}"))
         .build()
         .map_err(storage)?;
@@ -317,9 +321,19 @@ pub(crate) fn encode_bulk(
         .map(|_| Scratch::create(source))
         .transpose()?;
     let mut edge_side = match (&scratch_plan, &scratch) {
-        (Some(sized), Some(scratch)) => EdgeSide::Scratch(run_pass(&pool, cancelled, &cancel, || {
-            scratch_edges::scatter_edges(&plan.edges, budgets, &nodes, &index, sized, scratch, &cancel)
-        })?),
+        (Some(sized), Some(scratch)) => {
+            EdgeSide::Scratch(run_pass(&pool, cancelled, &cancel, || {
+                scratch_edges::scatter_edges(
+                    &plan.edges,
+                    budgets,
+                    &nodes,
+                    &index,
+                    sized,
+                    scratch,
+                    &cancel,
+                )
+            })?)
+        }
         _ => EdgeSide::Memory(run_pass(&pool, cancelled, &cancel, || {
             tables::collect_edges(&plan.edges, retain_edges, budgets, &nodes, &index, &cancel)
         })?),
@@ -415,9 +429,7 @@ pub(crate) fn encode_bulk(
 
     let meter = PassMeter::start("tables");
     let relation_stats = match (&edge_side, &ranked_edges) {
-        (EdgeSide::Memory(edges), _) if edge_groups.is_none() => {
-            RelationStats::from_ranked(edges)
-        }
+        (EdgeSide::Memory(edges), _) if edge_groups.is_none() => RelationStats::from_ranked(edges),
         (EdgeSide::Scratch(scattered), Some((_, ranked))) => RelationStats {
             names: &scattered.rel_names,
             first_appearance: ranked.first_appearance.clone(),
@@ -458,7 +470,8 @@ pub(crate) fn encode_bulk(
         (EdgeSide::Memory(edges), _, _) => EdgeUuids::memory(&edges.uuids),
         _ => return Err(storage("the over-budget build lost its scratch state")),
     };
-    let membership = build_membership(&output, &nodes, edge_uuids, edge_count, generation, &cancel)?;
+    let membership =
+        build_membership(&output, &nodes, edge_uuids, edge_count, generation, &cancel)?;
     check_cancelled(&cancel)?;
     passes.extend([meter.finish()]);
     crate::graph_construction::construction_failpoint("bulk.after_membership");
