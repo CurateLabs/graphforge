@@ -286,3 +286,77 @@ fn clustering_coefficient_uses_shared_controls_and_canonical_metadata() {
     assert_eq!(capability.dependency, BUILTIN_REVIEW);
     assert_eq!(capability.algorithm.as_str(), "clustering_coefficient");
 }
+
+fn neighbor_edges_output(
+    graph: &AdjacencyGraph,
+    threads: usize,
+    cancellation: AlgorithmCancellation,
+) -> Result<AlgorithmOutput, AlgorithmError> {
+    let options = RankOptions {
+        by: RankAlgorithm::ClusteringCoefficient,
+        clustering_normalization: Some(ClusteringNormalization::NeighborEdges),
+        ..RankOptions::default()
+    };
+    let control = AlgorithmControl::new(AlgorithmLimits::default(), cancellation)
+        .with_rank_options(&options)
+        .with_compute_pool(Arc::new(crate::ComputePool::new(threads).unwrap()));
+    ClusteringCoefficient.execute(graph, &control)
+}
+
+#[test]
+fn neighbor_edges_lcc_distinguishes_reciprocal_normalization_and_simplifies_edges() {
+    // Vertex 0 sees {1,2}; only 1->2 connects those neighbors. Reciprocal 0<->1
+    // changes Fagiolo's degree factors but must not change neighbor-edge counting.
+    let graph =
+        AdjacencyGraph::with_test_edges(4, &[(0, 1), (1, 0), (0, 2), (1, 2), (1, 2), (0, 0)]);
+    let output = neighbor_edges_output(&graph, 1, AlgorithmCancellation::default()).unwrap();
+    assert_scores_close(
+        &clustering_coefficient_output_scores(&output),
+        &[0.5, 0.5, 1.0, 0.0],
+    );
+    let default = execute_clustering_coefficient(
+        &graph,
+        AlgorithmLimits::default(),
+        AlgorithmCancellation::default(),
+    )
+    .unwrap();
+    assert_ne!(
+        clustering_coefficient_output_scores(&default),
+        clustering_coefficient_output_scores(&output)
+    );
+    let triangle =
+        AdjacencyGraph::with_test_edges(3, &[(0, 1), (1, 0), (1, 2), (2, 1), (2, 0), (0, 2)]);
+    assert_scores_close(
+        &clustering_coefficient_output_scores(
+            &neighbor_edges_output(&triangle, 1, AlgorithmCancellation::default()).unwrap(),
+        ),
+        &[1.0, 1.0, 1.0],
+    );
+}
+
+#[test]
+fn neighbor_edges_lcc_uses_private_pool_with_identical_bits_and_cancellation() {
+    let graph = dense_clustering_graph(128);
+    let prepared = prepare_clustering_coefficient(
+        &graph,
+        &AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default()),
+    )
+    .unwrap();
+    assert!(prepared.work_units >= CLUSTERING_COEFFICIENT_PARALLEL_CROSSOVER_WORK);
+    let serial = neighbor_edges_output(&graph, 1, AlgorithmCancellation::default()).unwrap();
+    for threads in [2, 4, 8] {
+        let parallel =
+            neighbor_edges_output(&graph, threads, AlgorithmCancellation::default()).unwrap();
+        assert_eq!(
+            clustering_coefficient_bits(&parallel),
+            clustering_coefficient_bits(&serial)
+        );
+        assert_eq!(parallel.rows(), serial.rows());
+    }
+    let cancellation = AlgorithmCancellation::default();
+    cancellation.cancel();
+    assert_eq!(
+        neighbor_edges_output(&graph, 4, cancellation),
+        Err(AlgorithmError::Cancelled)
+    );
+}

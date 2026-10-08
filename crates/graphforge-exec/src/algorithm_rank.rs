@@ -439,7 +439,7 @@ pub fn rank_algorithm_with_compute(
 ) -> Result<RecordBatch, GfError> {
     let graph = rank_projection(provider, dir, mode, label, options)?;
     let algorithm = Algorithm::Rank(options.by);
-    let output = execute_rank_with_compute(&graph, algorithm, limits, compute)?;
+    let output = execute_rank_with_options(&graph, algorithm, options, limits, compute)?;
     let batch = shape_algorithm_output(algorithm, &output)?;
     materialize_node_properties_with_batch_size(dir, property_stems, &batch, limits.batch_size)
         .map_err(Into::into)
@@ -468,6 +468,7 @@ fn rank_projection(
     label: EntityTypeSelection,
     options: &RankOptions,
 ) -> Result<AdjacencyGraph, GfError> {
+    validate_rank_options(options)?;
     let via = options.via.as_deref().unwrap_or("*");
     if via.is_empty() || via.trim() != via || via.chars().any(char::is_control) {
         return Err(GfError::Validation(format!(
@@ -492,19 +493,58 @@ fn rank_projection(
     )
 }
 
+/// Validate algorithm-specific rank options before reading a projection.
+///
+/// # Errors
+/// Returns validation errors for incompatible or invalid options.
+pub fn validate_rank_options(options: &RankOptions) -> Result<(), GfError> {
+    if let Some(pagerank) = options.pagerank {
+        if options.by != RankAlgorithm::PageRank {
+            return Err(GfError::Validation(
+                "pagerank options require by=pagerank".into(),
+            ));
+        }
+        if !pagerank.damping.is_finite() || !(0.0..=1.0).contains(&pagerank.damping) {
+            return Err(GfError::Validation(
+                "pagerank damping must be finite and in [0, 1]".into(),
+            ));
+        }
+    }
+    if options.clustering_normalization.is_some()
+        && options.by != RankAlgorithm::ClusteringCoefficient
+    {
+        return Err(GfError::Validation(
+            "clustering normalization requires by=clustering_coefficient".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn execute_rank_with_options(
+    graph: &AdjacencyGraph,
+    algorithm: Algorithm,
+    options: &RankOptions,
+    limits: AlgorithmLimits,
+    compute: Option<crate::SharedComputePool>,
+) -> Result<AlgorithmOutput, AlgorithmError> {
+    let mut registry = AlgorithmRegistry::default();
+    register_rank_algorithms(&mut registry)?;
+    let mut control =
+        AlgorithmControl::new(limits, AlgorithmCancellation::default()).with_rank_options(options);
+    if let Some(pool) = compute {
+        control = control.with_compute_pool(pool);
+    }
+    registry.execute(algorithm, graph, &control)
+}
+
+#[cfg(test)]
 fn execute_rank_with_compute(
     graph: &AdjacencyGraph,
     algorithm: Algorithm,
     limits: AlgorithmLimits,
     compute: Option<crate::SharedComputePool>,
 ) -> Result<AlgorithmOutput, AlgorithmError> {
-    let mut registry = AlgorithmRegistry::default();
-    register_rank_algorithms(&mut registry)?;
-    let mut control = AlgorithmControl::new(limits, AlgorithmCancellation::default());
-    if let Some(pool) = compute {
-        control = control.with_compute_pool(pool);
-    }
-    registry.execute(algorithm, graph, &control)
+    execute_rank_with_options(graph, algorithm, &RankOptions::default(), limits, compute)
 }
 
 fn exact_u32(value: usize, kind: &str) -> Result<u32, AlgorithmError> {
@@ -551,6 +591,52 @@ mod tests {
                 "{actual} != {expected}"
             );
         }
+    }
+
+    #[test]
+    fn rank_options_validate_algorithm_scope_and_finite_damping() {
+        for damping in [f64::NAN, f64::INFINITY, -0.1, 1.1] {
+            let options = RankOptions {
+                pagerank: Some(graphforge_core::PageRankOptions {
+                    damping,
+                    iterations: Some(1),
+                }),
+                ..RankOptions::default()
+            };
+            assert!(matches!(
+                validate_rank_options(&options),
+                Err(GfError::Validation(_))
+            ));
+        }
+        for damping in [0.0, 1.0] {
+            assert!(
+                validate_rank_options(&RankOptions {
+                    pagerank: Some(graphforge_core::PageRankOptions {
+                        damping,
+                        iterations: Some(0)
+                    }),
+                    ..RankOptions::default()
+                })
+                .is_ok()
+            );
+        }
+        assert!(
+            validate_rank_options(&RankOptions {
+                by: RankAlgorithm::Degree,
+                pagerank: Some(graphforge_core::PageRankOptions::default()),
+                ..RankOptions::default()
+            })
+            .is_err()
+        );
+        assert!(
+            validate_rank_options(&RankOptions {
+                clustering_normalization: Some(
+                    graphforge_core::ClusteringNormalization::NeighborEdges
+                ),
+                ..RankOptions::default()
+            })
+            .is_err()
+        );
     }
 
     #[test]
