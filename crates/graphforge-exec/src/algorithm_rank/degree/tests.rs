@@ -43,6 +43,20 @@ fn degree_parallel_graph(nodes: usize) -> AdjacencyGraph {
 }
 
 #[test]
+fn degree_is_single_pass_and_never_consumes_the_iteration_budget() {
+    let graph = degree_parallel_graph(5_000);
+    let output = execute_degree(
+        &graph,
+        AlgorithmLimits {
+            iterations: 0,
+            ..AlgorithmLimits::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(output.num_rows(), 5_000);
+}
+
+#[test]
 fn degree_scores_a_hand_verifiable_fixture_in_stable_uuid_order() {
     let output = execute_degree(
         &AdjacencyGraph::with_test_counts(3, 4),

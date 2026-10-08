@@ -75,12 +75,12 @@ fn triangle_scores_serial(
     let mut scores = Vec::with_capacity(neighbors.len());
     let mut visited_pairs = 0_usize;
     for node in 0..neighbors.len() {
-        control.checkpoint()?;
+        control.check_cancelled()?;
         let mut count = 0_u64;
         for (offset, &first) in neighbors[node].iter().enumerate() {
             for &second in &neighbors[node][offset + 1..] {
                 if visited_pairs.is_multiple_of(TRIANGLES_CHECKPOINT_PAIRS) {
-                    control.checkpoint()?;
+                    control.check_cancelled()?;
                 }
                 visited_pairs += 1;
                 if has_arc(neighbors, first, second) {

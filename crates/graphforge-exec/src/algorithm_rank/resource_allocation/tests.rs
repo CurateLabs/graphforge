@@ -121,7 +121,7 @@ fn resource_allocation_obeys_undirected_and_boundary_contracts() {
 #[test]
 fn resource_allocation_uses_shared_controls_and_dependency_metadata() {
     let graph = AdjacencyGraph::with_test_edges(3, &[(0, 2), (1, 2)]);
-    assert!(matches!(
+    assert!(
         execute_resource_allocation(
             &graph,
             AlgorithmLimits {
@@ -129,9 +129,10 @@ fn resource_allocation_uses_shared_controls_and_dependency_metadata() {
                 ..AlgorithmLimits::default()
             },
             AlgorithmCancellation::default(),
-        ),
-        Err(AlgorithmError::IterationLimit { .. })
-    ));
+        )
+        .is_ok(),
+        "a single-pass algorithm never consumes the iteration budget"
+    );
     assert!(matches!(
         execute_resource_allocation(
             &graph,
@@ -403,7 +404,7 @@ fn resource_allocation_parallel_limits_and_cancellation_return_structured() {
         execute_resource_allocation_with_pool(&graph, 4, AlgorithmLimits::default(), cancellation),
         Err(AlgorithmError::Cancelled)
     );
-    assert!(matches!(
+    assert!(
         execute_resource_allocation_with_pool(
             &graph,
             4,
@@ -412,9 +413,10 @@ fn resource_allocation_parallel_limits_and_cancellation_return_structured() {
                 ..AlgorithmLimits::default()
             },
             AlgorithmCancellation::default()
-        ),
-        Err(AlgorithmError::IterationLimit { .. })
-    ));
+        )
+        .is_ok(),
+        "a single-pass algorithm never consumes the iteration budget"
+    );
     assert!(matches!(
         execute_resource_allocation_with_pool(
             &graph,

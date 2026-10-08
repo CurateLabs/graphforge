@@ -193,7 +193,7 @@ fn total_neighbors_parallel_limits_and_cancellation_return_structured() {
         execute_total_neighbors_with_pool(&graph, 4, AlgorithmLimits::default(), cancellation),
         Err(AlgorithmError::Cancelled)
     );
-    assert!(matches!(
+    assert!(
         execute_total_neighbors_with_pool(
             &graph,
             4,
@@ -202,9 +202,10 @@ fn total_neighbors_parallel_limits_and_cancellation_return_structured() {
                 ..AlgorithmLimits::default()
             },
             AlgorithmCancellation::default()
-        ),
-        Err(AlgorithmError::IterationLimit { .. })
-    ));
+        )
+        .is_ok(),
+        "a single-pass algorithm never consumes the iteration budget"
+    );
     assert!(matches!(
         execute_total_neighbors_with_pool(
             &graph,
@@ -415,7 +416,7 @@ fn total_neighbors_obeys_undirected_and_boundary_contracts() {
 #[test]
 fn total_neighbors_uses_shared_controls_and_dependency_metadata() {
     let graph = AdjacencyGraph::with_test_edges(3, &[(0, 1)]);
-    assert!(matches!(
+    assert!(
         execute_total_neighbors(
             &graph,
             AlgorithmLimits {
@@ -423,9 +424,10 @@ fn total_neighbors_uses_shared_controls_and_dependency_metadata() {
                 ..AlgorithmLimits::default()
             },
             AlgorithmCancellation::default(),
-        ),
-        Err(AlgorithmError::IterationLimit { .. })
-    ));
+        )
+        .is_ok(),
+        "a single-pass algorithm never consumes the iteration budget"
+    );
     assert!(matches!(
         execute_total_neighbors(
             &graph,

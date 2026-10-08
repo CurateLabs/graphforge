@@ -86,7 +86,7 @@ fn prepare_clustering_coefficient(
     for (source, &node_id) in node_ids.iter().enumerate() {
         for edge in graph.neighbors(node_id) {
             if traversed_edges.is_multiple_of(1024) {
-                control.checkpoint()?;
+                control.check_cancelled()?;
             }
             traversed_edges += 1;
             let target = indices
@@ -212,7 +212,7 @@ fn clustering_coefficient_score_node(
     control: &AlgorithmControl,
     work: &mut usize,
 ) -> Result<f64, AlgorithmError> {
-    control.checkpoint()?;
+    control.check_cancelled()?;
     let outgoing = &prepared.outgoing;
     let incoming = &prepared.incoming;
     let mut neighbors = outgoing[node].clone();
@@ -292,12 +292,15 @@ fn clustering_coefficient_score_node(
     Ok(score)
 }
 
+/// Poll cancellation every [`CLUSTERING_COEFFICIENT_CHECKPOINT_WORK`] units of
+/// pair work. Clustering coefficient is a single pass, so this never consumes the
+/// iteration budget that bounds iterative algorithms (#1922).
 fn clustering_coefficient_checkpoint(
     control: &AlgorithmControl,
     work: &mut usize,
 ) -> Result<(), AlgorithmError> {
     if (*work).is_multiple_of(CLUSTERING_COEFFICIENT_CHECKPOINT_WORK) {
-        control.checkpoint()?;
+        control.check_cancelled()?;
     }
     *work = work.saturating_add(1);
     Ok(())

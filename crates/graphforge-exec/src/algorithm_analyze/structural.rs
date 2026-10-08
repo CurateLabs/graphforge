@@ -133,7 +133,7 @@ impl RustAlgorithm for TriangleCount {
         let mut projected = 0_usize;
         for &source in graph.node_ids() {
             if projected.is_multiple_of(4_096) {
-                control.checkpoint()?;
+                control.check_cancelled()?;
             }
             projected = projected.saturating_add(1);
             let source_uuid = graph
@@ -144,7 +144,7 @@ impl RustAlgorithm for TriangleCount {
             nodes.push(source_uuid);
             for edge in graph.neighbors(source) {
                 if projected.is_multiple_of(4_096) {
-                    control.checkpoint()?;
+                    control.check_cancelled()?;
                 }
                 projected = projected.saturating_add(1);
                 edges.push(TriangleEdge {
@@ -187,7 +187,7 @@ impl RustAlgorithm for Transitivity {
         let mut projected = 0_usize;
         for &source in graph.node_ids() {
             if projected.is_multiple_of(4_096) {
-                control.checkpoint()?;
+                control.check_cancelled()?;
             }
             projected = projected.saturating_add(1);
             let source_uuid = graph
@@ -198,7 +198,7 @@ impl RustAlgorithm for Transitivity {
             nodes.push(source_uuid);
             for edge in graph.neighbors(source) {
                 if projected.is_multiple_of(4_096) {
-                    control.checkpoint()?;
+                    control.check_cancelled()?;
                 }
                 projected = projected.saturating_add(1);
                 edges.push(TransitivityEdge {

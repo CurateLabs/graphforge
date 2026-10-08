@@ -27,7 +27,7 @@ pub(crate) fn depth_first_search(
         if !visited.insert(node) {
             continue;
         }
-        control.checkpoint()?;
+        control.check_cancelled()?;
         let order = u64::try_from(visits.len()).map_err(|_| AlgorithmError::Execution {
             message: "dfs discovery order exceeds the UInt64 range".into(),
         })?;
@@ -99,7 +99,7 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_and_iteration_limits_abort_without_partial_output() {
+    fn cancellation_aborts_without_partial_output_and_the_iteration_budget_is_ignored() {
         let graph = AdjacencyGraph::with_test_edges(2, &[(0, 1)]);
         let cancellation = AlgorithmCancellation::default();
         cancellation.cancel();
@@ -111,7 +111,7 @@ mod tests {
             ),
             Err(AlgorithmError::Cancelled)
         );
-        assert!(matches!(
+        assert!(
             depth_first_search(
                 &graph,
                 0,
@@ -122,12 +122,10 @@ mod tests {
                     },
                     AlgorithmCancellation::default(),
                 ),
-            ),
-            Err(AlgorithmError::IterationLimit {
-                observed: 2,
-                limit: 1
-            })
-        ));
+            )
+            .is_ok(),
+            "a single-pass algorithm never consumes the iteration budget"
+        );
     }
 
     #[test]

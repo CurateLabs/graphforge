@@ -150,7 +150,7 @@ fn betweenness_handles_parallel_self_loop_disconnected_and_empty_graphs() {
 #[test]
 fn betweenness_uses_shared_limits_cancellation_and_dependency_metadata() {
     let graph = AdjacencyGraph::with_test_edges(3, &[(0, 1), (1, 2)]);
-    assert_eq!(
+    assert!(
         execute_betweenness(
             &graph,
             AlgorithmLimits {
@@ -158,11 +158,9 @@ fn betweenness_uses_shared_limits_cancellation_and_dependency_metadata() {
                 ..AlgorithmLimits::default()
             },
             AlgorithmCancellation::default(),
-        ),
-        Err(AlgorithmError::IterationLimit {
-            observed: 1,
-            limit: 0,
-        })
+        )
+        .is_ok(),
+        "a single-pass algorithm never consumes the iteration budget"
     );
     assert!(matches!(
         execute_betweenness(
@@ -193,7 +191,7 @@ fn betweenness_uses_shared_limits_cancellation_and_dependency_metadata() {
         Err(AlgorithmError::Cancelled)
     );
     let edge_heavy = AdjacencyGraph::with_test_edges(1, &vec![(0, 0); 1025]);
-    assert_eq!(
+    assert!(
         execute_betweenness(
             &edge_heavy,
             AlgorithmLimits {
@@ -201,11 +199,9 @@ fn betweenness_uses_shared_limits_cancellation_and_dependency_metadata() {
                 ..AlgorithmLimits::default()
             },
             AlgorithmCancellation::default(),
-        ),
-        Err(AlgorithmError::IterationLimit {
-            observed: 2,
-            limit: 1,
-        })
+        )
+        .is_ok(),
+        "a single-pass algorithm never consumes the iteration budget"
     );
     let mut registry = AlgorithmRegistry::default();
     register_rank_algorithms(&mut registry).unwrap();
@@ -289,7 +285,7 @@ fn betweenness_parallel_limits_and_cancellation_are_structured() {
         execute_betweenness_with_pool(&graph, 4, AlgorithmLimits::default(), cancellation),
         Err(AlgorithmError::Cancelled)
     );
-    assert_eq!(
+    assert!(
         execute_betweenness_with_pool(
             &graph,
             4,
@@ -298,10 +294,8 @@ fn betweenness_parallel_limits_and_cancellation_are_structured() {
                 ..AlgorithmLimits::default()
             },
             AlgorithmCancellation::default(),
-        ),
-        Err(AlgorithmError::IterationLimit {
-            observed: 1,
-            limit: 0,
-        })
+        )
+        .is_ok(),
+        "a single-pass algorithm never consumes the iteration budget"
     );
 }

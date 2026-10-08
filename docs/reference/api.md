@@ -443,6 +443,12 @@ materialized NULL properties, shared Rust limits/cancellation/structured errors,
 and atomic opt-in write-back contracts apply unchanged. Python and Node contain no
 separate clustering coefficient implementation or fallback.
 
+Single-pass rank scoring (`degree`, `betweenness`, `closeness`, `harmonic_closeness`,
+`clustering_coefficient`, `triangles`, `k_core`, and the link-prediction scores) polls
+cancellation but never consumes the cooperative iteration budget, which counts rounds of
+iterative algorithms. The node and edge limits bound the input, and cancellation stops a
+long run.
+
 Triangle count is deterministic and unweighted. `by="triangles"` counts each
 distinct unordered three-node clique once for every participating node. The
 rank-wide `directed` option is accepted, but edge orientation is intentionally
