@@ -9,6 +9,7 @@ import random
 import tempfile
 import unittest
 
+from graphforge_bench.gdc_contracts import workspace_root
 from graphforge_bench.gdc_finbench_transaction_reference import (
     COLUMNS,
     LDBC_EDGE_FILES,
@@ -25,6 +26,7 @@ from graphforge_bench.gdc_finbench_transaction_reference import (
     shortest_transfer_path,
     shortest_transfer_path_forward,
 )
+from jsonschema import Draft202012Validator
 
 WINDOW = "1000|9000"
 LIMIT = "500|TIMESTAMP_DESCENDING"
@@ -221,6 +223,10 @@ class LdbcReferenceTests(unittest.TestCase):
         self.assertEqual(
             (reference["suite_id"], reference["rung_id"]), ("finbench-transaction", "sf-test")
         )
+        schema = json.loads(
+            (workspace_root() / "schemas" / "gdc-rung-reference.json").read_text(encoding="utf-8")
+        )
+        Draft202012Validator(schema).validate(reference)
         queries = reference["queries"]
         self.assertEqual(list(queries), list(LDBC_PARAMETERS))
         for operation, query in queries.items():
