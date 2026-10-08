@@ -253,6 +253,9 @@ mod tests {
                         via: Some("KNOWS".into()),
                         directed: true,
                         write_property: property.map(str::to_owned),
+
+                        pagerank: None,
+                        clustering_normalization: None,
                     },
                 )
                 .unwrap()

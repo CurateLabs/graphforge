@@ -165,6 +165,9 @@ impl GraphForge {
             via: via.map(str::to_owned),
             directed,
             write_property: write_property.map(str::to_owned),
+
+            pagerank: None,
+            clustering_normalization: None,
         };
         let label = label.to_owned();
         algorithm_result(py, py.detach(|| native.rank(&label, opts)))
@@ -186,6 +189,9 @@ impl GraphForge {
             via: via.map(str::to_owned),
             directed,
             write_property: None,
+
+            pagerank: None,
+            clustering_normalization: None,
         };
         let label = label.to_owned();
         py.detach(|| native.prepare_rank_invocation(&label, &options))
@@ -237,6 +243,8 @@ impl GraphForge {
             via: via.map(str::to_owned),
             directed,
             write_property: write_property.map(str::to_owned),
+
+            synchronous_label_propagation: None,
         };
         let label = label.to_owned();
         algorithm_result(py, py.detach(|| native.cluster(&label, opts)))

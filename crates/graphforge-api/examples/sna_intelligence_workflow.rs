@@ -249,6 +249,9 @@ fn main() {
         via: Some("COMMUNICATED".into()),
         directed: false,
         write_property: None,
+
+        pagerank: None,
+        clustering_normalization: None,
     };
     let cluster_options = ClusterOptions {
         via: Some("COMMUNICATED".into()),

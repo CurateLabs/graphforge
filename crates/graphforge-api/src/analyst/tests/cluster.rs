@@ -11,6 +11,8 @@ fn strongly_connected_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
+
+        synchronous_label_propagation: None,
     }
 }
 
@@ -25,6 +27,8 @@ fn biconnected_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
+
+        synchronous_label_propagation: None,
     }
 }
 
@@ -39,6 +43,8 @@ fn k_core_decomposition_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
+
+        synchronous_label_propagation: None,
     }
 }
 
@@ -53,6 +59,8 @@ fn approximate_max_cut_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
+
+        synchronous_label_propagation: None,
     }
 }
 
@@ -1043,6 +1051,8 @@ fn hdbscan_dispatches_stable_uuid_clusters_and_opt_in_writeback() {
         via: None,
         directed,
         write_property,
+
+        synchronous_label_propagation: None,
     };
 
     let undirected = graph.cluster("Person", options(false, None)).unwrap();

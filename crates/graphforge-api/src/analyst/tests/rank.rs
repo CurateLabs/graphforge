@@ -10,6 +10,9 @@ fn betweenness_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
+
+        pagerank: None,
+        clustering_normalization: None,
     }
 }
 
@@ -23,6 +26,9 @@ fn closeness_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
+
+        pagerank: None,
+        clustering_normalization: None,
     }
 }
 
@@ -36,6 +42,9 @@ fn harmonic_closeness_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
+
+        pagerank: None,
+        clustering_normalization: None,
     }
 }
 
@@ -49,6 +58,9 @@ fn eigenvector_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
+
+        pagerank: None,
+        clustering_normalization: None,
     }
 }
 
@@ -62,6 +74,9 @@ fn article_rank_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
+
+        pagerank: None,
+        clustering_normalization: None,
     }
 }
 
@@ -75,6 +90,9 @@ fn hits_hub_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
+
+        pagerank: None,
+        clustering_normalization: None,
     }
 }
 
@@ -88,6 +106,9 @@ fn hits_authority_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
+
+        pagerank: None,
+        clustering_normalization: None,
     }
 }
 
@@ -97,6 +118,9 @@ fn celf_options(directed: bool, via: Option<&str>, write_property: Option<&str>)
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
+
+        pagerank: None,
+        clustering_normalization: None,
     }
 }
 
@@ -110,6 +134,9 @@ fn clustering_coefficient_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
+
+        pagerank: None,
+        clustering_normalization: None,
     }
 }
 
@@ -123,6 +150,9 @@ fn triangles_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
+
+        pagerank: None,
+        clustering_normalization: None,
     }
 }
 
@@ -132,6 +162,9 @@ fn k_core_options(directed: bool, via: Option<&str>, write_property: Option<&str
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
+
+        pagerank: None,
+        clustering_normalization: None,
     }
 }
 
@@ -145,6 +178,9 @@ fn preferential_attachment_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
+
+        pagerank: None,
+        clustering_normalization: None,
     }
 }
 
@@ -158,6 +194,9 @@ fn adamic_adar_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
+
+        pagerank: None,
+        clustering_normalization: None,
     }
 }
 
@@ -171,6 +210,9 @@ fn common_neighbors_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
+
+        pagerank: None,
+        clustering_normalization: None,
     }
 }
 
@@ -184,6 +226,9 @@ fn resource_allocation_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
+
+        pagerank: None,
+        clustering_normalization: None,
     }
 }
 
@@ -197,6 +242,9 @@ fn total_neighbors_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
+
+        pagerank: None,
+        clustering_normalization: None,
     }
 }
 

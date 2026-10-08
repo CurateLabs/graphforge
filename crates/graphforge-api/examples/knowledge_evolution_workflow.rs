@@ -268,6 +268,9 @@ fn main() {
                 via: Some("SUPPORTED_BY".into()),
                 directed: false,
                 write_property: None,
+
+                pagerank: None,
+                clustering_normalization: None,
             },
         )
         .unwrap();
@@ -495,6 +498,9 @@ fn main() {
                 via: Some("SUPPORTED_BY".into()),
                 directed: false,
                 write_property: None,
+
+                pagerank: None,
+                clustering_normalization: None,
             },
         )
         .unwrap();

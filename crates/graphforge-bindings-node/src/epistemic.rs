@@ -463,6 +463,9 @@ impl ResolvedBeliefProjectionHandle {
             via,
             directed: directed.unwrap_or(true),
             write_property: None,
+
+            pagerank: None,
+            clustering_normalization: None,
         };
         self.inner
             .prepare_rank_invocation(&label, &options)
@@ -486,6 +489,8 @@ impl ResolvedBeliefProjectionHandle {
             via,
             directed: directed.unwrap_or(false),
             write_property: None,
+
+            synchronous_label_propagation: None,
         };
         self.inner
             .prepare_cluster_invocation(&label, &options)

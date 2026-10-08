@@ -342,6 +342,9 @@ fn branch_challenge_revision_and_suppression_preserve_parent_and_shared_graph() 
                 via: None,
                 directed: true,
                 write_property: None,
+
+                pagerank: None,
+                clustering_normalization: None,
             },
         )
         .unwrap();
@@ -531,20 +534,23 @@ fn branch_challenge_revision_and_suppression_preserve_parent_and_shared_graph() 
     assert!(g.assertion(next, None).is_err());
     assert_eq!(count(branch_view.graph()), 1);
     assert_eq!(
-        branch_view
-            .graph()
-            .rank(
-                "ClaimSubject",
-                RankOptions {
-                    by: graphforge_core::algorithms::RankAlgorithm::Degree,
-                    via: None,
-                    directed: true,
-                    write_property: None
-                }
-            )
-            .unwrap(),
-        raw_rank
-    );
+            branch_view
+                .graph()
+                .rank(
+                    "ClaimSubject",
+                    RankOptions {
+                        by: graphforge_core::algorithms::RankAlgorithm::Degree,
+                        via: None,
+                        directed: true,
+                        write_property: None
+
+    pagerank: None,
+    clustering_normalization: None,
+    }
+                )
+                .unwrap(),
+            raw_rank
+        );
     assert!(
         branch_view
             .graph()

@@ -1806,6 +1806,8 @@ mod tests {
             via: None,
             directed: true,
             write_property: None,
+
+            synchronous_label_propagation: None,
         };
         let direct_cluster = graph.cluster("Person", cluster_options.clone()).unwrap();
         let cluster = projection

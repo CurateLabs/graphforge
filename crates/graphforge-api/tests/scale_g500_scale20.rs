@@ -487,6 +487,9 @@ fn rank_degree(project: &Path, workers: usize) -> (String, usize) {
                 via: Some(REL_TYPE.into()),
                 directed: false,
                 write_property: None,
+
+                pagerank: None,
+                clustering_normalization: None,
             },
         )
         .expect("rank degree");

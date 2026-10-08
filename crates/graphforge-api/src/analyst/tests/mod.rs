@@ -24,6 +24,9 @@ fn degree_options(directed: bool, via: Option<&str>) -> RankOptions {
         via: via.map(str::to_owned),
         directed,
         write_property: None,
+
+        pagerank: None,
+        clustering_normalization: None,
     }
 }
 
@@ -45,6 +48,8 @@ fn components_options(directed: bool, via: Option<&str>) -> ClusterOptions {
         via: via.map(str::to_owned),
         directed,
         write_property: None,
+
+        synchronous_label_propagation: None,
     }
 }
 

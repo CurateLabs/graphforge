@@ -11,6 +11,8 @@ fn louvain_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
+
+        synchronous_label_propagation: None,
     }
 }
 
@@ -25,6 +27,8 @@ fn leiden_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
+
+        synchronous_label_propagation: None,
     }
 }
 
@@ -39,6 +43,8 @@ fn label_propagation_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
+
+        synchronous_label_propagation: None,
     }
 }
 
@@ -53,6 +59,8 @@ fn speaker_listener_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
+
+        synchronous_label_propagation: None,
     }
 }
 
@@ -67,6 +75,8 @@ fn girvan_newman_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
+
+        synchronous_label_propagation: None,
     }
 }
 
@@ -81,6 +91,8 @@ fn modularity_optimization_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
+
+        synchronous_label_propagation: None,
     }
 }
 
@@ -95,6 +107,8 @@ fn fastgreedy_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
+
+        synchronous_label_propagation: None,
     }
 }
 
@@ -109,6 +123,8 @@ fn infomap_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
+
+        synchronous_label_propagation: None,
     }
 }
 
@@ -123,6 +139,8 @@ fn leading_eigenvector_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
+
+        synchronous_label_propagation: None,
     }
 }
 
@@ -137,6 +155,8 @@ fn walktrap_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
+
+        synchronous_label_propagation: None,
     }
 }
 
@@ -151,6 +171,8 @@ fn spinglass_options(
         via: via.map(str::to_owned),
         directed,
         write_property: write_property.map(str::to_owned),
+
+        synchronous_label_propagation: None,
     }
 }
 

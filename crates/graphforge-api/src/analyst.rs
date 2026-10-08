@@ -87,6 +87,9 @@ impl GraphForge {
             via: (via != "*").then(|| via.to_owned()),
             directed: invocation_descriptor::required_bool(parameters, "directed")?,
             write_property: None,
+
+            pagerank: None,
+            clustering_normalization: None,
         };
         let current = self.prepare_rank_invocation(label, &options)?;
         if current.projection_fingerprint() != descriptor.projection_fingerprint() {
@@ -185,6 +188,8 @@ impl GraphForge {
             via: via.filter(|value| value != "*"),
             directed: invocation_descriptor::required_bool(parameters, "directed")?,
             write_property: None,
+
+            synchronous_label_propagation: None,
         };
         let current = self.prepare_cluster_invocation(label, &options)?;
         if current.projection_fingerprint() != descriptor.projection_fingerprint() {
@@ -959,6 +964,9 @@ impl GraphForge {
             via,
             directed,
             write_property: None,
+
+            pagerank: None,
+            clustering_normalization: None,
         };
         let _graph_visibility = write_property
             .as_ref()
@@ -1022,6 +1030,8 @@ impl GraphForge {
             via,
             directed,
             write_property: None,
+
+            synchronous_label_propagation: None,
         };
         let _graph_visibility = write_property
             .as_ref()

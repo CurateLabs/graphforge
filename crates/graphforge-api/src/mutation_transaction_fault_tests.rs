@@ -11,6 +11,9 @@ fn rank_options(write: bool) -> RankOptions {
         via: Some("KNOWS".into()),
         directed: true,
         write_property: write.then(|| "fault_metric".into()),
+
+        pagerank: None,
+        clustering_normalization: None,
     }
 }
 

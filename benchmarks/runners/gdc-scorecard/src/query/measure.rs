@@ -236,7 +236,10 @@ fn prepare(variant: &Variant, binding: &Binding) -> Result<Prepared, QueryError>
                 via: via.clone(),
                 directed: *directed,
                 write_property: None,
-            },
+            
+pagerank: None,
+clustering_normalization: None,
+},
         ),
         Operation::Cluster {
             label,
@@ -251,7 +254,9 @@ fn prepare(variant: &Variant, binding: &Binding) -> Result<Prepared, QueryError>
                 via: via.clone(),
                 directed: *directed,
                 write_property: None,
-            },
+            
+synchronous_label_propagation: None,
+},
         ),
         Operation::Paths {
             by,

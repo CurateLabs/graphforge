@@ -47,7 +47,10 @@ pub struct Variant {
 pub enum Operation {
     /// `GraphForge::execute_with_params(text, params)`.
     Cypher { text: String },
-    /// `GraphForge::rank(label, RankOptions { by, directed, via })`.
+    /// `GraphForge::rank(label, RankOptions { by, directed, via 
+pagerank: None,
+clustering_normalization: None,
+})`.
     Rank {
         label: String,
         by: String,
@@ -55,7 +58,9 @@ pub enum Operation {
         #[serde(default)]
         via: Option<String>,
     },
-    /// `GraphForge::cluster(label, ClusterOptions { by, directed, via })`.
+    /// `GraphForge::cluster(label, ClusterOptions { by, directed, via 
+synchronous_label_propagation: None,
+})`.
     Cluster {
         label: String,
         by: String,

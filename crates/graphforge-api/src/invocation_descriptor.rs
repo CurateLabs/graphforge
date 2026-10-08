@@ -1248,6 +1248,9 @@ mod tests {
             via: Some("KNOWS".into()),
             directed: true,
             write_property: None,
+
+            pagerank: None,
+            clustering_normalization: None,
         };
         let descriptor = graph.prepare_rank_invocation("Person", &options).unwrap();
         let direct = graph.rank("Person", options.clone()).unwrap();
@@ -1281,6 +1284,8 @@ mod tests {
             via: Some("KNOWS".into()),
             directed: false,
             write_property: None,
+
+            synchronous_label_propagation: None,
         };
         let descriptor = graph
             .prepare_cluster_invocation("Person", &cluster)
@@ -1379,6 +1384,9 @@ mod tests {
                     via: Some("KNOWS".into()),
                     directed: true,
                     write_property: None,
+
+                    pagerank: None,
+                    clustering_normalization: None,
                 },
             )
             .unwrap();

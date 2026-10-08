@@ -150,6 +150,9 @@ impl PyResolvedBeliefProjection {
             via: via.map(str::to_owned),
             directed,
             write_property: None,
+
+            pagerank: None,
+            clustering_normalization: None,
         };
         let label = label.to_owned();
         py.detach(|| self.inner.prepare_rank_invocation(&label, &options))
@@ -173,6 +176,8 @@ impl PyResolvedBeliefProjection {
             via: via.map(str::to_owned),
             directed,
             write_property: None,
+
+            synchronous_label_propagation: None,
         };
         let label = label.to_owned();
         py.detach(|| self.inner.prepare_cluster_invocation(&label, &options))

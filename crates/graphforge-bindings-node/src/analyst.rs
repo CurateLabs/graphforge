@@ -175,6 +175,9 @@ impl GraphForge {
             via,
             directed: directed.unwrap_or(true),
             write_property,
+
+            pagerank: None,
+            clustering_normalization: None,
         };
         let batch = g
             .rank(&label, options)
@@ -199,6 +202,9 @@ impl GraphForge {
             via,
             directed: directed.unwrap_or(true),
             write_property: None,
+
+            pagerank: None,
+            clustering_normalization: None,
         };
         graph
             .prepare_rank_invocation(&label, &options)
@@ -223,6 +229,8 @@ impl GraphForge {
             via,
             directed: directed.unwrap_or(false),
             write_property: None,
+
+            synchronous_label_propagation: None,
         };
         graph
             .prepare_cluster_invocation(&label, &options)
@@ -391,6 +399,8 @@ impl GraphForge {
             via,
             directed: directed.unwrap_or(false),
             write_property,
+
+            synchronous_label_propagation: None,
         };
         let batch = g
             .cluster(&label, options)

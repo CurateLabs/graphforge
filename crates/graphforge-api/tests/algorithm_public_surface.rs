@@ -82,6 +82,9 @@ fn descriptor_byte_and_embedding_dispatch_are_publicly_covered() {
         via: Some("KNOWS".into()),
         directed: true,
         write_property: None,
+
+        pagerank: None,
+        clustering_normalization: None,
     };
     let rank_descriptor = graph
         .prepare_rank_invocation("Person", &rank_options)
@@ -149,6 +152,9 @@ fn persisted_public_rank_is_exact_after_repeat_and_reopen_and_unavailable_is_sta
         via: Some("KNOWS".into()),
         directed: true,
         write_property: None,
+
+        pagerank: None,
+        clustering_normalization: None,
     };
     let first = graph.rank("Person", options.clone()).unwrap();
     let repeated = graph.rank("Person", options.clone()).unwrap();
