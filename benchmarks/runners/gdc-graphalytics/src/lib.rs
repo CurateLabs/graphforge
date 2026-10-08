@@ -6,12 +6,15 @@
 
 #![forbid(unsafe_code)]
 
-use arrow::array::{Array, FixedSizeBinaryArray, Float64Array, Int64Array};
+use arrow::array::{
+    Array, FixedSizeBinaryArray, Float64Array, Int64Array, StringArray, UInt64Array,
+};
+use arrow::datatypes::{DataType, Field};
 use arrow::record_batch::RecordBatch;
 use graphforge_api::{
-    ClusterAlgorithm, ClusterOptions, ClusteringNormalization, GraphForge, NodeHandle,
-    NodeSelector, PageRankOptions, PathAlgorithm, PathsOptions, PropValue, RankAlgorithm,
-    RankOptions, SynchronousLabelPropagationOptions,
+    ClusterAlgorithm, ClusterOptions, ClusteringNormalization, GraphForge, NodeSelector,
+    OperationId, PageRankOptions, PathAlgorithm, PathsOptions, RankAlgorithm, RankOptions,
+    SynchronousLabelPropagationOptions, bulk_edge_input_schema, bulk_node_input_schema,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -503,7 +506,7 @@ pub fn validate_reference(
 
 pub struct LiveGraph {
     graph: GraphForge,
-    handles: BTreeMap<u64, NodeHandle>,
+    selectors: BTreeMap<u64, NodeSelector>,
     ids_by_uuid: BTreeMap<[u8; 16], u64>,
 }
 
@@ -578,45 +581,121 @@ fn build_live_graph(ids: BTreeSet<u64>, edges: Vec<(u64, u64)>) -> Result<LiveGr
 
     let graph = GraphForge::new(None)
         .map_err(|error| SuiteError::InvalidDocument(format!("live GraphForge open: {error}")))?;
-    let mut handles = BTreeMap::new();
-    let mut ids_by_uuid = BTreeMap::new();
-    for id in ids {
-        let graphalytics_id = i64::try_from(id).map_err(|_| {
-            SuiteError::InvalidDocument(format!("vertex id exceeds signed 64-bit range: {id}"))
+    let ids = ids.into_iter().collect::<Vec<_>>();
+    let initial_labels = ids
+        .iter()
+        .map(|id| {
+            i64::try_from(*id).map_err(|_| {
+                SuiteError::InvalidDocument(format!("vertex id exceeds signed 64-bit range: {id}"))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    // These operation identities are scoped to this fresh, private fixture
+    // project. Null entity UUIDs let the public bulk contract generate UUIDv7
+    // identities in logical row order; dataset IDs remain Int64 properties.
+    let node_operation = OperationId("019a1091-0b23-7000-8000-000000000001".parse().map_err(
+        |error| SuiteError::InvalidDocument(format!("live node operation identity: {error}")),
+    )?);
+    let schema =
+        bulk_node_input_schema(vec![Field::new("graphalytics_id", DataType::Int64, false)])
+            .map_err(|error| SuiteError::InvalidDocument(format!("live node schema: {error}")))?;
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            std::sync::Arc::new(FixedSizeBinaryArray::new_null(16, ids.len())),
+            std::sync::Arc::new(StringArray::from(vec!["Vertex"; ids.len()])),
+            std::sync::Arc::new(Int64Array::from(initial_labels)),
+        ],
+    )
+    .map_err(|error| SuiteError::InvalidDocument(format!("live node batch: {error}")))?;
+    let receipt = graph
+        .publish_bulk_nodes(node_operation, &[batch])
+        .map_err(|error| {
+            SuiteError::InvalidDocument(format!("live node construction failed: {error}"))
         })?;
-        let handle = graph
-            .add_node(
-                "Vertex",
-                &BTreeMap::from([(
-                    "graphalytics_id".to_owned(),
-                    PropValue::Int(graphalytics_id),
-                )])
-                .into_iter()
-                .collect(),
-            )
-            .map_err(|error| {
-                SuiteError::InvalidDocument(format!("live node construction failed: {error}"))
-            })?;
-        ids_by_uuid.insert(*handle.uuid.as_bytes(), id);
-        handles.insert(id, handle);
+    let uuids = uuid_column(&receipt, "entity_uuid")?;
+    let ordinals = receipt
+        .column_by_name("row_ordinal")
+        .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
+        .ok_or_else(|| {
+            SuiteError::InvalidDocument("live node receipt missing row ordinals".into())
+        })?;
+    if receipt.num_rows() != ids.len() {
+        return Err(SuiteError::InvalidDocument(
+            "live node receipt vertex count mismatch".into(),
+        ));
     }
-    for (source, target) in edges {
+    let mut selectors = BTreeMap::new();
+    let mut ids_by_uuid = BTreeMap::new();
+    let mut uuids_by_id = BTreeMap::new();
+    for (row, id) in ids.iter().copied().enumerate() {
+        if ordinals.is_null(row) || ordinals.value(row) != row as u64 || uuids.is_null(row) {
+            return Err(SuiteError::InvalidDocument(
+                "live node receipt row identity mismatch".into(),
+            ));
+        }
+        let uuid: [u8; 16] = uuids.value(row).try_into().map_err(|_| {
+            SuiteError::InvalidDocument("live node receipt UUID must contain 16 bytes".into())
+        })?;
+        let text = uuid
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        selectors.insert(id, NodeSelector::uuid(&text).map_err(live_api_error)?);
+        ids_by_uuid.insert(uuid, id);
+        uuids_by_id.insert(id, uuid);
+    }
+    if !edges.is_empty() {
+        let operation = OperationId("019a1091-0b23-7000-8000-000000000002".parse().map_err(
+            |error| SuiteError::InvalidDocument(format!("live edge operation identity: {error}")),
+        )?);
+        let endpoint = |id: &u64| {
+            uuids_by_id.get(id).copied().ok_or_else(|| {
+                SuiteError::InvalidDocument(format!(
+                    "edge endpoint absent from vertex source: {id}"
+                ))
+            })
+        };
+        let sources = edges
+            .iter()
+            .map(|(source, _)| endpoint(source))
+            .collect::<Result<Vec<_>, _>>()?;
+        let targets = edges
+            .iter()
+            .map(|(_, target)| endpoint(target))
+            .collect::<Result<Vec<_>, _>>()?;
+        let sources =
+            FixedSizeBinaryArray::try_from_iter(sources.into_iter()).map_err(|error| {
+                SuiteError::InvalidDocument(format!("live edge source batch: {error}"))
+            })?;
+        let targets =
+            FixedSizeBinaryArray::try_from_iter(targets.into_iter()).map_err(|error| {
+                SuiteError::InvalidDocument(format!("live edge target batch: {error}"))
+            })?;
+        let schema = bulk_edge_input_schema(vec![Field::new("weight", DataType::Float64, false)])
+            .map_err(|error| {
+            SuiteError::InvalidDocument(format!("live edge schema: {error}"))
+        })?;
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                std::sync::Arc::new(FixedSizeBinaryArray::new_null(16, edges.len())),
+                std::sync::Arc::new(StringArray::from(vec!["EDGE"; edges.len()])),
+                std::sync::Arc::new(sources),
+                std::sync::Arc::new(targets),
+                std::sync::Arc::new(Float64Array::from(vec![1.0; edges.len()])),
+            ],
+        )
+        .map_err(|error| SuiteError::InvalidDocument(format!("live edge batch: {error}")))?;
         graph
-            .add_edge(
-                &handles[&source],
-                "EDGE",
-                &handles[&target],
-                &BTreeMap::from([("weight".to_owned(), PropValue::Float(1.0))])
-                    .into_iter()
-                    .collect(),
-            )
+            .publish_bulk_edges(operation, &[batch])
             .map_err(|error| {
                 SuiteError::InvalidDocument(format!("live edge construction failed: {error}"))
             })?;
     }
     Ok(LiveGraph {
         graph,
-        handles,
+        selectors,
         ids_by_uuid,
     })
 }
@@ -669,12 +748,11 @@ pub fn run_live_job(
 fn execute_live_output(live: &LiveGraph, job: &AlgorithmJob) -> Result<VertexMap, SuiteError> {
     match job.algorithm {
         Algorithm::Bfs => {
-            let source = required_source(live, job)?;
-            let selector = NodeSelector::Handle(source.clone());
+            let selector = required_source(live, job)?;
             let batch = live
                 .graph
                 .paths(
-                    Some(&selector),
+                    Some(selector),
                     None,
                     PathsOptions {
                         by: PathAlgorithm::Bfs,
@@ -715,12 +793,11 @@ fn execute_live_output(live: &LiveGraph, job: &AlgorithmJob) -> Result<VertexMap
             normalize_float_column(live, &batch, "score")
         }
         Algorithm::Sssp => {
-            let source = required_source(live, job)?;
-            let selector = NodeSelector::Handle(source.clone());
+            let selector = required_source(live, job)?;
             let batch = live
                 .graph
                 .paths(
-                    Some(&selector),
+                    Some(selector),
                     None,
                     PathsOptions {
                         by: PathAlgorithm::Dijkstra,
@@ -774,11 +851,11 @@ fn execute_live_output(live: &LiveGraph, job: &AlgorithmJob) -> Result<VertexMap
 fn required_source<'a>(
     live: &'a LiveGraph,
     job: &AlgorithmJob,
-) -> Result<&'a NodeHandle, SuiteError> {
+) -> Result<&'a NodeSelector, SuiteError> {
     let id = job.source_vertex.ok_or_else(|| {
         SuiteError::InvalidDocument(format!("{} requires source_vertex", job.algorithm))
     })?;
-    live.handles.get(&id).ok_or_else(|| {
+    live.selectors.get(&id).ok_or_else(|| {
         SuiteError::InvalidDocument(format!(
             "{} source vertex is absent from fixture: {id}",
             job.algorithm
@@ -895,7 +972,7 @@ fn normalize_paths(
         VertexValue::Float(f64::INFINITY)
     };
     let mut output = live
-        .handles
+        .selectors
         .keys()
         .map(|id| (*id, unreachable.clone()))
         .collect::<VertexMap>();
@@ -1343,7 +1420,7 @@ mod tests {
         let uuid = [1_u8; 16];
         let live = LiveGraph {
             graph: GraphForge::new(None).unwrap(),
-            handles: BTreeMap::new(),
+            selectors: BTreeMap::new(),
             ids_by_uuid: BTreeMap::from([(uuid, 1)]),
         };
         let targets = FixedSizeBinaryArray::try_from_iter([uuid].into_iter()).unwrap();
