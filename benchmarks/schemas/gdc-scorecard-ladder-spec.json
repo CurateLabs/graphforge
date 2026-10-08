@@ -78,6 +78,15 @@
               "required": ["path"],
               "additionalProperties": false
             },
+            {
+              "description": "Derived at check time from the reference outputs the acquired archive ships (Graphalytics).",
+              "type": "object",
+              "properties": {
+                "archive_outputs": { "const": "graphalytics" }
+              },
+              "required": ["archive_outputs"],
+              "additionalProperties": false
+            },
             { "type": "null" }
           ]
         },

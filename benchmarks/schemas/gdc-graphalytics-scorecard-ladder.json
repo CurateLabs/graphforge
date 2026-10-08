@@ -59,6 +59,23 @@
           "discrepancy": {
             "type": "string",
             "minLength": 1
+          },
+          "algorithms": {
+            "description": "The archive's .properties `algorithms` list: the algorithms its reference outputs cover.",
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "enum": ["bfs", "cdlp", "lcc", "pr", "sssp", "wcc"] }
+          },
+          "bfs_source_vertex": {
+            "description": "The archive's .properties `bfs.source-vertex`.",
+            "type": "integer",
+            "minimum": 0
+          },
+          "sssp_source_vertex": {
+            "description": "The archive's .properties `sssp.source-vertex`; null when the archive has no SSSP.",
+            "type": ["integer", "null"],
+            "minimum": 0
           }
         },
         "required": [
@@ -70,7 +87,10 @@
           "vertices",
           "edges",
           "listed_edges",
-          "load_mapping"
+          "load_mapping",
+          "algorithms",
+          "bfs_source_vertex",
+          "sssp_source_vertex"
         ],
         "additionalProperties": false
       }

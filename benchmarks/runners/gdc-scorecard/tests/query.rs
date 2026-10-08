@@ -351,6 +351,142 @@ fn every_measured_result_is_written_with_the_cells_its_digest_covers() {
     assert!(message.contains("is not empty"), "{message}");
 }
 
+/// Hyphenate the 32 hex digits Arrow displays for a `FixedSizeBinary(16)` UUID.
+fn canonical(hex: &str) -> String {
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    )
+}
+
+#[test]
+fn paths_select_their_source_by_uuid_and_keep_only_the_named_columns() {
+    let root = tempfile::tempdir().unwrap();
+    let project = durable_project(root.path());
+    let results_path = root.path().join("results");
+    std::fs::create_dir(&results_path).unwrap();
+    let results = ResultsDir::new(&results_path).unwrap();
+    let by_property = json!({"id": "by-property", "ordered": false,
+        "bindings": [{"id": "from-1", "params": {"source": int(1)}}],
+        "operation": {"kind": "paths", "by": "bfs", "directed": true, "via": "KNOWS",
+            "source": {"label": "Person", "property": "id", "param": "source"}}});
+    let first = run_with_results(
+        &project,
+        &serde_json::to_vec(&workload(json!([by_property]))).unwrap(),
+        &serde_json::to_vec(&expected(4, 3)).unwrap(),
+        "0".repeat(64),
+        Some(&results),
+    )
+    .unwrap();
+    assert_eq!(first.status, "passed");
+    let written: Value =
+        serde_json::from_slice(&std::fs::read(results_path.join("00000000.json")).unwrap())
+            .unwrap();
+    // Every column of the full result is written: source, target, cost, path.
+    assert_eq!(written["columns"].as_array().unwrap().len(), 4);
+    let source = written["rows"][0][0].as_str().unwrap().to_owned();
+
+    let str_param = |value: &str| json!({"source": {"type": "Str", "value": value}});
+    let by_uuid = json!({"id": "by-uuid", "ordered": false, "columns": ["target_uuid", "cost"],
+        "bindings": [{"id": "from-1", "params": str_param(&canonical(&source))}],
+        "operation": {"kind": "paths", "by": "bfs", "directed": true, "via": "KNOWS",
+            "source": {"uuid_param": "source"}}});
+    let missing_column = json!({"id": "missing-column", "ordered": false,
+        "columns": ["node_uuid", "depth"], "bindings": [{"id": "all"}],
+        "operation": {"kind": "rank", "label": "Person", "by": "degree", "directed": true}});
+    let projected_root = root.path().join("projected");
+    std::fs::create_dir(&projected_root).unwrap();
+    let projected = ResultsDir::new(&projected_root).unwrap();
+    let evidence = run_with_results(
+        &project,
+        &serde_json::to_vec(&workload(json!([by_uuid, missing_column]))).unwrap(),
+        &serde_json::to_vec(&expected(4, 3)).unwrap(),
+        "0".repeat(64),
+        Some(&projected),
+    )
+    .unwrap();
+    let document = serde_json::to_value(&evidence).unwrap();
+    assert_eq!(
+        document["variants"][0]["columns"],
+        json!(["target_uuid", "cost"])
+    );
+    assert!(document["variants"][1].get("columns").is_some());
+    let kept: Value =
+        serde_json::from_slice(&std::fs::read(projected_root.join("00000000.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        kept["columns"],
+        json!([{"name": "target_uuid", "type": "FixedSizeBinary(16)"},
+               {"name": "cost", "type": "Float64"}])
+    );
+    // The UUID-selected run reaches the same targets at the same depths.
+    let pairs = |rows: &Value, target: usize, cost: usize| -> Vec<(String, String)> {
+        let mut pairs: Vec<_> = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                (
+                    row[target].as_str().unwrap().to_owned(),
+                    row[cost].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        pairs.sort();
+        pairs
+    };
+    assert_eq!(pairs(&kept["rows"], 0, 1), pairs(&written["rows"], 1, 2));
+    assert_eq!(pairs(&kept["rows"], 0, 1).len(), 4);
+    // The kept cells reproduce the measured digest.
+    let rendered = Rendered {
+        columns: vec![
+            ("target_uuid".into(), "FixedSizeBinary(16)".into()),
+            ("cost".into(), "Float64".into()),
+        ],
+        rows: serde_json::from_value(kept["rows"].clone()).unwrap(),
+    };
+    assert_eq!(
+        rendered.digest(false),
+        measured(&evidence.variants[0].samples[0]).result_sha256
+    );
+    // A kept column the result lacks fails that sample, typed, and the run goes on.
+    let failure = evidence.variants[1].samples[0].failure().unwrap();
+    assert_eq!(failure.cause, "result_unrenderable");
+    assert!(failure.error.contains("depth"), "{}", failure.error);
+    assert_eq!(evidence.status, "failed");
+
+    // Malformed selectors and column lists are refused before the project opens.
+    let absent = root.path().join("absent");
+    let refused =
+        |variant: Value| cause(drive(&absent, &workload(json!([variant])), &expected(4, 3))).0;
+    let paths = |source: Value, columns: Value| {
+        json!({"id": "bfs", "ordered": false, "columns": columns,
+            "bindings": [{"id": "b", "params": {"source": source}}],
+            "operation": {"kind": "paths", "by": "bfs", "directed": true,
+                "source": {"uuid_param": "source"}}})
+    };
+    let good = json!({"type": "Str", "value": canonical(&source)});
+    for (variant, why) in [
+        (paths(int(1), json!(null)), "an integer UUID"),
+        (
+            paths(json!({"type": "Str", "value": "not-a-uuid"}), json!(null)),
+            "a malformed UUID",
+        ),
+        (paths(good.clone(), json!([])), "no columns"),
+        (
+            paths(good.clone(), json!(["cost", "cost"])),
+            "a repeated column",
+        ),
+        (paths(good, json!([""])), "an empty column name"),
+    ] {
+        assert_eq!(refused(variant), QueryCause::InvalidWorkload, "{why}");
+    }
+}
+
 #[test]
 fn malformed_workloads_and_counts_are_refused_before_opening() {
     // No project exists: each document is refused before the driver opens one.

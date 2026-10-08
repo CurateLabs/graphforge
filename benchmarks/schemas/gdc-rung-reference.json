@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "schema": "graphforge-gdc-rung-reference-schema/1",
   "title": "GDC rung reference",
-  "description": "The pinned reference answers of one scorecard rung, per query and binding, in the cell form the query driver writes (Arrow display text, null for null), with the suite's matching rule per query. An exact match compares every column; epsilon and equivalence compare the result projected onto the reference's columns, paired by the key columns.",
+  "description": "The pinned reference answers of one scorecard rung, per query and binding, in the cell form the query driver writes (Arrow display text, null for null), with the suite's matching rule per query. An exact match without a key compares every column; an exact match with a key, epsilon and equivalence compare the result projected onto the reference's columns, paired by the key columns.",
   "type": "object",
   "properties": {
     "schema": { "const": "graphforge-gdc-rung-reference/1" },
@@ -55,7 +55,7 @@
         {
           "if": { "properties": { "matching": { "const": "exact" } } },
           "then": {
-            "not": { "anyOf": [{ "required": ["epsilon"] }, { "required": ["key"] }, { "required": ["label"] }] }
+            "not": { "anyOf": [{ "required": ["epsilon"] }, { "required": ["label"] }] }
           }
         },
         {

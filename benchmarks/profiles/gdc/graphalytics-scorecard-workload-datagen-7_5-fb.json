@@ -1,0 +1,147 @@
+{
+  "schema": "graphforge-gdc-query-workload/1",
+  "suite": "graphalytics",
+  "variants": [
+    {
+      "id": "bfs",
+      "ordered": false,
+      "columns": [
+        "target_uuid",
+        "cost"
+      ],
+      "bindings": [
+        {
+          "id": "run-1",
+          "params": {
+            "source": {
+              "type": "Str",
+              "value": "9a6be629-508a-7935-b844-66146fded86d"
+            }
+          }
+        },
+        {
+          "id": "run-2",
+          "params": {
+            "source": {
+              "type": "Str",
+              "value": "9a6be629-508a-7935-b844-66146fded86d"
+            }
+          }
+        },
+        {
+          "id": "run-3",
+          "params": {
+            "source": {
+              "type": "Str",
+              "value": "9a6be629-508a-7935-b844-66146fded86d"
+            }
+          }
+        }
+      ],
+      "operation": {
+        "kind": "paths",
+        "by": "bfs",
+        "directed": false,
+        "source": {
+          "uuid_param": "source"
+        }
+      }
+    },
+    {
+      "id": "wcc",
+      "ordered": false,
+      "columns": [
+        "id",
+        "community_id"
+      ],
+      "bindings": [
+        {
+          "id": "run-1"
+        },
+        {
+          "id": "run-2"
+        },
+        {
+          "id": "run-3"
+        }
+      ],
+      "operation": {
+        "kind": "cluster",
+        "label": "Vertex",
+        "by": "components",
+        "directed": false
+      }
+    },
+    {
+      "id": "lcc",
+      "ordered": false,
+      "columns": [
+        "id",
+        "score"
+      ],
+      "bindings": [
+        {
+          "id": "run-1"
+        },
+        {
+          "id": "run-2"
+        },
+        {
+          "id": "run-3"
+        }
+      ],
+      "operation": {
+        "kind": "rank",
+        "label": "Vertex",
+        "by": "clustering_coefficient",
+        "directed": false
+      }
+    },
+    {
+      "id": "sssp",
+      "ordered": false,
+      "columns": [
+        "target_uuid",
+        "cost"
+      ],
+      "bindings": [
+        {
+          "id": "run-1",
+          "params": {
+            "source": {
+              "type": "Str",
+              "value": "9a6be629-508a-7935-b844-66146fded86d"
+            }
+          }
+        },
+        {
+          "id": "run-2",
+          "params": {
+            "source": {
+              "type": "Str",
+              "value": "9a6be629-508a-7935-b844-66146fded86d"
+            }
+          }
+        },
+        {
+          "id": "run-3",
+          "params": {
+            "source": {
+              "type": "Str",
+              "value": "9a6be629-508a-7935-b844-66146fded86d"
+            }
+          }
+        }
+      ],
+      "operation": {
+        "kind": "paths",
+        "by": "dijkstra",
+        "directed": false,
+        "weight": "weight",
+        "source": {
+          "uuid_param": "source"
+        }
+      }
+    }
+  ]
+}

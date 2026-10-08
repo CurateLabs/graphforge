@@ -1,0 +1,76 @@
+{
+  "schema": "graphforge-gdc-query-workload/1",
+  "suite": "graphalytics",
+  "variants": [
+    {
+      "id": "bfs",
+      "ordered": false,
+      "columns": [
+        "target_uuid",
+        "cost"
+      ],
+      "bindings": [
+        {
+          "id": "run-1",
+          "params": {
+            "source": {
+              "type": "Str",
+              "value": "ac611f85-2553-7b85-afea-41399c0eef32"
+            }
+          }
+        },
+        {
+          "id": "run-2",
+          "params": {
+            "source": {
+              "type": "Str",
+              "value": "ac611f85-2553-7b85-afea-41399c0eef32"
+            }
+          }
+        },
+        {
+          "id": "run-3",
+          "params": {
+            "source": {
+              "type": "Str",
+              "value": "ac611f85-2553-7b85-afea-41399c0eef32"
+            }
+          }
+        }
+      ],
+      "operation": {
+        "kind": "paths",
+        "by": "bfs",
+        "directed": true,
+        "source": {
+          "uuid_param": "source"
+        }
+      }
+    },
+    {
+      "id": "wcc",
+      "ordered": false,
+      "columns": [
+        "id",
+        "community_id"
+      ],
+      "bindings": [
+        {
+          "id": "run-1"
+        },
+        {
+          "id": "run-2"
+        },
+        {
+          "id": "run-3"
+        }
+      ],
+      "operation": {
+        "kind": "cluster",
+        "label": "Vertex",
+        "by": "components",
+        "directed": false
+      }
+    }
+  ]
+}

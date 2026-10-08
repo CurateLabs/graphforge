@@ -26,8 +26,8 @@ pub use measure::{
 };
 pub use reconcile::{CountPair, Reconciliation, reconcile};
 pub use workload::{
-    Binding, EXPECTED_COUNTS_SCHEMA, ExpectedCounts, Operation, SourceSelector, Variant,
-    WORKLOAD_SCHEMA, Workload, parse_expected_counts, parse_workload,
+    Binding, EXPECTED_COUNTS_SCHEMA, ExpectedCounts, MatchSource, Operation, SourceSelector,
+    UuidSource, Variant, WORKLOAD_SCHEMA, Workload, parse_expected_counts, parse_workload,
 };
 
 pub const EVIDENCE_SCHEMA: &str = "graphforge-gdc-query-evidence/1";
