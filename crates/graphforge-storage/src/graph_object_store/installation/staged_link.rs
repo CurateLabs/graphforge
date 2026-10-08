@@ -27,9 +27,9 @@ use super::{
 };
 use super::{
     GraphObjectInstallEvidence, GraphObjectPublicationLease, HashDomain, InstalledObject,
-    ObjectAuthentication, ReadIoEvidence, capture_installed_object, checked_read_io_sum,
-    classify_file_counted_in_domain, immutable_commit_error, record_completed_install,
-    seal_graph_object, verify_and_seal_graph_object_counted,
+    ObjectAuthentication, ReadIoEvidence, add_bucket_barriers, capture_installed_object,
+    checked_read_io_sum, classify_file_counted_in_domain, immutable_commit_error,
+    record_completed_install, seal_graph_object, verify_and_seal_graph_object_counted,
 };
 use crate::durable_commit::{acknowledge_directory, observe_barriers};
 use crate::graph_construction::{CapturedEncodedArtifact, construction_failpoint};
@@ -43,6 +43,9 @@ enum Existing {
     Mismatched {
         identity: FileIdentity,
         io: ReadIoEvidence,
+        /// Set when this inode is the encoder's own file, which linking again
+        /// cannot repair. The install is refused after the entry is retired.
+        refusal: Option<&'static str>,
     },
 }
 
@@ -78,9 +81,35 @@ pub(super) fn install_staged_encoded_artifact(
         checksum: source.checksum(),
         identity: captured_identity,
     };
-    let bucket = cas.digest_bucket(digest, true)?;
-    let installed = match existing_object(lease, source, &bucket, authentication)? {
+    let (bucket, bucket_barriers) = cas.ensure_digest_bucket(digest)?;
+    let mut carried = ReadIoEvidence::default();
+    let mut existing = existing_object(lease, source, &bucket, authentication)?;
+    // Retiring a mis-addressed entry and installing its replacement must not
+    // interleave with another repair of the same digest: an identity-checked
+    // unlink is two steps, so a second repairer could remove the correct
+    // object the first one just installed. Ordinary installs only ever link,
+    // never unlink, so they stay on shared authority. The lock is per bucket
+    // and held to the end of this install; the classification is checked again
+    // once it is held.
+    let mut _repair_lock = None;
+    if let Existing::Mismatched { identity, io, .. } = &existing {
+        carried = *io;
+        let classified = *identity;
+        returned_error_boundary("repair:before-lock")?;
+        _repair_lock = Some(RepairLock::acquire(&bucket, &cas.diagnostic_root)?);
+        returned_error_boundary("repair:locked")?;
+        if address_identity(&bucket, digest, &cas.diagnostic_root)? != Some(classified) {
+            // Another installer changed the entry while this one waited.
+            existing = existing_object(lease, source, &bucket, authentication)?;
+            if let Existing::Mismatched { io, .. } = &existing {
+                carried = checked_read_io_sum(carried, *io)?;
+            }
+        }
+    }
+    let installed = match existing {
         Existing::Reused(mut reused) => {
+            add_authentication_work(&mut reused.evidence, carried)?;
+            add_bucket_barriers(&mut reused.evidence, bucket_barriers);
             // A second name on the staged inode must be this very object-store
             // entry. Any other alias is not something this install created.
             if staged_links(source)? > 1 && reused.identity != source.identity() {
@@ -108,15 +137,22 @@ pub(super) fn install_staged_encoded_artifact(
         }
         existing => {
             let mut retire_barriers = 0;
-            let mut classification_io = ReadIoEvidence::default();
-            if let Existing::Mismatched { identity, io } = existing {
-                retire_mismatched(lease, &bucket, digest, identity)?;
-                retire_barriers = 1;
-                classification_io = io;
+            let classification_io = carried;
+            if let Existing::Mismatched {
+                identity, refusal, ..
+            } = existing
+            {
+                retire_barriers = retire_mismatched(lease, &bucket, digest, identity)?;
+                if let Some(refusal) = refusal {
+                    // The entry is gone, so a retry starts from a clean
+                    // address. This install has nothing correct to give it.
+                    return Err(validation(refusal));
+                }
             }
             match link_staged(lease, source, &bucket, authentication)? {
                 Linked::Installed(mut installed) => {
                     add_authentication_work(&mut installed.evidence, classification_io)?;
+                    add_bucket_barriers(&mut installed.evidence, bucket_barriers);
                     installed.evidence.directory_fsync_calls += retire_barriers;
                     installed.evidence.fsync_calls += retire_barriers;
                     installed
@@ -137,6 +173,7 @@ pub(super) fn install_staged_encoded_artifact(
                     add_authentication_work(&mut classification, classification_io)?;
                     record_completed_install(&classification, 0);
                     add_authentication_work(&mut evidence, classification_io)?;
+                    add_bucket_barriers(&mut evidence, bucket_barriers);
                     evidence.file_fsync_calls += file_fsyncs;
                     evidence.directory_fsync_calls += retire_barriers;
                     evidence.fsync_calls += file_fsyncs + retire_barriers;
@@ -201,6 +238,7 @@ fn existing_object(
         return Ok(Existing::Mismatched {
             identity,
             io: ReadIoEvidence::default(),
+            refusal: None,
         });
     }
     let path = graph_object_path(&cas.diagnostic_root, digest)?;
@@ -226,13 +264,18 @@ fn existing_object(
     let (mut io, mut matches) = classify(expected_checksum)?;
     if !matches && identity == source.identity() {
         // The object is the encoder's own inode, rewritten in place after it
-        // was linked. Removing it and linking the staged name again would
-        // reinstall the same bad bytes, so nothing here can repair it.
-        return Err(validation(if expected_checksum.is_some() {
-            "staged inventory checksum differs from the object at its address"
-        } else {
-            "staged encoded source is not the content its address names"
-        }));
+        // was linked. Linking the staged name again would reinstall the same
+        // bad bytes, so nothing here can repair it. The caller retires the
+        // entry, so no mis-addressed object stays at the address, and refuses.
+        return Ok(Existing::Mismatched {
+            identity,
+            io,
+            refusal: Some(if expected_checksum.is_some() {
+                "staged inventory checksum differs from the object at its address"
+            } else {
+                "staged encoded source is not the content its address names"
+            }),
+        });
     }
     if !matches && expected_checksum.is_some() {
         let (sha_io, sha_matches) = classify(None)?;
@@ -250,7 +293,11 @@ fn existing_object(
         ));
     }
     if !matches {
-        return Ok(Existing::Mismatched { identity, io });
+        return Ok(Existing::Mismatched {
+            identity,
+            io,
+            refusal: None,
+        });
     }
     if io.content_xxh64 != Some(source.checksum()) {
         return Err(validation(
@@ -292,16 +339,60 @@ fn add_authentication_work(
     Ok(())
 }
 
+/// Exclusive authority over one digest bucket, held while a mis-addressed
+/// entry is classified, retired and replaced. It is advisory and per bucket,
+/// so it is cheap, and only repairs take it.
+struct RepairLock<'a> {
+    bucket: &'a StableDirectory,
+}
+
+impl<'a> RepairLock<'a> {
+    fn acquire(bucket: &'a StableDirectory, root: &std::path::Path) -> Result<Self, GfError> {
+        bucket
+            .lock_exclusive()
+            .map_err(|error| storage("lock graph object bucket for repair", root, error))?;
+        Ok(Self { bucket })
+    }
+}
+
+impl Drop for RepairLock<'_> {
+    fn drop(&mut self) {
+        let _ = self.bucket.unlock();
+    }
+}
+
+/// The identity of whatever is named at the digest's address, if anything.
+fn address_identity(
+    bucket: &StableDirectory,
+    digest: &str,
+    root: &std::path::Path,
+) -> Result<Option<FileIdentity>, GfError> {
+    match bucket.open_child_file(std::ffi::OsStr::new(&digest[2..])) {
+        Ok(file) => graphforge_filesystem::file_identity(&file)
+            .map(Some)
+            .map_err(|error| storage("identify graph object at its address", root, error)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(storage("open graph object at its address", root, error)),
+    }
+}
+
 /// Remove an object proven not to hash to its address, so the correct install
-/// can take the name. The publication lease excludes collection meanwhile.
+/// can take the name. The caller holds the bucket's [`RepairLock`], which is
+/// what makes the identity-checked unlink safe against another repairer.
 fn retire_mismatched(
     lease: &GraphObjectPublicationLease,
     bucket: &StableDirectory,
     digest: &str,
     identity: FileIdentity,
-) -> Result<(), GfError> {
+) -> Result<u64, GfError> {
     let cas = &lease.cas;
     let object_path = graph_object_path(&cas.diagnostic_root, digest)?;
+    returned_error_boundary("repair:retiring")?;
+    if address_identity(bucket, digest, &cas.diagnostic_root)? != Some(identity) {
+        // Someone else already retired or replaced it; whatever is there now
+        // is not this caller's to remove.
+        return Ok(0);
+    }
     bucket
         .unlink_child_if_identity(std::ffi::OsStr::new(&digest[2..]), identity)
         .map_err(|error| storage("remove mis-addressed graph object", &object_path, error))?;
@@ -310,7 +401,8 @@ fn retire_mismatched(
     }
     construction_failpoint(&format!("cas.install.after_mismatch_unlink.{digest}"));
     acknowledge_directory(bucket)
-        .map_err(|error| storage("acknowledge mis-addressed removal", &object_path, error))
+        .map_err(|error| storage("acknowledge mis-addressed removal", &object_path, error))?;
+    Ok(1)
 }
 
 /// Unlink an object this lease linked that commit-boundary admission refused.
@@ -329,7 +421,8 @@ pub(in crate::graph_object_store) fn retire_unadmitted_link(
         return Ok(());
     }
     let bucket = lease.cas.digest_bucket(digest, false)?;
-    retire_mismatched(lease, &bucket, digest, identity)
+    let _repair_lock = RepairLock::acquire(&bucket, &lease.cas.diagnostic_root)?;
+    retire_mismatched(lease, &bucket, digest, identity).map(|_| ())
 }
 
 fn link_staged(
@@ -443,6 +536,7 @@ fn link_staged(
             file_fsync_calls: file_fsyncs,
             directory_fsync_calls: directory_fsyncs,
             fsync_calls: file_fsyncs + directory_fsyncs,
+            bucket_creations: 0,
         },
         identity,
     }))

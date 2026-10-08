@@ -6706,12 +6706,22 @@ fn validate_lifecycle_metric_policies_for_axis(
                             // per attempt and one bucket barrier per request,
                             // installed or reused. Copied bytes and manifest
                             // nodes also retire a temporary: two per attempt.
+                            // Every digest bucket an install created adds the
+                            // one barrier that makes it durable, and each
+                            // request creates at most one.
                             let linked = kind == "payload" && !cfg!(windows);
-                            let directory_barriers = if linked {
+                            let base_barriers = if linked {
                                 Some(requests)
                             } else {
                                 component.install_attempts.checked_mul(2)
                             };
+                            let directory_barriers = base_barriers
+                                .and_then(|base| base.checked_add(component.bucket_creations));
+                            if component.bucket_creations > requests {
+                                return Err(format!(
+                                    "{name} {kind} created more buckets than it had requests at rung {rung}"
+                                ));
+                            }
                             if component.install_attempts < component.installed_objects
                                 || component.install_attempts > requests
                                 || directory_barriers != Some(component.directory_fsync_calls)
@@ -7995,6 +8005,29 @@ fn linked_payload_policies_reject_a_reintroduced_copy_or_read_back() {
                 && error.contains("written by the object store"),
             "{axis:?}: {error}"
         );
+        // A directory barrier nobody accounts for must fail even though the
+        // aggregate reconciles; the same barrier accounted as a bucket
+        // creation is the durability the install owes and passes.
+        let mut unaccounted = baseline.clone();
+        for observation in &mut unaccounted {
+            observation.cas_publication_io.payload.directory_fsync_calls += 1;
+            reconcile_cas_phase_aggregate(observation);
+        }
+        let error = validate_lifecycle_metric_policies_for_axis(axis, &unaccounted)
+            .expect_err("an unaccounted directory barrier must fail");
+        assert!(
+            error.contains("durability components differ"),
+            "{axis:?}: {error}"
+        );
+        let mut accounted = baseline.clone();
+        for observation in &mut accounted {
+            let payload = &mut observation.cas_publication_io.payload;
+            payload.directory_fsync_calls += 1;
+            payload.bucket_creations += 1;
+            reconcile_cas_phase_aggregate(observation);
+        }
+        validate_lifecycle_metric_policies_for_axis(axis, &accounted)
+            .expect("a counted bucket creation barrier is accepted");
         let mut read_back = baseline.clone();
         for observation in &mut read_back {
             let payload = &mut observation.cas_publication_io.payload;

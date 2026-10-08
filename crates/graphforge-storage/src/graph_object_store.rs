@@ -39,6 +39,7 @@ thread_local! {
     #[cfg_attr(windows, allow(dead_code))]
     static CROSS_DEVICE_LINK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static BEFORE_OBJECT_LINK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static BOUNDARY_HOOK: std::cell::RefCell<Option<(String, Box<dyn FnOnce()>)>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -49,12 +50,29 @@ fn returned_error_boundary(name: &str) -> Result<(), GfError> {
             hook();
         }
     }
+    let hook = BOUNDARY_HOOK.with(|current| {
+        let mut current = current.borrow_mut();
+        if current.as_ref().is_some_and(|(hooked, _)| hooked == name) {
+            current.take().map(|(_, hook)| hook)
+        } else {
+            None
+        }
+    });
+    if let Some(hook) = hook {
+        hook();
+    }
     if RETURNED_ERROR_BOUNDARY.with(|boundary| boundary.borrow().as_deref() == Some(name)) {
         return Err(GfError::Storage(format!(
             "injected graph object returned error at {name}"
         )));
     }
     Ok(())
+}
+
+/// Run `hook` once, the next time an install reaches the named boundary.
+#[cfg(all(test, unix))]
+pub(crate) fn set_boundary_hook(name: &str, hook: Box<dyn FnOnce()>) {
+    BOUNDARY_HOOK.with(|current| *current.borrow_mut() = Some((name.to_owned(), hook)));
 }
 
 /// Make every staged-object link fail as if it crossed filesystems.
@@ -379,20 +397,65 @@ impl CasRoot {
     }
 
     fn digest_bucket(&self, digest: &str, create: bool) -> Result<StableDirectory, GfError> {
+        if create {
+            return self.ensure_digest_bucket(digest).map(|(bucket, _)| bucket);
+        }
+        validate_digest(digest)?;
+        self.sha256
+            .open_child_directory(std::ffi::OsStr::new(&digest[..2]))
+            .map_err(|error| {
+                storage(
+                    "open stable graph object bucket",
+                    &self.diagnostic_root,
+                    error,
+                )
+            })
+    }
+
+    /// Open the digest's bucket, creating it when absent. A created bucket is
+    /// only a name in the `sha256` directory until that directory is
+    /// acknowledged (ADR 0013), so creation is followed by its barrier. An
+    /// existing but empty bucket may be one whose creation was interrupted
+    /// before that barrier ran; nothing is linked into a bucket before it, so
+    /// emptiness is exactly that case, and the barrier is run again. Returns
+    /// the number of barriers this call ran, for the caller's evidence.
+    fn ensure_digest_bucket(&self, digest: &str) -> Result<(StableDirectory, u64), GfError> {
         validate_digest(digest)?;
         let name = std::ffi::OsStr::new(&digest[..2]);
-        let result = if create {
-            self.sha256.create_child_directory(name)
-        } else {
-            self.sha256.open_child_directory(name)
-        };
-        result.map_err(|error| {
+        let open = |error| {
             storage(
                 "open stable graph object bucket",
                 &self.diagnostic_root,
                 error,
             )
-        })
+        };
+        let bucket = match self.sha256.open_child_directory(name) {
+            Ok(bucket) => {
+                // Only a probe for whether the barrier may be owed: a stale
+                // answer costs one extra barrier or none, never an object.
+                let unfinished = std::fs::read_dir(bucket.path())
+                    .map_err(open)?
+                    .next()
+                    .is_none();
+                if !unfinished {
+                    return Ok((bucket, 0));
+                }
+                bucket
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.sha256.create_child_directory(name).map_err(open)?
+            }
+            Err(error) => return Err(open(error)),
+        };
+        returned_error_boundary("install:bucket-created")?;
+        crate::durable_commit::acknowledge_directory(&self.sha256).map_err(|error| {
+            storage(
+                "acknowledge graph object bucket creation",
+                &self.diagnostic_root,
+                error,
+            )
+        })?;
+        Ok((bucket, 1))
     }
 
     fn open_digest(&self, digest: &str) -> Result<File, GfError> {
@@ -762,6 +825,9 @@ pub struct GraphObjectInstallEvidence {
     pub file_fsync_calls: u64,
     /// Completed synchronization of object and temporary namespaces.
     pub directory_fsync_calls: u64,
+    /// Digest buckets this installation created. Each is made durable by one
+    /// barrier on the `sha256` directory, which `directory_fsync_calls` includes.
+    pub(crate) bucket_creations: u64,
 }
 
 /// Content-free application work accumulated from actual CAS operations.
@@ -788,6 +854,9 @@ pub struct GraphObjectIoTotals {
     pub reused_objects: u64,
     /// Logical bytes newly installed.
     pub installed_bytes: u64,
+    /// Digest buckets created, each made durable by one barrier on the
+    /// `sha256` directory that `directory_fsync_calls` includes.
+    pub bucket_creations: u64,
 }
 
 impl GraphObjectIoTotals {
@@ -815,6 +884,7 @@ impl GraphObjectIoTotals {
             install_attempts: u64::from(evidence.attempted_install),
             reused_objects: u64::from(evidence.reused_existing),
             installed_bytes: evidence.bytes_installed,
+            bucket_creations: evidence.bucket_creations,
         })
     }
 
@@ -838,6 +908,7 @@ impl GraphObjectIoTotals {
             (&mut self.install_attempts, other.install_attempts),
             (&mut self.reused_objects, other.reused_objects),
             (&mut self.installed_bytes, other.installed_bytes),
+            (&mut self.bucket_creations, other.bucket_creations),
         ] {
             *counter = counter
                 .checked_add(value)

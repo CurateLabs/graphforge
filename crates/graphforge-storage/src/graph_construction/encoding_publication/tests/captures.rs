@@ -181,7 +181,6 @@ fn known_captured_cas_inode_refuses_valid_same_length_corruption() {
     )
     .unwrap();
     let path = crate::graph_object_path(root.path(), source.content_sha256()).unwrap();
-    let identity = graphforge_filesystem::path_identity(&path).unwrap();
     let current = std::fs::read(root.path().join("CURRENT")).unwrap();
     let permissions = std::fs::metadata(&path).unwrap().permissions();
     let mut writable = permissions.clone();
@@ -211,9 +210,8 @@ fn known_captured_cas_inode_refuses_valid_same_length_corruption() {
     assert_eq!(observed.artifact_payload_sha256_bytes, 0);
     assert_eq!(observed.unclassified_sha256_bytes, 0);
     assert_eq!(observed.checksum_bytes, source.bytes());
-    assert_eq!(
-        graphforge_filesystem::path_identity(&path).unwrap(),
-        identity
-    );
+    // The refused entry is the encoder's own rewritten inode, so it is retired:
+    // no mis-addressed object stays at the address (#1899).
+    assert!(!path.exists());
     assert_eq!(std::fs::read(root.path().join("CURRENT")).unwrap(), current);
 }

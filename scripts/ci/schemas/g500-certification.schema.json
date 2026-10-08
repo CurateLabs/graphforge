@@ -1354,7 +1354,8 @@
         "installed_objects",
         "reused_objects",
         "installed_bytes",
-        "install_attempts"
+        "install_attempts",
+        "bucket_creations"
       ],
       "properties": {
         "read_bytes": {
@@ -1403,6 +1404,11 @@
           "maximum": 18446744073709551615
         },
         "install_attempts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "bucket_creations": {
           "type": "integer",
           "minimum": 0,
           "maximum": 18446744073709551615

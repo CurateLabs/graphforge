@@ -921,10 +921,10 @@ where
     F: FnOnce(&mut CasTemporaryWriter) -> Result<(u64, crate::durable_commit::FileSeal), GfError>,
 {
     validate_digest(digest)?;
-    let bucket = cas.digest_bucket(digest, true)?;
+    let (bucket, bucket_barriers) = cas.ensure_digest_bucket(digest)?;
     let destination_name = std::ffi::OsStr::new(&digest[2..]);
     let mut replace_prior = None;
-    if let Some(evidence) = try_reuse_existing_object(
+    if let Some(mut reused) = try_reuse_existing_object(
         cas,
         &bucket,
         destination_name,
@@ -936,7 +936,8 @@ where
             replace_prior: &mut replace_prior,
         },
     )? {
-        return Ok(evidence);
+        add_bucket_barriers(&mut reused.evidence, bucket_barriers);
+        return Ok(reused);
     }
     let temporary_name = std::ffi::OsString::from(Uuid::new_v4().hyphenated().to_string());
     #[cfg(unix)]
@@ -1002,17 +1003,23 @@ where
         authentication,
         replace_prior,
     )?;
-    Ok(InstalledObject {
-        evidence: installation_evidence(
-            expected_length,
-            installed,
-            bytes_hashed,
-            authentication,
-            preseal_io,
-            concurrent_io,
-        )?,
-        identity,
-    })
+    let mut evidence = installation_evidence(
+        expected_length,
+        installed,
+        bytes_hashed,
+        authentication,
+        preseal_io,
+        concurrent_io,
+    )?;
+    add_bucket_barriers(&mut evidence, bucket_barriers);
+    Ok(InstalledObject { evidence, identity })
+}
+
+/// Count the barrier that made a newly created bucket durable in this install.
+fn add_bucket_barriers(evidence: &mut GraphObjectInstallEvidence, barriers: u64) {
+    evidence.bucket_creations += barriers;
+    evidence.directory_fsync_calls += barriers;
+    evidence.fsync_calls += barriers;
 }
 
 fn installation_evidence(

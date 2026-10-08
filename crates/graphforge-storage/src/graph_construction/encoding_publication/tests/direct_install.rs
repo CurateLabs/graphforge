@@ -142,9 +142,15 @@ fn installed_object_is_the_staged_inode_and_nothing_is_written() {
     assert_eq!(observed.checksum_bytes, 0);
     assert_eq!(evidence.bytes_installed, source.bytes());
     assert_eq!(evidence.content_xxh64, Some(source.checksum()));
-    // One payload barrier and one namespace barrier for the address (ADR 0013).
+    // One payload barrier and one namespace barrier for the address (ADR 0013),
+    // plus the `sha256` barrier that makes the bucket this object created
+    // durable.
     assert_eq!(evidence.file_fsync_calls, 1);
-    assert_eq!(evidence.directory_fsync_calls, 1);
+    assert_eq!(evidence.bucket_creations, 1);
+    assert_eq!(
+        evidence.directory_fsync_calls,
+        1 + evidence.bucket_creations
+    );
 
     // The object is the encoder's inode, on the encoder's filesystem, sealed.
     let object = std::fs::metadata(staged.object_path()).unwrap();
@@ -539,20 +545,22 @@ fn edited_staged_file_is_refused_at_admission_and_leaves_no_mis_addressed_object
     object_store(staged.root.path());
 }
 
-/// A rerun with no capture finds the encoder's own inode at the address,
-/// rewritten in place. Replacing it would link the same bad bytes again, so the
-/// install refuses and leaves the object where it is; restoring the bytes
-/// lets the same install pass.
+/// A retry with no capture finds the encoder's own inode at the address,
+/// rewritten in place, because the interrupted attempt that linked it never
+/// reached admission. Linking it again would reinstall the same bad bytes, so
+/// the install refuses; it also retires the entry, so no mis-addressed object
+/// stays at the address. Restoring the bytes lets the same install pass.
 #[test]
-fn uncaptured_object_that_is_the_rewritten_staged_inode_is_refused_not_relinked() {
+fn uncaptured_object_that_is_the_rewritten_staged_inode_is_retired_and_refused() {
     let staged = staged(15_012);
     let inventory = staged.inventory();
     let source = inventory.open(Path::new(ARTIFACT)).unwrap();
     let good = std::fs::read(staged.staged_path()).unwrap();
     let first = crate::begin_graph_object_publication(staged.root.path()).unwrap();
     install(&first, &source).unwrap();
+    // The lease's record of what it linked is memory only, so dropping it is
+    // what a crash before admission leaves behind.
     drop(first);
-    let inode = std::fs::metadata(staged.object_path()).unwrap().ino();
     edit_in_place(&staged.staged_path());
     let current = staged.current();
 
@@ -565,16 +573,199 @@ fn uncaptured_object_that_is_the_rewritten_staged_inode_is_refused_not_relinked(
         "{error}"
     );
     assert_eq!(observed.artifact_payload_sha256_bytes, source.bytes());
-    assert_eq!(
-        std::fs::metadata(staged.object_path()).unwrap().ino(),
-        inode
+    assert!(
+        !staged.object_path().exists(),
+        "a refused install must not leave the mis-addressed entry"
     );
-    assert_eq!(std::fs::metadata(staged.staged_path()).unwrap().nlink(), 2);
+    assert_eq!(std::fs::metadata(staged.staged_path()).unwrap().nlink(), 1);
+    object_store(staged.root.path());
     assert_eq!(staged.current(), current);
 
     write_in_place(&staged.staged_path(), &good);
-    assert!(install(&lease, &source).unwrap().reused_existing);
+    let evidence = install(&lease, &source).unwrap();
+    assert!(!evidence.reused_existing);
     assert_eq!(std::fs::read(staged.object_path()).unwrap(), good);
+}
+
+/// The same, after a real process crash between the link and admission: the
+/// retry in a new process retires the entry the dead one left.
+#[test]
+fn retry_after_a_crash_retires_the_rewritten_staged_inode() {
+    let root = TempDir::new().unwrap();
+    assert_eq!(
+        crash_publication_child(
+            root.path(),
+            Some(&format!("cas.install.after_link.{ARTIFACT}"))
+        ),
+        Some(86)
+    );
+    let address = artifact_address(root.path());
+    assert!(address.exists(), "the crash left the linked object");
+    let encoding: GraphConstructionEncoding = serde_json::from_slice(
+        &std::fs::read(
+            root.path()
+                .join(PRIVATE_ROOT)
+                .join(Uuid::from_u128(OPERATION).simple().to_string())
+                .join("encoded-v1/inventory.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let session = GraphConstructionSession::open(
+        root.path(),
+        Uuid::from_u128(OPERATION),
+        0,
+        GraphConstructionBudgets::default(),
+    )
+    .unwrap();
+    let graph = session
+        .root
+        .open_child_directory(OsStr::new(&encoding.root))
+        .unwrap()
+        .open_child_directory(OsStr::new("graph"))
+        .unwrap();
+    let inventory = CapturedEncodedInventory {
+        root: &graph,
+        artifacts: &encoding.artifacts,
+        active_identities: &session
+            .checkpoint
+            .evidence
+            .storage_active_identity_allocated_bytes,
+    };
+    let source = inventory.open(Path::new(ARTIFACT)).unwrap();
+    let good = std::fs::read(&address).unwrap();
+    let staged_path = private_encoded_graph(root.path()).join(ARTIFACT);
+    edit_in_place(&staged_path);
+    assert_ne!(
+        sha256_hex(&std::fs::read(&address).unwrap()),
+        source.content_sha256()
+    );
+
+    let lease = crate::begin_graph_object_publication(root.path()).unwrap();
+    let error = install(&lease, &source).unwrap_err();
+    assert!(error.to_string().contains("not the content"), "{error}");
+    assert!(!address.exists());
+    object_store(root.path());
+
+    write_in_place(&staged_path, &good);
+    install(&lease, &source).unwrap();
+    assert_eq!(std::fs::read(&address).unwrap(), good);
+}
+
+/// Installer B classified a corrupt object, and installer A repaired it before
+/// B could take the repair lock. B must see A's correct object and keep it.
+#[test]
+fn repair_that_lost_the_race_keeps_the_winners_replacement() {
+    let staged = staged(15_031);
+    let inventory = staged.inventory();
+    let source = inventory.open(Path::new(ARTIFACT)).unwrap();
+    let bytes = std::fs::read(staged.staged_path()).unwrap();
+    crate::install_graph_object_bytes(staged.root.path(), &bytes).unwrap();
+    let mut corrupt = bytes.clone();
+    corrupt[0] ^= 0xff;
+    crate::graph_object_store::corrupt_sealed_graph_object_for_test(
+        &staged.object_path(),
+        &corrupt,
+    );
+    let address = staged.object_path();
+    let root = staged.root.path().to_path_buf();
+    let winner = bytes.clone();
+    let rival_inode = std::rc::Rc::new(std::cell::Cell::new(0_u64));
+    let recorded = std::rc::Rc::clone(&rival_inode);
+    crate::graph_object_store::set_boundary_hook(
+        "repair:before-lock",
+        Box::new(move || {
+            std::fs::remove_file(&address).unwrap();
+            crate::install_graph_object_bytes(&root, &winner).unwrap();
+            recorded.set(std::fs::metadata(&address).unwrap().ino());
+        }),
+    );
+    let lease = crate::begin_graph_object_publication(staged.root.path()).unwrap();
+    let evidence = install(&lease, &source).unwrap();
+    assert_ne!(rival_inode.get(), 0, "the rival repair ran");
+    assert!(evidence.reused_existing);
+    assert_eq!(evidence.bytes_installed, 0);
+    let after = std::fs::metadata(staged.object_path()).unwrap();
+    assert_eq!(after.ino(), rival_inode.get(), "the winner's object stayed");
+    assert_eq!(std::fs::metadata(staged.staged_path()).unwrap().nlink(), 1);
+    assert_eq!(std::fs::read(staged.object_path()).unwrap(), bytes);
+    object_store(staged.root.path());
+}
+
+/// Retiring and replacing a mis-addressed entry happens under exclusive bucket
+/// authority: while the repair unlinks, another repairer cannot take the lock,
+/// so it cannot delete the correct object this repair is about to install.
+#[test]
+fn repair_holds_exclusive_bucket_authority_while_it_retires_and_replaces() {
+    let staged = staged(15_032);
+    let inventory = staged.inventory();
+    let source = inventory.open(Path::new(ARTIFACT)).unwrap();
+    let bytes = std::fs::read(staged.staged_path()).unwrap();
+    crate::install_graph_object_bytes(staged.root.path(), &bytes).unwrap();
+    let mut corrupt = bytes.clone();
+    corrupt[0] ^= 0xff;
+    crate::graph_object_store::corrupt_sealed_graph_object_for_test(
+        &staged.object_path(),
+        &corrupt,
+    );
+    let bucket = staged.object_path().parent().unwrap().to_path_buf();
+    let rival_got_lock = std::rc::Rc::new(std::cell::Cell::new(None));
+    let recorded = std::rc::Rc::clone(&rival_got_lock);
+    let rival_bucket = bucket.clone();
+    crate::graph_object_store::set_boundary_hook(
+        "repair:retiring",
+        Box::new(move || {
+            let rival = graphforge_filesystem::StableDirectory::open(&rival_bucket).unwrap();
+            let acquired = rival.try_lock_exclusive().unwrap();
+            if acquired {
+                rival.unlock().unwrap();
+            }
+            recorded.set(Some(acquired));
+        }),
+    );
+    let lease = crate::begin_graph_object_publication(staged.root.path()).unwrap();
+    install(&lease, &source).unwrap();
+    assert_eq!(
+        rival_got_lock.get(),
+        Some(false),
+        "a second repairer must not enter while this one retires"
+    );
+    let rival = graphforge_filesystem::StableDirectory::open(&bucket).unwrap();
+    assert!(
+        rival.try_lock_exclusive().unwrap(),
+        "the repair lock is released when the install ends"
+    );
+    rival.unlock().unwrap();
+}
+
+/// Retiring an object that commit-boundary admission refused takes the same
+/// authority.
+#[test]
+fn retiring_an_unadmitted_link_holds_exclusive_bucket_authority() {
+    let staged = staged(15_033);
+    let inventory = staged.inventory();
+    let source = inventory.open(Path::new(ARTIFACT)).unwrap();
+    edit_in_place(&staged.staged_path());
+    let lease = crate::begin_graph_object_publication(staged.root.path()).unwrap();
+    install(&lease, &source).unwrap();
+    let bucket = staged.object_path().parent().unwrap().to_path_buf();
+    let rival_got_lock = std::rc::Rc::new(std::cell::Cell::new(None));
+    let recorded = std::rc::Rc::clone(&rival_got_lock);
+    crate::graph_object_store::set_boundary_hook(
+        "repair:retiring",
+        Box::new(move || {
+            let rival = graphforge_filesystem::StableDirectory::open(&bucket).unwrap();
+            let acquired = rival.try_lock_exclusive().unwrap();
+            if acquired {
+                rival.unlock().unwrap();
+            }
+            recorded.set(Some(acquired));
+        }),
+    );
+    let entry = file_entry(&source);
+    crate::graph_object_store::admit_graph_object_with_lease(&lease, &entry).unwrap_err();
+    assert_eq!(rival_got_lock.get(), Some(false));
+    assert!(!staged.object_path().exists());
 }
 
 /// The same edit through a whole publication: the commit boundary admits every
