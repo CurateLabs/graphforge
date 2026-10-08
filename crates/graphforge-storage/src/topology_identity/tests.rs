@@ -28,6 +28,19 @@ fn write_fragment(
     id_column: Option<&str>,
     statistics: EnabledStatistics,
 ) -> PathBuf {
+    write_fragment_as(dir, uuid_column, id_column, statistics, None, ROWS)
+}
+
+/// Like [`write_fragment`], with the statistics truncated at `truncate` bytes
+/// and `rows` rows starting at the first identity.
+fn write_fragment_as(
+    dir: &Path,
+    uuid_column: &str,
+    id_column: Option<&str>,
+    statistics: EnabledStatistics,
+    truncate: Option<usize>,
+    rows: usize,
+) -> PathBuf {
     let mut fields = vec![Field::new(
         uuid_column,
         DataType::FixedSizeBinary(16),
@@ -40,6 +53,8 @@ fn write_fragment(
         .set_data_page_row_count_limit(PAGE_ROWS)
         .set_write_batch_size(PAGE_ROWS / 2)
         .set_statistics_enabled(statistics)
+        .set_statistics_truncate_length(truncate)
+        .set_column_index_truncate_length(truncate)
         .build();
     let path = dir.join(format!("{uuid_column}.parquet"));
     let mut writer = ArrowWriter::try_new(
@@ -48,7 +63,7 @@ fn write_fragment(
         Some(properties),
     )
     .unwrap();
-    for start in (0..ROWS).step_by(PAGE_ROWS) {
+    for start in (0..rows).step_by(PAGE_ROWS) {
         let rows = start..start + PAGE_ROWS;
         let uuids = FixedSizeBinaryArray::try_from_iter(
             rows.clone().map(|row| identity(row).as_bytes().to_vec()),
@@ -281,4 +296,99 @@ fn a_cached_footer_never_sends_a_probe_to_the_path_it_was_first_read_from() {
     let (surrogates, metrics) = probe.lookup_node_surrogates(&[identity(2_500)]).unwrap();
     assert_eq!(surrogates, [Some(2_501)]);
     assert_eq!(metrics.pages_read, 1);
+}
+
+#[test]
+fn absent_statistics_make_every_group_and_page_possible_and_the_answer_still_exact() {
+    let dir = TempDir::new().unwrap();
+    let path = write_fragment_as(
+        dir.path(),
+        "node_uuid",
+        Some("node_id"),
+        EnabledStatistics::None,
+        None,
+        ROWS,
+    );
+    let fragment = load_fragment(&path, "node_uuid", Some("node_id")).unwrap();
+    assert!(fragment.groups.iter().all(|group| group.bounds.is_none()));
+    assert!(fragment.groups.iter().all(|group| group.pages.is_empty()));
+    let mut probe = probe_over(vec![fragment], Vec::new());
+    let (surrogates, metrics) = probe
+        .lookup_node_surrogates(&[identity(3_500), absent_after(10)])
+        .unwrap();
+    assert_eq!(surrogates, [Some(3_501), None]);
+    // Nothing can be ruled out: every row group is decoded.
+    assert_eq!(metrics.identity_blocks_read, GROUPS);
+}
+
+#[test]
+fn truncated_statistics_are_not_trusted_for_pruning() {
+    // A bound cut short of a whole UUID is only a prefix; pruning by it could
+    // exclude a row group that holds the candidate.
+    let dir = TempDir::new().unwrap();
+    let path = write_fragment_as(
+        dir.path(),
+        "node_uuid",
+        Some("node_id"),
+        EnabledStatistics::Page,
+        Some(8),
+        ROWS,
+    );
+    let fragment = load_fragment(&path, "node_uuid", Some("node_id")).unwrap();
+    assert!(fragment.groups.iter().all(|group| group.bounds.is_none()));
+    let mut probe = probe_over(vec![fragment], Vec::new());
+    let (surrogates, metrics) = probe.lookup_node_surrogates(&[identity(1_234)]).unwrap();
+    assert_eq!(surrogates, [Some(1_235)]);
+    assert_eq!(metrics.identity_blocks_read, GROUPS);
+}
+
+#[test]
+fn a_fragment_replaced_after_its_footer_was_read_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let mut probe = node_probe(dir.path());
+    let path = dir.path().join("node_uuid.parquet");
+    // Another file at the same path, as a rewrite that renames over it leaves.
+    let other = TempDir::new().unwrap();
+    let replacement = write_fragment_as(
+        other.path(),
+        "node_uuid",
+        Some("node_id"),
+        EnabledStatistics::Page,
+        None,
+        ROWS / 2,
+    );
+    std::fs::rename(&replacement, &path).unwrap();
+    let error = probe
+        .lookup_node_surrogates(&[identity(10)])
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("changed since its footer was read"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_uuid_held_by_two_fragments_is_corrupt_topology() {
+    let dir = TempDir::new().unwrap();
+    let first = write_fragment(
+        dir.path(),
+        "node_uuid",
+        Some("node_id"),
+        EnabledStatistics::Page,
+    );
+    let copy = dir.path().join("second.parquet");
+    std::fs::copy(&first, &copy).unwrap();
+    let mut probe = probe_over(
+        vec![
+            load_fragment(&first, "node_uuid", Some("node_id")).unwrap(),
+            load_fragment(&copy, "node_uuid", Some("node_id")).unwrap(),
+        ],
+        Vec::new(),
+    );
+    let error = probe
+        .lookup_node_surrogates(&[identity(10)])
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("more than one topology row"), "{error}");
 }

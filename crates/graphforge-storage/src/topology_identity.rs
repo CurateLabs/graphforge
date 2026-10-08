@@ -165,17 +165,21 @@ fn footer_cache() -> &'static Mutex<HashMap<FileKey, Arc<Fragment>>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn file_key(path: &Path) -> Result<FileKey, GfError> {
+fn key_of(metadata: &std::fs::Metadata) -> FileKey {
     use std::os::unix::fs::MetadataExt;
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|error| GfError::Storage(format!("topology fragment: {error}")))?;
-    Ok(FileKey {
+    FileKey {
         device: metadata.dev(),
         inode: metadata.ino(),
         length: metadata.len(),
         modified_nanos: i128::from(metadata.mtime()) * 1_000_000_000
             + i128::from(metadata.mtime_nsec()),
-    })
+    }
+}
+
+fn file_key(path: &Path) -> Result<FileKey, GfError> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| GfError::Storage(format!("topology fragment: {error}")))?;
+    Ok(key_of(&metadata))
 }
 
 fn storage(message: impl std::fmt::Display) -> GfError {
@@ -322,6 +326,11 @@ fn load_fragment(
         let group_rows = usize::try_from(group.num_rows()).unwrap_or(0);
         rows += group_rows as u64;
         let column = group.column(uuid_leaf);
+        // Absent statistics, or bounds that are not whole 16-byte UUIDs, make the
+        // group "may hold". The writer truncates statistics at 64 bytes
+        // (`permanent_parquet`), so a 16-byte UUID bound is never truncated: a
+        // bound of any other width can only come from another writer, and is
+        // not trusted.
         let bounds = column.statistics().and_then(|statistics| {
             let min: [u8; 16] = statistics.min_bytes_opt()?.try_into().ok()?;
             let max: [u8; 16] = statistics.max_bytes_opt()?.try_into().ok()?;
@@ -446,6 +455,18 @@ impl Fragment {
     ) -> Result<(), GfError> {
         let file = std::fs::File::open(&self.path)
             .map_err(|error| storage(format!("{}: {error}", self.path.display())))?;
+        // The footer this probe pruned by describes one file. Decoding another
+        // one with it would misread or miss rows, so a fragment replaced since
+        // the footer was read is refused rather than trusted.
+        let opened = file
+            .metadata()
+            .map_err(|error| storage(format!("{}: {error}", self.path.display())))?;
+        if key_of(&opened) != self.key {
+            return Err(storage(format!(
+                "{} changed since its footer was read",
+                self.path.display()
+            )));
+        }
         let file = crate::catalog::admitted_path_file(file)
             .map_err(|error| storage(format!("{}: {error}", self.path.display())))?;
         let mut leaves = vec![self.uuid_leaf];
@@ -539,6 +560,14 @@ fn collect_matches(
 }
 
 /// Identity lookups over one topology generation's published Parquet.
+///
+/// A probe is a read of one pinned generation and takes no lock. It is advisory
+/// for validation and authoritative only at commit: `commit_uuid_topology_rewrite`
+/// checks the new identities and then, under the project rewrite lock, refuses
+/// the commit unless the topology generation it probed is still the prior one.
+/// A publication that lands after a probe was opened therefore cannot let a
+/// stale answer commit, and a fragment replaced under a retained probe is refused
+/// when it is decoded (see `Fragment::scan_group`).
 #[derive(Clone)]
 pub struct TopologyIdentityProbe {
     nodes: Vec<Arc<Fragment>>,
@@ -776,7 +805,12 @@ impl TopologyIdentityProbe {
             metrics.pages_read += pages;
             metrics.identity_bytes_read += bytes;
             for (index, surrogate) in found {
-                resolved[index] = Some(surrogate);
+                // One live entity per UUID. A second row naming it, in this
+                // file or another, is corrupt topology; the rows were decoded
+                // already, so the check reads nothing more.
+                if resolved[index].replace(surrogate).is_some() {
+                    return Err(storage("a UUID is held by more than one topology row"));
+                }
             }
         }
         metrics.found = resolved.iter().filter(|value| value.is_some()).count() as u64;

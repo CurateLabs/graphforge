@@ -67,17 +67,26 @@ same probe.
 Two behaviours differ for a project written before #1902. Both are accepted
 under the pre-v1 policy, which changes the format in place without a migration:
 
-- **Deleted edge UUIDs become reusable.** A project that deleted edges before
-  the upgrade holds those deletions only in its ignored membership index, so the
-  UUID of an edge deleted before the upgrade can be appended again. Entities
-  deleted after the upgrade are recorded in `deleted_identities.parquet` and stay
-  spent. Deleted node UUIDs from before the upgrade were not separately tested.
+- **UUIDs deleted before the upgrade become reusable.** The index kept the
+  tombstones of a project's earlier deletions and nothing reads it now.
+  `deleted_identities.parquet` records only deletions made since the upgrade, so
+  an entity deleted before it can be appended again under the same UUID. This
+  holds for edges and nodes alike as far as the identity probe is concerned; the
+  ordinal facet's own checks are unchanged. Entities deleted after the upgrade
+  stay spent.
 - **Search verifies nodes by repeat-check when there is no ordinal facet.**
   `NodeIdentityCheck` used the ordinal facet when a project had one and the
   membership index otherwise. With the index gone, a project without an ordinal
   facet checks only that the rows it reads do not repeat a node UUID; it no longer
   cross-checks each row's `node_id` against a separate authority. A project with
   the ordinal facet is unchanged.
+
+The old files are left alone. Nothing reads `manifest.json`,
+`topology-receipt.json`, `identities-v5-*` or `node-surrogates-v5-*` in an
+upgraded project, and nothing removes them: orphan collection considers only the
+canonical ordinal artifact names, so the files stay in the graph-files inventory
+and travel through hydration (the two JSON controls are still copied), export,
+verify and import as ordinary entries until a future cleanup drops them.
 
 ## Node ordinal facet
 
