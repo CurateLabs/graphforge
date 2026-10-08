@@ -200,7 +200,7 @@ pub(super) fn for_each(
     operation_uuid: Uuid,
     cancellation: Option<&CancellationToken>,
     mut consume: impl FnMut(u64, RecordBatch) -> Result<(), GfError>,
-) -> Result<(), GfError> {
+) -> Result<Option<String>, GfError> {
     let mut window = Window {
         graph,
         operation_uuid,

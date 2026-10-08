@@ -5,6 +5,7 @@ import importlib.util
 import json
 from pathlib import Path
 import unittest
+from unittest import mock
 
 SPEC = importlib.util.spec_from_file_location(
     "tiny_growth", Path(__file__).parents[1] / "scripts/test-tiny-lifecycle-certification.py"
@@ -25,6 +26,8 @@ def observations():
                 metrics = [1, 0, 1, 0, 0]
             elif owner in GROWTH.DATA_OWNERS:
                 metrics = [2, 8192 * factor, 2, 8192 * factor, 8192 * factor]
+            elif owner in GROWTH.CONTROL_OWNERS:
+                metrics = [3, 2000 + 100 * factor, 3, 2000 + 100 * factor, 8192]
             else:
                 metrics = [1, 628, 1, 628, 4096]
             owners[owner] = {
@@ -127,7 +130,16 @@ class LifecycleGrowthTests(unittest.TestCase):
             [o["receipt"]["transient_peak_storage_bytes"] for o in recorded],
             [1093632, 1343488, 2449408],
         )
-        GROWTH.validate_growth(recorded)
+        # The fixture predates in-place sources: its import owner holds a copy of
+        # the input and grows with it, which is what DATA_OWNERS then said. The
+        # test is about the recorded peaks, so judge it under that classification.
+        with (
+            mock.patch.object(GROWTH, "CONTROL_OWNERS", set()),
+            mock.patch.object(
+                GROWTH, "DATA_OWNERS", GROWTH.DATA_OWNERS | {"source-project-import"}
+            ),
+        ):
+            GROWTH.validate_growth(recorded)
 
     def test_adjacent_peak_envelope_is_stricter_than_old_normalized_ceiling(self):
         peaks = [60000, 120000, 300000]
@@ -165,6 +177,19 @@ class LifecycleGrowthTests(unittest.TestCase):
                         changed[2]["receipt"]["retained_owners"][owner]["totals"][field] = value
                         with self.assertRaises(ValueError):
                             GROWTH.validate_growth(changed)
+
+    def test_import_session_holds_control_data_and_refuses_a_copy_of_the_input(self):
+        for owner in GROWTH.CONTROL_OWNERS:
+            for field in ("logical_bytes", "physical_logical_bytes", "allocated_bytes"):
+                # A copy of the input grows with the work: 1x, 2x, 4x.
+                copied = observations()
+                for observation, factor in zip(copied, (1, 2, 4), strict=True):
+                    totals = observation["receipt"]["retained_owners"][owner]["totals"]
+                    totals[field] = 8192 * factor
+                with self.subTest(owner=owner, field=field), self.assertRaises(ValueError):
+                    GROWTH.validate_growth(copied)
+        for owner in GROWTH.CONTROL_OWNERS:
+            self.assertNotIn(owner, GROWTH.DATA_OWNERS)
 
     def test_missing_owner_metric_and_fabricated_ratio_refused(self):
         for mutate in (

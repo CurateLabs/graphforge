@@ -31,7 +31,8 @@ use super::ordered::{Ordered, run_ordered};
 use super::scratch::{Appender, Partitions, Scatter, Scratch, read_blocks};
 use super::scratch_csr::{CsrRecord, CsrScratch, KeyHistogram};
 use super::tables::{
-    NodeIndex, NodeTable, Tasks, admit_batch, check_cancelled, copy_uuids, short_source,
+    NodeIndex, NodeTable, Tasks, admit_batch, check_cancelled, claim_in_order, copy_uuids,
+    short_source,
 };
 use super::{
     BulkSource, ConstructionChunkKind, GfError, GraphConstructionBudgets, required_string, storage,
@@ -499,105 +500,102 @@ pub(super) fn scatter_edges(
         plan.gate_bytes / (2 * plan.concurrency as u64) / 40,
     );
     let miss = Mutex::new(None::<[u8; 16]>);
-    tasks
-        .items
-        .par_iter()
-        .try_for_each(|&(source, task, rows)| {
+    claim_in_order(tasks.items.clone(), |(source, task, rows)| {
+        check_cancelled(cancel)?;
+        let mut scatter = Scatter::new(scratch, &partitions, plan.staging_bytes);
+        let mut cache = RelationCache {
+            shared: &dictionary,
+            ids: HashMap::new(),
+        };
+        let mut written = 0;
+        let mut uuids = Vec::new();
+        let mut sources_ranks = Vec::new();
+        let mut targets = Vec::new();
+        let mut rels = Vec::new();
+        let mut endpoints = Vec::new();
+        let mut task_miss = None::<[u8; 16]>;
+        let mut task_bounds = vec![None; partitions.len()];
+        sources[source].reader.read_task(task, &mut |batch| {
             check_cancelled(cancel)?;
-            let mut scatter = Scatter::new(scratch, &partitions, plan.staging_bytes);
-            let mut cache = RelationCache {
-                shared: &dictionary,
-                ids: HashMap::new(),
-            };
-            let mut written = 0;
-            let mut uuids = Vec::new();
-            let mut sources_ranks = Vec::new();
-            let mut targets = Vec::new();
-            let mut rels = Vec::new();
-            let mut endpoints = Vec::new();
-            let mut task_miss = None::<[u8; 16]>;
-            let mut task_bounds = vec![None; partitions.len()];
-            sources[source].reader.read_task(task, &mut |batch| {
-                check_cancelled(cancel)?;
-                crate::graph_construction::validate_canonical_batch(
-                    ConstructionChunkKind::Edge,
-                    &batch,
-                )?;
-                admit_batch(ConstructionChunkKind::Edge, &batch, budgets)?;
-                let count = batch.num_rows();
-                if written + count > rows {
-                    return Err(short_source());
-                }
-                if count == 0 {
-                    return Ok(());
-                }
-                uuids.clear();
-                uuids.resize(count, [0_u8; 16]);
-                copy_uuids(
-                    crate::graph_construction::batch_uuid_column(&batch, "edge_uuid")?,
-                    &mut uuids,
-                );
-                rels.clear();
-                rels.resize(count, 0);
-                cache.column(required_string(&batch, "rel_type")?, &mut rels)?;
-                for (name, ranks) in [
-                    ("source_uuid", &mut sources_ranks),
-                    ("target_uuid", &mut targets),
-                ] {
-                    endpoints.clear();
-                    endpoints.resize(count, [0_u8; 16]);
-                    copy_uuids(
-                        crate::graph_construction::batch_uuid_column(&batch, name)?,
-                        &mut endpoints,
-                    );
-                    ranks.clear();
-                    ranks.extend(endpoints.iter().map(|endpoint| {
-                        index.find(endpoint).unwrap_or_else(|| {
-                            task_miss.get_or_insert(*endpoint);
-                            0
-                        })
-                    }));
-                }
-                for row in 0..count {
-                    let record = EdgeRecord {
-                        uuid: uuids[row],
-                        src: sources_ranks[row],
-                        dst: targets[row],
-                        rel: rels[row],
-                    };
-                    if record.src != 0 && record.dst != 0 {
-                        histogram.add(record.src, record.dst);
-                    }
-                    let part = partition_of(&splitters, &record.uuid);
-                    observe(&mut task_bounds[part], record.uuid);
-                    scatter.push(part, &record.encode())?;
-                }
-                if let Some(properties) = properties {
-                    properties.ingest(&batch, cancel)?;
-                }
-                written += count;
-                Ok(())
-            })?;
-            if written != rows {
+            crate::graph_construction::validate_canonical_batch(
+                ConstructionChunkKind::Edge,
+                &batch,
+            )?;
+            admit_batch(ConstructionChunkKind::Edge, &batch, budgets)?;
+            let count = batch.num_rows();
+            if written + count > rows {
                 return Err(short_source());
             }
-            scatter.finish()?;
-            for (part, bounds_of_task) in task_bounds.into_iter().enumerate() {
-                if let Some((low, high)) = bounds_of_task {
-                    let mut shared = bounds[part]
-                        .lock()
-                        .map_err(|_| storage("UUID bounds lock poisoned"))?;
-                    observe(&mut shared, low);
-                    observe(&mut shared, high);
+            if count == 0 {
+                return Ok(());
+            }
+            uuids.clear();
+            uuids.resize(count, [0_u8; 16]);
+            copy_uuids(
+                crate::graph_construction::batch_uuid_column(&batch, "edge_uuid")?,
+                &mut uuids,
+            );
+            rels.clear();
+            rels.resize(count, 0);
+            cache.column(required_string(&batch, "rel_type")?, &mut rels)?;
+            for (name, ranks) in [
+                ("source_uuid", &mut sources_ranks),
+                ("target_uuid", &mut targets),
+            ] {
+                endpoints.clear();
+                endpoints.resize(count, [0_u8; 16]);
+                copy_uuids(
+                    crate::graph_construction::batch_uuid_column(&batch, name)?,
+                    &mut endpoints,
+                );
+                ranks.clear();
+                ranks.extend(endpoints.iter().map(|endpoint| {
+                    index.find(endpoint).unwrap_or_else(|| {
+                        task_miss.get_or_insert(*endpoint);
+                        0
+                    })
+                }));
+            }
+            for row in 0..count {
+                let record = EdgeRecord {
+                    uuid: uuids[row],
+                    src: sources_ranks[row],
+                    dst: targets[row],
+                    rel: rels[row],
+                };
+                if record.src != 0 && record.dst != 0 {
+                    histogram.add(record.src, record.dst);
                 }
+                let part = partition_of(&splitters, &record.uuid);
+                observe(&mut task_bounds[part], record.uuid);
+                scatter.push(part, &record.encode())?;
             }
-            if let Some(endpoint) = task_miss {
-                miss.lock()
-                    .map_err(|_| storage("endpoint lock poisoned"))?
-                    .get_or_insert(endpoint);
+            if let Some(properties) = properties {
+                properties.ingest(&batch, cancel)?;
             }
+            written += count;
             Ok(())
         })?;
+        if written != rows {
+            return Err(short_source());
+        }
+        scatter.finish()?;
+        for (part, bounds_of_task) in task_bounds.into_iter().enumerate() {
+            if let Some((low, high)) = bounds_of_task {
+                let mut shared = bounds[part]
+                    .lock()
+                    .map_err(|_| storage("UUID bounds lock poisoned"))?;
+                observe(&mut shared, low);
+                observe(&mut shared, high);
+            }
+        }
+        if let Some(endpoint) = task_miss {
+            miss.lock()
+                .map_err(|_| storage("endpoint lock poisoned"))?
+                .get_or_insert(endpoint);
+        }
+        Ok(())
+    })?;
     let initial_counts = partitions.counts()?;
     let total = initial_counts.iter().sum::<u64>();
     if total != tasks.total as u64 {

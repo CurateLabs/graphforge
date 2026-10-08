@@ -573,6 +573,13 @@ participant. These are successful local work counters and may overlap with
 process-level byte and hash measurements. Historical v1 receipts retain their
 original closed set of work units.
 
+Region diagnostics v2 also records in-place source reads in `source_read`
+(#1898): `observed_bytes` counts every byte range a source's decode read,
+counting repeats, and `reread_bytes` counts the bytes the source's SHA-256 had
+to read afterwards because no decode asked for them or the held-byte bound
+dropped them. Together they are the import's whole read of a registered
+Parquet source.
+
 Successful hash work counts actual inputs to completed SHA-256 and XXH64
 payload streams. Each stream counts separately: SHA plus XXH64 over one
 payload contributes twice its length, and a reused digest contributes no SHA

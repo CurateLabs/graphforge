@@ -408,7 +408,8 @@ pub use graphforge_core::{
 };
 pub use import_session::{
     GraphImportSession, ImportCallTiming, ImportConstructionEvidence, ImportOperationTimings,
-    ImportPhase, ImportProgress, ImportSessionLimits, ImportSourceKind, PublicationWorkComponents,
+    ImportPhase, ImportProgress, ImportSessionLimits, ImportSourceKind, ImportSourceProvenance,
+    PublicationWorkComponents,
 };
 pub use query_evidence::{
     QueryExecutionEvidence, QueryHopEvidence, QueryOperatorRssEvidence, QuerySinkEvidenceReceipt,

@@ -91,7 +91,7 @@ const WORK_UNITS_V1: [&str; 6] = [
     "hashed_bytes",
     "written_bytes",
 ];
-const WORK_UNITS_V2: [&str; 9] = [
+const WORK_UNITS_V2: [&str; 11] = [
     "rows",
     "bytes",
     "nodes",
@@ -101,6 +101,8 @@ const WORK_UNITS_V2: [&str; 9] = [
     "participant_materialized_bytes",
     "participant_reused_bytes",
     "participant_payload_read_bytes",
+    "observed_bytes",
+    "reread_bytes",
 ];
 const REGIONS: [&str; 62] = [
     "import_command",
@@ -290,6 +292,8 @@ mod tests {
             "participant_payload_read_bytes",
             19,
         );
+        graphforge_storage::concurrency_attribution::RegionScope::record_work("observed_bytes", 23);
+        graphforge_storage::concurrency_attribution::RegionScope::record_work("reread_bytes", 29);
         let mut value = serde_json::to_value(capture.finish()).unwrap();
         assert!(valid_snapshot(&value));
         value["regions"]["import_command"]["work"]["attempted_bytes"] = json!(17);

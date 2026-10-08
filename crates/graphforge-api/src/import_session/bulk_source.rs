@@ -5,9 +5,10 @@
 //! operation identity every batch normalizes under, match a sequential read of
 //! the file.
 
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use arrow::ipc::reader::FileReader as ArrowFileReader;
 use arrow::record_batch::RecordBatch;
@@ -19,6 +20,7 @@ use parquet::arrow::arrow_reader::{
 };
 use uuid::Uuid;
 
+use super::external_source::{self, ExternalSource, ObservedFile, SourceDigest};
 use super::{
     ImportSourceKind, SourceRecord, cancelled, canonicalize_parquet_batch, import_batch_operation,
     normalize_batch, storage, validation,
@@ -329,9 +331,58 @@ impl Refusals {
     }
 }
 
+/// Whole-file SHA-256 of each in-place source in a bulk build.
+///
+/// The digest is folded from the bytes the build's own tasks read, so hashing
+/// adds no read of the source. SHA-256 is sequential and the tasks run in
+/// parallel, but they are claimed in file order (see `claim_in_order` in
+/// `graphforge-storage`): the bytes read ahead of the hashed prefix are held,
+/// bounded by `external_source::pending_limit`, and whatever the decode never
+/// reads, such as the page index, is read once by [`Digests::finish`].
+#[derive(Default)]
+pub(super) struct Digests {
+    sources: Mutex<Vec<(u64, ExternalSource, SourceDigest)>>,
+}
+
+impl Digests {
+    fn register(&self, sequence: u64, external: &ExternalSource, digest: &SourceDigest) {
+        self.sources
+            .lock()
+            .expect("source digest registry lock poisoned")
+            .push((sequence, external.clone(), digest.clone()));
+    }
+
+    /// Complete every source's digest, keyed by source sequence, and confirm each
+    /// is still the file registration recorded.
+    pub(super) fn finish(&self) -> Result<BTreeMap<u64, String>, GfError> {
+        let sources = std::mem::take(
+            &mut *self
+                .sources
+                .lock()
+                .expect("source digest registry lock poisoned"),
+        );
+        let mut digests = BTreeMap::new();
+        for (sequence, external, digest) in sources {
+            let file = external.reopen()?;
+            let sha256 = digest.finish(&external, &file)?;
+            external.check(&file)?;
+            digests.insert(sequence, sha256);
+        }
+        Ok(digests)
+    }
+}
+
+/// An in-place Parquet source and the digest its tasks feed.
+struct InPlace {
+    external: ExternalSource,
+    digest: SourceDigest,
+}
+
 struct SourceReader<'a> {
     graph: &'a GraphForge,
     path: PathBuf,
+    /// `None` for a source an earlier version copied into the session.
+    in_place: Option<InPlace>,
     kind: BulkInputKind,
     operation_uuid: Uuid,
     sequence: u64,
@@ -392,6 +443,97 @@ impl SourceReader<'_> {
             );
         }
         refused
+    }
+}
+
+impl SourceReader<'_> {
+    /// The reader over `task`'s rows: whole row groups, trimmed by a row
+    /// selection where the task starts or ends inside one.
+    fn parquet_reader<T: parquet::file::reader::ChunkReader + 'static>(
+        &self,
+        input: T,
+        metadata: &ArrowReaderMetadata,
+        rows: u64,
+        first_batch: u64,
+    ) -> Result<parquet::arrow::arrow_reader::ParquetRecordBatchReader, GfError> {
+        let batch_rows = self.batch_rows as u64;
+        let start = first_batch * batch_rows;
+        let end = (start + BATCHES_PER_TASK * batch_rows).min(rows);
+        let mut groups = Vec::new();
+        let mut group_start = 0_u64;
+        let mut first_group_start = 0_u64;
+        for (index, group) in metadata.metadata().row_groups().iter().enumerate() {
+            let group_end = group_start + u64::try_from(group.num_rows()).unwrap_or(0);
+            if group_end > start && group_start < end {
+                if groups.is_empty() {
+                    first_group_start = group_start;
+                }
+                groups.push(index);
+            }
+            group_start = group_end;
+        }
+        let covered = groups
+            .iter()
+            .map(|index| {
+                u64::try_from(metadata.metadata().row_group(*index).num_rows()).unwrap_or(0)
+            })
+            .sum::<u64>();
+        let mut builder =
+            ParquetRecordBatchReaderBuilder::new_with_metadata(input, metadata.clone())
+                .with_batch_size(self.batch_rows)
+                .with_row_groups(groups);
+        if first_group_start != start || first_group_start + covered != end {
+            let mut selectors = Vec::new();
+            let skip_before = start - first_group_start;
+            if skip_before > 0 {
+                selectors.push(RowSelector::skip(
+                    usize::try_from(skip_before).map_err(storage)?,
+                ));
+            }
+            selectors.push(RowSelector::select(
+                usize::try_from(end - start).map_err(storage)?,
+            ));
+            let skip_after = first_group_start + covered - end;
+            if skip_after > 0 {
+                selectors.push(RowSelector::skip(
+                    usize::try_from(skip_after).map_err(storage)?,
+                ));
+            }
+            builder = builder.with_row_selection(RowSelection::from(selectors));
+        }
+        builder.build().map_err(storage)
+    }
+
+    /// Decode an in-place task, confirming before every batch and at the end that
+    /// the file is still the one registered.
+    #[allow(clippy::too_many_arguments)]
+    fn decode_parquet(
+        &self,
+        input: ObservedFile,
+        metadata: &ArrowReaderMetadata,
+        rows: u64,
+        first_batch: u64,
+        in_place: &InPlace,
+        guard: &File,
+        sink: &mut dyn FnMut(RecordBatch) -> Result<(), GfError>,
+    ) -> Result<(), GfError> {
+        let changed = |error: GfError| in_place.external.reclassify(guard, error);
+        let reader = self
+            .parquet_reader(input, metadata, rows, first_batch)
+            .map_err(changed)?;
+        for (offset, batch) in reader.enumerate() {
+            #[cfg(test)]
+            super::external_source::pass_hook(
+                &in_place.external.path,
+                "batch",
+                first_batch + offset as u64,
+            );
+            // The source can change between any two batches.
+            in_place.external.check(guard)?;
+            let batch = batch.map_err(|error| changed(storage(error)))?;
+            self.emit(first_batch + offset as u64, batch, sink)?;
+        }
+        in_place.external.check(guard)
     }
 }
 
@@ -460,60 +602,38 @@ impl BulkBatchReader for SourceReader<'_> {
         sink: &mut dyn FnMut(RecordBatch) -> Result<(), GfError>,
     ) -> Result<(), GfError> {
         let first_batch = task as u64 * BATCHES_PER_TASK;
-        let file = File::open(&self.path).map_err(storage)?;
         match &self.format {
             Format::Parquet { metadata, rows } => {
-                let batch_rows = self.batch_rows as u64;
-                let start = first_batch * batch_rows;
-                let end = (start + BATCHES_PER_TASK * batch_rows).min(*rows);
-                let mut groups = Vec::new();
-                let mut group_start = 0_u64;
-                let mut first_group_start = 0_u64;
-                for (index, group) in metadata.metadata().row_groups().iter().enumerate() {
-                    let group_end = group_start + u64::try_from(group.num_rows()).unwrap_or(0);
-                    if group_end > start && group_start < end {
-                        if groups.is_empty() {
-                            first_group_start = group_start;
-                        }
-                        groups.push(index);
+                if let Some(in_place) = &self.in_place {
+                    let file = in_place.external.reopen()?;
+                    #[cfg(test)]
+                    super::external_source::pass_hook(
+                        &in_place.external.path,
+                        "opened",
+                        task as u64,
+                    );
+                    let guard = file.try_clone().map_err(storage)?;
+                    let input = ObservedFile::new(file, in_place.digest.clone())?;
+                    self.decode_parquet(
+                        input,
+                        metadata,
+                        *rows,
+                        first_batch,
+                        in_place,
+                        &guard,
+                        sink,
+                    )?;
+                } else {
+                    // A session an earlier version began holds its own copy.
+                    let file = File::open(&self.path).map_err(storage)?;
+                    let mut decoded = self.parquet_reader(file, metadata, *rows, first_batch)?;
+                    for (offset, batch) in decoded.by_ref().enumerate() {
+                        self.emit(first_batch + offset as u64, batch.map_err(storage)?, sink)?;
                     }
-                    group_start = group_end;
-                }
-                let covered = groups
-                    .iter()
-                    .map(|index| {
-                        u64::try_from(metadata.metadata().row_group(*index).num_rows()).unwrap_or(0)
-                    })
-                    .sum::<u64>();
-                let mut builder =
-                    ParquetRecordBatchReaderBuilder::new_with_metadata(file, metadata.clone())
-                        .with_batch_size(self.batch_rows)
-                        .with_row_groups(groups);
-                if first_group_start != start || first_group_start + covered != end {
-                    let mut selectors = Vec::new();
-                    let skip_before = start - first_group_start;
-                    if skip_before > 0 {
-                        selectors.push(RowSelector::skip(
-                            usize::try_from(skip_before).map_err(storage)?,
-                        ));
-                    }
-                    selectors.push(RowSelector::select(
-                        usize::try_from(end - start).map_err(storage)?,
-                    ));
-                    let skip_after = first_group_start + covered - end;
-                    if skip_after > 0 {
-                        selectors.push(RowSelector::skip(
-                            usize::try_from(skip_after).map_err(storage)?,
-                        ));
-                    }
-                    builder = builder.with_row_selection(RowSelection::from(selectors));
-                }
-                let reader = builder.build().map_err(storage)?;
-                for (offset, batch) in reader.enumerate() {
-                    self.emit(first_batch + offset as u64, batch.map_err(storage)?, sink)?;
                 }
             }
             Format::Arrow { .. } => {
+                let file = File::open(&self.path).map_err(storage)?;
                 let mut reader = ArrowFileReader::try_new(file, None).map_err(storage)?;
                 let total = reader.num_batches() as u64;
                 for index in first_batch..(first_batch + BATCHES_PER_TASK).min(total) {
@@ -566,7 +686,33 @@ fn schema_owned_bytes(schema: &arrow::datatypes::Schema) -> u64 {
             .sum::<usize>()) as u64
 }
 
+/// The most compressed bytes any one task reads: the row groups its rows touch.
+fn largest_task_bytes(metadata: &ArrowReaderMetadata, batch_rows: usize) -> u64 {
+    let task_rows = BATCHES_PER_TASK * batch_rows as u64;
+    let mut largest = 0_u64;
+    let mut per_task = BTreeMap::<u64, u64>::new();
+    let mut group_start = 0_u64;
+    for group in metadata.metadata().row_groups() {
+        let rows = u64::try_from(group.num_rows()).unwrap_or(0);
+        if rows == 0 {
+            continue;
+        }
+        let bytes = u64::try_from(group.compressed_size()).unwrap_or(0);
+        for task in group_start / task_rows..=(group_start + rows - 1) / task_rows {
+            let total = per_task.entry(task).or_default();
+            *total = total.saturating_add(bytes);
+            largest = largest.max(*total);
+        }
+        group_start += rows;
+    }
+    largest
+}
+
 /// Plan one registered source from its footer (pass 0).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the build's shared observers travel with the plan's inputs"
+)]
 pub(super) fn plan<'a>(
     graph: &'a GraphForge,
     root: &Path,
@@ -575,18 +721,40 @@ pub(super) fn plan<'a>(
     operation_uuid: Uuid,
     cancellation: Option<&'a CancellationToken>,
     refusals: &'a Refusals,
+    digests: &'a Digests,
 ) -> Result<BulkSource<'a>, GfError> {
     let path = root.join("sources").join(&source.name);
     let kind = source.kind.input_kind();
+    let mut in_place = None;
     let required = match kind {
         BulkInputKind::Node => 2,
         BulkInputKind::Edge => 4,
     };
     let (format, rows, columns, schema_bytes, decoding_bytes) = match source.kind {
         ImportSourceKind::ParquetNodes | ImportSourceKind::ParquetEdges => {
-            let file = File::open(&path).map_err(storage)?;
-            let metadata =
-                ArrowReaderMetadata::load(&file, ArrowReaderOptions::new()).map_err(storage)?;
+            let metadata = if let Some(external) = source.external.as_ref() {
+                // The footer is read once through the digest, which keeps it.
+                let digest = SourceDigest::new(external.size);
+                let file = external.open_observed(&digest)?;
+                let guard = file.try_clone().map_err(storage)?;
+                let input = ObservedFile::new(file, digest.clone())?;
+                let metadata = ArrowReaderMetadata::load(&input, ArrowReaderOptions::new())
+                    .map_err(|error| external.reclassify(&guard, storage(error)))?;
+                digest.set_pending_limit(external_source::pending_limit(
+                    std::thread::available_parallelism().map_or(1, usize::from),
+                    largest_task_bytes(&metadata, batch_rows),
+                ));
+                digests.register(source.sequence, external, &digest);
+                in_place = Some(InPlace {
+                    external: external.clone(),
+                    digest,
+                });
+                metadata
+            } else {
+                // A session an earlier version began holds its own copy.
+                let file = File::open(&path).map_err(storage)?;
+                ArrowReaderMetadata::load(&file, ArrowReaderOptions::new()).map_err(storage)?
+            };
             let rows =
                 u64::try_from(metadata.metadata().file_metadata().num_rows()).map_err(storage)?;
             let columns = metadata.schema().fields().len();
@@ -635,10 +803,12 @@ pub(super) fn plan<'a>(
             .sum(),
         Format::Arrow { .. } => fs::metadata(&path).map_err(storage)?.len(),
     };
+    let tasks = usize::try_from(batches.div_ceil(BATCHES_PER_TASK)).map_err(storage)?;
     Ok(BulkSource {
         reader: Arc::new(SourceReader {
             graph,
             path,
+            in_place,
             kind,
             operation_uuid,
             sequence: source.sequence,
@@ -649,7 +819,7 @@ pub(super) fn plan<'a>(
             cancellation,
             refusals,
         }),
-        tasks: usize::try_from(batches.div_ceil(BATCHES_PER_TASK)).map_err(storage)?,
+        tasks,
         rows,
         property_free: columns == required,
         decoded_bytes,

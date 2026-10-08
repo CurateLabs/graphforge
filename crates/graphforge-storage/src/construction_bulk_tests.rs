@@ -1808,4 +1808,95 @@ mod bulk_builder {
             assert!(!run.scratch_left);
         }
     }
+
+    /// Records the order in which tasks begin, and holds each long enough for
+    /// the other workers to claim theirs.
+    struct Claims {
+        inner: Memory,
+        log: Arc<std::sync::Mutex<Vec<(&'static str, usize)>>>,
+        kind: &'static str,
+    }
+
+    impl BulkBatchReader for Claims {
+        fn task_rows(&self, task: usize) -> usize {
+            self.inner.task_rows(task)
+        }
+
+        fn read_task(
+            &self,
+            task: usize,
+            sink: &mut dyn FnMut(RecordBatch) -> Result<(), GfError>,
+        ) -> Result<(), GfError> {
+            self.log.lock().unwrap().push((self.kind, task));
+            std::thread::sleep(std::time::Duration::from_millis(4));
+            self.inner.read_task(task, sink)
+        }
+    }
+
+    /// Tasks are claimed lowest first: a source that is read front to back, as a
+    /// whole-file digest requires (#1898), is read in file order across workers,
+    /// never from several far-apart positions at once.
+    #[test]
+    fn tasks_are_claimed_in_index_order_on_every_pass() {
+        const WORKERS: usize = 4;
+        let (nodes, edges) = graph(640, 1_280, 10, identity_order);
+        let expected = bulk_with(&nodes, &edges, 1, WORKERS).unwrap();
+        for scratch in [false, true] {
+            let _forced = scratch.then(|| crate::graph_construction_encoding::ForcedPartitions::set(8, 4));
+            let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let mut plan = if scratch {
+                scratch_plan(&nodes, &edges, 1)
+            } else {
+                plan(&nodes, &edges, 1)
+            };
+            for (sources, kind, batches) in [
+                (&mut plan.nodes, "nodes", &nodes),
+                (&mut plan.edges, "edges", &edges),
+            ] {
+                sources[0].reader = Arc::new(Claims {
+                    inner: Memory {
+                        batches: batches.clone(),
+                        per_task: 1,
+                    },
+                    log: log.clone(),
+                    kind,
+                });
+            }
+            let root = TempDir::new().unwrap();
+            let mut session = pinned(&root);
+            session.set_cpu_admission(Some(Arc::new(
+                cpu_admission::ConstructionCpuAdmission::new(
+                    std::num::NonZeroUsize::new(WORKERS).unwrap(),
+                ),
+            )));
+            let encoding = session.prepare_bulk_encoding(1, &plan, || false).unwrap();
+            assert_same(&expected, &inventory(&encoding));
+            let log = log.lock().unwrap();
+            for kind in ["nodes", "edges"] {
+                let started = log
+                    .iter()
+                    .filter(|(held, _)| *held == kind)
+                    .map(|(_, task)| *task)
+                    .collect::<Vec<_>>();
+                let expected_tasks = if kind == "nodes" { nodes.len() } else { edges.len() };
+                // The over-budget edge pass first samples 64 tasks to place its
+                // splitters; the pass itself follows.
+                let sampled = usize::from(scratch && kind == "edges") * 64;
+                assert_eq!(
+                    started.len(),
+                    expected_tasks + sampled,
+                    "scratch={scratch} {kind}"
+                );
+                let started = started[sampled..].to_vec();
+                for (position, task) in started.iter().enumerate() {
+                    assert!(
+                        *task < position + WORKERS,
+                        "scratch={scratch} {kind}: task {task} began as number {position}; \
+                         workers claim the lowest unclaimed task, so none is more than {WORKERS} \
+                         ahead: {started:?}"
+                    );
+                }
+            }
+        }
+    }
 }
