@@ -1,0 +1,33 @@
+{
+  "schema": "graphforge-gdc-query-workload/1",
+  "suite": "snb-interactive",
+  "variants": [
+    {
+      "id": "friends",
+      "ordered": true,
+      "operation": {
+        "kind": "cypher",
+        "text": "MATCH (:Person {id: $person})-[:KNOWS]->(friend:Person) RETURN friend.id AS id, friend.firstName AS name ORDER BY id"
+      },
+      "bindings": [
+        {"id": "person-10", "params": {"person": {"type": "Int", "value": 10}}},
+        {"id": "person-14", "params": {"person": {"type": "Int", "value": 14}}}
+      ]
+    },
+    {
+      "id": "unparsable",
+      "ordered": true,
+      "operation": {"kind": "cypher", "text": "MATCH (person:Person RETURN person"},
+      "bindings": [{"id": "only"}]
+    },
+    {
+      "id": "people-per-city",
+      "ordered": false,
+      "operation": {
+        "kind": "cypher",
+        "text": "MATCH (:Person)-[:IS_LOCATED_IN]->(city:City) RETURN city.name AS city, count(*) AS people"
+      },
+      "bindings": [{"id": "all"}]
+    }
+  ]
+}

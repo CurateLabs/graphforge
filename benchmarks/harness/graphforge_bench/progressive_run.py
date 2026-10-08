@@ -23,7 +23,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from typing import Any
+from typing import Any, Protocol
 import xml.etree.ElementTree as ET
 
 from jsonschema import Draft202012Validator
@@ -603,13 +603,18 @@ def _benchexec_tool_directory(stage: Path, *, prefer_stage: bool = False) -> Pat
 WALL_ENVELOPE_SECONDS = 14_400
 
 
+PROGRESSIVE_DEFINITION = "graphforge-progressive-qualification-v1"
+
+
 def _stage_benchmark_xml(
-    root: Path, stage: Path, *, wall_seconds: int | None = WALL_ENVELOPE_SECONDS
+    root: Path,
+    stage: Path,
+    *,
+    wall_seconds: int | None = WALL_ENVELOPE_SECONDS,
+    definition: str = PROGRESSIVE_DEFINITION,
 ) -> None:
-    """Stage the definition; `wall_seconds=None` stages a rung with no wall limit."""
-    text = (root / "definitions/graphforge-progressive-qualification-v1.xml").read_text(
-        encoding="utf-8"
-    )
+    """Stage `definitions/<definition>.xml`; `wall_seconds=None` stages no wall limit."""
+    text = (root / "definitions" / f"{definition}.xml").read_text(encoding="utf-8")
     (stage / "benchmark.xml").write_text(
         _rewrite_benchmark_wall(text, wall_seconds), encoding="utf-8"
     )
@@ -676,13 +681,21 @@ def _benchexec_container_flags(stage: Path, *, durable_root: Path | None = None)
     return []
 
 
+class BenchExecTools(Protocol):
+    """The one executable `_run_benchexec` needs: the BenchExec interpreter."""
+
+    @property
+    def benchexec_python(self) -> Path: ...
+
+
 def _run_benchexec(
     stage: Path,
-    executables: Executables,
+    executables: BenchExecTools,
     identities: Mapping[str, Any],
     *,
     durable_root: Path | None = None,
     home: Path | None = None,
+    rundefinition: str = PROGRESSIVE_DEFINITION,
 ) -> int:
     raw_output = stage / "raw"
     raw_output.mkdir()
@@ -725,7 +738,7 @@ def _run_benchexec(
         "--outputpath",
         str(raw_output),
         "--rundefinition",
-        "graphforge-progressive-qualification-v1",
+        rundefinition,
         str(stage / "benchmark.xml"),
     ]
     if _digest(executables.benchexec_python) != identities.get("benchexec_python_sha256"):

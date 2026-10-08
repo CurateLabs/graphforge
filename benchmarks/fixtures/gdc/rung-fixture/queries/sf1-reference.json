@@ -1,0 +1,21 @@
+{
+  "schema": "graphforge-gdc-rung-reference/1",
+  "suite_id": "snb-interactive",
+  "rung_id": "sf1",
+  "source": "the rung fixture's hand-derived answers, one deliberately wrong",
+  "queries": {
+    "friends": {
+      "matching": "exact",
+      "bindings": {
+        "person-10": {"columns": ["id", "name"], "rows": [["11", "Bo"]]},
+        "person-14": {"columns": ["id", "name"], "rows": [["13", "Di"]]}
+      }
+    },
+    "people-per-city": {
+      "matching": "exact",
+      "bindings": {
+        "all": {"columns": ["city", "people"], "rows": [["Lisbon", "2"], ["Porto", "2"]]}
+      }
+    }
+  }
+}

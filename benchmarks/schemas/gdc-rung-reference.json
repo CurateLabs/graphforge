@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-gdc-rung-reference-schema/1",
+  "title": "GDC rung reference",
+  "description": "The pinned reference answers of one scorecard rung, per query and binding, in the cell form the query driver writes (Arrow display text, null for null), with the suite's matching rule per query. An exact match compares every column; epsilon and equivalence compare the result projected onto the reference's columns, paired by the key columns.",
+  "type": "object",
+  "properties": {
+    "schema": { "const": "graphforge-gdc-rung-reference/1" },
+    "suite_id": { "enum": ["graphalytics", "snb-bi", "snb-interactive", "finbench-transaction"] },
+    "rung_id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$" },
+    "source": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "queries": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "$ref": "#/$defs/query" }
+    }
+  },
+  "required": ["schema", "suite_id", "rung_id", "source", "queries"],
+  "additionalProperties": false,
+  "$defs": {
+    "cell": { "type": ["string", "null"] },
+    "binding": {
+      "type": "object",
+      "properties": {
+        "columns": { "type": "array", "items": { "type": "string" } },
+        "rows": {
+          "type": "array",
+          "items": { "type": "array", "items": { "$ref": "#/$defs/cell" } }
+        }
+      },
+      "required": ["columns", "rows"],
+      "additionalProperties": false
+    },
+    "query": {
+      "type": "object",
+      "properties": {
+        "matching": { "enum": ["exact", "epsilon", "equivalence"] },
+        "epsilon": { "type": "number", "exclusiveMinimum": 0 },
+        "key": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "label": { "type": "string", "minLength": 1 },
+        "bindings": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "$ref": "#/$defs/binding" }
+        }
+      },
+      "required": ["matching", "bindings"],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "matching": { "const": "exact" } } },
+          "then": {
+            "not": { "anyOf": [{ "required": ["epsilon"] }, { "required": ["key"] }, { "required": ["label"] }] }
+          }
+        },
+        {
+          "if": { "properties": { "matching": { "const": "epsilon" } } },
+          "then": { "required": ["epsilon", "key"], "not": { "required": ["label"] } }
+        },
+        {
+          "if": { "properties": { "matching": { "const": "equivalence" } } },
+          "then": { "required": ["key", "label"], "not": { "required": ["epsilon"] } }
+        }
+      ]
+    }
+  }
+}

@@ -73,6 +73,15 @@ the samples, an unreconciled project, or any other timing field in the
 document. These numbers are single-client engineering evidence, not LDBC
 results.
 
+A GDC scorecard card (#1893, `benchmarks/gdc-suite-index.md`, Scorecard
+ladders) takes each number from one authority only, and
+`assert_card_metric_sources` refuses a card that names any other: load and
+CSV-to-Parquet conversion time from the BenchExec run of that phase; latency,
+throughput and Graphalytics `Tp` from this driver clock; peak RSS from each
+BenchExec-run phase's largest process high-water mark; on-disk bytes from the
+product's storage-attribution receipt; node and edge counts from the driver's
+reconciliation after reopen.
+
 ## AssertionLedger merge comparison
 
 The ignored test

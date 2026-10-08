@@ -1,0 +1,52 @@
+{
+  "schema": "graphforge-gdc-query-workload/1",
+  "suite": "snb-interactive",
+  "variants": [
+    {
+      "id": "friends",
+      "ordered": true,
+      "operation": {
+        "kind": "cypher",
+        "text": "MATCH (:Person {id: $person})-[:KNOWS]->(friend:Person) RETURN friend.id AS id, friend.firstName AS name ORDER BY id"
+      },
+      "bindings": [
+        {"id": "person-10", "params": {"person": {"type": "Int", "value": 10}}},
+        {"id": "person-11", "params": {"person": {"type": "Int", "value": 11}}},
+        {"id": "person-13", "params": {"person": {"type": "Int", "value": 13}}}
+      ]
+    },
+    {
+      "id": "city-of",
+      "ordered": false,
+      "operation": {
+        "kind": "cypher",
+        "text": "MATCH (:Person {id: $person})-[:IS_LOCATED_IN]->(city:City) RETURN city.name AS city"
+      },
+      "bindings": [
+        {"id": "person-10", "params": {"person": {"type": "Int", "value": 10}}},
+        {"id": "person-12", "params": {"person": {"type": "Int", "value": 12}}}
+      ]
+    },
+    {
+      "id": "people-per-city",
+      "ordered": false,
+      "operation": {
+        "kind": "cypher",
+        "text": "MATCH (:Person)-[:IS_LOCATED_IN]->(city:City) RETURN city.name AS city, count(*) AS people"
+      },
+      "bindings": [{"id": "all"}]
+    },
+    {
+      "id": "person-components",
+      "ordered": false,
+      "operation": {
+        "kind": "cluster",
+        "label": "Person",
+        "by": "components",
+        "directed": false,
+        "via": "KNOWS"
+      },
+      "bindings": [{"id": "all"}]
+    }
+  ]
+}

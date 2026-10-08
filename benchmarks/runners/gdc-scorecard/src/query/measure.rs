@@ -1,6 +1,9 @@
 //! The per-operation latency clock, the measured pass, and the result digest.
 
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use arrow::array::Array;
@@ -12,6 +15,7 @@ use graphforge_api::{
     PathsOptions, PropValue, RankAlgorithm, RankOptions,
 };
 use serde::Serialize;
+use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use super::workload::{Binding, Operation, Variant};
@@ -23,6 +27,8 @@ use crate::identity::hex;
 pub const LATENCY_CLOCK: &str = "graphforge-gdc-query-clock/1";
 /// SHA-256 over a canonical rendering of the result; see [`result_digest`].
 pub const RESULT_DIGEST: &str = "graphforge-gdc-result-digest/1";
+/// One measured result written for a reference check; see [`ResultsDir`].
+pub const RESULT_SCHEMA: &str = "graphforge-gdc-query-result/1";
 /// Error text kept per failed sample; longer text is cut at a character boundary.
 pub const MAX_ERROR_BYTES: usize = 1024;
 
@@ -258,7 +264,12 @@ fn bounded(text: &str) -> String {
     format!("{}...", &text[..end])
 }
 
-fn sample(forge: &GraphForge, variant: &Variant, binding: &Binding) -> Result<Outcome, QueryError> {
+fn sample(
+    forge: &GraphForge,
+    variant: &Variant,
+    binding: &Binding,
+    results: Option<&ResultsDir>,
+) -> Result<Outcome, QueryError> {
     let (result, elapsed) = execute(forge, variant, binding)?;
     let (schema, batches) = match result {
         Ok(result) => result,
@@ -270,18 +281,25 @@ fn sample(forge: &GraphForge, variant: &Variant, binding: &Binding) -> Result<Ou
             }));
         }
     };
-    Ok(match result_digest(&schema, &batches, variant.ordered) {
-        Ok(result_sha256) => Outcome::Measured(Measured {
-            latency_ns: u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX),
-            rows: batches.iter().map(|batch| batch.num_rows() as u64).sum(),
-            result_sha256,
-        }),
-        Err(error) => Outcome::Failed(Failure {
-            cause: "result_unrenderable",
-            error_code: None,
-            error: bounded(error.message()),
-        }),
-    })
+    let rendered = match Rendered::new(&schema, &batches) {
+        Ok(rendered) => rendered,
+        Err(error) => {
+            return Ok(Outcome::Failed(Failure {
+                cause: "result_unrenderable",
+                error_code: None,
+                error: bounded(error.message()),
+            }));
+        }
+    };
+    let result_sha256 = rendered.digest(variant.ordered);
+    if let Some(results) = results {
+        results.write(variant, binding, &rendered, &result_sha256)?;
+    }
+    Ok(Outcome::Measured(Measured {
+        latency_ns: u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX),
+        rows: rendered.rows.len() as u64,
+        result_sha256,
+    }))
 }
 
 /// Nearest-rank percentile: the smallest sample with at least `percent`% of
@@ -307,6 +325,7 @@ pub fn nearest_rank(sorted: &[u64], percent: u64) -> u64 {
 pub fn measure_variant(
     forge: &GraphForge,
     variant: &Variant,
+    results: Option<&ResultsDir>,
 ) -> Result<VariantMeasurement, QueryError> {
     let first = &variant.bindings[0];
     let (warmup, _) = execute(forge, variant, first)?;
@@ -314,7 +333,7 @@ pub fn measure_variant(
     for binding in &variant.bindings {
         samples.push(Sample {
             binding_id: binding.id.clone(),
-            outcome: sample(forge, variant, binding)?,
+            outcome: sample(forge, variant, binding, results)?,
         });
     }
     let mut sorted: Vec<u64> = samples
@@ -363,43 +382,157 @@ pub fn result_digest(
     batches: &[RecordBatch],
     ordered: bool,
 ) -> Result<String, QueryError> {
-    let mut header = Vec::new();
-    cell(&mut header, RESULT_DIGEST);
-    cell(&mut header, if ordered { "ordered" } else { "unordered" });
-    for field in schema.fields() {
-        cell(&mut header, field.name());
-        cell(&mut header, &field.data_type().to_string());
-    }
-    header.push(b'\n');
-    let options = FormatOptions::default();
-    let mut rows = Vec::new();
-    for batch in batches {
-        let formatters = batch
-            .columns()
+    Ok(Rendered::new(schema, batches)?.digest(ordered))
+}
+
+/// One result as the digest sees it: each column's name and Arrow type, and
+/// every cell's Arrow display text, `None` for null. Batch boundaries and
+/// schema metadata are not kept.
+pub struct Rendered {
+    pub columns: Vec<(String, String)>,
+    pub rows: Vec<Vec<Option<String>>>,
+}
+
+impl Rendered {
+    /// Render every cell with Arrow's default display options.
+    ///
+    /// # Errors
+    /// `query_failed` if a column cannot be rendered.
+    pub fn new(schema: &SchemaRef, batches: &[RecordBatch]) -> Result<Self, QueryError> {
+        let columns = schema
+            .fields()
             .iter()
-            .map(|column| ArrayFormatter::try_new(column.as_ref(), &options))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| QueryError::new(QueryCause::QueryFailed, error.to_string()))?;
-        for index in 0..batch.num_rows() {
-            let mut row = Vec::new();
-            for (column, formatter) in batch.columns().iter().zip(&formatters) {
-                if column.is_null(index) {
-                    row.push(b'N');
-                } else {
-                    cell(&mut row, &formatter.value(index).to_string());
-                }
+            .map(|field| (field.name().clone(), field.data_type().to_string()))
+            .collect();
+        let options = FormatOptions::default();
+        let mut rows = Vec::new();
+        for batch in batches {
+            let formatters = batch
+                .columns()
+                .iter()
+                .map(|column| ArrayFormatter::try_new(column.as_ref(), &options))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| QueryError::new(QueryCause::QueryFailed, error.to_string()))?;
+            for index in 0..batch.num_rows() {
+                rows.push(
+                    batch
+                        .columns()
+                        .iter()
+                        .zip(&formatters)
+                        .map(|(column, formatter)| {
+                            (!column.is_null(index)).then(|| formatter.value(index).to_string())
+                        })
+                        .collect(),
+                );
             }
-            row.push(b'\n');
-            rows.push(row);
         }
+        Ok(Self { columns, rows })
     }
-    if !ordered {
-        rows.sort_unstable();
+
+    /// The `graphforge-gdc-result-digest/1` SHA-256; see [`result_digest`].
+    #[must_use]
+    pub fn digest(&self, ordered: bool) -> String {
+        let mut header = Vec::new();
+        cell(&mut header, RESULT_DIGEST);
+        cell(&mut header, if ordered { "ordered" } else { "unordered" });
+        for (name, data_type) in &self.columns {
+            cell(&mut header, name);
+            cell(&mut header, data_type);
+        }
+        header.push(b'\n');
+        let mut rows: Vec<Vec<u8>> = self
+            .rows
+            .iter()
+            .map(|cells| {
+                let mut row = Vec::new();
+                for value in cells {
+                    match value {
+                        None => row.push(b'N'),
+                        Some(text) => cell(&mut row, text),
+                    }
+                }
+                row.push(b'\n');
+                row
+            })
+            .collect();
+        if !ordered {
+            rows.sort_unstable();
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(&header);
+        for row in &rows {
+            hasher.update(row);
+        }
+        hex(&hasher.finalize())
     }
-    let mut hasher = Sha256::new();
-    hasher.update(&header);
-    for row in &rows {
-        hasher.update(row);
+}
+
+/// Where the driver writes each measured result for a later reference check,
+/// as one `graphforge-gdc-query-result/1` JSON file per sample: the query and
+/// binding ids, the ordering flag, the digest, the columns and every rendered
+/// cell. Writing happens after the clock stops, so it never enters a latency.
+#[derive(Debug)]
+pub struct ResultsDir {
+    path: PathBuf,
+    next: Cell<u64>,
+}
+
+impl ResultsDir {
+    /// Use an existing empty directory, so the results of two runs never mix.
+    ///
+    /// # Errors
+    /// `io_error` when the directory is missing, unreadable or not empty.
+    pub fn new(path: &Path) -> Result<Self, QueryError> {
+        let io = |error: std::io::Error| {
+            QueryError::new(QueryCause::Io, format!("{}: {error}", path.display()))
+        };
+        if std::fs::read_dir(path).map_err(io)?.next().is_some() {
+            return Err(QueryError::new(
+                QueryCause::Io,
+                format!("results directory {} is not empty", path.display()),
+            ));
+        }
+        Ok(Self {
+            path: path.to_owned(),
+            next: Cell::new(0),
+        })
     }
-    Ok(hex(&hasher.finalize()))
+
+    fn write(
+        &self,
+        variant: &Variant,
+        binding: &Binding,
+        rendered: &Rendered,
+        result_sha256: &str,
+    ) -> Result<(), QueryError> {
+        let ordinal = self.next.get();
+        self.next.set(ordinal + 1);
+        let document = json!({
+            "schema": RESULT_SCHEMA,
+            "query_id": variant.id,
+            "binding_id": binding.id,
+            "ordered": variant.ordered,
+            "result_sha256": result_sha256,
+            "columns": rendered
+                .columns
+                .iter()
+                .map(|(name, data_type)| json!({"name": name, "type": data_type}))
+                .collect::<Vec<_>>(),
+            "rows": rendered.rows,
+        });
+        let path = self.path.join(format!("{ordinal:08}.json"));
+        let io = |error: std::io::Error| {
+            QueryError::new(QueryCause::Io, format!("{}: {error}", path.display()))
+        };
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(io)?;
+        let mut writer = BufWriter::new(file);
+        serde_json::to_writer(&mut writer, &document)
+            .map_err(|error| QueryError::new(QueryCause::Io, error.to_string()))?;
+        writer.write_all(b"\n").map_err(io)?;
+        writer.flush().map_err(io)
+    }
 }

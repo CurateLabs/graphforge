@@ -1,0 +1,107 @@
+{
+  "schema": "graphforge-gdc-ldbc-csv-scorecard-ladder/1",
+  "suite_id": "snb-interactive",
+  "identity_profile": "scorecard",
+  "load_mapping": "profiles/gdc/rung-fixture-load-mapping.json",
+  "counts_source": {
+    "url": "https://github.com/ldbc/ldbc_snb_docs/blob/b2269610f433da72e7c97041f01680aae369a903/tables/legacy/table-number-of-entities-interactive.tex",
+    "description": "Fixture: counts are the committed rung-fixture archives' records; the URL is the table the real Interactive ladder cites"
+  },
+  "snapshot_totals_source": {
+    "url": "https://github.com/ldbc/ldbc_snb_docs/blob/b2269610f433da72e7c97041f01680aae369a903/tables/legacy/table-snsize-interactive.tex",
+    "description": "Fixture: snapshot totals are the committed rung-fixture archives' records"
+  },
+  "rungs": [
+    {
+      "id": "sf0",
+      "order": 1,
+      "scale_factor": "0",
+      "dataset_id": "rung-fixture-sf0",
+      "archive_url": "https://datasets.ldbcouncil.org/snb-interactive-v1/rung-fixture-sf0.tar.zst",
+      "archive_bytes": 376,
+      "archive_md5": "0c1d475b3b1dfae29dbd3a3ac0fca689",
+      "published_snapshot_totals": {"nodes": 7, "edges": 6},
+      "tables": [
+        {"table": "place", "kind": "nodes", "ldbc_name": "place", "published": 3, "listed": 3},
+        {
+          "table": "person",
+          "kind": "nodes",
+          "ldbc_name": "person",
+          "published": 5,
+          "listed": 4,
+          "held_back": 1,
+          "residual": 0,
+          "discrepancy": "Fixture: one person arrives in the update stream, which a read-only load does not apply."
+        },
+        {
+          "table": "person_knows_person",
+          "kind": "edges",
+          "ldbc_name": "person_knows_person",
+          "published": 2,
+          "listed": 2
+        },
+        {
+          "table": "person_islocatedin_place",
+          "kind": "edges",
+          "ldbc_name": "person_isLocatedIn_place",
+          "published": 4,
+          "listed": 4
+        }
+      ]
+    },
+    {
+      "id": "sf1",
+      "order": 2,
+      "scale_factor": "1",
+      "dataset_id": "rung-fixture-sf1",
+      "archive_url": "https://datasets.ldbcouncil.org/snb-interactive-v1/rung-fixture-sf1.tar.zst",
+      "archive_bytes": 384,
+      "archive_md5": "393ec2c3b0d73158e7305533e567a7d9",
+      "tables": [
+        {"table": "place", "kind": "nodes", "ldbc_name": "place", "published": 3, "listed": 3},
+        {"table": "person", "kind": "nodes", "ldbc_name": "person", "published": 5, "listed": 5},
+        {
+          "table": "person_knows_person",
+          "kind": "edges",
+          "ldbc_name": "person_knows_person",
+          "published": 3,
+          "listed": 3
+        },
+        {
+          "table": "person_islocatedin_place",
+          "kind": "edges",
+          "ldbc_name": "person_isLocatedIn_place",
+          "published": 5,
+          "listed": 5
+        }
+      ]
+    },
+    {
+      "id": "sf2",
+      "order": 3,
+      "scale_factor": "2",
+      "dataset_id": "rung-fixture-sf2",
+      "archive_url": "https://datasets.ldbcouncil.org/snb-interactive-v1/rung-fixture-sf1.tar.zst",
+      "archive_bytes": 384,
+      "archive_md5": "393ec2c3b0d73158e7305533e567a7d9",
+      "tables": [
+        {"table": "place", "kind": "nodes", "ldbc_name": "place", "published": 3, "listed": 3},
+        {"table": "person", "kind": "nodes", "ldbc_name": "person", "published": 5, "listed": 5},
+        {
+          "table": "person_knows_person",
+          "kind": "edges",
+          "ldbc_name": "person_knows_person",
+          "published": 3,
+          "listed": 3
+        },
+        {
+          "table": "person_islocatedin_place",
+          "kind": "edges",
+          "ldbc_name": "person_isLocatedIn_place",
+          "published": 5,
+          "listed": 5
+        }
+      ]
+    }
+  ]
+}

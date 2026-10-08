@@ -1,0 +1,57 @@
+{
+  "schema": "graphforge-gdc-scorecard-ladder-spec/1",
+  "suite_id": "snb-interactive",
+  "description": "A three-rung CI fixture in the SNB Interactive v1 CSV shape. sf0 passes; sf1 has one query that fails at runtime and one deliberately wrong reference answer, so it fails typed with both recorded; sf2 is never attempted. archives/ is built from source/ with: tar --zstd --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner --mode=u+rw,go+r-w -cf archives/rung-fixture-sfN.tar.zst -C source/sfN social_network",
+  "profile_root": "fixtures/gdc/rung-fixture",
+  "identity_profile": "scorecard",
+  "counts_ladder": "profiles/gdc/rung-fixture-scorecard-ladder.json",
+  "metric_shape": "queries",
+  "variance_line": "Read-only fixture queries over the bulk-load snapshot; the update stream is refused.",
+  "attribution": "Data shape from the LDBC Social Network Benchmark (https://ldbcouncil.org/benchmarks/snb/), used under CC-BY 4.0.",
+  "variances": [
+    {
+      "kind": "scope",
+      "subject": "validation",
+      "text": "Only reads before the first update in the validation stream are checked."
+    }
+  ],
+  "rungs": [
+    {
+      "id": "sf0",
+      "label": "fixture SF0",
+      "dataset_id": "rung-fixture-sf0",
+      "input_subdir": null,
+      "workload": "queries/sf0-workload.json",
+      "refused": [{"query_id": "IU1", "cause": "interactive_update_stream_not_exposed"}],
+      "reference": {"path": "queries/sf0-reference.json"},
+      "variances": [
+        {
+          "kind": "rewrite",
+          "subject": "people-per-city",
+          "text": "count(*) replaces count(person), which returns the same count here."
+        }
+      ]
+    },
+    {
+      "id": "sf1",
+      "label": "fixture SF1",
+      "dataset_id": "rung-fixture-sf1",
+      "input_subdir": null,
+      "workload": "queries/sf1-workload.json",
+      "refused": [{"query_id": "IU1", "cause": "interactive_update_stream_not_exposed"}],
+      "reference": {"path": "queries/sf1-reference.json"},
+      "variances": []
+    },
+    {
+      "id": "sf2",
+      "label": "fixture SF2",
+      "dataset_id": "rung-fixture-sf2",
+      "input_subdir": null,
+      "workload": "queries/sf1-workload.json",
+      "refused": [],
+      "reference": null,
+      "reference_note": "the fixture publishes no SF2 reference",
+      "variances": []
+    }
+  ]
+}

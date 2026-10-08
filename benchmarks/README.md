@@ -326,9 +326,36 @@ binding, each sample's binding id and outcome (latency, row count and result
 digest when measured), and nearest-rank p50/p95 over the measured samples.
 `gdc_measurement_policy.assert_query_latency_authority` validates it.
 
+With `--results-dir <empty dir>` the driver also writes each measured result as
+one `graphforge-gdc-query-result/1` file (query and binding ids, ordering flag,
+digest, column names and Arrow types, and every cell's Arrow display text,
+`null` for null), after the clock stops. The cells are the digest's input, so a
+reference check recomputes the measured digest from the file before trusting it.
+
 ```bash
 PYTHONPATH=harness uv run --locked python -m unittest tests.test_gdc_scorecard_query tests.test_gdc_measurement_policy
 ```
+
+### GDC scorecard ladders
+
+`graphforge_bench.gdc_rung` climbs one suite's scorecard ladder on the
+OVHC-AGENCY work root: per rung, acquire, then convert, load and query under
+BenchExec, check the reference, reclaim the workspace and require an empty
+work-root inventory, stopping at the first rung that does not pass. When the
+ladder finishes it renders the suite's card in #952's format. The method, the
+ladder spec, the typed failure causes and the card's authorities are in
+[`gdc-suite-index.md`](gdc-suite-index.md#scorecard-ladders).
+
+```bash
+make -C benchmarks gdc-acquire SUITE=<suite> DATASET_CACHE=<cache> WORK_ROOT=<work root> DATASETS="<ids>"
+make -C benchmarks gdc-scorecard-run LADDER=<ladder spec> OUTPUT_DIR=<evidence dir> \
+  WORK_ROOT=<work root> DATASET_CACHE=<cache> [THROUGH=<rung id>]
+make -C benchmarks gdc-scorecard-render LADDER=<ladder spec> OUTPUT_DIR=<evidence dir>
+make -C benchmarks gdc-scorecard-inventory WORK_ROOT=<work root>
+```
+
+`OUTPUT_DIR` must be outside `WORK_ROOT`. Raw output attaches to #952, not the
+repository.
 
 Per-suite adapters own workload semantics through their own Rust runner and
 harness module. The SNB BI suite (`gdc_snb_bi`) maps the 20 `BI*` analytical

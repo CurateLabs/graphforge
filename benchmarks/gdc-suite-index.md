@@ -255,6 +255,78 @@ true and recorded in evidence:
 Until then, `suite_status("spb")` returns `disposition=inventory_only`,
 `executable=false`, and the semantic reason above.
 
+## Scorecard ladders
+
+Each executable suite climbs its own scale ladder for the #952 scorecards with
+`graphforge_bench.gdc_rung` (operator commands: `README.md`, GDC scorecard
+ladders). A suite registers its ladder with one
+`graphforge-gdc-scorecard-ladder-spec/1` document
+(`schemas/gdc-scorecard-ladder-spec.json`): the identity profile to acquire
+from, its count ladder (`profiles/gdc/*-scorecard-ladder.json`), the card's
+one-line variance and attribution, and per rung the query workload, the
+queries refused at mapping with their typed causes, the pinned reference
+(`graphforge-gdc-rung-reference/1`, `schemas/gdc-rung-reference.json`) or a note
+saying why there is none, and the variances (`rewrite`, `spec_variance`,
+`reference_reading`, `discrepancy`, `scope`).
+
+One rung:
+
+1. **Admit.** A 60 s quiet-host window, then free space on the work root above
+   the declared reserve, as for a Graph500 rung. A refusal is recorded as
+   `not_admitted` and stops the ladder; a busy host launches nothing.
+2. **Acquire** the rung's archive from the pinned dataset cache
+   (`gdc_dataset_cache`); a pin mismatch is `checksum_mismatch`.
+3. **Convert, load, query**: three BenchExec runs of the
+   `graphforge-gdc-rung-phase-v1` definition, each executing
+   `graphforge_bench.gdc_phase` on one task. `convert` runs the converter;
+   `load` runs `gf import-session` begin, register, validate and commit;
+   `query` runs `gf storage-attribution`, then the query driver, which reopens
+   the project, reconciles every count and times each query. The three phases
+   share the rung's four-hour wall.
+4. **Expected counts** come from the count ladder: Graphalytics reconciles to
+   `listed_edges`; SNB and FinBench reconcile every table to `listed`, the
+   records of the pinned archive's loaded snapshot (the #952 reconciliation
+   rule). A column-labelled node table's per-label split is the converter's,
+   accepted only when it sums to the ladder's table count.
+5. **Check** every referenced result against the reference: `exact`,
+   `epsilon` (relative tolerance on numeric cells, rows paired by key columns)
+   or `equivalence` (the same partition up to relabelling). A written result
+   must reproduce its measured digest first.
+6. **Tear down**: reclaim `workspace/gdc-<suite>-<rung>` by path and inventory
+   the work root. The dataset cache is outside the work root and is kept.
+
+A rung passes only with no failure and an empty inventory. Typed causes include
+`rung_wall_exceeded`, `memory_limit_exceeded` (a phase's largest
+single-process peak RSS above 4 GiB, or BenchExec's memory stop),
+`host_swapped`, `convert_failed`, `load_failed`, `count_mismatch`,
+`query_failed`, `reference_mismatch`, `result_digest_mismatch` and
+`teardown_incomplete`. A query that fails at runtime or answers wrongly fails
+the rung, but every query still runs, so the result lists every failure. A
+refused query counts against coverage and is never checked.
+
+Each rung publishes, under `<suite>-<rung>-`: three `*-benchexec.json`
+documents (`graphforge-benchexec-run/1`), `expected-counts.json`,
+`query-evidence.json`, `correctness.json`, `inventory.json` and
+`result.json` (`graphforge-gdc-rung-result/1`, listing every document's
+SHA-256). The card (`<suite>-card.json`, `schemas/gdc-scorecard-card.json`, and
+`<suite>-card.txt`) headlines the largest passing rung and names the next
+rung's outcome. Its numbers come from those documents only, and
+`gdc_measurement_policy.assert_card_metric_sources` refuses any other
+authority: load and conversion time are BenchExec wall time; latency and
+throughput are the query driver clock; peak RSS is each phase's largest
+process high-water mark under BenchExec (BenchExec's cgroup peak counts page
+cache on the host's full-access mounts, as for the Graph500 ladder); on-disk
+bytes are the storage-attribution receipt's allocated bytes; graph counts are
+the driver's reconciliation after reopen. Graphalytics cards report `Tl`, `Tp`
+(the mean of three driver-clock runs per algorithm) and EVPS instead of
+throughput and latency; makespan is not measured yet and says so.
+
+`fixtures/gdc/rung-fixture/` is a three-rung CI ladder in the SNB Interactive
+v1 CSV shape: sf0 passes, sf1 fails (one query fails at runtime and one
+reference answer is wrong) and sf2 is never attempted.
+`tests/test_gdc_rung.py` drives it with the real converter, `gf` and driver;
+only BenchExec is replaced, because CI runners cannot delegate cgroups.
+
 ## Operator status query
 
 ```bash

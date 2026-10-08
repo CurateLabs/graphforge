@@ -1,0 +1,47 @@
+{
+  "schema": "graphforge-gdc-load-mapping/1",
+  "node_tables": [
+    {
+      "id": "place",
+      "format": "ldbc-csv",
+      "files": ["*/static/place_0_0.csv"],
+      "label": "Place",
+      "label_column": "type",
+      "label_values": {"city": "City", "country": "Country"},
+      "id_column": "id",
+      "properties": [
+        {"column": "id", "type": "int64"},
+        {"column": "name", "type": "string"}
+      ]
+    },
+    {
+      "id": "person",
+      "format": "ldbc-csv",
+      "files": ["*/dynamic/person_0_0.csv"],
+      "label": "Person",
+      "id_column": "id",
+      "properties": [
+        {"column": "id", "type": "int64"},
+        {"column": "firstName", "type": "string"}
+      ]
+    }
+  ],
+  "edge_tables": [
+    {
+      "id": "person_knows_person",
+      "format": "ldbc-csv",
+      "files": ["*/dynamic/person_knows_person_0_0.csv"],
+      "rel_type": "KNOWS",
+      "source": {"label": "Person", "column": "Person.id"},
+      "target": {"label": "Person", "column": "Person.id.1"}
+    },
+    {
+      "id": "person_islocatedin_place",
+      "format": "ldbc-csv",
+      "files": ["*/dynamic/person_isLocatedIn_place_0_0.csv"],
+      "rel_type": "IS_LOCATED_IN",
+      "source": {"label": "Person", "column": "Person.id"},
+      "target": {"label": "Place", "column": "Place.id"}
+    }
+  ]
+}

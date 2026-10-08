@@ -24,6 +24,17 @@ from graphforge_bench.gdc_contracts import workspace_root
 QUERY_EVIDENCE_SCHEMA = "graphforge-gdc-query-evidence/1"
 QUERY_LATENCY_CLOCK = "graphforge-gdc-query-clock/1"
 QUERY_DRIVER = "graphforge-benchmark-gdc-scorecard query"
+# The one authority behind each number on a GDC scorecard card (#1893).
+CARD_METRIC_SOURCES = {
+    "load_wall_seconds": "benchexec",
+    "conversion_wall_seconds": "benchexec",
+    "latency": QUERY_LATENCY_CLOCK,
+    "throughput": QUERY_LATENCY_CLOCK,
+    "graphalytics_tp": QUERY_LATENCY_CLOCK,
+    "peak_rss": "phase_process_high_water_under_benchexec",
+    "on_disk_bytes": "graphforge-storage-attribution/1",
+    "graph_counts": "query_driver_reconciliation_after_reopen",
+}
 
 
 class GdcMeasurementBoundaryError(ValueError):
@@ -78,6 +89,28 @@ def assert_live_diagnostic_boundary(
                 "caller_supplied_result",
                 f"{label} must not accept caller-supplied results",
             )
+
+
+def assert_card_metric_sources(card: Mapping[str, Any]) -> None:
+    """Refuse a scorecard card whose numbers claim any other authority.
+
+    Load and conversion time are BenchExec wall time; latency, throughput and
+    Graphalytics ``Tp`` come from the query driver clock; peak RSS is each
+    phase's largest process high-water mark under BenchExec; on-disk bytes are
+    the product's storage-attribution receipt; graph counts are the driver's
+    reconciliation after reopen. The card builder reads each number from that
+    source's own document.
+    """
+    if card.get("certification") is not False:
+        raise GdcMeasurementBoundaryError(
+            "certification_claim", "a GDC scorecard card is unaudited engineering evidence"
+        )
+    sources = card.get("metric_sources")
+    if not isinstance(sources, Mapping) or dict(sources) != CARD_METRIC_SOURCES:
+        raise GdcMeasurementBoundaryError(
+            "misattributed_authority",
+            f"card metric sources must be exactly {CARD_METRIC_SOURCES}, got {sources}",
+        )
 
 
 def nearest_rank(values: Sequence[int], percent: int) -> int:
