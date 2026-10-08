@@ -353,31 +353,28 @@ fn crash(root: &Path, chunks: u64, stage: &str, failpoint: &str, occurrence: u32
     assert_eq!(status.code(), Some(86), "{stage} {failpoint}#{occurrence}");
 }
 
-/// Allocation evidence that does not name native identities: current and
-/// authority category totals, recorded and authority peaks, the total peak
-/// and the sorted allocations.
-type IdentityFreeEvidence = (
+/// Logical category totals, independent of inode identities and allocated blocks.
+fn logical_categories(
+    evidence: &GraphConstructionEvidence,
+) -> (
     BTreeMap<crate::ArtifactCategory, crate::ArtifactStorageTotals>,
     BTreeMap<crate::ArtifactCategory, crate::ArtifactStorageTotals>,
-    BTreeMap<crate::ArtifactCategory, u64>,
-    BTreeMap<crate::ArtifactCategory, u64>,
-    u64,
-    Vec<u64>,
-);
-
-fn identity_free(evidence: &GraphConstructionEvidence) -> IdentityFreeEvidence {
-    let (ledger, _, current, authorities, peaks, peak_authorities, total) =
-        allocation_evidence(evidence);
-    let mut allocations = ledger.into_values().collect::<Vec<_>>();
-    allocations.sort_unstable();
+) {
+    let logical = super::super::tests::evidence_without_allocated_bytes(evidence);
     (
-        current,
-        authorities,
-        peaks,
-        peak_authorities,
-        total,
-        allocations,
+        logical.storage_current,
+        logical.storage_receipt_category_authorities,
     )
+}
+
+// Separate constructions carry their own timestamps and authentication receipts.
+// Their artifact names and written byte counts are the cross-run contract.
+fn encoded_artifact_sizes(session_root: &Path) -> BTreeMap<String, u64> {
+    read_encoding(session_root)
+        .artifacts
+        .into_iter()
+        .map(|artifact| (artifact.path, artifact.bytes))
+        .collect()
 }
 
 /// #900. Crash and resume at each encoding and publication boundary
@@ -386,15 +383,19 @@ fn identity_free(evidence: &GraphConstructionEvidence) -> IdentityFreeEvidence {
 /// After each crash the reopened ledger must equal the persisted ledger plus
 /// the encoded entries read from the files themselves, under the recorded
 /// digest; category totals must equal the identity union; a second reopen
-/// must agree; and once the flow completes, every category total, peak and
-/// allocation must equal those of a run that never crashed.
+/// must agree; and once the flow completes, logical category totals and encoded
+/// artifact names and byte counts must equal those of a run that never crashed.
 #[test]
 fn encoding_and_publication_crashes_reconstruct_allocation_evidence() {
     const CHUNKS: u64 = 3;
     let reference_root = TempDir::new().unwrap();
     run_flow(reference_root.path(), CHUNKS, None);
     let operation = Uuid::from_u128(9_980);
-    let reference = identity_free(open_session(reference_root.path(), operation).evidence());
+    let reference = logical_categories(open_session(reference_root.path(), operation).evidence());
+    let reference_artifact_sizes = encoded_artifact_sizes(&construction_session_root_path(
+        reference_root.path(),
+        operation,
+    ));
 
     // The pre-encoding reclaim writes the checkpoint twice, so the third
     // replace after arming the encode stage is the write that pins the
@@ -513,9 +514,14 @@ fn encoding_and_publication_crashes_reconstruct_allocation_evidence() {
             "{label}: the completed ledger is not exactly the encoded files"
         );
         assert_eq!(
-            identity_free(completed.evidence()),
+            logical_categories(completed.evidence()),
             reference,
-            "{label}: allocation evidence differs from an uncrashed run"
+            "{label}: logical category evidence differs from an uncrashed run"
+        );
+        assert_eq!(
+            encoded_artifact_sizes(&session_root),
+            reference_artifact_sizes,
+            "{label}: encoded artifact names or byte counts differ from an uncrashed run"
         );
     }
 }

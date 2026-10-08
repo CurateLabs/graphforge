@@ -339,8 +339,8 @@ fn materialized_records_bound_scales_with_the_smaller_of_workers_and_partitions(
     assert_eq!(materialized_records_bound(workers(2), 8, u64::MAX), None);
 }
 
-/// The evidence with native file identities relabelled in order of first
-/// appearance in the transition log, so runs against different roots compare.
+/// The logical evidence with native file identities relabelled in order of
+/// first appearance, so independent allocations against different roots compare.
 pub(super) fn relabelled(evidence: &GraphConstructionEvidence) -> serde_json::Value {
     let mut labels = BTreeMap::new();
     let mut label = |identity: &str| -> String {
@@ -350,8 +350,8 @@ pub(super) fn relabelled(evidence: &GraphConstructionEvidence) -> serde_json::Va
             .or_insert_with(|| format!("identity-{next}"))
             .clone()
     };
-    let mut copy = evidence.clone();
-    copy.storage_allocation_transitions = evidence
+    let mut copy = super::super::tests::evidence_without_allocated_bytes(evidence);
+    copy.storage_allocation_transitions = copy
         .storage_allocation_transitions
         .iter()
         .map(|transition| crate::StorageAllocationTransition {
@@ -367,12 +367,28 @@ pub(super) fn relabelled(evidence: &GraphConstructionEvidence) -> serde_json::Va
                 .collect(),
         })
         .collect();
-    copy.storage_active_identity_allocated_bytes = evidence
+    copy.storage_active_identity_allocated_bytes = copy
         .storage_active_identity_allocated_bytes
         .iter()
         .map(|(identity, bytes)| (label(identity), *bytes))
         .collect();
     serde_json::to_value(copy).unwrap()
+}
+
+fn assert_segments_retired(root: &crate::construction_directory::ConstructionDirectory) {
+    let remaining = root
+        .child_names()
+        .unwrap()
+        .into_iter()
+        .filter(|name| {
+            name.to_str()
+                .is_some_and(super::super::partition_shaping::is_partition_artifact_name)
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        remaining.is_empty(),
+        "segments were not retired: {remaining:?}"
+    );
 }
 
 /// Replay the ordered ledger and return the high-water mark of retained bytes
@@ -464,6 +480,7 @@ fn fixed_partition_finish_is_schedule_independent_across_worker_counts() {
             )
             .unwrap()
             .unwrap();
+        assert_segments_retired(session_root);
         let mut bytes = Vec::new();
         session_root
             .open_child_file(OsStr::new(&output))
@@ -719,6 +736,7 @@ fn finish_identity_fixture(
         )
         .map_err(|error| error.to_string())?
         .unwrap();
+    assert_segments_retired(session_root);
     let mut bytes = Vec::new();
     session_root
         .open_child_file(OsStr::new(&output))

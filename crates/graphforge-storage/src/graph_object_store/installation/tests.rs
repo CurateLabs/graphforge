@@ -124,11 +124,29 @@ fn allocation_observed_concurrent_cas_winner_keeps_real_temporary_peak() {
     let winner_root = root.path().to_path_buf();
     let payload = vec![8_u8; 16384];
     let winner_payload = payload.clone();
+    let coexistence = std::rc::Rc::new(std::cell::Cell::new(None));
+    let winner_coexistence = std::rc::Rc::clone(&coexistence);
     BEFORE_OBJECT_LINK.with(|hook| {
         *hook.borrow_mut() = Some(Box::new(move || {
+            let temporaries = fs::read_dir(winner_root.join(GRAPH_OBJECTS_DIR).join(TEMP_DIR))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect::<Vec<_>>();
+            assert_eq!(temporaries.len(), 1, "only the loser's temporary is live");
+            let loser_temporary = File::open(temporaries[0].path()).unwrap();
+            let loser_allocated = graphforge_filesystem::file_space_usage(&loser_temporary)
+                .unwrap()
+                .allocated_bytes;
             let mut winner = begin_graph_object_publication(&winner_root).unwrap();
             winner.set_allocation_operation(Some(winner_operation));
-            install_graph_object_bytes_with_lease(&winner, &winner_payload).unwrap();
+            let (digest, _) =
+                install_graph_object_bytes_with_lease(&winner, &winner_payload).unwrap();
+            let winner_file =
+                File::open(graph_object_path(&winner_root, &digest).unwrap()).unwrap();
+            let winner_allocated = graphforge_filesystem::file_space_usage(&winner_file)
+                .unwrap()
+                .allocated_bytes;
+            winner_coexistence.set(Some((loser_allocated, winner_allocated)));
         }));
     });
     let mut loser = begin_graph_object_publication(root.path()).unwrap();
@@ -141,7 +159,13 @@ fn allocation_observed_concurrent_cas_winner_keeps_real_temporary_peak() {
         .unwrap()
         .allocated_bytes;
     assert!(allocated > 0);
-    assert_eq!(operation.totals().unwrap(), (allocated, 2 * allocated));
+    let (loser_allocated, winner_allocated) = coexistence.get().expect("the winner ran");
+    assert!(loser_allocated > 0);
+    assert_eq!(allocated, winner_allocated);
+    assert_eq!(
+        operation.totals().unwrap(),
+        (allocated, loser_allocated + winner_allocated)
+    );
     assert_eq!(
         fs::read_dir(root.path().join(GRAPH_OBJECTS_DIR).join(TEMP_DIR))
             .unwrap()

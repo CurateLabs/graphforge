@@ -19,29 +19,68 @@ pub(super) fn fixed(values: &[[u8; 16]]) -> FixedSizeBinaryArray {
     FixedSizeBinaryArray::try_from_iter(values.iter().map(|value| value.as_slice())).unwrap()
 }
 
+/// Evidence comparable across independent filesystem runs. Logical bytes,
+/// submitted writes, object counts and operations remain exact; allocated
+/// blocks depend on extent layout and preallocation, even for identical files.
+pub(super) fn evidence_without_allocated_bytes(
+    evidence: &GraphConstructionEvidence,
+) -> GraphConstructionEvidence {
+    let mut evidence = evidence.clone();
+    for totals in evidence
+        .storage_current
+        .values_mut()
+        .chain(evidence.storage_receipt_category_authorities.values_mut())
+    {
+        totals.allocated_bytes = 0;
+    }
+    for allocated in evidence
+        .storage_transient_peak_allocated_bytes
+        .values_mut()
+        .chain(
+            evidence
+                .storage_receipt_transient_peak_authorities
+                .values_mut(),
+        )
+        .chain(
+            evidence
+                .storage_active_identity_allocated_bytes
+                .values_mut(),
+        )
+    {
+        *allocated = 0;
+    }
+    for transition in &mut evidence.storage_allocation_transitions {
+        for allocated in transition.installed.values_mut() {
+            *allocated = 0;
+        }
+    }
+    evidence.storage_transient_peak_total_allocated_bytes = 0;
+    evidence.current_merge_temporary_allocated_bytes = 0;
+    // Despite its name, this peak is derived from allocated blocks too.
+    evidence.peak_merge_temporary_bytes = 0;
+    evidence
+}
+
 /// Construction evidence as JSON with file identities (`volume:file_id`
 /// inode keys) made comparable across runs. Inodes differ between any two
 /// runs, and the filesystem reuses a freed inode for a later file, so which
 /// file gets which number depends on unlink order. Each install in the
 /// allocation transition log gets a fresh ordinal, and each removal names the
 /// ordinal of the latest install of its key; the active-identity map becomes
-/// its sorted sizes. Everything else must not depend on where or how the work
-/// was scheduled.
-pub(super) fn evidence_without_file_identities(
+/// its object count. Filesystem allocation is excluded; logical/written
+/// bytes and the install/removal identities remain comparable.
+pub(super) fn evidence_without_file_identities_and_allocations(
     evidence: &GraphConstructionEvidence,
 ) -> serde_json::Value {
-    let mut value = serde_json::to_value(evidence).unwrap();
+    let mut value = serde_json::to_value(evidence_without_allocated_bytes(evidence)).unwrap();
     let object = value.as_object_mut().unwrap();
-    let mut sizes: Vec<u64> = object["storage_active_identity_allocated_bytes"]
+    let active_objects = object["storage_active_identity_allocated_bytes"]
         .as_object()
         .unwrap()
-        .values()
-        .map(|size| size.as_u64().unwrap())
-        .collect();
-    sizes.sort_unstable();
+        .len();
     object.insert(
         "storage_active_identity_allocated_bytes".to_owned(),
-        serde_json::json!(sizes),
+        serde_json::json!(active_objects),
     );
     let mut latest = std::collections::HashMap::<String, usize>::new();
     let mut installs = 0_usize;
@@ -1152,8 +1191,8 @@ fn stage_prior_crash_chunks(root: &Path, prior: u64) {
 /// omits the staged ledger entries the receipt journal names, so with or
 /// without chunks accepted before the crash, the reopened ledger must be
 /// exactly the one the live staged files imply, reopen to the same ledger
-/// again, and finish with the allocation evidence of a run that never
-/// crashed.
+/// again, and finish with the logical byte counts and artifact names of a run that
+/// never crashed.
 #[test]
 fn subprocess_crashes_recover_each_durable_boundary() {
     for prior in [0_u64, 2] {
@@ -1316,41 +1355,32 @@ fn subprocess_crashes_recover_each_durable_boundary_after(prior: u64) {
             staged_ledger_on_disk(&session_path),
             "prior {prior} {failpoint}"
         );
-        // The allocation evidence of the run that never crashed: current and
-        // authority category totals, transient peaks, and allocation sizes.
+        // Independent runs must retain the same artifacts and logical bytes;
+        // each run's exact allocation ledger was checked against its own files.
+        let logical = evidence_without_allocated_bytes(evidence);
+        let clean_logical = evidence_without_allocated_bytes(&clean_evidence);
         assert_eq!(
-            evidence.storage_current, clean_evidence.storage_current,
-            "prior {prior} {failpoint}"
+            logical.storage_current, clean_logical.storage_current,
+            "prior {prior} {failpoint}: logical category totals"
         );
         assert_eq!(
-            evidence.storage_receipt_category_authorities,
-            clean_evidence.storage_receipt_category_authorities,
-            "prior {prior} {failpoint}"
+            logical.storage_receipt_category_authorities,
+            clean_logical.storage_receipt_category_authorities,
+            "prior {prior} {failpoint}: logical receipt authorities"
         );
-        assert_eq!(
-            evidence.storage_transient_peak_allocated_bytes,
-            clean_evidence.storage_transient_peak_allocated_bytes,
-            "prior {prior} {failpoint}"
-        );
-        assert_eq!(
-            evidence.storage_receipt_transient_peak_authorities,
-            clean_evidence.storage_receipt_transient_peak_authorities,
-            "prior {prior} {failpoint}"
-        );
-        assert_eq!(
-            evidence.storage_transient_peak_total_allocated_bytes,
-            clean_evidence.storage_transient_peak_total_allocated_bytes,
-            "prior {prior} {failpoint}"
-        );
-        let sizes = |ledger: &BTreeMap<String, u64>| {
-            let mut sizes: Vec<u64> = ledger.values().copied().collect();
-            sizes.sort_unstable();
-            sizes
+        assert_eq!(evidence.write_bytes, clean_evidence.write_bytes);
+        let staged_names = |path: &Path| {
+            std::fs::read_dir(path)
+                .unwrap()
+                .map(Result::unwrap)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("chunk-"))
+                .map(|entry| entry.file_name())
+                .collect::<std::collections::BTreeSet<_>>()
         };
         assert_eq!(
-            sizes(&evidence.storage_active_identity_allocated_bytes),
-            sizes(&clean_evidence.storage_active_identity_allocated_bytes),
-            "prior {prior} {failpoint}"
+            staged_names(&session_path),
+            staged_names(&construction_session_root(&reference, Uuid::from_u128(600))),
+            "prior {prior} {failpoint}: staged artifact names"
         );
         resumed.seal().unwrap();
     }
@@ -1433,7 +1463,7 @@ fn shape_inventory_and_evidence_commit_recover_without_double_counting() {
     ) -> GraphConstructionEvidence {
         evidence.storage_active_identity_allocated_bytes.clear();
         evidence.storage_allocation_transitions.clear();
-        evidence
+        evidence_without_allocated_bytes(&evidence)
     }
     const ROW_INSTALL: &str = "shape.row_partition.after_install";
     const FAILPOINTS: [&str; 6] = [

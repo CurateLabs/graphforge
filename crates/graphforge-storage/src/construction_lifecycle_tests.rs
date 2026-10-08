@@ -1709,8 +1709,8 @@ mod group_boundary {
 
     /// #1448: a boundary shape whose boundaries seal their spills and whose
     /// finish stages retire their segments on parallel lanes publishes the
-    /// same shape and records the same evidence as one that does both on the
-    /// calling thread, including when the lanes take their jobs in reverse.
+    /// same shape, logical/written bytes and retired segments as one that does
+    /// both on the calling thread, including when lanes take jobs in reverse.
     #[test]
     fn parallel_segment_retirement_matches_the_calling_thread() {
         let shape = |partition_count: u32,
@@ -1732,9 +1732,14 @@ mod group_boundary {
             stage_boundary_groups(&mut session, 3);
             session.shape_canonical_with_cancellation(|| false).unwrap();
             assert!(session.evidence().merge_directory_fsync_operations > 1);
+            assert_eq!(
+                segment_names(session.root.path()),
+                Vec::<String>::new(),
+                "{partition_count}: sealed segment survived retirement"
+            );
             (
                 shape_output_content(&session),
-                super::evidence_without_file_identities(session.evidence()),
+                super::evidence_without_file_identities_and_allocations(session.evidence()),
             )
         };
         // One partition: many segments per family to retire. Two: two open
@@ -1846,12 +1851,13 @@ mod group_boundary {
                     "{boundary}: retired staged input survived"
                 );
             }
-            // A clean reference run of the same fixture for ledger equality.
+            // A clean reference run of the same fixture for logical-byte equality.
             let clean_root = TempDir::new().unwrap();
             crate::open_or_initialize_project(clean_root.path()).unwrap();
             let mut clean = boundary_session(clean_root.path(), 141_800);
             complete_boundary(&mut clean);
-            let clean_current = clean.evidence().storage_current.clone();
+            let clean_current =
+                super::evidence_without_allocated_bytes(clean.evidence()).storage_current;
             drop(clean);
 
             let mut recovered = boundary_session(root.path(), 141_800);
@@ -1864,9 +1870,9 @@ mod group_boundary {
                 "{boundary}"
             );
             assert_eq!(
-                recovered.evidence().storage_current,
+                super::evidence_without_allocated_bytes(recovered.evidence()).storage_current,
                 clean_current,
-                "{boundary}: resumed run must reconcile every allocation"
+                "{boundary}: resumed run must retain the same logical category totals"
             );
             assert_eq!(
                 published_edge_count(root.path()),
@@ -1881,7 +1887,7 @@ mod group_boundary {
                 "{boundary}: progress controls outlived supersession"
             );
             assert_eq!(
-                reopened.evidence().storage_current,
+                super::evidence_without_allocated_bytes(reopened.evidence()).storage_current,
                 clean_current,
                 "{boundary}"
             );
@@ -2092,12 +2098,13 @@ mod group_boundary {
                 "{failpoint}"
             );
 
-            // A clean reference run of the same fixture for ledger equality.
+            // A clean reference run of the same fixture for logical-byte equality.
             let clean_root = TempDir::new().unwrap();
             crate::open_or_initialize_project(clean_root.path()).unwrap();
             let mut clean = boundary_session(clean_root.path(), 141_804);
             complete_boundary(&mut clean);
-            let clean_current = clean.evidence().storage_current.clone();
+            let clean_current =
+                super::evidence_without_allocated_bytes(clean.evidence()).storage_current;
             drop(clean);
 
             let mut recovered = boundary_session(root.path(), 141_804);
@@ -2117,9 +2124,9 @@ mod group_boundary {
                 "{failpoint}"
             );
             assert_eq!(
-                recovered.evidence().storage_current,
+                super::evidence_without_allocated_bytes(recovered.evidence()).storage_current,
                 clean_current,
-                "{failpoint}: recovered run must reconcile every allocation"
+                "{failpoint}: recovered run must retain the same logical category totals"
             );
             assert_eq!(published_edge_count(root.path()), 8 * 8192, "{failpoint}");
         }
@@ -2256,7 +2263,8 @@ mod group_boundary {
         clean.shape_canonical_with_cancellation(|| false).unwrap();
         let clean_outputs = shape_output_content(&clean);
         complete_boundary(&mut clean);
-        let clean_current = clean.evidence().storage_current.clone();
+        let clean_current =
+            super::evidence_without_allocated_bytes(clean.evidence()).storage_current;
         drop(clean);
 
         for failpoint in [
@@ -2279,9 +2287,9 @@ mod group_boundary {
             );
             complete_boundary(&mut recovered);
             assert_eq!(
-                recovered.evidence().storage_current,
+                super::evidence_without_allocated_bytes(recovered.evidence()).storage_current,
                 clean_current,
-                "{failpoint}: resumed run must reconcile every allocation"
+                "{failpoint}: resumed run must retain the same logical category totals"
             );
             assert_eq!(published_edge_count(root.path()), 8 * 8192, "{failpoint}");
         }
@@ -2302,7 +2310,8 @@ mod group_boundary {
         clean.shape_canonical_with_cancellation(|| false).unwrap();
         let clean_outputs = shape_output_content(&clean);
         complete_boundary(&mut clean);
-        let clean_current = clean.evidence().storage_current.clone();
+        let clean_current =
+            super::evidence_without_allocated_bytes(clean.evidence()).storage_current;
         drop(clean);
 
         // (failpoint, stage controls durable at the crash, segment families
@@ -2415,9 +2424,9 @@ mod group_boundary {
                 "{failpoint}"
             );
             assert_eq!(
-                recovered.evidence().storage_current,
+                super::evidence_without_allocated_bytes(recovered.evidence()).storage_current,
                 clean_current,
-                "{failpoint}: resumed run must reconcile every allocation"
+                "{failpoint}: resumed run must retain the same logical category totals"
             );
             assert_eq!(published_edge_count(root.path()), 8 * 8192, "{failpoint}");
             drop(recovered);
@@ -2443,7 +2452,8 @@ mod group_boundary {
         assert!(shape.edge_endpoints.is_none());
         let clean_outputs = shape_output_content(&clean);
         complete_boundary(&mut clean);
-        let clean_current = clean.evidence().storage_current.clone();
+        let clean_current =
+            super::evidence_without_allocated_bytes(clean.evidence()).storage_current;
         drop(clean);
 
         for (failpoint, lanes) in [
@@ -2478,9 +2488,9 @@ mod group_boundary {
             );
             complete_boundary(&mut recovered);
             assert_eq!(
-                recovered.evidence().storage_current,
+                super::evidence_without_allocated_bytes(recovered.evidence()).storage_current,
                 clean_current,
-                "{failpoint}: resumed run must reconcile every allocation"
+                "{failpoint}: resumed run must retain the same logical category totals"
             );
             assert_eq!(published_edge_count(root.path()), 8 * 8192, "{failpoint}");
         }
