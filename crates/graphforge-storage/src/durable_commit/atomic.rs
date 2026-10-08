@@ -746,6 +746,83 @@ where
     // Unknown native outcomes leave crash residue for the existing recovery
     // trust boundary; Drop cannot retire a source before destination ack.
     sealed.cleanup = false;
+    let (installed, identity, reused) = link_sealed(
+        &sealed,
+        destination,
+        target,
+        authenticate_winner,
+        before_destination_ack,
+        after_destination_ack,
+    )?;
+    drop(sealed.file.take());
+    sealed
+        .parent
+        .unlink_child_if_identity(&sealed.temporary, sealed.identity)?;
+    if let Some(allocation) = &sealed.allocation {
+        allocation
+            .remove_file_at(&sealed.parent.path().join(&sealed.temporary))
+            .map_err(io::Error::other)?;
+    }
+    after_temporary_retire()?;
+    acknowledge_directory(&sealed.parent)?;
+    Ok((installed, identity, reused))
+}
+
+/// Give an already-sealed, privately staged file its immutable name without
+/// copying it: link the exact inode into `destination`, then acknowledge the
+/// destination namespace. The staged name is left in place for its owner to
+/// retire with the rest of its private tree, so the staged inode stays valid
+/// for a retried publication, and a crash at any point leaves the staged name
+/// intact. The content owner authenticates every unrecognized existing winner;
+/// a winner's inode is returned and the staged inode is not aliased.
+///
+/// The staged name must be on the same filesystem as `destination`; a link
+/// across filesystems fails rather than falling back to a copy.
+///
+/// # Errors
+/// Returns the first failed identity check, link, authentication, hook or
+/// namespace acknowledgment. Nothing is removed on failure.
+pub fn link_immutable<A, B, D>(
+    sealed: &SealedArtifact,
+    destination: &StableDirectory,
+    target: &OsStr,
+    authenticate_winner: A,
+    before_destination_ack: B,
+    after_destination_ack: D,
+) -> io::Result<(File, FileIdentity, bool)>
+where
+    A: FnOnce(&File, FileIdentity) -> io::Result<()>,
+    B: FnOnce(bool, &File) -> io::Result<()>,
+    D: FnOnce(bool, &File) -> io::Result<()>,
+{
+    if sealed.cleanup {
+        return Err(io::Error::other(
+            "a linked staged file must be owned by its private tree, not a cleanup guard",
+        ));
+    }
+    link_sealed(
+        sealed,
+        destination,
+        target,
+        authenticate_winner,
+        before_destination_ack,
+        after_destination_ack,
+    )
+}
+
+fn link_sealed<A, B, D>(
+    sealed: &SealedArtifact,
+    destination: &StableDirectory,
+    target: &OsStr,
+    authenticate_winner: A,
+    before_destination_ack: B,
+    after_destination_ack: D,
+) -> io::Result<(File, FileIdentity, bool)>
+where
+    A: FnOnce(&File, FileIdentity) -> io::Result<()>,
+    B: FnOnce(bool, &File) -> io::Result<()>,
+    D: FnOnce(bool, &File) -> io::Result<()>,
+{
     let (installed, identity, reused) = match sealed.parent.link_child_into(
         &sealed.temporary,
         sealed.file(),
@@ -777,17 +854,6 @@ where
     before_destination_ack(reused, &installed)?;
     acknowledge_directory(destination)?;
     after_destination_ack(reused, &installed)?;
-    drop(sealed.file.take());
-    sealed
-        .parent
-        .unlink_child_if_identity(&sealed.temporary, sealed.identity)?;
-    if let Some(allocation) = &sealed.allocation {
-        allocation
-            .remove_file_at(&sealed.parent.path().join(&sealed.temporary))
-            .map_err(io::Error::other)?;
-    }
-    after_temporary_retire()?;
-    acknowledge_directory(&sealed.parent)?;
     Ok((installed, identity, reused))
 }
 

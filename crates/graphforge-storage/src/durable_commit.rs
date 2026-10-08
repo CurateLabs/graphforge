@@ -17,8 +17,8 @@ mod namespace;
 mod windows_allocation_tests;
 pub use atomic::{
     AtomicHooks, CommitCause, CommitFailure, GroupCommitFailure, PendingCommit, PublishMode,
-    SealedArtifact, Visibility, install_immutable, publish_atomic, publish_atomic_in,
-    stage_private_file, stage_writer,
+    SealedArtifact, Visibility, install_immutable, link_immutable, publish_atomic,
+    publish_atomic_in, stage_private_file, stage_writer,
 };
 pub use namespace::{
     NamespaceFailure, RetireEntry, RetirementBatch, create_directory, promote_no_replace,

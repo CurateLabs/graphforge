@@ -412,7 +412,23 @@ pub(crate) fn install_captured_encoded_artifact_with_lease(
     source: &crate::graph_construction::CapturedEncodedArtifact<'_>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<GraphObjectInstallEvidence, GfError> {
-    install_captured_source_with_lease(lease, &CapturedSource::Encoded(source), false, cancelled)
+    // The encoder already wrote, hashed and (for the staged path) synchronized
+    // this file on the project filesystem, so unix links it into place instead
+    // of copying it. Windows needs write-through, ACL-sealed handles that a
+    // finished file cannot be given, so it keeps the copy.
+    #[cfg(unix)]
+    {
+        staged_link::install_staged_encoded_artifact(lease, source, cancelled)
+    }
+    #[cfg(windows)]
+    {
+        install_captured_source_with_lease(
+            lease,
+            &CapturedSource::Encoded(source),
+            false,
+            cancelled,
+        )
+    }
 }
 
 /// Install a workspace file that a capture hashed and kept open, checking the
@@ -443,6 +459,8 @@ pub(crate) fn install_captured_portable_source_with_lease(
 
 /// A closed set of concrete, privately minted source capabilities.
 enum CapturedSource<'a, 'b> {
+    /// Only Windows copies an encoded source; unix links it (`staged_link`).
+    #[cfg_attr(unix, allow(dead_code))]
     Encoded(&'a crate::graph_construction::CapturedEncodedArtifact<'b>),
     Portable(&'a crate::project_portable_v2::CapturedPortableSource<'b>),
     Workspace(&'a crate::graph_files::CapturedWorkspaceFile),
@@ -1579,5 +1597,7 @@ fn seal_graph_object(file: &File, object_path: &Path, diagnostic: &Path) -> Resu
 
 #[cfg(test)]
 mod repair_tests;
+#[cfg(unix)]
+mod staged_link;
 #[cfg(test)]
 mod tests;

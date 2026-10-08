@@ -91,6 +91,26 @@ impl CapturedEncodedArtifact<'_> {
     pub(crate) fn source(&self) -> &std::fs::File {
         &self.file
     }
+    /// The retained directory holding the staged name.
+    #[cfg(unix)]
+    pub(crate) fn parent(&self) -> &StableDirectory {
+        &self.parent
+    }
+    /// The staged name inside [`Self::parent`].
+    #[cfg(unix)]
+    pub(crate) fn name(&self) -> &OsStr {
+        &self.name
+    }
+    /// The retained identity of the staged inode.
+    #[cfg(unix)]
+    pub(crate) fn identity(&self) -> graphforge_filesystem::FileIdentity {
+        self.identity
+    }
+    /// The artifact's path relative to the encoded graph root.
+    #[cfg(unix)]
+    pub(crate) fn relative_path(&self) -> &str {
+        &self.artifact.path
+    }
     pub(crate) fn revalidate(&self) -> Result<(), GfError> {
         self.root.revalidate_named().map_err(storage)?;
         self.parent.revalidate_named().map_err(storage)?;
@@ -100,7 +120,7 @@ impl CapturedEncodedArtifact<'_> {
             || metadata.len() != self.bytes()
             || graphforge_filesystem::file_identity(&self.file).map_err(storage)? != self.identity
             || graphforge_filesystem::file_identity(&named).map_err(storage)? != self.identity
-            || graphforge_filesystem::file_link_count(&self.file).map_err(storage)? != 1
+            || !self.has_expected_links()?
             || graphforge_filesystem::file_space_usage(&self.file)
                 .map_err(storage)?
                 .allocated_bytes
@@ -111,6 +131,17 @@ impl CapturedEncodedArtifact<'_> {
             ));
         }
         Ok(())
+    }
+}
+
+impl CapturedEncodedArtifact<'_> {
+    /// A staged source has one name until publication links it into the object
+    /// store, and two afterwards. The installer proves the second name is the
+    /// object-store entry for this inode, so a retried publication, which
+    /// reopens the staged name, is still admitted.
+    fn has_expected_links(&self) -> Result<bool, GfError> {
+        let links = graphforge_filesystem::file_link_count(&self.file).map_err(storage)?;
+        Ok(links == 1 || (cfg!(unix) && links == 2))
     }
 }
 
