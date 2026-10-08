@@ -201,14 +201,18 @@ impl ExternalSource {
     }
 
     /// Open the source for one read pass after re-establishing its identity and
-    /// its footer.
-    pub(super) fn open(&self) -> Result<File, GfError> {
-        self.open_with(None)
-    }
-
-    /// As [`Self::open`], offering the footer bytes it reads to `digest`.
+    /// its footer, offering the footer bytes it reads to `digest`.
     pub(super) fn open_observed(&self, digest: &SourceDigest) -> Result<File, GfError> {
-        self.open_with(Some(digest))
+        let file = self.reopen()?;
+        let (footer_len, footer_sha256) = footer_identity(&file, self.size, Some(digest))?;
+        if footer_len != self.footer_len || footer_sha256 != self.footer_sha256 {
+            return Err(source_changed(
+                &self.path,
+                SourceChange::Modified,
+                "Parquet footer differs from registration",
+            ));
+        }
+        Ok(file)
     }
 
     /// Open the source for a task of a pass that already verified its footer:
@@ -219,19 +223,6 @@ impl ExternalSource {
             Err(error) => return Err(self.classify_open_failure(error)),
         };
         self.check(&file)?;
-        Ok(file)
-    }
-
-    fn open_with(&self, digest: Option<&SourceDigest>) -> Result<File, GfError> {
-        let file = self.reopen()?;
-        let (footer_len, footer_sha256) = footer_identity(&file, self.size, digest)?;
-        if footer_len != self.footer_len || footer_sha256 != self.footer_sha256 {
-            return Err(source_changed(
-                &self.path,
-                SourceChange::Modified,
-                "Parquet footer differs from registration",
-            ));
-        }
         Ok(file)
     }
 
