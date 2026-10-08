@@ -593,7 +593,10 @@ fn the_bulk_reader_refuses_undeclared_types_under_a_strict_ontology() {
             .unwrap();
         session.register_parquet(kind, path).unwrap();
         let refusals = bulk_source::Refusals::default();
-        let plan = session.plan_bulk_build(&graph, None, &refusals).unwrap();
+        let digests = bulk_source::Digests::default();
+        let plan = session
+            .plan_bulk_build(&graph, None, &refusals, &digests)
+            .unwrap();
         let source = match kind {
             BulkInputKind::Node => &plan.nodes[0],
             BulkInputKind::Edge => &plan.edges[0],
@@ -626,7 +629,10 @@ fn the_bulk_reader_refuses_undeclared_types_under_a_strict_ontology() {
             .register_parquet(BulkInputKind::Node, &hosts)
             .unwrap();
         let refusals = bulk_source::Refusals::default();
-        let plan = session.plan_bulk_build(&graph, None, &refusals).unwrap();
+        let digests = bulk_source::Digests::default();
+        let plan = session
+            .plan_bulk_build(&graph, None, &refusals, &digests)
+            .unwrap();
         let mut batches = 0;
         let result = plan.nodes[0].reader.read_task(0, &mut |_| {
             batches += 1;

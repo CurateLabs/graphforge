@@ -12,14 +12,41 @@ use sha2::Digest as _;
 use uuid::Uuid;
 
 use super::{SourceDigest, hex};
-use crate::import_session::test_fixtures::{edges, fixture, nodes};
+use crate::import_session::test_fixtures::{edges, fixture, nodes, seeded_fixture};
 use crate::import_session::{
-    GraphImportSession, ImportPhase, ImportSessionLimits, ImportSourceKind,
+    BuildRoute, GraphImportSession, ImportPhase, ImportSessionLimits, ImportSourceKind,
 };
 use crate::{BulkInputKind, GraphForge, OperationId};
 
 const BATCH_ROWS: usize = 2;
 const NODE_ROWS: usize = 6;
+
+/// An initial import builds on the bulk builder; an append stages chunk by chunk.
+/// Every refusal below must hold on both construction paths.
+#[derive(Clone, Copy, Debug)]
+enum Route {
+    Staged,
+    Bulk,
+}
+
+const ROUTES: [Route; 2] = [Route::Staged, Route::Bulk];
+
+fn fixture_for(route: Route) -> (tempfile::TempDir, PathBuf, GraphForge) {
+    match route {
+        Route::Staged => seeded_fixture(),
+        Route::Bulk => fixture(),
+    }
+}
+
+fn assert_route(session: &GraphImportSession, route: Route) {
+    assert_eq!(
+        session.manifest.build_route,
+        Some(match route {
+            Route::Staged => BuildRoute::Staged,
+            Route::Bulk => BuildRoute::Bulk,
+        })
+    );
+}
 
 fn sha256(bytes: &[u8]) -> String {
     hex(&sha2::Sha256::digest(bytes))
@@ -27,7 +54,8 @@ fn sha256(bytes: &[u8]) -> String {
 
 fn write_nodes(path: &Path, ids: &[Uuid]) {
     let batch = nodes(ids);
-    let mut writer = ArrowWriter::try_new(File::create(path).unwrap(), batch.schema(), None).unwrap();
+    let mut writer =
+        ArrowWriter::try_new(File::create(path).unwrap(), batch.schema(), None).unwrap();
     writer.write(&batch).unwrap();
     writer.close().unwrap();
 }
@@ -215,7 +243,9 @@ fn digest_equals_sha256_for_any_read_order() {
 
 #[test]
 fn digest_rereads_ranges_dropped_beyond_the_pending_bound() {
-    let bytes = (0..(1 << 20)).map(|index: u32| index as u8).collect::<Vec<u8>>();
+    let bytes = (0..(1 << 20))
+        .map(|index: u32| index as u8)
+        .collect::<Vec<u8>>();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("blob");
     fs::write(&path, &bytes).unwrap();
@@ -261,20 +291,24 @@ fn fake_source(path: &Path, size: u64) -> super::ExternalSource {
     }
 }
 
-#[test]
-fn registration_copies_and_writes_no_source_bytes() {
-    let (_directory, _project, graph) = fixture();
+fn registration_copies_and_writes_no_source_bytes_on(route: Route) {
+    let (_directory, _project, graph) = fixture_for(route);
     // Large enough that a copy would dwarf the manifest and journal writes.
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("nodes.parquet");
     let ids = (0..40_000).map(|_| Uuid::now_v7()).collect::<Vec<_>>();
     write_nodes(&path, &ids);
     let size = fs::metadata(&path).unwrap().len();
-    assert!(size > 512 << 10, "fixture is too small to distinguish a copy");
+    assert!(
+        size > 512 << 10,
+        "fixture is too small to distinguish a copy"
+    );
 
     let mut session = begin(&graph);
     let capture = graphforge_storage::concurrency_attribution::RegionCapture::start("test");
-    session.register_parquet(BulkInputKind::Node, &path).unwrap();
+    session
+        .register_parquet(BulkInputKind::Node, &path)
+        .unwrap();
     let snapshot = capture.finish();
     let row = &snapshot.regions["test/register_parquet"];
     assert_eq!(row.work["bytes"], size);
@@ -298,6 +332,13 @@ fn registration_copies_and_writes_no_source_bytes() {
     assert_eq!(graph.node_count("Person").unwrap(), 40_000);
 }
 
+#[test]
+fn registration_copies_and_writes_no_source_bytes() {
+    for route in ROUTES {
+        registration_copies_and_writes_no_source_bytes_on(route);
+    }
+}
+
 fn walk_bytes(root: &Path) -> u64 {
     fs::read_dir(root)
         .unwrap()
@@ -313,9 +354,8 @@ fn walk_bytes(root: &Path) -> u64 {
         .sum()
 }
 
-#[test]
-fn registration_still_refuses_unsafe_and_oversized_sources() {
-    let (_directory, _project, graph) = fixture();
+fn registration_still_refuses_unsafe_and_oversized_sources_on(route: Route) {
+    let (_directory, _project, graph) = fixture_for(route);
     let source = source();
     let mut session = begin(&graph);
 
@@ -350,7 +390,11 @@ fn registration_still_refuses_unsafe_and_oversized_sources() {
         );
     }
     let not_parquet = source.path.with_extension("txt");
-    fs::write(&not_parquet, b"not parquet at all, but long enough to have a trailer").unwrap();
+    fs::write(
+        &not_parquet,
+        b"not parquet at all, but long enough to have a trailer",
+    )
+    .unwrap();
     assert!(
         session
             .register_parquet(BulkInputKind::Node, &not_parquet)
@@ -393,8 +437,14 @@ fn registration_still_refuses_unsafe_and_oversized_sources() {
 }
 
 #[test]
-fn manifest_and_receipt_carry_the_digest_of_the_bytes_that_were_read() {
-    let (directory, _project, graph) = fixture();
+fn registration_still_refuses_unsafe_and_oversized_sources() {
+    for route in ROUTES {
+        registration_still_refuses_unsafe_and_oversized_sources_on(route);
+    }
+}
+
+fn manifest_and_receipt_carry_the_digest_of_the_bytes_that_were_read_on(route: Route) {
+    let (directory, _project, graph) = fixture_for(route);
     let source = source();
     let mut session = begin(&graph);
     let session_uuid = session.session_uuid();
@@ -410,8 +460,12 @@ fn manifest_and_receipt_carry_the_digest_of_the_bytes_that_were_read() {
     );
 
     let progress = session.validate(&graph).unwrap();
+    assert_route(&session, route);
     let expected = sha256(&fs::read(&source.path).unwrap());
-    assert_eq!(session.manifest.sources[0].sha256.as_deref(), Some(expected.as_str()));
+    assert_eq!(
+        session.manifest.sources[0].sha256.as_deref(),
+        Some(expected.as_str())
+    );
     let provenance = &progress.construction.unwrap().source_provenance;
     assert_eq!(provenance.len(), 1);
     assert_eq!(provenance[0].kind, ImportSourceKind::ParquetNodes);
@@ -434,9 +488,15 @@ fn manifest_and_receipt_carry_the_digest_of_the_bytes_that_were_read() {
 }
 
 #[test]
-fn each_change_between_registration_and_validate_is_refused() {
+fn manifest_and_receipt_carry_the_digest_of_the_bytes_that_were_read() {
+    for route in ROUTES {
+        manifest_and_receipt_carry_the_digest_of_the_bytes_that_were_read_on(route);
+    }
+}
+
+fn each_change_between_registration_and_validate_is_refused_on(route: Route) {
     for change in &CHANGES {
-        let (_directory, _project, graph) = fixture();
+        let (_directory, _project, graph) = fixture_for(route);
         let source = source();
         let mut session = begin(&graph);
         session
@@ -455,9 +515,15 @@ fn each_change_between_registration_and_validate_is_refused() {
 }
 
 #[test]
-fn each_change_during_the_build_is_refused() {
+fn each_change_between_registration_and_validate_is_refused() {
+    for route in ROUTES {
+        each_change_between_registration_and_validate_is_refused_on(route);
+    }
+}
+
+fn each_change_during_the_build_is_refused_on(route: Route) {
     for change in &CHANGES {
-        let (_directory, _project, graph) = fixture();
+        let (_directory, _project, graph) = fixture_for(route);
         let source = source();
         let mut session = begin(&graph);
         session
@@ -473,15 +539,25 @@ fn each_change_during_the_build_is_refused() {
         let error = session.validate(&graph).unwrap_err();
         super::clear_pass_hook();
         assert_refusal(&error, change, "during the build");
-        assert!(session.manifest.sources[0].sha256.is_none(), "{}", change.name);
+        assert!(
+            session.manifest.sources[0].sha256.is_none(),
+            "{}",
+            change.name
+        );
         assert!(!session.manifest.sources[0].staged);
         assert_eq!(graph.node_count("Person").unwrap(), 0);
     }
 }
 
 #[test]
-fn a_touched_source_is_readable_again_once_it_matches_its_registration() {
-    let (_directory, _project, graph) = fixture();
+fn each_change_during_the_build_is_refused() {
+    for route in ROUTES {
+        each_change_during_the_build_is_refused_on(route);
+    }
+}
+
+fn a_touched_source_is_readable_again_once_it_matches_its_registration_on(route: Route) {
+    let (_directory, _project, graph) = fixture_for(route);
     let source = source();
     let mut session = begin(&graph);
     session
@@ -500,10 +576,20 @@ fn a_touched_source_is_readable_again_once_it_matches_its_registration() {
         .set_modified(original)
         .unwrap();
     let mut session = graph.resume_import_session(session_uuid).unwrap();
-    assert_eq!(session.validate(&graph).unwrap().rows_accepted, NODE_ROWS as u64);
+    assert_eq!(
+        session.validate(&graph).unwrap().rows_accepted,
+        NODE_ROWS as u64
+    );
     session.commit(&graph, None).unwrap();
     assert_eq!(graph.node_count("Person").unwrap(), NODE_ROWS as u64);
     assert_eq!(source.ids.len(), NODE_ROWS);
+}
+
+#[test]
+fn a_touched_source_is_readable_again_once_it_matches_its_registration() {
+    for route in ROUTES {
+        a_touched_source_is_readable_again_once_it_matches_its_registration_on(route);
+    }
 }
 
 #[cfg(unix)]
@@ -526,10 +612,9 @@ fn rewrite_label_in_place(path: &Path) {
 }
 
 #[cfg(unix)]
-#[test]
-fn a_digest_that_differs_from_the_recorded_one_is_refused() {
+fn a_digest_that_differs_from_the_recorded_one_is_refused_on(route: Route) {
     for during_build in [false, true] {
-        let (_directory, _project, graph) = fixture();
+        let (_directory, _project, graph) = fixture_for(route);
         let source = source();
         let mut session = begin(&graph);
         session
@@ -560,8 +645,15 @@ fn a_digest_that_differs_from_the_recorded_one_is_refused() {
 
 #[cfg(unix)]
 #[test]
-fn a_same_size_same_mtime_rewrite_is_digested_not_trusted() {
-    let (_directory, _project, graph) = fixture();
+fn a_digest_that_differs_from_the_recorded_one_is_refused() {
+    for route in ROUTES {
+        a_digest_that_differs_from_the_recorded_one_is_refused_on(route);
+    }
+}
+
+#[cfg(unix)]
+fn a_same_size_same_mtime_rewrite_is_digested_not_trusted_on(route: Route) {
+    let (_directory, _project, graph) = fixture_for(route);
     let source = source();
     let mut session = begin(&graph);
     session
@@ -572,12 +664,22 @@ fn a_same_size_same_mtime_rewrite_is_digested_not_trusted() {
     // attests to the bytes that were actually read, not the ones registered.
     let expected = sha256(&fs::read(&source.path).unwrap());
     session.validate(&graph).unwrap();
-    assert_eq!(session.manifest.sources[0].sha256.as_deref(), Some(expected.as_str()));
+    assert_eq!(
+        session.manifest.sources[0].sha256.as_deref(),
+        Some(expected.as_str())
+    );
 }
 
+#[cfg(unix)]
 #[test]
-fn abort_removes_the_session_and_leaves_the_source_alone() {
-    let (_directory, _project, graph) = fixture();
+fn a_same_size_same_mtime_rewrite_is_digested_not_trusted() {
+    for route in ROUTES {
+        a_same_size_same_mtime_rewrite_is_digested_not_trusted_on(route);
+    }
+}
+
+fn abort_removes_the_session_and_leaves_the_source_alone_on(route: Route) {
+    let (_directory, _project, graph) = fixture_for(route);
     let source = source();
     let before = fs::read(&source.path).unwrap();
     let mut session = begin(&graph);
@@ -592,8 +694,14 @@ fn abort_removes_the_session_and_leaves_the_source_alone() {
 }
 
 #[test]
-fn edge_sources_are_read_in_place_too() {
-    let (_directory, _project, graph) = fixture();
+fn abort_removes_the_session_and_leaves_the_source_alone() {
+    for route in ROUTES {
+        abort_removes_the_session_and_leaves_the_source_alone_on(route);
+    }
+}
+
+fn edge_sources_are_read_in_place_too_on(route: Route) {
+    let (_directory, _project, graph) = fixture_for(route);
     let directory = tempfile::tempdir().unwrap();
     let node_path = directory.path().join("nodes.parquet");
     let edge_path = directory.path().join("edges.parquet");
@@ -612,11 +720,22 @@ fn edge_sources_are_read_in_place_too() {
     session
         .register_parquet(BulkInputKind::Edge, &edge_path)
         .unwrap();
-    assert_eq!(fs::read_dir(session.root.join("sources")).unwrap().count(), 0);
+    assert_eq!(
+        fs::read_dir(session.root.join("sources")).unwrap().count(),
+        0
+    );
     let progress = session.validate(&graph).unwrap();
+    assert_route(&session, route);
     let provenance = progress.construction.unwrap().source_provenance;
     assert_eq!(provenance.len(), 2);
     assert!(provenance.iter().all(|source| source.sha256.is_some()));
     session.commit(&graph, None).unwrap();
     assert_eq!(graph.node_count("Person").unwrap(), 2);
+}
+
+#[test]
+fn edge_sources_are_read_in_place_too() {
+    for route in ROUTES {
+        edge_sources_are_read_in_place_too_on(route);
+    }
 }

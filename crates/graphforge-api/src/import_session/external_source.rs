@@ -116,7 +116,9 @@ fn read_exact_at(file: &File, offset: u64, bytes: &mut [u8]) -> std::io::Result<
 /// plain (unencrypted) Parquet.
 fn footer_identity(file: &File, size: u64) -> Result<(u64, String), GfError> {
     if size < 2 * PARQUET_MAGIC.len() as u64 + 4 {
-        return Err(validation("Parquet source is too short to be a Parquet file"));
+        return Err(validation(
+            "Parquet source is too short to be a Parquet file",
+        ));
     }
     let mut head = [0_u8; 4];
     read_exact_at(file, 0, &mut head).map_err(storage)?;
@@ -393,6 +395,47 @@ impl SourceDigest {
         RegionScope::record_work("bytes", reread);
         let hasher = std::mem::replace(&mut state.hasher, Sha256::new());
         Ok(hex(&hasher.finalize()))
+    }
+}
+
+/// A Parquet file whose every read is reported to a [`SourceDigest`], for
+/// readers that decode row groups in parallel from separate handles.
+pub(super) struct DigestingFile {
+    file: File,
+    size: u64,
+    digest: SourceDigest,
+}
+
+impl DigestingFile {
+    pub(super) const fn new(file: File, size: u64, digest: SourceDigest) -> Self {
+        Self { file, size, digest }
+    }
+}
+
+impl parquet::file::reader::Length for DigestingFile {
+    fn len(&self) -> u64 {
+        self.size
+    }
+}
+
+impl parquet::file::reader::ChunkReader for DigestingFile {
+    type T = std::io::BufReader<DigestingReader<File>>;
+
+    fn get_read(&self, start: u64) -> parquet::errors::Result<Self::T> {
+        let mut file = self.file.try_clone()?;
+        file.seek(SeekFrom::Start(start))?;
+        Ok(std::io::BufReader::new(DigestingReader::new(
+            file,
+            start,
+            self.digest.clone(),
+        )))
+    }
+
+    fn get_bytes(&self, start: u64, length: usize) -> parquet::errors::Result<bytes::Bytes> {
+        let mut bytes = vec![0_u8; length];
+        read_exact_at(&self.file, start, &mut bytes)?;
+        self.digest.observe(start, &bytes);
+        Ok(bytes::Bytes::from(bytes))
     }
 }
 

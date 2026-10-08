@@ -908,6 +908,7 @@ impl GraphImportSession {
         // build the builder cannot hold the node tables or edge properties of
         // stage; the last records its typed reason.
         let refusals = bulk_source::Refusals::default();
+        let digests = bulk_source::Digests::default();
         let route = if let Some(route) = self.manifest.build_route {
             route
         } else {
@@ -923,7 +924,7 @@ impl GraphImportSession {
             };
             let route = if initial {
                 match self
-                    .plan_bulk_build(graph, cancellation, &refusals)?
+                    .plan_bulk_build(graph, cancellation, &refusals, &digests)?
                     .route()
                 {
                     graphforge_storage::BulkRoute::Staged(reason) => {
@@ -941,8 +942,11 @@ impl GraphImportSession {
             route
         };
         if route == BuildRoute::Bulk {
-            let plan = self.plan_bulk_build(graph, cancellation, &refusals)?;
-            let built = self.build_initial(&mut construction, &plan, cancellation);
+            // The routing plan above read only footers; a fresh one reads the
+            // sources, so its digests are the build's.
+            let digests = bulk_source::Digests::default();
+            let plan = self.plan_bulk_build(graph, cancellation, &refusals, &digests)?;
+            let built = self.build_initial(&mut construction, &plan, &digests, cancellation);
             if built.is_err() {
                 self.record_bulk_refusal(&refusals)?;
             }
@@ -1013,6 +1017,7 @@ impl GraphImportSession {
         graph: &'a GraphForge,
         cancellation: Option<&'a CancellationToken>,
         refusals: &'a bulk_source::Refusals,
+        digests: &'a bulk_source::Digests,
     ) -> Result<graphforge_storage::BulkBuildPlan<'a>, GfError> {
         let mut plan = graphforge_storage::BulkBuildPlan {
             memory_budget: Some(bulk_source::bulk_build_memory_budget()?),
@@ -1027,6 +1032,7 @@ impl GraphImportSession {
                 self.manifest.operation_uuid,
                 cancellation,
                 refusals,
+                digests,
             )?;
             match source.kind.input_kind() {
                 BulkInputKind::Node => plan.nodes.push(planned),
@@ -1044,6 +1050,7 @@ impl GraphImportSession {
         &mut self,
         construction: &mut crate::GraphConstructionSession<'_>,
         plan: &graphforge_storage::BulkBuildPlan<'_>,
+        digests: &bulk_source::Digests,
         cancellation: Option<&CancellationToken>,
     ) -> Result<ImportProgress, GfError> {
         let region = RegionScope::named("bulk_build");
@@ -1055,8 +1062,15 @@ impl GraphImportSession {
         drop(region);
         let report = built?;
         let (nodes, edges) = (report.nodes, report.edges);
-        for source in &mut self.manifest.sources {
-            source.staged = true;
+        for source_index in 0..self.manifest.sources.len() {
+            if self.manifest.sources[source_index].external.is_some() {
+                // A successful build read every task of every in-place source.
+                let digest = digests
+                    .take(self.manifest.sources[source_index].sequence)
+                    .ok_or_else(|| storage("the build finished without a source digest"))?;
+                self.record_source_digest(source_index, Some(digest))?;
+            }
+            self.manifest.sources[source_index].staged = true;
         }
         self.manifest.progress.rows_accepted = nodes.saturating_add(edges);
         self.manifest.progress.files_pending = 0;
@@ -1523,8 +1537,7 @@ fn for_each_source_batch(
                 external_source::pass_hook("opened", 0);
                 let digest = external_source::SourceDigest::new(external.size);
                 let guard = file.try_clone().map_err(storage)?;
-                let chunk_reader =
-                    ImportChunkReader::new(file, tracker.clone(), digest.clone())?;
+                let chunk_reader = ImportChunkReader::new(file, tracker.clone(), digest.clone())?;
                 let reader = ParquetRecordBatchReaderBuilder::try_new(chunk_reader)
                     .map_err(storage)?
                     .with_batch_size(batch_rows)

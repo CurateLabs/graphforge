@@ -5,9 +5,11 @@
 //! operation identity every batch normalizes under, match a sequential read of
 //! the file.
 
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use arrow::ipc::reader::FileReader as ArrowFileReader;
 use arrow::record_batch::RecordBatch;
@@ -19,6 +21,9 @@ use parquet::arrow::arrow_reader::{
 };
 use uuid::Uuid;
 
+use super::external_source::{
+    DigestingFile, ExternalSource, SourceChange, SourceDigest, source_changed,
+};
 use super::{
     ImportSourceKind, SourceRecord, cancelled, canonicalize_parquet_batch, import_batch_operation,
     normalize_batch, storage, validation,
@@ -329,9 +334,68 @@ impl Refusals {
     }
 }
 
+/// Whole-file SHA-256 of each in-place source, produced by the read that
+/// completed it. A source appears only once every one of its tasks was read.
+#[derive(Default)]
+pub(super) struct Digests(std::sync::Mutex<BTreeMap<u64, String>>);
+
+impl Digests {
+    fn insert(&self, sequence: u64, sha256: String) {
+        if let Ok(mut held) = self.0.lock() {
+            held.insert(sequence, sha256);
+        }
+    }
+
+    /// The digest the build read for the source with this sequence.
+    pub(super) fn take(&self, sequence: u64) -> Option<String> {
+        self.0.lock().ok()?.remove(&sequence)
+    }
+}
+
+/// An in-place Parquet source: its registration, the digest being assembled from
+/// the bytes the tasks read, and how many tasks remain.
+struct InPlace<'a> {
+    external: ExternalSource,
+    digest: SourceDigest,
+    /// Digest an earlier complete read recorded, which this one must match.
+    expected: Option<String>,
+    tasks: usize,
+    finished: AtomicUsize,
+    digests: &'a Digests,
+}
+
+impl InPlace<'_> {
+    /// Called when a task has read all its batches. The task that completes the
+    /// source finishes the digest, reading again any range the tasks did not.
+    fn task_done(&self, sequence: u64, guard: &File) -> Result<(), GfError> {
+        self.external.check(guard)?;
+        if self.finished.fetch_add(1, Ordering::AcqRel) + 1 != self.tasks {
+            return Ok(());
+        }
+        self.complete(sequence, guard)
+    }
+
+    fn complete(&self, sequence: u64, guard: &File) -> Result<(), GfError> {
+        let sha256 = self.digest.finish(&self.external, guard)?;
+        self.external.check(guard)?;
+        if let Some(expected) = &self.expected
+            && *expected != sha256
+        {
+            return Err(source_changed(
+                &self.external.path,
+                SourceChange::DigestChanged,
+                &format!("recorded {expected}, read {sha256}"),
+            ));
+        }
+        self.digests.insert(sequence, sha256);
+        Ok(())
+    }
+}
+
 struct SourceReader<'a> {
     graph: &'a GraphForge,
     path: PathBuf,
+    in_place: Option<InPlace<'a>>,
     kind: BulkInputKind,
     operation_uuid: Uuid,
     sequence: u64,
@@ -460,9 +524,18 @@ impl BulkBatchReader for SourceReader<'_> {
         sink: &mut dyn FnMut(RecordBatch) -> Result<(), GfError>,
     ) -> Result<(), GfError> {
         let first_batch = task as u64 * BATCHES_PER_TASK;
-        let file = File::open(&self.path).map_err(storage)?;
         match &self.format {
             Format::Parquet { metadata, rows } => {
+                let in_place = self
+                    .in_place
+                    .as_ref()
+                    .ok_or_else(|| storage("Parquet import source has no registered identity"))?;
+                let file = in_place.external.open()?;
+                #[cfg(test)]
+                super::external_source::pass_hook("opened", task as u64);
+                let guard = file.try_clone().map_err(storage)?;
+                let file =
+                    DigestingFile::new(file, in_place.external.size, in_place.digest.clone());
                 let batch_rows = self.batch_rows as u64;
                 let start = first_batch * batch_rows;
                 let end = (start + BATCHES_PER_TASK * batch_rows).min(*rows);
@@ -510,10 +583,16 @@ impl BulkBatchReader for SourceReader<'_> {
                 }
                 let reader = builder.build().map_err(storage)?;
                 for (offset, batch) in reader.enumerate() {
+                    #[cfg(test)]
+                    super::external_source::pass_hook("batch", first_batch + offset as u64);
+                    // The source can change between any two batches.
+                    in_place.external.check(&guard)?;
                     self.emit(first_batch + offset as u64, batch.map_err(storage)?, sink)?;
                 }
+                in_place.task_done(self.sequence, &guard)?;
             }
             Format::Arrow { .. } => {
+                let file = File::open(&self.path).map_err(storage)?;
                 let mut reader = ArrowFileReader::try_new(file, None).map_err(storage)?;
                 let total = reader.num_batches() as u64;
                 for index in first_batch..(first_batch + BATCHES_PER_TASK).min(total) {
@@ -575,6 +654,7 @@ pub(super) fn plan<'a>(
     operation_uuid: Uuid,
     cancellation: Option<&'a CancellationToken>,
     refusals: &'a Refusals,
+    digests: &'a Digests,
 ) -> Result<BulkSource<'a>, GfError> {
     let path = root.join("sources").join(&source.name);
     let kind = source.kind.input_kind();
@@ -584,7 +664,10 @@ pub(super) fn plan<'a>(
     };
     let (format, rows, columns, schema_bytes, decoding_bytes) = match source.kind {
         ImportSourceKind::ParquetNodes | ImportSourceKind::ParquetEdges => {
-            let file = File::open(&path).map_err(storage)?;
+            let external = source.external.as_ref().ok_or_else(|| {
+                storage("Parquet import source has no registered identity; register it again")
+            })?;
+            let file = external.open()?;
             let metadata =
                 ArrowReaderMetadata::load(&file, ArrowReaderOptions::new()).map_err(storage)?;
             let rows =
@@ -635,10 +718,25 @@ pub(super) fn plan<'a>(
             .sum(),
         Format::Arrow { .. } => fs::metadata(&path).map_err(storage)?.len(),
     };
+    let tasks = usize::try_from(batches.div_ceil(BATCHES_PER_TASK)).map_err(storage)?;
+    let in_place = source.external.as_ref().map(|external| InPlace {
+        external: external.clone(),
+        digest: SourceDigest::new(external.size),
+        expected: source.sha256.clone(),
+        tasks,
+        finished: AtomicUsize::new(0),
+        digests,
+    });
+    if let Some(in_place) = in_place.as_ref().filter(|in_place| in_place.tasks == 0) {
+        // No task will read it, so the footer pass is the whole read.
+        let file = in_place.external.open()?;
+        in_place.complete(source.sequence, &file)?;
+    }
     Ok(BulkSource {
         reader: Arc::new(SourceReader {
             graph,
             path,
+            in_place,
             kind,
             operation_uuid,
             sequence: source.sequence,
@@ -649,7 +747,7 @@ pub(super) fn plan<'a>(
             cancellation,
             refusals,
         }),
-        tasks: usize::try_from(batches.div_ceil(BATCHES_PER_TASK)).map_err(storage)?,
+        tasks,
         rows,
         property_free: columns == required,
         decoded_bytes,
