@@ -198,6 +198,34 @@ impl BulkBatchReader for SourceReader<'_> {
         usize::try_from(rows).unwrap_or(0)
     }
 
+    /// The identity column's bounds over the row groups the task reads, when
+    /// the footer states them exactly: Parquet only, and only without nulls
+    /// (a null identity is derived, so it is not in the column's range).
+    fn uuid_bounds(&self, task: usize) -> Option<([u8; 16], [u8; 16])> {
+        let Format::Parquet { metadata, rows } = &self.format else {
+            return None;
+        };
+        let task_rows = BATCHES_PER_TASK * self.batch_rows as u64;
+        let start = task as u64 * task_rows;
+        let end = (start + task_rows).min(*rows);
+        let mut bounds: Option<([u8; 16], [u8; 16])> = None;
+        let mut group_start = 0_u64;
+        for group in metadata.metadata().row_groups() {
+            let group_end = group_start + u64::try_from(group.num_rows()).ok()?;
+            if group_end > start && group_start < end {
+                let statistics = group.column(0).statistics()?;
+                if statistics.null_count_opt() != Some(0) {
+                    return None;
+                }
+                let low = <[u8; 16]>::try_from(statistics.min_bytes_opt()?).ok()?;
+                let high = <[u8; 16]>::try_from(statistics.max_bytes_opt()?).ok()?;
+                bounds = Some(bounds.map_or((low, high), |(min, max)| (min.min(low), max.max(high))));
+            }
+            group_start = group_end;
+        }
+        bounds
+    }
+
     fn read_task(
         &self,
         task: usize,

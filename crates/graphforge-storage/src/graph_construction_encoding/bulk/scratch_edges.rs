@@ -133,12 +133,63 @@ impl RelationCache<'_> {
 
 // ------------------------------------------------------------- splitters
 
+/// Bits of a UUID's leading bytes that place it in a histogram bucket.
+const BOUND_BUCKET_BITS: u32 = 20;
+
+/// Boundaries from the tasks' footer bounds, when every task states them: each
+/// task's rows are spread evenly over the buckets between its bounds, which is
+/// exact for UUIDs that arrive in order and uniform for UUIDs that do not.
+fn splitters_from_bounds(
+    sources: &[BulkSource<'_>],
+    tasks: &Tasks,
+    wanted: usize,
+) -> Option<Vec<[u8; 16]>> {
+    let buckets = 1_usize << BOUND_BUCKET_BITS;
+    let bucket = |uuid: &[u8; 16]| {
+        (u32::from_be_bytes(uuid[..4].try_into().expect("4 bytes")) >> (32 - BOUND_BUCKET_BITS))
+            as usize
+    };
+    let mut slope = vec![0.0_f64; buckets + 1];
+    let mut total = 0.0_f64;
+    for &(source, task, rows) in &tasks.items {
+        if rows == 0 {
+            continue;
+        }
+        let (low, high) = sources[source].reader.uuid_bounds(task)?;
+        let (first, last) = (bucket(&low), bucket(&high));
+        if last < first {
+            return None;
+        }
+        let rate = rows as f64 / (last - first + 1) as f64;
+        slope[first] += rate;
+        slope[last + 1] -= rate;
+        total += rows as f64;
+    }
+    let mut splitters = Vec::new();
+    let (mut rate, mut cumulative, mut next) = (0.0_f64, 0.0_f64, 1_usize);
+    for (index, change) in slope.iter().take(buckets).enumerate() {
+        rate += change;
+        cumulative += rate;
+        while next < wanted && cumulative >= total * next as f64 / wanted as f64 {
+            // Everything up to this bucket sorts below the boundary.
+            if index + 1 < buckets {
+                splitters.push((((index + 1) as u128) << (128 - BOUND_BUCKET_BITS)).to_be_bytes());
+            }
+            next += 1;
+        }
+    }
+    splitters.dedup();
+    Some(splitters)
+}
+
 /// Edge-UUID range boundaries that split the edges into about `wanted`
-/// partitions of equal size, from a sample of the input.
+/// partitions of equal size.
 ///
-/// Row-group statistics cannot do this: the minimum and maximum of a group of
-/// unordered UUIDs say nothing about how the UUIDs are distributed. A sample
-/// of evenly spread tasks does, and it covers sorted input too.
+/// They come from the row-group bounds in the footers when the source states
+/// them. Otherwise (Arrow files, or UUIDs with nulls, which are derived) from a
+/// sample of evenly spread tasks: the minimum and maximum of a group of
+/// unordered UUIDs say nothing about how they are distributed, but a sample
+/// of tasks does, and it covers sorted input too.
 fn edge_splitters(
     sources: &[BulkSource<'_>],
     tasks: &Tasks,
@@ -148,7 +199,10 @@ fn edge_splitters(
     if wanted <= 1 || tasks.items.is_empty() {
         return Ok(Vec::new());
     }
-    let chosen_count = tasks.items.len().min(2.max(tasks.items.len().div_ceil(32)));
+    if let Some(splitters) = splitters_from_bounds(sources, tasks, wanted) {
+        return Ok(splitters);
+    }
+    let chosen_count = tasks.items.len().min(64);
     let chosen = (0..chosen_count)
         .map(|index| tasks.items[index * tasks.items.len() / chosen_count])
         .collect::<Vec<_>>();
@@ -179,6 +233,9 @@ fn edge_splitters(
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
+    if sample.is_empty() {
+        return Ok(Vec::new());
+    }
     sample.par_sort_unstable();
     let mut splitters = (1..wanted)
         .map(|part| sample[part * sample.len() / wanted])

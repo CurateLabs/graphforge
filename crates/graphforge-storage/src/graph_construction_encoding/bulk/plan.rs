@@ -30,6 +30,14 @@ pub trait BulkBatchReader: Send + Sync {
     /// copy and an assembled copy never coexist. A task that emits a different
     /// number of rows fails the build.
     fn task_rows(&self, task: usize) -> usize;
+
+    /// The smallest and largest identity UUID among `task`'s rows, when the
+    /// source's footer states them exactly (no nulls, so no derived UUIDs). The
+    /// over-budget route uses them to split edges into UUID ranges of equal
+    /// size without reading any data; without them it samples.
+    fn uuid_bounds(&self, _task: usize) -> Option<([u8; 16], [u8; 16])> {
+        None
+    }
 }
 
 /// One planned input source (pass 0).
@@ -156,6 +164,9 @@ pub struct BulkBuildReport {
     /// Bytes it read back.
     #[serde(default)]
     pub scratch_read_bytes: u64,
+    /// Edges in the largest edge-UUID range partition of the over-budget route.
+    #[serde(default)]
+    pub largest_edge_partition: u64,
 }
 
 #[derive(Clone, Copy, Default)]

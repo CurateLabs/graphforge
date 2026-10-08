@@ -4,14 +4,14 @@ adr: "0058"
 status: "Accepted"
 date: "2026-10-07"
 superseded_by: null
-revisit_when: "An initial build must exceed the in-memory budget before the scratch path lands, a published artifact stops being a projection of the three ranked inputs, or a chunk-API initial build needs the same speedup"
+revisit_when: "Node tables or edge properties must go out of core, a published artifact stops being a projection of the three ranked inputs, or a chunk-API initial build needs the same speedup"
 ---
 
 # ADR 0058: Initial builds run on a bulk builder derived from the published generation
 
 **Status:** Accepted
 
-**Implementation:** #1883 (slice of epic #1881).
+**Implementation:** #1883 and #1900 (slices of epic #1881).
 
 **Related:**
 - ADR 0013 (project generation protocol; the `CURRENT` swap is unchanged)
@@ -82,15 +82,57 @@ functions.
   sources). Appends keep the staged path, as do initial builds made through the
   chunk API (`GraphConstructionSession::append_*`), until the builder takes
   those inputs.
-- The builder is in-memory. An initial build whose estimated peak memory
-  exceeds the plan-time budget takes the staged path instead, which holds a
-  fixed window of memory and produces the same bytes. The route is chosen once,
-  by the first `validate`, from the footers and the process's cgroup-aware
-  memory headroom (three fifths of it), and written to the import manifest
-  (`build_route`); every later `validate`, in any process, reads it back. A
-  refused, cancelled or killed bulk attempt therefore cannot be re-routed to the
-  staged path by a change in free memory. It is never a retry. The scratch path of #1881 replaces
-  this routing for large inputs, and must land before the ladder slice.
+- An initial build whose estimated peak memory fits the plan-time budget keeps
+  everything resident. One that does not runs the same passes through scratch
+  files (below), so peak memory stays inside the budget. The budget is three
+  fifths of the process's cgroup-aware memory headroom, or the bytes in
+  `GF_BULK_BUILD_MEMORY_BUDGET_BYTES`. Routing is a function of the footers and
+  the budget, never of the data, and the bytes are the same on every route.
+- The staged path remains for appends, chunk-API sessions, sessions an earlier
+  binary began staging, and two plan-time cases the scratch route cannot hold,
+  each recorded as a typed reason in the import manifest (`staged_reason`):
+  `node_tables_exceed_budget` (the sorted node UUIDs, labels and endpoint index
+  need about 40 bytes per node and stay in memory) and
+  `edge_properties_exceed_budget` (the builder retains property-bearing edge
+  batches). Out-of-core node handling and edge properties on scratch remain
+  open under #1881.
+- The route is chosen once, by the first `validate`, and written to the import
+  manifest (`build_route`); every later `validate`, in any process, reads it
+  back. A refused, cancelled or killed bulk attempt therefore cannot be
+  re-routed to the staged path by a change in free memory. It is never a
+  retry. Whether the bulk route then runs in memory or on scratch is decided
+  again on each attempt from the live budget; either produces the same bytes.
+
+## Scratch route
+
+When the estimate exceeds the budget:
+
+- Pass 2 decodes the edges once, resolves endpoints through the node index and
+  scatters a 28-byte record (UUID, source rank, target rank, relation id) into
+  edge-UUID range partitions. Boundaries come from a sample of evenly spread
+  tasks; row-group statistics cannot give them, because the minimum and
+  maximum of unordered UUIDs say nothing about their distribution.
+- Pass 3 builds the partitions in order, several at a time. Sorting a partition
+  ranks its edges (the first `edge_id` is the number of earlier edges plus
+  one). It checks identities, writes its canonical edge files, keeps its sorted
+  UUIDs for the membership index, and scatters its adjacency entries once into
+  node-range partitions chosen from a histogram of entries per node-rank bucket.
+  Canonical edge files cover fixed windows of `edge_id`s that can straddle two
+  partitions; the rows after a partition's last whole window carry to the next,
+  one partition at a time.
+- The adjacency pass sorts each node-range partition and cuts it into shards.
+  The published shard boundaries are a greedy walk over the whole sorted
+  sequence of a relation group, so each group keeps its open shard between
+  partitions. That step runs in partition order; sorting and encoding overlap.
+- Scratch has no fsync and no SHA-256. Every block carries a CRC32C that the
+  reader checks. Scratch is written once and read once, deleted on completion,
+  on error, and when a session is opened for recovery, and a rerun starts from
+  the sources.
+- Partition count and the partitions in flight come from the budget. A memory
+  gate grants reservations in partition order, so the bytes in flight never
+  exceed the gate and a waiting partition is not starved. A partition larger
+  than the gate (an extreme skew) is refused with a resource-limit error.
+
 - Node and edge counts are limited to 2^32 - 2 by the dense ids. A larger input
   is refused with a resource-limit error.
 

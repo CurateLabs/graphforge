@@ -140,6 +140,7 @@ struct ScratchReport {
     csr_partitions: u64,
     write_bytes: u64,
     read_bytes: u64,
+    largest_partition: u64,
 }
 
 struct Membership {
@@ -533,6 +534,10 @@ pub(crate) fn encode_bulk(
             csr_partitions: sized.csr_partitions as u64,
             write_bytes: scratch.written_bytes(),
             read_bytes: scratch.read_bytes(),
+            largest_partition: match &edge_side {
+                EdgeSide::Scratch(scattered) => scattered.counts.iter().copied().max().unwrap_or(0),
+                EdgeSide::Memory(_) => 0,
+            },
         };
         drop(ranked_edges);
         scratch.remove()?;
@@ -738,6 +743,7 @@ pub(crate) fn encode_bulk(
             csr_partitions: scratch_report.csr_partitions,
             scratch_write_bytes: scratch_report.write_bytes,
             scratch_read_bytes: scratch_report.read_bytes,
+            largest_edge_partition: scratch_report.largest_partition,
         };
     }
     Ok(completed)
