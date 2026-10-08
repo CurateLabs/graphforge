@@ -52,7 +52,9 @@ impl GraphForge {
     }
 
     /// Whether the membership index holds `uuid` as a live node, or `None` when
-    /// no index exists at the current topology generation.
+    /// no index exists at the current topology generation. This is the only
+    /// place the selector touches the identity authority, so a different probe
+    /// (#1925) replaces this function and nothing else.
     fn indexed_node_membership(&self, uuid: Uuid) -> Result<Option<bool>, GfError> {
         let dir = self.dir();
         let generation = graphforge_storage::read_topology_generation(&dir)?;
@@ -329,6 +331,39 @@ mod tests {
         );
         assert!(bare.uuid_membership_index.lock().unwrap().is_none());
         assert_validation(bare.resolve_node_selector(&NodeSelector::Uuid(Uuid::now_v7())));
+    }
+
+    #[test]
+    fn clear_and_repopulate_to_the_same_generation_never_reuses_the_cached_index() {
+        let graph = GraphForge::new(None).unwrap();
+        graph.execute("CREATE (:Person {name: 'old'})").unwrap();
+        let old = first_uuid(&graph);
+        let generation = graphforge_storage::read_topology_generation(&graph.dir()).unwrap();
+        // Open the index cache at this generation.
+        assert_eq!(
+            graph
+                .resolve_node_selector(&NodeSelector::Uuid(old))
+                .unwrap(),
+            old
+        );
+        assert!(graph.uuid_membership_index.lock().unwrap().is_some());
+
+        graph.clear().unwrap();
+        graph.execute("CREATE (:Person {name: 'new'})").unwrap();
+        // clear() resets the generation counter, so it repeats the earlier value.
+        assert_eq!(
+            graphforge_storage::read_topology_generation(&graph.dir()).unwrap(),
+            generation
+        );
+        let new = first_uuid(&graph);
+        assert_ne!(new, old);
+        assert_eq!(
+            graph
+                .resolve_node_selector(&NodeSelector::Uuid(new))
+                .unwrap(),
+            new
+        );
+        assert_validation(graph.resolve_node_selector(&NodeSelector::Uuid(old)));
     }
 
     #[test]

@@ -444,6 +444,12 @@ impl GraphForge {
             .expect("procedure registry lock")
             .clear();
         self.adjacency_provider_for_session().invalidate();
+        // The topology generation counter restarts at clear(), so a cached
+        // membership index from before it can match a later generation.
+        *self
+            .uuid_membership_index
+            .lock()
+            .expect("UUID membership index lock poisoned") = None;
         // The session's read authority still declares the generation's node and
         // edge files, content-store objects the workspace wipe does not touch,
         // and every later catalog lists node files from it (#1388). Re-establish
