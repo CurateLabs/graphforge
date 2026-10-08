@@ -84,7 +84,8 @@ class LifecycleGrowthTests(unittest.TestCase):
                 },
             }
             for outcome, counts in (
-                ("stage+seal", (1, 0, 2, 1, 0)),
+                # An initial build runs on the bulk builder: no append, one seal.
+                ("stage+seal", (1, 0, 0, 1, 0)),
                 ("committed", (0, 1, 0, 0, 1)),
             )
         ]
@@ -94,6 +95,7 @@ class LifecycleGrowthTests(unittest.TestCase):
             lambda rows: rows[0].__setitem__("outcome", "validated"),
             lambda rows: rows[0]["operation_timings"].pop("seal"),
             lambda rows: rows[0]["operation_timings"]["append"].__setitem__("calls", 1),
+            lambda rows: rows[0]["operation_timings"]["seal"].__setitem__("calls", 0),
             lambda rows: rows[1]["operation_timings"]["publish"].__setitem__("errors", 1),
         ):
             invalid = copy.deepcopy(evidence)
