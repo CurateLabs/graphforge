@@ -7,7 +7,7 @@ use datafusion::common::ScalarValue;
 use datafusion::logical_expr::Operator;
 use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_expr::expressions::{
-    BinaryExpr, Column, DynamicFilterPhysicalExpr, InListExpr, Literal,
+    BinaryExpr, CaseExpr, Column, DynamicFilterPhysicalExpr, InListExpr, Literal,
 };
 
 pub(crate) fn is_uuid_dynamic_filter(expression: &Arc<dyn PhysicalExpr>, key: &str) -> bool {
@@ -43,6 +43,20 @@ pub(crate) fn uuid_candidates(
             (Some(left), Some(right)) => Some(&left & &right),
             (left, right) => left.or(right),
         };
+    }
+    if let Some(case) = expression.downcast_ref::<CaseExpr>() {
+        // Partitioned hash joins route each row to one branch, but the property
+        // scan can use the union of all finite branch nominations as a safe
+        // superset. An unrecognized branch (including an unbounded ELSE) keeps
+        // the ordinary scan rather than risking an incomplete nomination.
+        let mut uuids = BTreeSet::new();
+        for (_, result) in case.when_then_expr() {
+            uuids.extend(uuid_candidates(result, key)?);
+        }
+        if let Some(result) = case.else_expr() {
+            uuids.extend(uuid_candidates(result, key)?);
+        }
+        return Some(uuids);
     }
     if let Some(literal) = expression.downcast_ref::<Literal>()
         && literal.value() == &ScalarValue::Boolean(Some(false))
