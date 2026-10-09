@@ -80,7 +80,7 @@ impl GraphForge {
         let ordinal = self.ordinal_identities.revalidated_handle()?;
         find_in_bounded_passes(
             LabelMemberProjection::generation,
-            || read_search_generation(dir).map_err(Into::into),
+            || read_search_generation(dir),
             || {
                 vector_query
                     .as_ref()
@@ -119,7 +119,6 @@ impl GraphForge {
                     &hits,
                     projection.map(LabelMemberProjection::members),
                 )
-                .map_err(GfError::from)
             },
         )
     }
@@ -756,7 +755,7 @@ mod tests {
                 let seen = RefCell::new(Vec::new());
                 let result = find_in_bounded_passes(
                     LabelMemberProjection::generation,
-                    || read_search_generation(&dir).map_err(Into::into),
+                    || read_search_generation(&dir),
                     || {
                         before_capture(captures.get());
                         captures.set(captures.get() + 1);
