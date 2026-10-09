@@ -78,56 +78,49 @@ impl GraphForge {
         }
         let topology = self.dir().topology_files()?;
         let ordinal = self.ordinal_identities.revalidated_handle()?;
-        for attempt in 1_u8..=2 {
-            let before = read_search_generation(dir)?;
-            let projection = vector_query
-                .as_ref()
-                .map(|_| {
-                    project_label_members_snapshot_with_topology(
-                        dir,
-                        Some(&topology),
-                        ordinal.as_deref(),
-                        label_id,
-                        VectorLifecycleLimits::default(),
-                        || Ok(()),
-                    )
-                })
-                .transpose()?;
-            let hits = self.retrieve_find_hits(
-                dir,
-                &label,
-                label_id,
-                query.as_deref(),
-                vector_query.as_ref(),
-                space.as_deref(),
-                force_stale,
-                limit,
-                projection.as_ref(),
-            );
-            let hits = match hits {
-                Err(GfError::Lifecycle(_))
-                    if attempt == 1 && before != read_search_generation(dir)? =>
-                {
-                    continue;
-                }
-                result => result?,
-            };
-            let batch = shape_search_output_with_members(
-                dir,
-                &self.property_inventory_for_session(),
-                ordinal.as_deref(),
-                label_id,
-                &hits,
-                projection.as_ref().map(LabelMemberProjection::members),
-            )?;
-            if before == read_search_generation(dir)? {
-                return Ok(batch);
-            }
-            if attempt == 2 {
-                return Err(SearchArtifactError::ConcurrentMutation.into());
-            }
-        }
-        unreachable!("bounded find retry returns on both terminal paths")
+        find_in_bounded_passes(
+            LabelMemberProjection::generation,
+            || read_search_generation(dir),
+            || {
+                vector_query
+                    .as_ref()
+                    .map(|_| {
+                        project_label_members_snapshot_with_topology(
+                            dir,
+                            Some(&topology),
+                            ordinal.as_deref(),
+                            label_id,
+                            VectorLifecycleLimits::default(),
+                            || Ok(()),
+                        )
+                        .map_err(GfError::from)
+                    })
+                    .transpose()
+            },
+            |projection| {
+                self.retrieve_find_hits(
+                    dir,
+                    &label,
+                    label_id,
+                    query.as_deref(),
+                    vector_query.as_ref(),
+                    space.as_deref(),
+                    force_stale,
+                    limit,
+                    projection,
+                )
+            },
+            |hits, projection| {
+                shape_search_output_with_members(
+                    dir,
+                    &self.property_inventory_for_session(),
+                    ordinal.as_deref(),
+                    label_id,
+                    &hits,
+                    projection.map(LabelMemberProjection::members),
+                )
+            },
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -292,6 +285,44 @@ fn soft_dimension_miss(
         }
         Err(error) => Err(error.into()),
     }
+}
+
+/// Run retrieval and output shaping under one bounded freshness check.
+///
+/// A vector query pins the search generation its admitted topology projection
+/// reports, so a generation that advanced before the projection began costs no
+/// second decode: nothing had been read yet. A text-only query pins the
+/// generation read before retrieval. A pass is accepted only if the generation
+/// still equals the pin after shaping. When it moved, the next pass captures a
+/// new projection; membership from an earlier generation is never carried over.
+/// The loop runs at most two passes, so at most two topology projections are
+/// decoded, and a second generation change refuses with `ConcurrentMutation`.
+fn find_in_bounded_passes<P, H, B>(
+    projection_generation: impl Fn(&P) -> u64,
+    mut generation: impl FnMut() -> Result<u64, GfError>,
+    mut capture: impl FnMut() -> Result<Option<P>, GfError>,
+    mut retrieve: impl FnMut(Option<&P>) -> Result<H, GfError>,
+    mut shape: impl FnMut(H, Option<&P>) -> Result<B, GfError>,
+) -> Result<B, GfError> {
+    for attempt in 1_u8..=2 {
+        let projection = capture()?;
+        let pinned = match projection.as_ref() {
+            Some(projection) => projection_generation(projection),
+            None => generation()?,
+        };
+        let hits = match retrieve(projection.as_ref()) {
+            Err(GfError::Lifecycle(_)) if attempt == 1 && pinned != generation()? => continue,
+            result => result?,
+        };
+        let batch = shape(hits, projection.as_ref())?;
+        if pinned == generation()? {
+            return Ok(batch);
+        }
+        if attempt == 2 {
+            return Err(SearchArtifactError::ConcurrentMutation.into());
+        }
+    }
+    unreachable!("bounded find retry returns on both terminal paths")
 }
 
 fn validation(message: impl Into<String>) -> GfError {
@@ -653,5 +684,204 @@ mod tests {
             [crate::FindDiagnostic::ForcedStale { diagnostic }]
                 if diagnostic.starts_with("embedding_force_stale:v1 ")
         ));
+    }
+
+    /// Real topology projections over a published three-node fixture, with the
+    /// search generation advanced at a chosen point of the bounded passes.
+    mod bounded_passes {
+        use std::cell::{Cell, RefCell};
+
+        use graphforge_storage::generation::bump_search_generation;
+        use graphforge_storage::payload_digest::PayloadDigestCapture;
+
+        use super::*;
+
+        struct Fixture {
+            graph: GraphForge,
+            label_id: graphforge_value::EntityTypeSelection,
+        }
+
+        impl Fixture {
+            fn new() -> Self {
+                let graph = GraphForge::new(None).unwrap();
+                let nodes = ["alpha", "beta", "gamma"].map(|title| node(&graph, title));
+                publish(
+                    &graph,
+                    &[
+                        (&nodes[0], [1.0, 0.0]),
+                        (&nodes[1], [0.0, 1.0]),
+                        (&nodes[2], [1.0, 1.0]),
+                    ],
+                );
+                let label_id = graph.find_label_id("Paper").unwrap();
+                Self { graph, label_id }
+            }
+
+            fn dir(&self) -> std::path::PathBuf {
+                self.graph.workspace_for_session().path().to_path_buf()
+            }
+
+            fn capture(&self) -> Result<Option<LabelMemberProjection>, GfError> {
+                let dir = self.dir();
+                let topology = self.graph.dir().topology_files()?;
+                let ordinal = self.graph.ordinal_identities.revalidated_handle()?;
+                Ok(Some(project_label_members_snapshot_with_topology(
+                    &dir,
+                    Some(&topology),
+                    ordinal.as_deref(),
+                    self.label_id,
+                    VectorLifecycleLimits::default(),
+                    || Ok(()),
+                )?))
+            }
+
+            fn bump(&self) {
+                bump_search_generation(&self.dir()).unwrap();
+            }
+
+            /// Run the bounded passes. `before_capture` and `after_retrieve`
+            /// receive the zero-based pass number and may advance the generation.
+            /// Decoded bytes count only what the projections themselves consumed.
+            fn run(
+                &self,
+                before_capture: impl Fn(usize),
+                after_retrieve: impl Fn(usize),
+            ) -> Outcome {
+                let dir = self.dir();
+                let work = PayloadDigestCapture::start();
+                let captures = Cell::new(0_usize);
+                let retrievals = Cell::new(0_usize);
+                let decoded = Cell::new(0_u64);
+                let seen = RefCell::new(Vec::new());
+                let result = find_in_bounded_passes(
+                    LabelMemberProjection::generation,
+                    || read_search_generation(&dir),
+                    || {
+                        before_capture(captures.get());
+                        captures.set(captures.get() + 1);
+                        let start = work.snapshot().checksum_bytes;
+                        let projection = self.capture();
+                        decoded.set(decoded.get() + work.snapshot().checksum_bytes - start);
+                        projection
+                    },
+                    |projection| {
+                        let projection = projection.unwrap();
+                        seen.borrow_mut()
+                            .push((projection.generation(), projection.members().len()));
+                        after_retrieve(retrievals.get());
+                        retrievals.set(retrievals.get() + 1);
+                        Ok(vec![projection.members().len()])
+                    },
+                    |hits, _| Ok(hits),
+                );
+                let totals = work.snapshot();
+                eprintln!(
+                    "bounded find passes: projections={} decoded_bytes={} seen={:?}",
+                    totals.topology_projections,
+                    decoded.get(),
+                    seen.borrow()
+                );
+                assert_eq!(totals.artifact_payload_sha256_bytes, 0, "{totals:?}");
+                assert_eq!(totals.unclassified_sha256_bytes, 0, "{totals:?}");
+                Outcome {
+                    result,
+                    seen: seen.into_inner(),
+                    projections: totals.topology_projections,
+                    decoded_bytes: decoded.get(),
+                }
+            }
+        }
+
+        struct Outcome {
+            result: Result<Vec<usize>, GfError>,
+            /// Generation and member count of each projection retrieval received.
+            seen: Vec<(u64, usize)>,
+            /// Actual projections started, from the operation counters.
+            projections: u64,
+            /// Checksum bytes consumed by those projections.
+            decoded_bytes: u64,
+        }
+
+        /// One projection's decoded checksum bytes on this fixture.
+        fn single_projection_bytes(fixture: &Fixture) -> u64 {
+            let outcome = fixture.run(|_| {}, |_| {});
+            assert_eq!((outcome.projections, outcome.seen.len()), (1, 1));
+            assert!(outcome.decoded_bytes > 0);
+            outcome.decoded_bytes
+        }
+
+        #[test]
+        fn stable_generation_decodes_one_projection() {
+            let fixture = Fixture::new();
+            let one = single_projection_bytes(&fixture);
+            let outcome = fixture.run(|_| {}, |_| {});
+            assert_eq!(outcome.result.unwrap(), [3]);
+            assert_eq!(outcome.seen.len(), 1);
+            assert_eq!((outcome.projections, outcome.decoded_bytes), (1, one));
+        }
+
+        #[test]
+        fn generation_advancing_before_projection_costs_no_second_decode() {
+            let fixture = Fixture::new();
+            let one = single_projection_bytes(&fixture);
+            let outcome = fixture.run(
+                |pass| {
+                    if pass == 0 {
+                        fixture.bump()
+                    }
+                },
+                |_| {},
+            );
+            assert_eq!(outcome.result.unwrap(), [3]);
+            assert_eq!(
+                outcome.seen.len(),
+                1,
+                "no earlier read existed to invalidate"
+            );
+            assert_eq!((outcome.projections, outcome.decoded_bytes), (1, one));
+            assert_eq!(
+                outcome.seen[0].0,
+                read_search_generation(&fixture.dir()).unwrap()
+            );
+        }
+
+        #[test]
+        fn generation_change_after_projection_recaptures_once_at_the_new_generation() {
+            let fixture = Fixture::new();
+            let one = single_projection_bytes(&fixture);
+            let outcome = fixture.run(
+                |_| {},
+                |pass| {
+                    if pass == 0 {
+                        fixture.bump()
+                    }
+                },
+            );
+            assert_eq!(outcome.result.unwrap(), [3]);
+            assert_eq!(outcome.seen.len(), 2);
+            assert!(
+                outcome.seen[1].0 > outcome.seen[0].0,
+                "the retry must not reuse {:?}",
+                outcome.seen
+            );
+            assert_eq!(
+                outcome.seen[1].0,
+                read_search_generation(&fixture.dir()).unwrap()
+            );
+            assert_eq!((outcome.projections, outcome.decoded_bytes), (2, 2 * one));
+        }
+
+        #[test]
+        fn repeated_generation_change_refuses_after_two_projections() {
+            let fixture = Fixture::new();
+            let one = single_projection_bytes(&fixture);
+            let outcome = fixture.run(|_| {}, |_| fixture.bump());
+            assert_eq!(
+                outcome.result.unwrap_err().to_string(),
+                GfError::from(SearchArtifactError::ConcurrentMutation).to_string()
+            );
+            assert_eq!(outcome.seen.len(), 2);
+            assert_eq!((outcome.projections, outcome.decoded_bytes), (2, 2 * one));
+        }
     }
 }

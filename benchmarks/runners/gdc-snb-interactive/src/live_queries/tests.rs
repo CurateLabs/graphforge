@@ -45,6 +45,12 @@ fn definitions_cover_exactly_the_mapped_reads() {
     for definition in query_definitions() {
         assert!(!definition.columns.is_empty(), "{}", definition.operation);
         assert!(!definition.notes.is_empty(), "{}", definition.operation);
+        // #1919 is fixed, so no note cites it as a reason to rewrite.
+        assert!(
+            !definition.notes.contains("#1919"),
+            "{}",
+            definition.operation
+        );
         if let Some(variance) = definition.spec_variance {
             assert!(
                 variance.starts_with("reference behaviour, differs from spec prose: "),
