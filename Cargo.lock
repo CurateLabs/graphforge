@@ -2214,6 +2214,7 @@ dependencies = [
  "graphforge-search",
  "graphforge-storage",
  "graphforge-value",
+ "lz4_flex",
  "miniz_oxide",
  "parquet",
  "serde",

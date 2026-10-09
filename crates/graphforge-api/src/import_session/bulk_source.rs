@@ -10,7 +10,6 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use arrow::ipc::reader::FileReader as ArrowFileReader;
 use arrow::record_batch::RecordBatch;
 use graphforge_core::GfError;
 use graphforge_storage::{BulkBatchReader, BulkSource, SourceWorkspace};
@@ -20,6 +19,7 @@ use parquet::arrow::arrow_reader::{
 };
 use uuid::Uuid;
 
+use super::bounded_ipc::{self, CheckedIpcReader};
 use super::external_source::{self, ExternalSource, ObservedFile, SourceDigest};
 use super::parquet_admission::SourceScan;
 use super::{
@@ -54,264 +54,11 @@ enum Format {
         /// What the source's pages hold and what its batches decode to (#1918).
         scan: SourceScan,
     },
-    /// Rows of every record batch, from the IPC footer's message headers, and the
-    /// schema the footer states.
-    Arrow {
-        batch_rows: Vec<u64>,
-        schema: arrow::datatypes::SchemaRef,
-    },
-}
-
-/// Footer-only sizing precedes FileReader: that reader eagerly decodes every
-/// dictionary, so constructing it is already a payload allocation.
-struct IpcPlan {
-    rows: Vec<u64>,
-    columns: usize,
-    schema: arrow::datatypes::SchemaRef,
-    schema_bytes: u64,
-    decoding_bytes: u64,
-}
-
-#[allow(clippy::too_many_lines)]
-fn ipc_plan(path: &Path) -> Result<IpcPlan, GfError> {
-    use std::io::{Read as _, Seek as _, SeekFrom};
-    let budget = bulk_build_memory_budget()?;
-    let mut file = File::open(path).map_err(storage)?;
-    let length = file.metadata().map_err(storage)?.len();
-    if length < 10 {
-        return Err(storage("Arrow source is too short for an IPC footer"));
-    }
-    file.seek(SeekFrom::Start(length - 10)).map_err(storage)?;
-    let mut tail = [0; 10];
-    file.read_exact(&mut tail).map_err(storage)?;
-    let footer_length = u64::try_from(i32::from_le_bytes(tail[..4].try_into().expect("4 bytes")))
-        .map_err(|_| storage("Arrow footer length is negative"))?;
-    if &tail[4..] != b"ARROW1" || footer_length + 10 > length {
-        return Err(storage("Arrow source is not an IPC file"));
-    }
-    if footer_length > budget {
-        return Err(super::limit(
-            "Arrow source footer exceeds construction memory budget",
-        ));
-    }
-    let mut footer_bytes = vec![0; usize::try_from(footer_length).map_err(storage)?];
-    file.seek(SeekFrom::Start(length - 10 - footer_length))
-        .map_err(storage)?;
-    file.read_exact(&mut footer_bytes).map_err(storage)?;
-    let footer = arrow::ipc::root_as_footer(&footer_bytes).map_err(storage)?;
-    let ipc_schema = footer
-        .schema()
-        .ok_or_else(|| storage("Arrow footer has no schema"))?;
-    let mut schema_charge =
-        (std::mem::size_of::<arrow::datatypes::Schema>() as u64).saturating_add(256);
-    if let Some(fields) = ipc_schema.fields() {
-        for field in fields {
-            ipc_field_bytes(field, &mut schema_charge, budget, 0)?;
-        }
-    }
-    if let Some(metadata) = ipc_schema.custom_metadata() {
-        for entry in metadata {
-            schema_charge = schema_charge
-                .saturating_add(entry.key().map_or(0, str::len) as u64)
-                .saturating_add(entry.value().map_or(0, str::len) as u64)
-                .saturating_add(128);
-        }
-    }
-    if footer_length.saturating_add(schema_charge) > budget {
-        return Err(super::limit(
-            "Arrow source schema exceeds construction memory budget",
-        ));
-    }
-    let schema = arrow::ipc::convert::fb_to_schema(ipc_schema);
-    let schema_bytes = schema_owned_bytes(&schema);
-    let columns = schema.fields().len();
-    let mut dictionaries = 0_u64;
-    let mut maximum_batch = 0_u64;
-    let batch_count = footer.recordBatches().map_or(0, |blocks| blocks.len());
-    let rows_bytes = (batch_count as u64).saturating_mul(8);
-    if footer_length
-        .saturating_add(schema_bytes)
-        .saturating_add(rows_bytes)
-        > budget
-    {
-        return Err(super::limit(
-            "Arrow source row inventory exceeds construction memory budget",
-        ));
-    }
-    let mut rows = Vec::with_capacity(batch_count);
-    for (dictionary, blocks) in [
-        (true, footer.dictionaries()),
-        (false, footer.recordBatches()),
-    ] {
-        for block in blocks.into_iter().flatten() {
-            let offset = u64::try_from(block.offset()).map_err(storage)?;
-            let metadata_length = u64::try_from(block.metaDataLength()).map_err(storage)?;
-            if footer_length
-                .saturating_add(schema_bytes)
-                .saturating_add(metadata_length)
-                .saturating_add((rows.capacity() as u64).saturating_mul(8))
-                > budget
-                || offset
-                    .checked_add(metadata_length)
-                    .is_none_or(|end| end > length)
-            {
-                return Err(super::limit(
-                    "Arrow message metadata exceeds construction memory budget",
-                ));
-            }
-            let footer_body_length = u64::try_from(block.bodyLength())
-                .map_err(|_| storage("Arrow footer block body length is negative"))?;
-            if offset
-                .checked_add(metadata_length)
-                .and_then(|start| start.checked_add(footer_body_length))
-                .is_none_or(|end| end > length)
-            {
-                return Err(storage("Arrow footer block body extends beyond its source"));
-            }
-            if metadata_length.saturating_add(footer_body_length) > budget {
-                return Err(super::limit(
-                    "Arrow footer block allocation exceeds construction memory budget",
-                ));
-            }
-            let mut header = vec![0; usize::try_from(metadata_length).map_err(storage)?];
-            file.seek(SeekFrom::Start(offset)).map_err(storage)?;
-            file.read_exact(&mut header).map_err(storage)?;
-            let skip = if header.starts_with(&[0xff; 4]) { 8 } else { 4 };
-            let message = arrow::ipc::root_as_message(header.get(skip..).unwrap_or_default())
-                .map_err(storage)?;
-            let body_length = u64::try_from(message.bodyLength()).map_err(storage)?;
-            if body_length != footer_body_length {
-                return Err(storage("Arrow footer and message body lengths disagree"));
-            }
-            let body_start = offset
-                .checked_add(metadata_length)
-                .ok_or_else(|| storage("Arrow message offset overflows"))?;
-            if body_start
-                .checked_add(body_length)
-                .is_none_or(|end| end > length)
-            {
-                return Err(storage("Arrow message body is truncated"));
-            }
-            let batch = if dictionary {
-                message
-                    .header_as_dictionary_batch()
-                    .and_then(|dictionary| dictionary.data())
-            } else {
-                message.header_as_record_batch()
-            }
-            .ok_or_else(|| storage("Arrow footer block has the wrong message kind"))?;
-            let decoded = ipc_buffer_bytes(&mut file, batch, body_start, body_length)?;
-            let workspace = metadata_length
-                .saturating_add(body_length)
-                .saturating_add(decoded);
-            if dictionary {
-                dictionaries = dictionaries.saturating_add(workspace);
-            } else {
-                maximum_batch = maximum_batch.max(workspace);
-                rows.push(u64::try_from(batch.length()).map_err(storage)?);
-            }
-        }
-    }
-    let decoding_bytes = dictionaries.saturating_add(maximum_batch);
-    if decoding_bytes > budget {
-        return Err(super::limit(
-            "Arrow source decoding exceeds construction memory budget",
-        ));
-    }
-    Ok(IpcPlan {
-        rows,
-        columns,
-        schema: Arc::new(schema),
-        schema_bytes,
-        decoding_bytes,
-    })
-}
-
-fn ipc_field_bytes(
-    field: arrow::ipc::Field<'_>,
-    bytes: &mut u64,
-    budget: u64,
-    depth: usize,
-) -> Result<(), GfError> {
-    *bytes = bytes
-        .saturating_add(field.name().map_or(0, str::len) as u64)
-        .saturating_add(256);
-    if let Some(timestamp) = field.type_as_timestamp() {
-        *bytes = bytes.saturating_add(timestamp.timezone().map_or(0, str::len) as u64);
-    }
-    if let Some(union) = field.type_as_union() {
-        *bytes = bytes.saturating_add(
-            union
-                .typeIds()
-                .map_or(0, |ids| ids.len() as u64)
-                .saturating_mul(4),
-        );
-    }
-
-    if let Some(metadata) = field.custom_metadata() {
-        for entry in metadata {
-            *bytes = bytes
-                .saturating_add(entry.key().map_or(0, str::len) as u64)
-                .saturating_add(entry.value().map_or(0, str::len) as u64)
-                .saturating_add(128);
-        }
-    }
-    if *bytes > budget || depth > 64 {
-        return Err(super::limit(
-            "Arrow source schema exceeds construction memory budget",
-        ));
-    }
-    if let Some(children) = field.children() {
-        for child in children {
-            ipc_field_bytes(child, bytes, budget, depth + 1)?;
-        }
-    }
-    Ok(())
-}
-
-fn ipc_buffer_bytes(
-    file: &mut File,
-    batch: arrow::ipc::RecordBatch<'_>,
-    body_start: u64,
-    body_length: u64,
-) -> Result<u64, GfError> {
-    use std::io::{Read as _, Seek as _, SeekFrom};
-    let mut decoded = 0_u64;
-    for buffer in batch.buffers().into_iter().flatten() {
-        let offset = u64::try_from(buffer.offset()).map_err(storage)?;
-        let length = u64::try_from(buffer.length()).map_err(storage)?;
-        if offset
-            .checked_add(length)
-            .is_none_or(|end| end > body_length)
-        {
-            return Err(storage("Arrow buffer extends beyond its message body"));
-        }
-        let expanded = if batch.compression().is_some() && length != 0 {
-            if length < 8 {
-                return Err(storage("Arrow compressed buffer lacks expanded length"));
-            }
-            file.seek(SeekFrom::Start(body_start + offset))
-                .map_err(storage)?;
-            let mut prefix = [0; 8];
-            file.read_exact(&mut prefix).map_err(storage)?;
-            let expanded = i64::from_le_bytes(prefix);
-            if expanded == -1 {
-                length - 8
-            } else {
-                u64::try_from(expanded).map_err(storage)?
-            }
-        } else {
-            length
-        };
-        decoded = decoded.saturating_add(expanded);
-    }
-    decoded = decoded.saturating_add(
-        batch
-            .nodes()
-            .map_or(0, |nodes| nodes.len() as u64)
-            .saturating_mul(256),
-    );
-    Ok(decoded)
+    /// The planned IPC source (`bounded_ipc`): footer version, block
+    /// inventory, schema and the rows of every record batch, so a task reads
+    /// each block checked against this plan instead of parsing the footer
+    /// again or constructing an eagerly decoding file reader.
+    Arrow { plan: Arc<bounded_ipc::IpcPlan> },
 }
 
 /// The first batch a build refused, in the staged path's processing order (node
@@ -569,12 +316,12 @@ impl SourceReader<'_> {
                 (self.batch_rows as u64)
                     .min(rows.saturating_sub(first_batch * self.batch_rows as u64)),
             ),
-            Format::Arrow { batch_rows, schema } => (
-                Arc::clone(schema),
+            Format::Arrow { plan } => (
+                Arc::clone(&plan.schema),
                 false,
                 usize::try_from(first_batch)
                     .ok()
-                    .and_then(|index| batch_rows.get(index))
+                    .and_then(|index| plan.rows.get(index))
                     .copied()
                     .unwrap_or(0),
             ),
@@ -726,7 +473,7 @@ impl BulkBatchReader for SourceReader<'_> {
             Format::Parquet { metadata, scan, .. } => {
                 (metadata.metadata().memory_size() as u64).saturating_add(scan.resident_bytes())
             }
-            Format::Arrow { batch_rows, .. } => (batch_rows.capacity() as u64).saturating_mul(8),
+            Format::Arrow { plan } => plan.inventory_bytes,
         })
     }
 
@@ -745,9 +492,9 @@ impl BulkBatchReader for SourceReader<'_> {
                 (first_batch * batch_rows + BATCHES_PER_TASK * batch_rows).min(*rows)
                     - (first_batch * batch_rows).min(*rows)
             }
-            Format::Arrow { batch_rows, .. } => {
+            Format::Arrow { plan } => {
                 let first = usize::try_from(first_batch).unwrap_or(usize::MAX);
-                batch_rows
+                plan.rows
                     .iter()
                     .skip(first)
                     .take(usize::try_from(BATCHES_PER_TASK).unwrap_or(0))
@@ -830,10 +577,12 @@ impl BulkBatchReader for SourceReader<'_> {
                     }
                 }
             }
-            Format::Arrow { .. } => {
-                // Everything the IPC reader allocates (its dictionaries, then a
-                // message body and its decoded arrays per batch) was sized from
-                // the footer at plan time; reserve that before it allocates.
+            Format::Arrow { plan } => {
+                // Everything the checked reader allocates (its dictionaries,
+                // then one block, its decoded arrays and its frame workspaces
+                // per batch) was sized at plan time; reserve it, then read
+                // each block checked against the plan, the file and this
+                // reservation before it is decoded (#1918).
                 let pool = self
                     .workspace
                     .lock()
@@ -842,22 +591,18 @@ impl BulkBatchReader for SourceReader<'_> {
                 let _reservation = pool
                     .as_ref()
                     .map(|pool| {
-                        pool.reserve(self.decoding_bytes, &format!("Arrow task {task}"), &|| {
+                        pool.reserve(plan.decoding_bytes, &format!("Arrow task {task}"), &|| {
                             self.check_cancelled()
                         })
                     })
                     .transpose()?;
                 let file = File::open(&self.path).map_err(storage)?;
-                let mut reader = ArrowFileReader::try_new(file, None).map_err(storage)?;
-                let total = reader.num_batches() as u64;
+                let mut reader = CheckedIpcReader::new(plan, file)?;
+                reader.read_dictionaries()?;
+                let total = plan.rows.len() as u64;
                 for index in first_batch..(first_batch + BATCHES_PER_TASK).min(total) {
-                    reader
-                        .set_index(usize::try_from(index).map_err(storage)?)
-                        .map_err(storage)?;
-                    let batch = reader
-                        .next()
-                        .ok_or_else(|| storage("Arrow source ended before its footer count"))?
-                        .map_err(storage)?;
+                    let batch =
+                        reader.read_record_batch(usize::try_from(index).map_err(storage)?)?;
                     self.emit(index, batch, sink)?;
                 }
             }
@@ -886,7 +631,7 @@ thread_local! {
     pub(crate) static TEST_BUDGET: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
 
-fn schema_owned_bytes(schema: &arrow::datatypes::Schema) -> u64 {
+pub(super) fn schema_owned_bytes(schema: &arrow::datatypes::Schema) -> u64 {
     (std::mem::size_of_val(schema)
         + schema
             .fields()
@@ -1040,7 +785,7 @@ pub(super) fn plan<'a>(
             )
         }
         ImportSourceKind::ArrowNodes | ImportSourceKind::ArrowEdges => {
-            let sizing = ipc_plan(&path)?;
+            let sizing = Arc::new(bounded_ipc::ipc_plan(&path)?);
             let rows = sizing
                 .rows
                 .iter()
@@ -1050,8 +795,7 @@ pub(super) fn plan<'a>(
                 })?;
             (
                 Format::Arrow {
-                    batch_rows: sizing.rows,
-                    schema: sizing.schema,
+                    plan: Arc::clone(&sizing),
                 },
                 rows,
                 sizing.columns,
@@ -1065,7 +809,7 @@ pub(super) fn plan<'a>(
     }
     let batches = match &format {
         Format::Parquet { .. } => rows.div_ceil(batch_rows as u64),
-        Format::Arrow { batch_rows, .. } => batch_rows.len() as u64,
+        Format::Arrow { plan } => plan.rows.len() as u64,
     };
     let decoded_bytes = match &format {
         // What the batches decode to, not what the footer says they are stored as.
@@ -1131,187 +875,6 @@ mod bounds_tests {
             (true, true, None),
         ] {
             assert_eq!(exact_uuid_bounds(&bounds(low, high, nulls)), None);
-        }
-    }
-}
-
-#[cfg(test)]
-mod ipc_planning_tests {
-    use super::ipc_plan;
-    use arrow::array::Int64Array;
-    use arrow::datatypes::{DataType, Field, Schema};
-    use arrow::ipc::writer::{FileWriter, IpcWriteOptions};
-    use arrow::record_batch::RecordBatch;
-    use std::fs::File;
-    use std::sync::Arc;
-
-    fn write_source(path: &std::path::Path, compression: bool) {
-        let schema = Arc::new(Schema::new(vec![Field::new(
-            "value",
-            DataType::Int64,
-            false,
-        )]));
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![Arc::new(Int64Array::from(
-                (0..1024).map(i64::from).collect::<Vec<_>>(),
-            ))],
-        )
-        .unwrap();
-        let options = IpcWriteOptions::default()
-            .try_with_compression(compression.then_some(arrow::ipc::CompressionType::LZ4_FRAME))
-            .unwrap();
-        let mut writer =
-            FileWriter::try_new_with_options(File::create(path).unwrap(), &schema, options)
-                .unwrap();
-        writer.write(&batch).unwrap();
-        writer.finish().unwrap();
-    }
-
-    #[test]
-    fn ipc_footer_planning_counts_expansion_without_decoding_arrays() {
-        let root = tempfile::tempdir().unwrap();
-        for compressed in [false, true] {
-            let path = root.path().join(format!("{compressed}.arrow"));
-            write_source(&path, compressed);
-            let plan = ipc_plan(&path).unwrap();
-            assert_eq!(plan.rows, vec![1024]);
-            assert_eq!(plan.columns, 1);
-            assert!(plan.decoding_bytes >= 8192);
-        }
-    }
-
-    /// A compressed buffer states its own expansion in its first eight bytes. A
-    /// file whose footer and messages agree and whose buffer claims eight
-    /// gigabytes is refused when planned, before any reader allocates for it.
-    #[test]
-    fn a_compressed_buffer_that_advertises_a_huge_expansion_is_refused_when_planned() {
-        use arrow::array::StringArray;
-        let root = tempfile::tempdir().unwrap();
-        let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, true)]));
-        let text = "x".repeat(4_096);
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![Arc::new(StringArray::from(vec![text.as_str(); 1_000]))],
-        )
-        .unwrap();
-        for (compression, frame) in [
-            (arrow::ipc::CompressionType::ZSTD, [0x28, 0xB5, 0x2F, 0xFD]),
-            // An LZ4 frame header repeats the content size, so the expansion the
-            // IPC buffer states is the copy that precedes the frame's magic.
-            (
-                arrow::ipc::CompressionType::LZ4_FRAME,
-                [0x04, 0x22, 0x4D, 0x18],
-            ),
-        ] {
-            let path = root.path().join(format!("{compression:?}.arrow"));
-            let options = IpcWriteOptions::default()
-                .try_with_compression(Some(compression))
-                .unwrap();
-            let mut writer =
-                FileWriter::try_new_with_options(File::create(&path).unwrap(), &schema, options)
-                    .unwrap();
-            writer.write(&batch).unwrap();
-            writer.finish().unwrap();
-
-            super::super::bulk_source::TEST_BUDGET.with(|budget| budget.set(Some(1 << 30)));
-            let honest = ipc_plan(&path).unwrap();
-            assert!(
-                honest.decoding_bytes >= 4_096_000,
-                "{}",
-                honest.decoding_bytes
-            );
-            assert!(honest.decoding_bytes < 8 << 20, "{}", honest.decoding_bytes);
-
-            let mut bytes = std::fs::read(&path).unwrap();
-            let at = bytes
-                .windows(12)
-                .position(|window| {
-                    window[..8] == 4_096_000_u64.to_le_bytes() && window[8..] == frame
-                })
-                .expect("the values buffer states its expansion");
-            bytes[at..at + 8].copy_from_slice(&(8_u64 << 30).to_le_bytes());
-            std::fs::write(&path, bytes).unwrap();
-            let refused = ipc_plan(&path);
-            super::super::bulk_source::TEST_BUDGET.with(|budget| budget.set(None));
-            let error = refused
-                .err()
-                .expect("an 8 GiB expansion exceeds a 1 GiB budget");
-            assert!(
-                matches!(
-                    error,
-                    graphforge_core::GfError::Project {
-                        code: graphforge_core::ProjectErrorCode::ResourceLimit,
-                        ..
-                    }
-                ),
-                "{error}"
-            );
-            assert!(error.to_string().contains("decoding"), "{error}");
-        }
-    }
-
-    #[test]
-    fn ipc_timezone_schema_expansion_is_admitted_before_conversion() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("timezone.arrow");
-        let zone = std::iter::repeat_n('x', 400_000).collect::<String>();
-        let schema = Schema::new(vec![Field::new(
-            "when",
-            DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, Some(zone.into())),
-            true,
-        )]);
-        let mut writer = FileWriter::try_new(File::create(&path).unwrap(), &schema).unwrap();
-        writer.finish().unwrap();
-        super::super::bulk_source::TEST_BUDGET.with(|budget| budget.set(Some(600 << 10)));
-        let refused = ipc_plan(&path);
-        super::super::bulk_source::TEST_BUDGET.with(|budget| budget.set(None));
-        let error = refused
-            .err()
-            .expect("footer plus cloned timezone must be charged before conversion");
-        assert!(error.to_string().contains("schema"), "{error}");
-        super::super::bulk_source::TEST_BUDGET.with(|budget| budget.set(Some(2 << 20)));
-        let accepted = ipc_plan(&path);
-        super::super::bulk_source::TEST_BUDGET.with(|budget| budget.set(None));
-        let accepted = accepted.unwrap();
-        assert!(accepted.rows.is_empty());
-        assert!(accepted.schema_bytes >= 400_000);
-    }
-
-    #[test]
-    fn ipc_footer_allocation_lengths_are_validated_before_decoder_creation() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("input.arrow");
-        write_source(&path, false);
-        let original = std::fs::read(&path).unwrap();
-        let footer_length = i32::from_le_bytes(
-            original[original.len() - 10..original.len() - 6]
-                .try_into()
-                .unwrap(),
-        ) as usize;
-        let footer_start = original.len() - 10 - footer_length;
-        let footer =
-            arrow::ipc::root_as_footer(&original[footer_start..original.len() - 10]).unwrap();
-        let slot = footer_start
-            + footer._tab.loc()
-            + usize::from(
-                footer
-                    ._tab
-                    .vtable()
-                    .get(arrow::ipc::Footer::VT_RECORDBATCHES),
-            );
-        let vector =
-            slot + u32::from_le_bytes(original[slot..slot + 4].try_into().unwrap()) as usize;
-        // IPC Block is a fixed struct: offset8, metadata length4, padding4,
-        // body length8. This mutates the allocation FileReader actually uses.
-        for invalid in [-1_i64, i64::MAX] {
-            let mut corrupt = original.clone();
-            corrupt[vector + 4 + 16..vector + 4 + 24].copy_from_slice(&invalid.to_le_bytes());
-            std::fs::write(&path, corrupt).unwrap();
-            let error = ipc_plan(&path)
-                .err()
-                .expect("bad footer must refuse before allocating");
-            assert!(error.to_string().contains("footer block body"), "{error}");
         }
     }
 }

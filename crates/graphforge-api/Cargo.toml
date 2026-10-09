@@ -44,6 +44,8 @@ snap = "1.1"
 zstd-safe = { version = "=8.0.0", default-features = false, features = ["std"] }
 datafusion = { workspace = true }
 futures = { workspace = true }
+# The bounded LZ4 frame verifier uses the version pinned by arrow-ipc.
+lz4_flex = { version = "0.13.1", default-features = false, features = ["std", "frame"] }
 parquet = { workspace = true, features = ["experimental"] }
 serde_json = { workspace = true }
 serde = { workspace = true }
