@@ -368,10 +368,11 @@ fn probe_verification_rejects_records_beyond_the_scatter_count() {
         .write_all(&block)
         .unwrap();
     let cancel = AtomicBool::new(false);
-    let error =
-        verify_probes(&scratch, &probes, 0, &first_leaf_records(), &cancel).unwrap_err();
+    let error = verify_probes(&scratch, &probes, 0, &first_leaf_records(), &cancel).unwrap_err();
     assert!(
-        error.to_string().contains("more records than were scattered"),
+        error
+            .to_string()
+            .contains("more records than were scattered"),
         "{error}"
     );
     assert!(probes.path(0).exists(), "an unverified probe file stays");
@@ -394,8 +395,7 @@ fn probe_verification_checks_cancellation_inside_the_read() {
     // Already cancelled: only a check inside the probe processing itself can
     // see it. The scheduler's own gates are not on this path.
     let cancel = AtomicBool::new(true);
-    let error =
-        verify_probes(&scratch, &probes, 0, &first_leaf_records(), &cancel).unwrap_err();
+    let error = verify_probes(&scratch, &probes, 0, &first_leaf_records(), &cancel).unwrap_err();
     assert!(error.to_string().contains("cancelled"), "{error}");
     assert!(
         probes.path(0).exists(),
