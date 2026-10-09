@@ -4,6 +4,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 
 include!("property_rows_frame_tests.rs");
 include!("property_merge_admission_tests.rs");
+include!("property_list_gather_tests.rs");
 
 impl RunSink<'_, '_> {
     /// Bytes of the batches held now, which the gate must have granted.
