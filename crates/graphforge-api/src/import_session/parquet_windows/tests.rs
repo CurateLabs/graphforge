@@ -130,7 +130,7 @@ fn row_groups_reuse_the_task_window_at_a_batch_boundary() {
 #[test]
 fn group_rows_cross_global_batch_boundaries() {
     let mut budget = InventoryBudget::new(4096);
-    let mut ledger = ledger(3, 4, 4, 10, &mut budget);
+    let mut ledger = ledger(3, 4, 4, 12, &mut budget);
     let mut leaf = progress(3, 4, 4, 4);
     leaf.process_block(&mut ledger, &[0, 0, 0, 0], &[2, 3, 4, 5], None)
         .unwrap();
@@ -138,6 +138,20 @@ fn group_rows_cross_global_batch_boundaries() {
 
     assert_eq!(ledger.batch_totals().collect::<Vec<_>>(), [(0, 2), (1, 12)]);
     assert_eq!(ledger.current_bytes().unwrap(), 14);
+}
+
+#[test]
+fn cross_global_batch_charge_refuses_one_byte_below_the_actual_total() {
+    let mut budget = InventoryBudget::new(4096);
+    let mut ledger = ledger(3, 4, 4, 11, &mut budget);
+    let mut leaf = progress(3, 4, 4, 4);
+    let error = leaf
+        .process_block(&mut ledger, &[0, 0, 0, 0], &[2, 3, 4, 5], None)
+        .unwrap_err();
+    assert!(is_resource_limit(&error), "{error}");
+    assert_eq!(ledger.batch_bytes(0).unwrap(), 2);
+    assert_eq!(ledger.batch_bytes(1).unwrap(), 7);
+    assert_eq!(leaf.events_seen(), 3);
 }
 
 #[test]
