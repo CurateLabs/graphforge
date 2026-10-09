@@ -150,13 +150,17 @@ impl Scratch {
     /// so the tracker stays a pair of counters and never scans the
     /// directory. Overflow is an accounting error, not a saturation.
     pub(super) fn occupy(&self, bytes: u64) -> Result<(), GfError> {
-        let occupied = self
+        let previous = self
             .occupied
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current.checked_add(bytes)
             })
             .map_err(|_| storage("scratch occupancy overflowed"))?;
-        self.peak_occupied.fetch_max(occupied, Ordering::Relaxed);
+        // `fetch_update` yields the value before the reservation, so the
+        // peak is raised with the reserved total instead. The `checked_add`
+        // already proved this sum cannot overflow.
+        self.peak_occupied
+            .fetch_max(previous + bytes, Ordering::Relaxed);
         Ok(())
     }
 

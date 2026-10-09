@@ -291,7 +291,7 @@ impl<'a> PropertyRows<'a> {
             };
             let merged = self.merge(&previous, &path, uuid_name, cancel)?;
             // Both inputs are spent; their bytes leave the live occupancy.
-            self.scratch.reclaim_file(previous)?;
+            self.scratch.reclaim_file(&previous)?;
             self.scratch.reclaim_file(&path)?;
             path = merged;
             level += 1;
