@@ -165,7 +165,7 @@ jobs:
       # artifact is rebuilt rather than trusted; the key moves with the
       # toolchain so a compiler bump starts from an empty volume.
       - name: Mount sticky target/ disk
-        uses: useblacksmith/stickydisk@94697d49e77d0dd78b77deb85ad3de63a28b4b8a # v1.7.1
+        uses: useblacksmith/stickydisk@3f6be1451e3cad893b778bc93495c80452a5da26 # v1.7.2
         with:
           key: ${{ github.repository }}-rust-tests-rust-1.96.0-target-v2
           path: target
@@ -208,7 +208,7 @@ jobs:
       - name: Prepare native test temporary storage
         run: python3 scripts/test_environment.py --github-env "$GITHUB_ENV"
       - name: Mount sticky target/ disk
-        uses: useblacksmith/stickydisk@94697d49e77d0dd78b77deb85ad3de63a28b4b8a # v1.7.1
+        uses: useblacksmith/stickydisk@3f6be1451e3cad893b778bc93495c80452a5da26 # v1.7.2
         with:
           key: ${{ github.repository }}-rust-extras-rust-1.96.0-target-v1
           path: target
@@ -265,7 +265,7 @@ jobs:
       - name: Prepare native test temporary storage
         run: python3 scripts/test_environment.py --github-env "$GITHUB_ENV"
       - name: Mount sticky target/ disk
-        uses: useblacksmith/stickydisk@94697d49e77d0dd78b77deb85ad3de63a28b4b8a # v1.7.1
+        uses: useblacksmith/stickydisk@3f6be1451e3cad893b778bc93495c80452a5da26 # v1.7.2
         with:
           key: ${{ github.repository }}-feature-boundary-rust-1.96.0-target-v1
           path: target
@@ -387,7 +387,7 @@ jobs:
       - name: Prepare native test temporary storage
         run: python3 scripts/test_environment.py --github-env "$GITHUB_ENV"
       - name: Mount sticky target/ disk
-        uses: useblacksmith/stickydisk@94697d49e77d0dd78b77deb85ad3de63a28b4b8a # v1.7.1
+        uses: useblacksmith/stickydisk@3f6be1451e3cad893b778bc93495c80452a5da26 # v1.7.2
         with:
           key: ${{ github.repository }}-bindings-rust-1.96.0-target-v1
           path: target
@@ -532,12 +532,12 @@ jobs:
       - name: Prepare native test temporary storage
         run: python3 scripts/test_environment.py --github-env "$GITHUB_ENV"
       - name: Mount sticky target/ disk
-        uses: useblacksmith/stickydisk@94697d49e77d0dd78b77deb85ad3de63a28b4b8a # v1.7.1
+        uses: useblacksmith/stickydisk@3f6be1451e3cad893b778bc93495c80452a5da26 # v1.7.2
         with:
           key: ${{ github.repository }}-benchmarks-rust-1.96.0-target-v1
           path: target
       - name: Mount sticky benchmarks/target/ disk
-        uses: useblacksmith/stickydisk@94697d49e77d0dd78b77deb85ad3de63a28b4b8a # v1.7.1
+        uses: useblacksmith/stickydisk@3f6be1451e3cad893b778bc93495c80452a5da26 # v1.7.2
         with:
           key: ${{ github.repository }}-benchmarks-rust-1.96.0-benchmarks-target-v1
           path: benchmarks/target
