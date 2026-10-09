@@ -28,7 +28,6 @@ pub(crate) struct CapturedEncodedArtifact<'a> {
     name: std::ffi::OsString,
     file: std::fs::File,
     identity: graphforge_filesystem::FileIdentity,
-    allocated_bytes: u64,
     artifact: &'a crate::graph_construction_encoding::ConstructionEncodedArtifact,
 }
 
@@ -57,9 +56,13 @@ impl CapturedEncodedInventory<'_> {
         }
         let file = parent.open_child_file(&name).map_err(storage)?;
         let identity = graphforge_filesystem::file_identity(&file).map_err(storage)?;
-        let usage = graphforge_filesystem::file_space_usage(&file).map_err(storage)?;
+        // The ledger entry is accounting recorded when the artifact was encoded.
+        // Its presence admits this inode as one the session encoded; its
+        // allocation is not compared with a fresh measurement, because the
+        // artifact has not been synced and the filesystem may legitimately
+        // change `st_blocks` with no change to identity or content (#1928).
         let identity_key = format!("{:016x}:{}", identity.volume_serial, hex(&identity.file_id));
-        if self.active_identities.get(&identity_key) != Some(&usage.allocated_bytes) {
+        if !self.active_identities.contains_key(&identity_key) {
             return Err(storage(
                 "captured encoded source allocation identity changed",
             ));
@@ -70,7 +73,6 @@ impl CapturedEncodedInventory<'_> {
             name,
             file,
             identity,
-            allocated_bytes: usage.allocated_bytes,
             artifact,
         };
         source.revalidate()?;
@@ -111,6 +113,11 @@ impl CapturedEncodedArtifact<'_> {
     pub(crate) fn relative_path(&self) -> &str {
         &self.artifact.path
     }
+    /// The retained handle and the inventory name still denote the one file the
+    /// inventory admitted, with its length and link authority. Allocated blocks
+    /// are filesystem state of an unsynced file, not identity, and are never
+    /// compared (#1928). Content is authenticated by the consumer's XXH64 and
+    /// SHA-256 checks against the inventory.
     pub(crate) fn revalidate(&self) -> Result<(), GfError> {
         self.root.revalidate_named().map_err(storage)?;
         self.parent.revalidate_named().map_err(storage)?;
@@ -125,10 +132,6 @@ impl CapturedEncodedArtifact<'_> {
                 self.artifact.sha256.as_str(),
                 &self.file,
             )?
-            || graphforge_filesystem::file_space_usage(&self.file)
-                .map_err(storage)?
-                .allocated_bytes
-                != self.allocated_bytes
         {
             return Err(storage(
                 "captured encoded source identity or length changed",
