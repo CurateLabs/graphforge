@@ -1,23 +1,29 @@
-//! Final-plan authority for exact property-scan UUID pruning hints.
+//! Final-plan authority for exact property-scan UUID nominations.
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use datafusion::common::JoinType;
 use datafusion::common::config::ConfigOptions;
-use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
+use datafusion::common::tree_node::{Transformed, TreeNode};
 use datafusion::error::DataFusionError;
 use datafusion::physical_expr::PhysicalExpr;
+use datafusion::physical_expr::expressions::Column;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::ExecutionPlanProperties;
+use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::joins::HashJoinExec;
+use datafusion::physical_plan::joins::PartitionMode;
 
-/// Approves only UUID filters still owned by a surviving hash join.
+use crate::property_join_nomination::{UuidBuildKeyNomination, UuidBuildKeyTapExec};
+use crate::property_scan::PropertyOverlayExec;
+
+/// Approves only finite UUID keys collected from a surviving join's build side.
 ///
-/// Property scans may receive dynamic filters from operators that need the
-/// scan to produce rows before those filters can complete (for example a
-/// bounded sort or aggregate). The scan records candidate filters during
-/// pushdown, but waits on none until this final rule confirms the producer is a
-/// surviving `HashJoinExec` in the completed physical plan.
+/// Dynamic-filter expressions can also be emitted by operators whose scan must
+/// run before the expression completes. This final rule binds an approved
+/// property scan to the matching live hash join and taps that join's already
+/// required build input. The join predicate remains authoritative.
 #[derive(Debug, Default)]
 pub struct PropertyFilterApprovalRule;
 
@@ -27,25 +33,91 @@ impl PhysicalOptimizerRule for PropertyFilterApprovalRule {
         plan: Arc<dyn ExecutionPlan>,
         _config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        let mut approved_ids = BTreeSet::new();
-        plan.apply(|node| {
-            if let Some(join) = node.downcast_ref::<HashJoinExec>()
-                && let Some(filter) = join.dynamic_filter_expr()
-                && let Some(expression_id) = filter.expression_id()
-            {
-                approved_ids.insert(expression_id);
-            }
-            Ok(TreeNodeRecursion::Continue)
-        })?;
         plan.transform_up(|node| {
-            let Some(scan) = node.downcast_ref::<crate::property_scan::PropertyOverlayExec>()
+            let Some(join) = node.downcast_ref::<HashJoinExec>() else {
+                return Ok(Transformed::no(node));
+            };
+            if *join.join_type() == JoinType::Left {
+                let Some(rebuilt) = nominate_existing_collect_left(join)? else {
+                    return Ok(Transformed::no(node));
+                };
+                return Ok(Transformed::yes(rebuilt));
+            }
+            if !matches!(*join.join_type(), JoinType::Inner | JoinType::RightSemi)
+                || !matches!(
+                    *join.partition_mode(),
+                    PartitionMode::Partitioned | PartitionMode::CollectLeft
+                )
+                || join.left().boundedness().is_unbounded()
+                || join.right().boundedness().is_unbounded()
+                || join.left().downcast_ref::<UuidBuildKeyTapExec>().is_some()
+            {
+                return Ok(Transformed::no(node));
+            }
+
+            let Some(dynamic_filter) = join.dynamic_filter_expr() else {
+                return Ok(Transformed::no(node));
+            };
+            let Some(expression_id) = dynamic_filter.expression_id() else {
+                return Ok(Transformed::no(node));
+            };
+
+            let candidate = find_matching_candidate(join.right(), expression_id, &join)?;
+            let Some(candidate) = candidate else {
+                return Ok(Transformed::no(node));
+            };
+            let Some((build_column, probe_expression)) =
+                join.on().iter().find_map(|(build, probe)| {
+                    probe
+                        .dyn_eq(candidate.original_probe_key.as_ref())
+                        .then(|| (build, probe))
+                })
             else {
                 return Ok(Transformed::no(node));
             };
-            let approved = scan.approve_uuid_filters(&approved_ids);
-            Ok(Transformed::yes(
-                Arc::new(approved) as Arc<dyn ExecutionPlan>
-            ))
+            let Some(build_column) = build_column.downcast_ref::<Column>() else {
+                return Ok(Transformed::no(node));
+            };
+            let Some(probe_column) = probe_expression.downcast_ref::<Column>() else {
+                return Ok(Transformed::no(node));
+            };
+
+            let build_schema = join.left().schema();
+            let probe_schema = join.right().schema();
+            let Some(build_field) = build_schema.fields().get(build_column.index()) else {
+                return Ok(Transformed::no(node));
+            };
+            let Some(probe_field) = probe_schema.fields().get(probe_column.index()) else {
+                return Ok(Transformed::no(node));
+            };
+            if build_field.data_type() != &arrow::datatypes::DataType::FixedSizeBinary(16)
+                || probe_field.data_type() != &arrow::datatypes::DataType::FixedSizeBinary(16)
+                || probe_field.name() != probe_column.name()
+            {
+                return Ok(Transformed::no(node));
+            }
+
+            let nomination = UuidBuildKeyNomination::new();
+            let replacement_right = attach_nomination(
+                Arc::clone(join.right()),
+                expression_id,
+                &candidate.original_probe_key,
+                Arc::clone(&nomination),
+            )?;
+            let coalesced_left: Arc<dyn ExecutionPlan> =
+                Arc::new(CoalescePartitionsExec::new(Arc::clone(join.left())));
+            let tapped_left: Arc<dyn ExecutionPlan> = Arc::new(UuidBuildKeyTapExec::new(
+                coalesced_left,
+                build_column.index(),
+                nomination,
+            ));
+            let rebuilt = join
+                .builder()
+                .with_new_children(vec![tapped_left, replacement_right])?
+                .with_partition_mode(PartitionMode::CollectLeft)
+                .recompute_properties()
+                .build_exec()?;
+            Ok(Transformed::yes(rebuilt))
         })
         .map(|transformed| transformed.data)
     }
@@ -57,4 +129,121 @@ impl PhysicalOptimizerRule for PropertyFilterApprovalRule {
     fn schema_check(&self) -> bool {
         true
     }
+}
+
+struct MatchingCandidate {
+    original_probe_key: Arc<dyn PhysicalExpr>,
+}
+
+fn find_matching_candidate(
+    right: &Arc<dyn ExecutionPlan>,
+    expression_id: u64,
+    join: &HashJoinExec,
+) -> Result<Option<MatchingCandidate>, DataFusionError> {
+    let mut match_candidate = None;
+    right.apply(|node| {
+        if let Some(scan) = node.downcast_ref::<PropertyOverlayExec>() {
+            for candidate in scan.uuid_filter_candidates() {
+                if candidate.expression_id == expression_id
+                    && join
+                        .on()
+                        .iter()
+                        .any(|(_, probe)| probe.dyn_eq(candidate.original_probe_key.as_ref()))
+                {
+                    match_candidate = Some(MatchingCandidate {
+                        original_probe_key: candidate.original_probe_key,
+                    });
+                    break;
+                }
+            }
+        }
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
+    })?;
+    Ok(match_candidate)
+}
+
+/// An existing single-partition LEFT enrichment join can safely nominate
+/// direct property reads from its build UUIDs without changing join semantics
+/// or output properties. Keep the association on this exact direct scan edge.
+fn nominate_existing_collect_left(
+    join: &HashJoinExec,
+) -> Result<Option<Arc<dyn ExecutionPlan>>, DataFusionError> {
+    if *join.partition_mode() != PartitionMode::CollectLeft
+        || join.left().output_partitioning().partition_count() != 1
+        || join.left().boundedness().is_unbounded()
+        || join.right().boundedness().is_unbounded()
+        || join.left().downcast_ref::<UuidBuildKeyTapExec>().is_some()
+    {
+        return Ok(None);
+    }
+    let Some(scan) = join.right().downcast_ref::<PropertyOverlayExec>() else {
+        return Ok(None);
+    };
+    let Some(uuid_index) = scan.nomination_uuid_column() else {
+        return Ok(None);
+    };
+    let scan_schema = scan.schema();
+    let Some(uuid_field) = scan_schema.fields().get(uuid_index) else {
+        return Ok(None);
+    };
+
+    let matching_build_column = join.on().iter().find_map(|(build, probe)| {
+        let probe = probe.downcast_ref::<Column>()?;
+        if probe.index() != uuid_index
+            || probe.name() != uuid_field.name()
+            || probe.data_type(join.right().schema().as_ref()).ok()
+                != Some(arrow::datatypes::DataType::FixedSizeBinary(16))
+        {
+            return None;
+        }
+        let build = build.downcast_ref::<Column>()?;
+        (build.data_type(join.left().schema().as_ref()).ok()
+            == Some(arrow::datatypes::DataType::FixedSizeBinary(16)))
+        .then_some(build.index())
+    });
+    let Some(build_column) = matching_build_column else {
+        return Ok(None);
+    };
+
+    let nomination = UuidBuildKeyNomination::new();
+    let tapped_left: Arc<dyn ExecutionPlan> = Arc::new(UuidBuildKeyTapExec::new(
+        Arc::clone(join.left()),
+        build_column,
+        Arc::clone(&nomination),
+    ));
+    let nominated_right: Arc<dyn ExecutionPlan> = Arc::new(scan.with_uuid_nomination(nomination));
+    let rebuilt = join
+        .builder()
+        .with_new_children(vec![tapped_left, nominated_right])?
+        .recompute_properties()
+        .build_exec()?;
+    Ok(Some(rebuilt))
+}
+
+fn attach_nomination(
+    right: Arc<dyn ExecutionPlan>,
+    expression_id: u64,
+    original_probe_key: &Arc<dyn PhysicalExpr>,
+    nomination: Arc<UuidBuildKeyNomination>,
+) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+    right
+        .transform_up(|node| {
+            let Some(scan) = node.downcast_ref::<PropertyOverlayExec>() else {
+                return Ok(Transformed::no(node));
+            };
+            let matches = scan.uuid_filter_candidates().iter().any(|candidate| {
+                candidate.expression_id == expression_id
+                    && candidate
+                        .original_probe_key
+                        .dyn_eq(original_probe_key.as_ref())
+            });
+            if !matches {
+                return Ok(Transformed::no(node));
+            }
+            Ok(Transformed::yes(
+                Arc::new(scan.with_uuid_nomination(Arc::clone(&nomination)))
+                    as Arc<dyn ExecutionPlan>,
+            ))
+        })
+        .map(|transformed| transformed.data)
 }

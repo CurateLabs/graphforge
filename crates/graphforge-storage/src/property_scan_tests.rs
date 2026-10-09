@@ -7,8 +7,6 @@ use arrow::array::{BooleanArray, FixedSizeBinaryArray, RecordBatch, StringArray}
 use arrow::datatypes::{DataType, Field, Schema};
 use datafusion::datasource::MemTable;
 use datafusion::execution::session_state::SessionStateBuilder;
-use datafusion::physical_expr::PhysicalExpr;
-use datafusion::physical_expr::expressions::{CaseExpr, Column, InListExpr, lit};
 use datafusion::prelude::{SessionConfig, SessionContext};
 use futures::StreamExt;
 use parquet::arrow::ArrowWriter;
@@ -20,96 +18,6 @@ use crate::property_overlay::{
     PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_ROUTE_KEY, PROPERTY_TOMBSTONE_FIELD,
 };
 use crate::{AuthenticatedPropertyInventory, PropertyFragmentId, PropertyTable};
-
-fn uuid_list(values: &[[u8; 16]], schema: &Schema) -> Arc<dyn PhysicalExpr> {
-    let list = values
-        .iter()
-        .map(|value| {
-            lit(datafusion::common::ScalarValue::FixedSizeBinary(
-                16,
-                Some(value.to_vec()),
-            )) as Arc<dyn PhysicalExpr>
-        })
-        .collect();
-    Arc::new(
-        InListExpr::try_new(Arc::new(Column::new("node_uuid", 0)), list, false, schema).unwrap(),
-    )
-}
-
-#[test]
-fn partitioned_uuid_filter_uses_only_complete_finite_case_unions() {
-    let schema = Schema::new(vec![Field::new(
-        "node_uuid",
-        DataType::FixedSizeBinary(16),
-        false,
-    )]);
-    let first = [1_u128.to_be_bytes(), 3_u128.to_be_bytes()];
-    let second = [2_u128.to_be_bytes(), 3_u128.to_be_bytes()];
-    let case = CaseExpr::try_new(
-        Some(lit(datafusion::common::ScalarValue::UInt64(Some(1)))),
-        vec![
-            (
-                lit(datafusion::common::ScalarValue::UInt64(Some(0))),
-                uuid_list(&first, &schema),
-            ),
-            (
-                lit(datafusion::common::ScalarValue::UInt64(Some(1))),
-                uuid_list(&second, &schema),
-            ),
-        ],
-        Some(lit(datafusion::common::ScalarValue::Boolean(Some(false)))),
-    )
-    .unwrap();
-    let candidates = crate::property_scan_filter::uuid_candidates(
-        &(Arc::new(case) as Arc<dyn PhysicalExpr>),
-        "node_uuid",
-    )
-    .unwrap();
-    assert_eq!(
-        candidates,
-        [1_u128, 2, 3].map(u128::to_be_bytes).into_iter().collect()
-    );
-
-    let unknown_then = CaseExpr::try_new(
-        Some(lit(datafusion::common::ScalarValue::UInt64(Some(1)))),
-        vec![
-            (
-                lit(datafusion::common::ScalarValue::UInt64(Some(0))),
-                uuid_list(&first, &schema),
-            ),
-            (
-                lit(datafusion::common::ScalarValue::UInt64(Some(1))),
-                lit(datafusion::common::ScalarValue::Boolean(Some(true))),
-            ),
-        ],
-        Some(lit(datafusion::common::ScalarValue::Boolean(Some(false)))),
-    )
-    .unwrap();
-    assert!(
-        crate::property_scan_filter::uuid_candidates(
-            &(Arc::new(unknown_then) as Arc<dyn PhysicalExpr>),
-            "node_uuid",
-        )
-        .is_none()
-    );
-
-    let unknown_else = CaseExpr::try_new(
-        None,
-        vec![(
-            lit(datafusion::common::ScalarValue::Boolean(Some(false))),
-            uuid_list(&first, &schema),
-        )],
-        Some(lit(datafusion::common::ScalarValue::Boolean(Some(true)))),
-    )
-    .unwrap();
-    assert!(
-        crate::property_scan_filter::uuid_candidates(
-            &(Arc::new(unknown_else) as Arc<dyn PhysicalExpr>),
-            "node_uuid",
-        )
-        .is_none()
-    );
-}
 
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = sha2::Sha256::digest(bytes);

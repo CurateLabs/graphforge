@@ -69,7 +69,7 @@ fn shuffled(index: usize, nodes: usize) -> i64 {
     ((index * 7919 + 13) % nodes) as i64
 }
 
-fn construct(dir: &Path, nodes: usize) {
+fn construct_with_fanout(dir: &Path, nodes: usize, fan_out: usize) {
     let mut fields = CONSTRUCTION_NODE_SCHEMA.fields().to_vec();
     fields.push(Arc::new(Field::new("ident", DataType::Int64, true)));
     fields.push(Arc::new(Field::new("shuffled", DataType::Int64, true)));
@@ -108,7 +108,7 @@ fn construct(dir: &Path, nodes: usize) {
             .append_nodes(&format!("nodes-{start}"), &batch)
             .unwrap();
     }
-    let edges = nodes * FAN_OUT;
+    let edges = nodes * fan_out;
     for start in (0..edges).step_by(WRITE_WINDOW) {
         let end = (start + WRITE_WINDOW).min(edges);
         let rows = end - start;
@@ -116,11 +116,11 @@ fn construct(dir: &Path, nodes: usize) {
         let mut sources = FixedSizeBinaryBuilder::with_capacity(rows, 16);
         let mut targets = FixedSizeBinaryBuilder::with_capacity(rows, 16);
         for edge in start..end {
-            let source = edge / FAN_OUT;
+            let source = edge / fan_out;
             ids.append_value(edge_uuid(edge).as_bytes()).unwrap();
             sources.append_value(node_uuid(source).as_bytes()).unwrap();
             targets
-                .append_value(node_uuid((source + edge % FAN_OUT + 1) % nodes).as_bytes())
+                .append_value(node_uuid((source + edge % fan_out + 1) % nodes).as_bytes())
                 .unwrap();
         }
         let batch = RecordBatch::try_new(
@@ -262,9 +262,13 @@ struct Built {
 }
 
 fn build(nodes: usize) -> Built {
+    build_with_fanout(nodes, FAN_OUT)
+}
+
+fn build_with_fanout(nodes: usize, fan_out: usize) -> Built {
     let root = tempfile::tempdir().expect("project directory");
     let project = root.path().join("project");
-    construct(&project, nodes);
+    construct_with_fanout(&project, nodes, fan_out);
     let (fragments, largest) = property_fragments(&project);
     Built {
         _root: root,
@@ -376,6 +380,15 @@ fn anchored_destination_property_reads_do_not_grow_with_unrelated_rows() {
         let mut reads = Vec::new();
         for built in [&small, &large] {
             let forge = open_with_partitions(&built.project, target_partitions);
+            if target_partitions == 1 && reads.is_empty() {
+                let plan = forge
+                    .explain_stage(
+                        &query.replace("$ident", "0"),
+                        graphforge_api::ExplainStage::PhysicalPlan,
+                    )
+                    .expect("physical plan");
+                assert!(plan.contains("UuidBuildKeyTapExec"), "{plan}");
+            }
             let (warm, _) = measured(&forge, query, 0);
             assert_eq!(count(&warm), FAN_OUT as i64);
             let (batches, io) = measured(&forge, query, 5);
@@ -388,6 +401,25 @@ fn anchored_destination_property_reads_do_not_grow_with_unrelated_rows() {
             reads[1] <= reads[0] + (256 << 10),
             "target_partitions={target_partitions}: destination reads grew with unrelated rows: {reads:?}"
         );
+    }
+}
+
+/// A partitioned hash join switches to its map representation for a larger
+/// UUID frontier. The producer tap must still finish and preserve the exact
+/// result when that frontier contains more than 150 destinations.
+#[test]
+fn large_partitioned_uuid_frontier_preserves_destination_results() {
+    let _serial = serial();
+    const MAP_FAN_OUT: usize = 160;
+    let built = build_with_fanout(512, MAP_FAN_OUT);
+    let forge = open_with_partitions(&built.project, 4);
+    let query = "MATCH (a:Entity {ident: $ident})-[:LINK]->(b) RETURN count(b.ident) AS n";
+
+    for ident in [0_i64, 5] {
+        let (batches, io) = measured(&forge, query, ident);
+        assert_eq!(count(&batches), MAP_FAN_OUT as i64);
+        assert_eq!(io.write_bytes, 0);
+        assert_eq!(io.write_calls, 0);
     }
 }
 
