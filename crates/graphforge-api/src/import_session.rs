@@ -32,6 +32,7 @@ mod parquet_admission;
 mod parquet_brotli;
 mod parquet_codec;
 mod parquet_delta;
+mod parquet_page;
 mod parquet_scan;
 
 /// Written by this version: a session may register Parquet sources that stay

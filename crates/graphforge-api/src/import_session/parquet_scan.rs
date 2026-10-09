@@ -104,6 +104,9 @@ impl<R: Read> Compact<'_, R> {
         let mut value = 0_u64;
         for shift in (0..70).step_by(7) {
             let byte = self.byte()?;
+            if shift == 63 && byte > 1 {
+                return Err(storage("Parquet page header integer overflows"));
+            }
             value |= u64::from(byte & 0x7f) << shift;
             if byte & 0x80 == 0 {
                 return Ok(value);
@@ -224,7 +227,7 @@ impl<R: Read> Compact<'_, R> {
 }
 
 /// Fields of `PageHeader` and of its three page-specific structs.
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub(super) struct RawHeader {
     pub(super) kind: Option<i32>,
     pub(super) uncompressed: Option<i64>,
