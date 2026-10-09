@@ -323,7 +323,11 @@ fn a_page_that_bounds_a_small_batch_too_coarsely_is_replaced_by_the_exact_size()
         None,
     )
     .unwrap();
-    assert!(coarse.batch_bytes(0) > 8_000_000, "{}", coarse.batch_bytes(0));
+    assert!(
+        coarse.batch_bytes(0) > 8_000_000,
+        "{}",
+        coarse.batch_bytes(0)
+    );
     // With the window known, the columns it would refuse are sized from their values.
     let exact = SourceScan::build(handle, &metadata, 100, 1 << 40, 1 << 20, None).unwrap();
     let sizes = (0..20)
