@@ -13,14 +13,21 @@
 //! `FileDecoder` - so the decoder validates and decodes exactly the bytes
 //! that were checked, never a re-read the file could have changed.
 //!
-//! What the LZ4 frames themselves hold is not a constant: a frame header
-//! declares its block size (up to 8 MiB for the legacy format), linked
-//! frames keep a window and a doubled output buffer, and a concatenation
-//! retains its widest capacities while resizing. Planning and the reader
-//! both derive each buffer's exact geometry with [`scan_frame_geometry`] -
-//! an allocation-free walk that expands nothing - admit one codec context
-//! for the whole file before anything is constructed, and hold the reader's
-//! frame decoder to that context before it is built.
+//! What the LZ4 frames themselves hold is not a constant, but it is also
+//! bounded by what the consumers initialize: Arrow's compressed decode
+//! (`arrow-ipc` 58.4 `compression.rs`) constructs a fresh `FrameDecoder`
+//! per buffer and issues one `read_to_end`, and this module's verifier
+//! reads until the first zero - both stop there, so only the FIRST
+//! initialized frame is ever decoded and no later frame, malformed
+//! suffix, skippable magic or legacy tail is interpreted. A frame header
+//! declares its block size (up to 8 MiB for the legacy format) and linked
+//! frames keep a window and a doubled output buffer. Planning and the
+//! reader both derive each buffer's exact geometry from that first header
+//! alone ([`scan_first_frame_geometry`], at most 19 bytes, expanding
+//! nothing), admit one codec context for the whole file before anything
+//! is constructed, and hold the reader's frame decoder to that context
+//! before it is built. Block payloads, checksums and the actual expanded
+//! length stay the fixed-chunk verifier's job on the same owned bytes.
 
 use std::fs::File;
 use std::io::{Read as _, Seek as _, SeekFrom};
@@ -61,10 +68,13 @@ const LZ4_LEGACY_MAGIC: u32 = 0x184C_2102;
 /// rather than skipping them, so the geometry scan refuses them too.
 const LZ4_SKIPPABLE_RANGE: std::ops::RangeInclusive<u32> = 0x184D_2A50..=0x184D_2A5F;
 
-/// What expanding one compressed IPC buffer's frames holds: the frame
-/// decoder's retained `src`/`dst` capacities and the largest live total as
-/// the buffers resize between a file's concatenated frames.
-#[derive(Clone, Copy, Default)]
+/// What expanding one compressed IPC buffer holds: the frame decoder's
+/// reserved `src`/`dst` capacities for the first frame its consumer
+/// initializes. A fresh decoder starts with empty vectors, so the pinned
+/// `read_frame_info` (`lz4_flex` 0.13.1 `frame/decompress.rs`) reserves
+/// exactly these - no resize transient and no retained-previous-frame
+/// envelope, and a later frame is never initialized by these consumers.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 struct FrameGeometry {
     src: u64,
     dst: u64,
@@ -72,15 +82,22 @@ struct FrameGeometry {
 }
 
 impl FrameGeometry {
-    /// Account one frame the way `lz4_flex` 0.13.1 `FrameDecoder
-    /// read_frame_info` allocates: `src` grows to the declared block size,
-    /// `dst` to the block size - or twice it plus the window in linked mode
-    /// - each `reserve_exact` first holding the old and the new allocation
-    /// together, and both buffers keeping their capacity for the next frame
-    /// of a concatenation.
-    fn grow(&mut self, max_block: u64, linked: bool) -> Result<(), GfError> {
+    /// The geometry of no initialized frame: input the pinned decoder ends
+    /// as an empty stream - nothing follows the magic, or only the magic
+    /// does - charges nothing.
+    const EMPTY: Self = Self {
+        src: 0,
+        dst: 0,
+        peak: 0,
+    };
+
+    /// What the pinned decoder reserves when it initializes one frame: the
+    /// declared block size of `src`, the block size - or twice it plus the
+    /// 64 KiB linked window - of `dst`. The legacy format's four magic
+    /// bytes declare 8 MiB independent blocks.
+    fn first_frame(max_block: u64, linked: bool) -> Result<Self, GfError> {
         let overflow = || limit("Arrow LZ4 frame geometry overflows");
-        let need_dst = if linked {
+        let dst = if linked {
             max_block
                 .checked_mul(2)
                 .and_then(|dst| dst.checked_add(LZ4_WINDOW_BYTES))
@@ -88,30 +105,12 @@ impl FrameGeometry {
         } else {
             max_block
         };
-        let new_src = self.src.max(max_block);
-        let new_dst = self.dst.max(need_dst);
-        if new_src > self.src {
-            self.peak = self.peak.max(
-                self.src
-                    .checked_add(new_src)
-                    .and_then(|resize| resize.checked_add(self.dst))
-                    .ok_or_else(overflow)?,
-            );
-            self.src = new_src;
-        }
-        if new_dst > self.dst {
-            self.peak = self.peak.max(
-                self.src
-                    .checked_add(self.dst)
-                    .and_then(|resize| resize.checked_add(new_dst))
-                    .ok_or_else(overflow)?,
-            );
-            self.dst = new_dst;
-        }
-        self.peak = self
-            .peak
-            .max(self.src.checked_add(self.dst).ok_or_else(overflow)?);
-        Ok(())
+        let peak = max_block.checked_add(dst).ok_or_else(overflow)?;
+        Ok(Self {
+            src: max_block,
+            dst,
+            peak,
+        })
     }
 }
 
@@ -145,7 +144,7 @@ impl FrameBytes for SliceFrameBytes<'_> {
 }
 
 /// A planned file's compressed buffer, read in small fixed pieces: planning
-/// scans each frame's geometry by seeking, never holding the body or a
+/// scans the first frame's header by seeking, never holding the body or a
 /// per-block vector of it.
 struct FileFrameBytes<'a> {
     file: &'a mut File,
@@ -174,30 +173,48 @@ impl FrameBytes for FileFrameBytes<'_> {
     }
 }
 
-/// One standard frame header's decoder-relevant fields.
-struct FrameHeader {
-    max_block: u64,
-    linked: bool,
-    block_checksums: bool,
-    content_checksum: bool,
-}
-
-/// Parse a standard frame header the way `FrameInfo::read` does, refusing
-/// the variants the decoder refuses: unsupported versions and block sizes,
-/// reserved bits, dictionaries and skippable frames. The header checksum
-/// itself stays the frame decoder's verification on the owned bytes; the
-/// geometry only needs the header's length.
-fn read_frame_header(bytes: &mut dyn FrameBytes) -> Result<Option<FrameHeader>, GfError> {
-    let mut flg_bd = [0_u8; 2];
-    let taken = bytes.next_bytes(&mut flg_bd)?;
-    if taken == 0 {
-        // Nothing followed the magic: the decoder ends the stream here.
-        return Ok(None);
+/// Derive what a compressed buffer's consumer allocates from the first
+/// frame's header alone - at most 19 bytes, never a payload byte - the way
+/// the pinned decoder's `read_frame_info` (`lz4_flex` 0.13.1
+/// `frame/decompress.rs`) and `FrameInfo::read` (`frame/header.rs`) read
+/// it: an empty stream and any magic followed by nothing end as zero; a
+/// partial magic or header is an error; legacy magic alone initializes 8
+/// MiB blocks; a skippable, dictionary, wrong-version, reserved-bit or
+/// unsupported-block-size header is refused where the decoder refuses it.
+/// The header checksum itself stays the frame decoder's verification on
+/// the owned bytes - a header it rejects there charged nothing but is
+/// refused by the verifier anyway, so the geometry is an upper bound on
+/// what the bytes can allocate. What the header accepts is charged and
+/// nothing more: these consumers stop at the first frame's first zero,
+/// so no block, suffix or later frame is read, charged or refused here.
+fn scan_first_frame_geometry(bytes: &mut dyn FrameBytes) -> Result<FrameGeometry, GfError> {
+    let mut magic = [0_u8; 4];
+    match bytes.next_bytes(&mut magic)? {
+        0 => return Ok(FrameGeometry::EMPTY),
+        4 => {}
+        _ => return Err(storage("Arrow LZ4 frame magic is truncated")),
     }
-    if taken != 2 {
-        return Err(storage("Arrow LZ4 frame header is truncated"));
+    let magic = u32::from_le_bytes(magic);
+    if magic == LZ4_LEGACY_MAGIC {
+        return FrameGeometry::first_frame(LZ4_LEGACY_BLOCK_BYTES, false);
     }
-    let [flg, bd] = flg_bd;
+    let mut base = [0_u8; 3];
+    match bytes.next_bytes(&mut base)? {
+        0 => return Ok(FrameGeometry::EMPTY),
+        3 => {}
+        _ => return Err(storage("Arrow LZ4 frame header is truncated")),
+    }
+    if LZ4_SKIPPABLE_RANGE.contains(&magic) {
+        return Err(storage(
+            "Arrow compressed buffer holds a skippable LZ4 frame, which the frame decoder refuses",
+        ));
+    }
+    if magic != LZ4_FRAME_MAGIC {
+        return Err(storage(
+            "Arrow compressed buffer is not an LZ4 frame the decoder accepts",
+        ));
+    }
+    let [flg, bd] = base;
     if flg & 0b1100_0000 != 0b0100_0000 {
         return Err(storage("Arrow LZ4 frame header has an unsupported version"));
     }
@@ -214,124 +231,13 @@ fn read_frame_header(bytes: &mut dyn FrameBytes) -> Result<Option<FrameHeader>, 
         .checked_sub(4)
         .and_then(|index| LZ4_BLOCK_SIZES.get(index))
         .ok_or_else(|| storage("Arrow LZ4 frame header declares an unsupported block size"))?;
-    let mut rest = [0_u8; 9];
-    let rest_len = 1 + usize::from(flg & 0b0000_1000 != 0) * 8;
-    if bytes.next_bytes(&mut rest[..rest_len])? != rest_len {
-        return Err(storage("Arrow LZ4 frame header is truncated"));
-    }
-    Ok(Some(FrameHeader {
-        max_block: *max_block,
-        linked: flg & 0b0010_0000 == 0,
-        block_checksums: flg & 0b0001_0000 != 0,
-        content_checksum: flg & 0b0000_0100 != 0,
-    }))
-}
-
-/// Consume `length` bytes of block payload the decoder would expand,
-/// without holding any of it.
-fn skip_frame_bytes(bytes: &mut dyn FrameBytes, length: u64) -> Result<(), GfError> {
-    let mut skip = [0_u8; 512];
-    let mut left = length;
-    while left > 0 {
-        let want = (skip.len() as u64).min(left) as usize;
-        if bytes.next_bytes(&mut skip[..want])? != want {
-            return Err(storage("Arrow LZ4 frame block is truncated"));
-        }
-        left -= want as u64;
-    }
-    Ok(())
-}
-
-/// Walk a frame's data blocks the way `FrameDecoder::read_block` reads
-/// them: u32 block infos, payloads the scan skips without expanding, and an
-/// EndMark the decoder follows with a content checksum. Input that ends at
-/// a block boundary ends the stream - the decoder's caught EOF - which the
-/// `false` result reports; an EndMark returns `true` and the scan continues
-/// with the next frame.
-fn walk_frame_blocks(
-    bytes: &mut dyn FrameBytes,
-    max_block: u64,
-    block_checksums: bool,
-    content_checksum: bool,
-) -> Result<bool, GfError> {
-    loop {
-        let mut info = [0_u8; 4];
-        if bytes.next_bytes(&mut info)? != 4 {
-            return Ok(false);
-        }
-        let size = u32::from_le_bytes(info);
-        if size == 0 {
-            if content_checksum {
-                skip_frame_bytes(bytes, 4)?;
-            }
-            return Ok(true);
-        }
-        let len = u64::from(size & 0x7FFF_FFFF);
-        if len > max_block {
-            return Err(storage(
-                "Arrow LZ4 frame declares a block larger than its header's block size",
-            ));
-        }
-        skip_frame_bytes(bytes, len)?;
-        if block_checksums {
-            skip_frame_bytes(bytes, 4)?;
-        }
-    }
-}
-
-/// Walk the frames of one compressed IPC buffer without expanding anything,
-/// deriving what a `lz4_flex` 0.13.1 `FrameDecoder` holds while it decodes
-/// those bytes: the reserved block buffer, the output buffer (twice the
-/// block size plus the window in linked mode), and the largest live total
-/// as concatenated frames resize them. The walk follows the decoder's own
-/// grammar, so it accepts exactly the frame shapes the decoder accepts and
-/// refuses where it refuses; a clean scan still certifies no payload
-/// validity - checksums and contents stay the decoder's job, run on the
-/// owned bytes after this guard.
-fn scan_frame_geometry(bytes: &mut dyn FrameBytes) -> Result<FrameGeometry, GfError> {
-    let mut geometry = FrameGeometry::default();
-    loop {
-        let mut magic = [0_u8; 4];
-        let taken = bytes.next_bytes(&mut magic)?;
-        if taken == 0 {
-            return Ok(geometry);
-        }
-        if taken != 4 {
+    if flg & 0b0000_1000 != 0 {
+        let mut content_size = [0_u8; 8];
+        if bytes.next_bytes(&mut content_size)? != 8 {
             return Err(storage("Arrow LZ4 frame header is truncated"));
         }
-        match u32::from_le_bytes(magic) {
-            LZ4_LEGACY_MAGIC => {
-                geometry.grow(LZ4_LEGACY_BLOCK_BYTES, false)?;
-                if !walk_frame_blocks(bytes, LZ4_LEGACY_BLOCK_BYTES, false, false)? {
-                    return Ok(geometry);
-                }
-            }
-            magic if LZ4_SKIPPABLE_RANGE.contains(&magic) => {
-                return Err(storage(
-                    "Arrow compressed buffer holds a skippable LZ4 frame, which the frame decoder refuses",
-                ));
-            }
-            LZ4_FRAME_MAGIC => {
-                let Some(frame) = read_frame_header(bytes)? else {
-                    return Ok(geometry);
-                };
-                geometry.grow(frame.max_block, frame.linked)?;
-                if !walk_frame_blocks(
-                    bytes,
-                    frame.max_block,
-                    frame.block_checksums,
-                    frame.content_checksum,
-                )? {
-                    return Ok(geometry);
-                }
-            }
-            _ => {
-                return Err(storage(
-                    "Arrow compressed buffer is not an LZ4 frame the decoder accepts",
-                ));
-            }
-        }
     }
+    FrameGeometry::first_frame(*max_block, flg & 0b0010_0000 == 0)
 }
 
 /// What decoding one block holds and retains beside later blocks: the owned
@@ -383,11 +289,11 @@ pub(super) struct IpcPlan {
     /// plus the widest record batch, live one at a time, plus one LZ4 codec
     /// context when any block holds a frame.
     pub(super) decoding_bytes: u64,
-    /// One LZ4 codec context: the largest frame-decoder workspace any frame
-    /// in the file holds (its exact scanned geometry, resize transients
-    /// included) plus the persistent verification chunk. It covers the
-    /// verification decoder and Arrow's own decoder of the same bytes, which
-    /// never run concurrently. Zero when no block holds a frame.
+    /// One LZ4 codec context: the largest first-frame workspace any
+    /// compressed buffer's consumer initializes (its header-scanned
+    /// geometry) plus the persistent verification chunk. It covers the
+    /// verification decoder and Arrow's own decoder of the same bytes,
+    /// which never run concurrently. Zero when no block holds a frame.
     codec_context: u64,
     /// The retained plan structure itself, charged to the build like the
     /// footer it summarizes.
@@ -471,7 +377,7 @@ pub(super) fn ipc_plan(path: &Path) -> Result<IpcPlan, GfError> {
     let mut batches = Vec::with_capacity(batch_count);
     let mut dictionary_workspace = 0_u64;
     let mut batch_workspace = 0_u64;
-    let mut frame_peak = 0_u64;
+    let mut frames = IpcFrames::default();
     for (dictionary, blocks) in [
         (true, footer.dictionaries()),
         (false, footer.recordBatches()),
@@ -545,9 +451,10 @@ pub(super) fn ipc_plan(path: &Path) -> Result<IpcPlan, GfError> {
                 message.header_as_record_batch()
             }
             .ok_or_else(|| storage("Arrow footer block has the wrong message kind"))?;
-            let (decoded, block_frame_peak) =
+            let (decoded, block_frames) =
                 ipc_buffer_bytes(&mut file, batch, body_start, body_length)?;
-            frame_peak = frame_peak.max(block_frame_peak);
+            frames.peak = frames.peak.max(block_frames.peak);
+            frames.present |= block_frames.present;
             let workspace = block_workspace(metadata_length.saturating_add(body_length), decoded);
             if dictionary {
                 dictionary_workspace = dictionary_workspace.saturating_add(workspace);
@@ -567,12 +474,15 @@ pub(super) fn ipc_plan(path: &Path) -> Result<IpcPlan, GfError> {
             }
         }
     }
-    // One codec context for the whole file, derived from the exact scanned
-    // geometry of its frames: the verification chunk is held beside the
-    // worst frame decoder's buffers, whether the verification's or Arrow's
-    // own - the two never run concurrently.
-    let codec_context = if frame_peak > 0 {
-        frame_peak
+    // One codec context for the whole file, the largest individual
+    // first-frame charge across its compressed buffers - the verification
+    // decoder and Arrow's own decoder of the same bytes never run
+    // concurrently, and the persistent verification chunk stays allocated
+    // beside whichever runs. Zero when no block holds a frame: ordinary
+    // small files admit small budgets.
+    let codec_context = if frames.present {
+        frames
+            .peak
             .checked_add(VERIFY_CHUNK_BYTES as u64)
             .ok_or_else(|| limit("Arrow source frame geometry overflows"))?
     } else {
@@ -642,21 +552,32 @@ fn ipc_field_bytes(
     Ok(())
 }
 
+/// The codec charge one batch message's LZ4 frames add: `present` when any
+/// of its buffers runs the frame verifier - even a first frame whose
+/// header alone initializes nothing does, since the verifier's chunk is
+/// allocated for its read loop - and `peak`, the largest first-frame
+/// allocation among them.
+#[derive(Clone, Copy, Default)]
+struct IpcFrames {
+    peak: u64,
+    present: bool,
+}
+
 /// The decoded bytes a batch message holds - every buffer's expanded length,
 /// read from the file where compression states one, and its varlen nodes -
-/// and the largest frame-decoder workspace any of its LZ4 frames holds,
+/// plus what its LZ4 frames charge: the largest first-frame workspace,
 /// scanned from the file in small fixed reads.
 fn ipc_buffer_bytes(
     file: &mut File,
     batch: arrow::ipc::RecordBatch<'_>,
     body_start: u64,
     body_length: u64,
-) -> Result<(u64, u64), GfError> {
+) -> Result<(u64, IpcFrames), GfError> {
     let lz4 = batch
         .compression()
         .is_some_and(|body| body.codec() == arrow::ipc::CompressionType::LZ4_FRAME);
     let mut decoded = 0_u64;
-    let mut frame_peak = 0_u64;
+    let mut frames = IpcFrames::default();
     for buffer in batch.buffers().into_iter().flatten() {
         let offset = u64::try_from(buffer.offset()).map_err(storage)?;
         let length = u64::try_from(buffer.length()).map_err(storage)?;
@@ -679,11 +600,12 @@ fn ipc_buffer_bytes(
                 StatedExpansion::Empty => 0,
                 StatedExpansion::Frame(expanded) => {
                     if lz4 {
-                        let geometry = scan_frame_geometry(&mut FileFrameBytes {
+                        let geometry = scan_first_frame_geometry(&mut FileFrameBytes {
                             file,
                             remaining: length - 8,
                         })?;
-                        frame_peak = frame_peak.max(geometry.peak);
+                        frames.peak = frames.peak.max(geometry.peak);
+                        frames.present = true;
                     }
                     expanded
                 }
@@ -699,7 +621,7 @@ fn ipc_buffer_bytes(
             .map_or(0, |nodes| nodes.len() as u64)
             .saturating_mul(256),
     );
-    Ok((decoded, frame_peak))
+    Ok((decoded, frames))
 }
 
 /// The message kind a footer block must hold.
@@ -912,14 +834,17 @@ impl<'a> CheckedIpcReader<'a> {
 
     /// Expand one LZ4 frame through a fixed chunk, counting its output and
     /// refusing as soon as it passes the advertised length: the frame never
-    /// becomes an expanded buffer here.
+    /// becomes an expanded buffer here. The read loop is the consumer
+    /// boundary itself - a fresh decoder whose reads stop at its first
+    /// zero - so a buffer's later frames are neither decoded nor charged.
     fn verify_lz4_frame(&mut self, compressed: &[u8], expanded: u64) -> Result<(), GfError> {
         use lz4_flex::frame::FrameDecoder;
-        // What a frame decoder holds for exactly these bytes, derived
-        // without allocating before anything is constructed: the source
-        // bytes can have changed since the plan, so the geometry must still
-        // fit the admitted context alongside the chunk it shares.
-        let needed = scan_frame_geometry(&mut SliceFrameBytes::new(compressed))?
+        // What the consumer of these bytes allocates, derived from the
+        // first frame's header without allocating before anything is
+        // constructed: the source bytes can have changed since the plan,
+        // so the geometry must still fit the admitted context alongside
+        // the chunk it shares.
+        let needed = scan_first_frame_geometry(&mut SliceFrameBytes::new(compressed))?
             .peak
             .saturating_add(VERIFY_CHUNK_BYTES as u64);
         if needed > self.plan.codec_context {
@@ -1185,10 +1110,10 @@ mod ipc_planning_tests {
         }
     }
 
-    /// Write an uncompressed single-batch file holding one non-nullable
-    /// Int64 column, and return the values it holds: its body is exactly the
-    /// values buffer, so a test can rebuild that buffer as a compressed one
-    /// without touching anything else.
+    /// Write a compressed single-batch file holding one non-nullable Int64
+    /// column, and return the values it holds: the message declares LZ4
+    /// compression and its body ends with the values buffer, so a test can
+    /// rebuild that buffer's frame without touching anything else.
     fn write_int_source(path: &std::path::Path, rows: usize) -> Vec<i64> {
         let values: Vec<i64> = (0..rows).map(|row| row as i64 * 3 - 1).collect();
         let schema = Arc::new(Schema::new(vec![Field::new(
@@ -1201,7 +1126,12 @@ mod ipc_planning_tests {
             vec![Arc::new(Int64Array::from(values.clone()))],
         )
         .unwrap();
-        let mut writer = FileWriter::try_new(File::create(path).unwrap(), &schema).unwrap();
+        let options = IpcWriteOptions::default()
+            .try_with_compression(Some(arrow::ipc::CompressionType::LZ4_FRAME))
+            .unwrap();
+        let mut writer =
+            FileWriter::try_new_with_options(File::create(path).unwrap(), &schema, options)
+                .unwrap();
         writer.write(&batch).unwrap();
         writer.finish().unwrap();
         values
@@ -1211,15 +1141,25 @@ mod ipc_planning_tests {
     /// no checksums - an ordinary writer's frame.
     fn lz4_frame(values: &[u8], block_size: lz4_flex::frame::BlockSize, linked: bool) -> Vec<u8> {
         use std::io::Write as _;
-        let info = lz4_flex::frame::FrameInfo {
-            block_size,
-            block_mode: if linked {
-                lz4_flex::frame::BlockMode::Linked
-            } else {
-                lz4_flex::frame::BlockMode::Independent
-            },
-            ..Default::default()
+        let mut info = lz4_flex::frame::FrameInfo::default();
+        info.block_size = block_size;
+        info.block_mode = if linked {
+            lz4_flex::frame::BlockMode::Linked
+        } else {
+            lz4_flex::frame::BlockMode::Independent
         };
+        let mut encoder = lz4_flex::frame::FrameEncoder::with_frame_info(info, Vec::new());
+        encoder.write_all(values).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    /// One crafted lz4 frame with a content size: its header is 15 bytes,
+    /// so a cut before the eighth optional byte is a header truncation.
+    fn lz4_frame_with_content_size(values: &[u8]) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut info = lz4_flex::frame::FrameInfo::default();
+        info.content_size = Some(values.len() as u64);
+        info.block_size = lz4_flex::frame::BlockSize::Max64KB;
         let mut encoder = lz4_flex::frame::FrameEncoder::with_frame_info(info, Vec::new());
         encoder.write_all(values).unwrap();
         encoder.finish().unwrap()
@@ -1241,8 +1181,9 @@ mod ipc_planning_tests {
         values.iter().copied().flat_map(i64::to_le_bytes).collect()
     }
 
-    /// Expand a frame (or concatenation) the way the pinned decoder does:
-    /// parity evidence that geometry the scan accepts really decodes.
+    /// Run the exact consumer both production paths share: a fresh frame
+    /// decoder and one `read_to_end`, which stops at the first zero. This
+    /// is the parity evidence for what a scan's geometry must cover.
     fn decode_frames(frames: &[u8]) -> Vec<u8> {
         use std::io::Read as _;
         let mut output = Vec::new();
@@ -1252,9 +1193,28 @@ mod ipc_planning_tests {
         output
     }
 
+    /// The consumer errors on these bytes: the pinned decoder's `read_to_end`
+    /// returns `Err`, as it must for the fixture to compare semantics.
+    fn decode_frames_err(frames: &[u8]) {
+        use std::io::Read as _;
+        let mut output = Vec::new();
+        assert!(
+            lz4_flex::frame::FrameDecoder::new(frames)
+                .read_to_end(&mut output)
+                .is_err()
+        );
+    }
+
     fn scan_geometry(frames: &[u8]) -> super::FrameGeometry {
         let mut source = super::SliceFrameBytes::new(frames);
-        super::scan_frame_geometry(&mut source).unwrap()
+        super::scan_first_frame_geometry(&mut source).unwrap()
+    }
+
+    fn scan_geometry_err(frames: &[u8]) -> graphforge_core::GfError {
+        let mut source = super::SliceFrameBytes::new(frames);
+        super::scan_first_frame_geometry(&mut source)
+            .err()
+            .expect("the scan must refuse these bytes")
     }
 
     #[test]
@@ -1297,8 +1257,13 @@ mod ipc_planning_tests {
         assert_eq!(decode_frames(&legacy), values);
     }
 
+    /// The Arrow consumer constructs a fresh decoder and stops at the first
+    /// zero its one `read_to_end` returns, so a second frame after the
+    /// first - larger, legacy, skippable, malformed or garbage - is never
+    /// initialized. Its geometry must charge the first header only, and its
+    /// output must equal the first frame's payload alone.
     #[test]
-    fn concatenated_frames_retain_maxima_and_bound_each_resize() {
+    fn only_the_first_frame_initializes_so_its_header_charges_the_geometry() {
         let values = vec![9_u8; 80 * 1024];
         let first = lz4_frame(
             &values[..64 * 1024],
@@ -1310,141 +1275,213 @@ mod ipc_planning_tests {
             lz4_flex::frame::BlockSize::Max4MB,
             false,
         );
-        let mut both = first;
-        let first_dst = 2 * 64 * 1024 + super::LZ4_WINDOW_BYTES;
+        let first_payload = &values[..64 * 1024];
+        let alone = scan_geometry(&first);
+        assert_eq!(alone.src, 64 * 1024);
+        assert_eq!(alone.dst, 2 * 64 * 1024 + super::LZ4_WINDOW_BYTES);
+        assert_eq!(alone.peak, 3 * 64 * 1024 + super::LZ4_WINDOW_BYTES);
+
+        // A larger valid frame behind the first: one read_to_end returns
+        // only the first payload, and the geometry stays the first
+        // frame's charge.
+        let mut both = first.clone();
         both.extend_from_slice(&second);
+        assert_eq!(scan_geometry(&both), alone);
+        assert_eq!(decode_frames(&both), first_payload);
 
-        // The second frame grows src (64 KiB held + 4 MiB new, beside the
-        // retained dst) and then dst (4 MiB src + 192 KiB held + 4 MiB new);
-        // the dst resize is the peak.
-        let geometry = scan_geometry(&both);
-        assert_eq!(geometry.src, 4 << 20);
-        assert_eq!(geometry.dst, 4 << 20);
-        assert_eq!(geometry.peak, (4 << 20) + first_dst + (4 << 20));
-        assert_eq!(decode_frames(&both), values);
+        // The same holds for a legacy suffix, a skippable header, a
+        // truncated second magic and plain garbage: none of them may add
+        // credit or refuse.
+        let mut legacy = first.clone();
+        legacy.extend_from_slice(&legacy_frame(&values));
+        assert_eq!(scan_geometry(&legacy), alone);
+        assert_eq!(decode_frames(&legacy), first_payload);
 
-        // A later smaller frame retains the grown capacities: no further
-        // resize, no larger peak.
-        let third = lz4_frame(b"tail", lz4_flex::frame::BlockSize::Max64KB, true);
-        both.extend_from_slice(&third);
-        let geometry = scan_geometry(&both);
-        assert_eq!(geometry.src, 4 << 20);
-        assert_eq!(geometry.dst, 4 << 20);
-        assert_eq!(geometry.peak, (4 << 20) + first_dst + (4 << 20));
-        let mut expected = values;
-        expected.extend_from_slice(b"tail");
-        assert_eq!(decode_frames(&both), expected);
+        let mut skippable = first.clone();
+        skippable.extend_from_slice(&0x184D_2A50_u32.to_le_bytes());
+        skippable.extend_from_slice(&[0, 0, 0, 0]);
+        assert_eq!(scan_geometry(&skippable), alone);
+        assert_eq!(decode_frames(&skippable), first_payload);
+
+        let mut truncated_magic = first.clone();
+        truncated_magic.extend_from_slice(&[0x04, 0x22, 0x4D]);
+        assert_eq!(scan_geometry(&truncated_magic), alone);
+        assert_eq!(decode_frames(&truncated_magic), first_payload);
+
+        let mut garbage = first.clone();
+        garbage.extend_from_slice(&[0, 0, 0]);
+        assert_eq!(scan_geometry(&garbage), alone);
+        assert_eq!(decode_frames(&garbage), first_payload);
     }
 
+    /// A legacy FIRST frame declares its 8 MiB blocks with its four magic
+    /// bytes alone - both allocations are charged before any block is read
+    /// - and a first frame whose block returns zero output stops the
+    /// consumer there: nothing behind it is read, and the header's
+    /// geometry is all the scan charges.
     #[test]
-    fn geometry_refusals_match_decoder_rejection() {
-        use std::io::Read as _;
-        let good = lz4_frame(b"payload", lz4_flex::frame::BlockSize::Max64KB, false);
-        let refused = |frames: Vec<u8>, name: &str| {
-            let mut source = super::SliceFrameBytes::new(&frames);
-            let error = super::scan_frame_geometry(&mut source)
-                .err()
-                .unwrap_or_else(|| panic!("{name} must be refused"));
-            let mut output = Vec::new();
-            assert!(
-                lz4_flex::frame::FrameDecoder::new(&frames[..])
-                    .read_to_end(&mut output)
-                    .is_err(),
-                "{name} must also fail to decode"
-            );
-            error
-        };
+    fn a_legacy_first_frame_and_a_zero_output_block_charge_their_headers_only() {
+        // The legacy magic alone: the pinned decoder reserves 8 MiB of src
+        // beside 8 MiB of dst, then ends the stream at the block info's
+        // caught EOF - zero output, no error.
+        assert_eq!(
+            scan_geometry(&super::LZ4_LEGACY_MAGIC.to_le_bytes()),
+            super::FrameGeometry {
+                src: 8 << 20,
+                dst: 8 << 20,
+                peak: 16 << 20,
+            }
+        );
+        assert_eq!(decode_frames(&super::LZ4_LEGACY_MAGIC.to_le_bytes()), b"");
 
-        // A skippable frame is an error for the pinned decoder, not a skip.
+        // A standard header followed by an Uncompressed(0) block word: the
+        // consumer returns zero and stops, leaving the suffix unread. The
+        // header bytes are a real frame's, so the header checksum holds.
+        let real = lz4_frame(b"payload", lz4_flex::frame::BlockSize::Max64KB, false);
+        let mut stops = real[..7].to_vec();
+        stops.extend_from_slice(&0x8000_0000_u32.to_le_bytes());
+        stops.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(
+            scan_geometry(&stops),
+            super::FrameGeometry {
+                src: 64 * 1024,
+                dst: 64 * 1024,
+                peak: 2 * 64 * 1024,
+            }
+        );
+        assert_eq!(decode_frames(&stops), b"");
+    }
+
+    /// Headers the pinned decoder truly refuses are refused by the scan on
+    /// the same bytes, and the corner cases it ends as an empty stream
+    /// charge nothing: the scan's accept and refuse sets are the first
+    /// header's, not a whole-buffer grammar. A cut payload is not a header
+    /// refusal any more - the header charged its geometry, and the payload's
+    /// validity stays the verifier's job on the owned bytes.
+    #[test]
+    fn first_header_refusals_match_decoder_rejection() {
+        // A skippable frame with its full header is an error for the
+        // pinned decoder, not a skip.
         let mut skippable = 0x184D_2A50_u32.to_le_bytes().to_vec();
         skippable.extend_from_slice(&[0, 0, 0, 0]);
         assert!(
-            refused(skippable, "skippable")
+            scan_geometry_err(&skippable)
                 .to_string()
                 .contains("skippable")
         );
+        decode_frames_err(&skippable);
 
-        // A dictionary id is refused by the decoder.
+        // A dictionary id, reserved bits, a wrong version and block codes
+        // 0-3 are refused by both.
         let mut dictionary = super::LZ4_FRAME_MAGIC.to_le_bytes().to_vec();
         dictionary.extend_from_slice(&[0b0100_0001, 4 << 4, 0xAA, 0xBB, 0xCC, 0xDD, 0]);
         assert!(
-            refused(dictionary, "dictionary")
+            scan_geometry_err(&dictionary)
                 .to_string()
                 .contains("dictionary")
         );
+        decode_frames_err(&dictionary);
 
-        // Reserved bits, a wrong version and block codes 0-3 are refused.
         let mut reserved = super::LZ4_FRAME_MAGIC.to_le_bytes().to_vec();
         reserved.extend_from_slice(&[0b0100_0010, 4 << 4, 0]);
         assert!(
-            refused(reserved, "reserved")
+            scan_geometry_err(&reserved)
                 .to_string()
                 .contains("reserved")
         );
+        decode_frames_err(&reserved);
         let mut version = super::LZ4_FRAME_MAGIC.to_le_bytes().to_vec();
         version.extend_from_slice(&[0b1000_0000, 4 << 4, 0]);
-        assert!(refused(version, "version").to_string().contains("version"));
+        assert!(scan_geometry_err(&version).to_string().contains("version"));
+        decode_frames_err(&version);
         for code in 0_u8..4 {
             let mut header = super::LZ4_FRAME_MAGIC.to_le_bytes().to_vec();
             header.extend_from_slice(&[0b0100_0000, code << 4, 0]);
             assert!(
-                refused(header, "block size")
+                scan_geometry_err(&header)
                     .to_string()
                     .contains("block size")
             );
+            decode_frames_err(&header);
         }
 
-        // A wrong magic and a block larger than the header's size are
-        // refused.
-        let wrong = [1, 2, 3, 4, 5].to_vec();
-        assert!(
-            refused(wrong, "wrong magic")
-                .to_string()
-                .contains("not an LZ4")
-        );
-        let mut oversized = super::LZ4_FRAME_MAGIC.to_le_bytes().to_vec();
-        oversized.extend_from_slice(&[0b0100_0000, 4 << 4, 0]);
-        oversized.extend_from_slice(&u32::MAX.to_le_bytes());
-        oversized.extend_from_slice(&[0_u8; 64]);
-        assert!(
-            refused(oversized, "oversized block")
-                .to_string()
-                .contains("larger than its header's block size")
-        );
+        // A wrong magic and every truncation of the first frame's head are
+        // refused by both.
+        let mut wrong = [1, 2, 3, 4].to_vec();
+        wrong.extend_from_slice(&[5, 6, 7]);
+        assert!(scan_geometry_err(&wrong).to_string().contains("not an LZ4"));
+        decode_frames_err(&wrong);
 
-        // A payload cut short is refused.
-        let mut truncated = good.clone();
-        truncated.truncate(good.len() - 10);
         assert!(
-            refused(truncated, "truncated")
+            scan_geometry_err(&[0x04, 0x22])
                 .to_string()
                 .contains("truncated")
         );
+        decode_frames_err(&[0x04, 0x22]);
+        let mut partial_header = super::LZ4_FRAME_MAGIC.to_le_bytes().to_vec();
+        partial_header.extend_from_slice(&[0b0100_0000]);
+        assert!(
+            scan_geometry_err(&partial_header)
+                .to_string()
+                .contains("truncated")
+        );
+        decode_frames_err(&partial_header);
+        // A content-size header cut before its eight optional bytes: both
+        // refuse.
+        let sized = lz4_frame_with_content_size(b"payload");
+        assert_eq!(sized[4] & 0b0000_1000, 0b0000_1000, "content size flagged");
+        let mut content = sized;
+        content.truncate(10);
+        assert!(
+            scan_geometry_err(&content)
+                .to_string()
+                .contains("truncated")
+        );
+        decode_frames_err(&content);
 
-        // Trailing garbage after a frame is a wrong magic, not padding.
-        let mut garbage = good.clone();
-        garbage.extend_from_slice(&[0_u8; 3]);
-        refused(garbage, "trailing garbage");
+        // What the decoder ends as an empty stream charges nothing: empty
+        // input, and any non-legacy magic followed by nothing.
+        assert_eq!(scan_geometry(&[]), super::FrameGeometry::EMPTY);
+        let standard_magic = super::LZ4_FRAME_MAGIC.to_le_bytes().to_vec();
+        assert_eq!(scan_geometry(&standard_magic), super::FrameGeometry::EMPTY);
+        assert_eq!(decode_frames(&standard_magic), b"");
+        let skippable_magic = 0x184D_2A50_u32.to_le_bytes().to_vec();
+        assert_eq!(scan_geometry(&skippable_magic), super::FrameGeometry::EMPTY);
+        assert_eq!(decode_frames(&skippable_magic), b"");
+        let wrong_magic = [9_u8, 9, 9, 9].to_vec();
+        assert_eq!(scan_geometry(&wrong_magic), super::FrameGeometry::EMPTY);
+        assert_eq!(decode_frames(&wrong_magic), b"");
 
-        // But a stream cut at a block boundary ends cleanly, as the
-        // decoder's caught EOF does.
+        // A payload cut short - or a stream cut at a block boundary - no
+        // longer refuses the scan: only the header's geometry is charged,
+        // and what the bytes decode to stays the verifier's job.
+        let good = lz4_frame(b"payload", lz4_flex::frame::BlockSize::Max64KB, false);
+        let mut cut_payload = good.clone();
+        cut_payload.truncate(good.len() - 10);
+        assert_eq!(
+            scan_geometry(&cut_payload),
+            super::FrameGeometry {
+                src: 64 * 1024,
+                dst: 64 * 1024,
+                peak: 2 * 64 * 1024,
+            }
+        );
+        // The pinned decoder errors on a block cut mid-payload, and the
+        // verifier refuses the buffer for it.
+        decode_frames_err(&cut_payload);
         let mut boundary = good.clone();
-        let endmark_at = boundary.len() - 4;
-        boundary.truncate(endmark_at);
-        let geometry = scan_geometry(&boundary);
-        assert_eq!(geometry.src, 64 * 1024);
-        let mut output = Vec::new();
-        lz4_flex::frame::FrameDecoder::new(&boundary[..])
-            .read_to_end(&mut output)
-            .unwrap();
-        assert_eq!(output, b"payload");
+        boundary.truncate(boundary.len() - 4);
+        assert_eq!(scan_geometry(&boundary).src, 64 * 1024);
+        assert_eq!(decode_frames(&boundary), b"payload");
     }
 
     /// Rebuild the fixture's single record-batch values buffer as
-    /// `[8-byte expansion prefix][frames..]`, patching the message's body
-    /// length, the buffer's length, the footer block and the trailer around
-    /// the new body. The frames must expand to exactly the values the file
-    /// held, so the decoded batch is unchanged.
+    /// `[8-byte expansion prefix][frames..]`, patching the values slot's
+    /// length, the message's body length and the footer block around the
+    /// new body. An Int64 array carries two buffer slots - the validity
+    /// bitmap and the values - and every byte before the values buffer
+    /// stays verbatim; the frames must expand to exactly the values the
+    /// file held, so the decoded batch is unchanged.
     fn values_buffer_as_frames(path: &std::path::Path, frames: &[Vec<u8>], expansion: u64) {
         use arrow::ipc::Message as IpcMessage;
         use arrow::ipc::RecordBatch as IpcRecordBatch;
@@ -1464,7 +1501,8 @@ mod ipc_planning_tests {
         let message =
             arrow::ipc::root_as_message(&original[block_at + message_skip..body_start]).unwrap();
         let batch = message.header_as_record_batch().unwrap();
-        // The values buffer: a struct vector of (offset i64, length i64).
+        // The values buffer: a struct vector of (offset i64, length i32)
+        // slots, validity first and the nonempty values last.
         let buffers_slot = block_at
             + message_skip
             + batch._tab.loc()
@@ -1472,19 +1510,20 @@ mod ipc_planning_tests {
         let buffers = buffers_slot
             + u32::from_le_bytes(original[buffers_slot..buffers_slot + 4].try_into().unwrap())
                 as usize;
-        assert_eq!(
-            u32::from_le_bytes(original[buffers..buffers + 4].try_into().unwrap()),
-            1
-        );
-        let buffer_length_at = buffers + 4 + 8;
-        assert_eq!(
-            u64::from_le_bytes(
-                original[buffer_length_at..buffer_length_at + 8]
-                    .try_into()
-                    .unwrap()
-            ),
-            block.body_length,
-            "the values buffer spans the body"
+        let slot_count =
+            u32::from_le_bytes(original[buffers..buffers + 4].try_into().unwrap()) as usize;
+        assert_eq!(slot_count, 2, "an Int64 array carries validity and values");
+        let values_at = buffers + (slot_count - 1) * 16;
+        let values_offset =
+            u64::from_le_bytes(original[values_at..values_at + 8].try_into().unwrap());
+        let values_length = u64::try_from(i32::from_le_bytes(
+            original[values_at + 8..values_at + 12].try_into().unwrap(),
+        ))
+        .unwrap();
+        assert!(values_length > 8, "the values buffer holds a frame");
+        assert!(
+            values_offset + values_length <= block.body_length,
+            "the values buffer ends its body"
         );
         // The message's bodyLength field.
         let body_length_at = block_at
@@ -1492,14 +1531,15 @@ mod ipc_planning_tests {
             + message._tab.loc()
             + usize::from(message._tab.vtable().get(IpcMessage::VT_BODYLENGTH));
 
-        let new_body = 8 + frames.iter().map(Vec::len).sum::<usize>();
+        let new_body = values_offset + 8 + frames.iter().map(Vec::len).sum::<u64>();
+        let new_values_length = 8 + frames.iter().map(Vec::len).sum::<u64>();
         let footer_length = i32::from_le_bytes(
             original[original.len() - 10..original.len() - 6]
                 .try_into()
                 .unwrap(),
         ) as usize;
         let footer_start = original.len() - 10 - footer_length;
-        let mut footer = original[footer_start..original.len() - 10].to_vec();
+        let footer = original[footer_start..original.len() - 10].to_vec();
         let footer = arrow::ipc::root_as_footer(&footer).unwrap();
         let footer_block_slot = footer_start
             + footer._tab.loc()
@@ -1518,16 +1558,17 @@ mod ipc_planning_tests {
             + 4
             + 16;
 
-        let mut rebuilt = Vec::with_capacity(body_start + new_body + footer_length + 10);
+        let mut rebuilt = Vec::with_capacity(body_start + new_body as usize + footer_length + 10);
         rebuilt.extend_from_slice(&original[..body_start]);
+        rebuilt.extend_from_slice(&original[body_start..body_start + values_offset as usize]);
         rebuilt.extend_from_slice(&expansion.to_le_bytes());
         for frame in frames {
             rebuilt.extend_from_slice(frame);
         }
         rebuilt[body_length_at..body_length_at + 8]
             .copy_from_slice(&(new_body as i64).to_le_bytes());
-        rebuilt[buffer_length_at..buffer_length_at + 8]
-            .copy_from_slice(&(new_body as u64).to_le_bytes());
+        rebuilt[values_at + 8..values_at + 12]
+            .copy_from_slice(&(new_values_length as i32).to_le_bytes());
         rebuilt.extend_from_slice(&original[footer_start..footer_block]);
         rebuilt.extend_from_slice(&(new_body as i64).to_le_bytes());
         rebuilt.extend_from_slice(&original[footer_block + 8..original.len() - 10]);
@@ -1651,15 +1692,20 @@ mod ipc_planning_tests {
             4 * 64 * 1024 + super::VERIFY_CHUNK_BYTES as u64
         );
 
-        // The same values, now in a 4 MiB linked frame: same stated
-        // expansion, a body of the same length, forty-eight times the codec
-        // context.
+        // The same values, now in a 4 MiB linked frame: one block either
+        // way, so the encoded length is the same and only the header's
+        // block code differs - same stated expansion, a body of the same
+        // length, forty-eight times the codec context.
         let grown = lz4_frame(
             &values_bytes(&values),
             lz4_flex::frame::BlockSize::Max4MB,
             true,
         );
-        assert_eq!(grown.len(), 16_399);
+        assert_eq!(
+            grown.len(),
+            small.len(),
+            "one block, a different header only"
+        );
         values_buffer_as_frames(&path, &[grown], 16_384);
 
         let file = File::open(&path).unwrap();
@@ -1694,17 +1740,17 @@ mod ipc_planning_tests {
         let schema = Arc::new(Schema::new(vec![
             Field::new(
                 "first",
-                DataType::Dictionary(Int32Type::KEY_TYPE, DataType::Utf8),
+                DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
                 false,
             ),
             Field::new(
                 "second",
-                DataType::Dictionary(Int32Type::KEY_TYPE, DataType::Utf8),
+                DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
                 false,
             ),
         ]));
         let first = dictionary(&["alpha", "beta", "gamma"]);
-        let second = dictionary(&["one", "two", "three", "four"]);
+        let second = dictionary(&["one", "two", "three"]);
         let batch = RecordBatch::try_new(Arc::clone(&schema), vec![first, second]).unwrap();
         let options = IpcWriteOptions::default()
             .try_with_compression(Some(arrow::ipc::CompressionType::LZ4_FRAME))
