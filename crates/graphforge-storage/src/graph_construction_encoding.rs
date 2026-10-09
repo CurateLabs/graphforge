@@ -62,10 +62,8 @@ pub use bulk::{
     BulkStagedReason,
 };
 #[cfg(test)]
-pub(crate) use bulk::{
-    ForcedPartitions, ForcedPropertyFrames, ForcedPropertySizing, ForcedScratchRoute,
-    derived_concurrency, scratch_minimum_bytes,
-};
+#[path = "graph_construction_encoding/bulk_test_support.rs"]
+pub(crate) mod bulk_test_support;
 pub(crate) use bulk::{discard_scratch, encode_bulk};
 #[cfg(test)]
 pub(crate) use inventory::authenticate_inventory_payloads;

@@ -235,7 +235,7 @@ fn concurrent_intake_never_holds_more_than_the_gate_admits() {
     // Room for exactly two batches while eight threads push: the rest wait.
     let rows = rows_with(&scratch, usize::MAX >> 1, 4, 2 * need);
     ingest(&rows, 64, 8);
-    assert_eq!(rows.gate.free(), 2 * need);
+    assert_eq!(super::super::gate::tests::free(&rows.gate), 2 * need);
     // Eight threads shared room for two batches, and used it.
     assert!(rows.peak_retained_bytes() >= need && rows.peak_retained_bytes() <= 2 * need);
     let groups = rows.finish(&AtomicBool::new(false)).unwrap();

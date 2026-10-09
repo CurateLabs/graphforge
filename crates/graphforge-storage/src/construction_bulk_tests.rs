@@ -410,10 +410,11 @@ mod bulk_builder {
         for (budget, partitions) in [(920 << 20, (3, 4)), (944 << 20, (7, 5))] {
             let root = TempDir::new().unwrap();
             let mut session = pinned(&root);
-            let _forced = crate::graph_construction_encoding::ForcedPartitions::set(
-                partitions.0,
-                partitions.1,
-            );
+            let _forced =
+                crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(
+                    partitions.0,
+                    partitions.1,
+                );
             let mut plan = plan(&nodes, &edges, 2);
             plan.memory_budget = Some(budget);
             assert_eq!(plan.route(), crate::BulkRoute::Scratch);
@@ -562,27 +563,27 @@ mod bulk_builder {
 
         let expected = staged_with(budgets, &nodes, &[]).unwrap();
         let mut plan = plan(&nodes, &[], 1);
-        let budget = crate::graph_construction_encoding::scratch_minimum_bytes(&plan, budgets);
+        let budget = crate::graph_construction_encoding::bulk_test_support::scratch_minimum_bytes(
+            &plan, budgets,
+        );
         plan.memory_budget = Some(budget);
         assert_eq!(plan.route(), crate::BulkRoute::Scratch);
         let root = TempDir::new().unwrap();
         let mut session = pinned_with(&root, budgets);
         session.set_cpu_admission(Some(Arc::new(
-            cpu_admission::ConstructionCpuAdmission::new(
-                std::num::NonZeroUsize::new(1).unwrap(),
-            ),
+            cpu_admission::ConstructionCpuAdmission::new(std::num::NonZeroUsize::new(1).unwrap()),
         )));
-        // Keep one accepted task per run so the natural 32-way merge sees all
-        // wide rows first, while retaining the naturally derived 24 MiB pool,
-        // 192 KiB frame target, and fan-in of 32.
-        let _sizing = crate::graph_construction_encoding::ForcedPropertySizing::set(1, 32);
-        let encoding = session
-            .prepare_bulk_encoding(1, &plan, || false)
-            .unwrap();
+        // Each source task completes one run; property rows are naturally
+        // merged within the derived pool.
+        let encoding = session.prepare_bulk_encoding(1, &plan, || false).unwrap();
         assert_same(&expected, &inventory(&encoding));
         let report = session.bulk_build_report();
         assert_eq!(report.scratch_concurrency, 1, "{report:?}");
-        assert_eq!(report.property_retained_budget_bytes, 24 << 20, "{report:?}");
+        assert_eq!(
+            report.property_retained_budget_bytes,
+            24 << 20,
+            "{report:?}"
+        );
         assert!(!scratch_dir(&session).exists());
     }
 
@@ -623,7 +624,8 @@ mod bulk_builder {
         let expected = staged_with(budgets, &nodes, &[]).unwrap();
         let root = TempDir::new().unwrap();
         let mut session = pinned_with(&root, budgets);
-        let _frames = crate::graph_construction_encoding::ForcedPropertyFrames::set(2048);
+        let _frames =
+            crate::graph_construction_encoding::bulk_test_support::ForcedPropertyFrames::set(2048);
         let mut plan = plan(&nodes, &[], 1);
         plan.memory_budget = Some(920 << 20);
         let encoded = session.prepare_bulk_encoding(1, &plan, || false).unwrap();
@@ -789,9 +791,7 @@ mod bulk_builder {
         edges: usize,
         chunk: usize,
     ) -> (Vec<RecordBatch>, Vec<RecordBatch>) {
-        let ids = (0..nodes as u64)
-            .map(|i| uuid(0x10, i))
-            .collect::<Vec<_>>();
+        let ids = (0..nodes as u64).map(|i| uuid(0x10, i)).collect::<Vec<_>>();
         let node_order = (0..nodes).map(|i| scattered(i, nodes)).collect::<Vec<_>>();
         let node_batches = node_order
             .chunks(chunk)
@@ -828,6 +828,39 @@ mod bulk_builder {
             })
             .collect::<Vec<_>>();
         (node_batches, edge_batches)
+    }
+
+    fn with_padding(batch: RecordBatch, bytes: usize) -> RecordBatch {
+        let mut fields = batch.schema().fields().to_vec();
+        fields.push(Arc::new(Field::new("padding", DataType::Utf8, false)));
+        let mut columns = batch.columns().to_vec();
+        let value = "p".repeat(bytes);
+        columns.push(Arc::new(StringArray::from(vec![value; batch.num_rows()])));
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
+    }
+
+    fn padded_concurrent_property_graph(
+        nodes: usize,
+        edges: usize,
+        chunk: usize,
+        padding_bytes: usize,
+    ) -> (Vec<RecordBatch>, Vec<RecordBatch>) {
+        let (nodes, edges) = concurrent_property_graph(nodes, edges, chunk);
+        let nodes = nodes
+            .into_iter()
+            .map(|batch| with_padding(batch, padding_bytes))
+            .collect();
+        let edges = edges
+            .into_iter()
+            .map(|batch| {
+                if batch.num_columns() == 4 {
+                    batch
+                } else {
+                    with_padding(batch, padding_bytes)
+                }
+            })
+            .collect();
+        (nodes, edges)
     }
 
     /// Sixteen lanes, whatever the host has, so the derived concurrency does
@@ -932,13 +965,17 @@ mod bulk_builder {
         wanted: usize,
         lanes: usize,
     ) -> (u64, usize) {
-        let floor = crate::graph_construction_encoding::scratch_minimum_bytes(&plan_at(0), budgets);
+        let floor = crate::graph_construction_encoding::bulk_test_support::scratch_minimum_bytes(
+            &plan_at(0),
+            budgets,
+        );
         let mut budget = floor.next_multiple_of(4 << 20);
         loop {
             let probe = plan_at(budget);
-            let derived = crate::graph_construction_encoding::derived_concurrency(
-                &probe, budget, lanes, budgets,
-            );
+            let derived =
+                crate::graph_construction_encoding::bulk_test_support::derived_concurrency(
+                    &probe, budget, lanes, budgets,
+                );
             if derived >= wanted {
                 assert_eq!(probe.route(), crate::BulkRoute::Scratch, "budget {budget}");
                 return (budget, derived);
@@ -974,145 +1011,61 @@ mod bulk_builder {
     }
 
     #[test]
-    fn property_scratch_concurrency_follows_the_budget_and_publishes_the_same_bytes() {
-        let _scratch = crate::graph_construction_encoding::ForcedScratchRoute::new();
-        let budgets = small_property_budgets();
-        let (nodes, edges) = concurrent_property_graph(4_800, 9_600, 150);
-        let expected = staged_with(budgets, &nodes, &edges).unwrap();
-        assert!(
-            expected
-                .iter()
-                .any(|entry| entry.0.starts_with("edge_properties/"))
-        );
-        // A larger budget admits more workers, up to the lanes there are.
-        let derived_at = |extra: u64| {
-            let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let floor = crate::graph_construction_encoding::scratch_minimum_bytes(
-                &overlapping_plan(&nodes, &edges, 2, &peak, 0),
-                budgets,
-            );
-            let budget = floor + extra;
-            crate::graph_construction_encoding::derived_concurrency(
-                &overlapping_plan(&nodes, &edges, 2, &peak, budget),
-                budget,
-                16,
-                budgets,
-            )
-        };
-        let growth = [0, 128 << 20, 256 << 20, 512 << 20, 1 << 30, 2 << 30, 4 << 30].map(derived_at);
-        assert!(
-            growth.windows(2).all(|pair| pair[0] <= pair[1]) && growth[6] >= 8 && growth[0] == 1,
-            "{growth:?}"
-        );
-        let mut levels = Vec::new();
-        for wanted in [1, 2, 4, 8, 16] {
-            let (budget, derived) = budget_admitting(&nodes, &edges, budgets, wanted, wanted);
-            assert_eq!(derived, wanted);
-            let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let root = TempDir::new().unwrap();
-            let mut session = pinned_with(&root, budgets);
-            lanes(&mut session, wanted);
-            // Many runs and several merge levels at every concurrency.
-            let _sizing =
-                crate::graph_construction_encoding::ForcedPropertySizing::set(40 << 10, 3);
-            let plan = overlapping_plan(&nodes, &edges, 2, &peak, budget);
-            assert_eq!(plan.route(), crate::BulkRoute::Scratch);
-            let encoding = session.prepare_bulk_encoding(1, &plan, || false).unwrap();
-            assert_same(&expected, &inventory(&encoding));
-            let report = session.bulk_build_report();
-            assert_eq!(
-                report.scratch_concurrency as usize, derived,
-                "budget {budget}: {report:?}"
-            );
-            assert!(report.property_runs > 8, "{report:?}");
-            assert!(
-                report.property_peak_retained_bytes <= report.property_retained_budget_bytes,
-                "{report:?}"
-            );
-            assert!(report.property_source_bytes > 0, "{report:?}");
-            assert!(!scratch_dir(&session).exists());
-            // Tasks really ran side by side, not just a larger number in a report.
-            let overlapped = peak.load(std::sync::atomic::Ordering::SeqCst);
-            assert!(
-                overlapped >= derived.min(2),
-                "concurrency {derived} overlapped only {overlapped} tasks"
-            );
-            assert!(overlapped <= derived, "{overlapped} tasks for {derived} workers");
-            levels.push(derived);
-        }
-        assert_eq!(levels, vec![1, 2, 4, 8, 16]);
-    }
-
-    #[test]
     fn property_scratch_bytes_do_not_grow_with_the_number_of_runs() {
-        let _scratch = crate::graph_construction_encoding::ForcedScratchRoute::new();
         let budgets = small_property_budgets();
         let (nodes, edges) = concurrent_property_graph(4_800, 9_600, 150);
         let expected = staged_with(budgets, &nodes, &edges).unwrap();
+        let (budget, derived) = budget_admitting(&nodes, &edges, budgets, 1, 1);
+        assert_eq!(derived, 1);
         let mut written = Vec::new();
-        for (run_bytes, fan_in) in [(8 << 20, 64), (40 << 10, 64), (12 << 10, 64), (12 << 10, 2)] {
-            let (budget, _) = budget_admitting(&nodes, &edges, budgets, 1, 16);
+        for per_task in [64, 2, 1] {
+            let mut plan = plan(&nodes, &edges, per_task);
+            plan.memory_budget = Some(budget);
+            assert_eq!(plan.route(), crate::BulkRoute::Scratch);
             let root = TempDir::new().unwrap();
             let mut session = pinned_with(&root, budgets);
-            sixteen_lanes(&mut session);
-            let _sizing =
-                crate::graph_construction_encoding::ForcedPropertySizing::set(run_bytes, fan_in);
-            let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let plan = overlapping_plan(&nodes, &edges, 2, &peak, budget);
+            lanes(&mut session, 1);
             let encoding = session.prepare_bulk_encoding(1, &plan, || false).unwrap();
             assert_same(&expected, &inventory(&encoding));
             let report = session.bulk_build_report();
-            written.push((run_bytes, fan_in, report.property_runs, report.property_scratch_write_bytes));
+            assert_eq!(report.scratch_concurrency, 1, "{report:?}");
+            assert!(!scratch_dir(&session).exists());
+            written.push((
+                per_task,
+                report.property_runs,
+                report.property_scratch_write_bytes,
+            ));
         }
-        // With a fan-in wide enough for the runs, the input is written once as
-        // runs and once more by the merge, however many runs there are: the
-        // binary tree this replaced rewrote it once per level.
-        let (_, _, _, single) = written[0];
-        for (run_bytes, fan_in, runs, bytes) in &written[..3] {
+        assert!(
+            written[0].1 < written[1].1 && written[1].1 < written[2].1,
+            "{written:?}"
+        );
+        let single = written[0].2;
+        let plan = plan(&nodes, &edges, 1);
+        let fan_in = crate::graph_construction_encoding::bulk_test_support::property_fan_in(
+            &plan, budget, 1, budgets,
+        ) as u64;
+        for (per_task, runs, bytes) in &written[..2] {
             assert!(
                 *bytes <= single * 3,
-                "{run_bytes} byte runs ({runs} runs, fan-in {fan_in}) wrote {bytes}, one run wrote {single}"
+                "{per_task} batches per task ({runs} runs, fan-in {fan_in}) wrote {bytes}, one task wrote {single}"
             );
         }
-        // A fan-in of two does need levels, and is still bounded by them.
-        let (_, _, runs, bytes) = written[3];
-        let levels = u64::BITS - (runs - 1).leading_zeros();
+        let (_, runs, bytes) = written[2];
+        assert!(runs as u64 > fan_in, "{written:?}; natural fan-in {fan_in}");
+        let mut levels = 0_u32;
+        let mut reduced = runs as u64;
+        while reduced > fan_in {
+            reduced = reduced.div_ceil(fan_in);
+            levels += 1;
+        }
         assert!(bytes <= single * (u64::from(levels) + 2), "{written:?}");
-    }
-
-    #[test]
-    fn a_small_decode_pool_serializes_tasks_however_many_workers_run() {
-        let _scratch = crate::graph_construction_encoding::ForcedScratchRoute::new();
-        let budgets = small_property_budgets();
-        let (nodes, edges) = concurrent_property_graph(2_400, 4_800, 150);
-        let expected = staged_with(budgets, &nodes, &edges).unwrap();
-        for (pool, most_at_once) in [(5_u64 << 20, 1), (9 << 20, 2)] {
-            let (budget, derived) = budget_admitting(&nodes, &edges, budgets, 8, 8);
-            assert_eq!(derived, 8);
-            let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let root = TempDir::new().unwrap();
-            let mut session = pinned_with(&root, budgets);
-            lanes(&mut session, 8);
-            // Every task reserves at least 4 MiB before it reads.
-            let _pool = crate::graph_construction_encoding::ForcedPartitions::with_decode_pool(pool);
-            let plan = overlapping_plan(&nodes, &edges, 2, &peak, budget);
-            let encoding = session.prepare_bulk_encoding(1, &plan, || false).unwrap();
-            assert_same(&expected, &inventory(&encoding));
-            let report = session.bulk_build_report();
-            assert_eq!(report.scratch_concurrency, 8, "{report:?}");
-            assert_eq!(report.decode_pool_bytes, pool);
-            assert!(
-                report.decode_peak_bytes > 0 && report.decode_peak_bytes <= pool,
-                "{report:?}"
-            );
-            let overlapped = peak.load(std::sync::atomic::Ordering::SeqCst);
-            assert_eq!(overlapped, most_at_once, "a {pool} byte pool let {overlapped} tasks decode");
-        }
     }
 
     const RSS_ROOT: &str = "GF_BULK_RSS_ROOT";
     const RSS_BUDGET: &str = "GF_BULK_RSS_BUDGET";
     const RSS_LANES: &str = "GF_BULK_RSS_LANES";
+    const RSS_PER_TASK: &str = "GF_BULK_RSS_PER_TASK";
 
     // Keep the natural Memory estimate above the budget that admits 16 scratch
     // workers; otherwise the planner correctly takes the in-memory route.
@@ -1166,7 +1119,11 @@ mod bulk_builder {
     fn assert_wide_batches_fit(budgets: GraphConstructionBudgets) {
         let (nodes, edges) = wide_property_graph();
         for batch in nodes.iter().chain(&edges) {
-            assert!(batch.num_rows() <= budgets.max_batch_rows, "{} rows", batch.num_rows());
+            assert!(
+                batch.num_rows() <= budgets.max_batch_rows,
+                "{} rows",
+                batch.num_rows()
+            );
             assert!(
                 batch.get_array_memory_size() <= budgets.max_batch_bytes,
                 "{} source bytes exceed {}",
@@ -1182,6 +1139,7 @@ mod bulk_builder {
         batches: usize,
         per_task: usize,
         make: fn(usize) -> RecordBatch,
+        peak: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl BulkBatchReader for Generated {
@@ -1195,26 +1153,47 @@ mod bulk_builder {
             task: usize,
             sink: &mut dyn FnMut(RecordBatch) -> Result<(), GfError>,
         ) -> Result<(), GfError> {
+            use std::sync::atomic::Ordering::SeqCst;
             let first = task * self.per_task;
+            let now = self.peak.fetch_add(1, SeqCst) + 1;
+            self.peak.fetch_max(now, SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(20));
             for index in first..self.batches.min(first + self.per_task) {
-                sink((self.make)(index))?;
+                if let Err(error) = sink((self.make)(index)) {
+                    self.peak.fetch_sub(1, SeqCst);
+                    return Err(error);
+                }
             }
+            self.peak.fetch_sub(1, SeqCst);
             Ok(())
         }
     }
 
-    fn generated_plan(budget: u64) -> BulkBuildPlan<'static> {
+    fn generated_plan(
+        budget: u64,
+        per_task: usize,
+        peak: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> BulkBuildPlan<'static> {
         let batches = WIDE_ROWS / WIDE_BATCH;
+        assert_eq!(
+            batches % per_task,
+            0,
+            "task groups must cover whole wide batches"
+        );
         let source = |make: fn(usize) -> RecordBatch| BulkSource {
             reader: Arc::new(Generated {
                 batches,
-                per_task: 2,
+                per_task,
                 make,
+                peak: Arc::clone(&peak),
             }),
-            tasks: batches.div_ceil(2),
+            tasks: batches.div_ceil(per_task),
             rows: WIDE_ROWS as u64,
             property_free: false,
-            decoded_bytes: (WIDE_ROWS * 5_000) as u64,
+            decoded_bytes: u64::try_from(
+                (make(0).get_array_memory_size() as u128) * batches as u128,
+            )
+            .expect("generated source bytes fit u64"),
         };
         BulkBuildPlan {
             nodes: vec![source(wide_node_batch)],
@@ -1250,6 +1229,12 @@ mod bulk_builder {
         };
         let budgets = rss_property_budgets();
         let before = peak_rss_bytes();
+        let lane_count: usize = lane_count.parse().unwrap();
+        let per_task = std::env::var(RSS_PER_TASK)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(2);
+        let overlap = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut session = GraphConstructionSession::open(
             Path::new(&path),
             Uuid::from_u128(OPERATION),
@@ -1258,18 +1243,55 @@ mod bulk_builder {
         )
         .unwrap();
         session.checkpoint.session_now_micros = CLOCK;
-        lanes(&mut session, lane_count.parse().unwrap());
-        let plan = generated_plan(budget.parse().unwrap());
-        assert_eq!(plan.route(), crate::BulkRoute::Scratch, "RSS proof must use the natural production route");
+        lanes(&mut session, lane_count);
+        let budget: u64 = budget.parse().unwrap();
+        let plan = generated_plan(budget, per_task, Arc::clone(&overlap));
+        assert_eq!(
+            plan.route(),
+            crate::BulkRoute::Scratch,
+            "RSS proof must use the natural production route"
+        );
+        assert!(
+            plan.estimated_resident_bytes() > budget,
+            "RSS route must be naturally admitted as Scratch"
+        );
         let encoding = session.prepare_bulk_encoding(1, &plan, || false).unwrap();
         let report = session.bulk_build_report();
+        assert_eq!(
+            report.scratch_concurrency as usize, lane_count,
+            "{report:?}"
+        );
+        assert!(report.property_runs > 8, "{report:?}");
+        assert!(report.property_source_bytes > 0, "{report:?}");
+        assert!(
+            report.property_peak_retained_bytes <= report.property_retained_budget_bytes,
+            "{report:?}"
+        );
+        assert!(
+            report.decode_peak_bytes > 0 && report.decode_peak_bytes <= report.decode_pool_bytes,
+            "{report:?}"
+        );
+        let overlapped = overlap.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            overlapped >= lane_count.min(2),
+            "{lane_count} workers overlapped only {overlapped}"
+        );
+        assert!(
+            overlapped <= lane_count,
+            "{overlapped} tasks for {lane_count} workers"
+        );
+        assert!(!scratch_dir(&session).exists());
         println!(
-            "RSS_RESULT before={before} peak={} concurrency={} runs={} retained={}/{} digest={}",
+            "RSS_RESULT before={before} peak={} concurrency={} overlap={} runs={} source_bytes={} retained={}/{} decode_pool={} decode_peak={} clean=1 digest={}",
             peak_rss_bytes(),
             report.scratch_concurrency,
+            overlapped,
             report.property_runs,
+            report.property_source_bytes,
             report.property_peak_retained_bytes,
             report.property_retained_budget_bytes,
+            report.decode_pool_bytes,
+            report.decode_peak_bytes,
             digest(&inventory(&encoding)),
         );
     }
@@ -1279,11 +1301,22 @@ mod bulk_builder {
         let budgets = rss_property_budgets();
         let (nodes, edges) = wide_property_graph();
         assert_wide_batches_fit(budgets);
-        let expected = digest(&staged_with(budgets, &nodes, &edges).unwrap());
+        let expected_inventory = staged_with(budgets, &nodes, &edges).unwrap();
+        assert!(
+            expected_inventory
+                .iter()
+                .any(|entry| entry.0.starts_with("edge_properties/"))
+        );
+        let expected = digest(&expected_inventory);
         let mut concurrencies = Vec::new();
         for wanted in [1, 2, 4, 8, 16] {
-            let (budget, derived) =
-                budget_admitting_with(&generated_plan, budgets, wanted, wanted);
+            let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let (budget, derived) = budget_admitting_with(
+                &|budget| generated_plan(budget, 2, Arc::clone(&peak)),
+                budgets,
+                wanted,
+                wanted,
+            );
             let root = TempDir::new().unwrap();
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .arg("--exact")
@@ -1292,10 +1325,15 @@ mod bulk_builder {
                 .env(RSS_ROOT, root.path())
                 .env(RSS_BUDGET, budget.to_string())
                 .env(RSS_LANES, wanted.to_string())
+                .env(RSS_PER_TASK, "2")
                 .output()
                 .unwrap();
             let stdout = String::from_utf8_lossy(&output.stdout);
-            assert!(output.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+            assert!(
+                output.status.success(),
+                "{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
             let line = stdout
                 .lines()
                 .find(|line| line.starts_with("RSS_RESULT"))
@@ -1307,23 +1345,100 @@ mod bulk_builder {
                     .to_owned()
             };
             let peak: u64 = field("peak").parse().unwrap();
-            assert_eq!(field("concurrency").parse::<usize>().unwrap(), derived, "{line}");
+            assert_eq!(
+                field("concurrency").parse::<usize>().unwrap(),
+                derived,
+                "{line}"
+            );
             assert_eq!(field("digest"), expected, "{line}");
-            assert!(peak <= budget, "peak RSS {peak} over budget {budget}: {line}");
-            let (retained, allowed) = field("retained").split_once('/').map(|(a, b)| (a.parse::<u64>().unwrap(), b.parse::<u64>().unwrap())).unwrap();
+            let overlap = field("overlap").parse::<usize>().unwrap();
+            assert!(overlap >= derived.min(2) && overlap <= derived, "{line}");
+            assert!(field("runs").parse::<u64>().unwrap() > 8, "{line}");
+            assert!(field("source_bytes").parse::<u64>().unwrap() > 0, "{line}");
+            assert_eq!(field("clean"), "1", "{line}");
+            assert!(
+                peak <= budget,
+                "peak RSS {peak} over budget {budget}: {line}"
+            );
+            let (retained, allowed) = field("retained")
+                .split_once('/')
+                .map(|(a, b)| (a.parse::<u64>().unwrap(), b.parse::<u64>().unwrap()))
+                .unwrap();
             assert!(retained > 0 && retained <= allowed, "{line}");
             println!("budget {budget} concurrency {derived}: {line}");
             concurrencies.push(derived);
         }
         assert_eq!(concurrencies, vec![1, 2, 4, 8, 16]);
+
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (budget, derived) = budget_admitting_with(
+            &|budget| generated_plan(budget, 2, Arc::clone(&peak)),
+            budgets,
+            8,
+            8,
+        );
+        assert_eq!(derived, 8);
+        let probe = generated_plan(budget, 20, Arc::clone(&peak));
+        let pool = crate::graph_construction_encoding::bulk_test_support::decode_pool(
+            &probe, budget, 8, budgets,
+        );
+        let large_request =
+            crate::graph_construction_encoding::bulk_test_support::max_task_decode_bytes(&probe);
+        let small_plan = generated_plan(budget, 10, Arc::clone(&peak));
+        let small_request =
+            crate::graph_construction_encoding::bulk_test_support::max_task_decode_bytes(
+                &small_plan,
+            );
+        assert!(large_request.min(pool) > pool / 2 && large_request.min(pool) <= pool);
+        assert!(small_request.min(pool) > pool / 3 && small_request.min(pool) <= pool / 2);
+        for (per_task, expected_overlap) in [(20, 1), (10, 2)] {
+            let root = TempDir::new().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("graph_construction::tests::bulk_builder::property_scratch_rss_child")
+                .arg("--nocapture")
+                .env(RSS_ROOT, root.path())
+                .env(RSS_BUDGET, budget.to_string())
+                .env(RSS_LANES, "8")
+                .env(RSS_PER_TASK, per_task.to_string())
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success(),
+                "{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let line = stdout
+                .lines()
+                .find(|line| line.starts_with("RSS_RESULT"))
+                .unwrap_or_else(|| panic!("no result: {stdout}"));
+            let field = |name: &str| {
+                line.split_whitespace()
+                    .find_map(|part| part.strip_prefix(&format!("{name}=")))
+                    .unwrap()
+                    .to_owned()
+            };
+            assert_eq!(field("concurrency"), "8", "{line}");
+            assert_eq!(
+                field("overlap").parse::<usize>().unwrap(),
+                expected_overlap,
+                "{line}"
+            );
+            assert_eq!(field("decode_pool").parse::<u64>().unwrap(), pool, "{line}");
+            assert!(field("decode_peak").parse::<u64>().unwrap() > 0, "{line}");
+            assert_eq!(field("digest"), expected, "{line}");
+            assert_eq!(field("clean"), "1", "{line}");
+        }
     }
 
     const CONCURRENT_CRASH_ROOT: &str = "GF_BULK_CONCURRENT_CRASH_ROOT";
     const CONCURRENT_CRASH_POINT: &str = "GF_BULK_CONCURRENT_CRASH_POINT";
 
-    fn concurrent_crash_budget() -> u64 {
-        let (nodes, edges) = concurrent_property_graph(4_800, 9_600, 150);
-        budget_admitting(&nodes, &edges, small_property_budgets(), 4, 16).0
+    fn concurrent_crash_budget(nodes: &[RecordBatch], edges: &[RecordBatch]) -> u64 {
+        let (budget, derived) = budget_admitting(nodes, edges, small_property_budgets(), 4, 4);
+        assert_eq!(derived, 4);
+        budget
     }
 
     /// The killed process: a concurrent scratch build that dies on the n-th
@@ -1336,9 +1451,9 @@ mod bulk_builder {
         ) else {
             return;
         };
-        let _scratch = crate::graph_construction_encoding::ForcedScratchRoute::new();
         let (name, occurrence) = point.split_once(':').unwrap();
-        let (nodes, edges) = concurrent_property_graph(4_800, 9_600, 150);
+        let (nodes, edges) = padded_concurrent_property_graph(4_800, 9_600, 150, 2 << 10);
+        let budget = concurrent_crash_budget(&nodes, &edges);
         let mut session = GraphConstructionSession::open(
             Path::new(&path),
             Uuid::from_u128(OPERATION),
@@ -1347,21 +1462,22 @@ mod bulk_builder {
         )
         .unwrap();
         session.checkpoint.session_now_micros = CLOCK;
-        sixteen_lanes(&mut session);
+        lanes(&mut session, 4);
         let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let plan = overlapping_plan(&nodes, &edges, 2, &peak, concurrent_crash_budget());
-        let _sizing = crate::graph_construction_encoding::ForcedPropertySizing::set(40 << 10, 3);
-        *crate::graph_construction::ARMED_FAILPOINT.lock().unwrap() = Some((name.to_owned(), occurrence.parse().unwrap()));
+        let plan = overlapping_plan(&nodes, &edges, 2, &peak, budget);
+        assert!(plan.estimated_resident_bytes() > budget);
+        assert_eq!(plan.route(), crate::BulkRoute::Scratch);
+        *crate::graph_construction::ARMED_FAILPOINT.lock().unwrap() =
+            Some((name.to_owned(), occurrence.parse().unwrap()));
         session.prepare_bulk_encoding(1, &plan, || false).unwrap();
     }
 
     #[test]
     fn a_kill_during_a_concurrent_scratch_pass_reruns_to_identical_bytes() {
-        let _scratch = crate::graph_construction_encoding::ForcedScratchRoute::new();
         let budgets = small_property_budgets();
-        let (nodes, edges) = concurrent_property_graph(4_800, 9_600, 150);
+        let (nodes, edges) = padded_concurrent_property_graph(4_800, 9_600, 150, 2 << 10);
         let expected = staged_with(budgets, &nodes, &edges).unwrap();
-        let budget = concurrent_crash_budget();
+        let budget = concurrent_crash_budget(&nodes, &edges);
         let mut left_scratch = 0;
         for point in [
             "bulk.during_property_run:3",
@@ -1382,21 +1498,24 @@ mod bulk_builder {
             left_scratch += usize::from(walkdir_has(root.path(), "bulk-scratch"));
             // Recovery: opening the session deletes what the killed attempt left.
             let mut session = pinned_with(&root, budgets);
-            sixteen_lanes(&mut session);
+            lanes(&mut session, 4);
             assert!(
                 !scratch_dir(&session).exists(),
                 "recovery kept scratch after {point}"
             );
-            let _sizing =
-                crate::graph_construction_encoding::ForcedPropertySizing::set(40 << 10, 3);
             let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let plan = overlapping_plan(&nodes, &edges, 2, &peak, budget);
+            assert!(plan.estimated_resident_bytes() > budget);
+            assert_eq!(plan.route(), crate::BulkRoute::Scratch);
             let rerun = session.prepare_bulk_encoding(1, &plan, || false).unwrap();
             assert_eq!(expected, inventory(&rerun), "killed at {point}");
-            assert!(session.bulk_build_report().scratch_concurrency >= 2);
+            assert_eq!(session.bulk_build_report().scratch_concurrency, 4);
             assert!(!scratch_dir(&session).exists());
         }
-        assert!(left_scratch >= 3, "a killed attempt must leave scratch behind");
+        assert!(
+            left_scratch >= 3,
+            "a killed attempt must leave scratch behind"
+        );
     }
 
     fn refusal(nodes: &[RecordBatch], edges: &[RecordBatch]) -> String {
@@ -1594,7 +1713,8 @@ mod bulk_builder {
         for budget in [920 << 20, 944 << 20] {
             let root = TempDir::new().unwrap();
             let mut session = open(&root);
-            let _frames = crate::graph_construction_encoding::ForcedPropertyFrames::set(1);
+            let _frames =
+                crate::graph_construction_encoding::bulk_test_support::ForcedPropertyFrames::set(1);
             let mut plan = plan(&nodes, &edges, 1);
             plan.memory_budget = Some(budget);
             let scratch = session.prepare_bulk_encoding(1, &plan, || false).unwrap();
@@ -1861,7 +1981,7 @@ mod bulk_builder {
         workers: usize,
         (edge_partitions, csr_partitions): (usize, usize),
     ) -> Result<ScratchRun, GfError> {
-        let _forced = crate::graph_construction_encoding::ForcedPartitions::set(
+        let _forced = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(
             edge_partitions,
             csr_partitions,
         );
@@ -2022,7 +2142,10 @@ mod bulk_builder {
         let expected = bulk_with(&nodes, &edges, 1, 2).unwrap();
         // All 3,001 entries at a key used to require 120,040 bytes from
         // this 32 KiB gate. Edge partitions themselves fit the gate.
-        let _gate = crate::graph_construction_encoding::ForcedPartitions::with_gate(32 << 10);
+        let _gate =
+            crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(
+                32 << 10,
+            );
         let run = scratch_run(&nodes, &edges, 1, 2, (16, 2)).unwrap();
         assert_same(&expected, &run.inventory);
         assert_scratch_traffic(&run.report, 3001);
@@ -2112,10 +2235,14 @@ mod bulk_builder {
 
     #[test]
     fn a_cancelled_over_budget_build_leaves_no_scratch_and_the_rerun_is_identical() {
-        let _gate = crate::graph_construction_encoding::ForcedPartitions::with_gate(32 << 10);
+        let _gate =
+            crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(
+                32 << 10,
+            );
         let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
         let expected = bulk_with(&nodes, &edges, 2, 4).unwrap();
-        let _forced = crate::graph_construction_encoding::ForcedPartitions::set(6, 4);
+        let _forced =
+            crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(6, 4);
         for polls_before_cancel in [0_usize, 1, 40, 400, 2_000] {
             let root = TempDir::new().unwrap();
             let mut session = pinned(&root);
@@ -2183,11 +2310,14 @@ mod bulk_builder {
             return;
         };
         let (edge, csr) = partitions.split_once(',').unwrap();
-        let _forced = crate::graph_construction_encoding::ForcedPartitions::set(
+        let _forced = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(
             edge.parse().unwrap(),
             csr.parse().unwrap(),
         );
-        let _gate = crate::graph_construction_encoding::ForcedPartitions::with_gate(32 << 10);
+        let _gate =
+            crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(
+                32 << 10,
+            );
         let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
         let mut session = GraphConstructionSession::open(
             Path::new(&path),
@@ -2243,8 +2373,12 @@ mod bulk_builder {
                 !scratch_dir(&session).exists(),
                 "recovery kept scratch after {failpoint}"
             );
-            let _forced = crate::graph_construction_encoding::ForcedPartitions::set(7, 5);
-            let _gate = crate::graph_construction_encoding::ForcedPartitions::with_gate(32 << 10);
+            let _forced =
+                crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(7, 5);
+            let _gate =
+                crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(
+                    32 << 10,
+                );
             let rerun = session
                 .prepare_bulk_encoding(1, &scratch_plan(&nodes, &edges, 2), || false)
                 .unwrap();
@@ -2375,7 +2509,8 @@ mod bulk_builder {
             .collect::<Vec<_>>();
         let expected = bulk_with(&nodes, &edges, 2, 4).unwrap();
         for bounded in [false, true] {
-            let _forced = crate::graph_construction_encoding::ForcedPartitions::set(8, 4);
+            let _forced =
+                crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(8, 4);
             let mut plan = scratch_plan(&nodes, &edges, 2);
             if bounded {
                 plan.edges[0].reader = Arc::new(Bounded(Memory {
@@ -2423,8 +2558,11 @@ mod bulk_builder {
         assert_same(&staged(&nodes, &edges), &expected);
         for bounded in [false, true] {
             for (gate, parts) in [(32 << 10, 4), (64 << 10, 1)] {
-                let _gate = crate::graph_construction_encoding::ForcedPartitions::with_gate(gate);
-                let _parts = crate::graph_construction_encoding::ForcedPartitions::set(parts, 2);
+                let _gate = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(gate);
+                let _parts =
+                    crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(
+                        parts, 2,
+                    );
                 let mut plan = scratch_plan(&nodes, &edges, 1);
                 if bounded {
                     plan.edges[0].reader = Arc::new(Bounded(Memory {
@@ -2457,8 +2595,12 @@ mod bulk_builder {
                 &vec![ids[1]; 3001],
             )];
             let expected = bulk_with(&nodes, &refused, 1, 1).err().unwrap();
-            let _gate = crate::graph_construction_encoding::ForcedPartitions::with_gate(32 << 10);
-            let _parts = crate::graph_construction_encoding::ForcedPartitions::set(1, 2);
+            let _gate =
+                crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(
+                    32 << 10,
+                );
+            let _parts =
+                crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(1, 2);
             let root = TempDir::new().unwrap();
             let mut session = pinned(&root);
             let actual = session
@@ -2477,7 +2619,10 @@ mod bulk_builder {
             &vec![ids[0]; 3001],
             &vec![ids[1]; 3001],
         )];
-        let _gate = crate::graph_construction_encoding::ForcedPartitions::with_gate(32 << 10);
+        let _gate =
+            crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(
+                32 << 10,
+            );
         let error = scratch_run(&nodes, &edges, 1, 1, (1, 2)).err().unwrap();
         assert!(error.to_string().contains("duplicate identity"), "{error}");
     }
@@ -2506,7 +2651,10 @@ mod bulk_builder {
             // Previously each relation retained its 200-record tail while
             // partitions advanced: 102,400 bytes outside either sort gate.
             assert!(32 * 200 * 16 > gate);
-            let _gate = crate::graph_construction_encoding::ForcedPartitions::with_gate(gate);
+            let _gate =
+                crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(
+                    gate,
+                );
             let run = scratch_run(&nodes, &edges, 1, workers, parts).unwrap();
             assert_same(&expected, &run.inventory);
             assert_eq!(run.report.peak_csr_carry_entries, 1000);
@@ -2553,7 +2701,9 @@ mod bulk_builder {
         let (nodes, edges) = graph(640, 1_280, 10, identity_order);
         let expected = bulk_with(&nodes, &edges, 1, WORKERS).unwrap();
         for scratch in [false, true] {
-            let _forced = scratch.then(|| crate::graph_construction_encoding::ForcedPartitions::set(8, 4));
+            let _forced = scratch.then(|| {
+                crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(8, 4)
+            });
             let log = Arc::new(std::sync::Mutex::new(Vec::new()));
             let mut plan = if scratch {
                 scratch_plan(&nodes, &edges, 1)
@@ -2589,7 +2739,11 @@ mod bulk_builder {
                     .filter(|(held, _)| *held == kind)
                     .map(|(_, task)| *task)
                     .collect::<Vec<_>>();
-                let expected_tasks = if kind == "nodes" { nodes.len() } else { edges.len() };
+                let expected_tasks = if kind == "nodes" {
+                    nodes.len()
+                } else {
+                    edges.len()
+                };
                 // The over-budget edge pass first samples 64 tasks to place its
                 // splitters; the pass itself follows.
                 let sampled = usize::from(scratch && kind == "edges") * 64;

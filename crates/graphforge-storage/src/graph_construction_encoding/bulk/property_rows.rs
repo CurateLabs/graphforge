@@ -53,11 +53,9 @@ pub(super) const FRAME_INDEX_ENTRY_BYTES: u64 = (std::mem::size_of::<FrameMeta>(
 const KEY_BYTES: usize = 32;
 #[cfg(test)]
 #[path = "property_rows_test_support.rs"]
-mod test_support;
+pub(crate) mod test_support;
 #[cfg(test)]
-use test_support::{FORCED_FRAME_BYTES, FORCED_SIZING};
-#[cfg(test)]
-pub(crate) use test_support::{ForcedPropertyFrames, ForcedPropertySizing};
+use test_support::FORCED_FRAME_BYTES;
 
 pub(super) const HEADER: usize = 16;
 /// Columns every scratch row leads with: the identity and the owner (a node's
@@ -703,16 +701,6 @@ impl<'a> PropertyRows<'a> {
         merge_gate: Arc<ByteGate>,
         index_budget: Arc<FrameIndexBudget>,
     ) -> Self {
-        #[cfg(test)]
-        let sizing =
-            FORCED_SIZING
-                .with(std::cell::Cell::get)
-                .map_or(sizing, |(run_bytes, fan_in)| PropertySizing {
-                    run_bytes,
-                    retained_bytes: sizing.retained_bytes.max(run_bytes as u64),
-                    fan_in,
-                    ..sizing
-                });
         let frame_target = sizing.frame_bytes.max(1);
         #[cfg(test)]
         let frame_target = FORCED_FRAME_BYTES

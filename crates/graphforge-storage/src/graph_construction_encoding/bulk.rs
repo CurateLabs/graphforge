@@ -52,15 +52,12 @@ mod scratch;
 mod scratch_csr;
 mod scratch_edges;
 mod tables;
+#[cfg(test)]
+#[path = "bulk/bulk_test_support.rs"]
+pub(crate) mod test_support;
 
 pub use budget::{BulkRoute, BulkStagedReason};
-#[cfg(test)]
-pub(crate) use budget::{
-    ForcedPartitions, ForcedScratchRoute, derived_concurrency, scratch_minimum_bytes,
-};
 pub use plan::{BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkSource};
-#[cfg(test)]
-pub(crate) use property_rows::{ForcedPropertyFrames, ForcedPropertySizing};
 
 use budget::ScratchPlan;
 use emit::{EdgeEmitter, RelationStats, Semantics};

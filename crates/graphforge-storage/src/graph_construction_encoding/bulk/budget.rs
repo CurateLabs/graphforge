@@ -135,11 +135,6 @@ impl BulkBuildPlan<'_> {
     /// Route the plan for `budget` resident bytes.
     #[must_use]
     pub fn route_for(&self, budget: u64) -> BulkRoute {
-        #[cfg(test)]
-        if FORCED_SCRATCH.with(std::cell::Cell::get) && self.node_tables_resident_bytes() <= budget
-        {
-            return BulkRoute::Scratch;
-        }
         if self.estimated_resident_bytes() <= budget {
             BulkRoute::Memory
         } else if self.node_tables_resident_bytes() > budget {
@@ -242,14 +237,9 @@ pub(super) struct ScratchPlan {
 
 #[cfg(test)]
 #[path = "budget_test_support.rs"]
-mod test_support;
+pub(crate) mod test_support;
 #[cfg(test)]
-use test_support::{FORCED_DECODE, FORCED_GATE, FORCED_PARTITIONS, FORCED_SCRATCH};
-#[cfg(test)]
-pub(crate) use test_support::{
-    ForcedPartitions, ForcedScratchRoute, derived_concurrency, scratch_minimum_bytes,
-};
-
+use test_support::{FORCED_GATE, FORCED_PARTITIONS};
 impl ScratchPlan {
     #[cfg(test)]
     pub(super) fn derive(plan: &BulkBuildPlan<'_>, budget: u64, workers: usize) -> Self {
@@ -370,10 +360,6 @@ impl ScratchPlan {
                 (edge as u64, csr as u64)
             });
         let decode_bytes = working / 8 * 3;
-        #[cfg(test)]
-        let decode_bytes = FORCED_DECODE
-            .with(std::cell::Cell::get)
-            .unwrap_or(decode_bytes);
         Self {
             concurrency: usize::try_from(concurrency).unwrap_or(1),
             edge_partitions: usize::try_from(edge_partitions).unwrap_or(1),
