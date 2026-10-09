@@ -309,7 +309,7 @@ pub(super) fn decode(
                 "Uncompressed Parquet page size disagrees with its header",
             ));
         }
-        (compressed.body.clone(), compressed.body_capacity)
+        (compressed.body, compressed.body_capacity)
     };
     check(cancellation)?;
     let physical_bytes = compressed.physical_bytes;
