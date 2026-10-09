@@ -63,8 +63,8 @@ pub use bulk::{
 };
 #[cfg(test)]
 pub(crate) use bulk::{
-    ForcedPartitions, ForcedPropertyFrames, ForcedPropertySizing, derived_concurrency,
-    scratch_minimum_bytes,
+    ForcedPartitions, ForcedPropertyFrames, ForcedPropertySizing, ForcedScratchRoute,
+    derived_concurrency, scratch_minimum_bytes,
 };
 pub(crate) use bulk::{discard_scratch, encode_bulk};
 #[cfg(test)]

@@ -165,6 +165,7 @@ impl PropertyRows<'_> {
         cancel: &AtomicBool,
     ) -> Result<Run, GfError> {
         let uuid_name = self.uuid_name();
+        self.note_merge_inputs(runs.len());
         let mut inputs = runs
             .iter()
             .map(|run| Input::open(self, run, lower, upper))

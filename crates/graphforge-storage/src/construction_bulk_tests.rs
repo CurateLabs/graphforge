@@ -900,6 +900,7 @@ mod bulk_builder {
 
     #[test]
     fn property_scratch_concurrency_follows_the_budget_and_publishes_the_same_bytes() {
+        let _scratch = crate::graph_construction_encoding::ForcedScratchRoute::new();
         let budgets = small_property_budgets();
         let (nodes, edges) = concurrent_property_graph(4_800, 9_600, 150);
         let expected = staged_with(budgets, &nodes, &edges).unwrap();
@@ -969,6 +970,7 @@ mod bulk_builder {
 
     #[test]
     fn property_scratch_bytes_do_not_grow_with_the_number_of_runs() {
+        let _scratch = crate::graph_construction_encoding::ForcedScratchRoute::new();
         let budgets = small_property_budgets();
         let (nodes, edges) = concurrent_property_graph(4_800, 9_600, 150);
         let expected = staged_with(budgets, &nodes, &edges).unwrap();
@@ -1005,6 +1007,7 @@ mod bulk_builder {
 
     #[test]
     fn a_small_decode_pool_serializes_tasks_however_many_workers_run() {
+        let _scratch = crate::graph_construction_encoding::ForcedScratchRoute::new();
         let budgets = small_property_budgets();
         let (nodes, edges) = concurrent_property_graph(2_400, 4_800, 150);
         let expected = staged_with(budgets, &nodes, &edges).unwrap();
@@ -1155,6 +1158,7 @@ mod bulk_builder {
         ) else {
             return;
         };
+        let _scratch = crate::graph_construction_encoding::ForcedScratchRoute::new();
         let budgets = small_property_budgets();
         let before = peak_rss_bytes();
         let mut session = GraphConstructionSession::open(
@@ -1182,6 +1186,7 @@ mod bulk_builder {
 
     #[test]
     fn measured_peak_rss_stays_within_the_budget_at_every_concurrency() {
+        let _scratch = crate::graph_construction_encoding::ForcedScratchRoute::new();
         let budgets = small_property_budgets();
         let (nodes, edges) = wide_property_graph();
         let expected = digest(&staged_with(budgets, &nodes, &edges).unwrap());
@@ -1241,6 +1246,7 @@ mod bulk_builder {
         ) else {
             return;
         };
+        let _scratch = crate::graph_construction_encoding::ForcedScratchRoute::new();
         let (name, occurrence) = point.split_once(':').unwrap();
         let (nodes, edges) = concurrent_property_graph(4_800, 9_600, 150);
         let mut session = GraphConstructionSession::open(
@@ -1261,6 +1267,7 @@ mod bulk_builder {
 
     #[test]
     fn a_kill_during_a_concurrent_scratch_pass_reruns_to_identical_bytes() {
+        let _scratch = crate::graph_construction_encoding::ForcedScratchRoute::new();
         let budgets = small_property_budgets();
         let (nodes, edges) = concurrent_property_graph(4_800, 9_600, 150);
         let expected = staged_with(budgets, &nodes, &edges).unwrap();

@@ -134,6 +134,11 @@ impl BulkBuildPlan<'_> {
     /// Route the plan for `budget` resident bytes.
     #[must_use]
     pub fn route_for(&self, budget: u64) -> BulkRoute {
+        #[cfg(test)]
+        if FORCED_SCRATCH.with(std::cell::Cell::get) && self.node_tables_resident_bytes() <= budget
+        {
+            return BulkRoute::Scratch;
+        }
         if self.estimated_resident_bytes() <= budget {
             BulkRoute::Memory
         } else if self.node_tables_resident_bytes() > budget {
@@ -222,6 +227,7 @@ thread_local! {
         const { std::cell::Cell::new(None) };
     static FORCED_GATE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     static FORCED_DECODE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    static FORCED_SCRATCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Forces the partition counts of the builds the current test thread runs,
@@ -254,6 +260,26 @@ impl Drop for ForcedPartitions {
         FORCED_PARTITIONS.with(|forced| forced.set(None));
         FORCED_GATE.with(|forced| forced.set(None));
         FORCED_DECODE.with(|forced| forced.set(None));
+    }
+}
+
+/// Routes every build the current test thread runs, whose node tables fit its
+/// budget, through scratch however small the graph, until dropped.
+#[cfg(test)]
+pub(crate) struct ForcedScratchRoute;
+
+#[cfg(test)]
+impl ForcedScratchRoute {
+    pub(crate) fn new() -> Self {
+        FORCED_SCRATCH.with(|forced| forced.set(true));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for ForcedScratchRoute {
+    fn drop(&mut self) {
+        FORCED_SCRATCH.with(|forced| forced.set(false));
     }
 }
 
@@ -296,14 +322,15 @@ impl ScratchPlan {
         let available = budget
             .saturating_sub(shared)
             .saturating_add(MIN_WORKING_BYTES);
-        // A property-bearing worker also keeps what its thread allocates and
-        // frees: measured on SNB BI SF1, peak resident memory grew by about
+        // Each further property-bearing worker also keeps what its thread
+        // allocates and frees: measured on SNB BI SF1, peak resident memory grew by about
         // 120 MB per worker beyond the pools (1.27 GB at no workers, 2.10 GB at
         // 7, 3.05 GB at 15). Those bytes come off the working set, and the
         // workers may take at most five eighths of it.
         let overhead = |concurrency: u64| {
             if properties {
-                concurrency.saturating_mul(WORKER_BYTES)
+                // The first worker is part of the fixed footprint.
+                (concurrency - 1).saturating_mul(WORKER_BYTES)
             } else {
                 0
             }
@@ -312,7 +339,7 @@ impl ScratchPlan {
         let ceil = |bytes: u64, per: u64| bytes.div_ceil(per.max(1));
         let mut best = None;
         for concurrency in (1..=workers.max(1) as u64).rev() {
-            if concurrency > 1 && overhead(concurrency) > available / 8 * 5 {
+            if overhead(concurrency) > available / 8 * 5 {
                 continue;
             }
             let working = available.saturating_sub(overhead(concurrency));
@@ -353,7 +380,7 @@ impl ScratchPlan {
         // will bound sorting independently of the initial partition cap.
         let (concurrency, working, gate_bytes, edge_partitions, csr_partitions, staging) = best
             .unwrap_or_else(|| {
-                let working = available.saturating_sub(overhead(1));
+                let working = available;
                 let gate_bytes = working / 4 * 3;
                 #[cfg(test)]
                 let gate_bytes = FORCED_GATE.with(std::cell::Cell::get).unwrap_or(gate_bytes);
@@ -576,7 +603,10 @@ mod tests {
             let shared = floor - MIN_WORKING_BYTES;
             let property = sized.property;
             assert!(
-                shared + workers * WORKER_BYTES + property.retained_bytes + sized.decode_bytes
+                shared
+                    + (workers - 1) * WORKER_BYTES
+                    + property.retained_bytes
+                    + sized.decode_bytes
                     <= budget + MIN_WORKING_BYTES
                     || property.retained_bytes <= 1 << 20,
                 "budget {budget}: {sized:?}"

@@ -147,6 +147,7 @@ pub(super) struct PropertyRows<'a> {
     written: AtomicU64,
     read: AtomicU64,
     runs_formed: AtomicU64,
+    merge_inputs_peak: AtomicU64,
 }
 
 /// For each owner of a group without properties: its smallest identity and
@@ -414,6 +415,7 @@ impl<'a> PropertyRows<'a> {
             written: AtomicU64::new(0),
             read: AtomicU64::new(0),
             runs_formed: AtomicU64::new(0),
+            merge_inputs_peak: AtomicU64::new(0),
         }
     }
 
@@ -479,6 +481,16 @@ impl<'a> PropertyRows<'a> {
     /// The most bytes concurrent intake held at once.
     pub(super) fn peak_retained_bytes(&self) -> u64 {
         self.gate.peak()
+    }
+
+    /// The most runs any one merge held open.
+    pub(super) fn merge_inputs_peak(&self) -> u64 {
+        self.merge_inputs_peak.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn note_merge_inputs(&self, inputs: usize) {
+        self.merge_inputs_peak
+            .fetch_max(inputs as u64, Ordering::Relaxed);
     }
 
     /// Sorted runs formed from the input.
@@ -1103,6 +1115,15 @@ mod tests {
                 "run_bytes {run_bytes} fan_in {fan_in} threads {threads}"
             );
             assert!(rows.written_bytes() > 0 && rows.read_bytes() > 0);
+            // No merge held more runs open than the fan-in, however many there were.
+            assert!(
+                rows.merge_inputs_peak() <= fan_in as u64,
+                "{} runs open at fan-in {fan_in}",
+                rows.merge_inputs_peak()
+            );
+            if formed > fan_in as u64 {
+                assert!(rows.merge_inputs_peak() >= 2);
+            }
         }
     }
 
