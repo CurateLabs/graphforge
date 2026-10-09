@@ -50,6 +50,11 @@ pub trait BulkBatchReader: Send + Sync {
         0
     }
 
+    /// Give the reader the pool its tasks reserve their decode workspace from
+    /// (#1918). The builder calls it once, before any task runs; a reader with
+    /// no source-controlled allocations may ignore it.
+    fn bind_workspace(&self, _workspace: &Arc<super::SourceWorkspace>) {}
+
     /// The smallest and largest identity UUID among `task`'s rows, when the
     /// source's footer states them exactly (no nulls, so no derived UUIDs). The
     /// over-budget route uses them to split edges into UUID ranges of equal
@@ -231,6 +236,16 @@ pub struct BulkBuildReport {
     /// Fixed property workspace reserved before decoding any source.
     #[serde(default)]
     pub property_workspace_reserved_bytes: u64,
+    /// Bytes of the pool the registered-source readers reserved task workspace
+    /// from (#1918).
+    #[serde(default)]
+    pub source_workspace_capacity_bytes: u64,
+    /// The most workspace bytes the readers held at once.
+    #[serde(default)]
+    pub source_workspace_peak_bytes: u64,
+    /// Task reservations the readers made.
+    #[serde(default)]
+    pub source_workspace_reservations: u64,
 }
 
 #[derive(Clone, Copy, Default)]

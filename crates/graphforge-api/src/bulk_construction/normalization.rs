@@ -246,6 +246,7 @@ fn normalize_properties<F>(
     ordinal: u64,
     row: usize,
     columns: &[(&Field, &ArrayRef)],
+    keep: bool,
     mut owner_validation: F,
 ) -> Result<BTreeMap<String, PropValue>, BulkValidationError>
 where
@@ -271,7 +272,7 @@ where
                     })?,
                 )
             }
-        } else {
+        } else if keep {
             property_value_at(array.as_ref(), row).map_err(|message| {
                 row_error(
                     kind,
@@ -281,8 +282,23 @@ where
                     &message,
                 )
             })?
+        } else {
+            // The value is checked as it is converted and dropped, so a cell of
+            // millions of children is never all converted at once.
+            check_property_value_at(array.as_ref(), row).map_err(|message| {
+                row_error(
+                    kind,
+                    BulkValidationReason::UnsupportedPropertyType,
+                    ordinal,
+                    field.name(),
+                    &message,
+                )
+            })?;
+            PropValue::Null
         };
-        values.insert(field.name().to_owned(), value);
+        if keep {
+            values.insert(field.name().to_owned(), value);
+        }
     }
     Ok(values)
 }
@@ -389,6 +405,33 @@ fn is_preserved_spatial_field(field: &Field) -> bool {
         .data_type()
             == field.data_type()
     })
+}
+
+/// Convert the cell at `row` exactly as [`property_value_at`] does, with the
+/// same refusals in the same order, but hold only one converted value at a
+/// time: a list's children are converted and dropped one by one.
+fn check_property_value_at(array: &dyn Array, row: usize) -> Result<(), String> {
+    macro_rules! each_child {
+        ($ty:ty) => {{
+            let values = array
+                .as_any()
+                .downcast_ref::<$ty>()
+                .ok_or_else(|| "Arrow array does not match its schema".to_owned())?
+                .value(row);
+            for index in 0..values.len() {
+                check_property_value_at(values.as_ref(), index)?;
+            }
+            Ok(())
+        }};
+    }
+    if array.is_null(row) {
+        return Ok(());
+    }
+    match array.data_type() {
+        DataType::List(_) => each_child!(ListArray),
+        DataType::LargeList(_) => each_child!(LargeListArray),
+        _ => property_value_at(array, row).map(|_| ()),
+    }
 }
 
 fn property_value_at(array: &dyn Array, row: usize) -> Result<PropValue, String> {
@@ -1040,7 +1083,9 @@ impl GraphForge {
         operation_uuid: OperationId,
         batches: &[RecordBatch],
     ) -> Result<ValidatedBulkNodes, BulkValidationError> {
-        self.normalize_bulk_nodes(operation_uuid, batches, false)
+        // An import keeps the Arrow property columns as they are and needs only
+        // the identities and labels back, so no row retains its property values.
+        self.normalize_bulk_nodes(operation_uuid, batches, false, false)
     }
 
     pub(crate) fn normalize_import_node_chunk(
@@ -1077,14 +1122,17 @@ impl GraphForge {
                 &error.to_string(),
             )
         })?;
-        self.normalize_bulk_nodes(operation_uuid, batches, true)
+        self.normalize_bulk_nodes(operation_uuid, batches, true, true)
     }
 
+    /// `keep_properties` false still validates every property value, then drops
+    /// it with its row: the result holds only identities and labels.
     pub(super) fn normalize_bulk_nodes(
         &self,
         operation_uuid: OperationId,
         batches: &[RecordBatch],
         reject_existing: bool,
+        keep_properties: bool,
     ) -> Result<ValidatedBulkNodes, BulkValidationError> {
         let source_generation_uuid = *self
             .current_generation_uuid
@@ -1142,6 +1190,7 @@ impl GraphForge {
                     ordinal,
                     row,
                     &properties,
+                    keep_properties,
                     |name, field| validate_node_property(self, ordinal, label, name, field),
                 )?;
                 rows.push(BulkNodeRow {
@@ -1181,9 +1230,18 @@ impl GraphForge {
                 &error.to_string(),
             )
         })?;
-        self.normalize_bulk_edges(operation_uuid, batches, same_request_nodes, true, None)
+        self.normalize_bulk_edges(
+            operation_uuid,
+            batches,
+            same_request_nodes,
+            true,
+            None,
+            true,
+        )
     }
 
+    /// `keep_properties` false still validates every property value, then drops
+    /// it with its row: the result holds only identities, endpoints and types.
     pub(super) fn normalize_bulk_edges(
         &self,
         operation_uuid: OperationId,
@@ -1191,6 +1249,7 @@ impl GraphForge {
         same_request_nodes: &ValidatedBulkNodes,
         reject_existing: bool,
         additional_known_nodes: Option<&BTreeSet<Uuid>>,
+        keep_properties: bool,
     ) -> Result<ValidatedBulkEdges, BulkValidationError> {
         let source_generation_uuid = *self
             .current_generation_uuid
@@ -1265,6 +1324,7 @@ impl GraphForge {
                     ordinal,
                     row,
                     &properties,
+                    keep_properties,
                     |name, field| validate_edge_property(self, ordinal, rel_type, name, field),
                 )?;
                 rows.push(BulkEdgeRow {
@@ -1323,6 +1383,7 @@ impl GraphForge {
             &assumed_endpoints,
             true,
             None,
+            false,
         )?;
         canonical_import_chunk(
             BulkInputKind::Edge,

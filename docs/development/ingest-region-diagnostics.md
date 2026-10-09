@@ -195,12 +195,12 @@ The property reservation reuses the canonical CSR workspace between stages. Its
 fixed payload/encoder allowance is eight times `max_batch_bytes`, plus 32 MiB;
 owner inventory adds `max_catalog_identifier_bytes` and
 `max_batch_rows * (8 * ceil(max_property_columns / 64) + 128)`. Cached source
-metadata, schema transients and available IPC decoder bounds are accounted
-separately. With default construction limits, property workspace is 648 MiB,
-before those source allowances. This is an admission reservation, not a measured
-RSS value. Raw registered-source Parquet decoding and normalization expansion
-remain a separate bound under #1918; report the exact physical and logical input
-batch geometry rather than extending a cohort's RSS result to arbitrary inputs.
+metadata, schema transients and the registered sources' decoder bounds are
+accounted separately (see "Source decoding bound" below). With default
+construction limits, property workspace is 648 MiB, before those source
+allowances. This is an admission reservation, not a measured RSS value. Report the
+exact physical and logical input batch geometry rather than extending a cohort's
+RSS result to arbitrary inputs.
 
 For a fixed-budget payload ladder, keep node/edge counts and source batch rows
 constant, then increase variable-width property bytes. Set
@@ -266,6 +266,65 @@ Input SHA-256 identities used by the S22/S24 comparisons are:
 
 Raw receipts, artifact comparison output, timings, and recovery observations
 belong on the producing issue or PR, outside this documentation tree.
+
+## Source decoding bound
+
+A registered source is sized before it is decoded (ADR 0058, "Source decoding is
+sized and reserved before it allocates"), and the receipt's `bulk_build` names the
+pool the sizes were reserved from: `source_workspace_capacity_bytes`, the most it
+held at once (`source_workspace_peak_bytes`) and the reservations made
+(`source_workspace_reservations`). They are admission numbers, like
+`property_workspace_reserved_bytes`, not measured resident bytes; the process
+measurements below are.
+
+Three kinds of evidence stand behind the bound, each reproducible from the tree:
+
+- `crates/graphforge-api/tests/bounded_source_decoding.rs` builds inputs whose
+  stored bytes understate their decoded size on purpose: dictionary pages whose
+  entries expand per row, `DELTA_BYTE_ARRAY` pages that share a megabyte-long
+  prefix, 700-column schemas, lists with millions of children, compressed Arrow
+  buffers that advertise eight gigabytes, and pages and footers whose stated
+  lengths the file cannot hold. A counting global allocator measures the process's
+  live heap bytes across `validate`; each input is imported on the resident route,
+  through scratch and (where it is small enough) staged chunk by chunk, and the
+  three must publish the same answers, derived identities included.
+- `crates/graphforge-api/tests/bounded_source_rss.rs` re-executes its test binary
+  as a child for each case and reads the child's own `VmHWM` when its import ends,
+  under `ulimit -v 12 GiB` so a decode that ignored its budget aborts instead of
+  taking the host. Inputs are written by the parent, so the child's peak is the
+  import's. A ladder holds `GF_BULK_BUILD_MEMORY_BUDGET_BYTES` at 1,100 MiB and
+  grows only the decoded payload (one dictionary column of four 8 KiB strings, so
+  files of a few hundred kilobytes decode to 16, 32 and 64 MB); a second case is
+  refused while small. `GF_RSS_REPORT=<file>` appends each case as a JSON line with
+  its peak and starting RSS, the bytes the import read and wrote (`/proc/self/io`)
+  and the scratch bytes the receipt reports, so source reads and scratch traffic are
+  reported beside the resident set and never inferred from it.
+- Real inputs go through the release CLI. Convert SNB BI SF1 with
+  `graphforge-benchmark-gdc-scorecard convert --mapping
+  benchmarks/profiles/gdc/snb-bi-load-mapping.json --input-root
+  <cache>/snb-bi/extracted/bi-sf1-composite-projected-fk --output-dir <dir>`; the
+  conversion manifest records the mapping's SHA-256 and each table's input and
+  output SHA-256. Generate Graph500 with `graph500-generator --scale S
+  --edge-factor 16 --seed N --nodes F --edges F`. Load each with
+  `gf --json --project P import-session begin|register-parquet|validate|commit`,
+  `GF_BULK_BUILD_MEMORY_BUDGET_BYTES` set to three fifths of the cgroup's headroom
+  to reproduce a 4 GiB limit (about 2.4 GB), and read the validate step's maximum
+  RSS from GNU `time -v`. Pair a build of the merge base with the build under test,
+  alternate them, and report per-pair deltas with the host load; keep raw output on
+  the pull request.
+
+Input identities used by the #1918 process measurements:
+
+| Input | SHA-256 |
+| --- | --- |
+| SNB BI SF1 mapping `benchmarks/profiles/gdc/snb-bi-load-mapping.json` | `2e55c7d1a99b8545b6ab6be44f863705098d7bb95ce3ea14755772035b513d04` |
+| SNB BI SF1 `conversion-manifest.json` (31 files, 1,191,295,868 bytes; it lists every table's input and output SHA-256) | `0eda429d35ff0e257ffadbbf4c61601c771f74c6e57a84c5432326917ea36225` |
+| Graph500 S20 nodes (`--scale 20 --edge-factor 16 --seed 1`) | `5792da943d39a3ec0cfe48c375fef1b078ae31f2c086af5d9bcfd417c74f24aa` |
+| Graph500 S20 edges (same arguments) | `dc684265a6459185256daeab0d8dbe2ef99f5202360cc9a86d852e67d7ad08bb` |
+
+A page whose records could not be sized inside the 256 MiB sizing workspace is
+refused while planning, as is a footer whose parse would take more than a quarter
+of the budget; each message names the bytes it needed.
 
 ## Calibration
 

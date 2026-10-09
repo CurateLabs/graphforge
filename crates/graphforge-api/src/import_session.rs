@@ -27,6 +27,8 @@ mod external_source;
 mod journal;
 mod memory_budget;
 mod normalization;
+mod parquet_admission;
+mod parquet_scan;
 
 /// Written by this version: a session may register Parquet sources that stay
 /// where they are (#1898).
@@ -1044,6 +1046,7 @@ impl GraphImportSession {
                 cancellation,
                 refusals,
                 digests,
+                u64::try_from(self.construction_budgets().max_batch_bytes).unwrap_or(u64::MAX),
             )?;
             match source.kind.input_kind() {
                 BulkInputKind::Node => plan.nodes.push(planned),

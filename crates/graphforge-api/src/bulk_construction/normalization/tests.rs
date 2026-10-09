@@ -62,6 +62,7 @@ fn preserved_spatial_bulk_preflight_accepts_explicit_metadata_and_rejects_malfor
         0,
         0,
         &[(&field, &array)],
+        true,
         |_, _| Ok(()),
     )
     .unwrap();
@@ -391,7 +392,7 @@ fn wave13_property_normalization_and_strict_owner_failures_keep_bulk_context() {
     let array: ArrayRef = Arc::new(arrow::array::Date32Array::from(vec![1]));
     let columns = [(&field, &array)];
     let unsupported =
-        normalize_properties(BulkInputKind::Node, 9, 0, &columns, |_, _| Ok(())).unwrap_err();
+        normalize_properties(BulkInputKind::Node, 9, 0, &columns, true, |_, _| Ok(())).unwrap_err();
     assert_eq!(
         unsupported.reason,
         BulkValidationReason::UnsupportedPropertyType
@@ -399,16 +400,17 @@ fn wave13_property_normalization_and_strict_owner_failures_keep_bulk_context() {
     assert_eq!(unsupported.row_ordinal, Some(9));
     assert_eq!(unsupported.field.as_deref(), Some("when"));
 
-    let owner_error = normalize_properties(BulkInputKind::Edge, 11, 0, &columns, |name, _| {
-        Err(row_error(
-            BulkInputKind::Edge,
-            BulkValidationReason::UnknownOntologyProperty,
-            11,
-            name,
-            "owner rejected property",
-        ))
-    })
-    .unwrap_err();
+    let owner_error =
+        normalize_properties(BulkInputKind::Edge, 11, 0, &columns, true, |name, _| {
+            Err(row_error(
+                BulkInputKind::Edge,
+                BulkValidationReason::UnknownOntologyProperty,
+                11,
+                name,
+                "owner rejected property",
+            ))
+        })
+        .unwrap_err();
     assert_eq!(
         owner_error.reason,
         BulkValidationReason::UnknownOntologyProperty
@@ -1258,4 +1260,115 @@ fn wave13_strict_inherited_properties_and_types_are_validated_without_publicatio
         indexed_uuid_count(&graph, graphforge_storage::UuidIndexKind::Edge),
         0
     );
+}
+
+/// An import keeps its Arrow columns and needs only identities and labels back,
+/// so it checks each property cell without holding the converted value (#1918).
+/// The check must refuse exactly what the conversion refuses, with its message.
+#[test]
+fn checking_a_cell_refuses_what_converting_it_refuses() {
+    use arrow::array::{Int64Builder, LargeListBuilder, ListBuilder, StringBuilder};
+
+    let mut numbers = ListBuilder::new(Int64Builder::new());
+    for children in [0_usize, 3, 1] {
+        for child in 0..children {
+            numbers.values().append_value(child as i64);
+        }
+        numbers.append(true);
+    }
+    numbers.append(false);
+
+    let mut nested = ListBuilder::new(ListBuilder::new(StringBuilder::new()));
+    for outer in [2_usize, 0, 1] {
+        for inner in 0..outer {
+            for leaf in 0..=inner {
+                nested
+                    .values()
+                    .values()
+                    .append_value(format!("leaf-{leaf}"));
+            }
+            nested.values().append(true);
+        }
+        nested.append(true);
+    }
+
+    let mut large = LargeListBuilder::new(Int64Builder::new());
+    large.values().append_value(7);
+    large.append(true);
+    large.append(false);
+
+    // A wall-clock time past midnight is refused inside a list, at its child.
+    let times = Time64NanosecondArray::from(vec![1, 86_400_000_000_000_i64, 2]);
+    let offsets = arrow::buffer::OffsetBuffer::new(vec![0_i32, 1, 3].into());
+    let refused: ArrayRef = Arc::new(ListArray::new(
+        Arc::new(Field::new(
+            "item",
+            DataType::Time64(arrow::datatypes::TimeUnit::Nanosecond),
+            true,
+        )),
+        offsets,
+        Arc::new(times),
+        None,
+    ));
+
+    let unsupported_child: ArrayRef = Arc::new(ListArray::new(
+        Arc::new(Field::new("item", DataType::Binary, true)),
+        arrow::buffer::OffsetBuffer::new(vec![0_i32, 1].into()),
+        Arc::new(arrow::array::BinaryArray::from(vec![b"x".as_slice()])),
+        None,
+    ));
+
+    let arrays: Vec<ArrayRef> = vec![
+        Arc::new(numbers.finish()),
+        Arc::new(nested.finish()),
+        Arc::new(large.finish()),
+        refused,
+        unsupported_child,
+        Arc::new(Int64Array::from(vec![Some(1), None])),
+        Arc::new(StringArray::from(vec![Some("a"), None])),
+    ];
+    let mut failures = 0;
+    for array in arrays {
+        for row in 0..array.len() {
+            let converted = property_value_at(array.as_ref(), row).map(|_| ());
+            assert_eq!(
+                check_property_value_at(array.as_ref(), row),
+                converted,
+                "{:?} row {row}",
+                array.data_type()
+            );
+            failures += usize::from(converted.is_err());
+        }
+    }
+    assert_eq!(failures, 2, "the fixtures must include refusals");
+}
+
+/// Dropping the property values changes nothing a chunk is built from: the
+/// identities, labels and every refusal are the same.
+#[test]
+fn an_import_chunk_is_built_from_the_same_rows_whether_or_not_properties_are_kept() {
+    let graph = GraphForge::new(None).unwrap();
+    for rows in [1_usize, 9, 40] {
+        let ids = (0..rows).map(|i| uuid(100 + i as u128)).collect::<Vec<_>>();
+        let labels = vec!["Person"; rows];
+        let names = (0..rows)
+            .map(|i| Some(["a", "bb"][i % 2]))
+            .collect::<Vec<_>>();
+        let batch = node_batch(&ids, &labels, &names);
+        let kept = graph
+            .normalize_bulk_nodes(operation(1), std::slice::from_ref(&batch), false, true)
+            .unwrap();
+        let dropped = graph
+            .normalize_bulk_nodes(operation(1), std::slice::from_ref(&batch), false, false)
+            .unwrap();
+        let summary = |nodes: &ValidatedBulkNodes| {
+            nodes
+                .rows()
+                .iter()
+                .map(|row| (row.row_ordinal, row.node_uuid, row.label.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(summary(&kept), summary(&dropped));
+        assert!(dropped.rows().iter().all(|row| row.properties.is_empty()));
+    }
 }

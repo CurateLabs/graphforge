@@ -86,11 +86,12 @@ functions.
 - An initial build whose estimated peak memory fits the plan-time budget keeps
   everything resident. One that does not runs the same passes through scratch
   files (below), bounding normalized builder workspace within its reservation.
-  The registered-source decoding and normalization boundary is described below;
-  its complete memory bound remains a prerequisite under #1918. The budget is
+  Registered-source decoding and normalization are sized and reserved before
+  they allocate (below). The budget is
   three fifths of the process's cgroup-aware memory headroom, or the bytes in
-  `GF_BULK_BUILD_MEMORY_BUDGET_BYTES`. Routing is a function of the footers and
-  the budget, never of the data, and the bytes are the same on every route.
+  `GF_BULK_BUILD_MEMORY_BUDGET_BYTES`. Routing is a function of the footers,
+  the page headers and the budget, never of the order of the rows, and the bytes
+  are the same on every route.
 - The staged path remains for appends, sessions an earlier binary began staging
   (a chunk-API session replays its spool through it, see *Chunk-API initial
   builds*), and `node_tables_exceed_budget`: the identity tables,
@@ -196,12 +197,9 @@ decoding. Property scratch reads and writes are reported separately; catalog,
 window and projected-row scans all count. Cancellation and recovery discard this
 transport using the same restart policy as edge and CSR scratch.
 
-Registered-source decoding precedes this transport. Parquet dictionary/page
-expansion and the normalizer's row maps need their own bounded physical batching
-and admission (#1918); this decision does not claim that normalized-row transport
-alone bounds every source decoder. Available IPC footer/body expansion and schema
-metadata reservations are checked before creating eager source readers. Property
-traffic and fixed reservations remain distinct from measured process RSS.
+Registered-source decoding precedes this transport and has its own bound (next
+section). Property traffic and fixed reservations remain distinct from measured
+process RSS.
 
 **Alternatives.** Reusing the staged range partitioner would retain partition
 writers, SHA receipts and fsyncs and would inherit its sorted-chunk and skew
@@ -210,6 +208,91 @@ I/O with graph size. Arrow row conversion is not an exact transport: hidden
 children of null lists or temporal structs can affect the existing fragment
 charge. IPC preserves those children. This is an internal reversible storage
 choice; no public API or published format changes.
+
+## Source decoding is sized and reserved before it allocates (#1918)
+
+A source's stored bytes do not state what it decodes to. A dictionary-encoded
+column stores each distinct value once and expands it for every row that uses it;
+a delta-encoded one stores a value as a suffix of its predecessor; a repeated
+column holds as many children as a row has; and the Arrow reader keeps one
+decompressed page and one decoded dictionary per column resident while it
+advances. None of that is in the footer. The reader therefore sizes what it will
+hold before it reads, and refuses what cannot fit before it allocates.
+
+- **Plan.** For each Parquet source the planner reads every page header (never a
+  body) and checks each against the bytes left in its column chunk and against
+  the footer's totals. That fixes, for every row group, what a decode holds before
+  it reads a row: each column's largest decompressed page, its decompressed
+  dictionary (and a 4-byte offset per entry), and the one compressed page being
+  decompressed. The largest such row group is `decoded_workspace_bytes`, which the
+  fixed footprint already includes for IPC sources. The bytes the source's digest
+  holds ahead of its hashed prefix are counted there too, and never exceed a
+  sixty-fourth of the budget: what exceeds them is read again when the digest
+  completes, as before. The page and column indexes are not read; nothing the
+  decoder needs depends on them. A footer is refused before it is read if parsing it (the
+  metadata measures about 4 bytes per footer byte; the plan assumes 12, beside the
+  footer itself) would take more than a quarter of the budget.
+- **Size.** Each logical batch's Arrow bytes follow from those headers and, where
+  they cannot say, from the values. Fixed-width columns are rows times width.
+  Byte-array columns stored plain or as `DELTA_LENGTH_BYTE_ARRAY` hold their values
+  back to back, so the decompressed pages a batch touches bound it. Dictionary-
+  and `DELTA_BYTE_ARRAY`-encoded columns and repeated columns are measured through
+  the typed Parquet column readers, which materialize no Arrow array: the lengths
+  of the values each row selects, and the children each row holds. A dictionary
+  whose entries are all one length is sized without reading its indices. Each
+  child of a repeated value also costs a pair of 16-bit levels and the sink's
+  32-bit take index (8 bytes), because those scale with the child count and not
+  with its bytes. A bound from pages overstates a batch smaller than a page; where
+  that bound alone would put any batch of a source past the admission limit, the
+  plain columns of that source are sized from their values too, so the page bound
+  never decides a refusal. `BulkSource::decoded_bytes`, which the route estimate retains for
+  property-bearing kinds, is these sizes, not the footer's stored bytes. Sizing is
+  deterministic in the file, so it does not make routing depend on the data's
+  order.
+- **Admit.** Before the Arrow reader decodes a batch, a batch whose size exceeds
+  the intake window (`max_batch_bytes`) by more than an eighth is refused with a
+  typed resource limit, counted as rejected rows. Anything smaller is decoded and
+  meets the same exact window check as before, so no input the earlier decoder
+  accepted is refused by an estimate.
+- **Reserve.** A task reserves the pages it will hold, two copies of its widest
+  batch (the decoded batch and the identities and labels normalization rebuilds)
+  and 64 bytes per row, from one pool before it opens its file. The pool is the
+  property workspace plus the reader's planned workspace when properties force one
+  task at a time, a quarter of the working set otherwise, and one worst-case task
+  per worker when everything is resident. A task the pool could never grant is
+  refused with a typed resource limit; one it could grant later waits for a running
+  task to release. The report names the pool's capacity and the
+  most it held (`source_workspace_*`).
+- **Normalize.** An import needs identities and labels back from normalization and
+  keeps its Arrow property columns as they are, so normalization validates each
+  property cell and drops its value with its row instead of holding a map per row.
+  A list's children are converted one at a time. The refusals, their order and their
+  messages are those of the retaining path (a unit test compares the two on cells
+  that fail at every depth).
+- **IPC.** The footer sizing that refuses unallocatable files before a reader is
+  built is unchanged and its bound is reserved per task. The file's schema is run
+  through normalization on an empty batch first, so an unsupported column type is
+  refused before the file reader decodes every dictionary eagerly.
+
+*Limits, stated.* A page whose values the sizing readers could not hold at once
+(40 bytes each, 256 MiB at most) is refused while planning. The resident route
+retains its decoded batches by design; what it retains is now estimated from what
+they decode to. The sink copies a repeated column with a take index per child, which
+the 8 bytes per child above anticipates but does not make smaller. The Parquet
+crate reserves capacity for the decompressed size a page header states, which the
+header checks above bound but a rewrite that preserves the whole file pin
+(documented in resumable import) could still misstate; the decompressor then
+rejects the length mismatch. Sizing dictionary-, delta- and repeated columns
+decodes their indices or lengths once more while planning.
+
+**Alternatives.** Splitting a logical batch into smaller physical pieces would
+keep the decoder inside a smaller reservation, but the batch is the unit the
+builder's window, derived identities and refusal order are defined over, and it
+is already bounded by `max_batch_bytes`; what was unbounded was allocating before
+learning a batch exceeded it. Estimating a batch from its dictionary's largest
+entry refuses ordinary inputs whose dictionary holds one large value few rows
+use. Bounding by footer bytes understates dictionary and delta expansion by
+orders of magnitude.
 
 ## Restart instead of resume (amends ADR 0038 property 1)
 

@@ -330,6 +330,24 @@ fn digest_refuses_a_read_past_the_registered_size() {
     assert!(api_error(&error).1.contains("was resized"));
 }
 
+/// A length the file cannot hold is the file's claim, not a read: refused before
+/// anything is allocated for it, whatever the Parquet decoder asked for (#1918).
+#[test]
+fn a_read_the_file_cannot_hold_is_refused_before_it_is_allocated() {
+    use parquet::file::reader::ChunkReader as _;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("blob");
+    fs::write(&path, [1_u8; 100]).unwrap();
+    let input =
+        super::ObservedFile::new(File::open(&path).unwrap(), SourceDigest::new(100)).unwrap();
+    // 2^62 bytes would abort the process if it were allocated.
+    for (start, length) in [(0, 1_usize << 62), (90, 11), (101, 1), (u64::MAX, 1)] {
+        let error = input.get_bytes(start, length).unwrap_err();
+        assert!(error.to_string().contains("beyond the end"), "{error}");
+    }
+    assert_eq!(input.get_bytes(90, 10).unwrap().len(), 10);
+}
+
 fn fake_source(path: &Path, size: u64) -> super::ExternalSource {
     super::ExternalSource {
         path: path.to_path_buf(),

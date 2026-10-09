@@ -460,11 +460,13 @@ route property payloads through scratch instead of retaining their batches.
 Publication and restart semantics are unchanged.
 
 This bound covers normalized property transport and overlay assembly. Registered
-source decoding and normalization can expand Parquet dictionaries, nested pages
-and row maps before those rows reach the transport; their independent source
-workspace and physical batching work remains under #1918. A property scratch
-reservation therefore describes builder workspace, not a proof that arbitrary
-registered inputs fit the complete process budget.
+source decoding is bounded separately, before it allocates: page headers and the
+values a footer cannot size fix what each logical batch decodes to, a task
+reserves that from a shared workspace pool, and a batch past the intake window is
+refused with a typed resource limit (ADR 0058, "Source decoding is sized and
+reserved before it allocates"). A reservation is builder workspace, not a measured
+resident set; the fixed-budget process measurements are in the
+[ingest diagnostics](../../development/ingest-region-diagnostics.md).
 
 Publication does not copy those files. On unix it syncs each encoded file, links the same inode to
 `graph-objects/sha256/<2>/<62>`, and acknowledges the bucket directory, so each

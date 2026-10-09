@@ -456,13 +456,29 @@ impl RowsReader<'_, '_> {
         {
             return Err(storage("property scratch frame row count differs"));
         }
-        if batch.get_array_memory_size() > self.rows.frame_limit() {
+        if decoded_bytes(&batch) > self.rows.frame_limit() {
             return Err(storage(
                 "property scratch decoded frame exceeds its reservation",
             ));
         }
         Ok(Some(batch))
     }
+}
+
+/// Bytes the arrays of a decoded frame hold. The stream reader slices every
+/// column out of one message body, and `get_array_memory_size` counts that whole
+/// body once per column, so a wide frame would be charged its width times over.
+fn decoded_bytes(batch: &RecordBatch) -> usize {
+    batch
+        .columns()
+        .iter()
+        .map(|column| {
+            column
+                .to_data()
+                .get_slice_memory_size()
+                .unwrap_or(usize::MAX)
+        })
+        .fold(0_usize, usize::saturating_add)
 }
 
 /// Validate all allocation-bearing IPC lengths before Arrow's stream reader

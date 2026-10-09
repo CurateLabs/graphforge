@@ -31,6 +31,8 @@ const PARQUET_MAGIC: &[u8; 4] = b"PAR1";
 const PARQUET_TRAILER: u64 = 8;
 const PARQUET_TRAILER_LEN: usize = 8;
 const FOOTER_READ_LIMIT: u64 = 1 << 30;
+/// A footer is read and hashed in pieces of this size.
+const FOOTER_PIECE_BYTES: u64 = 1 << 20;
 /// Out-of-order bytes held while waiting for the gap before them, unless the
 /// source states a larger lead (see [`pending_limit`]). A decode order that
 /// exceeds the bound re-reads the dropped ranges once at the end.
@@ -184,11 +186,21 @@ fn footer_identity(
     if footer_len > FOOTER_READ_LIMIT || footer_len + PARQUET_TRAILER + 4 > size {
         return Err(validation("Parquet source footer length is out of range"));
     }
-    let mut footer = vec![0_u8; usize::try_from(footer_len).map_err(storage)?];
+    // The footer is hashed in pieces: its length is the file's to claim, and
+    // nothing here needs the whole of it at once.
     let footer_start = size - PARQUET_TRAILER - footer_len;
-    read(footer_start, &mut footer)?;
-    observe(footer_start, &footer);
-    Ok((footer_len, hex(&Sha256::digest(&footer))))
+    let mut hasher = Sha256::new();
+    let mut piece =
+        vec![0_u8; usize::try_from(footer_len.min(FOOTER_PIECE_BYTES)).map_err(storage)?];
+    let mut done = 0_u64;
+    while done < footer_len {
+        let step = usize::try_from((footer_len - done).min(FOOTER_PIECE_BYTES)).map_err(storage)?;
+        read(footer_start + done, &mut piece[..step])?;
+        observe(footer_start + done, &piece[..step]);
+        hasher.update(&piece[..step]);
+        done += step as u64;
+    }
+    Ok((footer_len, hex(&hasher.finalize())))
 }
 
 impl ExternalSource {
@@ -229,6 +241,11 @@ impl ExternalSource {
             footer_len,
             footer_sha256,
         })
+    }
+
+    /// Bytes of the Parquet footer registration recorded.
+    pub(super) fn footer_bytes(&self) -> u64 {
+        self.footer_len
     }
 
     fn identity_matches(&self, identity: &FileIdentity) -> bool {
@@ -625,6 +642,16 @@ impl ChunkReader for ObservedFile {
     }
 
     fn get_bytes(&self, start: u64, length: usize) -> parquet::errors::Result<Bytes> {
+        // A length the file cannot hold is the file's claim, not a read: refuse
+        // it before allocating for it.
+        if start
+            .checked_add(length as u64)
+            .is_none_or(|end| end > self.length)
+        {
+            return Err(parquet::errors::ParquetError::EOF(
+                "a read extends beyond the end of the source".into(),
+            ));
+        }
         let mut bytes = vec![0_u8; length];
         read_exact_at(&self.file, start, &mut bytes)?;
         self.digest.observe(start, &bytes);

@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use arrow::ipc::reader::FileReader as ArrowFileReader;
 use arrow::record_batch::RecordBatch;
 use graphforge_core::GfError;
-use graphforge_storage::{BulkBatchReader, BulkSource};
+use graphforge_storage::{BulkBatchReader, BulkSource, SourceWorkspace};
 use parquet::arrow::arrow_reader::{
     ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder, RowSelection,
     RowSelector,
@@ -21,6 +21,7 @@ use parquet::arrow::arrow_reader::{
 use uuid::Uuid;
 
 use super::external_source::{self, ExternalSource, ObservedFile, SourceDigest};
+use super::parquet_admission::SourceScan;
 use super::{
     ImportSourceKind, SourceRecord, cancelled, canonicalize_parquet_batch, import_batch_operation,
     normalize_batch, storage, validation,
@@ -50,9 +51,15 @@ enum Format {
     Parquet {
         metadata: ArrowReaderMetadata,
         rows: u64,
+        /// What the source's pages hold and what its batches decode to (#1918).
+        scan: SourceScan,
     },
-    /// Rows of every record batch, from the IPC footer's message headers.
-    Arrow { batch_rows: Vec<u64> },
+    /// Rows of every record batch, from the IPC footer's message headers, and the
+    /// schema the footer states.
+    Arrow {
+        batch_rows: Vec<u64>,
+        schema: arrow::datatypes::SchemaRef,
+    },
 }
 
 /// Footer-only sizing precedes FileReader: that reader eagerly decodes every
@@ -60,6 +67,7 @@ enum Format {
 struct IpcPlan {
     rows: Vec<u64>,
     columns: usize,
+    schema: arrow::datatypes::SchemaRef,
     schema_bytes: u64,
     decoding_bytes: u64,
 }
@@ -213,6 +221,7 @@ fn ipc_plan(path: &Path) -> Result<IpcPlan, GfError> {
     Ok(IpcPlan {
         rows,
         columns,
+        schema: Arc::new(schema),
         schema_bytes,
         decoding_bytes,
     })
@@ -390,6 +399,11 @@ struct SourceReader<'a> {
     format: Format,
     schema_bytes: u64,
     decoding_bytes: u64,
+    /// The canonical batch window; a batch that decodes to more than the window
+    /// allows is refused before it is decoded.
+    window_bytes: u64,
+    /// The pool the builder binds before any task runs.
+    workspace: Mutex<Option<Arc<SourceWorkspace>>>,
     cancellation: Option<&'a CancellationToken>,
     refusals: &'a Refusals,
 }
@@ -515,26 +529,192 @@ impl SourceReader<'_> {
         first_batch: u64,
         in_place: &InPlace,
         guard: &File,
+        admission: &TaskAdmission,
         sink: &mut dyn FnMut(RecordBatch) -> Result<(), GfError>,
     ) -> Result<(), GfError> {
         let changed = |error: GfError| in_place.external.reclassify(guard, error);
-        let reader = self
+        let mut reader = self
             .parquet_reader(input, metadata, rows, first_batch)
             .map_err(changed)?;
-        for (offset, batch) in reader.enumerate() {
+        let mut offset = 0_u64;
+        loop {
+            // The next batch is sized before the reader decodes it.
+            self.admit_batch(admission, rows, first_batch, offset)?;
+            let Some(batch) = reader.next() else { break };
             #[cfg(test)]
             super::external_source::pass_hook(
                 &in_place.external.path,
                 "batch",
-                first_batch + offset as u64,
+                first_batch + offset,
             );
             // The source can change between any two batches.
             in_place.external.check(guard)?;
             let batch = batch.map_err(|error| changed(storage(error)))?;
-            self.emit(first_batch + offset as u64, batch, sink)?;
+            self.emit(first_batch + offset, batch, sink)?;
+            offset += 1;
         }
         in_place.external.check(guard)
     }
+
+    /// Refuse a schema that normalization would refuse, before the task decodes
+    /// anything. The check is the one the first batch's normalization runs, on an
+    /// empty batch of the source's schema, so the refusal is the same and an
+    /// unsupported column costs no decode (an Arrow file's reader would decode
+    /// every dictionary first).
+    fn validate_schema(&self, first_batch: u64) -> Result<(), GfError> {
+        let (schema, parquet, first_rows) = match &self.format {
+            Format::Parquet { metadata, rows, .. } => (
+                Arc::clone(metadata.schema()),
+                true,
+                (self.batch_rows as u64)
+                    .min(rows.saturating_sub(first_batch * self.batch_rows as u64)),
+            ),
+            Format::Arrow { batch_rows, schema } => (
+                Arc::clone(schema),
+                false,
+                usize::try_from(first_batch)
+                    .ok()
+                    .and_then(|index| batch_rows.get(index))
+                    .copied()
+                    .unwrap_or(0),
+            ),
+        };
+        let empty = RecordBatch::new_empty(schema);
+        let checked = (|| {
+            let empty = if parquet {
+                canonicalize_parquet_batch(self.kind, &empty)?
+            } else {
+                empty
+            };
+            normalize_batch(
+                self.graph,
+                import_batch_operation(self.operation_uuid, self.sequence, first_batch),
+                self.kind,
+                &empty,
+            )
+            .map(|_| ())
+        })();
+        if checked.is_err() && self.check_cancelled().is_ok() {
+            self.refusals.record(
+                (
+                    u8::from(self.kind == BulkInputKind::Edge),
+                    self.sequence,
+                    first_batch,
+                ),
+                first_rows,
+            );
+        }
+        checked
+    }
+
+    fn admission_limit(&self) -> u64 {
+        // The window is checked exactly, on the decoded batch, after it is
+        // decoded; this limit refuses only what no accepted batch could be,
+        // before the decode allocates it.
+        self.window_bytes.saturating_add(self.window_bytes / 8)
+    }
+
+    /// Size a Parquet task's batches and reserve what its decode will hold.
+    fn admit(
+        &self,
+        scan: &SourceScan,
+        rows: u64,
+        task: usize,
+        first_batch: u64,
+    ) -> Result<TaskAdmission, GfError> {
+        let batch_rows = self.batch_rows as u64;
+        let batches = rows.div_ceil(batch_rows);
+        let count = BATCHES_PER_TASK.min(batches.saturating_sub(first_batch));
+        let sizes = (0..count)
+            .map(|offset| scan.batch_bytes(first_batch + offset))
+            .collect::<Vec<_>>();
+        let widest = sizes
+            .iter()
+            .map(|size| (*size).min(self.admission_limit()))
+            .max()
+            .unwrap_or(0);
+        let first_row = first_batch * batch_rows;
+        let last_row = ((first_batch + count) * batch_rows).min(rows);
+        let pool = self
+            .workspace
+            .lock()
+            .expect("workspace binding poisoned")
+            .clone();
+        let reservation = pool
+            .as_ref()
+            .map(|pool| {
+                // The decompressed pages every column holds, the batch being
+                // decoded and the copy that normalization hands the builder, and
+                // the per-row state of normalizing it.
+                let need = scan
+                    .pages_resident(first_row, last_row)
+                    .saturating_add(widest.saturating_mul(2))
+                    .saturating_add(batch_rows.saturating_mul(NORMALIZATION_ROW_BYTES));
+                pool.reserve(need, &format!("Parquet task {task}"), &|| {
+                    self.check_cancelled()
+                })
+            })
+            .transpose()?;
+        Ok(TaskAdmission {
+            sizes,
+            _reservation: reservation,
+        })
+    }
+
+    fn check_cancelled(&self) -> Result<(), GfError> {
+        if self
+            .cancellation
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            return Err(cancelled());
+        }
+        Ok(())
+    }
+
+    /// Refuse the batch at `offset` of a task if it would decode to more than
+    /// the window allows, before it is decoded.
+    fn admit_batch(
+        &self,
+        admission: &TaskAdmission,
+        rows: u64,
+        first_batch: u64,
+        offset: u64,
+    ) -> Result<(), GfError> {
+        let Some(size) = usize::try_from(offset)
+            .ok()
+            .and_then(|offset| admission.sizes.get(offset))
+        else {
+            return Ok(());
+        };
+        if *size <= self.admission_limit() {
+            return Ok(());
+        }
+        let index = first_batch + offset;
+        let batch_rows = self.batch_rows as u64;
+        self.refusals.record(
+            (
+                u8::from(self.kind == BulkInputKind::Edge),
+                self.sequence,
+                index,
+            ),
+            batch_rows.min(rows.saturating_sub(index * batch_rows)),
+        );
+        Err(super::limit(format!(
+            "Parquet batch {index} would decode to {size} bytes, above the {}-byte batch window;              refused before it was decoded",
+            self.window_bytes
+        )))
+    }
+}
+
+/// Bytes of per-row state normalizing a batch keeps beside the batch: the
+/// identity and label it rebuilds for every row.
+const NORMALIZATION_ROW_BYTES: u64 = 64;
+
+/// What a task reserved and what its batches will decode to.
+struct TaskAdmission {
+    /// Arrow bytes of each of the task's batches, in order.
+    sizes: Vec<u64>,
+    _reservation: Option<graphforge_storage::SourceReservation>,
 }
 
 impl BulkBatchReader for SourceReader<'_> {
@@ -543,13 +723,19 @@ impl BulkBatchReader for SourceReader<'_> {
     }
     fn retained_metadata_bytes(&self) -> u64 {
         self.schema_bytes.saturating_add(match &self.format {
-            Format::Parquet { metadata, .. } => metadata.metadata().memory_size() as u64,
-            Format::Arrow { batch_rows } => (batch_rows.capacity() as u64).saturating_mul(8),
+            Format::Parquet { metadata, scan, .. } => {
+                (metadata.metadata().memory_size() as u64).saturating_add(scan.resident_bytes())
+            }
+            Format::Arrow { batch_rows, .. } => (batch_rows.capacity() as u64).saturating_mul(8),
         })
     }
 
     fn decoded_workspace_bytes(&self) -> u64 {
         self.decoding_bytes
+    }
+
+    fn bind_workspace(&self, workspace: &Arc<SourceWorkspace>) {
+        *self.workspace.lock().expect("workspace binding poisoned") = Some(Arc::clone(workspace));
     }
     fn task_rows(&self, task: usize) -> usize {
         let first_batch = task as u64 * BATCHES_PER_TASK;
@@ -559,7 +745,7 @@ impl BulkBatchReader for SourceReader<'_> {
                 (first_batch * batch_rows + BATCHES_PER_TASK * batch_rows).min(*rows)
                     - (first_batch * batch_rows).min(*rows)
             }
-            Format::Arrow { batch_rows } => {
+            Format::Arrow { batch_rows, .. } => {
                 let first = usize::try_from(first_batch).unwrap_or(usize::MAX);
                 batch_rows
                     .iter()
@@ -575,7 +761,7 @@ impl BulkBatchReader for SourceReader<'_> {
     /// the footer states them exactly: Parquet only, and only without nulls
     /// (a null identity is derived, so it is not in the column's range).
     fn uuid_bounds(&self, task: usize) -> Option<([u8; 16], [u8; 16])> {
-        let Format::Parquet { metadata, rows } = &self.format else {
+        let Format::Parquet { metadata, rows, .. } = &self.format else {
             return None;
         };
         let task_rows = BATCHES_PER_TASK * self.batch_rows as u64;
@@ -602,8 +788,13 @@ impl BulkBatchReader for SourceReader<'_> {
         sink: &mut dyn FnMut(RecordBatch) -> Result<(), GfError>,
     ) -> Result<(), GfError> {
         let first_batch = task as u64 * BATCHES_PER_TASK;
+        self.validate_schema(first_batch)?;
         match &self.format {
-            Format::Parquet { metadata, rows } => {
+            Format::Parquet {
+                metadata,
+                rows,
+                scan,
+            } => {
                 if let Some(in_place) = &self.in_place {
                     let file = in_place.external.reopen()?;
                     #[cfg(test)]
@@ -612,6 +803,7 @@ impl BulkBatchReader for SourceReader<'_> {
                         "opened",
                         task as u64,
                     );
+                    let admission = self.admit(scan, *rows, task, first_batch)?;
                     let guard = file.try_clone().map_err(storage)?;
                     let input = ObservedFile::new(file, in_place.digest.clone())?;
                     self.decode_parquet(
@@ -621,18 +813,40 @@ impl BulkBatchReader for SourceReader<'_> {
                         first_batch,
                         in_place,
                         &guard,
+                        &admission,
                         sink,
                     )?;
                 } else {
                     // A session an earlier version began holds its own copy.
                     let file = File::open(&self.path).map_err(storage)?;
+                    let admission = self.admit(scan, *rows, task, first_batch)?;
                     let mut decoded = self.parquet_reader(file, metadata, *rows, first_batch)?;
-                    for (offset, batch) in decoded.by_ref().enumerate() {
-                        self.emit(first_batch + offset as u64, batch.map_err(storage)?, sink)?;
+                    let mut offset = 0_u64;
+                    loop {
+                        self.admit_batch(&admission, *rows, first_batch, offset)?;
+                        let Some(batch) = decoded.next() else { break };
+                        self.emit(first_batch + offset, batch.map_err(storage)?, sink)?;
+                        offset += 1;
                     }
                 }
             }
             Format::Arrow { .. } => {
+                // Everything the IPC reader allocates (its dictionaries, then a
+                // message body and its decoded arrays per batch) was sized from
+                // the footer at plan time; reserve that before it allocates.
+                let pool = self
+                    .workspace
+                    .lock()
+                    .expect("workspace binding poisoned")
+                    .clone();
+                let _reservation = pool
+                    .as_ref()
+                    .map(|pool| {
+                        pool.reserve(self.decoding_bytes, &format!("Arrow task {task}"), &|| {
+                            self.check_cancelled()
+                        })
+                    })
+                    .transpose()?;
                 let file = File::open(&self.path).map_err(storage)?;
                 let mut reader = ArrowFileReader::try_new(file, None).map_err(storage)?;
                 let total = reader.num_batches() as u64;
@@ -708,10 +922,35 @@ fn largest_task_bytes(metadata: &ArrowReaderMetadata, batch_rows: usize) -> u64 
     largest
 }
 
+/// Parsed footer metadata is at most this many times the footer's own bytes
+/// (measured in `bulk_source::footer_tests`), and the footer is held beside it.
+const FOOTER_PARSE_FACTOR: u64 = 12;
+
+/// The budget the plan-time size limits are stated against, at least this much.
+///
+/// The bulk route's fixed footprint alone is 512 MiB, so below a gigabyte it
+/// cannot take the build and `validate` stages it instead, which has its own
+/// admission. The limits below describe the bulk route; they must not refuse an
+/// input that the staged path takes.
+const PLANNING_FLOOR_BYTES: u64 = 1 << 30;
+
+fn require_footer_fits(footer_bytes: u64, budget: u64) -> Result<(), GfError> {
+    let budget = budget.max(PLANNING_FLOOR_BYTES);
+    let needed = footer_bytes.saturating_mul(FOOTER_PARSE_FACTOR + 1);
+    if needed > budget / 4 {
+        return Err(super::limit(format!(
+            "a Parquet footer of {footer_bytes} bytes needs {needed} bytes to parse, above a quarter \
+             of the {budget}-byte construction memory budget"
+        )));
+    }
+    Ok(())
+}
+
 /// Plan one registered source from its footer (pass 0).
 #[allow(
     clippy::too_many_arguments,
-    reason = "the build's shared observers travel with the plan's inputs"
+    clippy::too_many_lines,
+    reason = "the build's shared observers travel with the plan's inputs, and each source kind plans in one place"
 )]
 pub(super) fn plan<'a>(
     graph: &'a GraphForge,
@@ -722,6 +961,7 @@ pub(super) fn plan<'a>(
     cancellation: Option<&'a CancellationToken>,
     refusals: &'a Refusals,
     digests: &'a Digests,
+    window_bytes: u64,
 ) -> Result<BulkSource<'a>, GfError> {
     let path = root.join("sources").join(&source.name);
     let kind = source.kind.input_kind();
@@ -730,20 +970,33 @@ pub(super) fn plan<'a>(
         BulkInputKind::Node => 2,
         BulkInputKind::Edge => 4,
     };
+    let mut pending_bytes = 0_u64;
     let (format, rows, columns, schema_bytes, decoding_bytes) = match source.kind {
         ImportSourceKind::ParquetNodes | ImportSourceKind::ParquetEdges => {
+            let budget = bulk_build_memory_budget()?;
             let metadata = if let Some(external) = source.external.as_ref() {
                 // The footer is read once through the digest, which keeps it.
                 let digest = SourceDigest::new(external.size);
                 let file = external.open_observed(&digest)?;
                 let guard = file.try_clone().map_err(storage)?;
                 let input = ObservedFile::new(file, digest.clone())?;
+                // The footer is read whole and parsed into structures many times
+                // its size; refuse one the budget cannot hold before reading it.
+                require_footer_fits(external.footer_bytes(), budget)?;
                 let metadata = ArrowReaderMetadata::load(&input, ArrowReaderOptions::new())
                     .map_err(|error| external.reclassify(&guard, storage(error)))?;
-                digest.set_pending_limit(external_source::pending_limit(
+                // Reads ahead of the hashed prefix are held, so the bound on
+                // them is resident workspace like any other: it never exceeds
+                // a sixty-fourth of the budget, and the digest reads again what
+                // it had to drop.
+                pending_bytes = u64::try_from(external_source::pending_limit(
                     std::thread::available_parallelism().map_or(1, usize::from),
                     largest_task_bytes(&metadata, batch_rows),
-                ));
+                ))
+                .unwrap_or(u64::MAX)
+                .min(budget / 64)
+                .max(1 << 20);
+                digest.set_pending_limit(usize::try_from(pending_bytes).unwrap_or(usize::MAX));
                 digests.register(source.sequence, external, &digest);
                 in_place = Some(InPlace {
                     external: external.clone(),
@@ -759,12 +1012,31 @@ pub(super) fn plan<'a>(
                 u64::try_from(metadata.metadata().file_metadata().num_rows()).map_err(storage)?;
             let columns = metadata.schema().fields().len();
             let schema_bytes = schema_owned_bytes(metadata.schema().as_ref());
+            // Page headers and the values whose expansion they do not state.
+            let scan_file = match &in_place {
+                Some(held) => held.external.reopen()?,
+                None => File::open(&path).map_err(storage)?,
+            };
+            let scan = SourceScan::build(
+                scan_file,
+                metadata.metadata(),
+                batch_rows as u64,
+                budget.max(PLANNING_FLOOR_BYTES),
+                // A batch past the intake window plus an eighth is refused.
+                window_bytes.saturating_add(window_bytes / 8),
+                cancellation,
+            )?;
+            let decoding_bytes = scan.pages_resident_max().saturating_add(pending_bytes);
             (
-                Format::Parquet { metadata, rows },
+                Format::Parquet {
+                    metadata,
+                    rows,
+                    scan,
+                },
                 rows,
                 columns,
                 schema_bytes,
-                0,
+                decoding_bytes,
             )
         }
         ImportSourceKind::ArrowNodes | ImportSourceKind::ArrowEdges => {
@@ -779,6 +1051,7 @@ pub(super) fn plan<'a>(
             (
                 Format::Arrow {
                     batch_rows: sizing.rows,
+                    schema: sizing.schema,
                 },
                 rows,
                 sizing.columns,
@@ -792,15 +1065,11 @@ pub(super) fn plan<'a>(
     }
     let batches = match &format {
         Format::Parquet { .. } => rows.div_ceil(batch_rows as u64),
-        Format::Arrow { batch_rows } => batch_rows.len() as u64,
+        Format::Arrow { batch_rows, .. } => batch_rows.len() as u64,
     };
     let decoded_bytes = match &format {
-        Format::Parquet { metadata, .. } => metadata
-            .metadata()
-            .row_groups()
-            .iter()
-            .map(|group| u64::try_from(group.total_byte_size()).unwrap_or(0))
-            .sum(),
+        // What the batches decode to, not what the footer says they are stored as.
+        Format::Parquet { scan, .. } => scan.decoded_bytes(),
         Format::Arrow { .. } => fs::metadata(&path).map_err(storage)?.len(),
     };
     let tasks = usize::try_from(batches.div_ceil(BATCHES_PER_TASK)).map_err(storage)?;
@@ -816,6 +1085,8 @@ pub(super) fn plan<'a>(
             format,
             schema_bytes,
             decoding_bytes,
+            window_bytes,
+            workspace: Mutex::new(None),
             cancellation,
             refusals,
         }),
@@ -910,6 +1181,76 @@ mod ipc_planning_tests {
         }
     }
 
+    /// A compressed buffer states its own expansion in its first eight bytes. A
+    /// file whose footer and messages agree and whose buffer claims eight
+    /// gigabytes is refused when planned, before any reader allocates for it.
+    #[test]
+    fn a_compressed_buffer_that_advertises_a_huge_expansion_is_refused_when_planned() {
+        use arrow::array::StringArray;
+        let root = tempfile::tempdir().unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, true)]));
+        let text = "x".repeat(4_096);
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(StringArray::from(vec![text.as_str(); 1_000]))],
+        )
+        .unwrap();
+        for (compression, frame) in [
+            (arrow::ipc::CompressionType::ZSTD, [0x28, 0xB5, 0x2F, 0xFD]),
+            // An LZ4 frame header repeats the content size, so the expansion the
+            // IPC buffer states is the copy that precedes the frame's magic.
+            (
+                arrow::ipc::CompressionType::LZ4_FRAME,
+                [0x04, 0x22, 0x4D, 0x18],
+            ),
+        ] {
+            let path = root.path().join(format!("{compression:?}.arrow"));
+            let options = IpcWriteOptions::default()
+                .try_with_compression(Some(compression))
+                .unwrap();
+            let mut writer =
+                FileWriter::try_new_with_options(File::create(&path).unwrap(), &schema, options)
+                    .unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+
+            super::super::bulk_source::TEST_BUDGET.with(|budget| budget.set(Some(1 << 30)));
+            let honest = ipc_plan(&path).unwrap();
+            assert!(
+                honest.decoding_bytes >= 4_096_000,
+                "{}",
+                honest.decoding_bytes
+            );
+            assert!(honest.decoding_bytes < 8 << 20, "{}", honest.decoding_bytes);
+
+            let mut bytes = std::fs::read(&path).unwrap();
+            let at = bytes
+                .windows(12)
+                .position(|window| {
+                    window[..8] == 4_096_000_u64.to_le_bytes() && window[8..] == frame
+                })
+                .expect("the values buffer states its expansion");
+            bytes[at..at + 8].copy_from_slice(&(8_u64 << 30).to_le_bytes());
+            std::fs::write(&path, bytes).unwrap();
+            let refused = ipc_plan(&path);
+            super::super::bulk_source::TEST_BUDGET.with(|budget| budget.set(None));
+            let error = refused
+                .err()
+                .expect("an 8 GiB expansion exceeds a 1 GiB budget");
+            assert!(
+                matches!(
+                    error,
+                    graphforge_core::GfError::Project {
+                        code: graphforge_core::ProjectErrorCode::ResourceLimit,
+                        ..
+                    }
+                ),
+                "{error}"
+            );
+            assert!(error.to_string().contains("decoding"), "{error}");
+        }
+    }
+
     #[test]
     fn ipc_timezone_schema_expansion_is_admitted_before_conversion() {
         let root = tempfile::tempdir().unwrap();
@@ -974,3 +1315,9 @@ mod ipc_planning_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod footer_tests;
+
+#[cfg(test)]
+mod reservation_tests;

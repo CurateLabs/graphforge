@@ -653,3 +653,46 @@ fn the_bulk_reader_refuses_undeclared_types_under_a_strict_ontology() {
     );
     assert_eq!(rows, Some(1));
 }
+
+/// The reads a source's digest holds ahead of its hashed prefix are resident
+/// workspace: they are counted in what the reader says it needs, and they never
+/// exceed a sixty-fourth of the budget (#1918).
+#[test]
+fn the_digest_s_held_reads_are_counted_and_bounded_by_the_budget() {
+    let (_directory, _project, graph) = fixture();
+    let sources = tempfile::tempdir().unwrap();
+    let path = sources.path().join("nodes.parquet");
+    let batch = node_rows(&[v7(1), v7(2), v7(3)], "Person");
+    let mut writer =
+        parquet::arrow::ArrowWriter::try_new(File::create(&path).unwrap(), batch.schema(), None)
+            .unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+
+    let mut needs = Vec::new();
+    for budget in [256_u64 << 20, 4 << 30, 64 << 30] {
+        let mut session = graph
+            .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
+            .unwrap();
+        session
+            .register_parquet(BulkInputKind::Node, &path)
+            .unwrap();
+        bulk_source::TEST_BUDGET.with(|cell| cell.set(Some(budget)));
+        let refusals = bulk_source::Refusals::default();
+        let digests = bulk_source::Digests::default();
+        let plan = session
+            .plan_bulk_build(&graph, None, &refusals, &digests)
+            .unwrap();
+        bulk_source::TEST_BUDGET.with(|cell| cell.set(None));
+        let needed = plan.nodes[0].reader.decoded_workspace_bytes();
+        // Three rows of pages are a few kilobytes: nearly all of it is the held reads.
+        assert!(needed <= budget / 64 + (1 << 20), "{budget}: {needed}");
+        assert!(needed >= 1 << 20, "{budget}: {needed}");
+        needs.push(needed);
+        session.abort(&graph).unwrap();
+    }
+    // A larger budget lets the digest hold more, up to the bound it always had.
+    assert!(needs[0] < needs[1] && needs[1] <= needs[2], "{needs:?}");
+}
+
+mod encodings;

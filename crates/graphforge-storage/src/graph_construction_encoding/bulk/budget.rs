@@ -249,11 +249,14 @@ impl ScratchPlan {
         #[cfg(test)]
         let gate_bytes = FORCED_GATE.with(std::cell::Cell::get).unwrap_or(gate_bytes);
         let staging_total = working / 8;
+        // A task's decode window is the larger of the planning constant and what
+        // the sources need to open one row group (#1918).
+        let decode_window = DECODE_WINDOW_BYTES.max(plan.source_decoder_bytes());
         let ceil = |bytes: u64, per: u64| bytes.div_ceil(per.max(1));
         let mut best = None;
         for concurrency in (1..=if properties { 1 } else { workers.max(1) as u64 }).rev() {
             // Decoding tasks in flight must fit beside the staging buffers.
-            if concurrency > 1 && concurrency * DECODE_WINDOW_BYTES > working / 4 {
+            if concurrency > 1 && concurrency * decode_window > working / 4 {
                 continue;
             }
             let per_partition = gate_bytes / (2 * concurrency);
@@ -294,6 +297,32 @@ impl ScratchPlan {
             csr_partitions: usize::try_from(csr_partitions).unwrap_or(1),
             gate_bytes,
             staging_bytes: usize::try_from(staging).unwrap_or(8 << 10),
+        }
+    }
+
+    /// Bytes the registered-source readers' tasks may reserve at once (#1918).
+    ///
+    /// With properties one task runs at a time and shares the property workspace,
+    /// already reserved in the fixed footprint, with the pages its sources hold.
+    /// Without, the decoding quarter of the working set (see `derive`).
+    pub(super) fn source_pool_bytes(
+        plan: &BulkBuildPlan<'_>,
+        budget: u64,
+        budgets: super::GraphConstructionBudgets,
+    ) -> u64 {
+        let decoder = plan.source_decoder_bytes();
+        if plan
+            .nodes
+            .iter()
+            .chain(&plan.edges)
+            .any(|source| !source.property_free)
+        {
+            property_workspace(budgets).saturating_add(decoder)
+        } else {
+            let working = budget
+                .saturating_sub(plan.node_tables_resident_bytes())
+                .saturating_add(MIN_WORKING_BYTES);
+            (working / 4).max(decoder)
         }
     }
 
