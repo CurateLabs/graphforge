@@ -23,7 +23,9 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use graphforge_core::{GfError, ProjectErrorCode};
 use parquet::arrow::ArrowWriter;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::arrow_reader::{
+    ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
+};
 use parquet::basic::{Encoding, Type as PhysicalType};
 use parquet::file::metadata::{
     ColumnChunkMetaData, FileMetaData, ParquetMetaData, RowGroupMetaData,
@@ -203,9 +205,12 @@ fn build(
     metadata: &ParquetMetaData,
     capacity: u64,
 ) -> Result<SourceScan, GfError> {
+    let metadata =
+        ArrowReaderMetadata::try_new(Arc::new(metadata.clone()), ArrowReaderOptions::new())
+            .unwrap();
     SourceScan::build(
         File::open(file.path()).unwrap(),
-        metadata,
+        &metadata,
         1,
         capacity,
         u64::MAX,
@@ -409,9 +414,12 @@ fn build_from_path(
     metadata: &ParquetMetaData,
     capacity: u64,
 ) -> Result<SourceScan, GfError> {
+    let metadata =
+        ArrowReaderMetadata::try_new(Arc::new(metadata.clone()), ArrowReaderOptions::new())
+            .unwrap();
     SourceScan::build(
         File::open(path).unwrap(),
-        metadata,
+        &metadata,
         1,
         capacity,
         u64::MAX,
@@ -455,6 +463,11 @@ fn writer_generated_small_pages_pass_with_exact_counts() {
         .unwrap()
         .metadata()
         .clone();
+    let metadata = ArrowReaderMetadata::try_new(
+        Arc::new(metadata.as_ref().clone()),
+        ArrowReaderOptions::new(),
+    )
+    .unwrap();
 
     let scan = SourceScan::build(
         File::open(file.path()).unwrap(),

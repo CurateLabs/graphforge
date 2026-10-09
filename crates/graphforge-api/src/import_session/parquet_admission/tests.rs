@@ -10,9 +10,14 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::arrow_reader::{
+    ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
+};
 use parquet::basic::{Compression, Encoding};
+use parquet::data_type::{ByteArray, ByteArrayType, Int64Type};
 use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder, WriterVersion};
+use parquet::file::writer::SerializedFileWriter;
+use parquet::schema::parser::parse_message_type;
 
 use super::{SourceScan, needs_values};
 use crate::import_session::parquet_scan::{PageKind, encoding};
@@ -32,6 +37,11 @@ fn scan(file: &tempfile::NamedTempFile, batch_rows: u64) -> SourceScan {
         .unwrap()
         .metadata()
         .clone();
+    let metadata = ArrowReaderMetadata::try_new(
+        Arc::new(metadata.as_ref().clone()),
+        ArrowReaderOptions::new(),
+    )
+    .unwrap();
     SourceScan::build(handle, &metadata, batch_rows, 1 << 40, u64::MAX, None).unwrap()
 }
 
@@ -39,6 +49,133 @@ fn scan(file: &tempfile::NamedTempFile, batch_rows: u64) -> SourceScan {
 /// the capacity its buffers were allocated with.
 fn arrow_bytes(array: &dyn Array) -> u64 {
     array.to_data().get_slice_memory_size().unwrap() as u64
+}
+
+#[test]
+fn source_scan_projects_visible_leaves_across_an_omitted_map_gap() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let schema = Arc::new(
+        parse_message_type(
+            "message schema {
+                required int64 before;
+                optional group hidden (MAP) {
+                    repeated group key_value {
+                        required binary key (UTF8);
+                        optional group value {}
+                    }
+                }
+                optional binary after (UTF8);
+            }",
+        )
+        .unwrap(),
+    );
+    let properties = Arc::new(
+        WriterProperties::builder()
+            .set_dictionary_enabled(true)
+            .build(),
+    );
+    let mut writer = SerializedFileWriter::new(file.reopen().unwrap(), schema, properties).unwrap();
+    let rows = 4;
+    let mut row_group = writer.next_row_group().unwrap();
+    let mut before = row_group.next_column().unwrap().unwrap();
+    before
+        .typed::<Int64Type>()
+        .write_batch(&[10, 11, 12, 13], None, None)
+        .unwrap();
+    before.close().unwrap();
+    let mut hidden = row_group.next_column().unwrap().unwrap();
+    hidden
+        .typed::<ByteArrayType>()
+        .write_batch(
+            &(0..rows)
+                .map(|row| ByteArray::from(format!("hidden-key-{row:064}").into_bytes()))
+                .collect::<Vec<_>>(),
+            Some(&[2; 4]),
+            Some(&[0; 4]),
+        )
+        .unwrap();
+    hidden.close().unwrap();
+    let mut after = row_group.next_column().unwrap().unwrap();
+    after
+        .typed::<ByteArrayType>()
+        .write_batch(
+            &(0..rows)
+                .map(|row| ByteArray::from(format!("visible-value-{row:064}").into_bytes()))
+                .collect::<Vec<_>>(),
+            Some(&[1; 4]),
+            None,
+        )
+        .unwrap();
+    after.close().unwrap();
+    row_group.close().unwrap();
+    writer.close().unwrap();
+
+    let metadata =
+        ArrowReaderMetadata::load(&file.reopen().unwrap(), ArrowReaderOptions::new()).unwrap();
+    let scan = SourceScan::build(
+        File::open(file.path()).unwrap(),
+        &metadata,
+        2,
+        1 << 20,
+        u64::MAX,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        scan.shape
+            .leaves
+            .iter()
+            .map(|leaf| leaf.column_index)
+            .collect::<Vec<_>>(),
+        [0, 2],
+    );
+    assert_eq!(
+        scan.groups[0]
+            .leaves
+            .iter()
+            .map(|leaf| leaf.physical_column_index)
+            .collect::<Vec<_>>(),
+        [0, 2],
+    );
+    assert_eq!(scan.batch_bytes(0), 182);
+    assert_eq!(scan.batch_bytes(1), 182);
+
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file.reopen().unwrap())
+        .unwrap()
+        .with_batch_size(2)
+        .build()
+        .unwrap();
+    let mut decoded_rows = Vec::new();
+    let mut decoded_bytes = 0_u64;
+    for batch in reader {
+        let batch = batch.unwrap();
+        assert_eq!(batch.schema().fields().len(), 2);
+        assert_eq!(batch.schema().field(0).name(), "before");
+        assert_eq!(batch.schema().field(1).name(), "after");
+        let before = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap();
+        let after = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        for row in 0..batch.num_rows() {
+            decoded_rows.push((before.value(row), after.value(row).to_owned()));
+        }
+        decoded_bytes += batch
+            .columns()
+            .iter()
+            .map(|column| arrow_bytes(column.as_ref()))
+            .sum::<u64>();
+    }
+    assert_eq!(decoded_rows.len(), 4);
+    assert_eq!(decoded_rows[0], (10, format!("visible-value-{:064}", 0)));
+    assert_eq!(decoded_rows[3], (13, format!("visible-value-{:064}", 3)));
+    assert_eq!(decoded_bytes, 368);
+    assert_eq!(scan.decoded_bytes(), 364);
 }
 
 /// Every batch's stated size covers what the reader decodes, and exceeds it by
@@ -313,6 +450,11 @@ fn a_page_that_bounds_a_small_batch_too_coarsely_is_replaced_by_the_exact_size()
         .unwrap()
         .metadata()
         .clone();
+    let metadata = ArrowReaderMetadata::try_new(
+        Arc::new(metadata.as_ref().clone()),
+        ArrowReaderOptions::new(),
+    )
+    .unwrap();
     // Admitting by the bound alone: a 1 MiB window refuses every batch.
     let coarse = SourceScan::build(
         handle.try_clone().unwrap(),

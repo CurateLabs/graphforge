@@ -8,7 +8,9 @@ use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
 use graphforge_core::GfError;
 use parquet::arrow::ArrowWriter;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::arrow_reader::{
+    ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
+};
 use parquet::basic::{Compression, Encoding, Type};
 use parquet::column::page::Page;
 use parquet::file::properties::WriterProperties;
@@ -47,9 +49,12 @@ fn scan(
     metadata: &parquet::file::metadata::ParquetMetaData,
     batch_rows: u64,
 ) -> Result<SourceScan, GfError> {
+    let metadata =
+        ArrowReaderMetadata::try_new(Arc::new(metadata.clone()), ArrowReaderOptions::new())
+            .unwrap();
     SourceScan::build(
         File::open(file.path()).unwrap(),
-        metadata,
+        &metadata,
         batch_rows,
         1 << 30,
         u64::MAX,

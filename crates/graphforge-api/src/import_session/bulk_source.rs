@@ -764,7 +764,7 @@ pub(super) fn plan<'a>(
             };
             let scan = SourceScan::build(
                 scan_file,
-                metadata.metadata(),
+                &metadata,
                 batch_rows as u64,
                 budget.max(PLANNING_FLOOR_BYTES),
                 // A batch past the intake window plus an eighth is refused.

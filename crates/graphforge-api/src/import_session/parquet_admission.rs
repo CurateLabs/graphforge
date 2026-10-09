@@ -16,11 +16,13 @@
 //! the builder's per-batch window is stated in.
 
 use graphforge_core::GfError;
+use parquet::arrow::arrow_reader::ArrowReaderMetadata;
 use parquet::file::metadata::ParquetMetaData;
 use std::fs::File;
 
 use super::inventory_budget::{InventoryBudget, reserve};
 use super::parquet_scan::{GroupScan, Leaf, LeafScan, PageKind, scan_group};
+use super::parquet_shape::SchemaShape;
 use super::storage;
 use crate::CancellationToken;
 
@@ -39,6 +41,8 @@ const OFFSET_BYTES: u64 = 4;
 /// Everything known about how a source decodes, from its page headers and the
 /// values the headers cannot size.
 pub(super) struct SourceScan {
+    /// Arrow-visible schema and its mapping to original physical leaf ordinals.
+    shape: SchemaShape,
     groups: Vec<GroupScan>,
     /// First row of each row group.
     group_start: Vec<u64>,
@@ -56,15 +60,16 @@ impl SourceScan {
     ///
     /// `capacity` bounds what the sizing reads may hold; a page larger than it
     /// is refused here, before any reader would allocate it. It also bounds the
-    /// inventory the scan itself keeps — page facts, leaf scans, row-group
-    /// starts, per-batch sizes — charged as it is built, so an inventory the
-    /// workspace cannot hold is refused before it is allocated. `window` is the
+    /// inventory the scan itself keeps — the Arrow schema shape, page facts,
+    /// visible leaf scans, row-group starts, and per-batch sizes — charged as it
+    /// is built, so an inventory the workspace cannot hold is refused before it
+    /// is allocated. `window` is the
     /// size past which a batch is refused: a page-bounded size that exceeds it
     /// is replaced by the exact one, so a coarse bound never refuses a batch
     /// that fits.
     pub(super) fn build(
         file: File,
-        metadata: &ParquetMetaData,
+        metadata: &ArrowReaderMetadata,
         batch_rows: u64,
         capacity: u64,
         window: u64,
@@ -72,6 +77,8 @@ impl SourceScan {
     ) -> Result<Self, GfError> {
         let mut scanner = file.try_clone().map_err(storage)?;
         let mut budget = InventoryBudget::new(capacity);
+        let shape = SchemaShape::build(metadata, &mut budget, cancellation)?;
+        let metadata = metadata.metadata();
         let mut groups = Vec::new();
         let mut group_start = Vec::new();
         let mut start = 0_u64;
@@ -86,7 +93,7 @@ impl SourceScan {
             )?;
             group_start.push(start);
             start += u64::try_from(metadata.row_group(index).num_rows()).unwrap_or(0);
-            let group = scan_group(&mut scanner, metadata, index, &mut budget)?;
+            let group = scan_group(&mut scanner, metadata, index, &shape.leaves, &mut budget)?;
             for leaf in &group.leaves {
                 super::parquet_scan::require_page_fits(&leaf.summary, capacity)?;
             }
@@ -109,6 +116,7 @@ impl SourceScan {
         )?;
         value_bytes.resize(batches, 0);
         let mut scan = Self {
+            shape,
             groups,
             group_start,
             batch_rows: batch_rows.max(1),
@@ -229,8 +237,8 @@ impl SourceScan {
         bytes
     }
 
-    /// Read every column whose batch size the headers cannot state, one row
-    /// group at a time, and add its exact Arrow bytes to each batch it touches.
+    /// Read every visible column whose batch size the headers cannot state, one
+    /// row group at a time, and add its exact Arrow bytes to each batch it touches.
     fn size_values(
         &mut self,
         file: File,
@@ -239,12 +247,14 @@ impl SourceScan {
         capacity: u64,
         cancellation: Option<&CancellationToken>,
     ) -> Result<(), GfError> {
-        for column in 0..metadata.schema_descr().num_columns() {
+        for shape_leaf in &self.shape.leaves {
+            let column = shape_leaf.column_index;
             for (index, group) in self.groups.iter().enumerate() {
                 check(cancellation)?;
                 let leaf = group
                     .leaves
-                    .get(column)
+                    .iter()
+                    .find(|leaf| leaf.physical_column_index == column)
                     .ok_or_else(|| storage("Parquet row groups disagree on physical columns"))?;
                 if !needs_values(leaf) {
                     continue;

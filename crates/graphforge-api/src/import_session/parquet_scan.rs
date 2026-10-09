@@ -504,6 +504,9 @@ pub(super) struct GroupScan {
 
 /// One leaf column of a row group.
 pub(super) struct LeafScan {
+    /// Original physical Parquet leaf ordinal, which can have gaps when the
+    /// Arrow schema omits semantically empty structures.
+    pub(super) physical_column_index: usize,
     pub(super) leaf: Leaf,
     pub(super) nested: bool,
     /// The pages' decompressed bytes bound a batch of this column too coarsely to
@@ -535,7 +538,7 @@ impl GroupScan {
     }
 }
 
-/// Scan every leaf column of row group `group`.
+/// Scan the Arrow-visible leaves of row group `group` in physical ordinal order.
 ///
 /// The columns share `budget`: a flat fixed-width column's page facts are
 /// summarized into its `ChunkSummary` and dropped, releasing their bytes for
@@ -545,10 +548,13 @@ pub(super) fn scan_group(
     file: &mut File,
     metadata: &ParquetMetaData,
     group: usize,
+    visible_leaves: &[super::parquet_shape::Leaf],
     budget: &mut InventoryBudget,
 ) -> Result<GroupScan, GfError> {
     let mut leaves = Vec::new();
-    for chunk in metadata.row_group(group).columns() {
+    for visible in visible_leaves {
+        let physical_column_index = visible.column_index;
+        let chunk = metadata.row_group(group).column(physical_column_index);
         reserve(&mut leaves, 1, budget, "a row group's leaf scans")?;
         let descriptor = chunk.column_descr();
         let leaf = leaf_of(descriptor);
@@ -566,6 +572,7 @@ pub(super) fn scan_group(
             );
         }
         leaves.push(LeafScan {
+            physical_column_index,
             leaf,
             nested,
             exact: false,
