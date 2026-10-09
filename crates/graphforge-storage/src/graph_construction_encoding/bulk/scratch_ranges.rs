@@ -89,6 +89,7 @@ pub(super) fn uuid_splitters(
     tasks: &Tasks,
     wanted: usize,
     column: &str,
+    decode: &super::gate::ByteGate,
     cancel: &AtomicBool,
 ) -> Result<Vec<[u8; 16]>, GfError> {
     if wanted <= 1 || tasks.items.is_empty() {
@@ -108,6 +109,7 @@ pub(super) fn uuid_splitters(
         .par_iter()
         .map(|&(source, task, _)| {
             check_cancelled(cancel)?;
+            let _decoding = decode.hold(sources[source].task_decode_bytes(task), cancel)?;
             let mut uuids = Vec::new();
             let mut seen = 0_usize;
             sources[source].reader.read_task(task, &mut |batch| {

@@ -197,13 +197,21 @@ pub(super) fn scatter_edges(
     sources: &[BulkSource<'_>],
     budgets: GraphConstructionBudgets,
     properties: Option<&super::property_rows::PropertyRows<'_>>,
+    decode: &super::gate::ByteGate,
     endpoints: &Endpoints<'_>,
     plan: &ScratchPlan,
     scratch: &Scratch,
     cancel: &AtomicBool,
 ) -> Result<ScatteredEdges, GfError> {
     let tasks = Tasks::plan(sources, "edges")?;
-    let splitters = uuid_splitters(sources, &tasks, plan.edge_partitions, "edge_uuid", cancel)?;
+    let splitters = uuid_splitters(
+        sources,
+        &tasks,
+        plan.edge_partitions,
+        "edge_uuid",
+        decode,
+        cancel,
+    )?;
     let partitions = Partitions::create(scratch, "edges", splitters.len() + 1, EDGE_RECORD)?;
     let staging = match endpoints {
         Endpoints::Resident { .. } => plan.staging_bytes,
@@ -226,6 +234,7 @@ pub(super) fn scatter_edges(
     let miss = Mutex::new(None::<[u8; 16]>);
     claim_in_order(tasks.items.clone(), |(source, task, rows)| {
         check_cancelled(cancel)?;
+        let _decoding = decode.hold(sources[source].task_decode_bytes(task), cancel)?;
         let mut scatter = Scatter::new(scratch, &partitions, staging);
         let (mut endpoint_refs, mut edge_probes) = match endpoints {
             Endpoints::Deferred(sink) => (
@@ -245,6 +254,7 @@ pub(super) fn scatter_edges(
         let mut target_uuids = Vec::new();
         let mut task_miss = None::<[u8; 16]>;
         let mut task_bounds = vec![None; partitions.len()];
+        let mut sink = properties.map(super::property_rows::PropertyRows::sink);
         sources[source].reader.read_task(task, &mut |batch| {
             check_cancelled(cancel)?;
             if !sources[source].reader.admitted() {
@@ -348,8 +358,8 @@ pub(super) fn scatter_edges(
                     sink.push_probe(probes, &record.uuid)?;
                 }
             }
-            if let Some(properties) = properties {
-                properties.ingest(&batch, cancel)?;
+            if let Some(sink) = &mut sink {
+                sink.push(&batch, cancel)?;
             }
             written += count;
             crate::graph_construction::construction_failpoint("bulk.during_edge_scatter");
@@ -357,6 +367,9 @@ pub(super) fn scatter_edges(
         })?;
         if written != rows {
             return Err(short_source());
+        }
+        if let Some(sink) = sink {
+            sink.finish(cancel)?;
         }
         scatter.finish()?;
         if let Some(refs) = endpoint_refs {

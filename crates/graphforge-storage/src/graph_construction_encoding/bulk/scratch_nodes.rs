@@ -180,7 +180,14 @@ pub(super) fn scatter_nodes(
     cancel: &AtomicBool,
 ) -> Result<ScatteredNodes, GfError> {
     let tasks = Tasks::plan(sources, "nodes")?;
-    let splitters = uuid_splitters(sources, &tasks, plan.node_partitions, "node_uuid", cancel)?;
+    let splitters = uuid_splitters(
+        sources,
+        &tasks,
+        plan.node_partitions,
+        "node_uuid",
+        decode,
+        cancel,
+    )?;
     let partitions = Partitions::create(scratch, "nodes", splitters.len() + 1, NODE_RECORD)?;
     let staging = plan.staging_for(partitions.len());
     let bounds = (0..partitions.len())
@@ -189,12 +196,14 @@ pub(super) fn scatter_nodes(
     let dictionary = SharedDictionary::default();
     claim_in_order(tasks.items.clone(), |(source, task, rows)| {
         check_cancelled(cancel)?;
+        let _decoding = decode.hold(sources[source].task_decode_bytes(task), cancel)?;
         let mut scatter = Scatter::new(scratch, &partitions, staging);
         let mut cache = RelationCache::new(&dictionary);
         let mut written = 0;
         let mut uuids = Vec::new();
         let mut labels = Vec::new();
         let mut task_bounds = vec![None; partitions.len()];
+        let mut sink = properties.map(super::property_rows::PropertyRows::sink);
         sources[source].reader.read_task(task, &mut |batch| {
             check_cancelled(cancel)?;
             if !sources[source].reader.admitted() {
@@ -232,8 +241,8 @@ pub(super) fn scatter_nodes(
                     .encode(),
                 )?;
             }
-            if let Some(properties) = properties {
-                properties.ingest(&batch, cancel)?;
+            if let Some(sink) = &mut sink {
+                sink.push(&batch, cancel)?;
             }
             written += count;
             crate::graph_construction::construction_failpoint(DURING_SCATTER);
@@ -241,6 +250,9 @@ pub(super) fn scatter_nodes(
         })?;
         if written != rows {
             return Err(short_source());
+        }
+        if let Some(sink) = sink {
+            sink.finish(cancel)?;
         }
         scatter.finish()?;
         for (part, task_bounds) in task_bounds.into_iter().enumerate() {

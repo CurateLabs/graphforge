@@ -2,6 +2,21 @@ use super::*;
 use arrow::array::{Array, ArrayRef, FixedSizeBinaryArray, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 
+include!("property_rows_frame_tests.rs");
+include!("property_merge_admission_tests.rs");
+include!("property_list_gather_tests.rs");
+
+impl RunSink<'_, '_> {
+    /// Bytes of the batches held now, which the gate must have granted.
+    fn retained_bytes(&self) -> u64 {
+        self.pending
+            .values()
+            .flat_map(|pending| &pending.batches)
+            .map(|batch| (batch.get_array_memory_size() + batch.num_rows() * KEY_BYTES) as u64)
+            .sum()
+    }
+}
+
 fn batch(start: u64, count: usize) -> RecordBatch {
     let ids = (start..start + count as u64)
         .rev()
@@ -32,16 +47,44 @@ fn batch(start: u64, count: usize) -> RecordBatch {
     .unwrap()
 }
 
+fn new_rows(
+    scratch: &Scratch,
+    kind: ConstructionChunkKind,
+    budgets: GraphConstructionBudgets,
+    schema_bytes: u64,
+    sizing: PropertySizing,
+) -> PropertyRows<'_> {
+    let merge_capacity = super::super::budget::property_merge_capacity(
+        budgets,
+        schema_bytes,
+        0,
+        sizing.retained_bytes,
+        0,
+    );
+    PropertyRows::new_with_merge_gate(
+        scratch,
+        kind,
+        budgets,
+        schema_bytes,
+        sizing,
+        std::sync::Arc::new(super::super::gate::ByteGate::new(merge_capacity)),
+        std::sync::Arc::new(super::super::property_rows::FrameIndexBudget::new(
+            super::super::property_rows::FRAME_INDEX_LIMIT_BYTES,
+        )),
+    )
+}
+
 #[test]
 fn scratch_traffic_matches_file_lengths_including_repeated_scans() {
     let root = tempfile::tempdir().unwrap();
     let directory = super::super::StableDirectory::open(root.path()).unwrap();
     let scratch = Scratch::create(&directory).unwrap();
-    let rows = PropertyRows::new(
+    let rows = new_rows(
         &scratch,
         ConstructionChunkKind::Node,
         GraphConstructionBudgets::default(),
         0,
+        PropertySizing::SERIAL,
     );
     let path = rows.path().unwrap();
     let before_write = rows.written_bytes();
@@ -61,41 +104,327 @@ fn scratch_traffic_matches_file_lengths_including_repeated_scans() {
     assert_eq!(rows.read_bytes() - before_read, 2 * file_bytes);
 }
 
-#[test]
-fn binary_runs_sort_globally_without_retaining_one_run_per_batch() {
-    let root = tempfile::tempdir().unwrap();
-    let directory = super::super::StableDirectory::open(root.path()).unwrap();
-    let scratch = Scratch::create(&directory).unwrap();
-    let rows = PropertyRows::new(
-        &scratch,
-        ConstructionChunkKind::Node,
-        GraphConstructionBudgets::default(),
-        0,
-    );
-    let cancel = AtomicBool::new(false);
-    for index in (0..65).rev() {
-        rows.ingest(&batch(index * 32, 32), &cancel).unwrap();
-    }
-    assert!(
-        rows.groups
-            .lock()
-            .unwrap()
-            .values()
-            .all(|group| group.levels.len() <= 7)
-    );
-    let groups = rows.finish(&cancel).unwrap();
-    assert_eq!(groups.len(), 1);
-    let mut reader = rows.reader(&groups[0].path).unwrap();
-    let mut expected = 0_u64;
+/// `batch(start, 8)` without its properties.
+fn narrow(start: u64) -> RecordBatch {
+    batch(start, 8).project(&[0, 1]).unwrap()
+}
+
+fn rows_of(rows: &PropertyRows<'_>, group: &SortedGroup) -> Vec<u64> {
+    let mut reader = rows.group_reader(group);
+    let mut seen = Vec::new();
     while let Some(batch) = reader.next().unwrap() {
         let uuids = crate::graph_construction::batch_uuid_column(&batch, "node_uuid").unwrap();
         for row in 0..batch.num_rows() {
-            assert_eq!(&uuids.value(row)[8..], &expected.to_be_bytes());
-            expected += 1;
+            seen.push(u64::from_be_bytes(
+                uuids.value(row)[8..].try_into().unwrap(),
+            ));
         }
     }
-    assert_eq!(expected, 65 * 32);
-    assert!(rows.written_bytes() > 0 && rows.read_bytes() > 0);
+    seen
+}
+
+fn rows_with(
+    scratch: &Scratch,
+    run_bytes: usize,
+    fan_in: usize,
+    retained_bytes: u64,
+) -> PropertyRows<'_> {
+    new_rows(
+        scratch,
+        ConstructionChunkKind::Node,
+        GraphConstructionBudgets::default(),
+        0,
+        PropertySizing {
+            run_bytes,
+            retained_bytes,
+            fan_in,
+            frame_bytes: 4096,
+        },
+    )
+}
+
+/// Shuffled batches of 32 identities each, from `threads` concurrent sinks.
+fn ingest(rows: &PropertyRows<'_>, batches: u64, threads: u64) {
+    let cancel = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        for thread in 0..threads {
+            let cancel = &cancel;
+            scope.spawn(move || {
+                let mut sink = rows.sink();
+                for index in (0..batches).filter(|index| index % threads == thread).rev() {
+                    sink.push(&batch(index * 32, 32), cancel).unwrap();
+                    // What this worker holds is always paid for.
+                    assert!(sink.held >= sink.retained_bytes().min(rows.sizing.retained_bytes));
+                    assert!(sink.held <= rows.sizing.retained_bytes);
+                }
+                sink.finish(cancel).unwrap();
+            });
+        }
+    });
+}
+
+#[test]
+fn runs_merge_into_one_sorted_stream_at_every_fan_in_and_run_size() {
+    for (run_bytes, fan_in, threads) in [
+        (1, 2, 1),
+        (1, 3, 4),
+        (3 << 10, 2, 3),
+        (3 << 10, 5, 2),
+        (1 << 20, 16, 1),
+        (1 << 20, 2, 4),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let directory = super::super::StableDirectory::open(root.path()).unwrap();
+        let scratch = Scratch::create(&directory).unwrap();
+        let rows = rows_with(&scratch, run_bytes, fan_in, 1 << 20);
+        ingest(&rows, 65, threads);
+        let formed = rows.runs_formed();
+        assert!(
+            run_bytes > 1 << 10 || formed >= 65,
+            "run_bytes {run_bytes}: {formed} runs"
+        );
+        let groups = rows.finish(&AtomicBool::new(false)).unwrap();
+        assert_eq!(groups.len(), 1, "run_bytes {run_bytes} fan_in {fan_in}");
+        let seen = rows_of(&rows, &groups[0]);
+        assert_eq!(
+            seen,
+            (0..65 * 32).collect::<Vec<_>>(),
+            "run_bytes {run_bytes} fan_in {fan_in} threads {threads}"
+        );
+        assert!(rows.written_bytes() > 0 && rows.read_bytes() > 0);
+        // No merge held more runs open than the fan-in, however many there were.
+        assert!(
+            rows.merge_inputs_peak() <= fan_in as u64,
+            "{} runs open at fan-in {fan_in}",
+            rows.merge_inputs_peak()
+        );
+        if formed > fan_in as u64 {
+            assert!(rows.merge_inputs_peak() >= 2);
+        }
+    }
+}
+
+#[test]
+fn few_runs_are_not_rewritten_by_a_wide_enough_merge() {
+    // 65 runs under a fan-in of 64 merge once into segments; the input is
+    // written once and the segments once: no per-level rewriting.
+    let root = tempfile::tempdir().unwrap();
+    let directory = super::super::StableDirectory::open(root.path()).unwrap();
+    let scratch = Scratch::create(&directory).unwrap();
+    let rows = rows_with(&scratch, 1, 64, 1 << 20);
+    ingest(&rows, 65, 1);
+    let runs_written = rows.written_bytes();
+    let groups = rows.finish(&AtomicBool::new(false)).unwrap();
+    let merged_written = rows.written_bytes() - runs_written;
+    // One run per batch; the 65th batch makes one merge of the two
+    // smallest runs, and the final merge rewrites everything once more.
+    assert!(
+        merged_written <= runs_written + runs_written / 8,
+        "runs {runs_written} merged {merged_written}"
+    );
+    assert_eq!(rows_of(&rows, &groups[0]).len(), 65 * 32);
+}
+
+#[test]
+fn concurrent_intake_never_holds_more_than_the_gate_admits() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = super::super::StableDirectory::open(root.path()).unwrap();
+    let scratch = Scratch::create(&directory).unwrap();
+    let one = batch(0, 32);
+    let need = (one.get_array_memory_size() + 32 * KEY_BYTES) as u64;
+    // Room for exactly two batches while eight threads push: the rest wait.
+    let rows = rows_with(&scratch, usize::MAX >> 1, 4, 2 * need);
+    ingest(&rows, 64, 8);
+    assert_eq!(super::super::gate::tests::free(&rows.gate), 2 * need);
+    // Eight threads shared room for two batches, and used it.
+    assert!(rows.peak_retained_bytes() >= need && rows.peak_retained_bytes() <= 2 * need);
+    let groups = rows.finish(&AtomicBool::new(false)).unwrap();
+    assert_eq!(rows_of(&rows, &groups[0]), (0..64 * 32).collect::<Vec<_>>());
+}
+
+#[test]
+fn an_abandoned_sink_returns_its_bytes_to_the_gate() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = super::super::StableDirectory::open(root.path()).unwrap();
+    let scratch = Scratch::create(&directory).unwrap();
+    let one = batch(0, 32);
+    let need = (one.get_array_memory_size() + 32 * KEY_BYTES) as u64;
+    let rows = rows_with(&scratch, usize::MAX >> 1, 4, need);
+    let cancel = AtomicBool::new(false);
+    let mut sink = rows.sink();
+    sink.push(&one, &cancel).unwrap();
+    drop(sink);
+    // Were the bytes stranded, this would wait for the 20 ms poll forever.
+    let mut sink = rows.sink();
+    sink.push(&batch(32, 32), &cancel).unwrap();
+    sink.finish(&cancel).unwrap();
+}
+
+#[test]
+fn a_range_merge_yields_exactly_the_rows_inside_the_range() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = super::super::StableDirectory::open(root.path()).unwrap();
+    let scratch = Scratch::create(&directory).unwrap();
+    let rows = rows_with(&scratch, 1, 64, 1 << 20);
+    ingest(&rows, 20, 1);
+    let runs = std::mem::take(&mut rows.groups.lock().unwrap().runs)
+        .into_values()
+        .next()
+        .unwrap();
+    let id = |value: u64| {
+        let mut bytes = [0_u8; 16];
+        bytes[8..].copy_from_slice(&value.to_be_bytes());
+        bytes
+    };
+    let refs = runs.iter().collect::<Vec<_>>();
+    let cancel = AtomicBool::new(false);
+    for (lower, upper) in [
+        (None, None),
+        (Some(100), Some(101)),
+        (Some(31), Some(33)),
+        (None, Some(7)),
+        (Some(630), None),
+        (Some(10_000), None),
+        (Some(5), Some(5)),
+    ] {
+        let merged = rows
+            .merge(&refs, lower.map(id), upper.map(id), &cancel)
+            .unwrap();
+        let group = SortedGroup {
+            segments: vec![merged],
+            bare_owners: None,
+        };
+        let seen = rows_of(&rows, &group);
+        let expected = (0..20 * 32)
+            .filter(|value| lower.is_none_or(|lower| *value >= lower))
+            .filter(|value| upper.is_none_or(|upper| *value < upper))
+            .collect::<Vec<_>>();
+        assert_eq!(seen, expected, "{lower:?}..{upper:?}");
+    }
+}
+
+#[test]
+fn identities_repeated_across_runs_are_all_kept() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = super::super::StableDirectory::open(root.path()).unwrap();
+    let scratch = Scratch::create(&directory).unwrap();
+    let rows = rows_with(&scratch, 1, 2, 1 << 20);
+    let cancel = AtomicBool::new(false);
+    let mut sink = rows.sink();
+    for _ in 0..5 {
+        sink.push(&batch(0, 32), &cancel).unwrap();
+    }
+    sink.finish(&cancel).unwrap();
+    let groups = rows.finish(&cancel).unwrap();
+    let seen = rows_of(&rows, &groups[0]);
+    assert_eq!(seen.len(), 5 * 32);
+    assert!(seen.windows(2).all(|pair| pair[0] <= pair[1]));
+}
+
+#[test]
+fn schemas_stay_in_separate_groups_and_the_group_budget_is_enforced() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = super::super::StableDirectory::open(root.path()).unwrap();
+    let scratch = Scratch::create(&directory).unwrap();
+    let rows = rows_with(&scratch, 1 << 20, 4, 1 << 20);
+    let cancel = AtomicBool::new(false);
+    let mut sink = rows.sink();
+    sink.push(&batch(0, 8), &cancel).unwrap();
+    sink.push(&narrow(8), &cancel).unwrap();
+    sink.push(&batch(16, 8), &cancel).unwrap();
+    sink.finish(&cancel).unwrap();
+    let groups = rows.finish(&cancel).unwrap();
+    assert_eq!(groups.len(), 2);
+    // The schema without properties keeps its owners, not its rows.
+    let (bare, with_rows) = groups
+        .iter()
+        .partition::<Vec<_>, _>(|group| group.bare_owners.is_some());
+    assert_eq!((bare.len(), with_rows.len()), (1, 1));
+    assert_eq!(bare[0].bare_owners, Some(vec![("Person".to_owned(), 8)]));
+    assert!(bare[0].segments.is_empty());
+    assert_eq!(rows_of(&rows, with_rows[0]).len(), 16);
+
+    let limited = new_rows(
+        &scratch,
+        ConstructionChunkKind::Node,
+        GraphConstructionBudgets {
+            max_schema_groups: 1,
+            ..GraphConstructionBudgets::default()
+        },
+        0,
+        PropertySizing::SERIAL,
+    );
+    let mut sink = limited.sink();
+    sink.push(&batch(0, 8), &cancel).unwrap();
+    let error = sink.push(&narrow(8), &cancel).unwrap_err();
+    assert!(error.to_string().contains("schema-group budget"), "{error}");
+}
+
+/// A node batch with a label per row and no properties.
+fn labelled(ids: &[u64], labels: &[&str]) -> RecordBatch {
+    let uuids = ids
+        .iter()
+        .map(|id| {
+            let mut bytes = [0; 16];
+            bytes[8..].copy_from_slice(&id.to_be_bytes());
+            bytes
+        })
+        .collect::<Vec<_>>();
+    RecordBatch::try_new(
+        std::sync::Arc::new(Schema::new(vec![
+            Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+            Field::new("label", DataType::Utf8, false),
+        ])),
+        vec![
+            std::sync::Arc::new(
+                FixedSizeBinaryArray::try_from_iter(uuids.iter().map(|id| id.as_slice())).unwrap(),
+            ) as ArrayRef,
+            std::sync::Arc::new(StringArray::from(labels.to_vec())),
+        ],
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_group_without_properties_orders_owners_by_first_appearance_in_identity_order() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = super::super::StableDirectory::open(root.path()).unwrap();
+    let scratch = Scratch::create(&directory).unwrap();
+    let rows = rows_with(&scratch, 1 << 20, 4, 1 << 20);
+    let cancel = AtomicBool::new(false);
+    // Identity order is 1:Pet 2:Person 3:Person 4:City 5:Pet 6:City 7:Pet; the
+    // batches arrive out of order and from two workers.
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut sink = rows.sink();
+            sink.push(&labelled(&[6, 3, 5], &["City", "Person", "Pet"]), &cancel)
+                .unwrap();
+            sink.push(&labelled(&[7], &["Pet"]), &cancel).unwrap();
+            sink.finish(&cancel).unwrap();
+        });
+        scope.spawn(|| {
+            let mut sink = rows.sink();
+            sink.push(&labelled(&[4, 2, 1], &["City", "Person", "Pet"]), &cancel)
+                .unwrap();
+            sink.finish(&cancel).unwrap();
+        });
+    });
+    let groups = rows.finish(&cancel).unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(
+        groups[0].bare_owners,
+        Some(vec![
+            ("Pet".to_owned(), 3),
+            ("Person".to_owned(), 2),
+            ("City".to_owned(), 2),
+        ])
+    );
+    assert_eq!(
+        rows.written_bytes(),
+        0,
+        "a bare group must write no scratch"
+    );
+    assert_eq!(rows.runs_formed(), 0);
 }
 
 #[test]
@@ -103,11 +432,12 @@ fn ipc_type_metadata_is_charged_before_schema_instantiation() {
     let root = tempfile::tempdir().unwrap();
     let directory = super::super::StableDirectory::open(root.path()).unwrap();
     let scratch = Scratch::create(&directory).unwrap();
-    let rows = PropertyRows::new(
+    let rows = new_rows(
         &scratch,
         ConstructionChunkKind::Node,
         GraphConstructionBudgets::default(),
         0,
+        PropertySizing::SERIAL,
     );
     let zone = std::iter::repeat_n('x', 2 << 20).collect::<String>();
     let temporal = arrow::array::TimestampNanosecondArray::from(vec![0; 3]).with_timezone(zone);
@@ -134,11 +464,12 @@ fn frames_reject_crc_corruption_truncation_and_unbounded_ipc_bodies() {
     let root = tempfile::tempdir().unwrap();
     let directory = super::super::StableDirectory::open(root.path()).unwrap();
     let scratch = Scratch::create(&directory).unwrap();
-    let rows = PropertyRows::new(
+    let rows = new_rows(
         &scratch,
         ConstructionChunkKind::Node,
         GraphConstructionBudgets::default(),
         0,
+        PropertySizing::SERIAL,
     );
     let path = rows.path().unwrap();
     rows.write(&path, &batch(0, 3)).unwrap();

@@ -6,7 +6,7 @@ use arrow::array::Array;
 
 use super::super::{PropertyRouteKind, property_batch, property_projections_for_fields};
 use super::emit::Semantics;
-use super::property_rows::{BatchAccumulator, PropertyRows, SortedGroup};
+use super::property_rows::{self, BatchAccumulator, PropertyRows, SortedGroup};
 use super::{
     ConstructionChunkKind, ConstructionEncodedArtifact, GfError, GraphConstructionBudgets,
     GraphConstructionEncodingEvidence, RecordBatch, SemanticRouteKind, StableDirectory, SymbolKind,
@@ -36,13 +36,17 @@ pub(super) fn emit(
     artifacts: &mut Vec<ConstructionEncodedArtifact>,
 ) -> Result<(), GfError> {
     let mut ordinals = BTreeMap::<String, u64>::new();
-    let required = match kind {
-        ConstructionChunkKind::Node => 2,
-        ConstructionChunkKind::Edge => 4,
-    };
-    let owner_column = if required == 2 { "label" } else { "rel_type" };
+    // Scratch rows keep the identity and the owner beside the properties; an
+    // edge's endpoints were resolved when its record was scattered.
+    let required = property_rows::REQUIRED_COLUMNS;
+    let node = matches!(kind, ConstructionChunkKind::Node);
+    let owner_column = if node { "label" } else { "rel_type" };
     for group in groups {
-        let mut reader = rows.reader(&group.path)?;
+        // A group without properties writes no overlay.
+        if group.bare_owners.is_some() {
+            continue;
+        }
+        let mut reader = rows.group_reader(group);
         let mut batch = reader.next()?;
         let mut offset = 0;
         while batch.is_some() {
@@ -145,12 +149,8 @@ pub(super) fn emit(
                         let path = projected_path(&window, owner.ordinal, projection);
                         let property = property_batch(
                             &part,
-                            if required == 2 {
-                                "node_uuid"
-                            } else {
-                                "edge_uuid"
-                            },
-                            if required == 2 {
+                            if node { "node_uuid" } else { "edge_uuid" },
+                            if node {
                                 "graphforge.entity_type"
                             } else {
                                 "graphforge.rel_type"
@@ -158,7 +158,7 @@ pub(super) fn emit(
                             &resolved.topology_route,
                             &indexes,
                             fields,
-                            if required == 2 {
+                            if node {
                                 PropertyRouteKind::Node
                             } else {
                                 PropertyRouteKind::Edge
