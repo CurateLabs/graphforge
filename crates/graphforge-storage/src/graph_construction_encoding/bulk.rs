@@ -769,6 +769,12 @@ pub(crate) fn encode_bulk(
         + edge_properties
             .as_ref()
             .map_or(0, property_rows::PropertyRows::runs_formed);
+    let property_merge_inputs_peak = [&node_properties, &edge_properties]
+        .into_iter()
+        .flatten()
+        .map(property_rows::PropertyRows::merge_inputs_peak)
+        .max()
+        .unwrap_or(0);
     let property_peak_retained_bytes = [&node_properties, &edge_properties]
         .into_iter()
         .flatten()
@@ -921,6 +927,7 @@ pub(crate) fn encode_bulk(
                 0
             },
             property_runs,
+            property_merge_inputs_peak,
             decode_pool_bytes: decode.capacity(),
             decode_peak_bytes: decode.peak(),
             property_peak_retained_bytes,

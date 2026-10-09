@@ -265,9 +265,12 @@ pub struct BulkBuildReport {
     /// Sorted property runs written from the input.
     #[serde(default)]
     pub property_runs: u64,
-    /// Runs one property merge holds open.
+    /// Runs one property merge may hold open.
     #[serde(default)]
     pub property_merge_fan_in: u64,
+    /// The most runs any property merge did hold open.
+    #[serde(default)]
+    pub property_merge_inputs_peak: u64,
     /// Most bytes the workers held at once while forming property runs, against
     /// the `property_retained_budget_bytes` they were allowed.
     #[serde(default)]
