@@ -95,6 +95,38 @@ pub(crate) fn visit_property_overlay_batched_projected<F>(
     is_edge: bool,
     batch_size: usize,
     selected_properties: Option<&std::collections::BTreeSet<String>>,
+    visit: F,
+) -> Result<Option<crate::PropertyOverlayMetrics>, DataFusionError>
+where
+    F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
+{
+    visit_property_overlay_batched_selected(
+        dir,
+        inventory,
+        stem,
+        is_edge,
+        batch_size,
+        selected_properties,
+        None,
+        visit,
+    )
+}
+
+/// The most rows a pushed-down equality may nominate before the read gives up
+/// pruning and streams the route.
+const MAX_EQUALITY_CANDIDATES: usize = 1 << 18;
+
+/// Visit a route's newest live rows, optionally only those that can satisfy a
+/// pushed-down equality. The read streams the fragments and writes nothing.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(crate) fn visit_property_overlay_batched_selected<F>(
+    dir: &Path,
+    inventory: Option<&crate::AuthenticatedPropertyInventory>,
+    stem: &str,
+    is_edge: bool,
+    batch_size: usize,
+    selected_properties: Option<&std::collections::BTreeSet<String>>,
+    equality: Option<&crate::property_overlay::PropertyEquality>,
     mut visit: F,
 ) -> Result<Option<crate::PropertyOverlayMetrics>, DataFusionError>
 where
@@ -127,21 +159,60 @@ where
                 .transpose()
         })
         .map_err(|error| DataFusionError::External(Box::new(error)))?;
-    let scratch = inventory
-        .create_snapshot_scratch()
-        .map_err(|error| DataFusionError::External(Box::new(error)))?;
+    let collect = crate::lifecycle_io::is_active();
+    let limits = crate::property_overlay::PropertyOverlayLimits::default();
+    let mut metrics = crate::PropertyOverlayMetrics::default();
+    // Only a node route's equality is answered from statistics; the candidate
+    // read decodes the compared column alone.
+    let candidates = match equality.filter(|_| !is_edge) {
+        Some(equality) => inventory
+            .equality_candidates(
+                kind,
+                stem,
+                equality,
+                limits,
+                MAX_EQUALITY_CANDIDATES,
+                collect,
+            )
+            .map_err(|error| DataFusionError::External(Box::new(error)))?,
+        None => None,
+    };
+    let candidate_uuids = candidates.map(|(uuids, work)| {
+        metrics.absorb(&work);
+        uuids
+    });
+    // The compared column is needed to check the winner of each candidate.
+    let streamed_properties = match (equality, selected_properties) {
+        (Some(equality), Some(selected)) => {
+            let mut selected = selected.clone();
+            selected.insert(equality.column.clone());
+            Some(selected)
+        }
+        _ => selected_properties.cloned(),
+    };
     let mut rows = Vec::with_capacity(batch_size.max(1));
     let mut stopped = false;
-    let metrics = inventory
-        .visit_route_projected_optional(
+    let mut failure = None;
+    if candidate_uuids
+        .as_ref()
+        .is_none_or(|uuids| !uuids.is_empty())
+    {
+        let read = crate::property_overlay::RouteRead {
             kind,
-            stem,
-            scratch.path(),
-            crate::property_overlay::PropertyOverlayLimits::default(),
-            selected_properties,
-            |row| {
-                if stopped {
-                    return Ok(());
+            route: stem,
+            selected_properties: streamed_properties.as_ref(),
+            uuids: candidate_uuids.as_ref(),
+            limits,
+            collect,
+        };
+        let work = inventory
+            .visit_route_streaming(&read, |row| {
+                // A candidate's newest snapshot may differ from the value the
+                // candidate scan saw; the predicate decides.
+                if candidate_uuids.is_some()
+                    && equality.is_some_and(|equality| !equality.holds(&row.values))
+                {
+                    return Ok(true);
                 }
                 rows.push(row);
                 if rows.len() >= batch_size.max(1) {
@@ -156,13 +227,23 @@ where
                     let batch = normalize_property_batch(batch, schema.as_ref())?;
                     let batch =
                         project_property_batch(batch, kind.uuid_field(), selected_properties)?;
-                    stopped =
-                        !visit(&batch).map_err(graphforge_core::GfError::from_execution_error)?;
+                    match visit(&batch) {
+                        Ok(true) => {}
+                        Ok(false) => stopped = true,
+                        Err(error) => {
+                            failure = Some(error);
+                            stopped = true;
+                        }
+                    }
                 }
-                Ok(())
-            },
-        )
-        .map_err(|error| DataFusionError::External(Box::new(error)))?;
+                Ok(!stopped)
+            })
+            .map_err(|error| DataFusionError::External(Box::new(error)))?;
+        metrics.absorb(&work);
+    }
+    if let Some(error) = failure {
+        return Err(error);
+    }
     if !stopped && !rows.is_empty() {
         let batch = crate::writer::property_snapshots_to_batch(stem, is_edge, rows)
             .map_err(|error| DataFusionError::External(Box::new(error)))?
@@ -173,7 +254,7 @@ where
             .map_err(|error| DataFusionError::External(Box::new(error)))?;
         let _ = visit(&batch)?;
     }
-    Ok(metrics)
+    Ok(collect.then_some(metrics))
 }
 
 // Normalize decoded columns against their selected schema. Omitted required

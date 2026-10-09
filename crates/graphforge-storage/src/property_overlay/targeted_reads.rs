@@ -4,10 +4,10 @@ use super::{
     Array, AuthenticatedPropertyFragment, AuthenticatedPropertyInventory, BTreeMap, BTreeSet,
     BooleanArray, FixedSizeBinaryArray, GfError, OpenPropertyFragment, PROPERTY_TOMBSTONE_FIELD,
     PropertyOverlayLimits, PropertyOverlayMetrics, PropertyRouteKind, PropertySnapshotRow,
-    ReadCounts, RecordBatch, TargetReadAdmission, Uuid, admit_target_footer, admitted_batch_rows,
-    authenticated_arrow_error, charge_target_batch, corrupt, decode_snapshot_batch,
-    open_counted_retained_property_builder, parquet_error, parquet_resource_admission,
-    replay_decoder_limit, snapshot_charge, validate_fragment_schema,
+    ReadCounts, RecordBatch, SnapshotScratch, TargetReadAdmission, Uuid, admit_target_footer,
+    admitted_batch_rows, authenticated_arrow_error, charge_target_batch, corrupt,
+    decode_snapshot_batch, open_counted_retained_property_builder, parquet_error,
+    parquet_resource_admission, replay_decoder_limit, snapshot_charge, validate_fragment_schema,
     validate_parquet_resource_admission,
 };
 
@@ -328,10 +328,20 @@ pub(super) fn read_property_targets(
             metrics: metrics.unwrap_or_default(),
         });
     };
-    let targeted_scratch = inventory.create_snapshot_scratch()?;
+    // Replay bounds its memory tightly and keeps file snapshots. Every other
+    // targeted read authenticates in memory and writes nothing.
+    let replay_scratch = replay_budget
+        .map(|_| inventory.create_snapshot_scratch())
+        .transpose()?;
+    let lazy_scratch = inventory.lazy_snapshot_scratch()?;
+    let snapshot_scratch = replay_scratch
+        .as_ref()
+        .map_or(SnapshotScratch::Lazy(&lazy_scratch), |scratch| {
+            SnapshotScratch::Directory(scratch.path())
+        });
     for fragment in fragments.iter().rev() {
         let counts = ReadCounts::new(collect);
-        let opened = inventory.open_fragment(fragment, targeted_scratch.path())?;
+        let opened = inventory.open_fragment(fragment, snapshot_scratch)?;
         let source_reservation = opened.file.reservation_bytes();
         if source_reservation > limits.max_buffered_bytes {
             return Err(replay_decoder_limit(

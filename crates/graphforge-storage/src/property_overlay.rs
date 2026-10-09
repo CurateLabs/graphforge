@@ -12,6 +12,7 @@ pub use fragment_cap::{MAX_PROPERTY_FRAGMENT_BYTES, MAX_PROPERTY_FRAGMENT_ROWS};
 pub(crate) mod bounded_object;
 pub use bounded_object::MAX_PROPERTY_OBJECT_BYTES;
 mod inventory;
+pub(crate) use inventory::SnapshotScratch;
 #[cfg(test)]
 use inventory::digest_hex;
 pub use inventory::enumerate_property_fragments;
@@ -27,6 +28,10 @@ pub use projected_reads::{
     read_authenticated_property_snapshots_for, read_authenticated_property_snapshots_for_inventory,
     visit_authenticated_property_snapshots,
 };
+mod selective_reads;
+pub(crate) use selective_reads::{EqualityValue, PropertyEquality};
+mod streaming_merge;
+pub(crate) use streaming_merge::RouteRead;
 mod targeted_reads;
 use targeted_reads::read_property_targets;
 pub use targeted_reads::{
@@ -271,6 +276,10 @@ struct FragmentObject {
 struct FragmentFooter {
     physical_rows: usize,
     schema: arrow::datatypes::SchemaRef,
+    /// The authenticated footer, whose row-group statistics prune reads.
+    metadata: Arc<parquet::file::metadata::ParquetMetaData>,
+    /// Smallest and largest UUID of the fragment, when its statistics say.
+    uuid_range: Option<([u8; 16], [u8; 16])>,
 }
 
 /// Schema of one route, derived from its fragments' footers.
@@ -334,7 +343,12 @@ impl PartAuthentication {
 
 #[derive(Debug)]
 enum PropertyFile {
+    /// A scratch-file snapshot, used only for a legacy object larger than
+    /// [`MAX_IN_MEMORY_SNAPSHOT_BYTES`].
     Plain(File),
+    /// The authenticated bytes of one bounded object, held in memory. Reading
+    /// a property fragment writes nothing.
+    Memory(Bytes),
     Segmented {
         source: bounded_object::SegmentedSource,
         authentication: Arc<PartAuthentication>,
@@ -344,14 +358,14 @@ enum PropertyFile {
 impl PropertyFile {
     fn authentication(&self) -> (u64, u64, u64) {
         match self {
-            Self::Plain(_) => (0, 0, 0),
+            Self::Plain(_) | Self::Memory(_) => (0, 0, 0),
             Self::Segmented { authentication, .. } => authentication.values(),
         }
     }
 
     fn physical_reads(&self) -> (u64, u64) {
         match self {
-            Self::Plain(_) => (0, 0),
+            Self::Plain(_) | Self::Memory(_) => (0, 0),
             Self::Segmented { authentication, .. } => (
                 authentication.read_bytes.load(Ordering::Relaxed),
                 authentication.read_calls.load(Ordering::Relaxed),
@@ -362,6 +376,7 @@ impl PropertyFile {
     fn reservation_bytes(&self) -> u64 {
         match self {
             Self::Plain(_) => 0,
+            Self::Memory(bytes) => bytes.len() as u64,
             Self::Segmented { .. } => 2 * bounded_object::MAX_PROPERTY_OBJECT_BYTES as u64,
         }
     }
@@ -386,17 +401,27 @@ impl PropertyRead for File {
 
 impl PropertyRead for PropertyFile {
     fn physical(&self) -> bool {
-        matches!(self, Self::Plain(_))
+        matches!(self, Self::Plain(_) | Self::Memory(_))
     }
     fn read_at(&self, buffer: &mut [u8], offset: u64) -> std::io::Result<usize> {
         match self {
             Self::Plain(file) => retained_read_at(file, buffer, offset),
+            Self::Memory(bytes) => {
+                let Ok(start) = usize::try_from(offset) else {
+                    return Ok(0);
+                };
+                let available = bytes.get(start..).unwrap_or_default();
+                let length = available.len().min(buffer.len());
+                buffer[..length].copy_from_slice(&available[..length]);
+                Ok(length)
+            }
             Self::Segmented { source, .. } => source.read_at(buffer, offset),
         }
     }
     fn length(&self) -> std::io::Result<u64> {
         match self {
             Self::Plain(file) => file.length(),
+            Self::Memory(bytes) => Ok(bytes.len() as u64),
             Self::Segmented { source, .. } => Ok(source.len()),
         }
     }
@@ -563,6 +588,63 @@ pub struct PropertyOverlayMetrics {
     pub merge_peak_bytes: u64,
     /// Random/per-record seeks are forbidden and remain zero.
     pub per_record_seeks: u64,
+}
+
+impl PropertyOverlayMetrics {
+    /// Fold the work of another pass over the same route into this one:
+    /// counts add, and peaks take the larger.
+    pub(crate) fn absorb(&mut self, other: &Self) {
+        macro_rules! add {
+            ($($field:ident),* $(,)?) => { $(self.$field = self.$field.saturating_add(other.$field);)* };
+        }
+        macro_rules! peak {
+            ($($field:ident),* $(,)?) => { $(self.$field = self.$field.max(other.$field);)* };
+        }
+        add!(
+            physical_rows,
+            physical_bytes,
+            authentication_bytes,
+            authority_authentication_bytes,
+            property_authentication_bytes,
+            authenticated_snapshot_bytes,
+            validation_bytes,
+            selected_value_bytes,
+            physical_blocks,
+            read_calls,
+            authentication_block_equivalents,
+            authentication_read_calls,
+            authority_authentication_block_equivalents,
+            authority_authentication_read_calls,
+            property_authentication_block_equivalents,
+            property_authentication_read_calls,
+            validation_read_calls,
+            selected_value_read_calls,
+            range_seeks,
+            row_groups_considered,
+            row_groups_selected,
+            emitted_batches,
+            fragments_considered,
+            logical_rows,
+            shadowed_rows,
+            tombstones,
+            spill_bytes,
+            spool_input_bytes,
+            spill_runs,
+            merge_passes,
+            per_record_seeks,
+        );
+        peak!(
+            authenticated_snapshot_peak_bytes,
+            peak_run_references,
+            peak_buffered_rows,
+            peak_buffered_bytes,
+            decoder_peak_rows,
+            decoder_peak_bytes,
+            decoder_page_reservation_bytes,
+            merge_peak_rows,
+            merge_peak_bytes,
+        );
+    }
 }
 
 /// Complete logical property state for one UUID.
