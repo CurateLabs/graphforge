@@ -720,14 +720,16 @@ pub(super) fn plan<'a>(
         ImportSourceKind::ParquetNodes | ImportSourceKind::ParquetEdges => {
             let budget = bulk_build_memory_budget()?;
             let metadata = if let Some(external) = source.external.as_ref() {
-                // The footer is read once through the digest, which keeps it.
-                let digest = SourceDigest::new(external.size);
+                require_footer_fits(external.footer_bytes(), budget)?;
+                // Footer verification precedes the decoder's workspace
+                // reservation. Hash its reads without retaining an
+                // out-of-order footer copy in the digest's pending map.
+                let digest = SourceDigest::for_planning(external.size);
                 let file = external.open_observed(&digest)?;
                 let guard = file.try_clone().map_err(storage)?;
                 let input = ObservedFile::new(file, digest.clone())?;
                 // The footer is read whole and parsed into structures many times
                 // its size; refuse one the budget cannot hold before reading it.
-                require_footer_fits(external.footer_bytes(), budget)?;
                 let metadata = ArrowReaderMetadata::load(&input, ArrowReaderOptions::new())
                     .map_err(|error| external.reclassify(&guard, storage(error)))?;
                 // Reads ahead of the hashed prefix are held, so the bound on

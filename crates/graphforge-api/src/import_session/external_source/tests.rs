@@ -242,6 +242,26 @@ fn digest_equals_sha256_for_any_read_order() {
 }
 
 #[test]
+fn planning_footer_verification_keeps_no_pending_copy_and_preserves_provenance() {
+    let source = source();
+    let identity = super::ExternalSource::capture(&source.path).unwrap();
+    let original = fs::read(&source.path).unwrap();
+    let digest = SourceDigest::for_planning(identity.size);
+
+    // Exercise the real registration-pin and footer-verification transport,
+    // which observes the trailer and footer ahead of the undecoded body.
+    let file = identity.open_observed(&digest).unwrap();
+    {
+        let state = digest.state();
+        assert_eq!(state.pending_bytes, 0);
+        assert!(state.pending.is_empty());
+    }
+    assert_eq!(digest.finish(&identity, &file).unwrap(), sha256(&original));
+    assert!(digest.reread_bytes() >= identity.footer_bytes());
+    identity.check(&file).unwrap();
+}
+
+#[test]
 fn digest_rereads_ranges_dropped_beyond_the_pending_bound() {
     let bytes = (0..(1 << 20))
         .map(|index: u32| index as u8)
