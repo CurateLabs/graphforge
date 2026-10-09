@@ -676,14 +676,18 @@ characters). The same text appears in the retained certify stream under
 `error_tail`. `staging_failed` now means only that the rung never started;
 `benchexec_failed` means BenchExec itself failed before any phase reported.
 
-Host-wide swap activity during a rung invalidates its performance measurements,
-even when BenchExec exits successfully. The controller stops as `host_swapped`
-and retains the before/after `/proc/vmstat` counters in
-`s<scale>-failure-raw/host-swap.json`. A known phase or timeout failure remains
-the primary cause when swapping also occurred. `host_swap_unavailable` means
-the counters could not be read after execution; raw output is retained and the
-rung is rejected. Occupied swap without activity does not fail a rung, and a
-host-wide warning does not identify which process swapped.
+Swap by the rung's own pages during a rung invalidates its performance
+measurements, even when BenchExec exits successfully. The controller reads the
+swap counters of BenchExec's run cgroup (`benchmark_*`: `pswpout` in its
+`memory.stat` and `memory.swap.peak`), which the supervisor samples while the
+run is alive, and stops as `host_swapped` when either is above zero. It
+retains them in `s<scale>-failure-raw/phase-cgroup-swap.json`. The host-wide
+`/proc/vmstat` is not read: on a shared host another process's swap-out is not
+this rung's memory (#1914). A known phase or timeout failure remains the
+primary cause when swapping also occurred. `host_swap_unavailable` means a run
+that exited cleanly left no reading of its cgroup, so whether it swapped is
+unknown; raw output is retained and the rung is rejected. Occupied swap
+without a page-out does not fail a rung.
 
 The reserve is 75 GiB by default. Before each launch, admission measures free
 space available to the current user on the actual work-root filesystem.

@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import contextlib
 import io
-import itertools
 import json
 import os
 from pathlib import Path
@@ -28,7 +27,8 @@ import unittest
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
-from graphforge_bench import gdc_rung
+from graphforge_bench import gdc_rung, phase_cgroup
+from graphforge_bench.benchexec_process import HUNG_EVIDENCE, HUNG_STATUS
 from graphforge_bench.gdc_contracts import workspace_root
 from graphforge_bench.gdc_measurement_policy import (
     CARD_METRIC_SOURCES,
@@ -92,8 +92,11 @@ TERMINATED_STATUS = {"walltime": "TIMEOUT", "memory": "OUT OF MEMORY"}
 class FakeBenchExec:
     """Runs a staged phase the way BenchExec would, writing BenchExec's output layout."""
 
-    def __init__(self, *, termination: str | None = None) -> None:
+    def __init__(self, *, termination: str | None = None, swap: str | None = "clean") -> None:
         self.termination = termination
+        # What the run's cgroup sampler saw: "clean" (observed, no swap), "swapped",
+        # or None (the phase's cgroup was never observed).
+        self.swap = swap
         self.stages: list[Path] = []
 
     def __call__(self, stage: Path, executables: Any, identities: Any, work_root: Path) -> int:
@@ -139,6 +142,24 @@ class FakeBenchExec:
         for title, value in columns.items():
             ET.SubElement(run, "column", title=title, value=value)
         ET.ElementTree(result).write(raw / f"benchmark.results.{gdc_rung.DEFINITION}.xml")
+        if self.swap is not None:
+            pages = 7 if self.swap == "swapped" else 0
+            (stage / phase_cgroup.EVIDENCE_NAME).write_text(
+                json.dumps(
+                    {
+                        "schema": phase_cgroup.SCHEMA,
+                        "samples": 3,
+                        "runs": {
+                            "benchmark_fake": {
+                                "pswpout_pages": pages,
+                                "swap_peak_bytes": pages * 4096,
+                                "swap_max": "0",
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
         return 0
 
 
@@ -186,16 +207,6 @@ class TinyLadderEndToEndTests(Scratch):
         cls.executables = gdc_rung.GdcExecutables(
             gf=gf_binary(), driver=converter_binary(), benchexec_python=Path(sys.executable)
         )
-
-    def setUp(self) -> None:
-        super().setUp()
-        # Host swap is a host-wide interference check (PhaseClassificationTests);
-        # a shared CI or developer host must not decide these fixture outcomes.
-        swap = patch.object(
-            gdc_rung, "_host_swap_counters", return_value={"pswpin": 0, "pswpout": 0}
-        )
-        swap.start()
-        self.addCleanup(swap.stop)
 
     def test_tiny_ladder_stops_at_the_first_typed_failure_and_renders_its_card(self) -> None:
         benchexec = FakeBenchExec()
@@ -340,47 +351,67 @@ class TinyLadderEndToEndTests(Scratch):
         with self.assertRaises(FileExistsError):
             write_card(ROOT, ladder.spec, self.output)
 
-    def test_a_swap_rise_fails_the_phase_naming_and_retaining_the_counters(self) -> None:
-        readings = iter(
-            [{"pswpin": 10, "pswpout": 20}, {"pswpin": 12, "pswpout": 25}]  # before, after
+    def test_a_phase_whose_own_cgroup_swapped_fails_naming_and_retaining_the_counters(
+        self,
+    ) -> None:
+        ladder = self.ladder(self.executables, FakeBenchExec(swap="swapped"))
+        results = gdc_rung.climb(
+            ladder,
+            reserved_headroom_bytes=0,
+            quiet_host_wait_seconds=0,
+            quiet_host=lambda _wait: QUIET,
         )
-        ladder = self.ladder(self.executables, FakeBenchExec())
-        with patch.object(gdc_rung, "_host_swap_counters", side_effect=lambda: next(readings)):
-            results = gdc_rung.climb(
-                ladder,
-                reserved_headroom_bytes=0,
-                quiet_host_wait_seconds=0,
-                quiet_host=lambda _wait: QUIET,
-            )
         self.assertEqual(
             results[0]["failure"],
             {
                 "phase": "convert",
-                "cause": "host_swapped",
-                "detail": "host paged out during the phase: pswpout +5 (20 -> 25), pswpin +2; "
-                "see host-swap.json",
+                "cause": "phase_swapped",
+                "detail": "the phase's own cgroup paged out (benchmark_fake: pswpout 7 pages, "
+                "swap peak 28672 bytes); see phase-cgroup-swap.json",
             },
         )
-        retained = self.output / "snb-interactive-sf0-convert-benchexec-raw" / "host-swap.json"
+        retained = (
+            self.output / "snb-interactive-sf0-convert-benchexec-raw" / "phase-cgroup-swap.json"
+        )
         self.assertEqual(
-            json.loads(retained.read_text()),
-            {"before": {"pswpin": 10, "pswpout": 20}, "after": {"pswpin": 12, "pswpout": 25}},
+            json.loads(retained.read_text())["runs"]["benchmark_fake"]["pswpout_pages"], 7
         )
 
-    def test_a_swap_in_alone_does_not_fail_the_phase(self) -> None:
-        readings = itertools.cycle(
-            [{"pswpin": 10, "pswpout": 20}, {"pswpin": 30, "pswpout": 20}]  # before, after
+    def test_a_phase_whose_cgroup_was_never_observed_fails_rather_than_passes(self) -> None:
+        ladder = self.ladder(self.executables, FakeBenchExec(swap=None))
+        results = gdc_rung.climb(
+            ladder,
+            reserved_headroom_bytes=0,
+            quiet_host_wait_seconds=0,
+            quiet_host=lambda _wait: QUIET,
         )
-        ladder = self.ladder(self.executables, FakeBenchExec())
-        with patch.object(gdc_rung, "_host_swap_counters", side_effect=lambda: next(readings)):
-            results = gdc_rung.climb(
-                ladder,
-                reserved_headroom_bytes=0,
-                quiet_host_wait_seconds=0,
-                quiet_host=lambda _wait: QUIET,
-            )
-        self.assertEqual(results[0]["status"], "passed")
-        self.assertEqual(list(self.output.glob("*host-swap.json")), [])
+        failure = results[0]["failure"]
+        self.assertEqual((failure["phase"], failure["cause"]), ("convert", "phase_swap_unobserved"))
+
+    def test_a_hung_benchexec_fails_typed_with_the_supervisor_reason(self) -> None:
+        class Hung(FakeBenchExec):
+            def __call__(self, stage: Path, *args: Any) -> int:
+                super().__call__(stage, *args)
+                (stage / "raw" / HUNG_EVIDENCE).write_text(
+                    json.dumps({"reason": "BenchExec did not exit within 120 s"}), encoding="utf-8"
+                )
+                return HUNG_STATUS
+
+        ladder = self.ladder(self.executables, Hung())
+        results = gdc_rung.climb(
+            ladder,
+            reserved_headroom_bytes=0,
+            quiet_host_wait_seconds=0,
+            quiet_host=lambda _wait: QUIET,
+        )
+        self.assertEqual(
+            results[0]["failure"],
+            {
+                "phase": "convert",
+                "cause": "benchexec_hung",
+                "detail": "BenchExec did not exit within 120 s; the process group was killed",
+            },
+        )
 
     def test_a_phase_stopped_at_the_memory_limit_fails_typed_with_the_peak(self) -> None:
         ladder = self.ladder(self.executables, FakeBenchExec(termination="memory"))
@@ -520,7 +551,7 @@ class PhaseClassificationTests(unittest.TestCase):
         measured: Any = PASSED_RUN,
         telemetry: Any = PASSED_TELEMETRY,
         document: Any = None,
-        swapped: bool = False,
+        swapped: bool | None = False,
     ) -> Any:
         return gdc_rung.classify_phase(
             measured, telemetry, document or {"outcome": "passed"}, swapped=swapped
@@ -551,7 +582,8 @@ class PhaseClassificationTests(unittest.TestCase):
             "memory_limit_exceeded",
         )
         self.assertIsNone(self.classify(telemetry={"failure": None, "peak_rss_bytes": 4 * 1024**3}))
-        self.assertEqual(cause(swapped=True), "host_swapped")
+        self.assertEqual(cause(swapped=True), "phase_swapped")
+        self.assertEqual(cause(swapped=None), "phase_swap_unobserved")
         self.assertEqual(cause(document={"outcome": "exit"}), "benchexec_failed")
 
 
@@ -583,29 +615,6 @@ class FailedSampleDescriptionTests(unittest.TestCase):
         self.assertEqual(gdc_rung.describe_failed_samples({"variants": []}), "")
 
 
-class HostSwapDetailTests(unittest.TestCase):
-    """A `host_swapped` phase names the counters that moved."""
-
-    def test_only_a_page_out_marks_the_phase(self) -> None:
-        before = {"pswpin": 503592, "pswpout": 830053}
-        # Swap-ins with no swap-out are other processes' cold pages (systemd-journald
-        # waking to log the phase's own scope): not this phase's memory.
-        self.assertFalse(
-            gdc_rung.swapped_out(before, {"pswpin": 503611, "pswpout": 830053}),
-        )
-        self.assertTrue(gdc_rung.swapped_out(before, {"pswpin": 503592, "pswpout": 830054}))
-        self.assertTrue(gdc_rung.swapped_out(before, {"pswpin": 503700, "pswpout": 830060}))
-
-    def test_the_detail_names_both_counters(self) -> None:
-        self.assertEqual(
-            gdc_rung.swap_detail(
-                {"pswpin": 503592, "pswpout": 830053}, {"pswpin": 503595, "pswpout": 830060}
-            ),
-            "host paged out during the phase: pswpout +7 (830053 -> 830060), pswpin +3; "
-            "see host-swap.json",
-        )
-
-
 class BenchExecMemoryLimitTests(unittest.TestCase):
     """Each GDC phase runs under the rung envelope; the Graph500 ladder keeps its ceiling."""
 
@@ -613,10 +622,11 @@ class BenchExecMemoryLimitTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="gdc-limit-") as raw:
             stage = Path(raw)
             (stage / "bin").mkdir()
+            (stage / "benchmark.xml").write_text("fixture", encoding="utf-8")
             executables = SimpleNamespace(benchexec_python=Path(sys.executable))
             identities = {"benchexec_python_sha256": digest_of(Path(sys.executable))}
-            with patch("graphforge_bench.progressive_run.subprocess.run") as execute:
-                execute.return_value.returncode = 0
+            with patch("graphforge_bench.progressive_run.run_bounded") as execute:
+                execute.return_value = 0
                 runner(stage, executables, identities, Path(raw))
             return list(execute.call_args.args[0])
 
@@ -879,10 +889,14 @@ class MatchingTests(unittest.TestCase):
                 "schema": "graphforge-gdc-query-result/1",
                 "query_id": "q",
                 "binding_id": "b",
+                "ordered": False,
+                "result_sha256": "0" * 64,
+                "columns": [],
+                "rows": [],
             }
             for name in ("00000000.json", "00000001.json"):
                 (directory / name).write_text(json.dumps(document))
-            with self.assertRaises(RungInputError):
+            with self.assertRaisesRegex(RungInputError, "written twice"):
                 read_results(directory)
 
 
