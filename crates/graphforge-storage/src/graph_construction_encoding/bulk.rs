@@ -40,6 +40,7 @@ use super::{
 mod budget;
 mod csr;
 mod emit;
+mod gate;
 mod install;
 mod ordered;
 mod plan;
@@ -357,11 +358,13 @@ pub(crate) fn encode_bulk(
 
     // Pass 1: nodes.
     let meter = PassMeter::start("nodes");
+    let decode = gate::ByteGate::new(scratch_plan.as_ref().map_or(0, |sized| sized.decode_bytes));
     let mut nodes = run_pass(&pool, cancelled, &cancel, || {
         tables::collect_nodes(
             &plan.nodes,
             retain_nodes && node_properties.is_none(),
             node_properties.as_ref(),
+            scratch_plan.as_ref().map(|_| &decode),
             budgets,
             &cancel,
         )
@@ -380,6 +383,7 @@ pub(crate) fn encode_bulk(
                     &plan.edges,
                     budgets,
                     edge_properties.as_ref(),
+                    &decode,
                     &nodes,
                     &index,
                     sized,
@@ -915,6 +919,8 @@ pub(crate) fn encode_bulk(
                 0
             },
             property_runs,
+            decode_pool_bytes: decode.capacity(),
+            decode_peak_bytes: decode.peak(),
             property_peak_retained_bytes,
             property_retained_budget_bytes: if retain_nodes || retain_edges {
                 scratch_plan

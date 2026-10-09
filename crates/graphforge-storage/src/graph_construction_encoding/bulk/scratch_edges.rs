@@ -204,6 +204,7 @@ fn edge_splitters(
     sources: &[BulkSource<'_>],
     tasks: &Tasks,
     wanted: usize,
+    decode: &super::gate::ByteGate,
     cancel: &AtomicBool,
 ) -> Result<Vec<[u8; 16]>, GfError> {
     if wanted <= 1 || tasks.items.is_empty() {
@@ -223,6 +224,7 @@ fn edge_splitters(
         .par_iter()
         .map(|&(source, task, _)| {
             check_cancelled(cancel)?;
+            let _decoding = decode.hold(sources[source].task_decode_bytes(task), cancel)?;
             let mut uuids = Vec::new();
             let mut seen = 0_usize;
             sources[source].reader.read_task(task, &mut |batch| {
@@ -481,6 +483,7 @@ pub(super) fn scatter_edges(
     sources: &[BulkSource<'_>],
     budgets: GraphConstructionBudgets,
     properties: Option<&super::property_rows::PropertyRows<'_>>,
+    decode: &super::gate::ByteGate,
     nodes: &NodeTable,
     index: &NodeIndex<'_>,
     plan: &ScratchPlan,
@@ -488,7 +491,7 @@ pub(super) fn scatter_edges(
     cancel: &AtomicBool,
 ) -> Result<ScatteredEdges, GfError> {
     let tasks = Tasks::plan(sources, "edges")?;
-    let splitters = edge_splitters(sources, &tasks, plan.edge_partitions, cancel)?;
+    let splitters = edge_splitters(sources, &tasks, plan.edge_partitions, decode, cancel)?;
     let partitions = Partitions::create(scratch, "edges", splitters.len() + 1, EDGE_RECORD)?;
     let bounds = (0..partitions.len())
         .map(|_| Mutex::new(None::<([u8; 16], [u8; 16])>))
@@ -502,6 +505,8 @@ pub(super) fn scatter_edges(
     let miss = Mutex::new(None::<[u8; 16]>);
     claim_in_order(tasks.items.clone(), |(source, task, rows)| {
         check_cancelled(cancel)?;
+        // The bytes this task decodes are reserved before it reads.
+        let _decoding = decode.hold(sources[source].task_decode_bytes(task), cancel)?;
         let mut scatter = Scatter::new(scratch, &partitions, plan.staging_bytes);
         let mut cache = RelationCache {
             shared: &dictionary,
@@ -936,6 +941,7 @@ mod refinement_tests {
             gate_bytes: limit * 44 * 2,
             staging_bytes: 4096,
             property: super::super::property_rows::PropertySizing::SERIAL,
+            decode_bytes: 0,
         }
     }
 

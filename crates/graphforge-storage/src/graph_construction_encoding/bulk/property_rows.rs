@@ -24,15 +24,15 @@ use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Condvar, Mutex};
-use std::time::Duration;
 
 use arrow::array::UInt32Array;
 use arrow::compute::interleave_record_batch;
 use arrow::ipc::{reader::StreamReader, writer::StreamWriter};
 use arrow::record_batch::RecordBatch;
 
+use super::gate::ByteGate;
 use super::scratch::{Scratch, crc32c};
 use super::tables::check_cancelled;
 use super::{
@@ -110,67 +110,6 @@ impl PropertySizing {
     };
 }
 
-/// Where a retained batch's bytes are accounted: one pool for all workers.
-struct Gate {
-    capacity: u64,
-    available: Mutex<u64>,
-    changed: Condvar,
-    /// Most bytes ever held at once.
-    peak: AtomicU64,
-}
-
-impl Gate {
-    fn new(capacity: u64) -> Self {
-        Self {
-            capacity,
-            available: Mutex::new(capacity),
-            changed: Condvar::new(),
-            peak: AtomicU64::new(0),
-        }
-    }
-
-    fn try_acquire(&self, bytes: u64) -> Result<bool, GfError> {
-        let mut available = self
-            .available
-            .lock()
-            .map_err(|_| storage("property run gate poisoned"))?;
-        if *available >= bytes {
-            *available -= bytes;
-            self.peak
-                .fetch_max(self.capacity - *available, Ordering::Relaxed);
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    fn acquire(&self, bytes: u64, cancel: &AtomicBool) -> Result<(), GfError> {
-        let mut available = self
-            .available
-            .lock()
-            .map_err(|_| storage("property run gate poisoned"))?;
-        while *available < bytes {
-            check_cancelled(cancel)?;
-            available = self
-                .changed
-                .wait_timeout(available, Duration::from_millis(20))
-                .map_err(|_| storage("property run gate poisoned"))?
-                .0;
-        }
-        *available -= bytes;
-        self.peak
-            .fetch_max(self.capacity - *available, Ordering::Relaxed);
-        Ok(())
-    }
-
-    fn release(&self, bytes: u64) {
-        if let Ok(mut available) = self.available.lock() {
-            *available += bytes;
-        }
-        self.changed.notify_all();
-    }
-}
-
 /// One frame of a run: where it lies and the identities that bound it.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct FrameMeta {
@@ -202,7 +141,7 @@ pub(super) struct PropertyRows<'a> {
     schema_bytes: usize,
     pub(super) frame_target: usize,
     pub(super) sizing: PropertySizing,
-    gate: Gate,
+    pub(super) gate: ByteGate,
     pub(super) groups: Mutex<Groups>,
     next_file: AtomicU64,
     written: AtomicU64,
@@ -459,7 +398,7 @@ impl<'a> PropertyRows<'a> {
             frame_target,
             schema_bytes: usize::try_from(schema_bytes).unwrap_or(usize::MAX),
             sizing,
-            gate: Gate::new(sizing.retained_bytes),
+            gate: ByteGate::new(sizing.retained_bytes),
             groups: Mutex::new(Groups::default()),
             next_file: AtomicU64::new(0),
             written: AtomicU64::new(0),
@@ -529,7 +468,7 @@ impl<'a> PropertyRows<'a> {
     }
     /// The most bytes concurrent intake held at once.
     pub(super) fn peak_retained_bytes(&self) -> u64 {
-        self.gate.peak.load(Ordering::Relaxed)
+        self.gate.peak()
     }
 
     /// Sorted runs formed from the input.
@@ -1185,12 +1124,7 @@ mod tests {
         // Room for exactly two batches while eight threads push: the rest wait.
         let rows = rows_with(&scratch, usize::MAX >> 1, 4, 2 * need);
         ingest(&rows, 64, 8);
-        assert!(
-            rows.gate
-                .available
-                .lock()
-                .is_ok_and(|free| *free == 2 * need)
-        );
+        assert_eq!(rows.gate.free(), 2 * need);
         let groups = rows.finish(&AtomicBool::new(false)).unwrap();
         assert_eq!(rows_of(&rows, &groups[0]), (0..64 * 32).collect::<Vec<_>>());
     }

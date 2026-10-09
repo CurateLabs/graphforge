@@ -647,6 +647,7 @@ mod tests {
             gate_bytes: ScratchPlan::csr_cost(21),
             staging_bytes: 64,
             property: super::super::property_rows::PropertySizing::SERIAL,
+            decode_bytes: 0,
         };
         let cancel = AtomicBool::new(false);
         let options = AdjacencyBuildOptions {

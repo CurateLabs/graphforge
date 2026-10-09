@@ -209,6 +209,8 @@ pub(super) struct ScratchPlan {
     pub(super) staging_bytes: usize,
     /// Run formation and merging of property rows.
     pub(super) property: PropertySizing,
+    /// Bytes the tasks decoding at once may reserve in total.
+    pub(super) decode_bytes: u64,
 }
 
 #[cfg(test)]
@@ -269,8 +271,7 @@ impl ScratchPlan {
             .chain(&plan.edges)
             .any(|source| !source.property_free);
         // Held whatever the concurrency: the node tables, the fixed workspace,
-        // and (with properties) the overlay writer's workspace and one task's
-        // decoder.
+        // and (with properties) the overlay writer's workspace.
         let shared = plan
             .node_tables_resident_bytes()
             .saturating_add(if properties {
@@ -278,38 +279,23 @@ impl ScratchPlan {
             } else {
                 0
             });
-        // Every further worker decodes a task of its own.
-        let decoder = if properties {
-            plan.source_decoder_bytes().max(DECODE_WINDOW_BYTES)
-        } else {
-            DECODE_WINDOW_BYTES
-        };
-        let working_for = |concurrency: u64| {
-            budget
-                .saturating_sub(shared)
-                .saturating_sub(if properties {
-                    (concurrency - 1).saturating_mul(decoder)
-                } else {
-                    0
-                })
-                .saturating_add(MIN_WORKING_BYTES)
-        };
+        // What the workers share beyond that: staging, the bytes the tasks in
+        // flight decode, the bytes the property sort retains, and the partitions
+        // in flight. Which tasks decode at once is decided by the decode pool at
+        // run time, so the worker count is not charged one decoder each.
+        let working = budget
+            .saturating_sub(shared)
+            .saturating_add(MIN_WORKING_BYTES);
+        let decoder = DECODE_WINDOW_BYTES;
         let ceil = |bytes: u64, per: u64| bytes.div_ceil(per.max(1));
         let mut best = None;
         for concurrency in (1..=workers.max(1) as u64).rev() {
-            let working = working_for(concurrency);
             // Decoding tasks in flight must fit beside the staging buffers.
             if !properties && concurrency > 1 && concurrency * decoder > working / 4 {
                 continue;
             }
-            // Every worker's decoder fits the budget beyond the shared bytes,
-            // and each worker's property run fits half the working set, beside
-            // the scatter staging.
-            if properties
-                && concurrency > 1
-                && (budget < shared.saturating_add((concurrency - 1).saturating_mul(decoder))
-                    || working / 2 / concurrency < MIN_RUN_BYTES)
-            {
+            // Each worker's property run fits the retained pool.
+            if properties && concurrency > 1 && working / 8 * 3 / concurrency < MIN_RUN_BYTES {
                 continue;
             }
             // Three quarters of the working set hold partitions; the rest stages
@@ -341,7 +327,6 @@ impl ScratchPlan {
         // will bound sorting independently of the initial partition cap.
         let (concurrency, working, gate_bytes, edge_partitions, csr_partitions, staging) = best
             .unwrap_or_else(|| {
-                let working = working_for(1);
                 let gate_bytes = working / 4 * 3;
                 #[cfg(test)]
                 let gate_bytes = FORCED_GATE.with(std::cell::Cell::get).unwrap_or(gate_bytes);
@@ -369,7 +354,8 @@ impl ScratchPlan {
             csr_partitions: usize::try_from(csr_partitions).unwrap_or(1),
             gate_bytes,
             staging_bytes: usize::try_from(staging).unwrap_or(8 << 10),
-            property: property_sizing(working / 2, concurrency, plan.max_source_schema_bytes()),
+            property: property_sizing(working / 8 * 3, concurrency, plan.max_source_schema_bytes()),
+            decode_bytes: working / 8 * 3,
         }
     }
 
@@ -552,13 +538,13 @@ mod tests {
             );
             previous = workers;
             distinct.insert(workers);
-            // The node tables, the overlay writer's workspace, a decoder per
-            // worker and the shared run pool fit the budget.
+            // The node tables, the overlay writer's workspace and the shared
+            // run pool fit the budget, and the decode pool takes no more than
+            // the working set leaves.
             let shared = floor - MIN_WORKING_BYTES;
-            let decoders = (workers - 1) * DECODE_WINDOW_BYTES;
             let property = sized.property;
             assert!(
-                shared + decoders + property.retained_bytes <= budget
+                shared + property.retained_bytes + sized.decode_bytes <= budget + MIN_WORKING_BYTES
                     || property.retained_bytes <= 1 << 20,
                 "budget {budget}: {sized:?}"
             );
@@ -577,7 +563,7 @@ mod tests {
             );
         }
         assert!(
-            distinct.len() >= 3 && distinct.contains(&1),
+            distinct.len() >= 3,
             "concurrency never grew with the budget: {distinct:?}"
         );
         // A property-free plan of the same size is not charged for property runs.

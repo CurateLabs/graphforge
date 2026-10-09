@@ -849,13 +849,22 @@ mod bulk_builder {
         wanted: usize,
     ) -> (u64, usize) {
         let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let floor = crate::graph_construction_encoding::scratch_minimum_bytes(
-            &overlapping_plan(nodes, edges, 2, &peak, 0),
+        budget_admitting_with(
+            &|budget| overlapping_plan(nodes, edges, 2, &peak, budget),
             budgets,
-        );
+            wanted,
+        )
+    }
+
+    fn budget_admitting_with(
+        plan_at: &dyn Fn(u64) -> BulkBuildPlan<'static>,
+        budgets: GraphConstructionBudgets,
+        wanted: usize,
+    ) -> (u64, usize) {
+        let floor = crate::graph_construction_encoding::scratch_minimum_bytes(&plan_at(0), budgets);
         let mut budget = floor.next_multiple_of(4 << 20);
         loop {
-            let probe = overlapping_plan(nodes, edges, 2, &peak, budget);
+            let probe = plan_at(budget);
             let derived = crate::graph_construction_encoding::derived_concurrency(
                 &probe, budget, 16, budgets,
             );
@@ -971,44 +980,98 @@ mod bulk_builder {
     const RSS_ROOT: &str = "GF_BULK_RSS_ROOT";
     const RSS_BUDGET: &str = "GF_BULK_RSS_BUDGET";
 
+    const WIDE_ROWS: usize = 24_000;
+    const WIDE_BATCH: usize = 400;
+
+    /// Batch `index` of the wide nodes: 400 identities from across the range.
+    fn wide_node_batch(index: usize) -> RecordBatch {
+        let rows = (index * WIDE_BATCH..(index + 1) * WIDE_BATCH)
+            .map(|i| scattered(i, WIDE_ROWS))
+            .collect::<Vec<_>>();
+        wide_nodes(
+            &rows
+                .iter()
+                .map(|row| uuid(0x10, *row as u64))
+                .collect::<Vec<_>>(),
+            (index * WIDE_BATCH) as u64,
+        )
+    }
+
+    /// Batch `index` of the wide edges.
+    fn wide_edge_batch(index: usize) -> RecordBatch {
+        let rows = (index * WIDE_BATCH..(index + 1) * WIDE_BATCH)
+            .map(|i| scattered(i, WIDE_ROWS))
+            .collect::<Vec<_>>();
+        wide_edges(
+            &rows
+                .iter()
+                .map(|row| uuid(0x20, *row as u64))
+                .collect::<Vec<_>>(),
+            &rows
+                .iter()
+                .map(|row| uuid(0x10, ((row * 7 + 1) % WIDE_ROWS) as u64))
+                .collect::<Vec<_>>(),
+            &rows
+                .iter()
+                .map(|row| uuid(0x10, ((row * 13 + 5) % WIDE_ROWS) as u64))
+                .collect::<Vec<_>>(),
+            50_000 + (index * WIDE_BATCH) as u64,
+        )
+    }
+
     fn wide_property_graph() -> (Vec<RecordBatch>, Vec<RecordBatch>) {
-        let ids = (0..24_000_u64).map(|i| uuid(0x10, i)).collect::<Vec<_>>();
-        let nodes = (0..ids.len())
-            .map(|i| scattered(i, ids.len()))
-            .collect::<Vec<_>>()
-            .chunks(400)
-            .enumerate()
-            .map(|(index, rows)| {
-                wide_nodes(
-                    &rows.iter().map(|row| ids[*row]).collect::<Vec<_>>(),
-                    index as u64 * 400,
-                )
-            })
-            .collect::<Vec<_>>();
-        let edges = (0..24_000_usize)
-            .map(|i| scattered(i, 24_000))
-            .collect::<Vec<_>>()
-            .chunks(400)
-            .enumerate()
-            .map(|(index, rows)| {
-                wide_edges(
-                    &rows
-                        .iter()
-                        .map(|row| uuid(0x20, *row as u64))
-                        .collect::<Vec<_>>(),
-                    &rows
-                        .iter()
-                        .map(|row| ids[(row * 7 + 1) % 24_000])
-                        .collect::<Vec<_>>(),
-                    &rows
-                        .iter()
-                        .map(|row| ids[(row * 13 + 5) % 24_000])
-                        .collect::<Vec<_>>(),
-                    50_000 + index as u64 * 400,
-                )
-            })
-            .collect::<Vec<_>>();
-        (nodes, edges)
+        let batches = WIDE_ROWS / WIDE_BATCH;
+        (
+            (0..batches).map(wide_node_batch).collect(),
+            (0..batches).map(wide_edge_batch).collect(),
+        )
+    }
+
+    /// Source batches made on demand, so that a build under test holds none of
+    /// its input and its peak resident set is the builder's.
+    struct Generated {
+        batches: usize,
+        per_task: usize,
+        make: fn(usize) -> RecordBatch,
+    }
+
+    impl BulkBatchReader for Generated {
+        fn task_rows(&self, task: usize) -> usize {
+            let first = task * self.per_task;
+            (self.batches.min(first + self.per_task) - first.min(self.batches)) * WIDE_BATCH
+        }
+
+        fn read_task(
+            &self,
+            task: usize,
+            sink: &mut dyn FnMut(RecordBatch) -> Result<(), GfError>,
+        ) -> Result<(), GfError> {
+            let first = task * self.per_task;
+            for index in first..self.batches.min(first + self.per_task) {
+                sink((self.make)(index))?;
+            }
+            Ok(())
+        }
+    }
+
+    fn generated_plan(budget: u64) -> BulkBuildPlan<'static> {
+        let batches = WIDE_ROWS / WIDE_BATCH;
+        let source = |make: fn(usize) -> RecordBatch| BulkSource {
+            reader: Arc::new(Generated {
+                batches,
+                per_task: 2,
+                make,
+            }),
+            tasks: batches.div_ceil(2),
+            rows: WIDE_ROWS as u64,
+            property_free: false,
+            decoded_bytes: (WIDE_ROWS * 5_000) as u64,
+        };
+        BulkBuildPlan {
+            nodes: vec![source(wide_node_batch)],
+            edges: vec![source(wide_edge_batch)],
+            memory_budget: Some(budget),
+        }
     }
 
     fn digest(inventory: &Inventory) -> String {
@@ -1033,7 +1096,6 @@ mod bulk_builder {
             return;
         };
         let budgets = small_property_budgets();
-        let (nodes, edges) = wide_property_graph();
         let before = peak_rss_bytes();
         let mut session = GraphConstructionSession::open(
             Path::new(&path),
@@ -1044,8 +1106,7 @@ mod bulk_builder {
         .unwrap();
         session.checkpoint.session_now_micros = CLOCK;
         sixteen_lanes(&mut session);
-        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let plan = overlapping_plan(&nodes, &edges, 2, &peak, budget.parse().unwrap());
+        let plan = generated_plan(budget.parse().unwrap());
         let encoding = session.prepare_bulk_encoding(1, &plan, || false).unwrap();
         let report = session.bulk_build_report();
         println!(
@@ -1065,8 +1126,8 @@ mod bulk_builder {
         let (nodes, edges) = wide_property_graph();
         let expected = digest(&staged_with(budgets, &nodes, &edges).unwrap());
         let mut concurrencies = Vec::new();
-        for wanted in [1, 2, 4] {
-            let (budget, derived) = budget_admitting(&nodes, &edges, budgets, wanted);
+        for wanted in [1, 2, 4, 8] {
+            let (budget, derived) = budget_admitting_with(&generated_plan, budgets, wanted);
             let root = TempDir::new().unwrap();
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .arg("--exact")
@@ -1097,7 +1158,7 @@ mod bulk_builder {
             println!("budget {budget} concurrency {derived}: {line}");
             concurrencies.push(derived);
         }
-        assert!(concurrencies[2] > concurrencies[0], "{concurrencies:?}");
+        assert!(concurrencies.windows(2).all(|pair| pair[0] < pair[1]), "{concurrencies:?}");
     }
 
     const CONCURRENT_CRASH_ROOT: &str = "GF_BULK_CONCURRENT_CRASH_ROOT";
