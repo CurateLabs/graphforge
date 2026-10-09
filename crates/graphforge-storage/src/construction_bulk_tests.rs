@@ -426,7 +426,7 @@ mod bulk_builder {
                 "catalog and property scans must count: {report:?}"
             );
             assert!(report.property_workspace_reserved_bytes >= 648 << 20);
-            assert_eq!(report.scratch_concurrency, 1);
+            assert!(report.scratch_concurrency >= 2, "{report:?}");
             assert!(!scratch_dir(&session).exists());
         }
     }

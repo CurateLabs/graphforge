@@ -42,6 +42,8 @@ const EDGE_PARTITION_BYTES: u64 = 44;
 /// Bytes per adjacency entry a CSR partition holds: the sorted records, the
 /// per-relation view, and its share of the shard encoder.
 const CSR_PARTITION_BYTES: u64 = 40;
+/// Resident bytes a property-bearing worker adds beyond the pools it draws on.
+const WORKER_BYTES: u64 = 128 << 20;
 /// Smallest and largest bytes one worker retains to form a property run. A
 /// smaller run gives more runs to merge, a larger one more retained bytes.
 const MIN_RUN_BYTES: u64 = 8 << 20;
@@ -291,13 +293,29 @@ impl ScratchPlan {
         // flight decode, the bytes the property sort retains, and the partitions
         // in flight. Which tasks decode at once is decided by the decode pool at
         // run time, so the worker count is not charged one decoder each.
-        let working = budget
+        let available = budget
             .saturating_sub(shared)
             .saturating_add(MIN_WORKING_BYTES);
+        // A property-bearing worker also keeps what its thread allocates and
+        // frees: measured on SNB BI SF1, peak resident memory grew by about
+        // 120 MB per worker beyond the pools (1.27 GB at no workers, 2.10 GB at
+        // 7, 3.05 GB at 15). Those bytes come off the working set, and the
+        // workers may take at most five eighths of it.
+        let overhead = |concurrency: u64| {
+            if properties {
+                concurrency.saturating_mul(WORKER_BYTES)
+            } else {
+                0
+            }
+        };
         let decoder = DECODE_WINDOW_BYTES;
         let ceil = |bytes: u64, per: u64| bytes.div_ceil(per.max(1));
         let mut best = None;
         for concurrency in (1..=workers.max(1) as u64).rev() {
+            if concurrency > 1 && overhead(concurrency) > available / 8 * 5 {
+                continue;
+            }
+            let working = available.saturating_sub(overhead(concurrency));
             // Decoding tasks in flight must fit beside the staging buffers.
             if !properties && concurrency > 1 && concurrency * decoder > working / 4 {
                 continue;
@@ -335,6 +353,7 @@ impl ScratchPlan {
         // will bound sorting independently of the initial partition cap.
         let (concurrency, working, gate_bytes, edge_partitions, csr_partitions, staging) = best
             .unwrap_or_else(|| {
+                let working = available.saturating_sub(overhead(1));
                 let gate_bytes = working / 4 * 3;
                 #[cfg(test)]
                 let gate_bytes = FORCED_GATE.with(std::cell::Cell::get).unwrap_or(gate_bytes);
@@ -557,7 +576,8 @@ mod tests {
             let shared = floor - MIN_WORKING_BYTES;
             let property = sized.property;
             assert!(
-                shared + property.retained_bytes + sized.decode_bytes <= budget + MIN_WORKING_BYTES
+                shared + workers * WORKER_BYTES + property.retained_bytes + sized.decode_bytes
+                    <= budget + MIN_WORKING_BYTES
                     || property.retained_bytes <= 1 << 20,
                 "budget {budget}: {sized:?}"
             );
