@@ -78,56 +78,50 @@ impl GraphForge {
         }
         let topology = self.dir().topology_files()?;
         let ordinal = self.ordinal_identities.revalidated_handle()?;
-        for attempt in 1_u8..=2 {
-            let before = read_search_generation(dir)?;
-            let projection = vector_query
-                .as_ref()
-                .map(|_| {
-                    project_label_members_snapshot_with_topology(
-                        dir,
-                        Some(&topology),
-                        ordinal.as_deref(),
-                        label_id,
-                        VectorLifecycleLimits::default(),
-                        || Ok(()),
-                    )
-                })
-                .transpose()?;
-            let hits = self.retrieve_find_hits(
-                dir,
-                &label,
-                label_id,
-                query.as_deref(),
-                vector_query.as_ref(),
-                space.as_deref(),
-                force_stale,
-                limit,
-                projection.as_ref(),
-            );
-            let hits = match hits {
-                Err(GfError::Lifecycle(_))
-                    if attempt == 1 && before != read_search_generation(dir)? =>
-                {
-                    continue;
-                }
-                result => result?,
-            };
-            let batch = shape_search_output_with_members(
-                dir,
-                &self.property_inventory_for_session(),
-                ordinal.as_deref(),
-                label_id,
-                &hits,
-                projection.as_ref().map(LabelMemberProjection::members),
-            )?;
-            if before == read_search_generation(dir)? {
-                return Ok(batch);
-            }
-            if attempt == 2 {
-                return Err(SearchArtifactError::ConcurrentMutation.into());
-            }
-        }
-        unreachable!("bounded find retry returns on both terminal paths")
+        find_in_bounded_passes(
+            LabelMemberProjection::generation,
+            || read_search_generation(dir).map_err(Into::into),
+            || {
+                vector_query
+                    .as_ref()
+                    .map(|_| {
+                        project_label_members_snapshot_with_topology(
+                            dir,
+                            Some(&topology),
+                            ordinal.as_deref(),
+                            label_id,
+                            VectorLifecycleLimits::default(),
+                            || Ok(()),
+                        )
+                        .map_err(GfError::from)
+                    })
+                    .transpose()
+            },
+            |projection| {
+                self.retrieve_find_hits(
+                    dir,
+                    &label,
+                    label_id,
+                    query.as_deref(),
+                    vector_query.as_ref(),
+                    space.as_deref(),
+                    force_stale,
+                    limit,
+                    projection,
+                )
+            },
+            |hits, projection| {
+                shape_search_output_with_members(
+                    dir,
+                    &self.property_inventory_for_session(),
+                    ordinal.as_deref(),
+                    label_id,
+                    &hits,
+                    projection.map(LabelMemberProjection::members),
+                )
+                .map_err(GfError::from)
+            },
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -292,6 +286,44 @@ fn soft_dimension_miss(
         }
         Err(error) => Err(error.into()),
     }
+}
+
+/// Run retrieval and output shaping under one bounded freshness check.
+///
+/// A vector query pins the search generation its admitted topology projection
+/// reports, so a generation that advanced before the projection began costs no
+/// second decode: nothing had been read yet. A text-only query pins the
+/// generation read before retrieval. A pass is accepted only if the generation
+/// still equals the pin after shaping. When it moved, the next pass captures a
+/// new projection; membership from an earlier generation is never carried over.
+/// The loop runs at most two passes, so at most two topology projections are
+/// decoded, and a second generation change refuses with `ConcurrentMutation`.
+fn find_in_bounded_passes<P, H, B>(
+    projection_generation: impl Fn(&P) -> u64,
+    mut generation: impl FnMut() -> Result<u64, GfError>,
+    mut capture: impl FnMut() -> Result<Option<P>, GfError>,
+    mut retrieve: impl FnMut(Option<&P>) -> Result<H, GfError>,
+    mut shape: impl FnMut(H, Option<&P>) -> Result<B, GfError>,
+) -> Result<B, GfError> {
+    for attempt in 1_u8..=2 {
+        let projection = capture()?;
+        let pinned = match projection.as_ref() {
+            Some(projection) => projection_generation(projection),
+            None => generation()?,
+        };
+        let hits = match retrieve(projection.as_ref()) {
+            Err(GfError::Lifecycle(_)) if attempt == 1 && pinned != generation()? => continue,
+            result => result?,
+        };
+        let batch = shape(hits, projection.as_ref())?;
+        if pinned == generation()? {
+            return Ok(batch);
+        }
+        if attempt == 2 {
+            return Err(SearchArtifactError::ConcurrentMutation.into());
+        }
+    }
+    unreachable!("bounded find retry returns on both terminal paths")
 }
 
 fn validation(message: impl Into<String>) -> GfError {
