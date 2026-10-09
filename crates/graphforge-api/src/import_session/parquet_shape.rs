@@ -287,7 +287,7 @@ impl SchemaShape {
                     &mut root_children,
                     &mut root_tail,
                     budget,
-                    entry_field,
+                    Arc::clone(&entry_field),
                     entry_kind,
                     Some(map_idx),
                     map_definition,
@@ -410,7 +410,7 @@ impl SchemaShape {
                         &mut root_children,
                         &mut root_tail,
                         budget,
-                        element,
+                        Arc::clone(&element),
                         NodeKind::Struct,
                         Some(list_idx),
                         list_definition,
@@ -723,7 +723,12 @@ fn append_leaf(
         max_definition: definition,
         max_repetition: repetition,
         physical_type: parquet.get_physical_type(),
-        type_length: parquet.type_length(),
+        type_length: match parquet.as_ref() {
+            parquet::schema::types::Type::PrimitiveType { type_length, .. } => *type_length,
+            parquet::schema::types::Type::GroupType { .. } => {
+                return Err(storage("Parquet leaf inventory received a group type"));
+            }
+        },
     });
     Ok(index)
 }
