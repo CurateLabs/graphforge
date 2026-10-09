@@ -1,6 +1,8 @@
 //! A public Parquet `PageReader` that validates the owned bytes it returns.
 //!
-//! Header peeks are cached without owning page bodies. Data and dictionary
+//! Header peeks are cached without owning nonempty page bodies. Empty data
+//! pages are validated and consumed before either peek or get exposes a page.
+//! Data and dictionary
 //! bodies are read once, decoded by the bounded owned-page path, passed to the
 //! caller's preflight, then returned to Arrow from that same allocation.
 
@@ -196,6 +198,10 @@ where
         if self.pending.is_none() && !self.load_next_header()? {
             return Ok(None);
         }
+        self.read_pending_page().map(Some)
+    }
+
+    fn read_pending_page(&mut self) -> Result<Page, GfError> {
         let pending = self
             .pending
             .take()
@@ -241,7 +247,7 @@ where
         if let Some(events) = next_events {
             self.data_events = events;
         }
-        Ok(Some(decoded.page))
+        Ok(decoded.page)
     }
 
     fn load_next_header(&mut self) -> Result<bool, GfError> {
@@ -279,12 +285,20 @@ where
             ) {
                 return Err(storage("Unsupported Parquet page type"));
             }
+            let empty_data = !metadata.is_dict && metadata.num_levels == Some(0);
             self.pending = Some(PendingHeader {
                 header_bytes,
                 header,
                 compressed_bytes,
                 metadata,
             });
+            if empty_data {
+                // The pinned native reader can treat consecutive empty pages
+                // as column EOF and drop the chunk before later data/finish.
+                // Filter them here so peek and get still name the same page.
+                self.read_pending_page()?;
+                continue;
+            }
             return Ok(true);
         }
     }

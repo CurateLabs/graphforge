@@ -121,6 +121,17 @@ where
             _callback: std::marker::PhantomData,
         })
     }
+
+    fn check_active(&self) -> ParquetResult<()> {
+        if self.failures.failed() {
+            return Err(as_parquet_error(storage("Parquet task has already failed")));
+        }
+        if let Err(error) = check_cancelled(self.cancellation.as_ref()) {
+            self.failures.record(error.clone());
+            return Err(as_parquet_error(error));
+        }
+        Ok(())
+    }
 }
 
 impl<T, F, C> RowGroups for OwnedRowGroups<T, F, C>
@@ -135,14 +146,9 @@ where
     }
 
     fn column_chunks(&self, column_index: usize) -> ParquetResult<Box<dyn PageIterator>> {
-        if self.failures.failed() {
-            return Err(as_parquet_error(storage("Parquet task has already failed")));
-        }
-        if let Err(error) = check_cancelled(self.cancellation.as_ref()) {
-            self.failures.record(error.clone());
-            return Err(as_parquet_error(error));
-        }
+        self.check_active()?;
         for &group_index in self.selected.iter() {
+            self.check_active()?;
             if column_index >= self.metadata.row_group(group_index).num_columns() {
                 let error =
                     storage("Parquet physical column index is outside the selected row group");
@@ -150,6 +156,7 @@ where
                 return Err(as_parquet_error(error));
             }
         }
+        self.check_active()?;
         Ok(Box::new(OwnedColumnPageIterator {
             input: Arc::clone(&self.input),
             metadata: Arc::clone(&self.metadata),
