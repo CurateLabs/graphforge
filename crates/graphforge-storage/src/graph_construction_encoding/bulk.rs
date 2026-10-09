@@ -339,22 +339,39 @@ pub(crate) fn encode_bulk(
         .map_or(property_rows::PropertySizing::SERIAL, |sized| {
             sized.property
         });
+    let merge_budget_bytes = scratch_plan.as_ref().map_or(0, |sized| {
+        budget::property_merge_capacity(
+            budgets,
+            plan.max_source_schema_bytes(),
+            plan.source_decoder_bytes(),
+            sized.property.retained_bytes,
+            sized.decode_bytes,
+        )
+    });
+    let merge_gate = Arc::new(gate::ByteGate::new(merge_budget_bytes));
+    let frame_index_budget = Arc::new(property_rows::FrameIndexBudget::new(
+        property_rows::FRAME_INDEX_LIMIT_BYTES,
+    ));
     let node_properties = scratch.as_ref().filter(|_| retain_nodes).map(|scratch| {
-        property_rows::PropertyRows::new(
+        property_rows::PropertyRows::new_with_merge_gate(
             scratch,
             ConstructionChunkKind::Node,
             budgets,
             plan.max_source_schema_bytes(),
             property_sizing,
+            Arc::clone(&merge_gate),
+            Arc::clone(&frame_index_budget),
         )
     });
     let edge_properties = scratch.as_ref().filter(|_| retain_edges).map(|scratch| {
-        property_rows::PropertyRows::new(
+        property_rows::PropertyRows::new_with_merge_gate(
             scratch,
             ConstructionChunkKind::Edge,
             budgets,
             plan.max_source_schema_bytes(),
             property_sizing,
+            Arc::clone(&merge_gate),
+            Arc::clone(&frame_index_budget),
         )
     });
 
@@ -928,6 +945,8 @@ pub(crate) fn encode_bulk(
             },
             property_runs,
             property_merge_inputs_peak,
+            property_merge_budget_bytes: merge_gate.capacity(),
+            property_merge_peak_reserved_bytes: merge_gate.peak(),
             decode_pool_bytes: decode.capacity(),
             decode_peak_bytes: decode.peak(),
             property_peak_retained_bytes,

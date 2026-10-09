@@ -8,7 +8,7 @@
 //! The segments of consecutive ranges, in range order, are the merged run.
 
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, VecDeque};
 
 use arrow::array::{Array, FixedSizeBinaryArray};
 use arrow::compute::interleave_record_batch;
@@ -20,6 +20,7 @@ use super::tables::check_cancelled;
 use super::{AtomicBool, GfError, storage};
 
 type Uuid = [u8; 16];
+const CANCEL_CHECK_ROWS: usize = 256;
 
 /// A sorted property group: its segments, in identity order.
 pub(super) struct SortedGroup {
@@ -115,15 +116,19 @@ impl<'r, 'a> Input<'r, 'a> {
     }
 
     /// Load the next frame that holds rows of the range. `false` at its end.
-    fn load(&mut self, uuid_name: &str) -> Result<bool, GfError> {
+    fn load(&mut self, uuid_name: &str, cancel: &AtomicBool) -> Result<bool, GfError> {
+        self.batch = None;
+        self.uuids = None;
+        self.slot = None;
         while self.next_frame < self.frames.len() {
+            check_cancelled(cancel)?;
             let meta = self.frames[self.next_frame];
             if self.upper.is_some_and(|upper| meta.first >= upper) {
                 break;
             }
             let batch = self
                 .reader
-                .next()?
+                .next_expected(&meta)?
                 .ok_or_else(|| storage("a property run ended before its frame index"))?;
             self.next_frame += 1;
             let uuids = crate::graph_construction::batch_uuid_column(&batch, uuid_name)?.clone();
@@ -155,6 +160,24 @@ impl<'r, 'a> Input<'r, 'a> {
 }
 
 impl PropertyRows<'_> {
+    fn flush_merge_chunk(
+        writer: &mut super::property_rows::RunWriter<'_, '_>,
+        batches: &mut Vec<RecordBatch>,
+        indices: &mut Vec<(usize, usize)>,
+        bounds: &mut Option<(Uuid, Uuid)>,
+        max_row_bytes: &mut usize,
+        inputs: &mut [Input<'_, '_>],
+        cancel: &AtomicBool,
+    ) -> Result<(), GfError> {
+        check_cancelled(cancel)?;
+        Self::flush_chunk(writer, batches, indices, bounds, max_row_bytes)?;
+        crate::graph_construction::construction_failpoint("bulk.during_property_merge");
+        for input in inputs {
+            input.slot = None;
+        }
+        Ok(())
+    }
+
     /// Merge `runs` into one run holding the rows with identities in
     /// `[lower, upper)`; `None` leaves that side open.
     pub(super) fn merge(
@@ -165,45 +188,42 @@ impl PropertyRows<'_> {
         cancel: &AtomicBool,
     ) -> Result<Run, GfError> {
         let uuid_name = self.uuid_name();
+        check_cancelled(cancel)?;
+        let job_cost = self.merge_job_cost(runs, lower, upper);
+        let _reservation = self.merge_gate.hold_strict(job_cost, cancel)?;
+        check_cancelled(cancel)?;
         self.note_merge_inputs(runs.len());
         let mut inputs = runs
             .iter()
             .map(|run| Input::open(self, run, lower, upper))
             .collect::<Result<Vec<_>, _>>()?;
         let max_rows = self.budgets.max_batch_rows;
-        let mut heap = BinaryHeap::with_capacity(inputs.len());
-        for (index, input) in inputs.iter_mut().enumerate() {
-            if input.load(uuid_name)? {
-                heap.push(Reverse((input.current(), index)));
-            }
-        }
+        let mut heap = Self::initial_heap(&mut inputs, uuid_name, cancel)?;
         let mut writer = self.run_writer()?;
         let mut batches = Vec::<RecordBatch>::new();
         let mut indices = Vec::<(usize, usize)>::with_capacity(max_rows);
         let mut chunk_bytes = 0_usize;
+        let mut chunk_max_row_bytes = 0_usize;
         let mut bounds = None::<(Uuid, Uuid)>;
+        let mut processed_rows = 0_usize;
         while let Some(Reverse((uuid, index))) = heap.pop() {
             let source_batch = inputs[index].batch.as_ref().expect("a loaded frame");
             let row_bytes = Self::row_bytes(source_batch, inputs[index].row)?;
-            if indices.is_empty()
-                && row_bytes > self.frame_target
-                && source_batch.get_array_memory_size() > self.budgets.max_batch_bytes
-            {
-                return Err(storage(
-                    "wide property row exceeds its validated source batch window",
-                ));
-            }
             let next_bytes = chunk_bytes
                 .checked_add(row_bytes)
                 .ok_or_else(|| storage("property frame byte total overflows"))?;
             if !indices.is_empty() && (indices.len() >= max_rows || next_bytes > self.frame_target)
             {
-                Self::flush_chunk(&mut writer, &mut batches, &mut indices, &mut bounds)?;
+                Self::flush_merge_chunk(
+                    &mut writer,
+                    &mut batches,
+                    &mut indices,
+                    &mut bounds,
+                    &mut chunk_max_row_bytes,
+                    &mut inputs,
+                    cancel,
+                )?;
                 chunk_bytes = 0;
-                crate::graph_construction::construction_failpoint("bulk.during_property_merge");
-                for input in &mut inputs {
-                    input.slot = None;
-                }
             }
             let input = &mut inputs[index];
             let slot = if let Some(slot) = input.slot {
@@ -217,23 +237,126 @@ impl PropertyRows<'_> {
             chunk_bytes = chunk_bytes
                 .checked_add(row_bytes)
                 .ok_or_else(|| storage("property frame byte total overflows"))?;
+            chunk_max_row_bytes = chunk_max_row_bytes.max(row_bytes);
             bounds = Some(bounds.map_or((uuid, uuid), |(first, _)| (first, uuid)));
             input.row += 1;
-            if input.row < input.end || input.load(uuid_name)? {
-                heap.push(Reverse((input.current(), index)));
-            }
-            if indices.len() == max_rows {
+            processed_rows = processed_rows.saturating_add(1);
+            if processed_rows.is_multiple_of(CANCEL_CHECK_ROWS) {
                 check_cancelled(cancel)?;
-                Self::flush_chunk(&mut writer, &mut batches, &mut indices, &mut bounds)?;
-                chunk_bytes = 0;
-                crate::graph_construction::construction_failpoint("bulk.during_property_merge");
-                for input in &mut inputs {
-                    input.slot = None;
+            }
+            if input.row < input.end {
+                heap.push(Reverse((input.current(), index)));
+            } else {
+                check_cancelled(cancel)?;
+                if !indices.is_empty() {
+                    Self::flush_merge_chunk(
+                        &mut writer,
+                        &mut batches,
+                        &mut indices,
+                        &mut bounds,
+                        &mut chunk_max_row_bytes,
+                        &mut inputs,
+                        cancel,
+                    )?;
+                    chunk_bytes = 0;
+                }
+                batches.clear();
+                if inputs[index].load(uuid_name, cancel)? {
+                    heap.push(Reverse((inputs[index].current(), index)));
                 }
             }
+            if indices.len() == max_rows {
+                Self::flush_merge_chunk(
+                    &mut writer,
+                    &mut batches,
+                    &mut indices,
+                    &mut bounds,
+                    &mut chunk_max_row_bytes,
+                    &mut inputs,
+                    cancel,
+                )?;
+                chunk_bytes = 0;
+            }
         }
-        Self::flush_chunk(&mut writer, &mut batches, &mut indices, &mut bounds)?;
+        check_cancelled(cancel)?;
+        Self::flush_chunk(
+            &mut writer,
+            &mut batches,
+            &mut indices,
+            &mut bounds,
+            &mut chunk_max_row_bytes,
+        )?;
         writer.finish()
+    }
+
+    fn initial_heap(
+        inputs: &mut [Input<'_, '_>],
+        uuid_name: &str,
+        cancel: &AtomicBool,
+    ) -> Result<BinaryHeap<Reverse<(Uuid, usize)>>, GfError> {
+        let mut heap = BinaryHeap::with_capacity(inputs.len());
+        for (index, input) in inputs.iter_mut().enumerate() {
+            if input.load(uuid_name, cancel)? {
+                heap.push(Reverse((input.current(), index)));
+            }
+        }
+        Ok(heap)
+    }
+
+    pub(super) fn merge_job_cost(
+        &self,
+        runs: &[&Run],
+        lower: Option<Uuid>,
+        upper: Option<Uuid>,
+    ) -> u64 {
+        let mut retained = 0_u64;
+        let mut decode_peak = 0_u64;
+        let mut max_row = 0_u64;
+        let mut max_envelope = 0_u64;
+        let mut max_messages = 0_u64;
+        let mut max_headers = 0_u64;
+        for run in runs {
+            let mut run_retained = 0_u64;
+            let mut run_decode = 0_u64;
+            for frame in run.frames.iter().filter(|frame| {
+                lower.is_none_or(|lower| frame.last >= lower)
+                    && upper.is_none_or(|upper| frame.first < upper)
+            }) {
+                run_retained =
+                    run_retained.max(frame.body_bytes.saturating_add(frame.header_bytes));
+                run_decode = run_decode.max(
+                    frame
+                        .bytes
+                        .saturating_add(frame.message_bytes.saturating_mul(2)),
+                );
+                max_row = max_row.max(frame.max_row_bytes);
+                max_envelope = max_envelope.max(frame.output_envelope_bytes);
+                max_messages = max_messages.max(frame.message_bytes);
+                max_headers = max_headers.max(frame.header_bytes);
+            }
+            retained = retained.saturating_add(run_retained);
+            decode_peak = decode_peak.max(run_decode);
+        }
+        let gather = (self.frame_target as u64).max(max_row);
+        let encoded_output = gather.saturating_add(max_envelope);
+        let decode_transient = decode_peak;
+        let output_transient = gather
+            .saturating_mul(2)
+            .saturating_add(encoded_output.saturating_mul(4))
+            .saturating_add(max_messages.saturating_mul(4))
+            .saturating_add(max_headers);
+        let inputs = runs.len() as u64;
+        let indices = (self.budgets.max_batch_rows as u64)
+            .saturating_mul(std::mem::size_of::<(usize, usize)>() as u64);
+        let per_input = (std::mem::size_of::<Input<'_, '_>>() as u64)
+            .saturating_add(2 * std::mem::size_of::<Reverse<(Uuid, usize)>>() as u64)
+            .saturating_add(2 * std::mem::size_of::<&RecordBatch>() as u64);
+        let job_headers = (1_u64 << 20)
+            .saturating_add(indices)
+            .saturating_add(inputs.saturating_mul(per_input));
+        retained
+            .saturating_add(decode_transient.max(output_transient))
+            .saturating_add(job_headers)
     }
 
     fn flush_chunk(
@@ -241,14 +364,16 @@ impl PropertyRows<'_> {
         batches: &mut Vec<RecordBatch>,
         indices: &mut Vec<(usize, usize)>,
         bounds: &mut Option<(Uuid, Uuid)>,
+        max_row_bytes: &mut usize,
     ) -> Result<(), GfError> {
         if let Some((first, last)) = bounds.take() {
             let refs = batches.iter().collect::<Vec<_>>();
             let frame = interleave_record_batch(&refs, indices).map_err(storage)?;
-            writer.append(&frame, first, last)?;
+            writer.append(&frame, first, last, *max_row_bytes)?;
         }
         batches.clear();
         indices.clear();
+        *max_row_bytes = 0;
         Ok(())
     }
 
@@ -275,45 +400,79 @@ impl PropertyRows<'_> {
         splitters
     }
 
-    /// Reduce every group to at most `fan_in` runs by merging its smallest
-    /// runs, in parallel.
+    /// Reduce every group until both its nominal fan-in and whole-job byte
+    /// reservation fit. A count-only fan-in is insufficient when a run has a
+    /// row much larger than the usual frame target.
     fn reduce(&self, groups: &mut [Vec<Run>], cancel: &AtomicBool) -> Result<(), GfError> {
         let fan_in = self.sizing.fan_in.max(2);
-        // Each merge removes `inputs - 1` runs, so just enough merge, all at
-        // once, to leave `fan_in`; if that needs more runs than there are, the
-        // level merges them all and the next level finishes.
         loop {
             let mut jobs = Vec::new();
             for (group, runs) in groups.iter_mut().enumerate() {
-                if runs.len() <= fan_in {
+                if runs.len() < 2 {
                     continue;
                 }
-                // Smallest first; the path breaks ties so the choice is stable.
-                runs.sort_by(|left, right| (left.rows, &left.path).cmp(&(right.rows, &right.path)));
-                let excess = runs.len() - fan_in;
-                let mut merges = excess.div_ceil(fan_in - 1);
-                let mut take = excess + merges;
-                if take > runs.len() {
-                    take = runs.len();
-                    merges = take.div_ceil(fan_in);
+                let full = runs.iter().collect::<Vec<_>>();
+                let whole_cost = self.merge_job_cost(&full, None, None);
+                if runs.len() <= fan_in && whole_cost <= self.merge_budget_bytes() {
+                    continue;
                 }
-                let consumed = runs.drain(..take).collect::<Vec<_>>();
-                let (base, extra) = (consumed.len() / merges, consumed.len() % merges);
-                let mut consumed = consumed.into_iter();
-                for merge in 0..merges {
-                    let inputs = consumed
-                        .by_ref()
-                        .take(base + usize::from(merge < extra))
-                        .collect::<Vec<_>>();
+                // Prefer runs with the smallest actual frame reservation; the
+                // path breaks ties so the choice is stable.
+                runs.sort_by(|left, right| {
+                    let left_cost = self.merge_job_cost(&[left], None, None);
+                    let right_cost = self.merge_job_cost(&[right], None, None);
+                    (left_cost, &left.path).cmp(&(right_cost, &right.path))
+                });
+                let mut pending = std::mem::take(runs).into_iter().collect::<VecDeque<_>>();
+                let excess = pending.len().saturating_sub(fan_in);
+                let mut target_inputs = excess + excess.div_ceil(fan_in - 1);
+                if target_inputs > pending.len() {
+                    target_inputs = pending.len();
+                }
+                if excess == 0 {
+                    target_inputs = pending.len();
+                }
+                let mut selected = 0;
+                while selected < target_inputs {
+                    let Some(first) = pending.pop_front() else {
+                        break;
+                    };
+                    selected += 1;
+                    let mut inputs = vec![first];
+                    while inputs.len() < fan_in && selected < target_inputs {
+                        let Some(candidate) = pending.pop_front() else {
+                            break;
+                        };
+                        let mut refs = inputs.iter().collect::<Vec<_>>();
+                        refs.push(&candidate);
+                        if self.merge_job_cost(&refs, None, None) > self.merge_budget_bytes() {
+                            pending.push_front(candidate);
+                            break;
+                        }
+                        inputs.push(candidate);
+                        selected += 1;
+                    }
                     if inputs.len() == 1 {
-                        // A lone run has nothing to merge with at this level.
                         runs.extend(inputs);
                     } else {
                         jobs.push((group, inputs));
                     }
                 }
+                runs.extend(pending);
             }
             if jobs.is_empty() {
+                if groups.iter().any(|runs| {
+                    runs.len() > fan_in
+                        || (runs.len() >= 2
+                            && self.merge_job_cost(&runs.iter().collect::<Vec<_>>(), None, None)
+                                > self.merge_budget_bytes())
+                }) {
+                    return Err(GfError::Project {
+                        code: graphforge_core::ProjectErrorCode::ResourceLimit,
+                        message: "no pair of property runs fits the validated merge workspace"
+                            .into(),
+                    });
+                }
                 break;
             }
             let merged = jobs

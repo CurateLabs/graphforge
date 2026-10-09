@@ -271,6 +271,12 @@ pub struct BulkBuildReport {
     /// The most runs any property merge did hold open.
     #[serde(default)]
     pub property_merge_inputs_peak: u64,
+    /// One shared capacity for node and edge property merge jobs.
+    #[serde(default)]
+    pub property_merge_budget_bytes: u64,
+    /// Most bytes all concurrently admitted property merge jobs reserved.
+    #[serde(default)]
+    pub property_merge_peak_reserved_bytes: u64,
     /// Most bytes the workers held at once while forming property runs, against
     /// the `property_retained_budget_bytes` they were allowed.
     #[serde(default)]
