@@ -5547,7 +5547,7 @@ Used by:
 - unicode-segmentation 1.13.2
 - unicode-width 0.2.2
 - url 2.5.8
-- uuid 1.26.1
+- uuid 1.27.0
 - version_check 0.9.5
 - wasi 0.11.1+wasi-snapshot-preview1
 - wasip2 1.0.3+wasi-0.2.9
@@ -7058,7 +7058,7 @@ Used by:
 - ident_case 1.0.1
 - inventory 0.3.24
 - itoa 1.0.18
-- libc 0.2.189
+- libc 0.2.190
 - miniz_oxide 0.8.9
 - num-conv 0.2.2
 - objc2-core-foundation 0.3.2
@@ -8962,7 +8962,7 @@ SOFTWARE.
 Used by:
 - block2 0.6.2
 - libm 0.2.16
-- napi 3.12.7
+- napi 3.14.2
 - napi-build 2.6.0
 - napi-derive 3.6.10
 - napi-derive-backend 6.1.4
@@ -9004,7 +9004,7 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- tokio 1.53.1
+- tokio 1.53.2
 - tokio-stream 0.1.18
 - tokio-util 0.7.18
 
