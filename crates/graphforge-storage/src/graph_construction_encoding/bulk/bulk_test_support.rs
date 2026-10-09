@@ -25,11 +25,14 @@ pub(crate) fn decode_pool(
     super::budget::ScratchPlan::derive_with_budgets(plan, budget, workers, budgets).decode_bytes
 }
 
-pub(crate) fn max_task_decode_bytes(plan: &super::plan::BulkBuildPlan<'_>) -> u64 {
-    plan.nodes
+pub(crate) fn task_decode_bytes_bounds(plan: &super::plan::BulkBuildPlan<'_>) -> (u64, u64) {
+    let mut requests = plan
+        .nodes
         .iter()
         .chain(&plan.edges)
-        .map(|source| source.task_decode_bytes(0))
-        .max()
-        .unwrap_or(0)
+        .map(|source| source.task_decode_bytes(0));
+    let first = requests.next().unwrap_or(0);
+    requests.fold((first, first), |(min, max), request| {
+        (min.min(request), max.max(request))
+    })
 }

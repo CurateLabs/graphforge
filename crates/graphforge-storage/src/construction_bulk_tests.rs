@@ -1139,6 +1139,7 @@ mod bulk_builder {
         batches: usize,
         per_task: usize,
         make: fn(usize) -> RecordBatch,
+        in_flight: Arc<std::sync::atomic::AtomicUsize>,
         peak: Arc<std::sync::atomic::AtomicUsize>,
     }
 
@@ -1155,16 +1156,16 @@ mod bulk_builder {
         ) -> Result<(), GfError> {
             use std::sync::atomic::Ordering::SeqCst;
             let first = task * self.per_task;
-            let now = self.peak.fetch_add(1, SeqCst) + 1;
+            let now = self.in_flight.fetch_add(1, SeqCst) + 1;
             self.peak.fetch_max(now, SeqCst);
             std::thread::sleep(std::time::Duration::from_millis(20));
             for index in first..self.batches.min(first + self.per_task) {
                 if let Err(error) = sink((self.make)(index)) {
-                    self.peak.fetch_sub(1, SeqCst);
+                    self.in_flight.fetch_sub(1, SeqCst);
                     return Err(error);
                 }
             }
-            self.peak.fetch_sub(1, SeqCst);
+            self.in_flight.fetch_sub(1, SeqCst);
             Ok(())
         }
     }
@@ -1175,6 +1176,7 @@ mod bulk_builder {
         peak: Arc<std::sync::atomic::AtomicUsize>,
     ) -> BulkBuildPlan<'static> {
         let batches = WIDE_ROWS / WIDE_BATCH;
+        let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         assert_eq!(
             batches % per_task,
             0,
@@ -1185,6 +1187,7 @@ mod bulk_builder {
                 batches,
                 per_task,
                 make,
+                in_flight: Arc::clone(&in_flight),
                 peak: Arc::clone(&peak),
             }),
             tasks: batches.div_ceil(per_task),
@@ -1272,10 +1275,27 @@ mod bulk_builder {
             "{report:?}"
         );
         let overlapped = overlap.load(std::sync::atomic::Ordering::SeqCst);
-        assert!(
-            overlapped >= lane_count.min(2),
-            "{lane_count} workers overlapped only {overlapped}"
-        );
+        if per_task == 2 {
+            assert!(
+                overlapped >= lane_count.min(2),
+                "{lane_count} workers overlapped only {overlapped}"
+            );
+        } else {
+            let (min_request, max_request) =
+                crate::graph_construction_encoding::bulk_test_support::task_decode_bytes_bounds(
+                    &plan,
+                );
+            let expected_overlap = (report.decode_pool_bytes / min_request)
+                .min(lane_count as u64)
+                .min((WIDE_ROWS / WIDE_BATCH / per_task) as u64)
+                as usize;
+            assert!(
+                min_request > report.decode_pool_bytes / 2
+                    && max_request <= report.decode_pool_bytes,
+                "task requests [{min_request},{max_request}] with {report:?}"
+            );
+            assert_eq!(overlapped, expected_overlap, "{report:?}");
+        }
         assert!(
             overlapped <= lane_count,
             "{overlapped} tasks for {lane_count} workers"
@@ -1382,15 +1402,17 @@ mod bulk_builder {
         let pool = crate::graph_construction_encoding::bulk_test_support::decode_pool(
             &probe, budget, 8, budgets,
         );
-        let large_request =
-            crate::graph_construction_encoding::bulk_test_support::max_task_decode_bytes(&probe);
+        let (large_min, large_max) =
+            crate::graph_construction_encoding::bulk_test_support::task_decode_bytes_bounds(&probe);
         let small_plan = generated_plan(budget, 10, Arc::clone(&peak));
-        let small_request =
-            crate::graph_construction_encoding::bulk_test_support::max_task_decode_bytes(
+        let (small_min, small_max) =
+            crate::graph_construction_encoding::bulk_test_support::task_decode_bytes_bounds(
                 &small_plan,
             );
-        assert!(large_request.min(pool) > pool / 2 && large_request.min(pool) <= pool);
-        assert!(small_request.min(pool) > pool / 3 && small_request.min(pool) <= pool / 2);
+        assert!(large_min > pool / 2 && large_max <= pool);
+        assert!(small_min > pool / 3 && small_max <= pool / 2);
+        assert_eq!((pool / large_min).min(8).min(5), 1);
+        assert_eq!((pool / small_min).min(8).min(10), 2);
         for (per_task, expected_overlap) in [(20, 1), (10, 2)] {
             let root = TempDir::new().unwrap();
             let output = std::process::Command::new(std::env::current_exe().unwrap())
