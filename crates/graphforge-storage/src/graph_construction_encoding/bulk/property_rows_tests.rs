@@ -3,8 +3,9 @@ use arrow::array::{Array, ArrayRef, FixedSizeBinaryArray, Int64Array, StringArra
 use arrow::datatypes::{DataType, Field, Schema};
 
 include!("property_rows_frame_tests.rs");
+include!("property_merge_admission_tests.rs");
 
-impl RunSink<'_> {
+impl RunSink<'_, '_> {
     /// Bytes of the batches held now, which the gate must have granted.
     fn retained_bytes(&self) -> u64 {
         self.pending
@@ -45,12 +46,39 @@ fn batch(start: u64, count: usize) -> RecordBatch {
     .unwrap()
 }
 
+fn new_rows(
+    scratch: &Scratch,
+    kind: ConstructionChunkKind,
+    budgets: GraphConstructionBudgets,
+    schema_bytes: u64,
+    sizing: PropertySizing,
+) -> PropertyRows<'_> {
+    let merge_capacity = super::super::budget::property_merge_capacity(
+        budgets,
+        schema_bytes,
+        0,
+        sizing.retained_bytes,
+        0,
+    );
+    PropertyRows::new_with_merge_gate(
+        scratch,
+        kind,
+        budgets,
+        schema_bytes,
+        sizing,
+        std::sync::Arc::new(super::super::gate::ByteGate::new(merge_capacity)),
+        std::sync::Arc::new(super::super::property_rows::FrameIndexBudget::new(
+            super::super::property_rows::FRAME_INDEX_LIMIT_BYTES,
+        )),
+    )
+}
+
 #[test]
 fn scratch_traffic_matches_file_lengths_including_repeated_scans() {
     let root = tempfile::tempdir().unwrap();
     let directory = super::super::StableDirectory::open(root.path()).unwrap();
     let scratch = Scratch::create(&directory).unwrap();
-    let rows = PropertyRows::new(
+    let rows = new_rows(
         &scratch,
         ConstructionChunkKind::Node,
         GraphConstructionBudgets::default(),
@@ -100,7 +128,7 @@ fn rows_with(
     fan_in: usize,
     retained_bytes: u64,
 ) -> PropertyRows<'_> {
-    PropertyRows::new(
+    new_rows(
         scratch,
         ConstructionChunkKind::Node,
         GraphConstructionBudgets::default(),
@@ -315,7 +343,7 @@ fn schemas_stay_in_separate_groups_and_the_group_budget_is_enforced() {
     assert!(bare[0].segments.is_empty());
     assert_eq!(rows_of(&rows, with_rows[0]).len(), 16);
 
-    let limited = PropertyRows::new(
+    let limited = new_rows(
         &scratch,
         ConstructionChunkKind::Node,
         GraphConstructionBudgets {
@@ -403,7 +431,7 @@ fn ipc_type_metadata_is_charged_before_schema_instantiation() {
     let root = tempfile::tempdir().unwrap();
     let directory = super::super::StableDirectory::open(root.path()).unwrap();
     let scratch = Scratch::create(&directory).unwrap();
-    let rows = PropertyRows::new(
+    let rows = new_rows(
         &scratch,
         ConstructionChunkKind::Node,
         GraphConstructionBudgets::default(),
@@ -435,7 +463,7 @@ fn frames_reject_crc_corruption_truncation_and_unbounded_ipc_bodies() {
     let root = tempfile::tempdir().unwrap();
     let directory = super::super::StableDirectory::open(root.path()).unwrap();
     let scratch = Scratch::create(&directory).unwrap();
-    let rows = PropertyRows::new(
+    let rows = new_rows(
         &scratch,
         ConstructionChunkKind::Node,
         GraphConstructionBudgets::default(),

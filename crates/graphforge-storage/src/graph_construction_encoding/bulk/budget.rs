@@ -12,6 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::GraphConstructionBudgets;
 use super::plan::BulkBuildPlan;
 use super::property_rows::PropertySizing;
 
@@ -174,12 +175,31 @@ pub(super) fn property_workspace(budgets: super::GraphConstructionBudgets) -> u6
 
 pub(super) fn property_extra_workspace(
     plan: &BulkBuildPlan<'_>,
-    budgets: super::GraphConstructionBudgets,
+    budgets: GraphConstructionBudgets,
 ) -> u64 {
     property_workspace(budgets)
         .saturating_add(plan.max_source_schema_bytes().saturating_mul(8))
         .saturating_add(plan.source_decoder_bytes())
         .saturating_sub(CSR_WORKSPACE_BYTES)
+}
+
+/// Bytes available to all property merge jobs after intake has finished.
+/// The schema and decoder terms are shared with the source phase, while both
+/// idle property pools are reusable because node and edge finishes are
+/// sequential.
+pub(super) fn property_merge_capacity(
+    budgets: super::GraphConstructionBudgets,
+    source_schema_bytes: u64,
+    source_decoder_bytes: u64,
+    property_retained_bytes: u64,
+    decode_bytes: u64,
+) -> u64 {
+    (budgets.max_batch_bytes as u64)
+        .saturating_mul(8)
+        .saturating_add(source_schema_bytes.saturating_mul(8))
+        .saturating_add(source_decoder_bytes)
+        .saturating_add(property_retained_bytes)
+        .saturating_add(decode_bytes)
 }
 
 /// Run formation and merging of property rows within `pool` bytes, shared by

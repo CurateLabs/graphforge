@@ -100,6 +100,34 @@ impl ByteGate {
         self.acquire(bytes, cancel)?;
         Ok(Held { gate: self, bytes })
     }
+
+    /// Reserve a complete job without clipping its request to the pool.
+    pub(super) fn hold_strict(&self, bytes: u64, cancel: &AtomicBool) -> Result<Held<'_>, GfError> {
+        check_cancelled(cancel)?;
+        if bytes > self.capacity {
+            return Err(GfError::Project {
+                code: graphforge_core::ProjectErrorCode::ResourceLimit,
+                message: format!(
+                    "graph construction merge needs {bytes} bytes; its shared pool holds {}",
+                    self.capacity
+                ),
+            });
+        }
+        let mut available = self
+            .available
+            .lock()
+            .map_err(|_| storage("byte gate poisoned"))?;
+        while *available < bytes {
+            check_cancelled(cancel)?;
+            available = self
+                .changed
+                .wait_timeout(available, Duration::from_millis(20))
+                .map_err(|_| storage("byte gate poisoned"))?
+                .0;
+        }
+        self.take(&mut available, bytes);
+        Ok(Held { gate: self, bytes })
+    }
 }
 
 /// Bytes reserved from a [`ByteGate`], returned when dropped.
@@ -150,5 +178,20 @@ mod tests {
         cancel.store(true, Ordering::Release);
         let error = gate.acquire(5, &cancel).unwrap_err();
         assert!(error.to_string().contains("cancelled"), "{error}");
+    }
+
+    #[test]
+    fn strict_reservation_refuses_instead_of_clipping() {
+        let gate = ByteGate::new(10);
+        let error = gate.hold_strict(11, &AtomicBool::new(false)).err().unwrap();
+        assert!(matches!(
+            error,
+            GfError::Project {
+                code: graphforge_core::ProjectErrorCode::ResourceLimit,
+                ..
+            }
+        ));
+        assert_eq!(gate.free(), 10);
+        assert_eq!(gate.peak(), 0);
     }
 }

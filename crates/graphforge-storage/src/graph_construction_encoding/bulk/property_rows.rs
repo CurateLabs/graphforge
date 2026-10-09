@@ -24,8 +24,8 @@ use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use arrow::array::{
     Array, BinaryArray, LargeBinaryArray, LargeStringArray, StringArray, UInt32Array,
@@ -45,6 +45,9 @@ use super::{
 pub(super) use super::property_merge::SortedGroup;
 
 const DEFAULT_FRAME_BYTES: usize = 1 << 20;
+const IPC_ALIGNMENT: u64 = 64;
+pub(super) const FRAME_INDEX_LIMIT_BYTES: u64 = 32 << 20;
+pub(super) const FRAME_INDEX_ENTRY_BYTES: u64 = (std::mem::size_of::<FrameMeta>() as u64) * 4;
 /// Bytes one retained row adds while its run is sorted: the 16-byte identity,
 /// two ordinals, and the sort's own working copy.
 const KEY_BYTES: usize = 32;
@@ -88,7 +91,21 @@ impl PropertySizing {
 #[derive(Clone, Copy, Debug)]
 pub(super) struct FrameMeta {
     pub(super) offset: u64,
+    /// Complete private frame length, including its checksum header.
     pub(super) bytes: u64,
+    /// IPC bytes allocated by the frame reader before it decodes the batch.
+    pub(super) payload_bytes: u64,
+    /// Shared aligned allocation retained by all decoded IPC array buffers.
+    pub(super) body_bytes: u64,
+    /// Schema and record-batch FlatBuffer message bytes.
+    pub(super) message_bytes: u64,
+    /// Upper bound on the decoded batch's non-body schema and array headers.
+    pub(super) header_bytes: u64,
+    /// Largest logical payload of any row in this frame.
+    pub(super) max_row_bytes: u64,
+    /// Schema-specific IPC envelope and body-alignment bound beyond row bytes.
+    pub(super) output_envelope_bytes: u64,
+    pub(super) buffer_count: u32,
     pub(super) rows: u32,
     pub(super) first: [u8; 16],
     pub(super) last: [u8; 16],
@@ -100,11 +117,61 @@ pub(super) struct Run {
     pub(super) path: PathBuf,
     pub(super) frames: Vec<FrameMeta>,
     pub(super) rows: u64,
+    index_budget: Arc<FrameIndexBudget>,
+    index_charge: u64,
 }
 
 impl Run {
     pub(super) fn bytes(&self) -> u64 {
         self.frames.iter().map(|frame| frame.bytes).sum()
+    }
+}
+
+/// Bounds the cumulative frame summaries retained across both property kinds.
+#[derive(Debug)]
+pub(super) struct FrameIndexBudget {
+    capacity: u64,
+    used: AtomicU64,
+}
+
+impl FrameIndexBudget {
+    pub(super) fn new(capacity: u64) -> Self {
+        Self {
+            capacity,
+            used: AtomicU64::new(0),
+        }
+    }
+
+    fn reserve(&self) -> Result<(), GfError> {
+        let mut used = self.used.load(Ordering::Relaxed);
+        loop {
+            let next = used.saturating_add(FRAME_INDEX_ENTRY_BYTES);
+            if next > self.capacity {
+                return Err(GfError::Project {
+                    code: graphforge_core::ProjectErrorCode::ResourceLimit,
+                    message:
+                        "graph construction property frame index exceeds its bookkeeping budget"
+                            .into(),
+                });
+            }
+            match self
+                .used
+                .compare_exchange_weak(used, next, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => return Ok(()),
+                Err(actual) => used = actual,
+            }
+        }
+    }
+
+    fn release(&self, bytes: u64) {
+        self.used.fetch_sub(bytes, Ordering::Relaxed);
+    }
+}
+
+impl Drop for Run {
+    fn drop(&mut self) {
+        self.index_budget.release(self.index_charge);
     }
 }
 
@@ -116,6 +183,8 @@ pub(super) struct PropertyRows<'a> {
     pub(super) frame_target: usize,
     pub(super) sizing: PropertySizing,
     pub(super) gate: ByteGate,
+    pub(super) merge_gate: Arc<ByteGate>,
+    index_budget: Arc<FrameIndexBudget>,
     pub(super) groups: Mutex<Groups>,
     next_file: AtomicU64,
     written: AtomicU64,
@@ -258,6 +327,15 @@ pub(super) struct RunWriter<'p, 'a> {
     offset: u64,
     frames: Vec<FrameMeta>,
     total: u64,
+    index_charge: u64,
+}
+
+impl Drop for RunWriter<'_, '_> {
+    fn drop(&mut self) {
+        if self.index_charge > 0 {
+            self.rows.index_budget.release(self.index_charge);
+        }
+    }
 }
 
 impl RunWriter<'_, '_> {
@@ -266,8 +344,12 @@ impl RunWriter<'_, '_> {
         batch: &RecordBatch,
         first: [u8; 16],
         last: [u8; 16],
+        max_row_bytes: usize,
     ) -> Result<(), GfError> {
+        self.rows.index_budget.reserve()?;
+        self.index_charge = self.index_charge.saturating_add(FRAME_INDEX_ENTRY_BYTES);
         let frame = self.rows.encode_frame(batch)?;
+        let facts = inspect_frame(&frame, batch.schema().as_ref())?;
         self.file.write_all(&frame).map_err(storage)?;
         self.rows
             .written
@@ -276,6 +358,13 @@ impl RunWriter<'_, '_> {
         self.frames.push(FrameMeta {
             offset: self.offset,
             bytes: frame.len() as u64,
+            payload_bytes: facts.payload_bytes,
+            body_bytes: facts.body_bytes,
+            message_bytes: facts.message_bytes,
+            header_bytes: facts.header_bytes,
+            max_row_bytes: max_row_bytes as u64,
+            output_envelope_bytes: facts.output_envelope_bytes,
+            buffer_count: facts.buffer_count,
             rows,
             first,
             last,
@@ -288,11 +377,268 @@ impl RunWriter<'_, '_> {
     pub(super) fn finish(mut self) -> Result<Run, GfError> {
         self.file.flush().map_err(storage)?;
         Ok(Run {
-            path: self.path,
-            frames: self.frames,
+            path: std::mem::take(&mut self.path),
+            frames: std::mem::take(&mut self.frames),
             rows: self.total,
+            index_budget: Arc::clone(&self.rows.index_budget),
+            index_charge: std::mem::take(&mut self.index_charge),
         })
     }
+}
+
+#[derive(Clone, Copy)]
+struct FrameFacts {
+    payload_bytes: u64,
+    body_bytes: u64,
+    message_bytes: u64,
+    header_bytes: u64,
+    output_envelope_bytes: u64,
+    buffer_count: u32,
+}
+
+fn inspect_frame(frame: &[u8], schema: &arrow::datatypes::Schema) -> Result<FrameFacts, GfError> {
+    let payload = frame
+        .get(HEADER..)
+        .ok_or_else(|| storage("property frame is shorter than its header"))?;
+    let mut offset = 0_usize;
+    let mut schema_message_bytes = 0_u64;
+    let mut record_message_bytes = 0_u64;
+    let mut body_bytes = 0_u64;
+    let mut buffer_count = 0_u32;
+    let mut saw_schema = false;
+    let mut saw_record = false;
+    loop {
+        let prefix = payload
+            .get(offset..offset.saturating_add(4))
+            .ok_or_else(|| storage("truncated property IPC message prefix"))?;
+        let mut metadata_size = i32::from_le_bytes(prefix.try_into().expect("four bytes"));
+        offset += 4;
+        if metadata_size == -1 {
+            let prefix = payload
+                .get(offset..offset.saturating_add(4))
+                .ok_or_else(|| storage("truncated property IPC continuation prefix"))?;
+            metadata_size = i32::from_le_bytes(prefix.try_into().expect("four bytes"));
+            offset += 4;
+        }
+        if metadata_size == 0 {
+            if offset != payload.len() || !saw_schema || !saw_record {
+                return Err(storage("invalid property IPC message sequence"));
+            }
+            break;
+        }
+        let metadata_size = usize::try_from(metadata_size)
+            .map_err(|_| storage("negative property IPC metadata length"))?;
+        let metadata_end = offset
+            .checked_add(metadata_size)
+            .ok_or_else(|| storage("property IPC metadata length overflows"))?;
+        let message = arrow::ipc::root_as_message(
+            payload
+                .get(offset..metadata_end)
+                .ok_or_else(|| storage("truncated property IPC metadata"))?,
+        )
+        .map_err(storage)?;
+        let message_bytes = u64::try_from(metadata_end - offset + 8).map_err(storage)?;
+        let body_size = u64::try_from(message.bodyLength())
+            .map_err(|_| storage("negative property IPC body length"))?;
+        let body_start = metadata_end;
+        let body_end = body_start
+            .checked_add(usize::try_from(body_size).map_err(storage)?)
+            .ok_or_else(|| storage("property IPC body length overflows"))?;
+        if body_end > payload.len() {
+            return Err(storage("property IPC body exceeds its frame"));
+        }
+        match message.header_type() {
+            arrow::ipc::MessageHeader::Schema if !saw_schema && !saw_record && body_size == 0 => {
+                saw_schema = true;
+                schema_message_bytes = message_bytes;
+            }
+            arrow::ipc::MessageHeader::RecordBatch if saw_schema && !saw_record => {
+                saw_record = true;
+                record_message_bytes = message_bytes;
+                body_bytes = body_size;
+                buffer_count = u32::try_from(
+                    message
+                        .header_as_record_batch()
+                        .and_then(|batch| batch.buffers())
+                        .map_or(0, |buffers| buffers.len()),
+                )
+                .map_err(storage)?;
+            }
+            _ => return Err(storage("unsupported property IPC message sequence")),
+        }
+        offset = body_end;
+    }
+    let message_bytes = schema_message_bytes.saturating_add(record_message_bytes);
+    let header_bytes = decoded_header_bytes(schema, message_bytes, buffer_count);
+    let output_envelope_bytes = output_envelope_bytes(schema, message_bytes, buffer_count);
+    Ok(FrameFacts {
+        payload_bytes: u64::try_from(payload.len()).map_err(storage)?,
+        body_bytes,
+        message_bytes,
+        header_bytes,
+        output_envelope_bytes,
+        buffer_count,
+    })
+}
+
+fn decoded_header_bytes(
+    schema: &arrow::datatypes::Schema,
+    message_bytes: u64,
+    buffer_count: u32,
+) -> u64 {
+    let layout = schema_layout(schema);
+    message_bytes
+        .saturating_add(schema_header_bytes(schema))
+        .saturating_add(std::mem::size_of::<RecordBatch>() as u64)
+        .saturating_add(
+            (schema.fields().len() as u64)
+                .saturating_mul(std::mem::size_of::<arrow::array::ArrayRef>() as u64),
+        )
+        .saturating_add(
+            layout
+                .array_nodes
+                .saturating_mul(std::mem::size_of::<arrow::array::ArrayData>() as u64),
+        )
+        .saturating_add(
+            u64::from(buffer_count)
+                .saturating_mul(std::mem::size_of::<arrow::buffer::Buffer>() as u64)
+                .saturating_mul(2),
+        )
+}
+
+fn output_envelope_bytes(
+    schema: &arrow::datatypes::Schema,
+    message_bytes: u64,
+    buffer_count: u32,
+) -> u64 {
+    let layout = schema_layout(schema);
+    (HEADER as u64 + 8)
+        .saturating_add(message_bytes)
+        .saturating_add(layout.terminal_offsets)
+        .saturating_add((u64::from(buffer_count) + 1).saturating_mul(IPC_ALIGNMENT))
+}
+
+#[derive(Clone, Copy, Default)]
+struct SchemaLayout {
+    array_nodes: u64,
+    terminal_offsets: u64,
+}
+
+fn schema_layout(schema: &arrow::datatypes::Schema) -> SchemaLayout {
+    schema
+        .fields()
+        .iter()
+        .fold(SchemaLayout::default(), |mut layout, field| {
+            let child = field_layout(field.data_type());
+            layout.array_nodes = layout.array_nodes.saturating_add(child.array_nodes);
+            layout.terminal_offsets = layout
+                .terminal_offsets
+                .saturating_add(child.terminal_offsets);
+            layout
+        })
+}
+
+fn field_layout(data_type: &DataType) -> SchemaLayout {
+    let mut layout = SchemaLayout {
+        array_nodes: 1,
+        terminal_offsets: 0,
+    };
+    match data_type {
+        DataType::Utf8 | DataType::Binary => layout.terminal_offsets = 4,
+        DataType::LargeUtf8 | DataType::LargeBinary => layout.terminal_offsets = 8,
+        DataType::List(field) | DataType::Map(field, _) => {
+            layout.terminal_offsets = 4;
+            let child = field_layout(field.data_type());
+            layout.array_nodes = layout.array_nodes.saturating_add(child.array_nodes);
+            layout.terminal_offsets = layout
+                .terminal_offsets
+                .saturating_add(child.terminal_offsets);
+        }
+        DataType::LargeList(field) => {
+            layout.terminal_offsets = 8;
+            let child = field_layout(field.data_type());
+            layout.array_nodes = layout.array_nodes.saturating_add(child.array_nodes);
+            layout.terminal_offsets = layout
+                .terminal_offsets
+                .saturating_add(child.terminal_offsets);
+        }
+        DataType::ListView(field)
+        | DataType::LargeListView(field)
+        | DataType::FixedSizeList(field, _) => {
+            let child = field_layout(field.data_type());
+            layout.array_nodes = layout.array_nodes.saturating_add(child.array_nodes);
+            layout.terminal_offsets = layout
+                .terminal_offsets
+                .saturating_add(child.terminal_offsets);
+        }
+        DataType::Struct(fields) => {
+            for field in fields {
+                let child = field_layout(field.data_type());
+                layout.array_nodes = layout.array_nodes.saturating_add(child.array_nodes);
+                layout.terminal_offsets = layout
+                    .terminal_offsets
+                    .saturating_add(child.terminal_offsets);
+            }
+        }
+        _ => {}
+    }
+    layout
+}
+
+fn schema_header_bytes(schema: &arrow::datatypes::Schema) -> u64 {
+    let mut bytes = std::mem::size_of::<arrow::datatypes::Schema>() as u64;
+    bytes = bytes.saturating_add(
+        (schema.fields().len() as u64)
+            .saturating_mul(std::mem::size_of::<arrow::datatypes::FieldRef>() as u64),
+    );
+    for field in schema.fields() {
+        bytes = bytes.saturating_add(field_header_bytes(field));
+    }
+    let metadata = schema.metadata();
+    bytes = bytes
+        .saturating_add(
+            (metadata.capacity() as u64)
+                .saturating_mul(std::mem::size_of::<(String, String)>() as u64),
+        )
+        .saturating_add(metadata.iter().fold(0_u64, |total, (key, value)| {
+            total
+                .saturating_add(key.len() as u64)
+                .saturating_add(value.len() as u64)
+        }));
+    bytes
+}
+
+fn field_header_bytes(field: &arrow::datatypes::Field) -> u64 {
+    let mut bytes = (std::mem::size_of::<arrow::datatypes::Field>() + field.name().len()) as u64;
+    let metadata = field.metadata();
+    bytes = bytes
+        .saturating_add(
+            (metadata.capacity() as u64)
+                .saturating_mul(std::mem::size_of::<(String, String)>() as u64),
+        )
+        .saturating_add(metadata.iter().fold(0_u64, |total, (key, value)| {
+            total
+                .saturating_add(key.len() as u64)
+                .saturating_add(value.len() as u64)
+        }));
+    let nested = match field.data_type() {
+        DataType::List(child)
+        | DataType::LargeList(child)
+        | DataType::ListView(child)
+        | DataType::LargeListView(child)
+        | DataType::FixedSizeList(child, _)
+        | DataType::Map(child, _) => std::slice::from_ref(child),
+        DataType::Struct(fields) => fields.as_ref(),
+        _ => &[],
+    };
+    bytes = bytes.saturating_add(
+        (nested.len() as u64)
+            .saturating_mul(std::mem::size_of::<arrow::datatypes::FieldRef>() as u64),
+    );
+    for child in nested {
+        bytes = bytes.saturating_add(field_header_bytes(child));
+    }
+    bytes
 }
 
 /// Retain compact pieces in a binary tree. At most logarithmically many Arrow
@@ -344,12 +690,14 @@ impl BatchAccumulator {
 }
 
 impl<'a> PropertyRows<'a> {
-    pub(super) fn new(
+    pub(super) fn new_with_merge_gate(
         scratch: &'a Scratch,
         kind: ConstructionChunkKind,
         budgets: GraphConstructionBudgets,
         schema_bytes: u64,
         sizing: PropertySizing,
+        merge_gate: Arc<ByteGate>,
+        index_budget: Arc<FrameIndexBudget>,
     ) -> Self {
         #[cfg(test)]
         let sizing =
@@ -374,6 +722,8 @@ impl<'a> PropertyRows<'a> {
             schema_bytes: usize::try_from(schema_bytes).unwrap_or(usize::MAX),
             sizing,
             gate: ByteGate::new(sizing.retained_bytes),
+            merge_gate,
+            index_budget,
             groups: Mutex::new(Groups::default()),
             next_file: AtomicU64::new(0),
             written: AtomicU64::new(0),
@@ -457,6 +807,10 @@ impl<'a> PropertyRows<'a> {
             .fetch_max(inputs as u64, Ordering::Relaxed);
     }
 
+    pub(super) fn merge_budget_bytes(&self) -> u64 {
+        self.merge_gate.capacity()
+    }
+
     /// Sorted runs formed from the input.
     pub(super) fn runs_formed(&self) -> u64 {
         self.runs_formed.load(Ordering::Relaxed)
@@ -518,6 +872,7 @@ impl<'a> PropertyRows<'a> {
             offset: 0,
             frames: Vec::new(),
             total: 0,
+            index_charge: 0,
         })
     }
 
@@ -543,6 +898,7 @@ impl<'a> PropertyRows<'a> {
         let mut writer = self.run_writer()?;
         let mut indices = Vec::with_capacity(max_rows);
         let mut chunk_bytes = 0_usize;
+        let mut chunk_max_row_bytes = 0_usize;
         let mut chunk_first = None;
         let mut chunk_last = None;
         for key in &keys {
@@ -568,16 +924,19 @@ impl<'a> PropertyRows<'a> {
                     &frame,
                     chunk_first.expect("a nonempty property frame"),
                     chunk_last.expect("a nonempty property frame"),
+                    chunk_max_row_bytes,
                 )?;
                 crate::graph_construction::construction_failpoint("bulk.during_property_run");
                 indices.clear();
                 chunk_bytes = 0;
+                chunk_max_row_bytes = 0;
                 chunk_first = None;
             }
             indices.push((key.1 as usize, row));
             chunk_bytes = chunk_bytes
                 .checked_add(row_bytes)
                 .ok_or_else(|| storage("property frame byte total overflows"))?;
+            chunk_max_row_bytes = chunk_max_row_bytes.max(row_bytes);
             chunk_first.get_or_insert(key.0);
             chunk_last = Some(key.0);
         }
@@ -587,6 +946,7 @@ impl<'a> PropertyRows<'a> {
                 &frame,
                 chunk_first.expect("a nonempty property frame"),
                 chunk_last.expect("a nonempty property frame"),
+                chunk_max_row_bytes,
             )?;
             crate::graph_construction::construction_failpoint("bulk.during_property_run");
         }
@@ -970,6 +1330,20 @@ impl RowsReader<'_, '_> {
     }
 
     pub(super) fn next(&mut self) -> Result<Option<RecordBatch>, GfError> {
+        self.next_with_meta(None)
+    }
+
+    pub(super) fn next_expected(
+        &mut self,
+        expected: &FrameMeta,
+    ) -> Result<Option<RecordBatch>, GfError> {
+        self.next_with_meta(Some(expected))
+    }
+
+    fn next_with_meta(
+        &mut self,
+        expected: Option<&FrameMeta>,
+    ) -> Result<Option<RecordBatch>, GfError> {
         let mut header = [0_u8; HEADER];
         let n = self.file.read(&mut header[..1]).map_err(storage)?;
         if n == 0 {
@@ -982,6 +1356,17 @@ impl RowsReader<'_, '_> {
             header[..8].try_into().expect("eight bytes"),
         ))
         .map_err(storage)?;
+        if let Some(expected) = expected {
+            let expected_payload = usize::try_from(expected.payload_bytes).map_err(storage)?;
+            if size != expected_payload
+                || expected.bytes != expected.payload_bytes.saturating_add(HEADER as u64)
+                || u32::from_le_bytes(header[12..].try_into().expect("four bytes")) != expected.rows
+            {
+                return Err(storage(
+                    "property frame header conflicts with its run index",
+                ));
+            }
+        }
         if size > self.rows.frame_limit() {
             return Err(storage(
                 "property scratch frame exceeds its reserved workspace",
@@ -1004,7 +1389,7 @@ impl RowsReader<'_, '_> {
                 "property scratch frame row count exceeds its reservation",
             ));
         }
-        validate_ipc(
+        let facts = validate_ipc(
             &payload,
             expected_rows,
             self.rows.budgets.max_property_columns + REQUIRED_COLUMNS,
@@ -1013,6 +1398,13 @@ impl RowsReader<'_, '_> {
                 .saturating_mul(4)
                 .saturating_add(1 << 20),
         )?;
+        if let Some(expected) = expected
+            && (facts.body_bytes != expected.body_bytes
+                || facts.message_bytes != expected.message_bytes
+                || facts.buffer_count != expected.buffer_count)
+        {
+            return Err(storage("property IPC layout conflicts with its run index"));
+        }
         let mut stream =
             StreamReader::try_new(std::io::Cursor::new(payload), None).map_err(storage)?;
         let batch = stream
@@ -1026,10 +1418,28 @@ impl RowsReader<'_, '_> {
         {
             return Err(storage("property scratch frame row count differs"));
         }
-        if batch.get_array_memory_size() > self.rows.frame_limit() {
-            return Err(storage(
-                "property scratch decoded frame exceeds its reservation",
-            ));
+        if let Some(expected) = expected {
+            let max_row_bytes = (0..batch.num_rows()).try_fold(0_usize, |max, row| {
+                Ok::<_, GfError>(max.max(PropertyRows::row_bytes(&batch, row)?))
+            })?;
+            let observed = decoded_header_bytes(
+                batch.schema().as_ref(),
+                facts.message_bytes,
+                facts.buffer_count,
+            );
+            let envelope = output_envelope_bytes(
+                batch.schema().as_ref(),
+                facts.message_bytes,
+                facts.buffer_count,
+            );
+            if max_row_bytes as u64 != expected.max_row_bytes
+                || observed > expected.header_bytes
+                || envelope != expected.output_envelope_bytes
+            {
+                return Err(storage(
+                    "property decoded layout conflicts with its run index",
+                ));
+            }
         }
         Ok(Some(batch))
     }
@@ -1038,17 +1448,29 @@ impl RowsReader<'_, '_> {
 /// Validate all allocation-bearing IPC lengths before Arrow's stream reader
 /// allocates a declared message body. CRC protects accidental corruption, not
 /// the safety of lengths in a frame with a recomputed checksum.
+#[derive(Clone, Copy)]
+struct IpcReadFacts {
+    body_bytes: u64,
+    message_bytes: u64,
+    buffer_count: u32,
+}
+
 fn validate_ipc(
     payload: &[u8],
     rows: usize,
     max_fields: usize,
     schema_limit: usize,
-) -> Result<(), GfError> {
+) -> Result<IpcReadFacts, GfError> {
     let invalid = || storage("invalid property scratch IPC lengths");
     let mut offset = 0_usize;
     let mut batches = 0;
     let mut schema_seen = false;
+    let mut schema_message_bytes = 0_u64;
+    let mut record_message_bytes = 0_u64;
+    let mut body_bytes = 0_u64;
+    let mut buffer_count = 0_u32;
     loop {
+        let message_start = offset;
         let prefix = payload
             .get(offset..offset.checked_add(4).ok_or_else(invalid)?)
             .ok_or_else(invalid)?;
@@ -1063,7 +1485,11 @@ fn validate_ipc(
         }
         if size == 0 {
             return if offset == payload.len() && batches == 1 {
-                Ok(())
+                Ok(IpcReadFacts {
+                    body_bytes,
+                    message_bytes: schema_message_bytes.saturating_add(record_message_bytes),
+                    buffer_count,
+                })
             } else {
                 Err(invalid())
             };
@@ -1085,6 +1511,8 @@ fn validate_ipc(
                     return Err(invalid());
                 }
                 schema_seen = true;
+                schema_message_bytes =
+                    u64::try_from(offset - message_start).map_err(|_| invalid())?;
                 let schema = message.header_as_schema().ok_or_else(invalid)?;
                 if schema
                     .fields()
@@ -1111,6 +1539,11 @@ fn validate_ipc(
                     return Err(invalid());
                 }
                 validate_record(batch, body_size, payload.len())?;
+                record_message_bytes =
+                    u64::try_from(offset - message_start - body_size).map_err(|_| invalid())?;
+                body_bytes = u64::try_from(body_size).map_err(|_| invalid())?;
+                buffer_count = u32::try_from(batch.buffers().map_or(0, |values| values.len()))
+                    .map_err(|_| invalid())?;
                 batches += 1;
             }
             _ => return Err(invalid()),
