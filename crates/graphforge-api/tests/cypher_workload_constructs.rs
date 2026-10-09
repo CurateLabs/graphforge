@@ -63,7 +63,7 @@ fn unsupported(gf: &GraphForge, query: &str, params: &HashMap<String, IrLiteral>
         .expect_err("specific unsupported construct");
     assert_eq!(error.code(), "GF_NOT_IMPLEMENTED", "{query}: {error}");
     assert!(
-        matches!(&error, GfError::NotImplemented(actual) if actual == feature),
+        matches!(&error, GfError::NotImplemented(actual) if *actual == feature),
         "{query}: {error:?}"
     );
 }
