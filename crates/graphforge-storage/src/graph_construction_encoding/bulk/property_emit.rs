@@ -89,6 +89,7 @@ pub(super) fn emit(
             let first = window_reader.next()?.expect("nonempty window");
             if first.num_columns() == required {
                 while window_reader.next()?.is_some() {}
+                drop(window_reader);
                 rows.reclaim(&window)?;
                 continue;
             }
@@ -183,6 +184,7 @@ pub(super) fn emit(
                 }
                 current = window_reader.next()?;
             }
+            drop(window_reader);
             for (name, owner) in owners {
                 let resolved = resolve(semantics, kind, &name)?;
                 let (owner_kind, route_kind) = symbol_kinds(kind);
@@ -245,6 +247,7 @@ pub(super) fn emit(
                             artifacts,
                         )?;
                     }
+                    drop(projected);
                     rows.reclaim(&path)?;
                 }
             }
@@ -253,6 +256,7 @@ pub(super) fn emit(
         // This group's final stream has been read to a clean, verified end;
         // the catalog scan consumed its own earlier read. Nothing reads the
         // file again, so its bytes leave the live occupancy.
+        drop(reader);
         rows.reclaim(&group.path)?;
     }
     Ok(())
