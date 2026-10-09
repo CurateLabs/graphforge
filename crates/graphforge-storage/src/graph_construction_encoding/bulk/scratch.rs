@@ -1043,7 +1043,7 @@ pub(super) struct BlockReader<'a> {
 
 impl<'a> BlockReader<'a> {
     pub(super) fn open(scratch: &'a Scratch, path: &Path) -> Result<Self, GfError> {
-        Self::open_whole(scratch, File::open(path).map_err(storage)?, None)
+        Self::open_whole(scratch, File::open(path).map_err(storage)?, None, None)
     }
 
     /// Open one physical segment of a segmented partition. The opened
@@ -1057,18 +1057,29 @@ impl<'a> BlockReader<'a> {
         width: usize,
         cap: usize,
     ) -> Result<Self, GfError> {
-        let file = File::open(path).map_err(storage)?;
-        let length = file.metadata().map_err(storage)?.len();
-        if length > cap as u64 {
+        Self::open_whole(
+            scratch,
+            File::open(path).map_err(storage)?,
+            Some(width),
+            Some(cap),
+        )
+    }
+
+    fn open_whole(
+        scratch: &'a Scratch,
+        file: File,
+        width: Option<usize>,
+        cap: Option<usize>,
+    ) -> Result<Self, GfError> {
+        // Use one handle-metadata observation for both the segment cap and
+        // every later frame bound. A second stat could admit a grown file
+        // without checking that new length against its segment cap.
+        let remaining = file.metadata().map_err(storage)?.len();
+        if cap.is_some_and(|cap| remaining > cap as u64) {
             return Err(storage(
                 "a scratch segment is longer than its partition's segment cap",
             ));
         }
-        Self::open_whole(scratch, file, Some(width))
-    }
-
-    fn open_whole(scratch: &'a Scratch, file: File, width: Option<usize>) -> Result<Self, GfError> {
-        let remaining = file.metadata().map_err(storage)?.len();
         Ok(Self {
             scratch,
             file: std::io::BufReader::with_capacity(1 << 20, file),
