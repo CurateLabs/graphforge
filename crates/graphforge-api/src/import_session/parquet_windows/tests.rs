@@ -193,7 +193,7 @@ fn empty_progress_and_ledger_paths_observe_cancellation() {
 
     let mut budget = InventoryBudget::new(4096);
     let mut ledger = ledger(0, 0, 4, 10, &mut budget);
-    let leaf = progress(0, 0, 4, 0);
+    let mut leaf = progress(0, 0, 4, 0);
     let error = leaf
         .process_block(&mut ledger, &[], &[], Some(&cancelled))
         .unwrap_err();
