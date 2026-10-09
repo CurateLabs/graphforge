@@ -12,6 +12,7 @@ use parquet::arrow::schema::parquet_to_arrow_field_levels;
 use parquet::arrow::{ArrowWriter, ProjectionMask};
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
+use parquet::file::reader::{ChunkReader, Length};
 
 use super::OwnedRowGroups;
 use crate::CancellationToken;
@@ -23,6 +24,30 @@ use crate::import_session::parquet_reader::{OwnedBatchReader, PageFailures, Page
 struct Probe {
     calls: Arc<AtomicUsize>,
     refusal: bool,
+}
+
+struct CancellingChunkReader {
+    bytes: Bytes,
+    cancellation: CancellationToken,
+}
+
+impl Length for CancellingChunkReader {
+    fn len(&self) -> u64 {
+        self.cancellation.cancel();
+        u64::try_from(self.bytes.len()).unwrap()
+    }
+}
+
+impl ChunkReader for CancellingChunkReader {
+    type T = bytes::buf::Reader<Bytes>;
+
+    fn get_read(&self, start: u64) -> parquet::errors::Result<Self::T> {
+        self.bytes.get_read(start)
+    }
+
+    fn get_bytes(&self, start: u64, length: usize) -> parquet::errors::Result<Bytes> {
+        self.bytes.get_bytes(start, length)
+    }
 }
 
 impl PagePreflight for Probe {
@@ -409,6 +434,45 @@ fn empty_selection_still_observes_cancellation() {
         PageFailures::new(),
     );
     assert!(result.is_err());
+}
+
+#[test]
+fn cancellation_after_length_lookup_precedes_row_group_selection_work() {
+    let (bytes, metadata) = source();
+    let cancellation = CancellationToken::new();
+    let input = Arc::new(CancellingChunkReader {
+        bytes,
+        cancellation: cancellation.clone(),
+    });
+    let mut budget = InventoryBudget::new(128);
+    budget.admit(37, "preexisting test charge").unwrap();
+    let failures = PageFailures::new();
+    let result = OwnedRowGroups::<CancellingChunkReader, _, Probe>::new(
+        input,
+        metadata,
+        &[usize::MAX],
+        &mut budget,
+        |_, _| {
+            Ok(Probe {
+                calls: Arc::new(AtomicUsize::new(0)),
+                refusal: false,
+            })
+        },
+        Some(cancellation),
+        failures,
+    );
+    assert!(matches!(
+        result,
+        Err(GfError::Api {
+            code: graphforge_core::ApiErrorCode::Cancelled,
+            ..
+        })
+    ));
+    assert_eq!(
+        budget.live_bytes(),
+        37,
+        "failed construction preserves prior charges"
+    );
 }
 
 #[test]

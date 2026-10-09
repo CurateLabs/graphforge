@@ -16,6 +16,8 @@ use super::inventory_budget::{self, InventoryBudget};
 use super::parquet_reader::{OwnedPageReader, PageFailures, PagePreflight};
 use super::{cancelled, limit, storage};
 
+const ROW_GROUP_INIT_BLOCK: usize = 1024;
+
 /// Runtime row groups whose every column page passes the same owned-byte
 /// preflight before Arrow can decode it.
 pub(super) struct OwnedRowGroups<T, F, C> {
@@ -51,9 +53,11 @@ where
         check_cancelled(cancellation.as_ref())?;
 
         let file_len = input.len();
+        check_cancelled(cancellation.as_ref())?;
         let mut num_rows = 0_usize;
         let mut previous = None;
         for &group_index in selected_row_groups {
+            check_cancelled(cancellation.as_ref())?;
             if group_index >= metadata.num_row_groups()
                 || previous.is_some_and(|previous| previous >= group_index)
             {
@@ -68,17 +72,43 @@ where
             num_rows = num_rows
                 .checked_add(rows)
                 .ok_or_else(|| limit("selected Parquet row count exceeds a countable size"))?;
-            validate_group_columns(group, file_len)?;
+            validate_group_columns(group, file_len, cancellation.as_ref())?;
         }
+        check_cancelled(cancellation.as_ref())?;
 
         let mut selected = Vec::new();
-        inventory_budget::reserve(
+        let charged_before = budget.live_bytes();
+        if let Err(error) = inventory_budget::reserve(
             &mut selected,
             selected_row_groups.len(),
             budget,
             "selected row-group indices",
-        )?;
-        selected.extend_from_slice(selected_row_groups);
+        ) {
+            drop(selected);
+            release_selection_charge(budget, charged_before)?;
+            return Err(error);
+        }
+        let mut copied = 0_usize;
+        while copied < selected_row_groups.len() {
+            if let Err(error) = check_cancelled(cancellation.as_ref()) {
+                drop(selected);
+                release_selection_charge(budget, charged_before)?;
+                return Err(error);
+            }
+            let count = (selected_row_groups.len() - copied).min(ROW_GROUP_INIT_BLOCK);
+            let Some(end) = copied.checked_add(count) else {
+                drop(selected);
+                release_selection_charge(budget, charged_before)?;
+                return Err(limit("selected Parquet row-group count overflows"));
+            };
+            selected.extend_from_slice(&selected_row_groups[copied..end]);
+            copied = end;
+        }
+        if let Err(error) = check_cancelled(cancellation.as_ref()) {
+            drop(selected);
+            release_selection_charge(budget, charged_before)?;
+            return Err(error);
+        }
 
         Ok(Self {
             input,
@@ -236,12 +266,29 @@ where
 {
 }
 
-fn validate_group_columns(group: &RowGroupMetaData, file_len: u64) -> Result<(), GfError> {
+fn validate_group_columns(
+    group: &RowGroupMetaData,
+    file_len: u64,
+    cancellation: Option<&CancellationToken>,
+) -> Result<(), GfError> {
     for column in group.columns() {
+        check_cancelled(cancellation)?;
         checked_column_range(column, file_len)?;
         u64::try_from(column.num_values())
             .map_err(|_| storage("Parquet column event count is negative or too large"))?;
     }
+    Ok(())
+}
+
+fn release_selection_charge(
+    budget: &mut InventoryBudget,
+    charged_before: u64,
+) -> Result<(), GfError> {
+    let charge = budget
+        .live_bytes()
+        .checked_sub(charged_before)
+        .ok_or_else(|| storage("row-group selection budget decreased during construction"))?;
+    budget.release(charge);
     Ok(())
 }
 
