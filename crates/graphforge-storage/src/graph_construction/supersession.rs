@@ -598,10 +598,12 @@ fn authenticate_encoded_artifact_identities(
         let identity = file_identity(&file).map_err(storage)?;
         let usage = graphforge_filesystem::file_space_usage(&file).map_err(storage)?;
         let key = format!("{:016x}:{}", identity.volume_serial, hex(&identity.file_id));
-        if evidence
+        // The ledger entry is accounting recorded at encode; its presence
+        // admits the inode. A fresh `st_blocks` of an unsynced artifact is
+        // filesystem state and is not compared (#1928).
+        if !evidence
             .storage_active_identity_allocated_bytes
-            .get(&key)
-            .is_none_or(|allocated| *allocated != usage.allocated_bytes)
+            .contains_key(&key)
             || !crate::graph_construction_encoding::encoded_links_expected(
                 project,
                 &expected.sha256,

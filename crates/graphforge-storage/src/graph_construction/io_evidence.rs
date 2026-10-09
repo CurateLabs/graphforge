@@ -1263,19 +1263,23 @@ pub(super) fn record_encoded_active_artifacts(
         if usage.logical_bytes != artifact.bytes {
             return Err(storage("encoded artifact allocation authority changed"));
         }
+        // An entry already in the ledger keeps the allocation observed when it
+        // was first recorded. The artifact is not synced, so a later
+        // measurement may differ with no change to identity or content (#1928).
+        let recorded = evidence
+            .storage_active_identity_allocated_bytes
+            .get(&identity_key)
+            .copied();
         if encoded
-            .insert(identity_key.clone(), usage.allocated_bytes)
+            .insert(
+                identity_key.clone(),
+                recorded.unwrap_or(usage.allocated_bytes),
+            )
             .is_some()
         {
             return Err(storage("encoded artifact identity installed twice"));
         }
-        if let Some(existing) = evidence
-            .storage_active_identity_allocated_bytes
-            .get(&identity_key)
-        {
-            if *existing != usage.allocated_bytes {
-                return Err(storage("encoded artifact identity allocation changed"));
-            }
+        if recorded.is_some() {
             continue;
         }
         record_active_identity_install(

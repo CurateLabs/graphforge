@@ -2827,3 +2827,5 @@ mod captures;
 #[cfg(unix)]
 mod direct_install;
 mod property_fragment_cap;
+#[cfg(unix)]
+mod unsynced_allocation;
