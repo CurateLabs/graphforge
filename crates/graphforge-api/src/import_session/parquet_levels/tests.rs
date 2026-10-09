@@ -440,6 +440,66 @@ fn allowed_maximum_check_blocks_out_of_range_levels_and_indices() {
     assert!(error.to_string().contains("allowed maximum"), "{error}");
 }
 
+/// Mutation sentinel for the packed payload start: reverting the production
+/// transition that points `packed_bit_offset` after a packed run header makes
+/// this test fail, because the first values then decode from the header bytes
+/// instead of the payload.
+#[test]
+fn first_packed_run_payload_starts_after_its_vlq_header() {
+    let max = 5_i16;
+    let width = num_required_bits(u64::from(max));
+    let values: Vec<u64> = vec![5, 1, 4, 2];
+    let stream = packed_run(1, &values, width);
+    let mut cursor = HybridLevels::new(&stream, max, values.len()).unwrap();
+    assert_eq!(drain_levels(&mut cursor), as_levels(&values));
+    assert_eq!(cursor.next_level().unwrap(), None);
+    assert_eq!(cursor.consumed_bytes(), stream.len());
+}
+
+/// Mutation sentinel for the exhausted-run byte cursor: reverting the
+/// production transition that resumes `offset` at the consumed packed payload
+/// after a full run makes this test fail, because the next reload then
+/// rereads stale payload bytes as a run header.
+#[test]
+fn packed_rle_packed_runs_decode_in_concatenation() {
+    let max = 5_i16;
+    let width = num_required_bits(u64::from(max));
+    let head: Vec<u64> = vec![5, 1, 4, 2, 3, 0, 5, 1];
+    let tail: Vec<u64> = vec![4, 0, 5, 3, 1, 4, 2, 5];
+    let mut stream = packed_run(1, &head, width);
+    stream.extend(rle_run(9, 2, width));
+    stream.extend(packed_run(1, &tail, width));
+    let mut expected = as_levels(&head);
+    expected.extend(std::iter::repeat(2_i16).take(9));
+    expected.extend(as_levels(&tail));
+    let mut cursor = HybridLevels::new(&stream, max, expected.len()).unwrap();
+    assert_eq!(drain_levels(&mut cursor), expected);
+    assert_eq!(cursor.next_level().unwrap(), None);
+    assert_eq!(cursor.consumed_bytes(), stream.len());
+}
+
+/// The dictionary index cursor shares the hybrid engine, so both packed-run
+/// pointer transitions must hold behind its width byte too.
+#[test]
+fn dictionary_indices_share_hybrid_run_transitions() {
+    let dictionary_count = 6_usize;
+    let width = num_required_bits(u64::try_from(dictionary_count - 1).unwrap());
+    let head: Vec<u64> = vec![5, 1, 4, 2];
+    let tail: Vec<u64> = vec![4, 0, 5, 3];
+    let mut stream = vec![width];
+    stream.extend(packed_run(1, &head, width));
+    stream.extend(rle_run(5, 2, width));
+    stream.extend(packed_run(1, &tail, width));
+    let mut expected: Vec<u32> = Vec::new();
+    expected.extend(head.iter().copied());
+    expected.extend(std::iter::repeat(2_u32).take(5));
+    expected.extend(tail.iter().copied());
+    let mut cursor = DictionaryIndices::new(&stream, dictionary_count, expected.len()).unwrap();
+    assert_eq!(drain_indices(&mut cursor), expected);
+    assert_eq!(cursor.next_index().unwrap(), None);
+    assert_eq!(cursor.consumed_bytes(), stream.len());
+}
+
 #[test]
 fn insufficient_streams_are_refused() {
     let mut cursor = HybridLevels::new(&[], 1, 1).unwrap();

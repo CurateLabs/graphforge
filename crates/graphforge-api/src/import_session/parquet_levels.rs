@@ -202,7 +202,9 @@ impl LevelSource for PackedLevels<'_> {
             .bit_offset
             .checked_add(usize::from(self.width))
             .ok_or_else(truncated)?;
-        if bit_end > self.data.len() * 8 {
+        // Compare the required bytes with the body length: a `len * 8` bit
+        // comparison could overflow.
+        if bit_end.div_ceil(8) > self.data.len() {
             return Err(truncated());
         }
         let mut value = 0_u64;
@@ -286,19 +288,21 @@ impl<'a> Hybrid<'a> {
             // Only the logical prefix this run will actually supply needs
             // payload bytes: writers may truncate the final group, and events
             // past `expected` are ignored padding that need not be valid.
-            let decoded = usize::try_from(count)
-                .map_err(|_| overflow())?
-                .min(self.remaining());
+            let decoded = usize::try_from(count).map_err(|_| overflow())?.min(self.remaining());
+            // The packed payload starts immediately after this run header,
+            // at the byte offset the VLQ left behind; decoding must not
+            // reread the header bytes.
+            let bit_start = self.offset.checked_mul(8).ok_or_else(overflow)?;
             let bits = decoded
                 .checked_mul(usize::from(self.width))
                 .ok_or_else(overflow)?;
-            let bit_end = self
-                .packed_bit_offset
-                .checked_add(bits)
-                .ok_or_else(overflow)?;
-            if bit_end > self.data.len() * 8 {
+            let bit_end = bit_start.checked_add(bits).ok_or_else(overflow)?;
+            // Compare the required payload bytes with the body length: a
+            // `len * 8` bit comparison could overflow.
+            if bit_end.div_ceil(8) > self.data.len() {
                 return Err(truncated());
             }
+            self.packed_bit_offset = bit_start;
             self.run = Run::Packed {
                 remaining: u64::from(count),
             };
@@ -351,7 +355,9 @@ impl<'a> Hybrid<'a> {
             .packed_bit_offset
             .checked_add(usize::from(self.width))
             .ok_or_else(truncated)?;
-        if bit_end > self.data.len() * 8 {
+        // Compare the required bytes with the body length: a `len * 8` bit
+        // comparison could overflow.
+        if bit_end.div_ceil(8) > self.data.len() {
             return Err(truncated());
         }
         let mut value = 0_u64;
@@ -382,9 +388,17 @@ impl<'a> Hybrid<'a> {
                 }
                 Run::Packed { remaining } if remaining > 0 => {
                     let value = self.read_packed_value()?;
-                    self.run = Run::Packed {
-                        remaining: remaining - 1,
-                    };
+                    let remaining = remaining - 1;
+                    if remaining == 0 {
+                        // The full packed run is consumed: the next run
+                        // header follows its payload, so the byte cursor
+                        // resumes at the consumed payload length instead of
+                        // this run header's end. A partial final run never
+                        // reaches zero; its ignored padding stays unattributed
+                        // and `next` stops at `expected` without reloading.
+                        self.offset = self.packed_bit_offset.div_ceil(8);
+                    }
+                    self.run = Run::Packed { remaining };
                     self.emitted += 1;
                     return Ok(Some(value));
                 }
