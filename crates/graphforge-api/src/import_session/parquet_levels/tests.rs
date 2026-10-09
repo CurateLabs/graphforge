@@ -441,7 +441,6 @@ fn allowed_maximum_check_blocks_out_of_range_levels_and_indices() {
 }
 
 #[test]
-#[allow(deprecated)]
 fn insufficient_streams_are_refused() {
     let mut cursor = HybridLevels::new(&[], 1, 1).unwrap();
     assert!(cursor.next_level().is_err());
@@ -468,7 +467,6 @@ fn insufficient_streams_are_refused() {
 }
 
 #[test]
-#[allow(deprecated)]
 fn v1_rle_section_lengths_are_validated_before_borrowing() {
     let max = 1_i16;
     let body = [0xFF_u8, 0xFF, 0xFF, 0xFF, 1];
