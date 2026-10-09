@@ -105,6 +105,7 @@ impl SchemaShape {
         let mut leaves = Vec::new();
         let mut tasks = Vec::new();
         let mut root_children = None;
+        let mut root_tail = None;
         let mut tail_by_parent: Vec<Option<usize>> = Vec::new();
 
         // The root has no visible Arrow node; its fields are pushed in reverse
@@ -164,6 +165,7 @@ impl SchemaShape {
                         &mut nodes,
                         &mut tail_by_parent,
                         &mut root_children,
+                        &mut root_tail,
                         budget,
                         task.field.clone(),
                         kind,
@@ -177,6 +179,7 @@ impl SchemaShape {
                         &mut nodes,
                         &mut tail_by_parent,
                         &mut root_children,
+                        &mut root_tail,
                         &mut leaves,
                         budget,
                         &task.parquet,
@@ -213,6 +216,7 @@ impl SchemaShape {
                     &mut nodes,
                     &mut tail_by_parent,
                     &mut root_children,
+                    &mut root_tail,
                     &mut leaves,
                     budget,
                     &task.parquet,
@@ -267,6 +271,7 @@ impl SchemaShape {
                     &mut nodes,
                     &mut tail_by_parent,
                     &mut root_children,
+                    &mut root_tail,
                     budget,
                     task.field.clone(),
                     NodeKind::Map,
@@ -280,6 +285,7 @@ impl SchemaShape {
                     &mut nodes,
                     &mut tail_by_parent,
                     &mut root_children,
+                    &mut root_tail,
                     budget,
                     entry_field,
                     entry_kind,
@@ -352,6 +358,7 @@ impl SchemaShape {
                     &mut nodes,
                     &mut tail_by_parent,
                     &mut root_children,
+                    &mut root_tail,
                     budget,
                     task.field.clone(),
                     list_kind(task.field.data_type())?,
@@ -379,6 +386,7 @@ impl SchemaShape {
                         &mut nodes,
                         &mut tail_by_parent,
                         &mut root_children,
+                        &mut root_tail,
                         &mut leaves,
                         budget,
                         repeated,
@@ -400,6 +408,7 @@ impl SchemaShape {
                         &mut nodes,
                         &mut tail_by_parent,
                         &mut root_children,
+                        &mut root_tail,
                         budget,
                         element,
                         NodeKind::Struct,
@@ -481,6 +490,7 @@ impl SchemaShape {
                     &mut nodes,
                     &mut tail_by_parent,
                     &mut root_children,
+                    &mut root_tail,
                     budget,
                     task.field.clone(),
                     list_kind,
@@ -495,6 +505,7 @@ impl SchemaShape {
                     &mut nodes,
                     &mut tail_by_parent,
                     &mut root_children,
+                    &mut root_tail,
                     budget,
                     struct_field.clone(),
                     kind,
@@ -510,6 +521,7 @@ impl SchemaShape {
                     &mut nodes,
                     &mut tail_by_parent,
                     &mut root_children,
+                    &mut root_tail,
                     budget,
                     struct_field.clone(),
                     kind,
@@ -617,6 +629,7 @@ fn append_node(
     nodes: &mut Vec<Node>,
     tails: &mut Vec<Option<usize>>,
     roots: &mut Option<usize>,
+    root_tail: &mut Option<usize>,
     budget: &mut InventoryBudget,
     field: FieldRef,
     kind: NodeKind,
@@ -642,7 +655,7 @@ fn append_node(
         column_index,
     });
     tails.push(None);
-    attach_node(nodes, tails, roots, index);
+    attach_node(nodes, tails, roots, root_tail, index);
     Ok(index)
 }
 
@@ -650,37 +663,24 @@ fn attach_node(
     nodes: &mut [Node],
     tails: &mut [Option<usize>],
     roots: &mut Option<usize>,
+    root_tail: &mut Option<usize>,
     index: usize,
 ) {
     let parent = nodes[index].parent;
-    let tail = parent
-        .and_then(|p| tails[p])
-        .or_else(|| if parent.is_none() { *roots } else { None });
-    if let Some(tail) = tail {
-        nodes[tail].next_sibling = Some(index);
-    } else if let Some(parent) = parent {
-        nodes[parent].first_child = Some(index);
-    } else {
-        *roots = Some(index);
-    }
     if let Some(parent) = parent {
+        if let Some(tail) = tails[parent] {
+            nodes[tail].next_sibling = Some(index);
+        } else {
+            nodes[parent].first_child = Some(index);
+        }
         tails[parent] = Some(index);
     } else {
-        // Root siblings use a sentinel-free search through the link tail.
-        // Root fields are visited in physical DFS order and append at the end.
-        let mut current = *roots;
-        while let Some(node) = current {
-            if nodes[node].next_sibling.is_none() {
-                current = Some(node);
-                break;
-            }
-            current = nodes[node].next_sibling;
+        if let Some(tail) = *root_tail {
+            nodes[tail].next_sibling = Some(index);
+        } else {
+            *roots = Some(index);
         }
-        if let Some(tail) = current {
-            if tail != index {
-                nodes[tail].next_sibling = Some(index);
-            }
-        }
+        *root_tail = Some(index);
     }
 }
 
@@ -688,6 +688,7 @@ fn append_leaf(
     nodes: &mut Vec<Node>,
     tails: &mut Vec<Option<usize>>,
     roots: &mut Option<usize>,
+    root_tail: &mut Option<usize>,
     leaves: &mut Vec<Leaf>,
     budget: &mut InventoryBudget,
     parquet: &TypePtr,
@@ -714,7 +715,7 @@ fn append_leaf(
         column_index: Some(descriptor_index),
     });
     tails.push(None);
-    attach_node(nodes, tails, roots, index);
+    attach_node(nodes, tails, roots, root_tail, index);
     reserve(leaves, 1, budget, "schema leaves")?;
     leaves.push(Leaf {
         column_index: descriptor_index,
