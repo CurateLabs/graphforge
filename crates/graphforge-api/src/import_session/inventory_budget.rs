@@ -35,7 +35,10 @@ impl InventoryBudget {
     /// Admit `bytes` more live bytes for `what`, or refuse the scan before it
     /// allocates them.
     pub(super) fn admit(&mut self, bytes: u64, what: &str) -> Result<(), GfError> {
-        let total = self.charged.saturating_add(bytes);
+        let total = self
+            .charged
+            .checked_add(bytes)
+            .ok_or_else(|| limit("the Parquet page inventory exceeds a countable size"))?;
         if total > self.capacity {
             return Err(limit(format!(
                 "the Parquet page inventory of {what} would take this scan past its \
@@ -51,6 +54,11 @@ impl InventoryBudget {
     /// groups may use them again.
     pub(super) fn release(&mut self, bytes: u64) {
         self.charged = self.charged.saturating_sub(bytes);
+    }
+
+    /// Actual retained vector capacities after the scan's temporaries drop.
+    pub(super) fn live_bytes(&self) -> u64 {
+        self.charged
     }
 }
 
@@ -69,7 +77,10 @@ pub(super) fn reserve<E>(
     what: &str,
 ) -> Result<(), GfError> {
     let element = u64::try_from(std::mem::size_of::<E>()).unwrap_or(u64::MAX);
-    let needed = vec.len().saturating_add(additional);
+    let needed = vec
+        .len()
+        .checked_add(additional)
+        .ok_or_else(|| limit("the Parquet page inventory exceeds a countable size"))?;
     if needed <= vec.capacity() {
         return Ok(());
     }

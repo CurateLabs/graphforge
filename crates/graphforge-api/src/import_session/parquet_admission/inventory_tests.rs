@@ -394,7 +394,35 @@ fn columns_and_row_groups_share_one_inventory_budget() {
     // The same file on an adequate budget keeps all four inventories whole.
     let scan =
         build_from_path(four_file.path(), &four, MIB).expect("an adequate budget admits four");
-    assert_eq!(scan.groups.len(), 2);
+    assert_eq!(scan.groups.len(), 3);
+    let retained = scan.groups.capacity()
+        * std::mem::size_of::<super::super::parquet_scan::GroupScan>()
+        + scan.group_start.capacity() * std::mem::size_of::<u64>()
+        + scan.value_bytes.capacity() * std::mem::size_of::<u64>()
+        + scan
+            .groups
+            .iter()
+            .map(|group| {
+                group.leaves.capacity()
+                    * std::mem::size_of::<super::super::parquet_scan::LeafScan>()
+                    + group
+                        .leaves
+                        .iter()
+                        .filter_map(|leaf| leaf.pages.as_ref())
+                        .map(|pages| pages.capacity() * std::mem::size_of::<PageFact>())
+                        .sum::<usize>()
+            })
+            .sum::<usize>();
+    assert!(
+        scan.groups.capacity() > scan.groups.len(),
+        "exercise geometric slack"
+    );
+    assert_eq!(
+        scan.resident_bytes(),
+        retained as u64,
+        "charge allocated slots, not just occupied slots"
+    );
+
     for group in &scan.groups {
         assert_eq!(group.leaves.len(), 2);
         for leaf_scan in &group.leaves {
@@ -421,10 +449,10 @@ fn build_from_path(
 
 #[test]
 fn writer_generated_small_pages_pass_with_exact_counts() {
-    // An ordinary writer told to flush a page per row: 2,000 one-value pages
-    // across two row groups. A scan with an adequate budget reads them all and
+    // An ordinary writer told to flush a page per row: 3,000 one-value pages
+    // across three row groups. A scan with an adequate budget reads them all and
     // states exactly what they held.
-    let rows = 2_000_usize;
+    let rows = 3_000_usize;
     let batch = RecordBatch::try_new(
         Arc::new(Schema::new(vec![
             Field::new("n", DataType::Int64, false),
@@ -465,7 +493,7 @@ fn writer_generated_small_pages_pass_with_exact_counts() {
         None,
     )
     .expect("an ordinary many-page file is admitted");
-    assert_eq!(scan.groups.len(), 2);
+    assert_eq!(scan.groups.len(), 3);
     for group in &scan.groups {
         let pages = group.leaves[1].pages.as_ref().expect("strings keep pages");
         assert_eq!(pages.len(), 1_000, "one page per row");
@@ -490,4 +518,13 @@ fn writer_generated_small_pages_pass_with_exact_counts() {
             .sum::<u64>(),
         1_000
     );
+}
+
+#[test]
+fn inventory_admission_never_saturates_an_overflow_into_success() {
+    let mut budget = InventoryBudget::new(u64::MAX);
+    budget.admit(u64::MAX, "already charged").unwrap();
+    let error = budget.admit(1, "one more byte").unwrap_err();
+    assert!(is_resource_limit(&error), "{error}");
+    assert_eq!(budget.live_bytes(), u64::MAX);
 }

@@ -209,28 +209,10 @@ impl SourceScan {
             scan.value_bytes.iter_mut().for_each(|bytes| *bytes = 0);
             scan.size_values(file, metadata, capacity, cancellation)?;
         }
-        scan.resident_bytes = scan
-            .groups
-            .iter()
-            .map(|group| {
-                (std::mem::size_of::<GroupScan>() as u64)
-                    + group
-                        .leaves
-                        .iter()
-                        .map(|leaf| {
-                            (std::mem::size_of::<LeafScan>() as u64).saturating_add(
-                                leaf.pages.as_ref().map_or(0, |pages| {
-                                    (pages.capacity()
-                                        * std::mem::size_of::<super::parquet_scan::PageFact>())
-                                        as u64
-                                }),
-                            )
-                        })
-                        .sum::<u64>()
-            })
-            .sum::<u64>()
-            .saturating_add((scan.value_bytes.capacity() * 8) as u64)
-            .saturating_add((scan.group_start.capacity() * 8) as u64);
+        // The budget charged actual capacities, including unused geometric
+        // slots in groups/leaves. A sum of lengths would understate retained
+        // inventory after a three-element vector grows to four slots.
+        scan.resident_bytes = budget.live_bytes();
         Ok(scan)
     }
 
