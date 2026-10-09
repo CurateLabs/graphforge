@@ -8,7 +8,7 @@ use parquet::arrow::array_reader::RowGroups;
 use parquet::column::page::{PageIterator, PageReader};
 use parquet::errors::{ParquetError, Result as ParquetResult};
 use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
-use parquet::file::reader::{ChunkReader, Length};
+use parquet::file::reader::ChunkReader;
 
 use crate::CancellationToken;
 
@@ -25,6 +25,7 @@ pub(super) struct OwnedRowGroups<T, F, C> {
     num_rows: usize,
     factory: Arc<F>,
     cancellation: Option<CancellationToken>,
+    failures: PageFailures,
     _callback: std::marker::PhantomData<fn() -> C>,
 }
 

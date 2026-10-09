@@ -7,6 +7,7 @@ use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
 use graphforge_core::{GfError, ProjectErrorCode};
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
+use parquet::arrow::array_reader::RowGroups;
 use parquet::arrow::schema::parquet_to_arrow_field_levels;
 use parquet::arrow::{ArrowWriter, ProjectionMask};
 use parquet::basic::Compression;
@@ -60,7 +61,7 @@ fn source() -> (Bytes, Arc<parquet::file::metadata::ParquetMetaData>) {
     let mut output = Vec::new();
     let properties = WriterProperties::builder()
         .set_compression(Compression::UNCOMPRESSED)
-        .set_max_row_group_size(4)
+        .set_max_row_group_row_count(Some(4))
         .build();
     let mut writer = ArrowWriter::try_new(&mut output, schema, Some(properties)).unwrap();
     writer.write(&batch).unwrap();

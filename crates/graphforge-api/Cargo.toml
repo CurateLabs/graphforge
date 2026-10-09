@@ -19,6 +19,7 @@ discovery = ["dep:graphforge-discovery"]
 research = ["knowledge", "portable"]
 
 [dependencies]
+parking_lot.workspace = true
 graphforge-discovery = { version = "0.6.0-dev", path = "../graphforge-discovery", optional = true }
 graphforge-portable-oci = { version = "0.6.0-dev", path = "../graphforge-portable-oci", optional = true }
 graphforge-value = { version = "0.6.0-dev", path = "../graphforge-value" }

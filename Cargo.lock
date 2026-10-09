@@ -2216,6 +2216,7 @@ dependencies = [
  "graphforge-value",
  "lz4_flex",
  "miniz_oxide",
+ "parking_lot",
  "parquet",
  "serde",
  "serde_json",
