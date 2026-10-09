@@ -84,6 +84,33 @@ pub struct BulkSource<'a> {
     pub decoded_bytes: u64,
 }
 
+/// Bytes a task holds while it decodes, per byte of the rows it reads: the
+/// row groups' pages as read, the copy the source digest keeps until the file
+/// is hashed in order, and the batches decoded and normalized from them.
+const DECODE_EXPANSION: u64 = 4;
+/// Fewest bytes a decoding task reserves.
+const MIN_TASK_DECODE_BYTES: u64 = 4 << 20;
+
+impl BulkSource<'_> {
+    /// Bytes decoding `task` is expected to hold at once, from the footer's
+    /// uncompressed size shared out by rows, plus what the reader says its
+    /// decoder needs. Several tasks decode at once on the scratch route; each
+    /// reserves this much from a pool sized from the budget before it reads.
+    pub(super) fn task_decode_bytes(&self, task: usize) -> u64 {
+        let rows = self.reader.task_rows(task) as u64;
+        let share = if self.rows == 0 {
+            0
+        } else {
+            u64::try_from(u128::from(self.decoded_bytes) * u128::from(rows) / u128::from(self.rows))
+                .unwrap_or(u64::MAX)
+        };
+        share
+            .saturating_mul(DECODE_EXPANSION)
+            .saturating_add(self.reader.decoded_workspace_bytes())
+            .max(MIN_TASK_DECODE_BYTES)
+    }
+}
+
 /// The planned inputs of one initial build: node sources, then edge sources.
 #[derive(Clone, Default)]
 pub struct BulkBuildPlan<'a> {
@@ -231,6 +258,38 @@ pub struct BulkBuildReport {
     /// Fixed property workspace reserved before decoding any source.
     #[serde(default)]
     pub property_workspace_reserved_bytes: u64,
+    /// Uncompressed bytes of the property-bearing sources, from their footers:
+    /// the denominator of the property scratch traffic per input byte.
+    #[serde(default)]
+    pub property_source_bytes: u64,
+    /// Sorted property runs written from the input.
+    #[serde(default)]
+    pub property_runs: u64,
+    /// Runs one property merge may hold open.
+    #[serde(default)]
+    pub property_merge_fan_in: u64,
+    /// The most runs any property merge did hold open.
+    #[serde(default)]
+    pub property_merge_inputs_peak: u64,
+    /// One shared capacity for node and edge property merge jobs.
+    #[serde(default)]
+    pub property_merge_budget_bytes: u64,
+    /// Most bytes all concurrently admitted property merge jobs reserved.
+    #[serde(default)]
+    pub property_merge_peak_reserved_bytes: u64,
+    /// Most bytes the workers held at once while forming property runs, against
+    /// the `property_retained_budget_bytes` they were allowed.
+    #[serde(default)]
+    pub property_peak_retained_bytes: u64,
+    /// Bytes all workers together could hold while forming property runs.
+    #[serde(default)]
+    pub property_retained_budget_bytes: u64,
+    /// Bytes the tasks decoding at once may reserve, and the most they did.
+    #[serde(default)]
+    pub decode_pool_bytes: u64,
+    /// The most bytes the decoding tasks reserved at once.
+    #[serde(default)]
+    pub decode_peak_bytes: u64,
 }
 
 #[derive(Clone, Copy, Default)]
