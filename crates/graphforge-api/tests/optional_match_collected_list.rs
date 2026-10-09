@@ -43,6 +43,32 @@ fn pairs(rows: Vec<Vec<String>>) -> BTreeMap<i64, i64> {
         .collect()
 }
 
+#[test]
+fn correlated_optional_match_preserves_null_collected_node_seeds() {
+    let gf = GraphForge::new(None).expect("in-memory instance");
+    gf.execute("CREATE (:Person {id: 1})")
+        .expect("create person");
+
+    let actual = rows(
+        &gf,
+        "MATCH (p:Person)
+         WITH collect(p) AS people
+         UNWIND [people[0], people[99]] AS person
+         OPTIONAL MATCH (person)-[:KNOWS]->(friend)
+         WHERE friend IN people
+         RETURN person.id, friend.id",
+    );
+    let mut actual = actual;
+    actual.sort();
+    assert_eq!(
+        actual,
+        vec![
+            vec!["1".to_owned(), "null".to_owned()],
+            vec!["null".to_owned(), "null".to_owned()]
+        ],
+    );
+}
+
 const PERSONS: i64 = 60;
 const FORUMS: i64 = 9;
 const POSTS: i64 = 200;

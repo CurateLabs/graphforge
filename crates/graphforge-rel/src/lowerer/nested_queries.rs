@@ -554,7 +554,7 @@ impl GraphPlanLowerer {
             let Some(alias) = var_map.get(*var) else {
                 continue;
             };
-            input = self.enrich_bound_node(input, alias)?;
+            input = self.enrich_optional_outer_node(input, alias)?;
             input = self.join_node_properties(*var, *ty, input)?;
         }
         Ok(input)

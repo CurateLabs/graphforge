@@ -345,6 +345,36 @@ pub(super) fn enrich_bound_node_identity(
     alias: &str,
     dir: Option<&LoweringSnapshot>,
 ) -> Result<LogicalPlan, LoweringError> {
+    enrich_bound_node_identity_with_join(
+        input,
+        alias,
+        dir,
+        datafusion::logical_expr::JoinType::Inner,
+    )
+}
+
+/// Enrich a possibly-null outer node without discarding its row. This is used
+/// when an OPTIONAL MATCH reuses a node variable that may itself have come
+/// from an earlier unmatched optional pattern.
+pub(super) fn enrich_bound_node_identity_preserving_null(
+    input: &LogicalPlan,
+    alias: &str,
+    dir: Option<&LoweringSnapshot>,
+) -> Result<LogicalPlan, LoweringError> {
+    enrich_bound_node_identity_with_join(
+        input,
+        alias,
+        dir,
+        datafusion::logical_expr::JoinType::Left,
+    )
+}
+
+fn enrich_bound_node_identity_with_join(
+    input: &LogicalPlan,
+    alias: &str,
+    dir: Option<&LoweringSnapshot>,
+    join_type: datafusion::logical_expr::JoinType,
+) -> Result<LogicalPlan, LoweringError> {
     use datafusion::common::Column;
     use datafusion::logical_expr::col;
 
@@ -355,7 +385,7 @@ pub(super) fn enrich_bound_node_identity(
     let joined = LogicalPlanBuilder::from(input.clone())
         .join(
             identity,
-            datafusion::logical_expr::JoinType::Inner,
+            join_type,
             (
                 vec![Column::from_qualified_name(format!("{alias}.node_uuid"))],
                 vec![Column::from_qualified_name(format!(

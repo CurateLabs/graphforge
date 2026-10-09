@@ -34,8 +34,8 @@ mod traversal;
 mod writes;
 
 use scans::{
-    enrich_bound_node_identity, filter_node_by_type, lower_edge_scan, lower_node_scan,
-    lower_typed_edge_scan,
+    enrich_bound_node_identity, enrich_bound_node_identity_preserving_null, filter_node_by_type,
+    lower_edge_scan, lower_node_scan, lower_typed_edge_scan,
 };
 use traversal::lower_expand;
 
@@ -627,6 +627,27 @@ impl GraphPlanLowerer {
         };
         if has("node_uuid") && !has("node_id") {
             enrich_bound_node_identity(&input, alias, self.read_snapshot())
+        } else {
+            Ok(input)
+        }
+    }
+
+    /// Fill in a collected or unwound outer node's identity while keeping a
+    /// null node from an earlier OPTIONAL MATCH in the input relation.
+    fn enrich_optional_outer_node(
+        &self,
+        input: LogicalPlan,
+        alias: &str,
+    ) -> Result<LogicalPlan, LoweringError> {
+        let qualifier = datafusion::common::TableReference::bare(alias);
+        let has = |name| {
+            input
+                .schema()
+                .index_of_column_by_name(Some(&qualifier), name)
+                .is_some()
+        };
+        if has("node_uuid") && !has("node_id") {
+            enrich_bound_node_identity_preserving_null(&input, alias, self.read_snapshot())
         } else {
             Ok(input)
         }
