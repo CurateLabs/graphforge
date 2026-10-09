@@ -76,7 +76,7 @@ impl UuidBuildKeyNomination {
         *self
             .reservation
             .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Some(reservation);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(reservation);
         Ok(())
     }
 
@@ -94,7 +94,7 @@ impl UuidBuildKeyNomination {
             let exists = self
                 .collecting
                 .lock()
-                .unwrap_or_else(|error| error.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .contains(&uuid);
             if exists {
                 continue;
@@ -104,7 +104,7 @@ impl UuidBuildKeyNomination {
                 let reservation = self
                     .reservation
                     .lock()
-                    .unwrap_or_else(|error| error.into_inner());
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let reservation = reservation.as_ref().ok_or_else(|| {
                     DataFusionError::Internal(
                         "UUID build nomination tap has no memory reservation".into(),
@@ -116,13 +116,13 @@ impl UuidBuildKeyNomination {
             let inserted = self
                 .collecting
                 .lock()
-                .unwrap_or_else(|error| error.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(uuid);
             if !inserted {
                 let reservation = self
                     .reservation
                     .lock()
-                    .unwrap_or_else(|error| error.into_inner());
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some(reservation) = reservation.as_ref() {
                     reservation.shrink(NOMINATION_BYTES_PER_UUID);
                 }
@@ -136,7 +136,7 @@ impl UuidBuildKeyNomination {
             &mut *self
                 .collecting
                 .lock()
-                .unwrap_or_else(|error| error.into_inner()),
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
         if self.completed.set(keys).is_ok() {
             self.set_terminal(NominationStatus::Complete);

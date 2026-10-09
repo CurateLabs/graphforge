@@ -6,7 +6,9 @@ use datafusion::common::JoinType;
 use datafusion::common::config::ConfigOptions;
 use datafusion::common::tree_node::{Transformed, TreeNode};
 use datafusion::error::DataFusionError;
+use datafusion::physical_expr::Partitioning;
 use datafusion::physical_expr::PhysicalExpr;
+use datafusion::physical_expr::equivalence::AcrossPartitions;
 use datafusion::physical_expr::expressions::Column;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::ExecutionPlan;
@@ -14,6 +16,7 @@ use datafusion::physical_plan::ExecutionPlanProperties;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::joins::HashJoinExec;
 use datafusion::physical_plan::joins::PartitionMode;
+use datafusion::physical_plan::repartition::RepartitionExec;
 
 use crate::property_join_nomination::{UuidBuildKeyNomination, UuidBuildKeyTapExec};
 use crate::property_scan::PropertyOverlayExec;
@@ -37,6 +40,12 @@ impl PhysicalOptimizerRule for PropertyFilterApprovalRule {
             let Some(join) = node.downcast_ref::<HashJoinExec>() else {
                 return Ok(Transformed::no(node));
             };
+            if *join.join_type() == JoinType::Right {
+                let Some(rebuilt) = nominate_collect_left_right(join)? else {
+                    return Ok(Transformed::no(node));
+                };
+                return Ok(Transformed::yes(rebuilt));
+            }
             if *join.join_type() == JoinType::Left {
                 let Some(rebuilt) = nominate_existing_collect_left(join)? else {
                     return Ok(Transformed::no(node));
@@ -62,7 +71,7 @@ impl PhysicalOptimizerRule for PropertyFilterApprovalRule {
                 return Ok(Transformed::no(node));
             };
 
-            let candidate = find_matching_candidate(join.right(), expression_id, &join)?;
+            let candidate = find_matching_candidate(join.right(), expression_id, join)?;
             let Some(candidate) = candidate else {
                 return Ok(Transformed::no(node));
             };
@@ -70,7 +79,7 @@ impl PhysicalOptimizerRule for PropertyFilterApprovalRule {
                 join.on().iter().find_map(|(build, probe)| {
                     probe
                         .dyn_eq(candidate.original_probe_key.as_ref())
-                        .then(|| (build, probe))
+                        .then_some((build, probe))
                 })
             else {
                 return Ok(Transformed::no(node));
@@ -102,7 +111,7 @@ impl PhysicalOptimizerRule for PropertyFilterApprovalRule {
                 Arc::clone(join.right()),
                 expression_id,
                 &candidate.original_probe_key,
-                Arc::clone(&nomination),
+                &nomination,
             )?;
             let coalesced_left: Arc<dyn ExecutionPlan> =
                 Arc::new(CoalescePartitionsExec::new(Arc::clone(join.left())));
@@ -129,6 +138,119 @@ impl PhysicalOptimizerRule for PropertyFilterApprovalRule {
     fn schema_check(&self) -> bool {
         true
     }
+}
+
+/// Reorient the exact physical shape used for a partitioned destination
+/// enrichment: a direct property scan is the build side of CollectLeft RIGHT,
+/// and the preserved frontier produces the parent's RoundRobin partitions.
+/// Swapping makes the frontier the single LEFT-preserved build side, so a
+/// completed frontier UUID nomination can safely prune only that direct scan.
+fn nominate_collect_left_right(
+    join: &HashJoinExec,
+) -> Result<Option<Arc<dyn ExecutionPlan>>, DataFusionError> {
+    let join_plan: &dyn ExecutionPlan = join;
+    if *join.partition_mode() != PartitionMode::CollectLeft
+        || !join.contains_projection()
+        || join.fetch().is_some()
+        || join_plan.output_ordering().is_some()
+        || join.left().boundedness().is_unbounded()
+        || join.right().boundedness().is_unbounded()
+        || join_plan
+            .equivalence_properties()
+            .constants()
+            .iter()
+            .any(|constant| constant.across_partitions == AcrossPartitions::Heterogeneous)
+    {
+        return Ok(None);
+    }
+
+    let output_partitioning = join_plan.output_partitioning().clone();
+    if !matches!(&output_partitioning, Partitioning::RoundRobinBatch(partitions) if *partitions > 0)
+    {
+        return Ok(None);
+    }
+    let Some(scan) = join.left().downcast_ref::<PropertyOverlayExec>() else {
+        return Ok(None);
+    };
+    let Some(uuid_index) = scan.nomination_uuid_column() else {
+        return Ok(None);
+    };
+    let scan_schema = scan.schema();
+    let Some(uuid_field) = scan_schema.fields().get(uuid_index) else {
+        return Ok(None);
+    };
+
+    let frontier_column = join.on().iter().find_map(|(scan_key, frontier_key)| {
+        let scan_key = scan_key.downcast_ref::<Column>()?;
+        if scan_key.index() != uuid_index
+            || scan_key.name() != uuid_field.name()
+            || scan_key.data_type(join.left().schema().as_ref()).ok()
+                != Some(arrow::datatypes::DataType::FixedSizeBinary(16))
+        {
+            return None;
+        }
+        let frontier_key = frontier_key.downcast_ref::<Column>()?;
+        (frontier_key.data_type(join.right().schema().as_ref()).ok()
+            == Some(arrow::datatypes::DataType::FixedSizeBinary(16)))
+        .then_some(frontier_key.index())
+    });
+    let Some(frontier_column) = frontier_column else {
+        return Ok(None);
+    };
+
+    // The public swap remaps join keys, JoinFilter, and embedded projection.
+    // Only the exact embedded-projection shape is eligible here; rebuilding a
+    // wrapper returned for a non-projection join would require broader lineage.
+    let swapped = join.swap_inputs(PartitionMode::CollectLeft)?;
+    let Some(swapped_join) = swapped.downcast_ref::<HashJoinExec>() else {
+        return Ok(None);
+    };
+    if *swapped_join.join_type() != JoinType::Left
+        || *swapped_join.partition_mode() != PartitionMode::CollectLeft
+        || swapped_join.schema().as_ref() != join.schema().as_ref()
+    {
+        return Ok(None);
+    }
+    let Some(build_column) = swapped_join.on().iter().find_map(|(build, probe)| {
+        let build = build.downcast_ref::<Column>()?;
+        let probe = probe.downcast_ref::<Column>()?;
+        (build.index() == frontier_column
+            && build.data_type(swapped_join.left().schema().as_ref()).ok()
+                == Some(arrow::datatypes::DataType::FixedSizeBinary(16))
+            && probe.index() == uuid_index
+            && probe.name() == uuid_field.name()
+            && probe.data_type(swapped_join.right().schema().as_ref()).ok()
+                == Some(arrow::datatypes::DataType::FixedSizeBinary(16)))
+        .then_some(build.index())
+    }) else {
+        return Ok(None);
+    };
+
+    let nomination = UuidBuildKeyNomination::new();
+    let coalesced_frontier: Arc<dyn ExecutionPlan> =
+        Arc::new(CoalescePartitionsExec::new(Arc::clone(swapped_join.left())));
+    let tapped_frontier: Arc<dyn ExecutionPlan> = Arc::new(UuidBuildKeyTapExec::new(
+        coalesced_frontier,
+        build_column,
+        Arc::clone(&nomination),
+    ));
+    let Some(swapped_scan) = swapped_join.right().downcast_ref::<PropertyOverlayExec>() else {
+        return Ok(None);
+    };
+    let nominated_scan: Arc<dyn ExecutionPlan> =
+        Arc::new(swapped_scan.with_uuid_nomination(nomination));
+    let rewritten = swapped_join
+        .builder()
+        .with_new_children(vec![tapped_frontier, nominated_scan])?
+        .reset_state()
+        .recompute_properties()
+        .build_exec()?;
+    if rewritten.schema().as_ref() != join.schema().as_ref() {
+        return Ok(None);
+    }
+    let restored: Arc<dyn ExecutionPlan> =
+        Arc::new(RepartitionExec::try_new(rewritten, output_partitioning)?);
+    Ok(Some(restored))
 }
 
 struct MatchingCandidate {
@@ -224,7 +346,7 @@ fn attach_nomination(
     right: Arc<dyn ExecutionPlan>,
     expression_id: u64,
     original_probe_key: &Arc<dyn PhysicalExpr>,
-    nomination: Arc<UuidBuildKeyNomination>,
+    nomination: &Arc<UuidBuildKeyNomination>,
 ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
     right
         .transform_up(|node| {
@@ -241,7 +363,7 @@ fn attach_nomination(
                 return Ok(Transformed::no(node));
             }
             Ok(Transformed::yes(
-                Arc::new(scan.with_uuid_nomination(Arc::clone(&nomination)))
+                Arc::new(scan.with_uuid_nomination(Arc::clone(nomination)))
                     as Arc<dyn ExecutionPlan>,
             ))
         })
