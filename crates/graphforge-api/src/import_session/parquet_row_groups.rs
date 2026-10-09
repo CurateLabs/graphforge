@@ -1,0 +1,266 @@
+//! Public Arrow `RowGroups` backed by the owned, preflighting page reader.
+
+use std::io::Read;
+use std::sync::Arc;
+
+use graphforge_core::GfError;
+use parquet::arrow::array_reader::RowGroups;
+use parquet::column::page::{PageIterator, PageReader};
+use parquet::errors::{ParquetError, Result as ParquetResult};
+use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
+use parquet::file::reader::{ChunkReader, Length};
+
+use crate::CancellationToken;
+
+use super::inventory_budget::{self, InventoryBudget};
+use super::parquet_reader::{OwnedPageReader, PagePreflight};
+use super::{cancelled, limit, storage};
+
+/// Runtime row groups whose every column page passes the same owned-byte
+/// preflight before Arrow can decode it.
+pub(super) struct OwnedRowGroups<T, F, C> {
+    input: Arc<T>,
+    metadata: Arc<ParquetMetaData>,
+    selected: Arc<Vec<usize>>,
+    num_rows: usize,
+    factory: Arc<F>,
+    cancellation: Option<CancellationToken>,
+    _callback: std::marker::PhantomData<fn() -> C>,
+}
+
+impl<T, F, C> OwnedRowGroups<T, F, C>
+where
+    T: ChunkReader + 'static,
+    T::T: Read + Send + 'static,
+    F: Fn(usize, usize) -> Result<C, GfError> + Send + Sync + 'static,
+    C: PagePreflight + 'static,
+{
+    /// Build a selection, charging its retained row-group indices before the
+    /// vector allocation. Selection must be strictly increasing so row order
+    /// and checked aggregate row counts have one unambiguous authority.
+    pub(super) fn new(
+        input: Arc<T>,
+        metadata: Arc<ParquetMetaData>,
+        selected_row_groups: &[usize],
+        budget: &mut InventoryBudget,
+        factory: F,
+        cancellation: Option<CancellationToken>,
+    ) -> Result<Self, GfError> {
+        check_cancelled(cancellation.as_ref())?;
+
+        let file_len = input.len();
+        let mut num_rows = 0_usize;
+        let mut previous = None;
+        for &group_index in selected_row_groups {
+            if group_index >= metadata.num_row_groups()
+                || previous.is_some_and(|previous| previous >= group_index)
+            {
+                return Err(storage(
+                    "selected Parquet row groups must be valid, unique, and ascending",
+                ));
+            }
+            previous = Some(group_index);
+            let group = metadata.row_group(group_index);
+            let rows = usize::try_from(group.num_rows())
+                .map_err(|_| storage("Parquet row-group row count is negative or too large"))?;
+            num_rows = num_rows
+                .checked_add(rows)
+                .ok_or_else(|| limit("selected Parquet row count exceeds a countable size"))?;
+            validate_group_columns(group, file_len)?;
+        }
+
+        let mut selected = Vec::new();
+        inventory_budget::reserve(
+            &mut selected,
+            selected_row_groups.len(),
+            budget,
+            "selected row-group indices",
+        )?;
+        selected.extend_from_slice(selected_row_groups);
+
+        Ok(Self {
+            input,
+            metadata,
+            selected: Arc::new(selected),
+            num_rows,
+            factory: Arc::new(factory),
+            cancellation,
+            _callback: std::marker::PhantomData,
+        })
+    }
+}
+
+impl<T, F, C> RowGroups for OwnedRowGroups<T, F, C>
+where
+    T: ChunkReader + 'static,
+    T::T: Read + Send + 'static,
+    F: Fn(usize, usize) -> Result<C, GfError> + Send + Sync + 'static,
+    C: PagePreflight + 'static,
+{
+    fn num_rows(&self) -> usize {
+        self.num_rows
+    }
+
+    fn column_chunks(&self, column_index: usize) -> ParquetResult<Box<dyn PageIterator>> {
+        check_cancelled(self.cancellation.as_ref()).map_err(as_parquet_error)?;
+        for &group_index in self.selected.iter() {
+            if column_index >= self.metadata.row_group(group_index).num_columns() {
+                return Err(as_parquet_error(storage(
+                    "Parquet physical column index is outside the selected row group",
+                )));
+            }
+        }
+        Ok(Box::new(OwnedColumnPageIterator {
+            input: Arc::clone(&self.input),
+            metadata: Arc::clone(&self.metadata),
+            selected: Arc::clone(&self.selected),
+            factory: Arc::clone(&self.factory),
+            cancellation: self.cancellation.clone(),
+            column_index,
+            next_group: 0,
+            terminal: false,
+            _callback: std::marker::PhantomData,
+        }))
+    }
+
+    fn row_groups(&self) -> Box<dyn Iterator<Item = &RowGroupMetaData> + '_> {
+        Box::new(
+            self.selected
+                .iter()
+                .map(|&index| self.metadata.row_group(index)),
+        )
+    }
+
+    fn metadata(&self) -> &ParquetMetaData {
+        &self.metadata
+    }
+}
+
+struct OwnedColumnPageIterator<T, F, C> {
+    input: Arc<T>,
+    metadata: Arc<ParquetMetaData>,
+    selected: Arc<Vec<usize>>,
+    factory: Arc<F>,
+    cancellation: Option<CancellationToken>,
+    column_index: usize,
+    next_group: usize,
+    terminal: bool,
+    _callback: std::marker::PhantomData<fn() -> C>,
+}
+
+impl<T, F, C> Iterator for OwnedColumnPageIterator<T, F, C>
+where
+    T: ChunkReader + 'static,
+    T::T: Read + Send + 'static,
+    F: Fn(usize, usize) -> Result<C, GfError> + Send + Sync + 'static,
+    C: PagePreflight + 'static,
+{
+    type Item = ParquetResult<Box<dyn PageReader>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.terminal {
+            return None;
+        }
+        if let Err(error) = check_cancelled(self.cancellation.as_ref()) {
+            self.terminal = true;
+            return Some(Err(as_parquet_error(error)));
+        }
+        let group_index = *self.selected.get(self.next_group)?;
+        self.next_group += 1;
+        let group = self.metadata.row_group(group_index);
+        let column = group.column(self.column_index);
+        let (start, length) = match checked_column_range(column, self.input.len()) {
+            Ok(range) => range,
+            Err(error) => {
+                self.terminal = true;
+                return Some(Err(as_parquet_error(error)));
+            }
+        };
+        let event_count = match u64::try_from(column.num_values()) {
+            Ok(events) => events,
+            Err(_) => {
+                self.terminal = true;
+                return Some(Err(as_parquet_error(storage(
+                    "Parquet column event count is negative or too large",
+                ))));
+            }
+        };
+        let reader = match self.input.get_read(start) {
+            Ok(reader) => reader,
+            Err(error) => {
+                self.terminal = true;
+                return Some(Err(as_parquet_error(storage(error))));
+            }
+        };
+        let preflight = match (self.factory)(group_index, self.column_index) {
+            Ok(preflight) => preflight,
+            Err(error) => {
+                self.terminal = true;
+                return Some(Err(as_parquet_error(error)));
+            }
+        };
+        let page_reader = OwnedPageReader::new(
+            reader,
+            length,
+            column.compression(),
+            event_count,
+            self.cancellation.clone(),
+            preflight,
+        );
+        Some(Ok(Box::new(page_reader)))
+    }
+}
+
+impl<T, F, C> PageIterator for OwnedColumnPageIterator<T, F, C>
+where
+    T: ChunkReader + 'static,
+    T::T: Read + Send + 'static,
+    F: Fn(usize, usize) -> Result<C, GfError> + Send + Sync + 'static,
+    C: PagePreflight + 'static,
+{
+}
+
+fn validate_group_columns(group: &RowGroupMetaData, file_len: u64) -> Result<(), GfError> {
+    for column in group.columns() {
+        checked_column_range(column, file_len)?;
+        u64::try_from(column.num_values())
+            .map_err(|_| storage("Parquet column event count is negative or too large"))?;
+    }
+    Ok(())
+}
+
+fn checked_column_range(
+    column: &parquet::file::metadata::ColumnChunkMetaData,
+    file_len: u64,
+) -> Result<(u64, u64), GfError> {
+    let start = column
+        .dictionary_page_offset()
+        .unwrap_or_else(|| column.data_page_offset());
+    let start = u64::try_from(start)
+        .map_err(|_| storage("Parquet column start offset is negative or too large"))?;
+    let length = u64::try_from(column.compressed_size())
+        .map_err(|_| storage("Parquet column compressed length is negative or too large"))?;
+    let end = start
+        .checked_add(length)
+        .ok_or_else(|| storage("Parquet column byte range overflows"))?;
+    if end > file_len {
+        return Err(storage("Parquet column byte range extends past its input"));
+    }
+    Ok((start, length))
+}
+
+fn check_cancelled(cancellation: Option<&CancellationToken>) -> Result<(), GfError> {
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+        Err(cancelled())
+    } else {
+        Ok(())
+    }
+}
+
+fn as_parquet_error(error: GfError) -> ParquetError {
+    ParquetError::External(Box::new(error))
+}
+
+#[cfg(test)]
+#[path = "parquet_row_groups/tests.rs"]
+mod tests;
