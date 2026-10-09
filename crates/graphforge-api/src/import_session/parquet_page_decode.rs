@@ -250,6 +250,11 @@ fn raw_lz4(
                 distance *= 2;
             }
         }
+        // The pinned block grammar requires a final literal token after a
+        // match, even when its expanded bytes already fill the destination.
+        if cursor == input.len() {
+            return Err(storage("LZ4 match is missing its final literal token"));
+        }
     }
     check(cancellation)?;
     if written != output.len() {

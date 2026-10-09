@@ -228,3 +228,11 @@ fn raw_lz4_token_decoder_matches_the_pinned_encoder_at_overlap_boundaries() {
         assert!(decode(page(body, 1), Compression::LZ4_RAW, 1024, None).is_err());
     }
 }
+
+#[test]
+fn raw_lz4_match_requires_the_pinned_final_literal_token() {
+    let bytes = [0x10, b'a', 0x01, 0x00];
+    assert!(lz4_flex::block::decompress_into(&bytes, &mut [0; 5]).is_err());
+    let compressed = page(bytes.to_vec(), 5);
+    assert!(decode(compressed, Compression::LZ4_RAW, 9, None).is_err());
+}
