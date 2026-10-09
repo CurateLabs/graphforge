@@ -227,11 +227,12 @@ When the estimate exceeds the budget:
   decoding/scatter/sort working set. The remaining budget expands that working
   set; the planner does not invent headroom after exhausting the budget.
   The partitions in flight are also the threads that run every scratch pass.
-  Each further worker of a property-bearing build is charged one more decoded
-  task, and half the working set is shared by the workers' property runs, so the
-  concurrency is the largest worker count, at most the available lanes, at which
-  every worker still holds a run of at least 8 MiB (#1938). Before #1938 any
-  property-bearing input ran on one worker.
+  A property-bearing build charges an additional 128 MiB per worker after the
+  first, based on measured allocator/runtime growth. The remaining working set
+  assigns three eighths to the shared property-retention pool and three eighths
+  to decode. The planner selects the largest worker count, up to available
+  lanes, for which each worker can still hold an 8 MiB property run (#1938).
+  Before #1938, property-bearing input ran on one worker.
   Relation metadata and published artifact inventories remain proportional to
   the number of output groups and files; edge-bearing CSR workspace is fixed.
 
@@ -252,15 +253,19 @@ have length bounds and CRC32C, without hashing or fsync.
 Each worker retains the batches of its current task, per schema group, until
 a run's worth of bytes is held, then sorts them once and writes one run. The
 retained bytes of all workers draw on one gate sized from the budget, so
-concurrent intake cannot exceed it. A group with more runs than the merge
-fan-in is reduced by merging only its smallest runs, in parallel; the runs that
-remain merge once, into identity-range segments, one task per range. The
-segments in range order are the sorted group. Each input byte is therefore
-written as a run once and as a segment once, and rewritten only when the run
-count exceeds the fan-in. (#1920's two-way tree rewrote every row once per
-level: 20.4 GB of property scratch for the 1.19 GB SNB BI SF1 input, #1938.)
+concurrent intake cannot exceed it. Reduction continues until both the run
+count is within the derived fan-in and the complete selected frame set fits one
+strict merge reservation. This can require reducing a group below nominal
+fan-in when wide frames make its whole-job reservation too large. Each level
+merges only the smallest admitted runs needed to satisfy those limits. The
+runs that remain merge into identity-range segments, one task per range; the
+segments in range order are the sorted group. Input bytes are written once as
+a run and once as a final segment, plus any reduction rewrites required by
+fan-in or the shared byte budget. (#1920's two-way tree rewrote every row once
+per level: 20.4 GB of property scratch for the 1.19 GB SNB BI SF1 input, #1938.)
 Run size, fan-in and frame size are derived from the budget and the
-concurrency, and the receipt reports them with the retained-byte peak.
+concurrency, and the receipt reports them with retained and merge-reservation
+peaks.
 
 Catalog observation streams groups in digest order and rows in UUID order,
 using the same per-row interning operations as the resident route. A group

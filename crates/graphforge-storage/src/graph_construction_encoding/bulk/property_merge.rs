@@ -1,8 +1,9 @@
 //! Merging sorted property runs (#1938).
 //!
 //! A merge holds one decoded frame per input, picks the smallest identity
-//! among them, and writes the winners in frame-sized chunks gathered with one
-//! `interleave` per column. A run knows the identities that bound each of its
+//! among them, and writes the winners in frame-sized chunks through the shared
+//! gather path. List children are extended as ranges to avoid per-child index
+//! arrays. A run knows the identities that bound each of its
 //! frames, so a merge can be restricted to an identity range: it seeks to the
 //! first frame that can hold the range and stops at the first frame beyond it.
 //! The segments of consecutive ranges, in range order, are the merged run.
@@ -11,11 +12,10 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
 
 use arrow::array::{Array, FixedSizeBinaryArray};
-use arrow::compute::interleave_record_batch;
 use arrow::record_batch::RecordBatch;
 use rayon::prelude::*;
 
-use super::property_rows::{BareOwners, FrameMeta, Groups, PropertyRows, Run};
+use super::property_rows::{BareOwners, FrameMeta, Groups, PropertyRows, Run, gather_record_batch};
 use super::tables::check_cancelled;
 use super::{AtomicBool, GfError, storage};
 
@@ -368,7 +368,7 @@ impl PropertyRows<'_> {
     ) -> Result<(), GfError> {
         if let Some((first, last)) = bounds.take() {
             let refs = batches.iter().collect::<Vec<_>>();
-            let frame = interleave_record_batch(&refs, indices).map_err(storage)?;
+            let frame = gather_record_batch(&refs, indices)?;
             writer.append(&frame, first, last, *max_row_bytes)?;
         }
         batches.clear();
@@ -493,8 +493,8 @@ impl PropertyRows<'_> {
         Ok(())
     }
 
-    /// Sort every schema group: reduce each to at most `fan_in` runs, then
-    /// merge what is left into identity-range segments in parallel.
+    /// Reduce each schema group until fan-in and whole-job byte limits fit,
+    /// then merge it into identity-range segments in parallel.
     pub(super) fn finish(&self, cancel: &AtomicBool) -> Result<Vec<SortedGroup>, GfError> {
         let Groups { runs, bare } = std::mem::take(
             &mut *self
