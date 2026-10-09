@@ -14,7 +14,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::{GfError, StableDirectory, storage};
 
@@ -101,6 +101,12 @@ pub(super) struct Scratch {
     path: PathBuf,
     written: AtomicU64,
     read: AtomicU64,
+    /// Bytes the scratch files that still exist occupy, and the largest value
+    /// it ever reached. Owned files are reclaimed as soon as their final read
+    /// completes, so the peak says how much scratch a build really held, not
+    /// how much it moved in total.
+    occupied: AtomicU64,
+    peak_occupied: AtomicU64,
 }
 
 impl Scratch {
@@ -113,6 +119,8 @@ impl Scratch {
             path,
             written: AtomicU64::new(0),
             read: AtomicU64::new(0),
+            occupied: AtomicU64::new(0),
+            peak_occupied: AtomicU64::new(0),
         })
     }
 
@@ -128,6 +136,48 @@ impl Scratch {
     /// Bytes read back from scratch so far, headers included.
     pub(super) fn read_bytes(&self) -> u64 {
         self.read.load(Ordering::Relaxed)
+    }
+
+    /// Record that `bytes` more are occupied by scratch files, and raise the
+    /// peak. Every append calls this once per block, so the tracker stays a
+    /// pair of counters and never scans the directory. The value recorded is
+    /// the occupancy at the instant of the append, so the peak is exact.
+    pub(super) fn occupy(&self, bytes: u64) {
+        let occupied = self.occupied.fetch_add(bytes, Ordering::Relaxed) + bytes;
+        self.peak_occupied.fetch_max(occupied, Ordering::Relaxed);
+    }
+
+    /// Record that `bytes` left the tree with a reclaimed file. Saturating:
+    /// a released file was counted when its bytes were appended.
+    fn release(&self, bytes: u64) {
+        let _ = self
+            .occupied
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_sub(bytes))
+            });
+    }
+
+    /// The largest number of bytes scratch files occupied at once.
+    pub(super) fn peak_occupied_bytes(&self) -> u64 {
+        self.peak_occupied.load(Ordering::Relaxed)
+    }
+
+    /// The bytes scratch files occupy right now.
+    #[cfg(test)]
+    pub(super) fn occupied_bytes(&self) -> u64 {
+        self.occupied.load(Ordering::Relaxed)
+    }
+
+    /// Delete a scratch file whose final read has completed and verified,
+    /// subtracting the bytes it occupied from the live occupancy. The length
+    /// is measured here rather than accumulated by its writer, so a file any
+    /// writer produced (a refinement output, a partition a refinement kept)
+    /// is counted once, exactly.
+    pub(super) fn reclaim_file(&self, path: &Path) -> Result<(), GfError> {
+        let bytes = std::fs::metadata(path).map_err(storage)?.len();
+        std::fs::remove_file(path).map_err(storage)?;
+        self.release(bytes);
+        Ok(())
     }
 
     /// Delete the tree now and report a failure, instead of leaving it to `Drop`.
@@ -159,10 +209,18 @@ pub(super) struct Partitions {
     /// Bytes this set's files received and gave back, block headers included.
     written: AtomicU64,
     read: AtomicU64,
+    /// Whether this set owns its files and may reclaim them. Both constructors
+    /// below own what this build wrote. A set that ever wraps files imported
+    /// from outside this scratch tree must be constructed as a borrower, whose
+    /// files [`Self::reclaim`] never deletes.
+    owned: bool,
+    /// Which files a final read has already reclaimed: a file is deleted once.
+    consumed: Vec<AtomicBool>,
 }
 
 impl Partitions {
     /// `count` empty files named `{prefix}-{index}` of `width`-byte records.
+    /// The set owns the files it creates here.
     pub(super) fn create(
         scratch: &Scratch,
         prefix: &str,
@@ -181,6 +239,8 @@ impl Partitions {
             width,
             written: AtomicU64::new(0),
             read: AtomicU64::new(0),
+            owned: true,
+            consumed: (0..count).map(|_| AtomicBool::new(false)).collect(),
         })
     }
 
@@ -196,14 +256,22 @@ impl Partitions {
 
     /// Reuse existing verified-block files in the caller's logical order.
     /// Construction does not read or rewrite their records.
+    ///
+    /// The inventory owns its files: they are outputs this build wrote (the
+    /// leaves a refinement kept), so a final read may reclaim them. This is
+    /// not a licence to reclaim files imported from outside the scratch tree;
+    /// such an inventory must be built as a borrower instead.
     pub(super) fn from_inventory(inventory: Vec<(PathBuf, u64)>, width: usize) -> Self {
         let (paths, counts): (Vec<_>, Vec<_>) = inventory.into_iter().unzip();
+        let consumed = paths.iter().map(|_| AtomicBool::new(false)).collect();
         Self {
             paths,
             state: counts.into_iter().map(Mutex::new).collect(),
             width,
             written: AtomicU64::new(0),
             read: AtomicU64::new(0),
+            owned: true,
+            consumed,
         }
     }
 
@@ -243,6 +311,7 @@ impl Partitions {
             .fetch_add(block.len() as u64, Ordering::Relaxed);
         self.written
             .fetch_add(block.len() as u64, Ordering::Relaxed);
+        scratch.occupy(block.len() as u64);
         Ok(())
     }
 
@@ -257,6 +326,21 @@ impl Partitions {
                     .map_err(|_| storage("scratch partition lock poisoned"))
             })
             .collect()
+    }
+
+    /// Delete file `index` once its final read has completed and verified:
+    /// the bytes it occupied leave the live count. Owned files only, and each
+    /// file exactly once, so a file read on one path is never deleted twice or
+    /// read back after its data moved on. The cumulative read and write
+    /// counters are unaffected.
+    pub(super) fn reclaim(&self, scratch: &Scratch, index: usize) -> Result<(), GfError> {
+        if !self.owned {
+            return Ok(());
+        }
+        if self.consumed[index].swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        scratch.reclaim_file(&self.paths[index])
     }
 
     /// Read file `index` block by block, handing each verified payload to `visit`.
@@ -463,6 +547,7 @@ impl<'a> Appender<'a> {
         self.scratch
             .written
             .fetch_add(self.block.len() as u64, Ordering::Relaxed);
+        self.scratch.occupy(self.block.len() as u64);
         self.block.truncate(HEADER);
         Ok(())
     }
@@ -525,6 +610,36 @@ mod tests {
         let scratch = Scratch::create(&directory).unwrap();
         std::fs::write(scratch.file("x"), b"x").unwrap();
         drop(scratch);
+        assert!(!root.path().join(SCRATCH_DIRECTORY).exists());
+    }
+
+    #[test]
+    fn occupancy_falls_as_files_are_reclaimed_and_the_peak_stays_behind() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = StableDirectory::open(root.path()).unwrap();
+        let scratch = Scratch::create(&directory).unwrap();
+        let partitions = Partitions::create(&scratch, "p", 2, 4).unwrap();
+        let mut scatter = Scatter::new(&scratch, &partitions, 16);
+        for value in 0_u32..10 {
+            scatter
+                .push((value % 2) as usize, &value.to_le_bytes())
+                .unwrap();
+        }
+        scatter.finish().unwrap();
+        assert_eq!(scratch.occupied_bytes(), scratch.written_bytes());
+        assert_eq!(scratch.peak_occupied_bytes(), scratch.written_bytes());
+        partitions.reclaim(&scratch, 0).unwrap();
+        let live = scratch.occupied_bytes();
+        assert!(live > 0 && live < scratch.written_bytes());
+        // A file is reclaimed once: the second call removes nothing more.
+        partitions.reclaim(&scratch, 0).unwrap();
+        assert_eq!(scratch.occupied_bytes(), live);
+        assert!(!partitions.path(0).exists());
+        partitions.reclaim(&scratch, 1).unwrap();
+        assert_eq!(scratch.occupied_bytes(), 0);
+        assert_eq!(scratch.peak_occupied_bytes(), scratch.written_bytes());
+        assert!(scratch.peak_occupied_bytes() > live);
+        scratch.remove().unwrap();
         assert!(!root.path().join(SCRATCH_DIRECTORY).exists());
     }
 }

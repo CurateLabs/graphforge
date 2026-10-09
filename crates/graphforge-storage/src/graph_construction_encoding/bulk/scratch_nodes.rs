@@ -47,6 +47,9 @@ use super::{
 pub(super) const NODE_RECORD: usize = 20;
 pub(super) const REF_RECORD: usize = 33;
 pub(super) const RESOLVED_RECORD: usize = 37;
+/// An identity probe is the edge's own UUID and nothing else: it only asks
+/// whether that identity is a node's, so it carries no edge UUID and no role.
+pub(super) const PROBE_RECORD: usize = 16;
 
 /// Failpoints inside the passes that exist only on this route.
 const DURING_SCATTER: &str = "bulk.during_node_scatter";
@@ -88,10 +91,8 @@ impl NodeRecord {
 
 pub(super) const ROLE_SRC: u8 = 0;
 pub(super) const ROLE_DST: u8 = 1;
-pub(super) const ROLE_PROBE: u8 = 2;
 
-/// A UUID an edge asks the node leaves about: one of its endpoints, or (the
-/// probe) its own identity, which must not be a node's.
+/// A UUID an edge asks the node leaves about: one of its endpoints.
 #[derive(Clone, Copy)]
 pub(super) struct RefRecord {
     pub(super) key: [u8; 16],
@@ -291,10 +292,13 @@ pub(super) fn scatter_nodes(
 
 // ------------------------------------------------------------------ pass 2
 
-/// Where the edge pass sends the refs of its edges.
+/// Where the edge pass sends the refs and the identity probes of its edges.
 pub(super) struct RefSink<'a> {
     pub(super) router: &'a LeafRouter,
     pub(super) refs: &'a Partitions,
+    /// The identity probes: one 16-byte edge UUID each, routed to the same
+    /// node leaves as the refs.
+    pub(super) probes: &'a Partitions,
 }
 
 impl RefSink<'_> {
@@ -310,6 +314,19 @@ impl RefSink<'_> {
         };
         scatter.push(leaf, &record.encode())?;
         Ok(true)
+    }
+
+    /// Stage the identity probe of one edge for the node leaf that can hold
+    /// it. Without a node leaf nothing can collide, so there is nothing to do.
+    pub(super) fn push_probe(
+        &self,
+        probes: &mut Scatter<'_>,
+        edge: &[u8; 16],
+    ) -> Result<(), GfError> {
+        if let Some(leaf) = self.router.route(edge) {
+            probes.push(leaf, edge)?;
+        }
+        Ok(())
     }
 }
 
@@ -333,6 +350,7 @@ pub(super) struct ResolveContext<'a> {
     pub(super) plan: &'a ScratchPlan,
     pub(super) nodes: &'a ScatteredNodes,
     pub(super) refs: &'a Partitions,
+    pub(super) probes: &'a Partitions,
     pub(super) edges: &'a ScatteredEdges,
     pub(super) cancel: &'a AtomicBool,
 }
@@ -348,6 +366,7 @@ pub(super) fn resolve_endpoints(
         plan,
         nodes,
         refs,
+        probes,
         edges,
         cancel,
     } = *context;
@@ -396,6 +415,9 @@ pub(super) fn resolve_endpoints(
             if records.len() != count {
                 return Err(storage("a node scratch partition lost records"));
             }
+            // The raw leaf ends here: the sorted run below is what the sweeps
+            // read. Its file is reclaimed once this read has verified it.
+            nodes.leaves.reclaim(scratch, leaf)?;
             records.sort_unstable_by_key(|record| record.uuid);
             if records.windows(2).any(|pair| pair[0].uuid == pair[1].uuid) {
                 return Err(storage(
@@ -425,12 +447,32 @@ pub(super) fn resolve_endpoints(
                     label_counts[label].fetch_add(seen[label], Ordering::Relaxed);
                 }
             }
+            // The identity probes of this leaf: an edge UUID that is a node
+            // UUID. A probe only binary-searches its own edge UUID here, so it
+            // is a bare 16-byte record; the collision flag outlives the file,
+            // which is reclaimed once this read has verified it.
+            let mut local_collision = false;
+            probes.read(scratch, leaf, |payload| {
+                if !payload.len().is_multiple_of(PROBE_RECORD) {
+                    return Err(storage("a node probe block has a partial record"));
+                }
+                for bytes in payload.chunks_exact(PROBE_RECORD) {
+                    let edge: [u8; 16] = bytes.try_into().expect("16 bytes");
+                    if records
+                        .binary_search_by(|record| record.uuid.cmp(&edge))
+                        .is_ok()
+                    {
+                        local_collision = true;
+                    }
+                }
+                Ok(())
+            })?;
+            probes.reclaim(scratch, leaf)?;
             // The refs of this leaf, streamed against its sorted records.
             let mut out_degrees = vec![0_u32; count];
             let mut in_degrees = vec![0_u32; count];
             let mut scatter = Scatter::new(scratch, &resolved, staging);
             let mut local_miss = None::<[u8; 16]>;
-            let mut local_collision = false;
             refs.read(scratch, leaf, |payload| {
                 check_cancelled(cancel)?;
                 if !payload.len().is_multiple_of(REF_RECORD) {
@@ -440,7 +482,6 @@ pub(super) fn resolve_endpoints(
                     let reference = RefRecord::decode(bytes);
                     match records.binary_search_by(|record| record.uuid.cmp(&reference.key)) {
                         Ok(position) => match reference.role {
-                            ROLE_PROBE => local_collision = true,
                             role @ (ROLE_SRC | ROLE_DST) => {
                                 let degrees = if role == ROLE_SRC {
                                     &mut out_degrees
@@ -466,16 +507,18 @@ pub(super) fn resolve_endpoints(
                             }
                             _ => return Err(storage("a node reference has an unknown role")),
                         },
-                        Err(_) if reference.role != ROLE_PROBE => {
+                        Err(_) => {
                             local_miss =
                                 Some(local_miss.map_or(reference.key, |m| m.min(reference.key)));
                         }
-                        Err(_) => {}
                     }
                 }
                 crate::graph_construction::construction_failpoint(DURING_RESOLVE);
                 Ok(())
             })?;
+            // Every reference this leaf will ever see is resolved; the file is
+            // not read again.
+            refs.reclaim(scratch, leaf)?;
             scatter.finish()?;
             if local_collision {
                 collision.store(true, Ordering::Relaxed);
@@ -558,6 +601,8 @@ pub(super) fn join_endpoints(
     if joined.len() != records.len() * 2 {
         return Err(storage("an edge scratch partition lost endpoints"));
     }
+    // The join inputs are in the records now; their files are not read again.
+    resolved.reclaim(scratch, leaf)?;
     joined.sort_unstable_by_key(|record| (record.edge, record.role));
     let mut pairs = Vec::with_capacity(records.len());
     for (record, ends) in records.iter_mut().zip(joined.chunks_exact(2)) {
@@ -674,10 +719,238 @@ pub(super) fn sweep_nodes(
             crate::graph_construction::construction_failpoint(DURING_EMIT);
             Ok(())
         })?;
+        // This leaf's run fed the canonical files and the ordinal pushes; it
+        // is not read again.
+        runs.reclaim(scratch, leaf)?;
     }
     if !current.uuids.is_empty() {
         pending.push(current);
     }
     flush(&mut pending)?;
     Ok(rank)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::scratch_edges::{EDGE_RECORD, ScatteredEdges};
+    use super::*;
+    use crate::graph_construction_encoding::StableDirectory;
+
+    /// An identity that grows with `last`, so fixtures can order and split.
+    fn monoton(first: u8, last: u8) -> [u8; 16] {
+        let mut value = [0_u8; 16];
+        value[0] = first;
+        value[15] = last;
+        value
+    }
+
+    fn resolve_plan() -> ScratchPlan {
+        ScratchPlan::sized(1, 1, 1, 1 << 20, 4096)
+    }
+
+    /// Two node leaves — `a`, `b` in the first, `c`, `d` in the second, in
+    /// arrival order — beside the empty ref and probe leaves the edge pass
+    /// fills and the edge side the join consumes.
+    fn fixture(
+        scratch: &Scratch,
+    ) -> Result<(ScatteredNodes, Partitions, Partitions, ScatteredEdges), GfError> {
+        let (a, b, c, d) = (
+            monoton(0x10, 1),
+            monoton(0x10, 2),
+            monoton(0x20, 1),
+            monoton(0x20, 2),
+        );
+        let leaves = Partitions::create(scratch, "nodes", 2, NODE_RECORD)?;
+        let mut scatter = Scatter::new(scratch, &leaves, 256 << 10);
+        for (leaf, uuids) in [(0, [a, b].as_slice()), (1, [c, d].as_slice())] {
+            for uuid in uuids {
+                scatter.push(
+                    leaf,
+                    &NodeRecord {
+                        uuid: *uuid,
+                        label: 0,
+                    }
+                    .encode(),
+                )?;
+            }
+        }
+        scatter.finish()?;
+        let lows = vec![Some(a), Some(c)];
+        let scattered = ScatteredNodes {
+            router: LeafRouter::new(&lows),
+            counts: vec![2, 2],
+            total: 4,
+            label_names: vec!["Person".to_owned()],
+            leaves,
+            refinement_steps: 0,
+            refinement_write_bytes: 0,
+            refinement_read_bytes: 0,
+        };
+        let refs = Partitions::create(scratch, "refs", 2, REF_RECORD)?;
+        let probes = Partitions::create(scratch, "probes", 2, PROBE_RECORD)?;
+        let edges = ScatteredEdges {
+            partitions: Partitions::create(scratch, "edges", 1, EDGE_RECORD)?,
+            lows: vec![Some(monoton(0x30, 1))],
+            refinement_write_bytes: 0,
+            refinement_read_bytes: 0,
+            refinement_steps: 0,
+            counts: vec![0],
+            rel_names: vec!["KNOWS".to_owned()],
+            histogram: None,
+            total: 0,
+        };
+        Ok((scattered, refs, probes, edges))
+    }
+
+    fn sink_of<'a>(
+        nodes: &'a ScatteredNodes,
+        refs: &'a Partitions,
+        probes: &'a Partitions,
+    ) -> RefSink<'a> {
+        RefSink {
+            router: &nodes.router,
+            refs,
+            probes,
+        }
+    }
+
+    fn context<'a>(
+        scratch: &'a Scratch,
+        plan: &'a ScratchPlan,
+        nodes: &'a ScatteredNodes,
+        refs: &'a Partitions,
+        probes: &'a Partitions,
+        edges: &'a ScatteredEdges,
+        cancel: &'a AtomicBool,
+    ) -> ResolveContext<'a> {
+        ResolveContext {
+            scratch,
+            plan,
+            nodes,
+            refs,
+            probes,
+            edges,
+            cancel,
+        }
+    }
+
+    #[test]
+    fn a_probe_whose_edge_uuid_is_a_node_uuid_sets_the_collision() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = StableDirectory::open(root.path()).unwrap();
+        let scratch = Scratch::create(&directory).unwrap();
+        let (nodes, refs, probes, edges) = fixture(&scratch).unwrap();
+        let sink = sink_of(&nodes, &refs, &probes);
+        let mut scatter = Scatter::new(&scratch, &probes, 256 << 10);
+        for edge in [monoton(0x10, 2), monoton(0x30, 1), monoton(0x30, 2)] {
+            // The first probe is node b's UUID; the others are pure edges.
+            sink.push_probe(&mut scatter, &edge).unwrap();
+        }
+        scatter.finish().unwrap();
+        let cancel = AtomicBool::new(false);
+        let plan = resolve_plan();
+        let (resolved, _) = resolve_endpoints(&context(
+            &scratch, &plan, &nodes, &refs, &probes, &edges, &cancel,
+        ))
+        .unwrap();
+        assert!(resolved.collision, "a probe of a node UUID must collide");
+        assert!(resolved.miss.is_none());
+        // Every file the pass consumed is reclaimed, collisions included.
+        for leaf in 0..2 {
+            assert!(!nodes.leaves.path(leaf).exists());
+            assert!(!refs.path(leaf).exists());
+            assert!(!probes.path(leaf).exists());
+        }
+        scratch.remove().unwrap();
+    }
+
+    #[test]
+    fn endpoint_refs_resolve_alongside_compact_probes_without_nodes_in_them() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = StableDirectory::open(root.path()).unwrap();
+        let scratch = Scratch::create(&directory).unwrap();
+        let (nodes, refs, probes, edges) = fixture(&scratch).unwrap();
+        let sink = sink_of(&nodes, &refs, &probes);
+        // The edge's own UUID probes its leaf, and no node holds it.
+        let mut probe_scatter = Scatter::new(&scratch, &probes, 256 << 10);
+        sink.push_probe(&mut probe_scatter, &monoton(0x30, 1))
+            .unwrap();
+        probe_scatter.finish().unwrap();
+        // One edge with both endpoints in the first leaf.
+        let (a, b, e) = (monoton(0x10, 1), monoton(0x10, 2), monoton(0x30, 1));
+        let mut refs_scatter = Scatter::new(&scratch, &refs, 256 << 10);
+        for (role, key) in [(ROLE_SRC, a), (ROLE_DST, b)] {
+            assert!(
+                sink.push(&mut refs_scatter, &RefRecord { key, edge: e, role })
+                    .unwrap()
+            );
+        }
+        refs_scatter.finish().unwrap();
+        let cancel = AtomicBool::new(false);
+        let plan = resolve_plan();
+        let (resolved, _) = resolve_endpoints(&context(
+            &scratch, &plan, &nodes, &refs, &probes, &edges, &cancel,
+        ))
+        .unwrap();
+        assert!(!resolved.collision, "edge UUIDs must not collide");
+        assert!(resolved.miss.is_none());
+        let mut joined = Vec::new();
+        resolved
+            .resolved
+            .read(&scratch, 0, |payload| {
+                joined.extend(
+                    payload
+                        .chunks_exact(RESOLVED_RECORD)
+                        .map(ResolvedRecord::decode),
+                );
+                Ok(())
+            })
+            .unwrap();
+        joined.sort_unstable_by_key(|record| (record.edge, record.role));
+        assert_eq!(joined.len(), 2);
+        assert_eq!(
+            (joined[0].role, joined[0].endpoint, joined[0].rank),
+            (ROLE_SRC, a, 1)
+        );
+        assert_eq!(
+            (joined[1].role, joined[1].endpoint, joined[1].rank),
+            (ROLE_DST, b, 2)
+        );
+        // Probes and refs are spent; the runs and the resolved records await
+        // their own consumers.
+        assert!(!probes.path(0).exists());
+        assert!(!refs.path(0).exists());
+        assert!(resolved.runs.path(0).exists());
+        assert!(resolved.resolved.path(0).exists());
+        scratch.remove().unwrap();
+    }
+
+    #[test]
+    fn a_probe_file_is_deleted_only_after_a_verified_read() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = StableDirectory::open(root.path()).unwrap();
+        let scratch = Scratch::create(&directory).unwrap();
+        let (nodes, refs, probes, edges) = fixture(&scratch).unwrap();
+        let sink = sink_of(&nodes, &refs, &probes);
+        let mut scatter = Scatter::new(&scratch, &probes, 256 << 10);
+        sink.push_probe(&mut scatter, &monoton(0x30, 1)).unwrap();
+        scatter.finish().unwrap();
+        // The probe routes to the leaf that can hold it: the second one.
+        let path = probes.path(1);
+        let mut bytes = std::fs::read(path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        std::fs::write(path, bytes).unwrap();
+        let error = {
+            let cancel = AtomicBool::new(false);
+            let plan = resolve_plan();
+            resolve_endpoints(&context(
+                &scratch, &plan, &nodes, &refs, &probes, &edges, &cancel,
+            ))
+            .map(|_| ())
+            .unwrap_err()
+        };
+        assert!(error.to_string().contains("CRC32C"), "{error}");
+        assert!(path.exists(), "an unverified probe file is not reclaimed");
+    }
 }

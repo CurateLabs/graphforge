@@ -269,7 +269,8 @@ impl Refinement<'_> {
             return Err(storage(format!("a {what} scratch partition lost records")));
         }
         pending.rows += copied;
-        std::fs::remove_file(path).map_err(storage)?;
+        // The parent fed its coalescing output; it is not read again.
+        self.scratch.reclaim_file(&path)?;
         if pending.rows == self.limit {
             self.finish_pending()?;
         }
@@ -323,11 +324,12 @@ impl Refinement<'_> {
         }
         scatter.finish()?;
         let counts = children.counts()?;
-        std::fs::remove_file(path).map_err(storage)?;
+        // This partition fed its children; it is not read again.
+        self.scratch.reclaim_file(&path)?;
         for (child, count) in counts.into_iter().enumerate() {
             let path = children.path(child).to_path_buf();
             if count == 0 {
-                std::fs::remove_file(path).map_err(storage)?;
+                self.scratch.reclaim_file(&path)?;
             } else {
                 self.partition(path, count, bounds[child], true)?;
             }

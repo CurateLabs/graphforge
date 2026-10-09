@@ -1222,6 +1222,15 @@ mod bulk_builder {
             report.scratch_write_bytes
         );
         assert_eq!(report.scratch_read_bytes, report.scratch_write_bytes);
+        // Reclamation frees files as soon as their final read completes, so
+        // the occupied peak stays behind the cumulative writes.
+        assert!(report.scratch_peak_occupied_bytes > 0, "{report:?}");
+        assert!(
+            report.scratch_peak_occupied_bytes < report.scratch_write_bytes,
+            "peak {} must sit below the {} cumulative bytes: {report:?}",
+            report.scratch_peak_occupied_bytes,
+            report.scratch_write_bytes
+        );
         // A refinement reads parent blocks and writes child blocks. Their
         // payloads match, but different block boundaries have different CRC
         // header counts; only total successful scratch traffic is identical.
@@ -2058,11 +2067,11 @@ mod bulk_builder {
             nodes * (20 + 20),
             "nodes",
         );
-        // Per edge: three 33-byte references to the node leaves and two
-        // 37-byte resolved endpoints back.
+        // Per edge: two 33-byte references and one 16-byte identity probe to
+        // the node leaves, and two 37-byte resolved endpoints back.
         within(
             report.endpoint_scratch_write_bytes,
-            edges * (3 * 33 + 2 * 37),
+            edges * (2 * 33 + 16 + 2 * 37),
             "endpoints",
         );
         // The edge side moves what it always moved: the 28-byte record and
@@ -2081,6 +2090,15 @@ mod bulk_builder {
         assert_eq!(
             report.endpoint_scratch_read_bytes,
             report.endpoint_scratch_write_bytes
+        );
+        // Early reclamation keeps the occupied peak behind the cumulative
+        // writes, on the skewed and refined builds too.
+        assert!(report.scratch_peak_occupied_bytes > 0, "{report:?}");
+        assert!(
+            report.scratch_peak_occupied_bytes < report.scratch_write_bytes,
+            "peak {} must sit below the {} cumulative bytes: {report:?}",
+            report.scratch_peak_occupied_bytes,
+            report.scratch_write_bytes
         );
         assert_eq!(
             report.node_refinement_read_bytes > 0,
@@ -2299,6 +2317,40 @@ mod bulk_builder {
             error.to_string().contains("duplicate identity across construction runs (node)"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn scratch_peak_occupancy_stays_below_cumulative_writes_on_a_refined_build() {
+        // A skewed build whose node and edge ranges refine: leaves, probes and
+        // refs leave the occupancy as soon as their reads complete, so the
+        // build never holds everything its counters moved, and the relation
+        // spools survive until the pass that consumes them.
+        let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
+        let expected = bulk_with(&nodes, &edges, 2, 4).unwrap();
+        let _gate = crate::graph_construction_encoding::ForcedPartitions::with_gate(32 << 10);
+        let run = node_scratch_run(&nodes, &edges, 2, 4, (7, 5, 2)).unwrap();
+        assert_same(&expected, &run.inventory);
+        let report = &run.report;
+        assert!(report.node_refinement_write_bytes > 0, "{report:?}");
+        assert!(report.edge_refinement_write_bytes > 0, "{report:?}");
+        assert_node_scratch_traffic(report, 1_021, 3_001);
+        // The spool was written before it was read and the shards are the
+        // canonical ones: the spool survived to its final read.
+        assert_eq!(report.csr_spool_read_bytes, report.csr_spool_write_bytes);
+        assert!(report.csr_spool_write_bytes > 0, "{report:?}");
+        // The peak is a distinct figure: everything held at once, never the
+        // cumulative traffic, and at least one whole edge partition at a time.
+        assert!(
+            report.scratch_peak_occupied_bytes >= report.largest_edge_partition * 28,
+            "{report:?}"
+        );
+        assert!(
+            report.scratch_peak_occupied_bytes < report.scratch_write_bytes,
+            "peak {} must sit below the {} cumulative bytes: {report:?}",
+            report.scratch_peak_occupied_bytes,
+            report.scratch_write_bytes
+        );
+        assert!(!run.scratch_left);
     }
 
     #[test]
@@ -2568,6 +2620,8 @@ mod bulk_builder {
             let report = session.bulk_build_report();
             assert!(report.node_partitions > 0, "{report:?}");
             assert!(report.property_scratch_write_bytes > 0, "{report:?}");
+            // Property frames count toward the scratch occupancy peak.
+            assert!(report.scratch_peak_occupied_bytes > 0, "{report:?}");
             // Property scans read more than they write, by design; the node and
             // endpoint scratch is still written once and read once.
             assert_eq!(report.node_scratch_read_bytes, report.node_scratch_write_bytes);
@@ -2684,12 +2738,13 @@ mod bulk_builder {
             (
                 report.scratch_write_bytes,
                 report.scratch_read_bytes,
+                report.scratch_peak_occupied_bytes,
                 report.node_partitions,
                 report.node_scratch_write_bytes,
                 report.endpoint_scratch_write_bytes,
                 report.node_refinement_steps,
             ),
-            (0, 0, 0, 0, 0, 0),
+            (0, 0, 0, 0, 0, 0, 0),
             "{report:?}"
         );
         assert!(!report.passes.contains_key("endpoints"));

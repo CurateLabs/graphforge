@@ -202,6 +202,10 @@ struct ScratchReport {
     csr_partitions: u64,
     write_bytes: u64,
     read_bytes: u64,
+    /// The largest number of bytes scratch files occupied at once: files leave
+    /// the count as their final reads reclaim them, so this is the scratch the
+    /// build really held, not the bytes it moved.
+    peak_occupied_bytes: u64,
     largest_partition: u64,
     refinement_steps: u64,
     refinement_write_bytes: u64,
@@ -477,9 +481,11 @@ pub(crate) fn encode_bulk(
     // Pass 2: edges and endpoint resolution. Over budget, the edges scatter
     // into scratch partitions instead of landing in resident columns.
     let meter = PassMeter::start("edges");
-    // Endpoint references to the node leaves, and the CSR key partitions the
-    // endpoint pass derives from the exact degrees, when the nodes are on scratch.
+    // Endpoint references and the identity probes of the edges, and the CSR
+    // key partitions the endpoint pass derives from the exact degrees, when
+    // the nodes are on scratch.
     let mut refs = None::<scratch::Partitions>;
+    let mut identity_probes = None::<scratch::Partitions>;
     let mut node_keys = None::<(scratch_csr::KeyPartitioner, scratch_csr::KeyPartitioner)>;
     let mut edge_side = match (&scratch_plan, &scratch, &nodes) {
         (Some(sized), Some(scratch), NodeSide::Scratch(on_scratch)) => {
@@ -489,9 +495,16 @@ pub(crate) fn encode_bulk(
                 on_scratch.scattered.leaves.len(),
                 scratch_nodes::REF_RECORD,
             )?;
+            let probes = scratch::Partitions::create(
+                scratch,
+                "probes",
+                on_scratch.scattered.leaves.len(),
+                scratch_nodes::PROBE_RECORD,
+            )?;
             let sink = scratch_nodes::RefSink {
                 router: &on_scratch.scattered.router,
                 refs: &leaves,
+                probes: &probes,
             };
             let scattered = run_pass(&pool, cancelled, &cancel, || {
                 scratch_edges::scatter_edges(
@@ -505,6 +518,7 @@ pub(crate) fn encode_bulk(
                 )
             })?;
             refs = Some(leaves);
+            identity_probes = Some(probes);
             EdgeSide::Scratch(scattered)
         }
         (Some(sized), Some(scratch), NodeSide::Memory(table)) => {
@@ -545,10 +559,17 @@ pub(crate) fn encode_bulk(
         NodeSide::Scratch(on_scratch),
         EdgeSide::Scratch(scattered),
         Some(refs),
+        Some(probes),
         Some(sized),
         Some(scratch),
-    ) = (&mut nodes, &edge_side, &refs, &scratch_plan, &scratch)
-    {
+    ) = (
+        &mut nodes,
+        &edge_side,
+        &refs,
+        &identity_probes,
+        &scratch_plan,
+        &scratch,
+    ) {
         let meter = PassMeter::start("endpoints");
         let read_before = scratch.read_bytes();
         let (resolved, keys) = run_pass(&pool, cancelled, &cancel, || {
@@ -557,6 +578,7 @@ pub(crate) fn encode_bulk(
                 plan: sized,
                 nodes: &on_scratch.scattered,
                 refs,
+                probes,
                 edges: scattered,
                 cancel: &cancel,
             })
@@ -571,8 +593,10 @@ pub(crate) fn encode_bulk(
                 &cancel,
             ));
         }
-        // Reads of the endpoint pass that were not references: the node leaves.
-        node_leaf_read = scratch.read_bytes() - read_before - refs.read_bytes();
+        // Reads of the endpoint pass that were neither references nor probes:
+        // the node leaves.
+        node_leaf_read =
+            scratch.read_bytes() - read_before - refs.read_bytes() - probes.read_bytes();
         on_scratch.resolved = Some(resolved);
         node_keys = Some(keys);
         passes.extend([meter.finish()]);
@@ -892,11 +916,14 @@ pub(crate) fn encode_bulk(
                 node_scatter_traffic.1 + node_leaf_read + resolved.runs.read_bytes();
             if let EdgeSide::Scratch(_) = &edge_side {
                 let refs = refs.as_ref();
+                let probes = identity_probes.as_ref();
                 scratch_report.endpoint_write_bytes = refs
                     .map_or(0, scratch::Partitions::written_bytes)
+                    + probes.map_or(0, scratch::Partitions::written_bytes)
                     + resolved.resolved.written_bytes();
                 scratch_report.endpoint_read_bytes = refs
                     .map_or(0, scratch::Partitions::read_bytes)
+                    + probes.map_or(0, scratch::Partitions::read_bytes)
                     + resolved.resolved.read_bytes();
             }
         }
@@ -1016,6 +1043,11 @@ pub(crate) fn encode_bulk(
             .map_or(0, property_rows::PropertyRows::read_bytes);
     scratch_report.write_bytes += property_scratch_write_bytes;
     scratch_report.read_bytes += property_scratch_read_bytes;
+    // The peak is a high-water mark the appends have kept current all along;
+    // read it before the tree goes away.
+    scratch_report.peak_occupied_bytes = scratch
+        .as_ref()
+        .map_or(0, scratch::Scratch::peak_occupied_bytes);
     drop((node_properties, edge_properties));
     if let Some(scratch) = scratch {
         scratch.remove()?;
@@ -1139,6 +1171,7 @@ pub(crate) fn encode_bulk(
             csr_partitions: scratch_report.csr_partitions,
             scratch_write_bytes: scratch_report.write_bytes,
             scratch_read_bytes: scratch_report.read_bytes,
+            scratch_peak_occupied_bytes: scratch_report.peak_occupied_bytes,
             largest_edge_partition: scratch_report.largest_partition,
             edge_refinement_steps: scratch_report.refinement_steps,
             edge_refinement_write_bytes: scratch_report.refinement_write_bytes,

@@ -31,9 +31,7 @@ use super::emit::{EdgeEmitter, EdgeWindow};
 use super::ordered::{Ordered, run_ordered};
 use super::scratch::{Partitions, Scatter, Scratch};
 use super::scratch_csr::{CsrRecord, CsrScratch, KeyHistogram};
-use super::scratch_nodes::{
-    EndpointPair, ROLE_DST, ROLE_PROBE, ROLE_SRC, RefRecord, RefSink, join_endpoints,
-};
+use super::scratch_nodes::{EndpointPair, ROLE_DST, ROLE_SRC, RefRecord, RefSink, join_endpoints};
 use super::scratch_ranges::{
     RangeSpec, UuidBounds, observe, partition_of, refine_partitions, uuid_splitters,
 };
@@ -209,7 +207,9 @@ pub(super) fn scatter_edges(
     let partitions = Partitions::create(scratch, "edges", splitters.len() + 1, EDGE_RECORD)?;
     let staging = match endpoints {
         Endpoints::Resident { .. } => plan.staging_bytes,
-        Endpoints::Deferred(sink) => plan.staging_for(partitions.len() + sink.refs.len()),
+        Endpoints::Deferred(sink) => {
+            plan.staging_for(partitions.len() + sink.refs.len() + sink.probes.len())
+        }
     };
     let bounds = (0..partitions.len())
         .map(|_| Mutex::new(None::<([u8; 16], [u8; 16])>))
@@ -227,9 +227,12 @@ pub(super) fn scatter_edges(
     claim_in_order(tasks.items.clone(), |(source, task, rows)| {
         check_cancelled(cancel)?;
         let mut scatter = Scatter::new(scratch, &partitions, staging);
-        let mut endpoint_refs = match endpoints {
-            Endpoints::Deferred(sink) => Some(Scatter::new(scratch, sink.refs, staging)),
-            Endpoints::Resident { .. } => None,
+        let (mut endpoint_refs, mut edge_probes) = match endpoints {
+            Endpoints::Deferred(sink) => (
+                Some(Scatter::new(scratch, sink.refs, staging)),
+                Some(Scatter::new(scratch, sink.probes, staging)),
+            ),
+            Endpoints::Resident { .. } => (None, None),
         };
         let mut cache = RelationCache::new(&dictionary);
         let mut written = 0;
@@ -322,13 +325,12 @@ pub(super) fn scatter_edges(
                 let part = partition_of(&splitters, &record.uuid);
                 observe(&mut task_bounds[part], record.uuid);
                 scatter.push(part, &record.encode())?;
-                if let (Endpoints::Deferred(sink), Some(refs)) = (endpoints, endpoint_refs.as_mut())
+                if let (Endpoints::Deferred(sink), Some(refs), Some(probes)) =
+                    (endpoints, endpoint_refs.as_mut(), edge_probes.as_mut())
                 {
-                    for (role, key) in [
-                        (ROLE_SRC, source_uuids[row]),
-                        (ROLE_DST, target_uuids[row]),
-                        (ROLE_PROBE, record.uuid),
-                    ] {
+                    for (role, key) in
+                        [(ROLE_SRC, source_uuids[row]), (ROLE_DST, target_uuids[row])]
+                    {
                         let routed = sink.push(
                             refs,
                             &RefRecord {
@@ -337,10 +339,13 @@ pub(super) fn scatter_edges(
                                 role,
                             },
                         )?;
-                        if !routed && role != ROLE_PROBE {
+                        if !routed {
                             task_miss.get_or_insert(key);
                         }
                     }
+                    // The probe only asks whether this edge's own identity is
+                    // a node's; it carries the UUID alone.
+                    sink.push_probe(probes, &record.uuid)?;
                 }
             }
             if let Some(properties) = properties {
@@ -356,6 +361,9 @@ pub(super) fn scatter_edges(
         scatter.finish()?;
         if let Some(refs) = endpoint_refs {
             refs.finish()?;
+        }
+        if let Some(probes) = edge_probes {
+            probes.finish()?;
         }
         for (part, bounds_of_task) in task_bounds.into_iter().enumerate() {
             if let Some((low, high)) = bounds_of_task {
@@ -465,6 +473,9 @@ impl ScatteredEdges {
                 }
             }
         }
+        // The partition's records are sorted in memory now; the ranking input
+        // is loaded and this file is not read again.
+        self.partitions.reclaim(scratch, part)?;
         Ok(records)
     }
 

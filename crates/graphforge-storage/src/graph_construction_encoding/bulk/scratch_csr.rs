@@ -514,6 +514,9 @@ fn write_direction(
         ordered.acquire(index, cost)?;
         let outcome = (|| {
             let mut sorted = load_sorted(context.scratch, partitions, index, count)?;
+            // The entries are sorted in memory; this partition file is not
+            // read again.
+            partitions.reclaim(context.scratch, index)?;
             for chunk in sorted.chunks(4096) {
                 check_cancelled(context.cancel)?;
                 for entry in chunk {
@@ -559,6 +562,8 @@ fn write_direction(
         if carry.entries != spool_counts[group] {
             return Err(storage("a CSR relation spool lost entries"));
         }
+        // This group's spool is fully consumed; it is not read again.
+        spools.reclaim(context.scratch, group)?;
         carry.flush(&mut emit)?;
         totals[group] = (carry.entries, carry.node_count());
     }

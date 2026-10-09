@@ -177,8 +177,11 @@ impl<'a> PropertyRows<'a> {
         );
         file.write_all(&header).map_err(storage)?;
         file.write_all(&payload).map_err(storage)?;
-        self.written
-            .fetch_add((HEADER + payload.len()) as u64, Ordering::Relaxed);
+        let bytes = (HEADER + payload.len()) as u64;
+        self.written.fetch_add(bytes, Ordering::Relaxed);
+        // Property frames stay until their final consumer reads them, so this
+        // raises the scratch peak and nothing releases it early.
+        self.scratch.occupy(bytes);
         Ok(())
     }
 
