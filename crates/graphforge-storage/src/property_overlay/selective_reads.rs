@@ -200,3 +200,23 @@ fn group_may_equal(group: &RowGroupMetaData, leaf: usize, value: &EqualityValue)
         _ => true,
     }
 }
+
+/// Whether the statistics prove a row group holds no tombstone: the tombstone
+/// column is absent (a fragment from before tombstones) or its largest value is
+/// `false` and no slot is NULL.
+pub(crate) fn group_has_no_tombstone(
+    metadata: &ParquetMetaData,
+    group: usize,
+    tombstone_field: &str,
+) -> bool {
+    let Some(leaf) = column_leaf(metadata, tombstone_field) else {
+        return true;
+    };
+    let group = metadata.row_group(group);
+    match group.column(leaf).statistics() {
+        Some(statistics @ Statistics::Boolean(stats)) if !statistics.is_min_max_deprecated() => {
+            stats.max_opt() == Some(&false) && stats.null_count_opt() == Some(0)
+        }
+        _ => false,
+    }
+}

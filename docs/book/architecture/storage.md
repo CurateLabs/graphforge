@@ -562,14 +562,40 @@ Arrow, row-order, tombstone, and live-byte checks succeed. A late decoder or
 resource failure therefore discards the runs and returns a typed error with zero
 rows observed by direct callbacks or DataFusion—even for a projected `LIMIT 1`
 plan.
-Admission retains the stable root capability plus each fragment's authenticated
+
+The query scan (`PropertyOverlayExec`, shared by Cypher and SQL) does not spool.
+Every fragment is already a run sorted by UUID, so the newest snapshot of each
+UUID is a k-way merge of the fragments. A fragment opens when the merge
+frontier reaches its smallest UUID (from its footer statistics) and closes at
+EOF: disjoint base fragments are read one after another and an overlapping
+mutation fragment stays open beside the current one. The merge shares the same
+live-byte budget; a route whose overlapping fragments cannot be open within it
+is refused with that budget's error rather than spilled, because a read must
+not write. A scan that carries a `LIMIT` holds its rows until the whole route
+has validated, as before. The merge reads rows in UUID order, so results keep
+the order of the spooled merge.
+
+A node-property scan also accepts `column = literal` for `Int64`, `Utf8` and
+`Boolean` columns, offered by the plan as a hint (the filter stays in the
+plan). Row-group statistics select the fragments and row groups that can hold
+the value; their rows nominate candidate UUIDs; the candidates are then
+resolved against every fragment whose UUID range can hold one, so a newer
+snapshot or tombstone still decides the value. More than 262,144 candidates, or
+a column stored with another type in any fragment, declines the hint and the
+scan streams the route. A lookup on a column whose values rise with the UUID
+therefore authenticates the fragment that holds the value; a scattered column
+reads that column of every fragment. Admission retains the stable root
+capability plus each fragment's authenticated
 path, native file identity, length, XXH64 checksum, and schema—not one OS handle per
 historical fragment. A scan opens fragments on demand without following links,
 requires the admitted device/file identity, and checksums the complete file
-while streaming those exact bytes into an exclusively created, unnamed scratch
-file. Identity, length, and checksum must match before Parquet sees the scratch
-handle; full, targeted, and SQL readers never decode the mutable source handle.
-The source handle then closes. Consequently live
+while reading those exact bytes into memory (an object is at most 4 MiB, the
+physical cap), so reading writes nothing. Only a legacy plain fragment larger
+than one object, and the replay and mutation readers that bound their memory
+separately, stream the bytes into an exclusively created, unnamed scratch file
+instead. Identity, length, and checksum must match before Parquet sees the
+snapshot; full, targeted, and SQL readers never decode the mutable source
+handle. The source handle then closes. Consequently live
 fragment handles are bounded by `max_open_runs` rather than total history, and
 same-name replacement, transient in-place mutation (even if restored), symlink,
 scratch planting, and path substitution all fail closed. Parquet page headers
