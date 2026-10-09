@@ -93,7 +93,12 @@ impl OwnedBatchReader {
                 storage("Parquet task stopped after its page failure was consumed")
             }));
         }
-        if reader.schema().fields() != admitted_schema.fields() {
+        let native_schema = reader.schema();
+        // Fields equality deliberately omits dictionary ordering metadata,
+        // while with_schema's compatibility check includes it recursively.
+        if native_schema.fields() != admitted_schema.fields()
+            || !admitted_schema.fields().contains(native_schema.fields())
+        {
             let error = storage("Parquet Arrow fields differ from the admitted source schema");
             failures.record(error.clone());
             return Err(failures.take().unwrap_or(error));

@@ -723,3 +723,96 @@ fn resource_limit(message: &str) -> GfError {
         message: message.into(),
     }
 }
+
+#[test]
+fn dictionary_ordering_mismatch_is_refused_before_decoding() {
+    use arrow::array::StructArray;
+    use arrow::datatypes::Fields;
+
+    for nested in [false, true] {
+        let source_leaf = Arc::new(Field::new("value", DataType::Utf8, false));
+        let values = Arc::new(StringArray::from(vec!["a", "b", "a"]));
+        let (source_schema, column): (Arc<Schema>, arrow::array::ArrayRef) = if nested {
+            let children: Fields = vec![Arc::clone(&source_leaf)].into();
+            let structure = StructArray::new(children.clone(), vec![values], None);
+            (
+                Arc::new(Schema::new(vec![Field::new(
+                    "record",
+                    DataType::Struct(children),
+                    false,
+                )])),
+                Arc::new(structure),
+            )
+        } else {
+            (Arc::new(Schema::new(vec![source_leaf])), values)
+        };
+        let batch = RecordBatch::try_new(Arc::clone(&source_schema), vec![column]).unwrap();
+        let mut encoded = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut encoded, source_schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let bytes = Bytes::from(encoded);
+        let metadata = ParquetRecordBatchReaderBuilder::try_new(bytes.clone())
+            .unwrap()
+            .metadata()
+            .clone();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut budget = InventoryBudget::new(1 << 20);
+        let groups = row_groups(bytes, Arc::clone(&metadata), &[0], &mut budget, {
+            let calls = Arc::clone(&calls);
+            move |_, _| {
+                Ok(Probe {
+                    calls: Arc::clone(&calls),
+                    refusal: false,
+                })
+            }
+        })
+        .unwrap();
+        let dictionary_type =
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8));
+        let leaf = Field::new("value", dictionary_type, false);
+        let hinted = if nested {
+            Schema::new(vec![Field::new(
+                "record",
+                DataType::Struct(vec![leaf].into()),
+                false,
+            )])
+        } else {
+            Schema::new(vec![leaf])
+        };
+        let levels = parquet_to_arrow_field_levels(
+            metadata.file_metadata().schema_descr(),
+            ProjectionMask::all(),
+            Some(hinted.fields()),
+        )
+        .unwrap();
+        let native =
+            ParquetRecordBatchReader::try_new_with_row_groups(&levels, &groups, 3, None).unwrap();
+        let native_schema = native.schema();
+        let root = native_schema.field(0);
+        let bad_root = if nested {
+            let DataType::Struct(children) = root.data_type() else {
+                panic!("expected Struct")
+            };
+            root.clone().with_data_type(DataType::Struct(
+                vec![children[0].as_ref().clone().with_dict_is_ordered(true)].into(),
+            ))
+        } else {
+            root.clone().with_dict_is_ordered(true)
+        };
+        let admitted = Arc::new(Schema::new(vec![bad_root]));
+        assert_eq!(
+            native_schema.fields(),
+            admitted.fields(),
+            "Arrow equality omits dictionary ordering; compatibility must also be checked"
+        );
+        assert!(!admitted.fields().contains(native_schema.fields()));
+        let error = match OwnedBatchReader::new(native, admitted, groups.failures.clone()) {
+            Ok(_) => panic!("dictionary ordering mismatch must be refused before decoding"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, GfError::Storage(_)));
+        assert!(groups.failures.failed());
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+}
