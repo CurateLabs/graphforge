@@ -86,7 +86,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master as of 2026-08-05
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master as of 2026-08-05
         with:
           toolchain: "1.96.0"
           components: clippy, rustfmt
@@ -136,7 +136,7 @@ jobs:
 
       - name: Install cargo-deny and cargo-about
         if: needs.changes.outputs.licenses == 'true'
-        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-deny@0.20.2,cargo-about@0.9.1
       - name: Check third-party Rust licenses and notices
@@ -165,18 +165,18 @@ jobs:
       # artifact is rebuilt rather than trusted; the key moves with the
       # toolchain so a compiler bump starts from an empty volume.
       - name: Mount sticky target/ disk
-        uses: useblacksmith/stickydisk@94697d49e77d0dd78b77deb85ad3de63a28b4b8a # v1.7.1
+        uses: useblacksmith/stickydisk@3f6be1451e3cad893b778bc93495c80452a5da26 # v1.7.2
         with:
           key: ${{ github.repository }}-rust-tests-rust-1.96.0-target-v2
           path: target
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master as of 2026-08-05
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master as of 2026-08-05
         with:
           toolchain: "1.96.0"
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-nextest@0.9.145
 
@@ -208,16 +208,16 @@ jobs:
       - name: Prepare native test temporary storage
         run: python3 scripts/test_environment.py --github-env "$GITHUB_ENV"
       - name: Mount sticky target/ disk
-        uses: useblacksmith/stickydisk@94697d49e77d0dd78b77deb85ad3de63a28b4b8a # v1.7.1
+        uses: useblacksmith/stickydisk@3f6be1451e3cad893b778bc93495c80452a5da26 # v1.7.2
         with:
           key: ${{ github.repository }}-rust-extras-rust-1.96.0-target-v1
           path: target
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master as of 2026-08-05
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master as of 2026-08-05
         with:
           toolchain: "1.96.0"
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-nextest@0.9.145
       - name: Cache Cargo registry
@@ -265,12 +265,12 @@ jobs:
       - name: Prepare native test temporary storage
         run: python3 scripts/test_environment.py --github-env "$GITHUB_ENV"
       - name: Mount sticky target/ disk
-        uses: useblacksmith/stickydisk@94697d49e77d0dd78b77deb85ad3de63a28b4b8a # v1.7.1
+        uses: useblacksmith/stickydisk@3f6be1451e3cad893b778bc93495c80452a5da26 # v1.7.2
         with:
           key: ${{ github.repository }}-feature-boundary-rust-1.96.0-target-v1
           path: target
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master as of 2026-08-05
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master as of 2026-08-05
         with:
           toolchain: "1.96.0"
       - name: Cache Cargo registry
@@ -301,7 +301,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master as of 2026-08-05
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master as of 2026-08-05
         with:
           toolchain: "1.96.0"
       - name: Cache Cargo registry
@@ -387,7 +387,7 @@ jobs:
       - name: Prepare native test temporary storage
         run: python3 scripts/test_environment.py --github-env "$GITHUB_ENV"
       - name: Mount sticky target/ disk
-        uses: useblacksmith/stickydisk@94697d49e77d0dd78b77deb85ad3de63a28b4b8a # v1.7.1
+        uses: useblacksmith/stickydisk@3f6be1451e3cad893b778bc93495c80452a5da26 # v1.7.2
         with:
           key: ${{ github.repository }}-bindings-rust-1.96.0-target-v1
           path: target
@@ -409,7 +409,7 @@ jobs:
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master as of 2026-08-05
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master as of 2026-08-05
         with:
           toolchain: "1.96.0"
       - name: Cache Cargo registry
@@ -532,17 +532,17 @@ jobs:
       - name: Prepare native test temporary storage
         run: python3 scripts/test_environment.py --github-env "$GITHUB_ENV"
       - name: Mount sticky target/ disk
-        uses: useblacksmith/stickydisk@94697d49e77d0dd78b77deb85ad3de63a28b4b8a # v1.7.1
+        uses: useblacksmith/stickydisk@3f6be1451e3cad893b778bc93495c80452a5da26 # v1.7.2
         with:
           key: ${{ github.repository }}-benchmarks-rust-1.96.0-target-v1
           path: target
       - name: Mount sticky benchmarks/target/ disk
-        uses: useblacksmith/stickydisk@94697d49e77d0dd78b77deb85ad3de63a28b4b8a # v1.7.1
+        uses: useblacksmith/stickydisk@3f6be1451e3cad893b778bc93495c80452a5da26 # v1.7.2
         with:
           key: ${{ github.repository }}-benchmarks-rust-1.96.0-benchmarks-target-v1
           path: benchmarks/target
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master as of 2026-08-05
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master as of 2026-08-05
         with:
           toolchain: "1.96.0"
       - name: Cache Cargo registry

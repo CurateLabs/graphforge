@@ -47,6 +47,7 @@ impl BlossomForest {
         }
         Ok(forest)
     }
+    #[cfg(test)]
     pub(crate) fn vertex_count(&self) -> usize {
         self.vertex_owner.len()
     }
