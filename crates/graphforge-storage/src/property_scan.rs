@@ -174,6 +174,12 @@ impl PropertyOverlayExec {
     }
 
     pub(crate) fn uuid_filter_candidates(&self) -> Vec<PropertyUuidFilterCandidate> {
+        // A UUID hint must not move filtering ahead of a scan-level LIMIT:
+        // `[u, v] LIMIT 1` joined to `{v}` is empty before pruning, but would
+        // match if the hint removed `u` before LIMIT.
+        if self.limit.is_some() {
+            return Vec::new();
+        }
         let key = if self.is_edge {
             "edge_uuid"
         } else {
