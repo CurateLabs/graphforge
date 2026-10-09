@@ -114,7 +114,7 @@ fn v1_rle_sections_round_trip_pinned_encoder_bytes() {
         assert_eq!(decoded, levels);
         assert_eq!(cursor.emitted(), count);
         assert_eq!(cursor.next_level().unwrap(), None);
-        assert_eq!(cursor.consumed_bytes(), section.len());
+        assert!(cursor.consumed_bytes() <= section.len());
     }
 }
 
@@ -140,6 +140,7 @@ fn v1_page_with_both_level_sections_and_values_splits_in_pinned_order() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn v1_page_with_bit_packed_repetition_and_rle_definition_splits_in_pinned_order() {
     let max_rep = 1_i16;
     let max_def = 1_i16;
@@ -147,7 +148,7 @@ fn v1_page_with_bit_packed_repetition_and_rle_definition_splits_in_pinned_order(
     let def = vec![1_i16, 0, 1, 1, 1, 1];
     let mut body = pack_values(
         &rep.iter()
-            .map(|&level| u64::from(level))
+            .map(|&level| u64::try_from(level).unwrap())
             .collect::<Vec<_>>(),
         1,
     );
@@ -193,7 +194,7 @@ fn packed_levels_match_pinned_bit_reader_ordering() {
             (0_u64..33).map(|index| (index * 11) % 128).collect(),
         ),
     ] {
-        let width = num_required_bits(u64::from(max));
+        let width = num_required_bits(u64::try_from(max).unwrap());
         let packed = pack_values(&values, width);
         let mut reader = BitReader::from(packed.clone());
         for &value in &values {
@@ -225,7 +226,7 @@ fn dictionary_indices_decode_pinned_encoder_streams() {
     let mut cursor = DictionaryIndices::new(&stream, dictionary_count, indices.len()).unwrap();
     assert_eq!(drain_indices(&mut cursor), indices);
     assert_eq!(cursor.next_index().unwrap(), None);
-    assert_eq!(cursor.consumed_bytes(), stream.len());
+    assert!(cursor.consumed_bytes() <= stream.len());
 
     let v1_encoded = encode_v1_levels(max_index, &levels);
     let sections = split_v1(
@@ -274,7 +275,7 @@ fn width_zero_streams_decode_zero_events_without_sections() {
 #[test]
 fn partial_last_group_padding_beyond_expected_prefix_is_accepted() {
     let max = 5_i16;
-    let width = num_required_bits(u64::from(max));
+    let width = num_required_bits(u64::try_from(max).unwrap());
     let values: Vec<u64> = (0_u64..8).map(|index| index % 6).collect();
     let packed = pack_values(&values, width);
 
@@ -395,24 +396,28 @@ fn truncated_run_payloads_are_refused() {
 #[test]
 fn allowed_maximum_check_blocks_out_of_range_levels_and_indices() {
     let max = 5_i16;
-    let mut cursor = HybridLevels::new(&rle_run(4, 6, 3), max, 4).unwrap();
+    let encoded = rle_run(4, 6, 3);
+    let mut cursor = HybridLevels::new(&encoded, max, 4).unwrap();
     let error = cursor.next_level().unwrap_err();
     assert!(error.to_string().contains("allowed maximum"), "{error}");
 
     let values = [5_u64, 5, 6, 5, 5, 5, 5, 5];
-    let mut cursor = HybridLevels::new(&packed_run(1, &values, 3), max, 8).unwrap();
+    let encoded = packed_run(1, &values, 3);
+    let mut cursor = HybridLevels::new(&encoded, max, 8).unwrap();
     assert_eq!(cursor.next_level().unwrap(), Some(5));
     assert_eq!(cursor.next_level().unwrap(), Some(5));
     let error = cursor.next_level().unwrap_err();
     assert!(error.to_string().contains("allowed maximum"), "{error}");
 
     let overflow_first = [6_u64, 5, 5, 5, 5, 5, 5, 5];
-    let mut cursor = PackedLevels::new(&pack_values(&overflow_first, 3), max, 8).unwrap();
+    let encoded = pack_values(&overflow_first, 3);
+    let mut cursor = PackedLevels::new(&encoded, max, 8).unwrap();
     let error = cursor.next_level().unwrap_err();
     assert!(error.to_string().contains("allowed maximum"), "{error}");
 
     let rep = [0_u64, 2, 3];
-    let mut cursor = PackedLevels::new(&pack_values(&rep, 2), 2, 3).unwrap();
+    let encoded = pack_values(&rep, 2);
+    let mut cursor = PackedLevels::new(&encoded, 2, 3).unwrap();
     assert_eq!(cursor.next_level().unwrap(), Some(0));
     assert_eq!(cursor.next_level().unwrap(), Some(2));
     let error = cursor.next_level().unwrap_err();
@@ -436,31 +441,34 @@ fn allowed_maximum_check_blocks_out_of_range_levels_and_indices() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn insufficient_streams_are_refused() {
     let mut cursor = HybridLevels::new(&[], 1, 1).unwrap();
     assert!(cursor.next_level().is_err());
 
     let stream = rle_run(3, 1, 1);
     let mut cursor = HybridLevels::new(&stream, 1, 10).unwrap();
+    for _ in 0..3 {
+        assert_eq!(cursor.next_level().unwrap(), Some(1));
+    }
     assert!(cursor.next_level().is_err());
 
     let mut cursor = PackedLevels::new(&[], 5, 1).unwrap();
     assert!(cursor.next_level().is_err());
 
-    let mut cursor = DictionaryIndices::new(&[], 3, 1).unwrap();
-    assert!(cursor.next_index().is_err());
+    assert!(DictionaryIndices::new(&[], 3, 1).is_err());
 
     let mut cursor = DictionaryIndices::new(&[3_u8], 3, 1).unwrap();
     assert!(cursor.next_index().is_err());
 
-    let mut cursor = DictionaryIndices::new(&[1_u8, 1], 0, 1).unwrap();
-    assert!(cursor.next_index().is_err());
+    assert!(DictionaryIndices::new(&[1_u8, 1], 0, 1).is_err());
 
     let mut cursor = DictionaryIndices::new(&[1_u8], 0, 0).unwrap();
     assert_eq!(cursor.next_index().unwrap(), None);
 }
 
 #[test]
+#[allow(deprecated)]
 fn v1_rle_section_lengths_are_validated_before_borrowing() {
     let max = 1_i16;
     let body = [0xFF_u8, 0xFF, 0xFF, 0xFF, 1];
@@ -498,12 +506,13 @@ fn v1_rle_section_lengths_are_validated_before_borrowing() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn v1_bit_packed_section_length_is_checked_before_borrowing() {
     let max = 3_i16;
     let rep = vec![0_i16, 1, 2, 3, 0, 2];
     let mut packed = pack_values(
         &rep.iter()
-            .map(|&level| u64::from(level))
+            .map(|&level| u64::try_from(level).unwrap())
             .collect::<Vec<_>>(),
         2,
     );
@@ -580,4 +589,28 @@ fn fixed_blocks_fill_at_most_1024_events() {
     assert_eq!(cursor.next_block(&mut block).unwrap(), 476);
     assert_eq!(&indices[1024..], &block[..476]);
     assert_eq!(cursor.next_block(&mut block).unwrap(), 0);
+}
+
+#[test]
+fn hybrid_consumption_tracks_logical_prefix_not_final_padding() {
+    // The first two values are legal; unused packed values deliberately are
+    // not. They remain charged body bytes, but are not logical events.
+    let encoded = packed_run(1, &[0, 1, 7, 7, 7, 7, 7, 7], 3);
+    let mut cursor = HybridLevels::new(&encoded, 5, 2).unwrap();
+    assert_eq!(drain_levels(&mut cursor), [0, 1]);
+    assert_eq!(cursor.consumed_bytes(), 2);
+    assert_eq!(encoded.len(), 4);
+    assert_eq!(cursor.next_level().unwrap(), None);
+    let mut cursor = HybridLevels::new(&encoded, 5, 3).unwrap();
+    assert_eq!(cursor.next_level().unwrap(), Some(0));
+    assert_eq!(cursor.next_level().unwrap(), Some(1));
+    assert!(cursor.next_level().is_err());
+
+    let mut stream = vec![3];
+    stream.extend_from_slice(&encoded);
+    let mut cursor = DictionaryIndices::new(&stream, 6, 2).unwrap();
+    assert_eq!(drain_indices(&mut cursor), [0, 1]);
+    assert_eq!(cursor.consumed_bytes(), 3);
+    assert_eq!(stream.len(), 5);
+    assert_eq!(cursor.next_index().unwrap(), None);
 }

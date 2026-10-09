@@ -170,7 +170,7 @@ impl<'a> PackedLevels<'a> {
         }
         Ok(Self {
             data,
-            width: num_required_bits(u64::from(max_level)),
+            width: num_required_bits(u64::try_from(max_level).map_err(|_| invalid_descriptor())?),
             max_level,
             expected,
             emitted: 0,
@@ -212,7 +212,7 @@ impl LevelSource for PackedLevels<'_> {
         }
         self.bit_offset = bit_end;
         self.emitted += 1;
-        if value > u64::from(self.max_level) {
+        if value > u64::try_from(self.max_level).map_err(|_| invalid_descriptor())? {
             return Err(out_of_range());
         }
         let level = i16::try_from(value).map_err(|_| out_of_range())?;
@@ -410,15 +410,16 @@ impl<'a> HybridLevels<'a> {
         Ok(Self {
             engine: Hybrid::new(
                 data,
-                num_required_bits(u64::from(max_level)),
-                u64::from(max_level),
+                num_required_bits(u64::try_from(max_level).map_err(|_| invalid_descriptor())?),
+                u64::try_from(max_level).map_err(|_| invalid_descriptor())?,
                 expected,
             ),
         })
     }
 
-    /// Bytes of the section consumed so far; the caller continues the value
-    /// suffix here.
+    /// Bytes consumed by the logical prefix, including run headers. The
+    /// declared section span, not this prefix count, locates the value suffix:
+    /// unused final packed padding may remain in the admitted section.
     pub(super) fn consumed_bytes(&self) -> usize {
         self.engine.consumed_bytes()
     }
@@ -508,6 +509,7 @@ impl IndexSource for DictionaryIndices<'_> {
 /// V1 data page body split into level sections and the value suffix. Sections
 /// for zero-maximum descriptors are absent: the descriptor supplies implicit
 /// zero events and the value suffix starts where the preceding section ended.
+#[derive(Debug)]
 pub(super) struct V1Sections<'a> {
     pub(super) repetition: Option<&'a [u8]>,
     pub(super) definition: Option<&'a [u8]>,
@@ -597,7 +599,9 @@ fn v1_section<'a>(
         }
         #[allow(deprecated)]
         Encoding::BIT_PACKED => {
-            let width = usize::from(num_required_bits(u64::from(max_level)));
+            let width = usize::from(num_required_bits(
+                u64::try_from(max_level).map_err(|_| invalid_descriptor())?,
+            ));
             let bits = usize::try_from(num_values)
                 .map_err(|_| storage("Parquet page event count is out of range"))?
                 .checked_mul(width)
