@@ -777,6 +777,53 @@ fn arrow_import(
     validate(directory, graph, session, budget)
 }
 
+/// An Arrow file's reader slices every column of a batch out of one message body.
+/// Charged per column, 200 integer columns of 1,000 rows (1.6 MB) read as 320 MB,
+/// and the import was refused for exceeding the 64 MiB intake window.
+#[test]
+fn a_wide_arrow_batch_is_charged_its_body_once_not_once_per_column() {
+    let _serial = serial();
+    let rows = 1_000;
+    let names = (0..200)
+        .map(|column| format!("p{column:03}"))
+        .collect::<Vec<_>>();
+    let fields = names
+        .iter()
+        .map(|name| Field::new(name, DataType::Int64, true))
+        .collect::<Vec<_>>();
+    let mut columns: Vec<ArrayRef> = vec![
+        uuid_array(
+            &(0..rows)
+                .map(|row| Some(v7(1 + row as u128)))
+                .collect::<Vec<_>>(),
+        ),
+        Arc::new(StringArray::from(vec!["Thing"; rows])),
+    ];
+    for column in 0..names.len() {
+        columns.push(Arc::new(Int64Array::from(
+            (0..rows as i64)
+                .map(|row| row * 3 + column as i64)
+                .collect::<Vec<_>>(),
+        )));
+    }
+    let batch = RecordBatch::try_new(bulk_node_input_schema(fields).unwrap(), columns).unwrap();
+    for budget in ROUTES {
+        let mut run = arrow_import(std::slice::from_ref(&batch), |_, _| {}, budget);
+        run.result
+            .as_ref()
+            .unwrap_or_else(|error| panic!("{budget:?}: {error}"));
+        run.commit();
+        let answer = answers(
+            &run.graph,
+            &["MATCH (n:Thing) RETURN count(n) AS n, sum(n.p199) AS last"],
+        );
+        assert!(
+            answer.contains("1000") && answer.contains("1697500"),
+            "{answer}"
+        );
+    }
+}
+
 #[test]
 fn compressed_arrow_buffers_import_and_a_buffer_that_advertises_a_huge_size_is_refused() {
     let _serial = serial();

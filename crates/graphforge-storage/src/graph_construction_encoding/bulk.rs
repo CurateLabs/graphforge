@@ -45,6 +45,7 @@ mod ordered;
 mod plan;
 mod property_emit;
 mod property_rows;
+mod resident;
 mod scratch;
 mod scratch_csr;
 mod scratch_edges;
