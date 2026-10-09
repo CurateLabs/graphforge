@@ -89,7 +89,7 @@ pub(super) fn emit(
             let first = window_reader.next()?.expect("nonempty window");
             if first.num_columns() == required {
                 while window_reader.next()?.is_some() {}
-                std::fs::remove_file(window).map_err(storage)?;
+                rows.reclaim(&window)?;
                 continue;
             }
             for (ordinal, (name, owner)) in owners.iter_mut().enumerate() {
@@ -245,11 +245,15 @@ pub(super) fn emit(
                             artifacts,
                         )?;
                     }
-                    std::fs::remove_file(path).map_err(storage)?;
+                    rows.reclaim(&path)?;
                 }
             }
-            std::fs::remove_file(window).map_err(storage)?;
+            rows.reclaim(&window)?;
         }
+        // This group's final stream has been read to a clean, verified end;
+        // the catalog scan consumed its own earlier read. Nothing reads the
+        // file again, so its bytes leave the live occupancy.
+        rows.reclaim(&group.path)?;
     }
     Ok(())
 }

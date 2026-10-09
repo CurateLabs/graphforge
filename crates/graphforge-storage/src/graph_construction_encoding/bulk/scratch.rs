@@ -101,10 +101,15 @@ pub(super) struct Scratch {
     path: PathBuf,
     written: AtomicU64,
     read: AtomicU64,
-    /// Bytes the scratch files that still exist occupy, and the largest value
-    /// it ever reached. Owned files are reclaimed as soon as their final read
-    /// completes, so the peak says how much scratch a build really held, not
-    /// how much it moved in total.
+    /// Bytes reserved for scratch files that still exist, and the largest
+    /// value the reservation ever reached. A writer reserves an append's
+    /// complete logical length before the write can grow its file and keeps
+    /// the reservation when the write fails, because a partial write may
+    /// exist and the attempt tears the tree down anyway. Owned files are
+    /// reclaimed as soon as their final read completes, so the peak is a
+    /// conservative bound on what a build held at once: logical reserved
+    /// file bytes, bytes still buffered in the writer included. It is not
+    /// the filesystem's allocated blocks and not an exact physical overlap.
     occupied: AtomicU64,
     peak_occupied: AtomicU64,
 }
@@ -138,26 +143,36 @@ impl Scratch {
         self.read.load(Ordering::Relaxed)
     }
 
-    /// Record that `bytes` more are occupied by scratch files, and raise the
-    /// peak. Every append calls this once per block, so the tracker stays a
-    /// pair of counters and never scans the directory. The value recorded is
-    /// the occupancy at the instant of the append, so the peak is exact.
-    pub(super) fn occupy(&self, bytes: u64) {
-        let occupied = self.occupied.fetch_add(bytes, Ordering::Relaxed) + bytes;
-        self.peak_occupied.fetch_max(occupied, Ordering::Relaxed);
-    }
-
-    /// Record that `bytes` left the tree with a reclaimed file. Saturating:
-    /// a released file was counted when its bytes were appended.
-    fn release(&self, bytes: u64) {
-        let _ = self
+    /// Reserve `bytes` of logical occupancy before a write can grow a
+    /// scratch file, and raise the peak. Reserving first keeps the peak at
+    /// the real overlap even when another worker reclaims a file between
+    /// this write and its charge. Every append calls this once per block,
+    /// so the tracker stays a pair of counters and never scans the
+    /// directory. Overflow is an accounting error, not a saturation.
+    pub(super) fn occupy(&self, bytes: u64) -> Result<(), GfError> {
+        let occupied = self
             .occupied
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(current.saturating_sub(bytes))
-            });
+                current.checked_add(bytes)
+            })
+            .map_err(|_| storage("scratch occupancy overflowed"))?;
+        self.peak_occupied.fetch_max(occupied, Ordering::Relaxed);
+        Ok(())
     }
 
-    /// The largest number of bytes scratch files occupied at once.
+    /// Record that `bytes` left the tree with a reclaimed file. A release
+    /// must match bytes an earlier reservation counted; underflow is an
+    /// accounting error, not a saturation.
+    fn release(&self, bytes: u64) -> Result<(), GfError> {
+        self.occupied
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_sub(bytes)
+            })
+            .map_err(|_| storage("scratch occupancy accounting underflow"))?;
+        Ok(())
+    }
+
+    /// The largest number of bytes reserved for scratch files at once.
     pub(super) fn peak_occupied_bytes(&self) -> u64 {
         self.peak_occupied.load(Ordering::Relaxed)
     }
@@ -170,8 +185,7 @@ impl Scratch {
     pub(super) fn reclaim_file(&self, path: &Path) -> Result<(), GfError> {
         let bytes = std::fs::metadata(path).map_err(storage)?.len();
         std::fs::remove_file(path).map_err(storage)?;
-        self.release(bytes);
-        Ok(())
+        self.release(bytes)
     }
 
     /// Delete the tree now and report a failure, instead of leaving it to `Drop`.
@@ -293,6 +307,10 @@ impl Partitions {
         let mut records = self.state[index]
             .lock()
             .map_err(|_| storage("scratch partition lock poisoned"))?;
+        // Reserve the whole block before the write can grow the file, and
+        // keep the reservation when the write fails: a partial write may
+        // exist and the attempt tears the tree down either way.
+        scratch.occupy(block.len() as u64)?;
         OpenOptions::new()
             .append(true)
             .open(&self.paths[index])
@@ -305,7 +323,6 @@ impl Partitions {
             .fetch_add(block.len() as u64, Ordering::Relaxed);
         self.written
             .fetch_add(block.len() as u64, Ordering::Relaxed);
-        scratch.occupy(block.len() as u64);
         Ok(())
     }
 
@@ -537,11 +554,14 @@ impl<'a> Appender<'a> {
         let crc = crc32c(&self.block[HEADER..]);
         self.block[..4].copy_from_slice(&length.to_le_bytes());
         self.block[4..HEADER].copy_from_slice(&crc.to_le_bytes());
+        // Reserve the whole block before the write can grow the file, and
+        // keep the reservation when the write fails: a partial write may
+        // exist and the attempt tears the tree down either way.
+        self.scratch.occupy(self.block.len() as u64)?;
         self.file.write_all(&self.block).map_err(storage)?;
         self.scratch
             .written
             .fetch_add(self.block.len() as u64, Ordering::Relaxed);
-        self.scratch.occupy(self.block.len() as u64);
         self.block.truncate(HEADER);
         Ok(())
     }

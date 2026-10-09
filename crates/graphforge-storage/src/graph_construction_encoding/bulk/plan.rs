@@ -202,12 +202,14 @@ pub struct BulkBuildReport {
     /// Bytes it read back.
     #[serde(default)]
     pub scratch_read_bytes: u64,
-    /// The largest number of bytes its scratch files occupied at once, block
-    /// headers included. Files leave the occupancy as soon as their final read
-    /// reclaims them, so this is the scratch the build really held, strictly
-    /// less than the cumulative `scratch_write_bytes` when anything was
-    /// reclaimed early. Property scratch and refinement outputs are included;
-    /// it says nothing about input, output or process memory.
+    /// The largest number of bytes reserved for its scratch files at once,
+    /// block headers and bytes still buffered in a writer included. Files
+    /// leave the occupancy as soon as their final read reclaims them, so on
+    /// a successful build this is strictly less than the cumulative
+    /// `scratch_write_bytes` when anything was reclaimed early. This is a
+    /// conservative bound on logical reserved file bytes, not the
+    /// filesystem's allocated blocks or an exact physical overlap, and it
+    /// says nothing about input, output or process memory.
     #[serde(default)]
     pub scratch_peak_occupied_bytes: u64,
     /// Edges in the largest edge-UUID range partition of the over-budget route.

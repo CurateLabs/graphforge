@@ -1,4 +1,3 @@
-
 use super::super::scratch_edges::{EDGE_RECORD, ScatteredEdges};
 use super::*;
 use crate::graph_construction_encoding::StableDirectory;

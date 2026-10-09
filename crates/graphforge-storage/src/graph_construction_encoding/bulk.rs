@@ -202,9 +202,10 @@ struct ScratchReport {
     csr_partitions: u64,
     write_bytes: u64,
     read_bytes: u64,
-    /// The largest number of bytes scratch files occupied at once: files leave
-    /// the count as their final reads reclaim them, so this is the scratch the
-    /// build really held, not the bytes it moved.
+    /// The largest number of bytes reserved for scratch files at once: a
+    /// writer reserves each append before its file can grow, and a file's
+    /// final read reclaims it, so this is a conservative bound on the
+    /// scratch the build really held, not the bytes it moved.
     peak_occupied_bytes: u64,
     largest_partition: u64,
     refinement_steps: u64,
