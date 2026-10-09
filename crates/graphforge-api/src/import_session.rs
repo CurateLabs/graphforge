@@ -33,6 +33,7 @@ mod parquet_admission;
 mod parquet_alloc;
 mod parquet_brotli;
 mod parquet_codec;
+mod parquet_compact;
 mod parquet_delta;
 mod parquet_events;
 mod parquet_levels;
