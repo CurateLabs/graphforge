@@ -170,13 +170,7 @@ impl PropertyRows<'_> {
             .iter()
             .map(|run| Input::open(self, run, lower, upper))
             .collect::<Result<Vec<_>, _>>()?;
-        let (bytes, rows) = runs.iter().fold((0_usize, 0_usize), |(bytes, rows), run| {
-            (
-                bytes.saturating_add(usize::try_from(run.bytes()).unwrap_or(usize::MAX)),
-                rows.saturating_add(usize::try_from(run.rows).unwrap_or(usize::MAX)),
-            )
-        });
-        let step = self.rows_per_frame(bytes, rows);
+        let max_rows = self.budgets.max_batch_rows;
         let mut heap = BinaryHeap::with_capacity(inputs.len());
         for (index, input) in inputs.iter_mut().enumerate() {
             if input.load(uuid_name)? {
@@ -185,9 +179,32 @@ impl PropertyRows<'_> {
         }
         let mut writer = self.run_writer()?;
         let mut batches = Vec::<RecordBatch>::new();
-        let mut indices = Vec::<(usize, usize)>::with_capacity(step);
+        let mut indices = Vec::<(usize, usize)>::with_capacity(max_rows);
+        let mut chunk_bytes = 0_usize;
         let mut bounds = None::<(Uuid, Uuid)>;
         while let Some(Reverse((uuid, index))) = heap.pop() {
+            let source_batch = inputs[index].batch.as_ref().expect("a loaded frame");
+            let row_bytes = Self::row_bytes(source_batch, inputs[index].row)?;
+            if indices.is_empty()
+                && row_bytes > self.frame_target
+                && source_batch.get_array_memory_size() > self.budgets.max_batch_bytes
+            {
+                return Err(storage(
+                    "wide property row exceeds its validated source batch window",
+                ));
+            }
+            let next_bytes = chunk_bytes
+                .checked_add(row_bytes)
+                .ok_or_else(|| storage("property frame byte total overflows"))?;
+            if !indices.is_empty() && (indices.len() >= max_rows || next_bytes > self.frame_target)
+            {
+                Self::flush_chunk(&mut writer, &mut batches, &mut indices, &mut bounds)?;
+                chunk_bytes = 0;
+                crate::graph_construction::construction_failpoint("bulk.during_property_merge");
+                for input in &mut inputs {
+                    input.slot = None;
+                }
+            }
             let input = &mut inputs[index];
             let slot = if let Some(slot) = input.slot {
                 slot
@@ -197,14 +214,18 @@ impl PropertyRows<'_> {
                 batches.len() - 1
             };
             indices.push((slot, input.row));
+            chunk_bytes = chunk_bytes
+                .checked_add(row_bytes)
+                .ok_or_else(|| storage("property frame byte total overflows"))?;
             bounds = Some(bounds.map_or((uuid, uuid), |(first, _)| (first, uuid)));
             input.row += 1;
             if input.row < input.end || input.load(uuid_name)? {
                 heap.push(Reverse((input.current(), index)));
             }
-            if indices.len() == step {
+            if indices.len() == max_rows {
                 check_cancelled(cancel)?;
                 Self::flush_chunk(&mut writer, &mut batches, &mut indices, &mut bounds)?;
+                chunk_bytes = 0;
                 crate::graph_construction::construction_failpoint("bulk.during_property_merge");
                 for input in &mut inputs {
                     input.slot = None;
