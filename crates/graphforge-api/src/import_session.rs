@@ -30,6 +30,7 @@ mod memory_budget;
 mod normalization;
 mod parquet_admission;
 mod parquet_brotli;
+mod parquet_codec;
 mod parquet_delta;
 mod parquet_scan;
 

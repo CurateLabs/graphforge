@@ -2193,6 +2193,7 @@ dependencies = [
  "brotli-decompressor",
  "bytes",
  "codspeed-divan-compat",
+ "crc32fast",
  "cucumber",
  "datafusion",
  "fs4 1.1.0",
@@ -2213,15 +2214,18 @@ dependencies = [
  "graphforge-search",
  "graphforge-storage",
  "graphforge-value",
+ "miniz_oxide",
  "parquet",
  "serde",
  "serde_json",
  "serde_yaml_ng",
  "sha2",
+ "snap",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "uuid",
+ "zstd-safe 8.0.0",
 ]
 
 [[package]]
