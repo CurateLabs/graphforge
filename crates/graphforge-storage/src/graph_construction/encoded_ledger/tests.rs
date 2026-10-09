@@ -586,6 +586,138 @@ fn unpinned_inventory_resumes_under_the_control_bound_without_reshaping() {
     assert_omitted_and_restored(root.path(), operation, "resumed");
 }
 
+/// Reserve blocks past EOF, as in the unsynced capture tests (#1928),
+/// proving that identity, length and every content byte stay unchanged.
+#[cfg(target_os = "linux")]
+fn grow_allocation_keeping_content(path: &Path) {
+    let content = std::fs::read(path).unwrap();
+    let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    let identity = file_identity(&file).unwrap();
+    let before = graphforge_filesystem::file_space_usage(&file).unwrap();
+    rustix::fs::fallocate(
+        &file,
+        rustix::fs::FallocateFlags::KEEP_SIZE,
+        before.logical_bytes,
+        1 << 20,
+    )
+    .unwrap();
+    let after = graphforge_filesystem::file_space_usage(&file).unwrap();
+    assert!(after.allocated_bytes > before.allocated_bytes);
+    assert_eq!(after.logical_bytes, before.logical_bytes);
+    assert_eq!(file_identity(&file).unwrap(), identity);
+    assert_eq!(std::fs::read(path).unwrap(), content);
+}
+
+/// #1881. Reopening an encoded checkpoint admits allocation-only drift and
+/// restores the allocation observed on reopen, including on repeated resume.
+#[cfg(target_os = "linux")]
+#[test]
+fn reopen_accepts_encoded_allocation_drift_and_records_observed_allocation() {
+    let root = TempDir::new().unwrap();
+    crate::open_or_initialize_project(root.path()).unwrap();
+    let operation = Uuid::from_u128(9_982);
+    let mut session = open_session(root.path(), operation);
+    let shape = stage_and_shape(&mut session, 1);
+    session.encode_canonical(&shape, 1).unwrap();
+    drop(session);
+    let session_root = construction_session_root_path(root.path(), operation);
+    let before = persisted(&session_root);
+    assert!(before["encoded_ledger_sha256"].is_string());
+    let path = session_root.join("encoded-v1/graph/topology/generation.json");
+    grow_allocation_keeping_content(&path);
+    let reopened = open_session(root.path(), operation);
+    allocation_evidence(reopened.evidence());
+    drop(reopened);
+    assert_omitted_and_restored(root.path(), operation, "allocation drift");
+}
+
+/// #1881. Allocation drift never excuses a change to the artifact: an append
+/// refuses reopen before the control is rewritten, with and without moved
+/// allocation. A same-length in-place edit is not reopen's to find; the
+/// commit boundary refuses it (see
+/// `ladder_path_refuses_same_inode_encoded_corruption_at_cas_install`).
+#[cfg(target_os = "linux")]
+#[test]
+fn reopen_refuses_encoded_length_change_with_or_without_allocation_drift() {
+    use std::io::{Seek as _, Write as _};
+    for drift in [false, true] {
+        let root = TempDir::new().unwrap();
+        crate::open_or_initialize_project(root.path()).unwrap();
+        let operation = Uuid::from_u128(9_983);
+        let mut session = open_session(root.path(), operation);
+        let shape = stage_and_shape(&mut session, 1);
+        session.encode_canonical(&shape, 1).unwrap();
+        drop(session);
+        let session_root = construction_session_root_path(root.path(), operation);
+        let before = std::fs::read(session_root.join(CHECKPOINT)).unwrap();
+        let path = session_root.join("encoded-v1/graph/topology/generation.json");
+        if drift {
+            grow_allocation_keeping_content(&path);
+        }
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let identity = file_identity(&file).unwrap();
+        file.seek(std::io::SeekFrom::End(0)).unwrap();
+        file.write_all(b" ").unwrap();
+        assert_eq!(file_identity(&file).unwrap(), identity);
+        let error = GraphConstructionSession::open(root.path(), operation, 0, two_row_budgets())
+            .err()
+            .unwrap_or_else(|| panic!("drift={drift}: must refuse reopen"));
+        assert!(
+            error
+                .to_string()
+                .contains("encoded artifact length changed"),
+            "drift={drift}: {error}"
+        );
+        assert_eq!(
+            std::fs::read(session_root.join(CHECKPOINT)).unwrap(),
+            before,
+            "drift={drift}"
+        );
+    }
+}
+
+/// The pre-v1 allocation-bearing digest is deliberately unsupported. Refusal
+/// preserves the old checkpoint so an incompatible session is never rewritten.
+#[test]
+fn reopen_refuses_the_legacy_allocation_bearing_encoded_digest() {
+    let root = TempDir::new().unwrap();
+    crate::open_or_initialize_project(root.path()).unwrap();
+    let operation = Uuid::from_u128(9_984);
+    let mut session = open_session(root.path(), operation);
+    let shape = stage_and_shape(&mut session, 1);
+    session.encode_canonical(&shape, 1).unwrap();
+    let entries = session
+        .checkpoint
+        .encoded_index
+        .as_ref()
+        .unwrap()
+        .entries
+        .clone();
+    drop(session);
+    let session_root = construction_session_root_path(root.path(), operation);
+    let mut legacy = Sha256::new();
+    legacy.update(b"graphforge-construction-encoded-ledger-v1\0");
+    for (key, allocated) in entries {
+        legacy.update((key.len() as u64).to_be_bytes());
+        legacy.update(key.as_bytes());
+        legacy.update(allocated.to_be_bytes());
+    }
+    let mut control = persisted(&session_root);
+    control["encoded_ledger_sha256"] = serde_json::json!(hex(&legacy.finalize()));
+    let bytes = serde_json::to_vec(&control).unwrap();
+    std::fs::write(session_root.join(CHECKPOINT), &bytes).unwrap();
+    let error = GraphConstructionSession::open(root.path(), operation, 0, two_row_budgets())
+        .err()
+        .expect("legacy allocation-bearing digest must refuse reopen");
+    assert!(
+        error
+            .to_string()
+            .contains("encoded artifact identities differ"),
+        "{error}"
+    );
+    assert_eq!(std::fs::read(session_root.join(CHECKPOINT)).unwrap(), bytes);
+}
+
 /// #900. An encoded artifact replaced by a byte-identical file under a new
 /// inode cannot be adopted as ledger authority on reopen: the re-derived
 /// entries no longer reproduce the recorded digest.
@@ -607,7 +739,7 @@ fn reopen_refuses_encoded_entries_that_differ_from_the_recorded_digest() {
     assert!(
         error
             .to_string()
-            .contains("encoded artifact identities or allocations differ from checkpoint"),
+            .contains("encoded artifact identities differ from checkpoint"),
         "{error}"
     );
     assert_eq!(
@@ -712,6 +844,20 @@ fn ledger(entries: &[(&str, u64)]) -> BTreeMap<String, u64> {
         .iter()
         .map(|(key, allocated)| ((*key).to_owned(), *allocated))
         .collect()
+}
+
+#[test]
+fn encoded_ledger_digest_authenticates_identities_without_allocations() {
+    let first = ledger(&[("a", 4096), ("c", 8192)]);
+    let drifted = ledger(&[("a", 8192), ("c", 16384)]);
+    assert_eq!(
+        encoded_ledger_sha256(&first),
+        encoded_ledger_sha256(&drifted)
+    );
+    assert_ne!(
+        encoded_ledger_sha256(&first),
+        encoded_ledger_sha256(&ledger(&[("a", 4096), ("d", 8192)]))
+    );
 }
 
 #[test]
