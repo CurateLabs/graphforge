@@ -80,10 +80,13 @@ impl Wire {
         self
     }
 
-    /// `depth` nested single-field structs, each holding one more struct.
-    fn nested(self, depth: usize) -> Self {
-        let with_headers = (0..depth).fold(self, |wire, _| wire.field(Kind::Struct, 1, 0));
-        (0..depth).fold(with_headers, |wire, _| wire.stop())
+    /// `total` nested single-field structs, counting the struct the caller
+    /// skips: `total - 1` nested field headers and `total` STOPs, so even
+    /// the innermost struct at the depth limit ends with its own STOP.
+    fn nested(self, total: usize) -> Self {
+        let headers = total.saturating_sub(1);
+        let with_headers = (0..headers).fold(self, |wire, _| wire.field(Kind::Struct, 1, 0));
+        (0..total).fold(with_headers, |wire, _| wire.stop())
     }
 
     fn slice(&self) -> &[u8] {
@@ -93,6 +96,10 @@ impl Wire {
 
 fn cursor_of(wire: &Wire) -> CompactSlice<'_> {
     CompactSlice::new(wire.slice(), None)
+}
+
+fn cancelled_cursor<'a>(wire: &'a Wire, token: &'a CancellationToken) -> CompactSlice<'a> {
+    CompactSlice::new(wire.slice(), Some(token))
 }
 
 fn assert_malformed(error: GfError) {
@@ -174,6 +181,25 @@ fn allocating_list_accepts_an_empty_list_at_a_zero_budget() {
 }
 
 #[test]
+fn allocating_list_ignores_a_valid_advertised_tag_for_the_struct_consumer() {
+    // One element for a struct consumer: its minimal body is a single STOP.
+    // The header advertises Double — valid wire the consumer ignores, as
+    // native `read_thrift_vec` dispatches on the expected element type, not
+    // on the advertised tag.
+    let wire = Wire::new().list(Kind::Double as u8, 1).stop();
+    let mut cursor = cursor_of(&wire);
+    let list = cursor.allocating_list(8, 64).unwrap();
+    assert_eq!(list.count, 1);
+    assert_eq!(list.element, Kind::Double);
+    assert_eq!(cursor.position(), 1); // header only; the caller owns the body walk
+
+    // The consumer walks the body as the struct it expects and reads the
+    // element's STOP.
+    assert!(cursor.read_field(0).unwrap().is_none());
+    assert_eq!(cursor.position(), wire.slice().len());
+}
+
+#[test]
 fn extended_list_counts_above_i32_max_are_malformed() {
     let above_i32_max = usize::try_from(i64::from(i32::MAX) + 1).expect("fits usize");
     let wire = Wire::new().list(8, above_i32_max);
@@ -208,13 +234,15 @@ fn bool_values_accept_only_native_tags() {
 }
 
 #[test]
-fn empty_and_legacy_bool_list_headers_match_native() {
+fn empty_and_boolean_list_headers_match_native() {
     let empty = Wire::new().byte(0x00);
     let mut cursor = cursor_of(&empty);
     let list = cursor.read_list().unwrap();
     assert_eq!((list.count, list.element), (0, Kind::Byte));
 
-    for header in [0x01, 0x21] {
+    // Tag 1 is the legacy boolean tag, tag 2 the spec boolean tag; both
+    // normalize to `BoolTrue` at any count nibble.
+    for header in [0x01, 0x21, 0x02, 0x22] {
         let wire = Wire::new().byte(header);
         let mut cursor = cursor_of(&wire);
         let list = cursor.read_list().unwrap();
@@ -238,7 +266,7 @@ fn struct_fields_use_delta_full_ids_and_stop() {
 
     let field = cursor.read_field(2).unwrap().expect("full-id field");
     assert_eq!((field.id, field.kind), (-7, Kind::Binary));
-    assert_eq!(cursor.read_string().unwrap(), "ok");
+    assert_eq!(cursor.read_utf8().unwrap().as_bytes(), b"ok".as_slice());
 
     assert!(cursor.read_field(-7).unwrap().is_none());
     assert_eq!(cursor.remaining(), [0xFF_u8].as_slice());
@@ -294,11 +322,14 @@ fn scalars_read_with_native_widths() {
 fn binary_reads_borrow_bounded_utf8_ranges() {
     let wire = Wire::new().binary("héllo".as_bytes());
     let mut cursor = cursor_of(&wire);
-    assert_eq!(cursor.read_string().unwrap(), "héllo");
+    let utf8 = cursor.read_utf8().unwrap();
+    assert_eq!(utf8.len(), "héllo".len());
+    assert_eq!(utf8.as_bytes(), "héllo".as_bytes());
+    assert_eq!(cursor.position(), wire.slice().len());
 
     let wire = Wire::new().binary(&[0xFF, 0xFE]);
     let mut cursor = cursor_of(&wire);
-    assert_malformed(cursor.read_string().unwrap_err());
+    assert_malformed(cursor.read_utf8().unwrap_err());
 
     let wire = Wire::new().vlq(10).repeated(0x01, 3);
     let mut cursor = cursor_of(&wire);
@@ -307,6 +338,57 @@ fn binary_reads_borrow_bounded_utf8_ranges() {
     let wire = Wire::new().vlq(u64::MAX);
     let mut cursor = cursor_of(&wire);
     assert_malformed(cursor.read_bytes().unwrap_err());
+}
+
+#[test]
+fn utf8_windows_carry_multibyte_sequences_across_the_boundary() {
+    // A 2-byte sequence straddles the 1024-byte window edge: the first
+    // window ends on its lead byte, the next window starts on the carried
+    // prefix and completes the sequence.
+    let mut payload = vec![b'a'; 1023];
+    payload.extend_from_slice("é".as_bytes());
+    payload.extend_from_slice(b"tail");
+    let wire = Wire::new().binary(&payload);
+    let mut cursor = cursor_of(&wire);
+    let utf8 = cursor.read_utf8().unwrap();
+    assert_eq!(utf8.len(), payload.len());
+    assert_eq!(utf8.as_bytes(), payload.as_slice());
+    assert_eq!(cursor.position(), wire.slice().len());
+}
+
+#[test]
+fn utf8_windows_refuse_a_continuation_broken_across_the_boundary() {
+    let mut payload = vec![b'a'; 1023];
+    payload.push(0xC3); // lead byte on the window edge
+    payload.push(b'!'); // not a continuation byte: caught in the next window
+    let wire = Wire::new().binary(&payload);
+    let mut cursor = cursor_of(&wire);
+    assert_malformed(cursor.read_utf8().unwrap_err());
+}
+
+#[test]
+fn utf8_refuses_sequences_truncated_by_the_end_of_the_range() {
+    for trailer in [
+        vec![0xC3],             // 2-byte lead without its continuation
+        vec![0xE2, 0x82],       // 3-byte lead missing its last continuation
+        vec![0xF0, 0x9F, 0x92], // 4-byte lead missing its last continuation
+    ] {
+        let mut payload = vec![b'a'; 600];
+        payload.extend_from_slice(&trailer);
+        let wire = Wire::new().binary(&payload);
+        let mut cursor = cursor_of(&wire);
+        assert_malformed(cursor.read_utf8().unwrap_err());
+    }
+}
+
+#[test]
+fn utf8_admits_an_empty_range() {
+    let wire = Wire::new().binary(b"");
+    let mut cursor = cursor_of(&wire);
+    let utf8 = cursor.read_utf8().unwrap();
+    assert_eq!(utf8.len(), 0);
+    assert_eq!(utf8.as_bytes(), b"".as_slice());
+    assert_eq!(cursor.position(), 1); // the length varint only
 }
 
 #[test]
@@ -337,14 +419,51 @@ fn varints_reject_truncation_and_overflow_but_accept_safe_overlong_prefixes() {
 
 #[test]
 fn skip_depth_matches_the_native_64_level_limit() {
+    // 64 structs in total: the outer skipped struct plus 63 nested children,
+    // each closed by its own STOP.
     let shallow = Wire::new().nested(64);
     let mut cursor = cursor_of(&shallow);
     cursor.skip(Kind::Struct).unwrap();
     assert_eq!(cursor.position(), shallow.slice().len());
 
+    // The 65th struct would be visited at depth 0 and is refused.
     let deep = Wire::new().nested(65);
     let mut cursor = cursor_of(&deep);
     assert_malformed(cursor.skip(Kind::Struct).unwrap_err());
+}
+
+#[test]
+fn a_boolean_list_child_at_depth_zero_is_refused_before_its_fold() {
+    // 62 nested struct headers put the innermost struct at depth 2, so its
+    // boolean list sits at depth 1 and native would call its zero-byte
+    // elements at depth 0. The constant-time fold must not bypass that
+    // refusal.
+    let mut refused = Wire::new();
+    for _ in 0..62 {
+        refused = refused.field(Kind::Struct, 1, 0);
+    }
+    let mut refused = refused.field(Kind::List, 1, 0).list(1, 2);
+    for _ in 0..63 {
+        refused = refused.stop();
+    }
+    let mut cursor = cursor_of(&refused);
+    assert_malformed(cursor.skip(Kind::Struct).unwrap_err());
+    assert_eq!(cursor.position(), 64); // the headers and the list header only
+
+    // One nesting level shallower the same list folds in constant time, so
+    // the refusal is the depth rule, not the fold itself.
+    let mut folded = Wire::new();
+    for _ in 0..61 {
+        folded = folded.field(Kind::Struct, 1, 0);
+    }
+    let mut folded = folded.field(Kind::List, 1, 0).list(1, 2);
+    for _ in 0..62 {
+        folded = folded.stop();
+    }
+    let folded = folded.byte(0xAA);
+    let mut cursor = cursor_of(&folded);
+    cursor.skip(Kind::Struct).unwrap();
+    assert_eq!(cursor.remaining(), [0xAA_u8].as_slice());
 }
 
 #[test]
@@ -449,4 +568,65 @@ fn cancellation_is_typed_and_observed_at_entries() {
     let uncancelled = CancellationToken::new();
     let mut cursor = CompactSlice::new(&[], Some(&uncancelled));
     cursor.skip(Kind::BoolTrue).unwrap();
+}
+
+#[test]
+fn cancelled_public_entries_refuse_before_the_first_byte() {
+    let token = CancellationToken::new();
+    token.cancel();
+    let wire = Wire::new()
+        .byte(0x2C) // a field header that would parse
+        .zigzag(9)
+        .binary("é".as_bytes())
+        .list(1, 2);
+    let wire = &wire;
+
+    let mut cursor = cancelled_cursor(wire, &token);
+    assert_cancelled(cursor.read_byte().unwrap_err());
+    assert_eq!(cursor.position(), 0);
+
+    let mut cursor = cancelled_cursor(wire, &token);
+    assert_cancelled(cursor.read_vlq().unwrap_err());
+    assert_eq!(cursor.position(), 0);
+
+    let mut cursor = cancelled_cursor(wire, &token);
+    assert_cancelled(cursor.read_zig_zag().unwrap_err());
+    assert_eq!(cursor.position(), 0);
+
+    let mut cursor = cancelled_cursor(wire, &token);
+    assert_cancelled(cursor.read_i16().unwrap_err());
+    assert_eq!(cursor.position(), 0);
+
+    let mut cursor = cancelled_cursor(wire, &token);
+    assert_cancelled(cursor.read_i32().unwrap_err());
+    assert_eq!(cursor.position(), 0);
+
+    let mut cursor = cancelled_cursor(wire, &token);
+    assert_cancelled(cursor.read_bool_value().unwrap_err());
+    assert_eq!(cursor.position(), 0);
+
+    let mut cursor = cancelled_cursor(wire, &token);
+    assert_cancelled(cursor.read_bytes().unwrap_err());
+    assert_eq!(cursor.position(), 0);
+
+    let mut cursor = cancelled_cursor(wire, &token);
+    assert_cancelled(cursor.read_utf8().unwrap_err());
+    assert_eq!(cursor.position(), 0);
+
+    let mut cursor = cancelled_cursor(wire, &token);
+    assert_cancelled(cursor.read_field(0).unwrap_err());
+    assert_eq!(cursor.position(), 0);
+
+    let mut cursor = cancelled_cursor(wire, &token);
+    assert_cancelled(cursor.read_list().unwrap_err());
+    assert_eq!(cursor.position(), 0);
+
+    let mut cursor = cancelled_cursor(wire, &token);
+    assert_cancelled(cursor.skip(Kind::List).unwrap_err());
+    assert_eq!(cursor.position(), 0);
+
+    // Cancellation precedes the zero-width admission error too.
+    let mut cursor = cancelled_cursor(wire, &token);
+    assert_cancelled(cursor.allocating_list(0, 0).unwrap_err());
+    assert_eq!(cursor.position(), 0);
 }

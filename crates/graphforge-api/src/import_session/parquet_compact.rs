@@ -14,7 +14,13 @@
 //! be fully consumed: bytes after a root struct's STOP stay untouched, exactly
 //! as the native parser leaves them. A boolean struct field carries no
 //! payload, so its value rides in [`Kind::BoolTrue`] / [`Kind::BoolFalse`],
-//! mirroring the native `FieldIdentifier::bool_val`.
+//! mirroring the native `FieldIdentifier::bool_val`. Declared UTF-8 strings
+//! are admitted as a borrowed [`BorrowedUtf8`] range, validated in bounded
+//! windows — never re-scanned or copied as a whole.
+//!
+//! Every public reading entry observes cancellation before it consumes a
+//! byte or chooses any other error, including [`CompactSlice::allocating_list`]'s
+//! zero-width admission error.
 //!
 //! Guard contract: [`CompactSlice::allocating_list`] only admits a declared
 //! capacity against the caller's admitted budget and the bytes that remain.
@@ -24,12 +30,17 @@
 //! be used for unknown boolean lists: native skips their elements without
 //! reading any bytes, so [`CompactSlice::skip`] folds those lists instead.
 //!
-//! Two documented divergences, both reachable only from hostile writers: the
+//! Documented divergences, all reachable only from hostile writers: the
 //! value-reading [`CompactSlice::read_vlq`] caps the varint at the 10 bytes a
 //! `u64` can occupy instead of letting the native decoder's shifts wrap into
-//! lost bits, and list counts above `i32::MAX` are rejected where the native
-//! decoder's wrapping shifts could smuggle a small count out of a huge
-//! overlong encoding.
+//! lost bits; [`CompactSlice::read_i16`], [`CompactSlice::read_i32`], and full
+//! field ids refuse a decoded value that does not fit the declared width,
+//! where the native int16/int32 readers accept it with a truncating cast — so
+//! a malformed varint that fits `u64` but not the target width is a typed
+//! `integer_width` refusal here and silently different bits natively; and
+//! list counts above `i32::MAX` are rejected where the native decoder's
+//! wrapping shifts could smuggle a small count out of a huge overlong
+//! encoding.
 
 use graphforge_core::GfError;
 
@@ -41,6 +52,11 @@ const SKIP_DEPTH: i8 = 64;
 
 /// Element cadence at which skipping re-checks cancellation.
 const SKIP_CANCEL_CADENCE: usize = 1024;
+
+/// Bytes of UTF-8 validated per bounded window before cancellation is
+/// re-checked. Far longer than any incomplete UTF-8 prefix (at most three
+/// bytes), which is what keeps every window step advancing.
+const UTF8_WINDOW: usize = 1024;
 
 fn unexpected_end() -> GfError {
     storage("Parquet footer compact stream ends before the declared bytes")
@@ -152,6 +168,31 @@ pub(super) struct List {
     pub(super) element: Kind,
 }
 
+/// An admitted borrowed UTF-8 range, validated in bounded windows.
+///
+/// Deliberately not a [`str`]: admitting a footer string must not demand a
+/// whole-range re-validation pass or a copy, and the root footer facts that
+/// will consume these ranges need raw bytes, byte offsets, and ASCII key
+/// comparisons — none of which require string semantics. The only accessors
+/// are the borrowed [`Self::as_bytes`] and [`Self::len`]; there is no
+/// accessor that validates or copies the whole range as a string, and no
+/// unsafe.
+pub(super) struct BorrowedUtf8<'a> {
+    bytes: &'a [u8],
+}
+
+impl<'a> BorrowedUtf8<'a> {
+    /// The admitted UTF-8 bytes.
+    pub(super) fn as_bytes(&self) -> &'a [u8] {
+        self.bytes
+    }
+
+    /// The admitted length in bytes.
+    pub(super) fn len(&self) -> usize {
+        self.bytes.len()
+    }
+}
+
 /// Borrowing cursor over the unconsumed tail of an already-owned Parquet
 /// footer. Holds only the borrowed bytes, an optional borrowed cancellation
 /// token, and the consumed offset; construction allocates nothing.
@@ -220,6 +261,7 @@ impl<'a> CompactSlice<'a> {
 
     /// Read one wire byte.
     pub(super) fn read_byte(&mut self) -> Result<u8, GfError> {
+        self.cancelled()?;
         let Some((&byte, rest)) = self.remaining.split_first() else {
             return Err(unexpected_end());
         };
@@ -232,6 +274,7 @@ impl<'a> CompactSlice<'a> {
     /// a final payload of at most 1: anything else is rejected as overflow
     /// instead of wrapping the way the native decoder's shifted bits would.
     pub(super) fn read_vlq(&mut self) -> Result<u64, GfError> {
+        self.cancelled()?;
         let mut value = 0_u64;
         for index in 0..10_u32 {
             let byte = self.read_byte()?;
@@ -249,18 +292,21 @@ impl<'a> CompactSlice<'a> {
     /// Read a zig-zag encoded signed 64-bit value.
     #[allow(clippy::cast_possible_wrap)] // zigzag decoding
     pub(super) fn read_zig_zag(&mut self) -> Result<i64, GfError> {
+        self.cancelled()?;
         let value = self.read_vlq()?;
         Ok(((value >> 1) as i64) ^ -((value & 1) as i64))
     }
 
     /// Read a zig-zag varint that must fit `i16`, as full field ids do.
     pub(super) fn read_i16(&mut self) -> Result<i16, GfError> {
+        self.cancelled()?;
         let value = self.read_zig_zag()?;
         i16::try_from(value).map_err(|_| integer_width())
     }
 
     /// Read a zig-zag varint that must fit `i32`.
     pub(super) fn read_i32(&mut self) -> Result<i32, GfError> {
+        self.cancelled()?;
         let value = self.read_zig_zag()?;
         i32::try_from(value).map_err(|_| integer_width())
     }
@@ -268,6 +314,7 @@ impl<'a> CompactSlice<'a> {
     /// Read a boolean list-element value. The native decoder accepts 1 as
     /// true and both 0 and 2 as false.
     pub(super) fn read_bool_value(&mut self) -> Result<bool, GfError> {
+        self.cancelled()?;
         match self.read_byte()? {
             0x01 => Ok(true),
             0x00 | 0x02 => Ok(false),
@@ -277,6 +324,7 @@ impl<'a> CompactSlice<'a> {
 
     /// Borrow a declared-length binary range; nothing is copied.
     pub(super) fn read_bytes(&mut self) -> Result<&'a [u8], GfError> {
+        self.cancelled()?;
         let length = self.read_vlq()?;
         let length = usize::try_from(length).map_err(|_| unexpected_end())?;
         let range = self.remaining.get(..length).ok_or_else(unexpected_end)?;
@@ -285,10 +333,47 @@ impl<'a> CompactSlice<'a> {
         Ok(range)
     }
 
-    /// Borrow a declared-length UTF-8 string; nothing is copied.
-    pub(super) fn read_string(&mut self) -> Result<&'a str, GfError> {
+    /// Admit a declared-length UTF-8 range without copying it.
+    ///
+    /// The borrowed bytes are validated in bounded [`UTF8_WINDOW`] windows
+    /// with `std::str::from_utf8`, so a hostile footer cannot hold the cursor
+    /// in one unbounded scan: cancellation is re-checked before every window
+    /// and once after the last, and nothing is allocated proportionally to
+    /// the declared length. A window edge landing inside a multibyte
+    /// sequence reports an incomplete prefix (`error_len` is `None`); with
+    /// input left the window advances over `valid_up_to` only, carrying the
+    /// at-most-three prefix bytes into the next window so sequences are
+    /// never split — and because a whole [`UTF8_WINDOW`] window can never
+    /// consist only of that prefix, `valid_up_to` is positive there and every
+    /// such step advances. A real invalid byte, or a sequence truncated by
+    /// the end of the declared range, refuses the value.
+    ///
+    /// The admitted range is returned as [`BorrowedUtf8`], not [`str`]: the
+    /// cursor lends admitted bytes for byte, offset, and ASCII key
+    /// comparison, with no accessor that re-validates or copies the whole
+    /// range as a string.
+    pub(super) fn read_utf8(&mut self) -> Result<BorrowedUtf8<'a>, GfError> {
+        self.cancelled()?;
         let bytes = self.read_bytes()?;
-        std::str::from_utf8(bytes).map_err(|_| invalid_utf8())
+        let mut start = 0_usize;
+        while start < bytes.len() {
+            self.cancelled()?;
+            let end = (start + UTF8_WINDOW).min(bytes.len());
+            match std::str::from_utf8(&bytes[start..end]) {
+                Ok(_) => start = end,
+                Err(error) if error.error_len().is_some() => return Err(invalid_utf8()),
+                Err(error) => {
+                    if end == bytes.len() {
+                        // The range itself ends inside the sequence.
+                        return Err(invalid_utf8());
+                    }
+                    debug_assert!(error.valid_up_to() > 0);
+                    start += error.valid_up_to();
+                }
+            }
+        }
+        self.cancelled()?;
+        Ok(BorrowedUtf8 { bytes })
     }
 
     /// Read the next struct field, or `None` at the struct's STOP. `previous`
@@ -436,13 +521,14 @@ impl<'a> CompactSlice<'a> {
 
     /// Admit a known allocating list before the caller allocates for it.
     ///
-    /// Reads the list header and then rejects, with typed resource-limit
-    /// errors, a zero `element_width`, a `count * element_width` that is not
-    /// representable as `usize`/`isize`, or a request above
-    /// `available_request_bytes` — all before the caller may reserve. The
-    /// declared count must also fit the remaining bytes, because every known
-    /// allocating element (structs, integers, key/value entries, column
-    /// orders, histograms) needs at least one body byte.
+    /// Observes cancellation on entry — before the zero-width admission
+    /// error or any byte is consumed — and then rejects, with typed
+    /// resource-limit errors, a zero `element_width`, a
+    /// `count * element_width` that is not representable as `usize`/`isize`,
+    /// or a request above `available_request_bytes` — all before the caller
+    /// may reserve. The declared count must also fit the remaining bytes,
+    /// because every known allocating element (structs, integers, key/value
+    /// entries, column orders, histograms) needs at least one body byte.
     ///
     /// This does not validate element grammar and does not claim a complete
     /// footer or metadata envelope: callers must walk every actual element and
@@ -459,10 +545,10 @@ impl<'a> CompactSlice<'a> {
         element_width: usize,
         available_request_bytes: u64,
     ) -> Result<List, GfError> {
+        self.cancelled()?;
         if element_width == 0 {
             return Err(width_zero());
         }
-        self.cancelled()?;
         let list = self.read_list()?;
         if list.count == 0 {
             return Ok(list);
