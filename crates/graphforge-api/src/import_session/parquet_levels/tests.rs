@@ -447,13 +447,14 @@ fn allowed_maximum_check_blocks_out_of_range_levels_and_indices() {
 #[test]
 fn first_packed_run_payload_starts_after_its_vlq_header() {
     let max = 5_i16;
-    let width = num_required_bits(u64::from(max));
+    let width = num_required_bits(u64::try_from(max).unwrap());
     let values: Vec<u64> = vec![5, 1, 4, 2];
     let stream = packed_run(1, &values, width);
     let mut cursor = HybridLevels::new(&stream, max, values.len()).unwrap();
     assert_eq!(drain_levels(&mut cursor), as_levels(&values));
     assert_eq!(cursor.next_level().unwrap(), None);
-    assert_eq!(cursor.consumed_bytes(), stream.len());
+    let logical_payload_bytes = (values.len() * usize::from(width)).div_ceil(8);
+    assert_eq!(cursor.consumed_bytes(), 1 + logical_payload_bytes);
 }
 
 /// Mutation sentinel for the exhausted-run byte cursor: reverting the
@@ -463,7 +464,7 @@ fn first_packed_run_payload_starts_after_its_vlq_header() {
 #[test]
 fn packed_rle_packed_runs_decode_in_concatenation() {
     let max = 5_i16;
-    let width = num_required_bits(u64::from(max));
+    let width = num_required_bits(u64::try_from(max).unwrap());
     let head: Vec<u64> = vec![5, 1, 4, 2, 3, 0, 5, 1];
     let tail: Vec<u64> = vec![4, 0, 5, 3, 1, 4, 2, 5];
     let mut stream = packed_run(1, &head, width);
@@ -484,16 +485,16 @@ fn packed_rle_packed_runs_decode_in_concatenation() {
 fn dictionary_indices_share_hybrid_run_transitions() {
     let dictionary_count = 6_usize;
     let width = num_required_bits(u64::try_from(dictionary_count - 1).unwrap());
-    let head: Vec<u64> = vec![5, 1, 4, 2];
-    let tail: Vec<u64> = vec![4, 0, 5, 3];
+    let head: Vec<u64> = vec![5, 1, 4, 2, 3, 0, 5, 1];
+    let tail: Vec<u64> = vec![4, 0, 5, 3, 1, 4, 2, 5];
     let mut stream = vec![width];
     stream.extend(packed_run(1, &head, width));
     stream.extend(rle_run(5, 2, width));
     stream.extend(packed_run(1, &tail, width));
     let mut expected: Vec<u32> = Vec::new();
-    expected.extend(head.iter().copied());
+    expected.extend(head.iter().map(|value| u32::try_from(*value).unwrap()));
     expected.extend(std::iter::repeat(2_u32).take(5));
-    expected.extend(tail.iter().copied());
+    expected.extend(tail.iter().map(|value| u32::try_from(*value).unwrap()));
     let mut cursor = DictionaryIndices::new(&stream, dictionary_count, expected.len()).unwrap();
     assert_eq!(drain_indices(&mut cursor), expected);
     assert_eq!(cursor.next_index().unwrap(), None);
