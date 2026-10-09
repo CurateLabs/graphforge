@@ -334,3 +334,7 @@ fn as_parquet_error(error: GfError) -> ParquetError {
 #[cfg(test)]
 #[path = "parquet_row_groups/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "parquet_row_groups/empty_pages_tests.rs"]
+mod empty_pages_tests;
