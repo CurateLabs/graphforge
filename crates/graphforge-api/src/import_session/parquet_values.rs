@@ -9,7 +9,9 @@
 //! must equal the required nonnull values exactly before any dangerous
 //! third-party setter runs. Dictionary facts carry exactly one `u64` per
 //! dictionary entry — never per data row — and that single vector is charged
-//! against an explicit capacity argument before it is reserved.
+//! against an explicit capacity argument and reserved only after an
+//! allocation-free pass validates the body geometry, so a malformed body is
+//! refused before any allocation regardless of the admitted count.
 //!
 //! Scope: this module covers only these borrowing cursors and that one
 //! indispensable dictionary vector. Reader-owned compressed and decompressed
@@ -88,7 +90,7 @@ fn drain_into(source: &mut impl LengthSource, block: &mut [u64]) -> Result<usize
 /// nonnull value consumes a signed four-byte length and its checked in-bounds
 /// payload; the payload itself is never copied and no count-sized vector is
 /// created. Unused body tails after the required prefix stay admitted.
-struct PlainByteLengths<'a> {
+pub(super) struct PlainByteLengths<'a> {
     data: &'a [u8],
     offset: usize,
     expected: usize,
@@ -125,6 +127,10 @@ impl LengthSource for PlainByteLengths<'_> {
         if self.emitted == self.expected {
             return Ok(None);
         }
+        // Scalar steps stay cancellable like the block path: the check fires
+        // once a value is actually consumed, consistent with the delegated
+        // delta cursor.
+        check_cancel(self.cancellation)?;
         let length_end = self.offset.checked_add(4).ok_or_else(truncated)?;
         let raw = self
             .data
@@ -157,7 +163,7 @@ impl LengthSource for PlainByteLengths<'_> {
 /// Delta lengths delegated to the already-integrated
 /// [`Lengths`](super::parquet_delta::Lengths) cursor, with the exact body-count
 /// agreement the dangerous third-party setters rely on.
-struct DeltaByteLengths<'a> {
+pub(super) struct DeltaByteLengths<'a> {
     lengths: Lengths<'a>,
     expected: usize,
     emitted: usize,
@@ -313,6 +319,24 @@ pub(super) fn plain_value_facts(
     })
 }
 
+/// Allocation-free preflight for one admitted `PLAIN` `BYTE_ARRAY` dictionary
+/// body: a complete checked walk of the already-owned bytes that validates
+/// every entry length and aggregates the plain facts while storing no
+/// per-entry state and requesting no allocation. [`DictionaryByteFacts::new`]
+/// runs this before it reserves anything, so a malformed body is refused as a
+/// typed storage error before any allocation; a structural
+/// `entry_count * 4 <= body.len()` lower bound would not validate the
+/// individual entry lengths and cannot replace this walk. Cancellation is
+/// honored per bounded block, zero entries are accepted, and unused tails
+/// stay unexamined.
+fn dictionary_body_preflight(
+    body: &[u8],
+    entry_count: usize,
+    cancellation: Option<&CancellationToken>,
+) -> Result<PlainValueFacts, GfError> {
+    plain_value_facts(body, entry_count, cancellation)
+}
+
 /// Admitted byte-length facts for one already-owned `PLAIN` `BYTE_ARRAY`
 /// dictionary body. The lengths vector is this helper's entire live heap
 /// allocation: exactly one `u64` per dictionary entry, never per data row.
@@ -329,8 +353,12 @@ impl DictionaryByteFacts {
     /// Every entry's length and payload bounds are validated here, before any
     /// consumer or dictionary setter can act on the facts. A zero-entry
     /// dictionary is accepted; a claimed entry count whose vector would
-    /// exceed `credit` is refused before any allocation is requested. Unused
-    /// body tails after the entries stay admitted.
+    /// exceed `credit` is refused before any allocation is requested, and the
+    /// complete body geometry is checked by the allocation-free
+    /// [`dictionary_body_preflight`] before the vector is reserved, so a
+    /// malformed body is refused as a typed storage error before any
+    /// allocation no matter how large an admitted count claims. Unused body
+    /// tails after the entries stay admitted.
     pub(super) fn new(
         body: &[u8],
         entry_count: usize,
@@ -338,9 +366,8 @@ impl DictionaryByteFacts {
         cancellation: Option<&CancellationToken>,
     ) -> Result<Self, GfError> {
         check_cancel(cancellation)?;
-        // Charge the required count and then the allocator's real response
-        // against the admitted capacity, both before any resize touches
-        // pages. An oversized claim never reaches the allocator.
+        // Charge the required count against the admitted capacity before
+        // anything else. An oversized claim never reaches the allocator.
         let required = entry_count.checked_mul(size_of::<u64>()).ok_or_else(|| {
             limit("Parquet dictionary length vector overflows the addressable workspace")
         })?;
@@ -349,6 +376,11 @@ impl DictionaryByteFacts {
                 "Parquet dictionary length vector exceeds its admitted capacity",
             ));
         }
+        // The complete allocation-free checked body pass runs BEFORE
+        // reserve/resize: a tiny malformed body plus a huge admitted count is
+        // refused here before any allocation is requested, however large the
+        // admitted credit is.
+        let facts = dictionary_body_preflight(body, entry_count, cancellation)?;
         let mut lengths: Vec<u64> = Vec::new();
         lengths
             .try_reserve_exact(entry_count)
@@ -363,9 +395,9 @@ impl DictionaryByteFacts {
             ));
         }
         lengths.resize(entry_count, 0);
+        // Replay the immutable same owned bytes to fill the admitted fixed
+        // vector; the preflight already validated this exact prefix.
         let mut cursor = PlainByteLengths::new(body, entry_count, cancellation);
-        let mut payload_bytes = 0_u64;
-        let mut largest_length = 0_u64;
         let mut block = [0_u64; MAX_BLOCK_EVENTS];
         let mut at = 0;
         loop {
@@ -373,19 +405,16 @@ impl DictionaryByteFacts {
             for &length in &block[..count] {
                 lengths[at] = length;
                 at += 1;
-                payload_bytes = payload_bytes
-                    .checked_add(length)
-                    .ok_or_else(|| storage("Parquet dictionary payload total overflows"))?;
-                largest_length = largest_length.max(length);
             }
             if count == 0 {
                 break;
             }
         }
+        debug_assert_eq!(at, entry_count);
         Ok(Self {
             lengths,
-            payload_bytes,
-            largest_length,
+            payload_bytes: facts.payload_bytes,
+            largest_length: facts.largest_length,
         })
     }
 
@@ -477,6 +506,10 @@ impl LengthSource for DictionaryExpanded<'_, '_> {
         if self.emitted == self.expected {
             return Ok(None);
         }
+        // Scalar steps stay cancellable like the block path: the check fires
+        // once a value is actually consumed, consistent with the delegated
+        // delta cursor.
+        check_cancel(self.cancellation)?;
         let index = self
             .indices
             .as_mut()

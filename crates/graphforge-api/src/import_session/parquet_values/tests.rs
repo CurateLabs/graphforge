@@ -1,3 +1,4 @@
+use std::process::Command;
 use std::sync::Arc;
 
 use super::*;
@@ -201,6 +202,10 @@ fn plain_blocks_stay_bounded_and_honor_cancellation() {
     assert!(
         ValueLengths::new(Encoding::PLAIN, &encoded, values.len(), Some(&cancellation)).is_err()
     );
+
+    // The scalar path honors cancellation too, before consuming any value.
+    let mut direct = PlainByteLengths::new(&encoded, values.len(), Some(&cancellation));
+    assert!(direct.next_length().is_err());
 }
 
 #[test]
@@ -252,8 +257,11 @@ fn delta_length_sources_match_real_encoders_and_enforce_count_agreement() {
         assert!(ValueLengths::new(encoding, &encoded, values.len() - 1, None).is_err());
         // Mutation sentinel: the stream remains fully valid for its own
         // count, so reverting the exact nonnull agreement guard makes this
-        // admission succeed.
-        let error = ValueLengths::new(encoding, &encoded, values.len() + 1, None).unwrap_err();
+        // admission succeed. `.err().expect(...)` avoids a `Debug` bound on
+        // the borrowed cursor Ok type.
+        let error = ValueLengths::new(encoding, &encoded, values.len() + 1, None)
+            .err()
+            .expect("delta value lengths error");
         assert!(error.to_string().contains("nonnull"), "{error}");
     }
 
@@ -315,8 +323,9 @@ fn dictionary_facts_admit_exact_budget_and_refuse_one_byte_less() {
 
     // Mutation sentinel: reverting either the pre-reserve capacity charge or
     // the actual-capacity check makes this one-byte-short admission succeed.
-    let error =
-        DictionaryByteFacts::new(&dict, count, count * size_of::<u64>() - 1, None).unwrap_err();
+    let error = DictionaryByteFacts::new(&dict, count, count * size_of::<u64>() - 1, None)
+        .err()
+        .expect("dictionary facts error");
     assert!(error.to_string().contains("capacity"), "{error}");
 }
 
@@ -359,6 +368,110 @@ fn dictionary_facts_refuse_huge_counts_and_malformed_geometry() {
     assert_eq!(facts.largest_length(), 0);
     let facts = dictionary_facts(&dict, 0);
     assert_eq!(facts.entries(), 0);
+}
+
+#[test]
+fn dictionary_body_preflight_validates_whole_geometry_allocation_free() {
+    let values = varied_values(2);
+    let (dict, count) = dictionary_page(&values);
+    let expected = expected_lengths(&values);
+
+    let facts = dictionary_body_preflight(&dict, count, None).unwrap();
+    assert_eq!(facts.payload_bytes, expected.iter().sum::<u64>());
+    assert_eq!(
+        facts.largest_length,
+        expected.iter().max().copied().unwrap()
+    );
+
+    // Zero entries and ignored tails stay admitted without any walk error.
+    let facts = dictionary_body_preflight(&[], 0, None).unwrap();
+    assert_eq!(facts.payload_bytes, 0);
+    assert_eq!(facts.largest_length, 0);
+    let mut tailed = dict.clone();
+    tailed.extend_from_slice(b"admitted tail");
+    assert!(dictionary_body_preflight(&tailed, count, None).is_ok());
+
+    // A tiny truncated body under a huge admitted count refuses with the
+    // typed storage error, not a resource-limit error.
+    let error = dictionary_body_preflight(&[3_u8, 0], 1_usize << 30, None)
+        .err()
+        .expect("malformed admitted body error");
+    assert!(error.to_string().contains("required bytes"), "{error}");
+
+    // Every individual entry length is validated, not just a count bound.
+    let error = dictionary_body_preflight(&(-1_i32).to_le_bytes(), 1, None)
+        .err()
+        .expect("negative length error");
+    assert!(error.to_string().contains("negative"), "{error}");
+
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    assert!(dictionary_body_preflight(&dict, count, Some(&cancellation)).is_err());
+}
+
+/// Allocation measurement for the malformed-but-credit-admitted case (#1918
+/// review): a tiny truncated body, a huge entry count, and a credit admitting
+/// the full reserve must be refused by the geometry preflight before any
+/// allocation is requested. The child re-executes this test binary under a
+/// 1 GiB address-space cap, so the reverted reserve-before-preflight order
+/// dies trying to reserve 8 GiB and reports the resource-limit error instead
+/// of the typed storage error; the kernel-enforced cap is an actual
+/// allocation measurement, not a structural assertion. The exit codes keep
+/// the child's verdict intact across the libtest harness boundary.
+#[test]
+#[cfg(target_os = "linux")]
+fn dictionary_preflight_refuses_malformed_body_before_any_allocation() {
+    const CHILD_ENV: &str = "GF_PARQUET_DICT_PREFLIGHT_CHILD";
+    const CHILD_OK: i32 = 0;
+    const CHILD_RESERVE_RAN: i32 = 3;
+    const CHILD_UNEXPECTED: i32 = 4;
+    const CHILD_ADDRESS_SPACE_BYTES: u64 = 1 << 30;
+
+    if std::env::var_os(CHILD_ENV).is_some() {
+        let body: [u8; 2] = [3, 0];
+        let entries = 1_usize << 30;
+        let error = DictionaryByteFacts::new(&body, entries, usize::MAX, None)
+            .err()
+            .expect("malformed admitted dictionary body must be refused");
+        let message = error.to_string();
+        if message.contains("required bytes") {
+            std::process::exit(CHILD_OK);
+        }
+        if message.contains("Cannot allocate") {
+            std::process::exit(CHILD_RESERVE_RAN);
+        }
+        std::process::exit(CHILD_UNEXPECTED);
+    }
+
+    let exe = std::env::current_exe().expect("current test executable");
+    let filter = format!(
+        "{module}::dictionary_preflight_refuses_malformed_body_before_any_allocation",
+        module = module_path!(),
+    );
+    let output = Command::new("prlimit")
+        .arg(format!("--as={CHILD_ADDRESS_SPACE_BYTES}"))
+        .arg(exe)
+        .arg("--exact")
+        .arg(&filter)
+        .env(CHILD_ENV, "1")
+        .output()
+        .expect("spawn prlimit child process");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // The child must have matched and started exactly this one test; a
+    // mistyped filter would otherwise run zero tests and exit successfully.
+    assert!(
+        stdout.contains("running 1 test"),
+        "child did not run the filtered test; stdout: {stdout}"
+    );
+    let code = output.status.code();
+    assert_eq!(
+        code,
+        Some(CHILD_OK),
+        "child exit {code:?}: {CHILD_OK} = geometry refused before any allocation, \
+         {CHILD_RESERVE_RAN} = reserve ran before the preflight (mutation), \
+         {CHILD_UNEXPECTED} = unexpected error; stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
 }
 
 #[test]
@@ -405,6 +518,8 @@ fn dictionary_expanded_lengths_expand_repeated_real_indices_in_blocks() {
         DictionaryExpanded::new(Some(&facts), &stream, data.len(), Some(&cancellation)).unwrap();
     cancellation.cancel();
     assert!(cursor.next_block(&mut [0_u64; 1024]).is_err());
+    // The scalar path honors cancellation too, before consuming any value.
+    assert!(cursor.next_length().is_err());
 }
 
 #[test]
