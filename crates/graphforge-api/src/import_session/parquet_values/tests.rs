@@ -446,7 +446,11 @@ fn dictionary_preflight_refuses_malformed_body_before_any_allocation() {
     let exe = std::env::current_exe().expect("current test executable");
     let filter = format!(
         "{module}::dictionary_preflight_refuses_malformed_body_before_any_allocation",
-        module = module_path!(),
+        // libtest names omit the crate prefix included by module_path!().
+        module = module_path!()
+            .split_once("::")
+            .expect("test module has a crate prefix")
+            .1,
     );
     let output = Command::new("prlimit")
         .arg(format!("--as={CHILD_ADDRESS_SPACE_BYTES}"))
