@@ -45,7 +45,7 @@ pub(super) fn function(call: &FunctionCall) -> Option<UnsupportedCypherFeature> 
 /// Restrict the diagnosis to a property of an indexed relationship list. Scalar
 /// lists, map lists, fixed-hop relationships, and plain ALL remain supported.
 pub(super) fn indexed_relationship_property(expr: &Expr, state: &BinderState) -> bool {
-    any_expression(expr, &|expr| {
+    any_expression(expr, &|expr, locals| {
         let Expr::Property(property) = expr else {
             return false;
         };
@@ -58,10 +58,11 @@ pub(super) fn indexed_relationship_property(expr: &Expr, state: &BinderState) ->
         let Expr::Var(var) = strip_parens(&call.args[0]) else {
             return false;
         };
-        state.vars.get(&var.name).is_some_and(|id| {
-            state.var_kinds.get(id) == Some(&VarKind::Relationship)
-                && !state.edge_vars.contains_key(id)
-        })
+        !locals.contains(&var.name.as_str())
+            && state.vars.get(&var.name).is_some_and(|id| {
+                state.var_kinds.get(id) == Some(&VarKind::Relationship)
+                    && !state.edge_vars.contains_key(id)
+            })
     })
 }
 
@@ -108,8 +109,9 @@ pub(super) fn parameter_rows_across_labels(query: &AstQuery) -> Option<BindError
                             continue;
                         };
                         for (alias, labels) in &mut rows {
-                            let depends_on_row = any_expression(properties, &|expr| {
-                                matches!(expr, Expr::Property(property)
+                            let depends_on_row = any_expression(properties, &|expr, locals| {
+                                !locals.contains(&alias.as_str())
+                                    && matches!(expr, Expr::Property(property)
                                     if matches!(strip_parens(&property.object), Expr::Var(var) if &var.name == alias))
                             });
                             if depends_on_row {
@@ -132,61 +134,84 @@ pub(super) fn parameter_rows_across_labels(query: &AstQuery) -> Option<BindError
     None
 }
 
-fn any_expression(expr: &Expr, predicate: &impl Fn(&Expr) -> bool) -> bool {
-    if predicate(expr) {
+fn any_expression(expr: &Expr, predicate: &impl Fn(&Expr, &[&str]) -> bool) -> bool {
+    scoped_expression(expr, predicate, &mut Vec::new())
+}
+
+fn scoped_expression<'a>(
+    expr: &'a Expr,
+    predicate: &impl Fn(&Expr, &[&str]) -> bool,
+    locals: &mut Vec<&'a str>,
+) -> bool {
+    if predicate(expr, locals) {
         return true;
     }
     match expr {
-        Expr::Property(property) => any_expression(&property.object, predicate),
+        Expr::Property(property) => scoped_expression(&property.object, predicate, locals),
         Expr::BinaryOp(binary) => {
-            any_expression(&binary.left, predicate) || any_expression(&binary.right, predicate)
+            scoped_expression(&binary.left, predicate, locals)
+                || scoped_expression(&binary.right, predicate, locals)
         }
-        Expr::UnaryOp(unary) => any_expression(&unary.expr, predicate),
+        Expr::UnaryOp(unary) => scoped_expression(&unary.expr, predicate, locals),
         Expr::Parenthesized { inner, .. } | Expr::IsNull { expr: inner, .. } => {
-            any_expression(inner, predicate)
+            scoped_expression(inner, predicate, locals)
         }
-        Expr::FunctionCall(call) => call.args.iter().any(|arg| any_expression(arg, predicate)),
+        Expr::FunctionCall(call) => call
+            .args
+            .iter()
+            .any(|arg| scoped_expression(arg, predicate, locals)),
         Expr::List(list) => list
             .elements
             .iter()
-            .any(|item| any_expression(item, predicate)),
+            .any(|item| scoped_expression(item, predicate, locals)),
         Expr::Map(map) => map
             .entries
             .values()
-            .any(|value| any_expression(value, predicate)),
+            .any(|value| scoped_expression(value, predicate, locals)),
         Expr::Case(case) => {
             case.subject
                 .as_deref()
-                .is_some_and(|expr| any_expression(expr, predicate))
+                .is_some_and(|expr| scoped_expression(expr, predicate, locals))
                 || case.when_clauses.iter().any(|when| {
-                    any_expression(&when.condition, predicate)
-                        || any_expression(&when.result, predicate)
+                    scoped_expression(&when.condition, predicate, locals)
+                        || scoped_expression(&when.result, predicate, locals)
                 })
                 || case
                     .else_expr
                     .as_deref()
-                    .is_some_and(|expr| any_expression(expr, predicate))
+                    .is_some_and(|expr| scoped_expression(expr, predicate, locals))
         }
         Expr::ListComprehension(list) => {
-            any_expression(&list.list, predicate)
-                || list
-                    .filter
-                    .as_deref()
-                    .is_some_and(|expr| any_expression(expr, predicate))
+            if scoped_expression(&list.list, predicate, locals) {
+                return true;
+            }
+            locals.push(&list.var);
+            let found = list
+                .filter
+                .as_deref()
+                .is_some_and(|expr| scoped_expression(expr, predicate, locals))
                 || list
                     .projection
                     .as_deref()
-                    .is_some_and(|expr| any_expression(expr, predicate))
+                    .is_some_and(|expr| scoped_expression(expr, predicate, locals));
+            locals.pop();
+            found
         }
         Expr::Quantifier(quantifier) => {
-            any_expression(&quantifier.list, predicate)
-                || any_expression(&quantifier.predicate, predicate)
+            if scoped_expression(&quantifier.list, predicate, locals) {
+                return true;
+            }
+            locals.push(&quantifier.var);
+            let found = scoped_expression(&quantifier.predicate, predicate, locals);
+            locals.pop();
+            found
         }
         Expr::InList { expr, list, .. } => {
-            any_expression(expr, predicate) || any_expression(list, predicate)
+            scoped_expression(expr, predicate, locals) || scoped_expression(list, predicate, locals)
         }
         Expr::StringOp { expr, pattern, .. } | Expr::RegexMatch { expr, pattern, .. } => {
-            any_expression(expr, predicate) || any_expression(pattern, predicate)
+            scoped_expression(expr, predicate, locals)
+                || scoped_expression(pattern, predicate, locals)
         }
         _ => false,
     }

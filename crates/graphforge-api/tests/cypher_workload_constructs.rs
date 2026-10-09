@@ -626,7 +626,7 @@ fn unsupported_features_preserve_ordinary_binding_errors() {
             diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.kind
-                    == graphforge_api::BindErrorKind::UndeclaredVariable),
+                    == graphforge_core::BindErrorKind::UndeclaredVariable),
             "{query}: {diagnostics:?}"
         );
     }
@@ -663,6 +663,14 @@ fn all_predicate_local_alias_shadows_outer_relationship_list() {
             &gf,
             "MATCH (:Account {id: 1})-[r:transfer*1..2]->(:Account) \
         RETURN ALL(r IN [[{amount: 1}]] WHERE r[0].amount = 1) AS ok"
+        ),
+        vec![strings(&["true"]), strings(&["true"])]
+    );
+    assert_eq!(
+        rows(
+            &gf,
+            "MATCH (:Account {id: 1})-[r:transfer*1..2]->(:Account) \
+        RETURN ALL(x IN [1] WHERE ANY(r IN [[{amount: 1}]] WHERE r[0].amount = x)) AS ok"
         ),
         vec![strings(&["true"]), strings(&["true"])]
     );
