@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::io::Cursor;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use arrow::array::Int32Array;
 use arrow::datatypes::{DataType, Field, Schema};
@@ -63,6 +64,24 @@ impl PagePreflight for Preflight {
 
     fn finish(&mut self) -> Result<(), GfError> {
         self.finishes += 1;
+        Ok(())
+    }
+}
+
+struct BoxedProbe(Arc<AtomicUsize>);
+
+impl PagePreflight for BoxedProbe {
+    fn remaining_workspace(&self) -> Result<usize, GfError> {
+        Ok(64 << 20)
+    }
+
+    fn validate(&mut self, _: &DecodedPage) -> Result<(), GfError> {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<(), GfError> {
+        self.0.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 }
@@ -200,6 +219,31 @@ fn real_arrow_written_column_chunks_pass_through_owned_preflight_for_each_codec(
         );
         assert_eq!(reader.preflight.finishes, 1);
     }
+}
+
+#[test]
+fn adapter_accepts_a_boxed_shared_preflight_callback() {
+    let fixture = Fixture::numeric(Compression::SNAPPY);
+    let end = fixture.start + fixture.length;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let preflight: Box<dyn PagePreflight> = Box::new(BoxedProbe(Arc::clone(&calls)));
+    let mut reader: OwnedPageReader<Cursor<Vec<u8>>, Box<dyn PagePreflight>> = OwnedPageReader::new(
+        Cursor::new(fixture.bytes[fixture.start..end].to_vec()),
+        u64::try_from(fixture.length).unwrap(),
+        fixture.compression,
+        fixture.events,
+        None,
+        preflight,
+    );
+    let mut events = 0_u64;
+    for page in reader.by_ref() {
+        let page = page.unwrap();
+        if page.is_data_page() {
+            events += u64::from(page.num_values());
+        }
+    }
+    assert_eq!(events, fixture.events);
+    assert!(calls.load(Ordering::Relaxed) >= 2);
 }
 
 #[test]

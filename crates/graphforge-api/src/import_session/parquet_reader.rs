@@ -33,6 +33,20 @@ pub(super) trait PagePreflight: Send {
     fn finish(&mut self) -> Result<(), GfError>;
 }
 
+impl<T: PagePreflight + ?Sized> PagePreflight for Box<T> {
+    fn remaining_workspace(&self) -> Result<usize, GfError> {
+        (**self).remaining_workspace()
+    }
+
+    fn validate(&mut self, page: &DecodedPage) -> Result<(), GfError> {
+        (**self).validate(page)
+    }
+
+    fn finish(&mut self) -> Result<(), GfError> {
+        (**self).finish()
+    }
+}
+
 struct PendingHeader {
     header_bytes: usize,
     header: RawHeader,
