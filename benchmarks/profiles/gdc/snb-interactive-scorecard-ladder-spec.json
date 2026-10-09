@@ -56,11 +56,6 @@
     },
     {
       "kind": "rewrite",
-      "subject": "IC5",
-      "text": "the LDBC text's OPTIONAL MATCH ... WHERE friend IN friends returns wrong post counts (#1919), so the count is a conditional sum over the forum's posts"
-    },
-    {
-      "kind": "rewrite",
       "subject": "IC7",
       "text": "head(collect({msg, likeTime})) after ORDER BY likeTime DESC, message.id ASC is computed as max(likeTime), then min(message.id) among likes at that time, which selects the same like without relying on aggregation input order; not((liker)-[:KNOWS]-(person)) as a value is rejected (#1888) and becomes an empty pattern comprehension; :Message becomes (message:Post OR message:Comment)"
     },
