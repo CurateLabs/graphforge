@@ -7,7 +7,9 @@ use super::io_err;
 use super::parquet_err;
 use super::preflight_parquet_handle;
 use super::property_relative_name;
-use arrow::array::RecordBatch;
+use arrow::array::{
+    Array, ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray,
+};
 use arrow::datatypes::SchemaRef;
 use datafusion::error::DataFusionError;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -321,7 +323,7 @@ fn normalize_property_batch(
         .fields()
         .iter()
         .map(|field| {
-            if field.data_type() == &arrow::datatypes::DataType::Null {
+            let column = if field.data_type() == &arrow::datatypes::DataType::Null {
                 arrow::array::new_null_array(field.data_type(), batch.num_rows())
             } else {
                 batch
@@ -330,11 +332,52 @@ fn normalize_property_batch(
                     .unwrap_or_else(|| {
                         arrow::array::new_null_array(field.data_type(), batch.num_rows())
                     })
-            }
+            };
+            normalize_property_column(column, field.data_type())
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, graphforge_core::GfError>>()?;
     RecordBatch::try_new(Arc::clone(schema), columns)
         .map_err(|error| graphforge_core::GfError::Storage(error.to_string()))
+}
+
+/// Rebuild a homogeneous scalar batch column in the route's authenticated
+/// heterogeneous representation. A filtered read can contain only one of the
+/// historical scalar types even though the complete route schema is tagged.
+fn normalize_property_column(
+    column: ArrayRef,
+    expected: &arrow::datatypes::DataType,
+) -> Result<ArrayRef, graphforge_core::GfError> {
+    use graphforge_value::heterogeneous::{Scalar, encode_scalar};
+
+    if expected != &arrow::datatypes::DataType::Struct(crate::writer::heterogeneous_scalar_fields())
+    {
+        return Ok(column);
+    }
+    macro_rules! encode_values {
+        ($array_type:ty, $variant:ident) => {{
+            let values = column
+                .as_any()
+                .downcast_ref::<$array_type>()
+                .ok_or_else(|| {
+                    graphforge_core::GfError::Storage(
+                        "property scalar column does not match its Arrow type".into(),
+                    )
+                })?;
+            Arc::new(encode_scalar((0..values.len()).map(|row| {
+                (!values.is_null(row)).then(|| Scalar::$variant(values.value(row)))
+            }))) as ArrayRef
+        }};
+    }
+    let encoded = match column.data_type() {
+        arrow::datatypes::DataType::Int64 => encode_values!(Int64Array, Int),
+        arrow::datatypes::DataType::Float64 => encode_values!(Float64Array, Float),
+        arrow::datatypes::DataType::Utf8 => encode_values!(StringArray, Str),
+        arrow::datatypes::DataType::Boolean => encode_values!(BooleanArray, Bool),
+        // Null-only columns are handled by the route-schema projection above;
+        // the tagged array is already correct when a canonical tag is present.
+        _ => return Ok(column),
+    };
+    Ok(encoded)
 }
 
 /// Stream `properties/<stem>.parquet` as bounded batches without concatenating
