@@ -406,7 +406,6 @@ fn a_final_segment_truncated_at_a_frame_boundary_still_loses_no_evidence() {
     // Reclaiming the truncated file releases its actual 24 bytes; the 12
     // bytes the outside truncation destroyed stay conservatively charged.
     assert_eq!(scratch.occupied_bytes(), 12);
-    drop(scatter);
     scratch.remove().unwrap();
 }
 
@@ -716,6 +715,40 @@ fn concurrent_cleanups_serialize_and_release_every_byte_once() {
 }
 
 #[test]
+fn a_cleanup_failure_after_unlink_terminalizes_the_remaining_suffix() {
+    let (_root, _directory, scratch) = tree();
+    let partitions = four_segment_partition(&scratch);
+    let blocked = partitions.segment_path(0, 1);
+    let original = std::fs::read(&blocked).unwrap();
+    // A nonempty directory deterministically refuses remove_file without
+    // depending on user privileges or a product failpoint.
+    std::fs::remove_file(&blocked).unwrap();
+    std::fs::create_dir(&blocked).unwrap();
+    std::fs::write(blocked.join("obstruction"), b"keep").unwrap();
+    assert!(partitions.reclaim(&scratch, 0).is_err());
+    assert!(!partitions.segment_path(0, 0).exists());
+    assert_eq!(scratch.occupied_bytes(), 52);
+    assert_eq!(partitions.state[0].lock().unwrap().first_live, 1);
+    let mut block = [0_u8; HEADER + WIDTH];
+    let error = partitions.append(&scratch, 0, &mut block).unwrap_err();
+    assert!(
+        error.to_string().contains("no longer accepts appends"),
+        "{error}"
+    );
+    assert!(partitions.read(&scratch, 0, |_| Ok(())).is_err());
+    assert_eq!(partitions.counts().unwrap(), vec![10]);
+    // Restore the externally replaced file without altering its reservation,
+    // then finish cleanup exactly once. Failure remains terminal afterward.
+    std::fs::remove_dir_all(&blocked).unwrap();
+    std::fs::write(&blocked, original).unwrap();
+    partitions.reclaim(&scratch, 0).unwrap();
+    partitions.reclaim(&scratch, 0).unwrap();
+    assert_eq!(scratch.occupied_bytes(), 0);
+    assert!(partitions.append(&scratch, 0, &mut block).is_err());
+    scratch.remove().unwrap();
+}
+
+#[test]
 fn a_cleanup_attempt_inside_a_running_destructive_read_is_refused() {
     let (_root, _directory, scratch) = tree();
     let partitions = four_segment_partition(&scratch);
@@ -774,7 +807,6 @@ fn a_cancellation_mid_segment_stops_the_second_callback_and_reclaims_nothing() {
         error.to_string().contains("no longer accepts appends"),
         "{error}"
     );
-    drop(scatter);
     scratch.remove().unwrap();
 
     // A token observed before an empty final segment's unlink refuses that
@@ -907,7 +939,6 @@ fn a_non_destructive_read_validates_counts_and_restores_writing_on_success() {
     assert_eq!(scratch.occupied_bytes(), 12);
     partitions.reclaim(&scratch, 0).unwrap();
     assert_eq!(scratch.occupied_bytes(), 12, "cleanup never releases twice");
-    drop(scatter);
     scratch.remove().unwrap();
 }
 

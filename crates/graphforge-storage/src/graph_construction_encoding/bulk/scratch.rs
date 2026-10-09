@@ -644,6 +644,11 @@ impl Partitions {
             }
             SegmentLifecycle::Writing | SegmentLifecycle::Failed => {}
         }
+        // Cleanup is terminal before its first unlink. A later I/O or
+        // accounting error may leave a partly deleted suffix, which must
+        // never become appendable or readable again.
+        let was_writing = progress.lifecycle == SegmentLifecycle::Writing;
+        progress.lifecycle = SegmentLifecycle::Failed;
         for segment in progress.first_live..=progress.segment {
             let path = self.segment_path(index, segment);
             // A file that is already gone charges nothing back: an ordinal
@@ -655,7 +660,7 @@ impl Partitions {
             }
             progress.first_live = progress.first_live.max(segment.saturating_add(1));
         }
-        if progress.lifecycle == SegmentLifecycle::Writing {
+        if was_writing {
             progress.lifecycle = SegmentLifecycle::Consumed;
         }
         Ok(())
