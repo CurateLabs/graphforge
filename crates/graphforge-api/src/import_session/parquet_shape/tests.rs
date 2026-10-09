@@ -29,6 +29,31 @@ fn walk_children(shape: &SchemaShape, first: Option<usize>) -> Vec<usize> {
     result
 }
 
+fn assert_owner_links(shape: &SchemaShape) {
+    for (node_index, node) in shape.nodes.iter().enumerate() {
+        if let Some(child) = node.first_child {
+            assert_eq!(node.owner_leaf, shape.nodes[child].owner_leaf);
+        }
+        let Some(owner) = node.owner_leaf else {
+            continue;
+        };
+        assert!(owner < shape.leaves.len());
+        let mut cursor = Some(shape.leaves[owner].source_node);
+        let mut descends_from_owner = false;
+        while let Some(index) = cursor {
+            if index == node_index {
+                descends_from_owner = true;
+                break;
+            }
+            cursor = shape.nodes[index].parent;
+        }
+        assert!(
+            descends_from_owner,
+            "node {node_index} owner {owner} is not a descendant"
+        );
+    }
+}
+
 #[test]
 fn maps_nested_list_struct_and_temporal_fields_to_descriptor_levels() {
     let list_field = Arc::new(Field::new("element", DataType::Int32, true));
@@ -95,6 +120,7 @@ fn maps_nested_list_struct_and_temporal_fields_to_descriptor_levels() {
     let tags = record_children[0];
     assert_eq!(shape.nodes[tags].kind, NodeKind::LargeList);
     assert_eq!(shape.nodes[record].owner_leaf, Some(2));
+    assert_owner_links(&shape);
 
     let retained = budget.live_bytes();
     assert!(retained > 0);

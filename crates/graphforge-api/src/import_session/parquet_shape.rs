@@ -7,7 +7,7 @@ use std::sync::Arc;
 use arrow::datatypes::{DataType, FieldRef};
 use graphforge_core::GfError;
 use parquet::arrow::arrow_reader::ArrowReaderMetadata;
-use parquet::basic::{ConvertedType, PhysicalType, Repetition};
+use parquet::basic::{ConvertedType, Repetition, Type as PhysicalType};
 use parquet::schema::types::TypePtr;
 
 use crate::CancellationToken;
@@ -173,7 +173,7 @@ impl SchemaShape {
                         false,
                         None,
                     )?;
-                    let leaf_idx = append_leaf(
+                    append_leaf(
                         &mut nodes,
                         &mut tail_by_parent,
                         &mut root_children,
@@ -185,7 +185,6 @@ impl SchemaShape {
                         definition,
                         repetition,
                     )?;
-                    nodes[list_idx].owner_leaf = Some(leaf_idx);
                     continue;
                 }
 
@@ -376,7 +375,7 @@ impl SchemaShape {
                             "legacy repeated primitive Arrow element must be non-nullable",
                         ));
                     }
-                    let leaf_idx = append_leaf(
+                    append_leaf(
                         &mut nodes,
                         &mut tail_by_parent,
                         &mut root_children,
@@ -388,7 +387,6 @@ impl SchemaShape {
                         list_definition,
                         list_repetition,
                     )?;
-                    nodes[list_idx].owner_leaf = Some(leaf_idx);
                 } else if preserve_struct {
                     let item_fields = match element.data_type() {
                         DataType::Struct(fields) => fields,
@@ -819,6 +817,7 @@ fn has_physical_leaf(
             break;
         }
         for child in node.get_fields().iter().rev() {
+            check_cancelled(cancellation)?;
             reserve(&mut stack, 1, budget, "schema empty-group visitor stack")?;
             stack.push(Arc::clone(child));
         }
