@@ -4,22 +4,29 @@ adr: "0058"
 status: "Accepted"
 date: "2026-10-07"
 superseded_by: null
-revisit_when: "Node identity tables must go out of core, or a published artifact stops being a projection of the three ranked inputs"
+revisit_when: "A published artifact stops being a projection of the three ranked inputs, appends adopt the builder as a delta build and merge, or a build on an adequate budget cannot hold its node tables once out-of-core node identities (#1929) have landed"
 ---
 
 # ADR 0058: Initial builds run on a bulk builder derived from the published generation
 
 **Status:** Accepted
 
-**Implementation:** #1883, #1900 and #1916 (slices of epic #1881).
+**Implementation:** epic #1881. Merged: #1883 (the builder), #1900 (edge and
+adjacency scratch), #1916 (property scratch), #1898 (sources read in place),
+#1899 (direct-to-CAS writes), #1901 (chunk-API initial builds), #1902 (no UUID
+membership index) and #1928 (no allocated-block comparison of unsynced encoded
+artifacts). Pending: #1929 (out-of-core node tables), #1918 (bounded source
+decoding), #1938 (parallel scratch passes), the retirement of the old
+initial-build machinery, and the integrated acceptance audit and ladder. The
+epic's throughput close gate is #1387.
 
 **Related:**
 - ADR 0013 (project generation protocol; the `CURRENT` swap is unchanged)
 - ADR 0038 (determinism at the publication boundary; property 1 is amended below)
 - ADR 0046 (construction keeps its own sorting and partitioning)
 - ADR 0047 (one construction CPU budget)
-- ADR 0056 (shaping stays serial within stages; this record removes shaping for initial builds instead)
-- ADR 0057 (node-index endpoint resolution, which the builder keeps)
+- ADR 0056 (shaping stays serial within stages; this record removes shaping for initial builds instead, and appends keep it)
+- ADR 0057 (node-index endpoint resolution; the builder uses its own index, and the staged index is retired with the staged initial-build path)
 - #1387 (ingest floor), #1881 (epic)
 
 ## Context
@@ -91,14 +98,20 @@ functions.
   three fifths of the process's cgroup-aware memory headroom, or the bytes in
   `GF_BULK_BUILD_MEMORY_BUDGET_BYTES`. Routing is a function of the footers and
   the budget, never of the data, and the bytes are the same on every route.
-- The staged path remains for appends, sessions an earlier binary began staging
+- The staged path remains for appends and for sessions an earlier binary began
+  staging. **Pending (#1929):** it also remains for `node_tables_exceed_budget`
   (a chunk-API session replays its spool through it, see *Chunk-API initial
-  builds*), and `node_tables_exceed_budget`: the identity tables,
-  labels, endpoint index and degree arrays need a conservative 56 bytes per
-  node alongside the fixed workspace. Property payload size does not contribute
-  to this identity-table footprint. Out-of-core node identities remain open
-  under #1881. The historical `edge_properties_exceed_budget` manifest reason
-  remains readable but new builds do not select it.
+  builds*): the identity tables, labels, endpoint index and degree arrays need
+  a conservative 56 bytes per node alongside the fixed workspace. Property
+  payload size does not contribute to this identity-table footprint. #1929
+  moves the node tables to bounded scratch and removes that reason. The
+  historical `edge_properties_exceed_budget` manifest reason remains readable
+  but new builds do not select it.
+- Once #1929 lands, no plan sends an initial build to the staged path. Deleting
+  the machinery that only that path used is the last code slice of #1881. It
+  keeps what appends, recovery of sessions an earlier binary began, and the
+  staged replay of chunk-API sessions that recorded it still use. This record
+  does not list what is deleted; the slice's pull request does.
 - The route is chosen once, by the first `validate`, and written to the import
   manifest (`build_route`); every later `validate`, in any process, reads it
   back. A refused, cancelled or killed bulk attempt therefore cannot be
@@ -107,6 +120,52 @@ functions.
   again on each attempt from the live budget; either produces the same bytes.
   If that budget can no longer hold the bulk route's node tables or minimum scratch workspace, the attempt returns a resource-limit refusal before loading
   data. It keeps the bulk route and can retry when the budget is sufficient.
+
+## Maintainer decisions (2026-10-07, epic #1881)
+
+1. **Initial builds restart instead of resuming.** A crash, cancellation or
+   error discards the build's scratch and the next `validate` reruns from the
+   sources; objects already installed are content-addressed and skipped. This
+   amends ADR 0038 property 1 for initial builds (below). Publication
+   atomicity and the preservation of the prior `CURRENT` are unchanged.
+   Implemented by #1883.
+2. **Registered sources are read in place.** `register-parquet` no longer
+   copies and fsyncs the whole source. It records the file's canonical path,
+   native identity, size, modification time and footer. Every read
+   re-establishes that pin, and the whole-file SHA-256 is folded from the bytes
+   the build's own read pass decodes, so a source that is deleted, replaced,
+   resized or touched is refused. The pin is the change detector and the digest
+   is provenance: a rewrite that preserves the whole pin is not detected.
+   Sessions that copied sources under an earlier version still resume, validate
+   and append. Implemented by #1898.
+3. **Each published object is written once.** The encoded file is hashed while
+   it is written, synced, and linked into the content-addressed store; it is
+   not copied or read back at install (a copy remains where the filesystem
+   cannot link, and on Windows). Exact length and XXH64 are checked on first
+   read (ADR 0049). Implemented by #1899.
+4. **Initial builds only.** Appends keep the staged path. The builder does not
+   read a parent generation, and the CSR is still published only by initial
+   builds. Appends can adopt the builder later as a delta build followed by a
+   merge, which this record does not decide.
+5. **The UUID membership index is no longer produced or read.** It duplicated
+   the UUID columns of the published Parquet at 17-25 B per edge. Append
+   validation probes the published Parquet with page-index pruning. Under the
+   pre-v1 policy the format changed in place: projects that still carry the
+   files open, export and verify them as ordinary entries and never read them.
+   Implemented by #1902 (see [UUID identity authority](../book/architecture/uuid-membership-index.md)).
+
+## Pending work
+
+| Issue | What it changes | Until it lands |
+| --- | --- | --- |
+| #1929 | Node identities, the endpoint index and the degree and CSR-offset workspace use bounded scratch, so `node_tables_exceed_budget` has no producer. | A build whose node tables exceed the budget takes the staged path. |
+| #1918 | Registered-source decoding and normalization are bounded before allocation (Parquet dictionary and page expansion, row maps). | The scratch route bounds normalized transport, not every source decoder. A reservation describes builder workspace, not process RSS. |
+| #1938 | Scratch partitions run concurrently, as many as the budget admits. | Over-budget builds run one scratch partition at a time (`scratch_concurrency` 1). |
+| Retirement | Delete the initial-build machinery that nothing reaches once #1929 lands. | The staged initial-build code still exists and is reachable through the route above. |
+
+The throughput floor (1,000,000 edges/s at every ladder rung) and the
+multicore criterion are gated by the integrated ladder under #1881 and #1387.
+This record claims neither.
 
 ## Scratch route
 
