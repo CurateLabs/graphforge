@@ -175,6 +175,7 @@ pub(super) fn scatter_nodes(
     sources: &[BulkSource<'_>],
     budgets: GraphConstructionBudgets,
     properties: Option<&PropertyRows<'_>>,
+    decode: &super::gate::ByteGate,
     plan: &ScratchPlan,
     scratch: &Scratch,
     cancel: &AtomicBool,

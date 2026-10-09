@@ -91,7 +91,7 @@ pub(crate) fn derived_concurrency(
 
 impl ScratchPlan {
     /// A plan with resident node tables and exactly these sizes.
-    pub(super) fn sized(
+    pub(crate) fn sized(
         concurrency: usize,
         edge_partitions: usize,
         csr_partitions: usize,
@@ -113,5 +113,11 @@ impl ScratchPlan {
             property: PropertySizing::SERIAL,
             decode_bytes: 0,
         }
+    }
+}
+
+impl BulkBuildPlan<'_> {
+    pub(crate) fn property_floor_bytes(&self, budgets: super::GraphConstructionBudgets) -> u64 {
+        property_extra_if_any(self, budgets)
     }
 }

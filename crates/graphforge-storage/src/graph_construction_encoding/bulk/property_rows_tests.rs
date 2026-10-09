@@ -567,33 +567,21 @@ fn repeated_property_merges_track_live_files_and_the_final_consume_releases_ever
     let root = tempfile::tempdir().unwrap();
     let directory = super::super::StableDirectory::open(root.path()).unwrap();
     let scratch = Scratch::create(&directory).unwrap();
-    let rows = PropertyRows::new(
-        &scratch,
-        ConstructionChunkKind::Node,
-        GraphConstructionBudgets::default(),
-        0,
-    );
+    // Real one-batch runs and a two-input merge require repeated levels.
+    let rows = rows_with(&scratch, 1, 2, 1 << 20);
     let cancel = AtomicBool::new(false);
     for index in (0..65).rev() {
-        rows.ingest(&batch(index * 32, 32), &cancel).unwrap();
+        let mut sink = rows.sink();
+        sink.push(&batch(index * 32, 32), &cancel).unwrap();
+        sink.finish(&cancel).unwrap();
     }
-    // The tracker counts exactly the runs that still exist: every merge
-    // released its inputs once the merged output was complete.
-    let live = scratch.occupied_bytes();
-    assert!(live > 0);
-    assert_eq!(live, live_scratch_bytes(&directory));
+    assert!(scratch.occupied_bytes() > 0);
+    assert_eq!(scratch.occupied_bytes(), live_scratch_bytes(&directory));
     let groups = rows.finish(&cancel).unwrap();
     assert_eq!(groups.len(), 1);
-    assert_eq!(
-        scratch.occupied_bytes(),
-        std::fs::metadata(&groups[0].path).unwrap().len()
-    );
-    // Cumulative frame traffic strictly exceeds the peak: merge inputs left
-    // the occupancy before later levels wrote on top of them.
+    assert_eq!(scratch.occupied_bytes(), live_scratch_bytes(&directory));
     assert!(scratch.peak_occupied_bytes() < rows.written_bytes());
-    // The final consume verifies every frame; reclaiming the spent group
-    // then empties the tracker, so nothing is left in the tree.
-    let mut reader = rows.reader(&groups[0].path).unwrap();
+    let mut reader = rows.group_reader(&groups[0]);
     let mut expected = 0_u64;
     while let Some(batch) = reader.next().unwrap() {
         let uuids = crate::graph_construction::batch_uuid_column(&batch, "node_uuid").unwrap();
@@ -603,9 +591,12 @@ fn repeated_property_merges_track_live_files_and_the_final_consume_releases_ever
         }
     }
     assert_eq!(expected, 65 * 32);
-    rows.reclaim(&groups[0].path).unwrap();
+    drop(reader);
+    for segment in &groups[0].segments {
+        rows.reclaim(&segment.path).unwrap();
+        assert!(!segment.path.exists());
+    }
     assert_eq!(scratch.occupied_bytes(), 0);
-    assert!(!groups[0].path.exists());
     scratch.remove().unwrap();
 }
 
@@ -618,11 +609,12 @@ fn a_failed_property_write_keeps_its_reservation() {
     let root = tempfile::tempdir().unwrap();
     let directory = super::super::StableDirectory::open(root.path()).unwrap();
     let scratch = Scratch::create(&directory).unwrap();
-    let rows = PropertyRows::new(
+    let rows = new_rows(
         &scratch,
         ConstructionChunkKind::Node,
         GraphConstructionBudgets::default(),
         0,
+        PropertySizing::SERIAL,
     );
     let path = rows.path().unwrap();
     std::fs::remove_file(&path).unwrap();

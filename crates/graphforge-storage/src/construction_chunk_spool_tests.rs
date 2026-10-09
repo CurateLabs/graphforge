@@ -757,7 +757,7 @@ fn a_chunk_admitted_at_its_exact_byte_window_builds() {
     let mut session = spooled_session(&root, budgets);
     append_all(&mut session, std::slice::from_ref(&batch), &[]).unwrap();
     session.record_seal_route(SealRoute::Bulk).unwrap();
-    let _forced = crate::graph_construction_encoding::ForcedPartitions::set(2, 2).with_nodes(3);
+    let _forced = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(2, 2).with_nodes(3);
     let built = session
         .prepare_spooled_bulk_encoding(1, PROPERTY_SCRATCH_BUDGET, || false)
         .unwrap();
@@ -862,7 +862,7 @@ fn a_spooled_build_whose_node_tables_do_not_fit_runs_on_scratch_and_publishes_th
         let mut session = spooled_session(&root, GraphConstructionBudgets::default());
         append_all(&mut session, &nodes, &edges).unwrap();
         let _forced =
-            crate::graph_construction_encoding::ForcedPartitions::set(4, 3).with_nodes(5);
+            crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(4, 3).with_nodes(5);
         assert_eq!(session.spool_seal_route(budget).unwrap(), SealRoute::Bulk);
         session.record_seal_route(SealRoute::Bulk).unwrap();
         let built = session

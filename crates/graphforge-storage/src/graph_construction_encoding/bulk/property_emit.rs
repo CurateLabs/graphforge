@@ -257,7 +257,9 @@ pub(super) fn emit(
         // the catalog scan consumed its own earlier read. Nothing reads the
         // file again, so its bytes leave the live occupancy.
         drop(reader);
-        rows.reclaim(&group.path)?;
+        for segment in &group.segments {
+            rows.reclaim(&segment.path)?;
+        }
     }
     Ok(())
 }

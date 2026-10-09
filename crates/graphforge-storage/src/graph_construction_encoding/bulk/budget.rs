@@ -86,6 +86,8 @@ pub enum BulkRoute {
     Memory,
     /// Edge records and adjacency entries go through scratch files.
     Scratch,
+    /// Node tables, edge records and adjacency entries use scratch files.
+    ScratchNodes,
     /// The staged path builds it.
     Staged(BulkStagedReason),
 }
@@ -132,13 +134,20 @@ impl BulkBuildPlan<'_> {
             )
     }
 
+    /// Fixed workspace and cached source metadata without resident node tables.
+    #[must_use]
+    pub(crate) fn scratch_floor_bytes(&self) -> u64 {
+        self.node_tables_resident_bytes()
+            .saturating_sub(self.node_rows().saturating_mul(NODE_TABLE_BYTES))
+    }
+
     /// Route the plan for `budget` resident bytes.
     #[must_use]
     pub fn route_for(&self, budget: u64) -> BulkRoute {
         if self.estimated_resident_bytes() <= budget {
             BulkRoute::Memory
         } else if self.node_tables_resident_bytes() > budget {
-            BulkRoute::Staged(BulkStagedReason::NodeTablesExceedBudget)
+            BulkRoute::ScratchNodes
         } else {
             BulkRoute::Scratch
         }

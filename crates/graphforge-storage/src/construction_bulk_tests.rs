@@ -2909,7 +2909,7 @@ mod bulk_builder {
         (edge_partitions, csr_partitions, node_partitions): (usize, usize, usize),
     ) -> Result<ScratchRun, GfError> {
         let _forced =
-            crate::graph_construction_encoding::ForcedPartitions::set(edge_partitions, csr_partitions)
+            crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(edge_partitions, csr_partitions)
                 .with_nodes(node_partitions);
         let root = TempDir::new().unwrap();
         let mut session = pinned(&root);
@@ -3063,7 +3063,7 @@ mod bulk_builder {
             &vec![node_uuids[1]; 3001],
         )];
         let expected = bulk_with(&nodes, &edges, 1, 2).unwrap();
-        let _gate = crate::graph_construction_encoding::ForcedPartitions::with_gate(32 << 10);
+        let _gate = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(32 << 10);
         let run = node_scratch_run(&nodes, &edges, 1, 2, (16, 2, 2)).unwrap();
         assert_same(&expected, &run.inventory);
         assert_node_scratch_traffic(&run.report, 2, 3001);
@@ -3153,8 +3153,8 @@ mod bulk_builder {
         assert_same(&staged(&nodes, &edges), &expected);
         for bounded in [false, true] {
             for (gate, parts) in [(32 << 10, (4, 2, 4)), (64 << 10, (1, 2, 1))] {
-                let _gate = crate::graph_construction_encoding::ForcedPartitions::with_gate(gate);
-                let _parts = crate::graph_construction_encoding::ForcedPartitions::set(
+                let _gate = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(gate);
+                let _parts = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(
                     parts.0, parts.1,
                 )
                 .with_nodes(parts.2);
@@ -3184,7 +3184,7 @@ mod bulk_builder {
         // A duplicate inside the large cluster is a duplicate node, not an overflow.
         node_ids[2999] = node_ids[0];
         let nodes = vec![node_batch_of(&node_ids, &vec!["Person"; 3001])];
-        let _gate = crate::graph_construction_encoding::ForcedPartitions::with_gate(32 << 10);
+        let _gate = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(32 << 10);
         let error = node_scratch_run(&nodes, &[], 1, 1, (1, 2, 1))
             .err()
             .unwrap();
@@ -3202,7 +3202,7 @@ mod bulk_builder {
         // spools survive until the pass that consumes them.
         let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
         let expected = bulk_with(&nodes, &edges, 2, 4).unwrap();
-        let _gate = crate::graph_construction_encoding::ForcedPartitions::with_gate(32 << 10);
+        let _gate = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(32 << 10);
         let run = node_scratch_run(&nodes, &edges, 2, 4, (7, 5, 2)).unwrap();
         assert_same(&expected, &run.inventory);
         let report = &run.report;
@@ -3323,10 +3323,10 @@ mod bulk_builder {
 
     #[test]
     fn a_cancelled_node_scratch_build_leaves_no_scratch_and_the_rerun_is_identical() {
-        let _gate = crate::graph_construction_encoding::ForcedPartitions::with_gate(32 << 10);
+        let _gate = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(32 << 10);
         let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
         let expected = bulk_with(&nodes, &edges, 2, 4).unwrap();
-        let _forced = crate::graph_construction_encoding::ForcedPartitions::set(6, 4).with_nodes(5);
+        let _forced = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(6, 4).with_nodes(5);
         for polls_before_cancel in [0_usize, 1, 40, 400, 2_000, 6_000] {
             let root = TempDir::new().unwrap();
             let mut session = pinned(&root);
@@ -3385,9 +3385,9 @@ mod bulk_builder {
             .map(|part| part.parse::<usize>().unwrap())
             .collect::<Vec<_>>();
         let _forced =
-            crate::graph_construction_encoding::ForcedPartitions::set(parts[0], parts[1])
+            crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(parts[0], parts[1])
                 .with_nodes(parts[2]);
-        let _gate = crate::graph_construction_encoding::ForcedPartitions::with_gate(32 << 10);
+        let _gate = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(32 << 10);
         let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
         let mut session = GraphConstructionSession::open(
             Path::new(&path),
@@ -3450,8 +3450,8 @@ mod bulk_builder {
                 "recovery kept scratch after {failpoint}"
             );
             let _forced =
-                crate::graph_construction_encoding::ForcedPartitions::set(7, 5).with_nodes(1);
-            let _gate = crate::graph_construction_encoding::ForcedPartitions::with_gate(32 << 10);
+                crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(7, 5).with_nodes(1);
+            let _gate = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(32 << 10);
             let rerun = session
                 .prepare_bulk_encoding(1, &node_scratch_plan(&nodes, &edges, 2), || false)
                 .unwrap();
@@ -3484,7 +3484,7 @@ mod bulk_builder {
             + 512;
         for partitions in [(1, 1, 1), (4, 3, 5)] {
             let _forced =
-                crate::graph_construction_encoding::ForcedPartitions::set(partitions.0, partitions.1)
+                crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(partitions.0, partitions.1)
                     .with_nodes(partitions.2);
             let root = TempDir::new().unwrap();
             let mut session = pinned(&root);
@@ -3536,8 +3536,8 @@ mod bulk_builder {
             + 512;
         let root = TempDir::new().unwrap();
         let mut session = open(&root);
-        let _frames = crate::graph_construction_encoding::ForcedPropertyFrames::set(1);
-        let _forced = crate::graph_construction_encoding::ForcedPartitions::set(2, 2).with_nodes(2);
+        let _frames = crate::graph_construction_encoding::bulk_test_support::ForcedPropertyFrames::set(1);
+        let _forced = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(2, 2).with_nodes(2);
         let mut typed = plan(&typed_nodes, &typed_edges, 1);
         typed.memory_budget = Some(budget);
         let encoding = session.prepare_bulk_encoding(1, &typed, || false).unwrap();
@@ -3563,11 +3563,11 @@ mod bulk_builder {
             (8, 48 << 20, (12, 6, 12), 4),
             (4, 48 << 20, (9, 3, 9), 6),
         ] {
-            let _in_flight = crate::graph_construction_encoding::ForcedPartitions::with_concurrency(
+            let _in_flight = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_concurrency(
                 in_flight,
             );
-            let _gate = crate::graph_construction_encoding::ForcedPartitions::with_gate(gate);
-            let _stagger = crate::graph_construction_encoding::ForcedPartitions::with_stagger(stagger);
+            let _gate = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(gate);
+            let _stagger = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_stagger(stagger);
             let run = node_scratch_run(&nodes, &edges, 1, in_flight, partitions).unwrap();
             assert_eq!(
                 expected, run.inventory,
@@ -3592,9 +3592,9 @@ mod bulk_builder {
         // The hub's leaf is the first; its degrees must reach the key
         // partitioner first although it finishes last, or the heavy node
         // lands on the wrong rank and its 3,001 entries exceed the gate.
-        let _in_flight = crate::graph_construction_encoding::ForcedPartitions::with_concurrency(4);
-        let _gate = crate::graph_construction_encoding::ForcedPartitions::with_gate(64 << 10);
-        let _stagger = crate::graph_construction_encoding::ForcedPartitions::with_stagger(25);
+        let _in_flight = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_concurrency(4);
+        let _gate = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(64 << 10);
+        let _stagger = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_stagger(25);
         let run = node_scratch_run(&nodes, &edges, 1, 4, (16, 4, 2)).unwrap();
         assert_same(&expected, &run.inventory);
     }
