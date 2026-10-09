@@ -28,6 +28,7 @@ use parquet::file::properties::ReaderProperties;
 use parquet::file::reader::{ChunkReader, Length, RowGroupReader};
 use parquet::file::serialized_reader::SerializedRowGroupReader;
 
+use super::inventory_budget::{InventoryBudget, reserve};
 use super::parquet_scan::{GroupScan, Leaf, LeafScan, PageKind, encoding, scan_group};
 use super::{limit, storage};
 use crate::CancellationToken;
@@ -129,9 +130,13 @@ impl SourceScan {
     /// expansion only their values state.
     ///
     /// `capacity` bounds what the sizing reads may hold; a page larger than it
-    /// is refused here, before any reader would allocate it. `window` is the size
-    /// past which a batch is refused: a page-bounded size that exceeds it is
-    /// replaced by the exact one, so a coarse bound never refuses a batch that fits.
+    /// is refused here, before any reader would allocate it. It also bounds the
+    /// inventory the scan itself keeps — page facts, leaf scans, row-group
+    /// starts, per-batch sizes — charged as it is built, so an inventory the
+    /// workspace cannot hold is refused before it is allocated. `window` is the
+    /// size past which a batch is refused: a page-bounded size that exceeds it
+    /// is replaced by the exact one, so a coarse bound never refuses a batch
+    /// that fits.
     pub(super) fn build(
         file: File,
         metadata: &ParquetMetaData,
@@ -141,14 +146,17 @@ impl SourceScan {
         cancellation: Option<&CancellationToken>,
     ) -> Result<Self, GfError> {
         let mut scanner = file.try_clone().map_err(storage)?;
+        let mut budget = InventoryBudget::new(capacity);
         let mut groups = Vec::new();
         let mut group_start = Vec::new();
         let mut start = 0_u64;
         for index in 0..metadata.num_row_groups() {
             check(cancellation)?;
+            reserve(&mut group_start, 1, &mut budget, "the row-group starts")?;
+            reserve(&mut groups, 1, &mut budget, "the row-group page inventories")?;
             group_start.push(start);
             start += u64::try_from(metadata.row_group(index).num_rows()).unwrap_or(0);
-            let group = scan_group(&mut scanner, metadata, index)?;
+            let group = scan_group(&mut scanner, metadata, index, &mut budget)?;
             for leaf in &group.leaves {
                 super::parquet_scan::require_page_fits(&leaf.summary, capacity)?;
             }
@@ -162,12 +170,15 @@ impl SourceScan {
             ));
         }
         let batches = usize::try_from(start.div_ceil(batch_rows.max(1))).map_err(storage)?;
+        let mut value_bytes = Vec::new();
+        reserve(&mut value_bytes, batches, &mut budget, "the per-batch sizes")?;
+        value_bytes.resize(batches, 0);
         let mut scan = Self {
             groups,
             group_start,
             batch_rows: batch_rows.max(1),
             rows: start,
-            value_bytes: vec![0; batches],
+            value_bytes,
             resident_bytes: 0,
         };
         scan.size_values(
@@ -648,5 +659,7 @@ fn measure<T: DataType>(
     Ok(())
 }
 
+#[cfg(test)]
+mod inventory_tests;
 #[cfg(test)]
 mod tests;

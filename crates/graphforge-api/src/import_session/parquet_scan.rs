@@ -20,6 +20,7 @@ use graphforge_core::GfError;
 use parquet::file::metadata::{ColumnChunkMetaData, ParquetMetaData};
 use parquet::schema::types::ColumnDescriptor;
 
+use super::inventory_budget::{reserve, InventoryBudget};
 use super::{limit, storage};
 
 /// A page header larger than this is not a page header: statistics are the only
@@ -27,6 +28,8 @@ use super::{limit, storage};
 const MAX_HEADER_BYTES: usize = 1 << 20;
 /// Thrift structs nest a few levels; this bounds recursion on corrupt input.
 const MAX_DEPTH: usize = 12;
+/// Read-ahead the header scan holds while it reads one chunk's headers.
+const HEADER_READER_BYTES: usize = 4 << 10;
 
 const DATA_PAGE: i32 = 0;
 const INDEX_PAGE: i32 = 1;
@@ -294,22 +297,30 @@ fn read_header<R: Read>(reader: &mut R) -> Result<(usize, RawHeader), GfError> {
 ///
 /// Reads each page's header (never its body) and checks it against the bytes
 /// that remain in the chunk. `file` is a plain handle, not an observed one, so
-/// the scan does not feed the source digest out of order.
+/// the scan does not feed the source digest out of order. The facts are grown
+/// through `budget`, so a chunk of many pages is refused, before its inventory
+/// is allocated, when the caller's workspace cannot hold it.
 pub(super) fn scan_chunk(
     file: &mut File,
     chunk: &ColumnChunkMetaData,
+    budget: &mut InventoryBudget,
 ) -> Result<Vec<PageFact>, GfError> {
     let (start, length) = chunk.byte_range();
     let end = start
         .checked_add(length)
         .ok_or_else(|| storage("Parquet column chunk range overflows"))?;
     let flat = chunk.column_descr().max_rep_level() == 0;
+    // The read-ahead buffer is held for the whole chunk's headers, one at a time.
+    budget.admit(
+        u64::try_from(HEADER_READER_BYTES).unwrap_or(u64::MAX),
+        "a column chunk's page headers",
+    )?;
     let mut pages = Vec::new();
     let mut offset = start;
     let mut data_values = 0_i64;
     while offset < end {
         file.seek(SeekFrom::Start(offset)).map_err(storage)?;
-        let mut reader = BufReader::with_capacity(4096, &mut *file);
+        let mut reader = BufReader::with_capacity(HEADER_READER_BYTES, &mut *file);
         let (header_len, raw) = read_header(&mut reader)?;
         let compressed = u64::try_from(raw.compressed.ok_or_else(|| out_of_range("size"))?)
             .map_err(|_| out_of_range("compressed size"))?;
@@ -338,7 +349,16 @@ pub(super) fn scan_chunk(
         };
         if kind == PageKind::Data {
             data_values += i64::from(values);
+            // A page that overruns the footer's value count is refused the
+            // moment it arrives, not once every page of a chunk of millions
+            // has been read and recorded.
+            if data_values > chunk.num_values() {
+                return Err(storage(
+                    "Parquet column chunk pages disagree with the footer's value count",
+                ));
+            }
         }
+        reserve(&mut pages, 1, budget, "a column chunk's page facts")?;
         pages.push(PageFact {
             kind,
             compressed: u32::try_from(compressed).map_err(|_| out_of_range("compressed size"))?,
@@ -349,6 +369,7 @@ pub(super) fn scan_chunk(
         });
         offset = body + compressed;
     }
+    budget.release(u64::try_from(HEADER_READER_BYTES).unwrap_or(u64::MAX));
     // The footer states the chunk's uncompressed total. Writers differ in what
     // they count (headers, the dictionary) and some leave it zero, so only a claim
     // far past a stated total is a corrupt length.
@@ -496,24 +517,41 @@ impl GroupScan {
 }
 
 /// Scan every leaf column of row group `group`.
+///
+/// The columns share `budget`: a flat fixed-width column's page facts are
+/// summarized into its `ChunkSummary` and dropped, releasing their bytes for
+/// the columns after it, while a byte-array or nested column keeps its facts
+/// for the life of the plan and stays charged.
 pub(super) fn scan_group(
     file: &mut File,
     metadata: &ParquetMetaData,
     group: usize,
+    budget: &mut InventoryBudget,
 ) -> Result<GroupScan, GfError> {
     let mut leaves = Vec::new();
     for chunk in metadata.row_group(group).columns() {
+        reserve(&mut leaves, 1, budget, "a row group's leaf scans")?;
         let descriptor = chunk.column_descr();
         let leaf = leaf_of(descriptor);
         let nested = descriptor.max_rep_level() > 0;
-        let pages = scan_chunk(file, chunk)?;
+        let pages = scan_chunk(file, chunk, budget)?;
         let summary = ChunkSummary::of(&pages);
+        let retained = leaf == Leaf::Variable || nested;
+        if !retained {
+            budget.release(
+                u64::try_from(pages.capacity())
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(u64::try_from(std::mem::size_of::<PageFact>()).unwrap_or(
+                        u64::MAX,
+                    )),
+            );
+        }
         leaves.push(LeafScan {
             leaf,
             nested,
             exact: false,
             summary,
-            pages: (leaf == Leaf::Variable || nested).then_some(pages),
+            pages: retained.then_some(pages),
         });
     }
     Ok(GroupScan { leaves })

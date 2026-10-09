@@ -24,6 +24,7 @@ pub(crate) mod bulk_source;
 #[cfg(test)]
 mod cpu_budget_report;
 mod external_source;
+mod inventory_budget;
 mod journal;
 mod memory_budget;
 mod normalization;
