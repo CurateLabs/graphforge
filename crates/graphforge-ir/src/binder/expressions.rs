@@ -434,6 +434,11 @@ impl Binder {
                     // upgrades it to a whole node value in `lower_return_item_expr`.
                     s.builder.push_expr(IrExpr::VarRef(node_var))
                 } else if let Some(feature) = super::unsupported::function(call) {
+                    // Validate argument scope before reporting the missing
+                    // implementation; an undefined name remains a bind error.
+                    for arg in &call.args {
+                        self.lower_expr(arg, parent_span, s);
+                    }
                     s.errors
                         .push(super::unsupported::diagnostic(feature, call.span));
                     s.builder.push_expr(IrExpr::Literal(IrLiteral::Null))

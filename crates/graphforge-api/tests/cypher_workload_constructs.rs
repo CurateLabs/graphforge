@@ -542,6 +542,11 @@ fn malformed_unsupported_forms_keep_syntax_errors() {
         "RETURN COUNT { (a)-[:r]-> }",
         "MATCH p = shortestPath((a)-[:r*]->) RETURN p",
         "CALL { RETURN } RETURN 1",
+        "CALL { RETURN 1 AS n } RETURN",
+        "RETURN reduce(total = 0, x IN [1] | total + x) + )",
+        "RETURN COUNT { RETURN 1 AS n } + )",
+        "CALL { RETURN reduce(total = 0, x IN [1] | total + x)",
+        "MATCH p = shortestPath((a)-[:r*]->(b)) RETURN",
     ] {
         assert!(
             matches!(gf.execute(query), Err(GfError::Parse { .. })),
@@ -592,5 +597,73 @@ fn unwound_node_recollection_preserves_properties_and_identity() {
         WITH collect(n) AS ns UNWIND ns AS x RETURN x.id AS source"
         ),
         vec![strings(&["1"])]
+    );
+}
+
+#[test]
+fn unsupported_features_preserve_ordinary_binding_errors() {
+    let gf = schemas();
+    let params = HashMap::from([(
+        "rows".to_owned(),
+        IrLiteral::List(vec![IrLiteral::Map(vec![
+            ("left_key".to_owned(), IrLiteral::Int(7)),
+            ("right_key".to_owned(), IrLiteral::Str("k".to_owned())),
+        ])]),
+    )]);
+    for query in [
+        "RETURN id(missing)",
+        "RETURN duration({hours: missing})",
+        "UNWIND $rows AS row MATCH (a:L1 {left_key: row.left_key}), (b:L2 {right_key: row.right_key}) RETURN missing",
+    ] {
+        let error = gf
+            .execute_with_params(query, &params)
+            .expect_err("undefined name");
+        assert_eq!(error.code(), "GF_PARSE", "{query}: {error}");
+        let GfError::Bind { diagnostics, .. } = error else {
+            panic!("{query}: {error}")
+        };
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.kind
+                    == graphforge_api::BindErrorKind::UndeclaredVariable),
+            "{query}: {diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn parameter_row_refusal_tracks_with_wildcards_and_aliases() {
+    let gf = schemas();
+    let params = HashMap::from([(
+        "rows".to_owned(),
+        IrLiteral::List(vec![IrLiteral::Map(vec![
+            ("left_key".to_owned(), IrLiteral::Int(7)),
+            ("right_key".to_owned(), IrLiteral::Str("k".to_owned())),
+        ])]),
+    )]);
+    for query in [
+        "UNWIND $rows AS row MATCH (a:L1 {left_key: row.left_key}) WITH * MATCH (b:L2 {right_key: row.right_key}) RETURN a.title, b.enabled",
+        "UNWIND $rows AS row MATCH (a:L1 {left_key: row.left_key}) WITH a, row AS next MATCH (b:L2 {right_key: next.right_key}) RETURN a.title, b.enabled",
+    ] {
+        unsupported(
+            &gf,
+            query,
+            &params,
+            "Cypher parameter rows matching properties across different node labels",
+        );
+    }
+}
+
+#[test]
+fn all_predicate_local_alias_shadows_outer_relationship_list() {
+    let gf = accounts();
+    assert_eq!(
+        rows(
+            &gf,
+            "MATCH (:Account {id: 1})-[r:transfer*1..2]->(:Account) \
+        RETURN ALL(r IN [[{amount: 1}]] WHERE r[0].amount = 1) AS ok"
+        ),
+        vec![strings(&["true"]), strings(&["true"])]
     );
 }
