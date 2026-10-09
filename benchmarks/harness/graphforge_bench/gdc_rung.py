@@ -49,9 +49,10 @@ from typing import Any
 import uuid
 import xml.etree.ElementTree as ET
 
-from graphforge_bench import gdc_dataset_cache
+from graphforge_bench import gdc_dataset_cache, phase_cgroup
 from graphforge_bench import gdc_graphalytics_scorecard as graphalytics
 from graphforge_bench.benchexec_authority import EvidenceError, Limits, normalize_run
+from graphforge_bench.benchexec_process import HUNG_EVIDENCE, HUNG_STATUS
 from graphforge_bench.gdc_contracts import GdcContractError
 from graphforge_bench.gdc_measurement_policy import (
     GdcMeasurementBoundaryError,
@@ -78,7 +79,6 @@ from graphforge_bench.progressive_host_run import (
     MAXIMUM_WALL_SECONDS,
     SYSTEM_BENCHEXEC_PYTHON,
     HostRunError,
-    _host_swap_counters,
     _require_quiet_host,
     _wrap_executable_for_tmp,
     measure_host_capacity,
@@ -418,13 +418,14 @@ def classify_phase(
     telemetry: Mapping[str, Any] | None,
     benchexec: Mapping[str, Any] | None,
     *,
-    swapped: bool,
+    swapped: bool | None,
 ) -> tuple[str, str] | None:
     """The typed cause of a phase that did not pass, or None.
 
     A resource limit BenchExec enforced comes first, since it explains a missing
     or failed telemetry line; then the phase's own failure; then the 4 GiB
-    process envelope; then host swap, which makes the measurement unusable.
+    process envelope; then the phase's own swap, which makes the measurement
+    unusable (`swapped` is None when the phase's cgroup was never observed).
     """
     if measured is None:
         return "benchexec_failed", "BenchExec produced no result"
@@ -451,34 +452,16 @@ def classify_phase(
         return "phase_telemetry_missing", "the phase reports no process peak RSS"
     if peak > MEMORY_LIMIT_BYTES:
         return "memory_limit_exceeded", f"process peak RSS {peak} exceeds {MEMORY_LIMIT_BYTES}"
+    if swapped is None:
+        return (
+            "phase_swap_unobserved",
+            "the phase's cgroup was never read, so whether it swapped is unknown",
+        )
     if swapped:
-        return "host_swapped", "the host paged out during the phase"
+        return "phase_swapped", "the phase's own cgroup paged out"
     if benchexec is None or benchexec.get("outcome") != "passed":
         return "benchexec_failed", f"BenchExec outcome {benchexec and benchexec.get('outcome')}"
     return None
-
-
-def swapped_out(before: Mapping[str, int], after: Mapping[str, int]) -> bool:
-    """Whether the host paged anything out while the phase ran.
-
-    Only a rise in `pswpout` marks the phase as swap-exposed. Phase processes are
-    new, so any page of theirs that reaches swap goes out inside the window; a
-    `pswpin` rise with `pswpout` flat reads pages that left memory before the phase
-    began, which are some other process's. Measured on this host (#1914): a daemon
-    such as systemd-journald, woken by the scope BenchExec starts for every phase,
-    reads its cold pages back, so counting `pswpin` fails short phases at random.
-    """
-    return after["pswpout"] > before["pswpout"]
-
-
-def swap_detail(before: Mapping[str, int], after: Mapping[str, int]) -> str:
-    """What the host's swap counters did, so a `host_swapped` rung says what moved."""
-    return (
-        "host paged out during the phase: "
-        f"pswpout +{after['pswpout'] - before['pswpout']} "
-        f"({before['pswpout']} -> {after['pswpout']}), "
-        f"pswpin +{after['pswpin'] - before['pswpin']}; see host-swap.json"
-    )
 
 
 def describe_failed_samples(evidence: Mapping[str, Any]) -> str:
@@ -504,24 +487,31 @@ def describe_failed_samples(evidence: Mapping[str, Any]) -> str:
     return "; ".join(parts)[:2048]
 
 
+def _hung_detail(raw: Path) -> str:
+    """Why the supervisor killed BenchExec, from the evidence it left beside the raw output."""
+    try:
+        reason = json.loads((raw / HUNG_EVIDENCE).read_text(encoding="utf-8"))["reason"]
+    except (OSError, ValueError, KeyError, TypeError):
+        reason = "BenchExec did not exit"
+    return f"{reason}; the process group was killed"
+
+
 def run_phase(rung: Rung, name: str, task: dict[str, Any], wall_seconds: int) -> PhaseRun:
     ladder = rung.ladder
     with tempfile.TemporaryDirectory(prefix=".gf-gdc-authority-", dir=ladder.work_root) as parent:
         stage, task = _stage_phase(
             ladder, Path(parent), {"schema": TASK_SCHEMA, **task}, wall_seconds
         )
-        swap_before = _host_swap_counters()
         status = ladder.benchexec(stage, ladder.executables, ladder.identities, ladder.work_root)
-        swap_after = _host_swap_counters()
-        swapped = swapped_out(swap_before, swap_after)
         raw = stage / "raw"
-        if swapped and raw.is_dir():
-            # Retain the counters beside the failed raw output (#1727), even when a
-            # known phase failure stays the primary cause: they record the interference.
-            (raw / "host-swap.json").write_text(
-                json.dumps({"before": swap_before, "after": swap_after}, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
+        # The phase's own cgroup counters (#1914), not the host's: another process's
+        # page-out on a shared host is not this phase's memory.
+        swap = phase_cgroup.load_evidence(stage / phase_cgroup.EVIDENCE_NAME)
+        swapped = phase_cgroup.verdict(swap)
+        if swap is not None and raw.is_dir():
+            # Retain the counters beside the raw output (#1727), even when a known
+            # phase failure stays the primary cause: they record the swapping.
+            shutil.copyfile(stage / phase_cgroup.EVIDENCE_NAME, raw / phase_cgroup.EVIDENCE_NAME)
         telemetry = _phase_telemetry(raw) if raw.is_dir() else None
         measured: dict[str, Any] | None
         try:
@@ -540,10 +530,13 @@ def run_phase(rung: Rung, name: str, task: dict[str, Any], wall_seconds: int) ->
             except (EvidenceError, RungInputError) as error:
                 document, invalid = None, str(error)
         cause = classify_phase(measured, telemetry, document, swapped=swapped)
-        if cause is not None and cause[0] == "host_swapped":
-            cause = (cause[0], swap_detail(swap_before, swap_after))
+        if cause is not None and cause[0] == "phase_swapped" and swap is not None:
+            cause = (cause[0], phase_cgroup.detail(swap))
         if invalid is not None:
             cause = ("benchexec_evidence_invalid", invalid)
+        elif status == HUNG_STATUS and (cause is None or cause[0] == "benchexec_failed"):
+            # A phase's own failure stays primary; a hang explains a missing result.
+            cause = ("benchexec_hung", _hung_detail(raw))
         elif cause is None and status != 0:
             cause = ("benchexec_failed", f"BenchExec exited {status}")
         if cause is not None and raw.is_dir():
@@ -847,14 +840,19 @@ def _check(rung: Rung, evidence: Mapping[str, Any], results_dir: Path, input_roo
     except RungInputError as error:
         rung.fail("check", error.cause, str(error))
         return
-    correctness = check_reference(
-        reference=reference,
-        reference_sha256=reference_sha256,
-        evidence=evidence,
-        results=results,
-        # A pinned cache reference is the suite's whole answer key.
-        complete=reference_spec is not None and "cache_path" in reference_spec,
-    )
+    try:
+        correctness = check_reference(
+            reference=reference,
+            reference_sha256=reference_sha256,
+            evidence=evidence,
+            results=results,
+            # A pinned cache reference is the suite's whole answer key.
+            complete=reference_spec is not None and "cache_path" in reference_spec,
+        )
+    except RungInputError as error:
+        # A result file is read as the check consumes it, so a malformed one surfaces here.
+        rung.fail("check", error.cause, str(error))
+        return
     rung.publish("correctness", correctness)
     for mismatch in correctness["mismatches"]:
         if mismatch["cause"] != "query_failed":  # already the query phase's failure

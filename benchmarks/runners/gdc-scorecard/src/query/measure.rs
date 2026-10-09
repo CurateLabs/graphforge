@@ -2,6 +2,7 @@
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write as _;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -328,8 +329,16 @@ fn sample(
         None => Ok((schema, batches)),
         Some(columns) => project(&schema, &batches, columns),
     };
-    let rendered = match projected.and_then(|(schema, batches)| Rendered::new(&schema, &batches)) {
-        Ok(rendered) => rendered,
+    // The result is rendered a row at a time (#1914): once to digest it and, when the
+    // reference check wants the cells, once more to write them. A Graphalytics result
+    // has a row per vertex, and holding every rendered row (plus the copy the JSON
+    // writer used to make) cost over 300 bytes a row.
+    let digested = projected.and_then(|(schema, batches)| {
+        let result_sha256 = streamed_digest(&schema, &batches, variant.ordered)?;
+        Ok((schema, batches, result_sha256))
+    });
+    let (schema, batches, result_sha256) = match digested {
+        Ok(digested) => digested,
         Err(error) => {
             return Ok(Outcome::Failed(Failure {
                 cause: "result_unrenderable",
@@ -338,13 +347,12 @@ fn sample(
             }));
         }
     };
-    let result_sha256 = rendered.digest(variant.ordered);
     if let Some(results) = results {
-        results.write(variant, binding, &rendered, &result_sha256)?;
+        results.write(variant, binding, &schema, &batches, &result_sha256)?;
     }
     Ok(Outcome::Measured(Measured {
         latency_ns: u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX),
-        rows: rendered.rows.len() as u64,
+        rows: batches.iter().map(|batch| batch.num_rows() as u64).sum(),
         result_sha256,
     }))
 }
@@ -403,7 +411,9 @@ pub fn measure_variant(
     results: Option<&ResultsDir>,
 ) -> Result<VariantMeasurement, QueryError> {
     let first = &variant.bindings[0];
-    let (warmup, _) = execute(forge, variant, first)?;
+    // Only whether the warm-up completed is kept: its result is dropped here, not held
+    // through the measured pass beside each sample's own.
+    let warmup_completed = execute(forge, variant, first)?.0.is_ok();
     let mut samples = Vec::with_capacity(variant.bindings.len());
     for binding in &variant.bindings {
         samples.push(Sample {
@@ -432,7 +442,7 @@ pub fn measure_variant(
         warmup: Warmup {
             binding_id: first.id.clone(),
             excluded: true,
-            completed: warmup.is_ok(),
+            completed: warmup_completed,
         },
         samples,
         summary,
@@ -451,6 +461,10 @@ fn cell(row: &mut Vec<u8>, text: &str) {
 /// one has its encoded rows sorted bytewise first, so row order cannot change
 /// its digest. Schema metadata and batch boundaries are not part of the digest.
 ///
+/// The digest is computed a row at a time: an ordered result holds one rendered
+/// row, an unordered one also keeps its encoded rows (see [`streamed_digest`]).
+/// [`Rendered::digest`] is the same definition over rows held in memory.
+///
 /// # Errors
 /// `query_failed` if a column cannot be rendered.
 pub fn result_digest(
@@ -458,7 +472,95 @@ pub fn result_digest(
     batches: &[RecordBatch],
     ordered: bool,
 ) -> Result<String, QueryError> {
-    Ok(Rendered::new(schema, batches)?.digest(ordered))
+    streamed_digest(schema, batches, ordered)
+}
+
+/// Visit every row of `batches` in result order with its cells rendered as Arrow
+/// display text. `texts[column]` is a cell's text unless `nulls[column]`; both
+/// slices are reused from row to row, so a visit sees one row's cells and no more.
+fn visit_rows(
+    batches: &[RecordBatch],
+    mut visit: impl FnMut(&[String], &[bool]) -> Result<(), QueryError>,
+) -> Result<(), QueryError> {
+    let options = FormatOptions::default();
+    let mut texts: Vec<String> = Vec::new();
+    let mut nulls: Vec<bool> = Vec::new();
+    for batch in batches {
+        let formatters = batch
+            .columns()
+            .iter()
+            .map(|column| ArrayFormatter::try_new(column.as_ref(), &options))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| QueryError::new(QueryCause::QueryFailed, error.to_string()))?;
+        texts.resize_with(formatters.len(), String::new);
+        nulls.resize(formatters.len(), false);
+        for index in 0..batch.num_rows() {
+            for (position, (column, formatter)) in
+                batch.columns().iter().zip(&formatters).enumerate()
+            {
+                nulls[position] = column.is_null(index);
+                if !nulls[position] {
+                    texts[position].clear();
+                    write!(texts[position], "{}", formatter.value(index)).map_err(|error| {
+                        QueryError::new(QueryCause::QueryFailed, error.to_string())
+                    })?;
+                }
+            }
+            visit(&texts, &nulls)?;
+        }
+    }
+    Ok(())
+}
+
+/// [`Rendered::digest`] without the rendered rows: each row is rendered, encoded
+/// and dropped. An ordered result hashes as it streams. An unordered one keeps its
+/// encoded rows in one buffer with an offset per row and sorts the offsets, which
+/// is the digest's bytewise row sort at a fraction of the memory of a `Vec<Vec<u8>>`.
+fn streamed_digest(
+    schema: &SchemaRef,
+    batches: &[RecordBatch],
+    ordered: bool,
+) -> Result<String, QueryError> {
+    let mut header = Vec::new();
+    cell(&mut header, RESULT_DIGEST);
+    cell(&mut header, if ordered { "ordered" } else { "unordered" });
+    for field in schema.fields() {
+        cell(&mut header, field.name());
+        cell(&mut header, &field.data_type().to_string());
+    }
+    header.push(b'\n');
+    let mut hasher = Sha256::new();
+    hasher.update(&header);
+    let mut encoded: Vec<u8> = Vec::new();
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut row: Vec<u8> = Vec::new();
+    visit_rows(batches, |texts, nulls| {
+        row.clear();
+        for (text, null) in texts.iter().zip(nulls) {
+            if *null {
+                row.push(b'N');
+            } else {
+                cell(&mut row, text);
+            }
+        }
+        row.push(b'\n');
+        if ordered {
+            hasher.update(&row);
+        } else {
+            spans.push((encoded.len(), row.len()));
+            encoded.extend_from_slice(&row);
+        }
+        Ok(())
+    })?;
+    if !ordered {
+        spans.sort_unstable_by(|left, right| {
+            encoded[left.0..left.0 + left.1].cmp(&encoded[right.0..right.0 + right.1])
+        });
+        for (start, length) in spans {
+            hasher.update(&encoded[start..start + length]);
+        }
+    }
+    Ok(hex(&hasher.finalize()))
 }
 
 /// One result as the digest sees it: each column's name and Arrow type, and
@@ -574,15 +676,137 @@ impl ResultsDir {
         })
     }
 
+    /// Write one result as compact JSON with its keys in sorted order, the layout
+    /// `serde_json` gives a `json!` object, and the rows after every other member
+    /// the check needs to start (`schema` alone follows them). The rows are
+    /// rendered and written one at a time; no document is built.
     fn write(
         &self,
         variant: &Variant,
         binding: &Binding,
-        rendered: &Rendered,
+        schema: &SchemaRef,
+        batches: &[RecordBatch],
         result_sha256: &str,
     ) -> Result<(), QueryError> {
         let ordinal = self.next.get();
         self.next.set(ordinal + 1);
+        let path = self.path.join(format!("{ordinal:08}.json"));
+        let io = |error: std::io::Error| {
+            QueryError::new(QueryCause::Io, format!("{}: {error}", path.display()))
+        };
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(io)?;
+        let mut writer = BufWriter::new(file);
+        let columns: Vec<_> = schema
+            .fields()
+            .iter()
+            .map(|field| json!({"name": field.name(), "type": field.data_type().to_string()}))
+            .collect();
+        (|| -> std::io::Result<()> {
+            writer.write_all(b"{\"binding_id\":")?;
+            put_json(&mut writer, &binding.id)?;
+            writer.write_all(b",\"columns\":")?;
+            put_json(&mut writer, &columns)?;
+            writer.write_all(b",\"ordered\":")?;
+            put_json(&mut writer, &variant.ordered)?;
+            writer.write_all(b",\"query_id\":")?;
+            put_json(&mut writer, &variant.id)?;
+            writer.write_all(b",\"result_sha256\":")?;
+            put_json(&mut writer, result_sha256)?;
+            writer.write_all(b",\"rows\":[")
+        })()
+        .map_err(io)?;
+        let mut first = true;
+        visit_rows(batches, |texts, nulls| {
+            (|| -> std::io::Result<()> {
+                if !first {
+                    writer.write_all(b",")?;
+                }
+                first = false;
+                writer.write_all(b"[")?;
+                for (position, (text, null)) in texts.iter().zip(nulls).enumerate() {
+                    if position > 0 {
+                        writer.write_all(b",")?;
+                    }
+                    if *null {
+                        writer.write_all(b"null")?;
+                    } else {
+                        put_json(&mut writer, text.as_str())?;
+                    }
+                }
+                writer.write_all(b"]")
+            })()
+            .map_err(io)
+        })?;
+        (|| -> std::io::Result<()> {
+            writer.write_all(b"],\"schema\":")?;
+            put_json(&mut writer, RESULT_SCHEMA)?;
+            writer.write_all(b"}\n")?;
+            writer.flush()
+        })()
+        .map_err(io)
+    }
+}
+
+fn put_json<T: Serialize + ?Sized>(writer: &mut impl Write, value: &T) -> std::io::Result<()> {
+    serde_json::to_writer(writer, value).map_err(std::io::Error::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use arrow::array::{ArrayRef, Int64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use serde_json::{Value, json};
+
+    use super::*;
+
+    fn variant(ordered: bool) -> Variant {
+        serde_json::from_value(json!({
+            "id": "q",
+            "ordered": ordered,
+            "operation": {"kind": "cypher", "text": "RETURN 1"},
+            "bindings": [{"id": "b"}],
+        }))
+        .unwrap()
+    }
+
+    fn batches() -> (SchemaRef, Vec<RecordBatch>) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, true),
+        ]));
+        let batch = |ids: Vec<i64>, names: Vec<Option<&str>>| {
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(Int64Array::from(ids)) as ArrayRef,
+                    Arc::new(StringArray::from(names)) as ArrayRef,
+                ],
+            )
+            .unwrap()
+        };
+        let batches = vec![
+            batch(vec![1, 2], vec![Some("a\"b"), None]),
+            batch(vec![], vec![]),
+            batch(vec![3], vec![Some("")]),
+        ];
+        (schema, batches)
+    }
+
+    /// The document the writer built before it streamed: a `json!` object, rows rendered whole.
+    fn built_document(
+        variant: &Variant,
+        binding: &Binding,
+        schema: &SchemaRef,
+        batches: &[RecordBatch],
+        result_sha256: &str,
+    ) -> Vec<u8> {
+        let rendered = Rendered::new(schema, batches).unwrap();
         let document = json!({
             "schema": RESULT_SCHEMA,
             "query_id": variant.id,
@@ -596,19 +820,62 @@ impl ResultsDir {
                 .collect::<Vec<_>>(),
             "rows": rendered.rows,
         });
-        let path = self.path.join(format!("{ordinal:08}.json"));
-        let io = |error: std::io::Error| {
-            QueryError::new(QueryCause::Io, format!("{}: {error}", path.display()))
-        };
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(io)?;
-        let mut writer = BufWriter::new(file);
-        serde_json::to_writer(&mut writer, &document)
-            .map_err(|error| QueryError::new(QueryCause::Io, error.to_string()))?;
-        writer.write_all(b"\n").map_err(io)?;
-        writer.flush().map_err(io)
+        let mut bytes = serde_json::to_vec(&document).unwrap();
+        bytes.push(b'\n');
+        bytes
+    }
+
+    #[test]
+    fn a_streamed_result_file_is_byte_for_byte_the_document_built_whole() {
+        let (schema, batches) = batches();
+        for ordered in [true, false] {
+            let variant = variant(ordered);
+            let binding = &variant.bindings[0];
+            let sha = streamed_digest(&schema, &batches, ordered).unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            let results = ResultsDir::new(directory.path()).unwrap();
+            results
+                .write(&variant, binding, &schema, &batches, &sha)
+                .unwrap();
+            let written = std::fs::read(directory.path().join("00000000.json")).unwrap();
+            assert_eq!(
+                String::from_utf8(written.clone()).unwrap(),
+                String::from_utf8(built_document(&variant, binding, &schema, &batches, &sha))
+                    .unwrap()
+            );
+            let parsed: Value = serde_json::from_slice(&written).unwrap();
+            assert_eq!(
+                parsed["rows"],
+                json!([["1", "a\"b"], ["2", null], ["3", ""]]),
+                "a null cell is JSON null, an empty string stays empty"
+            );
+        }
+    }
+
+    #[test]
+    fn a_result_with_no_rows_is_written_with_an_empty_array() {
+        let (schema, _) = batches();
+        let variant = variant(false);
+        let directory = tempfile::tempdir().unwrap();
+        let results = ResultsDir::new(directory.path()).unwrap();
+        results
+            .write(&variant, &variant.bindings[0], &schema, &[], "d")
+            .unwrap();
+        let written: Value =
+            serde_json::from_slice(&std::fs::read(directory.path().join("00000000.json")).unwrap())
+                .unwrap();
+        assert_eq!(written["rows"], json!([]));
+        assert_eq!(written["schema"], RESULT_SCHEMA);
+    }
+
+    #[test]
+    fn a_null_and_an_empty_string_digest_differently_when_streamed() {
+        let (schema, batches) = batches();
+        let with_null = streamed_digest(&schema, &batches, true).unwrap();
+        let rendered = Rendered::new(&schema, &batches).unwrap();
+        assert_eq!(with_null, rendered.digest(true));
+        let mut emptied = Rendered::new(&schema, &batches).unwrap();
+        emptied.rows[1][1] = Some(String::new());
+        assert_ne!(with_null, emptied.digest(true));
     }
 }

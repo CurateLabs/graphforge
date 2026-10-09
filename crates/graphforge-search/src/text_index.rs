@@ -210,14 +210,72 @@ where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
     checkpoint()?;
+    let tokens = validate_query(query, limit, limits)?;
+    let validated = open_validated(index_dir, expected_properties, limits, &mut checkpoint)?;
+    run_validated_search(
+        &validated,
+        index_dir,
+        &tokens,
+        limit,
+        limits,
+        &mut checkpoint,
+    )
+}
+
+/// Search an index that [`open_validated`] already opened and fully
+/// validated, without reopening or decoding it again.
+///
+/// `index_dir` only labels errors; the searcher already holds the index.
+/// Query, limit, work and cancellation checks are identical to
+/// [`search_text_index`].
+pub(crate) fn search_validated<C>(
+    validated: &ValidatedIndex,
+    index_dir: &Path,
+    query: &str,
+    limit: usize,
+    limits: TextSearchLimits,
+    mut checkpoint: C,
+) -> Result<Vec<TextSearchHit>, SearchArtifactError>
+where
+    C: FnMut() -> Result<(), SearchArtifactError>,
+{
+    checkpoint()?;
+    let tokens = validate_query(query, limit, limits)?;
+    run_validated_search(
+        validated,
+        index_dir,
+        &tokens,
+        limit,
+        limits,
+        &mut checkpoint,
+    )
+}
+
+fn validate_query(
+    query: &str,
+    limit: usize,
+    limits: TextSearchLimits,
+) -> Result<Vec<String>, SearchArtifactError> {
     if limit == 0 {
         return Err(invalid("limit", "must be greater than zero"));
     }
     if limit > limits.results {
         return Err(exhausted("text_results", limits.results));
     }
-    let tokens = analyze_query(query, limits)?;
-    let validated = open_validated(index_dir, expected_properties, limits, &mut checkpoint)?;
+    analyze_query(query, limits)
+}
+
+fn run_validated_search<C>(
+    validated: &ValidatedIndex,
+    index_dir: &Path,
+    tokens: &[String],
+    limit: usize,
+    limits: TextSearchLimits,
+    checkpoint: &mut C,
+) -> Result<Vec<TextSearchHit>, SearchArtifactError>
+where
+    C: FnMut() -> Result<(), SearchArtifactError>,
+{
     let work = validated
         .documents
         .checked_mul(tokens.len())
@@ -280,14 +338,14 @@ where
     Ok(hits)
 }
 
-struct ValidatedIndex {
+pub(crate) struct ValidatedIndex {
     searcher: tantivy::Searcher,
     uuid_field: Field,
     text_fields: Vec<(String, Field)>,
     documents: usize,
 }
 
-fn open_validated<C>(
+pub(crate) fn open_validated<C>(
     index_dir: &Path,
     expected_properties: &[String],
     limits: TextSearchLimits,

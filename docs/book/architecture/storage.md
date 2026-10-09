@@ -446,29 +446,60 @@ retained parent routes with newly emitted routes and verifies the complete
 mapping before installing the version-4 manifest. Legacy parent payloads can
 retain their authenticated CAS objects while their logical route paths change.
 
-An initial import builds this same encoded inventory without staging or shaping:
-the bulk builder ranks nodes and edges and emits each artifact once, hashed as it
-is written. Over budget, compact edges, adjacency entries and normalized property
-rows use disposable CRC32C scratch without SHA or fsync
+**Initial builds.** An initial build (an empty project, from an import session or the chunk API)
+produces this same encoded inventory without staging or shaping. The bulk
+builder ranks nodes and edges, and every canonical artifact is a projection of
+the ranked arrays: sorted node UUIDs, sorted edge UUIDs, and `(src, dst)` per
+edge. Each artifact is emitted once and hashed as it is written
 ([ADR 0058](../../adr/0058-initial-builds-run-on-a-bulk-builder.md),
-[resumable import](resumable-import.md)). Property runs sort exact schemas by UUID,
-then stream the existing logical windows, owner projections and 4 MiB fragments.
-Physical scratch frames do not change catalog IDs, cuts, ordinals or published
-bytes. When the node tables (about 56 bytes per node plus the fixed
-workspace) do not fit the budget, node identities, endpoint resolution, degrees
-and CSR key ranges are built per node-UUID range partition on the same scratch
-(`scratch_nodes`, ADR 0058). The historical `node_tables_exceed_budget` and
-`edge_properties_exceed_budget` manifest reasons remain readable; no new plan
-selects either. Publication and restart semantics are unchanged.
+[resumable import](resumable-import.md)). Appends to a non-empty project keep
+the staged path above, and the builder never reads a parent generation.
 
-This bound covers normalized property transport and overlay assembly. Registered
-source decoding and normalization can expand Parquet dictionaries, nested pages
-and row maps before those rows reach the transport; their independent source
-workspace and physical batching work remains under #1918. A property scratch
-reservation therefore describes builder workspace, not a proof that arbitrary
-registered inputs fit the complete process budget.
+- **Restart, not resume.** A crash, cancellation or error discards the build's
+  scratch, and the next `validate` reruns from the sources. A rerun produces the
+  same graph as an uninterrupted run (ADR 0038 property 1, amended for initial
+  builds).
+- **Sources are read in place.** A registered Parquet source is pinned by path,
+  device, inode, size and modification time and is not copied. The source SHA-256
+  is folded from the bytes the build itself reads. A source that changed is
+  refused; a rewrite that preserves the whole pin is not detected.
+- **Chunk-API builds spool.** On an empty project each accepted chunk is one
+  durable Arrow IPC file, and sealing builds from the spool. A crash leaves the
+  spool intact, and every decode is authenticated against the digest
+  acknowledged at acceptance.
+- **Over budget, scratch.** When the estimate exceeds the memory budget, compact
+  edge records, adjacency entries and normalized property rows use disposable
+  CRC32C scratch without SHA-256 or fsync. Property runs sort exact schemas by
+  UUID, then stream the existing logical windows, owner projections and 4 MiB
+  fragments. Physical scratch frames do not change catalog IDs, cuts, ordinals
+  or published bytes.
+- **Node tables use scratch when needed.** When about 56 bytes per node plus
+  fixed workspace exceeds the budget, node identities, endpoint resolution,
+  degrees and CSR key ranges use bounded node-UUID range partitions on scratch
+  (#1929).
+- **Route.** The route is chosen once by the first `validate` and recorded in
+  the import manifest (`build_route`). A later change in free memory cannot send
+  a started build to another route.
 
-Publication does not copy those files. On unix it syncs each encoded file, links the same inode to
+Pending, tracked under epic #1881:
+
+- **Source decoding is not bounded (#1918).** The property scratch bound covers
+  normalized property transport and overlay assembly. Registered source decoding
+  and normalization can expand Parquet dictionaries, nested pages and row maps
+  before those rows reach the transport. A scratch reservation therefore
+  describes builder workspace, not a proof that arbitrary registered inputs fit
+  the complete process budget.
+- **Scratch passes run one at a time (#1938).** Over-budget builds report
+  `scratch_concurrency` 1 until partitions run concurrently.
+- **Retired machinery.** The staged initial-build code awaits deletion after
+  #1929. No new initial-build plan selects it; old staged sessions remain
+  readable until the retirement change lands.
+
+The historical `node_tables_exceed_budget` and `edge_properties_exceed_budget`
+manifest reasons remain readable; new plans use bounded scratch instead of
+selecting either reason. Publication semantics are unchanged.
+
+Publication does not copy the encoded files. On unix it syncs each encoded file, links the same inode to
 `graph-objects/sha256/<2>/<62>`, and acknowledges the bucket directory, so each
 published byte is written once (ADR 0013 barriers unchanged). The encoded name
 stays until the session's private tree is retired, so a publication that stopped

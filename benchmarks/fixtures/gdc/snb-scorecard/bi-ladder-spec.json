@@ -42,7 +42,7 @@
     {
       "kind": "rewrite",
       "subject": "BI4",
-      "text": "rewrite: LDBC text hits #1888 D5 (CALL subquery). The top-100 forums are ordered by their largest per-country member count, then id, which is the order the LDBC ORDER BY + WITH DISTINCT yields and Umbra's maxNumberOfMembers. The UNION ALL of members with their messages and members with 0 becomes every member of a top forum with an OPTIONAL MATCH count of distinct messages in top-forum threads. Top-forum membership of a thread's forum is tested inside the count, not in the OPTIONAL MATCH WHERE: that shape returns wrong answers in BI13 and IC5 (#1919), though it matches the reference on BI4's own query fixture. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node."
+      "text": "rewrite: LDBC text hits #1888 D5 (CALL subquery). The top-100 forums are ordered by their largest per-country member count, then id, which is the order the LDBC ORDER BY + WITH DISTINCT yields and Umbra's maxNumberOfMembers. The UNION ALL of members with their messages and members with 0 becomes every member of a top forum with an OPTIONAL MATCH count of distinct messages in top-forum threads. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node."
     },
     {
       "kind": "rewrite",
@@ -82,7 +82,7 @@
     {
       "kind": "rewrite",
       "subject": "BI13",
-      "text": "rewrite: LDBC text hits #1888 D3 (`zombie.creationDate.year` fails to plan) and #1919 (`OPTIONAL MATCH ... WHERE likerZombie IN zombies` returns zero like counts on the query fixture). The creation-date components are read from a WITH-bound alias of the same property, and likes by zombies are counted with a conditional count inside the aggregate, which counts the same like edges. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node."
+      "text": "rewrite: LDBC text hits #1888 D3 (`zombie.creationDate.year` fails to plan). The creation-date components are read from a WITH-bound alias of the same property. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node."
     },
     {
       "kind": "rewrite",
