@@ -153,23 +153,20 @@ struct FileFrameBytes<'a> {
 
 impl FrameBytes for FileFrameBytes<'_> {
     fn next_bytes(&mut self, buffer: &mut [u8]) -> Result<usize, GfError> {
-        let want = (buffer.len() as u64).min(self.remaining);
+        let want = usize::try_from((buffer.len() as u64).min(self.remaining)).map_err(storage)?;
         if want == 0 {
             return Ok(0);
         }
         let mut taken = 0_usize;
-        while taken < want as usize {
-            let read = self
-                .file
-                .read(&mut buffer[taken..want as usize])
-                .map_err(storage)?;
+        while taken < want {
+            let read = self.file.read(&mut buffer[taken..want]).map_err(storage)?;
             if read == 0 {
                 return Err(storage("Arrow compressed buffer is truncated"));
             }
             taken += read;
         }
-        self.remaining -= want;
-        Ok(want as usize)
+        self.remaining -= want as u64;
+        Ok(want)
     }
 }
 
