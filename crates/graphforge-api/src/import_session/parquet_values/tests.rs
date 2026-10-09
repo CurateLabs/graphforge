@@ -553,12 +553,12 @@ fn dictionary_expanded_refuses_missing_dictionary_and_out_of_range_indices() {
     let indices: Vec<u32> = (0..4)
         .map(|index| index % u32::try_from(count).unwrap())
         .collect();
-    let levels: Vec<i16> = indices
-        .iter()
-        .map(|&index| i16::try_from(index).unwrap())
-        .collect();
     let mut stream = vec![width];
-    stream.extend_from_slice(&encode_hybrid(max, &levels));
+    // RLE runs have an exact logical count. A packed final run is padded to
+    // eight entries and would legitimately supply the fifth requested index.
+    for &index in &indices {
+        stream.extend_from_slice(&rle_run(1, u64::from(index), width));
+    }
     let mut cursor =
         DictionaryExpanded::new(Some(&facts), &stream, indices.len() + 1, None).unwrap();
     for &index in &indices {
@@ -591,7 +591,7 @@ fn dictionary_expanded_accepts_width0_padding_and_zero_required_values() {
     // Legal final packed padding is neither validated nor consumed: the tail
     // holds out-of-range indices that must never decode.
     let mut stream = vec![width];
-    stream.extend_from_slice(&packed_run(1, &[0, 1, 2, 1, 0, 9, 9, 9], width));
+    stream.extend_from_slice(&packed_run(1, &[0, 1, 2, 1, 0, 3, 3, 3], width));
     let expected: Vec<u64> = [0_usize, 1, 2, 1, 0]
         .iter()
         .map(|&index| u64::try_from(entries[index].len()).unwrap())

@@ -221,14 +221,14 @@ fn v1_page_may_begin_with_a_repetition_continuation() {
 fn v2_summary_checks_actual_nonnull_rows_and_separate_sections() {
     let rep = [0, 1, 0, 1, 1, 0];
     let def = [2, 2, 0, 1, 2, 2];
-    let page = v2_page(&rep, &def, 1, 2, 1, 3, b"value bytes");
+    let page = v2_page(&rep, &def, 1, 2, 2, 3, b"value bytes");
     let cursor = PageEvents::new(&page, 1, 2).unwrap();
     assert_eq!(cursor.value_suffix(), b"value bytes");
     assert_eq!(
         cursor.validated_summary(None).unwrap(),
         super::EventSummary {
             events: 6,
-            nonnull: 3,
+            nonnull: 4,
             row_starts: 3,
             first_repetition: Some(0),
         }
