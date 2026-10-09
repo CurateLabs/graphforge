@@ -77,6 +77,34 @@ confirmed removal; historical maxima are never reduced. Crash/error coverage
 must include unlink-before-sync and sync-before-checkpoint, repeated resume,
 legacy continuation and replay after CURRENT advances.
 
+## Encoded ledger restoration on reopen
+
+The checkpoint can omit encoded allocation-ledger entries while its pinned
+inventory names every artifact. `encoded_ledger_sha256` uses the
+`graphforge-construction-encoded-ledger-v2\0` domain and hashes only the
+length-prefixed physical identity keys in sorted order. Allocation is observed
+accounting, never file identity: ext4 delayed allocation can change allocated
+blocks without changing the inode, length or content (#1881).
+
+Before restoring the entries, reopen requires each artifact's inode to
+reproduce the digest and its byte length to equal the pinned inventory. It does
+not re-read the payload: content (SHA-256 and XXH64) is authenticated where it
+was before, at commit-boundary admission and the CAS install, and link
+authority at supersession reclaim. Reopen records the allocation it observes,
+reconciles the construction-staging category total, and raises the historical
+peaks when necessary. Logical byte and object totals are unchanged and peaks
+never decrease.
+
+This is an in-place pre-v1 change to the private construction checkpoint
+contract, consistent with [project format compatibility](project-format-compatibility.md).
+A checkpoint whose encoded ledger digest was written by an earlier build (the
+allocation-bearing v1 domain) is refused at reopen with `encoded artifact
+identities differ from checkpoint`, and the refusal leaves the checkpoint
+unmodified. Only unfinished constructions that had already omitted their
+encoded entries are affected; restart them from their original inputs.
+Committed project generations, graph payload formats, the JSON field and the
+construction format marker are unaffected.
+
 ## Measurement and completion gates
 
 The deterministic `construction_lifecycle_multilevel_allocation_baseline`

@@ -392,7 +392,13 @@ One rung:
    `load` runs `gf import-session` begin, register, validate and commit;
    `query` runs `gf storage-attribution`, then the query driver, which reopens
    the project, reconciles every count and times each query. The three phases
-   share the rung's four-hour wall.
+   share the rung's four-hour wall. BenchExec runs through
+   `graphforge_bench.benchexec_launcher` (the `fork` start method, see
+   `benchexec_process`), in its own process group with a bounded wait: a
+   BenchExec that wrote its final results and did not exit within two minutes,
+   or outlived its wall limit by fifteen, is killed with its group and the
+   phase fails `benchexec_hung`. The group is killed after every run, so no
+   process outlives its phase.
 4. **Expected counts** come from the count ladder: Graphalytics reconciles to
    `listed_edges`; SNB and FinBench reconcile every table to `listed`, the
    records of the pinned archive's loaded snapshot (the #952 reconciliation
@@ -403,13 +409,17 @@ One rung:
    key), `epsilon` (Graphalytics' `|r - s| <= epsilon * |r|` on numeric cells,
    rows paired by key columns) or `equivalence` (the same partition up to
    relabelling). A written result must reproduce its measured digest first.
+   Each written result is read once, row by row, and never held whole: its
+   digest is recomputed and its rows are paired against an index of the
+   reference in the same pass, so memory is the index plus the encoded rows
+   of an unordered digest, not copies of the result.
 6. **Tear down**: reclaim `workspace/gdc-<suite>-<rung>` by path and inventory
    the work root. The dataset cache is outside the work root and is kept.
 
 A rung passes only with no failure and an empty inventory. Typed causes include
 `rung_wall_exceeded`, `memory_limit_exceeded` (BenchExec's memory stop at
 the rung's 4 GiB limit, or a phase's largest single-process peak RSS above 4 GiB),
-`host_swapped`, `convert_failed`, `load_failed`, `count_mismatch`,
+`phase_swapped`, `phase_swap_unobserved`, `benchexec_hung`, `convert_failed`, `load_failed`, `count_mismatch`,
 `query_failed`, `reference_mismatch`, `result_digest_mismatch` and
 `teardown_incomplete`. A query that fails at runtime or answers wrongly fails
 the rung, but every query still runs, so the result lists every failure. A
@@ -420,13 +430,16 @@ BenchExec's memory limit, unlike the Graph500 ladder's 96 GB ceiling. The
 bulk builder reads its cgroup's limit, so it plans a build that fits; a
 phase BenchExec stops records the limit and the measured peaks in its detail.
 
-`host_swapped` means the host's `pswpout` counter rose while a phase ran. A
-`pswpin` rise alone does not fail the phase: new phase processes cannot have
-had pages swapped out before the window, so swap-ins with a flat `pswpout` are
-other processes' cold pages (measured on OVHC-AGENCY: `systemd-journald`
-reading its pages back when BenchExec's scope logs). A swapped phase publishes
-`<suite>-<rung>-<phase>-benchexec-raw/host-swap.json` with both counters
-before and after, and its failure detail names what moved. A `query_failed`
+`phase_swapped` means the phase's own cgroup paged out: `pswpout` in the
+`memory.stat` of BenchExec's `benchmark_*` run cgroup, or its `memory.swap.peak`,
+is above zero. The host's `/proc/vmstat` is not read, since on a shared host
+another process's swap-out is not this phase's memory (#1914). BenchExec
+removes the run cgroup when the run ends, so the supervisor samples it while the
+run is alive and keeps the largest reading. A phase whose cgroup was never read
+fails `phase_swap_unobserved` rather than passing unchecked. A failed phase
+publishes `<suite>-<rung>-<phase>-benchexec-raw/phase-cgroup-swap.json`, naming
+the cgroup, its `pswpout`, its swap peak and its `memory.swap.max` (BenchExec
+sets 0). A `query_failed`
 rung's detail lists each distinct failed-sample error with its bindings; the
 same text is in `query-evidence.json` and the correctness mismatches.
 

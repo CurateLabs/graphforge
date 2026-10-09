@@ -174,6 +174,7 @@ physical rewrite rules:
 | `VarLenExpandExec` | Breadth-first expansion for `*min..max` patterns with relationship isomorphism |
 | `OntologyInferExec` | Pass-through that carries the inference rule into the plan and `explain()` |
 | `OptionalMatchExec` | Left-join semantics with Cypher null-shaping (distinct from SQL LEFT JOIN) |
+| `CorrelatedSeedExec` | The outer rows of a correlated `OPTIONAL MATCH` or `EXISTS`, bound by `OptionalMatchExec` to the rows it executed once |
 | `UnwindExec` | Cypher list unwinding |
 | `EdgeCountExec` | `count(r)` answered from the adjacency edge-entry count |
 | `OrderedOneHopExec` | One hop `ORDER BY` destination UUID `LIMIT k`, emitted in ordinal order |

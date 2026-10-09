@@ -24,7 +24,6 @@ import sys
 import tempfile
 from typing import Any
 import unittest
-from unittest.mock import patch
 
 from graphforge_bench import gdc_graphalytics_scorecard as graphalytics
 from graphforge_bench import gdc_rung
@@ -74,11 +73,6 @@ class GraphalyticsLadderEndToEndTests(unittest.TestCase):
         self.work = self.scratch / "work"
         self.work.mkdir()
         self.output = self.scratch / "evidence"
-        swap = patch.object(
-            gdc_rung, "_host_swap_counters", return_value={"pswpin": 0, "pswpout": 0}
-        )
-        swap.start()
-        self.addCleanup(swap.stop)
 
     def evidence(self, name: str) -> Any:
         return json.loads((self.output / name).read_text(encoding="utf-8"))

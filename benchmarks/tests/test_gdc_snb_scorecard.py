@@ -21,7 +21,6 @@ import sys
 import tempfile
 from typing import Any
 import unittest
-from unittest.mock import patch
 
 from graphforge_bench import gdc_rung, gdc_snb_bi, gdc_snb_interactive
 from graphforge_bench import gdc_snb_interactive_reference as interactive_reference
@@ -81,11 +80,6 @@ class LadderCase(unittest.TestCase):
         self.work = self.scratch / "work"
         self.work.mkdir()
         self.output = self.scratch / "evidence"
-        swap = patch.object(
-            gdc_rung, "_host_swap_counters", return_value={"pswpin": 0, "pswpout": 0}
-        )
-        swap.start()
-        self.addCleanup(swap.stop)
 
     def climb(self) -> tuple[gdc_rung.Ladder, list[dict[str, Any]], FakeBenchExec]:
         benchexec = FakeBenchExec()

@@ -15,8 +15,8 @@ use crate::TextSearchLimits;
 use crate::analyzer::{TEXT_CONTRACT_VERSION, analyze_query};
 use crate::source::{TextSourceProjection, project_text_source_with, text_source_snapshot};
 use crate::text_index::{
-    TEXT_BACKEND_VERSION, TextIndexBuildOutcome, TextSearchHit, build_text_index,
-    search_text_index, validate_text_index,
+    TEXT_BACKEND_VERSION, TextIndexBuildOutcome, TextSearchHit, ValidatedIndex, build_text_index,
+    open_validated, search_text_index, search_validated,
 };
 
 const EMPTY_MARKER_FILE: &str = "empty-text-v1.marker";
@@ -530,6 +530,51 @@ fn prepare_text_index_with_budget<C>(
 where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
+    prepare_validated_text_index(project_dir, request, mode, limits, checkpoint, policy)
+        .map(PreparedTextIndex::into_published)
+}
+
+/// A prepared text index, carrying the already-open validated searcher when
+/// the preparation validated an existing artifact, so a query can run on it
+/// instead of decoding the same immutable corpus a second time.
+enum PreparedTextIndex {
+    Empty(PublishedSearchArtifact),
+    /// Published by this call. Its build directory was validated, but that
+    /// searcher cannot be held across publication: the directory is renamed
+    /// into place, which fails on Windows while its files are mapped.
+    Built(PublishedSearchArtifact),
+    /// Reused after validation; the searcher is the validation's own.
+    Reused(PublishedSearchArtifact, ValidatedIndex),
+}
+
+impl PreparedTextIndex {
+    fn into_published(self) -> PublishedTextIndex {
+        match self {
+            Self::Empty(artifact) => PublishedTextIndex::Empty(artifact),
+            Self::Built(artifact) | Self::Reused(artifact, _) => {
+                PublishedTextIndex::Tantivy(artifact)
+            }
+        }
+    }
+
+    const fn artifact(&self) -> &PublishedSearchArtifact {
+        match self {
+            Self::Empty(artifact) | Self::Built(artifact) | Self::Reused(artifact, _) => artifact,
+        }
+    }
+}
+
+fn prepare_validated_text_index<C>(
+    project_dir: &Path,
+    request: TextIndexRequest<'_>,
+    mode: SearchPublicationMode,
+    limits: TextLifecycleLimits,
+    checkpoint: C,
+    policy: TextPreparationPolicy<'_>,
+) -> Result<PreparedTextIndex, SearchArtifactError>
+where
+    C: FnMut() -> Result<(), SearchArtifactError>,
+{
     let key = SearchArtifactKey::text(request.label, request.properties)?;
     let properties = key
         .properties()
@@ -543,8 +588,9 @@ where
     // `coordinate_search_publication` can return. Their results are
     // captured here so the outcome below can be built from them directly,
     // instead of reopening and re-decoding the same immutable artifact a
-    // second time purely to discard the result.
-    let reused_prepared = RefCell::new(None::<PublishedTextIndex>);
+    // second time purely to discard the result. A reused artifact's open
+    // searcher is kept so the query itself does not decode it again.
+    let reused_prepared = RefCell::new(None::<PreparedTextIndex>);
     let built_kind = Cell::new(None::<TextArtifactKind>);
     let revalidate = |expected: &SearchSourceSnapshot| {
         generation_checked_snapshot(
@@ -593,10 +639,10 @@ where
             )
         },
         |artifact| {
-            let published = inspect_text_artifact(artifact, &properties, limits.text, || {
+            let prepared = open_text_artifact(artifact, &properties, limits.text, || {
                 checkpoint.borrow_mut()()
             })?;
-            *reused_prepared.borrow_mut() = Some(published);
+            *reused_prepared.borrow_mut() = Some(prepared);
             Ok(())
         },
         |build_dir, _snapshot| {
@@ -688,9 +734,9 @@ where
 /// of reopening and re-decoding the artifact a second time.
 fn finish_prepared_text_index(
     outcome: SearchPublicationOutcome,
-    reused_prepared: RefCell<Option<PublishedTextIndex>>,
+    reused_prepared: RefCell<Option<PreparedTextIndex>>,
     built_kind: &Cell<Option<TextArtifactKind>>,
-) -> PublishedTextIndex {
+) -> PreparedTextIndex {
     match outcome {
         SearchPublicationOutcome::Reused(_) => reused_prepared
             .into_inner()
@@ -699,8 +745,8 @@ fn finish_prepared_text_index(
             .get()
             .expect("a published outcome is only returned once build has recorded its kind")
         {
-            TextArtifactKind::Empty => PublishedTextIndex::Empty(artifact),
-            TextArtifactKind::Tantivy => PublishedTextIndex::Tantivy(artifact),
+            TextArtifactKind::Empty => PreparedTextIndex::Empty(artifact),
+            TextArtifactKind::Tantivy => PreparedTextIndex::Built(artifact),
         },
     }
 }
@@ -867,7 +913,7 @@ where
         .key
         .properties()
         .expect("text artifact keys always contain properties");
-    let publication = prepare_text_index_with_budget(
+    let publication = prepare_validated_text_index(
         project_dir,
         request.index,
         SearchPublicationMode::ReuseFresh,
@@ -879,8 +925,20 @@ where
         },
     )?;
     let hits = match &publication {
-        PublishedTextIndex::Empty(_) => Vec::new(),
-        PublishedTextIndex::Tantivy(artifact) => search_text_index(
+        PreparedTextIndex::Empty(_) => Vec::new(),
+        // The searcher validated while reusing this artifact answers the
+        // query; reopening it would decode the same bytes again.
+        PreparedTextIndex::Reused(artifact, validated) => search_validated(
+            validated,
+            &artifact.path,
+            request.query,
+            request.limit,
+            limits.text,
+            &mut *checkpoint,
+        )?,
+        // Its validated searcher could not outlive publication, so the
+        // published directory is opened and validated for the query.
+        PreparedTextIndex::Built(artifact) => search_text_index(
             &artifact.path,
             properties,
             request.query,
@@ -970,27 +1028,52 @@ where
     inspect_text_path(path, properties, limits, checkpoint).map(|_| ())
 }
 
-fn inspect_text_artifact<C>(
+fn open_text_artifact<C>(
     artifact: &PublishedSearchArtifact,
     properties: &[String],
     limits: TextSearchLimits,
     checkpoint: C,
-) -> Result<PublishedTextIndex, SearchArtifactError>
+) -> Result<PreparedTextIndex, SearchArtifactError>
 where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
-    match inspect_text_path(&artifact.path, properties, limits, checkpoint)? {
-        TextArtifactKind::Empty => Ok(PublishedTextIndex::Empty(artifact.clone())),
-        TextArtifactKind::Tantivy => Ok(PublishedTextIndex::Tantivy(artifact.clone())),
+    match open_text_path(&artifact.path, properties, limits, checkpoint)? {
+        OpenedText::Empty => Ok(PreparedTextIndex::Empty(artifact.clone())),
+        OpenedText::Tantivy(validated) => {
+            Ok(PreparedTextIndex::Reused(artifact.clone(), validated))
+        }
     }
+}
+
+enum OpenedText {
+    Empty,
+    Tantivy(ValidatedIndex),
 }
 
 fn inspect_text_path<C>(
     path: &Path,
     properties: &[String],
     limits: TextSearchLimits,
-    mut checkpoint: C,
+    checkpoint: C,
 ) -> Result<TextArtifactKind, SearchArtifactError>
+where
+    C: FnMut() -> Result<(), SearchArtifactError>,
+{
+    open_text_path(path, properties, limits, checkpoint).map(|opened| match opened {
+        OpenedText::Empty => TextArtifactKind::Empty,
+        OpenedText::Tantivy(_) => TextArtifactKind::Tantivy,
+    })
+}
+
+/// Validates one text artifact directory exactly as [`inspect_text_path`]
+/// reports it, returning the validated searcher for a Tantivy index so a
+/// caller that goes on to query it need not decode it again.
+fn open_text_path<C>(
+    path: &Path,
+    properties: &[String],
+    limits: TextSearchLimits,
+    mut checkpoint: C,
+) -> Result<OpenedText, SearchArtifactError>
 where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
@@ -1002,11 +1085,10 @@ where
                 return Err(corrupt(path, "empty text marker has invalid contents"));
             }
             validate_empty_layout(path, &mut checkpoint)?;
-            Ok(TextArtifactKind::Empty)
+            Ok(OpenedText::Empty)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            validate_text_index(path, properties, limits, checkpoint)?;
-            Ok(TextArtifactKind::Tantivy)
+            open_validated(path, properties, limits, &mut checkpoint).map(OpenedText::Tantivy)
         }
         Err(source) => Err(SearchArtifactError::Io {
             operation: "read empty text marker",
@@ -1293,7 +1375,8 @@ mod tests {
 
     fn bulk_uuid(index: usize) -> Uuid {
         let mut bytes = [0_u8; 16];
-        bytes[8..16].copy_from_slice(&(index as u64).to_be_bytes());
+        // Offset by one: the nil UUID is not a valid node identity.
+        bytes[8..16].copy_from_slice(&(index as u64 + 1).to_be_bytes());
         Uuid::from_bytes(bytes)
     }
 
@@ -2100,14 +2183,16 @@ mod tests {
         assert!(matches!(error, SearchArtifactError::ConcurrentMutation));
     }
 
-    /// #1409 regression: a text query used to fully reopen and decode the
-    /// Tantivy corpus three times — once to validate a build or a reuse
-    /// candidate, once more purely to discard that same validation, and
-    /// once to actually run the search. Prove, by counting rather than by
-    /// reading the source, that the throwaway middle pass is gone on both
-    /// the fresh-build path and the warm-reuse path.
+    /// #1409 and #1434 regression: a text query used to fully reopen and
+    /// decode the Tantivy corpus three times, then twice. Prove, by counting
+    /// rather than by reading the source, that a warm-reuse query decodes it
+    /// exactly once: the validation that gates reuse hands its open searcher
+    /// to the query. A query that has to build first still validates the
+    /// private build directory and then the published one, because the build
+    /// directory is renamed into place and its searcher cannot be held across
+    /// that rename.
     #[test]
-    fn search_query_opens_the_text_index_at_most_twice() {
+    fn search_query_decodes_the_text_index_once_when_reusing() {
         let dir = TempDir::new().unwrap();
         write_person(dir.path(), "Alice Example");
         let properties = properties();
@@ -2126,7 +2211,7 @@ mod tests {
         assert_eq!(
             crate::text_index::OPEN_VALIDATED_CALLS.with(std::cell::Cell::get),
             2,
-            "a fresh-build text query should decode the corpus exactly twice"
+            "a fresh-build text query validates the build directory, then the published one"
         );
 
         crate::text_index::OPEN_VALIDATED_CALLS.with(|calls| calls.set(0));
@@ -2139,12 +2224,12 @@ mod tests {
             || Ok(()),
         )
         .unwrap();
-        assert_eq!(reused.len(), 1);
         assert_eq!(
             crate::text_index::OPEN_VALIDATED_CALLS.with(std::cell::Cell::get),
-            2,
-            "a warm-reuse text query should decode the corpus exactly twice"
+            1,
+            "a warm-reuse text query should decode the corpus exactly once"
         );
+        assert_eq!(reused, built, "hits and scores must not depend on the path");
     }
 
     /// Measured evidence for #1409: bytes decoded and wall time for one

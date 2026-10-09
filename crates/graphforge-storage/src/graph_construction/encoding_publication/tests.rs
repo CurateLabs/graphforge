@@ -1070,7 +1070,7 @@ fn reclaim_refuses_encoded_artifact_inode_replacement() {
     assert!(
         error
             .to_string()
-            .contains("encoded artifact identities or allocations differ from checkpoint"),
+            .contains("encoded artifact identities differ from checkpoint"),
         "{error}"
     );
 }

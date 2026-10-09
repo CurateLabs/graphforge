@@ -21,7 +21,6 @@ import sys
 import tempfile
 from typing import Any
 import unittest
-from unittest.mock import patch
 
 from graphforge_bench import gdc_finbench_transaction_scorecard as scorecard
 from graphforge_bench import gdc_rung
@@ -201,11 +200,6 @@ class Scratch(unittest.TestCase):
         )
 
     def setUp(self) -> None:
-        swap = patch.object(
-            gdc_rung, "_host_swap_counters", return_value={"pswpin": 0, "pswpout": 0}
-        )
-        swap.start()
-        self.addCleanup(swap.stop)
         scratch = tempfile.TemporaryDirectory(prefix="finbench-rung-")
         self.addCleanup(scratch.cleanup)
         self.scratch = Path(scratch.name)

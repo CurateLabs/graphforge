@@ -17,8 +17,8 @@ use crate::mutation;
 use crate::path_hydration;
 use crate::physical_schema_fallback;
 use crate::read_resource;
-use crate::row_exec::OptionalMatchExec;
 use crate::row_exec::UnwindExec;
+use crate::row_exec::{CorrelatedSeedExec, OptionalMatchExec};
 use crate::write_driver;
 use crate::write_exec::GraphDeleteExec;
 use crate::write_exec::GraphRemoveExec;
@@ -251,6 +251,12 @@ impl ExtensionPlanner for GraphForgeExtensionPlanner {
                 ));
             };
             return Ok(Some(Arc::new(OptionalMatchExec::new(opt, outer, inner))));
+        }
+        if let Some(seed) = node
+            .as_any()
+            .downcast_ref::<graphforge_plan::CorrelatedSeedNode>()
+        {
+            return Ok(Some(Arc::new(CorrelatedSeedExec::new(seed))));
         }
         if let Some(unwind) = node.as_any().downcast_ref::<UnwindNode>() {
             let input = physical_inputs.first().cloned().ok_or_else(|| {

@@ -18,7 +18,7 @@ to relabelling).
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
 import json
@@ -28,22 +28,16 @@ from typing import Any
 
 from jsonschema import Draft202012Validator
 
+from graphforge_bench.gdc_result_stream import StreamedResult
+from graphforge_bench.gdc_rung_error import RungInputError
+
 LADDER_SPEC_SCHEMA = "graphforge-gdc-scorecard-ladder-spec/1"
 REFERENCE_SCHEMA = "graphforge-gdc-rung-reference/1"
 CORRECTNESS_SCHEMA = "graphforge-gdc-rung-correctness/1"
 EXPECTED_COUNTS_SCHEMA = "graphforge-gdc-expected-counts/1"
-QUERY_RESULT_SCHEMA = "graphforge-gdc-query-result/1"
 RESULT_DIGEST = "graphforge-gdc-result-digest/1"
 GRAPHALYTICS_LADDER = "graphforge-gdc-graphalytics-scorecard-ladder/1"
 LDBC_CSV_LADDER = "graphforge-gdc-ldbc-csv-scorecard-ladder/1"
-
-
-class RungInputError(ValueError):
-    """A rung input is malformed or contradicts another, with a typed cause."""
-
-    def __init__(self, cause: str, message: str) -> None:
-        super().__init__(message)
-        self.cause = cause
 
 
 def read_json(path: Path) -> Any:
@@ -300,43 +294,72 @@ def _cell(text: str) -> bytes:
     return b"V" + str(len(encoded)).encode("ascii") + b":" + encoded
 
 
+class ResultDigest:
+    """``graphforge-gdc-result-digest/1`` over rows fed one at a time.
+
+    An ordered result hashes each row as it arrives. An unordered one keeps the
+    encoded rows, which are far smaller than the rows themselves, and hashes them
+    sorted, as the digest defines.
+    """
+
+    def __init__(self, columns: Sequence[Mapping[str, str]], ordered: bool) -> None:
+        header = _cell(RESULT_DIGEST) + _cell("ordered" if ordered else "unordered")
+        for column in columns:
+            header += _cell(column["name"]) + _cell(column["type"])
+        self._hash = hashlib.sha256(header + b"\n")
+        self._ordered = ordered
+        self._rows: list[bytes] = []
+
+    def add(self, row: Sequence[Any]) -> None:
+        # Cell lengths count UTF-8 bytes; for ASCII text that is the character count,
+        # so a row of ASCII is encoded with one string join and one encode.
+        text = "".join(["N" if value is None else f"V{len(value)}:{value}" for value in row])
+        if text.isascii():
+            encoded = f"{text}\n".encode("ascii")
+        else:
+            encoded = b"".join(b"N" if value is None else _cell(value) for value in row) + b"\n"
+        if self._ordered:
+            self._hash.update(encoded)
+        else:
+            self._rows.append(encoded)
+
+    def tap(self, rows: Iterable[Sequence[Any]]) -> Iterator[Sequence[Any]]:
+        """The same rows, each added to the digest as it passes."""
+        for row in rows:
+            self.add(row)
+            yield row
+
+    def hexdigest(self) -> str:
+        self._rows.sort()
+        for start in range(0, len(self._rows), 1 << 16):
+            self._hash.update(b"".join(self._rows[start : start + (1 << 16)]))
+        self._rows.clear()
+        return self._hash.hexdigest()
+
+
 def result_digest(
-    columns: Sequence[Mapping[str, str]], rows: Sequence[Sequence[Any]], ordered: bool
+    columns: Sequence[Mapping[str, str]], rows: Iterable[Sequence[Any]], ordered: bool
 ) -> str:
     """``graphforge-gdc-result-digest/1`` recomputed from a written result."""
-    header = _cell(RESULT_DIGEST) + _cell("ordered" if ordered else "unordered")
-    for column in columns:
-        header += _cell(column["name"]) + _cell(column["type"])
-    encoded = [
-        b"".join(b"N" if value is None else _cell(value) for value in row) + b"\n" for row in rows
-    ]
-    if not ordered:
-        encoded.sort()
-    digest = hashlib.sha256(header + b"\n")
-    for row in encoded:
-        digest.update(row)
+    digest = ResultDigest(columns, ordered)
+    for row in rows:
+        digest.add(row)
     return digest.hexdigest()
-
-
-def _read_result(path: Path) -> Mapping[str, Any]:
-    document = read_json(path)
-    if not isinstance(document, Mapping) or document.get("schema") != QUERY_RESULT_SCHEMA:
-        raise RungInputError("invalid_document", f"{path.name} is not a query result")
-    return document
 
 
 class ResultFiles(Mapping[tuple[str, str], Mapping[str, Any]]):
     """The driver's written results by (query id, binding id), read from disk on access.
 
-    A Graphalytics result has one row per vertex, millions at the larger rungs,
-    so results are not all held in memory at once: each access reads its file.
+    A Graphalytics result has one row per vertex, millions at the larger rungs, so
+    nothing holds a result's rows: each access opens its file and `result["rows"]`
+    reads it row by row.
     """
 
     def __init__(self, paths: Mapping[tuple[str, str], Path]) -> None:
         self._paths = dict(paths)
 
     def __getitem__(self, key: tuple[str, str]) -> Mapping[str, Any]:
-        return _read_result(self._paths[key])
+        return StreamedResult.open(self._paths[key])
 
     def __iter__(self) -> Iterator[tuple[str, str]]:
         return iter(self._paths)
@@ -349,7 +372,7 @@ def read_results(results_dir: Path) -> ResultFiles:
     """Every result the driver wrote, keyed by (query id, binding id)."""
     paths: dict[tuple[str, str], Path] = {}
     for path in sorted(results_dir.glob("*.json")):
-        document = _read_result(path)
+        document = StreamedResult.open(path)
         key = (str(document["query_id"]), str(document["binding_id"]))
         if key in paths:
             raise RungInputError("invalid_document", f"result {key} is written twice")
@@ -430,21 +453,87 @@ def _match_rows_with_sets(
     return True
 
 
-Keyed = dict[tuple[Any, ...], dict[str, Any]]
+class _NoMatchError(Exception):
+    """A row that cannot belong to the reference answer; ends the streamed comparison."""
 
 
-def _keyed(columns: Sequence[str], rows: list[list[Any]], key: Sequence[str]) -> Keyed | None:
-    """Rows by their key cells; None when a key repeats or a row has the wrong width."""
-    keyed: Keyed = {}
-    for row in rows:
-        if len(row) != len(columns):
-            return None
-        cells = dict(zip(columns, row))
-        identity = tuple(cells[name] for name in key)
-        if identity in keyed:
-            return None
-        keyed[identity] = cells
-    return keyed
+def _identity(row: Sequence[Any], key_at: Sequence[int]) -> Any:
+    """A row's key: the cell itself for one key column, else the tuple of key cells."""
+    if len(key_at) == 1:
+        return row[key_at[0]]
+    return tuple(row[index] for index in key_at)
+
+
+class ReferenceIndex:
+    """A reference's rows by key cells.
+
+    ``entries`` maps each key to ``(ordinal, *value cells)``: the row's position in
+    the reference and its non-key cells in column order. It is None when the
+    reference itself repeats a key or has a row of the wrong width, which no result
+    can match.
+    """
+
+    def __init__(self, columns: Sequence[str], rows: Sequence[Sequence[Any]], key: Sequence[str]):
+        position = {name: index for index, name in enumerate(columns)}
+        self.values = [name for name in columns if name not in key]
+        key_at = [position[name] for name in key]
+        value_at = [position[name] for name in self.values]
+        entries: dict[Any, tuple[Any, ...]] | None = {}
+        for ordinal, row in enumerate(rows):
+            if len(row) != len(columns):
+                entries = None
+                break
+            identity = _identity(row, key_at)
+            if identity in entries:
+                entries = None
+                break
+            entries[identity] = (ordinal, *(row[index] for index in value_at))
+        self.entries = entries
+
+
+class IndexCache:
+    """The key index of the reference rows last compared against.
+
+    The bindings of one query share their reference rows and run one after another,
+    so one index serves all of them; a new reference replaces it.
+    """
+
+    def __init__(self) -> None:
+        self._rows: Sequence[Sequence[Any]] | None = None
+        self._shape: tuple[tuple[str, ...], tuple[str, ...]] | None = None
+        self._index: ReferenceIndex | None = None
+
+    def index(
+        self, columns: Sequence[str], rows: Sequence[Sequence[Any]], key: Sequence[str]
+    ) -> ReferenceIndex:
+        shape = (tuple(columns), tuple(key))
+        if self._index is None or self._rows is not rows or self._shape != shape:
+            self._rows, self._shape = rows, shape
+            self._index = ReferenceIndex(columns, rows, key)
+        return self._index
+
+
+def _paired(
+    rows: Iterable[Sequence[Any]], width: int, key_at: Sequence[int], entries: Mapping[Any, Any]
+) -> Iterator[tuple[int, Sequence[Any], tuple[Any, ...]]]:
+    """Each result row with its reference entry; the first row with no partner ends it.
+
+    A row is unpaired when it has the wrong width, a key the reference lacks or a key
+    already seen. At the end every key the reference lists must have been paired.
+    """
+    seen = bytearray(len(entries))
+    count = 0
+    for at_row, row in enumerate(rows):
+        if len(row) != width:
+            raise _NoMatchError
+        entry = entries.get(_identity(row, key_at))
+        if entry is None or seen[entry[0]]:
+            raise _NoMatchError
+        seen[entry[0]] = 1
+        count += 1
+        yield at_row, row, entry
+    if count != len(entries):
+        raise _NoMatchError
 
 
 def within_epsilon(value: float, reference: float, epsilon: float) -> bool:
@@ -459,43 +548,77 @@ def within_epsilon(value: float, reference: float, epsilon: float) -> bool:
     return abs(reference - value) <= epsilon * abs(reference)
 
 
-def _match_epsilon(left: Keyed, right: Keyed, values: Sequence[str], epsilon: float) -> bool:
-    """A numeric cell may differ from the reference by `epsilon`, relative; others exactly."""
-    for identity, cells in left.items():
-        wanted = right[identity]
-        for name in values:
-            value, reference = cells[name], wanted[name]
-            number, reference_number = _number(value), _number(reference)
-            if number is None or reference_number is None:
-                if value != reference:
+def _match_keyed(
+    rule: Mapping[str, Any],
+    names: Sequence[str],
+    wanted: Sequence[str],
+    ordered: bool,
+    rows: Iterable[Sequence[Any]],
+    reference_rows: Sequence[Sequence[Any]],
+    cache: IndexCache | None,
+) -> bool:
+    """The keyed rules, comparing the result to the reference one row at a time.
+
+    Rows are paired by the rule's key columns over the result's columns projected
+    onto the reference's; both sides must hold exactly the same keys. ``exact``
+    compares every reference cell, ``epsilon`` compares numeric cells within the
+    relative bound (and an ordered result keeps the reference's row order), and
+    ``equivalence`` requires the labels to relabel one-to-one.
+    """
+    key = list(rule["key"])
+    if not set(wanted) <= set(names) or not set(key) <= set(wanted):
+        return False
+    kind = rule["matching"]
+    if kind not in ("exact", "epsilon") and set(wanted) != {*key, str(rule["label"])}:
+        return False
+    index = (cache or IndexCache()).index(wanted, reference_rows, key)
+    if index.entries is None:
+        return False
+    position = {name: at for at, name in enumerate(names)}
+    key_at = [position[name] for name in key]
+    value_at = [position[name] for name in index.values]
+    try:
+        pairs = _paired(rows, len(names), key_at, index.entries)
+        if kind == "exact":
+            for _, row, entry in pairs:
+                for at, reference in zip(value_at, entry[1:]):
+                    if row[at] != reference:
+                        return False
+        elif kind == "epsilon":
+            epsilon = float(rule["epsilon"])
+            for at_row, row, entry in pairs:
+                # An ordered result keeps the reference's row order as well.
+                if ordered and entry[0] != at_row:
                     return False
-            elif not within_epsilon(number, reference_number, epsilon):
-                return False
-    return True
-
-
-def _match_keyed_exact(left: Keyed, right: Keyed, values: Sequence[str]) -> bool:
-    """Every reference cell is identical in the row with the same key."""
-    return all(
-        cells[name] == right[identity][name] for identity, cells in left.items() for name in values
-    )
-
-
-def _match_equivalence(left: Keyed, right: Keyed, label: str) -> bool:
-    """Component labels that relabel one-to-one: the same partition of the keys."""
-    forward: dict[Any, Any] = {}
-    backward: dict[Any, Any] = {}
-    for identity, cells in left.items():
-        mine, theirs = cells[label], right[identity][label]
-        if forward.setdefault(mine, theirs) != theirs:
-            return False
-        if backward.setdefault(theirs, mine) != mine:
-            return False
+                for at, reference in zip(value_at, entry[1:]):
+                    value = row[at]
+                    number, reference_number = _number(value), _number(reference)
+                    if number is None or reference_number is None:
+                        if value != reference:
+                            return False
+                    elif not within_epsilon(number, reference_number, epsilon):
+                        return False
+        else:
+            forward: dict[Any, Any] = {}
+            backward: dict[Any, Any] = {}
+            label_at = value_at[0]
+            for _, row, entry in pairs:
+                mine, theirs = row[label_at], entry[1]
+                if forward.setdefault(mine, theirs) != theirs:
+                    return False
+                if backward.setdefault(theirs, mine) != mine:
+                    return False
+    except _NoMatchError:
+        return False
     return True
 
 
 def matches(
-    rule: Mapping[str, Any], result: Mapping[str, Any], reference: Mapping[str, Any]
+    rule: Mapping[str, Any],
+    result: Mapping[str, Any],
+    reference: Mapping[str, Any],
+    *,
+    cache: IndexCache | None = None,
 ) -> bool:
     """Whether one written result matches its reference under the query's rule.
 
@@ -508,12 +631,18 @@ def matches(
     rule's key columns, so an analyst verb's extra node columns do not take
     part; both sides must hold exactly the same keys, and an ordered
     ``epsilon`` result must also keep the reference's row order.
+
+    ``result["rows"]`` may be a one-shot iterator. The keyed rules read it row by
+    row and never hold it, so a Graphalytics result of millions of rows costs one
+    row of memory, not a copy; it may be left partly unread when the answer is
+    already no. A ``cache`` shares one reference's key index among the bindings
+    that compare against the same ``reference["rows"]``.
     """
     names = [column["name"] for column in result["columns"]]
     wanted = list(reference["columns"])
-    actual, expected = list(result["rows"]), list(reference["rows"])
     ordered = bool(result["ordered"])
     if rule["matching"] == "exact" and "key" not in rule:
+        actual, expected = list(result["rows"]), list(reference["rows"])
         if names != wanted:
             return False
         set_columns = list(rule.get("set_columns", []))
@@ -523,6 +652,7 @@ def matches(
             return False
         return _match_rows_with_sets(actual, expected, {names.index(n) for n in set_columns})
     if rule["matching"] == "projection":
+        actual, expected = list(result["rows"]), list(reference["rows"])
         if not set(wanted) <= set(names) or len(set(names)) != len(names):
             return False
         if any(len(row) != len(names) for row in actual):
@@ -530,22 +660,7 @@ def matches(
         positions = [names.index(name) for name in wanted]
         projected = [[row[position] for position in positions] for row in actual]
         return _match_exact(projected, expected, ordered)
-    key = list(rule["key"])
-    if not set(wanted) <= set(names) or not set(key) <= set(wanted):
-        return False
-    left, right = _keyed(names, actual, key), _keyed(wanted, expected, key)
-    if left is None or right is None or left.keys() != right.keys():
-        return False
-    values = [name for name in wanted if name not in key]
-    if rule["matching"] == "exact":
-        return _match_keyed_exact(left, right, values)
-    if rule["matching"] == "epsilon":
-        # An ordered result keeps the reference's row order as well.
-        if ordered and list(left) != list(right):
-            return False
-        return _match_epsilon(left, right, values, float(rule["epsilon"]))
-    label = str(rule["label"])
-    return set(wanted) == {*key, label} and _match_equivalence(left, right, label)
+    return _match_keyed(rule, names, wanted, ordered, result["rows"], reference["rows"], cache)
 
 
 def _samples(evidence: Mapping[str, Any]) -> dict[tuple[str, str], Mapping[str, Any]]:
@@ -574,12 +689,15 @@ def check_reference(
     checked cells are the measured answer. A reference binding the workload
     never ran is a spec error, not a pass. Measured bindings without a
     reference entry are counted as unchecked.
+
+    Each written result is read once, row by row, and no result is held whole:
+    its digest is recomputed and, when the reference has an entry for it, its
+    match is decided in the same pass (#1914).
     """
     samples = _samples(evidence)
     mismatches: list[dict[str, Any]] = []
-    # Each written result is read once: its digest is checked and, when the
-    # reference has an entry for it, its match is decided in the same pass.
     matched_keys: dict[tuple[str, str], bool] = {}
+    index_cache = IndexCache()
     for key, sample in samples.items():
         if sample.get("status") != "measured":
             continue
@@ -588,16 +706,24 @@ def check_reference(
             if reference is not None:
                 mismatches.append(_mismatch(key, "result_missing", "the driver wrote no result"))
             continue
-        recomputed = result_digest(written["columns"], written["rows"], bool(written["ordered"]))
-        if not recomputed == written["result_sha256"] == sample["result_sha256"]:
+        digest = ResultDigest(written["columns"], bool(written["ordered"]))
+        rows = digest.tap(iter(written["rows"]))
+        rule = reference["queries"].get(key[0]) if reference is not None else None
+        if rule is not None and key[1] in rule["bindings"]:
+            streamed = {
+                "columns": written["columns"],
+                "ordered": written["ordered"],
+                "rows": rows,
+            }
+            matched_keys[key] = matches(rule, streamed, rule["bindings"][key[1]], cache=index_cache)
+        for _ in rows:  # the digest covers every row, whatever the match decided
+            pass
+        if not digest.hexdigest() == written["result_sha256"] == sample["result_sha256"]:
             mismatches.append(
                 _mismatch(
                     key, "result_digest_mismatch", "written cells are not the measured result"
                 )
             )
-        rule = reference["queries"].get(key[0]) if reference is not None else None
-        if rule is not None and key[1] in rule["bindings"]:
-            matched_keys[key] = matches(rule, written, rule["bindings"][key[1]])
         del written
     if reference is None:
         return {
