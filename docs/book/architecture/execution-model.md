@@ -109,10 +109,7 @@ Timing observations are not CI assertions; sampled peaks are not hard bounds.
 conjunct of a filter to the node-property scan beneath it, looking through
 column projections and the nullable side of a left join only. The filter stays
 in the plan, so the hint can only remove rows the filter would discard anyway.
-`UnusedRouteJoin` removes a left join onto a property route on its identity key
-when no operator above reads a column of the route: the route holds each key at
-most once, so the join can neither add nor drop a row, and executing it would
-authenticate the whole route to learn nothing. `ExpandNode` reports which input
+`ExpandNode` reports which input
 columns it needs, so an anchor's property join feeding an expansion decodes only
 the properties the query reads.
 

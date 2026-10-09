@@ -443,8 +443,15 @@ const SHAPES: [Shape; 5] = [
     Shape {
         name: "lookup by node_uuid",
         text: "MATCH (n) WHERE n.node_uuid = $uuid RETURN n.node_uuid AS id",
-        // Unbounded pending an index probe: the scan ignores its filters.
-        bound: |layout| (layout.node_bytes + EXECUTION_RESIDUAL_BYTES, false),
+        // Unbounded pending an index probe: the scan ignores its filters. The
+        // node's property route is joined by key, which authenticates each of
+        // its fragments once (counted since #1931).
+        bound: |layout| {
+            (
+                layout.node_bytes + layout.property_bytes + EXECUTION_RESIDUAL_BYTES,
+                false,
+            )
+        },
         rows: |_| 1,
         paths_per_destination: |_| 1,
     },

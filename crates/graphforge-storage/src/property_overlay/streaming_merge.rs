@@ -58,7 +58,12 @@ impl ReadAccounting {
             authentication_bytes: collect.then(|| Arc::new(AtomicU64::new(0))),
             authentication_block_equivalents: collect.then(|| Arc::new(AtomicU64::new(0))),
             authentication_read_calls: collect.then(|| Arc::new(AtomicU64::new(0))),
-            budget: Arc::new(LiveByteBudget::new(limits.max_buffered_bytes)),
+            // A merge holds the fragment it is reading and, beside it, the
+            // overlay that rewrites some of its UUIDs, where the spooled merge
+            // held one decoder at a time: twice the one-decoder budget.
+            budget: Arc::new(LiveByteBudget::new(
+                limits.max_buffered_bytes.saturating_mul(2),
+            )),
             decoded: Arc::new(Mutex::new(DecodedRetention::default())),
         }
     }

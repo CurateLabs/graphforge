@@ -415,7 +415,7 @@ fn an_overlapping_fragment_beyond_the_live_byte_budget_is_refused_not_spilled() 
                 selected_properties: None,
                 uuids: None,
                 limits: PropertyOverlayLimits {
-                    max_buffered_bytes: 20 * 1024,
+                    max_buffered_bytes: 12 * 1024,
                     ..PropertyOverlayLimits::default()
                 },
                 collect: true,
