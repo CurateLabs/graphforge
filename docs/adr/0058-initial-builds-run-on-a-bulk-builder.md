@@ -253,7 +253,11 @@ hold before it reads, and refuses what cannot fit before it allocates.
   the intake window (`max_batch_bytes`) by more than an eighth is refused with a
   typed resource limit, counted as rejected rows. Anything smaller is decoded and
   meets the same exact window check as before, so no input the earlier decoder
-  accepted is refused by an estimate.
+  accepted is refused by an estimate. That exact check, and the one on a decoded
+  property-scratch frame, count each buffer allocation once: an Arrow file's reader
+  slices all the columns of a batch out of one message body, which
+  `get_array_memory_size` reports once per column, so a 2.6 MB batch of forty
+  integer columns read as 105 MB and was refused.
 - **Reserve.** A task reserves the pages it will hold, two copies of its widest
   batch (the decoded batch and the identities and labels normalization rebuilds)
   and 64 bytes per row, from one pool before it opens its file. The pool is the
