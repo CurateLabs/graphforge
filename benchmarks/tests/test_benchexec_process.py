@@ -6,10 +6,12 @@ pool tracks is a waiting parent; BenchExec's exit SIGTERMs it and the real worke
 orphaned. With a forkserver or spawn start method that orphan holds the resource
 tracker's pipe and BenchExec's exit handler waits for the tracker for ever.
 
-Whether the interpreter's own exit handler does that wait depends on its version
-(3.12.3 does not, 3.12.13 and 3.14 do), so the model below waits for the tracker
-explicitly, the way that handler does. The hang then follows from the start method
-alone, on every interpreter the harness supports, and the tests need no BenchExec.
+Whether the interpreter's own exit performs that teardown depends on its version
+(3.12.3 does not, 3.12.13 and 3.14 do), so the model below performs the exit
+itself, in the interpreter's own finalization order: multiprocessing's exit
+function reaps the pool's tracked workers first, and only then does the tracker
+stop wait for the tracker. The hang then follows from the start method alone, on
+every interpreter the harness supports, and the tests need no BenchExec.
 """
 
 from __future__ import annotations
@@ -32,31 +34,40 @@ HARNESS = workspace_root() / "harness"
 FINAL_RESULTS = '<result endtime="2026-10-09T00:00:00+00:00"><run/></result>'
 OPEN_RESULTS = '<result starttime="2026-10-09T00:00:00+00:00"><run/></result>'
 
-# A pool whose worker forks like BenchExec's containerized tool: the process the pool
-# tracks waits for a child, and the child carries on as the worker and outlives the pool.
+# A pool that models BenchExec's containerized tool. With `orphan` the worker forks like
+# BenchExec's containerized tool: the process the pool tracks waits for a child, and the
+# child carries on as the worker and outlives the pool. Without it this is an ordinary
+# pool whose workers the pool tracks to the end.
 POOL_MODEL = """
-    import multiprocessing, multiprocessing.resource_tracker, os, signal, sys, threading, time
+    import multiprocessing, multiprocessing.resource_tracker, multiprocessing.util
+    import os, signal, sys, threading, time
     from pathlib import Path
 
     def init():
         signal.signal(signal.SIGTERM, signal.SIG_DFL)
 
-    def enter_container():
-        pid = os.fork()
+    def enter_container(orphan):
+        pid = os.fork() if orphan else 0
         if pid:
             os.waitpid(pid, 0)
             os._exit(0)
-        threading.Thread(target=time.sleep, args=(60,)).start()
+        if orphan:
+            threading.Thread(target=time.sleep, args=(60,)).start()
         return os.getpid()
 
-    def run(context, raw):
+    def run(context, raw, orphan):
         pool = (multiprocessing.get_context(context) if context else multiprocessing).Pool(1, init)
-        Path(raw, "pids").write_text(str(pool.apply(enter_container)))
+        Path(raw, "pids").write_text(str(pool.apply(enter_container, (orphan,))))
         Path(raw, "benchmark.results.xml").write_text(%r)
-        # BenchExec's exit: the interpreter's exit handler stops the resource tracker, which
-        # closes its end of the tracker's pipe and waits for the tracker to exit. The tracker
-        # exits only when every holder of the pipe has closed it; a forkserver or spawn worker
-        # holds it, and the orphaned worker never closes it. A fork pool starts no tracker.
+        # BenchExec's exit, in the interpreter's own finalization order: multiprocessing's
+        # exit function first terminates and joins the pool's tracked workers and runs the
+        # semaphore cleanups. Only then does the tracker stop close its end of the tracker's
+        # pipe and wait for the tracker to exit, which happens once every holder of the pipe
+        # has closed it. A forkserver or spawn worker holds it, so the orphaned worker keeps
+        # the wait hanging for ever, while a pool the interpreter could still reap does not.
+        # A fork pool starts no tracker. The explicit finalization and stop mirror what
+        # 3.12.13 and 3.14 do at exit; 3.12.3 has no such cleanup, so the model performs it.
+        multiprocessing.util._exit_function()
         multiprocessing.resource_tracker._resource_tracker._stop()
 """
 
@@ -226,12 +237,12 @@ class RunBoundedTests(ScratchTest):
 class ForkserverExitHangTests(ScratchTest):
     """The mechanism itself: an orphaned pool worker and a forkserver or spawn tracker."""
 
-    def model(self, context: str | None) -> list[str]:
+    def model(self, context: str | None, *, orphan: bool = True) -> list[str]:
         body = textwrap.dedent(POOL_MODEL % FINAL_RESULTS)
         body += textwrap.dedent(
             f"""
             if __name__ == "__main__":
-                run({context!r}, {str(self.raw)!r})
+                run({context!r}, {str(self.raw)!r}, {orphan!r})
             """
         )
         return self.script("model.py", body)
@@ -245,6 +256,19 @@ class ForkserverExitHangTests(ScratchTest):
         self.assertEqual(self.run_bounded(self.model("fork"), exit_grace_seconds=20.0), 0)
         self.assertFalse((self.raw / HUNG_EVIDENCE).exists())
         self.assertTrue(wait_dead(int((self.raw / "pids").read_text())))
+
+    def test_a_pool_without_an_orphan_exits_even_though_the_exit_stops_the_tracker(
+        self,
+    ) -> None:
+        # The control: the same pool, the same explicit finalization and tracker stop,
+        # without the orphan. Finalization reaps the tracked workers first, so an
+        # ordinary forkserver or spawn pool must not hang the way the orphaned one does.
+        for context in ("forkserver", "spawn"):
+            with self.subTest(start_method=context):
+                (self.raw / "pids").unlink(missing_ok=True)
+                self.assertEqual(self.run_bounded(self.model(context, orphan=False)), 0)
+                self.assertFalse((self.raw / HUNG_EVIDENCE).exists())
+                self.assertTrue(wait_dead(int((self.raw / "pids").read_text())))
 
 
 class LauncherTests(ScratchTest):
@@ -284,7 +308,7 @@ class LauncherTests(ScratchTest):
             """
             def main():
                 raw = sys.argv[sys.argv.index("--outputpath") + 1]
-                run(None, raw)
+                run(None, raw, True)
             """
         )
         return self.stub_benchexec(main)
