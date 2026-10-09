@@ -111,3 +111,21 @@ fn zstd_fixed_context_decodes_modern_members_and_checks_total_size() {
         zstd(b"invalid", &mut [], ZSTD_WORKSPACE - 1).unwrap_err()
     ));
 }
+
+#[test]
+fn gzip_stream_resumes_at_actual_input_and_output_chunk_boundaries() {
+    let values = (0..1_000_003)
+        .map(|index| {
+            let value = (index as u64).wrapping_mul(0x9E3779B97F4A7C15);
+            (value ^ (value >> 27) ^ (value >> 43)) as u8
+        })
+        .collect::<Vec<_>>();
+    let bytes = compress(Compression::GZIP(Default::default()), &values);
+    assert!(
+        bytes.len() > 8 << 10,
+        "fixture crosses real encoded input chunks"
+    );
+    let mut output = vec![0; values.len()];
+    gzip(&bytes, &mut output, gzip_workspace()).unwrap();
+    assert_eq!(output, values);
+}

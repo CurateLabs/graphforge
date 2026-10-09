@@ -129,7 +129,13 @@ pub(super) fn gzip_cancellable(
                 let end = written.saturating_add(OUTPUT_BLOCK).min(output.len());
                 &mut output[written..end]
             };
-            let result = inflate(&mut state, &input[source..], destination, MZFlush::None);
+            let source_end = source.saturating_add(OUTPUT_BLOCK).min(input.len());
+            let result = inflate(
+                &mut state,
+                &input[source..source_end],
+                destination,
+                MZFlush::None,
+            );
             source += result.bytes_consumed;
             if checking_end && result.bytes_written != 0 {
                 return Err(storage("Gzip page output exceeds its stated size"));
