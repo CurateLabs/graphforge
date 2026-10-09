@@ -263,7 +263,7 @@ pub(super) fn collect_nodes(
         check_cancelled(cancel)?;
         // The bytes this task decodes are reserved before it reads.
         let _decoding = decode
-            .map(|pool| pool.hold(sources[source].task_decode_bytes(task), cancel))
+            .map(|pool| pool.hold_task(sources[source].task_decode_bytes(task), cancel))
             .transpose()?;
         let mut chunk = NodeChunk::default();
         let mut written = 0;

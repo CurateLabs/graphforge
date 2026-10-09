@@ -219,6 +219,7 @@ thread_local! {
     static FORCED_PARTITIONS: std::cell::Cell<Option<(usize, usize)>> =
         const { std::cell::Cell::new(None) };
     static FORCED_GATE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    static FORCED_DECODE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
 
 /// Forces the partition counts of the builds the current test thread runs,
@@ -233,6 +234,12 @@ impl ForcedPartitions {
         Self
     }
 
+    /// Forces the bytes the decoding tasks may reserve in total.
+    pub(crate) fn with_decode_pool(bytes: u64) -> Self {
+        FORCED_DECODE.with(|forced| forced.set(Some(bytes)));
+        Self
+    }
+
     pub(crate) fn set(edge: usize, csr: usize) -> Self {
         FORCED_PARTITIONS.with(|forced| forced.set(Some((edge, csr))));
         Self
@@ -244,6 +251,7 @@ impl Drop for ForcedPartitions {
     fn drop(&mut self) {
         FORCED_PARTITIONS.with(|forced| forced.set(None));
         FORCED_GATE.with(|forced| forced.set(None));
+        FORCED_DECODE.with(|forced| forced.set(None));
     }
 }
 
@@ -348,6 +356,11 @@ impl ScratchPlan {
             .map_or((edge_partitions, csr_partitions), |(edge, csr)| {
                 (edge as u64, csr as u64)
             });
+        let decode_bytes = working / 8 * 3;
+        #[cfg(test)]
+        let decode_bytes = FORCED_DECODE
+            .with(std::cell::Cell::get)
+            .unwrap_or(decode_bytes);
         Self {
             concurrency: usize::try_from(concurrency).unwrap_or(1),
             edge_partitions: usize::try_from(edge_partitions).unwrap_or(1),
@@ -355,7 +368,7 @@ impl ScratchPlan {
             gate_bytes,
             staging_bytes: usize::try_from(staging).unwrap_or(8 << 10),
             property: property_sizing(working / 8 * 3, concurrency, plan.max_source_schema_bytes()),
-            decode_bytes: working / 8 * 3,
+            decode_bytes,
         }
     }
 

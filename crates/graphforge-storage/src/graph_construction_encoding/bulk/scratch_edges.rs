@@ -224,7 +224,7 @@ fn edge_splitters(
         .par_iter()
         .map(|&(source, task, _)| {
             check_cancelled(cancel)?;
-            let _decoding = decode.hold(sources[source].task_decode_bytes(task), cancel)?;
+            let _decoding = decode.hold_task(sources[source].task_decode_bytes(task), cancel)?;
             let mut uuids = Vec::new();
             let mut seen = 0_usize;
             sources[source].reader.read_task(task, &mut |batch| {
@@ -506,7 +506,7 @@ pub(super) fn scatter_edges(
     claim_in_order(tasks.items.clone(), |(source, task, rows)| {
         check_cancelled(cancel)?;
         // The bytes this task decodes are reserved before it reads.
-        let _decoding = decode.hold(sources[source].task_decode_bytes(task), cancel)?;
+        let _decoding = decode.hold_task(sources[source].task_decode_bytes(task), cancel)?;
         let mut scatter = Scatter::new(scratch, &partitions, plan.staging_bytes);
         let mut cache = RelationCache {
             shared: &dictionary,

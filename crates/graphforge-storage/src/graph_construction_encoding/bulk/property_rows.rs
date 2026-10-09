@@ -259,6 +259,16 @@ impl RunSink<'_, '_> {
         Ok(())
     }
 
+    /// Bytes of the batches held now, which the gate must have granted.
+    #[cfg(test)]
+    fn retained_bytes(&self) -> u64 {
+        self.pending
+            .values()
+            .flat_map(|pending| &pending.batches)
+            .map(|batch| (batch.get_array_memory_size() + batch.num_rows() * KEY_BYTES) as u64)
+            .sum()
+    }
+
     /// Write whatever is still retained.
     pub(super) fn finish(mut self, cancel: &AtomicBool) -> Result<(), GfError> {
         self.flush(cancel)
@@ -1054,6 +1064,9 @@ mod tests {
                     let mut sink = rows.sink();
                     for index in (0..batches).filter(|index| index % threads == thread).rev() {
                         sink.push(&batch(index * 32, 32), cancel).unwrap();
+                        // What this worker holds is always paid for.
+                        assert!(sink.held >= sink.retained_bytes().min(rows.sizing.retained_bytes));
+                        assert!(sink.held <= rows.sizing.retained_bytes);
                     }
                     sink.finish(cancel).unwrap();
                 });
@@ -1125,6 +1138,8 @@ mod tests {
         let rows = rows_with(&scratch, usize::MAX >> 1, 4, 2 * need);
         ingest(&rows, 64, 8);
         assert_eq!(rows.gate.free(), 2 * need);
+        // Eight threads shared room for two batches, and used it.
+        assert!(rows.peak_retained_bytes() >= need && rows.peak_retained_bytes() <= 2 * need);
         let groups = rows.finish(&AtomicBool::new(false)).unwrap();
         assert_eq!(rows_of(&rows, &groups[0]), (0..64 * 32).collect::<Vec<_>>());
     }
