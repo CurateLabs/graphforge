@@ -386,10 +386,45 @@ fn registration_copies_and_writes_no_source_bytes_on(route: Route) {
     assert_eq!(graph.node_count("Person").unwrap(), 40_000);
 }
 
+/// Child half of `registration_copies_and_writes_no_source_bytes`; does nothing
+/// unless the parent names a route.
+#[test]
+fn registration_write_bound_child() {
+    let Some(name) = std::env::var_os("GF_TEST_REGISTRATION_ROUTE") else {
+        return;
+    };
+    let route = ROUTES
+        .into_iter()
+        .find(|route| format!("{route:?}") == name.to_string_lossy())
+        .unwrap_or_else(|| panic!("unknown route {name:?}"));
+    registration_copies_and_writes_no_source_bytes_on(route);
+}
+
+/// The write bound reads `wchar` from `/proc/self/io`, which counts every
+/// thread in the process. Under `cargo test` other tests write concurrently,
+/// so each route runs alone in a fresh process (#1941).
 #[test]
 fn registration_copies_and_writes_no_source_bytes() {
     for route in ROUTES {
-        registration_copies_and_writes_no_source_bytes_on(route);
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "import_session::external_source::tests::registration_write_bound_child",
+                "--nocapture",
+            ])
+            .env("GF_TEST_REGISTRATION_ROUTE", format!("{route:?}"))
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&child.stdout);
+        assert!(
+            child.status.success(),
+            "{route:?} child failed: {stdout}\n{}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+        assert!(
+            stdout.contains("1 passed"),
+            "{route:?} child ran no test: {stdout}"
+        );
     }
 }
 
