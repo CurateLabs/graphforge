@@ -45,6 +45,7 @@ mod install;
 mod ordered;
 mod plan;
 mod property_emit;
+mod property_gather;
 mod property_merge;
 mod property_rows;
 mod scratch;
