@@ -30,6 +30,7 @@ mod journal;
 mod memory_budget;
 mod normalization;
 mod parquet_admission;
+mod parquet_alloc;
 mod parquet_brotli;
 mod parquet_codec;
 mod parquet_delta;
@@ -37,9 +38,9 @@ mod parquet_events;
 mod parquet_levels;
 mod parquet_page;
 mod parquet_page_decode;
-mod parquet_windows;
 mod parquet_scan;
 mod parquet_values;
+mod parquet_windows;
 
 /// Written by this version: a session may register Parquet sources that stay
 /// where they are (#1898).
