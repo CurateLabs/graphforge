@@ -12,8 +12,10 @@ use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_expr::expressions::Column;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::ExecutionPlanProperties;
 use datafusion::physical_plan::joins::HashJoinExec;
 use datafusion::physical_plan::joins::PartitionMode;
+use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::test::TestMemoryExec;
 use futures::StreamExt;
 
@@ -220,6 +222,40 @@ fn left_join_with_wrong_uuid_index() -> Arc<dyn ExecutionPlan> {
     )
 }
 
+fn right_enrichment_join(
+    scan: PropertyOverlayExec,
+    partitions: usize,
+    fetch: Option<usize>,
+) -> Arc<dyn ExecutionPlan> {
+    let scan: Arc<dyn ExecutionPlan> = Arc::new(scan);
+    let frontier: Arc<dyn ExecutionPlan> = Arc::new(
+        RepartitionExec::try_new(
+            empty_uuid_build(),
+            datafusion::physical_expr::Partitioning::RoundRobinBatch(partitions),
+        )
+        .unwrap(),
+    );
+    let left_key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("node_uuid", 0));
+    let right_key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("node_uuid", 0));
+    let join = HashJoinExec::try_new(
+        scan,
+        frontier,
+        vec![(left_key, right_key)],
+        None,
+        &JoinType::Right,
+        Some(vec![1]),
+        PartitionMode::CollectLeft,
+        NullEquality::NullEqualsNothing,
+        false,
+    )
+    .unwrap()
+    .builder()
+    .with_fetch(fetch)
+    .build_exec()
+    .unwrap();
+    join
+}
+
 #[test]
 fn direct_collect_left_enrichment_taps_only_eligible_scans() {
     let rule = PropertyFilterApprovalRule;
@@ -256,6 +292,101 @@ fn direct_collect_left_enrichment_taps_only_eligible_scans() {
         .unwrap();
     let join = wrong_index.downcast_ref::<HashJoinExec>().unwrap();
     assert!(join.left().downcast_ref::<UuidBuildKeyTapExec>().is_none());
+}
+
+#[test]
+fn partitioned_collect_left_right_enrichment_swaps_and_restores_parent_contract() {
+    let rule = PropertyFilterApprovalRule;
+    let config = ConfigOptions::default();
+    for partitions in [2, 4] {
+        let original = right_enrichment_join(property_scan(None, None), partitions, None);
+        let original_join = original.downcast_ref::<HashJoinExec>().unwrap();
+        assert_eq!(*original_join.join_type(), JoinType::Right);
+        assert_eq!(*original_join.partition_mode(), PartitionMode::CollectLeft);
+        assert!(original_join.contains_projection());
+        assert_eq!(
+            original.output_partitioning(),
+            &datafusion::physical_expr::Partitioning::RoundRobinBatch(partitions)
+        );
+
+        let optimized = rule.optimize(Arc::clone(&original), &config).unwrap();
+        let restored = optimized.downcast_ref::<RepartitionExec>().unwrap();
+        assert_eq!(
+            restored.partitioning(),
+            &datafusion::physical_expr::Partitioning::RoundRobinBatch(partitions)
+        );
+        assert_eq!(restored.schema().as_ref(), original.schema().as_ref());
+        let join = restored.input().downcast_ref::<HashJoinExec>().unwrap();
+        assert_eq!(*join.join_type(), JoinType::Left);
+        assert_eq!(*join.partition_mode(), PartitionMode::CollectLeft);
+        assert_eq!(join.schema().as_ref(), original.schema().as_ref());
+        assert!(join.contains_projection());
+        assert!(join.left().downcast_ref::<UuidBuildKeyTapExec>().is_some());
+        let coalesced = join
+            .left()
+            .downcast_ref::<UuidBuildKeyTapExec>()
+            .unwrap()
+            .children()[0]
+            .downcast_ref::<datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec>(
+            )
+            .unwrap();
+        assert_eq!(
+            coalesced.input().output_partitioning(),
+            &datafusion::physical_expr::Partitioning::RoundRobinBatch(partitions)
+        );
+        assert!(join.right().downcast_ref::<PropertyOverlayExec>().is_some());
+    }
+}
+
+#[test]
+fn right_enrichment_rejects_fetch_limits_equality_and_missing_projection() {
+    let rule = PropertyFilterApprovalRule;
+    let config = ConfigOptions::default();
+    let limited_join = right_enrichment_join(property_scan(None, None), 2, Some(1));
+    let unchanged = rule.optimize(Arc::clone(&limited_join), &config).unwrap();
+    assert!(unchanged.downcast_ref::<HashJoinExec>().is_some());
+
+    for scan in [
+        property_scan(Some(1), None),
+        property_scan(
+            None,
+            Some(PropertyEquality {
+                column: "ident".into(),
+                value: EqualityValue::Int(1),
+            }),
+        ),
+    ] {
+        let plan = right_enrichment_join(scan, 2, None);
+        let unchanged = rule.optimize(Arc::clone(&plan), &config).unwrap();
+        assert!(unchanged.downcast_ref::<HashJoinExec>().is_some());
+    }
+
+    let scan: Arc<dyn ExecutionPlan> = Arc::new(property_scan(None, None));
+    let frontier: Arc<dyn ExecutionPlan> = Arc::new(
+        RepartitionExec::try_new(
+            empty_uuid_build(),
+            datafusion::physical_expr::Partitioning::RoundRobinBatch(2),
+        )
+        .unwrap(),
+    );
+    let left_key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("node_uuid", 0));
+    let right_key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("node_uuid", 0));
+    let no_projection: Arc<dyn ExecutionPlan> = Arc::new(
+        HashJoinExec::try_new(
+            scan,
+            frontier,
+            vec![(left_key, right_key)],
+            None,
+            &JoinType::Right,
+            None,
+            PartitionMode::CollectLeft,
+            NullEquality::NullEqualsNothing,
+            false,
+        )
+        .unwrap(),
+    );
+    let unchanged = rule.optimize(Arc::clone(&no_projection), &config).unwrap();
+    assert!(unchanged.downcast_ref::<HashJoinExec>().is_some());
 }
 
 #[test]
