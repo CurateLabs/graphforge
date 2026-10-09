@@ -433,6 +433,10 @@ impl Binder {
                     // resolves against that var's columns. A terminal RETURN
                     // upgrades it to a whole node value in `lower_return_item_expr`.
                     s.builder.push_expr(IrExpr::VarRef(node_var))
+                } else if let Some(feature) = super::unsupported::function(call) {
+                    s.errors
+                        .push(super::unsupported::diagnostic(feature, call.span));
+                    s.builder.push_expr(IrExpr::Literal(IrLiteral::Null))
                 } else {
                     let fn_name = call.name.join(".");
                     let ir_args: Vec<ExprId> = call
@@ -635,6 +639,15 @@ impl Binder {
             // lowered with the loop var OUT of scope; the loop var is then bound
             // (shadowing) only while lowering the predicate, and restored after.
             Expr::Quantifier(q) => {
+                if q.kind == graphforge_ast::QuantifierKind::All
+                    && super::unsupported::indexed_relationship_property(&q.predicate, s)
+                {
+                    s.errors.push(super::unsupported::diagnostic(
+                        graphforge_core::UnsupportedCypherFeature::IndexedPathRelationshipPredicate,
+                        q.span,
+                    ));
+                    return s.builder.push_expr(IrExpr::Literal(IrLiteral::Null));
+                }
                 let list = self.lower_expr(&q.list, parent_span, s);
                 let prev = s.vars.get(&q.var).copied();
                 let loop_var = VarId(s.next_var);

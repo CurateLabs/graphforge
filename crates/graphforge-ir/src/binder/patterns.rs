@@ -236,6 +236,13 @@ impl Binder {
                         (1, Some(1))
                     };
                     let is_scalar_hop = min_hops == 1 && max_hops == Some(1);
+                    if !is_scalar_hop && rel.types.len() > 1 {
+                        s.errors.push(super::unsupported::diagnostic(
+                            graphforge_core::UnsupportedCypherFeature::VariableLengthRelationshipAlternation,
+                            rel.span,
+                        ));
+                        return;
+                    }
                     if is_var_hop && is_scalar_hop {
                         s.scalar_list_edges.insert(edge_var);
                     }

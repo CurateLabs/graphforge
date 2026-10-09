@@ -1,6 +1,6 @@
 //! Public-facade acceptance pins for the exact workload Cypher constructs the
 //! GDC benchmark runners currently rewrite around. Every test states the
-//! openCypher semantics through the public [`GraphForge::execute`] /
+//! openCypher semantics or a specific typed unsupported-feature refusal through the public [`GraphForge::execute`] /
 //! [`GraphForge::execute_with_params`] boundary with literal expected rows: a
 //! stored temporal property component read in a filter and an aggregation, a
 //! parameterized duration constructor map, an `OPTIONAL MATCH` whose WHERE
@@ -23,7 +23,7 @@ use std::collections::HashMap;
 
 use arrow::array::Array;
 use arrow::util::display::array_value_to_string;
-use graphforge_api::{GraphForge, IrLiteral};
+use graphforge_api::{GfError, GraphForge, IrLiteral};
 
 /// Every column of every row, rendered; `None` for a null cell. Rows keep the
 /// engine's order — deterministic queries carry their own `ORDER BY`.
@@ -55,6 +55,17 @@ fn rows_with(
 
 fn rows(gf: &GraphForge, query: &str) -> Vec<Vec<Option<String>>> {
     rows_with(gf, query, &HashMap::new())
+}
+
+fn unsupported(gf: &GraphForge, query: &str, params: &HashMap<String, IrLiteral>, feature: &str) {
+    let error = gf
+        .execute_with_params(query, params)
+        .expect_err("specific unsupported construct");
+    assert_eq!(error.code(), "GF_NOT_IMPLEMENTED", "{query}: {error}");
+    assert!(
+        matches!(error, GfError::NotImplemented(actual) if actual == feature),
+        "{query}: {error:?}"
+    );
 }
 
 fn strings(values: &[&str]) -> Vec<Option<String>> {
@@ -115,31 +126,25 @@ fn temporal_component_of_stored_property_filters_and_aggregates() {
 }
 
 #[test]
-fn parameterized_duration_hours_equals_seconds_and_bounds_arithmetic() {
+fn dynamic_duration_maps_are_explicitly_unsupported() {
     let gf = GraphForge::new(None).expect("in-memory instance");
     for (delta, seconds) in [(0, 0), (1, 3_600), (-1, -3_600), (24, 86_400)] {
         let params = HashMap::from([
             ("delta".to_owned(), IrLiteral::Int(delta)),
             ("seconds".to_owned(), IrLiteral::Int(seconds)),
         ]);
-        assert_eq!(
-            rows_with(
-                &gf,
-                "RETURN duration({hours: $delta}) = duration({seconds: $seconds})",
-                &params
-            ),
-            vec![strings(&["true"])],
-            "{delta}h"
+        unsupported(
+            &gf,
+            "RETURN duration({hours: $delta}) = duration({seconds: $seconds})",
+            &params,
+            "Cypher duration maps with nonliteral values",
         );
     }
-    // A whole-hour duration crossing a day boundary, literal and fixture
-    // independent.
+    // Literal constructors and their calendar arithmetic retain supported semantics.
     assert_eq!(
         rows(
             &gf,
-            "RETURN datetime('2012-01-01T23:00Z') + duration({hours: 2}) \
-             = datetime('2012-01-02T01:00Z'), \
-             date('2012-01-01') + duration({hours: 24}) = date('2012-01-02')"
+            "RETURN datetime('2012-01-01T23:00Z') + duration({hours: 2}) = datetime('2012-01-02T01:00Z'), date('2012-01-01') + duration({hours: 24}) = date('2012-01-02')"
         ),
         vec![strings(&["true", "true"])]
     );
@@ -210,7 +215,7 @@ fn collected_node_list_with_distinct_feeds_optional_match() {
 }
 
 #[test]
-fn unwound_map_parameter_rows_match_across_label_schemas() {
+fn parameter_row_matches_across_labels_are_explicitly_unsupported() {
     let gf = schemas();
     let row = || {
         IrLiteral::Map(vec![
@@ -218,42 +223,23 @@ fn unwound_map_parameter_rows_match_across_label_schemas() {
             ("right_key".to_owned(), IrLiteral::Str("k".to_owned())),
         ])
     };
-    let params = HashMap::from([(
-        "rows".to_owned(),
-        IrLiteral::List(vec![
-            row(),
-            row(),
-            IrLiteral::Map(vec![
-                ("left_key".to_owned(), IrLiteral::Int(99)),
-                ("right_key".to_owned(), IrLiteral::Str("missing".to_owned())),
-            ]),
-        ]),
-    )]);
-    // The duplicate parameter row is admitted twice; the 99/'missing' row
-    // matches nothing and contributes no rows.
-    assert_eq!(
-        rows_with(
-            &gf,
-            "UNWIND $rows AS row \
-             MATCH (a:L1 {left_key: row.left_key}), (b:L2 {right_key: row.right_key}) \
-             RETURN a.title AS t, b.enabled AS e ORDER BY t, e",
-            &params
-        ),
-        vec![strings(&["left", "true"]), strings(&["left", "true"])]
+    let params = HashMap::from([("rows".to_owned(), IrLiteral::List(vec![row(), row()]))]);
+    unsupported(
+        &gf,
+        "UNWIND $rows AS row MATCH (a:L1 {left_key: row.left_key}), (b:L2 {right_key: row.right_key}) RETURN a.title AS t, b.enabled AS e ORDER BY t, e",
+        &params,
+        "Cypher parameter rows matching properties across different node labels",
     );
 }
 
 #[test]
-fn all_quantifier_indexes_variable_length_relationship_properties() {
+fn indexed_variable_relationship_all_is_explicitly_unsupported() {
     let gf = accounts();
-    assert_eq!(
-        rows(
-            &gf,
-            "MATCH (a:Account {id: 1}) MATCH (a)-[rs:transfer*1..3]->(b) \
-             WHERE ALL(i IN range(0, size(rs) - 1) WHERE rs[i].amount > 0) \
-             RETURN b.id AS dest, size(rs) AS hops ORDER BY dest, hops"
-        ),
-        vec![strings(&["2", "1"]), strings(&["3", "2"])]
+    unsupported(
+        &gf,
+        "MATCH (a:Account {id: 1}) MATCH (a)-[rs:transfer*1..3]->(b) WHERE ALL(i IN range(0, size(rs) - 1) WHERE rs[i].amount > 0) RETURN b.id AS dest, size(rs) AS hops ORDER BY dest, hops",
+        &HashMap::new(),
+        "Cypher ALL predicates over indexed variable-length relationship properties",
     );
 }
 
@@ -272,152 +258,114 @@ fn path_node_list_comprehension_filters_in_the_same_with() {
 }
 
 #[test]
-fn variable_length_multi_type_alternation_traverses_both_directions() {
+fn variable_length_type_alternation_is_explicitly_unsupported() {
     let gf = accounts();
-    assert_eq!(
-        rows(
-            &gf,
-            "MATCH (a:Account {id: 1}) MATCH (a)-[rs:transfer|withdraw*1..3]->(b) \
-             RETURN b.id AS dest, size(rs) AS hops ORDER BY dest, hops"
-        ),
-        vec![
-            strings(&["2", "1"]),
-            strings(&["3", "2"]),
-            strings(&["4", "3"]),
-        ]
+    unsupported(
+        &gf,
+        "MATCH (a:Account {id: 1}) MATCH (a)-[rs:transfer|withdraw*1..3]->(b) RETURN b.id AS dest, size(rs) AS hops ORDER BY dest, hops",
+        &HashMap::new(),
+        "Cypher variable-length relationship type alternation",
     );
-    // Distinct real paths are not collapsed, and reversal walks against the
-    // stored orientation.
-    assert_eq!(
-        rows(
-            &gf,
-            "MATCH (a:Account {id: 4}) MATCH (a)<-[rs:transfer|withdraw*1..3]-(b) \
-             RETURN b.id AS dest, size(rs) AS hops ORDER BY dest, hops"
-        ),
-        vec![
-            strings(&["1", "3"]),
-            strings(&["2", "2"]),
-            strings(&["3", "1"]),
-        ]
+    unsupported(
+        &gf,
+        "MATCH (a:Account {id: 4}) MATCH (a)<-[rs:transfer|withdraw*1..3]-(b) RETURN b.id AS dest, size(rs) AS hops ORDER BY dest, hops",
+        &HashMap::new(),
+        "Cypher variable-length relationship type alternation",
     );
 }
 
 #[test]
-fn start_and_end_node_of_each_unwound_variable_path_hop() {
+fn endpoints_of_unwound_path_hops_are_explicitly_unsupported() {
     let gf = accounts();
-    assert_eq!(
-        rows(
-            &gf,
-            "MATCH (a:Account {id: 1}) MATCH p = (a)-[:transfer*2..2]->(b) \
-             UNWIND relationships(p) AS hop \
-             RETURN startNode(hop).id AS s, endNode(hop).id AS e ORDER BY s, e"
-        ),
-        vec![strings(&["1", "2"]), strings(&["2", "3"])]
+    unsupported(
+        &gf,
+        "MATCH (a:Account {id: 1}) MATCH p = (a)-[:transfer*2..2]->(b) UNWIND relationships(p) AS hop RETURN startNode(hop).id AS s, endNode(hop).id AS e ORDER BY s, e",
+        &HashMap::new(),
+        "Cypher endpoint functions on unbound relationship values",
     );
 }
 
 #[test]
-fn relationship_identity_of_variable_path_hops_matches_a_fixed_edge() {
+fn id_function_is_explicitly_unsupported() {
     let gf = accounts();
-    let prefix = "MATCH (a:Account {id: 1}), (x:Account {id: 1}) \
-                  MATCH p = (a)-[:transfer*2..2]->(b) \
-                  UNWIND relationships(p) AS hop \
-                  MATCH (x)-[f:transfer]->(:Account {id: 2}) ";
-    // Two hops, each with a non-null identity, all distinct: the path binds
-    // two different relationships without collapsing them.
-    assert_eq!(
-        rows(
-            &gf,
-            &format!(
-                "{prefix}RETURN count(*) AS pairs, count(id(hop)) AS identified, \
-                 count(DISTINCT id(hop)) AS distinct_ids"
-            )
-        ),
-        vec![strings(&["2", "2", "2"])]
+    unsupported(
+        &gf,
+        "MATCH (a:Account {id: 1}), (x:Account {id: 1}) MATCH p = (a)-[:transfer*2..2]->(b) UNWIND relationships(p) AS hop MATCH (x)-[f:transfer]->(:Account {id: 2}) RETURN count(*) AS pairs, count(id(hop)) AS identified, count(DISTINCT id(hop)) AS distinct_ids",
+        &HashMap::new(),
+        "Cypher id identity function",
     );
-    // Identity equality holds across bindings: exactly one hop is the fixed
-    // 1 ->transfer 2 edge, without asserting on the rendered identity.
-    assert_eq!(
-        rows(
-            &gf,
-            &format!("{prefix}WHERE id(hop) = id(f) RETURN count(*) AS matched")
-        ),
-        vec![strings(&["1"])]
+    unsupported(
+        &gf,
+        "MATCH (a:Account {id: 1}), (x:Account {id: 1}) MATCH p = (a)-[:transfer*2..2]->(b) UNWIND relationships(p) AS hop MATCH (x)-[f:transfer]->(:Account {id: 2}) WHERE id(hop) = id(f) RETURN count(*) AS matched",
+        &HashMap::new(),
+        "Cypher id identity function",
     );
 }
 
 #[test]
-fn reduce_folds_scalar_lists_and_path_hop_amounts() {
+fn reduce_expressions_are_explicitly_unsupported() {
     let gf = accounts();
-    assert_eq!(
-        rows(&gf, "RETURN reduce(total = 0, x IN [1, 2, 3] | total + x)"),
-        vec![strings(&["6"])]
+    unsupported(
+        &gf,
+        "RETURN reduce(total = 0, x IN [1, 2, 3] | total + x)",
+        &HashMap::new(),
+        "Cypher reduce accumulator expressions",
     );
-    assert_eq!(
-        rows(&gf, "RETURN reduce(total = 0, x IN [] | total + x)"),
-        vec![strings(&["0"])]
+    unsupported(
+        &gf,
+        "RETURN reduce(total = 0, x IN [] | total + x)",
+        &HashMap::new(),
+        "Cypher reduce accumulator expressions",
     );
-    assert_eq!(
-        rows(
-            &gf,
-            "MATCH (a:Account {id: 1}) MATCH p = (a)-[:transfer*1..2]->(b) \
-             RETURN b.id AS dest, \
-             reduce(total = 0, hop IN relationships(p) | total + hop.amount) AS total \
-             ORDER BY dest"
-        ),
-        vec![strings(&["2", "10"]), strings(&["3", "30"])]
+    unsupported(
+        &gf,
+        "MATCH (a:Account {id: 1}) MATCH p = (a)-[:transfer*1..2]->(b) RETURN b.id AS dest, reduce(total = 0, hop IN relationships(p) | total + hop.amount) AS total ORDER BY dest",
+        &HashMap::new(),
+        "Cypher reduce accumulator expressions",
     );
 }
 
 #[test]
-fn count_subquery_counts_per_outer_row() {
+fn count_subqueries_are_explicitly_unsupported() {
     let gf = accounts();
-    assert_eq!(
-        rows(
-            &gf,
-            "MATCH (a:Account) RETURN a.id AS dest, COUNT { (a)-[:transfer]->() } AS n \
-             ORDER BY dest"
-        ),
-        vec![
-            strings(&["1", "1"]),
-            strings(&["2", "1"]),
-            strings(&["3", "0"]),
-            strings(&["4", "0"]),
-        ]
+    unsupported(
+        &gf,
+        "MATCH (a:Account) RETURN a.id AS dest, COUNT { (a)-[:transfer]->() } AS n ORDER BY dest",
+        &HashMap::new(),
+        "Cypher COUNT subqueries",
     );
 }
 
 #[test]
-fn uncorrelated_call_subquery_returns_its_own_rows() {
+fn uncorrelated_call_subqueries_are_explicitly_unsupported() {
     let gf = GraphForge::new(None).expect("in-memory instance");
-    assert_eq!(
-        rows(&gf, "CALL { RETURN 1 AS value } RETURN value"),
-        vec![strings(&["1"])]
+    unsupported(
+        &gf,
+        "CALL { RETURN 1 AS value } RETURN value",
+        &HashMap::new(),
+        "Cypher CALL subqueries",
     );
 }
 
 #[test]
-fn correlated_call_subquery_sees_the_outer_variable() {
+fn correlated_call_subqueries_are_explicitly_unsupported() {
     let gf = accounts();
-    assert_eq!(
-        rows(
-            &gf,
-            "MATCH (a:Account) CALL { WITH a MATCH (a)-[:transfer]->(b) RETURN b.id AS target } \
-             RETURN a.id AS source, target ORDER BY source, target"
-        ),
-        vec![strings(&["1", "2"]), strings(&["2", "3"])]
+    unsupported(
+        &gf,
+        "MATCH (a:Account) CALL { WITH a MATCH (a)-[:transfer]->(b) RETURN b.id AS target } RETURN a.id AS source, target ORDER BY source, target",
+        &HashMap::new(),
+        "Cypher CALL subqueries",
     );
 }
 
 #[test]
-fn call_subqueries_compose_with_union_all() {
+fn union_call_subqueries_are_explicitly_unsupported() {
     let gf = GraphForge::new(None).expect("in-memory instance");
-    assert_eq!(
-        rows(
-            &gf,
-            "CALL { RETURN 1 AS value UNION ALL RETURN 1 AS value } RETURN value"
-        ),
-        vec![strings(&["1"]), strings(&["1"])]
+    unsupported(
+        &gf,
+        "CALL { RETURN 1 AS value UNION ALL RETURN 1 AS value } RETURN value",
+        &HashMap::new(),
+        "Cypher CALL subqueries",
     );
 }
 
@@ -425,40 +373,31 @@ fn call_subqueries_compose_with_union_all() {
 /// (`size` on a Path is a type error in openCypher). Each fixture pair has a
 /// unique shortest path, so no `ORDER BY` is needed.
 #[test]
-fn shortest_path_returns_the_minimum_hop_count() {
+fn shortest_path_patterns_are_explicitly_unsupported() {
     let gf = accounts();
-    assert_eq!(
-        rows(
-            &gf,
-            "MATCH (a:Account {id: 1}), (b:Account {id: 3}) \
-             MATCH p = shortestPath((a)-[:transfer*]->(b)) \
-             RETURN length(p)"
-        ),
-        vec![strings(&["2"])]
+    unsupported(
+        &gf,
+        "MATCH (a:Account {id: 1}), (b:Account {id: 3}) MATCH p = shortestPath((a)-[:transfer*]->(b)) RETURN length(p)",
+        &HashMap::new(),
+        "Cypher shortest-path patterns",
     );
-    assert_eq!(
-        rows(
-            &gf,
-            "MATCH (a:Account {id: 1}), (b:Account {id: 4}) \
-             MATCH p = shortestPath((a)-[:transfer|withdraw*]->(b)) \
-             RETURN length(p)"
-        ),
-        vec![strings(&["3"])]
+    unsupported(
+        &gf,
+        "MATCH (a:Account {id: 1}), (b:Account {id: 4}) MATCH p = shortestPath((a)-[:transfer|withdraw*]->(b)) RETURN length(p)",
+        &HashMap::new(),
+        "Cypher shortest-path patterns",
     );
 }
 
 /// A bounded `*1..1` bound over the single direct edge.
 #[test]
-fn shortest_path_bounded_to_one_hop_returns_the_single_edge() {
+fn bounded_shortest_path_patterns_are_explicitly_unsupported() {
     let gf = accounts();
-    assert_eq!(
-        rows(
-            &gf,
-            "MATCH (a:Account {id: 1}), (b:Account {id: 2}) \
-             MATCH p = shortestPath((a)-[:transfer*1..1]->(b)) \
-             RETURN length(p)"
-        ),
-        vec![strings(&["1"])]
+    unsupported(
+        &gf,
+        "MATCH (a:Account {id: 1}), (b:Account {id: 2}) MATCH p = shortestPath((a)-[:transfer*1..1]->(b)) RETURN length(p)",
+        &HashMap::new(),
+        "Cypher shortest-path patterns",
     );
 }
 
@@ -573,4 +512,40 @@ fn unproved_element_kinds_keep_the_value_kind_conflict_at_a_node_pattern() {
         )
         .expect_err("parameter element types prove nothing");
     assert!(error.to_string().contains("bound as a value"), "{error}");
+}
+
+#[test]
+fn supported_fixed_relationship_endpoints_and_scalar_all_keep_their_semantics() {
+    let gf = accounts();
+    assert_eq!(
+        rows(
+            &gf,
+            "MATCH ()-[r]->() RETURN startNode(r).id AS s, endNode(r).id AS e ORDER BY s"
+        ),
+        vec![
+            strings(&["1", "2"]),
+            strings(&["2", "3"]),
+            strings(&["3", "4"])
+        ]
+    );
+    assert_eq!(
+        rows(&gf, "RETURN ALL(x IN [1, 2, 3] WHERE x > 0)"),
+        vec![strings(&["true"])]
+    );
+}
+
+#[test]
+fn malformed_unsupported_forms_keep_syntax_errors() {
+    let gf = GraphForge::new(None).expect("in-memory instance");
+    for query in [
+        "RETURN reduce(total = 0, x IN [1] total + x)",
+        "RETURN COUNT { (a)-[:r]-> }",
+        "MATCH p = shortestPath((a)-[:r*]->) RETURN p",
+        "CALL { RETURN } RETURN 1",
+    ] {
+        assert!(
+            matches!(gf.execute(query), Err(GfError::Parse { .. })),
+            "{query}"
+        );
+    }
 }

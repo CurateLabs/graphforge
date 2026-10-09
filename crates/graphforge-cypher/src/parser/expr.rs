@@ -176,6 +176,46 @@ fn parse_prefix(ts: &mut TokenStream) -> Result<Expr, ParseError> {
         // --- Block-form existential subquery or exists(...) function ---
         Some(Tok::Exists) => parse_exists(ts, start),
 
+        Some(Tok::Count) if ts.peek_n(1) == Some(&Tok::LBrace) => {
+            // COUNT and EXISTS have the same block grammar; retain syntax errors.
+            parse_exists(ts, start)?;
+            Err(unsupported(
+                ts,
+                start,
+                graphforge_core::UnsupportedCypherFeature::CountSubquery,
+            ))
+        }
+        Some(Tok::Reduce) if ts.peek_n(1) == Some(&Tok::LParen) => {
+            ts.advance();
+            ts.eat(&Tok::LParen)?;
+            eat_ident(ts)?;
+            ts.eat(&Tok::Eq)?;
+            parse_expr(ts, 0)?;
+            ts.eat(&Tok::Comma)?;
+            eat_ident(ts)?;
+            ts.eat(&Tok::In)?;
+            parse_expr(ts, 0)?;
+            ts.eat(&Tok::Pipe)?;
+            parse_expr(ts, 0)?;
+            ts.eat(&Tok::RParen)?;
+            Err(unsupported(
+                ts,
+                start,
+                graphforge_core::UnsupportedCypherFeature::Reduce,
+            ))
+        }
+        Some(Tok::ShortestPath | Tok::AllShortestPaths) if ts.peek_n(1) == Some(&Tok::LParen) => {
+            ts.advance();
+            ts.eat(&Tok::LParen)?;
+            parse_pattern(ts)?;
+            ts.eat(&Tok::RParen)?;
+            Err(unsupported(
+                ts,
+                start,
+                graphforge_core::UnsupportedCypherFeature::ShortestPath,
+            ))
+        }
+
         // --- Keyword-named functions ---
         Some(
             Tok::Count
@@ -442,6 +482,18 @@ fn parse_identifier(ts: &mut TokenStream, name: String, start: usize) -> Result<
             span: ts.span_from(start),
         }))
     }
+}
+
+fn unsupported(
+    ts: &TokenStream<'_>,
+    start: usize,
+    feature: graphforge_core::UnsupportedCypherFeature,
+) -> ParseError {
+    ts.err_at(
+        ts.span_from(start),
+        ParseErrorKind::UnsupportedFeature(feature),
+        format!("{} are not supported", feature.description()),
+    )
 }
 
 fn parse_exists(ts: &mut TokenStream, start: usize) -> Result<Expr, ParseError> {

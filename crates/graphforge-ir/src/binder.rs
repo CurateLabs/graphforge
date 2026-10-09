@@ -11,6 +11,7 @@
 mod expressions;
 mod patterns;
 mod projection;
+mod unsupported;
 mod writes;
 
 use self::patterns::strip_parens;
@@ -283,6 +284,9 @@ impl Binder {
     }
 
     fn bind_staged(&self, ast: &AstQuery) -> Result<GraphPlan, Vec<BindError>> {
+        if let Some(error) = unsupported::parameter_rows_across_labels(ast) {
+            return Err(vec![error]);
+        }
         let dialect = match ast.dialect {
             DialectVersion::OpenCypher9 => "openCypher",
         };

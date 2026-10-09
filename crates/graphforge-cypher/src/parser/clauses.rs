@@ -489,39 +489,19 @@ fn parse_call_clause(ts: &mut TokenStream) -> Result<CallClause, ParseError> {
     ts.eat(&Tok::Call)?;
 
     if ts.at(&Tok::LBrace) {
-        // CALL { ... } subquery form
-        ts.advance(); // consume {
-        // Consume tokens until matching } (depth-aware)
-        let mut depth = 1usize;
-        while !ts.is_empty() {
-            match ts.peek() {
-                Some(Tok::LBrace) => {
-                    depth += 1;
-                    ts.advance();
-                }
-                Some(Tok::RBrace) => {
-                    depth -= 1;
-                    ts.advance();
-                    if depth == 0 {
-                        break;
-                    }
-                }
-                _ => {
-                    ts.advance();
-                }
-            }
+        ts.eat(&Tok::LBrace)?;
+        let body = parse_subquery(ts)?;
+        if body.clauses.is_empty() {
+            return Err(ts.err("CALL subquery requires a query body"));
         }
-        if depth != 0 {
-            return Err(ts.err("unterminated CALL subquery: expected `}`"));
-        }
-        let yield_items = parse_opt_yield(ts)?;
-        Ok(CallClause {
-            procedure: vec![],
-            args: vec![],
-            args_explicit: false,
-            yield_items,
-            span: ts.span_from(start),
-        })
+        ts.eat(&Tok::RBrace)?;
+        Err(ts.err_at(
+            ts.span_from(start),
+            ParseErrorKind::UnsupportedFeature(
+                graphforge_core::UnsupportedCypherFeature::CallSubquery,
+            ),
+            "Cypher CALL subqueries are not supported",
+        ))
     } else {
         // CALL proc.name(args) form
         let procedure = parse_procedure_name(ts)?;
