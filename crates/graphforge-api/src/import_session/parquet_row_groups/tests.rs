@@ -658,7 +658,8 @@ fn mismatched_admitted_fields_fail_before_page_callbacks() {
         .unwrap();
         let native =
             ParquetRecordBatchReader::try_new_with_row_groups(&levels, &groups, 4, None).unwrap();
-        let fields = native.schema().fields();
+        let native_schema = native.schema();
+        let fields = native_schema.fields();
         let admitted = Arc::new(Schema::new(vec![Arc::new(replacement), fields[1].clone()]));
         let error = match OwnedBatchReader::new(native, admitted, groups.failures.clone()) {
             Ok(_) => panic!("mismatched admitted Arrow fields must be rejected"),

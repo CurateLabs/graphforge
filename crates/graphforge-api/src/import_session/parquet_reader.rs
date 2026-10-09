@@ -129,7 +129,6 @@ impl Iterator for OwnedBatchReader {
                 Ok(batch) => Some(Ok(batch)),
                 Err(error) => {
                     self.reader = None;
-                    let error = storage(error);
                     self.failures.record(error.clone());
                     Some(Err(self.failures.take().unwrap_or(error)))
                 }
