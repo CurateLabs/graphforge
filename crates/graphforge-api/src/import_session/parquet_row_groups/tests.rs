@@ -1,9 +1,10 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use arrow::array::{Int32Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::RecordBatch;
+use arrow::record_batch::{RecordBatch, RecordBatchReader};
 use bytes::Bytes;
 use graphforge_core::{GfError, ProjectErrorCode};
 use parquet::arrow::array_reader::RowGroups;
@@ -18,7 +19,9 @@ use super::OwnedRowGroups;
 use crate::CancellationToken;
 use crate::import_session::inventory_budget::InventoryBudget;
 use crate::import_session::parquet_page_decode::DecodedPage;
-use crate::import_session::parquet_reader::{OwnedBatchReader, PageFailures, PagePreflight};
+use crate::import_session::parquet_reader::{
+    OwnedBatchReader, PageFailures, PagePreflight, attach_admitted_schema,
+};
 
 #[derive(Clone)]
 struct Probe {
@@ -150,7 +153,8 @@ fn public_arrow_reader_routes_all_selected_physical_columns_through_preflight() 
     .unwrap();
     let native =
         ParquetRecordBatchReader::try_new_with_row_groups(&levels, &groups, 6, None).unwrap();
-    let mut reader = OwnedBatchReader::new(native, groups.failures.clone());
+    let admitted = native.schema().clone();
+    let mut reader = OwnedBatchReader::new(native, admitted, groups.failures.clone()).unwrap();
     let batches = reader.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
     assert_eq!(
         batches
@@ -243,7 +247,8 @@ fn typed_callback_refusal_reaches_arrow_before_the_page_is_decoded() {
     .unwrap();
     let native =
         ParquetRecordBatchReader::try_new_with_row_groups(&levels, &groups, 4, None).unwrap();
-    let mut reader = OwnedBatchReader::new(native, failures.clone());
+    let admitted = native.schema().clone();
+    let mut reader = OwnedBatchReader::new(native, admitted, failures.clone()).unwrap();
     let error = reader.next().unwrap().unwrap_err();
     assert!(matches!(
         &error,
@@ -353,6 +358,8 @@ fn a_consumed_task_failure_returns_an_error_instead_of_successful_eof() {
     let native =
         ParquetRecordBatchReader::try_new_with_row_groups(&levels, &groups, 4, None).unwrap();
     let failures = groups.failures.clone();
+    let admitted = native.schema().clone();
+    let mut reader = OwnedBatchReader::new(native, admitted, failures.clone()).unwrap();
     failures.record(resource_limit("pre-consumed task refusal"));
     assert!(matches!(
         failures.take(),
@@ -361,16 +368,13 @@ fn a_consumed_task_failure_returns_an_error_instead_of_successful_eof() {
             ..
         })
     ));
-    let mut reader = OwnedBatchReader::new(native, failures);
     let error = reader
         .next()
         .expect("a failed task must never appear to reach successful EOF")
         .unwrap_err();
     assert!(matches!(error, GfError::Storage(_)));
     assert!(error.to_string().contains("page failure was consumed"));
-    for _ in 0..3 {
-        assert!(reader.next().is_none());
-    }
+    assert!(reader.next().is_none());
     assert_eq!(calls.load(Ordering::Relaxed), 0);
 }
 
@@ -542,6 +546,174 @@ fn empty_selection_is_a_valid_zero_row_collection() {
     assert_eq!(groups.num_rows(), 0);
     assert_eq!(groups.row_groups().count(), 0);
     assert_eq!(groups.column_chunks(0).unwrap().count(), 0);
+}
+
+#[test]
+fn public_owned_reader_restores_the_exact_admitted_schema_arc() {
+    let (bytes, metadata) = source();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut budget = InventoryBudget::new(1 << 20);
+    let groups = row_groups(bytes, Arc::clone(&metadata), &[0, 1, 2], &mut budget, {
+        let calls = Arc::clone(&calls);
+        move |_, _| {
+            Ok(Probe {
+                calls: Arc::clone(&calls),
+                refusal: false,
+            })
+        }
+    })
+    .unwrap();
+    let levels = parquet_to_arrow_field_levels(
+        metadata.file_metadata().schema_descr(),
+        ProjectionMask::all(),
+        None,
+    )
+    .unwrap();
+    let native =
+        ParquetRecordBatchReader::try_new_with_row_groups(&levels, &groups, 6, None).unwrap();
+    let admitted = Arc::new(Schema::new_with_metadata(
+        native.schema().fields().clone(),
+        HashMap::from([("source".to_owned(), "admitted".to_owned())]),
+    ));
+    let mut reader =
+        OwnedBatchReader::new(native, Arc::clone(&admitted), groups.failures.clone()).unwrap();
+    let batches = reader.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+
+    assert!(!batches.is_empty());
+    assert!(Arc::ptr_eq(batches[0].schema_ref(), &admitted));
+    assert_eq!(batches[0].schema().metadata(), admitted.metadata());
+    assert_eq!(
+        batches[0].column(0).as_ref(),
+        &Int32Array::from_iter_values(0..6)
+    );
+    assert_eq!(
+        batches[1].column(1).as_ref(),
+        &StringArray::from_iter_values((6..12).map(|value| format!("row-{value}")))
+    );
+}
+
+#[test]
+fn schema_attachment_keeps_the_native_column_arrays_and_buffers() {
+    let (bytes, metadata) = source();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut budget = InventoryBudget::new(1 << 20);
+    let groups = row_groups(bytes, Arc::clone(&metadata), &[0], &mut budget, {
+        let calls = Arc::clone(&calls);
+        move |_, _| {
+            Ok(Probe {
+                calls: Arc::clone(&calls),
+                refusal: false,
+            })
+        }
+    })
+    .unwrap();
+    let levels = parquet_to_arrow_field_levels(
+        metadata.file_metadata().schema_descr(),
+        ProjectionMask::all(),
+        None,
+    )
+    .unwrap();
+    let mut native =
+        ParquetRecordBatchReader::try_new_with_row_groups(&levels, &groups, 4, None).unwrap();
+    let batch = native.next().unwrap().unwrap();
+    let input_columns = batch.columns().to_vec();
+    let admitted = Arc::new(Schema::new_with_metadata(
+        batch.schema().fields().clone(),
+        HashMap::from([("origin".to_owned(), "reader".to_owned())]),
+    ));
+
+    let attached = attach_admitted_schema(batch, &admitted).unwrap();
+    for (before, after) in input_columns.iter().zip(attached.columns()) {
+        assert!(Arc::ptr_eq(before, after));
+    }
+}
+
+#[test]
+fn mismatched_admitted_fields_fail_before_page_callbacks() {
+    let (bytes, metadata) = source();
+    let cases = [
+        Field::new("other", DataType::Int32, false),
+        Field::new("id", DataType::Int64, false),
+        Field::new("id", DataType::Int32, true),
+    ];
+
+    for replacement in cases {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut budget = InventoryBudget::new(1 << 20);
+        let groups = row_groups(bytes.clone(), Arc::clone(&metadata), &[0], &mut budget, {
+            let calls = Arc::clone(&calls);
+            move |_, _| {
+                Ok(Probe {
+                    calls: Arc::clone(&calls),
+                    refusal: false,
+                })
+            }
+        })
+        .unwrap();
+        let levels = parquet_to_arrow_field_levels(
+            metadata.file_metadata().schema_descr(),
+            ProjectionMask::all(),
+            None,
+        )
+        .unwrap();
+        let native =
+            ParquetRecordBatchReader::try_new_with_row_groups(&levels, &groups, 4, None).unwrap();
+        let fields = native.schema().fields();
+        let admitted = Arc::new(Schema::new(vec![Arc::new(replacement), fields[1].clone()]));
+        let error = match OwnedBatchReader::new(native, admitted, groups.failures.clone()) {
+            Ok(_) => panic!("mismatched admitted Arrow fields must be rejected"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, GfError::Storage(_)));
+        assert!(groups.failures.failed());
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[test]
+fn preexisting_typed_page_failure_precedes_admitted_schema_mismatch() {
+    let (bytes, metadata) = source();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut budget = InventoryBudget::new(1 << 20);
+    let groups = row_groups(bytes, Arc::clone(&metadata), &[0], &mut budget, {
+        let calls = Arc::clone(&calls);
+        move |_, _| {
+            Ok(Probe {
+                calls: Arc::clone(&calls),
+                refusal: false,
+            })
+        }
+    })
+    .unwrap();
+    let levels = parquet_to_arrow_field_levels(
+        metadata.file_metadata().schema_descr(),
+        ProjectionMask::all(),
+        None,
+    )
+    .unwrap();
+    let native =
+        ParquetRecordBatchReader::try_new_with_row_groups(&levels, &groups, 4, None).unwrap();
+    groups
+        .failures
+        .record(resource_limit("preexisting typed limit"));
+    let wrong = Arc::new(Schema::new(vec![Field::new(
+        "wrong",
+        DataType::Int32,
+        false,
+    )]));
+
+    let error = match OwnedBatchReader::new(native, wrong, groups.failures.clone()) {
+        Ok(_) => panic!("preexisting task failure must win over schema mismatch"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        GfError::Project {
+            code: ProjectErrorCode::ResourceLimit,
+            ..
+        }
+    ));
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
 }
 
 fn resource_limit(message: &str) -> GfError {

@@ -9,7 +9,8 @@
 use std::io::Read;
 use std::sync::Arc;
 
-use arrow::record_batch::RecordBatch;
+use arrow::datatypes::SchemaRef;
+use arrow::record_batch::{RecordBatch, RecordBatchReader};
 use graphforge_core::GfError;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
 use parquet::basic::Compression;
@@ -77,15 +78,31 @@ impl PageFailures {
 /// can continue to poll other columns after returning an error.
 pub(super) struct OwnedBatchReader {
     reader: Option<ParquetRecordBatchReader>,
+    admitted_schema: SchemaRef,
     failures: PageFailures,
 }
 
 impl OwnedBatchReader {
-    pub(super) fn new(reader: ParquetRecordBatchReader, failures: PageFailures) -> Self {
-        Self {
-            reader: Some(reader),
-            failures,
+    pub(super) fn new(
+        reader: ParquetRecordBatchReader,
+        admitted_schema: SchemaRef,
+        failures: PageFailures,
+    ) -> Result<Self, GfError> {
+        if failures.failed() {
+            return Err(failures.take().unwrap_or_else(|| {
+                storage("Parquet task stopped after its page failure was consumed")
+            }));
         }
+        if reader.schema().fields() != admitted_schema.fields() {
+            let error = storage("Parquet Arrow fields differ from the admitted source schema");
+            failures.record(error.clone());
+            return Err(failures.take().unwrap_or(error));
+        }
+        Ok(Self {
+            reader: Some(reader),
+            admitted_schema,
+            failures,
+        })
     }
 }
 
@@ -108,7 +125,15 @@ impl Iterator for OwnedBatchReader {
             })));
         }
         match result {
-            Some(Ok(batch)) => Some(Ok(batch)),
+            Some(Ok(batch)) => match attach_admitted_schema(batch, &self.admitted_schema) {
+                Ok(batch) => Some(Ok(batch)),
+                Err(error) => {
+                    self.reader = None;
+                    let error = storage(error);
+                    self.failures.record(error.clone());
+                    Some(Err(self.failures.take().unwrap_or(error)))
+                }
+            },
             Some(Err(error)) => {
                 self.reader = None;
                 let error = storage(error);
@@ -121,6 +146,15 @@ impl Iterator for OwnedBatchReader {
             }
         }
     }
+}
+
+pub(super) fn attach_admitted_schema(
+    batch: RecordBatch,
+    admitted_schema: &SchemaRef,
+) -> Result<RecordBatch, GfError> {
+    batch
+        .with_schema(Arc::clone(admitted_schema))
+        .map_err(storage)
 }
 
 impl std::iter::FusedIterator for OwnedBatchReader {}
