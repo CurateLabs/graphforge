@@ -244,6 +244,12 @@ impl LabelMemberProjection {
     pub fn members(&self) -> &BTreeSet<[u8; 16]> {
         &self.members
     }
+
+    /// The committed search generation this membership was admitted under.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.snapshot.generation
+    }
     pub(crate) fn validate_binding(
         &self,
         project: &Path,

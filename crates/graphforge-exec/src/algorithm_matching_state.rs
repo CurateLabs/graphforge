@@ -606,6 +606,7 @@ impl AlternatingDualState {
         Ok(crossing)
     }
 
+    #[cfg(test)]
     pub(crate) fn pop_outer(&mut self) -> Option<usize> {
         debug_assert_eq!(self.blossoms.vertex_count(), self.vertices.len());
         let vertex = self.outer_queue.pop_front()?;

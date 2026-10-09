@@ -25,7 +25,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master as of 2026-08-05
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master as of 2026-08-05
         with:
           # The pin is a `master` commit, which has no default toolchain; the
           # nightly channel must be named or the step fails before any target
@@ -37,7 +37,7 @@ jobs:
           targets: x86_64-unknown-linux-gnu
 
       - name: Mount fuzz build disk
-        uses: useblacksmith/stickydisk@94697d49e77d0dd78b77deb85ad3de63a28b4b8a # v1.7.1
+        uses: useblacksmith/stickydisk@3f6be1451e3cad893b778bc93495c80452a5da26 # v1.7.2
         with:
           key: ${{ github.repository }}-daily-fuzz-${{ hashFiles('fuzz/Cargo.toml', '**/Cargo.lock') }}-target-v1
           path: fuzz/target
@@ -53,7 +53,7 @@ jobs:
             ${{ runner.os }}-fuzz-
 
       - name: Install cargo-fuzz
-        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-fuzz
 
