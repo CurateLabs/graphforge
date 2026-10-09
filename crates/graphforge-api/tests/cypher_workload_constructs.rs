@@ -549,3 +549,48 @@ fn malformed_unsupported_forms_keep_syntax_errors() {
         );
     }
 }
+
+/// UNWIND introduces a fresh name, including when the existing name is a
+/// previously unwound node. WITH may remove that name before a later UNWIND.
+#[test]
+fn unwind_rejects_an_alias_already_in_scope() {
+    let gf = accounts();
+    for query in [
+        "UNWIND [1] AS n UNWIND [2] AS n RETURN n",
+        "MATCH (a:Account {id: 1}) WITH collect(a) AS xs UNWIND xs AS n UNWIND [n] AS n RETURN n.id",
+        "MATCH (a:Account {id: 1}) WITH collect(a) AS xs UNWIND xs AS n UNWIND [1] AS n WITH collect(n) AS ns UNWIND ns AS x OPTIONAL MATCH (x)-[:transfer]->(m) RETURN x.id",
+    ] {
+        let error = gf
+            .execute(query)
+            .expect_err("UNWIND cannot overwrite an in-scope alias");
+        assert_eq!(error.code(), "GF_PARSE", "{query}: {error}");
+        assert!(
+            error.to_string().contains("VariableAlreadyBound"),
+            "{query}: {error}"
+        );
+    }
+}
+
+#[test]
+fn unwound_node_recollection_preserves_properties_and_identity() {
+    let gf = accounts();
+    for collection in ["collect(n)", "collect(DISTINCT n)"] {
+        let query = format!(
+            "MATCH (a:Account {{id: 1}}) WITH collect(a) AS xs \
+            UNWIND xs AS n WITH {collection} AS ns UNWIND ns AS n \
+            OPTIONAL MATCH (n)-[:transfer]->(m) \
+            RETURN n.id AS source, m.id AS dest"
+        );
+        assert_eq!(rows(&gf, &query), vec![strings(&["1", "2"])], "{query}");
+    }
+    // Graph-pattern enrichment adds topology without replacing value fields.
+    assert_eq!(
+        rows(
+            &gf,
+            "MATCH (a:Account {id: 1}) WITH collect(a) AS xs \
+        UNWIND xs AS n MATCH (n)-[:transfer]->(m) \
+        WITH collect(n) AS ns UNWIND ns AS x RETURN x.id AS source"
+        ),
+        vec![strings(&["1"])]
+    );
+}

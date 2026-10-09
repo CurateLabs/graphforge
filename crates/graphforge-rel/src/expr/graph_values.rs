@@ -77,6 +77,12 @@ impl ExprLowerer<'_> {
             .var_map
             .get(*var_id)
             .ok_or(LoweringError::UnboundVar(var_id.0))?;
+        // UNWIND preserves whole-node value fields in its qualified schema.
+        // Recollection must use those fields even after topology enrichment,
+        // which does not populate the scan-derived node_shapes registry.
+        if let Some(value) = self.spread_node_value(base) {
+            return Ok(value);
+        }
         let label = args.get(1).and_then(|&id| match self.arena.get(id) {
             IrExpr::Literal(IrLiteral::Str(s)) => Some(s.as_str()),
             _ => None,
@@ -319,10 +325,40 @@ impl ExprLowerer<'_> {
                 .is_none()
     }
 
+    /// Reconstruct a whole node value from preserved value fields. Enrichment
+    /// may add storage topology, which must not become a user property.
+    fn spread_node_value(&self, base: &str) -> Option<DfExpr> {
+        use datafusion::functions::core::expr_fn::named_struct;
+        let schema = self.input_schema.as_ref()?;
+        let qualifier = datafusion::common::TableReference::bare(base);
+        schema.index_of_column_by_name(Some(&qualifier), "node_uuid")?;
+        schema.index_of_column_by_name(Some(&qualifier), "labels")?;
+        let fields = schema
+            .iter()
+            .filter(|(qualifier, field)| {
+                qualifier.is_some_and(|q| q.table() == base)
+                    && !matches!(field.name().as_str(), "node_id" | "type_id" | "type_ids")
+            })
+            .flat_map(|(_, field)| {
+                [
+                    lit(field.name().as_str()),
+                    qualified_col(base, field.name()),
+                ]
+            })
+            .collect::<Vec<_>>();
+        Some(null_unless(
+            qualified_col(base, "node_uuid").is_not_null(),
+            named_struct(fields),
+        ))
+    }
+
     /// The whole node or relationship value of a spread UNWIND entity, rebuilt
     /// from its qualified columns (#1887 D16); `None` for any other variable.
     fn spread_entity_value(&self, base: &str) -> Option<DfExpr> {
         use datafusion::functions::core::expr_fn::named_struct;
+        if let Some(value) = self.spread_node_value(base) {
+            return Some(value);
+        }
         let identity = if self.is_spread_entity(base, "node_uuid", "type_ids") {
             "node_uuid"
         } else if self.is_spread_entity(base, "edge_uuid", "rel_type_name") {

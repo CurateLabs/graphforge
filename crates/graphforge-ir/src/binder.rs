@@ -453,8 +453,17 @@ impl Binder {
     }
 
     fn lower_unwind(&self, u: &graphforge_ast::UnwindClause, s: &mut BinderState) {
-        // Infer the element fact against the pre-UNWIND scope, before `alias`
-        // is (re)bound and could shadow a name the list expression references.
+        // UNWIND declares a new variable; reusing an in-scope name is an
+        // error rather than a metadata-changing shadow binding.
+        if s.vars.contains_key(&u.alias) {
+            s.errors.push(BindError::new(
+                BindErrorKind::VariableAlreadyBound,
+                u.span,
+                format!("VariableAlreadyBound: `{}`", u.alias),
+            ));
+            return;
+        }
+        // Infer the element fact against the input scope before binding alias.
         let fact = node_list_fact(&u.expr, s);
         let list_expr = self.lower_expr(&u.expr, u.span, s);
         let alias = ensure_var_name(&u.alias, s);
