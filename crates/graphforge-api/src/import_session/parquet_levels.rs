@@ -288,7 +288,9 @@ impl<'a> Hybrid<'a> {
             // Only the logical prefix this run will actually supply needs
             // payload bytes: writers may truncate the final group, and events
             // past `expected` are ignored padding that need not be valid.
-            let decoded = usize::try_from(count).map_err(|_| overflow())?.min(self.remaining());
+            let decoded = usize::try_from(count)
+                .map_err(|_| overflow())?
+                .min(self.remaining());
             // The packed payload starts immediately after this run header,
             // at the byte offset the VLQ left behind; decoding must not
             // reread the header bytes.
