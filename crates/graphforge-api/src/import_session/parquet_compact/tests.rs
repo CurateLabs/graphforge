@@ -329,7 +329,7 @@ fn binary_reads_borrow_bounded_utf8_ranges() {
 
     let wire = Wire::new().binary(&[0xFF, 0xFE]);
     let mut cursor = cursor_of(&wire);
-    assert_malformed(cursor.read_utf8().unwrap_err());
+    assert_malformed(cursor.read_utf8().err().expect("UTF-8 read must fail"));
 
     let wire = Wire::new().vlq(10).repeated(0x01, 3);
     let mut cursor = cursor_of(&wire);
@@ -363,7 +363,7 @@ fn utf8_windows_refuse_a_continuation_broken_across_the_boundary() {
     payload.push(b'!'); // not a continuation byte: caught in the next window
     let wire = Wire::new().binary(&payload);
     let mut cursor = cursor_of(&wire);
-    assert_malformed(cursor.read_utf8().unwrap_err());
+    assert_malformed(cursor.read_utf8().err().expect("UTF-8 read must fail"));
 }
 
 #[test]
@@ -377,7 +377,7 @@ fn utf8_refuses_sequences_truncated_by_the_end_of_the_range() {
         payload.extend_from_slice(&trailer);
         let wire = Wire::new().binary(&payload);
         let mut cursor = cursor_of(&wire);
-        assert_malformed(cursor.read_utf8().unwrap_err());
+        assert_malformed(cursor.read_utf8().err().expect("UTF-8 read must fail"));
     }
 }
 
@@ -610,7 +610,7 @@ fn cancelled_public_entries_refuse_before_the_first_byte() {
     assert_eq!(cursor.position(), 0);
 
     let mut cursor = cancelled_cursor(wire, &token);
-    assert_cancelled(cursor.read_utf8().unwrap_err());
+    assert_cancelled(cursor.read_utf8().err().expect("UTF-8 read must fail"));
     assert_eq!(cursor.position(), 0);
 
     let mut cursor = cancelled_cursor(wire, &token);
