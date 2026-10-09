@@ -394,35 +394,7 @@ fn columns_and_row_groups_share_one_inventory_budget() {
     // The same file on an adequate budget keeps all four inventories whole.
     let scan =
         build_from_path(four_file.path(), &four, MIB).expect("an adequate budget admits four");
-    assert_eq!(scan.groups.len(), 3);
-    let retained = scan.groups.capacity()
-        * std::mem::size_of::<super::super::parquet_scan::GroupScan>()
-        + scan.group_start.capacity() * std::mem::size_of::<u64>()
-        + scan.value_bytes.capacity() * std::mem::size_of::<u64>()
-        + scan
-            .groups
-            .iter()
-            .map(|group| {
-                group.leaves.capacity()
-                    * std::mem::size_of::<super::super::parquet_scan::LeafScan>()
-                    + group
-                        .leaves
-                        .iter()
-                        .filter_map(|leaf| leaf.pages.as_ref())
-                        .map(|pages| pages.capacity() * std::mem::size_of::<PageFact>())
-                        .sum::<usize>()
-            })
-            .sum::<usize>();
-    assert!(
-        scan.groups.capacity() > scan.groups.len(),
-        "exercise geometric slack"
-    );
-    assert_eq!(
-        scan.resident_bytes(),
-        retained as u64,
-        "charge allocated slots, not just occupied slots"
-    );
-
+    assert_eq!(scan.groups.len(), 2);
     for group in &scan.groups {
         assert_eq!(group.leaves.len(), 2);
         for leaf_scan in &group.leaves {
@@ -494,6 +466,34 @@ fn writer_generated_small_pages_pass_with_exact_counts() {
     )
     .expect("an ordinary many-page file is admitted");
     assert_eq!(scan.groups.len(), 3);
+    let retained = scan.groups.capacity()
+        * std::mem::size_of::<super::super::parquet_scan::GroupScan>()
+        + scan.group_start.capacity() * std::mem::size_of::<u64>()
+        + scan.value_bytes.capacity() * std::mem::size_of::<u64>()
+        + scan
+            .groups
+            .iter()
+            .map(|group| {
+                group.leaves.capacity()
+                    * std::mem::size_of::<super::super::parquet_scan::LeafScan>()
+                    + group
+                        .leaves
+                        .iter()
+                        .filter_map(|leaf| leaf.pages.as_ref())
+                        .map(|pages| pages.capacity() * std::mem::size_of::<PageFact>())
+                        .sum::<usize>()
+            })
+            .sum::<usize>();
+    assert!(
+        scan.groups.capacity() > scan.groups.len(),
+        "exercise geometric slack"
+    );
+    assert_eq!(
+        scan.resident_bytes(),
+        retained as u64,
+        "charge allocated slots, not just occupied slots"
+    );
+
     for group in &scan.groups {
         let pages = group.leaves[1].pages.as_ref().expect("strings keep pages");
         assert_eq!(pages.len(), 1_000, "one page per row");

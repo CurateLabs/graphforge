@@ -82,6 +82,20 @@ fn every_allocator_denies_before_an_uncountable_request_and_returns_its_credit()
 }
 
 #[test]
+fn a_denied_constructor_never_reads_the_compressed_input() {
+    struct Unread;
+    impl Read for Unread {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            panic!("a denied Brotli constructor may not begin decoding");
+        }
+    }
+    let budget = shared(fixed_bytes() + INPUT_BYTES);
+    let error = decode_with_budget(Unread, &mut [], &budget).unwrap_err();
+    assert!(is_limit(&error), "{error}");
+    assert_eq!(budget.borrow().live, fixed_bytes());
+}
+
+#[test]
 fn constructor_and_initial_table_denials_are_typed_and_do_not_resume_decoding() {
     let input = vec![b'x'; 256 << 10];
     let encoded = compressed(&input);
@@ -95,7 +109,7 @@ fn constructor_and_initial_table_denials_are_typed_and_do_not_resume_decoding() 
     ] {
         let budget = shared(capacity);
         let mut output = vec![0_u8; input.len()];
-        let error = decode_with_budget(&encoded, &mut output, &budget).unwrap_err();
+        let error = decode_with_budget(encoded.as_slice(), &mut output, &budget).unwrap_err();
         assert!(is_limit(&error), "capacity={capacity}: {error}");
         assert_eq!(
             budget.borrow().live,

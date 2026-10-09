@@ -137,8 +137,8 @@ impl<T: Default + Clone> Allocator<T> for BoundedAlloc<T> {
     }
 }
 
-type Decoder<'a> = DecompressorCustomAlloc<
-    &'a [u8],
+type Decoder<R> = DecompressorCustomAlloc<
+    R,
     Cell<u8>,
     BoundedAlloc<u8>,
     BoundedAlloc<u32>,
@@ -146,7 +146,7 @@ type Decoder<'a> = DecompressorCustomAlloc<
 >;
 
 fn fixed_bytes() -> usize {
-    std::mem::size_of::<Decoder<'_>>()
+    std::mem::size_of::<Decoder<&[u8]>>()
         + std::mem::size_of::<RefCell<Budget>>()
         + 2 * std::mem::size_of::<usize>() // Rc counters
 }
@@ -178,7 +178,11 @@ pub(super) fn decode(input: &[u8], output: &mut [u8], capacity: usize) -> Result
     decode_with_budget(input, output, &shared)
 }
 
-fn decode_with_budget(input: &[u8], output: &mut [u8], shared: &Shared) -> Result<(), GfError> {
+fn decode_with_budget<R: Read>(
+    input: R,
+    output: &mut [u8],
+    shared: &Shared,
+) -> Result<(), GfError> {
     let buffer = BoundedAlloc::<u8>::new(shared).alloc_cell(INPUT_BYTES);
     check(shared)?;
     let mut decoder = Decoder::new(
