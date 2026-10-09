@@ -1,5 +1,7 @@
 //! Final-plan authority for exact property-scan UUID nominations.
 
+mod equality_anchor;
+
 use std::sync::Arc;
 
 use datafusion::common::JoinType;
@@ -40,6 +42,9 @@ impl PhysicalOptimizerRule for PropertyFilterApprovalRule {
             let Some(join) = node.downcast_ref::<HashJoinExec>() else {
                 return Ok(Transformed::no(node));
             };
+            if let Some(rebuilt) = equality_anchor::shared_equality_build(join)? {
+                return Ok(Transformed::yes(rebuilt));
+            }
             if *join.join_type() == JoinType::Right {
                 let Some(rebuilt) = nominate_collect_left_right(join)? else {
                     return Ok(Transformed::no(node));

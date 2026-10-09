@@ -521,3 +521,72 @@ fn a_read_statement_writes_nothing() {
     assert_eq!(io.write_bytes, 0, "{io:?}");
     assert_eq!(io.wchar.unwrap_or(0), 0, "{io:?}");
 }
+
+#[test]
+fn strict_property_anchors_stream_topology_against_the_equality_build() {
+    let _serial = serial();
+    let built = build(SMALL_NODES);
+    for partitions in [1, 2, 4] {
+        let forge = open_with_partitions(&built.project, partitions);
+        let query = "MATCH (a:Entity {ident: 5})-[:LINK]->(b) RETURN count(*) AS n";
+        let physical = forge
+            .explain_stage(query, graphforge_api::ExplainStage::PhysicalPlan)
+            .unwrap();
+        if partitions > 1 {
+            assert!(
+                physical.contains("HashJoinExec: mode=CollectLeft, join_type=Inner"),
+                "{physical}"
+            );
+        }
+        assert!(
+            physical.contains("PropertyOverlayExec: route=_untyped, equality=ident=Int(5)"),
+            "{physical}"
+        );
+        let (batches, io) = measured(&forge, ANCHORED_HOP, 5);
+        assert_eq!(count(&batches), FAN_OUT as i64);
+        assert_eq!(io.write_bytes, 0, "{io:?}");
+        // Parallel execution wakes Tokio through eventfd write(8). The
+        // process-wide syscall counter is a zero-file-write gate only when
+        // execution stays on the calling thread, as in the existing control.
+        if partitions == 1 {
+            assert_eq!(io.wchar.unwrap_or(0), 0, "{io:?}");
+        }
+        let (values, io) = measured(
+            &forge,
+            "MATCH (a:Entity {ident: $ident})-[:LINK]->(b) \
+             RETURN a.ident AS anchor, b.ident AS neighbor",
+            5,
+        );
+        let mut pairs = Vec::new();
+        for batch in &values {
+            let anchors = batch
+                .column_by_name("anchor")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            let neighbors = batch
+                .column_by_name("neighbor")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                assert!(!anchors.is_null(row) && !neighbors.is_null(row));
+                pairs.push((anchors.value(row), neighbors.value(row)));
+            }
+        }
+        pairs.sort_unstable();
+        assert_eq!(pairs, vec![(5, 6), (5, 7)]);
+        assert_eq!(io.write_bytes, 0, "{io:?}");
+        if partitions == 1 {
+            assert_eq!(io.wchar.unwrap_or(0), 0, "{io:?}");
+        }
+        let (batches, io) = measured(&forge, ANCHORED_LOOKUP, i64::MAX);
+        assert_eq!(count(&batches), 0);
+        assert_eq!(io.write_bytes, 0, "{io:?}");
+        if partitions == 1 {
+            assert_eq!(io.wchar.unwrap_or(0), 0, "{io:?}");
+        }
+    }
+}

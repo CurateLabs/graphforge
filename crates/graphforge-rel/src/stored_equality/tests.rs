@@ -221,3 +221,137 @@ fn a_computed_column_is_not_looked_through() {
     assert!(!transformed);
     assert!(scan_filters(&after).is_empty());
 }
+
+fn join_types(plan: &LogicalPlan) -> Vec<JoinType> {
+    let mut types = Vec::new();
+    plan.apply(|node| {
+        if let LogicalPlan::Join(join) = node {
+            types.push(join.join_type);
+        }
+        Ok(TreeNodeRecursion::Continue)
+    })
+    .unwrap();
+    types
+}
+
+#[test]
+fn a_single_strict_property_equality_admits_inner_join_and_retains_filter() {
+    for predicate in [col("n.ident").eq(lit(7_i64)), lit(7_i64).eq(col("n.ident"))] {
+        let before = plan(
+            GraphReadTable::Properties("Entity".into()),
+            JoinType::Left,
+            true,
+            predicate.clone(),
+        );
+        let (after, transformed) = rewritten(before);
+        assert!(transformed);
+        assert_eq!(join_types(&after), vec![JoinType::Inner]);
+        let LogicalPlan::Filter(filter) = after else {
+            panic!("filter missing");
+        };
+        assert_eq!(filter.predicate, predicate);
+    }
+}
+
+#[test]
+fn conjunctions_and_computed_projections_keep_left_padding() {
+    let predicate = col("n.ident")
+        .eq(lit(7_i64))
+        .and(col("n.name").eq(lit("ada")));
+    let (after, _) = rewritten(plan(
+        GraphReadTable::Properties("Entity".into()),
+        JoinType::Left,
+        true,
+        predicate,
+    ));
+    assert_eq!(join_types(&after), vec![JoinType::Left]);
+    let before = plan(
+        GraphReadTable::Properties("Entity".into()),
+        JoinType::Left,
+        false,
+        col("p.ident").eq(lit(7_i64)),
+    );
+    let LogicalPlan::Filter(filter) = before else {
+        panic!("filter");
+    };
+    let projected = LogicalPlanBuilder::from(filter.input.as_ref().clone())
+        .project(vec![
+            col("p.ident"),
+            (lit(1_i64) / col("p.ident")).alias("computed"),
+        ])
+        .unwrap()
+        .filter(col("p.ident").eq(lit(7_i64)))
+        .unwrap()
+        .build()
+        .unwrap();
+    let (after, _) = rewritten(projected);
+    assert_eq!(join_types(&after), vec![JoinType::Left]);
+}
+
+#[test]
+fn an_existing_scan_hint_still_admits_strict_null_rejection() {
+    let before = plan(
+        GraphReadTable::Properties("Entity".into()),
+        JoinType::Left,
+        false,
+        col("p.ident").eq(lit(7_i64)),
+    );
+    let hinted = before
+        .transform_up(|node| {
+            let LogicalPlan::TableScan(mut scan) = node else {
+                return Ok(Transformed::no(node));
+            };
+            if scan.table_name.table() != "p" {
+                return Ok(Transformed::no(LogicalPlan::TableScan(scan)));
+            }
+            scan.filters.push(col("p.ident").eq(lit(7_i64)));
+            Ok(Transformed::yes(LogicalPlan::TableScan(scan)))
+        })
+        .unwrap()
+        .data;
+    let (after, changed) = rewritten(hinted);
+    assert!(changed);
+    assert_eq!(join_types(&after), vec![JoinType::Inner]);
+    assert_eq!(scan_filters(&after).len(), 1);
+}
+
+#[test]
+fn a_nested_right_join_keeps_expression_evaluation_before_null_rejection() {
+    let predicate = col("p.ident").eq(lit(7_i64));
+    let inner = plan(
+        GraphReadTable::Properties("Entity".into()),
+        JoinType::Left,
+        false,
+        predicate.clone(),
+    );
+    let LogicalPlan::Filter(filter) = inner else {
+        panic!("inner filter");
+    };
+    let outer = LogicalPlanBuilder::scan(
+        "a",
+        GraphReadSource::new(GraphReadTable::Nodes, &nodes(), None),
+        None,
+    )
+    .unwrap()
+    .join_on(
+        filter.input.as_ref().clone(),
+        JoinType::Left,
+        vec![
+            col("a.node_uuid").eq(col("n.node_uuid")),
+            (lit(1_i64) / col("p.ident")).gt(lit(0_i64)),
+        ],
+    )
+    .unwrap()
+    .filter(predicate.clone())
+    .unwrap()
+    .build()
+    .unwrap();
+    let (after, transformed) = rewritten(outer);
+    assert!(transformed);
+    assert_eq!(join_types(&after), vec![JoinType::Left, JoinType::Left]);
+    assert_eq!(scan_filters(&after), vec![predicate.clone()]);
+    let LogicalPlan::Filter(filter) = after else {
+        panic!("outer filter");
+    };
+    assert_eq!(filter.predicate, predicate);
+}

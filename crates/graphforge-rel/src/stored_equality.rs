@@ -8,8 +8,10 @@
 //!
 //! This rule runs last and offers each `column = literal` conjunct to the
 //! property scan that supplies the column, through the `Properties` source's
-//! own pushdown declaration. A hint is not a rewrite: the filter stays where it
-//! is and still decides which rows survive. The scan may use the hint to return
+//! own pushdown declaration. The filter stays where it is and still decides
+//! which rows survive. A single strict equality through column-only projections
+//! also admits an INNER join: NULL-extended rows cannot pass that equality.
+//! The scan may use the hint to return
 //! fewer rows, but only rows the filter would have discarded, because the hint
 //! sits on the nullable side of a left join under a filter that rejects NULL:
 //! an omitted right row becomes a NULL-extended left row, and that row fails
@@ -53,30 +55,44 @@ fn comparison(column: &Column, literal: &Expr) -> Expr {
     Expr::Column(column.clone()).eq(literal.clone())
 }
 
+fn projected_column(mut expr: &Expr) -> Option<&Column> {
+    while let Expr::Alias(alias) = expr {
+        expr = alias.expr.as_ref();
+    }
+    match expr {
+        Expr::Column(column) => Some(column),
+        _ => None,
+    }
+}
+
 /// Offer `wanted` to the property scans under `plan`, looking through column
 /// projections and left joins only. Returns the rewritten plan and whether any
 /// scan took a hint.
-fn hint(plan: &LogicalPlan, wanted: &[(Column, Expr)]) -> Result<Option<LogicalPlan>> {
+fn hint(
+    plan: &LogicalPlan,
+    wanted: &[(Column, Expr)],
+    strict_equality: bool,
+) -> Result<Option<LogicalPlan>> {
     match plan {
         LogicalPlan::Projection(projection) => {
             let mapped = wanted
                 .iter()
                 .filter_map(|(column, literal)| {
                     let index = projection.schema.index_of_column(column).ok()?;
-                    let mut source = &projection.expr[index];
-                    while let Expr::Alias(alias) = source {
-                        source = alias.expr.as_ref();
-                    }
-                    match source {
-                        Expr::Column(inner) => Some((inner.clone(), literal.clone())),
-                        _ => None,
-                    }
+                    let inner = projected_column(&projection.expr[index])?;
+                    Some((inner.clone(), literal.clone()))
                 })
                 .collect::<Vec<_>>();
             if mapped.is_empty() {
                 return Ok(None);
             }
-            hint(&projection.input, &mapped)?
+            // Moving a null-rejecting equality ahead of computed projections
+            // could suppress errors or volatile evaluations on unmatched rows.
+            let column_only = projection
+                .expr
+                .iter()
+                .all(|expr| projected_column(expr).is_some());
+            hint(&projection.input, &mapped, strict_equality && column_only)?
                 .map(|input| {
                     Projection::try_new(projection.expr.clone(), Arc::new(input))
                         .map(LogicalPlan::Projection)
@@ -86,32 +102,50 @@ fn hint(plan: &LogicalPlan, wanted: &[(Column, Expr)]) -> Result<Option<LogicalP
         LogicalPlan::Join(join) if join.join_type == JoinType::Left => {
             let right = wanted
                 .iter()
-                .filter(|(column, _)| join.right.schema().index_of_column(column).is_ok())
+                .filter(|(column, _)| {
+                    join.right.schema().index_of_column(column).is_ok()
+                        && join.left.schema().index_of_column(column).is_err()
+                })
                 .cloned()
                 .collect::<Vec<_>>();
             if right.is_empty() {
                 return Ok(None);
             }
-            Ok(hint(&join.right, &right)?.map(|right| {
-                LogicalPlan::Join(Join {
-                    right: Arc::new(right),
-                    ..join.clone()
+            // A nested right join may evaluate its own expressions before the
+            // outer filter. Keep its NULL padding and evaluation scope intact.
+            let promote =
+                strict_equality && matches!(join.right.as_ref(), LogicalPlan::TableScan(_));
+            hint(&join.right, &right, promote)?
+                .map(|right| {
+                    Join::try_new(
+                        Arc::clone(&join.left),
+                        Arc::new(right),
+                        join.on.clone(),
+                        join.filter.clone(),
+                        if promote {
+                            JoinType::Inner
+                        } else {
+                            JoinType::Left
+                        },
+                        join.join_constraint,
+                        join.null_equality,
+                        join.null_aware,
+                    )
+                    .map(LogicalPlan::Join)
                 })
-            }))
+                .transpose()
         }
         LogicalPlan::TableScan(scan) => {
             let Some(source) = scan.source.downcast_ref::<GraphReadSource>() else {
                 return Ok(None);
             };
             let mut filters = scan.filters.clone();
+            let mut admitted = false;
             for (column, literal) in wanted {
                 if column.relation.as_ref() != Some(&scan.table_name) {
                     continue;
                 }
                 let predicate = comparison(column, literal);
-                if filters.contains(&predicate) {
-                    continue;
-                }
                 let supported = datafusion::logical_expr::TableSource::supports_filters_pushdown(
                     source,
                     &[&predicate],
@@ -122,9 +156,12 @@ fn hint(plan: &LogicalPlan, wanted: &[(Column, Expr)]) -> Result<Option<LogicalP
                 {
                     continue;
                 }
-                filters.push(predicate);
+                admitted = true;
+                if !filters.contains(&predicate) {
+                    filters.push(predicate);
+                }
             }
-            if filters.len() == scan.filters.len() {
+            if !admitted || (filters.len() == scan.filters.len() && !strict_equality) {
                 return Ok(None);
             }
             let mut replacement = scan.clone();
@@ -159,7 +196,8 @@ impl OptimizerRule for StoredEqualityHints {
         if wanted.is_empty() {
             return Ok(Transformed::no(plan));
         }
-        match hint(&filter.input, &wanted)? {
+        let strict_equality = equality(&filter.predicate).is_some();
+        match hint(&filter.input, &wanted, strict_equality)? {
             Some(input) => Ok(Transformed::yes(LogicalPlan::Filter(Filter::try_new(
                 filter.predicate.clone(),
                 Arc::new(input),

@@ -405,3 +405,109 @@ fn left_enrichment_scan_nominations_exclude_limits_and_property_equalities() {
         None
     );
 }
+
+fn partitioned_equality_join(
+    scan: PropertyOverlayExec,
+    preserve_order: bool,
+) -> Arc<dyn ExecutionPlan> {
+    let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("node_uuid", 0));
+    let distribution = datafusion::physical_expr::Partitioning::Hash(vec![Arc::clone(&key)], 4);
+    let left: Arc<dyn ExecutionPlan> =
+        Arc::new(RepartitionExec::try_new(empty_uuid_build(), distribution.clone()).unwrap());
+    let scan: Arc<dyn ExecutionPlan> = Arc::new(scan);
+    let input = if preserve_order {
+        let ordering = datafusion::physical_expr::LexOrdering::new(vec![
+            datafusion::physical_expr::PhysicalSortExpr::new(Arc::clone(&key), Default::default()),
+        ])
+        .unwrap();
+        Arc::new(datafusion::physical_plan::sorts::sort::SortExec::new(
+            ordering, scan,
+        )) as Arc<dyn ExecutionPlan>
+    } else {
+        scan
+    };
+    let right = RepartitionExec::try_new(input, distribution).unwrap();
+    let right: Arc<dyn ExecutionPlan> = Arc::new(if preserve_order {
+        right.with_preserve_order()
+    } else {
+        right
+    });
+    Arc::new(
+        HashJoinExec::try_new(
+            left,
+            right,
+            vec![(Arc::clone(&key), key)],
+            None,
+            &JoinType::Inner,
+            Some(vec![0, 2]),
+            PartitionMode::Partitioned,
+            NullEquality::NullEqualsNothing,
+            false,
+        )
+        .unwrap(),
+    )
+}
+
+#[test]
+fn a_partitioned_equality_anchor_uses_one_build_and_restores_hash_distribution() {
+    use datafusion::physical_optimizer::sanity_checker::SanityCheckPlan;
+    let equality = PropertyEquality {
+        column: "ident".into(),
+        value: EqualityValue::Int(7),
+    };
+    let original = partitioned_equality_join(property_scan(None, Some(equality)), false);
+    let original_distribution = original.output_partitioning().clone();
+    let original_schema = original.schema();
+    let rewritten = PropertyFilterApprovalRule
+        .optimize(original, &ConfigOptions::default())
+        .unwrap();
+    assert_eq!(rewritten.schema(), original_schema);
+    assert_eq!(
+        format!("{:?}", rewritten.output_partitioning()),
+        format!("{original_distribution:?}")
+    );
+    let exchange = rewritten
+        .downcast_ref::<RepartitionExec>()
+        .expect("output hash restored");
+    let join = exchange
+        .input()
+        .downcast_ref::<HashJoinExec>()
+        .expect("embedded projection retained");
+    assert_eq!(*join.join_type(), JoinType::Inner);
+    assert_eq!(*join.partition_mode(), PartitionMode::CollectLeft);
+    assert_eq!(join.left().output_partitioning().partition_count(), 1);
+    assert!(
+        join.left()
+            .downcast_ref::<datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec>(
+            )
+            .is_some()
+    );
+    SanityCheckPlan::new()
+        .optimize(rewritten, &ConfigOptions::default())
+        .expect("final rewrite meets distribution requirements");
+}
+
+#[test]
+fn equality_anchor_rejects_limits_order_and_stale_nominations() {
+    let equality = || {
+        Some(PropertyEquality {
+            column: "ident".into(),
+            value: EqualityValue::Int(7),
+        })
+    };
+    for (scan, preserve_order) in [
+        (property_scan(Some(1), equality()), false),
+        (property_scan(None, None), false),
+        (property_scan(None, equality()), true),
+        (
+            property_scan(None, equality()).with_uuid_nomination(UuidBuildKeyNomination::new()),
+            false,
+        ),
+    ] {
+        let original = partitioned_equality_join(scan, preserve_order);
+        let after = PropertyFilterApprovalRule
+            .optimize(original, &ConfigOptions::default())
+            .unwrap();
+        assert!(after.downcast_ref::<HashJoinExec>().is_some());
+    }
+}
