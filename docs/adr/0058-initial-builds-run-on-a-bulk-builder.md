@@ -116,6 +116,10 @@ functions.
   chunk-spool replay, format-2 copied-source sessions and the persisted
   `build_route` are pending removal. The facade will refuse staged construction
   on an empty project; storage tests may still use the staged engine.
+  The staged-versus-bulk test oracle is also retired. Bulk correctness is
+  established by byte identity across resident, scratch and node-scratch
+  routes, forced worker counts, kill and rerun, and equality of recorded
+  queries and exact node and edge counts.
 - The route is chosen once, by the first `validate`, and written to the import
   manifest (`build_route`); every later `validate`, in any process, reads it
   back. A refused, cancelled or killed bulk attempt therefore cannot be
