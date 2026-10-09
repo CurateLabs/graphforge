@@ -20,7 +20,7 @@ use graphforge_core::GfError;
 use parquet::file::metadata::{ColumnChunkMetaData, ParquetMetaData};
 use parquet::schema::types::ColumnDescriptor;
 
-use super::inventory_budget::{reserve, InventoryBudget};
+use super::inventory_budget::{InventoryBudget, reserve};
 use super::{limit, storage};
 
 /// A page header larger than this is not a page header: statistics are the only
@@ -557,9 +557,9 @@ pub(super) fn scan_group(
             budget.release(
                 u64::try_from(pages.capacity())
                     .unwrap_or(u64::MAX)
-                    .saturating_mul(u64::try_from(std::mem::size_of::<PageFact>()).unwrap_or(
-                        u64::MAX,
-                    )),
+                    .saturating_mul(
+                        u64::try_from(std::mem::size_of::<PageFact>()).unwrap_or(u64::MAX),
+                    ),
             );
         }
         leaves.push(LeafScan {

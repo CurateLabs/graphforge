@@ -181,7 +181,11 @@ fn row_group(
     builder.build().expect("a row group")
 }
 
-fn file_metadata(schema_descr: &SchemaDescPtr, groups: Vec<RowGroupMetaData>, rows: i64) -> ParquetMetaData {
+fn file_metadata(
+    schema_descr: &SchemaDescPtr,
+    groups: Vec<RowGroupMetaData>,
+    rows: i64,
+) -> ParquetMetaData {
     ParquetMetaData::new(
         FileMetaData::new(1, rows, None, None, Arc::clone(schema_descr), None),
         groups,
@@ -218,11 +222,7 @@ fn zero_value_pages(count: usize) -> (tempfile::NamedTempFile, ParquetMetaData) 
     }
     let descr = leaf("c", PhysicalType::BYTE_ARRAY);
     let schema_descr = schema(std::slice::from_ref(&descr));
-    let chunk = chunk(
-        Arc::clone(&descr),
-        u64::try_from(bytes.len()).unwrap(),
-        0,
-    );
+    let chunk = chunk(Arc::clone(&descr), u64::try_from(bytes.len()).unwrap(), 0);
     let metadata = file_metadata(
         &schema_descr,
         vec![row_group(&schema_descr, vec![chunk], 0)],
@@ -319,11 +319,7 @@ fn pages_past_the_footer_value_count_are_refused_when_they_arrive() {
     bytes.push(0x15);
     let descr = leaf("c", PhysicalType::INT32);
     let schema_descr = schema(std::slice::from_ref(&descr));
-    let chunk = chunk(
-        Arc::clone(&descr),
-        u64::try_from(bytes.len()).unwrap(),
-        10,
-    );
+    let chunk = chunk(Arc::clone(&descr), u64::try_from(bytes.len()).unwrap(), 10);
     let metadata = file_metadata(
         &schema_descr,
         vec![row_group(&schema_descr, vec![chunk], 0)],
@@ -396,8 +392,8 @@ fn columns_and_row_groups_share_one_inventory_budget() {
     );
 
     // The same file on an adequate budget keeps all four inventories whole.
-    let scan = build_from_path(four_file.path(), &four, MIB)
-        .expect("an adequate budget admits four");
+    let scan =
+        build_from_path(four_file.path(), &four, MIB).expect("an adequate budget admits four");
     assert_eq!(scan.groups.len(), 2);
     for group in &scan.groups {
         assert_eq!(group.leaves.len(), 2);
