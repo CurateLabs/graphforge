@@ -34,6 +34,9 @@ pub use allocation_operation::StorageAllocationOperation;
 pub mod concurrency_attribution;
 mod private_storage_ownership;
 mod property_filter_approval;
+mod property_join_nomination;
+#[cfg(test)]
+mod property_join_nomination_tests;
 pub use property_filter_approval::PropertyFilterApprovalRule;
 pub mod storage_attribution;
 pub mod transient_composition;

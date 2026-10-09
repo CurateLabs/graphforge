@@ -1,5 +1,6 @@
 //! Bounded DataFusion execution for authenticated immutable property overlays.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -10,7 +11,9 @@ use datafusion::common::stats::Precision;
 use datafusion::common::{ColumnStatistics, Statistics};
 use datafusion::error::DataFusionError;
 use datafusion::execution::TaskContext;
-use datafusion::physical_expr::expressions::DynamicFilterPhysicalExpr;
+use datafusion::execution::memory_pool::MemoryConsumer;
+use datafusion::execution::memory_pool::MemoryReservation;
+use datafusion::physical_expr::expressions::{Column, DynamicFilterPhysicalExpr};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType, SchedulingType};
 use datafusion::physical_plan::filter_pushdown::{
@@ -54,7 +57,7 @@ pub(crate) struct PropertyOverlayExec {
     planned_rows: Option<usize>,
     equality: Option<crate::property_overlay::PropertyEquality>,
     uuid_filters: Vec<Arc<dyn PhysicalExpr>>,
-    uuid_filters_approved: bool,
+    uuid_nominations: Vec<Arc<crate::property_join_nomination::UuidBuildKeyNomination>>,
     props: Arc<PlanProperties>,
     #[cfg(any(test, feature = "test-support"))]
     digest_context: graphforge_core::hash_observation::operation::Context,
@@ -160,7 +163,7 @@ impl PropertyOverlayExec {
             planned_rows,
             equality: options.equality,
             uuid_filters: Vec::new(),
-            uuid_filters_approved: false,
+            uuid_nominations: Vec::new(),
             props,
             metrics,
             work_counts,
@@ -170,19 +173,83 @@ impl PropertyOverlayExec {
         })
     }
 
-    pub(crate) fn approve_uuid_filters(
-        &self,
-        approved_ids: &std::collections::BTreeSet<u64>,
-    ) -> Self {
-        let mut approved = self.clone();
-        approved.uuid_filters.retain(|filter| {
-            filter
-                .expression_id()
-                .is_some_and(|expression_id| approved_ids.contains(&expression_id))
-        });
-        approved.uuid_filters_approved = true;
-        approved
+    pub(crate) fn uuid_filter_candidates(&self) -> Vec<PropertyUuidFilterCandidate> {
+        let key = if self.is_edge {
+            "edge_uuid"
+        } else {
+            "node_uuid"
+        };
+        self.uuid_filters
+            .iter()
+            .filter_map(|filter| {
+                let dynamic = filter.downcast_ref::<DynamicFilterPhysicalExpr>()?;
+                let expression_id = dynamic.expression_id()?;
+                let original = dynamic.original_children();
+                let remapped = dynamic.remapped_children().unwrap_or(original);
+                if original.len() != 1 || remapped.len() != 1 {
+                    return None;
+                }
+                let source = remapped[0].downcast_ref::<Column>()?;
+                let field = self.schema.fields().get(source.index())?;
+                if source.name() != key
+                    || field.name() != source.name()
+                    || field.data_type() != &arrow::datatypes::DataType::FixedSizeBinary(16)
+                {
+                    return None;
+                }
+                Some(PropertyUuidFilterCandidate {
+                    expression_id,
+                    original_probe_key: Arc::clone(&original[0]),
+                })
+            })
+            .collect()
     }
+
+    /// Returns this scan's canonical UUID column only when reading it with a
+    /// join-key nomination cannot change LIMIT or equality semantics.
+    pub(crate) fn nomination_uuid_column(&self) -> Option<usize> {
+        if self.limit.is_some() || self.equality.is_some() {
+            return None;
+        }
+        let key = if self.is_edge {
+            "edge_uuid"
+        } else {
+            "node_uuid"
+        };
+        let mut matching = self
+            .schema
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(_, field)| {
+                field.name() == key
+                    && field.data_type() == &arrow::datatypes::DataType::FixedSizeBinary(16)
+                    && !field.is_nullable()
+            })
+            .map(|(index, _)| index);
+        let index = matching.next()?;
+        matching.next().is_none().then_some(index)
+    }
+
+    pub(crate) fn with_uuid_nomination(
+        &self,
+        nomination: Arc<crate::property_join_nomination::UuidBuildKeyNomination>,
+    ) -> Self {
+        let mut replacement = self.clone();
+        if !replacement
+            .uuid_nominations
+            .iter()
+            .any(|existing| Arc::ptr_eq(existing, &nomination))
+        {
+            replacement.uuid_nominations.push(nomination);
+        }
+        replacement
+    }
+}
+
+pub(crate) struct PropertyUuidFilterCandidate {
+    pub(crate) expression_id: u64,
+    pub(crate) original_probe_key: Arc<dyn PhysicalExpr>,
 }
 
 impl DisplayAs for PropertyOverlayExec {
@@ -257,7 +324,6 @@ impl ExecutionPlan for PropertyOverlayExec {
     ) -> Result<FilterPushdownPropagation<Arc<dyn ExecutionPlan>>, DataFusionError> {
         let mut replacement = self.clone();
         if phase == FilterPushdownPhase::Post {
-            replacement.uuid_filters_approved = false;
             let key = if self.is_edge {
                 "edge_uuid"
             } else {
@@ -281,7 +347,7 @@ impl ExecutionPlan for PropertyOverlayExec {
     fn reset_state(self: Arc<Self>) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
         let mut reset = (*self).clone();
         reset.uuid_filters.clear();
-        reset.uuid_filters_approved = false;
+        reset.uuid_nominations.clear();
         Ok(Arc::new(reset))
     }
 
@@ -298,7 +364,7 @@ impl ExecutionPlan for PropertyOverlayExec {
     fn execute(
         &self,
         partition: usize,
-        _context: Arc<TaskContext>,
+        context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream, DataFusionError> {
         if partition != 0 {
             return Err(DataFusionError::Internal(
@@ -319,49 +385,80 @@ impl ExecutionPlan for PropertyOverlayExec {
         #[cfg(any(test, feature = "test-support"))]
         let digest_context = self.digest_context.clone();
         let lifecycle_context = self.lifecycle_context.clone();
-        let uuid_filters = if self.uuid_filters_approved {
-            self.uuid_filters.clone()
-        } else {
-            Vec::new()
-        };
-        let key = if self.is_edge {
-            "edge_uuid"
-        } else {
-            "node_uuid"
-        };
+        let uuid_nominations = self.uuid_nominations.clone();
+        let memory_pool = Arc::clone(context.memory_pool());
         tokio::spawn(async move {
-            for filter in &uuid_filters {
-                let dynamic = filter
-                    .downcast_ref::<DynamicFilterPhysicalExpr>()
-                    .expect("only dynamic UUID filters are retained");
-                tokio::select! {
-                    () = dynamic.wait_complete() => {},
+            for nomination in &uuid_nominations {
+                let ready = tokio::select! {
+                    result = nomination.wait(&sender) => result,
                     () = sender.closed() => return,
-                }
-            }
-            let mut uuids = None;
-            for filter in &uuid_filters {
-                let dynamic = filter
-                    .downcast_ref::<DynamicFilterPhysicalExpr>()
-                    .expect("only dynamic UUID filters are retained");
-                let current = match dynamic.current() {
-                    Ok(current) => current,
+                };
+                match ready {
+                    Ok(true) => {}
+                    Ok(false) => return,
                     Err(error) => {
                         let _ = sender.send(Err(error)).await;
                         return;
                     }
-                };
-                if let Some(wanted) = super::property_scan_filter::uuid_candidates(&current, key) {
-                    uuids = Some(match uuids {
-                        None => wanted,
-                        Some(prior) => &prior & &wanted,
-                    });
                 }
+            }
+            if uuid_nominations
+                .iter()
+                .any(|nomination| nomination.ids().is_none())
+            {
+                let _ = sender
+                    .send(Err(DataFusionError::Internal(
+                        "completed UUID nomination has no key set".into(),
+                    )))
+                    .await;
+                return;
             }
             tokio::task::spawn_blocking(move || {
                 #[cfg(any(test, feature = "test-support"))]
                 let _digest_guard = digest_context.attach();
                 let _lifecycle_capture = lifecycle_context.attach();
+
+                let mut uuid_intersection = None::<BTreeSet<[u8; 16]>>;
+                let mut uuid_intersection_reservation = None::<MemoryReservation>;
+                if uuid_nominations.len() > 1 {
+                    let smallest = uuid_nominations
+                        .iter()
+                        .filter_map(|nomination| nomination.ids())
+                        .min_by_key(|ids| ids.len())
+                        .expect("completed nominations have key sets");
+                    let Some(reserve_bytes) = smallest
+                        .len()
+                        .checked_mul(crate::property_join_nomination::NOMINATION_BYTES_PER_UUID)
+                        .and_then(|bytes| {
+                            bytes
+                                .checked_add(crate::property_join_nomination::NOMINATION_BASE_BYTES)
+                        })
+                    else {
+                        let _ = sender.blocking_send(Err(DataFusionError::ResourcesExhausted(
+                            "UUID nomination intersection size overflow".into(),
+                        )));
+                        return;
+                    };
+                    let reservation = MemoryConsumer::new("GraphForge UUID scan intersection")
+                        .register(&memory_pool);
+                    if let Err(error) = reservation.try_grow(reserve_bytes) {
+                        let _ = sender.blocking_send(Err(error));
+                        return;
+                    }
+                    let mut intersection = smallest.clone();
+                    for nomination in &uuid_nominations {
+                        let ids = nomination.ids().expect("completed nomination");
+                        intersection.retain(|uuid| ids.contains(uuid));
+                    }
+                    uuid_intersection = Some(intersection);
+                    uuid_intersection_reservation = Some(reservation);
+                }
+                let _uuid_intersection_reservation = uuid_intersection_reservation;
+                let uuids = uuid_intersection.as_ref().or_else(|| {
+                    uuid_nominations
+                        .first()
+                        .and_then(|nomination| nomination.ids())
+                });
                 let selected_properties = projection
                     .as_ref()
                     .map(|names| names.iter().cloned().collect());
@@ -400,7 +497,7 @@ impl ExecutionPlan for PropertyOverlayExec {
                     batch_size,
                     selected_properties.as_ref(),
                     equality.as_ref(),
-                    uuids.as_ref(),
+                    uuids,
                     |batch| {
                         let mut batch = project_batch(batch)?;
                         if let Some(rows) = remaining.as_mut() {
@@ -455,7 +552,7 @@ impl ExecutionPlan for PropertyOverlayExec {
                             batch_size,
                             selected_properties.as_ref(),
                             equality.as_ref(),
-                            uuids.as_ref(),
+                            uuids,
                             |batch| {
                                 let mut batch = project_batch(batch)?;
                                 let Some(rows) = replay_remaining.as_mut() else {
