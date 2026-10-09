@@ -260,7 +260,7 @@ fn a_probe_leaf_truncated_to_zero_is_not_believed_or_reclaimed() {
         PROBE_BLOCK as u64,
         "one whole block was written"
     );
-    std::fs::write(path, []).unwrap();
+    std::fs::write(path, b"").unwrap();
     let error = {
         let cancel = AtomicBool::new(false);
         let plan = resolve_plan();
