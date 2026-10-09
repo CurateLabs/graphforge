@@ -1,10 +1,10 @@
 //! Nested queries lowering.
 
 use super::{
-    Arc, DfExpr, ExprArena, ExprFunctionExt, ExprId, ExprSchemable, Extension, GraphOp, GraphPlan,
-    GraphPlanLowerer, IrExpr, JoinType, LogicalPlan, LogicalPlanBuilder, LoweringError,
-    MapUnsupportedExpr, OptionalMatchNode, PATTERN_COMPREHENSION_VALUE_ALIAS, UnwindNode, VarId,
-    VarMap, array_agg, list_index_range, lower_filter, var_alias,
+    Arc, CorrelatedSeedNode, DfExpr, ExprArena, ExprFunctionExt, ExprId, ExprSchemable, Extension,
+    GraphOp, GraphPlan, GraphPlanLowerer, IrExpr, JoinType, LogicalPlan, LogicalPlanBuilder,
+    LoweringError, MapUnsupportedExpr, OptionalMatchNode, PATTERN_COMPREHENSION_VALUE_ALIAS,
+    UnwindNode, VarId, VarMap, array_agg, list_index_range, lower_filter, var_alias,
 };
 
 impl GraphPlanLowerer {
@@ -464,6 +464,13 @@ impl GraphPlanLowerer {
     /// predicates instead of dropping the row, and duplicate outer rows each
     /// see their own matches (#1887 D15).
     ///
+    /// The outer rows are executed once: the seed is a
+    /// [`CorrelatedSeedNode`] the optional-match node binds to them, not a
+    /// second copy of the outer plan, whose aggregates (`collect`) need not
+    /// return their lists in the same order the second time (#1919). The
+    /// semi or anti join is the optional-match node over the distinct matched
+    /// seed rows, with a marker column that says whether a seed row matched.
+    ///
     /// Returns `None` when the subquery's pipeline does not keep every outer
     /// column (a full subquery projecting with WITH), leaving the identity-key
     /// correlation in place.
@@ -475,48 +482,95 @@ impl GraphPlanLowerer {
         input: &LogicalPlan,
         var_map: &VarMap,
     ) -> Result<Option<LogicalPlan>, LoweringError> {
-        let seed = distinct_rows(input)?;
+        use datafusion::common::Column;
+        use datafusion::logical_expr::lit;
+
+        const MATCHED: &str = "__gf_correlated_matched";
+
+        let (seed_id, seed) = correlated_seed(input)?;
         let mut child_vm = var_map.clone();
         let child_plan = self.lower_pipeline_from(child_ops, exprs, &mut child_vm, seed, None)?;
-        let Some(keys) = outer_column_keys(input, &child_plan) else {
+        let Some(join_keys) = outer_column_keys(input, &child_plan) else {
             return Ok(None);
         };
-        let left_keys = keys
+        // One row per seed row that matched, however many matches it had.
+        let mut matched_projection = join_keys
             .iter()
-            .map(|(outer_idx, _)| schema_join_column(input.schema(), *outer_idx))
+            .map(|(_, inner_idx)| {
+                DfExpr::Column(schema_join_column(child_plan.schema(), *inner_idx))
+            })
             .collect::<Vec<_>>();
-        let right_keys = keys
-            .iter()
-            .map(|(_, inner_idx)| schema_join_column(child_plan.schema(), *inner_idx))
-            .collect::<Vec<_>>();
-        let join_type = if negated {
-            JoinType::LeftAnti
-        } else {
-            JoinType::LeftSemi
-        };
-        LogicalPlanBuilder::from(input.clone())
-            .join_detailed(
-                child_plan,
-                join_type,
-                (left_keys, right_keys),
-                None,
-                datafusion::common::NullEquality::NullEqualsNull,
-            )
+        matched_projection.push(lit(true).alias(MATCHED));
+        let matched = LogicalPlanBuilder::from(child_plan)
+            .project(matched_projection)
+            .and_then(LogicalPlanBuilder::distinct)
             .and_then(LogicalPlanBuilder::build)
-            .map_unsupported_expr()
-            .map(Some)
+            .map_unsupported_expr()?;
+        let outer_width = join_keys.len();
+        let keys = (0..outer_width)
+            .zip(&join_keys)
+            .map(|(matched_idx, (outer_idx, _))| (*outer_idx, matched_idx))
+            .collect::<Vec<_>>();
+        let optional = OptionalMatchNode::new(
+            Arc::new(input.clone()),
+            Arc::new(matched),
+            keys,
+            vec![outer_width],
+        )
+        .with_correlated_seed(seed_id);
+        let marker = DfExpr::Column(Column::from_name(MATCHED));
+        let predicate = if negated {
+            marker.is_null()
+        } else {
+            marker.is_not_null()
+        };
+        LogicalPlanBuilder::from(LogicalPlan::Extension(Extension {
+            node: Arc::new(optional),
+        }))
+        .filter(predicate)
+        .and_then(|builder| builder.project(plan_columns(input)))
+        .and_then(LogicalPlanBuilder::build)
+        .map_unsupported_expr()
+        .map(Some)
+    }
+
+    /// The outer rows with the columns a correlated sub-plan would add for the
+    /// outer nodes it matches again: their identity and properties.
+    ///
+    /// The sub-plan resolves these on its seed, so they would reach the result
+    /// only through its matches and be null on a row that matched nothing,
+    /// although they belong to the outer row. The label of the re-matched node
+    /// stays a filter inside the sub-plan.
+    fn bind_outer_nodes(
+        &self,
+        ops: &[GraphOp],
+        mut input: LogicalPlan,
+        var_map: &VarMap,
+    ) -> Result<LogicalPlan, LoweringError> {
+        for op in ops {
+            let GraphOp::NodeScan { var, ty } = op else {
+                continue;
+            };
+            let Some(alias) = var_map.get(*var) else {
+                continue;
+            };
+            input = self.enrich_optional_outer_node(input, alias)?;
+            input = self.join_node_properties(*var, *ty, input)?;
+        }
+        Ok(input)
     }
 
     /// The OPTIONAL MATCH counterpart of [`Self::lower_correlated_exists`]:
-    /// the optional pipeline is seeded with the distinct outer rows and
-    /// left-joined back on every outer column, null-safe.
+    /// the optional pipeline is seeded with the distinct outer rows, executed
+    /// once, and left-joined back on every outer column, null-safe.
     fn lower_correlated_optional_op(
         &self,
         child: &GraphPlan,
         input: LogicalPlan,
         var_map: &mut VarMap,
     ) -> Result<Option<LogicalPlan>, LoweringError> {
-        let seed = distinct_rows(&input)?;
+        let input = self.bind_outer_nodes(&child.ops, input, var_map)?;
+        let (seed_id, seed) = correlated_seed(&input)?;
         let mut child_vm = var_map.clone();
         let child_plan =
             self.lower_pipeline_from(&child.ops, &child.exprs, &mut child_vm, seed, None)?;
@@ -542,7 +596,7 @@ impl GraphPlanLowerer {
             join_keys,
             inner_keep_idx,
         )
-        .with_null_safe_keys();
+        .with_correlated_seed(seed_id);
         Ok(Some(LogicalPlan::Extension(Extension {
             node: Arc::new(node),
         })))
@@ -651,13 +705,22 @@ fn promote_optional_entity_vars(
     }
 }
 
-/// The distinct rows of `plan`: the seed of a correlated subquery, so each
-/// outer row's matches are produced once however often the row repeats.
-fn distinct_rows(plan: &LogicalPlan) -> Result<LogicalPlan, LoweringError> {
-    LogicalPlanBuilder::from(plan.clone())
-        .distinct()
-        .and_then(LogicalPlanBuilder::build)
-        .map_unsupported_expr()
+/// The seed of a correlated subquery over the rows of `outer`, and its id:
+/// the distinct outer rows, so each outer row's matches are produced once
+/// however often the row repeats. The rows themselves are not planned here;
+/// the optional-match node that owns the id binds them when it executes
+/// `outer`, so the subquery and the join back to `outer` see the same rows
+/// (#1919).
+fn correlated_seed(outer: &LogicalPlan) -> Result<(u64, LogicalPlan), LoweringError> {
+    let leaf = CorrelatedSeedNode::new(outer.schema().clone());
+    let id = leaf.id();
+    let seed = LogicalPlanBuilder::from(LogicalPlan::Extension(Extension {
+        node: Arc::new(leaf),
+    }))
+    .distinct()
+    .and_then(LogicalPlanBuilder::build)
+    .map_unsupported_expr()?;
+    Ok((id, seed))
 }
 
 /// Every outer column paired with the same qualified column of a subquery

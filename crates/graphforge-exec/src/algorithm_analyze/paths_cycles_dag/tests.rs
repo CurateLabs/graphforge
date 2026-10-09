@@ -757,6 +757,45 @@ fn is_dag_uses_shared_limits_cancellation_and_rust_metadata() {
 }
 
 #[test]
+fn minimum_spanning_tree_handles_large_sparse_weighted_graph() {
+    // Exercise projection, normalization, Kruskal, and Arrow output together.
+    // Matching-state initialization here previously performed quadratic work.
+    let nodes = 100_000_u64;
+    let edges = (0..nodes - 1)
+        .map(|node| (node, node, node + 1))
+        .chain((0..nodes - 17).map(|node| (nodes + node, node, node + 17)))
+        .collect::<Vec<_>>();
+    let weights = (0..nodes - 1)
+        .flat_map(|_| [1.0, 1.0])
+        .chain((0..nodes - 17).flat_map(|_| [2.0, 2.0]))
+        .collect::<Vec<_>>();
+    let graph = AdjacencyGraph::with_test_undirected_multigraph(nodes, &edges)
+        .with_test_edge_weights(&weights);
+    let output = execute(
+        &graph,
+        AnalyzeAlgorithm::MinimumSpanningTree,
+        false,
+        AlgorithmLimits::default(),
+        AlgorithmCancellation::default(),
+    )
+    .unwrap();
+    let rows = output.rows();
+    assert_eq!(rows.len(), usize::try_from(nodes - 1).unwrap());
+    for (node, row) in rows.iter().enumerate() {
+        let node = node as u128;
+        assert_eq!(
+            row,
+            &vec![
+                AlgorithmValue::Uuid(node.to_be_bytes()),
+                AlgorithmValue::Uuid(node.to_be_bytes()),
+                AlgorithmValue::Uuid((node + 1).to_be_bytes()),
+                AlgorithmValue::Float64(1.0),
+            ]
+        );
+    }
+}
+
+#[test]
 fn minimum_spanning_tree_shapes_uuid_forest_and_shared_controls() {
     let graph = AdjacencyGraph::with_test_edges(
         6,

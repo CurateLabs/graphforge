@@ -497,3 +497,37 @@ CARGO_TARGET_DIR=/home/ubuntu/.cache/graphforge-target-1825-measurement \
 ```
 
 Canonical input digests (base rows followed by staged rows) are `da8bfd70ed1122f60fa9d9ad73112345244680c01c83fb34a495891a21323c3c` (10,000 assessments) and `a11eceb8f5cfa6a2f9c8bdfed3eda6374c6ae4faa7c46ae137e2f578aaf50d64` (100,000 assessments). The raw measured outputs and executable SHA-256 are on [issue #1825](https://github.com/CurateLabs/graphforge/issues/1825#issuecomment-5988658705).
+
+## Sparse weighted spanning-tree diagnosis
+
+`graphforge-api/examples/spanning_tree_scaling.rs` bulk-publishes UUIDv7 `Person`
+nodes and two weighted edges per node: `i -> (i + 1) % V` and
+`i -> (i + 17) % V`. Their weights are respectively `V - i + 0.5` and `V - i`.
+It times one public Rust `analyze` call per size, including projection and Arrow
+output, with graph construction and output digesting outside the interval.
+Publication uses calls of at most 16,384 rows to stay inside the legacy bulk
+API's topology writer window; the final graph and timed invocation are unchanged.
+The output asserts `V - 1` rows and prints ordered-result and input SHA-256
+values. The input digest concatenates each edge's UUID, source UUID, target
+UUID, and big-endian IEEE-754 weight bits, in construction order; the node
+identities, label, and relationship type are fixed by the example.
+
+| Nodes / edges | Input SHA-256 |
+| ---: | --- |
+| 1,000 / 2,000 | `071a36ac7e35c11a200e368c7d329cd871f331d9967fdccb1b896cf61cce2cc2` |
+| 10,000 / 20,000 | `e468d71e95bbfc068d81b735c7bb5c7953d5b88f7795182fd608c78550e51c6c` |
+| 100,000 / 200,000 | `0f4224be1312549f8a30aa57dea57bf51e7d11ff24ea48fa3ecf973a0e715bc1` |
+
+```bash
+CARGO_TARGET_DIR=/tmp/graphforge-mst-target CARGO_BUILD_JOBS=4 \
+  cargo build --locked -p graphforge-api --example spanning_tree_scaling \
+  --config 'profile.dev.package.graphforge-exec.opt-level=3'
+python3 scripts/test_environment.py -- \
+  /tmp/graphforge-mst-target/debug/examples/spanning_tree_scaling
+```
+
+Compare the same profile, inputs, and result digests across revisions. Report
+host contention and keep observations on the issue or PR. This single-pass
+clock is diagnostic evidence, not a performance gate or a Divan benchmark.
+The exec suite separately checks every edge of a 100,000-node weighted sparse
+forest without timing assertions.
