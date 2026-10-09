@@ -143,11 +143,15 @@ fn construct(dir: &Path, nodes: usize) {
 /// One target partition keeps the whole statement on the calling thread, where
 /// the lifecycle capture is installed, so it observes every read-path byte.
 fn open(project: &Path) -> GraphForge {
+    open_with_partitions(project, 1)
+}
+
+fn open_with_partitions(project: &Path, target_partitions: usize) -> GraphForge {
     GraphForge::new_with_options(
         Some(project.to_str().expect("utf-8 path")),
         GraphForgeOptions {
             resource: ExecutionResourcePolicy {
-                target_partitions: Some(1),
+                target_partitions: Some(target_partitions),
                 ..ExecutionResourcePolicy::default()
             },
             ..GraphForgeOptions::default()
@@ -368,21 +372,23 @@ fn anchored_destination_property_reads_do_not_grow_with_unrelated_rows() {
     let large = build(LARGE_NODES);
     assert!(large.fragments >= 2 * small.fragments - 1);
     let query = "MATCH (a:Entity {ident: $ident})-[:LINK]->(b) RETURN count(b.ident) AS n";
-    let mut reads = Vec::new();
-    for built in [&small, &large] {
-        let forge = open(&built.project);
-        let (warm, _) = measured(&forge, query, 0);
-        assert_eq!(count(&warm), FAN_OUT as i64);
-        let (batches, io) = measured(&forge, query, 5);
-        assert_eq!(count(&batches), FAN_OUT as i64);
-        assert_eq!(io.write_bytes, 0);
-        assert_eq!(io.write_calls, 0);
-        reads.push(io.read_bytes);
+    for target_partitions in [1, 2, 4] {
+        let mut reads = Vec::new();
+        for built in [&small, &large] {
+            let forge = open_with_partitions(&built.project, target_partitions);
+            let (warm, _) = measured(&forge, query, 0);
+            assert_eq!(count(&warm), FAN_OUT as i64);
+            let (batches, io) = measured(&forge, query, 5);
+            assert_eq!(count(&batches), FAN_OUT as i64);
+            assert_eq!(io.write_bytes, 0);
+            assert_eq!(io.write_calls, 0);
+            reads.push(io.read_bytes);
+        }
+        assert!(
+            reads[1] <= reads[0] + (256 << 10),
+            "target_partitions={target_partitions}: destination reads grew with unrelated rows: {reads:?}"
+        );
     }
-    assert!(
-        reads[1] <= reads[0] + (256 << 10),
-        "destination reads grew with unrelated rows: {reads:?}"
-    );
 }
 
 /// Statistics cannot exclude a fragment from a scattered column, so its lookup

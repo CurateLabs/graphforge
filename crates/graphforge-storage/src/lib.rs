@@ -33,6 +33,8 @@ mod construction_directory;
 pub use allocation_operation::StorageAllocationOperation;
 pub mod concurrency_attribution;
 mod private_storage_ownership;
+mod property_filter_approval;
+pub use property_filter_approval::PropertyFilterApprovalRule;
 pub mod storage_attribution;
 pub mod transient_composition;
 pub use private_storage_ownership::{
