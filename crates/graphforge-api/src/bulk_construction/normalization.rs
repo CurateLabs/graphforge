@@ -1093,8 +1093,25 @@ impl GraphForge {
         operation_uuid: OperationId,
         batch: &RecordBatch,
     ) -> Result<RecordBatch, BulkValidationError> {
-        let normalized =
-            self.normalize_import_nodes(operation_uuid, std::slice::from_ref(batch))?;
+        self.normalize_import_node_chunk_at(operation_uuid, batch, 0)
+    }
+
+    /// Normalize one physical piece of a logical import chunk with logical row
+    /// ordinals starting at `first_ordinal`, so a piece under the unchanged
+    /// operation identity derives the identities the full chunk derives (#1918).
+    pub(crate) fn normalize_import_node_chunk_at(
+        &self,
+        operation_uuid: OperationId,
+        batch: &RecordBatch,
+        first_ordinal: u64,
+    ) -> Result<RecordBatch, BulkValidationError> {
+        let normalized = self.normalize_bulk_nodes_at(
+            operation_uuid,
+            std::slice::from_ref(batch),
+            false,
+            false,
+            first_ordinal,
+        )?;
         let identities = canonical_import_uuid_array(
             BulkInputKind::Node,
             normalized.rows().iter().map(|row| row.node_uuid),
@@ -1134,6 +1151,20 @@ impl GraphForge {
         reject_existing: bool,
         keep_properties: bool,
     ) -> Result<ValidatedBulkNodes, BulkValidationError> {
+        self.normalize_bulk_nodes_at(operation_uuid, batches, reject_existing, keep_properties, 0)
+    }
+
+    /// The same normalization with logical row ordinals starting at
+    /// `first_ordinal`: one physical piece of one logical batch derives the
+    /// ordinals and identities the full batch derives (#1918).
+    fn normalize_bulk_nodes_at(
+        &self,
+        operation_uuid: OperationId,
+        batches: &[RecordBatch],
+        reject_existing: bool,
+        keep_properties: bool,
+        first_ordinal: u64,
+    ) -> Result<ValidatedBulkNodes, BulkValidationError> {
         let source_generation_uuid = *self
             .current_generation_uuid
             .lock()
@@ -1148,7 +1179,7 @@ impl GraphForge {
         }
         let mut observed = HashSet::new();
         let mut rows = Vec::new();
-        let mut ordinal = 0_u64;
+        let mut ordinal = first_ordinal;
 
         for batch in batches {
             let uuids = uuid_column(batch, BulkInputKind::Node, "node_uuid")?;
@@ -1251,6 +1282,31 @@ impl GraphForge {
         additional_known_nodes: Option<&BTreeSet<Uuid>>,
         keep_properties: bool,
     ) -> Result<ValidatedBulkEdges, BulkValidationError> {
+        self.normalize_bulk_edges_at(
+            operation_uuid,
+            batches,
+            same_request_nodes,
+            reject_existing,
+            additional_known_nodes,
+            keep_properties,
+            0,
+        )
+    }
+
+    /// The same normalization with logical row ordinals starting at
+    /// `first_ordinal`: one physical piece of one logical batch derives the
+    /// ordinals and identities the full batch derives (#1918).
+    #[allow(clippy::too_many_arguments)] // the piece offset rides along with the existing edge contract
+    fn normalize_bulk_edges_at(
+        &self,
+        operation_uuid: OperationId,
+        batches: &[RecordBatch],
+        same_request_nodes: &ValidatedBulkNodes,
+        reject_existing: bool,
+        additional_known_nodes: Option<&BTreeSet<Uuid>>,
+        keep_properties: bool,
+        first_ordinal: u64,
+    ) -> Result<ValidatedBulkEdges, BulkValidationError> {
         let source_generation_uuid = *self
             .current_generation_uuid
             .lock()
@@ -1276,7 +1332,7 @@ impl GraphForge {
         known_nodes.extend(same_request_nodes.identities());
         let mut observed = HashSet::new();
         let mut rows = Vec::new();
-        let mut ordinal = 0_u64;
+        let mut ordinal = first_ordinal;
 
         for batch in batches {
             let uuids = uuid_column(batch, BulkInputKind::Edge, "edge_uuid")?;
@@ -1356,6 +1412,18 @@ impl GraphForge {
         operation_uuid: OperationId,
         batch: &RecordBatch,
     ) -> Result<RecordBatch, BulkValidationError> {
+        self.normalize_import_edge_chunk_at(operation_uuid, batch, 0)
+    }
+
+    /// Normalize one physical piece of a logical import edge chunk with logical
+    /// row ordinals starting at `first_ordinal`, so a piece under the unchanged
+    /// operation identity derives the identities the full chunk derives (#1918).
+    pub(crate) fn normalize_import_edge_chunk_at(
+        &self,
+        operation_uuid: OperationId,
+        batch: &RecordBatch,
+        first_ordinal: u64,
+    ) -> Result<RecordBatch, BulkValidationError> {
         // Construction sealing owns the global endpoint proof across all node
         // chunks. This prevalidation still checks the complete edge schema,
         // identities, properties, and within-chunk duplicates without retaining
@@ -1377,13 +1445,14 @@ impl GraphForge {
                 .lock()
                 .expect("generation UUID lock poisoned"),
         };
-        let normalized = self.normalize_bulk_edges(
+        let normalized = self.normalize_bulk_edges_at(
             operation_uuid,
             std::slice::from_ref(batch),
             &assumed_endpoints,
             true,
             None,
             false,
+            first_ordinal,
         )?;
         canonical_import_chunk(
             BulkInputKind::Edge,
