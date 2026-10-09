@@ -109,9 +109,13 @@ functions.
   but new builds do not select it.
 - Once #1929 lands, no plan sends an initial build to the staged path. Deleting
   the machinery that only that path used is the last code slice of #1881. It
-  keeps what appends, recovery of sessions an earlier binary began, and the
-  staged replay of chunk-API sessions that recorded it still use. This record
-  does not list what is deleted; the slice's pull request does.
+  keeps the append engine. The maintainer's 2026-10-09 retirement decision
+  removes compatibility for staged initial-build sessions from unreleased
+  0.6.0-dev builds: a session with parent generation zero and staged chunks
+  must restart its import. Endpoint-index resume, staged route reasons,
+  chunk-spool replay, format-2 copied-source sessions and the persisted
+  `build_route` are pending removal. The facade will refuse staged construction
+  on an empty project; storage tests may still use the staged engine.
 - The route is chosen once, by the first `validate`, and written to the import
   manifest (`build_route`); every later `validate`, in any process, reads it
   back. A refused, cancelled or killed bulk attempt therefore cannot be
@@ -185,7 +189,8 @@ When the estimate exceeds the budget:
   Consecutive small child ranges coalesce through one streaming output, so
   bookkeeping follows the number of bounded partitions rather than the radix
   fanout. Already-fitting initial ranges keep their original scratch files.
-- Pass 3 builds the partitions in order, several at a time. Sorting a partition
+- Pass 3 currently builds the partitions in order, one at a time. #1938 will
+  admit concurrent partitions from their workspace reservations. Sorting a partition
   ranks its edges (the first `edge_id` is the number of earlier edges plus
   one). It checks identities, writes its canonical edge files, and scatters
   its adjacency entries once into node-range partitions bounded by exact node degrees. A node larger than a
