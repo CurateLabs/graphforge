@@ -179,7 +179,7 @@ fn parse_prefix(ts: &mut TokenStream) -> Result<Expr, ParseError> {
         Some(Tok::Count) if ts.peek_n(1) == Some(&Tok::LBrace) => {
             // COUNT and EXISTS have the same block grammar; retain syntax errors.
             parse_exists(ts, start)?;
-            Err(unsupported(
+            Ok(unsupported(
                 ts,
                 start,
                 graphforge_core::UnsupportedCypherFeature::CountSubquery,
@@ -198,7 +198,7 @@ fn parse_prefix(ts: &mut TokenStream) -> Result<Expr, ParseError> {
             ts.eat(&Tok::Pipe)?;
             parse_expr(ts, 0)?;
             ts.eat(&Tok::RParen)?;
-            Err(unsupported(
+            Ok(unsupported(
                 ts,
                 start,
                 graphforge_core::UnsupportedCypherFeature::Reduce,
@@ -209,7 +209,7 @@ fn parse_prefix(ts: &mut TokenStream) -> Result<Expr, ParseError> {
             ts.eat(&Tok::LParen)?;
             parse_pattern(ts)?;
             ts.eat(&Tok::RParen)?;
-            Err(unsupported(
+            Ok(unsupported(
                 ts,
                 start,
                 graphforge_core::UnsupportedCypherFeature::ShortestPath,
@@ -485,15 +485,15 @@ fn parse_identifier(ts: &mut TokenStream, name: String, start: usize) -> Result<
 }
 
 fn unsupported(
-    ts: &TokenStream<'_>,
+    ts: &mut TokenStream<'_>,
     start: usize,
     feature: graphforge_core::UnsupportedCypherFeature,
-) -> ParseError {
-    ts.err_at(
-        ts.span_from(start),
-        ParseErrorKind::UnsupportedFeature(feature),
-        format!("{} are not supported", feature.description()),
-    )
+) -> Expr {
+    let span = ts.span_from(start);
+    ts.record_unsupported(feature, span);
+    // This internal placeholder cannot leave the full-query parse boundary:
+    // parse_query returns the recorded feature error after grammar validation.
+    Expr::Literal(Literal::Null(span))
 }
 
 fn parse_exists(ts: &mut TokenStream, start: usize) -> Result<Expr, ParseError> {

@@ -79,7 +79,13 @@ pub(super) fn parameter_rows_across_labels(query: &AstQuery) -> Option<BindError
                 }
             }
             AstClause::With(with) => {
-                let mut forwarded = HashMap::new();
+                let mut forwarded = if with.items.iter().any(
+                    |item| matches!(strip_parens(&item.expr), Expr::Var(var) if var.name == "*"),
+                ) {
+                    rows.clone()
+                } else {
+                    HashMap::new()
+                };
                 for item in &with.items {
                     if let Expr::Var(var) = strip_parens(&item.expr)
                         && let Some(labels) = rows.get(&var.name)

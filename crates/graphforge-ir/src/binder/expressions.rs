@@ -639,6 +639,12 @@ impl Binder {
             // lowered with the loop var OUT of scope; the loop var is then bound
             // (shadowing) only while lowering the predicate, and restored after.
             Expr::Quantifier(q) => {
+                let list = self.lower_expr(&q.list, parent_span, s);
+                let prev = s.vars.get(&q.var).copied();
+                let loop_var = VarId(s.next_var);
+                s.next_var += 1;
+                s.vars.insert(q.var.clone(), loop_var);
+                let predicate = self.lower_expr(&q.predicate, parent_span, s);
                 if q.kind == graphforge_ast::QuantifierKind::All
                     && super::unsupported::indexed_relationship_property(&q.predicate, s)
                 {
@@ -646,14 +652,7 @@ impl Binder {
                         graphforge_core::UnsupportedCypherFeature::IndexedPathRelationshipPredicate,
                         q.span,
                     ));
-                    return s.builder.push_expr(IrExpr::Literal(IrLiteral::Null));
                 }
-                let list = self.lower_expr(&q.list, parent_span, s);
-                let prev = s.vars.get(&q.var).copied();
-                let loop_var = VarId(s.next_var);
-                s.next_var += 1;
-                s.vars.insert(q.var.clone(), loop_var);
-                let predicate = self.lower_expr(&q.predicate, parent_span, s);
                 match prev {
                     Some(v) => {
                         s.vars.insert(q.var.clone(), v);

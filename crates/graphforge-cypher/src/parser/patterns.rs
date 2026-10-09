@@ -27,15 +27,15 @@ pub fn parse_pattern(ts: &mut TokenStream) -> Result<PathPattern, ParseError> {
     if matches!(ts.peek(), Some(Tok::ShortestPath | Tok::AllShortestPaths)) {
         ts.advance();
         ts.eat(&Tok::LParen)?;
-        parse_pattern(ts)?;
+        let mut pattern = parse_pattern(ts)?;
         ts.eat(&Tok::RParen)?;
-        return Err(ts.err_at(
+        ts.record_unsupported(
+            graphforge_core::UnsupportedCypherFeature::ShortestPath,
             ts.span_from(start),
-            ParseErrorKind::UnsupportedFeature(
-                graphforge_core::UnsupportedCypherFeature::ShortestPath,
-            ),
-            "Cypher shortest-path patterns are not supported",
-        ));
+        );
+        pattern.var = var;
+        pattern.span = ts.span_from(start);
+        return Ok(pattern);
     }
 
     let first = parse_node_pattern(ts)?;

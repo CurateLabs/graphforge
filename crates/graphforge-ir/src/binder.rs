@@ -284,9 +284,6 @@ impl Binder {
     }
 
     fn bind_staged(&self, ast: &AstQuery) -> Result<GraphPlan, Vec<BindError>> {
-        if let Some(error) = unsupported::parameter_rows_across_labels(ast) {
-            return Err(vec![error]);
-        }
         let dialect = match ast.dialect {
             DialectVersion::OpenCypher9 => "openCypher",
         };
@@ -336,6 +333,9 @@ impl Binder {
 
         if !state.errors.is_empty() {
             return Err(state.errors);
+        }
+        if let Some(error) = unsupported::parameter_rows_across_labels(ast) {
+            return Err(vec![error]);
         }
         Ok(state.builder.build())
     }

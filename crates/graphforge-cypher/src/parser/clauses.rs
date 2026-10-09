@@ -17,7 +17,11 @@ use super::patterns::{parse_pattern, parse_pattern_list};
 
 /// Parse a full Cypher query into an [`AstQuery`].
 pub fn parse_query(ts: &mut TokenStream) -> Result<AstQuery, ParseError> {
-    parse_query_until(ts, false)
+    let query = parse_query_until(ts, false)?;
+    if let Some(error) = ts.unsupported.take() {
+        return Err(error);
+    }
+    Ok(query)
 }
 
 pub(super) fn parse_subquery(ts: &mut TokenStream) -> Result<AstQuery, ParseError> {
@@ -495,13 +499,17 @@ fn parse_call_clause(ts: &mut TokenStream) -> Result<CallClause, ParseError> {
             return Err(ts.err("CALL subquery requires a query body"));
         }
         ts.eat(&Tok::RBrace)?;
-        Err(ts.err_at(
+        ts.record_unsupported(
+            graphforge_core::UnsupportedCypherFeature::CallSubquery,
             ts.span_from(start),
-            ParseErrorKind::UnsupportedFeature(
-                graphforge_core::UnsupportedCypherFeature::CallSubquery,
-            ),
-            "Cypher CALL subqueries are not supported",
-        ))
+        );
+        Ok(CallClause {
+            procedure: Vec::new(),
+            args: Vec::new(),
+            args_explicit: false,
+            yield_items: Vec::new(),
+            span: ts.span_from(start),
+        })
     } else {
         // CALL proc.name(args) form
         let procedure = parse_procedure_name(ts)?;
