@@ -544,7 +544,25 @@ fn select_target_row_groups(
     let mut selected_groups = Vec::new();
     let mut prior_uuid = None;
     for index in 0..builder.metadata().num_row_groups() {
-        let validation = open_counted_retained_property_builder(opened, counts.clone())?
+        let validation = open_counted_retained_property_builder(opened, counts.clone())?;
+        // The pass checks UUID order and, for a tombstone, that no value
+        // follows it. A row group the statistics show holds no tombstone needs
+        // only its two key columns, whatever the width of the route.
+        let validation = if super::selective_reads::group_has_no_tombstone(
+            builder.metadata(),
+            index,
+            PROPERTY_TOMBSTONE_FIELD,
+        ) {
+            let keys = [kind.uuid_field(), PROPERTY_TOMBSTONE_FIELD]
+                .into_iter()
+                .filter_map(|name| validation.schema().index_of(name).ok())
+                .collect::<Vec<_>>();
+            let mask = parquet::arrow::ProjectionMask::roots(validation.parquet_schema(), keys);
+            validation.with_projection(mask)
+        } else {
+            validation
+        };
+        let validation = validation
             .with_row_groups(vec![index])
             .with_batch_size(targeted_batch_rows)
             .build()
