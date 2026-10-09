@@ -31,11 +31,7 @@ pub(crate) fn spanning_forest(
     let mut graph = normalize_weighted_undirected(nodes, edges, control, &mut work)?;
     checkpointed_sort(&mut graph.edges, maximize, control, &mut work)?;
 
-    let mut initial_vertices = 0;
-    while graph.matching_state.pop_outer().is_some() {
-        initial_vertices += 1;
-    }
-    let mut sets = DisjointSets::new(initial_vertices);
+    let mut sets = DisjointSets::new(nodes.len());
     let mut forest = Vec::with_capacity(nodes.len().saturating_sub(1));
     for edge in graph.edges {
         checkpoint(control, &mut work)?;
@@ -320,6 +316,106 @@ mod tests {
             spanning_forest(&nodes, &edges, true, &cancelled),
             Err(AlgorithmError::Cancelled)
         );
+    }
+
+    #[test]
+    fn seeded_forests_match_independent_prim_and_preserve_permutation_ties() {
+        // Prim grows one component at a time using a plain edge scan, with no
+        // shared sorting or union-find implementation from Kruskal.
+        fn prim(nodes: &[[u8; 16]], edges: &[SpanningEdge], maximize: bool) -> (f64, usize) {
+            let mut visited = vec![false; nodes.len()];
+            let mut weight = 0.0;
+            let mut count = 0;
+            while visited.contains(&false) {
+                let candidate = edges
+                    .iter()
+                    .filter_map(|edge| {
+                        let source = nodes
+                            .iter()
+                            .position(|node| *node == edge.source_uuid)
+                            .unwrap();
+                        let target = nodes
+                            .iter()
+                            .position(|node| *node == edge.target_uuid)
+                            .unwrap();
+                        (visited[source] != visited[target]).then_some((
+                            edge.weight,
+                            source,
+                            target,
+                        ))
+                    })
+                    .min_by(|left, right| {
+                        if maximize {
+                            right.0.total_cmp(&left.0)
+                        } else {
+                            left.0.total_cmp(&right.0)
+                        }
+                    });
+                if let Some((edge_weight, source, target)) = candidate {
+                    visited[source] = true;
+                    visited[target] = true;
+                    weight += edge_weight;
+                    count += 1;
+                } else {
+                    let root = visited.iter().position(|value| !value).unwrap();
+                    visited[root] = true;
+                }
+            }
+            (weight, count)
+        }
+
+        let mut state = 0x5eed_u64;
+        let mut random = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            state >> 32
+        };
+        for sample in 0..128 {
+            let nodes = (0..(sample % 12)).map(uuid).collect::<Vec<_>>();
+            let mut edges = Vec::new();
+            for source in 0..nodes.len() {
+                for target in source..nodes.len() {
+                    for _ in 0..random() % 3 {
+                        let edge = SpanningEdge {
+                            edge_uuid: (edges.len() as u128).to_be_bytes(),
+                            source_uuid: nodes[source],
+                            target_uuid: nodes[target],
+                            weight: (random() % 15) as f64 - 7.0,
+                        };
+                        edges.push(edge);
+                        // Preserve stored identity across mirrored adjacency.
+                        edges.push(SpanningEdge {
+                            source_uuid: edge.target_uuid,
+                            target_uuid: edge.source_uuid,
+                            ..edge
+                        });
+                    }
+                }
+            }
+            for maximize in [false, true] {
+                let expected = prim(&nodes, &edges, maximize);
+                let forest = spanning_forest(&nodes, &edges, maximize, &control()).unwrap();
+                assert_eq!(
+                    (
+                        forest.iter().map(|edge| edge.weight).sum::<f64>(),
+                        forest.len()
+                    ),
+                    expected,
+                    "sample={sample}, maximize={maximize}"
+                );
+                let mut permuted_nodes = nodes.clone();
+                permuted_nodes.reverse();
+                let mut permuted_edges = edges.clone();
+                permuted_edges.reverse();
+                assert_eq!(
+                    spanning_forest(&permuted_nodes, &permuted_edges, maximize, &control())
+                        .unwrap(),
+                    forest,
+                    "sample={sample}, maximize={maximize}"
+                );
+            }
+        }
     }
 
     #[test]

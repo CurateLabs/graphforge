@@ -27,7 +27,6 @@ impl WeightedEdge {
 pub(crate) struct WeightedUndirectedGraph {
     pub node_index: HashMap<[u8; 16], usize>,
     pub edges: Vec<WeightedEdge>,
-    pub matching_state: AlternatingDualState,
 }
 
 /// Selected weighted matching execution path for #558 disposition evidence.
@@ -77,13 +76,21 @@ pub(crate) fn normalize_weighted_undirected(
 
     let mut edges = by_uuid.into_values().collect::<Vec<_>>();
     edges.sort_by_key(|edge| (edge.source_uuid, edge.target_uuid, edge.edge_uuid));
-    let matching_state = AlternatingDualState::new(nodes.len(), &edges)?;
-    for (edge_index, edge) in edges.iter().enumerate() {
+    Ok(WeightedUndirectedGraph { node_index, edges })
+}
+
+// Matching duals carry edge-sized tie-breaking vectors. Construct them only
+// for matching, so normalization stays O(V + E log E) for spanning trees.
+fn initial_matching_state(
+    graph: &WeightedUndirectedGraph,
+) -> Result<AlternatingDualState, AlgorithmError> {
+    let matching_state = AlternatingDualState::new(graph.node_index.len(), &graph.edges)?;
+    for (edge_index, edge) in graph.edges.iter().enumerate() {
         if edge.source_uuid == edge.target_uuid {
             continue;
         }
-        let source = node_index[&edge.source_uuid];
-        let target = node_index[&edge.target_uuid];
+        let source = graph.node_index[&edge.source_uuid];
+        let target = graph.node_index[&edge.target_uuid];
         if matching_state.slack(&IndexedWeightedEdge {
             edge: edge_index,
             left: source,
@@ -94,11 +101,7 @@ pub(crate) fn normalize_weighted_undirected(
             return Err(execution("initial matching duals must be feasible"));
         }
     }
-    Ok(WeightedUndirectedGraph {
-        node_index,
-        edges,
-        matching_state,
-    })
+    Ok(matching_state)
 }
 
 pub(crate) fn solve_exact_matching(
@@ -120,7 +123,7 @@ pub(crate) fn solve_exact_matching(
             weight: value.weight,
         })
         .collect::<Vec<_>>();
-    let mut state = graph.matching_state.clone();
+    let mut state = initial_matching_state(graph)?;
     let selected = state.solve_exact(&indexed, control)?;
     control.check_output_rows(selected.len())?;
     Ok(selected.into_iter().map(|edge| graph.edges[edge]).collect())
@@ -146,7 +149,6 @@ pub(crate) fn solve_exact_matching_by_edge_uuid(
     edges.sort_by_key(|edge| edge.edge_uuid);
     let reordered = WeightedUndirectedGraph {
         node_index: graph.node_index.clone(),
-        matching_state: AlternatingDualState::new(graph.node_index.len(), &edges)?,
         edges,
     };
     solve_exact_matching(&reordered, control)
