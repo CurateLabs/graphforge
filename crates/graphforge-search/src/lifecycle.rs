@@ -1375,7 +1375,8 @@ mod tests {
 
     fn bulk_uuid(index: usize) -> Uuid {
         let mut bytes = [0_u8; 16];
-        bytes[8..16].copy_from_slice(&(index as u64).to_be_bytes());
+        // Offset by one: the nil UUID is not a valid node identity.
+        bytes[8..16].copy_from_slice(&(index as u64 + 1).to_be_bytes());
         Uuid::from_bytes(bytes)
     }
 
