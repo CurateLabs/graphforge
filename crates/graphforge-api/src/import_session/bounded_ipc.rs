@@ -237,6 +237,14 @@ fn scan_first_frame_geometry(bytes: &mut dyn FrameBytes) -> Result<FrameGeometry
     FrameGeometry::first_frame(*max_block, flg & 0b0010_0000 == 0)
 }
 
+/// Native buffers the pinned frame decoder initializes for this owned stream.
+/// Parquet's historical framed LZ4 consumer has the same first-zero lifetime
+/// as the IPC verifier, so both must admit the same header-derived geometry.
+pub(super) fn lz4_frame_workspace(input: &[u8]) -> Result<usize, GfError> {
+    let geometry = scan_first_frame_geometry(&mut SliceFrameBytes::new(input))?;
+    usize::try_from(geometry.peak).map_err(storage)
+}
+
 /// What decoding one block holds and retains beside later blocks: the owned
 /// metadata and body, plus twice the decoded output - Arrow's geometric
 /// output growth and the copy that alignment or normalization keeps beside

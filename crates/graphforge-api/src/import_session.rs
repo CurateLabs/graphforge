@@ -35,6 +35,7 @@ mod parquet_codec;
 mod parquet_delta;
 mod parquet_levels;
 mod parquet_page;
+mod parquet_page_decode;
 mod parquet_scan;
 
 /// Written by this version: a session may register Parquet sources that stay

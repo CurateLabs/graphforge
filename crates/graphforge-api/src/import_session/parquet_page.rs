@@ -20,6 +20,8 @@ pub(super) struct CompressedPage {
     pub(super) header: RawHeader,
     pub(super) body: Bytes,
     pub(super) physical_bytes: u64,
+    /// The allocation remains owned even when a later consumer takes a slice.
+    pub(super) body_capacity: usize,
 }
 
 fn check(cancellation: Option<&CancellationToken>) -> Result<(), GfError> {
@@ -80,10 +82,12 @@ pub(super) fn read<R: Read>(
             return Err(storage("Parquet page checksum mismatch"));
         }
     }
+    let body_capacity = body.capacity();
     Ok(CompressedPage {
         header,
         body: Bytes::from(body),
         physical_bytes,
+        body_capacity,
     })
 }
 
