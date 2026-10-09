@@ -4,6 +4,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use datafusion::common::stats::Precision;
 use datafusion::common::{ColumnStatistics, Statistics};
@@ -20,6 +21,9 @@ use datafusion::physical_plan::{
     SendableRecordBatchStream,
 };
 use futures::stream;
+
+/// The most a limited scan holds back while the rest of its route validates.
+const MAX_HELD_BYTES: usize = 64 << 20;
 
 pub(crate) struct PropertyScanOptions<'a> {
     pub(crate) projection: Option<&'a Vec<usize>>,
@@ -246,6 +250,7 @@ impl ExecutionPlan for PropertyOverlayExec {
         let is_edge = self.is_edge;
         let projection = self.projection.clone();
         let mut remaining = self.limit;
+        let hold_until_validated = self.limit.is_some();
         let batch_size = self.batch_size;
         let work_counts = self.work_counts.clone();
         let equality = self.equality.clone();
@@ -259,6 +264,14 @@ impl ExecutionPlan for PropertyOverlayExec {
             let selected_properties = projection
                 .as_ref()
                 .map(|names| names.iter().cloned().collect());
+            let mut held = Vec::new();
+            let mut held_bytes = 0_usize;
+            let mut hold_until_validated = hold_until_validated;
+            let send = |batch: RecordBatch| {
+                sender
+                    .blocking_send(Ok(batch))
+                    .map_err(|_| DataFusionError::Execution("property scan consumer closed".into()))
+            };
             let result = crate::catalog::visit_property_overlay_batched_selected(
                 &project,
                 inventory.as_deref(),
@@ -292,12 +305,33 @@ impl ExecutionPlan for PropertyOverlayExec {
                         }
                         *rows -= batch.num_rows();
                     }
-                    sender.blocking_send(Ok(batch)).map_err(|_| {
-                        DataFusionError::Execution("property scan consumer closed".into())
-                    })?;
+                    if hold_until_validated {
+                        held_bytes = held_bytes.saturating_add(batch.get_array_memory_size());
+                        held.push(batch);
+                        if held_bytes <= MAX_HELD_BYTES {
+                            return Ok(true);
+                        }
+                        // A limit this large streams: holding it would cost
+                        // more memory than the scan's own bounds allow.
+                        hold_until_validated = false;
+                        for batch in held.drain(..) {
+                            send(batch)?;
+                        }
+                        return Ok(true);
+                    }
+                    send(batch)?;
                     Ok(true)
                 },
             );
+            // A limit stops its consumer after the first rows, so a failure in
+            // the rest of the route would go unobserved. Its rows wait for the
+            // whole route to validate: the limit changes emission, not authority.
+            let result = result.and_then(|work| {
+                for batch in held {
+                    send(batch)?;
+                }
+                Ok(work)
+            });
             let result = result.and_then(|work| {
                 let (Some((work_counts, decoder_peak)), Some(work)) = (work_counts, work) else {
                     return Ok(());

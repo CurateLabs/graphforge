@@ -83,9 +83,13 @@ commits, and reopens therefore do not require ambient `TMPDIR` on the project
 volume. The container must permit creating these private workspaces, including
 when a compact generation is opened for reading.
 
-Authenticated property reads similarly allocate `.gf-property-scratch-*` beside
-their source trees or in the project container, preserving their same-volume
-snapshot checks. These per-query directories are removed when the read ends.
+An authenticated property read checks each fragment object (at most 4 MiB) against
+the manifest in memory and decodes those bytes, so a query on a durable project
+creates no scratch and writes nothing. Only a legacy fragment larger than one
+object is copied to a `.gf-property-scratch-*` directory beside its source tree
+or in the project container, preserving the same-volume snapshot check; that
+directory is removed when the read ends. Replay and mutation reads, which bound
+their memory separately, keep the scratch copy.
 
 Each workspace has a unique owner; the final retained reader releases and removes
 it. Opening another facade never sweeps another reader's workspace. A killed

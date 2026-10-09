@@ -350,3 +350,6 @@ impl AuthenticatedPropertyInventory {
         Ok(Some((candidates, metrics)))
     }
 }
+
+#[cfg(test)]
+mod tests;
