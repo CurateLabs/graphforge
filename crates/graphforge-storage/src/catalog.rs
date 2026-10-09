@@ -87,7 +87,7 @@ pub use property_readers::visit_node_property_overlay_admitted;
 pub use property_readers::visit_properties_batched;
 pub use property_readers::visit_property_fragments_admitted;
 pub(crate) use property_readers::visit_property_overlay_batched;
-pub(crate) use property_readers::visit_property_overlay_batched_projected;
+pub(crate) use property_readers::visit_property_overlay_batched_selected;
 pub(crate) use property_readers::visit_property_overlay_batched_with_inventory;
 pub use providers::EdgePropertyTable;
 pub use providers::PropertyTable;

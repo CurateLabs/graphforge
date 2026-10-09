@@ -28,6 +28,9 @@ pub(crate) struct PropertyScanOptions<'a> {
     /// Whether planning may admit the route for a footer row bound. A
     /// key-only scan of an unread route reports a manifest estimate instead.
     pub(crate) footer_statistics: bool,
+    /// An equality the scan answers from footer statistics. The plan keeps the
+    /// filter above the scan, so the scan may return more rows than match.
+    pub(crate) equality: Option<crate::property_overlay::PropertyEquality>,
 }
 
 #[derive(Clone)]
@@ -41,6 +44,7 @@ pub(crate) struct PropertyOverlayExec {
     limit: Option<usize>,
     batch_size: usize,
     planned_rows: Option<usize>,
+    equality: Option<crate::property_overlay::PropertyEquality>,
     props: Arc<PlanProperties>,
     #[cfg(any(test, feature = "test-support"))]
     digest_context: graphforge_core::hash_observation::operation::Context,
@@ -144,6 +148,7 @@ impl PropertyOverlayExec {
             limit: options.limit,
             batch_size: options.batch_size.max(1),
             planned_rows,
+            equality: options.equality,
             props,
             metrics,
             work_counts,
@@ -156,7 +161,11 @@ impl PropertyOverlayExec {
 
 impl DisplayAs for PropertyOverlayExec {
     fn fmt_as(&self, _: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "PropertyOverlayExec: route={}", self.route)
+        write!(f, "PropertyOverlayExec: route={}", self.route)?;
+        if let Some(equality) = &self.equality {
+            write!(f, ", equality={}={:?}", equality.column, equality.value)?;
+        }
+        Ok(())
     }
 }
 
@@ -239,6 +248,7 @@ impl ExecutionPlan for PropertyOverlayExec {
         let mut remaining = self.limit;
         let batch_size = self.batch_size;
         let work_counts = self.work_counts.clone();
+        let equality = self.equality.clone();
         #[cfg(any(test, feature = "test-support"))]
         let digest_context = self.digest_context.clone();
         let lifecycle_context = self.lifecycle_context.clone();
@@ -249,13 +259,14 @@ impl ExecutionPlan for PropertyOverlayExec {
             let selected_properties = projection
                 .as_ref()
                 .map(|names| names.iter().cloned().collect());
-            let result = crate::catalog::visit_property_overlay_batched_projected(
+            let result = crate::catalog::visit_property_overlay_batched_selected(
                 &project,
                 inventory.as_deref(),
                 &route,
                 is_edge,
                 batch_size,
                 selected_properties.as_ref(),
+                equality.as_ref(),
                 |batch| {
                     let mut batch = projection.as_ref().map_or_else(
                         || Ok(batch.clone()),

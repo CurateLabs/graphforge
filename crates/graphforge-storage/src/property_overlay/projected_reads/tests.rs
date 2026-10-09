@@ -968,6 +968,7 @@ fn projected_overlay_decodes_only_selected_values_and_mandatory_keys() {
                 limit: None,
                 batch_size: 17,
                 footer_statistics: true,
+                equality: None,
             },
         )
         .unwrap(),
@@ -1003,6 +1004,7 @@ fn projected_overlay_decodes_only_selected_values_and_mandatory_keys() {
                     limit: None,
                     batch_size: 17,
                     footer_statistics: true,
+                    equality: None,
                 },
             )
             .unwrap(),
