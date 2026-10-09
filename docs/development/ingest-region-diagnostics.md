@@ -186,10 +186,21 @@ rerun validate and commit, and check both artifact parity and scratch removal.
 
 For property-bearing comparisons, also record `property_scratch_write_bytes`,
 `property_scratch_read_bytes` and `property_workspace_reserved_bytes`. Property
-traffic includes initial IPC runs, every merge, catalog scans, logical window
-spools and owner/projection spools. Reads can exceed writes because sorted rows
-serve both catalog and overlay encoding. Subtract property traffic as well as
-edge refinement and CSR spools when reconciling the compact edge base.
+traffic includes the sorted runs, the merges that reduce and then combine them,
+catalog scans, logical window spools and owner/projection spools. Reads can
+exceed writes because sorted rows serve both catalog and overlay encoding.
+Subtract property traffic as well as edge refinement and CSR spools when
+reconciling the compact edge base.
+
+Report scratch bytes per input byte as `property_scratch_write_bytes /
+property_source_bytes` (the footers' uncompressed bytes of the property-bearing
+sources). `property_runs` and `property_merge_fan_in` say how many runs the
+sort formed and how many one merge held open; a group with no more runs than the
+fan-in is written as runs once and as merged segments once. Compare
+`property_peak_retained_bytes` with `property_retained_budget_bytes`: the first
+is the most the workers held at once while forming runs, and it can never exceed
+the second. `scratch_concurrency` is the worker count the budget admitted, and
+it applies to property-bearing builds as it does to property-free ones.
 
 The property reservation reuses the canonical CSR workspace between stages. Its
 fixed payload/encoder allowance is eight times `max_batch_bytes`, plus 32 MiB;
