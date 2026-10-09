@@ -10,7 +10,7 @@ ProjectionExec: expr=[1 as one]
           VarLenExpandExec: rel=KNOWS, hops=1..2, adjacency=hit
             FilterExec: name@6 = Alice
               HashJoinExec: mode=CollectLeft, join_type=Right, on=[(node_uuid@0, node_uuid@0)], projection=[node_uuid@2, node_id@3, type_id@4, type_ids@5, created_at@6, updated_at@7, name@1]
-                PropertyOverlayExec: route=_untyped
+                PropertyOverlayExec: route=_untyped, equality=name=Str("Alice")
                 FilterExec: array_has(type_ids@3, 1073741824)
                   RepartitionExec: partitioning=RoundRobinBatch(<N>), input_partitions=1
                     OrderedPartitionStreamExec: input_partitions=3

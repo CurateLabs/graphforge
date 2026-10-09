@@ -25,7 +25,6 @@ pub use lowerer::GraphPlanLowerer;
 
 pub mod input_predicates;
 pub mod stored_equality;
-pub mod unused_route_join;
 
 pub mod calendar;
 

@@ -29,7 +29,6 @@ pub fn optimizer_rules() -> Vec<Arc<dyn OptimizerRule + Send + Sync>> {
     // Last, so every filter has reached its final place before it is offered
     // to the property scan that can use it.
     rules.push(Arc::new(crate::stored_equality::StoredEqualityHints));
-    rules.push(Arc::new(crate::unused_route_join::UnusedRouteJoin));
     rules
 }
 

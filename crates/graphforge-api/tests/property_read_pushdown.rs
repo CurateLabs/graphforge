@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use arrow::array::{
     Array, ArrayRef, FixedSizeBinaryBuilder, Int64Array, Int64Builder, StringArray,
@@ -215,6 +215,17 @@ fn count(batches: &[RecordBatch]) -> i64 {
         .value(0)
 }
 
+/// The `wchar` gate counts the whole process, so the tests of this binary,
+/// whose fixtures write, run one at a time.
+static SERIAL: Mutex<()> = Mutex::new(());
+
+fn serial() -> MutexGuard<'static, ()> {
+    SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+const ANCHORED_LOOKUP: &str = "MATCH (a:Entity {ident: $ident}) RETURN count(*) AS n";
 const ANCHORED_HOP: &str = "MATCH (a:Entity {ident: $ident})-[:LINK]->(b) RETURN count(*) AS n";
 /// The same anchor on a column whose values are scattered over every fragment,
 /// so no fragment can be excluded by its statistics.
@@ -261,6 +272,7 @@ fn build(nodes: usize) -> Built {
 
 #[test]
 fn the_equality_is_planned_into_the_property_scan() {
+    let _serial = serial();
     let built = build(SMALL_NODES);
     let forge = open(&built.project);
     let plan = forge
@@ -273,14 +285,16 @@ fn the_equality_is_planned_into_the_property_scan() {
         plan.contains("PropertyOverlayExec: route=_untyped, equality=ident=Int(5)"),
         "{plan}"
     );
-    // Nothing reads the destination's properties, so its route is not scanned.
-    assert_eq!(plan.matches("PropertyOverlayExec").count(), 1, "{plan}");
+    // The destination's route is still joined by key: a statement that reads
+    // no property of it still authenticates it (permanent_storage_budgets).
+    assert_eq!(plan.matches("PropertyOverlayExec").count(), 2, "{plan}");
 }
 
-/// An id-anchored one-hop query reads the fragment that holds the id, not the
-/// route: its reads do not grow when the route does.
+/// An id-anchored lookup reads the fragment that holds the id, not the route:
+/// its reads do not grow when the route does.
 #[test]
-fn an_anchored_one_hop_reads_what_the_match_costs_not_what_the_route_costs() {
+fn an_anchored_lookup_reads_what_the_match_costs_not_what_the_route_costs() {
+    let _serial = serial();
     let small = build(SMALL_NODES);
     let large = build(LARGE_NODES);
     assert!(small.fragments >= 3, "the route spans fragments");
@@ -289,10 +303,10 @@ fn an_anchored_one_hop_reads_what_the_match_costs_not_what_the_route_costs() {
     for built in [&small, &large] {
         let forge = open(&built.project);
         // The first statement admits the route's footers once per session.
-        let (warm, _) = measured(&forge, ANCHORED_HOP, 0);
-        assert_eq!(count(&warm), FAN_OUT as i64);
-        let (batches, io) = measured(&forge, ANCHORED_HOP, 5);
-        assert_eq!(count(&batches), FAN_OUT as i64);
+        let (warm, _) = measured(&forge, ANCHORED_LOOKUP, 0);
+        assert_eq!(count(&warm), 1);
+        let (batches, io) = measured(&forge, ANCHORED_LOOKUP, 5);
+        assert_eq!(count(&batches), 1);
         // The anchor's fragment is authenticated to find it and again to read
         // it, plus the footers and topology; never the other fragments.
         let bound = 2 * built.largest + (1 << 20);
@@ -312,10 +326,44 @@ fn an_anchored_one_hop_reads_what_the_match_costs_not_what_the_route_costs() {
     );
 }
 
+/// The destination's route is joined by key, which authenticates every
+/// fragment of it once per statement: the one-hop adds one pass over the
+/// route's key columns to the lookup, and no decode of its values.
+#[test]
+fn an_anchored_one_hop_adds_one_authentication_pass_of_the_destination_route() {
+    let _serial = serial();
+    let built = build(SMALL_NODES);
+    let route_bytes = {
+        let inventory = graphforge_storage::resolve_project_generation(&built.project)
+            .expect("project resolves")
+            .unadmitted_graph_files_inventory()
+            .expect("inventory reads")
+            .expect("a constructed generation declares an inventory");
+        inventory
+            .files
+            .iter()
+            .filter(|file| file.relative_path.starts_with("properties/"))
+            .map(|file| file.byte_length)
+            .sum::<u64>()
+    };
+    let forge = open(&built.project);
+    let (_, _) = measured(&forge, ANCHORED_HOP, 0);
+    let (_, lookup) = measured(&forge, ANCHORED_LOOKUP, 5);
+    let (hop, one_hop) = measured(&forge, ANCHORED_HOP, 5);
+    assert_eq!(count(&hop), FAN_OUT as i64);
+    assert!(
+        one_hop.read_bytes <= lookup.read_bytes + route_bytes + (1 << 20),
+        "one-hop read {} against lookup {} + route {route_bytes}",
+        one_hop.read_bytes,
+        lookup.read_bytes
+    );
+}
+
 /// Statistics cannot exclude a fragment from a scattered column, so its lookup
 /// reads that column of every fragment; it returns the same rows.
 #[test]
 fn a_scattered_column_still_answers_exactly() {
+    let _serial = serial();
     let built = build(SMALL_NODES);
     let forge = open(&built.project);
     for ident in [0_i64, 7, (SMALL_NODES / 2) as i64, (SMALL_NODES - 1) as i64] {
@@ -329,6 +377,7 @@ fn a_scattered_column_still_answers_exactly() {
 /// The pushed-down plan and a plan that cannot push return the same answers.
 #[test]
 fn pushing_the_equality_does_not_change_an_answer() {
+    let _serial = serial();
     let built = build(SMALL_NODES);
     let forge = open(&built.project);
     for ident in [0_i64, 1, 4095, 4096, 8191, 12_287, 12_288, -3] {
@@ -342,6 +391,7 @@ fn pushing_the_equality_does_not_change_an_answer() {
 /// equality finds it in, and a reopened project agrees.
 #[test]
 fn a_newer_snapshot_shadows_an_older_match() {
+    let _serial = serial();
     let built = build(SMALL_NODES);
     let forge = open(&built.project);
     forge
@@ -363,6 +413,7 @@ fn a_newer_snapshot_shadows_an_older_match() {
 /// spooled run, in the application counters or in the bytes handed to `write`.
 #[test]
 fn a_read_statement_writes_nothing() {
+    let _serial = serial();
     let built = build(SMALL_NODES);
     let forge = open(&built.project);
     for query in [ANCHORED_HOP, SCATTERED_HOP, UNPUSHED_HOP] {

@@ -7720,8 +7720,10 @@ fn count_row_marker_avoids_property_values_through_public_lifecycle() {
     assert!(counted.physical_rows > 0);
     assert_eq!(counted.physical_rows, values.physical_rows);
     let unrequested_bytes = payloads.iter().flatten().map(String::len).sum::<usize>() as u64;
-    assert!(counted.spill_bytes + unrequested_bytes <= values.spill_bytes);
-    assert!(counted.spill_bytes <= nodes.len() as u64 * 256);
+    // A read spools nothing (#1931): the unrequested values cost the decoder,
+    // not scratch bytes.
+    assert_eq!(counted.spill_bytes, 0);
+    assert_eq!(values.spill_bytes, 0);
     assert!(counted.decoder_peak_bytes <= nodes.len() as u64 * 256);
     assert!(counted.decoder_peak_bytes < values.decoder_peak_bytes);
     println!(
