@@ -4,14 +4,14 @@ adr: "0058"
 status: "Accepted"
 date: "2026-10-07"
 superseded_by: null
-revisit_when: "Node identity tables must go out of core, or a published artifact stops being a projection of the three ranked inputs"
+revisit_when: "A published artifact stops being a projection of the three ranked inputs, or the node-scratch route's scratch volume (about 250 bytes per edge and 40 per node) becomes the limit on a supported workload"
 ---
 
 # ADR 0058: Initial builds run on a bulk builder derived from the published generation
 
 **Status:** Accepted
 
-**Implementation:** #1883, #1900 and #1916 (slices of epic #1881).
+**Implementation:** #1883, #1900, #1916 and #1929 (slices of epic #1881).
 
 **Related:**
 - ADR 0013 (project generation protocol; the `CURRENT` swap is unchanged)
@@ -91,14 +91,16 @@ functions.
   three fifths of the process's cgroup-aware memory headroom, or the bytes in
   `GF_BULK_BUILD_MEMORY_BUDGET_BYTES`. Routing is a function of the footers and
   the budget, never of the data, and the bytes are the same on every route.
-- The staged path remains for appends, sessions an earlier binary began staging
-  (a chunk-API session replays its spool through it, see *Chunk-API initial
-  builds*), and `node_tables_exceed_budget`: the identity tables,
-  labels, endpoint index and degree arrays need a conservative 56 bytes per
-  node alongside the fixed workspace. Property payload size does not contribute
-  to this identity-table footprint. Out-of-core node identities remain open
-  under #1881. The historical `edge_properties_exceed_budget` manifest reason
-  remains readable but new builds do not select it.
+- The staged path remains for appends and sessions an earlier binary began
+  staging (a chunk-API session that recorded the staged replay replays its
+  spool through it, see *Chunk-API initial builds*). No plan stages for want
+  of memory: the
+  identity tables, labels, endpoint index and degree arrays need a conservative
+  56 bytes per node alongside the fixed workspace, and when those do not fit
+  (or do not fit beside the property workspace) the node tables go to scratch
+  too (below). The historical `node_tables_exceed_budget` and
+  `edge_properties_exceed_budget` manifest reasons remain readable but nothing
+  produces them.
 - The route is chosen once, by the first `validate`, and written to the import
   manifest (`build_route`); every later `validate`, in any process, reads it
   back. A refused, cancelled or killed bulk attempt therefore cannot be
@@ -163,6 +165,54 @@ When the estimate exceeds the budget:
 
 - Node and edge counts are limited to 2^32 - 2 by the dense ids. A larger input
   is refused with a resource-limit error.
+
+## Node tables on scratch (#1929)
+
+A node's rank is its position in global UUID order, so range partitions of the
+node UUID space give each partition a rank base (the nodes in earlier
+partitions) and endpoint resolution becomes a partition-local join. The route
+is chosen when the node tables, with the property workspace if any, do not fit
+beside the fixed workspace; the fixed workspace itself is the floor, and a
+smaller budget is refused before decoding.
+
+- **Nodes.** Decoding scatters 20-byte records (UUID, label id) into node-UUID
+  range partitions, with the same footer-bound or sampled splitters, observed
+  bounds and radix refinement edges use. Each final leaf records its smallest
+  UUID, which routes later records to it; an oversized range with equal bounds
+  is a duplicate node.
+- **Edges.** Decoding scatters the 28-byte edge record with its ranks still
+  zero, and three 33-byte references per edge to the node leaves: the source,
+  the target, and a probe of the edge's own UUID.
+- **Endpoints.** Each node leaf, in order and within the memory gate, is
+  loaded, sorted, checked for duplicates, written as a sorted run (20 bytes per
+  node, read once by the node-file and ordinal sweep), and its references
+  stream against it without being held. A hit becomes a
+  37-byte resolved record routed by edge UUID to its edge leaf and counts into
+  the node's exact out or in degree; a probe hit means an edge UUID equals a
+  node UUID; a miss is an unknown endpoint. Degrees feed the CSR key
+  partitioners in rank order, so a partition table has one entry per run of
+  nodes sharing a partition and per heavy node, never one per node.
+- **Ranks.** The existing edge pass sorts a leaf, checks duplicate edges, joins
+  the leaf's resolved records to fill endpoint ranks and UUIDs, and carries on
+  exactly as before. An edge leaf reserves 144 bytes per edge instead of 44.
+- **Sweep.** The catalog takes label counts and first appearance (by smallest
+  rank) from the endpoint pass. Canonical node files and the ordinal index
+  stream from the runs in rank order, windows of the same size, so bytes match.
+- **Refusals.** After the endpoint pass, a probe hit or a miss triggers a scan
+  of the edge leaves that raises a repeated edge UUID, then an edge UUID equal
+  to a node UUID, then a missing endpoint (naming whether it is an edge's
+  UUID), the order the resident build reports them. The scan reads scratch
+  again; it is the error path.
+
+Ranks, edge ids, the catalog order, resolved ranks and CSR order are functions
+of the sorted identity sets, not of partition counts, worker counts, label-id
+assignment or arrival order. Scratch per node is 40 bytes (the 20-byte
+scatter and the 20-byte run), plus 20 more for each radix step its range
+needed; per edge it is 173 bytes (three 33-byte references
+and two 37-byte resolved endpoints) on top of the compact edge base. Each block
+is written once and read once, and the report names node, endpoint, refinement
+and spool traffic separately. A kill inside any pass is recovered like any scratch: the next
+attempt discards it and rebuilds from the sources.
 
 ## Bounded property scratch
 
@@ -286,15 +336,17 @@ staging:
 - The chunk-API build takes the same route as a registered-source build: the
   plan is built from the receipts and the memory budget (`BulkBuildPlan::route`),
   so an over-budget estimate runs the scratch passes of #1912 and #1920 over the
-  spool and never stages or refuses. The seal route (`bulk`, or `replay_staged`
-  when even the node tables exceed the budget, the one case an import session
-  also stages) is recorded in the checkpoint before any build or replay work and
-  read back on every retry; a retry never re-decides from live memory, and
-  whether a `bulk` attempt runs in memory or on scratch is decided again from
-  the live budget (a budget that can no longer hold the node tables refuses the
-  attempt before decoding, as for a registered source). `replay_staged`
-  re-appends the authenticated spool through the staged path, chunk by chunk
-  under the same chunk ids, so an interrupted replay resumes.
+  spool and never stages. When the node tables do not fit either, they go to
+  scratch too (*Node tables on scratch*). The seal route (`bulk`; `replay_staged`
+  survives for a session an earlier binary recorded it in and for the
+  storage-level seal, and no plan chooses it for want of memory) is recorded in
+  the checkpoint before any build or replay work and read back on every retry; a
+  retry never re-decides from live memory, and whether a `bulk` attempt runs in
+  memory, on scratch, or with the node tables on scratch is decided again from
+  the live budget (a budget below the fixed workspace refuses the attempt
+  before decoding, as for a registered source, and keeps the route).
+  `replay_staged` re-appends the authenticated spool through the staged path,
+  chunk by chunk under the same chunk ids, so an interrupted replay resumes.
 - A crash during the build leaves the spool intact; the rerun is identical.
   The spool is deleted once the build's inventory is pinned.
 - Import sessions stage through `begin_staged_graph_construction`: they route

@@ -156,6 +156,9 @@ pub(super) struct Partitions {
     /// Records appended to each file, behind the lock that orders its appends.
     state: Vec<Mutex<u64>>,
     width: usize,
+    /// Bytes this set's files received and gave back, block headers included.
+    written: AtomicU64,
+    read: AtomicU64,
 }
 
 impl Partitions {
@@ -176,7 +179,19 @@ impl Partitions {
             state: (0..count).map(|_| Mutex::new(0)).collect(),
             paths,
             width,
+            written: AtomicU64::new(0),
+            read: AtomicU64::new(0),
         })
+    }
+
+    /// Bytes appended to this set's files so far.
+    pub(super) fn written_bytes(&self) -> u64 {
+        self.written.load(Ordering::Relaxed)
+    }
+
+    /// Bytes [`Self::read`] has given back so far.
+    pub(super) fn read_bytes(&self) -> u64 {
+        self.read.load(Ordering::Relaxed)
     }
 
     /// Reuse existing verified-block files in the caller's logical order.
@@ -187,6 +202,8 @@ impl Partitions {
             paths,
             state: counts.into_iter().map(Mutex::new).collect(),
             width,
+            written: AtomicU64::new(0),
+            read: AtomicU64::new(0),
         }
     }
 
@@ -224,6 +241,8 @@ impl Partitions {
         scratch
             .written
             .fetch_add(block.len() as u64, Ordering::Relaxed);
+        self.written
+            .fetch_add(block.len() as u64, Ordering::Relaxed);
         Ok(())
     }
 
@@ -245,9 +264,52 @@ impl Partitions {
         &self,
         scratch: &Scratch,
         index: usize,
-        visit: impl FnMut(&[u8]) -> Result<(), GfError>,
+        mut visit: impl FnMut(&[u8]) -> Result<(), GfError>,
     ) -> Result<(), GfError> {
-        read_blocks(scratch, &self.paths[index], visit)
+        let mut reader = BlockReader::open(scratch, &self.paths[index])?;
+        let mut payload = Vec::new();
+        let outcome = loop {
+            match reader.next_block(&mut payload) {
+                Ok(true) => {
+                    if let Err(error) = visit(&payload) {
+                        break Err(error);
+                    }
+                }
+                Ok(false) => break Ok(()),
+                Err(error) => break Err(error),
+            }
+        };
+        self.read.fetch_add(reader.bytes, Ordering::Relaxed);
+        outcome
+    }
+}
+
+/// Routes a UUID to the one range leaf that can hold it.
+///
+/// Leaves are disjoint UUID ranges in ascending order, so each is described
+/// by the smallest UUID it holds: a UUID belongs to the last leaf whose
+/// smallest UUID does not exceed it. A UUID below every leaf (an endpoint that
+/// names no node) goes to the first, where a lookup misses.
+pub(super) struct LeafRouter {
+    lows: Vec<[u8; 16]>,
+    leaves: Vec<usize>,
+}
+
+impl LeafRouter {
+    /// `lows[leaf]` is the smallest UUID in `leaf`, or `None` for an empty leaf.
+    pub(super) fn new(lows: &[Option<[u8; 16]>]) -> Self {
+        let (leaves, lows) = lows
+            .iter()
+            .enumerate()
+            .filter_map(|(leaf, low)| low.map(|low| (leaf, low)))
+            .unzip();
+        Self { lows, leaves }
+    }
+
+    /// The leaf `uuid` belongs to, or `None` when every leaf is empty.
+    pub(super) fn route(&self, uuid: &[u8; 16]) -> Option<usize> {
+        let after = self.lows.partition_point(|low| low <= uuid);
+        self.leaves.get(after.saturating_sub(1)).copied()
     }
 }
 
@@ -255,6 +317,8 @@ impl Partitions {
 pub(super) struct BlockReader<'a> {
     scratch: &'a Scratch,
     file: std::io::BufReader<File>,
+    /// Bytes this reader has verified so far, headers included.
+    bytes: u64,
 }
 
 impl<'a> BlockReader<'a> {
@@ -262,6 +326,7 @@ impl<'a> BlockReader<'a> {
         Ok(Self {
             scratch,
             file: std::io::BufReader::with_capacity(1 << 20, File::open(path).map_err(storage)?),
+            bytes: 0,
         })
     }
 
@@ -287,6 +352,7 @@ impl<'a> BlockReader<'a> {
         self.scratch
             .read
             .fetch_add((HEADER + length) as u64, Ordering::Relaxed);
+        self.bytes += (HEADER + length) as u64;
         Ok(true)
     }
 }

@@ -752,6 +752,17 @@ fn a_chunk_admitted_at_its_exact_byte_window_builds() {
     let expected = staged_with(budgets, std::slice::from_ref(&batch), &[]).unwrap();
     let built = spooled_with(budgets, std::slice::from_ref(&batch), &[]).unwrap();
     assert_same(&expected, &built);
+    // The node pass of a build with the node tables on scratch admits it too.
+    let root = TempDir::new().unwrap();
+    let mut session = spooled_session(&root, budgets);
+    append_all(&mut session, std::slice::from_ref(&batch), &[]).unwrap();
+    session.record_seal_route(SealRoute::Bulk).unwrap();
+    let _forced = crate::graph_construction_encoding::ForcedPartitions::set(2, 2).with_nodes(3);
+    let built = session
+        .prepare_spooled_bulk_encoding(1, PROPERTY_SCRATCH_BUDGET, || false)
+        .unwrap();
+    assert_same(&expected, &inventory(&built));
+    assert!(session.bulk_build_report().node_partitions > 0);
 }
 
 // ----------------------------------------------------------------------
@@ -798,11 +809,14 @@ fn an_over_budget_spooled_build_takes_the_scratch_route_and_publishes_the_staged
     }
 }
 
-/// Only a build whose node tables alone exceed the budget replays through the
-/// staged path, as an import session's route does.
+/// A budget below the node tables no longer replays the spool through the
+/// staged path (#1929): the node tables go to scratch, and a budget below the
+/// fixed workspace is refused before decoding, as for a registered source. The
+/// spool stays intact, so a retry with room builds the staged path's bytes.
 #[test]
-fn only_a_budget_below_the_node_tables_replays_the_spool_through_the_staged_path() {
+fn a_budget_below_the_node_tables_keeps_the_bulk_route_for_a_spooled_build() {
     let (nodes, edges) = graph(300, 700, 200, scattered);
+    let expected = staged(&nodes, &edges);
     let root = TempDir::new().unwrap();
     let mut session = spooled_session(&root, GraphConstructionBudgets::default());
     append_all(&mut session, &nodes, &edges).unwrap();
@@ -810,10 +824,67 @@ fn only_a_budget_below_the_node_tables_replays_the_spool_through_the_staged_path
         session.spool_seal_route(SCRATCH_BUDGET).unwrap(),
         SealRoute::Bulk
     );
-    assert_eq!(
-        session.spool_seal_route(1).unwrap(),
-        SealRoute::ReplayStaged
+    assert_eq!(session.spool_seal_route(1).unwrap(), SealRoute::Bulk);
+    session.record_seal_route(SealRoute::Bulk).unwrap();
+    let error = session
+        .prepare_spooled_bulk_encoding(1, 1, || false)
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            GfError::Project {
+                code: graphforge_core::ProjectErrorCode::ResourceLimit,
+                ..
+            }
+        ),
+        "{error}"
     );
+    assert!(!scratch_dir(&session).exists());
+    let built = session
+        .prepare_spooled_bulk_encoding(1, SCRATCH_BUDGET, || false)
+        .unwrap();
+    assert_same(&expected, &inventory(&built));
+}
+
+/// A spooled build whose node tables do not fit runs the node passes over the
+/// spool: nodes, endpoints, degrees and CSR key ranges go through scratch, the
+/// bytes are the staged path's, and nothing is staged.
+#[test]
+fn a_spooled_build_whose_node_tables_do_not_fit_runs_on_scratch_and_publishes_the_staged_bytes() {
+    let plain = graph(1_021, 3_001, 700, scattered);
+    let property_bearing = property_bearing_inputs();
+    for ((nodes, edges), budget) in [
+        (plain, SCRATCH_BUDGET),
+        (property_bearing, PROPERTY_SCRATCH_BUDGET),
+    ] {
+        let expected = staged(&nodes, &edges);
+        let root = TempDir::new().unwrap();
+        let mut session = spooled_session(&root, GraphConstructionBudgets::default());
+        append_all(&mut session, &nodes, &edges).unwrap();
+        let _forced =
+            crate::graph_construction_encoding::ForcedPartitions::set(4, 3).with_nodes(5);
+        assert_eq!(session.spool_seal_route(budget).unwrap(), SealRoute::Bulk);
+        session.record_seal_route(SealRoute::Bulk).unwrap();
+        let built = session
+            .prepare_spooled_bulk_encoding(1, budget, || false)
+            .unwrap();
+        assert_same(&expected, &inventory(&built));
+        let report = session.bulk_build_report();
+        assert!(report.node_partitions > 1, "{report:?}");
+        assert!(report.node_scratch_write_bytes > 0, "{report:?}");
+        assert!(report.endpoint_scratch_write_bytes > 0, "{report:?}");
+        assert_eq!(
+            report.node_scratch_read_bytes, report.node_scratch_write_bytes,
+            "{report:?}"
+        );
+        assert_eq!(
+            report.endpoint_scratch_read_bytes, report.endpoint_scratch_write_bytes,
+            "{report:?}"
+        );
+        assert!(!scratch_dir(&session).exists());
+        assert_eq!(session.evidence().input_batches, 0);
+        assert_eq!(session.evidence().parquet_shards, 0);
+    }
 }
 
 // ----------------------------------------------------------------------

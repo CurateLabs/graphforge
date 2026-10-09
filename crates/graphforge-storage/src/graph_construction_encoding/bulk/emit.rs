@@ -178,12 +178,55 @@ impl<'a> RelationStats<'a> {
     }
 }
 
+/// What the catalog needs to know about the nodes' labels: names, the order
+/// they first appear in UUID order, and how many nodes carry each.
+pub(super) struct LabelStats {
+    pub(super) names: Vec<String>,
+    pub(super) first_appearance: Vec<u32>,
+    pub(super) counts: Vec<u64>,
+}
+
+/// Where the catalog gets the node labels: the resident node table, or the
+/// statistics the endpoint pass gathered when the nodes are on scratch.
+#[derive(Clone, Copy)]
+pub(super) enum NodeLabels<'a> {
+    Table(&'a NodeTable),
+    Stats(&'a LabelStats),
+}
+
+impl NodeLabels<'_> {
+    pub(super) fn names(&self) -> &[String] {
+        match self {
+            Self::Table(nodes) => &nodes.label_names,
+            Self::Stats(stats) => &stats.names,
+        }
+    }
+
+    /// `(label, observations)` in the order labels first appear in UUID order.
+    fn observed(&self) -> Vec<(u32, u64)> {
+        match self {
+            Self::Table(nodes) => {
+                let counts = observation_counts(&nodes.labels, nodes.label_names.len());
+                first_appearance(&nodes.labels, nodes.label_names.len())
+                    .into_iter()
+                    .map(|label| (label, counts[label as usize]))
+                    .collect()
+            }
+            Self::Stats(stats) => stats
+                .first_appearance
+                .iter()
+                .map(|label| (*label, stats.counts[*label as usize]))
+                .collect(),
+        }
+    }
+}
+
 /// Intern in the order the staged path does: every node observation in UUID
 /// order (by schema group for property-bearing input), then every edge's.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_catalog(
     budgets: GraphConstructionBudgets,
-    nodes: &NodeTable,
+    nodes: NodeLabels<'_>,
     edge_relations: &RelationStats<'_>,
     node_groups: Option<&[SchemaGroup]>,
     edge_groups: Option<&[SchemaGroup]>,
@@ -210,12 +253,11 @@ pub(super) fn build_catalog(
         intern_rows(&mut catalog, groups, ConstructionChunkKind::Node, budgets)?;
     } else {
         {
-            let counts = observation_counts(&nodes.labels, nodes.label_names.len());
-            for label in first_appearance(&nodes.labels, nodes.label_names.len()) {
+            for (label, observations) in nodes.observed() {
                 catalog.intern_label_observed_at(
-                    &nodes.label_names[label as usize],
+                    &nodes.names()[label as usize],
                     0,
-                    counts[label as usize],
+                    observations,
                 )?;
                 admit(&catalog, budgets)?;
             }
@@ -384,6 +426,9 @@ pub(super) fn relation_routes(
         .collect()
 }
 
+/// The source and target node UUIDs of a window's edges.
+pub(super) type EndpointUuids<'a> = (&'a [[u8; 16]], &'a [[u8; 16]]);
+
 /// A run of consecutive ranked edges that one canonical edge file holds.
 pub(super) struct EdgeWindow<'a> {
     /// `edge_id` of the first edge.
@@ -392,12 +437,16 @@ pub(super) struct EdgeWindow<'a> {
     pub(super) src: &'a [u32],
     pub(super) dst: &'a [u32],
     pub(super) rels: &'a [u32],
+    /// The UUIDs of the source and target nodes, when the node table is not
+    /// resident to look them up in.
+    pub(super) endpoint_uuids: Option<EndpointUuids<'a>>,
 }
 
 /// Everything an edge window needs besides its edges.
 pub(super) struct EdgeEmitter<'a> {
     pub(super) installer: &'a Installer<'a>,
-    pub(super) nodes: &'a NodeTable,
+    /// The resident node table; `None` when the nodes are on scratch.
+    pub(super) nodes: Option<&'a NodeTable>,
     pub(super) relations: &'a [RelationRoute],
     pub(super) components: &'a BTreeMap<String, String>,
     pub(super) semantics: &'a Semantics<'a>,
@@ -421,6 +470,7 @@ pub(super) fn emit_edges(
             src: &edges.src[start..end],
             dst: &edges.dst[start..end],
             rels: &edges.rels[start..end],
+            endpoint_uuids: None,
         })
     })
 }
@@ -449,16 +499,18 @@ impl EdgeEmitter<'_> {
             .iter()
             .map(|rank| u64::from(*rank))
             .collect::<Vec<_>>();
-        let src_uuids = window
-            .src
-            .iter()
-            .map(|rank| nodes.uuids[*rank as usize - 1])
-            .collect::<Vec<_>>();
-        let dst_uuids = window
-            .dst
-            .iter()
-            .map(|rank| nodes.uuids[*rank as usize - 1])
-            .collect::<Vec<_>>();
+        let (src_uuids, dst_uuids) = if let Some((src, dst)) = window.endpoint_uuids {
+            (src.to_vec(), dst.to_vec())
+        } else {
+            let nodes = nodes.ok_or_else(|| storage("edge endpoints have no node identities"))?;
+            let lookup = |ranks: &[u32]| {
+                ranks
+                    .iter()
+                    .map(|rank| nodes.uuids[*rank as usize - 1])
+                    .collect::<Vec<_>>()
+            };
+            (lookup(window.src), lookup(window.dst))
+        };
         let canonical = edge_batch(
             window.uuids,
             &src_uuids,

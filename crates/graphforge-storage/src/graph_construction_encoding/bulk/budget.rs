@@ -2,8 +2,10 @@
 //!
 //! The footers fix the answer to two questions before a byte is read:
 //!
-//! - which route builds the generation: in memory, on scratch files, or on the
-//!   staged path (a typed reason says why not);
+//! - which route builds the generation: in memory, on scratch files with
+//!   resident node tables, or on scratch files with the node tables on
+//!   scratch too (the staged path remains only for appends and sessions an
+//!   earlier binary began);
 //! - for the scratch route, how many partitions and how many partitions in
 //!   flight fit the normalized builder workspace inside the budget. Registered
 //!   source decoding and normalization require the separate bound in #1918.
@@ -38,6 +40,13 @@ const DECODE_WINDOW_BYTES: u64 = 48 << 20;
 /// Bytes per edge a partition holds while it is built: the 28-byte record, its
 /// column copies for one window, and the CSR entries it stages.
 const EDGE_PARTITION_BYTES: u64 = 44;
+/// The same when node tables are on scratch: the partition also holds the two
+/// 37-byte resolved endpoint records of each edge until they are joined, then
+/// the two endpoint UUIDs.
+const EDGE_PARTITION_BYTES_NODE_SCRATCH: u64 = 144;
+/// Bytes per node a node partition holds while endpoints resolve: the 20-byte
+/// record, the out and in degrees, and slack for the sort.
+const NODE_PARTITION_BYTES: u64 = 40;
 /// Bytes per adjacency entry a CSR partition holds: the sorted records, the
 /// per-relation view, and its share of the shard encoder.
 const CSR_PARTITION_BYTES: u64 = 40;
@@ -47,15 +56,16 @@ const MAX_STAGING_BYTES: u64 = 256 << 10;
 /// Partitions per set. Files open per block, so this bounds only bookkeeping.
 const MAX_PARTITIONS: u64 = 4096;
 
-/// Why an initial build cannot run on the bulk builder and stages instead.
+/// Why an initial build staged instead of running on the bulk builder.
 ///
-/// Chosen once, at plan time, from the footers and the memory budget.
+/// Both reasons are historical: they stay readable in manifests an earlier
+/// binary wrote, and no new plan selects either.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BulkStagedReason {
-    /// The node tables (sorted UUIDs, labels, endpoint index, and any retained
-    /// cached source metadata) do not fit the budget. External node handling is not
-    /// implemented (#1881).
+    /// Historical reason retained for manifest decoding. New plans keep the node
+    /// tables on scratch (`BulkRoute::ScratchNodes`) when they do not fit the
+    /// budget (#1929).
     NodeTablesExceedBudget,
     /// Historical reason retained for manifest decoding. New property-bearing
     /// plans use bounded property scratch instead of selecting this reason.
@@ -69,7 +79,12 @@ pub enum BulkRoute {
     Memory,
     /// Edge records and adjacency entries go through scratch files.
     Scratch,
-    /// The staged path builds it.
+    /// The node tables go through scratch files as well: node identities,
+    /// endpoint resolution, degrees and CSR key ranges are built per node-UUID
+    /// range partition (#1929).
+    ScratchNodes,
+    /// The staged path builds it. No plan selects this route; it is kept so a
+    /// historical receipt still names a route.
     Staged(BulkStagedReason),
 }
 
@@ -115,13 +130,27 @@ impl BulkBuildPlan<'_> {
             )
     }
 
+    /// The workspace property-bearing sources add; zero for property-free input.
+    #[cfg(test)]
+    pub(crate) fn property_floor_bytes(&self, budgets: super::GraphConstructionBudgets) -> u64 {
+        property_extra_if_any(self, budgets)
+    }
+
+    /// The fixed workspace and cached source metadata, without any node
+    /// tables: the least a build on scratch needs resident.
+    #[must_use]
+    pub(crate) fn scratch_floor_bytes(&self) -> u64 {
+        self.node_tables_resident_bytes()
+            .saturating_sub(self.node_rows().saturating_mul(NODE_TABLE_BYTES))
+    }
+
     /// Route the plan for `budget` resident bytes.
     #[must_use]
     pub fn route_for(&self, budget: u64) -> BulkRoute {
         if self.estimated_resident_bytes() <= budget {
             BulkRoute::Memory
         } else if self.node_tables_resident_bytes() > budget {
-            BulkRoute::Staged(BulkStagedReason::NodeTablesExceedBudget)
+            BulkRoute::ScratchNodes
         } else {
             BulkRoute::Scratch
         }
@@ -151,6 +180,43 @@ pub(super) fn property_workspace(budgets: super::GraphConstructionBudgets) -> u6
         .saturating_add(32 << 20)
 }
 
+/// Whether the node tables go to scratch under `budget`: the resident node
+/// tables and, for property-bearing input, the property workspace do not fit
+/// beside the fixed workspace. [`BulkBuildPlan::route_for`] sees only the node
+/// tables; the property workspace depends on the construction budgets.
+pub(super) fn node_tables_on_scratch(
+    plan: &BulkBuildPlan<'_>,
+    budget: u64,
+    budgets: super::GraphConstructionBudgets,
+) -> bool {
+    // A test that forces node partitions forces the route, so a build with no
+    // nodes at all, which no budget can push over, still exercises it.
+    #[cfg(test)]
+    if FORCED_NODE_PARTITIONS.with(std::cell::Cell::get).is_some() {
+        return true;
+    }
+    plan.node_tables_resident_bytes()
+        .saturating_add(property_extra_if_any(plan, budgets))
+        > budget
+}
+
+/// The property workspace of a plan that has property-bearing sources.
+pub(super) fn property_extra_if_any(
+    plan: &BulkBuildPlan<'_>,
+    budgets: super::GraphConstructionBudgets,
+) -> u64 {
+    if plan
+        .nodes
+        .iter()
+        .chain(&plan.edges)
+        .any(|source| !source.property_free)
+    {
+        property_extra_workspace(plan, budgets)
+    } else {
+        0
+    }
+}
+
 pub(super) fn property_extra_workspace(
     plan: &BulkBuildPlan<'_>,
     budgets: super::GraphConstructionBudgets,
@@ -170,10 +236,24 @@ pub(super) struct ScratchPlan {
     pub(super) edge_partitions: usize,
     /// Node-range partitions per CSR direction.
     pub(super) csr_partitions: usize,
+    /// Whether the node tables are on scratch.
+    pub(super) node_tables_on_scratch: bool,
+    /// Node-UUID range partitions when the node tables are on scratch.
+    pub(super) node_partitions: usize,
     /// Bytes the partitions in flight may reserve in total.
     pub(super) gate_bytes: u64,
     /// Staging buffer per partition per worker.
     pub(super) staging_bytes: usize,
+    /// Total staging allowance, shared by every open partition buffer.
+    pub(super) staging_total: u64,
+    /// Test builds only: milliseconds each partition sleeps per partition after
+    /// it, before it takes its turn, so later partitions finish first.
+    #[cfg(test)]
+    pub(super) stagger_millis: u64,
+    /// Bytes an edge partition reserves per row.
+    pub(super) edge_row_bytes: u64,
+    /// Bytes a node partition reserves per row; zero when nodes are resident.
+    pub(super) node_row_bytes: u64,
 }
 
 #[cfg(test)]
@@ -182,6 +262,11 @@ thread_local! {
     static FORCED_PARTITIONS: std::cell::Cell<Option<(usize, usize)>> =
         const { std::cell::Cell::new(None) };
     static FORCED_GATE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    static FORCED_CONCURRENCY: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+    static FORCED_STAGGER: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    static FORCED_NODE_PARTITIONS: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// Forces the partition counts of the builds the current test thread runs,
@@ -196,9 +281,28 @@ impl ForcedPartitions {
         Self
     }
 
+    /// Makes earlier partitions slower than later ones, so a pass that must
+    /// hand its turns over in order is tested against the worst schedule.
+    pub(crate) fn with_stagger(millis: u64) -> Self {
+        FORCED_STAGGER.with(|forced| forced.set(Some(millis)));
+        Self
+    }
+
+    /// Partitions in flight, whatever the budget would allow.
+    pub(crate) fn with_concurrency(workers: usize) -> Self {
+        FORCED_CONCURRENCY.with(|forced| forced.set(Some(workers)));
+        Self
+    }
+
     pub(crate) fn set(edge: usize, csr: usize) -> Self {
         FORCED_PARTITIONS.with(|forced| forced.set(Some((edge, csr))));
         Self
+    }
+
+    /// Also forces the node-UUID partitions of a build with scratch node tables.
+    pub(crate) fn with_nodes(self, nodes: usize) -> Self {
+        FORCED_NODE_PARTITIONS.with(|forced| forced.set(Some(nodes)));
+        self
     }
 }
 
@@ -207,6 +311,9 @@ impl Drop for ForcedPartitions {
     fn drop(&mut self) {
         FORCED_PARTITIONS.with(|forced| forced.set(None));
         FORCED_GATE.with(|forced| forced.set(None));
+        FORCED_CONCURRENCY.with(|forced| forced.set(None));
+        FORCED_STAGGER.with(|forced| forced.set(None));
+        FORCED_NODE_PARTITIONS.with(|forced| forced.set(None));
     }
 }
 
@@ -221,6 +328,7 @@ impl ScratchPlan {
         )
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(super) fn derive_with_budgets(
         plan: &BulkBuildPlan<'_>,
         budget: u64,
@@ -228,18 +336,30 @@ impl ScratchPlan {
         budgets: super::GraphConstructionBudgets,
     ) -> Self {
         let edges = plan.edge_rows();
+        let nodes = plan.node_rows();
+        // With node tables on scratch no byte per node is resident; the node
+        // partitions reserve their share from the gate instead.
+        let node_scratch = node_tables_on_scratch(plan, budget, budgets);
+        let (edge_row_bytes, node_row_bytes) = if node_scratch {
+            (EDGE_PARTITION_BYTES_NODE_SCRATCH, NODE_PARTITION_BYTES)
+        } else {
+            (EDGE_PARTITION_BYTES, 0)
+        };
         let properties = plan
             .nodes
             .iter()
             .chain(&plan.edges)
             .any(|source| !source.property_free);
-        let fixed = plan
-            .node_tables_resident_bytes()
-            .saturating_add(if properties {
-                property_extra_workspace(plan, budgets)
-            } else {
-                0
-            });
+        let fixed = if node_scratch {
+            plan.scratch_floor_bytes()
+        } else {
+            plan.node_tables_resident_bytes()
+        }
+        .saturating_add(if properties {
+            property_extra_workspace(plan, budgets)
+        } else {
+            0
+        });
         let working = budget
             .saturating_sub(fixed)
             .saturating_add(MIN_WORKING_BYTES);
@@ -257,31 +377,60 @@ impl ScratchPlan {
                 continue;
             }
             let per_partition = gate_bytes / (2 * concurrency);
-            let edge_partitions = ceil(edges.saturating_mul(EDGE_PARTITION_BYTES), per_partition)
-                .clamp(1, MAX_PARTITIONS);
+            let edge_partitions =
+                ceil(edges.saturating_mul(edge_row_bytes), per_partition).clamp(1, MAX_PARTITIONS);
             let csr_partitions = ceil(edges.saturating_mul(CSR_PARTITION_BYTES), per_partition)
                 .clamp(1, MAX_PARTITIONS);
-            let widest = edge_partitions.max(2 * csr_partitions);
+            let node_partitions = if node_scratch {
+                ceil(nodes.saturating_mul(node_row_bytes), per_partition).clamp(1, MAX_PARTITIONS)
+            } else {
+                0
+            };
+            let widest = (edge_partitions + node_partitions).max(2 * csr_partitions);
             let staging = (staging_total / (concurrency * widest)).min(MAX_STAGING_BYTES);
             if staging >= MIN_STAGING_BYTES {
-                best = Some((concurrency, edge_partitions, csr_partitions, staging));
+                best = Some((
+                    concurrency,
+                    edge_partitions,
+                    csr_partitions,
+                    node_partitions,
+                    staging,
+                ));
                 break;
             }
         }
         // If even one worker cannot stage at the preferred minimum, smaller
         // blocks preserve the same total buffer reservation. Radix refinement
         // will bound sorting independently of the initial partition cap.
-        let (concurrency, edge_partitions, csr_partitions, staging) = best.unwrap_or_else(|| {
-            let per_partition = gate_bytes / 2;
-            (
-                1,
-                ceil(edges.saturating_mul(EDGE_PARTITION_BYTES), per_partition)
-                    .clamp(1, MAX_PARTITIONS),
-                ceil(edges.saturating_mul(CSR_PARTITION_BYTES), per_partition)
-                    .clamp(1, MAX_PARTITIONS),
-                (staging_total / (2 * MAX_PARTITIONS)).max(32),
-            )
-        });
+        let (concurrency, edge_partitions, csr_partitions, node_partitions, staging) = best
+            .unwrap_or_else(|| {
+                let per_partition = gate_bytes / 2;
+                (
+                    1,
+                    ceil(edges.saturating_mul(edge_row_bytes), per_partition)
+                        .clamp(1, MAX_PARTITIONS),
+                    ceil(edges.saturating_mul(CSR_PARTITION_BYTES), per_partition)
+                        .clamp(1, MAX_PARTITIONS),
+                    if node_scratch {
+                        ceil(nodes.saturating_mul(node_row_bytes), per_partition)
+                            .clamp(1, MAX_PARTITIONS)
+                    } else {
+                        0
+                    },
+                    (staging_total / (2 * MAX_PARTITIONS)).max(32),
+                )
+            });
+        #[cfg(test)]
+        let concurrency = FORCED_CONCURRENCY
+            .with(std::cell::Cell::get)
+            .map_or(concurrency, |forced| forced as u64);
+        #[cfg(test)]
+        let node_partitions =
+            FORCED_NODE_PARTITIONS
+                .with(std::cell::Cell::get)
+                .map_or(node_partitions, |forced| {
+                    if node_scratch { forced as u64 } else { 0 }
+                });
         #[cfg(test)]
         let (edge_partitions, csr_partitions) = FORCED_PARTITIONS
             .with(std::cell::Cell::get)
@@ -292,14 +441,62 @@ impl ScratchPlan {
             concurrency: usize::try_from(concurrency).unwrap_or(1),
             edge_partitions: usize::try_from(edge_partitions).unwrap_or(1),
             csr_partitions: usize::try_from(csr_partitions).unwrap_or(1),
+            node_tables_on_scratch: node_scratch,
+            node_partitions: usize::try_from(node_partitions).unwrap_or(1),
             gate_bytes,
             staging_bytes: usize::try_from(staging).unwrap_or(8 << 10),
+            staging_total,
+            #[cfg(test)]
+            stagger_millis: FORCED_STAGGER.with(std::cell::Cell::get).unwrap_or(0),
+            edge_row_bytes,
+            node_row_bytes,
         }
     }
 
+    /// A plan with resident node tables and exactly these sizes.
+    #[cfg(test)]
+    pub(super) fn sized(
+        concurrency: usize,
+        edge_partitions: usize,
+        csr_partitions: usize,
+        gate_bytes: u64,
+        staging_bytes: usize,
+    ) -> Self {
+        Self {
+            concurrency,
+            edge_partitions,
+            csr_partitions,
+            node_tables_on_scratch: false,
+            node_partitions: 0,
+            gate_bytes,
+            staging_bytes,
+            staging_total: staging_bytes as u64 * 64,
+            stagger_millis: 0,
+            edge_row_bytes: EDGE_PARTITION_BYTES,
+            node_row_bytes: 0,
+        }
+    }
+
+    /// Staging buffer per partition per worker when `fanout` partitions are
+    /// open at once, from the plan's total staging allowance.
+    pub(super) fn staging_for(&self, fanout: usize) -> usize {
+        let share = self.staging_total / (self.concurrency.max(1) as u64 * fanout.max(1) as u64);
+        usize::try_from(share.clamp(64, MAX_STAGING_BYTES)).unwrap_or(64)
+    }
+
     /// Bytes a partition of `rows` edges reserves while it is built.
-    pub(super) fn edge_cost(rows: u64) -> u64 {
-        rows.saturating_mul(EDGE_PARTITION_BYTES)
+    pub(super) fn edge_cost(&self, rows: u64) -> u64 {
+        rows.saturating_mul(self.edge_row_bytes)
+    }
+
+    /// Bytes a node partition of `rows` nodes reserves while it is resolved.
+    pub(super) fn node_cost(&self, rows: u64) -> u64 {
+        rows.saturating_mul(self.node_row_bytes)
+    }
+
+    /// The most adjacency entries one CSR partition may hold.
+    pub(super) fn csr_entry_limit(&self) -> u64 {
+        self.gate_bytes / (2 * self.concurrency.max(1) as u64) / CSR_PARTITION_BYTES
     }
 
     /// Bytes a CSR partition of `entries` adjacency entries reserves.
@@ -378,9 +575,8 @@ mod tests {
                 // The partitions in flight reserve at most half the gate, so a
                 // partition twice its share still fits.
                 let edges = 16_u64 << scale;
-                let in_flight =
-                    ScratchPlan::edge_cost(edges.div_ceil(sized.edge_partitions as u64))
-                        * sized.concurrency as u64;
+                let in_flight = sized.edge_cost(edges.div_ceil(sized.edge_partitions as u64))
+                    * sized.concurrency as u64;
                 assert!(
                     sized.edge_partitions as u64 == MAX_PARTITIONS
                         || in_flight <= sized.gate_bytes / 2,

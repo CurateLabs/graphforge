@@ -454,10 +454,12 @@ rows use disposable CRC32C scratch without SHA or fsync
 [resumable import](resumable-import.md)). Property runs sort exact schemas by UUID,
 then stream the existing logical windows, owner projections and 4 MiB fragments.
 Physical scratch frames do not change catalog IDs, cuts, ordinals or published
-bytes. Node identity tables remain resident. The historical
-`edge_properties_exceed_budget` manifest reason remains readable; new plans
-route property payloads through scratch instead of retaining their batches.
-Publication and restart semantics are unchanged.
+bytes. When the node tables (about 56 bytes per node plus the fixed
+workspace) do not fit the budget, node identities, endpoint resolution, degrees
+and CSR key ranges are built per node-UUID range partition on the same scratch
+(`scratch_nodes`, ADR 0058). The historical `node_tables_exceed_budget` and
+`edge_properties_exceed_budget` manifest reasons remain readable; no new plan
+selects either. Publication and restart semantics are unchanged.
 
 This bound covers normalized property transport and overlay assembly. Registered
 source decoding and normalization can expand Parquet dictionaries, nested pages

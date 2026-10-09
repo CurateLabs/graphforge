@@ -184,6 +184,18 @@ only the ADR 0038 ordinal receipt's documented random nonce. Compare reopened
 query data without per-query schema metadata. Kill an active scratch build,
 rerun validate and commit, and check both artifact parity and scratch removal.
 
+For a node-heavy comparison, set the budget above the fixed workspace (the
+plan's floor: 512 MiB plus cached source metadata) and below the node tables
+(`floor + 56 * nodes`). The receipt then has `node_partitions > 0` and a pass
+`endpoints`. Reconcile scratch in four families: the base edge payload above;
+`node_scratch_write_bytes` less `node_refinement_write_bytes`, which is 40
+bytes per node (the 20-byte scatter and the 20-byte sorted run);
+`endpoint_scratch_write_bytes`,
+which is 173 bytes per edge (three 33-byte references and two 37-byte resolved
+endpoints); and the refinement and spool bytes. Each family's reads equal its
+writes. Peak RSS (`/usr/bin/time -v` on `validate`) stays within the budget
+although `56 * nodes` is several times larger.
+
 For property-bearing comparisons, also record `property_scratch_write_bytes`,
 `property_scratch_read_bytes` and `property_workspace_reserved_bytes`. Property
 traffic includes initial IPC runs, every merge, catalog scans, logical window
