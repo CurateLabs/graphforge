@@ -302,28 +302,44 @@ fn large_pages_are_drained_in_caller_owned_blocks_capped_at_1024() {
 
     let mut oversized_rep = [0x5555_i16; 2048];
     let mut oversized_def = [0x6666_i16; 2048];
-    let error = cursor
+    let first = cursor
         .next_block(&mut oversized_rep, &mut oversized_def, None)
-        .err()
-        .expect("2048-event request must be refused");
-    assert!(is_storage(&error));
-    assert!(oversized_rep.iter().all(|value| *value == 0x5555));
-    assert!(oversized_def.iter().all(|value| *value == 0x6666));
+        .unwrap();
+    assert_eq!(first, MAX_BLOCK_EVENTS);
+    assert!(
+        oversized_rep[..MAX_BLOCK_EVENTS]
+            .iter()
+            .all(|value| *value == 0)
+    );
+    for (index, value) in oversized_def[..MAX_BLOCK_EVENTS].iter().enumerate() {
+        assert_eq!(*value, if index % 3 != 0 { 1 } else { 0 });
+    }
+    assert!(
+        oversized_rep[MAX_BLOCK_EVENTS..]
+            .iter()
+            .all(|value| *value == 0x5555)
+    );
+    assert!(
+        oversized_def[MAX_BLOCK_EVENTS..]
+            .iter()
+            .all(|value| *value == 0x6666)
+    );
 
     let mut rep_block = [0_i16; MAX_BLOCK_EVENTS];
     let mut def_block = [0_i16; MAX_BLOCK_EVENTS];
-    let mut seen = 0;
+    let mut remaining_counts = Vec::new();
     loop {
         let count = cursor
             .next_block(&mut rep_block, &mut def_block, None)
             .unwrap();
         assert!(count <= MAX_BLOCK_EVENTS);
-        seen += count;
         if count == 0 {
             break;
         }
+        remaining_counts.push(count);
     }
-    assert_eq!(seen, 3073);
+    assert_eq!(remaining_counts, [1024, 1024, 1]);
+    assert_eq!(first + remaining_counts.iter().sum::<usize>(), 3073);
     assert_eq!(cursor.validated_summary(None).unwrap().nonnull, 3073 - 1025);
 }
 
@@ -363,6 +379,28 @@ fn cancellation_is_typed_and_precedes_any_event_write() {
     ));
     assert!(rep.iter().all(|value| *value == 0x1111));
     assert!(def.iter().all(|value| *value == 0x2222));
+}
+
+#[test]
+fn cancellation_is_checked_for_empty_v1_and_v2_summaries() {
+    let empty_v1 = v1_page(&[], &[], 0, 0, b"");
+    let empty_v2 = v2_page(&[], &[], 0, 0, 0, 0, b"");
+    let token = CancellationToken::new();
+    token.cancel();
+    for page in [&empty_v1, &empty_v2] {
+        let error = PageEvents::new(page, 0, 0)
+            .unwrap()
+            .validated_summary(Some(&token))
+            .err()
+            .expect("empty summary must honor cancellation before scanning");
+        assert!(matches!(
+            error,
+            GfError::Api {
+                code: ApiErrorCode::Cancelled,
+                ..
+            }
+        ));
+    }
 }
 
 #[test]

@@ -54,7 +54,8 @@ pub(super) struct EventSummary {
 /// A page-borrowing pair of level cursors and its borrowed value suffix.
 ///
 /// The cursor owns only scalar progress and parser state. Output is supplied
-/// by the caller in equal-sized arrays capped at 1024 events per call.
+/// by the caller in equal-sized arrays; each call writes at most 1024 events
+/// and leaves any unused buffer tail untouched.
 pub(super) struct PageEvents<'a> {
     page: &'a Page,
     max_repetition: i16,
@@ -200,18 +201,19 @@ impl<'a> PageEvents<'a> {
     }
 
     /// Fill caller-owned repetition and definition blocks with validated
-    /// levels. Both buffers must have the same length, and neither may exceed
-    /// [`MAX_BLOCK_EVENTS`]. A contract error is returned before either
-    /// buffer is written.
+    /// levels. Both buffers must have the same length. At most
+    /// [`MAX_BLOCK_EVENTS`] entries are written, so larger buffers are safe
+    /// and retain their unused tails. A length mismatch is rejected before
+    /// either buffer is written.
     pub(super) fn next_block(
         &mut self,
         repetition: &mut [i16],
         definition: &mut [i16],
         cancellation: Option<&CancellationToken>,
     ) -> Result<usize, GfError> {
-        if repetition.len() != definition.len() || repetition.len() > MAX_BLOCK_EVENTS {
+        if repetition.len() != definition.len() {
             return Err(storage(
-                "Parquet level block must have matching lengths up to 1024",
+                "Parquet repetition and definition level blocks must have matching lengths",
             ));
         }
         if cancellation.is_some_and(CancellationToken::is_cancelled) {
@@ -220,6 +222,7 @@ impl<'a> PageEvents<'a> {
 
         let count = repetition
             .len()
+            .min(MAX_BLOCK_EVENTS)
             .min(self.expected.saturating_sub(self.emitted as usize));
         for index in 0..count {
             let rep = self
@@ -263,6 +266,9 @@ impl<'a> PageEvents<'a> {
         &self,
         cancellation: Option<&CancellationToken>,
     ) -> Result<EventSummary, GfError> {
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            return Err(cancelled());
+        }
         let mut scan = Self::new(self.page, self.max_repetition, self.max_definition)?;
         let mut repetition = [0_i16; MAX_BLOCK_EVENTS];
         let mut definition = [0_i16; MAX_BLOCK_EVENTS];
