@@ -10,8 +10,12 @@ use datafusion::common::stats::Precision;
 use datafusion::common::{ColumnStatistics, Statistics};
 use datafusion::error::DataFusionError;
 use datafusion::execution::TaskContext;
-use datafusion::physical_expr::EquivalenceProperties;
+use datafusion::physical_expr::expressions::DynamicFilterPhysicalExpr;
+use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType, SchedulingType};
+use datafusion::physical_plan::filter_pushdown::{
+    ChildPushdownResult, FilterPushdownPhase, FilterPushdownPropagation, PushedDown,
+};
 use datafusion::physical_plan::metrics::{
     Count, ExecutionPlanMetricsSet, Gauge, MetricBuilder, MetricsSet,
 };
@@ -49,6 +53,7 @@ pub(crate) struct PropertyOverlayExec {
     batch_size: usize,
     planned_rows: Option<usize>,
     equality: Option<crate::property_overlay::PropertyEquality>,
+    uuid_filters: Vec<Arc<dyn PhysicalExpr>>,
     props: Arc<PlanProperties>,
     #[cfg(any(test, feature = "test-support"))]
     digest_context: graphforge_core::hash_observation::operation::Context,
@@ -153,6 +158,7 @@ impl PropertyOverlayExec {
             batch_size: options.batch_size.max(1),
             planned_rows,
             equality: options.equality,
+            uuid_filters: Vec::new(),
             props,
             metrics,
             work_counts,
@@ -227,6 +233,34 @@ impl ExecutionPlan for PropertyOverlayExec {
         }))
     }
 
+    fn handle_child_pushdown_result(
+        &self,
+        phase: FilterPushdownPhase,
+        child_pushdown_result: ChildPushdownResult,
+        _config: &datafusion::common::config::ConfigOptions,
+    ) -> Result<FilterPushdownPropagation<Arc<dyn ExecutionPlan>>, DataFusionError> {
+        let mut replacement = self.clone();
+        if phase == FilterPushdownPhase::Post {
+            let key = if self.is_edge {
+                "edge_uuid"
+            } else {
+                "node_uuid"
+            };
+            for filter in &child_pushdown_result.parent_filters {
+                if super::property_scan_filter::is_uuid_dynamic_filter(&filter.filter, key) {
+                    replacement.uuid_filters.push(Arc::clone(&filter.filter));
+                }
+            }
+        }
+        // These are pruning hints. Keep the join's own predicate authoritative,
+        // including filters whose final form cannot nominate an exact UUID set.
+        Ok(FilterPushdownPropagation {
+            filters: vec![PushedDown::No; child_pushdown_result.parent_filters.len()],
+            updated_node: (!replacement.uuid_filters.is_empty())
+                .then(|| Arc::new(replacement) as Arc<dyn ExecutionPlan>),
+        })
+    }
+
     fn metrics(&self) -> Option<MetricsSet> {
         self.metrics
             .as_ref()
@@ -261,104 +295,144 @@ impl ExecutionPlan for PropertyOverlayExec {
         #[cfg(any(test, feature = "test-support"))]
         let digest_context = self.digest_context.clone();
         let lifecycle_context = self.lifecycle_context.clone();
-        tokio::task::spawn_blocking(move || {
-            #[cfg(any(test, feature = "test-support"))]
-            let _digest_guard = digest_context.attach();
-            let _lifecycle_capture = lifecycle_context.attach();
-            let selected_properties = projection
-                .as_ref()
-                .map(|names| names.iter().cloned().collect());
-            let mut held = Vec::new();
-            let mut held_bytes = 0_usize;
-            let mut hold_until_validated = hold_until_validated;
-            let send = |batch: RecordBatch| {
-                sender
-                    .blocking_send(Ok(batch))
-                    .map_err(|_| DataFusionError::Execution("property scan consumer closed".into()))
-            };
-            let result = crate::catalog::visit_property_overlay_batched_selected(
-                &project,
-                inventory.as_deref(),
-                &route,
-                is_edge,
-                batch_size,
-                selected_properties.as_ref(),
-                equality.as_ref(),
-                |batch| {
-                    let mut batch = projection.as_ref().map_or_else(
-                        || Ok(batch.clone()),
-                        |names| {
-                            let indices = names
-                                .iter()
-                                .map(|name| batch.schema().index_of(name))
-                                .collect::<Result<Vec<_>, _>>()
-                                .map_err(|error| {
-                                    DataFusionError::ArrowError(Box::new(error), None)
-                                })?;
-                            batch
-                                .project(&indices)
-                                .map_err(|error| DataFusionError::ArrowError(Box::new(error), None))
-                        },
-                    )?;
-                    if let Some(rows) = remaining.as_mut() {
-                        if *rows == 0 {
-                            return Ok(true);
-                        }
-                        if batch.num_rows() > *rows {
-                            batch = batch.slice(0, *rows);
-                        }
-                        *rows -= batch.num_rows();
-                    }
-                    if hold_until_validated {
-                        held_bytes = held_bytes.saturating_add(batch.get_array_memory_size());
-                        held.push(batch);
-                        if held_bytes <= MAX_HELD_BYTES {
-                            return Ok(true);
-                        }
-                        // A limit this large streams: holding it would cost
-                        // more memory than the scan's own bounds allow.
-                        hold_until_validated = false;
-                        for batch in held.drain(..) {
-                            send(batch)?;
-                        }
-                        return Ok(true);
-                    }
-                    send(batch)?;
-                    Ok(true)
-                },
-            );
-            // A limit stops its consumer after the first rows, so a failure in
-            // the rest of the route would go unobserved. Its rows wait for the
-            // whole route to validate: the limit changes emission, not authority.
-            let result = result.and_then(|work| {
-                for batch in held {
-                    send(batch)?;
+        let uuid_filters = self.uuid_filters.clone();
+        let key = if self.is_edge {
+            "edge_uuid"
+        } else {
+            "node_uuid"
+        };
+        tokio::spawn(async move {
+            for filter in &uuid_filters {
+                let dynamic = filter
+                    .downcast_ref::<DynamicFilterPhysicalExpr>()
+                    .expect("only dynamic UUID filters are retained");
+                tokio::select! {
+                    () = dynamic.wait_complete() => {},
+                    () = sender.closed() => return,
                 }
-                Ok(work)
-            });
-            let result = result.and_then(|work| {
-                let (Some((work_counts, decoder_peak)), Some(work)) = (work_counts, work) else {
-                    return Ok(());
+            }
+            let mut uuids = None;
+            for filter in &uuid_filters {
+                let dynamic = filter
+                    .downcast_ref::<DynamicFilterPhysicalExpr>()
+                    .expect("only dynamic UUID filters are retained");
+                let current = match dynamic.current() {
+                    Ok(current) => current,
+                    Err(error) => {
+                        let _ = sender.send(Err(error)).await;
+                        return;
+                    }
                 };
-                // Completed reader work only; these logical counters are not native RSS.
-                let measured = |value| {
-                    usize::try_from(value).map_err(|_| {
-                        DataFusionError::Execution("property metric exceeds platform range".into())
+                if let Some(wanted) = super::property_scan_filter::uuid_candidates(&current, key) {
+                    uuids = Some(match uuids {
+                        None => wanted,
+                        Some(prior) => &prior & &wanted,
+                    });
+                }
+            }
+            tokio::task::spawn_blocking(move || {
+                #[cfg(any(test, feature = "test-support"))]
+                let _digest_guard = digest_context.attach();
+                let _lifecycle_capture = lifecycle_context.attach();
+                let selected_properties = projection
+                    .as_ref()
+                    .map(|names| names.iter().cloned().collect());
+                let mut held = Vec::new();
+                let mut held_bytes = 0_usize;
+                let mut hold_until_validated = hold_until_validated;
+                let send = |batch: RecordBatch| {
+                    sender.blocking_send(Ok(batch)).map_err(|_| {
+                        DataFusionError::Execution("property scan consumer closed".into())
                     })
                 };
-                for (counter, value) in work_counts.iter().zip([
-                    work.spill_bytes,
-                    work.authentication_bytes,
-                    work.physical_rows,
-                ]) {
-                    counter.add(measured(value)?);
+                let result = crate::catalog::visit_property_overlay_batched_selected(
+                    &project,
+                    inventory.as_deref(),
+                    &route,
+                    is_edge,
+                    batch_size,
+                    selected_properties.as_ref(),
+                    equality.as_ref(),
+                    uuids.as_ref(),
+                    |batch| {
+                        let mut batch = projection.as_ref().map_or_else(
+                            || Ok(batch.clone()),
+                            |names| {
+                                let indices = names
+                                    .iter()
+                                    .map(|name| batch.schema().index_of(name))
+                                    .collect::<Result<Vec<_>, _>>()
+                                    .map_err(|error| {
+                                        DataFusionError::ArrowError(Box::new(error), None)
+                                    })?;
+                                batch.project(&indices).map_err(|error| {
+                                    DataFusionError::ArrowError(Box::new(error), None)
+                                })
+                            },
+                        )?;
+                        if let Some(rows) = remaining.as_mut() {
+                            if *rows == 0 {
+                                return Ok(true);
+                            }
+                            if batch.num_rows() > *rows {
+                                batch = batch.slice(0, *rows);
+                            }
+                            *rows -= batch.num_rows();
+                        }
+                        if hold_until_validated {
+                            held_bytes = held_bytes.saturating_add(batch.get_array_memory_size());
+                            held.push(batch);
+                            if held_bytes <= MAX_HELD_BYTES {
+                                return Ok(true);
+                            }
+                            // A limit this large streams: holding it would cost
+                            // more memory than the scan's own bounds allow.
+                            hold_until_validated = false;
+                            for batch in held.drain(..) {
+                                send(batch)?;
+                            }
+                            return Ok(true);
+                        }
+                        send(batch)?;
+                        Ok(true)
+                    },
+                );
+                // A limit stops its consumer after the first rows, so a failure in
+                // the rest of the route would go unobserved. Its rows wait for the
+                // whole route to validate: the limit changes emission, not authority.
+                let result = result.and_then(|work| {
+                    for batch in held {
+                        send(batch)?;
+                    }
+                    Ok(work)
+                });
+                let result = result.and_then(|work| {
+                    let (Some((work_counts, decoder_peak)), Some(work)) = (work_counts, work)
+                    else {
+                        return Ok(());
+                    };
+                    // Completed reader work only; these logical counters are not native RSS.
+                    let measured = |value| {
+                        usize::try_from(value).map_err(|_| {
+                            DataFusionError::Execution(
+                                "property metric exceeds platform range".into(),
+                            )
+                        })
+                    };
+                    for (counter, value) in work_counts.iter().zip([
+                        work.spill_bytes,
+                        work.authentication_bytes,
+                        work.physical_rows,
+                    ]) {
+                        counter.add(measured(value)?);
+                    }
+                    decoder_peak.set_max(measured(work.decoder_peak_bytes)?);
+                    Ok(())
+                });
+                if let Err(error) = result {
+                    let _ = sender.blocking_send(Err(error));
                 }
-                decoder_peak.set_max(measured(work.decoder_peak_bytes)?);
-                Ok(())
             });
-            if let Err(error) = result {
-                let _ = sender.blocking_send(Err(error));
-            }
         });
         let schema = Arc::clone(&self.schema);
         let output = stream::unfold(receiver, |mut receiver| async move {

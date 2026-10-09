@@ -473,6 +473,7 @@ pub use ordinal_identity_v4::{
 
 pub mod property_overlay;
 mod property_scan;
+mod property_scan_filter;
 pub use property_overlay::{
     AuthenticatedPropertyInventory, EdgeOwnerProbeWork, PROPERTY_OVERLAY_FORMAT,
     PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_TOMBSTONE_FIELD, PropertyFragmentId,

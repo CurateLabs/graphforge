@@ -359,6 +359,32 @@ fn an_anchored_one_hop_adds_one_authentication_pass_of_the_destination_route() {
     );
 }
 
+/// An anchored expansion reads destination properties for the matching UUIDs.
+/// Doubling unrelated rows must not double those authentication reads.
+#[test]
+fn anchored_destination_property_reads_do_not_grow_with_unrelated_rows() {
+    let _serial = serial();
+    let small = build(SMALL_NODES);
+    let large = build(LARGE_NODES);
+    assert!(large.fragments >= 2 * small.fragments - 1);
+    let query = "MATCH (a:Entity {ident: $ident})-[:LINK]->(b) RETURN count(b.ident) AS n";
+    let mut reads = Vec::new();
+    for built in [&small, &large] {
+        let forge = open(&built.project);
+        let (warm, _) = measured(&forge, query, 0);
+        assert_eq!(count(&warm), FAN_OUT as i64);
+        let (batches, io) = measured(&forge, query, 5);
+        assert_eq!(count(&batches), FAN_OUT as i64);
+        assert_eq!(io.write_bytes, 0);
+        assert_eq!(io.write_calls, 0);
+        reads.push(io.read_bytes);
+    }
+    assert!(
+        reads[1] <= reads[0] + (256 << 10),
+        "destination reads grew with unrelated rows: {reads:?}"
+    );
+}
+
 /// Statistics cannot exclude a fragment from a scattered column, so its lookup
 /// reads that column of every fragment; it returns the same rows.
 #[test]
