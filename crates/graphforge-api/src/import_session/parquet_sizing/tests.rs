@@ -2,7 +2,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, StringArray};
+use arrow::array::{Array, ArrayRef, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
@@ -173,10 +173,38 @@ fn flat_dictionary_validity_is_packed_across_row_groups_and_batch_boundaries() {
         let metadata = metadata(&file);
         assert_eq!(metadata.num_row_groups(), 2);
         let sized = scan(&file, &metadata, 5).unwrap();
-        let expected = if nullable { [30, 19] } else { [36, 22] };
+        // The second window contains rows 5..8: with alternating nulls,
+        // only row 6 contributes a three-byte value.
+        let expected = if nullable { [30, 16] } else { [36, 22] };
         assert_eq!(sized.batch_bytes(0), expected[0]);
         assert_eq!(sized.batch_bytes(1), expected[1]);
         assert_eq!(sized.decoded_bytes(), expected.into_iter().sum::<u64>());
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file.reopen().unwrap())
+            .unwrap()
+            .with_batch_size(5)
+            .build()
+            .unwrap();
+        let actual_sizes = reader
+            .enumerate()
+            .map(|(index, decoded)| {
+                let decoded = decoded.unwrap();
+                assert_eq!(decoded.num_rows(), [5, 3][index]);
+                let values = decoded
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                for row in 0..values.len() {
+                    let source_row = index * 5 + row;
+                    assert_eq!(values.is_null(row), nullable && source_row % 2 == 1);
+                    if !values.is_null(row) {
+                        assert_eq!(values.value(row), "aaa");
+                    }
+                }
+                values.to_data().get_slice_memory_size().unwrap() as u64
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual_sizes, if nullable { [30, 16] } else { [35, 21] });
     }
 }
 
