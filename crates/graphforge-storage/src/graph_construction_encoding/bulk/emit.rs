@@ -91,7 +91,11 @@ fn intern_rows(
     budgets: GraphConstructionBudgets,
 ) -> Result<(), GfError> {
     for group in groups {
-        intern_batch(catalog, &group.batch, kind, budgets)?;
+        let required = match kind {
+            ConstructionChunkKind::Node => 2,
+            ConstructionChunkKind::Edge => 4,
+        };
+        intern_batch(catalog, &group.batch, kind, required, budgets)?;
     }
     Ok(())
 }
@@ -100,11 +104,12 @@ pub(super) fn intern_batch(
     catalog: &mut RuntimeCatalog,
     batch: &RecordBatch,
     kind: ConstructionChunkKind,
+    required: usize,
     budgets: GraphConstructionBudgets,
 ) -> Result<(), GfError> {
-    let (required, owner_column) = match kind {
-        ConstructionChunkKind::Node => (2, "label"),
-        ConstructionChunkKind::Edge => (4, "rel_type"),
+    let owner_column = match kind {
+        ConstructionChunkKind::Node => "label",
+        ConstructionChunkKind::Edge => "rel_type",
     };
     let owners = required_string(batch, owner_column)?;
     let schema = batch.schema();
@@ -200,10 +205,16 @@ pub(super) fn build_catalog(
     let mut catalog = RuntimeCatalog::new();
     if let Some((rows, groups)) = node_scratch {
         for group in groups {
-            let mut reader = rows.reader(&group.path)?;
+            let mut reader = rows.group_reader(group)?;
             while let Some(batch) = reader.next()? {
                 super::tables::check_cancelled(cancel)?;
-                intern_batch(&mut catalog, &batch, ConstructionChunkKind::Node, budgets)?;
+                intern_batch(
+                    &mut catalog,
+                    &batch,
+                    ConstructionChunkKind::Node,
+                    super::property_rows::REQUIRED_COLUMNS,
+                    budgets,
+                )?;
             }
         }
     } else if let Some(groups) = node_groups {
@@ -223,10 +234,16 @@ pub(super) fn build_catalog(
     }
     if let Some((rows, groups)) = edge_scratch {
         for group in groups {
-            let mut reader = rows.reader(&group.path)?;
+            let mut reader = rows.group_reader(group)?;
             while let Some(batch) = reader.next()? {
                 super::tables::check_cancelled(cancel)?;
-                intern_batch(&mut catalog, &batch, ConstructionChunkKind::Edge, budgets)?;
+                intern_batch(
+                    &mut catalog,
+                    &batch,
+                    ConstructionChunkKind::Edge,
+                    super::property_rows::REQUIRED_COLUMNS,
+                    budgets,
+                )?;
             }
         }
     } else if let Some(groups) = edge_groups {

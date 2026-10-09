@@ -44,18 +44,19 @@ mod install;
 mod ordered;
 mod plan;
 mod property_emit;
+mod property_merge;
 mod property_rows;
 mod scratch;
 mod scratch_csr;
 mod scratch_edges;
 mod tables;
 
-#[cfg(test)]
-pub(crate) use budget::ForcedPartitions;
 pub use budget::{BulkRoute, BulkStagedReason};
+#[cfg(test)]
+pub(crate) use budget::{ForcedPartitions, derived_concurrency};
 pub use plan::{BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkSource};
 #[cfg(test)]
-pub(crate) use property_rows::ForcedPropertyFrames;
+pub(crate) use property_rows::{ForcedPropertyFrames, ForcedPropertySizing};
 
 use budget::ScratchPlan;
 use emit::{EdgeEmitter, RelationStats, Semantics};
@@ -330,12 +331,18 @@ pub(crate) fn encode_bulk(
         .as_ref()
         .map(|_| Scratch::create(source))
         .transpose()?;
+    let property_sizing = scratch_plan
+        .as_ref()
+        .map_or(property_rows::PropertySizing::SERIAL, |sized| {
+            sized.property
+        });
     let node_properties = scratch.as_ref().filter(|_| retain_nodes).map(|scratch| {
         property_rows::PropertyRows::new(
             scratch,
             ConstructionChunkKind::Node,
             budgets,
             plan.max_source_schema_bytes(),
+            property_sizing,
         )
     });
     let edge_properties = scratch.as_ref().filter(|_| retain_edges).map(|scratch| {
@@ -344,6 +351,7 @@ pub(crate) fn encode_bulk(
             ConstructionChunkKind::Edge,
             budgets,
             plan.max_source_schema_bytes(),
+            property_sizing,
         )
     });
 
@@ -637,10 +645,18 @@ pub(crate) fn encode_bulk(
     {
         let cache_window =
             graphforge_filesystem::cache_release_window_for_streams(2).map_err(storage)?;
-        let mut lanes = lanes::ParquetLanes::new(
-            if scratch.is_some() { None } else { admission },
-            budgets.max_batch_bytes,
-        );
+        // Parquet compression keeps its lanes on the scratch route when the
+        // plan runs more than one worker: the lanes hold at most
+        // `max_batch_bytes` of fragments, inside the property workspace.
+        let lanes_admission = if scratch_plan
+            .as_ref()
+            .is_some_and(|sized| sized.concurrency <= 1)
+        {
+            None
+        } else {
+            admission
+        };
+        let mut lanes = lanes::ParquetLanes::new(lanes_admission, budgets.max_batch_bytes);
         let mut property_evidence = GraphConstructionEncodingEvidence::default();
         for (rows, groups, kind) in [
             (
@@ -741,6 +757,18 @@ pub(crate) fn encode_bulk(
         + edge_properties
             .as_ref()
             .map_or(0, property_rows::PropertyRows::read_bytes);
+    let property_runs = node_properties
+        .as_ref()
+        .map_or(0, property_rows::PropertyRows::runs_formed)
+        + edge_properties
+            .as_ref()
+            .map_or(0, property_rows::PropertyRows::runs_formed);
+    let property_peak_retained_bytes = [&node_properties, &edge_properties]
+        .into_iter()
+        .flatten()
+        .map(property_rows::PropertyRows::peak_retained_bytes)
+        .max()
+        .unwrap_or(0);
     scratch_report.write_bytes += property_scratch_write_bytes;
     scratch_report.read_bytes += property_scratch_read_bytes;
     drop((node_properties, edge_properties));
@@ -876,6 +904,32 @@ pub(crate) fn encode_bulk(
             peak_csr_carry_entries: scratch_report.peak_csr_carry_entries,
             property_scratch_write_bytes,
             property_scratch_read_bytes,
+            property_source_bytes: if scratch_plan.is_some() {
+                plan.nodes
+                    .iter()
+                    .chain(&plan.edges)
+                    .filter(|source| !source.property_free)
+                    .map(|source| source.decoded_bytes)
+                    .fold(0_u64, u64::saturating_add)
+            } else {
+                0
+            },
+            property_runs,
+            property_peak_retained_bytes,
+            property_retained_budget_bytes: if retain_nodes || retain_edges {
+                scratch_plan
+                    .as_ref()
+                    .map_or(0, |sized| sized.property.retained_bytes)
+            } else {
+                0
+            },
+            property_merge_fan_in: if retain_nodes || retain_edges {
+                scratch_plan
+                    .as_ref()
+                    .map_or(0, |sized| sized.property.fan_in as u64)
+            } else {
+                0
+            },
             property_workspace_reserved_bytes: if scratch_plan.is_some()
                 && (retain_nodes || retain_edges)
             {

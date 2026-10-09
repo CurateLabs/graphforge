@@ -1,17 +1,31 @@
 //! Exact-schema property rows on disposable, CRC-protected Arrow IPC runs.
 //!
-//! Run fan-in is two. Binary levels compact runs during intake, so neither
-//! decoded payload nor the run inventory grows with the source's batch count.
+//! Property rows must reach the overlay writer in identity order, grouped by
+//! exact schema, while the decoded input is bounded (#1916). The route is an
+//! external merge sort sized from the memory budget (#1938):
+//!
+//! 1. Each worker retains the batches of its current task, per schema group,
+//!    until a run's worth of bytes (`PropertySizing::run_bytes`) is held, then
+//!    sorts them once by identity and writes one run. A run is written once.
+//! 2. A group with more runs than the merge fan-in is reduced by merging only
+//!    its smallest runs, in parallel, so every byte is rewritten at most as
+//!    often as the run count requires and not once per binary level.
+//! 3. The remaining runs merge in a single pass into identity-range segments,
+//!    one task per range, so the segments in range order are the sorted group.
+//!
+//! The retained bytes of all workers share one gate, so concurrent intake can
+//! never hold more than the budget derived for it, however many workers run.
 
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex};
+use std::time::Duration;
 
 use arrow::array::UInt32Array;
-use arrow::compute::concat_batches;
+use arrow::compute::interleave_record_batch;
 use arrow::ipc::{reader::StreamReader, writer::StreamWriter};
 use arrow::record_batch::RecordBatch;
 
@@ -19,7 +33,12 @@ use super::scratch::{Scratch, crc32c};
 use super::tables::check_cancelled;
 use super::{AtomicBool, ConstructionChunkKind, GfError, GraphConstructionBudgets, storage};
 
-const FRAME_TARGET: usize = 1 << 20;
+pub(super) use super::property_merge::SortedGroup;
+
+const DEFAULT_FRAME_BYTES: usize = 1 << 20;
+/// Bytes one retained row adds while its run is sorted: the 16-byte identity,
+/// two ordinals, and the sort's own working copy.
+const KEY_BYTES: usize = 32;
 #[cfg(test)]
 thread_local! { static FORCED_FRAME_BYTES: std::cell::Cell<Option<usize>> = const {std::cell::Cell::new(None)}; }
 #[cfg(test)]
@@ -37,27 +56,275 @@ impl Drop for ForcedPropertyFrames {
         FORCED_FRAME_BYTES.with(|forced| forced.set(None));
     }
 }
+#[cfg(test)]
+thread_local! { static FORCED_SIZING: std::cell::Cell<Option<(usize, usize)>> = const {std::cell::Cell::new(None)}; }
+/// Forces the run size and merge fan-in of the builds the current test thread
+/// runs, until dropped, so a small input spans many runs and merge levels.
+#[cfg(test)]
+pub(crate) struct ForcedPropertySizing;
+#[cfg(test)]
+impl ForcedPropertySizing {
+    pub(crate) fn set(run_bytes: usize, fan_in: usize) -> Self {
+        FORCED_SIZING.with(|forced| forced.set(Some((run_bytes.max(1), fan_in.max(2)))));
+        Self
+    }
+}
+#[cfg(test)]
+impl Drop for ForcedPropertySizing {
+    fn drop(&mut self) {
+        FORCED_SIZING.with(|forced| forced.set(None));
+    }
+}
 
-const HEADER: usize = 16;
+pub(super) const HEADER: usize = 16;
+/// Columns every scratch row leads with: the identity and the owner (a node's
+/// label, an edge's relation type). The properties follow.
+pub(super) const REQUIRED_COLUMNS: usize = 2;
 
-struct Group {
-    levels: Vec<Option<PathBuf>>,
+/// How the budget divides among run formation and merging.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct PropertySizing {
+    /// Bytes one worker retains before it sorts and writes a run.
+    pub(super) run_bytes: usize,
+    /// Bytes every worker together may retain, including sort keys.
+    pub(super) retained_bytes: u64,
+    /// Runs one merge holds open.
+    pub(super) fan_in: usize,
+    /// Target size of one scratch frame.
+    pub(super) frame_bytes: usize,
+}
+
+impl PropertySizing {
+    /// The sizing of a build that runs one worker.
+    pub(super) const SERIAL: Self = Self {
+        run_bytes: 64 << 20,
+        retained_bytes: 128 << 20,
+        fan_in: 16,
+        frame_bytes: DEFAULT_FRAME_BYTES,
+    };
+}
+
+/// Where a retained batch's bytes are accounted: one pool for all workers.
+struct Gate {
+    capacity: u64,
+    available: Mutex<u64>,
+    changed: Condvar,
+    /// Most bytes ever held at once.
+    peak: AtomicU64,
+}
+
+impl Gate {
+    fn new(capacity: u64) -> Self {
+        Self {
+            capacity,
+            available: Mutex::new(capacity),
+            changed: Condvar::new(),
+            peak: AtomicU64::new(0),
+        }
+    }
+
+    fn try_acquire(&self, bytes: u64) -> Result<bool, GfError> {
+        let mut available = self
+            .available
+            .lock()
+            .map_err(|_| storage("property run gate poisoned"))?;
+        if *available >= bytes {
+            *available -= bytes;
+            self.peak
+                .fetch_max(self.capacity - *available, Ordering::Relaxed);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn acquire(&self, bytes: u64, cancel: &AtomicBool) -> Result<(), GfError> {
+        let mut available = self
+            .available
+            .lock()
+            .map_err(|_| storage("property run gate poisoned"))?;
+        while *available < bytes {
+            check_cancelled(cancel)?;
+            available = self
+                .changed
+                .wait_timeout(available, Duration::from_millis(20))
+                .map_err(|_| storage("property run gate poisoned"))?
+                .0;
+        }
+        *available -= bytes;
+        self.peak
+            .fetch_max(self.capacity - *available, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn release(&self, bytes: u64) {
+        if let Ok(mut available) = self.available.lock() {
+            *available += bytes;
+        }
+        self.changed.notify_all();
+    }
+}
+
+/// One frame of a run: where it lies and the identities that bound it.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct FrameMeta {
+    pub(super) offset: u64,
+    pub(super) bytes: u64,
+    pub(super) rows: u32,
+    pub(super) first: [u8; 16],
+    pub(super) last: [u8; 16],
+}
+
+/// A file of frames whose rows are in identity order.
+#[derive(Debug)]
+pub(super) struct Run {
+    pub(super) path: PathBuf,
+    pub(super) frames: Vec<FrameMeta>,
+    pub(super) rows: u64,
+}
+
+impl Run {
+    pub(super) fn bytes(&self) -> u64 {
+        self.frames.iter().map(|frame| frame.bytes).sum()
+    }
 }
 
 pub(super) struct PropertyRows<'a> {
     scratch: &'a Scratch,
     kind: ConstructionChunkKind,
-    budgets: GraphConstructionBudgets,
+    pub(super) budgets: GraphConstructionBudgets,
     schema_bytes: usize,
-    frame_target: usize,
-    groups: Mutex<BTreeMap<String, Group>>,
+    pub(super) frame_target: usize,
+    pub(super) sizing: PropertySizing,
+    gate: Gate,
+    pub(super) runs: Mutex<BTreeMap<String, Vec<Run>>>,
     next_file: AtomicU64,
     written: AtomicU64,
     read: AtomicU64,
+    runs_formed: AtomicU64,
 }
 
-pub(super) struct SortedGroup {
-    pub(super) path: PathBuf,
+/// Pending batches of one schema group in a worker's current run.
+#[derive(Default)]
+struct Pending {
+    batches: Vec<RecordBatch>,
+}
+
+/// One worker's view of the intake: batches wait here, per schema group, until
+/// a run's worth is held. Dropping it returns whatever it still holds.
+pub(super) struct RunSink<'r, 'a> {
+    rows: &'r PropertyRows<'a>,
+    pending: BTreeMap<String, Pending>,
+    held: u64,
+}
+
+impl RunSink<'_, '_> {
+    /// Retain `batch` for the next run of its schema group.
+    pub(super) fn push(&mut self, batch: &RecordBatch, cancel: &AtomicBool) -> Result<(), GfError> {
+        if batch.num_rows() == 0 {
+            return Ok(());
+        }
+        let sizing = self.rows.sizing;
+        let need = (batch.get_array_memory_size() as u64)
+            .saturating_add((batch.num_rows() * KEY_BYTES) as u64)
+            .min(sizing.retained_bytes);
+        // A run is as large as the worker's share allows, never smaller than
+        // one batch.
+        if self.held > 0 && self.held.saturating_add(need) > sizing.run_bytes as u64 {
+            self.flush(cancel)?;
+        }
+        if !self.rows.gate.try_acquire(need)? {
+            // Others hold the pool. Return this worker's share first, so the
+            // wait below can never be for bytes this worker itself holds.
+            self.flush(cancel)?;
+            self.rows.gate.acquire(need, cancel)?;
+        }
+        self.held += need;
+        let digest = crate::graph_construction::normalized_schema_digest(batch.schema().as_ref());
+        if !self.pending.contains_key(&digest)
+            && self.pending.len() >= self.rows.budgets.max_schema_groups
+        {
+            return Err(storage("construction schema-group budget exhausted"));
+        }
+        // Grouped by the schema the source stated; stored without an edge's
+        // endpoints, which the edge records already carry.
+        let kept = self.rows.scratch_columns(batch)?;
+        self.pending.entry(digest).or_default().batches.push(kept);
+        Ok(())
+    }
+
+    /// Sort and write every pending group as one run each.
+    fn flush(&mut self, cancel: &AtomicBool) -> Result<(), GfError> {
+        for (digest, pending) in std::mem::take(&mut self.pending) {
+            check_cancelled(cancel)?;
+            let run = self.rows.write_run(&pending.batches, cancel)?;
+            drop(pending);
+            self.rows.add_run(digest, run)?;
+        }
+        self.rows.gate.release(self.held);
+        self.held = 0;
+        Ok(())
+    }
+
+    /// Write whatever is still retained.
+    pub(super) fn finish(mut self, cancel: &AtomicBool) -> Result<(), GfError> {
+        self.flush(cancel)
+    }
+}
+
+impl Drop for RunSink<'_, '_> {
+    fn drop(&mut self) {
+        // An abandoned sink (an error elsewhere) must not strand the pool.
+        if self.held > 0 {
+            self.rows.gate.release(self.held);
+            self.held = 0;
+        }
+    }
+}
+
+/// Appends frames to one run file and records where each lies.
+pub(super) struct RunWriter<'p, 'a> {
+    rows: &'p PropertyRows<'a>,
+    path: PathBuf,
+    file: std::io::BufWriter<File>,
+    offset: u64,
+    frames: Vec<FrameMeta>,
+    total: u64,
+}
+
+impl RunWriter<'_, '_> {
+    pub(super) fn append(
+        &mut self,
+        batch: &RecordBatch,
+        first: [u8; 16],
+        last: [u8; 16],
+    ) -> Result<(), GfError> {
+        let frame = self.rows.encode_frame(batch)?;
+        self.file.write_all(&frame).map_err(storage)?;
+        self.rows
+            .written
+            .fetch_add(frame.len() as u64, Ordering::Relaxed);
+        let rows = u32::try_from(batch.num_rows()).map_err(storage)?;
+        self.frames.push(FrameMeta {
+            offset: self.offset,
+            bytes: frame.len() as u64,
+            rows,
+            first,
+            last,
+        });
+        self.offset += frame.len() as u64;
+        self.total += u64::from(rows);
+        Ok(())
+    }
+
+    pub(super) fn finish(mut self) -> Result<Run, GfError> {
+        self.file.flush().map_err(storage)?;
+        Ok(Run {
+            path: self.path,
+            frames: self.frames,
+            rows: self.total,
+        })
+    }
 }
 
 /// Retain compact pieces in a binary tree. At most logarithmically many Arrow
@@ -82,7 +349,8 @@ impl BatchAccumulator {
                 self.levels[level] = Some(batch);
                 return Ok(());
             };
-            batch = concat_batches(&batch.schema(), [&previous, &batch]).map_err(storage)?;
+            batch = arrow::compute::concat_batches(&batch.schema(), [&previous, &batch])
+                .map_err(storage)?;
             level += 1;
         }
     }
@@ -101,7 +369,7 @@ impl BatchAccumulator {
         if batches.len() == 1 {
             return Ok(batches.into_iter().next());
         }
-        concat_batches(&first.schema(), &batches)
+        arrow::compute::concat_batches(&first.schema(), &batches)
             .map(Some)
             .map_err(storage)
     }
@@ -113,8 +381,19 @@ impl<'a> PropertyRows<'a> {
         kind: ConstructionChunkKind,
         budgets: GraphConstructionBudgets,
         schema_bytes: u64,
+        sizing: PropertySizing,
     ) -> Self {
-        let frame_target = FRAME_TARGET;
+        #[cfg(test)]
+        let sizing =
+            FORCED_SIZING
+                .with(std::cell::Cell::get)
+                .map_or(sizing, |(run_bytes, fan_in)| PropertySizing {
+                    run_bytes,
+                    retained_bytes: sizing.retained_bytes.max(run_bytes as u64),
+                    fan_in,
+                    ..sizing
+                });
+        let frame_target = sizing.frame_bytes.max(1);
         #[cfg(test)]
         let frame_target = FORCED_FRAME_BYTES
             .with(std::cell::Cell::get)
@@ -125,10 +404,44 @@ impl<'a> PropertyRows<'a> {
             budgets,
             frame_target,
             schema_bytes: usize::try_from(schema_bytes).unwrap_or(usize::MAX),
-            groups: Mutex::new(BTreeMap::new()),
+            sizing,
+            gate: Gate::new(sizing.retained_bytes),
+            runs: Mutex::new(BTreeMap::new()),
             next_file: AtomicU64::new(0),
             written: AtomicU64::new(0),
             read: AtomicU64::new(0),
+            runs_formed: AtomicU64::new(0),
+        }
+    }
+
+    pub(super) fn uuid_name(&self) -> &'static str {
+        match self.kind {
+            ConstructionChunkKind::Node => "node_uuid",
+            ConstructionChunkKind::Edge => "edge_uuid",
+        }
+    }
+
+    /// `batch` as scratch rows keep it: identity, owner, properties.
+    fn scratch_columns(&self, batch: &RecordBatch) -> Result<RecordBatch, GfError> {
+        let source_required = match self.kind {
+            ConstructionChunkKind::Node => 2,
+            ConstructionChunkKind::Edge => 4,
+        };
+        if source_required == REQUIRED_COLUMNS {
+            return Ok(batch.clone());
+        }
+        let columns = (0..REQUIRED_COLUMNS)
+            .chain(source_required..batch.num_columns())
+            .collect::<Vec<_>>();
+        batch.project(&columns).map_err(storage)
+    }
+
+    /// A worker's intake. Create one per task and `finish` it.
+    pub(super) fn sink(&self) -> RunSink<'_, 'a> {
+        RunSink {
+            rows: self,
+            pending: BTreeMap::new(),
+            held: 0,
         }
     }
 
@@ -147,42 +460,128 @@ impl<'a> PropertyRows<'a> {
     pub(super) fn read_bytes(&self) -> u64 {
         self.read.load(Ordering::Relaxed)
     }
+    /// The most bytes concurrent intake held at once.
+    pub(super) fn peak_retained_bytes(&self) -> u64 {
+        self.gate.peak.load(Ordering::Relaxed)
+    }
 
-    pub(super) fn write(&self, path: &Path, batch: &RecordBatch) -> Result<(), GfError> {
-        let mut payload = Vec::new();
+    /// Sorted runs formed from the input.
+    pub(super) fn runs_formed(&self) -> u64 {
+        self.runs_formed.load(Ordering::Relaxed)
+    }
+
+    fn add_run(&self, digest: String, run: Run) -> Result<(), GfError> {
+        let mut groups = self
+            .runs
+            .lock()
+            .map_err(|_| storage("property schema lock poisoned"))?;
+        if !groups.contains_key(&digest) && groups.len() >= self.budgets.max_schema_groups {
+            return Err(storage("construction schema-group budget exhausted"));
+        }
+        groups.entry(digest).or_default().push(run);
+        self.runs_formed.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// A new run file for the merge or the sink to fill.
+    pub(super) fn run_writer(&self) -> Result<RunWriter<'_, 'a>, GfError> {
+        let path = self.path()?;
+        let file = OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .map_err(storage)?;
+        Ok(RunWriter {
+            rows: self,
+            path,
+            file: std::io::BufWriter::with_capacity(1 << 20, file),
+            offset: 0,
+            frames: Vec::new(),
+            total: 0,
+        })
+    }
+
+    /// Sort `batches` (one schema group) by identity and write them as one run.
+    fn write_run(&self, batches: &[RecordBatch], cancel: &AtomicBool) -> Result<Run, GfError> {
+        let uuid_name = self.uuid_name();
+        let total_rows = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
+        let total_bytes = batches
+            .iter()
+            .map(RecordBatch::get_array_memory_size)
+            .sum::<usize>();
+        let mut keys = Vec::with_capacity(total_rows);
+        for (ordinal, batch) in batches.iter().enumerate() {
+            let uuids = crate::graph_construction::batch_uuid_column(batch, uuid_name)?;
+            let ordinal = u32::try_from(ordinal).map_err(storage)?;
+            for row in 0..batch.num_rows() {
+                keys.push((
+                    <[u8; 16]>::try_from(uuids.value(row)).map_err(storage)?,
+                    ordinal,
+                    u32::try_from(row).map_err(storage)?,
+                ));
+            }
+        }
+        keys.sort_unstable();
+        let refs = batches.iter().collect::<Vec<_>>();
+        let step = self.rows_per_frame(total_bytes, total_rows);
+        let mut writer = self.run_writer()?;
+        let mut indices = Vec::with_capacity(step);
+        for chunk in keys.chunks(step) {
+            check_cancelled(cancel)?;
+            indices.clear();
+            indices.extend(chunk.iter().map(|key| (key.1 as usize, key.2 as usize)));
+            let frame = interleave_record_batch(&refs, &indices).map_err(storage)?;
+            writer.append(&frame, chunk[0].0, chunk[chunk.len() - 1].0)?;
+            crate::graph_construction::construction_failpoint("bulk.during_property_run");
+        }
+        writer.finish()
+    }
+
+    /// Rows that make a frame of about the target size, at this row width.
+    pub(super) fn rows_per_frame(&self, bytes: usize, rows: usize) -> usize {
+        (self.frame_target / (bytes / rows.max(1)).max(1)).clamp(1, self.budgets.max_batch_rows)
+    }
+
+    fn encode_frame(&self, batch: &RecordBatch) -> Result<Vec<u8>, GfError> {
+        let mut frame = vec![0_u8; HEADER];
         {
-            let mut writer =
-                StreamWriter::try_new(&mut payload, &batch.schema()).map_err(storage)?;
+            let mut writer = StreamWriter::try_new(&mut frame, &batch.schema()).map_err(storage)?;
             writer.write(batch).map_err(storage)?;
             writer.finish().map_err(storage)?;
         }
+        let payload = frame.len() - HEADER;
         // This ceiling includes IPC alignment, offsets and schema metadata.
         // Refuse corrupt/unbounded frames before allocating on the read side.
-        if payload.len() > self.frame_limit() {
+        if payload > self.frame_limit() {
             return Err(storage(
                 "property scratch frame exceeds its reserved workspace",
             ));
         }
-        let mut file = OpenOptions::new()
-            .append(true)
-            .open(path)
-            .map_err(storage)?;
-        let mut header = [0_u8; HEADER];
-        header[..8].copy_from_slice(&(payload.len() as u64).to_le_bytes());
-        header[8..12].copy_from_slice(&crc32c(&payload).to_le_bytes());
-        header[12..].copy_from_slice(
+        let crc = crc32c(&frame[HEADER..]);
+        frame[..8].copy_from_slice(&(payload as u64).to_le_bytes());
+        frame[8..12].copy_from_slice(&crc.to_le_bytes());
+        frame[12..HEADER].copy_from_slice(
             &u32::try_from(batch.num_rows())
                 .map_err(storage)?
                 .to_le_bytes(),
         );
-        file.write_all(&header).map_err(storage)?;
-        file.write_all(&payload).map_err(storage)?;
+        Ok(frame)
+    }
+
+    /// Append `batch` to the frame file `path` (windows and projections).
+    pub(super) fn write(&self, path: &Path, batch: &RecordBatch) -> Result<(), GfError> {
+        let frame = self.encode_frame(batch)?;
+        OpenOptions::new()
+            .append(true)
+            .open(path)
+            .map_err(storage)?
+            .write_all(&frame)
+            .map_err(storage)?;
         self.written
-            .fetch_add((HEADER + payload.len()) as u64, Ordering::Relaxed);
+            .fetch_add(frame.len() as u64, Ordering::Relaxed);
         Ok(())
     }
 
-    fn frame_limit(&self) -> usize {
+    pub(super) fn frame_limit(&self) -> usize {
         self.budgets
             .max_batch_bytes
             .saturating_mul(2)
@@ -218,183 +617,55 @@ impl<'a> PropertyRows<'a> {
         RecordBatch::try_new(batch.schema(), columns).map_err(storage)
     }
 
-    fn write_compact(&self, path: &Path, batch: &RecordBatch) -> Result<(), GfError> {
-        let bytes = batch.get_array_memory_size();
-        let step = (batch.num_rows().saturating_mul(self.frame_target) / bytes.max(1)).max(1);
-        let mut offset = 0;
-        while offset < batch.num_rows() {
-            let len = step.min(batch.num_rows() - offset);
-            let compact = Self::copy_range(batch, offset, len)?;
-            self.write(path, &compact)?;
-            offset += len;
-        }
-        Ok(())
+    /// The rows of a sorted group, in identity order.
+    pub(super) fn group_reader<'r>(
+        &'r self,
+        group: &'r SortedGroup,
+    ) -> Result<GroupReader<'r, 'a>, GfError> {
+        Ok(GroupReader {
+            rows: self,
+            segments: group.segments.iter(),
+            current: None,
+        })
     }
+}
 
-    pub(super) fn ingest(&self, batch: &RecordBatch, cancel: &AtomicBool) -> Result<(), GfError> {
-        if batch.num_rows() == 0 {
-            return Ok(());
-        }
-        let digest = crate::graph_construction::normalized_schema_digest(batch.schema().as_ref());
-        let uuid_name = match self.kind {
-            ConstructionChunkKind::Node => "node_uuid",
-            ConstructionChunkKind::Edge => "edge_uuid",
-        };
-        let uuids = crate::graph_construction::batch_uuid_column(batch, uuid_name)?;
-        let mut indexes =
-            (0..u32::try_from(batch.num_rows()).map_err(storage)?).collect::<Vec<_>>();
-        indexes.sort_unstable_by(|left, right| {
-            uuids
-                .value(*left as usize)
-                .cmp(uuids.value(*right as usize))
-        });
-        let indexes = UInt32Array::from(indexes);
-        let columns = batch
-            .columns()
-            .iter()
-            .map(|column| arrow::compute::take(column.as_ref(), &indexes, None).map_err(storage))
-            .collect::<Result<Vec<_>, _>>()?;
-        let sorted = RecordBatch::try_new(batch.schema(), columns).map_err(storage)?;
-        let mut path = self.path()?;
-        self.write_compact(&path, &sorted)?;
-        drop(sorted);
-        let mut groups = self
-            .groups
-            .lock()
-            .map_err(|_| storage("property schema lock poisoned"))?;
-        if !groups.contains_key(&digest) && groups.len() >= self.budgets.max_schema_groups {
-            return Err(storage("construction schema-group budget exhausted"));
-        }
-        let group = groups
-            .entry(digest)
-            .or_insert_with(|| Group { levels: Vec::new() });
-        let mut level = 0;
+/// Reads a sorted group's segments one after another.
+pub(super) struct GroupReader<'r, 'a> {
+    rows: &'r PropertyRows<'a>,
+    segments: std::slice::Iter<'r, Run>,
+    current: Option<RowsReader<'r, 'a>>,
+}
+
+impl GroupReader<'_, '_> {
+    pub(super) fn next(&mut self) -> Result<Option<RecordBatch>, GfError> {
         loop {
-            check_cancelled(cancel)?;
-            if level == group.levels.len() {
-                group.levels.push(Some(path));
-                break;
-            }
-            let Some(previous) = group.levels[level].take() else {
-                group.levels[level] = Some(path);
-                break;
-            };
-            let merged = self.merge(&previous, &path, uuid_name, cancel)?;
-            std::fs::remove_file(previous).map_err(storage)?;
-            std::fs::remove_file(path).map_err(storage)?;
-            path = merged;
-            level += 1;
-        }
-        Ok(())
-    }
-
-    pub(super) fn finish(&self, cancel: &AtomicBool) -> Result<Vec<SortedGroup>, GfError> {
-        let groups = std::mem::take(
-            &mut *self
-                .groups
-                .lock()
-                .map_err(|_| storage("property schema lock poisoned"))?,
-        );
-        let uuid = match self.kind {
-            ConstructionChunkKind::Node => "node_uuid",
-            ConstructionChunkKind::Edge => "edge_uuid",
-        };
-        let mut result = Vec::with_capacity(groups.len());
-        for group in groups.into_values() {
-            let mut paths = group.levels.into_iter().rev().flatten();
-            let Some(mut path) = paths.next() else {
-                continue;
-            };
-            for next in paths {
-                let merged = self.merge(&path, &next, uuid, cancel)?;
-                std::fs::remove_file(path).map_err(storage)?;
-                std::fs::remove_file(next).map_err(storage)?;
-                path = merged;
-            }
-            result.push(SortedGroup { path });
-        }
-        Ok(result)
-    }
-
-    fn merge(
-        &self,
-        left: &Path,
-        right: &Path,
-        uuid_name: &str,
-        cancel: &AtomicBool,
-    ) -> Result<PathBuf, GfError> {
-        let output = self.path()?;
-        let mut readers = [self.reader(left)?, self.reader(right)?];
-        let mut batches = [readers[0].next()?, readers[1].next()?];
-        let mut offsets = [0_usize; 2];
-        let mut accumulator = BatchAccumulator::new();
-        let mut accumulated_bytes = 0;
-        let mut accumulated_rows = 0;
-        while batches.iter().any(Option::is_some) {
-            check_cancelled(cancel)?;
-            let side = match (&batches[0], &batches[1]) {
-                (Some(a), Some(b)) => usize::from(
-                    crate::graph_construction::batch_uuid_column(a, uuid_name)?.value(offsets[0])
-                        > crate::graph_construction::batch_uuid_column(b, uuid_name)?
-                            .value(offsets[1]),
-                ),
-                (Some(_), None) => 0,
-                (None, Some(_)) => 1,
-                (None, None) => break,
-            };
-            let batch = batches[side].as_ref().expect("selected live run");
-            let start = offsets[side];
-            let mut end = start + 1;
-            // Copy contiguous winning rows together, rather than making one
-            // RecordBatch per row for an already sorted run.
-            if let Some(other) = &batches[1 - side] {
-                let key = crate::graph_construction::batch_uuid_column(other, uuid_name)?
-                    .value(offsets[1 - side]);
-                let uuids = crate::graph_construction::batch_uuid_column(batch, uuid_name)?;
-                while end < batch.num_rows() && uuids.value(end) <= key {
-                    end += 1;
+            if let Some(reader) = &mut self.current {
+                if let Some(batch) = reader.next()? {
+                    return Ok(Some(batch));
                 }
-            } else {
-                end = batch.num_rows();
+                self.current = None;
             }
-            let piece = Self::copy_range(batch, start, end - start)?;
-            if accumulated_rows + piece.num_rows() > self.budgets.max_batch_rows {
-                if let Some(pending) = accumulator.finish()? {
-                    self.write(&output, &pending)?;
-                }
-                accumulated_bytes = 0;
-                accumulated_rows = 0;
-            }
-            accumulated_rows += piece.num_rows();
-            accumulated_bytes += piece.get_array_memory_size();
-            accumulator.push(piece)?;
-            offsets[side] = end;
-            if end == batch.num_rows() {
-                batches[side] = readers[side].next()?;
-                offsets[side] = 0;
-            }
-            if accumulated_bytes >= self.frame_target {
-                self.write(
-                    &output,
-                    &accumulator.finish()?.expect("nonempty accumulator"),
-                )?;
-                accumulated_bytes = 0;
-                accumulated_rows = 0;
-            }
+            let Some(segment) = self.segments.next() else {
+                return Ok(None);
+            };
+            self.current = Some(self.rows.reader(&segment.path)?);
         }
-        if let Some(batch) = accumulator.finish()? {
-            self.write(&output, &batch)?;
-        }
-        Ok(output)
     }
 }
 
 pub(super) struct RowsReader<'r, 's> {
-    rows: &'r PropertyRows<'s>,
-    file: File,
+    pub(super) rows: &'r PropertyRows<'s>,
+    pub(super) file: File,
 }
 
 impl RowsReader<'_, '_> {
+    /// Continue reading at the frame that starts `offset` bytes into the file.
+    pub(super) fn seek(&mut self, offset: u64) -> Result<(), GfError> {
+        self.file.seek(SeekFrom::Start(offset)).map_err(storage)?;
+        Ok(())
+    }
+
     pub(super) fn next(&mut self) -> Result<Option<RecordBatch>, GfError> {
         let mut header = [0_u8; HEADER];
         let n = self.file.read(&mut header[..1]).map_err(storage)?;
@@ -433,11 +704,7 @@ impl RowsReader<'_, '_> {
         validate_ipc(
             &payload,
             expected_rows,
-            self.rows.budgets.max_property_columns
-                + match self.rows.kind {
-                    ConstructionChunkKind::Node => 2,
-                    ConstructionChunkKind::Edge => 4,
-                },
+            self.rows.budgets.max_property_columns + REQUIRED_COLUMNS,
             self.rows
                 .schema_bytes
                 .saturating_mul(4)
@@ -686,6 +953,7 @@ mod tests {
             ConstructionChunkKind::Node,
             GraphConstructionBudgets::default(),
             0,
+            PropertySizing::SERIAL,
         );
         let path = rows.path().unwrap();
         let before_write = rows.written_bytes();
@@ -705,41 +973,247 @@ mod tests {
         assert_eq!(rows.read_bytes() - before_read, 2 * file_bytes);
     }
 
-    #[test]
-    fn binary_runs_sort_globally_without_retaining_one_run_per_batch() {
-        let root = tempfile::tempdir().unwrap();
-        let directory = super::super::StableDirectory::open(root.path()).unwrap();
-        let scratch = Scratch::create(&directory).unwrap();
-        let rows = PropertyRows::new(
-            &scratch,
-            ConstructionChunkKind::Node,
-            GraphConstructionBudgets::default(),
-            0,
-        );
-        let cancel = AtomicBool::new(false);
-        for index in (0..65).rev() {
-            rows.ingest(&batch(index * 32, 32), &cancel).unwrap();
-        }
-        assert!(
-            rows.groups
-                .lock()
-                .unwrap()
-                .values()
-                .all(|group| group.levels.len() <= 7)
-        );
-        let groups = rows.finish(&cancel).unwrap();
-        assert_eq!(groups.len(), 1);
-        let mut reader = rows.reader(&groups[0].path).unwrap();
-        let mut expected = 0_u64;
+    fn rows_of(rows: &PropertyRows<'_>, group: &SortedGroup) -> Vec<u64> {
+        let mut reader = rows.group_reader(group).unwrap();
+        let mut seen = Vec::new();
         while let Some(batch) = reader.next().unwrap() {
             let uuids = crate::graph_construction::batch_uuid_column(&batch, "node_uuid").unwrap();
             for row in 0..batch.num_rows() {
-                assert_eq!(&uuids.value(row)[8..], &expected.to_be_bytes());
-                expected += 1;
+                seen.push(u64::from_be_bytes(
+                    uuids.value(row)[8..].try_into().unwrap(),
+                ));
             }
         }
-        assert_eq!(expected, 65 * 32);
-        assert!(rows.written_bytes() > 0 && rows.read_bytes() > 0);
+        seen
+    }
+
+    fn rows_with(
+        scratch: &Scratch,
+        run_bytes: usize,
+        fan_in: usize,
+        retained_bytes: u64,
+    ) -> PropertyRows<'_> {
+        PropertyRows::new(
+            scratch,
+            ConstructionChunkKind::Node,
+            GraphConstructionBudgets::default(),
+            0,
+            PropertySizing {
+                run_bytes,
+                retained_bytes,
+                fan_in,
+                frame_bytes: 4096,
+            },
+        )
+    }
+
+    /// Shuffled batches of 32 identities each, from `threads` concurrent sinks.
+    fn ingest(rows: &PropertyRows<'_>, batches: u64, threads: u64) {
+        let cancel = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            for thread in 0..threads {
+                let cancel = &cancel;
+                scope.spawn(move || {
+                    let mut sink = rows.sink();
+                    for index in (0..batches).filter(|index| index % threads == thread).rev() {
+                        sink.push(&batch(index * 32, 32), cancel).unwrap();
+                    }
+                    sink.finish(cancel).unwrap();
+                });
+            }
+        });
+    }
+
+    #[test]
+    fn runs_merge_into_one_sorted_stream_at_every_fan_in_and_run_size() {
+        for (run_bytes, fan_in, threads) in [
+            (1, 2, 1),
+            (1, 3, 4),
+            (3 << 10, 2, 3),
+            (3 << 10, 5, 2),
+            (1 << 20, 16, 1),
+            (1 << 20, 2, 4),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let directory = super::super::StableDirectory::open(root.path()).unwrap();
+            let scratch = Scratch::create(&directory).unwrap();
+            let rows = rows_with(&scratch, run_bytes, fan_in, 1 << 20);
+            ingest(&rows, 65, threads);
+            let formed = rows.runs_formed();
+            assert!(
+                run_bytes > 1 << 10 || formed >= 65,
+                "run_bytes {run_bytes}: {formed} runs"
+            );
+            let groups = rows.finish(&AtomicBool::new(false)).unwrap();
+            assert_eq!(groups.len(), 1, "run_bytes {run_bytes} fan_in {fan_in}");
+            let seen = rows_of(&rows, &groups[0]);
+            assert_eq!(
+                seen,
+                (0..65 * 32).collect::<Vec<_>>(),
+                "run_bytes {run_bytes} fan_in {fan_in} threads {threads}"
+            );
+            assert!(rows.written_bytes() > 0 && rows.read_bytes() > 0);
+        }
+    }
+
+    #[test]
+    fn few_runs_are_not_rewritten_by_a_wide_enough_merge() {
+        // 65 runs under a fan-in of 64 merge once into segments; the input is
+        // written once and the segments once: no per-level rewriting.
+        let root = tempfile::tempdir().unwrap();
+        let directory = super::super::StableDirectory::open(root.path()).unwrap();
+        let scratch = Scratch::create(&directory).unwrap();
+        let rows = rows_with(&scratch, 1, 64, 1 << 20);
+        ingest(&rows, 65, 1);
+        let runs_written = rows.written_bytes();
+        let groups = rows.finish(&AtomicBool::new(false)).unwrap();
+        let merged_written = rows.written_bytes() - runs_written;
+        // One run per batch; the 65th batch makes one merge of the two
+        // smallest runs, and the final merge rewrites everything once more.
+        assert!(
+            merged_written <= runs_written + runs_written / 8,
+            "runs {runs_written} merged {merged_written}"
+        );
+        assert_eq!(rows_of(&rows, &groups[0]).len(), 65 * 32);
+    }
+
+    #[test]
+    fn concurrent_intake_never_holds_more_than_the_gate_admits() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = super::super::StableDirectory::open(root.path()).unwrap();
+        let scratch = Scratch::create(&directory).unwrap();
+        let one = batch(0, 32);
+        let need = (one.get_array_memory_size() + 32 * KEY_BYTES) as u64;
+        // Room for exactly two batches while eight threads push: the rest wait.
+        let rows = rows_with(&scratch, usize::MAX >> 1, 4, 2 * need);
+        ingest(&rows, 64, 8);
+        assert!(
+            rows.gate
+                .available
+                .lock()
+                .is_ok_and(|free| *free == 2 * need)
+        );
+        let groups = rows.finish(&AtomicBool::new(false)).unwrap();
+        assert_eq!(rows_of(&rows, &groups[0]), (0..64 * 32).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn an_abandoned_sink_returns_its_bytes_to_the_gate() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = super::super::StableDirectory::open(root.path()).unwrap();
+        let scratch = Scratch::create(&directory).unwrap();
+        let one = batch(0, 32);
+        let need = (one.get_array_memory_size() + 32 * KEY_BYTES) as u64;
+        let rows = rows_with(&scratch, usize::MAX >> 1, 4, need);
+        let cancel = AtomicBool::new(false);
+        let mut sink = rows.sink();
+        sink.push(&one, &cancel).unwrap();
+        drop(sink);
+        // Were the bytes stranded, this would wait for the 20 ms poll forever.
+        let mut sink = rows.sink();
+        sink.push(&batch(32, 32), &cancel).unwrap();
+        sink.finish(&cancel).unwrap();
+    }
+
+    #[test]
+    fn a_range_merge_yields_exactly_the_rows_inside_the_range() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = super::super::StableDirectory::open(root.path()).unwrap();
+        let scratch = Scratch::create(&directory).unwrap();
+        let rows = rows_with(&scratch, 1, 64, 1 << 20);
+        ingest(&rows, 20, 1);
+        let runs = std::mem::take(&mut *rows.runs.lock().unwrap())
+            .into_values()
+            .next()
+            .unwrap();
+        let id = |value: u64| {
+            let mut bytes = [0_u8; 16];
+            bytes[8..].copy_from_slice(&value.to_be_bytes());
+            bytes
+        };
+        let refs = runs.iter().collect::<Vec<_>>();
+        let cancel = AtomicBool::new(false);
+        for (lower, upper) in [
+            (None, None),
+            (Some(100), Some(101)),
+            (Some(31), Some(33)),
+            (None, Some(7)),
+            (Some(630), None),
+            (Some(10_000), None),
+            (Some(5), Some(5)),
+        ] {
+            let merged = rows
+                .merge(&refs, lower.map(id), upper.map(id), &cancel)
+                .unwrap();
+            let group = SortedGroup {
+                segments: vec![merged],
+            };
+            let seen = rows_of(&rows, &group);
+            let expected = (0..20 * 32)
+                .filter(|value| lower.is_none_or(|lower| *value >= lower))
+                .filter(|value| upper.is_none_or(|upper| *value < upper))
+                .collect::<Vec<_>>();
+            assert_eq!(seen, expected, "{lower:?}..{upper:?}");
+        }
+    }
+
+    #[test]
+    fn identities_repeated_across_runs_are_all_kept() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = super::super::StableDirectory::open(root.path()).unwrap();
+        let scratch = Scratch::create(&directory).unwrap();
+        let rows = rows_with(&scratch, 1, 2, 1 << 20);
+        let cancel = AtomicBool::new(false);
+        let mut sink = rows.sink();
+        for _ in 0..5 {
+            sink.push(&batch(0, 32), &cancel).unwrap();
+        }
+        sink.finish(&cancel).unwrap();
+        let groups = rows.finish(&cancel).unwrap();
+        let seen = rows_of(&rows, &groups[0]);
+        assert_eq!(seen.len(), 5 * 32);
+        assert!(seen.windows(2).all(|pair| pair[0] <= pair[1]));
+    }
+
+    #[test]
+    fn schemas_stay_in_separate_groups_and_the_group_budget_is_enforced() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = super::super::StableDirectory::open(root.path()).unwrap();
+        let scratch = Scratch::create(&directory).unwrap();
+        let rows = rows_with(&scratch, 1 << 20, 4, 1 << 20);
+        let cancel = AtomicBool::new(false);
+        let narrow = |start: u64| {
+            let full = batch(start, 8);
+            full.project(&[0, 1]).unwrap()
+        };
+        let mut sink = rows.sink();
+        sink.push(&batch(0, 8), &cancel).unwrap();
+        sink.push(&narrow(8), &cancel).unwrap();
+        sink.push(&batch(16, 8), &cancel).unwrap();
+        sink.finish(&cancel).unwrap();
+        let groups = rows.finish(&cancel).unwrap();
+        assert_eq!(groups.len(), 2);
+        let mut sizes = groups
+            .iter()
+            .map(|group| rows_of(&rows, group).len())
+            .collect::<Vec<_>>();
+        sizes.sort_unstable();
+        assert_eq!(sizes, vec![8, 16]);
+
+        let limited = PropertyRows::new(
+            &scratch,
+            ConstructionChunkKind::Node,
+            GraphConstructionBudgets {
+                max_schema_groups: 1,
+                ..GraphConstructionBudgets::default()
+            },
+            0,
+            PropertySizing::SERIAL,
+        );
+        let mut sink = limited.sink();
+        sink.push(&batch(0, 8), &cancel).unwrap();
+        let error = sink.push(&narrow(8), &cancel).unwrap_err();
+        assert!(error.to_string().contains("schema-group budget"), "{error}");
     }
 
     #[test]
@@ -752,6 +1226,7 @@ mod tests {
             ConstructionChunkKind::Node,
             GraphConstructionBudgets::default(),
             0,
+            PropertySizing::SERIAL,
         );
         let zone = std::iter::repeat_n('x', 2 << 20).collect::<String>();
         let temporal = arrow::array::TimestampNanosecondArray::from(vec![0; 3]).with_timezone(zone);
@@ -783,6 +1258,7 @@ mod tests {
             ConstructionChunkKind::Node,
             GraphConstructionBudgets::default(),
             0,
+            PropertySizing::SERIAL,
         );
         let path = rows.path().unwrap();
         rows.write(&path, &batch(0, 3)).unwrap();

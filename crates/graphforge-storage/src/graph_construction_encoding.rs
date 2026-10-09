@@ -62,7 +62,9 @@ pub use bulk::{
     BulkStagedReason,
 };
 #[cfg(test)]
-pub(crate) use bulk::{ForcedPartitions, ForcedPropertyFrames};
+pub(crate) use bulk::{
+    ForcedPartitions, ForcedPropertyFrames, ForcedPropertySizing, derived_concurrency,
+};
 pub(crate) use bulk::{discard_scratch, encode_bulk};
 #[cfg(test)]
 pub(crate) use inventory::authenticate_inventory_payloads;

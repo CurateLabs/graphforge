@@ -262,6 +262,7 @@ pub(super) fn collect_nodes(
         check_cancelled(cancel)?;
         let mut chunk = NodeChunk::default();
         let mut written = 0;
+        let mut sink = properties.map(super::property_rows::PropertyRows::sink);
         sources[source].reader.read_task(task, &mut |batch| {
             check_cancelled(cancel)?;
             if !sources[source].reader.admitted() {
@@ -287,8 +288,8 @@ pub(super) fn collect_nodes(
                 &mut labels[written..written + count],
             );
             written += count;
-            if let Some(properties) = properties {
-                properties.ingest(&batch, cancel)?;
+            if let Some(sink) = &mut sink {
+                sink.push(&batch, cancel)?;
             }
             if retain {
                 chunk.kept.push(batch);
@@ -297,6 +298,9 @@ pub(super) fn collect_nodes(
         })?;
         if written != rows {
             return Err(short_source());
+        }
+        if let Some(sink) = sink {
+            sink.finish(cancel)?;
         }
         Ok(chunk)
     })?;

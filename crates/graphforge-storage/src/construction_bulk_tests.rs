@@ -716,6 +716,464 @@ mod bulk_builder {
         assert!(!scratch_dir(&session).exists());
     }
 
+    // ------------------------------------------------------------------
+    // Concurrent property scratch (#1938).
+    // ------------------------------------------------------------------
+
+    /// Property-bearing nodes in two schemas and edges in two, arriving in
+    /// scattered order so that every task holds identities from the whole range.
+    fn concurrent_property_graph(
+        nodes: usize,
+        edges: usize,
+        chunk: usize,
+    ) -> (Vec<RecordBatch>, Vec<RecordBatch>) {
+        let ids = (0..nodes as u64)
+            .map(|i| uuid(0x10, i))
+            .collect::<Vec<_>>();
+        let node_order = (0..nodes).map(|i| scattered(i, nodes)).collect::<Vec<_>>();
+        let node_batches = node_order
+            .chunks(chunk)
+            .enumerate()
+            .map(|(index, rows)| {
+                property_nodes(
+                    &rows.iter().map(|row| ids[*row]).collect::<Vec<_>>(),
+                    index % 3 != 0,
+                )
+            })
+            .collect::<Vec<_>>();
+        let edge_order = (0..edges).map(|i| scattered(i, edges)).collect::<Vec<_>>();
+        let edge_batches = edge_order
+            .chunks(chunk)
+            .enumerate()
+            .map(|(index, rows)| {
+                let uuids = rows
+                    .iter()
+                    .map(|row| uuid(0x20, *row as u64))
+                    .collect::<Vec<_>>();
+                let src = rows
+                    .iter()
+                    .map(|row| ids[(row * 7 + 1) % nodes])
+                    .collect::<Vec<_>>();
+                let dst = rows
+                    .iter()
+                    .map(|row| ids[(row * 13 + 5) % nodes])
+                    .collect::<Vec<_>>();
+                if index % 4 == 3 {
+                    edge_batch_of(&uuids, &vec!["OWNS"; uuids.len()], &src, &dst)
+                } else {
+                    property_edges(&uuids, &src, &dst)
+                }
+            })
+            .collect::<Vec<_>>();
+        (node_batches, edge_batches)
+    }
+
+    /// Sixteen lanes, whatever the host has, so the derived concurrency does
+    /// not depend on the machine running the test.
+    fn sixteen_lanes(session: &mut GraphConstructionSession) {
+        session.set_cpu_admission(Some(Arc::new(
+            cpu_admission::ConstructionCpuAdmission::new(std::num::NonZeroUsize::new(16).unwrap()),
+        )));
+    }
+
+    /// A reader that records how many tasks decode at once.
+    struct Overlap {
+        inner: Memory,
+        in_flight: std::sync::atomic::AtomicUsize,
+        peak: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl BulkBatchReader for Overlap {
+        fn schema_resident_bytes(&self) -> u64 {
+            self.inner.schema_resident_bytes()
+        }
+
+        fn task_rows(&self, task: usize) -> usize {
+            self.inner.task_rows(task)
+        }
+
+        fn read_task(
+            &self,
+            task: usize,
+            sink: &mut dyn FnMut(RecordBatch) -> Result<(), GfError>,
+        ) -> Result<(), GfError> {
+            use std::sync::atomic::Ordering::SeqCst;
+            let now = self.in_flight.fetch_add(1, SeqCst) + 1;
+            self.peak.fetch_max(now, SeqCst);
+            // Long enough that tasks claimed by different workers overlap.
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let result = self.inner.read_task(task, sink);
+            self.in_flight.fetch_sub(1, SeqCst);
+            result
+        }
+    }
+
+    fn overlapping_source(
+        batches: &[RecordBatch],
+        required: usize,
+        per_task: usize,
+        peak: &Arc<std::sync::atomic::AtomicUsize>,
+    ) -> BulkSource<'static> {
+        let mut source = source(batches, required, per_task);
+        source.reader = Arc::new(Overlap {
+            inner: Memory {
+                batches: batches.to_vec(),
+                per_task,
+            },
+            in_flight: std::sync::atomic::AtomicUsize::new(0),
+            peak: Arc::clone(peak),
+        });
+        source
+    }
+
+    fn overlapping_plan(
+        nodes: &[RecordBatch],
+        edges: &[RecordBatch],
+        per_task: usize,
+        peak: &Arc<std::sync::atomic::AtomicUsize>,
+        budget: u64,
+    ) -> BulkBuildPlan<'static> {
+        BulkBuildPlan {
+            nodes: vec![overlapping_source(nodes, 2, per_task, peak)],
+            edges: vec![overlapping_source(edges, 4, per_task, peak)],
+            memory_budget: Some(budget),
+        }
+    }
+
+    /// The smallest budget, in 4 MiB steps, whose derived concurrency is at
+    /// least `wanted`, and that concurrency.
+    fn budget_admitting(
+        nodes: &[RecordBatch],
+        edges: &[RecordBatch],
+        budgets: GraphConstructionBudgets,
+        wanted: usize,
+    ) -> (u64, usize) {
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut budget = 600_u64 << 20;
+        loop {
+            let probe = overlapping_plan(nodes, edges, 2, &peak, budget);
+            let derived = crate::graph_construction_encoding::derived_concurrency(
+                &probe, budget, 16, budgets,
+            );
+            if derived >= wanted {
+                return (budget, derived);
+            }
+            budget += 4 << 20;
+            assert!(budget < 16 << 30, "no budget admits {wanted} workers");
+        }
+    }
+
+    fn small_property_budgets() -> GraphConstructionBudgets {
+        // Small windows keep the property workspace, and so the smallest budget
+        // that admits a scratch build, a few hundred MiB.
+        GraphConstructionBudgets {
+            max_batch_rows: 1_024,
+            max_run_records: 4 * 1_024,
+            max_batch_bytes: 4 << 20,
+            max_catalog_identifier_bytes: 1 << 20,
+            ..GraphConstructionBudgets::default()
+        }
+    }
+
+    #[test]
+    fn property_scratch_concurrency_follows_the_budget_and_publishes_the_same_bytes() {
+        let budgets = small_property_budgets();
+        let (nodes, edges) = concurrent_property_graph(4_800, 9_600, 150);
+        let expected = staged_with(budgets, &nodes, &edges).unwrap();
+        assert!(
+            expected
+                .iter()
+                .any(|entry| entry.0.starts_with("edge_properties/"))
+        );
+        let mut levels = Vec::new();
+        for wanted in [1, 2, 4, 8] {
+            let (budget, derived) = budget_admitting(&nodes, &edges, budgets, wanted);
+            let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let root = TempDir::new().unwrap();
+            let mut session = pinned_with(&root, budgets);
+            sixteen_lanes(&mut session);
+            // Many runs and several merge levels at every concurrency.
+            let _sizing =
+                crate::graph_construction_encoding::ForcedPropertySizing::set(40 << 10, 3);
+            let plan = overlapping_plan(&nodes, &edges, 2, &peak, budget);
+            assert_eq!(plan.route(), crate::BulkRoute::Scratch);
+            let encoding = session.prepare_bulk_encoding(1, &plan, || false).unwrap();
+            assert_same(&expected, &inventory(&encoding));
+            let report = session.bulk_build_report();
+            assert_eq!(
+                report.scratch_concurrency as usize, derived,
+                "budget {budget}: {report:?}"
+            );
+            assert!(report.property_runs > 8, "{report:?}");
+            assert!(
+                report.property_peak_retained_bytes <= report.property_retained_budget_bytes,
+                "{report:?}"
+            );
+            assert!(report.property_source_bytes > 0, "{report:?}");
+            assert!(!scratch_dir(&session).exists());
+            // Tasks really ran side by side, not just a larger number in a report.
+            let overlapped = peak.load(std::sync::atomic::Ordering::SeqCst);
+            assert!(
+                overlapped >= derived.min(2),
+                "concurrency {derived} overlapped only {overlapped} tasks"
+            );
+            assert!(overlapped <= derived, "{overlapped} tasks for {derived} workers");
+            levels.push(derived);
+        }
+        assert!(
+            levels.windows(2).all(|pair| pair[0] < pair[1]),
+            "a larger budget must admit more workers: {levels:?}"
+        );
+        assert!(levels[0] == 1 && levels[3] >= 8, "{levels:?}");
+    }
+
+    #[test]
+    fn property_scratch_bytes_do_not_grow_with_the_number_of_runs() {
+        let budgets = small_property_budgets();
+        let (nodes, edges) = concurrent_property_graph(4_800, 9_600, 150);
+        let expected = staged_with(budgets, &nodes, &edges).unwrap();
+        let mut written = Vec::new();
+        for (run_bytes, fan_in) in [(8 << 20, 64), (40 << 10, 64), (12 << 10, 64), (12 << 10, 2)] {
+            let (budget, _) = budget_admitting(&nodes, &edges, budgets, 1);
+            let root = TempDir::new().unwrap();
+            let mut session = pinned_with(&root, budgets);
+            sixteen_lanes(&mut session);
+            let _sizing =
+                crate::graph_construction_encoding::ForcedPropertySizing::set(run_bytes, fan_in);
+            let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let plan = overlapping_plan(&nodes, &edges, 2, &peak, budget);
+            let encoding = session.prepare_bulk_encoding(1, &plan, || false).unwrap();
+            assert_same(&expected, &inventory(&encoding));
+            let report = session.bulk_build_report();
+            written.push((run_bytes, fan_in, report.property_runs, report.property_scratch_write_bytes));
+        }
+        // With a fan-in wide enough for the runs, the input is written once as
+        // runs and once more by the merge, however many runs there are: the
+        // binary tree this replaced rewrote it once per level.
+        let (_, _, _, single) = written[0];
+        for (run_bytes, fan_in, runs, bytes) in &written[..3] {
+            assert!(
+                *bytes <= single * 3,
+                "{run_bytes} byte runs ({runs} runs, fan-in {fan_in}) wrote {bytes}, one run wrote {single}"
+            );
+        }
+        // A fan-in of two does need levels, and is still bounded by them.
+        let (_, _, runs, bytes) = written[3];
+        let levels = u64::BITS - (runs - 1).leading_zeros();
+        assert!(bytes <= single * (u64::from(levels) + 2), "{written:?}");
+    }
+
+    const RSS_ROOT: &str = "GF_BULK_RSS_ROOT";
+    const RSS_BUDGET: &str = "GF_BULK_RSS_BUDGET";
+
+    fn wide_property_graph() -> (Vec<RecordBatch>, Vec<RecordBatch>) {
+        let ids = (0..24_000_u64).map(|i| uuid(0x10, i)).collect::<Vec<_>>();
+        let nodes = (0..ids.len())
+            .map(|i| scattered(i, ids.len()))
+            .collect::<Vec<_>>()
+            .chunks(1_000)
+            .enumerate()
+            .map(|(index, rows)| {
+                wide_nodes(
+                    &rows.iter().map(|row| ids[*row]).collect::<Vec<_>>(),
+                    index as u64 * 1_000,
+                )
+            })
+            .collect::<Vec<_>>();
+        let edges = (0..24_000_usize)
+            .map(|i| scattered(i, 24_000))
+            .collect::<Vec<_>>()
+            .chunks(1_000)
+            .enumerate()
+            .map(|(index, rows)| {
+                wide_edges(
+                    &rows
+                        .iter()
+                        .map(|row| uuid(0x20, *row as u64))
+                        .collect::<Vec<_>>(),
+                    &rows
+                        .iter()
+                        .map(|row| ids[(row * 7 + 1) % 24_000])
+                        .collect::<Vec<_>>(),
+                    &rows
+                        .iter()
+                        .map(|row| ids[(row * 13 + 5) % 24_000])
+                        .collect::<Vec<_>>(),
+                    50_000 + index as u64 * 1_000,
+                )
+            })
+            .collect::<Vec<_>>();
+        (nodes, edges)
+    }
+
+    fn digest(inventory: &Inventory) -> String {
+        use sha2::Digest as _;
+        hex(&sha2::Sha256::digest(format!("{inventory:?}").as_bytes()))
+    }
+
+    fn peak_rss_bytes() -> u64 {
+        std::fs::read_to_string("/proc/self/status")
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix("VmHWM:"))
+            .and_then(|rest| rest.split_whitespace().next()?.parse::<u64>().ok())
+            .map_or(0, |kib| kib * 1024)
+    }
+
+    /// One scratch build in a process of its own, so that its peak resident set
+    /// is its own.
+    #[test]
+    fn property_scratch_rss_child() {
+        let (Ok(path), Ok(budget)) = (std::env::var(RSS_ROOT), std::env::var(RSS_BUDGET)) else {
+            return;
+        };
+        let budgets = small_property_budgets();
+        let (nodes, edges) = wide_property_graph();
+        let before = peak_rss_bytes();
+        let mut session = GraphConstructionSession::open(
+            Path::new(&path),
+            Uuid::from_u128(OPERATION),
+            0,
+            budgets,
+        )
+        .unwrap();
+        session.checkpoint.session_now_micros = CLOCK;
+        sixteen_lanes(&mut session);
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let plan = overlapping_plan(&nodes, &edges, 2, &peak, budget.parse().unwrap());
+        let encoding = session.prepare_bulk_encoding(1, &plan, || false).unwrap();
+        let report = session.bulk_build_report();
+        println!(
+            "RSS_RESULT before={before} peak={} concurrency={} runs={} retained={}/{} digest={}",
+            peak_rss_bytes(),
+            report.scratch_concurrency,
+            report.property_runs,
+            report.property_peak_retained_bytes,
+            report.property_retained_budget_bytes,
+            digest(&inventory(&encoding)),
+        );
+    }
+
+    #[test]
+    fn measured_peak_rss_stays_within_the_budget_at_every_concurrency() {
+        let budgets = small_property_budgets();
+        let (nodes, edges) = wide_property_graph();
+        let expected = digest(&staged_with(budgets, &nodes, &edges).unwrap());
+        let mut concurrencies = Vec::new();
+        for wanted in [1, 2, 4] {
+            let (budget, derived) = budget_admitting(&nodes, &edges, budgets, wanted);
+            let root = TempDir::new().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("graph_construction::tests::bulk_builder::property_scratch_rss_child")
+                .arg("--nocapture")
+                .env(RSS_ROOT, root.path())
+                .env(RSS_BUDGET, budget.to_string())
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(output.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+            let line = stdout
+                .lines()
+                .find(|line| line.starts_with("RSS_RESULT"))
+                .unwrap_or_else(|| panic!("no result: {stdout}"));
+            let field = |name: &str| {
+                line.split_whitespace()
+                    .find_map(|part| part.strip_prefix(&format!("{name}=")))
+                    .unwrap()
+                    .to_owned()
+            };
+            let peak: u64 = field("peak").parse().unwrap();
+            assert_eq!(field("concurrency").parse::<usize>().unwrap(), derived, "{line}");
+            assert_eq!(field("digest"), expected, "{line}");
+            assert!(peak <= budget, "peak RSS {peak} over budget {budget}: {line}");
+            let (retained, allowed) = field("retained").split_once('/').map(|(a, b)| (a.parse::<u64>().unwrap(), b.parse::<u64>().unwrap())).unwrap();
+            assert!(retained > 0 && retained <= allowed, "{line}");
+            println!("budget {budget} concurrency {derived}: {line}");
+            concurrencies.push(derived);
+        }
+        assert!(concurrencies[2] > concurrencies[0], "{concurrencies:?}");
+    }
+
+    const CONCURRENT_CRASH_ROOT: &str = "GF_BULK_CONCURRENT_CRASH_ROOT";
+    const CONCURRENT_CRASH_POINT: &str = "GF_BULK_CONCURRENT_CRASH_POINT";
+
+    fn concurrent_crash_budget() -> u64 {
+        let (nodes, edges) = concurrent_property_graph(4_800, 9_600, 150);
+        budget_admitting(&nodes, &edges, small_property_budgets(), 4).0
+    }
+
+    /// The killed process: a concurrent scratch build that dies on the n-th
+    /// time it reaches a failpoint, while other workers are mid-pass.
+    #[test]
+    fn property_scratch_concurrent_crash_child() {
+        let (Ok(path), Ok(point)) = (
+            std::env::var(CONCURRENT_CRASH_ROOT),
+            std::env::var(CONCURRENT_CRASH_POINT),
+        ) else {
+            return;
+        };
+        let (name, occurrence) = point.split_once(':').unwrap();
+        let (nodes, edges) = concurrent_property_graph(4_800, 9_600, 150);
+        let mut session = GraphConstructionSession::open(
+            Path::new(&path),
+            Uuid::from_u128(OPERATION),
+            0,
+            small_property_budgets(),
+        )
+        .unwrap();
+        session.checkpoint.session_now_micros = CLOCK;
+        sixteen_lanes(&mut session);
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let plan = overlapping_plan(&nodes, &edges, 2, &peak, concurrent_crash_budget());
+        let _sizing = crate::graph_construction_encoding::ForcedPropertySizing::set(40 << 10, 3);
+        *crate::graph_construction::ARMED_FAILPOINT.lock().unwrap() = Some((name.to_owned(), occurrence.parse().unwrap()));
+        session.prepare_bulk_encoding(1, &plan, || false).unwrap();
+    }
+
+    #[test]
+    fn a_kill_during_a_concurrent_scratch_pass_reruns_to_identical_bytes() {
+        let budgets = small_property_budgets();
+        let (nodes, edges) = concurrent_property_graph(4_800, 9_600, 150);
+        let expected = staged_with(budgets, &nodes, &edges).unwrap();
+        let budget = concurrent_crash_budget();
+        let mut left_scratch = 0;
+        for point in [
+            "bulk.during_property_run:3",
+            "bulk.during_property_run:40",
+            "bulk.during_property_merge:2",
+            "bulk.after_property_window:1",
+        ] {
+            let root = TempDir::new().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("graph_construction::tests::bulk_builder::property_scratch_concurrent_crash_child")
+                .arg("--nocapture")
+                .env(CONCURRENT_CRASH_ROOT, root.path())
+                .env(CONCURRENT_CRASH_POINT, point)
+                .status()
+                .unwrap();
+            assert_eq!(status.code(), Some(86), "{point}");
+            left_scratch += usize::from(root.path().join("bulk-scratch").exists());
+            // Recovery: opening the session deletes what the killed attempt left.
+            let mut session = pinned_with(&root, budgets);
+            sixteen_lanes(&mut session);
+            assert!(
+                !scratch_dir(&session).exists(),
+                "recovery kept scratch after {point}"
+            );
+            let _sizing =
+                crate::graph_construction_encoding::ForcedPropertySizing::set(40 << 10, 3);
+            let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let plan = overlapping_plan(&nodes, &edges, 2, &peak, budget);
+            let rerun = session.prepare_bulk_encoding(1, &plan, || false).unwrap();
+            assert_eq!(expected, inventory(&rerun), "killed at {point}");
+            assert!(session.bulk_build_report().scratch_concurrency >= 2);
+            assert!(!scratch_dir(&session).exists());
+        }
+        assert!(left_scratch >= 3, "a killed attempt must leave scratch behind");
+    }
+
     fn refusal(nodes: &[RecordBatch], edges: &[RecordBatch]) -> String {
         bulk_with(nodes, edges, 2, 4).unwrap_err().to_string()
     }

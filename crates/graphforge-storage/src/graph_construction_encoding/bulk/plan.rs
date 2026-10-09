@@ -231,6 +231,23 @@ pub struct BulkBuildReport {
     /// Fixed property workspace reserved before decoding any source.
     #[serde(default)]
     pub property_workspace_reserved_bytes: u64,
+    /// Uncompressed bytes of the property-bearing sources, from their footers:
+    /// the denominator of the property scratch traffic per input byte.
+    #[serde(default)]
+    pub property_source_bytes: u64,
+    /// Sorted property runs written from the input.
+    #[serde(default)]
+    pub property_runs: u64,
+    /// Runs one property merge holds open.
+    #[serde(default)]
+    pub property_merge_fan_in: u64,
+    /// Most bytes the workers held at once while forming property runs, against
+    /// the `property_retained_budget_bytes` they were allowed.
+    #[serde(default)]
+    pub property_peak_retained_bytes: u64,
+    /// Bytes all workers together could hold while forming property runs.
+    #[serde(default)]
+    pub property_retained_budget_bytes: u64,
 }
 
 #[derive(Clone, Copy, Default)]
