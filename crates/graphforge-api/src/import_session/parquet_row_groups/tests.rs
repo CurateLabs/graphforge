@@ -1,4 +1,3 @@
-use std::error::Error;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -17,7 +16,7 @@ use super::OwnedRowGroups;
 use crate::CancellationToken;
 use crate::import_session::inventory_budget::InventoryBudget;
 use crate::import_session::parquet_page_decode::DecodedPage;
-use crate::import_session::parquet_reader::PagePreflight;
+use crate::import_session::parquet_reader::{PageFailures, PagePreflight};
 
 #[derive(Clone)]
 struct Probe {
@@ -85,7 +84,15 @@ fn row_groups<F>(
 where
     F: Fn(usize, usize) -> Result<Probe, GfError> + Send + Sync + 'static,
 {
-    OwnedRowGroups::new(Arc::new(bytes), metadata, groups, budget, factory, None)
+    OwnedRowGroups::new(
+        Arc::new(bytes),
+        metadata,
+        groups,
+        budget,
+        factory,
+        None,
+        PageFailures::new(),
+    )
 }
 
 #[test]
@@ -181,12 +188,21 @@ fn projected_column_keeps_its_original_physical_leaf_index() {
 fn typed_callback_refusal_reaches_arrow_before_the_page_is_decoded() {
     let (bytes, metadata) = source();
     let mut budget = InventoryBudget::new(1 << 20);
-    let groups = row_groups(bytes, Arc::clone(&metadata), &[0], &mut budget, |_, _| {
-        Ok(Probe {
-            calls: Arc::new(AtomicUsize::new(0)),
-            refusal: true,
-        })
-    })
+    let failures = PageFailures::new();
+    let groups = OwnedRowGroups::new(
+        Arc::new(bytes),
+        Arc::clone(&metadata),
+        &[0],
+        &mut budget,
+        |_, _| {
+            Ok(Probe {
+                calls: Arc::new(AtomicUsize::new(0)),
+                refusal: true,
+            })
+        },
+        None,
+        failures.clone(),
+    )
     .unwrap();
     let levels = parquet_to_arrow_field_levels(
         metadata.file_metadata().schema_descr(),
@@ -197,17 +213,25 @@ fn typed_callback_refusal_reaches_arrow_before_the_page_is_decoded() {
     let mut reader =
         ParquetRecordBatchReader::try_new_with_row_groups(&levels, &groups, 4, None).unwrap();
     let error = reader.next().unwrap().unwrap_err();
-    let typed = error
-        .source()
-        .and_then(|source| source.downcast_ref::<GfError>())
-        .expect("preflight refusal remains a typed GraphForge error");
+    assert!(error.to_string().contains("test preflight refusal"));
+    failures.record(GfError::Storage(
+        "later failure must not replace the first".into(),
+    ));
+    let typed = failures
+        .take()
+        .expect("the shared slot retains the original typed GraphForge error");
     assert!(matches!(
-        typed,
+        &typed,
         GfError::Project {
             code: ProjectErrorCode::ResourceLimit,
             ..
         }
     ));
+    assert!(typed.to_string().contains("test preflight refusal"));
+    assert!(
+        failures.take().is_none(),
+        "the captured failure is consumed once"
+    );
     assert!(
         reader.next().is_none(),
         "terminal refusal must not retry an unvalidated page"
@@ -316,6 +340,7 @@ fn empty_selection_still_observes_cancellation() {
             })
         },
         Some(token),
+        PageFailures::new(),
     );
     assert!(result.is_err());
 }
@@ -336,6 +361,7 @@ fn empty_selection_is_a_valid_zero_row_collection() {
             })
         },
         None,
+        PageFailures::new(),
     )
     .unwrap();
     assert_eq!(groups.num_rows(), 0);

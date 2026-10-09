@@ -13,7 +13,7 @@ use parquet::file::reader::{ChunkReader, Length};
 use crate::CancellationToken;
 
 use super::inventory_budget::{self, InventoryBudget};
-use super::parquet_reader::{OwnedPageReader, PagePreflight};
+use super::parquet_reader::{OwnedPageReader, PageFailures, PagePreflight};
 use super::{cancelled, limit, storage};
 
 /// Runtime row groups whose every column page passes the same owned-byte
@@ -45,6 +45,7 @@ where
         budget: &mut InventoryBudget,
         factory: F,
         cancellation: Option<CancellationToken>,
+        failures: PageFailures,
     ) -> Result<Self, GfError> {
         check_cancelled(cancellation.as_ref())?;
 
@@ -85,6 +86,7 @@ where
             num_rows,
             factory: Arc::new(factory),
             cancellation,
+            failures,
             _callback: std::marker::PhantomData,
         })
     }
@@ -102,12 +104,16 @@ where
     }
 
     fn column_chunks(&self, column_index: usize) -> ParquetResult<Box<dyn PageIterator>> {
-        check_cancelled(self.cancellation.as_ref()).map_err(as_parquet_error)?;
+        if let Err(error) = check_cancelled(self.cancellation.as_ref()) {
+            self.failures.record(error.clone());
+            return Err(as_parquet_error(error));
+        }
         for &group_index in self.selected.iter() {
             if column_index >= self.metadata.row_group(group_index).num_columns() {
-                return Err(as_parquet_error(storage(
-                    "Parquet physical column index is outside the selected row group",
-                )));
+                let error =
+                    storage("Parquet physical column index is outside the selected row group");
+                self.failures.record(error.clone());
+                return Err(as_parquet_error(error));
             }
         }
         Ok(Box::new(OwnedColumnPageIterator {
@@ -116,6 +122,7 @@ where
             selected: Arc::clone(&self.selected),
             factory: Arc::clone(&self.factory),
             cancellation: self.cancellation.clone(),
+            failures: self.failures.clone(),
             column_index,
             next_group: 0,
             terminal: false,
@@ -142,6 +149,7 @@ struct OwnedColumnPageIterator<T, F, C> {
     selected: Arc<Vec<usize>>,
     factory: Arc<F>,
     cancellation: Option<CancellationToken>,
+    failures: PageFailures,
     column_index: usize,
     next_group: usize,
     terminal: bool,
@@ -162,8 +170,7 @@ where
             return None;
         }
         if let Err(error) = check_cancelled(self.cancellation.as_ref()) {
-            self.terminal = true;
-            return Some(Err(as_parquet_error(error)));
+            return Some(self.fail(error));
         }
         let group_index = *self.selected.get(self.next_group)?;
         self.next_group += 1;
@@ -172,31 +179,27 @@ where
         let (start, length) = match checked_column_range(column, self.input.len()) {
             Ok(range) => range,
             Err(error) => {
-                self.terminal = true;
-                return Some(Err(as_parquet_error(error)));
+                return Some(self.fail(error));
             }
         };
         let event_count = match u64::try_from(column.num_values()) {
             Ok(events) => events,
             Err(_) => {
-                self.terminal = true;
-                return Some(Err(as_parquet_error(storage(
+                return Some(self.fail(storage(
                     "Parquet column event count is negative or too large",
-                ))));
+                )));
             }
         };
         let reader = match self.input.get_read(start) {
             Ok(reader) => reader,
             Err(error) => {
-                self.terminal = true;
-                return Some(Err(as_parquet_error(storage(error))));
+                return Some(self.fail(storage(error)));
             }
         };
         let preflight = match (self.factory)(group_index, self.column_index) {
             Ok(preflight) => preflight,
             Err(error) => {
-                self.terminal = true;
-                return Some(Err(as_parquet_error(error)));
+                return Some(self.fail(error));
             }
         };
         let page_reader = OwnedPageReader::new(
@@ -205,9 +208,18 @@ where
             column.compression(),
             event_count,
             self.cancellation.clone(),
+            self.failures.clone(),
             preflight,
         );
         Some(Ok(Box::new(page_reader)))
+    }
+}
+
+impl<T, F, C> OwnedColumnPageIterator<T, F, C> {
+    fn fail(&mut self, error: GfError) -> ParquetResult<Box<dyn PageReader>> {
+        self.terminal = true;
+        self.failures.record(error.clone());
+        Err(as_parquet_error(error))
     }
 }
 

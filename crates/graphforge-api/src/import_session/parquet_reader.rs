@@ -5,6 +5,7 @@
 //! caller's preflight, then returned to Arrow from that same allocation.
 
 use std::io::Read;
+use std::sync::Arc;
 
 use graphforge_core::GfError;
 use parquet::basic::Compression;
@@ -31,6 +32,29 @@ pub(super) trait PagePreflight: Send {
     fn remaining_workspace(&self) -> Result<usize, GfError>;
     fn validate(&mut self, page: &DecodedPage) -> Result<(), GfError>;
     fn finish(&mut self) -> Result<(), GfError>;
+}
+
+/// First typed page-pipeline failure shared with the source-reader boundary.
+/// Arrow's Parquet-to-Arrow error conversion stringifies `ParquetError`, so
+/// callers retain this slot to recover the original GraphForge error.
+#[derive(Clone, Default)]
+pub(super) struct PageFailures(Arc<parking_lot::Mutex<Option<GfError>>>);
+
+impl PageFailures {
+    pub(super) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(super) fn record(&self, error: GfError) {
+        let mut first = self.0.lock();
+        if first.is_none() {
+            *first = Some(error);
+        }
+    }
+
+    pub(super) fn take(&self) -> Option<GfError> {
+        self.0.lock().take()
+    }
 }
 
 impl<T: PagePreflight + ?Sized> PagePreflight for Box<T> {
@@ -62,6 +86,7 @@ pub(super) struct OwnedPageReader<R, C> {
     expected_data_events: u64,
     data_events: u64,
     cancellation: Option<CancellationToken>,
+    failures: PageFailures,
     preflight: C,
     pending: Option<PendingHeader>,
     finish_called: bool,
@@ -79,6 +104,7 @@ where
         compression: Compression,
         expected_data_events: u64,
         cancellation: Option<CancellationToken>,
+        failures: PageFailures,
         preflight: C,
     ) -> Self {
         Self {
@@ -88,6 +114,7 @@ where
             expected_data_events,
             data_events: 0,
             cancellation,
+            failures,
             preflight,
             pending: None,
             finish_called: false,
@@ -252,6 +279,7 @@ where
     }
 
     fn typed_error(&mut self, error: GfError) -> ParquetError {
+        self.failures.record(error.clone());
         self.pending = None;
         self.terminal = true;
         ParquetError::External(Box::new(error))

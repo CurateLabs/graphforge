@@ -15,7 +15,7 @@ use parquet::file::properties::{WriterProperties, WriterVersion};
 
 use crate::CancellationToken;
 
-use super::{OwnedPageReader, PagePreflight};
+use super::{OwnedPageReader, PageFailures, PagePreflight};
 use crate::import_session::parquet_page_decode::DecodedPage;
 
 struct Preflight {
@@ -140,6 +140,7 @@ impl Fixture {
             self.compression,
             self.events,
             None,
+            PageFailures::new(),
             preflight,
         )
     }
@@ -233,6 +234,7 @@ fn adapter_accepts_a_boxed_shared_preflight_callback() {
         fixture.compression,
         fixture.events,
         None,
+        PageFailures::new(),
         preflight,
     );
     let mut events = 0_u64;
@@ -334,6 +336,7 @@ fn wrong_codec_and_cancelled_reads_fail_before_callback_or_retry() {
         wrong_codec,
         fixture.events,
         None,
+        PageFailures::new(),
         Preflight::new(64 << 20),
     );
     let error = reader.next().unwrap().unwrap_err();
@@ -348,6 +351,7 @@ fn wrong_codec_and_cancelled_reads_fail_before_callback_or_retry() {
         fixture.compression,
         fixture.events,
         Some(cancelled),
+        PageFailures::new(),
         Preflight::new(64 << 20),
     );
     reader.peek_next_page().unwrap().unwrap();
@@ -495,6 +499,7 @@ fn index_pages_are_crc_checked_in_bounded_chunks_and_not_dispatched() {
         Compression::UNCOMPRESSED,
         1,
         None,
+        PageFailures::new(),
         Preflight::new(1024),
     );
     let page = reader.next().unwrap().unwrap();
@@ -515,6 +520,7 @@ fn checksum_failure_on_an_owned_body_never_reaches_preflight() {
         Compression::UNCOMPRESSED,
         1,
         None,
+        PageFailures::new(),
         Preflight::new(1024),
     );
     let error = reader.next().unwrap().unwrap_err();
