@@ -522,7 +522,7 @@ pub use write_exec::{GraphDeleteExec, GraphRemoveExec, GraphSetExec};
 mod expand_exec;
 pub use expand_exec::{ExpandExec, OntologyInferExec, V4OrdinalIdentityResolver, VarLenExpandExec};
 mod row_exec;
-pub use row_exec::{OptionalMatchExec, UnwindExec};
+pub use row_exec::{CorrelatedSeedExec, OptionalMatchExec, UnwindExec};
 mod session;
 mod sort_runs;
 pub use session::{

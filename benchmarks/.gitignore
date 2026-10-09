@@ -7,3 +7,6 @@ credentials/
 *.secret
 fly/.env
 target/
+
+# Left behind only when a test run is killed before its cleanup
+fixtures/gdc/scratch-*/
