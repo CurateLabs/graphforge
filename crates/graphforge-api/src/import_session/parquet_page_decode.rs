@@ -389,8 +389,21 @@ pub(super) fn decode(
                 "Decoded Parquet page capacity exceeds remaining workspace",
             ));
         }
-        output.resize(shape.uncompressed, 0);
-        output[..prefix].copy_from_slice(&compressed.body[..prefix]);
+        while output.len() < shape.uncompressed {
+            check(cancellation)?;
+            let end = output
+                .len()
+                .saturating_add(BLOCK_BYTES)
+                .min(shape.uncompressed);
+            output.resize(end, 0);
+        }
+        for (source, destination) in compressed.body[..prefix]
+            .chunks(BLOCK_BYTES)
+            .zip(output[..prefix].chunks_mut(BLOCK_BYTES))
+        {
+            check(cancellation)?;
+            destination.copy_from_slice(source);
+        }
         // V2 pages containing only level/null events have no encoded value
         // suffix. The ordinary reader does not initialize a codec for them.
         if shape.uncompressed > prefix {

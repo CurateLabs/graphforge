@@ -69,7 +69,11 @@ pub(super) fn read<R: Read>(
             "Parquet compressed page capacity exceeds its admitted workspace",
         ));
     }
-    body.resize(compressed, 0);
+    while body.len() < compressed {
+        check(cancellation)?;
+        let end = body.len().saturating_add(READ_BLOCK).min(compressed);
+        body.resize(end, 0);
+    }
     let mut checksum = crc32fast::Hasher::new();
     for block in body.chunks_mut(READ_BLOCK) {
         check(cancellation)?;

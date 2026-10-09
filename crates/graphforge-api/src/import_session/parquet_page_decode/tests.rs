@@ -208,8 +208,17 @@ fn framed_lz4_admits_actual_native_buffers_and_ignores_later_frames() {
 fn cancellation_is_checked_before_any_page_decode() {
     let token = CancellationToken::new();
     token.cancel();
-    let compressed = page(vec![0], usize::MAX);
-    assert!(decode(compressed, Compression::SNAPPY, usize::MAX, Some(&token)).is_err());
+    let compressed = page(vec![7], 1);
+    let error = decode(compressed, Compression::UNCOMPRESSED, 1, Some(&token))
+        .err()
+        .unwrap();
+    assert!(matches!(
+        error,
+        GfError::Api {
+            code: graphforge_core::ApiErrorCode::Cancelled,
+            ..
+        }
+    ));
 }
 
 #[test]
