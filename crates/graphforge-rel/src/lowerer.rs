@@ -64,9 +64,9 @@ use graphforge_ir::{
 };
 use graphforge_ontology::OntologyHandle;
 use graphforge_plan::{
-    DeleteTarget, GraphCreateNode, GraphDeleteNode, GraphRemoveNode, GraphSetNode,
-    OptionalMatchNode, RemoveTarget, ResolvedEdgeSpec, ResolvedNodeSpec, SetTarget, UnwindNode,
-    VarLenExpandNode,
+    CorrelatedSeedNode, DeleteTarget, GraphCreateNode, GraphDeleteNode, GraphRemoveNode,
+    GraphSetNode, OptionalMatchNode, RemoveTarget, ResolvedEdgeSpec, ResolvedNodeSpec, SetTarget,
+    UnwindNode, VarLenExpandNode,
 };
 use graphforge_value::{EntityTypeId, PropertyId, RelationTypeId};
 
