@@ -525,6 +525,68 @@ mod bulk_builder {
     }
 
     #[test]
+    fn skewed_property_scratch_matches_staged_artifacts_at_natural_minimum() {
+        let budgets = GraphConstructionBudgets {
+            max_batch_rows: 1024,
+            max_batch_bytes: 256 << 10,
+            max_run_records: 4 * 1024,
+            ..GraphConstructionBudgets::default()
+        };
+        let mut uuids = (0..32_768_u64)
+            .map(|index| uuid(0x10, index))
+            .collect::<Vec<_>>();
+        uuids.sort_unstable();
+        let large = "x".repeat(100 << 10);
+        let mut nodes = Vec::with_capacity(32);
+        for (task, ids) in uuids.chunks(1024).enumerate() {
+            let mut fields = CONSTRUCTION_NODE_SCHEMA.fields().to_vec();
+            fields.push(Arc::new(Field::new("name", DataType::Utf8, false)));
+            let names = (0..ids.len())
+                .map(|row| if row == 0 { large.as_str() } else { "" })
+                .collect::<Vec<_>>();
+            let batch = RecordBatch::try_new(
+                Arc::new(Schema::new(fields)),
+                vec![
+                    Arc::new(fixed(ids)),
+                    Arc::new(StringArray::from(vec!["Person"; ids.len()])),
+                    Arc::new(StringArray::from(names)),
+                ],
+            )
+            .unwrap();
+            assert!(
+                batch.get_array_memory_size() <= budgets.max_batch_bytes,
+                "source task {task} exceeded its byte window"
+            );
+            nodes.push(batch);
+        }
+
+        let expected = staged_with(budgets, &nodes, &[]).unwrap();
+        let mut plan = plan(&nodes, &[], 1);
+        let budget = crate::graph_construction_encoding::scratch_minimum_bytes(&plan, budgets);
+        plan.memory_budget = Some(budget);
+        assert_eq!(plan.route(), crate::BulkRoute::Scratch);
+        let root = TempDir::new().unwrap();
+        let mut session = pinned_with(&root, budgets);
+        session.set_cpu_admission(Some(Arc::new(
+            cpu_admission::ConstructionCpuAdmission::new(
+                std::num::NonZeroUsize::new(1).unwrap(),
+            ),
+        )));
+        // Keep one accepted task per run so the natural 32-way merge sees all
+        // wide rows first, while retaining the naturally derived 24 MiB pool,
+        // 192 KiB frame target, and fan-in of 32.
+        let _sizing = crate::graph_construction_encoding::ForcedPropertySizing::set(1, 32);
+        let encoding = session
+            .prepare_bulk_encoding(1, &plan, || false)
+            .unwrap();
+        assert_same(&expected, &inventory(&encoding));
+        let report = session.bulk_build_report();
+        assert_eq!(report.scratch_concurrency, 1, "{report:?}");
+        assert_eq!(report.property_retained_budget_bytes, 24 << 20, "{report:?}");
+        assert!(!scratch_dir(&session).exists());
+    }
+
+    #[test]
     fn property_fields_active_in_later_frames_apply_to_earlier_owner_rows() {
         let ids = (0..521_u64)
             .map(|id| {

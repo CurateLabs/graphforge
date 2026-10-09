@@ -27,8 +27,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use arrow::array::UInt32Array;
+use arrow::array::{
+    Array, BinaryArray, LargeBinaryArray, LargeStringArray, StringArray, UInt32Array,
+};
 use arrow::compute::interleave_record_batch;
+use arrow::datatypes::DataType;
 use arrow::ipc::{reader::StreamReader, writer::StreamWriter};
 use arrow::record_batch::RecordBatch;
 
@@ -561,10 +564,6 @@ impl<'a> PropertyRows<'a> {
     fn write_run(&self, batches: &[RecordBatch], cancel: &AtomicBool) -> Result<Run, GfError> {
         let uuid_name = self.uuid_name();
         let total_rows = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
-        let total_bytes = batches
-            .iter()
-            .map(RecordBatch::get_array_memory_size)
-            .sum::<usize>();
         let mut keys = Vec::with_capacity(total_rows);
         for (ordinal, batch) in batches.iter().enumerate() {
             let uuids = crate::graph_construction::batch_uuid_column(batch, uuid_name)?;
@@ -579,23 +578,313 @@ impl<'a> PropertyRows<'a> {
         }
         keys.sort_unstable();
         let refs = batches.iter().collect::<Vec<_>>();
-        let step = self.rows_per_frame(total_bytes, total_rows);
+        let max_rows = self.budgets.max_batch_rows;
         let mut writer = self.run_writer()?;
-        let mut indices = Vec::with_capacity(step);
-        for chunk in keys.chunks(step) {
+        let mut indices = Vec::with_capacity(max_rows);
+        let mut chunk_bytes = 0_usize;
+        let mut chunk_first = None;
+        let mut chunk_last = None;
+        for key in &keys {
             check_cancelled(cancel)?;
-            indices.clear();
-            indices.extend(chunk.iter().map(|key| (key.1 as usize, key.2 as usize)));
+            let batch = &batches[key.1 as usize];
+            let row = key.2 as usize;
+            let row_bytes = Self::row_bytes(batch, row)?;
+            if indices.is_empty()
+                && row_bytes > self.frame_target
+                && batch.get_array_memory_size() > self.budgets.max_batch_bytes
+            {
+                return Err(storage(
+                    "wide property row exceeds its validated source batch window",
+                ));
+            }
+            let next_bytes = chunk_bytes
+                .checked_add(row_bytes)
+                .ok_or_else(|| storage("property frame byte total overflows"))?;
+            if !indices.is_empty() && (indices.len() >= max_rows || next_bytes > self.frame_target)
+            {
+                let frame = interleave_record_batch(&refs, &indices).map_err(storage)?;
+                writer.append(
+                    &frame,
+                    chunk_first.expect("a nonempty property frame"),
+                    chunk_last.expect("a nonempty property frame"),
+                )?;
+                crate::graph_construction::construction_failpoint("bulk.during_property_run");
+                indices.clear();
+                chunk_bytes = 0;
+                chunk_first = None;
+            }
+            indices.push((key.1 as usize, row));
+            chunk_bytes = chunk_bytes
+                .checked_add(row_bytes)
+                .ok_or_else(|| storage("property frame byte total overflows"))?;
+            chunk_first.get_or_insert(key.0);
+            chunk_last = Some(key.0);
+        }
+        if !indices.is_empty() {
             let frame = interleave_record_batch(&refs, &indices).map_err(storage)?;
-            writer.append(&frame, chunk[0].0, chunk[chunk.len() - 1].0)?;
+            writer.append(
+                &frame,
+                chunk_first.expect("a nonempty property frame"),
+                chunk_last.expect("a nonempty property frame"),
+            )?;
             crate::graph_construction::construction_failpoint("bulk.during_property_run");
         }
         writer.finish()
     }
 
-    /// Rows that make a frame of about the target size, at this row width.
-    pub(super) fn rows_per_frame(&self, bytes: usize, rows: usize) -> usize {
-        (self.frame_target / (bytes / rows.max(1)).max(1)).clamp(1, self.budgets.max_batch_rows)
+    /// Logical Arrow bytes contributed by one row, including nested children,
+    /// variable-width offsets, and validity. Computing this before interleave
+    /// keeps skewed keys from materializing an over-budget output frame.
+    pub(super) fn row_bytes(batch: &RecordBatch, row: usize) -> Result<usize, GfError> {
+        batch.columns().iter().try_fold(0_usize, |total, column| {
+            let bytes = Self::column_row_bytes(column.as_ref(), row)?;
+            total
+                .checked_add(bytes)
+                .ok_or_else(|| storage("property row byte total overflows"))
+        })
+    }
+
+    fn column_row_bytes(array: &dyn Array, row: usize) -> Result<usize, GfError> {
+        let data_type = array.data_type();
+        let fast = match data_type {
+            DataType::FixedSizeBinary(width) => usize::try_from(*width).ok(),
+            DataType::Boolean => Some(1),
+            DataType::Utf8 => array
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .and_then(|values| usize::try_from(values.value_length(row)).ok())
+                .and_then(|length| length.checked_add(4)),
+            DataType::LargeUtf8 => array
+                .as_any()
+                .downcast_ref::<LargeStringArray>()
+                .and_then(|values| usize::try_from(values.value_length(row)).ok())
+                .map(|length| length + 8),
+            DataType::Binary => array
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .and_then(|values| usize::try_from(values.value_length(row)).ok())
+                .and_then(|length| length.checked_add(4)),
+            DataType::LargeBinary => array
+                .as_any()
+                .downcast_ref::<LargeBinaryArray>()
+                .and_then(|values| usize::try_from(values.value_length(row)).ok())
+                .map(|length| length + 8),
+            data_type if data_type.primitive_width().is_some() => data_type.primitive_width(),
+            _ => None,
+        };
+        if let Some(bytes) = fast {
+            // Charge a byte for every nullable row. A non-null one-row slice
+            // drops its validity buffer, but a multirow output may retain it.
+            return bytes
+                .checked_add(usize::from(array.nulls().is_some()))
+                .ok_or_else(|| storage("property row byte total overflows"));
+        }
+        Self::array_data_row_bytes(&array.to_data(), row)
+    }
+
+    fn array_data_row_bytes(data: &arrow::array::ArrayData, row: usize) -> Result<usize, GfError> {
+        let data_type = data.data_type();
+        let offset = data
+            .offset()
+            .checked_add(row)
+            .ok_or_else(|| storage("property row offset overflows"))?;
+        let value_bytes = match data_type {
+            DataType::Utf8 | DataType::Binary => Self::variable_value_bytes(data, row, false)?,
+            DataType::LargeUtf8 | DataType::LargeBinary => {
+                Self::variable_value_bytes(data, row, true)?
+            }
+            DataType::List(_) | DataType::Map(_, _) => Self::list_row_bytes(data, row, false)?,
+            DataType::LargeList(_) => Self::list_row_bytes(data, row, true)?,
+            DataType::ListView(_) => Self::list_view_row_bytes(data, row, false)?,
+            DataType::LargeListView(_) => Self::list_view_row_bytes(data, row, true)?,
+            DataType::FixedSizeList(_, width) => Self::fixed_list_row_bytes(data, offset, *width)?,
+            DataType::Struct(_) => Self::struct_row_bytes(data, offset)?,
+            DataType::Dictionary(key_type, _) => Self::dictionary_row_bytes(data, key_type, row)?,
+            DataType::FixedSizeBinary(width) => usize::try_from(*width).map_err(storage)?,
+            DataType::Boolean => 1,
+            data_type if data_type.primitive_width().is_some() => data_type
+                .primitive_width()
+                .expect("checked primitive width"),
+            _ => data
+                .slice(row, 1)
+                .get_slice_memory_size()
+                .map_err(storage)?,
+        };
+        value_bytes
+            .checked_add(usize::from(data.nulls().is_some()))
+            .ok_or_else(|| storage("property row byte total overflows"))
+    }
+
+    fn variable_value_bytes(
+        data: &arrow::array::ArrayData,
+        row: usize,
+        large: bool,
+    ) -> Result<usize, GfError> {
+        let (start, end, width) = if large {
+            let offsets = data.buffer::<i64>(0);
+            (
+                usize::try_from(offsets[row]).map_err(storage)?,
+                usize::try_from(offsets[row + 1]).map_err(storage)?,
+                8,
+            )
+        } else {
+            let offsets = data.buffer::<i32>(0);
+            (
+                usize::try_from(offsets[row]).map_err(storage)?,
+                usize::try_from(offsets[row + 1]).map_err(storage)?,
+                4,
+            )
+        };
+        end.checked_sub(start)
+            .and_then(|bytes| bytes.checked_add(width))
+            .ok_or_else(|| storage("property value range is invalid"))
+    }
+
+    fn list_row_bytes(
+        data: &arrow::array::ArrayData,
+        row: usize,
+        large: bool,
+    ) -> Result<usize, GfError> {
+        let (start, end, width) = if large {
+            let offsets = data.buffer::<i64>(0);
+            (
+                usize::try_from(offsets[row]).map_err(storage)?,
+                usize::try_from(offsets[row + 1]).map_err(storage)?,
+                8,
+            )
+        } else {
+            let offsets = data.buffer::<i32>(0);
+            (
+                usize::try_from(offsets[row]).map_err(storage)?,
+                usize::try_from(offsets[row + 1]).map_err(storage)?,
+                4,
+            )
+        };
+        let len = end
+            .checked_sub(start)
+            .ok_or_else(|| storage("property list range is invalid"))?;
+        let child = data
+            .child_data()
+            .first()
+            .ok_or_else(|| storage("property list has no child data"))?;
+        Self::array_range_bytes(child, start, len)?
+            .checked_add(width)
+            .ok_or_else(|| storage("property row byte total overflows"))
+    }
+
+    fn list_view_row_bytes(
+        data: &arrow::array::ArrayData,
+        row: usize,
+        large: bool,
+    ) -> Result<usize, GfError> {
+        let (start, len, width) = if large {
+            let offsets = data.buffer::<i64>(0);
+            let sizes = data.buffer::<i64>(1);
+            (
+                usize::try_from(offsets[row]).map_err(storage)?,
+                usize::try_from(sizes[row]).map_err(storage)?,
+                16,
+            )
+        } else {
+            let offsets = data.buffer::<i32>(0);
+            let sizes = data.buffer::<i32>(1);
+            (
+                usize::try_from(offsets[row]).map_err(storage)?,
+                usize::try_from(sizes[row]).map_err(storage)?,
+                8,
+            )
+        };
+        let child = data
+            .child_data()
+            .first()
+            .ok_or_else(|| storage("property list view has no child data"))?;
+        Self::array_range_bytes(child, start, len)?
+            .checked_add(width)
+            .ok_or_else(|| storage("property row byte total overflows"))
+    }
+
+    fn fixed_list_row_bytes(
+        data: &arrow::array::ArrayData,
+        offset: usize,
+        width: i32,
+    ) -> Result<usize, GfError> {
+        let width = usize::try_from(width).map_err(storage)?;
+        let start = offset
+            .checked_mul(width)
+            .ok_or_else(|| storage("property list offset overflows"))?;
+        let child = data
+            .child_data()
+            .first()
+            .ok_or_else(|| storage("property list has no child data"))?;
+        Self::array_range_bytes(child, start, width)
+    }
+
+    fn struct_row_bytes(data: &arrow::array::ArrayData, offset: usize) -> Result<usize, GfError> {
+        data.child_data().iter().try_fold(0_usize, |total, child| {
+            let child_row = offset.saturating_sub(child.offset());
+            total
+                .checked_add(Self::array_data_row_bytes(child, child_row)?)
+                .ok_or_else(|| storage("property row byte total overflows"))
+        })
+    }
+
+    fn dictionary_row_bytes(
+        data: &arrow::array::ArrayData,
+        key_type: &DataType,
+        row: usize,
+    ) -> Result<usize, GfError> {
+        let key_bytes = key_type
+            .primitive_width()
+            .ok_or_else(|| storage("property dictionary key is not primitive"))?;
+        if data.is_null(row) {
+            return Ok(key_bytes);
+        }
+        let child = data
+            .child_data()
+            .first()
+            .ok_or_else(|| storage("property dictionary has no values"))?;
+        let key = Self::dictionary_index(data, key_type, row)?;
+        key_bytes
+            .checked_add(Self::array_data_row_bytes(child, key)?)
+            .ok_or_else(|| storage("property row byte total overflows"))
+    }
+
+    fn dictionary_index(
+        data: &arrow::array::ArrayData,
+        key_type: &DataType,
+        row: usize,
+    ) -> Result<usize, GfError> {
+        macro_rules! index {
+            ($key:ty) => {
+                usize::try_from(data.buffer::<$key>(0)[row]).map_err(storage)
+            };
+        }
+        match key_type {
+            DataType::Int8 => index!(i8),
+            DataType::Int16 => index!(i16),
+            DataType::Int32 => index!(i32),
+            DataType::Int64 => index!(i64),
+            DataType::UInt8 => index!(u8),
+            DataType::UInt16 => index!(u16),
+            DataType::UInt32 => index!(u32),
+            DataType::UInt64 => index!(u64),
+            _ => Err(storage("property dictionary key is not an integer")),
+        }
+    }
+
+    fn array_range_bytes(
+        data: &arrow::array::ArrayData,
+        start: usize,
+        len: usize,
+    ) -> Result<usize, GfError> {
+        let end = start
+            .checked_add(len)
+            .ok_or_else(|| storage("property child range overflows"))?;
+        (start..end).try_fold(0_usize, |total, row| {
+            total
+                .checked_add(Self::array_data_row_bytes(data, row)?)
+                .ok_or_else(|| storage("property row byte total overflows"))
+        })
     }
 
     fn encode_frame(&self, batch: &RecordBatch) -> Result<Vec<u8>, GfError> {
@@ -965,6 +1254,8 @@ mod tests {
     use super::*;
     use arrow::array::{Array, ArrayRef, FixedSizeBinaryArray, Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
+
+    include!("property_rows_frame_tests.rs");
 
     fn batch(start: u64, count: usize) -> RecordBatch {
         let ids = (start..start + count as u64)
