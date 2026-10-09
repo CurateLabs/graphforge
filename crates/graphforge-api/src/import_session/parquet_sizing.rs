@@ -488,11 +488,13 @@ where
                 "Parquet values disagree with the row-group footer count",
             ));
         }
+        // The retained length allocation must be dead before its credit can
+        // become available to the next physical column's sizing pass.
+        self.dictionary = None;
         if self.dictionary_charge > 0 {
             self.budget.release(self.dictionary_charge);
             self.dictionary_charge = 0;
         }
-        self.dictionary = None;
         Ok(())
     }
 }

@@ -133,6 +133,48 @@ fn uniform_dictionary_entries_still_validate_every_index() {
     );
 }
 
+#[test]
+fn flat_dictionary_validity_is_packed_across_row_groups_and_batch_boundaries() {
+    for nullable in [false, true] {
+        let values = (0..8)
+            .map(|row| {
+                if nullable && row % 2 == 1 {
+                    None
+                } else {
+                    Some("aaa")
+                }
+            })
+            .collect::<Vec<_>>();
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Utf8,
+            nullable,
+        )]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(StringArray::from(values)) as ArrayRef],
+        )
+        .unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let properties = WriterProperties::builder()
+            .set_compression(Compression::UNCOMPRESSED)
+            .set_dictionary_enabled(true)
+            .set_max_row_group_row_count(Some(4))
+            .build();
+        let mut writer =
+            ArrowWriter::try_new(file.reopen().unwrap(), batch.schema(), Some(properties)).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let metadata = metadata(&file);
+        assert_eq!(metadata.num_row_groups(), 2);
+        let sized = scan(&file, &metadata, 5).unwrap();
+        let expected = if nullable { [30, 19] } else { [36, 22] };
+        assert_eq!(sized.batch_bytes(0), expected[0]);
+        assert_eq!(sized.batch_bytes(1), expected[1]);
+        assert_eq!(sized.decoded_bytes(), expected.into_iter().sum::<u64>());
+    }
+}
+
 fn v2_page(repetition: u8, row_starts: u32) -> DecodedPage {
     // One RLE hybrid event each for repetition=0/1 and definition=1.
     let body = Bytes::from(vec![2, repetition, 2, 1, 7, 0, 0, 0]);

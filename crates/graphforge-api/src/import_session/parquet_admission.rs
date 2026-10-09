@@ -36,13 +36,6 @@ fn needs_values(leaf: &LeafScan) -> bool {
 /// Arrow bytes a value of a leaf occupies besides its payload: an offset, and a
 /// validity bit per slot (added per record, rounded up).
 const OFFSET_BYTES: u64 = 4;
-/// What each child of a repeated value costs beyond its own bytes while it moves
-/// through the build: the pair of 16-bit levels the reader holds for every slot of
-/// a batch (4 bytes), and the 32-bit index the sink's sort takes it by (4 bytes).
-/// Both scale with the number of children, not with their bytes, so a cell of
-/// booleans costs far more than the bits Arrow stores for it.
-const REPEATED_CHILD_BYTES: u64 = 8;
-
 /// Everything known about how a source decodes, from its page headers and the
 /// values the headers cannot size.
 pub(super) struct SourceScan {
