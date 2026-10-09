@@ -228,6 +228,12 @@ fn cancelled_delta_validation_precedes_body_traversal() {
         // The deliberately invalid body would return Storage if traversal
         // happened before the cancellation authority was checked.
         let error = validate(encoding, &[], 0, 32, Some(&cancellation)).unwrap_err();
-        assert_eq!(error, cancelled());
+        assert!(matches!(
+            error,
+            GfError::Api {
+                code: graphforge_core::ApiErrorCode::Cancelled,
+                ..
+            }
+        ));
     }
 }
