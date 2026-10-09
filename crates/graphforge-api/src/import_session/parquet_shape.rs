@@ -146,13 +146,19 @@ impl SchemaShape {
             let nullable = task.nullable_override.unwrap_or(physical_nullable);
 
             let is_primitive = task.parquet.is_primitive();
-            let is_list_group = !is_primitive
-                && task.parquet.get_basic_info().converted_type() == ConvertedType::LIST;
-            let is_map_group = !is_primitive
+            let map_annotation = !is_primitive
                 && matches!(
                     task.parquet.get_basic_info().converted_type(),
                     ConvertedType::MAP | ConvertedType::MAP_KEY_VALUE
                 );
+            let map_as_list = map_annotation && {
+                let fields = task.parquet.get_fields();
+                fields.len() == 1 && !fields[0].is_primitive() && fields[0].get_fields().len() == 1
+            };
+            let is_list_group = !is_primitive
+                && (task.parquet.get_basic_info().converted_type() == ConvertedType::LIST
+                    || map_as_list);
+            let is_map_group = map_annotation && !map_as_list;
 
             if is_primitive {
                 if matches!(
@@ -375,7 +381,8 @@ impl SchemaShape {
                         || (!is_list_annotation(repeated)
                             && !has_single_repeated_child(repeated)
                             && (repeated.name() == "array"
-                                || repeated.name() == format!("{}_tuple", task.parquet.name()))));
+                                || repeated.name().strip_suffix("_tuple")
+                                    == Some(task.parquet.name()))));
                 if repeated.is_primitive() {
                     if element.is_nullable() {
                         return Err(storage(
