@@ -27,7 +27,7 @@
     {
       "kind": "rewrite",
       "subject": "BI1",
-      "text": "rewrite: LDBC text hits #1888 D3 (`message.creationDate.year` fails to plan). The year is read from a WITH-bound alias of the same property, so every value is unchanged. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node."
+      "text": "rewrite: LDBC text uses a `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes because import sessions assign one label per node. The upstream stored creation-date component expression is preserved."
     },
     {
       "kind": "rewrite",
@@ -62,7 +62,7 @@
     {
       "kind": "rewrite",
       "subject": "BI8",
-      "text": "rewrite: LDBC text hits #1888 D8 (a concatenated node list `a + collect(n)` loses the node type, so its elements are refused in a pattern). The interested persons and the message creators are concatenated as person ids and the distinct persons re-matched by id, which selects the same persons. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node."
+      "text": "rewrite: LDBC text uses a `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes because import sessions assign one label per node. Upstream collect/concatenate/UNWIND node values are preserved."
     },
     {
       "kind": "rewrite",
@@ -82,7 +82,7 @@
     {
       "kind": "rewrite",
       "subject": "BI13",
-      "text": "rewrite: LDBC text hits #1888 D3 (`zombie.creationDate.year` fails to plan). The creation-date components are read from a WITH-bound alias of the same property. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node."
+      "text": "rewrite: LDBC text uses a `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes because import sessions assign one label per node. The upstream stored creation-date component arithmetic is preserved."
     },
     {
       "kind": "rewrite",
