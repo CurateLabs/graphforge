@@ -1,12 +1,16 @@
 //! Passes 2 and 3 of the over-budget bulk build (#1900).
 //!
-//! Pass 2 decodes the edges once, resolves their endpoints through the node
-//! index, and scatters a compact record (UUID, source and target rank,
-//! relation id) into edge-UUID range partitions on scratch. The range
-//! boundaries come from a sample of the edge UUIDs. When the node tables are
-//! on scratch too, the endpoints are not resolved here: the record carries no
-//! ranks and the endpoints become refs for the node leaves (#1929), whose
-//! resolved records pass 3 joins back.
+//! Pass 2 decodes the edges once and scatters a compact record (UUID, source
+//! and target rank, relation id) into edge-UUID range partitions on scratch.
+//! The range boundaries come from a sample of the edge UUIDs. When the node
+//! tables are resident the endpoints resolve here, through the node index.
+//! When the node tables are on scratch too, the record carries no ranks: pass
+//! 2 then writes only the raw records and hashes a canonical topology proof
+//! per task, and a second pass over the same planned tasks sends the
+//! endpoints to the node leaves (#1929) only after the raw partitions have
+//! refined — so the refinement never overlaps live reference files — and only
+//! after its replay proof equals pass 2's (#1929 phase order). The node
+//! leaves' resolved records pass 3 joins back.
 //!
 //! Pass 3 builds the partitions in order, several at a time within the memory
 //! gate. A partition holds every edge of its UUID range, so sorting it ranks
@@ -25,6 +29,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use arrow::array::StringArray;
+use sha2::Digest as _;
 
 use super::budget::ScratchPlan;
 use super::emit::{EdgeEmitter, EdgeWindow};
@@ -40,8 +45,89 @@ use super::tables::{
     short_source,
 };
 use super::{
-    BulkSource, ConstructionChunkKind, GfError, GraphConstructionBudgets, required_string, storage,
+    BulkSource, ConstructionChunkKind, GfError, GraphConstructionBudgets, Sha256, required_string,
+    storage,
 };
+
+// ----------------------------------------------------------------- proof
+
+/// Domain tag of the deferred route's canonical edge topology proof. It keeps
+/// these digests from ever colliding with any other SHA-256 use, and the
+/// domain-separated task identities keep two planned tasks — even two
+/// identical row streams — from producing equal task hashes that would cancel
+/// in the XOR accumulator.
+const EDGE_TOPOLOGY_DOMAIN: &[u8] = b"graphforge.bulk.edge-topology.v1";
+
+/// The canonical topology hash of one planned task: the domain-separated
+/// source index, task index and exact expected row count, then the ordered
+/// stream of edge UUID, source UUID, target UUID, and length-prefixed
+/// relation-name bytes, one tuple per row in task order. The hash runs
+/// continuously across the batches a task emits, so a changed batch boundary
+/// cannot change it; only the row stream can.
+struct TaskTopology(Sha256);
+
+impl TaskTopology {
+    fn start(source: usize, task: usize, rows: usize) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(EDGE_TOPOLOGY_DOMAIN);
+        hasher.update(u64::try_from(source).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(u64::try_from(task).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(u64::try_from(rows).unwrap_or(u64::MAX).to_le_bytes());
+        Self(hasher)
+    }
+
+    fn row(&mut self, edge: &[u8; 16], source: &[u8; 16], target: &[u8; 16], relation: &str) {
+        let hasher = &mut self.0;
+        hasher.update(edge);
+        hasher.update(source);
+        hasher.update(target);
+        hasher.update(
+            u64::try_from(relation.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
+        hasher.update(relation.as_bytes());
+    }
+
+    fn finish(self) -> [u8; 32] {
+        self.0.finalize().into()
+    }
+}
+
+/// The constant-space aggregate of one pass's task hashes: a fixed 32-byte
+/// XOR accumulator under one mutex, combined independently of the order the
+/// workers finished in. Every task's exact row count must match its footer
+/// plan before its hash may enter; the fixed 256-bit result is the pass's
+/// deterministic cryptographic replay evidence, not a source-property replay
+/// claim.
+struct TopologyProof {
+    accumulator: Mutex<[u8; 32]>,
+}
+
+impl TopologyProof {
+    fn new() -> Self {
+        Self {
+            accumulator: Mutex::new([0_u8; 32]),
+        }
+    }
+
+    fn add_task(&self, task: [u8; 32]) -> Result<(), GfError> {
+        let mut accumulator = self
+            .accumulator
+            .lock()
+            .map_err(|_| storage("edge topology proof lock poisoned"))?;
+        for (slot, byte) in accumulator.iter_mut().zip(task) {
+            *slot ^= byte;
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<[u8; 32], GfError> {
+        self.accumulator
+            .into_inner()
+            .map_err(|_| storage("edge topology proof lock poisoned"))
+    }
+}
 
 pub(super) const EDGE_RECORD: usize = 28;
 
@@ -170,6 +256,10 @@ pub(super) struct ScatteredEdges {
     /// Exact degrees, when the endpoints resolved during the scatter.
     pub(super) histogram: Option<KeyHistogram>,
     pub(super) total: u64,
+    /// The canonical topology proof the deferred route's first pass hashed;
+    /// the reference pass must replay it exactly, and the resident route,
+    /// which resolves in one pass, keeps none.
+    pub(super) topology_proof: Option<[u8; 32]>,
 }
 
 fn missing_endpoint_error(is_edge: bool) -> GfError {
@@ -187,9 +277,11 @@ pub(super) enum Endpoints<'a> {
         nodes: &'a NodeTable,
         index: &'a NodeIndex<'a>,
     },
-    /// The node tables are on scratch: leave the ranks zero and send the
-    /// endpoints to the node leaves.
-    Deferred(&'a RefSink<'a>),
+    /// The node tables are on scratch: the ranks stay zero, and a second pass
+    /// over the same planned tasks sends the endpoints to the node leaves
+    /// only after the raw partitions have refined and its replay proof has
+    /// matched this pass's (#1929).
+    Deferred,
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -213,12 +305,7 @@ pub(super) fn scatter_edges(
         cancel,
     )?;
     let partitions = Partitions::create(scratch, "edges", splitters.len() + 1, EDGE_RECORD)?;
-    let staging = match endpoints {
-        Endpoints::Resident { .. } => plan.staging_bytes,
-        Endpoints::Deferred(sink) => {
-            plan.staging_for(partitions.len() + sink.refs.len() + sink.probes.len())
-        }
-    };
+    let staging = plan.staging_bytes;
     let bounds = (0..partitions.len())
         .map(|_| Mutex::new(None::<([u8; 16], [u8; 16])>))
         .collect::<Vec<_>>();
@@ -229,21 +316,24 @@ pub(super) fn scatter_edges(
             tasks.total as u64,
             plan.csr_entry_limit(),
         )),
-        Endpoints::Deferred(_) => None,
+        Endpoints::Deferred => None,
+    };
+    // The deferred route hashes the canonical topology while the required
+    // identity and endpoint columns are in hand; the reference pass must
+    // reproduce it exactly.
+    let proof = match endpoints {
+        Endpoints::Deferred => Some(TopologyProof::new()),
+        Endpoints::Resident { .. } => None,
     };
     let miss = Mutex::new(None::<[u8; 16]>);
     claim_in_order(tasks.items.clone(), |(source, task, rows)| {
         check_cancelled(cancel)?;
         let _decoding = decode.hold(sources[source].task_decode_bytes(task), cancel)?;
         let mut scatter = Scatter::new(scratch, &partitions, staging);
-        let (mut endpoint_refs, mut edge_probes) = match endpoints {
-            Endpoints::Deferred(sink) => (
-                Some(Scatter::new(scratch, sink.refs, staging)),
-                Some(Scatter::new(scratch, sink.probes, staging)),
-            ),
-            Endpoints::Resident { .. } => (None, None),
-        };
         let mut cache = RelationCache::new(&dictionary);
+        let mut hasher = proof
+            .as_ref()
+            .map(|_| TaskTopology::start(source, task, rows));
         let mut written = 0;
         let mut uuids = Vec::new();
         let mut sources_ranks = Vec::new();
@@ -279,7 +369,8 @@ pub(super) fn scatter_edges(
             );
             rels.clear();
             rels.resize(count, 0);
-            cache.column(required_string(&batch, "rel_type")?, &mut rels)?;
+            let relations = required_string(&batch, "rel_type")?;
+            cache.column(relations, &mut rels)?;
             match endpoints {
                 Endpoints::Resident { index, .. } => {
                     for (name, ranks) in [
@@ -301,7 +392,7 @@ pub(super) fn scatter_edges(
                         }));
                     }
                 }
-                Endpoints::Deferred(_) => {
+                Endpoints::Deferred => {
                     for (name, column) in [
                         ("source_uuid", &mut source_uuids),
                         ("target_uuid", &mut target_uuids),
@@ -318,7 +409,7 @@ pub(super) fn scatter_edges(
             for row in 0..count {
                 let (src, dst) = match endpoints {
                     Endpoints::Resident { .. } => (sources_ranks[row], targets[row]),
-                    Endpoints::Deferred(_) => (0, 0),
+                    Endpoints::Deferred => (0, 0),
                 };
                 let record = EdgeRecord {
                     uuid: uuids[row],
@@ -335,27 +426,13 @@ pub(super) fn scatter_edges(
                 let part = partition_of(&splitters, &record.uuid);
                 observe(&mut task_bounds[part], record.uuid);
                 scatter.push(part, &record.encode())?;
-                if let (Endpoints::Deferred(sink), Some(refs), Some(probes)) =
-                    (endpoints, endpoint_refs.as_mut(), edge_probes.as_mut())
-                {
-                    for (role, key) in
-                        [(ROLE_SRC, source_uuids[row]), (ROLE_DST, target_uuids[row])]
-                    {
-                        let routed = sink.push(
-                            refs,
-                            &RefRecord {
-                                key,
-                                edge: record.uuid,
-                                role,
-                            },
-                        )?;
-                        if !routed {
-                            task_miss.get_or_insert(key);
-                        }
-                    }
-                    // The probe only asks whether this edge's own identity is
-                    // a node's; it carries the UUID alone.
-                    sink.push_probe(probes, &record.uuid)?;
+                if let Some(hasher) = &mut hasher {
+                    hasher.row(
+                        &record.uuid,
+                        &source_uuids[row],
+                        &target_uuids[row],
+                        relations.value(row),
+                    );
                 }
             }
             if let Some(sink) = &mut sink {
@@ -372,11 +449,10 @@ pub(super) fn scatter_edges(
             sink.finish(cancel)?;
         }
         scatter.finish()?;
-        if let Some(refs) = endpoint_refs {
-            refs.finish()?;
-        }
-        if let Some(probes) = edge_probes {
-            probes.finish()?;
+        // The task's exact row count has matched the footer plan; its proof
+        // may enter the accumulator.
+        if let (Some(proof), Some(hasher)) = (&proof, hasher) {
+            proof.add_task(hasher.finish())?;
         }
         for (part, bounds_of_task) in task_bounds.into_iter().enumerate() {
             if let Some((low, high)) = bounds_of_task {
@@ -419,6 +495,10 @@ pub(super) fn scatter_edges(
         cancel,
     )?;
     let counts = refined.partitions.counts()?;
+    let topology_proof = match proof {
+        Some(proof) => Some(proof.finish()?),
+        None => None,
+    };
     let scattered = ScatteredEdges {
         partitions: refined.partitions,
         lows: refined.lows,
@@ -429,22 +509,171 @@ pub(super) fn scatter_edges(
         rel_names: dictionary.into_names()?,
         histogram,
         total,
+        topology_proof,
     };
     // The in-memory build checks identities (a repeated edge UUID, an edge
     // UUID equal to a node UUID) before it names a missing endpoint. Keep that
     // precedence so the same input is refused the same way on either route.
+    // On the deferred route the endpoint leaves answer in their own pass, so
+    // the only miss this pass can know is the resident index's.
     let miss = miss
         .into_inner()
         .map_err(|_| storage("endpoint lock poisoned"))?;
     if let Some(endpoint) = miss {
         let node_uuids = match endpoints {
             Endpoints::Resident { nodes, .. } => Some(nodes.uuids.as_slice()),
-            // No node leaf exists, so nothing can collide with an edge UUID.
-            Endpoints::Deferred(_) => None,
+            Endpoints::Deferred => None,
         };
         return Err(scattered.refusal(scratch, plan, node_uuids, false, Some(endpoint), cancel));
     }
     Ok(scattered)
+}
+
+// ------------------------------------------------- deferred reference pass
+
+/// What the deferred route's second edge pass learned.
+#[derive(Debug)]
+pub(super) struct ReplayedEdges {
+    /// The canonical topology proof of the replayed rows; the caller compares
+    /// it with the first pass's before any endpoint resolves or anything is
+    /// published.
+    pub(super) proof: [u8; 32],
+    /// The smallest endpoint no node leaf could hold.
+    pub(super) miss: Option<[u8; 16]>,
+}
+
+/// The typed refusal when the reference pass replayed a different canonical
+/// topology than the raw pass accepted: the two versions cannot be mixed, so
+/// nothing may resolve or publish over the difference. The aggregate proofs
+/// are 256-bit SHA-256 fingerprints with the same collision limits as every
+/// other digest, not a byte comparison or a source-property replay claim.
+pub(super) fn replay_refusal(
+    accepted: Option<[u8; 32]>,
+    replayed: [u8; 32],
+) -> Result<(), GfError> {
+    if accepted == Some(replayed) {
+        return Ok(());
+    }
+    Err(GfError::Api {
+        code: graphforge_core::ApiErrorCode::IdentityConflict,
+        message: "graph construction encoding: an edge source replayed different rows than \
+                  the accepted first pass read; refusing to mix topology versions"
+            .to_owned(),
+    })
+}
+
+/// The second edge pass of the deferred route: replay every planned task of
+/// the same fixed task plan, send each row's two endpoint references and its
+/// identity probe to the node leaves, and hash the same canonical tuple
+/// stream the first pass hashed. Only refs and probes are written: the
+/// property rows, the relation dictionary and the raw edge records stay the
+/// first pass's accepted output. Validation, admission, the decode gate and
+/// cancellation run exactly as in the first pass, and every task's exact row
+/// count must match the footer plan before its proof enters the accumulator.
+pub(super) fn replay_edges(
+    sources: &[BulkSource<'_>],
+    budgets: GraphConstructionBudgets,
+    decode: &super::gate::ByteGate,
+    sink: &RefSink<'_>,
+    plan: &ScratchPlan,
+    scratch: &Scratch,
+    cancel: &AtomicBool,
+) -> Result<ReplayedEdges, GfError> {
+    let tasks = Tasks::plan(sources, "edges")?;
+    let staging = plan.staging_for(sink.refs.len() + sink.probes.len());
+    let proof = TopologyProof::new();
+    let miss = Mutex::new(None::<[u8; 16]>);
+    claim_in_order(tasks.items.clone(), |(source, task, rows)| {
+        check_cancelled(cancel)?;
+        let _decoding = decode.hold(sources[source].task_decode_bytes(task), cancel)?;
+        let mut refs = Scatter::new(scratch, sink.refs, staging);
+        let mut probes = Scatter::new(scratch, sink.probes, staging);
+        let mut hasher = TaskTopology::start(source, task, rows);
+        let mut written = 0;
+        let mut uuids = Vec::new();
+        let mut source_uuids = Vec::new();
+        let mut target_uuids = Vec::new();
+        let mut task_miss = None::<[u8; 16]>;
+        sources[source].reader.read_task(task, &mut |batch| {
+            check_cancelled(cancel)?;
+            if !sources[source].reader.admitted() {
+                crate::graph_construction::validate_canonical_batch(
+                    ConstructionChunkKind::Edge,
+                    &batch,
+                )?;
+                admit_batch(ConstructionChunkKind::Edge, &batch, budgets)?;
+            }
+            let count = batch.num_rows();
+            if written + count > rows {
+                return Err(short_source());
+            }
+            if count == 0 {
+                return Ok(());
+            }
+            uuids.clear();
+            uuids.resize(count, [0_u8; 16]);
+            copy_uuids(
+                crate::graph_construction::batch_uuid_column(&batch, "edge_uuid")?,
+                &mut uuids,
+            );
+            let relations = required_string(&batch, "rel_type")?;
+            for (name, column) in [
+                ("source_uuid", &mut source_uuids),
+                ("target_uuid", &mut target_uuids),
+            ] {
+                column.clear();
+                column.resize(count, [0_u8; 16]);
+                copy_uuids(
+                    crate::graph_construction::batch_uuid_column(&batch, name)?,
+                    column,
+                );
+            }
+            for row in 0..count {
+                hasher.row(
+                    &uuids[row],
+                    &source_uuids[row],
+                    &target_uuids[row],
+                    relations.value(row),
+                );
+                for (role, key) in [(ROLE_SRC, source_uuids[row]), (ROLE_DST, target_uuids[row])] {
+                    let routed = sink.push(
+                        &mut refs,
+                        &RefRecord {
+                            key,
+                            edge: uuids[row],
+                            role,
+                        },
+                    )?;
+                    if !routed {
+                        task_miss.get_or_insert(key);
+                    }
+                }
+                // The probe only asks whether this edge's own identity is a
+                // node's; it carries the UUID alone.
+                sink.push_probe(&mut probes, &uuids[row])?;
+            }
+            written += count;
+            Ok(())
+        })?;
+        if written != rows {
+            return Err(short_source());
+        }
+        refs.finish()?;
+        probes.finish()?;
+        proof.add_task(hasher.finish())?;
+        if let Some(endpoint) = task_miss {
+            miss.lock()
+                .map_err(|_| storage("endpoint lock poisoned"))?
+                .get_or_insert(endpoint);
+        }
+        Ok(())
+    })?;
+    Ok(ReplayedEdges {
+        proof: proof.finish()?,
+        miss: miss
+            .into_inner()
+            .map_err(|_| storage("endpoint lock poisoned"))?,
+    })
 }
 
 impl ScatteredEdges {
@@ -788,3 +1017,7 @@ pub(super) fn rank_partitions(context: &RankContext<'_>) -> Result<RankedEdges, 
         counts,
     })
 }
+
+#[cfg(test)]
+#[path = "scratch_edges_deferred_tests.rs"]
+mod deferred_tests;

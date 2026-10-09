@@ -3650,4 +3650,65 @@ mod bulk_builder {
         assert_eq!(report.node_refinement_write_bytes, 0, "{report:?}");
         assert!(report.passes.contains_key("endpoints"));
     }
+
+    #[test]
+    fn the_endpoint_reference_pass_is_metered_only_on_the_node_scratch_route() {
+        let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
+        // In memory: one edges pass, no reference pass.
+        let root = TempDir::new().unwrap();
+        let mut session = pinned(&root);
+        session
+            .prepare_bulk_encoding(1, &plan(&nodes, &edges, 2), || false)
+            .unwrap();
+        let report = session.bulk_build_report();
+        assert!(report.passes.contains_key("edges"));
+        assert!(!report.passes.contains_key("edge-refs"), "{report:?}");
+        assert!(!report.passes.contains_key("endpoints"));
+        // The node tables fit: the edges scatter, the nodes stay resident, and
+        // the endpoints resolve during the edge pass.
+        let run = scratch_run(&nodes, &edges, 2, 4, (4, 3)).unwrap();
+        let report = &run.report;
+        assert!(report.passes.contains_key("edges"));
+        assert!(!report.passes.contains_key("edge-refs"), "{report:?}");
+        // The node tables do not fit: the added real source read is its own
+        // metered pass, between the edges and the endpoints.
+        let run = node_scratch_run(&nodes, &edges, 2, 4, (4, 3, 4)).unwrap();
+        let report = &run.report;
+        assert!(report.passes.contains_key("edges"), "{report:?}");
+        assert!(report.passes.contains_key("edge-refs"), "{report:?}");
+        assert!(report.passes.contains_key("endpoints"));
+    }
+
+    #[test]
+    fn two_edge_sources_over_scratch_node_tables_match_the_resident_bytes() {
+        let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
+        // The first source carries the first two batches, the second the rest.
+        let resident = BulkBuildPlan {
+            nodes: vec![source(&nodes, 2, 2)],
+            edges: vec![source(&edges[..2], 4, 2), source(&edges[2..], 4, 2)],
+            memory_budget: None,
+        };
+        let root = TempDir::new().unwrap();
+        let mut session = pinned(&root);
+        let expected = inventory(
+            &session
+                .prepare_bulk_encoding(1, &resident, || false)
+                .unwrap(),
+        );
+        let mut plan = resident;
+        plan.memory_budget = Some(plan.scratch_floor_bytes() + 1);
+        assert_eq!(plan.route(), crate::BulkRoute::ScratchNodes);
+        let _forced =
+            crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(4, 3)
+                .with_nodes(4);
+        let root = TempDir::new().unwrap();
+        let mut session = pinned(&root);
+        let encoding = session.prepare_bulk_encoding(1, &plan, || false).unwrap();
+        assert_same(&expected, &inventory(&encoding));
+        let report = session.bulk_build_report();
+        assert_eq!((report.nodes, report.edges), (1_021, 3_001));
+        assert_node_scratch_traffic(&report, 1_021, 3_001);
+        assert!(report.passes.contains_key("edge-refs"), "{report:?}");
+        assert!(!scratch_dir(&session).exists());
+    }
 }

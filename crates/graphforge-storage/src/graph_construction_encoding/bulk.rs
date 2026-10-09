@@ -18,8 +18,12 @@
 //!
 //! When the arrays do not fit the memory budget the same passes run through
 //! scratch files: edges (`scratch_edges`, #1900) and, when the node tables do
-//! not fit either, nodes as well (`scratch_nodes`, #1929), whose endpoint
-//! pass resolves edge endpoints per node-UUID range partition.
+//! not fit either, nodes as well (`scratch_nodes`, #1929). On that node-scratch
+//! route the raw edge pass is followed by a separately metered
+//! endpoint-reference pass that replays the planned edge tasks, sends the
+//! references and probes to the node leaves, and proves the replayed topology
+//! equals the first pass's before the endpoint pass resolves anything
+//! (#1929): the edge refinement then never overlaps live reference files.
 //!
 //! Intermediates are never synced or hashed. A crash discards them and the
 //! build reruns from the sources (ADR 0038 as amended for initial builds).
@@ -516,8 +520,13 @@ pub(crate) fn encode_bulk(
     passes.extend([meter.finish()]);
     crate::graph_construction::construction_failpoint("bulk.after_nodes");
 
-    // Pass 2: edges and endpoint resolution. Over budget, the edges scatter
-    // into scratch partitions instead of landing in resident columns.
+    // Pass 2: edges. Over budget, the edges scatter into scratch partitions
+    // instead of landing in resident columns. When the node tables are on
+    // scratch too, that pass writes only the raw 28-byte records, assigns the
+    // relation ids and ingests the properties once, and hashes a canonical
+    // topology proof: the endpoint references and identity probes are
+    // deferred to their own pass below, so the edge refinement never
+    // overlaps live reference files (#1929).
     let meter = PassMeter::start("edges");
     // Endpoint references and the identity probes of the edges, and the CSR
     // key partitions the endpoint pass derives from the exact degrees, when
@@ -526,44 +535,19 @@ pub(crate) fn encode_bulk(
     let mut identity_probes = None::<scratch::Partitions>;
     let mut node_keys = None::<(scratch_csr::KeyPartitioner, scratch_csr::KeyPartitioner)>;
     let mut edge_side = match (&scratch_plan, &scratch, &nodes) {
-        (Some(sized), Some(scratch), NodeSide::Scratch(on_scratch)) => {
-            // The references split into capped physical segments, so the
-            // endpoint pass can reclaim each one as soon as its verified
-            // read has resolved it (#1929). Probes stay one small file per
-            // leaf: they are read and reclaimed whole, before any reference.
-            let leaves = scratch::Partitions::create_segmented(
-                scratch,
-                "refs",
-                on_scratch.scattered.leaves.len(),
-                scratch_nodes::REF_RECORD,
-                ENDPOINT_REFERENCE_SEGMENT_BYTES,
-            )?;
-            let probes = scratch::Partitions::create(
-                scratch,
-                "probes",
-                on_scratch.scattered.leaves.len(),
-                scratch_nodes::PROBE_RECORD,
-            )?;
-            let sink = scratch_nodes::RefSink {
-                router: &on_scratch.scattered.router,
-                refs: &leaves,
-                probes: &probes,
-            };
-            let scattered = run_pass(&pool, cancelled, &cancel, || {
+        (Some(sized), Some(scratch), NodeSide::Scratch(_)) => {
+            EdgeSide::Scratch(run_pass(&pool, cancelled, &cancel, || {
                 scratch_edges::scatter_edges(
                     &plan.edges,
                     budgets,
                     edge_properties.as_ref(),
                     &decode,
-                    &Endpoints::Deferred(&sink),
+                    &Endpoints::Deferred,
                     sized,
                     scratch,
                     &cancel,
                 )
-            })?;
-            refs = Some(leaves);
-            identity_probes = Some(probes);
-            EdgeSide::Scratch(scattered)
+            })?)
         }
         (Some(sized), Some(scratch), NodeSide::Memory(table)) => {
             let index = pool.install(|| NodeIndex::build(&table.uuids));
@@ -597,6 +581,66 @@ pub(crate) fn encode_bulk(
     }
     passes.extend([meter.finish()]);
     crate::graph_construction::construction_failpoint("bulk.after_edges");
+
+    // Endpoint references over scratch node tables, now that the raw edge
+    // partitions have refined: the pass replays the same fixed task plan,
+    // sends two references and one probe per row to the node leaves, and
+    // proves the replayed topology equals the first pass's before anything is
+    // resolved or published (#1929). The property rows, the relation
+    // dictionary and the raw edge records stay the first pass's accepted
+    // output; a replay that differs is a source identity conflict, never a
+    // mix of topology versions.
+    if let (
+        NodeSide::Scratch(on_scratch),
+        EdgeSide::Scratch(scattered),
+        Some(sized),
+        Some(scratch),
+    ) = (&nodes, &edge_side, &scratch_plan, &scratch)
+    {
+        let meter = PassMeter::start("edge-refs");
+        // The references split into capped physical segments, so the
+        // endpoint pass can reclaim each one as soon as its verified read
+        // has resolved it (#1929). Probes stay one small file per leaf: they
+        // are read and reclaimed whole, before any reference.
+        let leaves = scratch::Partitions::create_segmented(
+            scratch,
+            "refs",
+            on_scratch.scattered.leaves.len(),
+            scratch_nodes::REF_RECORD,
+            ENDPOINT_REFERENCE_SEGMENT_BYTES,
+        )?;
+        let probes = scratch::Partitions::create(
+            scratch,
+            "probes",
+            on_scratch.scattered.leaves.len(),
+            scratch_nodes::PROBE_RECORD,
+        )?;
+        let sink = scratch_nodes::RefSink {
+            router: &on_scratch.scattered.router,
+            refs: &leaves,
+            probes: &probes,
+        };
+        let replayed = run_pass(&pool, cancelled, &cancel, || {
+            scratch_edges::replay_edges(
+                &plan.edges,
+                budgets,
+                &decode,
+                &sink,
+                sized,
+                scratch,
+                &cancel,
+            )
+        })?;
+        refs = Some(leaves);
+        identity_probes = Some(probes);
+        scratch_edges::replay_refusal(scattered.topology_proof, replayed.proof)?;
+        // A missing endpoint keeps its established refusal, ahead of the
+        // endpoint resolution that would name it again.
+        if let Some(endpoint) = replayed.miss {
+            return Err(scattered.refusal(scratch, sized, None, false, Some(endpoint), &cancel));
+        }
+        passes.extend([meter.finish()]);
+    }
 
     // Endpoints over scratch node tables: rank every node leaf, resolve the
     // endpoint references routed to it, and learn the exact degrees.

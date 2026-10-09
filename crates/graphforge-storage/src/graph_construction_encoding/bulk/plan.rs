@@ -209,10 +209,10 @@ pub struct BulkBuildReport {
     /// Edges built.
     pub edges: u64,
     /// Per-pass measurements by pass name (`plan`, `nodes`, `edges`,
-    /// `endpoints` (node tables on scratch only), `ranks` (scratch only),
-    /// `catalog`, `tables`, `ordinal`, `adjacency`, `properties`,
-    /// `finalize`). Keys and values are numeric-only so receipts stay within
-    /// the certification runner's sanitizer.
+    /// `edge-refs` and `endpoints` (node tables on scratch only), `ranks`
+    /// (scratch only), `catalog`, `tables`, `ordinal`, `adjacency`,
+    /// `properties`, `finalize`). Keys and values are numeric-only so receipts
+    /// stay within the certification runner's sanitizer.
     pub passes: std::collections::BTreeMap<String, BulkPassReport>,
     /// Partitions in flight on the over-budget route; zero when the build ran in memory.
     #[serde(default)]

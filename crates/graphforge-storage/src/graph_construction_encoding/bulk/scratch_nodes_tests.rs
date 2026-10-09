@@ -86,6 +86,7 @@ fn fixture(
         rel_names: vec!["KNOWS".to_owned()],
         histogram: None,
         total: 0,
+        topology_proof: None,
     };
     Ok((scattered, refs, probes, edges))
 }
