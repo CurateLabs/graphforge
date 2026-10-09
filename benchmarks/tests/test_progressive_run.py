@@ -1301,13 +1301,17 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         stage.mkdir()
         (stage / "bin").mkdir()
         (stage / "benchmark.xml").write_text("fixture", encoding="utf-8")
-        with patch("graphforge_bench.progressive_run.subprocess.run") as execute:
-            execute.return_value.returncode = 0
+        with patch("graphforge_bench.progressive_run.run_bounded") as execute:
+            execute.return_value = 0
             self.assertEqual(_run_benchexec(stage, self.executables, plan["identities"]), 0)
         command = execute.call_args.args[0]
-        self.assertEqual(command[0], str(self.base / "benchexec"))
-        self.assertEqual(command[1:3], ["--tool-directory", str(stage / "bin")])
-        self.assertEqual(command[3:5], ["--full-access-dir", str(stage.resolve())])
+        # BenchExec runs through the fork-start-method launcher, on the identity-checked Python.
+        self.assertEqual(
+            command[:3],
+            [str(self.executables.benchexec_python), "-m", "graphforge_bench.benchexec_launcher"],
+        )
+        self.assertEqual(command[3:5], ["--tool-directory", str(stage / "bin")])
+        self.assertEqual(command[5:7], ["--full-access-dir", str(stage.resolve())])
         environment = execute.call_args.kwargs["env"]
         self.assertEqual(environment["PYTHONPATH"], str(ROOT / "harness"))
         required = {"HOME", "LANG", "LC_ALL", "PATH", "PYTHONPATH"}
@@ -1477,10 +1481,10 @@ class ProgressiveRunControllerTests(unittest.TestCase):
             (stage / "bin").mkdir()
             (stage / "benchmark.xml").write_text("fixture", encoding="utf-8")
             with (
-                patch("graphforge_bench.progressive_run.subprocess.run") as execute,
+                patch("graphforge_bench.progressive_run.run_bounded") as execute,
                 patch.object(Path, "mkdir"),
             ):
-                execute.return_value.returncode = 0
+                execute.return_value = 0
                 _run_benchexec(stage, self.executables, plan["identities"])
             command = execute.call_args.args[0]
             self.assertNotIn("--memorylimit", command)
@@ -1501,10 +1505,10 @@ class ProgressiveRunControllerTests(unittest.TestCase):
 
         work = WORK_PARENT
         with (
-            patch("graphforge_bench.progressive_run.subprocess.run") as execute,
+            patch("graphforge_bench.progressive_run.run_bounded") as execute,
             patch.object(Path, "mkdir"),
         ):
-            execute.return_value.returncode = 0
+            execute.return_value = 0
             _run_benchexec(
                 stage,
                 self.executables,

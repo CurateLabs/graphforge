@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, Int64Array, StringArray};
+use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use gdc_scorecard::query::{
@@ -396,6 +396,19 @@ fn every_measured_result_is_written_with_the_cells_its_digest_covers() {
     }
     assert_eq!(evidence.status, "failed");
 
+    // The rows are streamed to the file, never built into a document. The bytes are those
+    // the parsed document gives back: compact, keys sorted, `rows` before `schema`.
+    for index in 0..3 {
+        let bytes = std::fs::read(results_path.join(format!("{index:08}.json"))).unwrap();
+        let parsed: Value = serde_json::from_slice(&bytes).unwrap();
+        let mut again = serde_json::to_vec(&parsed).unwrap();
+        again.push(b'\n');
+        assert_eq!(bytes, again, "{index}");
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.find("\"rows\"").unwrap() < text.find("\"schema\"").unwrap());
+        assert!(text.find("\"result_sha256\"").unwrap() < text.find("\"rows\"").unwrap());
+    }
+
     // A directory that already holds results is refused, so two runs never mix.
     let (code, message) = (
         ResultsDir::new(&results_path).unwrap_err().cause(),
@@ -764,4 +777,61 @@ fn unordered_digests_ignore_row_order_and_ordered_digests_do_not() {
     let other = [batch(&[1, 2, 3], &[Some("a"), Some(""), Some("c")])];
     assert_ne!(digest(&forward, false), digest(&other, false));
     assert_ne!(digest(&forward, false), digest(&forward, true));
+}
+
+/// The digest is computed a row at a time, never from `Rendered`'s rows; `Rendered::digest`
+/// stays as the definition it must reproduce, for every shape of result.
+#[test]
+fn the_streamed_digest_is_the_digest_of_the_rendered_rows() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("name", DataType::Utf8, true),
+        Field::new("score", DataType::Float64, true),
+    ]));
+    let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut next = move |bound: u64| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state % bound
+    };
+    let names = ["", "N", "a", "a, b", "é", "\u{2603}", "V1:z", "line\nbreak"];
+    let batch = |ids: Vec<i64>, names: Vec<Option<&str>>, scores: Vec<Option<f64>>| {
+        RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(ids)) as ArrayRef,
+                Arc::new(StringArray::from(names)) as ArrayRef,
+                Arc::new(Float64Array::from(scores)) as ArrayRef,
+            ],
+        )
+        .unwrap()
+    };
+    let mut compared = 0;
+    for _ in 0..300 {
+        let mut batches = Vec::new();
+        for _ in 0..next(4) {
+            let rows = next(25) as usize;
+            batches.push(batch(
+                (0..rows).map(|_| next(10) as i64).collect(),
+                (0..rows)
+                    .map(|_| (next(5) != 0).then(|| names[next(names.len() as u64) as usize]))
+                    .collect(),
+                (0..rows)
+                    .map(|_| (next(5) != 0).then(|| next(1000) as f64 / 8.0))
+                    .collect(),
+            ));
+        }
+        let rendered = Rendered::new(&schema, &batches).unwrap();
+        for ordered in [false, true] {
+            assert_eq!(
+                result_digest(&schema, &batches, ordered).unwrap(),
+                rendered.digest(ordered),
+                "{ordered} {} rows",
+                rendered.rows.len()
+            );
+            compared += 1;
+        }
+    }
+    assert_eq!(compared, 600);
 }
