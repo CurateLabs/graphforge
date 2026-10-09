@@ -355,6 +355,64 @@ pub(super) struct ResolveContext<'a> {
     pub(super) cancel: &'a AtomicBool,
 }
 
+/// Probe rows between two cancellation checks inside one block. An admitted
+/// block can hold a full staging buffer, so the token is observed at a fixed
+/// row cadence as well as before each block, without testing it per row.
+const PROBE_CANCEL_ROWS: usize = 1 << 12;
+
+/// Read the identity probes of one leaf — an edge UUID that is a node UUID —
+/// and return whether any of them hit the leaf's sorted `records`.
+///
+/// [`Partitions::read`] treats an end of file at any block boundary as clean,
+/// so the read alone cannot tell a lost whole block — a file truncated to
+/// zero included — from an empty partition, and these probes are the sole
+/// collision evidence on this route. The leaf's expected probe count is
+/// therefore snapshotted before the read, every decoded probe is counted
+/// against it, an overshoot is rejected as soon as it is seen, and the exact
+/// match must hold before the caller may reclaim the file or believe what the
+/// probes showed. Cancellation is checked before each block and every
+/// `PROBE_CANCEL_ROWS` records.
+pub(super) fn verify_probes(
+    scratch: &Scratch,
+    probes: &Partitions,
+    leaf: usize,
+    records: &[NodeRecord],
+    cancel: &AtomicBool,
+) -> Result<bool, GfError> {
+    let expected = probes.counts()?[leaf];
+    let mut collision = false;
+    let mut seen = 0_u64;
+    probes.read(scratch, leaf, |payload| {
+        check_cancelled(cancel)?;
+        if !payload.len().is_multiple_of(PROBE_RECORD) {
+            return Err(storage("a node probe block has a partial record"));
+        }
+        for (row, bytes) in payload.chunks_exact(PROBE_RECORD).enumerate() {
+            seen += 1;
+            if seen > expected {
+                return Err(storage(
+                    "a node probe partition holds more records than were scattered",
+                ));
+            }
+            if row % PROBE_CANCEL_ROWS == PROBE_CANCEL_ROWS - 1 {
+                check_cancelled(cancel)?;
+            }
+            let edge: [u8; 16] = bytes.try_into().expect("16 bytes");
+            if records
+                .binary_search_by(|record| record.uuid.cmp(&edge))
+                .is_ok()
+            {
+                collision = true;
+            }
+        }
+        Ok(())
+    })?;
+    if seen != expected {
+        return Err(storage("a node probe partition lost records"));
+    }
+    Ok(collision)
+}
+
 /// Rank every node leaf and resolve the refs routed to it. Also returns the
 /// out and in CSR key partitioners the exact degrees give.
 #[allow(clippy::too_many_lines)]
@@ -448,25 +506,9 @@ pub(super) fn resolve_endpoints(
                 }
             }
             // The identity probes of this leaf: an edge UUID that is a node
-            // UUID. A probe only binary-searches its own edge UUID here, so it
-            // is a bare 16-byte record; the collision flag outlives the file,
-            // which is reclaimed once this read has verified it.
-            let mut local_collision = false;
-            probes.read(scratch, leaf, |payload| {
-                if !payload.len().is_multiple_of(PROBE_RECORD) {
-                    return Err(storage("a node probe block has a partial record"));
-                }
-                for bytes in payload.chunks_exact(PROBE_RECORD) {
-                    let edge: [u8; 16] = bytes.try_into().expect("16 bytes");
-                    if records
-                        .binary_search_by(|record| record.uuid.cmp(&edge))
-                        .is_ok()
-                    {
-                        local_collision = true;
-                    }
-                }
-                Ok(())
-            })?;
+            // UUID. The read verifies the block CRCs and the scatter count
+            // before the file is reclaimed and its answer is believed.
+            let local_collision = verify_probes(scratch, probes, leaf, &records, cancel)?;
             probes.reclaim(scratch, leaf)?;
             // The refs of this leaf, streamed against its sorted records.
             let mut out_degrees = vec![0_u32; count];
