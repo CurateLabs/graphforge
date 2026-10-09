@@ -6,27 +6,23 @@ use std::io::Read;
 use std::path::{Component, Path};
 
 use super::{
-    AuthenticatedUuidIndexSnapshot, COPY_BUFFER_BYTES, ConstructionEncodedArtifact, ENCODED_ROOT,
-    ENCODING_FORMAT_VERSION, GfError, GraphConstructionEncoding, GraphConstructionEncodingEvidence,
-    StableDirectory, account_cache_release, add_evidence_counter, file_identity, file_link_count,
-    storage,
+    COPY_BUFFER_BYTES, ConstructionEncodedArtifact, ENCODED_ROOT, ENCODING_FORMAT_VERSION, GfError,
+    GraphConstructionEncoding, GraphConstructionEncodingEvidence, StableDirectory,
+    account_cache_release, add_evidence_counter, file_identity, file_link_count, storage,
 };
 
 pub(crate) fn authenticate_inventory(
     root: &StableDirectory,
     inventory: &GraphConstructionEncoding,
-    parent_index: Option<&AuthenticatedUuidIndexSnapshot>,
 ) -> Result<GraphConstructionEncodingEvidence, GfError> {
     let _diagnostic_scope =
         crate::graph_construction::diagnostics::Scope::start("inventory_authentication");
     let evidence = authenticate_inventory_payloads(root, inventory, &mut || false)?;
-    authenticate_inventory_references(inventory, parent_index)?;
     Ok(evidence)
 }
 
 /// The control half of [`authenticate_inventory`]: the inventory's structural
-/// invariants and its retained-parent references, without reading a payload
-/// byte. The encoder runs this after installing the inventory it just wrote.
+/// invariants, without reading a payload byte. The encoder runs this after installing the inventory it just wrote.
 ///
 /// The payloads are not re-read here. Every artifact digest in the inventory
 /// was computed by the single pass that wrote the bytes, and the boundary that
@@ -38,51 +34,8 @@ pub(crate) fn authenticate_inventory(
 /// to shape outputs).
 pub(crate) fn authenticate_inventory_control(
     inventory: &GraphConstructionEncoding,
-    parent_index: Option<&AuthenticatedUuidIndexSnapshot>,
 ) -> Result<(), GfError> {
-    validate_inventory_invariants(inventory)?;
-    authenticate_inventory_references(inventory, parent_index)
-}
-
-fn authenticate_inventory_references(
-    inventory: &GraphConstructionEncoding,
-    parent_index: Option<&AuthenticatedUuidIndexSnapshot>,
-) -> Result<(), GfError> {
-    if inventory.retained_artifacts.is_empty() {
-        if inventory.evidence.retained_index_runs != 0 {
-            return Err(storage("retained-index evidence lacks references"));
-        }
-        return Ok(());
-    }
-    let parent = parent_index
-        .ok_or_else(|| storage("retained artifacts lack authenticated parent snapshot"))?;
-    let mut previous = None;
-    let mut references = Vec::with_capacity(inventory.retained_artifacts.len());
-    for retained in &inventory.retained_artifacts {
-        if previous.is_some_and(|value: &str| value >= retained.target_path.as_str()) {
-            return Err(storage(
-                "retained artifact targets are not unique and sorted",
-            ));
-        }
-        references.push(
-            crate::uuid_membership::ConstructionReferenceAuthentication {
-                source_root: &retained.source_root,
-                source_root_volume: retained.source_root_volume,
-                source_root_file_id: &retained.source_root_file_id,
-                source_path: &retained.source_path,
-                source_volume: retained.source_volume,
-                source_file_id: &retained.source_file_id,
-                target_path: &retained.target_path,
-                bytes: retained.bytes,
-                sha256: &retained.sha256,
-                xxh64: retained.xxh64,
-                parent_manifest_sha256: &retained.parent_manifest_sha256,
-            },
-        );
-        previous = Some(retained.target_path.as_str());
-    }
-    parent.authenticate_construction_references(&references)?;
-    Ok(())
+    validate_inventory_invariants(inventory)
 }
 
 fn validate_inventory_invariants(inventory: &GraphConstructionEncoding) -> Result<(), GfError> {
@@ -131,7 +84,8 @@ pub(crate) fn authenticate_inventory_payloads(
             .open_child_file(OsStr::new(&name))
             .map_err(storage)?;
         let identity = file_identity(&file).map_err(storage)?;
-        let (released, operations) = authenticate_encoded_checksum(file, expected, cancelled)?;
+        let (released, operations) =
+            authenticate_encoded_checksum(file, expected, directory.path(), cancelled)?;
         directory.revalidate_named().map_err(storage)?;
         let named = directory
             .open_child_file(OsStr::new(&name))
@@ -179,13 +133,53 @@ fn open_artifact_directory(
     Ok((directory, name))
 }
 
+/// An encoded artifact has one name until publication links the same inode
+/// into the object store (unix). A publication that stopped after that link is
+/// retried by reopening this inventory, and a published project can hydrate
+/// the object into reader workspaces, so more names are legitimate, but only
+/// when the artifact's content address resolves to this very inode. Any other
+/// extra name is refused.
+pub(crate) fn staged_links_admitted(
+    encoded: &std::path::Path,
+    sha256: &str,
+    file: &File,
+) -> Result<bool, GfError> {
+    let project = encoded.ancestors().find_map(|ancestor| {
+        (ancestor.file_name() == Some(OsStr::new(".graphforge-construction")))
+            .then(|| ancestor.parent())
+            .flatten()
+    });
+    match project {
+        Some(project) => encoded_links_expected(project, sha256, file),
+        None => Ok(file_link_count(file).map_err(storage)? == 1),
+    }
+}
+
+/// [`staged_links_admitted`] once the project root is known.
+pub(crate) fn encoded_links_expected(
+    project: &std::path::Path,
+    sha256: &str,
+    file: &File,
+) -> Result<bool, GfError> {
+    match file_link_count(file).map_err(storage)? {
+        1 => Ok(true),
+        2.. if cfg!(unix) => {
+            let address = crate::graph_object_path(project, sha256)?;
+            Ok(graphforge_filesystem::path_identity(&address).ok()
+                == Some(file_identity(file).map_err(storage)?))
+        }
+        _ => Ok(false),
+    }
+}
+
 fn authenticate_encoded_checksum(
     file: File,
     expected: &ConstructionEncodedArtifact,
+    encoded: &std::path::Path,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(graphforge_filesystem::FileCacheReleaseEvidence, u64), GfError> {
     let identity = file_identity(&file).map_err(storage)?;
-    if file_link_count(&file).map_err(storage)? != 1
+    if !staged_links_admitted(encoded, &expected.sha256, &file)?
         || file.metadata().map_err(storage)?.len() != expected.bytes
     {
         return Err(storage("canonical artifact identity or length changed"));
@@ -212,7 +206,7 @@ fn authenticate_encoded_checksum(
         if bytes != expected.bytes
             || checksum.finish() != expected.xxh64
             || file_identity(reader.file()).map_err(storage)? != identity
-            || file_link_count(reader.file()).map_err(storage)? != 1
+            || !staged_links_admitted(encoded, &expected.sha256, reader.file())?
             || reader.file().metadata().map_err(storage)?.len() != expected.bytes
         {
             return Err(storage(

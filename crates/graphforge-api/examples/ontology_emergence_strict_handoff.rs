@@ -517,6 +517,7 @@ fn main() {
                 via: None,
                 directed: false,
                 write_property: None,
+                ..Default::default()
             },
         )
         .unwrap();

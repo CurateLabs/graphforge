@@ -162,7 +162,7 @@ fn preferential_attachment_checkpoint(
     visited: &mut usize,
 ) -> Result<(), AlgorithmError> {
     if (*visited).is_multiple_of(PREFERENTIAL_ATTACHMENT_CHECKPOINT_INTERVAL) {
-        control.checkpoint()?;
+        control.check_cancelled()?;
     }
     *visited = visited.saturating_add(1);
     Ok(())

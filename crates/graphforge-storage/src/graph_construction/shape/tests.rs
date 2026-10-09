@@ -479,7 +479,6 @@ fn nonempty_base_rejects_duplicate_cross_kind_and_missing_endpoint_without_copy(
     );
     assert!(!operation_root.join("staged-identities.run").exists());
     assert_eq!(shape.parent_topology_generation, 1);
-    assert!(shape.parent_uuid_manifest_sha256.is_some());
 
     drop(delta);
     let mut retained_endpoints =
@@ -860,19 +859,48 @@ fn segment_retirement_is_schedule_independent_including_failure() {
             .child_names()
             .unwrap()
             .into_iter()
-            .filter_map(|name| name.into_string().ok())
-            .filter(|name| super::super::partition_shaping::is_partition_artifact_name(name))
-            .count();
+            .filter(|name| {
+                name.to_str()
+                    .is_some_and(super::super::partition_shaping::is_partition_artifact_name)
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            remaining.is_empty(),
+            "segments survived retirement: {remaining:?}"
+        );
+        let retired = segments
+            .iter()
+            .filter(|segment| segment.name != "part-endpoints-g99999999999999999999-p0.run")
+            .map(|segment| {
+                assert!(
+                    !session.root.path().join(&segment.name).exists(),
+                    "segment survived retirement: {}",
+                    segment.name
+                );
+                assert!(
+                    !session
+                        .root
+                        .path()
+                        .join(super::super::shape_receipt_name(&segment.name))
+                        .exists(),
+                    "retired segment receipt survived: {}",
+                    segment.name
+                );
+                (segment.name.clone(), segment.bytes, segment.xxh64.clone())
+            })
+            .collect::<Vec<_>>();
         (
             error,
-            remaining,
-            super::super::tests::evidence_without_file_identities(&session.checkpoint.evidence),
+            retired,
+            super::super::tests::evidence_without_file_identities_and_allocations(
+                &session.checkpoint.evidence,
+            ),
         )
     };
     let serial = retire(1);
     let parallel = retire(8);
     // Every real segment is retired on either path, so none remain.
-    assert_eq!(serial.1, 0);
+    assert_eq!(serial.1.len(), 24);
     assert_eq!(serial, parallel);
 }
 

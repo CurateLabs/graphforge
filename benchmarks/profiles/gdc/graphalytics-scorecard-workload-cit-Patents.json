@@ -1,0 +1,160 @@
+{
+  "schema": "graphforge-gdc-query-workload/1",
+  "suite": "graphalytics",
+  "variants": [
+    {
+      "id": "bfs",
+      "ordered": false,
+      "columns": [
+        "target_uuid",
+        "cost"
+      ],
+      "bindings": [
+        {
+          "id": "run-1",
+          "params": {
+            "source": {
+              "type": "Str",
+              "value": "2bce719b-09c4-7204-8c2f-ee009e3f5879"
+            }
+          }
+        },
+        {
+          "id": "run-2",
+          "params": {
+            "source": {
+              "type": "Str",
+              "value": "2bce719b-09c4-7204-8c2f-ee009e3f5879"
+            }
+          }
+        },
+        {
+          "id": "run-3",
+          "params": {
+            "source": {
+              "type": "Str",
+              "value": "2bce719b-09c4-7204-8c2f-ee009e3f5879"
+            }
+          }
+        }
+      ],
+      "operation": {
+        "kind": "paths",
+        "by": "bfs",
+        "directed": true,
+        "source": {
+          "uuid_param": "source"
+        }
+      }
+    },
+    {
+      "id": "wcc",
+      "ordered": false,
+      "columns": [
+        "id",
+        "community_id"
+      ],
+      "bindings": [
+        {
+          "id": "run-1"
+        },
+        {
+          "id": "run-2"
+        },
+        {
+          "id": "run-3"
+        }
+      ],
+      "operation": {
+        "kind": "cluster",
+        "label": "Vertex",
+        "by": "components",
+        "directed": false
+      }
+    },
+    {
+      "id": "pr",
+      "ordered": false,
+      "columns": [
+        "id",
+        "score"
+      ],
+      "bindings": [
+        {
+          "id": "run-1"
+        },
+        {
+          "id": "run-2"
+        },
+        {
+          "id": "run-3"
+        }
+      ],
+      "operation": {
+        "kind": "rank",
+        "label": "Vertex",
+        "by": "pagerank",
+        "directed": true,
+        "pagerank": {
+          "damping": 0.85,
+          "iterations": 10
+        }
+      }
+    },
+    {
+      "id": "cdlp",
+      "ordered": false,
+      "columns": [
+        "id",
+        "community_id"
+      ],
+      "bindings": [
+        {
+          "id": "run-1"
+        },
+        {
+          "id": "run-2"
+        },
+        {
+          "id": "run-3"
+        }
+      ],
+      "operation": {
+        "kind": "cluster",
+        "label": "Vertex",
+        "by": "label_propagation",
+        "directed": true,
+        "synchronous_label_propagation": {
+          "iterations": 10,
+          "initial_label_property": "id"
+        }
+      }
+    },
+    {
+      "id": "lcc",
+      "ordered": false,
+      "columns": [
+        "id",
+        "score"
+      ],
+      "bindings": [
+        {
+          "id": "run-1"
+        },
+        {
+          "id": "run-2"
+        },
+        {
+          "id": "run-3"
+        }
+      ],
+      "operation": {
+        "kind": "rank",
+        "label": "Vertex",
+        "by": "clustering_coefficient",
+        "directed": true,
+        "clustering_normalization": "neighbor_edges"
+      }
+    }
+  ]
+}

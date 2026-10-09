@@ -1,0 +1,83 @@
+{
+  "schema": "graphforge-gdc-scorecard-ladder-spec/1",
+  "suite_id": "graphalytics",
+  "description": "The Graphalytics scorecard ladder (#952, #1903): wiki-Talk, cit-Patents, datagen-7_5-fb and graph500-22 from the pinned LDBC archives. All listed algorithms run through the public analyst verbs on the durable project; every run is checked against the archive's own reference outputs with the Graphalytics matching rules.",
+  "profile_root": ".",
+  "identity_profile": "scorecard",
+  "counts_ladder": "profiles/gdc/graphalytics-scorecard-ladder.json",
+  "metric_shape": "graphalytics",
+  "variance_line": "Graphalytics algorithms run through GraphForge analyst verbs with explicit compatibility modes; makespan is not measured.",
+  "attribution": "Datasets, reference outputs and specification from LDBC Graphalytics (https://ldbcouncil.org/benchmarks/graphalytics/); LDBC materials are used under CC-BY 4.0.",
+  "variances": [
+    {
+      "kind": "spec_variance",
+      "subject": "Tp",
+      "text": "Tp is the driver clock around one analyst-verb call that returns a materialized Arrow result: paths(by=bfs|dijkstra) also builds each reached vertex's path, and rank and cluster return each vertex's properties. Graphalytics Tp excludes producing output."
+    },
+    {
+      "kind": "spec_variance",
+      "subject": "runs",
+      "text": "Each algorithm runs once as an excluded warm-up, then three measured runs in one warm process on the reopened project; Tp is their mean and every run is checked."
+    },
+    {
+      "kind": "reference_reading",
+      "subject": "BFS, SSSP",
+      "text": "paths returns only reached vertices, so a vertex the reference marks unreachable (9223372036854775807 or infinity) matches by its absence; every reference output must list every vertex exactly once."
+    },
+    {
+      "kind": "spec_variance",
+      "subject": "timeouts",
+      "text": "Graphalytics' per-class job time-outs are not applied; each rung runs under the four-hour rung wall."
+    }
+  ],
+  "rungs": [
+    {
+      "id": "wiki-Talk",
+      "label": "wiki-Talk (2XS)",
+      "dataset_id": "wiki-Talk",
+      "input_subdir": null,
+      "workload": "profiles/gdc/graphalytics-scorecard-workload-wiki-Talk.json",
+      "refused": [],
+      "reference": {
+        "archive_outputs": "graphalytics"
+      },
+      "variances": []
+    },
+    {
+      "id": "cit-Patents",
+      "label": "cit-Patents (XS)",
+      "dataset_id": "cit-Patents",
+      "input_subdir": null,
+      "workload": "profiles/gdc/graphalytics-scorecard-workload-cit-Patents.json",
+      "refused": [],
+      "reference": {
+        "archive_outputs": "graphalytics"
+      },
+      "variances": []
+    },
+    {
+      "id": "datagen-7_5-fb",
+      "label": "datagen-7_5-fb (S)",
+      "dataset_id": "datagen-7_5-fb",
+      "input_subdir": null,
+      "workload": "profiles/gdc/graphalytics-scorecard-workload-datagen-7_5-fb.json",
+      "refused": [],
+      "reference": {
+        "archive_outputs": "graphalytics"
+      },
+      "variances": []
+    },
+    {
+      "id": "graph500-22",
+      "label": "graph500-22 (S)",
+      "dataset_id": "graph500-22",
+      "input_subdir": null,
+      "workload": "profiles/gdc/graphalytics-scorecard-workload-graph500-22.json",
+      "refused": [],
+      "reference": {
+        "archive_outputs": "graphalytics"
+      },
+      "variances": []
+    }
+  ]
+}

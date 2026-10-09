@@ -525,6 +525,75 @@ impl ScalarUDFImpl for CypherTimeProject {
     }
 }
 
+/// `datetime` from a Unix-epoch instant (#1887 D14): args are `[epochSeconds,
+/// epochMillis, nanosecond, timezone]`, exactly one epoch argument non-null
+/// per call site. A null epoch value yields a null datetime; the instant is
+/// rendered in `timezone` (UTC when null). Returns the `datetime` struct.
+pub(in crate::expr) static CYPHER_DATETIME_FROM_EPOCH: LazyLock<ScalarUDF> =
+    LazyLock::new(|| ScalarUDF::new_from_impl(CypherDateTimeFromEpoch::new()));
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub(super) struct CypherDateTimeFromEpoch {
+    signature: Signature,
+}
+
+impl CypherDateTimeFromEpoch {
+    pub(super) fn new() -> Self {
+        Self {
+            signature: Signature::any(4, Volatility::Immutable),
+        }
+    }
+}
+
+impl ScalarUDFImpl for CypherDateTimeFromEpoch {
+    fn name(&self) -> &'static str {
+        "cypher_datetime_from_epoch"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> datafusion::error::Result<DataType> {
+        Ok(DataType::Struct(datetime_fields()))
+    }
+
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion::error::Result<ColumnarValue> {
+        use datafusion::arrow::array::{Array, StringArray};
+        use datafusion::arrow::compute::cast;
+        use datafusion::error::DataFusionError;
+
+        validate_heterogeneous_arguments(&args.args)?;
+        let rows = args.number_rows;
+        let cols = udf_argument_arrays(&args)?;
+        let ints = cast_argument_arrays(&cols[0..3], &DataType::Int64)?;
+        let tz_arr = cast(&cols[3], &DataType::Utf8).map_err(DataFusionError::from)?;
+        let tz = tz_arr.as_any().downcast_ref::<StringArray>();
+        let parts: Vec<DateTimeRow> = (0..rows)
+            .map(|i| {
+                let extra_nanos = optional_i64_at(&ints[2], i).unwrap_or(0);
+                let (seconds, nanos) =
+                    match (optional_i64_at(&ints[0], i), optional_i64_at(&ints[1], i)) {
+                        (Some(seconds), None) => (seconds, extra_nanos),
+                        (None, Some(millis)) => (
+                            millis.div_euclid(1_000),
+                            millis.rem_euclid(1_000) * 1_000_000 + extra_nanos,
+                        ),
+                        _ => return None,
+                    };
+                let zone = tz.and_then(|a| (!a.is_null(i)).then(|| a.value(i)));
+                crate::temporal::datetime_from_epoch(seconds, nanos, zone)
+            })
+            .collect();
+        Ok(ColumnarValue::Array(std::sync::Arc::new(
+            build_datetime_struct(&parts),
+        )))
+    }
+}
+
 /// `datetime`-from-value projection (`Temporal3` [8]-[11]). Args are `[date_src,
 /// time_src, year, month, day, week, dayOfWeek, ordinalDay, quarter,
 /// dayOfQuarter, hour, minute, second, millisecond, microsecond, nanosecond,

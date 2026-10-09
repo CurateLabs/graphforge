@@ -593,42 +593,6 @@ fn parquet_experiment(source: &Path) -> Value {
         "encode_elapsed_ns":encode_ns, "decode_elapsed_ns":decode_ns})
 }
 
-fn pack_identity_records(original: &[u8]) -> Vec<u8> {
-    assert_eq!(original.len() % 32, 0);
-    let mut packed = Vec::with_capacity(original.len() / 32 * 25);
-    for record in original.chunks_exact(32) {
-        assert_eq!(
-            &record[17..24],
-            &[0; 7],
-            "only reserved zero padding is omitted"
-        );
-        packed.extend_from_slice(&record[..17]);
-        packed.extend_from_slice(&record[24..32]);
-    }
-    packed
-}
-
-#[test]
-fn packed_identity_candidate_preserves_full_width_and_tombstone_boundaries() {
-    for uuid in [[0; 16], [255; 16]] {
-        for kind in 0..=3_u8 {
-            for surrogate in [0_u64, 1, u32::MAX.into(), u64::from(u32::MAX) + 1, u64::MAX] {
-                let mut original = [0; 32];
-                original[..16].copy_from_slice(&uuid);
-                original[16] = kind;
-                original[24..32].copy_from_slice(&surrogate.to_be_bytes());
-                let packed = pack_identity_records(&original);
-                assert_eq!(&packed[..16], &uuid);
-                assert_eq!(packed[16], kind);
-                assert_eq!(
-                    u64::from_be_bytes(packed[17..25].try_into().unwrap()),
-                    surrogate
-                );
-            }
-        }
-    }
-}
-
 fn adjacency_codec_experiment(source: &Path) -> Value {
     use arrow::ipc::{
         CompressionType,
@@ -722,70 +686,6 @@ fn adjacency_codec_experiment(source: &Path) -> Value {
     json!({"shards":shards,"source_bytes":source_bytes,"source_allocated_bytes_unix":source_allocated_bytes,"normalized_bytes_none_lz4_zstd":sizes,
         "estimated_allocated_bytes_at_4096":allocations,"encode_elapsed_ns":encode_ns,"decode_elapsed_ns":decode_ns,
         "largest_decoded_batch_array_bytes":largest_decoded_batch,"production_format_changed":true})
-}
-
-fn identity_padding_experiment(source: &Path) -> Value {
-    let selected = graphforge_storage::resolve_project_generation(source).unwrap();
-    let inventory = selected.graph_files_inventory().unwrap().unwrap();
-    let mut records = 0_u64;
-    let mut edges = 0_u64;
-    let mut runs = 0_u64;
-    let mut current_bytes = 0_u64;
-    for entry in &inventory.files {
-        let name = Path::new(&entry.relative_path)
-            .file_name()
-            .unwrap()
-            .to_str()
-            .unwrap();
-        if !entry.relative_path.starts_with("topology/uuid-membership/")
-            || !name.starts_with("identities-")
-        {
-            continue;
-        }
-        let bytes = std::fs::read(
-            graphforge_storage::graph_object_path(source, &entry.content_sha256).unwrap(),
-        )
-        .unwrap();
-        let mut cursor = bytes.as_slice();
-        let mut prior: Option<[u8; 16]> = None;
-        while !cursor.is_empty() {
-            assert!(cursor.len() >= 17);
-            let uuid: [u8; 16] = cursor[..16].try_into().unwrap();
-            assert!(prior.is_none_or(|prior| prior < uuid));
-            prior = Some(uuid);
-            let kind = cursor[16];
-            assert!(kind <= 3);
-            let width = if kind == 1 { 17 } else { 25 };
-            assert!(cursor.len() >= width);
-            let surrogate = if kind == 1 {
-                0
-            } else {
-                u64::from_be_bytes(cursor[17..25].try_into().unwrap())
-            };
-            // Expand only in the test to quantify the previous physical representation.
-            // This is not a legacy reader or production migration path.
-            let mut expanded = [0_u8; 32];
-            expanded[..17].copy_from_slice(&cursor[..17]);
-            expanded[24..].copy_from_slice(&surrogate.to_be_bytes());
-            let packed = pack_identity_records(&expanded);
-            assert_eq!(&packed[..width], &cursor[..width]);
-            if kind == 1 {
-                assert_eq!(&packed[17..], &[0; 8]);
-                edges += 1;
-            }
-            records += 1;
-            cursor = &cursor[width..];
-        }
-        current_bytes += bytes.len() as u64;
-        runs += 1;
-    }
-    assert!(records > 0);
-    assert_eq!(current_bytes, records * 25 - edges * 8);
-    assert!(current_bytes <= records * 25);
-    json!({"identity_runs":runs,"records":records,"live_edge_records":edges,
-        "current_record_bytes":current_bytes,"previous_32_byte_baseline":records * 32,
-        "reserved_padding_saved_bytes":records * 7,"defined_zero_edge_saved_bytes":edges * 8,
-        "production_format_changed":true})
 }
 
 #[test]
@@ -1156,7 +1056,6 @@ fn assess(f: Fixture) {
             "random-identity fixtures must retain the measured at-least-20% Parquet reduction"
         );
     }
-    let identity_experiment = identity_padding_experiment(&source);
     let manifest_experiment = bucket_manifest_experiment(&source);
     if f.heterogeneous {
         // 352 before ADR 0037. Construction now publishes the adjacency CSR with
@@ -1164,7 +1063,9 @@ fn assess(f: Fixture) {
         // Merkle tree covers them, and the authenticated walk visits their leaves
         // and the interior nodes above them. The count is a pinned observation of
         // that tree's shape, not an invariant, so it moves when the file set does.
-        assert_eq!(manifest_experiment["authenticated_lookups_checked"], 373);
+        // 373 while the fixture still published the membership index files
+        // (manifest, topology receipt, identity and surrogate runs; #1902).
+        assert_eq!(manifest_experiment["authenticated_lookups_checked"], 368);
         assert!(
             manifest_experiment["source_manifest_allocated_bytes"]
                 .as_u64()
@@ -1202,7 +1103,7 @@ fn assess(f: Fixture) {
         json!({"fixture":f.name,"nodes":f.nodes,"edges":f.edges,"routes":f.routes,"random_ids":matches!(f.identifiers, Identifiers::Random),"properties":f.properties,"heterogeneous_schemas":f.heterogeneous,"adjacency_built":f.adjacency,"constructed_allocated_bytes":constructed.allocated_bytes,"constructed_categories":constructed.categories,
             "construction_elapsed_ns":construction_ns,"semantic_fingerprint":fingerprint,"whole_project":whole_project,
             "permanent": {"logical_bytes":storage.logical_bytes,"physical_logical_bytes":storage.physical_logical_bytes,"allocated_bytes":storage.allocated_bytes,"physical_objects":storage.physical_objects,"categories":storage.categories},
-            "adjacency_codec_experiment":adjacency_experiment,"parquet_experiment":experiment,"identity_padding_experiment":identity_experiment,"manifest_bucket_experiment":manifest_experiment})
+            "adjacency_codec_experiment":adjacency_experiment,"parquet_experiment":experiment,"manifest_bucket_experiment":manifest_experiment})
     );
 }
 
@@ -3400,7 +3301,7 @@ fn cas_uuid_hydration_budget(root: &Path, source: &Path) {
             graphforge_storage::graph_object_path(source, &entry.content_sha256).unwrap(),
         )
         .unwrap();
-        if matches!(name, "manifest.json" | "topology-receipt.json") {
+        if matches!(name, "ordinal-v4-manifest.json" | "ordinal-v4-receipt.json") {
             assert_eq!(graphforge_filesystem::file_link_count(&file).unwrap(), 1);
             assert_ne!(
                 graphforge_filesystem::file_identity(&file).unwrap(),
@@ -3410,7 +3311,7 @@ fn cas_uuid_hydration_budget(root: &Path, source: &Path) {
             control_allocated += graphforge_filesystem::file_space_usage(&file)
                 .unwrap()
                 .allocated_bytes;
-        } else if name.starts_with("identities-v5") || name.starts_with("node-surrogates-v5") {
+        } else if name.starts_with("forward-v4-") || name.starts_with("ordinal-v4-") {
             assert!(file.metadata().unwrap().permissions().readonly());
             assert_eq!(
                 graphforge_filesystem::file_identity(&file).unwrap(),

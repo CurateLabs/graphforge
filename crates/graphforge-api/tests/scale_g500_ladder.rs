@@ -1557,7 +1557,7 @@ fn open_persisted_construction<'a>(
             .expect("resume persisted construction session");
     }
     let session = graph
-        .begin_graph_construction(budgets)
+        .begin_staged_graph_construction(budgets)
         .expect("begin persisted construction session");
     let parent = path.parent().expect("construction session parent");
     fs::create_dir_all(parent).expect("construction session parent");
@@ -3551,8 +3551,10 @@ fn run_integrated_certification_config(
     let initial_generation = graphforge_storage::resolve_project_generation(&source)
         .expect("resolve initial source generation");
     journal.replace_project_owner("source_project", &initial_generation);
+    // The staged lifecycle is what the phase metric policies certify; the
+    // chunk API's default spools and builds with the bulk builder instead.
     let mut construction = graph
-        .begin_graph_construction(Default::default())
+        .begin_staged_graph_construction(Default::default())
         .expect("begin certification construction");
     let node_count = (1_u64 << scale)
         .checked_mul(u64::from(preflight_node_factor))
@@ -3617,16 +3619,15 @@ fn run_integrated_certification_config(
     let manifest_bytes = committed_inventory
         .files
         .iter()
-        .find(|entry| entry.relative_path == "topology/uuid-membership/manifest.json")
-        .expect("constructed UUID manifest")
+        .find(|entry| entry.relative_path == "topology/uuid-membership/ordinal-v4-manifest.json")
+        .expect("constructed ordinal manifest")
         .byte_length;
-    // Fresh construction has no topology-mutation receipt yet. If present,
-    // its authenticated bytes are also copied privately during hydration.
     let receipt_bytes = committed_inventory
         .files
         .iter()
-        .find(|entry| entry.relative_path == "topology/uuid-membership/topology-receipt.json")
-        .map_or(0, |entry| entry.byte_length);
+        .find(|entry| entry.relative_path == "topology/uuid-membership/ordinal-v4-receipt.json")
+        .expect("constructed ordinal receipt")
+        .byte_length;
     let hydration_uuid_control_bytes = manifest_bytes + receipt_bytes;
     journal.replace_project_owner("source_project", &committed_generation);
     journal.pass("ingest", phase, Some(input_fingerprint));
@@ -4429,8 +4430,10 @@ struct LifecycleLinearityObservation {
     shape_merge_bytes: [u64; 2],
     shape_block_components: [u64; 2],
     canonical_artifact_objects: u64,
+    /// Bytes of every canonical artifact the publication installed or reused.
+    canonical_output_bytes: u64,
     cas_publication_io: graphforge_storage::GraphPublicationIo,
-    encode_fsync_components: [u64; 4],
+    encode_fsync_components: [u64; 3],
     hydration_files_copied: u64,
     hydration_uuid_control_bytes: u64,
     /// Files the final source manifest declares, and the catalog objects that
@@ -4441,7 +4444,7 @@ struct LifecycleLinearityObservation {
     hydration_directory_fsync_operations: u64,
     shape_read_component_calls: [u64; 6],
     shape_write_component_calls: [u64; 2],
-    encode_write_component_calls: [u64; 5],
+    encode_write_component_calls: [u64; 4],
     category_metrics: BTreeMap<String, [u64; 6]>,
     category_authority_metrics: BTreeMap<String, [u64; 6]>,
     phase_disk_peaks: BTreeMap<String, u64>,
@@ -4586,6 +4589,9 @@ fn lifecycle_linearity_observation(evidence: &Value) -> LifecycleLinearityObserv
     let canonical_artifact_objects = construction["canonical_artifact_objects"]
         .as_u64()
         .expect("canonical artifact inventory");
+    let canonical_output_bytes = construction["canonical_output_bytes"]
+        .as_u64()
+        .expect("canonical output bytes");
     let encode_fsync_components = [
         construction["encode_output_fsync_operations"]
             .as_u64()
@@ -4593,9 +4599,6 @@ fn lifecycle_linearity_observation(evidence: &Value) -> LifecycleLinearityObserv
         construction["encode_source_spool_fsync_operations"]
             .as_u64()
             .expect("encode spool fsyncs"),
-        construction["encode_membership_fsync_operations"]
-            .as_u64()
-            .expect("encode membership fsyncs"),
         construction["encode_ordinal_fsync_operations"]
             .as_u64()
             .expect("encode ordinal fsyncs"),
@@ -4641,9 +4644,6 @@ fn lifecycle_linearity_observation(evidence: &Value) -> LifecycleLinearityObserv
         construction["encode_output_write_operations"]
             .as_u64()
             .expect("encode output writes"),
-        construction["encode_membership_write_operations"]
-            .as_u64()
-            .expect("encode membership writes"),
         construction["encode_source_spool_write_operations"]
             .as_u64()
             .expect("encode spool writes"),
@@ -4753,6 +4753,7 @@ fn lifecycle_linearity_observation(evidence: &Value) -> LifecycleLinearityObserv
         shape_merge_bytes: [merge_read_bytes, merge_write_bytes],
         shape_block_components,
         canonical_artifact_objects,
+        canonical_output_bytes,
         cas_publication_io: serde_json::from_value(construction["cas_publication_io"].clone())
             .expect("native CAS component evidence"),
         encode_fsync_components,
@@ -4992,12 +4993,17 @@ fn validate_retained_reconciliation(evidence: &Value) -> Result<(), String> {
         let topology_rows = live_nodes
             .checked_add(live_edges)
             .ok_or_else(|| "live topology denominator overflow".to_owned())?;
-        for category in ["uuid_and_surrogates", "adjacency"] {
+        // The ordinal node-identity facet holds one record per node; the UUID
+        // membership index that held one per edge too is gone (#1902).
+        for (category, denominator) in [
+            ("uuid_and_surrogates", live_nodes),
+            ("adjacency", topology_rows),
+        ] {
             let logical_bytes = evidence_u64(
                 evidence,
                 &format!("/storage/{owner}/categories/{category}/logical_bytes"),
             )?;
-            if logical_bytes < topology_rows {
+            if logical_bytes < denominator {
                 return Err(format!(
                     "{owner}.{category} is below the topology denominator"
                 ));
@@ -5387,7 +5393,7 @@ enum PhaseMetricPolicy {
     /// `materialize_graph_objects` reads the route table once to
     /// authenticate routes, then for every object that
     /// `requires_single_link_materialization` (the route table itself, the
-    /// UUID-membership controls and the private ordinal-v4 authority) reads
+    /// private ordinal-v4 controls) reads
     /// it once while copying (`copy_and_authenticate_materialized_object`)
     /// and once more to verify the installed copy (`verify_file_counted`),
     /// writing it exactly once. Every other object is hard-linked from the
@@ -5429,6 +5435,15 @@ enum PhaseMetricPolicy {
     EncodeWriteComponentCalls,
     AppendObjectInventory,
     ShapeBlockInventory,
+    /// Unix links the encoder's file into the object store instead of copying
+    /// it. Payload read bytes are then only the authentication of objects that
+    /// already existed, and together with the bytes installed they account for
+    /// every canonical output byte exactly once.
+    LinkedPayloadReadBytes,
+    /// Payload write bytes are zero: the encoder wrote each object once and the
+    /// object store wrote none of them. What the phase still writes is the
+    /// manifest's control nodes, which the fresh-publication bound polices.
+    LinkedPayloadWriteBytes,
     CasFsyncInventory,
     CasReadComponentCalls,
     CasWriteComponentCalls,
@@ -5461,6 +5476,8 @@ impl PhaseMetricPolicy {
             | Self::ShapeWriteComponentCalls
             | Self::EncodeWriteComponentCalls
             | Self::ShapeBlockInventory
+            | Self::LinkedPayloadReadBytes
+            | Self::LinkedPayloadWriteBytes
             | Self::CasFsyncInventory
             | Self::CasReadComponentCalls
             | Self::CasWriteComponentCalls
@@ -5478,6 +5495,19 @@ struct PhasePolicyRow {
 
 const ZERO: PhaseMetricPolicy = PhaseMetricPolicy::StructurallyZero;
 const SCALE: PhaseMetricPolicy = PhaseMetricPolicy::ScaleBearing;
+/// Windows copies each encoded file into the object store, so its bytes follow
+/// the data. Everywhere else the install links the encoder's file (#1899) and
+/// the invariant is that the object store writes no payload byte at all.
+const CAS_PAYLOAD_READ_BYTES: PhaseMetricPolicy = if cfg!(windows) {
+    SCALE
+} else {
+    PhaseMetricPolicy::LinkedPayloadReadBytes
+};
+const CAS_PAYLOAD_WRITE_BYTES: PhaseMetricPolicy = if cfg!(windows) {
+    SCALE
+} else {
+    PhaseMetricPolicy::LinkedPayloadWriteBytes
+};
 const ENCODING_BUFFER_BYTES: u64 =
     graphforge_storage::GRAPH_CONSTRUCTION_ENCODING_BUFFER_BYTES as u64;
 const OBJECT_BUFFER_BYTES: u64 = graphforge_storage::GRAPH_OBJECT_IO_BUFFER_BYTES as u64;
@@ -5540,12 +5570,16 @@ const HYDRATION_ROUTE_TABLE_CONTROL_BYTES: u64 = 2 * 1024;
 //   ceil(bytes / staged block) ..= bytes); object count and fsyncs are zero.
 // encode_write_postwrite_authentication: bytes and read calls are data-
 //   proportional; write calls and fsyncs reconcile to the native encoder
-//   components (output, spool, membership, ordinal barriers).
+//   components (output, spool, ordinal barriers).
 // publication_preauthentication: the encoded-inventory control read is
 //   structure-bounded by one encoding buffer, and its call count derives from
 //   those bytes; every other field is zero.
-// cas_install_read_write: bytes are data-proportional; calls and fsyncs
-//   reconcile to the CAS publication components and the one-publication,
+// cas_install_read_write: Windows copies, so bytes are data-proportional.
+//   Elsewhere the install links the encoder's file (#1899): the object store
+//   writes no payload byte, its payload reads are only the authentication of
+//   objects that already existed, and installed bytes plus those reads equal
+//   the canonical output bytes. Calls and fsyncs reconcile to the CAS
+//   publication components and the one-publication,
 //   every-path-installed-or-reused inventory; payload calls are bounded by
 //   the payload bytes.
 // hydration_verification: read_bytes is a conservation law over the copy
@@ -5630,8 +5664,8 @@ const PHASE_METRIC_POLICIES: [PhasePolicyRow; 9] = [
     PhasePolicyRow {
         phase: "cas_install_read_write",
         fields: [
-            SCALE,
-            SCALE,
+            CAS_PAYLOAD_READ_BYTES,
+            CAS_PAYLOAD_WRITE_BYTES,
             PhaseMetricPolicy::CasReadComponentCalls,
             PhaseMetricPolicy::CasWriteComponentCalls,
             ZERO,
@@ -5811,6 +5845,33 @@ fn validate_buffered_calls(
     Ok(())
 }
 
+/// Per-rung buffered bounds for a component that may do no I/O at all: a rung
+/// with no bytes has no calls, and a rung with bytes stays inside the
+/// `ceil(bytes / max_bytes_per_call)..=bytes` envelope. No monotonicity: what
+/// is read is whatever already existed.
+fn validate_buffered_calls_or_idle(
+    name: &str,
+    calls: [u64; 3],
+    bytes: [u64; 3],
+    max_bytes_per_call: u64,
+) -> Result<(), String> {
+    for (rung, (calls, bytes)) in calls.into_iter().zip(bytes).enumerate() {
+        if bytes == 0 {
+            if calls != 0 {
+                return Err(format!("{name} rung {rung} has calls without bytes"));
+            }
+            continue;
+        }
+        let minimum_calls = checked_ceil_div(name, bytes, max_bytes_per_call)?;
+        if calls < minimum_calls || calls > bytes {
+            return Err(format!(
+                "{name} rung {rung} violates buffered bounds {minimum_calls}..={bytes}: calls={calls}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Same per-rung buffered bounds as [`validate_buffered_calls`], but without
 /// the non-decreasing requirement: the call count here is dominated by a
 /// fixed, small set of file/manifest objects rather than by payload bytes
@@ -5968,7 +6029,6 @@ fn validate_positive_normalized_ceiling(
 enum CategoryBehavior {
     NodeBearing,
     EdgeBearing,
-    Mixed,
     FixedInventory,
     StructurallyZero,
 }
@@ -6061,7 +6121,9 @@ fn category_behavior(category: &str) -> Result<CategoryBehavior, String> {
         // CSR shards do not append trailing rows without edges; its adjacency
         // payload therefore grows on the edge axis. This is fixture-specific.
         "topology_edges" | "adjacency" => Ok(CategoryBehavior::EdgeBearing),
-        "uuid_and_surrogates" => Ok(CategoryBehavior::Mixed),
+        // The ordinal node-identity facet is all that remains; it scales with
+        // nodes only (#1902).
+        "uuid_and_surrogates" => Ok(CategoryBehavior::NodeBearing),
         "catalog_and_manifests" => Ok(CategoryBehavior::FixedInventory),
         "properties"
         | "construction_staging"
@@ -6146,9 +6208,6 @@ fn validate_category_taxonomy(
                     {
                         validate_affine_metric(&name, values, denominators)?;
                     }
-                    (CategoryBehavior::Mixed, 1 | 3) => {
-                        validate_affine_metric(&name, values, denominators)?;
-                    }
                     (CategoryBehavior::NodeBearing, 4 | 5)
                         if matches!(axis, LinearityAxis::Nodes) =>
                     {
@@ -6157,9 +6216,6 @@ fn validate_category_taxonomy(
                     (CategoryBehavior::EdgeBearing, 4 | 5)
                         if matches!(axis, LinearityAxis::Edges) =>
                     {
-                        validate_quantized_allocation(&name, values, denominators)?;
-                    }
-                    (CategoryBehavior::Mixed, 4 | 5) => {
                         validate_quantized_allocation(&name, values, denominators)?;
                     }
                     (_, 1 | 3 | 4 | 5) if values[0] == values[1] && values[0] == values[2] => {}
@@ -6355,9 +6411,12 @@ fn validate_lifecycle_metric_policies_for_axis(
             .checked_add(observation.live_edges)
             .ok_or_else(|| "live topology denominator overflow".to_owned())?;
         for owner in ["source", "clean_import"] {
-            for category in ["uuid_and_surrogates", "adjacency"] {
+            for (category, denominator) in [
+                ("uuid_and_surrogates", observation.live_nodes),
+                ("adjacency", topology_rows),
+            ] {
                 let key = format!("{owner}.{category}");
-                if observation.category_metrics[&key][1] < topology_rows {
+                if observation.category_metrics[&key][1] < denominator {
                     return Err(format!(
                         "{key} logical bytes are below the authoritative topology-row denominator at rung {rung}"
                     ));
@@ -6511,6 +6570,37 @@ fn validate_lifecycle_metric_policies_for_axis(
                         validate_shape_block_inventory(&name, values[rung], observation, rung)?;
                     }
                 }
+                PhaseMetricPolicy::LinkedPayloadReadBytes => {
+                    for (rung, observation) in observations.iter().enumerate() {
+                        let payload = &observation.cas_publication_io.payload;
+                        let accounted = payload
+                            .installed_bytes
+                            .checked_add(payload.read_bytes)
+                            .ok_or_else(|| format!("{name} payload byte total overflows"))?;
+                        if accounted != observation.canonical_output_bytes {
+                            return Err(format!(
+                                "{name} payload installed plus authenticated bytes differ from the canonical output at rung {rung}: {accounted} vs {}",
+                                observation.canonical_output_bytes
+                            ));
+                        }
+                        // Only an object that already existed is read.
+                        if (payload.reused_objects == 0) != (payload.read_bytes == 0) {
+                            return Err(format!(
+                                "{name} payload reads do not match reused objects at rung {rung}"
+                            ));
+                        }
+                    }
+                }
+                PhaseMetricPolicy::LinkedPayloadWriteBytes => {
+                    for (rung, observation) in observations.iter().enumerate() {
+                        let payload = &observation.cas_publication_io.payload;
+                        if payload.write_bytes != 0 {
+                            return Err(format!(
+                                "{name} payload bytes were written by the object store at rung {rung}"
+                            ));
+                        }
+                    }
+                }
                 PhaseMetricPolicy::CasReadComponentCalls
                 | PhaseMetricPolicy::CasWriteComponentCalls => {
                     let read = policy == PhaseMetricPolicy::CasReadComponentCalls;
@@ -6530,12 +6620,21 @@ fn validate_lifecycle_metric_policies_for_axis(
                             payload.write_bytes
                         }
                     });
-                    validate_buffered_calls(
-                        &format!("{name}.payload"),
-                        payload_calls,
-                        payload_bytes,
-                        OBJECT_BUFFER_BYTES,
-                    )?;
+                    if cfg!(windows) {
+                        validate_buffered_calls(
+                            &format!("{name}.payload"),
+                            payload_calls,
+                            payload_bytes,
+                            OBJECT_BUFFER_BYTES,
+                        )?;
+                    } else {
+                        validate_buffered_calls_or_idle(
+                            &format!("{name}.payload"),
+                            payload_calls,
+                            payload_bytes,
+                            OBJECT_BUFFER_BYTES,
+                        )?;
+                    }
                     for observation in observations {
                         validate_fresh_cas_control_bound(observation)?;
                     }
@@ -6601,12 +6700,31 @@ fn validate_lifecycle_metric_policies_for_axis(
                                     "{name} {kind} installs nothing in a fresh publication at rung {rung}"
                                 ));
                             }
+                            // A linked payload (non-Windows) gets one file barrier
+                            // per attempt and one bucket barrier per request,
+                            // installed or reused. Copied bytes and manifest
+                            // nodes also retire a temporary: two per attempt.
+                            // Every digest bucket an install created adds the
+                            // one barrier that makes it durable, and each
+                            // request creates at most one.
+                            let linked = kind == "payload" && !cfg!(windows);
+                            let base_barriers = if linked {
+                                Some(requests)
+                            } else {
+                                component.install_attempts.checked_mul(2)
+                            };
+                            let directory_barriers = base_barriers
+                                .and_then(|base| base.checked_add(component.bucket_creations));
+                            if component.bucket_creations > requests {
+                                return Err(format!(
+                                    "{name} {kind} created more buckets than it had requests at rung {rung}"
+                                ));
+                            }
                             if component.install_attempts < component.installed_objects
                                 || component.install_attempts > requests
-                                || component.install_attempts.checked_mul(2)
-                                    != Some(component.directory_fsync_calls)
+                                || directory_barriers != Some(component.directory_fsync_calls)
                                 || component.file_fsync_calls < component.install_attempts
-                                || (kind == "manifest"
+                                || ((kind == "manifest" || linked)
                                     && component.file_fsync_calls != component.install_attempts)
                             {
                                 return Err(format!(
@@ -6639,7 +6757,7 @@ fn validate_lifecycle_metric_policies_for_axis(
                             .ok_or_else(|| format!("{name} component sum overflows"))?;
                         if values[rung] != expected {
                             return Err(format!(
-                                "{name} does not reconcile output/spool/membership/ordinal barriers at rung {rung}"
+                                "{name} does not reconcile output/spool/ordinal barriers at rung {rung}"
                             ));
                         }
                         // Floor: a non-empty graph always writes at least one
@@ -6804,7 +6922,6 @@ fn synthetic_category_metrics(axis: LinearityAxis, factor: u64) -> BTreeMap<Stri
             let bearing = match category_behavior(category).unwrap() {
                 CategoryBehavior::NodeBearing => matches!(axis, LinearityAxis::Nodes),
                 CategoryBehavior::EdgeBearing => matches!(axis, LinearityAxis::Edges),
-                CategoryBehavior::Mixed => true,
                 CategoryBehavior::FixedInventory => false,
                 CategoryBehavior::StructurallyZero => {
                     metrics.insert(format!("{owner}.{category}"), [0; 6]);
@@ -6879,7 +6996,7 @@ fn synthetic_linearity_observations_for_axis(
                         factor,
                         0,
                         0,
-                        43,
+                        35,
                     ],
                 ),
                 (
@@ -6888,15 +7005,19 @@ fn synthetic_linearity_observations_for_axis(
                 ),
                 (
                     "cas_install_read_write".into(),
-                    [
-                        119 + 900 * factor,
-                        100 + 800 * factor,
-                        19 * factor + 39,
-                        19 * factor + 1,
-                        0,
-                        0,
-                        60,
-                    ],
+                    if cfg!(windows) {
+                        [
+                            119 + 900 * factor,
+                            100 + 800 * factor,
+                            19 * factor + 39,
+                            19 * factor + 1,
+                            0,
+                            0,
+                            60,
+                        ]
+                    } else {
+                        [119, 100, 39, 1, 0, 0, 41]
+                    },
                 ),
                 ("hydration_verification".into(), {
                     // Only the small mutable controls are copied; the identity
@@ -6973,21 +7094,40 @@ fn synthetic_linearity_observations_for_axis(
             shape_merge_bytes: [100 + 900 * factor, 100 + 800 * factor],
             shape_block_components: [3 + factor, 3 + factor],
             canonical_artifact_objects: 19,
+            canonical_output_bytes: if cfg!(windows) {
+                900 * factor
+            } else {
+                800 * factor
+            },
             cas_publication_io: graphforge_storage::GraphPublicationIo {
                 publications: 1,
                 initial_entries: 0,
                 changed_paths: 19,
-                payload: graphforge_storage::GraphObjectIoTotals {
-                    read_bytes: 900 * factor,
-                    read_calls: 19 * factor,
-                    write_bytes: 800 * factor,
-                    write_calls: 19 * factor,
-                    file_fsync_calls: 19,
-                    directory_fsync_calls: 38,
-                    installed_objects: 19,
-                    install_attempts: 19,
-                    installed_bytes: 800 * factor,
-                    ..Default::default()
+                payload: if cfg!(windows) {
+                    // Copied: the source is read once and written once.
+                    graphforge_storage::GraphObjectIoTotals {
+                        read_bytes: 900 * factor,
+                        read_calls: 19 * factor,
+                        write_bytes: 800 * factor,
+                        write_calls: 19 * factor,
+                        file_fsync_calls: 19,
+                        directory_fsync_calls: 38,
+                        installed_objects: 19,
+                        install_attempts: 19,
+                        installed_bytes: 800 * factor,
+                        ..Default::default()
+                    }
+                } else {
+                    // Linked: nothing is read or written, one file barrier and
+                    // one bucket barrier per object.
+                    graphforge_storage::GraphObjectIoTotals {
+                        file_fsync_calls: 19,
+                        directory_fsync_calls: 19,
+                        installed_objects: 19,
+                        install_attempts: 19,
+                        installed_bytes: 800 * factor,
+                        ..Default::default()
+                    }
                 },
                 manifest: graphforge_storage::GraphObjectIoTotals {
                     read_bytes: 100,
@@ -7008,7 +7148,7 @@ fn synthetic_linearity_observations_for_axis(
                     ..Default::default()
                 },
             },
-            encode_fsync_components: [10, 5, 8, 20],
+            encode_fsync_components: [10, 5, 20],
             hydration_files_copied: 19,
             hydration_uuid_control_bytes: 100,
             manifest_files: SYNTHETIC_MANIFEST_FILES,
@@ -7017,7 +7157,7 @@ fn synthetic_linearity_observations_for_axis(
             hydration_directory_fsync_operations: 19,
             shape_read_component_calls: [factor, 0, 0, 0, 0, 0],
             shape_write_component_calls: [factor, 0],
-            encode_write_component_calls: [factor, 0, 0, 0, 0],
+            encode_write_component_calls: [factor, 0, 0, 0],
             category_metrics: synthetic_category_metrics(axis, factor),
             category_authority_metrics: synthetic_category_metrics(axis, factor),
             phase_disk_peaks: CERTIFICATION_PHASES
@@ -7806,6 +7946,12 @@ fn cas_fsync_inventory_rejects_a_fresh_publication_that_installed_nothing() {
                 } else {
                     &mut observation.cas_publication_io.manifest
                 };
+                if kind == "payload" && !cfg!(windows) {
+                    // A reused object is authenticated by reading it, so the
+                    // mutation stays coherent with the byte conservation law.
+                    component.read_bytes += component.installed_bytes;
+                    component.read_calls += component.installed_objects;
+                }
                 component.reused_objects += component.installed_objects;
                 component.installed_objects = 0;
                 component.install_attempts = 0;
@@ -7829,6 +7975,70 @@ fn cas_fsync_inventory_rejects_a_fresh_publication_that_installed_nothing() {
                 "{axis:?} {kind}: {error}"
             );
         }
+    }
+}
+
+/// The linked-install invariant, proven by mutation. Re-introducing the copy
+/// (the object store writing payload bytes) or the read-back (authenticating
+/// objects it just installed) must fail even when the aggregate reconciles to
+/// its components, because the bytes are no longer accounted exactly once.
+#[test]
+#[cfg(not(windows))]
+fn linked_payload_policies_reject_a_reintroduced_copy_or_read_back() {
+    for axis in [LinearityAxis::Nodes, LinearityAxis::Edges] {
+        let baseline = synthetic_linearity_observations_for_axis(axis);
+        validate_lifecycle_metric_policies_for_axis(axis, &baseline).expect("linked baseline");
+        let mut copied = baseline.clone();
+        for observation in &mut copied {
+            let payload = &mut observation.cas_publication_io.payload;
+            payload.write_bytes = payload.installed_bytes;
+            payload.write_calls = payload.installed_objects;
+            reconcile_cas_phase_aggregate(observation);
+        }
+        let error = validate_lifecycle_metric_policies_for_axis(axis, &copied)
+            .expect_err("a copy of the payload must fail");
+        assert!(
+            error.contains("cas_install_read_write.write_bytes")
+                && error.contains("written by the object store"),
+            "{axis:?}: {error}"
+        );
+        // A directory barrier nobody accounts for must fail even though the
+        // aggregate reconciles; the same barrier accounted as a bucket
+        // creation is the durability the install owes and passes.
+        let mut unaccounted = baseline.clone();
+        for observation in &mut unaccounted {
+            observation.cas_publication_io.payload.directory_fsync_calls += 1;
+            reconcile_cas_phase_aggregate(observation);
+        }
+        let error = validate_lifecycle_metric_policies_for_axis(axis, &unaccounted)
+            .expect_err("an unaccounted directory barrier must fail");
+        assert!(
+            error.contains("durability components differ"),
+            "{axis:?}: {error}"
+        );
+        let mut accounted = baseline.clone();
+        for observation in &mut accounted {
+            let payload = &mut observation.cas_publication_io.payload;
+            payload.directory_fsync_calls += 1;
+            payload.bucket_creations += 1;
+            reconcile_cas_phase_aggregate(observation);
+        }
+        validate_lifecycle_metric_policies_for_axis(axis, &accounted)
+            .expect("a counted bucket creation barrier is accepted");
+        let mut read_back = baseline.clone();
+        for observation in &mut read_back {
+            let payload = &mut observation.cas_publication_io.payload;
+            payload.read_bytes = payload.installed_bytes;
+            payload.read_calls = payload.installed_objects;
+            reconcile_cas_phase_aggregate(observation);
+        }
+        let error = validate_lifecycle_metric_policies_for_axis(axis, &read_back)
+            .expect_err("reading back what was just installed must fail");
+        assert!(
+            error.contains("cas_install_read_write.read_bytes")
+                && error.contains("differ from the canonical output"),
+            "{axis:?}: {error}"
+        );
     }
 }
 
@@ -7869,7 +8079,7 @@ fn encode_fsync_inventory_rejects_barriers_that_stop_being_counted() {
             .position(|field| *field == "fsync_calls")
             .unwrap();
         for observation in &mut no_barriers {
-            observation.encode_fsync_components = [0; 4];
+            observation.encode_fsync_components = [0; 3];
             observation
                 .phases
                 .get_mut("encode_write_postwrite_authentication")
@@ -8624,7 +8834,7 @@ fn million_edge_sink_uses_sixteen_durable_chunks_and_replays_stably() {
     let budgets = GraphConstructionBudgets::default();
     assert_eq!(CONSTRUCTION_BATCH_ROWS, budgets.max_batch_rows);
     let mut session = graph
-        .begin_graph_construction(budgets)
+        .begin_staged_graph_construction(budgets)
         .expect("begin million-edge construction");
     publish_nodes(&mut session, 2, None);
     let session_uuid = session.session_uuid();
@@ -8659,6 +8869,61 @@ fn million_edge_sink_uses_sixteen_durable_chunks_and_replays_stably() {
     assert_eq!(replayed.evidence.immutable_artifacts, 67);
     assert_eq!(replayed.evidence.replayed_chunks, 16);
     assert_eq!(submitted_chunk_count(&replayed.evidence), 33);
+}
+
+#[test]
+fn million_edge_spool_keeps_sixteen_durable_chunks_and_replays_stably() {
+    let project = TempDir::new().expect("million-edge spool project");
+    let graph = GraphForge::new(project.path().to_str()).expect("open million-edge spool project");
+    let budgets = GraphConstructionBudgets::default();
+    let mut session = graph
+        .begin_graph_construction(budgets)
+        .expect("begin million-edge spool construction");
+    publish_nodes(&mut session, 2, None);
+    let session_uuid = session.session_uuid();
+    let mut sink = EdgeSink::new(&mut session, None);
+    for _ in 0..1_048_576 {
+        sink.push(0, 1);
+    }
+    sink.flush();
+    let first_digest = sink.finish();
+    let first = session.progress();
+    assert_eq!(
+        first.accepted_chunks, 17,
+        "one node plus sixteen edge chunks"
+    );
+    assert_eq!(first.evidence.input_batches, 17);
+    // Spooled, not staged: one file per chunk and none of the staged artifacts.
+    assert_eq!(first.evidence.spooled_chunks, 17);
+    assert_eq!(first.evidence.parquet_shards, 0);
+    assert_eq!(first.evidence.immutable_artifacts, 0);
+    assert!(first.evidence.write_bytes > 0 && first.evidence.write_operations > 0);
+    assert!(first.evidence.fsync_operations >= 2 * 17);
+    let spool = project
+        .path()
+        .join(".graphforge-construction")
+        .join(session_uuid.simple().to_string())
+        .join("chunk-spool");
+    assert_eq!(fs::read_dir(&spool).expect("spool").count(), 17);
+    drop(session);
+
+    // A resumed process finds every accepted chunk and answers a replay of the
+    // same input from them, accepting nothing new.
+    let mut replay = graph
+        .resume_graph_construction(session_uuid, budgets)
+        .expect("resume million-edge spool construction");
+    assert_eq!(replay.progress().accepted_chunks, 17);
+    let mut sink = EdgeSink::new(&mut replay, None);
+    for _ in 0..1_048_576 {
+        sink.push(0, 1);
+    }
+    sink.flush();
+    assert_eq!(sink.finish(), first_digest);
+    let replayed = replay.progress();
+    assert_eq!(replayed.accepted_chunks, 17);
+    assert_eq!(replayed.evidence.input_batches, 17);
+    assert_eq!(replayed.evidence.replayed_chunks, 16);
+    assert_eq!(fs::read_dir(&spool).expect("spool").count(), 17);
 }
 
 fn submitted_chunk_count(evidence: &graphforge_storage::GraphConstructionEvidence) -> u64 {

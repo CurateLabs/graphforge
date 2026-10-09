@@ -484,6 +484,7 @@ fn main() {
                 via: Some("PARENT_OF".into()),
                 directed: false,
                 write_property: None,
+                ..Default::default()
             },
         )
         .unwrap();

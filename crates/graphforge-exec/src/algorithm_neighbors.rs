@@ -28,7 +28,7 @@ pub(crate) fn simple_neighbors(
     for (source, &node_id) in node_ids.iter().enumerate() {
         for edge in graph.neighbors(node_id) {
             if traversed_edges.is_multiple_of(1024) {
-                control.checkpoint()?;
+                control.check_cancelled()?;
             }
             traversed_edges += 1;
             let target = indices

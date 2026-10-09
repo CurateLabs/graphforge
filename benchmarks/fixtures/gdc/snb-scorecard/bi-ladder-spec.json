@@ -1,0 +1,334 @@
+{
+  "schema": "graphforge-gdc-scorecard-ladder-spec/1",
+  "suite_id": "snb-bi",
+  "description": "CI fixture for the snb-bi scorecard (#1904), built by graphforge_bench.gdc_snb_scorecard_fixture. sf0 passes against its reference; sf1 is not pinned and is passed over; sf2 runs a deliberately wrong query text, so its reference check fails typed.",
+  "profile_root": "fixtures/gdc/snb-scorecard",
+  "identity_profile": "scorecard",
+  "counts_ladder": "profiles/gdc/snb-bi-fixture-scorecard-ladder.json",
+  "metric_shape": "queries",
+  "variance_line": "Read-only BI reads on the initial snapshot; the insert/delete batches are refused.",
+  "attribution": "Data, parameters and the SF10 reference from the LDBC Social Network Benchmark Business Intelligence workload (https://ldbcouncil.org/benchmarks/snb/), used under CC-BY 4.0.",
+  "variances": [
+    {
+      "kind": "scope",
+      "subject": "bindings",
+      "text": "Each query variant runs the first 30 rows of its LDBC parameters-sfN/bi-*.csv file, in file order. At SF10 these are exactly the bindings of LDBC's Umbra validation output (checked for all 28 variants)."
+    },
+    {
+      "kind": "scope",
+      "subject": "variants",
+      "text": "BI2, BI8, BI10, BI14 and BI16 run as their LDBC parameter variants a and b; coverage counts each variant, and each INS/DEL batch operation, as one query."
+    },
+    {
+      "kind": "reference_reading",
+      "subject": "parameters and floats",
+      "text": "An LDBC DATE parameter binds as midnight UTC, since the reads compare it with datetime properties. Float cells (BI1 averageMessageLength and percentageOfMessages, BI13 zombieScore) match the reference within a relative 1e-9 with rows in the reference's order; every other cell matches exactly."
+    },
+    {
+      "kind": "rewrite",
+      "subject": "BI1",
+      "text": "rewrite: LDBC text hits #1888 D3 (`message.creationDate.year` fails to plan). The year is read from a WITH-bound alias of the same property, so every value is unchanged. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node."
+    },
+    {
+      "kind": "rewrite",
+      "subject": "BI2",
+      "text": "rewrite: LDBC text matches the `:Message` supertype label, which import sessions cannot assign (one label per node). `(m:Message)` becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes."
+    },
+    {
+      "kind": "rewrite",
+      "subject": "BI3",
+      "text": "rewrite: LDBC text matches the `:Message` supertype label, which import sessions cannot assign (one label per node). `(m:Message)` becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes."
+    },
+    {
+      "kind": "rewrite",
+      "subject": "BI4",
+      "text": "rewrite: LDBC text hits #1888 D5 (CALL subquery). The top-100 forums are ordered by their largest per-country member count, then id, which is the order the LDBC ORDER BY + WITH DISTINCT yields and Umbra's maxNumberOfMembers. The UNION ALL of members with their messages and members with 0 becomes every member of a top forum with an OPTIONAL MATCH count of distinct messages in top-forum threads. Top-forum membership of a thread's forum is tested inside the count, not in the OPTIONAL MATCH WHERE: that shape returns wrong answers in BI13 and IC5 (#1919), though it matches the reference on BI4's own query fixture. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node."
+    },
+    {
+      "kind": "rewrite",
+      "subject": "BI5",
+      "text": "rewrite: LDBC text matches the `:Message` supertype label, which import sessions cannot assign (one label per node). `(m:Message)` becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes."
+    },
+    {
+      "kind": "rewrite",
+      "subject": "BI6",
+      "text": "rewrite: LDBC text matches the `:Message` supertype label, which import sessions cannot assign (one label per node). `(m:Message)` becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes."
+    },
+    {
+      "kind": "rewrite",
+      "subject": "BI7",
+      "text": "rewrite: LDBC text matches the `:Message` supertype label, which import sessions cannot assign (one label per node). `(m:Message)` becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes."
+    },
+    {
+      "kind": "rewrite",
+      "subject": "BI8",
+      "text": "rewrite: LDBC text hits #1888 D8 (a concatenated node list `a + collect(n)` loses the node type, so its elements are refused in a pattern). The interested persons and the message creators are concatenated as person ids and the distinct persons re-matched by id, which selects the same persons. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node."
+    },
+    {
+      "kind": "rewrite",
+      "subject": "BI9",
+      "text": "rewrite: LDBC text matches the `:Message` supertype label, which import sessions cannot assign (one label per node). `(m:Message)` becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes."
+    },
+    {
+      "kind": "rewrite",
+      "subject": "BI10",
+      "text": "rewrite: LDBC text calls the APOC procedure `apoc.path.subgraphNodes`, which GraphForge does not provide. APOC keeps persons whose shortest KNOWS distance lies in [minPathDistance, maxPathDistance]; here the distance is the minimum length over KNOWS trails of length 1..4 from the start person, which equals the shortest-path distance for every person within 4 hops (a shortest walk is a trail). The start person is excluded, as APOC's minLevel 1 excludes it. The specification fixes the distances at 3 and 4 (umbra/queries/bi-10.sql), the pattern bound 4 relies on that, and the runner refuses any other binding. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node."
+    },
+    {
+      "kind": "rewrite",
+      "subject": "BI12",
+      "text": "rewrite: LDBC text matches the `:Message` supertype label, which import sessions cannot assign (one label per node). `(m:Message)` becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes."
+    },
+    {
+      "kind": "rewrite",
+      "subject": "BI13",
+      "text": "rewrite: LDBC text hits #1888 D3 (`zombie.creationDate.year` fails to plan) and #1919 (`OPTIONAL MATCH ... WHERE likerZombie IN zombies` returns zero like counts on the query fixture). The creation-date components are read from a WITH-bound alias of the same property, and likes by zombies are counted with a conditional count inside the aggregate, which counts the same like edges. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node."
+    },
+    {
+      "kind": "rewrite",
+      "subject": "BI14",
+      "text": "rewrite: LDBC text picks each city's top pair as `collect(...)[0]` after an ORDER BY, which depends on aggregation keeping input order; openCypher does not guarantee that. The pair is chosen explicitly as the highest score, then the lowest person1 id, then the lowest person2 id, which is the pair the LDBC ordering puts first. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node."
+    },
+    {
+      "kind": "rewrite",
+      "subject": "BI16",
+      "text": "rewrite: LDBC text hits #1888 D5 (CALL subquery). LDBC runs the same per-person subquery for (tagA, dateA) and (tagB, dateB) and keeps persons that pass both; here the A pass runs over all persons and the B pass runs for each person that passed A. A person's B counts depend only on that person, so the surviving persons and their counts are the same. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node."
+    },
+    {
+      "kind": "rewrite",
+      "subject": "BI17",
+      "text": "rewrite: LDBC text hits #1888 D4 (`duration({hours: $delta})` with a non-literal argument fails). The delta becomes a comparison of epoch milliseconds with `$delta * 3600000` added, which is exact for whole hours on a UTC instant. The final WHERE moves onto a WITH carrying the compared values. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node."
+    }
+  ],
+  "rungs": [
+    {
+      "id": "sf0",
+      "label": "fixture SF0",
+      "dataset_id": "bi-fixture-sf0",
+      "input_subdir": null,
+      "workload": {
+        "builder": "snb-bi",
+        "queries": "profiles/gdc/snb-bi-scorecard-queries.json",
+        "parameters": {
+          "dataset_id": "bi-fixture-parameters",
+          "path": "fixture-parameters/parameters-sf0"
+        },
+        "per_variant": 30
+      },
+      "refused": [
+        {
+          "query_id": "BI15a",
+          "cause": "weighted_shortest_path_not_exposed"
+        },
+        {
+          "query_id": "BI15b",
+          "cause": "weighted_shortest_path_not_exposed"
+        },
+        {
+          "query_id": "BI19a",
+          "cause": "weighted_shortest_path_not_exposed"
+        },
+        {
+          "query_id": "BI19b",
+          "cause": "weighted_shortest_path_not_exposed"
+        },
+        {
+          "query_id": "BI20a",
+          "cause": "weighted_shortest_path_not_exposed"
+        },
+        {
+          "query_id": "BI20b",
+          "cause": "weighted_shortest_path_not_exposed"
+        },
+        {
+          "query_id": "INS1",
+          "cause": "bi_batch_update_stream_not_exposed"
+        },
+        {
+          "query_id": "INS2",
+          "cause": "bi_batch_update_stream_not_exposed"
+        },
+        {
+          "query_id": "INS3",
+          "cause": "bi_batch_update_stream_not_exposed"
+        },
+        {
+          "query_id": "INS4",
+          "cause": "bi_batch_update_stream_not_exposed"
+        },
+        {
+          "query_id": "INS5",
+          "cause": "bi_batch_update_stream_not_exposed"
+        },
+        {
+          "query_id": "INS6",
+          "cause": "bi_batch_update_stream_not_exposed"
+        },
+        {
+          "query_id": "INS7",
+          "cause": "bi_batch_update_stream_not_exposed"
+        },
+        {
+          "query_id": "INS8",
+          "cause": "bi_batch_update_stream_not_exposed"
+        },
+        {
+          "query_id": "DEL1",
+          "cause": "bi_batch_update_stream_not_exposed"
+        },
+        {
+          "query_id": "DEL2",
+          "cause": "bi_batch_update_stream_not_exposed"
+        },
+        {
+          "query_id": "DEL3",
+          "cause": "bi_batch_update_stream_not_exposed"
+        },
+        {
+          "query_id": "DEL4",
+          "cause": "bi_batch_update_stream_not_exposed"
+        },
+        {
+          "query_id": "DEL5",
+          "cause": "bi_batch_update_stream_not_exposed"
+        },
+        {
+          "query_id": "DEL6",
+          "cause": "bi_batch_update_stream_not_exposed"
+        },
+        {
+          "query_id": "DEL7",
+          "cause": "bi_batch_update_stream_not_exposed"
+        },
+        {
+          "query_id": "DEL8",
+          "cause": "bi_batch_update_stream_not_exposed"
+        }
+      ],
+      "reference": {
+        "builder": "snb-bi-umbra",
+        "workload_key": "umbra-validation",
+        "path": "output/output-sf0/results.csv",
+        "source": "Umbra-format results derived by graphforge_bench.gdc_snb_bi_reference"
+      },
+      "variances": []
+    },
+    {
+      "id": "sf1",
+      "label": "fixture SF1",
+      "not_pinned": "Fixture: the SF1 rung is declared but not pinned, so the climb records it and continues."
+    },
+    {
+      "id": "sf2",
+      "label": "fixture SF2",
+      "dataset_id": "bi-fixture-sf2",
+      "input_subdir": null,
+      "workload": {
+        "builder": "snb-bi",
+        "queries": "profiles/gdc/snb-bi-mutated-queries.json",
+        "parameters": {
+          "dataset_id": "bi-fixture-parameters",
+          "path": "fixture-parameters/parameters-sf0"
+        },
+        "per_variant": 30
+      },
+      "refused": [
+        {
+          "query_id": "BI15a",
+          "cause": "weighted_shortest_path_not_exposed"
+        },
+        {
+          "query_id": "BI15b",
+          "cause": "weighted_shortest_path_not_exposed"
+        },
+        {
+          "query_id": "BI19a",
+          "cause": "weighted_shortest_path_not_exposed"
+        },
+        {
+          "query_id": "BI19b",
+          "cause": "weighted_shortest_path_not_exposed"
+        },
+        {
+          "query_id": "BI20a",
+          "cause": "weighted_shortest_path_not_exposed"
+        },
+        {
+          "query_id": "BI20b",
+          "cause": "weighted_shortest_path_not_exposed"
+        },
+        {
+          "query_id": "INS1",
+          "cause": "bi_batch_update_stream_not_exposed"
+        },
+        {
+          "query_id": "INS2",
+          "cause": "bi_batch_update_stream_not_exposed"
+        },
+        {
+          "query_id": "INS3",
+          "cause": "bi_batch_update_stream_not_exposed"
+        },
+        {
+          "query_id": "INS4",
+          "cause": "bi_batch_update_stream_not_exposed"
+        },
+        {
+          "query_id": "INS5",
+          "cause": "bi_batch_update_stream_not_exposed"
+        },
+        {
+          "query_id": "INS6",
+          "cause": "bi_batch_update_stream_not_exposed"
+        },
+        {
+          "query_id": "INS7",
+          "cause": "bi_batch_update_stream_not_exposed"
+        },
+        {
+          "query_id": "INS8",
+          "cause": "bi_batch_update_stream_not_exposed"
+        },
+        {
+          "query_id": "DEL1",
+          "cause": "bi_batch_update_stream_not_exposed"
+        },
+        {
+          "query_id": "DEL2",
+          "cause": "bi_batch_update_stream_not_exposed"
+        },
+        {
+          "query_id": "DEL3",
+          "cause": "bi_batch_update_stream_not_exposed"
+        },
+        {
+          "query_id": "DEL4",
+          "cause": "bi_batch_update_stream_not_exposed"
+        },
+        {
+          "query_id": "DEL5",
+          "cause": "bi_batch_update_stream_not_exposed"
+        },
+        {
+          "query_id": "DEL6",
+          "cause": "bi_batch_update_stream_not_exposed"
+        },
+        {
+          "query_id": "DEL7",
+          "cause": "bi_batch_update_stream_not_exposed"
+        },
+        {
+          "query_id": "DEL8",
+          "cause": "bi_batch_update_stream_not_exposed"
+        }
+      ],
+      "reference": {
+        "builder": "snb-bi-umbra",
+        "workload_key": "umbra-validation",
+        "path": "output/output-sf0/results.csv",
+        "source": "Umbra-format results derived by graphforge_bench.gdc_snb_bi_reference"
+      },
+      "variances": []
+    }
+  ]
+}

@@ -571,6 +571,12 @@ pub struct OptionalMatchNode {
     /// `MATCH (a) OPTIONAL MATCH (a)-[:R]->(b)`) is carried by the outer side;
     /// appending its columns again would duplicate the `var_<shared>` fields.
     pub inner_keep_idx: Vec<usize>,
+    /// Whether a null key equals a null key. Set for a correlated optional
+    /// sub-plan seeded with the outer rows, whose keys are every outer column:
+    /// an outer row with a null value must still find the sub-plan rows seeded
+    /// from it (#1887 D15). Pattern joins on identities leave it unset, so a
+    /// null identity never matches.
+    pub null_safe_keys: bool,
     schema: DFSchemaRef,
 }
 
@@ -597,8 +603,17 @@ impl OptionalMatchNode {
             optional,
             join_keys,
             inner_keep_idx,
+            null_safe_keys: false,
             schema,
         }
+    }
+
+    /// The same node with null-safe key equality (see
+    /// [`null_safe_keys`](Self::null_safe_keys)).
+    #[must_use]
+    pub fn with_null_safe_keys(mut self) -> Self {
+        self.null_safe_keys = true;
+        self
     }
 
     /// Build the output [`DFSchema`]: outer fields, then the kept optional
@@ -664,12 +679,17 @@ impl UserDefinedLogicalNodeCore for OptionalMatchNode {
         // column indices are preserved (the schema is rebuilt from them).
         let optional = Arc::new(inputs.pop().unwrap_or_else(|| (*self.optional).clone()));
         let outer = Arc::new(inputs.pop().unwrap_or_else(|| (*self.outer).clone()));
-        Ok(Self::new(
+        let node = Self::new(
             outer,
             optional,
             self.join_keys.clone(),
             self.inner_keep_idx.clone(),
-        ))
+        );
+        Ok(if self.null_safe_keys {
+            node.with_null_safe_keys()
+        } else {
+            node
+        })
     }
 }
 

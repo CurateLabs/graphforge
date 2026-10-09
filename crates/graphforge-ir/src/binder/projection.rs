@@ -1127,6 +1127,24 @@ impl Binder {
             if let Some(v) = node_var {
                 return Some(Self::node_struct_expr(v, s));
             }
+            // A runtime-typed variable (an UNWIND element) may hold a node or
+            // relationship carried as its spread identity columns; the lowerer
+            // rebuilds the whole value rather than return its UUID (#1887 D16).
+            if let Expr::Var(VarRef { name, .. }) = expr
+                && let Some(v) = s.vars.get(name).copied()
+                && matches!(
+                    s.var_kinds.get(&v),
+                    None | Some(crate::binder::VarKind::Unknown)
+                )
+                && !s.node_vars.contains_key(&v)
+                && !s.edge_rel_names.contains_key(&v)
+            {
+                let var_ref = s.builder.push_expr(IrExpr::VarRef(v));
+                return Some(s.builder.push_expr(IrExpr::FunctionCall {
+                    name: "_runtime_value".into(),
+                    args: vec![var_ref],
+                }));
+            }
         }
 
         match expr {

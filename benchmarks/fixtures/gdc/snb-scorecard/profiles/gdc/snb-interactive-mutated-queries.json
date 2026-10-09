@@ -1,0 +1,538 @@
+{
+  "queries": [
+    {
+      "columns": [
+        "friendId",
+        "friendLastName",
+        "distanceFromPerson",
+        "friendBirthday",
+        "friendCreationDate",
+        "friendGender",
+        "friendBrowserUsed",
+        "friendLocationIp",
+        "friendEmails",
+        "friendLanguages",
+        "friendCityName",
+        "friendUniversities",
+        "friendCompanies"
+      ],
+      "cypher": "MATCH path = (p:Person {id: $personId})-[:KNOWS*1..3]-(friend:Person {firstName: $firstName})\nWHERE NOT p = friend\nWITH friend, min(length(path)) AS distance\nORDER BY distance ASC, friend.lastName ASC, toInteger(friend.id) ASC\nLIMIT 20\nMATCH (friend)-[:IS_LOCATED_IN]->(friendCity:City)\nOPTIONAL MATCH (friend)-[studyAt:STUDY_AT]->(uni:University)-[:IS_LOCATED_IN]->(uniCity:City)\nWITH friend, collect(\n    CASE uni.name WHEN null THEN null\n    ELSE {name: uni.name, classYear: studyAt.classYear, city: uniCity.name} END) AS unis,\n    friendCity, distance\nOPTIONAL MATCH (friend)-[workAt:WORK_AT]->(company:Company)-[:IS_LOCATED_IN]->(companyCountry:Country)\nWITH friend, collect(\n    CASE company.name WHEN null THEN null\n    ELSE {name: company.name, workFrom: workAt.workFrom, country: companyCountry.name} END) AS companies,\n    unis, friendCity, distance\nRETURN\n    friend.id AS friendId,\n    friend.lastName AS friendLastName,\n    distance AS distanceFromPerson,\n    friend.birthday AS friendBirthday,\n    friend.creationDate AS friendCreationDate,\n    friend.gender AS friendGender,\n    friend.browserUsed AS friendBrowserUsed,\n    friend.locationIP AS friendLocationIp,\n    friend.email AS friendEmails,\n    friend.speaks AS friendLanguages,\n    friendCity.name AS friendCityName,\n    unis AS friendUniversities,\n    companies AS friendCompanies\nORDER BY distanceFromPerson ASC, friendLastName ASC, toInteger(friendId) ASC\nLIMIT 20",
+      "interface": "cypher",
+      "invocation": "MATCH path = (p:Person {id: $personId})-[:KNOWS*1..3]-(friend:Person {firstName: $firstName})\nWHERE NOT p = friend\nWITH friend, min(length(path)) AS distance\nORDER BY distance ASC, friend.lastName ASC, toInteger(friend.id) ASC\nLIMIT 20\nMATCH (friend)-[:IS_LOCATED_IN]->(friendCity:City)\nOPTIONAL MATCH (friend)-[studyAt:STUDY_AT]->(uni:University)-[:IS_LOCATED_IN]->(uniCity:City)\nWITH friend, collect(\n    CASE uni.name WHEN null THEN null\n    ELSE {name: uni.name, classYear: studyAt.classYear, city: uniCity.name} END) AS unis,\n    friendCity, distance\nOPTIONAL MATCH (friend)-[workAt:WORK_AT]->(company:Company)-[:IS_LOCATED_IN]->(companyCountry:Country)\nWITH friend, collect(\n    CASE company.name WHEN null THEN null\n    ELSE {name: company.name, workFrom: workAt.workFrom, country: companyCountry.name} END) AS companies,\n    unis, friendCity, distance\nRETURN\n    friend.id AS friendId,\n    friend.lastName AS friendLastName,\n    distance AS distanceFromPerson,\n    friend.birthday AS friendBirthday,\n    friend.creationDate AS friendCreationDate,\n    friend.gender AS friendGender,\n    friend.browserUsed AS friendBrowserUsed,\n    friend.locationIP AS friendLocationIp,\n    friend.email AS friendEmails,\n    friend.speaks AS friendLanguages,\n    friendCity.name AS friendCityName,\n    unis AS friendUniversities,\n    companies AS friendCompanies\nORDER BY distanceFromPerson ASC, friendLastName ASC, toInteger(friendId) ASC\nLIMIT 20",
+      "limit": 20,
+      "notes": "shortestPath((p)-[:KNOWS*1..3]-(friend)) is unsupported (#1888) and becomes min(length(path)) over the bounded match, the same value because a shortest path is a simple path; the [name, year, place] tuples are maps {name, classYear|workFrom, city|country} because GraphForge encodes a heterogeneous list as a tagged union (#1888)",
+      "operation": "IC1",
+      "parameters": [
+        {
+          "data_type": "int64",
+          "name": "personId"
+        },
+        {
+          "data_type": "utf8",
+          "name": "firstName"
+        }
+      ],
+      "spec_variance": "reference behaviour, differs from spec prose: CASE uni.name WHEN null (and company.name) never matches, as in Neo4j, so a friend with no university or company gets one all-null entry instead of an empty set",
+      "unordered_list_columns": [
+        "friendUniversities",
+        "friendCompanies"
+      ]
+    },
+    {
+      "columns": [
+        "personId",
+        "personFirstName",
+        "personLastName",
+        "postOrCommentId",
+        "postOrCommentContent",
+        "postOrCommentCreationDate"
+      ],
+      "cypher": "MATCH (:Person {id: $personId})-[:KNOWS]-(friend:Person)<-[:HAS_CREATOR]-(message)\nWHERE (message:Post OR message:Comment) AND message.creationDate < $maxDate\nRETURN\n    friend.id AS personId,\n    friend.firstName AS personFirstName,\n    friend.lastName AS personLastName,\n    message.id AS postOrCommentId,\n    coalesce(message.content, message.imageFile) AS postOrCommentContent,\n    message.creationDate AS postOrCommentCreationDate\nORDER BY postOrCommentCreationDate DESC, toInteger(postOrCommentId) ASC\nLIMIT 20",
+      "interface": "cypher",
+      "invocation": "MATCH (:Person {id: $personId})-[:KNOWS]-(friend:Person)<-[:HAS_CREATOR]-(message)\nWHERE (message:Post OR message:Comment) AND message.creationDate <= $maxDate\nRETURN\n    friend.id AS personId,\n    friend.firstName AS personFirstName,\n    friend.lastName AS personLastName,\n    message.id AS postOrCommentId,\n    coalesce(message.content, message.imageFile) AS postOrCommentContent,\n    message.creationDate AS postOrCommentCreationDate\nORDER BY postOrCommentCreationDate DESC, toInteger(postOrCommentId) ASC\nLIMIT 20",
+      "limit": 20,
+      "notes": ":Message becomes (message:Post OR message:Comment) because import sessions store one label per node",
+      "operation": "IC2",
+      "parameters": [
+        {
+          "data_type": "int64",
+          "name": "personId"
+        },
+        {
+          "data_type": "int64",
+          "name": "maxDate"
+        }
+      ],
+      "spec_variance": "reference behaviour, differs from spec prose: keeps a message whose creationDate equals $maxDate (<=) where the prose says before $maxDate",
+      "unordered_list_columns": []
+    },
+    {
+      "columns": [
+        "friendId",
+        "friendFirstName",
+        "friendLastName",
+        "xCount",
+        "yCount",
+        "xyCount"
+      ],
+      "cypher": "MATCH (countryX:Country {name: $countryXName}),\n      (countryY:Country {name: $countryYName}),\n      (person:Person {id: $personId})\nWITH person, countryX, countryY\nLIMIT 1\nMATCH (city:City)-[:IS_PART_OF]->(country:Country)\nWHERE country IN [countryX, countryY]\nWITH person, countryX, countryY, collect(city) AS cities\nMATCH (person)-[:KNOWS*1..2]-(friend)-[:IS_LOCATED_IN]->(city)\nWHERE NOT person = friend AND NOT city IN cities\nWITH DISTINCT friend, countryX, countryY\nMATCH (friend)<-[:HAS_CREATOR]-(message),\n      (message)-[:IS_LOCATED_IN]->(country)\nWHERE $endDate > message.creationDate >= $startDate AND\n      country IN [countryX, countryY]\nWITH friend,\n     CASE WHEN country = countryX THEN 1 ELSE 0 END AS messageX,\n     CASE WHEN country = countryY THEN 1 ELSE 0 END AS messageY\nWITH friend, sum(messageX) AS xCount, sum(messageY) AS yCount\nWHERE xCount > 0 AND yCount > 0\nRETURN friend.id AS friendId,\n       friend.firstName AS friendFirstName,\n       friend.lastName AS friendLastName,\n       xCount,\n       yCount,\n       xCount + yCount AS xyCount\nORDER BY xyCount DESC, friendId ASC\nLIMIT 20",
+      "interface": "cypher",
+      "invocation": "MATCH (countryX:Country {name: $countryXName}),\n      (countryY:Country {name: $countryYName}),\n      (person:Person {id: $personId})\nWITH person, countryX, countryY\nLIMIT 1\nMATCH (city:City)-[:IS_PART_OF]->(country:Country)\nWHERE country IN [countryX, countryY]\nWITH person, countryX, countryY, collect(city) AS cities\nMATCH (person)-[:KNOWS*1..2]-(friend)-[:IS_LOCATED_IN]->(city)\nWHERE NOT person = friend AND NOT city IN cities\nWITH DISTINCT friend, countryX, countryY\nMATCH (friend)<-[:HAS_CREATOR]-(message),\n      (message)-[:IS_LOCATED_IN]->(country)\nWHERE $endDate > message.creationDate >= $startDate AND\n      country IN [countryX, countryY]\nWITH friend,\n     CASE WHEN country = countryX THEN 1 ELSE 0 END AS messageX,\n     CASE WHEN country = countryY THEN 1 ELSE 0 END AS messageY\nWITH friend, sum(messageX) AS xCount, sum(messageY) AS yCount\nWHERE xCount > 0 AND yCount > 0\nRETURN friend.id AS friendId,\n       friend.firstName AS friendFirstName,\n       friend.lastName AS friendLastName,\n       xCount,\n       yCount,\n       xCount + yCount AS xyCount\nORDER BY xyCount DESC, friendId ASC\nLIMIT 20",
+      "limit": 20,
+      "notes": "reference text unchanged",
+      "operation": "IC3",
+      "parameters": [
+        {
+          "data_type": "int64",
+          "name": "personId"
+        },
+        {
+          "data_type": "utf8",
+          "name": "countryXName"
+        },
+        {
+          "data_type": "utf8",
+          "name": "countryYName"
+        },
+        {
+          "data_type": "int64",
+          "name": "startDate"
+        },
+        {
+          "data_type": "int64",
+          "name": "endDate"
+        }
+      ],
+      "spec_variance": "reference behaviour, differs from spec prose: takes endDate where the specification takes durationDays",
+      "unordered_list_columns": []
+    },
+    {
+      "columns": [
+        "tagName",
+        "postCount"
+      ],
+      "cypher": "MATCH (person:Person {id: $personId})-[:KNOWS]-(friend:Person),\n      (friend)<-[:HAS_CREATOR]-(post:Post)-[:HAS_TAG]->(tag)\nWITH DISTINCT tag, post\nWITH tag,\n     CASE\n       WHEN $endDate > post.creationDate >= $startDate THEN 1\n       ELSE 0\n     END AS valid,\n     CASE\n       WHEN $startDate > post.creationDate THEN 1\n       ELSE 0\n     END AS inValid\nWITH tag, sum(valid) AS postCount, sum(inValid) AS inValidPostCount\nWHERE postCount > 0 AND inValidPostCount = 0\nRETURN tag.name AS tagName, postCount\nORDER BY postCount DESC, tagName ASC\nLIMIT 10",
+      "interface": "cypher",
+      "invocation": "MATCH (person:Person {id: $personId})-[:KNOWS]-(friend:Person),\n      (friend)<-[:HAS_CREATOR]-(post:Post)-[:HAS_TAG]->(tag)\nWITH DISTINCT tag, post\nWITH tag,\n     CASE\n       WHEN $endDate > post.creationDate >= $startDate THEN 1\n       ELSE 0\n     END AS valid,\n     CASE\n       WHEN $startDate > post.creationDate THEN 1\n       ELSE 0\n     END AS inValid\nWITH tag, sum(valid) AS postCount, sum(inValid) AS inValidPostCount\nWHERE postCount > 0 AND inValidPostCount = 0\nRETURN tag.name AS tagName, postCount\nORDER BY postCount DESC, tagName ASC\nLIMIT 10",
+      "limit": 10,
+      "notes": "reference text unchanged",
+      "operation": "IC4",
+      "parameters": [
+        {
+          "data_type": "int64",
+          "name": "personId"
+        },
+        {
+          "data_type": "int64",
+          "name": "startDate"
+        },
+        {
+          "data_type": "int64",
+          "name": "endDate"
+        }
+      ],
+      "spec_variance": "reference behaviour, differs from spec prose: takes endDate where the specification takes durationDays",
+      "unordered_list_columns": []
+    },
+    {
+      "columns": [
+        "forumName",
+        "postCount"
+      ],
+      "cypher": "MATCH (person:Person {id: $personId})-[:KNOWS*1..2]-(friend)\nWHERE NOT person = friend\nWITH DISTINCT friend\nMATCH (friend)<-[membership:HAS_MEMBER]-(forum)\nWHERE membership.joinDate > $minDate\nWITH forum, collect(friend) AS friends\nOPTIONAL MATCH (forum)-[:CONTAINER_OF]->(post)-[:HAS_CREATOR]->(author)\nWITH forum,\n     sum(CASE WHEN post IS NOT NULL AND author IN friends THEN 1 ELSE 0 END) AS postCount\nRETURN forum.title AS forumName, postCount\nORDER BY postCount DESC, forum.id ASC\nLIMIT 20",
+      "interface": "cypher",
+      "invocation": "MATCH (person:Person {id: $personId})-[:KNOWS*1..2]-(friend)\nWHERE NOT person = friend\nWITH DISTINCT friend\nMATCH (friend)<-[membership:HAS_MEMBER]-(forum)\nWHERE membership.joinDate > $minDate\nWITH forum, collect(friend) AS friends\nOPTIONAL MATCH (forum)-[:CONTAINER_OF]->(post)-[:HAS_CREATOR]->(author)\nWITH forum,\n     sum(CASE WHEN post IS NOT NULL AND author IN friends THEN 1 ELSE 0 END) AS postCount\nRETURN forum.title AS forumName, postCount\nORDER BY postCount DESC, forum.id ASC\nLIMIT 20",
+      "limit": 20,
+      "notes": "the LDBC text's OPTIONAL MATCH ... WHERE friend IN friends returns wrong post counts (#1919), so the count is a conditional sum over the forum's posts",
+      "operation": "IC5",
+      "parameters": [
+        {
+          "data_type": "int64",
+          "name": "personId"
+        },
+        {
+          "data_type": "int64",
+          "name": "minDate"
+        }
+      ],
+      "spec_variance": null,
+      "unordered_list_columns": []
+    },
+    {
+      "columns": [
+        "tagName",
+        "postCount"
+      ],
+      "cypher": "MATCH (knownTag:Tag {name: $tagName})\nWITH knownTag.id AS knownTagId\nMATCH (person:Person {id: $personId})-[:KNOWS*1..2]-(friend)\nWHERE NOT person = friend\nWITH knownTagId, collect(DISTINCT friend) AS friends\nUNWIND friends AS f\n    MATCH (f)<-[:HAS_CREATOR]-(post:Post),\n          (post)-[:HAS_TAG]->(t:Tag {id: knownTagId}),\n          (post)-[:HAS_TAG]->(tag:Tag)\n    WHERE NOT t = tag\n    WITH tag.name AS tagName, count(post) AS postCount\nRETURN tagName, postCount\nORDER BY postCount DESC, tagName ASC\nLIMIT 10",
+      "interface": "cypher",
+      "invocation": "MATCH (knownTag:Tag {name: $tagName})\nWITH knownTag.id AS knownTagId\nMATCH (person:Person {id: $personId})-[:KNOWS*1..2]-(friend)\nWHERE NOT person = friend\nWITH knownTagId, collect(DISTINCT friend) AS friends\nUNWIND friends AS f\n    MATCH (f)<-[:HAS_CREATOR]-(post:Post),\n          (post)-[:HAS_TAG]->(t:Tag {id: knownTagId}),\n          (post)-[:HAS_TAG]->(tag:Tag)\n    WHERE NOT t = tag\n    WITH tag.name AS tagName, count(post) AS postCount\nRETURN tagName, postCount\nORDER BY postCount DESC, tagName ASC\nLIMIT 10",
+      "limit": 10,
+      "notes": "reference text unchanged",
+      "operation": "IC6",
+      "parameters": [
+        {
+          "data_type": "int64",
+          "name": "personId"
+        },
+        {
+          "data_type": "utf8",
+          "name": "tagName"
+        }
+      ],
+      "spec_variance": null,
+      "unordered_list_columns": []
+    },
+    {
+      "columns": [
+        "personId",
+        "personFirstName",
+        "personLastName",
+        "likeCreationDate",
+        "commentOrPostId",
+        "commentOrPostContent",
+        "minutesLatency",
+        "isNew"
+      ],
+      "cypher": "MATCH (person:Person {id: $personId})<-[:HAS_CREATOR]-(message)<-[like:LIKES]-(liker:Person)\nWHERE message:Post OR message:Comment\nWITH person, liker, max(like.creationDate) AS likeTime\nMATCH (person)<-[:HAS_CREATOR]-(message)<-[like:LIKES]-(liker)\nWHERE (message:Post OR message:Comment) AND like.creationDate = likeTime\nWITH person, liker, likeTime, min(message.id) AS latestMessageId\nMATCH (person)<-[:HAS_CREATOR]-(message)\nWHERE (message:Post OR message:Comment) AND message.id = latestMessageId\nRETURN\n    liker.id AS personId,\n    liker.firstName AS personFirstName,\n    liker.lastName AS personLastName,\n    likeTime AS likeCreationDate,\n    message.id AS commentOrPostId,\n    coalesce(message.content, message.imageFile) AS commentOrPostContent,\n    toInteger(floor(toFloat(likeTime - message.creationDate) / 1000.0) / 60.0) AS minutesLatency,\n    size([(liker)-[:KNOWS]-(person) | 1]) = 0 AS isNew\nORDER BY likeCreationDate DESC, toInteger(personId) ASC\nLIMIT 20",
+      "interface": "cypher",
+      "invocation": "MATCH (person:Person {id: $personId})<-[:HAS_CREATOR]-(message)<-[like:LIKES]-(liker:Person)\nWHERE message:Post OR message:Comment\nWITH person, liker, max(like.creationDate) AS likeTime\nMATCH (person)<-[:HAS_CREATOR]-(message)<-[like:LIKES]-(liker)\nWHERE (message:Post OR message:Comment) AND like.creationDate = likeTime\nWITH person, liker, likeTime, min(message.id) AS latestMessageId\nMATCH (person)<-[:HAS_CREATOR]-(message)\nWHERE (message:Post OR message:Comment) AND message.id = latestMessageId\nRETURN\n    liker.id AS personId,\n    liker.firstName AS personFirstName,\n    liker.lastName AS personLastName,\n    likeTime AS likeCreationDate,\n    message.id AS commentOrPostId,\n    coalesce(message.content, message.imageFile) AS commentOrPostContent,\n    toInteger(floor(toFloat(likeTime - message.creationDate) / 1000.0) / 60.0) AS minutesLatency,\n    size([(liker)-[:KNOWS]-(person) | 1]) = 0 AS isNew\nORDER BY likeCreationDate DESC, toInteger(personId) ASC\nLIMIT 20",
+      "limit": 20,
+      "notes": "head(collect({msg, likeTime})) after ORDER BY likeTime DESC, message.id ASC is computed as max(likeTime), then min(message.id) among likes at that time, which selects the same like without relying on aggregation input order; not((liker)-[:KNOWS]-(person)) as a value is rejected (#1888) and becomes an empty pattern comprehension; :Message becomes (message:Post OR message:Comment)",
+      "operation": "IC7",
+      "parameters": [
+        {
+          "data_type": "int64",
+          "name": "personId"
+        }
+      ],
+      "spec_variance": null,
+      "unordered_list_columns": []
+    },
+    {
+      "columns": [
+        "personId",
+        "personFirstName",
+        "personLastName",
+        "commentCreationDate",
+        "commentId",
+        "commentContent"
+      ],
+      "cypher": "MATCH (start:Person {id: $personId})<-[:HAS_CREATOR]-(message)<-[:REPLY_OF]-(comment:Comment)-[:HAS_CREATOR]->(person:Person)\nWHERE message:Post OR message:Comment\nRETURN\n    person.id AS personId,\n    person.firstName AS personFirstName,\n    person.lastName AS personLastName,\n    comment.creationDate AS commentCreationDate,\n    comment.id AS commentId,\n    comment.content AS commentContent\nORDER BY commentCreationDate DESC, commentId ASC\nLIMIT 20",
+      "interface": "cypher",
+      "invocation": "MATCH (start:Person {id: $personId})<-[:HAS_CREATOR]-(message)<-[:REPLY_OF]-(comment:Comment)-[:HAS_CREATOR]->(person:Person)\nWHERE message:Post OR message:Comment\nRETURN\n    person.id AS personId,\n    person.firstName AS personFirstName,\n    person.lastName AS personLastName,\n    comment.creationDate AS commentCreationDate,\n    comment.id AS commentId,\n    comment.content AS commentContent\nORDER BY commentCreationDate DESC, commentId ASC\nLIMIT 20",
+      "limit": 20,
+      "notes": "(:Message) becomes a named node with (message:Post OR message:Comment)",
+      "operation": "IC8",
+      "parameters": [
+        {
+          "data_type": "int64",
+          "name": "personId"
+        }
+      ],
+      "spec_variance": null,
+      "unordered_list_columns": []
+    },
+    {
+      "columns": [
+        "personId",
+        "personFirstName",
+        "personLastName",
+        "commentOrPostId",
+        "commentOrPostContent",
+        "commentOrPostCreationDate"
+      ],
+      "cypher": "MATCH (root:Person {id: $personId})-[:KNOWS*1..2]-(friend:Person)\nWHERE NOT friend = root\nWITH collect(DISTINCT friend) AS friends\nUNWIND friends AS friend\n    MATCH (friend)<-[:HAS_CREATOR]-(message)\n    WHERE (message:Post OR message:Comment) AND message.creationDate < $maxDate\nRETURN\n    friend.id AS personId,\n    friend.firstName AS personFirstName,\n    friend.lastName AS personLastName,\n    message.id AS commentOrPostId,\n    coalesce(message.content, message.imageFile) AS commentOrPostContent,\n    message.creationDate AS commentOrPostCreationDate\nORDER BY commentOrPostCreationDate DESC, commentOrPostId ASC\nLIMIT 20",
+      "interface": "cypher",
+      "invocation": "MATCH (root:Person {id: $personId})-[:KNOWS*1..2]-(friend:Person)\nWHERE NOT friend = root\nWITH collect(DISTINCT friend) AS friends\nUNWIND friends AS friend\n    MATCH (friend)<-[:HAS_CREATOR]-(message)\n    WHERE (message:Post OR message:Comment) AND message.creationDate < $maxDate\nRETURN\n    friend.id AS personId,\n    friend.firstName AS personFirstName,\n    friend.lastName AS personLastName,\n    message.id AS commentOrPostId,\n    coalesce(message.content, message.imageFile) AS commentOrPostContent,\n    message.creationDate AS commentOrPostCreationDate\nORDER BY commentOrPostCreationDate DESC, commentOrPostId ASC\nLIMIT 20",
+      "limit": 20,
+      "notes": "ORDER BY message.id becomes its projected alias commentOrPostId; :Message becomes (message:Post OR message:Comment)",
+      "operation": "IC9",
+      "parameters": [
+        {
+          "data_type": "int64",
+          "name": "personId"
+        },
+        {
+          "data_type": "int64",
+          "name": "maxDate"
+        }
+      ],
+      "spec_variance": null,
+      "unordered_list_columns": []
+    },
+    {
+      "columns": [
+        "personId",
+        "personFirstName",
+        "personLastName",
+        "commonInterestScore",
+        "personGender",
+        "personCityName"
+      ],
+      "cypher": "MATCH (person:Person {id: $personId})-[:KNOWS*2..2]-(friend),\n      (friend)-[:IS_LOCATED_IN]->(city:City)\nWHERE NOT friend = person AND\n      NOT (friend)-[:KNOWS]-(person)\nWITH DISTINCT person, friend, city\nWITH person, friend, city, datetime({epochMillis: friend.birthday}) AS birthday\nWHERE (birthday.month = $month AND birthday.day >= 21) OR\n      (birthday.month = ($month % 12) + 1 AND birthday.day < 22)\nOPTIONAL MATCH (friend)<-[:HAS_CREATOR]-(post:Post)\nWITH person, friend, city, count(post) AS postCount\nOPTIONAL MATCH (friend)<-[:HAS_CREATOR]-(post:Post)-[:HAS_TAG]->(:Tag)<-[:HAS_INTEREST]-(person)\nWITH friend, city, postCount, count(DISTINCT post.id) AS commonPostCount\nRETURN friend.id AS personId,\n       friend.firstName AS personFirstName,\n       friend.lastName AS personLastName,\n       commonPostCount - (postCount - commonPostCount) AS commonInterestScore,\n       friend.gender AS personGender,\n       city.name AS personCityName\nORDER BY commonInterestScore DESC, personId ASC\nLIMIT 10",
+      "interface": "cypher",
+      "invocation": "MATCH (person:Person {id: $personId})-[:KNOWS*2..2]-(friend),\n      (friend)-[:IS_LOCATED_IN]->(city:City)\nWHERE NOT friend = person AND\n      NOT (friend)-[:KNOWS]-(person)\nWITH DISTINCT person, friend, city\nWITH person, friend, city, datetime({epochMillis: friend.birthday}) AS birthday\nWHERE (birthday.month = $month AND birthday.day >= 21) OR\n      (birthday.month = ($month % 12) + 1 AND birthday.day < 22)\nOPTIONAL MATCH (friend)<-[:HAS_CREATOR]-(post:Post)\nWITH person, friend, city, count(post) AS postCount\nOPTIONAL MATCH (friend)<-[:HAS_CREATOR]-(post:Post)-[:HAS_TAG]->(:Tag)<-[:HAS_INTEREST]-(person)\nWITH friend, city, postCount, count(DISTINCT post.id) AS commonPostCount\nRETURN friend.id AS personId,\n       friend.firstName AS personFirstName,\n       friend.lastName AS personLastName,\n       commonPostCount - (postCount - commonPostCount) AS commonInterestScore,\n       friend.gender AS personGender,\n       city.name AS personCityName\nORDER BY commonInterestScore DESC, personId ASC\nLIMIT 10",
+      "limit": 10,
+      "notes": "the post list comprehension with a pattern predicate is rejected (#1888), so posts are counted with OPTIONAL MATCH and the interest pattern is matched directly and counted with count(DISTINCT post.id)",
+      "operation": "IC10",
+      "parameters": [
+        {
+          "data_type": "int64",
+          "name": "personId"
+        },
+        {
+          "data_type": "int64",
+          "name": "month"
+        }
+      ],
+      "spec_variance": null,
+      "unordered_list_columns": []
+    },
+    {
+      "columns": [
+        "personId",
+        "personFirstName",
+        "personLastName",
+        "organizationName",
+        "organizationWorkFromYear"
+      ],
+      "cypher": "MATCH (person:Person {id: $personId})-[:KNOWS*1..2]-(friend:Person)\nWHERE NOT(person = friend)\nWITH DISTINCT friend\nMATCH (friend)-[workAt:WORK_AT]->(company:Company)-[:IS_LOCATED_IN]->(:Country {name: $countryName})\nWHERE workAt.workFrom < $workFromYear\nRETURN\n    friend.id AS personId,\n    friend.firstName AS personFirstName,\n    friend.lastName AS personLastName,\n    company.name AS organizationName,\n    workAt.workFrom AS organizationWorkFromYear\nORDER BY organizationWorkFromYear ASC, toInteger(personId) ASC, organizationName DESC\nLIMIT 10",
+      "interface": "cypher",
+      "invocation": "MATCH (person:Person {id: $personId})-[:KNOWS*1..2]-(friend:Person)\nWHERE NOT(person = friend)\nWITH DISTINCT friend\nMATCH (friend)-[workAt:WORK_AT]->(company:Company)-[:IS_LOCATED_IN]->(:Country {name: $countryName})\nWHERE workAt.workFrom < $workFromYear\nRETURN\n    friend.id AS personId,\n    friend.firstName AS personFirstName,\n    friend.lastName AS personLastName,\n    company.name AS organizationName,\n    workAt.workFrom AS organizationWorkFromYear\nORDER BY organizationWorkFromYear ASC, toInteger(personId) ASC, organizationName DESC\nLIMIT 10",
+      "limit": 10,
+      "notes": "reference text unchanged",
+      "operation": "IC11",
+      "parameters": [
+        {
+          "data_type": "int64",
+          "name": "personId"
+        },
+        {
+          "data_type": "utf8",
+          "name": "countryName"
+        },
+        {
+          "data_type": "int64",
+          "name": "workFromYear"
+        }
+      ],
+      "spec_variance": null,
+      "unordered_list_columns": []
+    },
+    {
+      "columns": [
+        "personId",
+        "personFirstName",
+        "personLastName",
+        "tagNames",
+        "replyCount"
+      ],
+      "cypher": "MATCH (tag:Tag)-[:HAS_TYPE]->(:TagClass)-[:IS_SUBCLASS_OF*0..]->(baseTagClass:TagClass)\nWHERE tag.name = $tagClassName OR baseTagClass.name = $tagClassName\nWITH collect(tag.id) AS tags\nMATCH (:Person {id: $personId})-[:KNOWS]-(friend:Person)<-[:HAS_CREATOR]-(comment:Comment)-[:REPLY_OF]->(:Post)-[:HAS_TAG]->(tag:Tag)\nWHERE tag.id IN tags\nRETURN\n    friend.id AS personId,\n    friend.firstName AS personFirstName,\n    friend.lastName AS personLastName,\n    collect(DISTINCT tag.name) AS tagNames,\n    count(DISTINCT comment) AS replyCount\nORDER BY replyCount DESC, toInteger(personId) ASC\nLIMIT 20",
+      "interface": "cypher",
+      "invocation": "MATCH (tag:Tag)-[:HAS_TYPE]->(:TagClass)-[:IS_SUBCLASS_OF*0..]->(baseTagClass:TagClass)\nWHERE tag.name = $tagClassName OR baseTagClass.name = $tagClassName\nWITH collect(tag.id) AS tags\nMATCH (:Person {id: $personId})-[:KNOWS]-(friend:Person)<-[:HAS_CREATOR]-(comment:Comment)-[:REPLY_OF]->(:Post)-[:HAS_TAG]->(tag:Tag)\nWHERE tag.id IN tags\nRETURN\n    friend.id AS personId,\n    friend.firstName AS personFirstName,\n    friend.lastName AS personLastName,\n    collect(DISTINCT tag.name) AS tagNames,\n    count(DISTINCT comment) AS replyCount\nORDER BY replyCount DESC, toInteger(personId) ASC\nLIMIT 20",
+      "limit": 20,
+      "notes": "[:HAS_TYPE|IS_SUBCLASS_OF*0..] fails at execution (#1888, two-type variable-length pattern) and becomes [:HAS_TYPE] then [:IS_SUBCLASS_OF*0..], the only paths the SNB schema admits from a Tag to a TagClass",
+      "operation": "IC12",
+      "parameters": [
+        {
+          "data_type": "int64",
+          "name": "personId"
+        },
+        {
+          "data_type": "utf8",
+          "name": "tagClassName"
+        }
+      ],
+      "spec_variance": "reference behaviour, differs from spec prose: also selects a Tag whose own name equals $tagClassName (the tag.name = $tagClassName disjunct)",
+      "unordered_list_columns": [
+        "tagNames"
+      ]
+    },
+    {
+      "columns": [
+        "shortestPathLength"
+      ],
+      "cypher": null,
+      "interface": "analyst_verb",
+      "invocation": "paths(source=Person{id: $person1Id}, target=Person{id: $person2Id}, by=bfs, via=KNOWS, directed=false)",
+      "limit": null,
+      "notes": "paths(by=bfs, via=KNOWS, directed=false) instead of Cypher shortestPath (#1888); -1 when the verb returns no row, 0 for equal endpoints as the specification states",
+      "operation": "IC13",
+      "parameters": [
+        {
+          "data_type": "int64",
+          "name": "person1Id"
+        },
+        {
+          "data_type": "int64",
+          "name": "person2Id"
+        }
+      ],
+      "spec_variance": null,
+      "unordered_list_columns": []
+    },
+    {
+      "columns": [
+        "firstName",
+        "lastName",
+        "birthday",
+        "locationIP",
+        "browserUsed",
+        "cityId",
+        "gender",
+        "creationDate"
+      ],
+      "cypher": "MATCH (n:Person {id: $personId})-[:IS_LOCATED_IN]->(p:City)\nRETURN\n    n.firstName AS firstName,\n    n.lastName AS lastName,\n    n.birthday AS birthday,\n    n.locationIP AS locationIP,\n    n.browserUsed AS browserUsed,\n    p.id AS cityId,\n    n.gender AS gender,\n    n.creationDate AS creationDate",
+      "interface": "cypher",
+      "invocation": "MATCH (n:Person {id: $personId})-[:IS_LOCATED_IN]->(p:City)\nRETURN\n    n.firstName AS firstName,\n    n.lastName AS lastName,\n    n.birthday AS birthday,\n    n.locationIP AS locationIP,\n    n.browserUsed AS browserUsed,\n    p.id AS cityId,\n    n.gender AS gender,\n    n.creationDate AS creationDate",
+      "limit": null,
+      "notes": "reference text unchanged",
+      "operation": "IS1",
+      "parameters": [
+        {
+          "data_type": "int64",
+          "name": "personId"
+        }
+      ],
+      "spec_variance": null,
+      "unordered_list_columns": []
+    },
+    {
+      "columns": [
+        "messageId",
+        "messageContent",
+        "messageCreationDate",
+        "postId",
+        "personId",
+        "personFirstName",
+        "personLastName"
+      ],
+      "cypher": "MATCH (:Person {id: $personId})<-[:HAS_CREATOR]-(message)\nWITH\n message,\n message.id AS messageId,\n message.creationDate AS messageCreationDate\nORDER BY messageCreationDate DESC, messageId ASC\nLIMIT 10\nMATCH (message)-[:REPLY_OF*0..]->(post:Post),\n      (post)-[:HAS_CREATOR]->(person)\nRETURN\n messageId,\n coalesce(message.imageFile, message.content) AS messageContent,\n messageCreationDate,\n post.id AS postId,\n person.id AS personId,\n person.firstName AS personFirstName,\n person.lastName AS personLastName\nORDER BY messageCreationDate DESC, messageId ASC",
+      "interface": "cypher",
+      "invocation": "MATCH (:Person {id: $personId})<-[:HAS_CREATOR]-(message)\nWITH\n message,\n message.id AS messageId,\n message.creationDate AS messageCreationDate\nORDER BY messageCreationDate DESC, messageId ASC\nLIMIT 10\nMATCH (message)-[:REPLY_OF*0..]->(post:Post),\n      (post)-[:HAS_CREATOR]->(person)\nRETURN\n messageId,\n coalesce(message.imageFile, message.content) AS messageContent,\n messageCreationDate,\n post.id AS postId,\n person.id AS personId,\n person.firstName AS personFirstName,\n person.lastName AS personLastName\nORDER BY messageCreationDate DESC, messageId ASC",
+      "limit": 10,
+      "notes": "reference text unchanged",
+      "operation": "IS2",
+      "parameters": [
+        {
+          "data_type": "int64",
+          "name": "personId"
+        }
+      ],
+      "spec_variance": "reference behaviour, differs from spec prose: breaks creation-date ties by messageId ascending where the specification says descending",
+      "unordered_list_columns": []
+    },
+    {
+      "columns": [
+        "personId",
+        "firstName",
+        "lastName",
+        "friendshipCreationDate"
+      ],
+      "cypher": "MATCH (n:Person {id: $personId})-[r:KNOWS]-(friend)\nRETURN\n    friend.id AS personId,\n    friend.firstName AS firstName,\n    friend.lastName AS lastName,\n    r.creationDate AS friendshipCreationDate\nORDER BY friendshipCreationDate DESC, toInteger(personId) ASC",
+      "interface": "cypher",
+      "invocation": "MATCH (n:Person {id: $personId})-[r:KNOWS]-(friend)\nRETURN\n    friend.id AS personId,\n    friend.firstName AS firstName,\n    friend.lastName AS lastName,\n    r.creationDate AS friendshipCreationDate\nORDER BY friendshipCreationDate DESC, toInteger(personId) ASC",
+      "limit": null,
+      "notes": "reference text unchanged",
+      "operation": "IS3",
+      "parameters": [
+        {
+          "data_type": "int64",
+          "name": "personId"
+        }
+      ],
+      "spec_variance": null,
+      "unordered_list_columns": []
+    },
+    {
+      "columns": [
+        "messageCreationDate",
+        "messageContent"
+      ],
+      "cypher": "MATCH (m)\nWHERE (m:Post OR m:Comment) AND m.id = $messageId\nRETURN\n    m.creationDate AS messageCreationDate,\n    coalesce(m.content, m.imageFile) AS messageContent",
+      "interface": "cypher",
+      "invocation": "MATCH (m)\nWHERE (m:Post OR m:Comment) AND m.id = $messageId\nRETURN\n    m.creationDate AS messageCreationDate,\n    coalesce(m.content, m.imageFile) AS messageContent",
+      "limit": null,
+      "notes": "(m:Message {id}) becomes (m) WHERE (m:Post OR m:Comment) AND m.id",
+      "operation": "IS4",
+      "parameters": [
+        {
+          "data_type": "int64",
+          "name": "messageId"
+        }
+      ],
+      "spec_variance": null,
+      "unordered_list_columns": []
+    },
+    {
+      "columns": [
+        "personId",
+        "firstName",
+        "lastName"
+      ],
+      "cypher": "MATCH (m)-[:HAS_CREATOR]->(p:Person)\nWHERE (m:Post OR m:Comment) AND m.id = $messageId\nRETURN\n    p.id AS personId,\n    p.firstName AS firstName,\n    p.lastName AS lastName",
+      "interface": "cypher",
+      "invocation": "MATCH (m)-[:HAS_CREATOR]->(p:Person)\nWHERE (m:Post OR m:Comment) AND m.id = $messageId\nRETURN\n    p.id AS personId,\n    p.firstName AS firstName,\n    p.lastName AS lastName",
+      "limit": null,
+      "notes": "(m:Message {id}) becomes (m) WHERE (m:Post OR m:Comment) AND m.id",
+      "operation": "IS5",
+      "parameters": [
+        {
+          "data_type": "int64",
+          "name": "messageId"
+        }
+      ],
+      "spec_variance": null,
+      "unordered_list_columns": []
+    },
+    {
+      "columns": [
+        "forumId",
+        "forumTitle",
+        "moderatorId",
+        "moderatorFirstName",
+        "moderatorLastName"
+      ],
+      "cypher": "MATCH (m)-[:REPLY_OF*0..]->(p:Post)<-[:CONTAINER_OF]-(f:Forum)-[:HAS_MODERATOR]->(mod:Person)\nWHERE (m:Post OR m:Comment) AND m.id = $messageId\nRETURN\n    f.id AS forumId,\n    f.title AS forumTitle,\n    mod.id AS moderatorId,\n    mod.firstName AS moderatorFirstName,\n    mod.lastName AS moderatorLastName",
+      "interface": "cypher",
+      "invocation": "MATCH (m)-[:REPLY_OF*0..]->(p:Post)<-[:CONTAINER_OF]-(f:Forum)-[:HAS_MODERATOR]->(mod:Person)\nWHERE (m:Post OR m:Comment) AND m.id = $messageId\nRETURN\n    f.id AS forumId,\n    f.title AS forumTitle,\n    mod.id AS moderatorId,\n    mod.firstName AS moderatorFirstName,\n    mod.lastName AS moderatorLastName",
+      "limit": null,
+      "notes": "(m:Message {id}) becomes (m) WHERE (m:Post OR m:Comment) AND m.id",
+      "operation": "IS6",
+      "parameters": [
+        {
+          "data_type": "int64",
+          "name": "messageId"
+        }
+      ],
+      "spec_variance": null,
+      "unordered_list_columns": []
+    },
+    {
+      "columns": [
+        "commentId",
+        "commentContent",
+        "commentCreationDate",
+        "replyAuthorId",
+        "replyAuthorFirstName",
+        "replyAuthorLastName",
+        "replyAuthorKnowsOriginalMessageAuthor"
+      ],
+      "cypher": "MATCH (m)<-[:REPLY_OF]-(c:Comment)-[:HAS_CREATOR]->(p:Person)\nWHERE (m:Post OR m:Comment) AND m.id = $messageId\nOPTIONAL MATCH (m)-[:HAS_CREATOR]->(a:Person)-[r:KNOWS]-(p)\nRETURN c.id AS commentId,\n    c.content AS commentContent,\n    c.creationDate AS commentCreationDate,\n    p.id AS replyAuthorId,\n    p.firstName AS replyAuthorFirstName,\n    p.lastName AS replyAuthorLastName,\n    CASE r\n        WHEN null THEN false\n        ELSE true\n    END AS replyAuthorKnowsOriginalMessageAuthor\nORDER BY commentCreationDate DESC, replyAuthorId",
+      "interface": "cypher",
+      "invocation": "MATCH (m)<-[:REPLY_OF]-(c:Comment)-[:HAS_CREATOR]->(p:Person)\nWHERE (m:Post OR m:Comment) AND m.id = $messageId\nOPTIONAL MATCH (m)-[:HAS_CREATOR]->(a:Person)-[r:KNOWS]-(p)\nRETURN c.id AS commentId,\n    c.content AS commentContent,\n    c.creationDate AS commentCreationDate,\n    p.id AS replyAuthorId,\n    p.firstName AS replyAuthorFirstName,\n    p.lastName AS replyAuthorLastName,\n    CASE r\n        WHEN null THEN false\n        ELSE true\n    END AS replyAuthorKnowsOriginalMessageAuthor\nORDER BY commentCreationDate DESC, replyAuthorId",
+      "limit": null,
+      "notes": "(m:Message {id}) becomes (m) WHERE (m:Post OR m:Comment) AND m.id",
+      "operation": "IS7",
+      "parameters": [
+        {
+          "data_type": "int64",
+          "name": "messageId"
+        }
+      ],
+      "spec_variance": "reference behaviour, differs from spec prose: CASE r WHEN null THEN false ELSE true END never matches null, as in Neo4j, so replyAuthorKnowsOriginalMessageAuthor is always true",
+      "unordered_list_columns": []
+    }
+  ],
+  "schema": "graphforge-gdc-snb-interactive-queries/1"
+}

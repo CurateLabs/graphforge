@@ -68,7 +68,7 @@ impl LocalDictionary {
     }
 }
 
-fn copy_uuids(array: &FixedSizeBinaryArray, out: &mut [[u8; 16]]) {
+pub(super) fn copy_uuids(array: &FixedSizeBinaryArray, out: &mut [[u8; 16]]) {
     for (slot, bytes) in out.iter_mut().zip(array.value_data().chunks_exact(16)) {
         *slot = <[u8; 16]>::try_from(bytes).expect("16-byte chunk");
     }
@@ -77,14 +77,14 @@ fn copy_uuids(array: &FixedSizeBinaryArray, out: &mut [[u8; 16]]) {
 /// The exact rows each task will emit, from the footers, and where they land in
 /// the assembled columns. Every task decodes straight into its own slice of the
 /// final arrays, so a decoded copy and an assembled copy never coexist.
-struct Tasks {
+pub(super) struct Tasks {
     /// `(source, task, rows)` in input order.
-    items: Vec<(usize, usize, usize)>,
-    total: usize,
+    pub(super) items: Vec<(usize, usize, usize)>,
+    pub(super) total: usize,
 }
 
 impl Tasks {
-    fn plan(sources: &[BulkSource<'_>], what: &str) -> Result<Self, GfError> {
+    pub(super) fn plan(sources: &[BulkSource<'_>], what: &str) -> Result<Self, GfError> {
         let mut items = Vec::new();
         let mut total = 0_usize;
         for (source, planned) in sources.iter().enumerate() {
@@ -112,6 +112,30 @@ impl Tasks {
             })
             .collect()
     }
+}
+
+/// Run `work` on every job on the rayon pool, handing jobs out in index order.
+///
+/// A worker that finishes takes the lowest job nobody has claimed, so jobs *start*
+/// in index order: the reads of a source begin in file order rather than at
+/// several far-apart positions, as a static split (`par_iter`) would have them. It
+/// does not keep the jobs in flight close together, since a slow job leaves the
+/// others free to run ahead of it. A consumer that needs the bytes in order, such
+/// as the whole-file digest of a registered source (#1898), is therefore helped in
+/// the usual case and must still bound what it holds. Results come back in job
+/// order.
+pub(super) fn claim_in_order<J: Send, R: Send>(
+    jobs: Vec<J>,
+    work: impl Fn(J) -> Result<R, GfError> + Sync + Send,
+) -> Result<Vec<R>, GfError> {
+    let mut finished = jobs
+        .into_iter()
+        .enumerate()
+        .par_bridge()
+        .map(|(index, job)| work(job).map(|result| (index, result)))
+        .collect::<Result<Vec<_>, GfError>>()?;
+    finished.sort_unstable_by_key(|(index, _)| *index);
+    Ok(finished.into_iter().map(|(_, result)| result).collect())
 }
 
 /// Merge the tasks' local dictionaries into one and return each task's
@@ -146,7 +170,7 @@ fn remap_in_place(tasks: &Tasks, column: &mut [u32], maps: &[Vec<u32>]) {
 /// The staged path's per-chunk admission, applied to every decoded batch: the
 /// property-column, row and byte windows. (Its run window is implied: a budget
 /// set validates `max_run_records >= 4 * max_batch_rows`.)
-fn admit_batch(
+pub(super) fn admit_batch(
     kind: ConstructionChunkKind,
     batch: &RecordBatch,
     budgets: GraphConstructionBudgets,
@@ -166,7 +190,7 @@ fn admit_batch(
     Ok(())
 }
 
-fn short_source() -> GfError {
+pub(super) fn short_source() -> GfError {
     storage("a source emitted a different row count than its footer")
 }
 
@@ -219,6 +243,7 @@ pub(super) struct NodeTable {
 pub(super) fn collect_nodes(
     sources: &[BulkSource<'_>],
     retain: bool,
+    properties: Option<&super::property_rows::PropertyRows<'_>>,
     budgets: GraphConstructionBudgets,
     cancel: &AtomicBool,
 ) -> Result<NodeTable, GfError> {
@@ -226,49 +251,55 @@ pub(super) fn collect_nodes(
     // Zero-allocated: pages become resident only as tasks write them.
     let mut uuids = vec![[0_u8; 16]; tasks.total];
     let mut labels = vec![0_u32; tasks.total];
-    let chunks = tasks
+    let jobs = tasks
         .items
-        .par_iter()
+        .iter()
+        .copied()
         .zip(tasks.carve(&mut uuids))
         .zip(tasks.carve(&mut labels))
-        .map(|((&(source, task, rows), uuids), labels)| {
+        .collect::<Vec<_>>();
+    let chunks = claim_in_order(jobs, |(((source, task, rows), uuids), labels)| {
+        check_cancelled(cancel)?;
+        let mut chunk = NodeChunk::default();
+        let mut written = 0;
+        sources[source].reader.read_task(task, &mut |batch| {
             check_cancelled(cancel)?;
-            let mut chunk = NodeChunk::default();
-            let mut written = 0;
-            sources[source].reader.read_task(task, &mut |batch| {
-                check_cancelled(cancel)?;
+            if !sources[source].reader.admitted() {
                 crate::graph_construction::validate_canonical_batch(
                     ConstructionChunkKind::Node,
                     &batch,
                 )?;
                 admit_batch(ConstructionChunkKind::Node, &batch, budgets)?;
-                let count = batch.num_rows();
-                if written + count > rows {
-                    return Err(short_source());
-                }
-                if count == 0 {
-                    return Ok(());
-                }
-                copy_uuids(
-                    crate::graph_construction::batch_uuid_column(&batch, "node_uuid")?,
-                    &mut uuids[written..written + count],
-                );
-                chunk.dictionary.column(
-                    required_string(&batch, "label")?,
-                    &mut labels[written..written + count],
-                );
-                written += count;
-                if retain {
-                    chunk.kept.push(batch);
-                }
-                Ok(())
-            })?;
-            if written != rows {
+            }
+            let count = batch.num_rows();
+            if written + count > rows {
                 return Err(short_source());
             }
-            Ok(chunk)
-        })
-        .collect::<Result<Vec<_>, GfError>>()?;
+            if count == 0 {
+                return Ok(());
+            }
+            copy_uuids(
+                crate::graph_construction::batch_uuid_column(&batch, "node_uuid")?,
+                &mut uuids[written..written + count],
+            );
+            chunk.dictionary.column(
+                required_string(&batch, "label")?,
+                &mut labels[written..written + count],
+            );
+            written += count;
+            if let Some(properties) = properties {
+                properties.ingest(&batch, cancel)?;
+            }
+            if retain {
+                chunk.kept.push(batch);
+            }
+            Ok(())
+        })?;
+        if written != rows {
+            return Err(short_source());
+        }
+        Ok(chunk)
+    })?;
     let dictionaries = chunks
         .iter()
         .map(|chunk| &chunk.dictionary)
@@ -382,25 +413,31 @@ pub(super) fn collect_edges(
     let mut src = vec![0_u32; tasks.total];
     let mut dst = vec![0_u32; tasks.total];
     let mut rels = vec![0_u32; tasks.total];
-    let chunks = tasks
+    let jobs = tasks
         .items
-        .par_iter()
+        .iter()
+        .copied()
         .zip(tasks.carve(&mut uuids))
         .zip(tasks.carve(&mut src))
         .zip(tasks.carve(&mut dst))
         .zip(tasks.carve(&mut rels))
-        .map(|((((&(source, task, rows), uuids), src), dst), rels)| {
+        .collect::<Vec<_>>();
+    let chunks = claim_in_order(
+        jobs,
+        |(((((source, task, rows), uuids), src), dst), rels)| {
             check_cancelled(cancel)?;
             let mut chunk = EdgeChunk::default();
             let mut written = 0;
             let mut endpoints = Vec::new();
             sources[source].reader.read_task(task, &mut |batch| {
                 check_cancelled(cancel)?;
-                crate::graph_construction::validate_canonical_batch(
-                    ConstructionChunkKind::Edge,
-                    &batch,
-                )?;
-                admit_batch(ConstructionChunkKind::Edge, &batch, budgets)?;
+                if !sources[source].reader.admitted() {
+                    crate::graph_construction::validate_canonical_batch(
+                        ConstructionChunkKind::Edge,
+                        &batch,
+                    )?;
+                    admit_batch(ConstructionChunkKind::Edge, &batch, budgets)?;
+                }
                 let count = batch.num_rows();
                 if written + count > rows {
                     return Err(short_source());
@@ -441,8 +478,8 @@ pub(super) fn collect_edges(
                 return Err(short_source());
             }
             Ok(chunk)
-        })
-        .collect::<Result<Vec<_>, GfError>>()?;
+        },
+    )?;
     let miss = chunks.iter().find_map(|chunk| chunk.miss);
     let dictionaries = chunks
         .iter()

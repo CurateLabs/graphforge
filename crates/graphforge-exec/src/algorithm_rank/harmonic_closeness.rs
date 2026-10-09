@@ -39,16 +39,9 @@ impl PreparedHarmonicCloseness {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct HarmonicClosenessSourceScore {
-    score: f64,
-    checkpoints: u64,
-}
-
-#[derive(Clone, Debug, PartialEq)]
 struct HarmonicClosenessChunkScores {
     start: usize,
     scores: Vec<f64>,
-    checkpoints: u64,
 }
 
 impl RustAlgorithm for HarmonicCloseness {
@@ -155,9 +148,12 @@ fn harmonic_closeness_scores_serial(
 ) -> Result<Vec<f64>, AlgorithmError> {
     let mut scores = Vec::with_capacity(prepared.sources());
     for source in 0..prepared.sources() {
-        scores.push(
-            harmonic_closeness_score_source(prepared, source, denominator, control, true)?.score,
-        );
+        scores.push(harmonic_closeness_score_source(
+            prepared,
+            source,
+            denominator,
+            control,
+        )?);
     }
     Ok(scores)
 }
@@ -176,34 +172,21 @@ fn harmonic_closeness_scores_parallel(
             .par_iter()
             .map(|&(start, end)| {
                 let mut scores = Vec::with_capacity(end - start);
-                let mut checkpoints = 0_u64;
                 for source in start..end {
-                    let result = harmonic_closeness_score_source(
+                    scores.push(harmonic_closeness_score_source(
                         prepared,
                         source,
                         denominator,
                         control,
-                        false,
-                    )?;
-                    checkpoints = checkpoints.checked_add(result.checkpoints).ok_or_else(|| {
-                        execution("harmonic closeness checkpoint count overflows")
-                    })?;
-                    scores.push(result.score);
+                    )?);
                 }
-                Ok(HarmonicClosenessChunkScores {
-                    start,
-                    scores,
-                    checkpoints,
-                })
+                Ok(HarmonicClosenessChunkScores { start, scores })
             })
             .collect::<Vec<Result<_, AlgorithmError>>>())
     })?;
     let chunks = first_harmonic_closeness_chunk_error(chunk_results)?;
     let mut scores = vec![0.0; prepared.sources()];
     for chunk in chunks {
-        for _ in 0..chunk.checkpoints {
-            control.checkpoint()?;
-        }
         scores[chunk.start..chunk.start + chunk.scores.len()].copy_from_slice(&chunk.scores);
     }
     Ok(scores)
@@ -214,10 +197,8 @@ fn harmonic_closeness_score_source(
     source: usize,
     denominator: f64,
     control: &AlgorithmControl,
-    consume_checkpoints: bool,
-) -> Result<HarmonicClosenessSourceScore, AlgorithmError> {
-    let mut checkpoints = 0_u64;
-    harmonic_closeness_checkpoint(control, consume_checkpoints, &mut checkpoints)?;
+) -> Result<f64, AlgorithmError> {
+    control.check_cancelled()?;
     let mut distance = vec![usize::MAX; prepared.sources()];
     distance[source] = 0;
     let mut queue = VecDeque::from([source]);
@@ -228,7 +209,7 @@ fn harmonic_closeness_score_source(
             if traversed_edges > 0
                 && traversed_edges.is_multiple_of(HARMONIC_CLOSENESS_CHECKPOINT_EDGES)
             {
-                harmonic_closeness_checkpoint(control, consume_checkpoints, &mut checkpoints)?;
+                control.check_cancelled()?;
             }
             traversed_edges += 1;
             let target = usize::try_from(target)
@@ -253,23 +234,7 @@ fn harmonic_closeness_score_source(
             "harmonic closeness score exceeds supported range",
         ));
     }
-    Ok(HarmonicClosenessSourceScore { score, checkpoints })
-}
-
-fn harmonic_closeness_checkpoint(
-    control: &AlgorithmControl,
-    consume: bool,
-    checkpoints: &mut u64,
-) -> Result<(), AlgorithmError> {
-    if consume {
-        control.checkpoint()?;
-    } else {
-        control.check_cancelled()?;
-        *checkpoints = checkpoints
-            .checked_add(1)
-            .ok_or_else(|| execution("harmonic closeness checkpoint count overflows"))?;
-    }
-    Ok(())
+    Ok(score)
 }
 
 fn first_harmonic_closeness_chunk_error(

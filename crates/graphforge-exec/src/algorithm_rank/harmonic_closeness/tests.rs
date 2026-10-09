@@ -154,7 +154,7 @@ fn harmonic_closeness_handles_parallel_self_loop_disconnected_and_empty_graphs()
 #[test]
 fn harmonic_closeness_uses_shared_limits_cancellation_and_dependency_metadata() {
     let graph = AdjacencyGraph::with_test_edges(3, &[(0, 1), (1, 2)]);
-    assert_eq!(
+    assert!(
         execute_harmonic_closeness(
             &graph,
             AlgorithmLimits {
@@ -162,11 +162,9 @@ fn harmonic_closeness_uses_shared_limits_cancellation_and_dependency_metadata() 
                 ..AlgorithmLimits::default()
             },
             AlgorithmCancellation::default(),
-        ),
-        Err(AlgorithmError::IterationLimit {
-            observed: 1,
-            limit: 0,
-        })
+        )
+        .is_ok(),
+        "a single-pass algorithm never consumes the iteration budget"
     );
     assert!(matches!(
         execute_harmonic_closeness(
@@ -197,7 +195,7 @@ fn harmonic_closeness_uses_shared_limits_cancellation_and_dependency_metadata() 
         Err(AlgorithmError::Cancelled)
     );
     let edge_heavy = AdjacencyGraph::with_test_edges(1, &vec![(0, 0); 1025]);
-    assert_eq!(
+    assert!(
         execute_harmonic_closeness(
             &edge_heavy,
             AlgorithmLimits {
@@ -205,11 +203,9 @@ fn harmonic_closeness_uses_shared_limits_cancellation_and_dependency_metadata() 
                 ..AlgorithmLimits::default()
             },
             AlgorithmCancellation::default(),
-        ),
-        Err(AlgorithmError::IterationLimit {
-            observed: 2,
-            limit: 1,
-        })
+        )
+        .is_ok(),
+        "a single-pass algorithm never consumes the iteration budget"
     );
     let mut registry = AlgorithmRegistry::default();
     register_rank_algorithms(&mut registry).unwrap();
@@ -329,7 +325,7 @@ fn harmonic_closeness_parallel_cancellation_and_limits_are_structured() {
         execute_harmonic_closeness_with_pool(&graph, 4, cancellation),
         Err(AlgorithmError::Cancelled)
     );
-    assert_eq!(
+    assert!(
         execute_harmonic_closeness_with_pool_and_limits(
             &graph,
             4,
@@ -338,11 +334,9 @@ fn harmonic_closeness_parallel_cancellation_and_limits_are_structured() {
                 ..AlgorithmLimits::default()
             },
             AlgorithmCancellation::default(),
-        ),
-        Err(AlgorithmError::IterationLimit {
-            observed: 1,
-            limit: 0
-        })
+        )
+        .is_ok(),
+        "a single-pass algorithm never consumes the iteration budget"
     );
     assert!(matches!(
         execute_harmonic_closeness_with_pool_and_limits(

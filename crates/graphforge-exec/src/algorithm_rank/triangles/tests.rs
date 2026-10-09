@@ -125,7 +125,7 @@ fn triangles_ignore_direction_multiplicity_and_self_loops() {
 #[test]
 fn triangles_use_shared_controls_and_dependency_metadata() {
     let graph = AdjacencyGraph::with_test_edges(3, &[(0, 1), (1, 2), (2, 0)]);
-    assert!(matches!(
+    assert!(
         execute_triangles(
             &graph,
             AlgorithmLimits {
@@ -133,9 +133,10 @@ fn triangles_use_shared_controls_and_dependency_metadata() {
                 ..AlgorithmLimits::default()
             },
             AlgorithmCancellation::default(),
-        ),
-        Err(AlgorithmError::IterationLimit { .. })
-    ));
+        )
+        .is_ok(),
+        "a single-pass algorithm never consumes the iteration budget"
+    );
     let cancellation = AlgorithmCancellation::default();
     cancellation.cancel();
     assert_eq!(

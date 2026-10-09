@@ -14,5 +14,5 @@ pub(in crate::expr) use conversions::{
     CypherConversion, CypherConversionKind, CypherToString, cypher_float_string, to_cypher_boolean,
     to_cypher_float, to_cypher_integer, to_cypher_string, trunc_float_to_i64,
 };
-pub use literals::{ir_literal_to_scalar, scalar_to_ir_literal};
+pub use literals::{ir_literal_to_scalar, scalar_to_ir_literal, try_ir_literal_to_scalar};
 pub(in crate::expr) use literals::{render_temporal, spatial_scalar};

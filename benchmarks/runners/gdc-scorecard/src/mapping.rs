@@ -78,7 +78,10 @@ pub struct Property {
     pub name: Option<String>,
     #[serde(rename = "type")]
     pub kind: PropertyType,
-    /// Only for `date` and `datetime`; defaults to [`TemporalFormat::Iso8601`].
+    /// For `date` and `datetime`, how the text is written; defaults to
+    /// [`TemporalFormat::Iso8601`]. An `int64` with a format stores the instant
+    /// the text names as whole epoch milliseconds, the form a Cypher query that
+    /// compares against epoch-millisecond integers needs.
     #[serde(default)]
     pub format: Option<TemporalFormat>,
     /// Required for `list` and refused otherwise: the one-character separator.
@@ -266,10 +269,13 @@ fn check_label_column(table: &NodeTable) -> Result<(), ConvertError> {
 
 fn check_property_options(table: &str, property: &Property) -> Result<(), ConvertError> {
     let name = property.output_name();
-    let temporal = matches!(property.kind, PropertyType::Date | PropertyType::Datetime);
+    let temporal = matches!(
+        property.kind,
+        PropertyType::Date | PropertyType::Datetime | PropertyType::Int64
+    );
     if property.format.is_some() && !temporal {
         return Err(invalid(format!(
-            "table {table} property {name}: format applies only to date and datetime"
+            "table {table} property {name}: format applies only to date, datetime and int64"
         )));
     }
     match (&property.separator, property.kind) {

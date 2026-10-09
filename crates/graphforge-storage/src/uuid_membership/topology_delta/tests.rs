@@ -1,28 +1,17 @@
-use super::super::AuthenticatedUuidIndexSnapshot;
 use super::super::CommittedUuidTopologyRewrite;
 use super::super::INDEX_DIR;
-use super::super::MANIFEST;
-use super::super::Manifest;
 use super::super::UuidIndexBuildLimits;
-use super::super::UuidIndexKind;
-use super::super::UuidMembershipIndex;
 use super::super::UuidTopologyDelta;
 use super::super::V4_ORDINAL_MANIFEST;
-use super::super::maintenance::manifest_file_names;
 use super::super::maintenance::standalone_v4_pinned_update;
 use super::super::ordinal_artifacts::stage_v4_ordinal_artifacts;
 use super::super::ordinal_artifacts::stage_v4_ordinal_artifacts_unordered;
-use super::super::rebuild::rebuild_uuid_membership_indexes;
 use super::super::rebuild::rebuild_v4_ordinal_identity;
 use super::super::tests::fixture;
 use super::super::tests::install_v4_plan;
 use super::super::tests::pinned_v4_update;
-use super::super::tests::singleton_append_series;
-use super::append_uuid_membership_delta;
 use super::commit_uuid_topology_rewrite;
 use super::hex_sha256;
-use super::plan_uuid_membership_delta;
-use super::prepare_uuid_membership_delta;
 use super::prepare_v4_ordinal_delta;
 use std::fs;
 use uuid::Uuid;
@@ -415,7 +404,6 @@ fn standalone_existing_v4_advances_with_topology_transaction() {
         b"{\"topology_generation\":7,\"search_generation\":0,\"property_generation\":0}\n",
     )
     .unwrap();
-    rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default()).unwrap();
     rebuild_v4_ordinal_identity(dir.path(), UuidIndexBuildLimits::default()).unwrap();
     let topology = dir.path().join("topology/nodes.parquet");
     let mut staged = crate::staging::RewriteBatch::new();
@@ -447,187 +435,6 @@ fn standalone_existing_v4_advances_with_topology_transaction() {
             .unwrap()
             .is_some()
     );
-}
-
-#[test]
-fn v3_leveled_append_has_bounded_runs_and_nonquadratic_doubling() {
-    let (_, small) = singleton_append_series(64);
-    let (large, large_bytes) = singleton_append_series(128);
-    assert!(large_bytes <= small * 5 / 2);
-    let manifest: Manifest =
-        serde_json::from_slice(&fs::read(large.path().join(INDEX_DIR).join(MANIFEST)).unwrap())
-            .unwrap();
-    assert!(manifest.runs.len() <= 9);
-    assert_eq!(manifest.runs.iter().filter(|run| run.base).count(), 1);
-    let mut index = UuidMembershipIndex::open(large.path()).unwrap();
-    assert_eq!(index.count(UuidIndexKind::Node), 128);
-    assert_eq!(
-        index
-            .lookup_node_surrogates(&[Uuid::from_u128(1), Uuid::from_u128(128)])
-            .unwrap()
-            .0,
-        [Some(1), Some(128)]
-    );
-}
-
-#[test]
-fn append_rejects_cross_run_uuid_and_surrogate_collisions_before_publication() {
-    let dir = tempfile::tempdir().unwrap();
-    crate::generation::force_bump_topology_generation_for_test(dir.path()).unwrap();
-    append_uuid_membership_delta(
-        dir.path(),
-        1,
-        &[(Uuid::from_u128(1), 1)],
-        &[Uuid::from_u128(2)],
-    )
-    .unwrap();
-    let manifest_before = fs::read(dir.path().join(INDEX_DIR).join(MANIFEST)).unwrap();
-
-    crate::generation::force_bump_topology_generation_for_test(dir.path()).unwrap();
-    assert!(
-        append_uuid_membership_delta(dir.path(), 2, &[], &[Uuid::from_u128(1)],)
-            .unwrap_err()
-            .to_string()
-            .contains("already exists")
-    );
-    assert_eq!(
-        fs::read(dir.path().join(INDEX_DIR).join(MANIFEST)).unwrap(),
-        manifest_before
-    );
-    assert!(
-        append_uuid_membership_delta(dir.path(), 2, &[(Uuid::from_u128(3), 1)], &[],)
-            .unwrap_err()
-            .to_string()
-            .contains("surrogate already exists")
-    );
-
-    let reverse = tempfile::tempdir().unwrap();
-    crate::generation::force_bump_topology_generation_for_test(reverse.path()).unwrap();
-    append_uuid_membership_delta(reverse.path(), 1, &[], &[Uuid::from_u128(9)]).unwrap();
-    crate::generation::force_bump_topology_generation_for_test(reverse.path()).unwrap();
-    assert!(
-        append_uuid_membership_delta(reverse.path(), 2, &[(Uuid::from_u128(9), 9)], &[])
-            .unwrap_err()
-            .to_string()
-            .contains("already exists")
-    );
-}
-
-#[test]
-fn bulk_append_validation_uses_sequential_megabyte_blocks_and_zero_random_seeks() {
-    let dir = tempfile::tempdir().unwrap();
-    let retained = (1_u64..=40_000)
-        .map(|value| (Uuid::from_u128(u128::from(value)), value))
-        .collect::<Vec<_>>();
-    crate::generation::force_bump_topology_generation_for_test(dir.path()).unwrap();
-    append_uuid_membership_delta(dir.path(), 1, &retained, &[]).unwrap();
-
-    crate::generation::force_bump_topology_generation_for_test(dir.path()).unwrap();
-    let metrics =
-        append_uuid_membership_delta(dir.path(), 2, &[(Uuid::from_u128(50_000), 50_000)], &[])
-            .unwrap();
-    assert_eq!(metrics.validation_random_seeks, 0);
-    assert_eq!(metrics.validation_scan_bytes, 40_000 * (25 + 24));
-    assert_eq!(metrics.validation_scan_blocks, 2);
-}
-
-#[test]
-fn retained_planner_stages_only_new_and_binary_carry_outputs() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().join(INDEX_DIR);
-    let first_nodes = (1_u64..=40_000)
-        .map(|value| (Uuid::from_u128(u128::from(value)), value))
-        .collect::<Vec<_>>();
-
-    let mut first = crate::RewriteBatch::new();
-    prepare_uuid_membership_delta(
-        dir.path(),
-        0,
-        1,
-        None,
-        &mut first,
-        &first_nodes,
-        &[],
-        &[],
-        &[],
-    )
-    .unwrap();
-    // Two empty base files, two L0 files, manifest, and receipt. No copy of
-    // any retained corpus exists on the initial plan.
-    assert_eq!(first.staged_paths().count(), 6);
-    first.commit_unsealed_for_test().unwrap();
-    fs::create_dir_all(dir.path().join("topology")).unwrap();
-    fs::write(
-        crate::generation::generation_path(dir.path()),
-        crate::generation::encode_generation_state(1, 1, 0).unwrap(),
-    )
-    .unwrap();
-    let before = manifest_file_names(
-        &serde_json::from_slice::<Manifest>(&fs::read(root.join(MANIFEST)).unwrap()).unwrap(),
-    );
-
-    let scratch = tempfile::tempdir_in(dir.path()).unwrap();
-    let mut snapshot = AuthenticatedUuidIndexSnapshot::open_at_generation(dir.path(), 1).unwrap();
-    let second_nodes = (40_001_u64..=80_000)
-        .map(|value| (Uuid::from_u128(u128::from(value)), value))
-        .collect::<Vec<_>>();
-    let (planned, outputs, superseded, metrics) = plan_uuid_membership_delta(
-        &root,
-        1,
-        2,
-        Some(&mut snapshot),
-        scratch.path(),
-        &second_nodes,
-        &[],
-        &[],
-        &[],
-    )
-    .unwrap();
-    // Generation two carries L0+L0 into exactly one L1 pair. Retained base
-    // files are descriptor-reused, not copied into planner outputs.
-    assert_eq!(outputs.len(), 2);
-    assert_eq!(superseded.len(), 2);
-    assert_eq!(planned.runs.iter().filter(|run| !run.base).count(), 1);
-    assert_eq!(planned.runs.iter().find(|run| !run.base).unwrap().level, 1);
-    assert!(
-        before
-            .iter()
-            .all(|name| !outputs.iter().any(|(out, _)| &out.name == name))
-    );
-    assert!(metrics.validation_scan_bytes > 0);
-    assert_eq!(metrics.validation_random_seeks, 0);
-    assert_eq!(metrics.prior_topology_rows_decoded, 0);
-    assert!(metrics.snapshot_admission_authentication_bytes > 0);
-    assert!(metrics.validation_scan_bytes <= metrics.snapshot_admission_authentication_bytes * 2);
-    assert!(metrics.new_output_authentication_bytes <= metrics.physical_bytes_written);
-
-    let mut install = crate::RewriteBatch::new();
-    for (record, path) in &outputs {
-        install.stage_file(&root.join(&record.name), path).unwrap();
-    }
-    install
-        .stage_bytes(&root.join(MANIFEST), &serde_json::to_vec(&planned).unwrap())
-        .unwrap();
-    install.commit_unsealed_for_test().unwrap();
-    snapshot.advance_to(planned).unwrap();
-
-    let scratch = tempfile::tempdir_in(dir.path()).unwrap();
-    let (_, _, _, subsequent) = plan_uuid_membership_delta(
-        &root,
-        2,
-        3,
-        Some(&mut snapshot),
-        scratch.path(),
-        &[(Uuid::from_u128(80_001), 80_001)],
-        &[],
-        &[],
-        &[],
-    )
-    .unwrap();
-    assert_eq!(subsequent.snapshot_admission_authentication_bytes, 0);
-    assert_eq!(subsequent.snapshot_admission_authentication_blocks, 0);
-    assert_eq!(subsequent.validation_scan_bytes, 0);
-    assert_eq!(subsequent.validation_scan_blocks, 0);
 }
 
 #[test]

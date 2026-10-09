@@ -165,10 +165,13 @@ DATA_OWNERS = {
     "query-results",
     "portable-package",
     "source-project-construction",
-    "source-project-import",
     "source-project-published",
     "imported-project-published",
 }
+# The import session of the source project. Registered Parquet sources are read
+# where they are (#1898), so the session holds manifest, journal and receipt
+# bytes, not a copy of the input: it must not follow the data.
+CONTROL_OWNERS = {"source-project-import"}
 ZERO_OWNERS = {"imported-project-construction", "imported-project-import"}
 BYTE_FIELDS = ("logical_bytes", "physical_logical_bytes", "allocated_bytes")
 
@@ -181,6 +184,19 @@ def positive_slopes(name: str, values: list[int], work: list[int]) -> None:
     right = deltas[1] * (work[1] - work[0])
     if left > 2 * right or right > 2 * left:
         raise ValueError(f"{name}: adjacent normalized slopes differ by more than factor2")
+
+
+def sublinear_growth(name: str, values: list[int], work: list[int]) -> None:
+    """An owner that holds no payload grows by less than half of proportionally.
+
+    A copy of the input would grow with the work, a 4x work step giving about
+    4x; control data (a manifest, a journal frame, a receipt) is nearly fixed. The
+    bound is the midpoint between them for the fixture's 1x/2x/4x work steps.
+    """
+    if any(value < 0 for value in values):
+        raise ValueError(f"{name}: negative evidence")
+    if values[2] * work[0] * 2 > values[0] * work[2]:
+        raise ValueError(f"{name}: follows the data, so it holds a copy of it")
 
 
 def peak_envelope(name: str, values: list[int], work: list[int]) -> None:
@@ -270,6 +286,8 @@ def validate_growth(observations: list[dict[str, object]]) -> None:
                     raise ValueError(f"{owner}: empty lock gained payload")
                 if len(set(values)) != 1:
                     raise ValueError(f"{owner}: fixed lock inventory changed")
+            elif owner in CONTROL_OWNERS:
+                sublinear_growth(f"{owner}.{field}", values, work)
             elif owner in DATA_OWNERS:
                 # Published inventories include content-addressed radix nodes. Their
                 # count depends on hashed path prefixes, not graph row count; a

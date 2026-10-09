@@ -1381,7 +1381,6 @@ migrations: []
         assert_eq!(outcome.remapped_label_values, 4);
         assert!(outcome.encoding_marked);
         assert!(has_runtime_entity_label_encoding_marker(dir.path()));
-        assert!(crate::uuid_membership_index_is_fresh(dir.path()).unwrap());
 
         // Reopening and probing the generation-carried UUID authority must not
         // decode the topology that reconciliation just rewrote.
@@ -1412,7 +1411,7 @@ migrations: []
     }
 
     #[test]
-    fn uuid_neutral_label_rewrite_recovers_after_committed_refresh_failure() {
+    fn uuid_neutral_label_rewrites_advance_one_generation_each() {
         let dir = TempDir::new().unwrap();
         write_nodes(dir.path(), &[&[0], &[1]]);
         let mut catalog = RuntimeCatalog::new();
@@ -1435,23 +1434,14 @@ migrations: []
         };
 
         let before = crate::read_topology_generation(dir.path()).unwrap();
-        crate::uuid_membership::fail_next_snapshot_refresh_for_test();
-        let error = crate::uuid_membership::commit_uuid_neutral_topology_rewrite(
-            dir.path(),
-            stage_current(),
-        )
-        .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("committed but UUID index snapshot refresh failed")
-        );
         assert_eq!(
-            crate::read_topology_generation(dir.path()).unwrap(),
-            before + 1
+            crate::uuid_membership::commit_uuid_neutral_topology_rewrite(
+                dir.path(),
+                stage_current(),
+            )
+            .unwrap(),
+            Some(before + 1)
         );
-        assert!(crate::uuid_membership_index_is_fresh(dir.path()).unwrap());
-
         assert_eq!(
             crate::uuid_membership::commit_uuid_neutral_topology_rewrite(
                 dir.path(),
@@ -1460,9 +1450,8 @@ migrations: []
             .unwrap(),
             Some(before + 2)
         );
-        assert!(crate::uuid_membership_index_is_fresh(dir.path()).unwrap());
         assert_eq!(
-            crate::UuidMembershipIndex::open(dir.path())
+            crate::TopologyIdentityProbe::open_dir(dir.path())
                 .unwrap()
                 .count(crate::UuidIndexKind::Node),
             2

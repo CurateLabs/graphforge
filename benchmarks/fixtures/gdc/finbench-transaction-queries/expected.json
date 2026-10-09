@@ -1,0 +1,806 @@
+{
+  "schema": "graphforge-gdc-finbench-query-expected/1",
+  "dataset_id": "finbench-engineering-queries-v1",
+  "derivation": "graphforge_bench.gdc_finbench_transaction_reference",
+  "results": {
+    "TCR1": [
+      {
+        "binding": {
+          "id": 101,
+          "startTime": 1000,
+          "endTime": 2000,
+          "truncationLimit": 500,
+          "truncationOrder": "TIMESTAMP_DESCENDING"
+        },
+        "rows": [
+          [
+            "102",
+            "1",
+            "304",
+            "MAC"
+          ],
+          [
+            "112",
+            "1",
+            "304",
+            "MAC"
+          ],
+          [
+            "106",
+            "2",
+            "301",
+            "POS"
+          ],
+          [
+            "108",
+            "2",
+            "303",
+            "IP"
+          ],
+          [
+            "108",
+            "3",
+            "303",
+            "IP"
+          ],
+          [
+            "111",
+            "3",
+            "301",
+            "POS"
+          ]
+        ]
+      },
+      {
+        "binding": {
+          "id": 101,
+          "startTime": 1000,
+          "endTime": 2000,
+          "truncationLimit": 3,
+          "truncationOrder": "TIMESTAMP_DESCENDING"
+        },
+        "rows": [
+          [
+            "102",
+            "1",
+            "304",
+            "MAC"
+          ],
+          [
+            "106",
+            "2",
+            "301",
+            "POS"
+          ],
+          [
+            "108",
+            "3",
+            "303",
+            "IP"
+          ]
+        ]
+      }
+    ],
+    "TCR2": [
+      {
+        "binding": {
+          "id": 2,
+          "startTime": 1000,
+          "endTime": 2000,
+          "truncationLimit": 500,
+          "truncationOrder": "TIMESTAMP_DESCENDING"
+        },
+        "rows": [
+          [
+            "128",
+            "7000.000",
+            "700.000"
+          ],
+          [
+            "122",
+            "5000.000",
+            "1200.500"
+          ],
+          [
+            "125",
+            "5000.000",
+            "550.000"
+          ],
+          [
+            "124",
+            "4000.000",
+            "400.000"
+          ],
+          [
+            "123",
+            "3000.250",
+            "100.000"
+          ],
+          [
+            "126",
+            "1000.000",
+            "10.000"
+          ]
+        ]
+      },
+      {
+        "binding": {
+          "id": 2,
+          "startTime": 1000,
+          "endTime": 2000,
+          "truncationLimit": 3,
+          "truncationOrder": "TIMESTAMP_DESCENDING"
+        },
+        "rows": [
+          [
+            "122",
+            "5000.000",
+            "1200.500"
+          ],
+          [
+            "125",
+            "5000.000",
+            "550.000"
+          ],
+          [
+            "124",
+            "4000.000",
+            "400.000"
+          ],
+          [
+            "123",
+            "3000.250",
+            "100.000"
+          ],
+          [
+            "126",
+            "1000.000",
+            "10.000"
+          ]
+        ]
+      }
+    ],
+    "TCR3": [
+      {
+        "binding": {
+          "id1": 130,
+          "id2": 133,
+          "startTime": 1000,
+          "endTime": 2000
+        },
+        "rows": [
+          [
+            "3"
+          ]
+        ]
+      },
+      {
+        "binding": {
+          "id1": 131,
+          "id2": 132,
+          "startTime": 1000,
+          "endTime": 2000
+        },
+        "rows": [
+          [
+            "1"
+          ]
+        ]
+      },
+      {
+        "binding": {
+          "id1": 130,
+          "id2": 134,
+          "startTime": 1000,
+          "endTime": 2000
+        },
+        "rows": [
+          [
+            "-1"
+          ]
+        ]
+      }
+    ],
+    "TCR4": [
+      {
+        "binding": {
+          "id1": 135,
+          "id2": 136,
+          "startTime": 1000,
+          "endTime": 2000
+        },
+        "rows": [
+          [
+            "138",
+            "2",
+            "31.250",
+            "30.000",
+            "1",
+            "5.000",
+            "5.000"
+          ],
+          [
+            "137",
+            "1",
+            "30.000",
+            "30.000",
+            "2",
+            "30.500",
+            "20.500"
+          ]
+        ]
+      },
+      {
+        "binding": {
+          "id1": 136,
+          "id2": 135,
+          "startTime": 1000,
+          "endTime": 2000
+        },
+        "rows": []
+      }
+    ],
+    "TCR5": [
+      {
+        "binding": {
+          "id": 3,
+          "startTime": 1000,
+          "endTime": 2000,
+          "truncationLimit": 500,
+          "truncationOrder": "TIMESTAMP_DESCENDING"
+        },
+        "rows": [
+          [
+            "[140, 142, 143, 144]"
+          ],
+          [
+            "[140, 142, 143]"
+          ],
+          [
+            "[141, 146, 147]"
+          ],
+          [
+            "[140, 142]"
+          ],
+          [
+            "[141, 146]"
+          ]
+        ]
+      },
+      {
+        "binding": {
+          "id": 3,
+          "startTime": 1000,
+          "endTime": 2000,
+          "truncationLimit": 1,
+          "truncationOrder": "TIMESTAMP_DESCENDING"
+        },
+        "rows": [
+          [
+            "[140, 142, 143]"
+          ],
+          [
+            "[141, 146, 147]"
+          ],
+          [
+            "[140, 142]"
+          ],
+          [
+            "[141, 146]"
+          ]
+        ]
+      }
+    ],
+    "TCR6": [
+      {
+        "binding": {
+          "id": 150,
+          "threshold1": 100.0,
+          "threshold2": 100.0,
+          "startTime": 1000,
+          "endTime": 2000,
+          "truncationLimit": 500,
+          "truncationOrder": "TIMESTAMP_DESCENDING"
+        },
+        "rows": [
+          [
+            "151",
+            "1250.000",
+            "600.000"
+          ],
+          [
+            "152",
+            "700.000",
+            "300.000"
+          ]
+        ]
+      },
+      {
+        "binding": {
+          "id": 150,
+          "threshold1": 100.0,
+          "threshold2": 100.0,
+          "startTime": 1000,
+          "endTime": 2000,
+          "truncationLimit": 4,
+          "truncationOrder": "TIMESTAMP_DESCENDING"
+        },
+        "rows": [
+          [
+            "151",
+            "1050.000",
+            "600.000"
+          ],
+          [
+            "152",
+            "580.000",
+            "300.000"
+          ]
+        ]
+      },
+      {
+        "binding": {
+          "id": 150,
+          "threshold1": 100.0,
+          "threshold2": 100.0,
+          "startTime": 1000,
+          "endTime": 2000,
+          "truncationLimit": 3,
+          "truncationOrder": "TIMESTAMP_DESCENDING"
+        },
+        "rows": []
+      },
+      {
+        "binding": {
+          "id": 160,
+          "threshold1": 100.0,
+          "threshold2": 100.0,
+          "startTime": 1000,
+          "endTime": 2000,
+          "truncationLimit": 500,
+          "truncationOrder": "TIMESTAMP_DESCENDING"
+        },
+        "rows": []
+      }
+    ],
+    "TCR7": [
+      {
+        "binding": {
+          "id": 165,
+          "threshold": 60.0,
+          "startTime": 1000,
+          "endTime": 2000,
+          "truncationLimit": 500,
+          "truncationOrder": "TIMESTAMP_DESCENDING"
+        },
+        "rows": [
+          [
+            "1",
+            "2",
+            "1.111"
+          ]
+        ]
+      },
+      {
+        "binding": {
+          "id": 165,
+          "threshold": 60.0,
+          "startTime": 1000,
+          "endTime": 2000,
+          "truncationLimit": 3,
+          "truncationOrder": "TIMESTAMP_DESCENDING"
+        },
+        "rows": [
+          [
+            "1",
+            "2",
+            "0.741"
+          ]
+        ]
+      },
+      {
+        "binding": {
+          "id": 171,
+          "threshold": 60.0,
+          "startTime": 1000,
+          "endTime": 2000,
+          "truncationLimit": 500,
+          "truncationOrder": "TIMESTAMP_DESCENDING"
+        },
+        "rows": [
+          [
+            "1",
+            "0",
+            "-1.000"
+          ]
+        ]
+      }
+    ],
+    "TCR8": [
+      {
+        "binding": {
+          "id": 210,
+          "threshold": 0.5,
+          "startTime": 1000,
+          "endTime": 2000,
+          "truncationLimit": 500,
+          "truncationOrder": "TIMESTAMP_DESCENDING"
+        },
+        "rows": [
+          [
+            "182",
+            "0.030",
+            "4"
+          ],
+          [
+            "180",
+            "0.045",
+            "3"
+          ],
+          [
+            "179",
+            "0.110",
+            "2"
+          ],
+          [
+            "177",
+            "0.080",
+            "2"
+          ]
+        ]
+      },
+      {
+        "binding": {
+          "id": 210,
+          "threshold": 0.5,
+          "startTime": 1000,
+          "endTime": 2000,
+          "truncationLimit": 2,
+          "truncationOrder": "TIMESTAMP_DESCENDING"
+        },
+        "rows": [
+          [
+            "179",
+            "0.060",
+            "2"
+          ]
+        ]
+      }
+    ],
+    "TCR9": [
+      {
+        "binding": {
+          "id": 185,
+          "threshold": 50.0,
+          "startTime": 1000,
+          "endTime": 2000,
+          "truncationLimit": 500,
+          "truncationOrder": "TIMESTAMP_DESCENDING"
+        },
+        "rows": [
+          [
+            "2.500",
+            "1.250",
+            "0.625"
+          ]
+        ]
+      },
+      {
+        "binding": {
+          "id": 185,
+          "threshold": 50.0,
+          "startTime": 1000,
+          "endTime": 2000,
+          "truncationLimit": 1,
+          "truncationOrder": "TIMESTAMP_DESCENDING"
+        },
+        "rows": [
+          [
+            "2.500",
+            "-1.000",
+            "-1.000"
+          ]
+        ]
+      },
+      {
+        "binding": {
+          "id": 186,
+          "threshold": 50.0,
+          "startTime": 1000,
+          "endTime": 2000,
+          "truncationLimit": 500,
+          "truncationOrder": "TIMESTAMP_DESCENDING"
+        },
+        "rows": [
+          [
+            "-1.000",
+            "0.000",
+            "0.000"
+          ]
+        ]
+      }
+    ],
+    "TCR10": [
+      {
+        "binding": {
+          "pid1": 4,
+          "pid2": 5,
+          "startTime": 1000,
+          "endTime": 2000
+        },
+        "rows": [
+          [
+            "0.333"
+          ]
+        ]
+      },
+      {
+        "binding": {
+          "pid1": 4,
+          "pid2": 6,
+          "startTime": 1000,
+          "endTime": 2000
+        },
+        "rows": [
+          [
+            "0.000"
+          ]
+        ]
+      }
+    ],
+    "TCR11": [
+      {
+        "binding": {
+          "id": 1,
+          "startTime": 1000,
+          "endTime": 2000,
+          "truncationLimit": 500,
+          "truncationOrder": "TIMESTAMP_DESCENDING"
+        },
+        "rows": [
+          [
+            "1700.500",
+            "5"
+          ]
+        ]
+      },
+      {
+        "binding": {
+          "id": 1,
+          "startTime": 1000,
+          "endTime": 2000,
+          "truncationLimit": 1,
+          "truncationOrder": "TIMESTAMP_DESCENDING"
+        },
+        "rows": [
+          [
+            "600.500",
+            "3"
+          ]
+        ]
+      }
+    ],
+    "TCR12": [
+      {
+        "binding": {
+          "id": 6,
+          "startTime": 1000,
+          "endTime": 2000,
+          "truncationLimit": 500,
+          "truncationOrder": "TIMESTAMP_DESCENDING"
+        },
+        "rows": [
+          [
+            "192",
+            "300.500"
+          ],
+          [
+            "193",
+            "50.000"
+          ]
+        ]
+      },
+      {
+        "binding": {
+          "id": 6,
+          "startTime": 1000,
+          "endTime": 2000,
+          "truncationLimit": 2,
+          "truncationOrder": "TIMESTAMP_DESCENDING"
+        },
+        "rows": [
+          [
+            "192",
+            "200.000"
+          ],
+          [
+            "193",
+            "50.000"
+          ]
+        ]
+      }
+    ],
+    "TSR1": [
+      {
+        "binding": {
+          "id": 103
+        },
+        "rows": [
+          [
+            "520",
+            "true",
+            "credit card"
+          ]
+        ]
+      }
+    ],
+    "TSR2": [
+      {
+        "binding": {
+          "id": 165,
+          "startTime": 1000,
+          "endTime": 2000
+        },
+        "rows": [
+          [
+            "300.000",
+            "150.000",
+            "3",
+            "350.000",
+            "200.000",
+            "3"
+          ]
+        ]
+      },
+      {
+        "binding": {
+          "id": 199,
+          "startTime": 1000,
+          "endTime": 2000
+        },
+        "rows": [
+          [
+            "1000.000",
+            "1000.000",
+            "1",
+            "0.000",
+            "-1.000",
+            "0"
+          ]
+        ]
+      }
+    ],
+    "TSR3": [
+      {
+        "binding": {
+          "id": 185,
+          "threshold": 100.0,
+          "startTime": 1000,
+          "endTime": 2000
+        },
+        "rows": [
+          [
+            "0.333"
+          ]
+        ]
+      },
+      {
+        "binding": {
+          "id": 198,
+          "threshold": 100.0,
+          "startTime": 1000,
+          "endTime": 2000
+        },
+        "rows": [
+          [
+            "0.000"
+          ]
+        ]
+      },
+      {
+        "binding": {
+          "id": 199,
+          "threshold": 100.0,
+          "startTime": 1000,
+          "endTime": 2000
+        },
+        "rows": [
+          [
+            "-1.000"
+          ]
+        ]
+      }
+    ],
+    "TSR4": [
+      {
+        "binding": {
+          "id": 190,
+          "threshold": 150.0,
+          "startTime": 1000,
+          "endTime": 2000
+        },
+        "rows": [
+          [
+            "194",
+            "1",
+            "1000.000"
+          ],
+          [
+            "192",
+            "1",
+            "200.000"
+          ]
+        ]
+      },
+      {
+        "binding": {
+          "id": 190,
+          "threshold": 0.0,
+          "startTime": 1000,
+          "endTime": 2000
+        },
+        "rows": [
+          [
+            "194",
+            "1",
+            "1000.000"
+          ],
+          [
+            "192",
+            "2",
+            "300.500"
+          ]
+        ]
+      }
+    ],
+    "TSR5": [
+      {
+        "binding": {
+          "id": 151,
+          "threshold": 100.0,
+          "startTime": 1000,
+          "endTime": 2000
+        },
+        "rows": [
+          [
+            "155",
+            "2",
+            "350.000"
+          ],
+          [
+            "158",
+            "1",
+            "350.000"
+          ],
+          [
+            "157",
+            "1",
+            "300.000"
+          ],
+          [
+            "156",
+            "1",
+            "250.000"
+          ]
+        ]
+      }
+    ],
+    "TSR6": [
+      {
+        "binding": {
+          "id": 120,
+          "startTime": 1000,
+          "endTime": 2000
+        },
+        "rows": [
+          [
+            "195"
+          ],
+          [
+            "198"
+          ]
+        ]
+      }
+    ]
+  }
+}

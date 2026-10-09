@@ -12,8 +12,6 @@ use rayon::prelude::*;
 
 use crate::algorithm_dispatch::{AlgorithmControl, AlgorithmError};
 
-const CHECKPOINT_INTERVAL: usize = 4_096;
-
 /// Candidate `(source, middle, target)` probes below which counting stays serial.
 ///
 /// Chosen from release-mode serial-vs-parallel timings of exact global triangle
@@ -37,7 +35,6 @@ pub(crate) enum TriangleCountExecutionPath {
 #[derive(Debug, PartialEq, Eq)]
 struct TriangleChunk {
     count: u64,
-    checkpoints: usize,
 }
 
 /// One stored edge entry in the selected public-identity projection.
@@ -66,7 +63,7 @@ pub(crate) fn triangle_count(
     edges: &[TriangleEdge],
     control: &AlgorithmControl,
 ) -> Result<u64, AlgorithmError> {
-    control.checkpoint()?;
+    control.check_cancelled()?;
     control.check_output_rows(1)?;
 
     let mut work = 0_usize;
@@ -87,7 +84,7 @@ fn count_triangles_serial(
     control: &AlgorithmControl,
 ) -> Result<u64, AlgorithmError> {
     let mut work = 0_usize;
-    let chunk = count_source_range(neighbors, 0, neighbors.len(), control, &mut work, true)?;
+    let chunk = count_source_range(neighbors, 0, neighbors.len(), control, &mut work)?;
     Ok(chunk.count)
 }
 
@@ -104,13 +101,13 @@ fn count_triangles_parallel(
             .par_iter()
             .map(|&(start, end)| {
                 let mut work = 0_usize;
-                count_source_range(neighbors, start, end, control, &mut work, false)
+                count_source_range(neighbors, start, end, control, &mut work)
             })
             .collect::<Vec<Result<_, AlgorithmError>>>();
         first_chunk_error(results)
     })?;
 
-    reduce_chunks(chunk_results, control)
+    reduce_chunks(chunk_results)
 }
 
 fn count_source_range(
@@ -119,24 +116,22 @@ fn count_source_range(
     end: usize,
     control: &AlgorithmControl,
     work: &mut usize,
-    consume_checkpoints: bool,
 ) -> Result<TriangleChunk, AlgorithmError> {
     let mut count = 0_u64;
-    let mut checkpoints = 0_usize;
 
     for source in start..end {
-        chunk_checkpoint(control, work, &mut checkpoints, consume_checkpoints)?;
+        checkpoint(control, work)?;
         for &middle in neighbors[source].range(source.saturating_add(1)..) {
-            chunk_checkpoint(control, work, &mut checkpoints, consume_checkpoints)?;
+            checkpoint(control, work)?;
             for &target in neighbors[middle].range(middle.saturating_add(1)..) {
-                chunk_checkpoint(control, work, &mut checkpoints, consume_checkpoints)?;
+                checkpoint(control, work)?;
                 if neighbors[source].contains(&target) {
                     count = increment(count)?;
                 }
             }
         }
     }
-    Ok(TriangleChunk { count, checkpoints })
+    Ok(TriangleChunk { count })
 }
 
 fn index_nodes(
@@ -204,15 +199,9 @@ fn checked_add(left: u64, right: u64) -> Result<u64, AlgorithmError> {
         .ok_or_else(|| execution("triangle_count exceeds supported range"))
 }
 
-fn reduce_chunks(
-    chunks: Vec<TriangleChunk>,
-    control: &AlgorithmControl,
-) -> Result<u64, AlgorithmError> {
+fn reduce_chunks(chunks: Vec<TriangleChunk>) -> Result<u64, AlgorithmError> {
     let mut total = 0_u64;
     for chunk in chunks {
-        for _ in 0..chunk.checkpoints {
-            control.checkpoint()?;
-        }
         total = checked_add(total, chunk.count)?;
     }
     Ok(total)
@@ -247,13 +236,12 @@ fn candidate_probe_count(
 ) -> Result<u64, AlgorithmError> {
     let mut probes = 0_u64;
     let mut work = 0_usize;
-    let mut checkpoints = 0_usize;
     for (middle, adjacent) in neighbors.iter().enumerate() {
-        chunk_checkpoint(control, &mut work, &mut checkpoints, true)?;
+        checkpoint(control, &mut work)?;
         let mut lower = 0_u64;
         let mut higher = 0_u64;
         for &neighbor in adjacent {
-            chunk_checkpoint(control, &mut work, &mut checkpoints, true)?;
+            checkpoint(control, &mut work)?;
             if neighbor < middle {
                 lower = lower.saturating_add(1);
             } else if neighbor > middle {
@@ -308,34 +296,11 @@ fn source_chunks(sources: usize, threads: usize) -> Vec<(usize, usize)> {
     ranges
 }
 
-fn chunk_checkpoint(
-    control: &AlgorithmControl,
-    work: &mut usize,
-    checkpoints: &mut usize,
-    consume_checkpoint: bool,
-) -> Result<(), AlgorithmError> {
-    *work = work.saturating_add(1);
-    if work.is_multiple_of(CHECKPOINT_INTERVAL) {
-        if consume_checkpoint {
-            control.checkpoint()?;
-        } else {
-            *checkpoints = checkpoints.saturating_add(1);
-            control.check_cancelled()?;
-        }
-    } else {
-        control.check_cancelled()?;
-    }
-    Ok(())
-}
-
+/// Poll cancellation. Triangle counting is a single pass, so it never consumes
+/// the iteration budget that bounds iterative algorithms (#1922).
 fn checkpoint(control: &AlgorithmControl, work: &mut usize) -> Result<(), AlgorithmError> {
     *work = work.saturating_add(1);
-    if work.is_multiple_of(CHECKPOINT_INTERVAL) {
-        control.checkpoint()?;
-    } else {
-        control.check_cancelled()?;
-    }
-    Ok(())
+    control.check_cancelled()
 }
 
 fn execution(message: impl Into<String>) -> AlgorithmError {
@@ -511,10 +476,10 @@ mod tests {
             },
             AlgorithmCancellation::default(),
         );
-        assert!(matches!(
-            triangle_count(&[], &[], &iteration_limited),
-            Err(AlgorithmError::IterationLimit { .. })
-        ));
+        assert!(
+            triangle_count(&[], &[], &iteration_limited).is_ok(),
+            "a single-pass algorithm never consumes the iteration budget"
+        );
     }
 
     #[test]
@@ -629,10 +594,10 @@ mod tests {
             AlgorithmCancellation::default(),
         )
         .with_compute_pool(Arc::new(crate::ComputePool::new(4).unwrap()));
-        assert!(matches!(
-            triangle_count(&nodes, &edges, &iteration_limited),
-            Err(AlgorithmError::IterationLimit { .. })
-        ));
+        assert!(
+            triangle_count(&nodes, &edges, &iteration_limited).is_ok(),
+            "a single-pass algorithm never consumes the iteration budget"
+        );
     }
 
     #[test]

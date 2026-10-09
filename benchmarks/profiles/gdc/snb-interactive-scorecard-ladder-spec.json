@@ -1,0 +1,262 @@
+{
+  "schema": "graphforge-gdc-scorecard-ladder-spec/1",
+  "suite_id": "snb-interactive",
+  "description": "SNB Interactive v1 scorecard ladder SF1 -> SF3 -> SF10 -> SF30 on the pinned CsvComposite-LongDateFormatter archives. Workloads come from the pinned substitution parameters; every rung is checked against a spec-derived reference over its snapshot. Unpinned rungs are recorded as not admitted.",
+  "profile_root": ".",
+  "identity_profile": "scorecard",
+  "counts_ladder": "profiles/gdc/snb-interactive-scorecard-ladder.json",
+  "metric_shape": "queries",
+  "variance_line": "Read-only Interactive v1 reads on the bulk-load snapshot; the update stream is refused.",
+  "attribution": "Data and parameters from the LDBC Social Network Benchmark Interactive v1 workload (https://ldbcouncil.org/benchmarks/snb/), used under CC-BY 4.0.",
+  "variances": [
+    {
+      "kind": "scope",
+      "subject": "bindings",
+      "text": "Complex reads run the first 30 rows of the pinned interactive_N_param.txt substitution files (IC3 and IC4 bind endDate = startDate + durationDays days, as the Cypher reference does). Short reads run the first 30 distinct ids of their kind in the pinned validation stream, excluding ids that the stream's own updates create. A binding whose person or message is not in the loaded snapshot is skipped and counted in the inputs-notes evidence."
+    },
+    {
+      "kind": "reference_reading",
+      "subject": "reference",
+      "text": "Checked against a spec-derived reference (graphforge_bench.gdc_snb_interactive_reference, which never runs GraphForge, over the loaded snapshot read from the archive's CSV files), not the LDBC validation set: the pinned validation stream begins with an update at position 0 at SF0.1, SF1 and SF10 (#952 decision 2026-10-08)."
+    },
+    {
+      "kind": "reference_reading",
+      "subject": "IC13 and sets",
+      "text": "IC13 runs paths(by=bfs, via=KNOWS, undirected) between the two persons: no row stands for the reference's -1, and the cost column is compared with the hop count. IC1 universities and companies and IC12 tagNames compare as sets of elements, since the specification leaves their order open."
+    },
+    {
+      "kind": "rewrite",
+      "subject": "IC1",
+      "text": "shortestPath((p)-[:KNOWS*1..3]-(friend)) is unsupported (#1888) and becomes min(length(path)) over the bounded match, the same value because a shortest path is a simple path; the [name, year, place] tuples are maps {name, classYear|workFrom, city|country} because GraphForge encodes a heterogeneous list as a tagged union (#1888)"
+    },
+    {
+      "kind": "spec_variance",
+      "subject": "IC1",
+      "text": "reference behaviour, differs from spec prose: CASE uni.name WHEN null (and company.name) never matches, as in Neo4j, so a friend with no university or company gets one all-null entry instead of an empty set"
+    },
+    {
+      "kind": "rewrite",
+      "subject": "IC2",
+      "text": ":Message becomes (message:Post OR message:Comment) because import sessions store one label per node"
+    },
+    {
+      "kind": "spec_variance",
+      "subject": "IC2",
+      "text": "reference behaviour, differs from spec prose: keeps a message whose creationDate equals $maxDate (<=) where the prose says before $maxDate"
+    },
+    {
+      "kind": "spec_variance",
+      "subject": "IC3",
+      "text": "reference behaviour, differs from spec prose: takes endDate where the specification takes durationDays"
+    },
+    {
+      "kind": "spec_variance",
+      "subject": "IC4",
+      "text": "reference behaviour, differs from spec prose: takes endDate where the specification takes durationDays"
+    },
+    {
+      "kind": "rewrite",
+      "subject": "IC5",
+      "text": "the LDBC text's OPTIONAL MATCH ... WHERE friend IN friends returns wrong post counts (#1919), so the count is a conditional sum over the forum's posts"
+    },
+    {
+      "kind": "rewrite",
+      "subject": "IC7",
+      "text": "head(collect({msg, likeTime})) after ORDER BY likeTime DESC, message.id ASC is computed as max(likeTime), then min(message.id) among likes at that time, which selects the same like without relying on aggregation input order; not((liker)-[:KNOWS]-(person)) as a value is rejected (#1888) and becomes an empty pattern comprehension; :Message becomes (message:Post OR message:Comment)"
+    },
+    {
+      "kind": "rewrite",
+      "subject": "IC8",
+      "text": "(:Message) becomes a named node with (message:Post OR message:Comment)"
+    },
+    {
+      "kind": "rewrite",
+      "subject": "IC9",
+      "text": "ORDER BY message.id becomes its projected alias commentOrPostId; :Message becomes (message:Post OR message:Comment)"
+    },
+    {
+      "kind": "rewrite",
+      "subject": "IC10",
+      "text": "the post list comprehension with a pattern predicate is rejected (#1888), so posts are counted with OPTIONAL MATCH and the interest pattern is matched directly and counted with count(DISTINCT post.id)"
+    },
+    {
+      "kind": "rewrite",
+      "subject": "IC12",
+      "text": "[:HAS_TYPE|IS_SUBCLASS_OF*0..] fails at execution (#1888, two-type variable-length pattern) and becomes [:HAS_TYPE] then [:IS_SUBCLASS_OF*0..], the only paths the SNB schema admits from a Tag to a TagClass"
+    },
+    {
+      "kind": "spec_variance",
+      "subject": "IC12",
+      "text": "reference behaviour, differs from spec prose: also selects a Tag whose own name equals $tagClassName (the tag.name = $tagClassName disjunct)"
+    },
+    {
+      "kind": "rewrite",
+      "subject": "IC13",
+      "text": "paths(by=bfs, via=KNOWS, directed=false) instead of Cypher shortestPath (#1888); -1 when the verb returns no row, 0 for equal endpoints as the specification states"
+    },
+    {
+      "kind": "spec_variance",
+      "subject": "IS2",
+      "text": "reference behaviour, differs from spec prose: breaks creation-date ties by messageId ascending where the specification says descending"
+    },
+    {
+      "kind": "rewrite",
+      "subject": "IS4",
+      "text": "(m:Message {id}) becomes (m) WHERE (m:Post OR m:Comment) AND m.id"
+    },
+    {
+      "kind": "rewrite",
+      "subject": "IS5",
+      "text": "(m:Message {id}) becomes (m) WHERE (m:Post OR m:Comment) AND m.id"
+    },
+    {
+      "kind": "rewrite",
+      "subject": "IS6",
+      "text": "(m:Message {id}) becomes (m) WHERE (m:Post OR m:Comment) AND m.id"
+    },
+    {
+      "kind": "rewrite",
+      "subject": "IS7",
+      "text": "(m:Message {id}) becomes (m) WHERE (m:Post OR m:Comment) AND m.id"
+    },
+    {
+      "kind": "spec_variance",
+      "subject": "IS7",
+      "text": "reference behaviour, differs from spec prose: CASE r WHEN null THEN false ELSE true END never matches null, as in Neo4j, so replyAuthorKnowsOriginalMessageAuthor is always true"
+    }
+  ],
+  "rungs": [
+    {
+      "id": "sf1",
+      "label": "SF1",
+      "dataset_id": "social_network-sf1-CsvComposite-LongDateFormatter",
+      "input_subdir": null,
+      "workload": {
+        "builder": "snb-interactive",
+        "queries": "profiles/gdc/snb-interactive-scorecard-queries.json",
+        "parameters": {
+          "dataset_id": "substitution_parameters-sf1",
+          "path": "substitution_parameters-sf1"
+        },
+        "short_reads": {
+          "workload_key": "neo4j-validation",
+          "path": "validation_params-sf1.csv"
+        },
+        "per_variant": 30
+      },
+      "refused": [
+        {
+          "query_id": "IC14",
+          "cause": "weighted_interaction_path_enumeration_not_exposed"
+        },
+        {
+          "query_id": "IU1",
+          "cause": "interactive_update_stream_not_exposed"
+        },
+        {
+          "query_id": "IU2",
+          "cause": "interactive_update_stream_not_exposed"
+        },
+        {
+          "query_id": "IU3",
+          "cause": "interactive_update_stream_not_exposed"
+        },
+        {
+          "query_id": "IU4",
+          "cause": "interactive_update_stream_not_exposed"
+        },
+        {
+          "query_id": "IU5",
+          "cause": "interactive_update_stream_not_exposed"
+        },
+        {
+          "query_id": "IU6",
+          "cause": "interactive_update_stream_not_exposed"
+        },
+        {
+          "query_id": "IU7",
+          "cause": "interactive_update_stream_not_exposed"
+        },
+        {
+          "query_id": "IU8",
+          "cause": "interactive_update_stream_not_exposed"
+        }
+      ],
+      "reference": {
+        "builder": "snb-interactive-spec-derived"
+      },
+      "variances": []
+    },
+    {
+      "id": "sf3",
+      "label": "SF3",
+      "not_pinned": "#1878 pins SF1 and SF10 only; this rung needs a pinned archive and count-ladder entry"
+    },
+    {
+      "id": "sf10",
+      "label": "SF10",
+      "dataset_id": "social_network-sf10-CsvComposite-LongDateFormatter",
+      "input_subdir": null,
+      "workload": {
+        "builder": "snb-interactive",
+        "queries": "profiles/gdc/snb-interactive-scorecard-queries.json",
+        "parameters": {
+          "dataset_id": "substitution_parameters-sf10",
+          "path": "substitution_parameters-sf10"
+        },
+        "short_reads": {
+          "workload_key": "neo4j-validation",
+          "path": "validation_params-sf10.csv"
+        },
+        "per_variant": 30
+      },
+      "refused": [
+        {
+          "query_id": "IC14",
+          "cause": "weighted_interaction_path_enumeration_not_exposed"
+        },
+        {
+          "query_id": "IU1",
+          "cause": "interactive_update_stream_not_exposed"
+        },
+        {
+          "query_id": "IU2",
+          "cause": "interactive_update_stream_not_exposed"
+        },
+        {
+          "query_id": "IU3",
+          "cause": "interactive_update_stream_not_exposed"
+        },
+        {
+          "query_id": "IU4",
+          "cause": "interactive_update_stream_not_exposed"
+        },
+        {
+          "query_id": "IU5",
+          "cause": "interactive_update_stream_not_exposed"
+        },
+        {
+          "query_id": "IU6",
+          "cause": "interactive_update_stream_not_exposed"
+        },
+        {
+          "query_id": "IU7",
+          "cause": "interactive_update_stream_not_exposed"
+        },
+        {
+          "query_id": "IU8",
+          "cause": "interactive_update_stream_not_exposed"
+        }
+      ],
+      "reference": {
+        "builder": "snb-interactive-spec-derived"
+      },
+      "variances": []
+    },
+    {
+      "id": "sf30",
+      "label": "SF30",
+      "not_pinned": "#1878 pins SF1 and SF10 only; this rung needs a pinned archive and count-ladder entry"
+    }
+  ]
+}

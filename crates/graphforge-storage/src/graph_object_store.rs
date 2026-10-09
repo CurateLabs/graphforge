@@ -36,7 +36,10 @@ const BUFFER_BYTES: usize = GRAPH_OBJECT_IO_BUFFER_BYTES;
 #[cfg(test)]
 thread_local! {
     static RETURNED_ERROR_BOUNDARY: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    #[cfg_attr(windows, allow(dead_code))]
+    static CROSS_DEVICE_LINK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static BEFORE_OBJECT_LINK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static BOUNDARY_HOOK: std::cell::RefCell<Option<(String, Box<dyn FnOnce()>)>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -47,12 +50,69 @@ fn returned_error_boundary(name: &str) -> Result<(), GfError> {
             hook();
         }
     }
+    let hook = BOUNDARY_HOOK.with(|current| {
+        let mut current = current.borrow_mut();
+        if current.as_ref().is_some_and(|(hooked, _)| hooked == name) {
+            current.take().map(|(_, hook)| hook)
+        } else {
+            None
+        }
+    });
+    if let Some(hook) = hook {
+        hook();
+    }
     if RETURNED_ERROR_BOUNDARY.with(|boundary| boundary.borrow().as_deref() == Some(name)) {
         return Err(GfError::Storage(format!(
             "injected graph object returned error at {name}"
         )));
     }
     Ok(())
+}
+
+/// Run `hook` once, the next time an install reaches the named boundary.
+#[cfg(all(test, unix))]
+pub(crate) fn set_boundary_hook(name: &str, hook: Box<dyn FnOnce()>) {
+    BOUNDARY_HOOK.with(|current| *current.borrow_mut() = Some((name.to_owned(), hook)));
+}
+
+/// Make every staged-object link fail as if it crossed filesystems.
+#[cfg(test)]
+#[cfg_attr(windows, allow(dead_code))]
+pub(crate) fn force_cross_device_link(on: bool) {
+    CROSS_DEVICE_LINK.with(|forced| forced.set(on));
+}
+
+#[cfg(all(test, unix))]
+fn cross_device_link_forced() -> bool {
+    CROSS_DEVICE_LINK.with(std::cell::Cell::get)
+}
+
+#[cfg(all(not(test), unix))]
+fn cross_device_link_forced() -> bool {
+    false
+}
+
+/// What refuses a same-inode, same-length edit of an encoded payload between
+/// the encoder's write and publication. Windows copies the file and checksums
+/// the copy; unix links it, so the commit boundary's XXH64 admission refuses
+/// it before `CURRENT` can move.
+#[cfg(test)]
+pub(crate) const SAME_INODE_CORRUPTION_REFUSAL: &str = if cfg!(unix) {
+    "graph payload XXH64 checksum does not match its inventory"
+} else {
+    "captured encoded source checksum or length changed during copy"
+};
+
+/// Fail the next install that reaches `boundary` with an injected error.
+#[cfg(test)]
+pub(crate) fn inject_returned_error_at(boundary: Option<&str>) {
+    RETURNED_ERROR_BOUNDARY.with(|current| *current.borrow_mut() = boundary.map(str::to_owned));
+}
+
+/// Run `hook` once, after an object is sealed and before it gains its address.
+#[cfg(test)]
+pub(crate) fn set_before_object_link_hook(hook: Option<Box<dyn FnOnce()>>) {
+    BEFORE_OBJECT_LINK.with(|current| *current.borrow_mut() = hook);
 }
 
 #[cfg(not(test))]
@@ -68,6 +128,11 @@ pub struct GraphObjectPublicationLease {
     lease_identity: graphforge_filesystem::FileIdentity,
     file: Option<File>,
     installed_objects: std::sync::Mutex<BTreeMap<String, CapturedGraphObject>>,
+    /// Objects this lease gave a content address by linking a staged file. If
+    /// commit-boundary admission refuses one, it must not stay at an address
+    /// its bytes do not hash to.
+    #[cfg(unix)]
+    linked_objects: std::sync::Mutex<BTreeMap<String, graphforge_filesystem::FileIdentity>>,
     // Only explicit adjacency rebuilding mints this capability. It is consumed
     // by compact replay for files under the adjacency index namespace only.
     pub(crate) repair_corrupt_adjacency: bool,
@@ -332,20 +397,65 @@ impl CasRoot {
     }
 
     fn digest_bucket(&self, digest: &str, create: bool) -> Result<StableDirectory, GfError> {
+        if create {
+            return self.ensure_digest_bucket(digest).map(|(bucket, _)| bucket);
+        }
+        validate_digest(digest)?;
+        self.sha256
+            .open_child_directory(std::ffi::OsStr::new(&digest[..2]))
+            .map_err(|error| {
+                storage(
+                    "open stable graph object bucket",
+                    &self.diagnostic_root,
+                    error,
+                )
+            })
+    }
+
+    /// Open the digest's bucket, creating it when absent. A created bucket is
+    /// only a name in the `sha256` directory until that directory is
+    /// acknowledged (ADR 0013), so creation is followed by its barrier. An
+    /// existing but empty bucket may be one whose creation was interrupted
+    /// before that barrier ran; nothing is linked into a bucket before it, so
+    /// emptiness is exactly that case, and the barrier is run again. Returns
+    /// the number of barriers this call ran, for the caller's evidence.
+    fn ensure_digest_bucket(&self, digest: &str) -> Result<(StableDirectory, u64), GfError> {
         validate_digest(digest)?;
         let name = std::ffi::OsStr::new(&digest[..2]);
-        let result = if create {
-            self.sha256.create_child_directory(name)
-        } else {
-            self.sha256.open_child_directory(name)
-        };
-        result.map_err(|error| {
+        let open = |error| {
             storage(
                 "open stable graph object bucket",
                 &self.diagnostic_root,
                 error,
             )
-        })
+        };
+        let bucket = match self.sha256.open_child_directory(name) {
+            Ok(bucket) => {
+                // Only a probe for whether the barrier may be owed: a stale
+                // answer costs one extra barrier or none, never an object.
+                let unfinished = std::fs::read_dir(bucket.path())
+                    .map_err(open)?
+                    .next()
+                    .is_none();
+                if !unfinished {
+                    return Ok((bucket, 0));
+                }
+                bucket
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.sha256.create_child_directory(name).map_err(open)?
+            }
+            Err(error) => return Err(open(error)),
+        };
+        returned_error_boundary("install:bucket-created")?;
+        crate::durable_commit::acknowledge_directory(&self.sha256).map_err(|error| {
+            storage(
+                "acknowledge graph object bucket creation",
+                &self.diagnostic_root,
+                error,
+            )
+        })?;
+        Ok((bucket, 1))
     }
 
     fn open_digest(&self, digest: &str) -> Result<File, GfError> {
@@ -532,8 +642,39 @@ impl GraphObjectPublicationLease {
         {
             return Err(validation("captured graph object identity changed"));
         }
-        admit_checksum_file(file, entry, &self.cas.diagnostic_root)?;
+        let admitted = admit_checksum_file(file, entry, &self.cas.diagnostic_root);
+        self.retire_if_refused(&entry.content_sha256, capture.identity, admitted)?;
         Ok(true)
+    }
+
+    /// A refusal means the bytes at this address are not the bytes it names.
+    /// Leave no object there that this lease linked from a staged file.
+    #[cfg(unix)]
+    fn retire_if_refused(
+        &self,
+        digest: &str,
+        identity: graphforge_filesystem::FileIdentity,
+        admitted: Result<(), GfError>,
+    ) -> Result<(), GfError> {
+        if let Err(GfError::Validation(message)) = &admitted
+            && let Err(retire) = installation::retire_unadmitted_link(self, digest, identity)
+        {
+            return Err(validation(format!(
+                "{message}; retiring the mis-addressed object also failed: {retire}"
+            )));
+        }
+        admitted
+    }
+
+    #[cfg(not(unix))]
+    #[allow(clippy::unused_self)]
+    fn retire_if_refused(
+        &self,
+        _digest: &str,
+        _identity: graphforge_filesystem::FileIdentity,
+        admitted: Result<(), GfError>,
+    ) -> Result<(), GfError> {
+        admitted
     }
 
     pub(crate) fn revalidate_for_root(&self, root: &Path) -> Result<(), GfError> {
@@ -607,6 +748,8 @@ pub fn begin_graph_object_publication(root: &Path) -> Result<GraphObjectPublicat
         lease_identity,
         file: Some(file),
         installed_objects: std::sync::Mutex::new(BTreeMap::new()),
+        #[cfg(unix)]
+        linked_objects: std::sync::Mutex::new(BTreeMap::new()),
         repair_corrupt_adjacency: false,
     })
 }
@@ -682,6 +825,9 @@ pub struct GraphObjectInstallEvidence {
     pub file_fsync_calls: u64,
     /// Completed synchronization of object and temporary namespaces.
     pub directory_fsync_calls: u64,
+    /// Digest buckets this installation created. Each is made durable by one
+    /// barrier on the `sha256` directory, which `directory_fsync_calls` includes.
+    pub(crate) bucket_creations: u64,
 }
 
 /// Content-free application work accumulated from actual CAS operations.
@@ -708,6 +854,9 @@ pub struct GraphObjectIoTotals {
     pub reused_objects: u64,
     /// Logical bytes newly installed.
     pub installed_bytes: u64,
+    /// Digest buckets created, each made durable by one barrier on the
+    /// `sha256` directory that `directory_fsync_calls` includes.
+    pub bucket_creations: u64,
 }
 
 impl GraphObjectIoTotals {
@@ -735,6 +884,7 @@ impl GraphObjectIoTotals {
             install_attempts: u64::from(evidence.attempted_install),
             reused_objects: u64::from(evidence.reused_existing),
             installed_bytes: evidence.bytes_installed,
+            bucket_creations: evidence.bucket_creations,
         })
     }
 
@@ -758,6 +908,7 @@ impl GraphObjectIoTotals {
             (&mut self.install_attempts, other.install_attempts),
             (&mut self.reused_objects, other.reused_objects),
             (&mut self.installed_bytes, other.installed_bytes),
+            (&mut self.bucket_creations, other.bucket_creations),
         ] {
             *counter = counter
                 .checked_add(value)
@@ -1070,11 +1221,16 @@ pub(crate) fn admit_graph_object_with_lease(
     entry: &crate::GraphFileEntry,
 ) -> Result<(), GfError> {
     lease.cas.revalidate_named()?;
-    admit_checksum_file(
-        lease.cas.open_digest(&entry.content_sha256)?,
-        entry,
-        &lease.cas.diagnostic_root,
-    )
+    let file = lease.cas.open_digest(&entry.content_sha256)?;
+    let identity = graphforge_filesystem::file_identity(&file).map_err(|error| {
+        storage(
+            "identify graph object for admission",
+            &lease.cas.diagnostic_root,
+            error,
+        )
+    })?;
+    let admitted = admit_checksum_file(file, entry, &lease.cas.diagnostic_root);
+    lease.retire_if_refused(&entry.content_sha256, identity, admitted)
 }
 
 fn admit_checksum_file(
@@ -1739,6 +1895,24 @@ fn verify_file_counted_in_domain(
     diagnostic: &Path,
     domain: graphforge_core::hash_observation::HashDomain,
 ) -> Result<ReadIoEvidence, GfError> {
+    let (io, matches) =
+        classify_file_counted_in_domain(file, digest, expected_length, diagnostic, domain, None)?;
+    if !matches {
+        return Err(validation("graph object digest does not match its address"));
+    }
+    Ok(io)
+}
+
+/// Preserve completed authentication work even when the bytes do not match.
+/// Installation can then account a repaired object without reading it twice.
+fn classify_file_counted_in_domain(
+    file: File,
+    digest: &str,
+    expected_length: u64,
+    diagnostic: &Path,
+    domain: graphforge_core::hash_observation::HashDomain,
+    expected_checksum: Option<u64>,
+) -> Result<(ReadIoEvidence, bool), GfError> {
     let metadata = file
         .metadata()
         .map_err(|error| storage("inspect graph object handle", diagnostic, error))?;
@@ -1747,13 +1921,19 @@ fn verify_file_counted_in_domain(
             "graph object handle is not the declared regular file",
         ));
     }
+    let identity = graphforge_filesystem::file_identity(&file)
+        .map_err(|error| storage("identify graph object handle", diagnostic, error))?;
     let mut file = graphforge_filesystem::FileCacheReleasingReader::new(file)
         .map_err(|error| storage("open bounded graph object handle", diagnostic, error))?;
-    let mut hasher = crate::payload_digest::PayloadSha256::for_domain(domain);
+    file.rewind()
+        .map_err(|error| storage("rewind graph object handle", diagnostic, error))?;
+    let mut hasher = expected_checksum
+        .is_none()
+        .then(|| crate::payload_digest::PayloadSha256::for_domain(domain));
     let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut io = ReadIoEvidence::default();
     let mut buffer = vec![0_u8; BUFFER_BYTES];
-    let verified = (|| -> Result<(), GfError> {
+    let verified = (|| -> Result<bool, GfError> {
         loop {
             let read = file
                 .read(&mut buffer)
@@ -1772,15 +1952,32 @@ fn verify_file_counted_in_domain(
                 .calls
                 .checked_add(1)
                 .ok_or_else(|| validation("object authentication read calls overflow"))?;
-            hasher.update(&buffer[..read]);
+            if let Some(hasher) = &mut hasher {
+                hasher.update(&buffer[..read]);
+            }
             checksum.update(&buffer[..read]);
         }
-        if hex_digest(hasher.finalize().into()) != digest {
-            return Err(validation("graph object digest does not match its address"));
+        if io.bytes != expected_length
+            || file
+                .file()
+                .metadata()
+                .map_err(|error| storage("reinspect graph object handle", diagnostic, error))?
+                .len()
+                != expected_length
+            || graphforge_filesystem::file_identity(file.file())
+                .map_err(|error| storage("reidentify graph object handle", diagnostic, error))?
+                != identity
+        {
+            return Err(validation("graph object changed during authentication"));
         }
-        io.content_xxh64 = Some(checksum.finish());
-        io.sha_bytes = io.bytes;
-        Ok(())
+        let checksum = checksum.finish();
+        io.content_xxh64 = Some(checksum);
+        if let Some(hasher) = hasher.take() {
+            io.sha_bytes = io.bytes;
+            Ok(hex_digest(hasher.finalize().into()) == digest)
+        } else {
+            Ok(Some(checksum) == expected_checksum)
+        }
     })();
     let released = file.finish().map_err(|error| {
         storage(
@@ -1790,16 +1987,16 @@ fn verify_file_counted_in_domain(
         )
     });
     match (verified, released) {
-        (Ok(()), Ok(_)) => {
+        (Ok(matches), Ok(_)) => {
             crate::lifecycle_io::record_read(
                 crate::StorageIoPhase::HydrationVerification,
                 io.bytes,
                 io.calls,
             );
             crate::lifecycle_io::record_objects(crate::StorageIoPhase::HydrationVerification, 1);
-            Ok(io)
+            Ok((io, matches))
         }
-        (Ok(()), Err(error)) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
         (Err(primary), Ok(_)) => Err(primary),
         (Err(primary), Err(release)) => Err(storage(
             "authenticate graph object and release consumed cache",

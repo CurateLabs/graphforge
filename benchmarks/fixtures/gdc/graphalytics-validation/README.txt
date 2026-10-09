@@ -1,0 +1,23 @@
+Official Graphalytics validation vectors, copied unchanged from LDBC
+ldbc_graphalytics v1.0.0 (93ed5b8a2d38b7852634cfe9f65fea337789c018).
+Semantics: ldbc_graphalytics_docs v1.0.5 (5cf6ae65d26c809f2e3e0dac4716f153c71dc639).
+License: Apache-2.0 (upstream repository LICENSE).
+
+Source base: https://github.com/ldbc/ldbc_graphalytics/tree/93ed5b8a2d38b7852634cfe9f65fea337789c018/graphalytics-validation/src/main/resources/validation-graphs
+
+Source paths and SHA-256:
+pr/dir-input  4d99942d48c7a630401d1cee92680a5ef265977ea6625de4bef9887848e1abfb
+pr/dir-output  d40bb568b733c2d598adb2de4105c15b506d046fbf205a6d57bab3ef7859fffa
+pr/undir-input  badf0f44a9120ca41846d47250701baec3cca53085d78c0ef4c0e4ff539e4c20
+pr/undir-output  2786e4c66e84940123c7466eaa7ed34dfc7330015fa3bd33e29f4368529d7ba3
+cdlp/dir-input  8500cc9852b839c4f4b1898fbb4fe19db4760abbf51c838b465c665249d36c0e
+cdlp/dir-output  95f24809ddc23138261cab1fab437c8740330ada6984d99afcb1f141eecc4881
+cdlp/undir-input  8e53953701385f6d0b36e1d0cf975c3311f69bf69baaf46797ce26c1d26bfc95
+cdlp/undir-output  6ee513e192d37cf95cfa1434779660c2d164a86c3bb209518072a3ae873c3cc8
+lcc/dir-input  1799187d4a1825bf193e9dd3cf0c74624bb0f04668541020a243878d85b68d93
+lcc/dir-output  c0b6e3504851da96bf0bd3adb1fb4ce72b43b8c586e70de6ee2931676b227ba8
+lcc/undir-input  82a9d0ac29c35f074a885ddbf0afd7c4040854f374782536d2951b547421285e
+lcc/undir-output  568f1fe2a2580a727db8bbf634b6be831f157c386fa2352370cb7ef5e028fabb
+
+isolates.vertices and isolates.edges are local synthetic fixtures (Apache-2.0),
+with sparse vertex IDs and a declared isolated vertex; not upstream vectors.

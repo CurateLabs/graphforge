@@ -104,7 +104,7 @@ const NODE_FILES: &[NodeFile] = &[
     },
     NodeFile {
         file: "Post",
-        labels: "Message:Post",
+        labels: "Post",
         columns: &[
             Column::Int("id"),
             Column::DateTime("creationDate"),
@@ -115,7 +115,7 @@ const NODE_FILES: &[NodeFile] = &[
     },
     NodeFile {
         file: "Comment",
-        labels: "Message:Comment",
+        labels: "Comment",
         columns: &[
             Column::Int("id"),
             Column::DateTime("creationDate"),
@@ -444,9 +444,7 @@ pub fn load_query_graph(forge: &GraphForge, directory: &Path) -> Result<LoadSumm
     for node_file in NODE_FILES {
         let table = read_csv(directory, node_file.file)?;
         // Rows are grouped by which properties they carry: an absent optional
-        // value is left off the CREATE rather than bound as null, because
-        // GraphForge panics on a list of maps whose values mix null and string
-        // (#1887 D10).
+        // value is left off the CREATE rather than bound as null.
         let mut groups: BTreeMap<Vec<&'static str>, Vec<IrLiteral>> = BTreeMap::new();
         for row in &table.rows {
             let mut entries = Vec::new();

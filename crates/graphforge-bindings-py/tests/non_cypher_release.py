@@ -27,8 +27,8 @@ production_source = runpy.run_path(str(Path(__file__).with_name("native_sources.
     "production_source"
 ]
 PYO3_SOURCE = ROOT / "crates/graphforge-bindings-py/src/lib.rs"
-EXPECTED_RUST_DIGEST = "47ffb81ad3b9872364cd050b0e7761bc9fcf57c909447484a9f64fedef85ea0c"
-EXPECTED_RELEASE_DIGEST = "70d52b3767a1d151d99649a2f6b6fdce35844acd22667d0ace9f6c3be5c0e405"
+EXPECTED_RUST_DIGEST = "b163156aa96a6519472b411a966839592cc48989550459291574b2ce77900d49"
+EXPECTED_RELEASE_DIGEST = "f00f608db7d933aab9a53f21237fde7750d2ea5a993e3a46ce0210c0dd4b6cd2"
 
 PYTHON_ONLY_METHODS = frozenset(
     {
@@ -286,7 +286,7 @@ def _classification_report() -> dict[str, object]:
         for group in manifest["method_evidence_groups"].values()
         for method_id in group["ids"]
     }
-    assert len(release_methods) == 349
+    assert len(release_methods) == 350
     assert _digest(release_methods) == EXPECTED_RELEASE_DIGEST
     assert set(EVIDENCE) == set(manifest["method_evidence_groups"])
 
@@ -419,6 +419,7 @@ def _classification_report() -> dict[str, object]:
             )
         elif rust_id.startswith("GraphConstructionSession.") or rust_id in {
             "GraphForge.begin_graph_construction",
+            "GraphForge.begin_staged_graph_construction",
             "GraphForge.resume_graph_construction",
         }:
             classification = "not-exposed"

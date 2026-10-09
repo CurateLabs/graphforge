@@ -19,9 +19,10 @@ throughput), #1429 and #1448 (construction concurrency attempts), #1456
 
 ## Amendment: initial builds restart instead of resuming (ADR 0058, #1883)
 
-Property 1 below holds for the staged path, which appends and chunk-API builds
-keep. An initial import builds its generation with the bulk builder, which
-stages nothing and so has nothing to resume. For it, property 1 reads: *a rerun
+Property 1 below holds for the staged path, which appends keep. An initial
+build, from an import session or the chunk API, builds its generation with the
+bulk builder, which stages nothing and so has nothing to resume (the chunk API
+spools its accepted chunks, which do resume; the build from them restarts). For it, property 1 reads: *a rerun
 after a crash, cancellation or error produces the same graph as an
 uninterrupted run.* The interrupted attempt's scratch is discarded, and the
 rerun starts from the registered sources. Properties 2 and 3, publication

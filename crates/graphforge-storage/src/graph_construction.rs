@@ -7,6 +7,7 @@
 //! sealing path. A generation-last publisher consumes the sealed inventory.
 
 mod intake;
+mod spool;
 use intake::{
     ReceiptPointer, artifact_stem, property_free_schema_sha256, receipt_from_intent, receipt_name,
     uuid_column, uuid_value, validate_artifact_name, validate_intent, validate_parquet_metadata,
@@ -16,6 +17,8 @@ pub(crate) use intake::{
     normalized_schema_digest, uuid_column as batch_uuid_column,
     validate_schema as validate_canonical_batch,
 };
+pub use spool::SealRoute;
+use spool::{ChunkPreference, ChunkRoute, SpoolArtifact, SpoolState, SpoolTotals};
 mod io_evidence;
 pub(crate) use io_evidence::{
     ConstructionFileHandle, CountingChunkReader, CountingRead, IoCounter,
@@ -120,9 +123,19 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use uuid::Uuid;
 
+use crate::TopologyIdentityProbe;
 use crate::UuidIndexKind;
 use crate::construction_detail_codec::{DetailCodec, DetailValidator};
-use crate::uuid_membership::{AuthenticatedUuidIndexSnapshot, UuidConstructionSnapshotWork};
+
+/// What the construction session needs to know about its parent topology.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct UuidConstructionSnapshotWork {
+    pub authentication_bytes: u64,
+    pub authentication_blocks: u64,
+    pub live_nodes: u64,
+    pub live_edges: u64,
+    pub max_node_surrogate: u64,
+}
 
 use crate::construction_record_layout::{
     BASE_IDENTITY_WIDTH, ENDPOINT_WIDTH, FORMAT_VERSION, IDENTITY_SURROGATE_OFFSET,
@@ -647,9 +660,6 @@ pub struct ConstructionShape {
     pub semantic_authority_sha256: Option<String>,
     /// Parent generation retained by the publisher; zero denotes an empty base.
     pub parent_topology_generation: u64,
-    /// Authenticated parent UUID-manifest authority. The shaped identities file
-    /// contains only this session's delta and never copies the parent payload.
-    pub parent_uuid_manifest_sha256: Option<String>,
     /// UUID-sorted node/edge identity records with assigned surrogates.
     pub identities: String,
     /// UUID-sorted node type records, when nodes were staged.
@@ -736,8 +746,8 @@ impl ConstructionSemanticAuthority {
 }
 
 pub use crate::graph_construction_encoding::{
-    BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkSource,
-    ConstructionRetainedArtifact, GraphConstructionEncoding, GraphConstructionEncodingEvidence,
+    BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkRoute, BulkSource,
+    BulkStagedReason, GraphConstructionEncoding, GraphConstructionEncodingEvidence,
     GraphConstructionEncodingInvocationEvidence,
 };
 
@@ -834,6 +844,11 @@ pub struct ConstructionChunkReceipt {
     identities: ArtifactReceipt,
     endpoints: Option<ArtifactReceipt>,
     details: ArtifactReceipt,
+    /// The one self-describing file a spooled chunk occupies. A spooled chunk
+    /// has no staged artifacts: the four fields above then hold the absent
+    /// placeholder, which staged validation refuses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    spool: Option<SpoolArtifact>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -867,6 +882,16 @@ struct Checkpoint {
     shape_authority_sha256: Option<String>,
     #[serde(default)]
     encoding_inventory_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "ChunkRoute::is_undecided")]
+    chunk_route: ChunkRoute,
+    /// How a spooled session builds, decided once before any build or replay
+    /// work starts and read back on resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    seal_route: Option<SealRoute>,
+    /// What the spooled chunks amounted to, recorded with the seal route (no
+    /// chunk is accepted after it) so the input counters outlive the spool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    spool_totals: Option<SpoolTotals>,
     #[serde(default)]
     inputs_retired: bool,
     #[serde(default)]
@@ -1028,7 +1053,7 @@ pub struct GraphConstructionSession {
     project: StableDirectory,
     root: StableDirectory,
     checkpoint: Checkpoint,
-    base_snapshot: Option<AuthenticatedUuidIndexSnapshot>,
+    base_snapshot: Option<TopologyIdentityProbe>,
     parent_catalog: RuntimeCatalog,
     compact_parent: Option<crate::GraphFilesInventory>,
     semantic_authority: Option<ConstructionSemanticAuthority>,
@@ -1061,6 +1086,10 @@ pub struct GraphConstructionSession {
     /// Whether shaping may complete over zero staged chunks: set only while the
     /// bulk builder supplies the rows (#1883).
     bulk_empty_shape: bool,
+    /// Whether this process asked for chunk spooling before the first chunk.
+    chunk_preference: ChunkPreference,
+    /// Accepted chunks of a spooled session, rebuilt from the spool on open.
+    spool: Option<SpoolState>,
     /// Measurements of the last bulk build this session ran (#1883).
     bulk_report:
         std::sync::Arc<std::sync::Mutex<crate::graph_construction_encoding::BulkBuildReport>>,
@@ -1597,25 +1626,22 @@ impl GraphConstructionSession {
             }
             (None, UuidConstructionSnapshotWork::default())
         } else {
-            let mut snapshot = if let Some(inventory) = &compact_inventory {
-                AuthenticatedUuidIndexSnapshot::open_from_compact_inventory(
+            let snapshot = if let Some(inventory) = &compact_inventory {
+                TopologyIdentityProbe::open_compact(
                     project_dir,
                     inventory,
                     parent_topology_generation,
                 )?
             } else {
-                AuthenticatedUuidIndexSnapshot::open_at_generation(
-                    graph_source_dir,
-                    parent_topology_generation,
-                )?
+                let files = crate::TopologyFiles::discover_legacy(graph_source_dir)?;
+                TopologyIdentityProbe::open(graph_source_dir, &files, parent_topology_generation)?
             };
             let max_node_surrogate = crate::writer::read_surrogate_tails(graph_source_dir)?
                 .ok_or_else(|| storage("nonempty parent lacks surrogate tails"))?
                 .0;
-            let (authentication_bytes, authentication_blocks) = snapshot.take_authentication_work();
             let work = UuidConstructionSnapshotWork {
-                authentication_bytes,
-                authentication_blocks,
+                authentication_bytes: snapshot.authenticated_bytes(),
+                authentication_blocks: snapshot.authenticated_objects(),
                 live_nodes: snapshot.count(UuidIndexKind::Node),
                 live_edges: snapshot.count(UuidIndexKind::Edge),
                 max_node_surrogate,
@@ -1705,6 +1731,9 @@ impl GraphConstructionSession {
                 edge_schema_sha256: BTreeSet::new(),
                 shape_authority_sha256: None,
                 encoding_inventory_sha256: None,
+                chunk_route: ChunkRoute::Undecided,
+                seal_route: None,
+                spool_totals: None,
                 inputs_retired: false,
                 shape_retired: false,
                 base_work,
@@ -1756,6 +1785,8 @@ impl GraphConstructionSession {
             shape_finish_interrupted: false,
             cpu_admission: None,
             bulk_empty_shape: false,
+            chunk_preference: ChunkPreference::Stage,
+            spool: None,
             bulk_report: std::sync::Arc::default(),
             session_lock,
             _reservation: reservation,
@@ -1790,7 +1821,11 @@ impl GraphConstructionSession {
             recover_shape_intent(&session.root, &mut session.checkpoint)?;
         session.shape_outputs_verified = shape_outputs_verified;
         session.shape_boundary_retired_through = shape_boundary_retired_through;
+        // Over-budget bulk scratch is never resumed: whatever a killed attempt
+        // left is deleted here, and again when the next attempt starts (#1900).
+        crate::graph_construction_encoding::discard_scratch(session.root.path())?;
         session.recover_intent()?;
+        session.restore_spool()?;
         if session
             .checkpoint
             .evidence
@@ -1922,8 +1957,17 @@ impl GraphConstructionSession {
 
     /// Number of durably accepted chunks.
     #[must_use]
-    pub const fn accepted_chunks(&self) -> u64 {
-        self.checkpoint.next_sequence
+    pub fn accepted_chunks(&self) -> u64 {
+        if let Some(spool) = &self.spool {
+            spool.len()
+        } else if self.checkpoint.chunk_route == spool::ChunkRoute::Spool {
+            // The spool is spent; the totals recorded with the seal route remain.
+            self.checkpoint
+                .spool_totals
+                .map_or(0, |totals| totals.chunks())
+        } else {
+            self.checkpoint.next_sequence
+        }
     }
 
     /// Independently reopen and authenticate every sealed artifact once, then
@@ -1939,6 +1983,13 @@ impl GraphConstructionSession {
         self.recover_intent()?;
         if self.checkpoint.state != GraphConstructionState::Staging {
             return Err(storage("only a staging session can be sealed"));
+        }
+        if self.checkpoint.chunk_route == spool::ChunkRoute::Spool
+            && self.checkpoint.seal_route != Some(SealRoute::Bulk)
+        {
+            // Sealing a spooled session through the staged lifecycle stages
+            // its chunks first; the bulk builder reaches this over no chunks.
+            self.replay_spool_to_staged(|| false)?;
         }
         let mut prior_digest = None;
         let mut saw_edge = false;

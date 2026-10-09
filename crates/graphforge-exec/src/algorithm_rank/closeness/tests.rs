@@ -144,7 +144,7 @@ fn closeness_handles_parallel_self_loop_disconnected_and_empty_graphs() {
 #[test]
 fn closeness_uses_shared_limits_cancellation_and_dependency_metadata() {
     let graph = AdjacencyGraph::with_test_edges(3, &[(0, 1), (1, 2)]);
-    assert_eq!(
+    assert!(
         execute_closeness(
             &graph,
             AlgorithmLimits {
@@ -152,11 +152,9 @@ fn closeness_uses_shared_limits_cancellation_and_dependency_metadata() {
                 ..AlgorithmLimits::default()
             },
             AlgorithmCancellation::default(),
-        ),
-        Err(AlgorithmError::IterationLimit {
-            observed: 1,
-            limit: 0,
-        })
+        )
+        .is_ok(),
+        "a single-pass algorithm never consumes the iteration budget"
     );
     assert!(matches!(
         execute_closeness(
@@ -187,7 +185,7 @@ fn closeness_uses_shared_limits_cancellation_and_dependency_metadata() {
         Err(AlgorithmError::Cancelled)
     );
     let edge_heavy = AdjacencyGraph::with_test_edges(1, &vec![(0, 0); 1025]);
-    assert_eq!(
+    assert!(
         execute_closeness(
             &edge_heavy,
             AlgorithmLimits {
@@ -195,11 +193,9 @@ fn closeness_uses_shared_limits_cancellation_and_dependency_metadata() {
                 ..AlgorithmLimits::default()
             },
             AlgorithmCancellation::default(),
-        ),
-        Err(AlgorithmError::IterationLimit {
-            observed: 2,
-            limit: 1,
-        })
+        )
+        .is_ok(),
+        "a single-pass algorithm never consumes the iteration budget"
     );
     let mut registry = AlgorithmRegistry::default();
     register_rank_algorithms(&mut registry).unwrap();
@@ -304,7 +300,7 @@ fn closeness_parallel_cancellation_and_limits_are_structured() {
         execute_closeness_with_pool(&graph, 4, cancellation),
         Err(AlgorithmError::Cancelled)
     );
-    assert_eq!(
+    assert!(
         execute_closeness_with_pool_and_limits(
             &graph,
             4,
@@ -313,11 +309,9 @@ fn closeness_parallel_cancellation_and_limits_are_structured() {
                 ..AlgorithmLimits::default()
             },
             AlgorithmCancellation::default(),
-        ),
-        Err(AlgorithmError::IterationLimit {
-            observed: 1,
-            limit: 0
-        })
+        )
+        .is_ok(),
+        "a single-pass algorithm never consumes the iteration budget"
     );
     assert!(matches!(
         execute_closeness_with_pool_and_limits(

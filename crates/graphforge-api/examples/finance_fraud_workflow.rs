@@ -160,6 +160,7 @@ fn rank_options() -> RankOptions {
         via: Some("TRANSFERRED_TO".into()),
         directed: true,
         write_property: None,
+        ..Default::default()
     }
 }
 

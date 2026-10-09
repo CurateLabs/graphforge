@@ -1,9 +1,7 @@
 //! Durable, bounded staged graph-import sessions (#738).
 
-#[cfg(test)]
-use graphforge_filesystem::ObservedSync as _;
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -22,41 +20,22 @@ use uuid::Uuid;
 
 use crate::{BulkInputKind, CancellationToken, GraphConstructionBudgets, GraphForge, OperationId};
 
-mod bulk_source;
+pub(crate) mod bulk_source;
 #[cfg(test)]
 mod cpu_budget_report;
+mod external_source;
 mod journal;
 mod memory_budget;
 mod normalization;
 
-const FORMAT_VERSION: u32 = 2;
+/// Written by this version: a session may register Parquet sources that stay
+/// where they are (#1898).
+const FORMAT_VERSION: u32 = 3;
+/// Sessions an earlier version began copied Parquet sources into the session;
+/// they still resume, validate and append.
+const OLDEST_FORMAT_VERSION: u32 = 2;
 const SESSION_DIR: &str = "import-sessions";
 const MANIFEST: &str = "manifest.json";
-
-#[cfg(test)]
-thread_local! {
-    static COPY_PARQUET_FAILURES: std::cell::RefCell<Vec<&'static str>> = const {
-        std::cell::RefCell::new(Vec::new())
-    };
-}
-
-#[cfg(test)]
-fn inject_copy_parquet_failures(points: &[&'static str]) {
-    COPY_PARQUET_FAILURES.with(|failures| failures.borrow_mut().extend_from_slice(points));
-}
-
-#[cfg(test)]
-fn copy_parquet_failure(point: &str) -> Result<(), GfError> {
-    COPY_PARQUET_FAILURES.with(|failures| {
-        let mut failures = failures.borrow_mut();
-        if let Some(index) = failures.iter().position(|candidate| *candidate == point) {
-            failures.remove(index);
-            return Err(storage(format!("injected Parquet copy {point} failure")));
-        }
-        Ok(())
-    })?;
-    Ok(())
-}
 
 /// Explicit resource envelope for one staged import.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -212,6 +191,10 @@ pub struct ImportConstructionEvidence {
     pub peak_batch_rows: u64,
     /// Largest retained Arrow byte window.
     pub peak_batch_bytes: u64,
+    /// Provenance of every registered source once all are staged: what was read
+    /// and the SHA-256 the build's own read pass computed. Empty before then.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_provenance: Vec<ImportSourceProvenance>,
     /// Exact transient allocation high-water retained across resume.
     pub transient_peak_allocated_bytes: u64,
     /// Receipt-owned construction staging/spill category totals.
@@ -230,6 +213,29 @@ pub struct ImportConstructionEvidence {
     /// Scratch bytes written to those runs.
     #[serde(default)]
     pub external_run_bytes: u64,
+}
+
+/// Provenance of one registered import source, from the read pass that staged it.
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct ImportSourceProvenance {
+    /// Registration order.
+    pub sequence: u64,
+    /// Encoding and role of the source.
+    pub kind: ImportSourceKind,
+    /// Registered size in bytes.
+    pub bytes: u64,
+    /// Whole-file SHA-256 of an in-place Parquet source, lowercase hex: the content
+    /// read under the identity pin (device, inode, size and modification time
+    /// unchanged from registration). It is folded from the bytes the build decoded;
+    /// a range the held-byte bound dropped, and bytes no decode asks for, are read
+    /// from the file when the digest completes. It does not detect a rewrite that
+    /// preserves all four pinned fields, and a staged import resumed after a stop
+    /// may pair batches decoded earlier with the digest of its final pass. Absent
+    /// for session-owned Arrow encodings and for copies made by earlier versions.
+    pub sha256: Option<String>,
+    /// SHA-256 of the Parquet footer recorded at registration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub footer_sha256: Option<String>,
 }
 
 /// Closed semantic publication-work contract for ordinary construction evidence.
@@ -335,6 +341,14 @@ struct SourceRecord {
     batches_staged: u64,
     #[serde(default)]
     inflight_batch: Option<u64>,
+    /// A Parquet source is read where it is; registration recorded its identity
+    /// here. Arrow sources are session-owned encodings and have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    external: Option<external_source::ExternalSource>,
+    /// Whole-file SHA-256 of an external source, computed by the first complete
+    /// read pass and required to match on every later one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -356,6 +370,10 @@ struct SessionManifest {
     /// and read back by every later one (ADR 0058). `None` until then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     build_route: Option<BuildRoute>,
+    /// Why an initial build staged instead of running on the bulk builder, when
+    /// the plan said so (ADR 0058). `None` for builds that did not stage on a plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    staged_reason: Option<graphforge_storage::BulkStagedReason>,
 }
 
 /// The two ways `validate` builds a generation (ADR 0058).
@@ -519,6 +537,7 @@ impl GraphForge {
             construction_session_uuid: None,
             updated_unix_millis: unix_millis()?,
             build_route: None,
+            staged_reason: None,
         };
         let journal = journal::Journal::open(&root, &manifest, self.allocation_operation.as_ref())?;
         write_manifest_with_allocation(&root, &manifest, self.allocation_operation.as_ref())?;
@@ -537,7 +556,7 @@ impl GraphForge {
         let _region = RegionScope::named("resume_import");
         let root = import_root(self, session_uuid)?;
         let manifest = read_manifest(&root)?;
-        if manifest.format_version != FORMAT_VERSION || manifest.session_uuid != session_uuid {
+        if !supported_format(manifest.format_version) || manifest.session_uuid != session_uuid {
             return Err(validation("incompatible or mismatched import manifest"));
         }
         if matches!(
@@ -563,7 +582,7 @@ impl GraphForge {
     ) -> Result<(ImportPhase, ImportProgress), GfError> {
         let root = import_root(self, session_uuid)?;
         let manifest = read_manifest(&root)?;
-        if manifest.format_version != FORMAT_VERSION || manifest.session_uuid != session_uuid {
+        if !supported_format(manifest.format_version) || manifest.session_uuid != session_uuid {
             return Err(validation("incompatible or mismatched import manifest"));
         }
         Ok((manifest.phase, manifest.progress))
@@ -781,6 +800,7 @@ impl GraphImportSession {
             name,
             destination.metadata().map_err(storage)?.len(),
             rows,
+            None,
         );
         if result.is_err() {
             if self.journal.ensure_writable().is_ok() {
@@ -792,58 +812,31 @@ impl GraphImportSession {
         result
     }
 
-    /// Register a local Parquet source by copying it into durable session ownership.
+    /// Register a local Parquet source, which stays where it is.
+    ///
+    /// Registration records the file's canonical path, native identity, size,
+    /// modification time and Parquet footer; it copies and writes nothing. Each
+    /// later read refuses a source that no longer matches (see
+    /// [`external_source`]).
     pub fn register_parquet(&mut self, kind: BulkInputKind, source: &Path) -> Result<(), GfError> {
         self.journal.ensure_writable()?;
         let _region = RegionScope::named("register_parquet");
         self.ensure_open()?;
         reject_unsafe_path(source)?;
-        let metadata = fs::symlink_metadata(source).map_err(storage)?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(validation(
-                "Parquet source must be a regular non-symlink file",
-            ));
-        }
+        // One open of the file decides everything recorded about it.
+        let external = external_source::ExternalSource::capture(source)?;
         if self
             .manifest
             .progress
             .bytes_accepted
-            .saturating_add(metadata.len())
+            .saturating_add(external.size)
             > self.manifest.limits.max_source_bytes
         {
             return Err(limit("import max_source_bytes exceeded"));
         }
         let sequence = self.next_sequence()?;
         let name = format!("{sequence:020}.parquet");
-        let destination = self.root.join("sources").join(&name);
-        let temporary = self.root.join("sources").join(format!(".{name}.tmp"));
-        let (bytes, cache_release, seal) = copy_parquet_source(source, &temporary)?;
-        let writer_release = cache_release.writer;
-        debug_assert!(writer_release.sync_operations > 0);
-        #[cfg(target_os = "linux")]
-        {
-            let operation_window = graphforge_filesystem::cache_release_window_for_streams(2)
-                .expect("two-stream cache budget is valid");
-            debug_assert!(cache_release.reader.peak_window_bytes <= operation_window.get());
-            debug_assert!(cache_release.writer.peak_window_bytes <= operation_window.get());
-            debug_assert!(
-                cache_release.peak_combined_window_bytes
-                    <= graphforge_filesystem::DEFAULT_CACHE_RELEASE_WINDOW_BYTES
-            );
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            // No file-cache release is supported off Linux, so neither stream
-            // may report released bytes.
-            debug_assert_eq!(cache_release.reader.released_bytes, 0);
-            debug_assert_eq!(cache_release.writer.released_bytes, 0);
-            let _ = cache_release.peak_combined_window_bytes;
-        }
-        if bytes != metadata.len() {
-            let _ = fs::remove_file(&temporary);
-            return Err(storage("Parquet source length changed while copying"));
-        }
-        self.publish_source(&temporary, &destination, seal)?;
+        let bytes = external.size;
         let result = self.register_record(
             match kind {
                 BulkInputKind::Node => ImportSourceKind::ParquetNodes,
@@ -852,12 +845,9 @@ impl GraphImportSession {
             name,
             bytes,
             0,
+            Some(external),
         );
-        if result.is_err() {
-            if self.journal.ensure_writable().is_ok() {
-                self.cleanup_source(&destination)?;
-            }
-        } else {
+        if result.is_ok() {
             RegionScope::record_work("bytes", bytes);
         }
         result
@@ -910,10 +900,13 @@ impl GraphImportSession {
         // consulted exactly once, so a refused, cancelled or killed bulk
         // attempt followed by a memory drop cannot send a sealed session to
         // the staged path, which would refuse every retry. An initial build
-        // that has staged nothing and whose estimated memory fits runs on the
-        // bulk builder (ADR 0058); an append, a session an earlier binary
-        // began staging, and an initial build larger than memory stage.
+        // that has staged nothing runs on the bulk builder, in memory or, when
+        // its estimate exceeds the budget, on scratch files (ADR 0058). An
+        // append, a session an earlier binary began staging, and an initial
+        // build the builder cannot hold the node tables or edge properties of
+        // stage; the last records its typed reason.
         let refusals = bulk_source::Refusals::default();
+        let digests = bulk_source::Digests::default();
         let route = if let Some(route) = self.manifest.build_route {
             route
         } else {
@@ -927,13 +920,18 @@ impl GraphImportSession {
                         .iter()
                         .all(|source| !source.staged && source.batches_staged == 0)
             };
-            let route = if initial
-                && self
-                    .plan_bulk_build(graph, cancellation, &refusals)?
-                    .estimated_resident_bytes()
-                    <= bulk_source::bulk_build_memory_budget()
-            {
-                BuildRoute::Bulk
+            let route = if initial {
+                match self
+                    .plan_bulk_build(graph, cancellation, &refusals, &digests)?
+                    .route()
+                {
+                    graphforge_storage::BulkRoute::Staged(reason) => {
+                        self.manifest.staged_reason = Some(reason);
+                        BuildRoute::Staged
+                    }
+                    graphforge_storage::BulkRoute::Memory
+                    | graphforge_storage::BulkRoute::Scratch => BuildRoute::Bulk,
+                }
             } else {
                 BuildRoute::Staged
             };
@@ -942,8 +940,24 @@ impl GraphImportSession {
             route
         };
         if route == BuildRoute::Bulk {
-            let plan = self.plan_bulk_build(graph, cancellation, &refusals)?;
-            let built = self.build_initial(&mut construction, &plan, cancellation);
+            // An initial build restarts rather than resumes (#1881). An encoded
+            // inventory is reused only if the digest of every in-place source it
+            // was built from is already recorded, which binds the two: otherwise
+            // a crash after the inventory was pinned and before the digests were
+            // recorded would pair that graph with the digest of whatever the
+            // file holds now.
+            let reused = construction.progress().state
+                != graphforge_storage::GraphConstructionState::Staging;
+            if reused && self.in_place_digest_missing() {
+                construction = self.restart_construction(graph, construction)?;
+            }
+            let reused = reused && !self.in_place_digest_missing();
+            // The routing plan above read only footers; a fresh one reads the
+            // sources, so its digests are the build's.
+            let digests = bulk_source::Digests::default();
+            let plan = self.plan_bulk_build(graph, cancellation, &refusals, &digests)?;
+            let built =
+                self.build_initial(&mut construction, &plan, &digests, reused, cancellation);
             if built.is_err() {
                 self.record_bulk_refusal(&refusals)?;
             }
@@ -955,7 +969,7 @@ impl GraphImportSession {
                 if source.kind.input_kind() != input_kind || source.staged {
                     continue;
                 }
-                normalization::for_each(
+                let digest = normalization::for_each(
                     graph,
                     &session_root,
                     &source,
@@ -972,6 +986,7 @@ impl GraphImportSession {
                         )
                     },
                 )?;
+                self.record_source_digest(source_index, digest)?;
                 self.manifest.sources[source_index].staged = true;
                 self.manifest.progress.files_pending =
                     self.manifest.progress.files_pending.saturating_sub(1);
@@ -1013,8 +1028,12 @@ impl GraphImportSession {
         graph: &'a GraphForge,
         cancellation: Option<&'a CancellationToken>,
         refusals: &'a bulk_source::Refusals,
+        digests: &'a bulk_source::Digests,
     ) -> Result<graphforge_storage::BulkBuildPlan<'a>, GfError> {
-        let mut plan = graphforge_storage::BulkBuildPlan::default();
+        let mut plan = graphforge_storage::BulkBuildPlan {
+            memory_budget: Some(bulk_source::bulk_build_memory_budget()?),
+            ..Default::default()
+        };
         for source in &self.manifest.sources {
             let planned = bulk_source::plan(
                 graph,
@@ -1024,6 +1043,7 @@ impl GraphImportSession {
                 self.manifest.operation_uuid,
                 cancellation,
                 refusals,
+                digests,
             )?;
             match source.kind.input_kind() {
                 BulkInputKind::Node => plan.nodes.push(planned),
@@ -1041,6 +1061,8 @@ impl GraphImportSession {
         &mut self,
         construction: &mut crate::GraphConstructionSession<'_>,
         plan: &graphforge_storage::BulkBuildPlan<'_>,
+        digests: &bulk_source::Digests,
+        reused_inventory: bool,
         cancellation: Option<&CancellationToken>,
     ) -> Result<ImportProgress, GfError> {
         let region = RegionScope::named("bulk_build");
@@ -1051,9 +1073,24 @@ impl GraphImportSession {
         }
         drop(region);
         let report = built?;
+        // A reused inventory decoded nothing: the digests recorded with it stand,
+        // and the file is not read again to produce another.
+        let mut source_digests = if reused_inventory {
+            std::collections::BTreeMap::new()
+        } else {
+            digests.finish()?
+        };
         let (nodes, edges) = (report.nodes, report.edges);
-        for source in &mut self.manifest.sources {
-            source.staged = true;
+        for source_index in 0..self.manifest.sources.len() {
+            if self.manifest.sources[source_index].external.is_some() {
+                // A successful build read every task of every in-place source.
+                match source_digests.remove(&self.manifest.sources[source_index].sequence) {
+                    Some(digest) => self.record_source_digest(source_index, Some(digest))?,
+                    None if self.manifest.sources[source_index].sha256.is_some() => {}
+                    None => return Err(storage("the build finished without a source digest")),
+                }
+            }
+            self.manifest.sources[source_index].staged = true;
         }
         self.manifest.progress.rows_accepted = nodes.saturating_add(edges);
         self.manifest.progress.files_pending = 0;
@@ -1068,6 +1105,56 @@ impl GraphImportSession {
         }
         self.manifest.phase = ImportPhase::Validated;
         self.checkpoint()
+    }
+
+    /// Whether an in-place source has no recorded digest.
+    fn in_place_digest_missing(&self) -> bool {
+        self.manifest
+            .sources
+            .iter()
+            .any(|source| source.external.is_some() && source.sha256.is_none())
+    }
+
+    /// Replace the construction session with an empty one. The manifest forgets
+    /// the old session before it is discarded, so a crash in between leaves an
+    /// unreferenced session rather than a manifest naming one that is gone.
+    fn restart_construction<'a>(
+        &mut self,
+        graph: &'a GraphForge,
+        old: crate::GraphConstructionSession<'a>,
+    ) -> Result<crate::GraphConstructionSession<'a>, GfError> {
+        self.manifest.construction_session_uuid = None;
+        self.persist_manifest()?;
+        old.discard()?;
+        self.open_construction(graph)
+    }
+
+    /// Keep the first complete read's SHA-256 as the source's provenance and
+    /// refuse any later read that disagrees with it.
+    fn record_source_digest(
+        &mut self,
+        source_index: usize,
+        digest: Option<String>,
+    ) -> Result<(), GfError> {
+        let Some(digest) = digest else {
+            return Ok(());
+        };
+        let source = &mut self.manifest.sources[source_index];
+        match &source.sha256 {
+            Some(recorded) if *recorded != digest => Err(external_source::source_changed(
+                source
+                    .external
+                    .as_ref()
+                    .map_or_else(|| Path::new(&source.name), |external| &external.path),
+                external_source::SourceChange::DigestChanged,
+                &format!("recorded {recorded}, read {digest}"),
+            )),
+            Some(_) => Ok(()),
+            None => {
+                source.sha256 = Some(digest);
+                Ok(())
+            }
+        }
     }
 
     fn append_source_batch(
@@ -1298,7 +1385,7 @@ impl GraphImportSession {
             }
             return resumed;
         }
-        let session = graph.begin_graph_construction(budgets);
+        let session = graph.begin_staged_graph_construction(budgets);
         if let (Some(timings), Some(started)) = (&mut self.operation_timings, started) {
             timings.begin.record(started, session.is_err());
         }
@@ -1330,6 +1417,26 @@ impl GraphImportSession {
             .get(&graphforge_storage::ArtifactCategory::ConstructionStaging)
             .copied()
             .unwrap_or_default();
+        // Recorded once the last source is staged, so the journal frames written
+        // for every batch before then stay small however many sources there are.
+        let source_provenance = if self.manifest.progress.files_pending == 0 {
+            self.manifest
+                .sources
+                .iter()
+                .map(|source| ImportSourceProvenance {
+                    sequence: source.sequence,
+                    kind: source.kind,
+                    bytes: source.bytes,
+                    sha256: source.sha256.clone(),
+                    footer_sha256: source
+                        .external
+                        .as_ref()
+                        .map(|external| external.footer_sha256.clone()),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         self.manifest.progress.construction = Some(ImportConstructionEvidence {
             configured_batch_rows: u64::try_from(self.manifest.limits.batch_rows)
                 .unwrap_or(u64::MAX),
@@ -1357,6 +1464,7 @@ impl GraphImportSession {
             peak_cache_release_window_bytes: progress.evidence.peak_cache_release_window_bytes,
             peak_batch_rows: progress.evidence.peak_batch_rows,
             peak_batch_bytes: progress.evidence.peak_batch_bytes,
+            source_provenance,
             transient_peak_allocated_bytes: progress
                 .evidence
                 .storage_transient_peak_total_allocated_bytes,
@@ -1382,9 +1490,14 @@ impl GraphImportSession {
         name: String,
         bytes: u64,
         rows: u64,
+        external: Option<external_source::ExternalSource>,
     ) -> Result<(), GfError> {
         self.journal.ensure_writable()?;
-        let destination = self.root.join("sources").join(&name);
+        // Only a session-owned source can be left behind by a failed checkpoint;
+        // an external source is never ours to remove.
+        let owned = external
+            .is_none()
+            .then(|| self.root.join("sources").join(&name));
         let total = self.manifest.progress.bytes_accepted.saturating_add(bytes);
         if total > self.manifest.limits.max_source_bytes {
             return Err(limit("import max_source_bytes exceeded"));
@@ -1398,12 +1511,24 @@ impl GraphImportSession {
             staged: false,
             batches_staged: 0,
             inflight_batch: None,
+            external,
+            sha256: None,
         });
+        if self
+            .manifest
+            .sources
+            .last()
+            .is_some_and(|source| source.external.is_some())
+        {
+            // A session an earlier version began cannot be read by that version
+            // once it holds a source that stays where it is.
+            self.manifest.format_version = FORMAT_VERSION;
+        }
         self.manifest.phase = ImportPhase::Open;
         self.manifest.progress.bytes_accepted = total;
         self.manifest.progress.files_accepted += 1;
         self.manifest.progress.files_pending += 1;
-        self.checkpoint_with_source_cleanup(Some(&destination))
+        self.checkpoint_with_source_cleanup(owned.as_deref())
             .map(|_| ())
     }
 }
@@ -1425,16 +1550,18 @@ fn append_region_name(kind: BulkInputKind) -> &'static str {
     }
 }
 
+/// Stream one source's batches to `consume`. A Parquet source is read where it
+/// is; the result is its whole-file SHA-256 when the pass read all of it.
 fn for_each_source_batch(
     root: &Path,
     source: &SourceRecord,
     batch_rows: usize,
     mut consume: impl FnMut(Option<RecordBatch>) -> Result<(), GfError>,
-) -> Result<(), GfError> {
-    let path = root.join("sources").join(&source.name);
+) -> Result<Option<String>, GfError> {
     let tracker = graphforge_filesystem::FileCacheReleaseTracker::default();
     match source.kind {
         ImportSourceKind::ArrowNodes | ImportSourceKind::ArrowEdges => {
+            let path = root.join("sources").join(&source.name);
             let result = (|| {
                 let file = File::open(path).map_err(storage)?;
                 let reader = graphforge_filesystem::FileCacheReleasingReader::with_tracker(
@@ -1450,30 +1577,69 @@ fn for_each_source_batch(
                 )
             })();
             finish_source_cache_release(result, &tracker, "Arrow source")?;
+            Ok(None)
         }
         ImportSourceKind::ParquetNodes | ImportSourceKind::ParquetEdges => {
             let result = (|| {
-                let file = File::open(path).map_err(storage)?;
-                let chunk_reader = ImportChunkReader::new(file, tracker.clone())?;
+                // A source registered before sources stayed in place was copied
+                // into the session, which owns it: nothing to pin or digest.
+                let Some(external) = source.external.as_ref() else {
+                    let file =
+                        File::open(root.join("sources").join(&source.name)).map_err(storage)?;
+                    let chunk_reader = ImportChunkReader::new(file, tracker.clone(), None)?;
+                    let reader = ParquetRecordBatchReaderBuilder::try_new(chunk_reader)
+                        .map_err(storage)?
+                        .with_batch_size(batch_rows)
+                        .build()
+                        .map_err(storage)?;
+                    consume_source_batches(
+                        reader.map(|batch| {
+                            canonicalize_parquet_batch(
+                                source.kind.input_kind(),
+                                &batch.map_err(storage)?,
+                            )
+                        }),
+                        &mut consume,
+                    )?;
+                    return Ok(None);
+                };
+                let digest = external_source::SourceDigest::new(external.size);
+                let file = external.open_observed(&digest)?;
+                #[cfg(test)]
+                external_source::pass_hook(&external.path, "opened", 0);
+                let guard = file.try_clone().map_err(storage)?;
+                let chunk_reader =
+                    ImportChunkReader::new(file, tracker.clone(), Some(digest.clone()))?;
+                // A read that fails because the file changed under it is that
+                // change, not an I/O or format error.
                 let reader = ParquetRecordBatchReaderBuilder::try_new(chunk_reader)
-                    .map_err(storage)?
-                    .with_batch_size(batch_rows)
-                    .build()
-                    .map_err(storage)?;
+                    .and_then(|builder| builder.with_batch_size(batch_rows).build())
+                    .map_err(|error| external.reclassify(&guard, storage(error)))?;
+                #[cfg(test)]
+                let mut seen = 0_u64;
                 consume_source_batches(
                     reader.map(|batch| {
+                        #[cfg(test)]
+                        {
+                            external_source::pass_hook(&external.path, "batch", seen);
+                            seen += 1;
+                        }
+                        // The source can change between any two batches.
+                        external.check(&guard)?;
                         canonicalize_parquet_batch(
                             source.kind.input_kind(),
-                            &batch.map_err(storage)?,
+                            &batch.map_err(|error| external.reclassify(&guard, storage(error)))?,
                         )
                     }),
                     &mut consume,
-                )
+                )?;
+                let sha256 = digest.finish(external, &guard)?;
+                external.check(&guard)?;
+                Ok(Some(sha256))
             })();
-            finish_source_cache_release(result, &tracker, "Parquet source")?;
+            finish_source_cache_release(result, &tracker, "Parquet source")
         }
     }
-    Ok(())
 }
 
 /// Drain admitted earlier batches before a later decode error, while still
@@ -1507,18 +1673,22 @@ struct ImportChunkReader {
     file: std::sync::Arc<File>,
     length: u64,
     tracker: graphforge_filesystem::FileCacheReleaseTracker,
+    /// The digest an in-place source's reads feed; none for a session-owned copy.
+    digest: Option<external_source::SourceDigest>,
 }
 
 impl ImportChunkReader {
     fn new(
         file: File,
         tracker: graphforge_filesystem::FileCacheReleaseTracker,
+        digest: Option<external_source::SourceDigest>,
     ) -> Result<Self, GfError> {
         let length = file.metadata().map_err(storage)?.len();
         Ok(Self {
             file: std::sync::Arc::new(file),
             length,
             tracker,
+            digest,
         })
     }
 }
@@ -1530,7 +1700,9 @@ impl Length for ImportChunkReader {
 }
 
 impl ChunkReader for ImportChunkReader {
-    type T = BufReader<graphforge_filesystem::FileCacheReleasingReader>;
+    type T = BufReader<
+        external_source::DigestingReader<graphforge_filesystem::FileCacheReleasingReader>,
+    >;
 
     fn get_read(&self, start: u64) -> parquet::errors::Result<Self::T> {
         let file = self.file.try_clone()?;
@@ -1539,7 +1711,10 @@ impl ChunkReader for ImportChunkReader {
             self.tracker.clone(),
         )?;
         reader.seek(SeekFrom::Start(start))?;
-        Ok(BufReader::new(reader))
+        Ok(BufReader::with_capacity(
+            external_source::PAGE_HEADER_BUFFER_BYTES,
+            external_source::DigestingReader::new(reader, start, self.digest.clone()),
+        ))
     }
 
     fn get_bytes(&self, start: u64, length: usize) -> parquet::errors::Result<Bytes> {
@@ -1552,6 +1727,9 @@ impl ChunkReader for ImportChunkReader {
         let mut bytes = vec![0_u8; length];
         reader.read_exact(&mut bytes)?;
         reader.finish()?;
+        if let Some(digest) = &self.digest {
+            digest.observe(start, &bytes);
+        }
         Ok(Bytes::from(bytes))
     }
 }
@@ -1567,131 +1745,6 @@ fn finish_source_cache_release<T>(
         (Err(primary), Ok(())) => Err(primary),
         (Err(primary), Err(release)) => Err(storage(format!(
             "{primary}; {source_kind} cache release also failed: {release}"
-        ))),
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct CopyCacheReleaseEvidence {
-    reader: graphforge_filesystem::FileCacheReleaseEvidence,
-    writer: graphforge_filesystem::FileCacheReleaseEvidence,
-    peak_combined_window_bytes: u64,
-}
-
-fn finish_parquet_copy_source(
-    reader: &mut graphforge_filesystem::FileCacheReleasingReader,
-) -> Result<graphforge_filesystem::FileCacheReleaseEvidence, GfError> {
-    let evidence = reader.finish().map_err(storage)?;
-    #[cfg(test)]
-    copy_parquet_failure("source release")?;
-    Ok(evidence)
-}
-
-fn synchronize_parquet_copy_output(
-    writer: &mut graphforge_filesystem::DurableFileCacheWriter,
-) -> Result<graphforge_storage::durable_commit::FileSeal, GfError> {
-    let seal =
-        graphforge_storage::durable_commit::seal_cache_writer_witness(writer).map_err(storage)?;
-    #[cfg(test)]
-    copy_parquet_failure("writer release")?;
-    Ok(seal)
-}
-
-fn copy_parquet_source(
-    source: &Path,
-    temporary: &Path,
-) -> Result<
-    (
-        u64,
-        CopyCacheReleaseEvidence,
-        graphforge_storage::durable_commit::FileSeal,
-    ),
-    GfError,
-> {
-    let parent = source
-        .parent()
-        .ok_or_else(|| validation("Parquet source must have a parent directory"))?;
-    let name = source
-        .file_name()
-        .ok_or_else(|| validation("Parquet source must have a file name"))?;
-    let directory = graphforge_filesystem::StableDirectory::open(parent).map_err(storage)?;
-    let source_file = directory.open_child_file(name).map_err(storage)?;
-    let tracker = graphforge_filesystem::FileCacheReleaseTracker::default();
-    let window = graphforge_filesystem::cache_release_window_for_streams(2).map_err(storage)?;
-    let mut reader = graphforge_filesystem::FileCacheReleasingReader::with_window_bytes(
-        source_file,
-        window,
-        tracker.clone(),
-    )
-    .map_err(storage)?;
-    let mut writer = graphforge_filesystem::DurableFileCacheWriter::with_window_bytes(
-        File::create(temporary).map_err(storage)?,
-        window,
-    )
-    .map_err(storage)?;
-    let mut copied = 0_u64;
-    let copied_result = (|| -> Result<(), GfError> {
-        let mut buffer = vec![0_u8; 1024 * 1024];
-        loop {
-            let read = reader.read(&mut buffer).map_err(storage)?;
-            if read == 0 {
-                break;
-            }
-            writer.write_all(&buffer[..read]).map_err(storage)?;
-            copied = copied
-                .checked_add(u64::try_from(read).map_err(storage)?)
-                .ok_or_else(|| storage("Parquet copy byte count overflow"))?;
-            #[cfg(test)]
-            copy_parquet_failure("copy")?;
-        }
-        Ok(())
-    })();
-    let reader_release = finish_parquet_copy_source(&mut reader);
-    let writer_release = synchronize_parquet_copy_output(&mut writer);
-    let mut result =
-        append_copy_cleanup(copied_result, reader_release.map(|_| ()), "source release");
-    let mut seal = None;
-    result = append_copy_cleanup(
-        result,
-        writer_release.map(|witness| {
-            seal = Some(witness);
-        }),
-        "writer synchronization/release",
-    );
-    let reader_evidence = tracker.evidence();
-    let writer_evidence = writer.evidence();
-    let peak_combined_window_bytes = reader_evidence
-        .peak_window_bytes
-        .checked_add(writer_evidence.peak_window_bytes)
-        .ok_or_else(|| storage("Parquet copy cache-window evidence overflow"))?;
-    drop(writer);
-    drop(reader);
-    if let Err(primary) = result {
-        let removed = fs::remove_file(temporary).map_err(storage);
-        return append_copy_cleanup(Err(primary), removed, "partial output removal");
-    }
-    Ok((
-        copied,
-        CopyCacheReleaseEvidence {
-            reader: reader_evidence,
-            writer: writer_evidence,
-            peak_combined_window_bytes,
-        },
-        seal.expect("successful writer release supplies its seal"),
-    ))
-}
-
-fn append_copy_cleanup<T>(
-    primary: Result<T, GfError>,
-    cleanup: Result<(), GfError>,
-    context: &str,
-) -> Result<T, GfError> {
-    match (primary, cleanup) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Ok(_), Err(cleanup)) => Err(cleanup),
-        (Err(primary), Ok(())) => Err(primary),
-        (Err(primary), Err(cleanup)) => Err(storage(format!(
-            "{primary}; Parquet copy {context} also failed: {cleanup}"
         ))),
     }
 }
@@ -1739,12 +1792,16 @@ fn write_manifest_with_allocation(
     journal::write_checkpoint(root, manifest, allocation, &mut false)
 }
 
+const fn supported_format(version: u32) -> bool {
+    version >= OLDEST_FORMAT_VERSION && version <= FORMAT_VERSION
+}
+
 fn read_manifest(root: &Path) -> Result<SessionManifest, GfError> {
     let mut manifest: SessionManifest = serde_json::from_reader(BufReader::new(
         File::open(root.join(MANIFEST)).map_err(storage)?,
     ))
     .map_err(storage)?;
-    if manifest.format_version != FORMAT_VERSION {
+    if !supported_format(manifest.format_version) {
         return Err(validation("incompatible import manifest format"));
     }
     journal::replay(root, &mut manifest)?;
@@ -2406,118 +2463,6 @@ mod tests {
     }
 
     #[test]
-    fn parquet_registration_copy_bounds_combined_non_sparse_cache_and_preserves_bytes() {
-        let root = tempfile::tempdir().unwrap();
-        let source = root.path().join("source.parquet");
-        let destination = root.path().join("destination.tmp");
-        let chunk = (0_u32..(1 << 18))
-            .flat_map(u32::to_le_bytes)
-            .collect::<Vec<_>>();
-        // Derived from the live per-stream window rather than a fixed byte
-        // count: the length must exceed one full window so that (a) the
-        // combined reader+writer window genuinely peaks at the shared
-        // aggregate budget and (b) at least one rollover plus a final
-        // partial window occurs, regardless of how the budget is priced.
-        let window = graphforge_filesystem::cache_release_window_for_streams(2)
-            .unwrap()
-            .get();
-        let length = window + 17;
-        let expected_release_operations = (length + window - 1) / window;
-        let mut output = File::create(&source).unwrap();
-        let mut remaining = length;
-        while remaining > 0 {
-            let bytes = usize::try_from(remaining.min(chunk.len() as u64)).unwrap();
-            output.write_all(&chunk[..bytes]).unwrap();
-            remaining -= bytes as u64;
-        }
-        output.observed_sync_all().unwrap();
-        drop(output);
-
-        let (copied, evidence, _seal) = copy_parquet_source(&source, &destination).unwrap();
-        assert_eq!(copied, length);
-        assert_eq!(destination.metadata().unwrap().len(), length);
-        #[cfg(target_os = "linux")]
-        {
-            assert_eq!(
-                evidence.reader.release_operations,
-                expected_release_operations
-            );
-            assert_eq!(
-                evidence.writer.release_operations,
-                expected_release_operations
-            );
-            assert_eq!(evidence.reader.released_bytes, length);
-            assert_eq!(evidence.writer.released_bytes, length);
-            assert_eq!(
-                evidence.peak_combined_window_bytes,
-                graphforge_filesystem::DEFAULT_CACHE_RELEASE_WINDOW_BYTES
-            );
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            assert_eq!(evidence.reader.unsupported_operations, 1);
-            assert_eq!(evidence.writer.unsupported_operations, 1);
-            assert_eq!(evidence.peak_combined_window_bytes, length * 2);
-        }
-
-        let mut expected = BufReader::new(File::open(source).unwrap());
-        let mut actual = BufReader::new(File::open(destination).unwrap());
-        let mut expected_chunk = vec![0_u8; 1 << 20];
-        let mut actual_chunk = vec![0_u8; 1 << 20];
-        loop {
-            let expected_read = expected.read(&mut expected_chunk).unwrap();
-            let actual_read = actual.read(&mut actual_chunk).unwrap();
-            assert_eq!(actual_read, expected_read);
-            assert_eq!(
-                &actual_chunk[..actual_read],
-                &expected_chunk[..expected_read]
-            );
-            if expected_read == 0 {
-                break;
-            }
-        }
-    }
-
-    #[test]
-    fn parquet_copy_failure_syncs_and_removes_partial_output() {
-        let root = tempfile::tempdir().unwrap();
-        let source = root.path().join("source.parquet");
-        let destination = root.path().join("destination.tmp");
-        std::fs::write(&source, vec![7_u8; 2 * 1024 * 1024]).unwrap();
-        inject_copy_parquet_failures(&["copy"]);
-
-        let error = copy_parquet_source(&source, &destination).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("injected Parquet copy copy failure")
-        );
-        assert!(!destination.exists());
-    }
-
-    #[test]
-    fn parquet_copy_preserves_primary_and_appends_every_cleanup_failure() {
-        let root = tempfile::tempdir().unwrap();
-        let source = root.path().join("source.parquet");
-        let destination = root.path().join("destination.tmp");
-        std::fs::write(&source, vec![9_u8; 2 * 1024 * 1024]).unwrap();
-        inject_copy_parquet_failures(&["copy", "source release", "writer release"]);
-
-        let error = copy_parquet_source(&source, &destination)
-            .unwrap_err()
-            .to_string();
-        let copy = error.find("injected Parquet copy copy failure").unwrap();
-        let source_release = error
-            .find("Parquet copy source release also failed")
-            .unwrap();
-        let writer_release = error
-            .find("Parquet copy writer synchronization/release also failed")
-            .unwrap();
-        assert!(copy < source_release && source_release < writer_release);
-        assert!(!destination.exists());
-    }
-
-    #[test]
     fn parquet_abort_and_missing_endpoint_preserve_prior_generation() {
         let (_directory, project, graph) = fixture();
         let source_dir = tempfile::tempdir().unwrap();
@@ -2612,8 +2557,22 @@ mod tests {
                 .register_parquet(BulkInputKind::Node, Path::new("../escape.parquet"))
                 .is_err()
         );
+        assert!(
+            session
+                .register_parquet(BulkInputKind::Node, &corrupt)
+                .is_err(),
+            "registration reads the footer, so a non-Parquet file is refused up front"
+        );
+        // A file with Parquet's framing but an undecodable footer registers and
+        // is refused when it is read.
+        let framed = source_dir.path().join("framed.parquet");
+        let mut bytes = b"PAR1".to_vec();
+        bytes.extend_from_slice(&[0xff; 16]);
+        bytes.extend_from_slice(&10_u32.to_le_bytes());
+        bytes.extend_from_slice(b"PAR1");
+        fs::write(&framed, bytes).unwrap();
         session
-            .register_parquet(BulkInputKind::Node, &corrupt)
+            .register_parquet(BulkInputKind::Node, &framed)
             .unwrap();
         assert!(session.validate(&graph).is_err());
 

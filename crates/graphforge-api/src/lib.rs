@@ -399,14 +399,17 @@ pub use graphforge_core::uuid::{
     portable_v2_import_generation,
 };
 pub use graphforge_core::{
-    AlgorithmError, AnalyzeOptions, ApiErrorCode, ClusterOptions, EdgeHandle, ExplainStage,
-    FindOptions, GfError, LoweringError, NodeHandle, NodeSelector, OntologyFormat, OntologyMode,
-    ParseErrorKind, PathsOptions, ProjectErrorCode, PropValue, RankOptions, SimilarOptions, Span,
-    SpatialCoordinates, SpatialCrs, SpatialGeometryType, SpatialType, SpatialValue, TemporalValue,
+    AlgorithmError, AnalyzeOptions, ApiErrorCode, ClusterOptions, ClusteringNormalization,
+    EdgeHandle, ExplainStage, FindOptions, GfError, LoweringError, NodeHandle, NodeSelector,
+    OntologyFormat, OntologyMode, PageRankOptions, ParseErrorKind, PathsOptions, ProjectErrorCode,
+    PropValue, RankOptions, SimilarOptions, Span, SpatialCoordinates, SpatialCrs,
+    SpatialGeometryType, SpatialType, SpatialValue, SynchronousLabelPropagationOptions,
+    TemporalValue,
 };
 pub use import_session::{
     GraphImportSession, ImportCallTiming, ImportConstructionEvidence, ImportOperationTimings,
-    ImportPhase, ImportProgress, ImportSessionLimits, ImportSourceKind, PublicationWorkComponents,
+    ImportPhase, ImportProgress, ImportSessionLimits, ImportSourceKind, ImportSourceProvenance,
+    PublicationWorkComponents,
 };
 pub use query_evidence::{
     QueryExecutionEvidence, QueryHopEvidence, QueryOperatorRssEvidence, QuerySinkEvidenceReceipt,
@@ -663,7 +666,7 @@ pub struct GraphForge {
     /// Generation UUID whose graph snapshot was hydrated into `dir`.
     current_generation_uuid: Arc<Mutex<uuid::Uuid>>,
     /// Authenticated UUID index handle cached for one topology generation.
-    uuid_membership_index: Mutex<Option<graphforge_storage::UuidMembershipIndex>>,
+    identity_probe: Mutex<Option<graphforge_storage::TopologyIdentityProbe>>,
     /// Decoded epistemic ledgers cached for one immutable read generation.
     /// See `epistemic_snapshot::EpistemicLedgerCache` for the invalidation
     /// contract: keyed by `(generation_uuid, manifest_sha256)`, so a publish
@@ -901,7 +904,7 @@ impl GraphForge {
             })),
             read_only: false,
             current_generation_uuid: Arc::new(Mutex::new(generation_uuid)),
-            uuid_membership_index: Mutex::new(None),
+            identity_probe: Mutex::new(None),
             #[cfg(feature = "knowledge")]
             epistemic_ledger_cache: Mutex::new(None),
             ordinal_identities,
@@ -1182,7 +1185,7 @@ impl GraphForge {
             })),
             read_only,
             current_generation_uuid: Arc::new(Mutex::new(generation_uuid)),
-            uuid_membership_index: Mutex::new(None),
+            identity_probe: Mutex::new(None),
             #[cfg(feature = "knowledge")]
             epistemic_ledger_cache: Mutex::new(None),
             ordinal_identities,

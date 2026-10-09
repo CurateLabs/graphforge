@@ -834,7 +834,7 @@ impl V4OrdinalIdentityHandle {
     /// fails authenticated open; discovery never falls back around it.
     pub fn discover(
         project_dir: &Path,
-        topology_generation: u64,
+        _topology_generation: u64,
     ) -> Result<V4OrdinalIdentityDiscovery, V4OrdinalIdentityError> {
         let root = StableDirectory::open(&project_dir.join(INDEX_DIR)).map_err(io_error)?;
         match root.open_child_file(MANIFEST_NAME.as_ref()) {
@@ -842,13 +842,7 @@ impl V4OrdinalIdentityHandle {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(io_error(error)),
         }
-        if crate::UuidMembershipIndex::open_at_generation(project_dir, topology_generation).is_err()
-        {
-            return Err(V4OrdinalIdentityError::InvalidDescriptor(
-                "current v3 authority failed authentication",
-            ));
-        }
-        Ok(V4OrdinalIdentityDiscovery::RebuildRequired { found_version: 3 })
+        Ok(V4OrdinalIdentityDiscovery::RebuildRequired { found_version: 0 })
     }
 
     /// Open one immutable v4 generation without reading artifact bytes.

@@ -76,16 +76,9 @@ pub(crate) enum BetweennessExecutionPath {
     Parallel { threads: usize, chunks: usize },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BetweennessCheckpointMode {
-    Consume,
-    Defer,
-}
-
 #[derive(Debug)]
 struct BetweennessSourceRun {
     source: usize,
-    checkpoints: usize,
     contribution: Result<Vec<f64>, AlgorithmError>,
 }
 
@@ -121,15 +114,7 @@ fn betweenness_scores_serial(
 ) -> Result<Vec<f64>, AlgorithmError> {
     let mut scores = vec![0.0; graph.node_ids().len()];
     for source in 0..graph.node_ids().len() {
-        let mut checkpoints = 0_usize;
-        let contribution = betweenness_source_contribution(
-            graph,
-            indices,
-            source,
-            control,
-            BetweennessCheckpointMode::Consume,
-            &mut checkpoints,
-        )?;
+        let contribution = betweenness_source_contribution(graph, indices, source, control)?;
         accumulate_betweenness_contribution(&mut scores, &contribution);
     }
     Ok(scores)
@@ -151,18 +136,10 @@ fn betweenness_scores_parallel(
                 control.check_cancelled()?;
                 let mut local = Vec::with_capacity(end - start);
                 for source in start..end {
-                    let mut checkpoints = 0_usize;
-                    let contribution = betweenness_source_contribution(
-                        graph,
-                        indices,
-                        source,
-                        control,
-                        BetweennessCheckpointMode::Defer,
-                        &mut checkpoints,
-                    );
+                    let contribution =
+                        betweenness_source_contribution(graph, indices, source, control);
                     local.push(BetweennessSourceRun {
                         source,
-                        checkpoints,
                         contribution,
                     });
                 }
@@ -176,9 +153,6 @@ fn betweenness_scores_parallel(
     for (_, mut source_runs) in chunk_results {
         source_runs.sort_by_key(|run| run.source);
         for run in source_runs {
-            for _ in 0..run.checkpoints {
-                control.checkpoint()?;
-            }
             let contribution = run.contribution?;
             accumulate_betweenness_contribution(&mut scores, &contribution);
         }
@@ -197,11 +171,9 @@ fn betweenness_source_contribution(
     indices: &HashMap<u64, usize>,
     source: usize,
     control: &AlgorithmControl,
-    checkpoint_mode: BetweennessCheckpointMode,
-    checkpoints: &mut usize,
 ) -> Result<Vec<f64>, AlgorithmError> {
     let node_ids = graph.node_ids();
-    betweenness_checkpoint(control, checkpoint_mode, checkpoints)?;
+    control.check_cancelled()?;
     let mut stack = Vec::with_capacity(node_ids.len());
     let mut predecessors = vec![Vec::new(); node_ids.len()];
     let mut paths = vec![0.0_f64; node_ids.len()];
@@ -214,13 +186,13 @@ fn betweenness_source_contribution(
 
     while let Some(vertex) = queue.pop_front() {
         if visited > 0 && visited.is_multiple_of(1024) {
-            betweenness_checkpoint(control, checkpoint_mode, checkpoints)?;
+            control.check_cancelled()?;
         }
         visited += 1;
         stack.push(vertex);
         for edge in graph.neighbors(node_ids[vertex]) {
             if traversed_edges > 0 && traversed_edges.is_multiple_of(1024) {
-                betweenness_checkpoint(control, checkpoint_mode, checkpoints)?;
+                control.check_cancelled()?;
             }
             traversed_edges += 1;
             let target = indices
@@ -249,7 +221,7 @@ fn betweenness_source_contribution(
     while let Some(target) = stack.pop() {
         for &predecessor in &predecessors[target] {
             if traversed_predecessors > 0 && traversed_predecessors.is_multiple_of(1024) {
-                betweenness_checkpoint(control, checkpoint_mode, checkpoints)?;
+                control.check_cancelled()?;
             }
             traversed_predecessors += 1;
             dependency[predecessor] +=
@@ -263,23 +235,6 @@ fn betweenness_source_contribution(
         }
     }
     Ok(contribution)
-}
-
-fn betweenness_checkpoint(
-    control: &AlgorithmControl,
-    mode: BetweennessCheckpointMode,
-    checkpoints: &mut usize,
-) -> Result<(), AlgorithmError> {
-    match mode {
-        BetweennessCheckpointMode::Consume => {
-            control.checkpoint()?;
-        }
-        BetweennessCheckpointMode::Defer => {
-            control.check_cancelled()?;
-            *checkpoints = checkpoints.saturating_add(1);
-        }
-    }
-    Ok(())
 }
 
 fn run_betweenness_on_pool<R>(

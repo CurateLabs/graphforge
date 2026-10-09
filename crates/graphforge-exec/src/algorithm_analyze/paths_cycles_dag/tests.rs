@@ -639,7 +639,7 @@ fn topological_sort_cycles_and_shared_controls_are_structured() {
         ),
         Err(AlgorithmError::OutputLimit { .. })
     ));
-    assert!(matches!(
+    assert!(
         execute(
             &graph,
             AnalyzeAlgorithm::TriangleCount,
@@ -649,9 +649,10 @@ fn topological_sort_cycles_and_shared_controls_are_structured() {
                 ..AlgorithmLimits::default()
             },
             AlgorithmCancellation::default(),
-        ),
-        Err(AlgorithmError::IterationLimit { .. })
-    ));
+        )
+        .is_ok(),
+        "a single-pass algorithm never consumes the iteration budget"
+    );
     let cancellation = AlgorithmCancellation::default();
     cancellation.cancel();
     assert_eq!(

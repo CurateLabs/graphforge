@@ -1,0 +1,61 @@
+{
+  "schema": "graphforge-gdc-scorecard-ladder-spec/1",
+  "suite_id": "graphalytics",
+  "description": "A three-rung CI fixture in the Graphalytics archive format (.v, .e, .properties and per-algorithm reference outputs, hand-derived). ga-directed and ga-undirected pass; ga-wrong's BFS reference gives vertex 5 depth 2 where the true depth is 3, so it fails with reference_mismatch. archives/ is built from source/<id> with: tar --zstd --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner --mode=u+rw,go+r-w -cf archives/<id>.tar.zst -C source/<id> <files>",
+  "profile_root": "fixtures/gdc/graphalytics-rung-fixture",
+  "identity_profile": "scorecard",
+  "counts_ladder": "profiles/gdc/graphalytics-rung-fixture-ladder.json",
+  "metric_shape": "graphalytics",
+  "variance_line": "Fixture: Graphalytics algorithms through GraphForge analyst verbs; PR and CDLP are refused.",
+  "attribution": "Data format and reference-output format from LDBC Graphalytics (https://ldbcouncil.org/benchmarks/graphalytics/), used under CC-BY 4.0.",
+  "variances": [
+    {
+      "kind": "spec_variance",
+      "subject": "Tp",
+      "text": "Tp includes materializing the analyst verb's Arrow result."
+    }
+  ],
+  "rungs": [
+    {
+      "id": "ga-directed",
+      "label": "fixture directed",
+      "dataset_id": "ga-directed",
+      "input_subdir": null,
+      "workload": "queries/directed-workload.json",
+      "refused": [
+        {"query_id": "pr", "cause": "fixed_iteration_pagerank_not_exposed"},
+        {"query_id": "cdlp", "cause": "synchronous_cdlp_not_exposed"},
+        {"query_id": "lcc", "cause": "directed_lcc_semantics_not_exposed"}
+      ],
+      "reference": {"archive_outputs": "graphalytics"},
+      "variances": []
+    },
+    {
+      "id": "ga-undirected",
+      "label": "fixture undirected weighted",
+      "dataset_id": "ga-undirected",
+      "input_subdir": null,
+      "workload": "queries/undirected-workload.json",
+      "refused": [
+        {"query_id": "pr", "cause": "fixed_iteration_pagerank_not_exposed"},
+        {"query_id": "cdlp", "cause": "synchronous_cdlp_not_exposed"}
+      ],
+      "reference": {"archive_outputs": "graphalytics"},
+      "variances": []
+    },
+    {
+      "id": "ga-wrong",
+      "label": "fixture wrong reference",
+      "dataset_id": "ga-wrong",
+      "input_subdir": null,
+      "workload": "queries/directed-workload.json",
+      "refused": [
+        {"query_id": "pr", "cause": "fixed_iteration_pagerank_not_exposed"},
+        {"query_id": "cdlp", "cause": "synchronous_cdlp_not_exposed"},
+        {"query_id": "lcc", "cause": "directed_lcc_semantics_not_exposed"}
+      ],
+      "reference": {"archive_outputs": "graphalytics"},
+      "variances": []
+    }
+  ]
+}

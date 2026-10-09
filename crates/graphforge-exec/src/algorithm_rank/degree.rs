@@ -34,7 +34,7 @@ impl RustAlgorithm for Degree {
             DegreeExecutionPath::Serial => {
                 for (index, &node_id) in node_ids.iter().enumerate() {
                     if index.is_multiple_of(DEGREE_CHECKPOINT_NODES) {
-                        control.checkpoint()?;
+                        control.check_cancelled()?;
                     }
                     let uuid = graph
                         .node_uuid(node_id)

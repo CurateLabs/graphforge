@@ -271,7 +271,7 @@ Full algorithm catalog: [Algorithm Verbs](../book/architecture/algorithms.md)
 
 ---
 
-### `rank(label, *, by, via=None, directed=True, write_property=None)` → `pyarrow.Table`
+### `rank(label, *, by, via=None, directed=True, write_property=None, damping=None, iterations=None, clustering_normalization=None)` → `pyarrow.Table`
 
 Score every node. Returns non-null `node_uuid: FixedSizeBinary(16)`, non-null
 `score: Float64`, then materialized node properties.
@@ -289,7 +289,7 @@ individually, and an undirected self-loop contributes two entries. `via=None`
 selects every relationship type. When `write_property` is set, all scores are
 persisted atomically only after successful execution; omitting it is read-only.
 
-PageRank is unweighted, uses damping `0.85`, uniform initialization,
+By default PageRank is unweighted, uses damping `0.85`, uniform initialization,
 teleportation, and dangling-mass redistribution, and converges when L1 delta is
 at most `selected_node_count * 1e-10`. Directed mode follows outgoing adjacency;
 undirected mode exports both endpoint directions. Parallel edges contribute
@@ -298,6 +298,23 @@ typed schema with zero rows; disconnected selections retain every node and
 normalized score mass. The shared Rust node, edge, output, iteration, and
 cancellation limits produce structured errors. Python and Node call this same
 Rust handler without an algorithm backend or fallback of their own.
+
+PageRank accepts `damping` (finite, between `0` and `1`, default `0.85`) and
+`iterations` (an exact nonnegative number of synchronous rounds). Omitting
+`iterations` retains the convergence rule above. Fixed rounds start at uniform
+`1/N` scores and redistribute sink mass uniformly, even when scores stabilize
+earlier. Zero rounds return the initial distribution. These options are valid
+only for PageRank; resource checkpoints remain a separate hard limit.
+
+```python
+scores = forge.rank("Vertex", by="pagerank", damping=0.85, iterations=10)
+```
+
+Rust sets `RankOptions.pagerank = Some(PageRankOptions { damping: 0.85,
+iterations: Some(10) })`. Node appends `damping`, `iterations`, and
+`clusteringNormalization` after the existing rank arguments.
+Rust callers that enumerate every field in `RankOptions` or `ClusterOptions`
+must add the new option fields or finish the literal with `..Default::default()`.
 
 Betweenness is exact, unweighted Brandes node betweenness. For `n > 2`, scores
 are normalized by `1 / ((n - 1) * (n - 2))`; selections of at most two nodes
@@ -405,13 +422,32 @@ Directed mode applies Fagiolo's coefficient over Boolean adjacency: self-loops a
 ignored, same-direction parallel arcs collapse, reciprocal arcs remain distinct,
 and total/reciprocal degree normalize directed triangles. Undirected mode exports
 both endpoint directions and reduces to classic `2T / (k * (k - 1))` local
-transitivity. A zero denominator scores `0.0`.
+transitivity. A zero denominator scores `0.0`. This remains the default
+`clustering_normalization="fagiolo"` definition.
+
+`clustering_normalization="neighbor_edges"` selects the Graphalytics definition:
+form the unique union of incoming and outgoing neighbors, count directed edges
+between distinct members, and divide by `k * (k - 1)`. Fewer than two neighbors
+score zero. Reciprocal neighbor edges count separately; loops and duplicate arcs
+are ignored. Both definitions agree on undirected simple graphs. Rust selects
+`RankOptions.clustering_normalization = Some(ClusteringNormalization::NeighborEdges)`.
+
+```python
+lcc = forge.rank("Vertex", by="clustering_coefficient", directed=True,
+                 clustering_normalization="neighbor_edges")
+```
 
 `via` filters before simplification. Disconnected, isolated, degree-one, and empty
 selections retain stable finite behavior and topology order. The UUID-only schema,
 materialized NULL properties, shared Rust limits/cancellation/structured errors,
 and atomic opt-in write-back contracts apply unchanged. Python and Node contain no
 separate clustering coefficient implementation or fallback.
+
+Single-pass rank scoring (`degree`, `betweenness`, `closeness`, `harmonic_closeness`,
+`clustering_coefficient`, `triangles`, `k_core`, and the link-prediction scores) polls
+cancellation but never consumes the cooperative iteration budget, which counts rounds of
+iterative algorithms. The node and edge limits bound the input, and cancellation stops a
+long run.
 
 Triangle count is deterministic and unweighted. `by="triangles"` counts each
 distinct unordered three-node clique once for every participating node. The
@@ -645,7 +681,7 @@ forge.rank("Person", by="degree", via="KNOWS", directed=False)
 
 ---
 
-### `cluster(label, *, by, vector_property=None, via=None, directed=False, write_property=None)` → `pyarrow.Table`
+### `cluster(label, *, by, vector_property=None, via=None, directed=False, write_property=None, synchronous_iterations=None, initial_label_property=None)` → `pyarrow.Table`
 
 Assign community membership. Returns non-null `node_uuid: FixedSizeBinary(16)`,
 non-null `community_id: Int64`, then materialized node properties.
@@ -892,8 +928,8 @@ numeric validation, structured Rust errors, and atomic opt-in
 remain thin Arrow IPC bindings with no runtime backend, fallback, packaging
 dependency, or recovery path.
 
-`by="label_propagation"` performs deterministic, unweighted classic
-asynchronous label propagation in Rust. Nodes begin with unique labels. A
+With no synchronous options, `by="label_propagation"` performs deterministic,
+unweighted classic asynchronous label propagation in Rust. Nodes begin with unique labels. A
 fixed Rust pseudo-random stream shuffles each sweep and uniformly resolves
 ties among the most frequent neighbor labels while updates take effect
 immediately. The stream is not a public seed option. Execution stops when
@@ -912,6 +948,35 @@ original node in each community. Shared Rust limits, bounded cancellation
 checkpoints, structured errors, UUID-only identity, and atomic opt-in
 `write_property` apply. Python and Node remain thin Arrow IPC bindings with no
 algorithm backend, fallback, packaging dependency, or recovery path.
+
+Set `synchronous_iterations` to select synchronous, deterministic fixed rounds.
+Every round reads only the previous labels; ties select the smallest numeric
+label, and isolates retain their labels. Directed graphs count incoming and
+outgoing neighbors separately, so reciprocal neighbors vote twice. Undirected
+graphs count each unique neighbor once. Self-loops and repeated arcs are ignored.
+Zero rounds return initial labels; there is no convergence shortcut or partition
+renumbering. The returned `community_id` and opt-in writeback retain exact labels.
+
+`initial_label_property` selects an exact Int64 property on every selected node.
+Missing, null, noninteger, or conflicting values fail typed. This property requires
+`synchronous_iterations`. When omitted, initial labels are selected-node ordinals
+in topology order. Supply original IDs when numeric tie-breaks must be independent
+of insertion order, as in Graphalytics.
+
+```python
+labels = forge.cluster("Vertex", by="label_propagation", directed=True,
+                       synchronous_iterations=10,
+                       initial_label_property="original_id")
+```
+
+Rust sets `ClusterOptions.synchronous_label_propagation =
+Some(SynchronousLabelPropagationOptions { iterations: 10,
+initial_label_property: Some("original_id".into()) })`. Node appends
+`synchronousIterations` and `initialLabelProperty` after the existing cluster
+arguments. All new options also apply to invocation preparation and recorded
+analysis. Descriptors retain the semantic parameters and fingerprint loaded label
+values; editing that input makes replay return `GF_PROJECTION_CHANGED`. Default
+invocation bytes remain compatible.
 
 `by="speaker_listener"` performs deterministic classic Speaker-Listener Label
 Propagation in Rust. Unique labels initialize node memories. A fixed Rust

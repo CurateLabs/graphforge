@@ -200,6 +200,42 @@ pub(crate) fn reconcile_auxiliary(
     }
 }
 
+/// Decide whether a rewrite that carried no auxiliary receipt committed. With
+/// the project rewrite lock held and any durable intent rolled forward, the
+/// generation state is either the prior pair (nothing happened) or the next
+/// pair (the intent completed); anything else is ambiguous.
+pub(crate) fn reconcile_generation_transition(
+    root: &Path,
+    prior: GenerationPair,
+    next: GenerationPair,
+) -> Result<AuxiliaryReconcileOutcome, GfError> {
+    let guard = acquire(root)?;
+    guard.revalidate()?;
+    let raw = crate::generation::read_generation_state_raw(root)?;
+    recover_locked(
+        root,
+        &guard.directory,
+        GenerationPair {
+            topology: raw.topology,
+            search: raw.search,
+            property: raw.property,
+        },
+    )?;
+    let current = crate::generation::read_generation_state_raw(root)?;
+    let current = GenerationPair {
+        topology: current.topology,
+        search: current.search,
+        property: current.property,
+    };
+    if current == next {
+        Ok(AuxiliaryReconcileOutcome::Committed)
+    } else if current == prior {
+        Ok(AuxiliaryReconcileOutcome::NotCommitted)
+    } else {
+        Err(storage("rewrite outcome is ambiguous or substituted"))
+    }
+}
+
 fn storage(error: impl std::fmt::Display) -> GfError {
     GfError::Storage(error.to_string())
 }

@@ -1,0 +1,438 @@
+{
+  "queries": [
+    {
+      "columns": [
+        "year",
+        "isComment",
+        "lengthCategory",
+        "messageCount",
+        "averageMessageLength",
+        "sumMessageLength",
+        "percentageOfMessages"
+      ],
+      "cypher": "MATCH (message)\nWHERE (message:Post OR message:Comment) AND message.creationDate < $datetime\nWITH count(message) AS totalMessageCountInt\nWITH toFloat(totalMessageCountInt) AS totalMessageCount\nMATCH (message)\nWHERE (message:Post OR message:Comment) AND message.creationDate < $datetime\n  AND message.content IS NOT NULL\nWITH totalMessageCount, message, message.creationDate AS creationDate\nWITH totalMessageCount, message, creationDate.year AS year\nWITH\n  totalMessageCount,\n  year,\n  message:Comment AS isComment,\n  CASE\n    WHEN message.length <  40 THEN 0\n    WHEN message.length <  80 THEN 1\n    WHEN message.length < 160 THEN 2\n    ELSE                           3\n  END AS lengthCategory,\n  count(message) AS messageCount,\n  sum(message.length) / toFloat(count(message)) AS averageMessageLength,\n  sum(message.length) AS sumMessageLength\nRETURN\n  year,\n  isComment,\n  lengthCategory,\n  messageCount,\n  averageMessageLength,\n  sumMessageLength,\n  messageCount / totalMessageCount AS percentageOfMessages\nORDER BY\n  year DESC,\n  isComment ASC,\n  lengthCategory ASC",
+      "operation": "BI1",
+      "parameters": [
+        {
+          "fixed": null,
+          "kind": "datetime",
+          "name": "datetime"
+        }
+      ],
+      "rewrite": "rewrite: LDBC text hits #1888 D3 (`message.creationDate.year` fails to plan). The year is read from a WITH-bound alias of the same property, so every value is unchanged. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node.",
+      "upstream": "neo4j/queries/bi-1.cypher"
+    },
+    {
+      "columns": [
+        "tagName",
+        "countWindow1",
+        "countWindow2",
+        "diff"
+      ],
+      "cypher": "MATCH (tag:Tag)-[:HAS_TYPE]->(:TagClass {name: $tagClass})\nOPTIONAL MATCH (message1)-[:HAS_TAG]->(tag)\n  WHERE (message1:Post OR message1:Comment) AND $date <= message1.creationDate\n    AND message1.creationDate < $date + duration({days: 100})\nWITH tag, count(message1) AS countWindow1\nOPTIONAL MATCH (message2)-[:HAS_TAG]->(tag)\n  WHERE (message2:Post OR message2:Comment) AND $date + duration({days: 100}) <= message2.creationDate\n    AND message2.creationDate < $date + duration({days: 200})\nWITH\n  tag,\n  countWindow1,\n  count(message2) AS countWindow2\nRETURN\n  tag.name AS tagName,\n  countWindow1,\n  countWindow2,\n  abs(countWindow1 - countWindow2) AS diff\nORDER BY\n  diff DESC,\n  tagName ASC\nLIMIT 100",
+      "operation": "BI2",
+      "parameters": [
+        {
+          "fixed": null,
+          "kind": "datetime",
+          "name": "date"
+        },
+        {
+          "fixed": null,
+          "kind": "string",
+          "name": "tagClass"
+        }
+      ],
+      "rewrite": "rewrite: LDBC text matches the `:Message` supertype label, which import sessions cannot assign (one label per node). `(m:Message)` becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes.",
+      "upstream": "neo4j/queries/bi-2.cypher"
+    },
+    {
+      "columns": [
+        "forumId",
+        "forumTitle",
+        "forumCreationDate",
+        "personId",
+        "messageCount"
+      ],
+      "cypher": "MATCH\n  (:Country {name: $country})<-[:IS_PART_OF]-(:City)<-[:IS_LOCATED_IN]-\n  (person:Person)<-[:HAS_MODERATOR]-(forum:Forum)-[:CONTAINER_OF]->\n  (post:Post)<-[:REPLY_OF*0..]-(message)-[:HAS_TAG]->(:Tag)-[:HAS_TYPE]->(:TagClass {name: $tagClass})\nWHERE (message:Post OR message:Comment)\nRETURN\n  forum.id AS forumId,\n  forum.title AS forumTitle,\n  forum.creationDate AS forumCreationDate,\n  person.id AS personId,\n  count(DISTINCT message) AS messageCount\nORDER BY\n  messageCount DESC,\n  forumId ASC\nLIMIT 20",
+      "operation": "BI3",
+      "parameters": [
+        {
+          "fixed": null,
+          "kind": "string",
+          "name": "tagClass"
+        },
+        {
+          "fixed": null,
+          "kind": "string",
+          "name": "country"
+        }
+      ],
+      "rewrite": "rewrite: LDBC text matches the `:Message` supertype label, which import sessions cannot assign (one label per node). `(m:Message)` becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes.",
+      "upstream": "neo4j/queries/bi-3.cypher"
+    },
+    {
+      "columns": [
+        "personId",
+        "personFirstName",
+        "personLastName",
+        "personCreationDate",
+        "messageCount"
+      ],
+      "cypher": "MATCH (country:Country)<-[:IS_PART_OF]-(:City)<-[:IS_LOCATED_IN]-(person:Person)<-[:HAS_MEMBER]-(forum:Forum)\nWHERE forum.creationDate > $date\nWITH country, forum, count(person) AS numberOfMembers\nWITH forum, max(numberOfMembers) AS maxNumberOfMembers\nORDER BY maxNumberOfMembers DESC, forum.id ASC\nLIMIT 100\nWITH collect(forum) AS topForums\nMATCH (topForum:Forum)-[:HAS_MEMBER]->(person:Person)\nWHERE topForum IN topForums\nWITH DISTINCT topForums, person\nOPTIONAL MATCH (forum:Forum)-[:CONTAINER_OF]->(:Post)<-[:REPLY_OF*0..]-(message)-[:HAS_CREATOR]->(person)\nWHERE (message:Post OR message:Comment)\nWITH person, count(DISTINCT CASE WHEN forum IN topForums THEN message END) AS messageCount\nRETURN\n  person.id AS personId,\n  person.firstName AS personFirstName,\n  person.lastName AS personLastName,\n  person.creationDate AS personCreationDate,\n  messageCount\nORDER BY\n  messageCount DESC,\n  personId ASC\nLIMIT 100",
+      "operation": "BI4",
+      "parameters": [
+        {
+          "fixed": null,
+          "kind": "datetime",
+          "name": "date"
+        }
+      ],
+      "rewrite": "rewrite: LDBC text hits #1888 D5 (CALL subquery). The top-100 forums are ordered by their largest per-country member count, then id, which is the order the LDBC ORDER BY + WITH DISTINCT yields and Umbra's maxNumberOfMembers. The UNION ALL of members with their messages and members with 0 becomes every member of a top forum with an OPTIONAL MATCH count of distinct messages in top-forum threads. Top-forum membership of a thread's forum is tested inside the count, not in the OPTIONAL MATCH WHERE: that shape returns wrong answers in BI13 and IC5 (#1919), though it matches the reference on BI4's own query fixture. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node.",
+      "upstream": "neo4j/queries/bi-4.cypher"
+    },
+    {
+      "columns": [
+        "personId",
+        "replyCount",
+        "likeCount",
+        "messageCount",
+        "score"
+      ],
+      "cypher": "MATCH (tag:Tag {name: $tag})<-[:HAS_TAG]-(message)-[:HAS_CREATOR]->(person:Person)\nWHERE (message:Post OR message:Comment)\nOPTIONAL MATCH (message)<-[likes:LIKES]-(:Person)\nWITH person, message, count(likes) AS likeCount\nOPTIONAL MATCH (message)<-[:REPLY_OF]-(reply:Comment)\nWITH person, message, likeCount, count(reply) AS replyCount\nWITH person, count(message) AS messageCount, sum(likeCount) AS likeCount, sum(replyCount) AS replyCount\nRETURN\n  person.id AS personId,\n  replyCount,\n  likeCount,\n  messageCount,\n  1*messageCount + 2*replyCount + 10*likeCount AS score\nORDER BY\n  score DESC,\n  personId ASC\nLIMIT 100",
+      "operation": "BI5",
+      "parameters": [
+        {
+          "fixed": null,
+          "kind": "string",
+          "name": "tag"
+        }
+      ],
+      "rewrite": "rewrite: LDBC text matches the `:Message` supertype label, which import sessions cannot assign (one label per node). `(m:Message)` becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes.",
+      "upstream": "neo4j/queries/bi-5.cypher"
+    },
+    {
+      "columns": [
+        "person1Id",
+        "authorityScore"
+      ],
+      "cypher": "MATCH (tag:Tag {name: $tag})<-[:HAS_TAG]-(message1)-[:HAS_CREATOR]->(person1:Person)\nWHERE (message1:Post OR message1:Comment)\nOPTIONAL MATCH (message1)<-[:LIKES]-(person2:Person)\nOPTIONAL MATCH (person2)<-[:HAS_CREATOR]-(message2)<-[like:LIKES]-(person3:Person)\nWHERE (message2:Post OR message2:Comment)\nRETURN\n  person1.id AS person1Id,\n  count(DISTINCT like) AS authorityScore\nORDER BY\n  authorityScore DESC,\n  person1Id ASC\nLIMIT 100",
+      "operation": "BI6",
+      "parameters": [
+        {
+          "fixed": null,
+          "kind": "string",
+          "name": "tag"
+        }
+      ],
+      "rewrite": "rewrite: LDBC text matches the `:Message` supertype label, which import sessions cannot assign (one label per node). `(m:Message)` becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes.",
+      "upstream": "neo4j/queries/bi-6.cypher"
+    },
+    {
+      "columns": [
+        "relatedTagName",
+        "count"
+      ],
+      "cypher": "MATCH\n  (tag:Tag {name: $tag})<-[:HAS_TAG]-(message),\n  (message)<-[:REPLY_OF]-(comment:Comment)-[:HAS_TAG]->(relatedTag:Tag)\nWHERE (message:Post OR message:Comment)\n  AND NOT (comment)-[:HAS_TAG]->(tag)\nRETURN\n  relatedTag.name AS relatedTagName,\n  count(DISTINCT comment) AS count\nORDER BY\n  count DESC,\n  relatedTagName ASC\nLIMIT 100",
+      "operation": "BI7",
+      "parameters": [
+        {
+          "fixed": null,
+          "kind": "string",
+          "name": "tag"
+        }
+      ],
+      "rewrite": "rewrite: LDBC text matches the `:Message` supertype label, which import sessions cannot assign (one label per node). `(m:Message)` becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes.",
+      "upstream": "neo4j/queries/bi-7.cypher"
+    },
+    {
+      "columns": [
+        "personId",
+        "score",
+        "friendsScore"
+      ],
+      "cypher": "MATCH (tag:Tag {name: $tag})\nOPTIONAL MATCH (tag)<-[interest:HAS_INTEREST]-(person:Person)\nWITH tag, collect(person.id) AS interestedPersonIds\nOPTIONAL MATCH (tag)<-[:HAS_TAG]-(message)-[:HAS_CREATOR]->(person:Person)\n         WHERE (message:Post OR message:Comment)\n           AND $startDate < message.creationDate\n           AND message.creationDate < $endDate\nWITH tag, interestedPersonIds, interestedPersonIds + collect(person.id) AS personIds\nUNWIND personIds AS personId\nWITH DISTINCT tag, personId\nMATCH (person:Person {id: personId})\nWITH\n  tag,\n  person,\n  100 * size([(tag)<-[interest:HAS_INTEREST]-(person) | interest]) + size([(tag)<-[:HAS_TAG]-(message)-[:HAS_CREATOR]->(person) WHERE (message:Post OR message:Comment) AND $startDate < message.creationDate AND message.creationDate < $endDate | message])\n  AS score\nOPTIONAL MATCH (person)-[:KNOWS]-(friend)\nWITH\n  person,\n  score,\n  100 * size([(tag)<-[interest:HAS_INTEREST]-(friend) | interest]) + size([(tag)<-[:HAS_TAG]-(message)-[:HAS_CREATOR]->(friend) WHERE (message:Post OR message:Comment) AND $startDate < message.creationDate AND message.creationDate < $endDate | message])\n  AS friendScore\nRETURN\n  person.id AS personId,\n  score,\n  sum(friendScore) AS friendsScore\nORDER BY\n  score + friendsScore DESC,\n  personId ASC\nLIMIT 100",
+      "operation": "BI8",
+      "parameters": [
+        {
+          "fixed": null,
+          "kind": "string",
+          "name": "tag"
+        },
+        {
+          "fixed": null,
+          "kind": "datetime",
+          "name": "startDate"
+        },
+        {
+          "fixed": null,
+          "kind": "datetime",
+          "name": "endDate"
+        }
+      ],
+      "rewrite": "rewrite: LDBC text hits #1888 D8 (a concatenated node list `a + collect(n)` loses the node type, so its elements are refused in a pattern). The interested persons and the message creators are concatenated as person ids and the distinct persons re-matched by id, which selects the same persons. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node.",
+      "upstream": "neo4j/queries/bi-8.cypher"
+    },
+    {
+      "columns": [
+        "personId",
+        "personFirstName",
+        "personLastName",
+        "threadCount",
+        "messageCount"
+      ],
+      "cypher": "MATCH (person:Person)<-[:HAS_CREATOR]-(post:Post)<-[:REPLY_OF*0..]-(reply)\nWHERE  (reply:Post OR reply:Comment)\n  AND  post.creationDate >= $startDate\n  AND  post.creationDate <= $endDate\n  AND reply.creationDate >= $startDate\n  AND reply.creationDate <= $endDate\nRETURN\n  person.id AS personId,\n  person.firstName AS personFirstName,\n  person.lastName AS personLastName,\n  count(DISTINCT post) AS threadCount,\n  count(DISTINCT reply) AS messageCount\nORDER BY\n  messageCount DESC,\n  personId ASC\nLIMIT 100",
+      "operation": "BI9",
+      "parameters": [
+        {
+          "fixed": null,
+          "kind": "datetime",
+          "name": "startDate"
+        },
+        {
+          "fixed": null,
+          "kind": "datetime",
+          "name": "endDate"
+        }
+      ],
+      "rewrite": "rewrite: LDBC text matches the `:Message` supertype label, which import sessions cannot assign (one label per node). `(m:Message)` becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes.",
+      "upstream": "neo4j/queries/bi-9.cypher"
+    },
+    {
+      "columns": [
+        "personId",
+        "tagName",
+        "messageCount"
+      ],
+      "cypher": "MATCH path = (startPerson:Person {id: $personId})-[:KNOWS*1..4]-(expertCandidatePerson:Person)\nWHERE expertCandidatePerson <> startPerson\nWITH expertCandidatePerson, min(length(path)) AS distance\nWHERE $minPathDistance <= distance AND distance <= $maxPathDistance\nMATCH\n  (expertCandidatePerson)-[:IS_LOCATED_IN]->(:City)-[:IS_PART_OF]->(:Country {name: $country}),\n  (expertCandidatePerson)<-[:HAS_CREATOR]-(message)-[:HAS_TAG]->(:Tag)-[:HAS_TYPE]->\n  (:TagClass {name: $tagClass})\nWHERE (message:Post OR message:Comment)\nMATCH\n  (message)-[:HAS_TAG]->(tag:Tag)\nRETURN\n  expertCandidatePerson.id AS personId,\n  tag.name AS tagName,\n  count(DISTINCT message) AS messageCount\nORDER BY\n  messageCount DESC,\n  tagName ASC,\n  personId ASC\nLIMIT 100",
+      "operation": "BI10",
+      "parameters": [
+        {
+          "fixed": null,
+          "kind": "int64",
+          "name": "personId"
+        },
+        {
+          "fixed": null,
+          "kind": "string",
+          "name": "country"
+        },
+        {
+          "fixed": null,
+          "kind": "string",
+          "name": "tagClass"
+        },
+        {
+          "fixed": 3,
+          "kind": "int64",
+          "name": "minPathDistance"
+        },
+        {
+          "fixed": 4,
+          "kind": "int64",
+          "name": "maxPathDistance"
+        }
+      ],
+      "rewrite": "rewrite: LDBC text calls the APOC procedure `apoc.path.subgraphNodes`, which GraphForge does not provide. APOC keeps persons whose shortest KNOWS distance lies in [minPathDistance, maxPathDistance]; here the distance is the minimum length over KNOWS trails of length 1..4 from the start person, which equals the shortest-path distance for every person within 4 hops (a shortest walk is a trail). The start person is excluded, as APOC's minLevel 1 excludes it. The specification fixes the distances at 3 and 4 (umbra/queries/bi-10.sql), the pattern bound 4 relies on that, and the runner refuses any other binding. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node.",
+      "upstream": "neo4j/queries/bi-10.cypher"
+    },
+    {
+      "columns": [
+        "count"
+      ],
+      "cypher": "MATCH (a:Person)-[:IS_LOCATED_IN]->(:City)-[:IS_PART_OF]->(country:Country {name: $country}),\n      (a)-[k1:KNOWS]-(b:Person)\nWHERE a.id < b.id\n  AND $startDate <= k1.creationDate AND k1.creationDate <= $endDate\nWITH DISTINCT country, a, b\nMATCH (b)-[:IS_LOCATED_IN]->(:City)-[:IS_PART_OF]->(country)\nWITH DISTINCT country, a, b\nMATCH (b)-[k2:KNOWS]-(c:Person),\n      (c)-[:IS_LOCATED_IN]->(:City)-[:IS_PART_OF]->(country)\nWHERE b.id < c.id\n  AND $startDate <= k2.creationDate AND k2.creationDate <= $endDate\nWITH DISTINCT a, b, c\nMATCH (c)-[k3:KNOWS]-(a)\nWHERE $startDate <= k3.creationDate AND k3.creationDate <= $endDate\nWITH DISTINCT a, b, c\nRETURN count(*) AS count",
+      "operation": "BI11",
+      "parameters": [
+        {
+          "fixed": null,
+          "kind": "string",
+          "name": "country"
+        },
+        {
+          "fixed": null,
+          "kind": "datetime",
+          "name": "startDate"
+        },
+        {
+          "fixed": null,
+          "kind": "datetime",
+          "name": "endDate"
+        }
+      ],
+      "rewrite": null,
+      "upstream": "neo4j/queries/bi-11.cypher"
+    },
+    {
+      "columns": [
+        "messageCount",
+        "personCount"
+      ],
+      "cypher": "MATCH (person:Person)\nOPTIONAL MATCH (person)<-[:HAS_CREATOR]-(message)-[:REPLY_OF*0..]->(post:Post)\nWHERE (message:Post OR message:Comment)\n  AND message.content IS NOT NULL\n  AND message.length < $lengthThreshold\n  AND message.creationDate > $startDate\n  AND post.language IN $languages\nWITH\n  person,\n  count(message) AS messageCount\nRETURN\n  messageCount,\n  count(person) AS personCount\nORDER BY\n  personCount DESC,\n  messageCount DESC",
+      "operation": "BI12",
+      "parameters": [
+        {
+          "fixed": null,
+          "kind": "datetime",
+          "name": "startDate"
+        },
+        {
+          "fixed": null,
+          "kind": "int64",
+          "name": "lengthThreshold"
+        },
+        {
+          "fixed": null,
+          "kind": "string_list",
+          "name": "languages"
+        }
+      ],
+      "rewrite": "rewrite: LDBC text matches the `:Message` supertype label, which import sessions cannot assign (one label per node). `(m:Message)` becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes.",
+      "upstream": "neo4j/queries/bi-12.cypher"
+    },
+    {
+      "columns": [
+        "zombieId",
+        "zombieLikeCount",
+        "totalLikeCount",
+        "zombieScore"
+      ],
+      "cypher": "MATCH (country:Country {name: $country})<-[:IS_PART_OF]-(:City)<-[:IS_LOCATED_IN]-(zombie:Person)\nWHERE zombie.creationDate < $endDate\nWITH country, zombie\nOPTIONAL MATCH (zombie)<-[:HAS_CREATOR]-(message)\nWHERE (message:Post OR message:Comment) AND message.creationDate < $endDate\nWITH\n  country,\n  zombie,\n  count(message) AS messageCount\nWITH\n  country,\n  zombie,\n  zombie.creationDate AS zombieCreationDate,\n  messageCount\nWITH\n  country,\n  zombie,\n  12 * ($endDate.year  - zombieCreationDate.year )\n     + ($endDate.month - zombieCreationDate.month)\n     + 1 AS months,\n  messageCount\nWHERE messageCount / months < 1\nWITH\n  country,\n  collect(zombie) AS zombies\nUNWIND zombies AS zombie\nOPTIONAL MATCH\n  (zombie)<-[:HAS_CREATOR]-(message)<-[:LIKES]-(likerZombie:Person)\nWHERE (message:Post OR message:Comment)\nWITH\n  zombie,\n  count(CASE WHEN likerZombie IN zombies THEN likerZombie END) AS zombieLikeCount\nOPTIONAL MATCH\n  (zombie)<-[:HAS_CREATOR]-(message)<-[:LIKES]-(likerPerson:Person)\nWHERE (message:Post OR message:Comment) AND likerPerson.creationDate < $endDate\nWITH\n  zombie,\n  zombieLikeCount,\n  count(likerPerson) AS totalLikeCount\nRETURN\n  zombie.id AS zombieId,\n  zombieLikeCount,\n  totalLikeCount,\n  CASE totalLikeCount\n    WHEN 0 THEN 0.0\n    ELSE zombieLikeCount / toFloat(totalLikeCount)\n  END AS zombieScore\nORDER BY\n  zombieScore DESC,\n  zombieId ASC\nLIMIT 100",
+      "operation": "BI13",
+      "parameters": [
+        {
+          "fixed": null,
+          "kind": "string",
+          "name": "country"
+        },
+        {
+          "fixed": null,
+          "kind": "datetime",
+          "name": "endDate"
+        }
+      ],
+      "rewrite": "rewrite: LDBC text hits #1888 D3 (`zombie.creationDate.year` fails to plan) and #1919 (`OPTIONAL MATCH ... WHERE likerZombie IN zombies` returns zero like counts on the query fixture). The creation-date components are read from a WITH-bound alias of the same property, and likes by zombies are counted with a conditional count inside the aggregate, which counts the same like edges. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node.",
+      "upstream": "neo4j/queries/bi-13.cypher"
+    },
+    {
+      "columns": [
+        "person1Id",
+        "person2Id",
+        "city1Name",
+        "score"
+      ],
+      "cypher": "MATCH\n  (country1:Country {name: $country1})<-[:IS_PART_OF]-(city1:City)<-[:IS_LOCATED_IN]-(person1:Person),\n  (country2:Country {name: $country2})<-[:IS_PART_OF]-(city2:City)<-[:IS_LOCATED_IN]-(person2:Person),\n  (person1)-[:KNOWS]-(person2)\nWITH person1, person2, city1, 0 AS score\nOPTIONAL MATCH (person1)<-[:HAS_CREATOR]-(c:Comment)-[:REPLY_OF]->(parent)-[:HAS_CREATOR]->(person2)\nWHERE (parent:Post OR parent:Comment)\nWITH DISTINCT person1, person2, city1, score + (CASE WHEN c IS NULL THEN 0 ELSE  4 END) AS score\nOPTIONAL MATCH (person1)<-[:HAS_CREATOR]-(m)<-[:REPLY_OF]-(:Comment)-[:HAS_CREATOR]->(person2)\nWHERE (m:Post OR m:Comment)\nWITH DISTINCT person1, person2, city1, score + (CASE WHEN m IS NULL THEN 0 ELSE  1 END) AS score\nOPTIONAL MATCH (person1)-[:LIKES]->(m)-[:HAS_CREATOR]->(person2)\nWHERE (m:Post OR m:Comment)\nWITH DISTINCT person1, person2, city1, score + (CASE WHEN m IS NULL THEN 0 ELSE 10 END) AS score\nOPTIONAL MATCH (person1)<-[:HAS_CREATOR]-(m)<-[:LIKES]-(person2)\nWHERE (m:Post OR m:Comment)\nWITH DISTINCT person1, person2, city1, score + (CASE WHEN m IS NULL THEN 0 ELSE  1 END) AS score\nWITH city1, max(score) AS topScore, collect({score: score, person1Id: person1.id, person2Id: person2.id}) AS pairs\nUNWIND pairs AS pair\nWITH city1, topScore, pair\nWHERE pair.score = topScore\nWITH city1, topScore, min(pair.person1Id) AS topPerson1Id, collect(pair) AS best\nUNWIND best AS pair\nWITH city1, topScore, topPerson1Id, pair\nWHERE pair.person1Id = topPerson1Id\nWITH city1, topScore, topPerson1Id, min(pair.person2Id) AS topPerson2Id\nRETURN\n  topPerson1Id AS person1Id,\n  topPerson2Id AS person2Id,\n  city1.name AS city1Name,\n  topScore AS score\nORDER BY\n  score DESC,\n  person1Id ASC,\n  person2Id ASC\nLIMIT 100",
+      "operation": "BI14",
+      "parameters": [
+        {
+          "fixed": null,
+          "kind": "string",
+          "name": "country1"
+        },
+        {
+          "fixed": null,
+          "kind": "string",
+          "name": "country2"
+        }
+      ],
+      "rewrite": "rewrite: LDBC text picks each city's top pair as `collect(...)[0]` after an ORDER BY, which depends on aggregation keeping input order; openCypher does not guarantee that. The pair is chosen explicitly as the highest score, then the lowest person1 id, then the lowest person2 id, which is the pair the LDBC ordering puts first. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node.",
+      "upstream": "neo4j/queries/bi-14.cypher"
+    },
+    {
+      "columns": [
+        "personId",
+        "messageCountA",
+        "messageCountB"
+      ],
+      "cypher": "MATCH (person1:Person)<-[:HAS_CREATOR]-(message1)-[:HAS_TAG]->(tag:Tag {name: $tagA})\nWHERE (message1:Post OR message1:Comment) AND date(message1.creationDate) = date($dateA)\nOPTIONAL MATCH (person1)-[:KNOWS]-(person2:Person)<-[:HAS_CREATOR]-(message2)-[:HAS_TAG]->(tag)\nWHERE (message2:Post OR message2:Comment) AND date(message2.creationDate) = date($dateA)\nWITH person1, count(DISTINCT message1) AS cm, count(DISTINCT person2) AS cp2\nWHERE cp2 <= $maxKnowsLimit\nWITH person1, cm AS messageCountA\nMATCH (person1)<-[:HAS_CREATOR]-(message1)-[:HAS_TAG]->(tag:Tag {name: $tagB})\nWHERE (message1:Post OR message1:Comment) AND date(message1.creationDate) = date($dateB)\nOPTIONAL MATCH (person1)-[:KNOWS]-(person2:Person)<-[:HAS_CREATOR]-(message2)-[:HAS_TAG]->(tag)\nWHERE (message2:Post OR message2:Comment) AND date(message2.creationDate) = date($dateB)\nWITH person1, messageCountA, count(DISTINCT message1) AS cm, count(DISTINCT person2) AS cp2\nWHERE cp2 <= $maxKnowsLimit\nRETURN\n  person1.id AS personId,\n  messageCountA,\n  cm AS messageCountB\nORDER BY messageCountA + messageCountB DESC, personId ASC\nLIMIT 20",
+      "operation": "BI16",
+      "parameters": [
+        {
+          "fixed": null,
+          "kind": "string",
+          "name": "tagA"
+        },
+        {
+          "fixed": null,
+          "kind": "datetime",
+          "name": "dateA"
+        },
+        {
+          "fixed": null,
+          "kind": "string",
+          "name": "tagB"
+        },
+        {
+          "fixed": null,
+          "kind": "datetime",
+          "name": "dateB"
+        },
+        {
+          "fixed": null,
+          "kind": "int64",
+          "name": "maxKnowsLimit"
+        }
+      ],
+      "rewrite": "rewrite: LDBC text hits #1888 D5 (CALL subquery). LDBC runs the same per-person subquery for (tagA, dateA) and (tagB, dateB) and keeps persons that pass both; here the A pass runs over all persons and the B pass runs for each person that passed A. A person's B counts depend only on that person, so the surviving persons and their counts are the same. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node.",
+      "upstream": "neo4j/queries/bi-16.cypher"
+    },
+    {
+      "columns": [
+        "person1Id",
+        "messageCount"
+      ],
+      "cypher": "MATCH\n  (tag:Tag {name: $tag}),\n  (person1:Person)<-[:HAS_CREATOR]-(message1)-[:REPLY_OF*0..]->(post1:Post)<-[:CONTAINER_OF]-(forum1:Forum),\n  (message1)-[:HAS_TAG]->(tag),\n  (forum1)<-[:HAS_MEMBER]->(person2:Person)<-[:HAS_CREATOR]-(comment:Comment)-[:HAS_TAG]->(tag),\n  (forum1)<-[:HAS_MEMBER]->(person3:Person)<-[:HAS_CREATOR]-(message2),\n  (comment)-[:REPLY_OF]->(message2)-[:REPLY_OF*0..]->(post2:Post)<-[:CONTAINER_OF]-(forum2:Forum)\nWHERE (message1:Post OR message1:Comment) AND (message2:Post OR message2:Comment)\nMATCH (comment)-[:HAS_TAG]->(tag)\nMATCH (message2)-[:HAS_TAG]->(tag)\nWITH\n  person1,\n  message2,\n  forum1,\n  forum2,\n  message1.creationDate AS message1CreationDate,\n  message2.creationDate AS message2CreationDate\nWHERE forum1 = forum2\n  AND message2CreationDate.epochMillis > message1CreationDate.epochMillis + $delta * 3600000\n  AND NOT (forum2)-[:HAS_MEMBER]->(person1)\nRETURN person1.id AS person1Id, count(DISTINCT message2) AS messageCount\nORDER BY messageCount DESC, person1Id ASC\nLIMIT 10",
+      "operation": "BI17",
+      "parameters": [
+        {
+          "fixed": null,
+          "kind": "string",
+          "name": "tag"
+        },
+        {
+          "fixed": null,
+          "kind": "int64",
+          "name": "delta"
+        }
+      ],
+      "rewrite": "rewrite: LDBC text hits #1888 D4 (`duration({hours: $delta})` with a non-literal argument fails). The delta becomes a comparison of epoch milliseconds with `$delta * 3600000` added, which is exact for whole hours on a UTC instant. The final WHERE moves onto a WITH carrying the compared values. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node.",
+      "upstream": "neo4j/queries/bi-17.cypher"
+    },
+    {
+      "columns": [
+        "person1Id",
+        "person2Id",
+        "mutualFriendCount"
+      ],
+      "cypher": "MATCH (tag:Tag {name: $tag})<-[:HAS_INTEREST]-(person1:Person)-[:KNOWS]-(mutualFriend:Person)-[:KNOWS]-(person2:Person)-[:HAS_INTEREST]->(tag)\nWHERE person1 <> person2\n  AND NOT (person1)-[:KNOWS]-(person2)\nRETURN person1.id AS person1Id, person2.id AS person2Id, count(DISTINCT mutualFriend) AS mutualFriendCount\nORDER BY mutualFriendCount DESC, person1Id ASC, person2Id ASC\nLIMIT 20",
+      "operation": "BI18",
+      "parameters": [
+        {
+          "fixed": null,
+          "kind": "string",
+          "name": "tag"
+        }
+      ],
+      "rewrite": null,
+      "upstream": "neo4j/queries/bi-18.cypher"
+    }
+  ],
+  "refused": [
+    {
+      "cause": "weighted_shortest_path_not_exposed",
+      "operation": "BI15"
+    },
+    {
+      "cause": "weighted_shortest_path_not_exposed",
+      "operation": "BI19"
+    },
+    {
+      "cause": "weighted_shortest_path_not_exposed",
+      "operation": "BI20"
+    }
+  ],
+  "schema": "graphforge-gdc-snb-bi-queries/1",
+  "upstream": {
+    "commit": "47dd38b40844ecdb0e42e5a610c369535304786d",
+    "source": "https://github.com/ldbc/ldbc_snb_bi"
+  }
+}

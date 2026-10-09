@@ -102,17 +102,9 @@ fn content_addressed_v4_install_reuses_identical_and_preserves_collisions() {
     let reused = stage_v4_ordinal_bundle(mappings, 1, &index, &mut || false).unwrap();
     assert!(reused.publications.is_empty());
     inject_v4_authority_failure("after_artifacts");
-    let error = publish_v4_construction_artifacts(
-        &encoded,
-        reused,
-        1,
-        &hex_sha256(b"delta"),
-        None,
-        &mut || false,
-        None,
-    )
-    .unwrap_err()
-    .to_string();
+    let error = publish_v4_construction_artifacts(&encoded, reused, 1, None, &mut || false, None)
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("injected v4 authority failure at after_artifacts"));
     for (name, identity, bytes) in &originals {
         let file = index.open_child_file(std::ffi::OsStr::new(name)).unwrap();
@@ -133,16 +125,8 @@ fn content_addressed_v4_install_reuses_identical_and_preserves_collisions() {
 
     let reused = stage_v4_ordinal_bundle(mappings, 1, &index, &mut || false).unwrap();
     assert!(reused.publications.is_empty());
-    let (outputs, _, _) = publish_v4_construction_artifacts(
-        &encoded,
-        reused,
-        1,
-        &hex_sha256(b"delta"),
-        None,
-        &mut || false,
-        None,
-    )
-    .unwrap();
+    let (outputs, _, _) =
+        publish_v4_construction_artifacts(&encoded, reused, 1, None, &mut || false, None).unwrap();
     for (name, identity, bytes) in &originals {
         let output = outputs
             .iter()

@@ -335,8 +335,6 @@ jobs:
           runtime_entity_labels::tests::catalog_persistence_replaces_read_only_cas_aliases
           route_component::tests::
           route_component::owned::tests::legacy_cas_materialization_translates_routes_before_creating_paths
-          uuid_membership::tests::owned_manifest_
-          uuid_membership::tests::readonly_shared_runs_preserve_uuid_snapshot_authentication
           graph_files::tests::graph_file_copy_
           adjacency::builder::tests::admitted_reserved_relations_build_portable_distinct_indexes
           mutator::tests::mapped_reserved_delete_preserves_other_routes_and_reopens
@@ -592,6 +590,8 @@ jobs:
             -p graphforge-benchmark-gdc-snb-bi
           cargo test --locked --manifest-path benchmarks/Cargo.toml \
             -p graphforge-benchmark-gdc-snb-interactive
+          cargo test --locked --manifest-path benchmarks/Cargo.toml \
+            -p graphforge-benchmark-gdc-finbench-transaction
           cargo test --locked --manifest-path benchmarks/Cargo.toml \
             -p graphforge-benchmark-certify --lib
           cargo build --locked -p graphforge-cli --bin gf

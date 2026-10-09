@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import itertools
 import json
 import os
 from pathlib import Path
@@ -42,12 +43,18 @@ from graphforge_bench.gdc_rung_inputs import (
     read_results,
     result_digest,
 )
-from graphforge_bench.gdc_scorecard_card import CardError, render_card, write_card
+from graphforge_bench.gdc_scorecard_card import (
+    MAKESPAN_NOT_MEASURED,
+    CardError,
+    render_card,
+    write_card,
+)
 from graphforge_bench.progressive_host_run import (
     HostRunError,
     reclaim_rung_workspace,
     reclaim_workspace,
 )
+from graphforge_bench.progressive_run import _run_benchexec
 from graphforge_bench.tools.graphforge_gdc_phase import EXECUTABLE, Tool
 from jsonschema import Draft202012Validator
 
@@ -76,6 +83,10 @@ def serve_fixture_archives(url: str) -> contextlib.AbstractContextManager[io.Byt
     """The dataset cache's opener, serving the committed archives with no network."""
     name = url.rsplit("/", 1)[1]
     return contextlib.closing(io.BytesIO((FIXTURE / "archives" / name).read_bytes()))
+
+
+# BenchExec's run status for a run it stopped at a limit.
+TERMINATED_STATUS = {"walltime": "TIMEOUT", "memory": "OUT OF MEMORY"}
 
 
 class FakeBenchExec:
@@ -110,7 +121,7 @@ class FakeBenchExec:
         )
         status = "DONE" if completed.returncode == 0 else "ERROR"
         columns = {
-            "status": status if self.termination is None else "TIMEOUT",
+            "status": status if self.termination is None else TERMINATED_STATUS[self.termination],
             "walltime": f"{wall:.6f}s",
             "cputime": f"{cpu:.6f}s",
             "memory": f"{after.ru_maxrss * 1024}B",
@@ -253,6 +264,12 @@ class TinyLadderEndToEndTests(Scratch):
             [("query", "query_failed"), ("check", "reference_mismatch")],
         )
         self.assertIn("people-per-city/all", failed["failures"][1]["detail"])
+        # The rung says what failed, not only that something did: the driver's own
+        # exit message counts failures and names a workspace the teardown deletes.
+        self.assertEqual(
+            failed["failures"][0]["detail"],
+            "unparsable (only): GF_PARSE: parse error at 21..27: expected RParen, found Return",
+        )
         failed_evidence = json.loads(
             (self.output / "snb-interactive-sf1-query-evidence.json").read_text()
         )
@@ -322,6 +339,66 @@ class TinyLadderEndToEndTests(Scratch):
         self.assertEqual(len(benchexec.stages), 6)
         with self.assertRaises(FileExistsError):
             write_card(ROOT, ladder.spec, self.output)
+
+    def test_a_swap_rise_fails_the_phase_naming_and_retaining_the_counters(self) -> None:
+        readings = iter(
+            [{"pswpin": 10, "pswpout": 20}, {"pswpin": 12, "pswpout": 25}]  # before, after
+        )
+        ladder = self.ladder(self.executables, FakeBenchExec())
+        with patch.object(gdc_rung, "_host_swap_counters", side_effect=lambda: next(readings)):
+            results = gdc_rung.climb(
+                ladder,
+                reserved_headroom_bytes=0,
+                quiet_host_wait_seconds=0,
+                quiet_host=lambda _wait: QUIET,
+            )
+        self.assertEqual(
+            results[0]["failure"],
+            {
+                "phase": "convert",
+                "cause": "host_swapped",
+                "detail": "host paged out during the phase: pswpout +5 (20 -> 25), pswpin +2; "
+                "see host-swap.json",
+            },
+        )
+        retained = self.output / "snb-interactive-sf0-convert-benchexec-raw" / "host-swap.json"
+        self.assertEqual(
+            json.loads(retained.read_text()),
+            {"before": {"pswpin": 10, "pswpout": 20}, "after": {"pswpin": 12, "pswpout": 25}},
+        )
+
+    def test_a_swap_in_alone_does_not_fail_the_phase(self) -> None:
+        readings = itertools.cycle(
+            [{"pswpin": 10, "pswpout": 20}, {"pswpin": 30, "pswpout": 20}]  # before, after
+        )
+        ladder = self.ladder(self.executables, FakeBenchExec())
+        with patch.object(gdc_rung, "_host_swap_counters", side_effect=lambda: next(readings)):
+            results = gdc_rung.climb(
+                ladder,
+                reserved_headroom_bytes=0,
+                quiet_host_wait_seconds=0,
+                quiet_host=lambda _wait: QUIET,
+            )
+        self.assertEqual(results[0]["status"], "passed")
+        self.assertEqual(list(self.output.glob("*host-swap.json")), [])
+
+    def test_a_phase_stopped_at_the_memory_limit_fails_typed_with_the_peak(self) -> None:
+        ladder = self.ladder(self.executables, FakeBenchExec(termination="memory"))
+        results = gdc_rung.climb(
+            ladder,
+            reserved_headroom_bytes=0,
+            quiet_host_wait_seconds=0,
+            quiet_host=lambda _wait: QUIET,
+        )
+        self.assertEqual(len(results), 1)
+        failure = results[0]["failure"]
+        self.assertEqual((failure["phase"], failure["cause"]), ("convert", "memory_limit_exceeded"))
+        self.assertRegex(
+            failure["detail"],
+            r"^BenchExec stopped the phase at its 4294967296 byte memory limit; "
+            r"BenchExec memory \d+, process peak RSS \d+$",
+        )
+        self.assertTrue(results[0]["inventory"]["empty"])
 
     def test_a_phase_stopped_at_the_wall_fails_typed_and_still_tears_down(self) -> None:
         ladder = self.ladder(self.executables, FakeBenchExec(termination="walltime"))
@@ -476,6 +553,97 @@ class PhaseClassificationTests(unittest.TestCase):
         self.assertIsNone(self.classify(telemetry={"failure": None, "peak_rss_bytes": 4 * 1024**3}))
         self.assertEqual(cause(swapped=True), "host_swapped")
         self.assertEqual(cause(document={"outcome": "exit"}), "benchexec_failed")
+
+
+class FailedSampleDescriptionTests(unittest.TestCase):
+    def test_each_distinct_error_lists_its_bindings_and_stays_bounded(self) -> None:
+        def failed(binding: str, code: str, error: str) -> dict[str, Any]:
+            return {"binding_id": binding, "status": "failed", "error_code": code, "error": error}
+
+        evidence = {
+            "variants": [
+                {"query_id": "bfs", "samples": [failed("run-1", "GF_VALIDATION", "too big")] * 1},
+                {
+                    "query_id": "lcc",
+                    "samples": [
+                        failed("run-1", "GF_EXECUTION", "iteration limit"),
+                        {"binding_id": "run-2", "status": "measured"},
+                        failed("run-3", "GF_EXECUTION", "iteration limit"),
+                    ],
+                },
+            ]
+        }
+        self.assertEqual(
+            gdc_rung.describe_failed_samples(evidence),
+            "bfs (run-1): GF_VALIDATION: too big; "
+            "lcc (run-1, run-3): GF_EXECUTION: iteration limit",
+        )
+        evidence["variants"][0]["samples"][0]["error"] = "x" * 5000
+        self.assertEqual(len(gdc_rung.describe_failed_samples(evidence)), 2048)
+        self.assertEqual(gdc_rung.describe_failed_samples({"variants": []}), "")
+
+
+class HostSwapDetailTests(unittest.TestCase):
+    """A `host_swapped` phase names the counters that moved."""
+
+    def test_only_a_page_out_marks_the_phase(self) -> None:
+        before = {"pswpin": 503592, "pswpout": 830053}
+        # Swap-ins with no swap-out are other processes' cold pages (systemd-journald
+        # waking to log the phase's own scope): not this phase's memory.
+        self.assertFalse(
+            gdc_rung.swapped_out(before, {"pswpin": 503611, "pswpout": 830053}),
+        )
+        self.assertTrue(gdc_rung.swapped_out(before, {"pswpin": 503592, "pswpout": 830054}))
+        self.assertTrue(gdc_rung.swapped_out(before, {"pswpin": 503700, "pswpout": 830060}))
+
+    def test_the_detail_names_both_counters(self) -> None:
+        self.assertEqual(
+            gdc_rung.swap_detail(
+                {"pswpin": 503592, "pswpout": 830053}, {"pswpin": 503595, "pswpout": 830060}
+            ),
+            "host paged out during the phase: pswpout +7 (830053 -> 830060), pswpin +3; "
+            "see host-swap.json",
+        )
+
+
+class BenchExecMemoryLimitTests(unittest.TestCase):
+    """Each GDC phase runs under the rung envelope; the Graph500 ladder keeps its ceiling."""
+
+    def run_benchexec(self, runner: Any) -> list[str]:
+        with tempfile.TemporaryDirectory(prefix="gdc-limit-") as raw:
+            stage = Path(raw)
+            (stage / "bin").mkdir()
+            executables = SimpleNamespace(benchexec_python=Path(sys.executable))
+            identities = {"benchexec_python_sha256": digest_of(Path(sys.executable))}
+            with patch("graphforge_bench.progressive_run.subprocess.run") as execute:
+                execute.return_value.returncode = 0
+                runner(stage, executables, identities, Path(raw))
+            return list(execute.call_args.args[0])
+
+    def test_a_gdc_phase_runs_under_the_declared_envelope(self) -> None:
+        command = self.run_benchexec(gdc_rung.host_benchexec)
+        self.assertEqual(
+            command[command.index("--memorylimit") + 1], str(gdc_rung.MEMORY_LIMIT_BYTES) + "B"
+        )
+        self.assertEqual(gdc_rung.MEMORY_LIMIT_BYTES, 4 * 1024**3)
+        schema = json.loads((ROOT / "schemas/gdc-rung-result.json").read_text())
+        self.assertEqual(
+            schema["properties"]["limits"]["properties"]["memory_bytes"]["const"],
+            gdc_rung.MEMORY_LIMIT_BYTES,
+        )
+        # The phase definition declares no second memory limit.
+        self.assertNotIn(
+            "memlimit", (ROOT / "definitions" / f"{gdc_rung.DEFINITION}.xml").read_text()
+        )
+
+    def test_the_progressive_ladder_keeps_its_ceiling(self) -> None:
+        command = self.run_benchexec(
+            lambda stage, executables, identities, root: _run_benchexec(
+                stage, executables, identities, durable_root=root, home=root
+            )
+        )
+        self.assertEqual(command[command.index("--memorylimit") + 1], "96GB")
+        self.assertEqual(command.count("--memorylimit"), 1)
 
 
 class ExpectedCountsTests(unittest.TestCase):
@@ -664,6 +832,46 @@ class MatchingTests(unittest.TestCase):
         )
         self.assertEqual([m["cause"] for m in unmatched["mismatches"]], ["reference_unmatched"])
 
+    def test_a_failed_referenced_sample_reports_its_error_text(self) -> None:
+        evidence = {
+            "variants": [
+                {
+                    "query_id": "q",
+                    "samples": [
+                        {
+                            "binding_id": "b",
+                            "status": "failed",
+                            "cause": "query_failed",
+                            "error_code": "GF_VALIDATION",
+                            "error": "validation error: node selector topology scan "
+                            "exceeds row limit",
+                        }
+                    ],
+                }
+            ]
+        }
+        reference = {
+            "source": "test",
+            "queries": {
+                "q": {"matching": "exact", "bindings": {"b": {"columns": ["id"], "rows": []}}}
+            },
+        }
+        failed = check_reference(
+            reference=reference, reference_sha256=None, evidence=evidence, results={}
+        )
+        self.assertEqual(
+            failed["mismatches"],
+            [
+                {
+                    "query_id": "q",
+                    "binding_id": "b",
+                    "cause": "query_failed",
+                    "detail": "GF_VALIDATION: validation error: node selector topology scan "
+                    "exceeds row limit",
+                }
+            ],
+        )
+
     def test_results_written_twice_are_refused(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
@@ -736,6 +944,7 @@ class CardRenderingTests(unittest.TestCase):
             "latency": None,
             "graphalytics": {
                 "tl_seconds": 61.25,
+                "makespan_not_measured": MAKESPAN_NOT_MEASURED,
                 "algorithms": [
                     {
                         "algorithm": "bfs",
@@ -787,11 +996,11 @@ class CardRenderingTests(unittest.TestCase):
             text,
         )
         self.assertIn("Tp:           bfs 2.0 s (mean of 3 driver-clock runs)\n", text)
-        self.assertIn("Makespan:     not measured\n", text)
+        self.assertIn(f"Makespan:     not measured ({MAKESPAN_NOT_MEASURED})\n", text)
         self.assertIn("EVPS:         bfs 1.01e+07\n", text)
         self.assertNotIn("Latency:", text)
         self.assertIn(
-            "Coverage:     4/6 queries; refused: pr (fixed_iteration_pagerank_not_exposed); "
+            "Coverage:     4/6 algorithms; refused: pr (fixed_iteration_pagerank_not_exposed); "
             "cdlp (synchronous_cdlp_not_exposed)\n",
             text,
         )

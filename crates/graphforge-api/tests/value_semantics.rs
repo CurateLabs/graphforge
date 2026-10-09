@@ -188,7 +188,8 @@ fn relationship_variables_compare_by_identity() {
     gf.execute("CREATE (:A)-[:REL]->(:B)")
         .expect("create relationship");
     let result = gf
-        .execute("MATCH ()-[r:REL]->(), ()-[s:REL]->() RETURN r = s AS same")
+        // Separate clauses: one MATCH never binds a relationship twice (#1887 D6).
+        .execute("MATCH ()-[r:REL]->() MATCH ()-[s:REL]->() RETURN r = s AS same")
         .expect("relationship equality");
     assert_eq!(result.stats.rows_produced, 1);
     assert_eq!(bool_cell(&result.batches[0], "same"), Some(true));

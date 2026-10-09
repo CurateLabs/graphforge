@@ -28,7 +28,6 @@ pub(crate) struct CapturedEncodedArtifact<'a> {
     name: std::ffi::OsString,
     file: std::fs::File,
     identity: graphforge_filesystem::FileIdentity,
-    allocated_bytes: u64,
     artifact: &'a crate::graph_construction_encoding::ConstructionEncodedArtifact,
 }
 
@@ -57,9 +56,13 @@ impl CapturedEncodedInventory<'_> {
         }
         let file = parent.open_child_file(&name).map_err(storage)?;
         let identity = graphforge_filesystem::file_identity(&file).map_err(storage)?;
-        let usage = graphforge_filesystem::file_space_usage(&file).map_err(storage)?;
+        // The ledger entry is accounting recorded when the artifact was encoded.
+        // Its presence admits this inode as one the session encoded; its
+        // allocation is not compared with a fresh measurement, because the
+        // artifact has not been synced and the filesystem may legitimately
+        // change `st_blocks` with no change to identity or content (#1928).
         let identity_key = format!("{:016x}:{}", identity.volume_serial, hex(&identity.file_id));
-        if self.active_identities.get(&identity_key) != Some(&usage.allocated_bytes) {
+        if !self.active_identities.contains_key(&identity_key) {
             return Err(storage(
                 "captured encoded source allocation identity changed",
             ));
@@ -70,7 +73,6 @@ impl CapturedEncodedInventory<'_> {
             name,
             file,
             identity,
-            allocated_bytes: usage.allocated_bytes,
             artifact,
         };
         source.revalidate()?;
@@ -91,6 +93,31 @@ impl CapturedEncodedArtifact<'_> {
     pub(crate) fn source(&self) -> &std::fs::File {
         &self.file
     }
+    /// The retained directory holding the staged name.
+    #[cfg(unix)]
+    pub(crate) fn parent(&self) -> &StableDirectory {
+        &self.parent
+    }
+    /// The staged name inside [`Self::parent`].
+    #[cfg(unix)]
+    pub(crate) fn name(&self) -> &OsStr {
+        &self.name
+    }
+    /// The retained identity of the staged inode.
+    #[cfg(unix)]
+    pub(crate) fn identity(&self) -> graphforge_filesystem::FileIdentity {
+        self.identity
+    }
+    /// The artifact's path relative to the encoded graph root.
+    #[cfg(unix)]
+    pub(crate) fn relative_path(&self) -> &str {
+        &self.artifact.path
+    }
+    /// The retained handle and the inventory name still denote the one file the
+    /// inventory admitted, with its length and link authority. Allocated blocks
+    /// are filesystem state of an unsynced file, not identity, and are never
+    /// compared (#1928). Content is authenticated by the consumer's XXH64 and
+    /// SHA-256 checks against the inventory.
     pub(crate) fn revalidate(&self) -> Result<(), GfError> {
         self.root.revalidate_named().map_err(storage)?;
         self.parent.revalidate_named().map_err(storage)?;
@@ -100,11 +127,11 @@ impl CapturedEncodedArtifact<'_> {
             || metadata.len() != self.bytes()
             || graphforge_filesystem::file_identity(&self.file).map_err(storage)? != self.identity
             || graphforge_filesystem::file_identity(&named).map_err(storage)? != self.identity
-            || graphforge_filesystem::file_link_count(&self.file).map_err(storage)? != 1
-            || graphforge_filesystem::file_space_usage(&self.file)
-                .map_err(storage)?
-                .allocated_bytes
-                != self.allocated_bytes
+            || !crate::graph_construction_encoding::staged_links_admitted(
+                self.root.path(),
+                self.artifact.sha256.as_str(),
+                &self.file,
+            )?
         {
             return Err(storage(
                 "captured encoded source identity or length changed",
@@ -349,7 +376,7 @@ impl GraphConstructionSession {
             let encoding =
                 self.prepare_canonical_encoding_with_cancellation(generation, cancelled)?;
             let nodes = encoding.evidence.ordinal_records;
-            let edges = encoding.evidence.membership_records.saturating_sub(nodes);
+            let edges = encoding.evidence.edge_records;
             if let Ok(mut report) = self.bulk_report.lock() {
                 *report = crate::graph_construction_encoding::BulkBuildReport {
                     nodes,
@@ -418,7 +445,7 @@ impl GraphConstructionSession {
                 shape,
                 generation,
                 self.checkpoint.ontology_mode,
-                self.base_snapshot.as_ref(),
+                self.checkpoint.base_work.live_nodes,
                 parent.as_ref(),
                 self.semantic_authority.as_ref(),
                 &shape_outputs,
@@ -623,19 +650,6 @@ impl GraphConstructionSession {
             .publication_application_read_operations
             .checked_add(manifest_read_calls)
             .ok_or_else(|| storage("publication manifest read call count overflows"))?;
-        for retained in &encoding.retained_artifacts {
-            let entry = manifest_state
-                .entries()
-                .find(|entry| entry.relative_path == retained.target_path)
-                .ok_or_else(|| storage("retained construction object is absent from parent"))?;
-            if entry.byte_length != retained.bytes
-                || entry.content_sha256 != retained.sha256
-                || entry.content_xxh64 != retained.xxh64
-            {
-                return Err(storage("retained construction object authority changed"));
-            }
-        }
-
         let workspace = self
             .project_path
             .join(PRIVATE_ROOT)

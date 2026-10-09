@@ -1,9 +1,9 @@
 //! Cypher comparison, equality, membership and three-valued predicates.
 
 use super::{
-    date_struct_value, datetime_struct_parts, is_date_struct, is_datetime_struct,
-    is_duration_struct, is_het_struct_type, is_localdatetime_struct, is_time_struct,
-    localdatetime_struct_parts, time_struct_parts, unwrap_het,
+    date_struct_value, datetime_struct_parts, duration_struct_parts, is_date_struct,
+    is_datetime_struct, is_duration_struct, is_het_struct_type, is_localdatetime_struct,
+    is_time_struct, localdatetime_struct_parts, time_struct_parts, unwrap_het,
 };
 use datafusion::arrow::array::{Array, FixedSizeListArray, LargeListArray, ListArray};
 use datafusion::arrow::datatypes::DataType;
@@ -278,15 +278,24 @@ pub(super) fn cypher_order_key(v: &ScalarValue) -> String {
                 return "99:null".to_string();
             };
             let instant = i128::from(nanos) - i128::from(offset) * 1_000_000_000;
-            format!("55:time:{}", ordered_i128_key(instant))
+            format!(
+                "55:time:{}:{}",
+                ordered_i128_key(instant),
+                ordered_i128_key(i128::from(offset))
+            )
         }
         ScalarValue::Struct(s) if is_datetime_struct(&v.data_type()) => {
-            let Some((days, nanos, offset, _)) = datetime_struct_parts(s, 0) else {
+            let Some((days, nanos, offset, zone)) = datetime_struct_parts(s, 0) else {
                 return "99:null".to_string();
             };
             let instant = i128::from(days) * 86_400_000_000_000 + i128::from(nanos)
                 - i128::from(offset) * 1_000_000_000;
-            format!("55:datetime:{}", ordered_i128_key(instant))
+            format!(
+                "55:datetime:{}:{}:{}",
+                ordered_i128_key(instant),
+                ordered_i128_key(i128::from(offset)),
+                zone.map_or_else(|| "0".to_owned(), |zone| format!("1{zone}"))
+            )
         }
         ScalarValue::Struct(s) if is_path_struct(s) => "50:path".to_string(),
         ScalarValue::Struct(s) if is_rel_struct(s) => "30:rel".to_string(),
@@ -675,7 +684,9 @@ fn cypher_compare(a: &ScalarValue, b: &ScalarValue) -> Option<i8> {
             ))
         }
         // `time` orders by its UTC instant (`time - offset`), not the struct's
-        // native lexicographic `(time, offset)`. (#1008, Temporal7 [3])
+        // native lexicographic `(time, offset)` (#1008, Temporal7 [3]). Two
+        // values at one instant with different offsets are unequal, so they
+        // order by offset: `<`, `<=`, `=`, `>=` and `>` then agree (#1887 D11).
         (ScalarValue::Struct(x), ScalarValue::Struct(y))
             if is_time_struct(&a.data_type()) && is_time_struct(&b.data_type()) =>
         {
@@ -683,18 +694,20 @@ fn cypher_compare(a: &ScalarValue, b: &ScalarValue) -> Option<i8> {
             let (yn, yo) = time_struct_parts(y, 0)?;
             let xi = i128::from(xn) - i128::from(xo) * 1_000_000_000;
             let yi = i128::from(yn) - i128::from(yo) * 1_000_000_000;
-            Some(to_i8(xi.cmp(&yi)))
+            Some(to_i8(xi.cmp(&yi).then(xo.cmp(&yo))))
         }
+        // `datetime` orders by instant, then offset, then named zone (an
+        // offset-only value first): the components equality compares.
         (ScalarValue::Struct(x), ScalarValue::Struct(y))
             if is_datetime_struct(&a.data_type()) && is_datetime_struct(&b.data_type()) =>
         {
-            let (xd, xn, xo, _) = datetime_struct_parts(x, 0)?;
-            let (yd, yn, yo, _) = datetime_struct_parts(y, 0)?;
+            let (xd, xn, xo, xz) = datetime_struct_parts(x, 0)?;
+            let (yd, yn, yo, yz) = datetime_struct_parts(y, 0)?;
             let xi = i128::from(xd) * 86_400_000_000_000 + i128::from(xn)
                 - i128::from(xo) * 1_000_000_000;
             let yi = i128::from(yd) * 86_400_000_000_000 + i128::from(yn)
                 - i128::from(yo) * 1_000_000_000;
-            Some(to_i8(xi.cmp(&yi)))
+            Some(to_i8(xi.cmp(&yi).then(xo.cmp(&yo)).then(xz.cmp(&yz))))
         }
         _ => None, // incomparable types
     }
@@ -830,16 +843,47 @@ pub(super) fn cypher_value_eq(l: &ScalarValue, r: &ScalarValue) -> Option<bool> 
         (ScalarValue::LargeList(a), ScalarValue::LargeList(b)) => {
             cypher_seq_eq(&a.value(0), &b.value(0))
         }
-        // Node/relationship/path structs compare by **identity** — structurally
-        // equal (a null property counts as equal). Plain maps use three-valued
-        // structural equality (a null value propagates: `{a: null} = {a: null}`
-        // is `null`, not `true`).
+        // Temporal values compare by their components, never as maps: an
+        // absent optional component (a datetime's named zone) is a value, not
+        // an unknown (#1887 D11).
+        (ScalarValue::Struct(_), ScalarValue::Struct(_))
+            if temporal_kind(l).is_some() || temporal_kind(r).is_some() =>
+        {
+            temporal_value_eq(l, r)
+        }
+        // Node/relationship/path values compare by **identity** (#1887 D1/D12).
+        // Plain maps use three-valued structural equality (a null value
+        // propagates: `{a: null} = {a: null}` is `null`, not `true`).
         (ScalarValue::Struct(a), ScalarValue::Struct(b)) => {
             if is_entity_struct(a) || is_entity_struct(b) {
-                Some(l == r)
+                entity_identity_eq(a, b)
             } else {
                 cypher_struct_eq(a, b)
             }
+        }
+        // Where a plan carries a node or relationship in scalar form it is its
+        // 16-byte UUID; compare that against a whole value's identity.
+        (ScalarValue::Struct(entity), ScalarValue::FixedSizeBinary(16, Some(_)))
+        | (ScalarValue::FixedSizeBinary(16, Some(_)), ScalarValue::Struct(entity))
+            if matches!(
+                entity_kind(entity),
+                Some(EntityKind::Node | EntityKind::Relationship)
+            ) =>
+        {
+            let uuid = if matches!(l, ScalarValue::FixedSizeBinary(..)) {
+                l
+            } else {
+                r
+            };
+            let name = if entity_kind(entity) == Some(EntityKind::Node) {
+                "node_uuid"
+            } else {
+                "edge_uuid"
+            };
+            let identity = entity
+                .column_by_name(name)
+                .and_then(|column| ScalarValue::try_from_array(column, 0).ok())?;
+            cypher_value_eq(&identity, uuid)
         }
         _ if is_numeric_scalar(l) && is_numeric_scalar(r) => {
             if let (Some(li), Some(ri)) = (scalar_as_i128(l), scalar_as_i128(r)) {
@@ -944,6 +988,119 @@ pub fn decode_het_scalar(value: &ScalarValue) -> datafusion::error::Result<Optio
         }
     };
     Ok(Some(decoded))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TemporalKind {
+    Date,
+    LocalDateTime,
+    Time,
+    DateTime,
+    Duration,
+}
+
+fn temporal_kind(value: &ScalarValue) -> Option<TemporalKind> {
+    let data_type = value.data_type();
+    if is_date_struct(&data_type) {
+        Some(TemporalKind::Date)
+    } else if is_localdatetime_struct(&data_type) {
+        Some(TemporalKind::LocalDateTime)
+    } else if is_time_struct(&data_type) {
+        Some(TemporalKind::Time)
+    } else if is_datetime_struct(&data_type) {
+        Some(TemporalKind::DateTime)
+    } else if is_duration_struct(&data_type) {
+        Some(TemporalKind::Duration)
+    } else {
+        None
+    }
+}
+
+/// Equality of two non-null struct values at least one of which is temporal.
+/// Values of different kinds are unequal. Values of one kind are equal when
+/// every component is: a `time` and a `datetime` compare their offset (and a
+/// `datetime` its named zone) as well as their instant, so two values that
+/// order equal but render differently are unequal.
+fn temporal_value_eq(l: &ScalarValue, r: &ScalarValue) -> Option<bool> {
+    let (ScalarValue::Struct(a), ScalarValue::Struct(b)) = (l, r) else {
+        return Some(false);
+    };
+    let kind = temporal_kind(l);
+    if kind != temporal_kind(r) {
+        return Some(false);
+    }
+    match kind? {
+        TemporalKind::Date => Some(date_struct_value(a, 0)? == date_struct_value(b, 0)?),
+        TemporalKind::LocalDateTime => {
+            Some(localdatetime_struct_parts(a, 0)? == localdatetime_struct_parts(b, 0)?)
+        }
+        TemporalKind::Time => Some(time_struct_parts(a, 0)? == time_struct_parts(b, 0)?),
+        TemporalKind::DateTime => {
+            Some(datetime_struct_parts(a, 0)? == datetime_struct_parts(b, 0)?)
+        }
+        TemporalKind::Duration => {
+            let parts =
+                |s| duration_struct_parts(s, 0).map(|d| (d.months, d.days, d.seconds, d.nanos));
+            Some(parts(a)? == parts(b)?)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EntityKind {
+    Node,
+    Relationship,
+    Path,
+}
+
+fn entity_kind(s: &datafusion::arrow::array::StructArray) -> Option<EntityKind> {
+    if is_path_struct(s) {
+        Some(EntityKind::Path)
+    } else if is_rel_struct(s) {
+        Some(EntityKind::Relationship)
+    } else if is_node_struct(s) {
+        Some(EntityKind::Node)
+    } else {
+        None
+    }
+}
+
+/// Identity equality of graph values (#1887 D1/D12): two nodes are equal when
+/// their `node_uuid`s are, two relationships when their `edge_uuid`s are, and
+/// two paths when their node and relationship sequences are element-wise
+/// equal. Labels and properties are not identity: the same node read through
+/// differently shaped projections (a bare variable, a list element, a
+/// collected value) carries different property columns. A graph value never
+/// equals a value of another kind.
+fn entity_identity_eq(
+    a: &datafusion::arrow::array::StructArray,
+    b: &datafusion::arrow::array::StructArray,
+) -> Option<bool> {
+    let kind = entity_kind(a);
+    if kind != entity_kind(b) {
+        return Some(false);
+    }
+    let field = |s: &datafusion::arrow::array::StructArray, name: &str| {
+        s.column_by_name(name)
+            .and_then(|column| ScalarValue::try_from_array(column, 0).ok())
+    };
+    let identity = |name: &str| -> Option<bool> {
+        let (Some(left), Some(right)) = (field(a, name), field(b, name)) else {
+            return Some(false);
+        };
+        cypher_value_eq(&left, &right)
+    };
+    match kind? {
+        EntityKind::Node => identity("node_uuid"),
+        EntityKind::Relationship => identity("edge_uuid"),
+        EntityKind::Path => {
+            if identity("nodes")? {
+                identity("relationships")
+            } else {
+                Some(false)
+            }
+        }
+    }
 }
 
 /// Whether a `Struct` is a node / relationship / path value (whose equality is

@@ -29,7 +29,7 @@ use graphforge_storage::{
     PortableV2Limits, PortableV2Mode, PortableV2Output, PortableV2PackageClass,
     PortableV2PropertyProjection, PortableV2SelectionProfile, PortableV2SubsetClosure,
     PortableV2SubsetRequest, ProjectCapability, ProjectGenerationRequest, ProjectStageOutcome,
-    UuidIndexKind, UuidMembershipIndex, capture_graph_files, empty_workspace_participants,
+    TopologyIdentityProbe, UuidIndexKind, capture_graph_files, empty_workspace_participants,
     resolve_project_generation, stage_project_generation_with_graph_tree,
 };
 use sha2::{Digest, Sha256};
@@ -106,7 +106,7 @@ fn property_digests(root: &Path) -> BTreeMap<String, String> {
 
 /// The UUID-membership index of a project's current compact generation, read
 /// from a private materialization that outlives it.
-fn membership_index(project: &Path) -> (tempfile::TempDir, UuidMembershipIndex) {
+fn membership_index(project: &Path) -> (tempfile::TempDir, TopologyIdentityProbe) {
     let inventory = resolve_project_generation(project)
         .unwrap()
         .graph_files_inventory()
@@ -114,7 +114,7 @@ fn membership_index(project: &Path) -> (tempfile::TempDir, UuidMembershipIndex) 
         .unwrap();
     let workspace = tempfile::tempdir_in(project).unwrap();
     graphforge_storage::materialize_graph_objects(project, &inventory, workspace.path()).unwrap();
-    let index = UuidMembershipIndex::open(workspace.path()).unwrap();
+    let index = TopologyIdentityProbe::open_dir(workspace.path()).unwrap();
     (workspace, index)
 }
 

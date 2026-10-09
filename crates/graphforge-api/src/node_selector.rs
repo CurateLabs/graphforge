@@ -35,8 +35,16 @@ impl GraphForge {
         }
     }
 
+    /// Confirm one node UUID exists. A selector that names one node resolves by
+    /// identity lookup in the published node Parquet (row-group and page pruning,
+    /// ADR 0057), so it is not bounded by the graph's node count.
     fn require_node(&self, uuid: Uuid) -> Result<Uuid, GfError> {
-        if self.node_uuids(None)?.contains(&uuid) {
+        let mut cached = self.cached_identity_probe()?;
+        let (found, _) = cached
+            .as_mut()
+            .expect("identity probe was just opened")
+            .probe(graphforge_storage::UuidIndexKind::Node, &[uuid])?;
+        if found.first().copied().unwrap_or(false) {
             Ok(uuid)
         } else {
             Err(validation("node selector matched no nodes"))
@@ -263,6 +271,76 @@ mod tests {
             })
             .unwrap();
         assert_ne!(upper, lower);
+    }
+
+    #[test]
+    fn uuid_selector_resolves_through_the_published_parquet() {
+        let graph = GraphForge::new(None).unwrap();
+        graph.execute("CREATE (:Person {name: 'Alice'})").unwrap();
+        let uuid = first_uuid(&graph);
+        assert!(graph.identity_probe.lock().unwrap().is_none());
+        assert_eq!(
+            graph
+                .resolve_node_selector(&NodeSelector::Uuid(uuid))
+                .unwrap(),
+            uuid
+        );
+        // The lookup opened the Parquet probe; no topology scan was needed.
+        assert!(graph.identity_probe.lock().unwrap().is_some());
+        assert_validation(graph.resolve_node_selector(&NodeSelector::Uuid(Uuid::now_v7())));
+
+        // A new generation replaces the cached probe, and the new node resolves.
+        graph.execute("CREATE (:Person {name: 'Bob'})").unwrap();
+        let both = graph
+            .execute("MATCH (n:Person) RETURN n.node_uuid")
+            .unwrap();
+        let column = both.batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<FixedSizeBinaryArray>()
+            .unwrap();
+        for row in 0..column.len() {
+            let found = Uuid::from_slice(column.value(row)).unwrap();
+            assert_eq!(
+                graph
+                    .resolve_node_selector(&NodeSelector::Uuid(found))
+                    .unwrap(),
+                found
+            );
+        }
+    }
+
+    #[test]
+    fn clear_and_repopulate_to_the_same_generation_never_reuses_the_cached_index() {
+        let graph = GraphForge::new(None).unwrap();
+        graph.execute("CREATE (:Person {name: 'old'})").unwrap();
+        let old = first_uuid(&graph);
+        let generation = graphforge_storage::read_topology_generation(&graph.dir()).unwrap();
+        // Open the probe cache at this generation.
+        assert_eq!(
+            graph
+                .resolve_node_selector(&NodeSelector::Uuid(old))
+                .unwrap(),
+            old
+        );
+        assert!(graph.identity_probe.lock().unwrap().is_some());
+
+        graph.clear().unwrap();
+        graph.execute("CREATE (:Person {name: 'new'})").unwrap();
+        // clear() resets the generation counter, so it repeats the earlier value.
+        assert_eq!(
+            graphforge_storage::read_topology_generation(&graph.dir()).unwrap(),
+            generation
+        );
+        let new = first_uuid(&graph);
+        assert_ne!(new, old);
+        assert_eq!(
+            graph
+                .resolve_node_selector(&NodeSelector::Uuid(new))
+                .unwrap(),
+            new
+        );
+        assert_validation(graph.resolve_node_selector(&NodeSelector::Uuid(old)));
     }
 
     #[test]

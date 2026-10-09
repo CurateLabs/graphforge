@@ -11,7 +11,10 @@ BenchExec runs on the work root, one per phase:
 
 The expected counts come from the suite's count ladder (``gdc_rung_inputs``).
 The driver's written results are then checked against the pinned reference
-with the suite's matching rule. Finally the rung workspace is reclaimed by
+with the suite's matching rule. A Graphalytics rung also holds the archive's
+``.properties`` to the ladder before converting, and derives its reference
+from the archive's own reference outputs (``gdc_graphalytics_scorecard``).
+Finally the rung workspace is reclaimed by
 path and the work root is inventoried; a rung only passes with an empty
 inventory.
 
@@ -47,6 +50,7 @@ import uuid
 import xml.etree.ElementTree as ET
 
 from graphforge_bench import gdc_dataset_cache
+from graphforge_bench import gdc_graphalytics_scorecard as graphalytics
 from graphforge_bench.benchexec_authority import EvidenceError, Limits, normalize_run
 from graphforge_bench.gdc_contracts import GdcContractError
 from graphforge_bench.gdc_measurement_policy import (
@@ -59,6 +63,7 @@ from graphforge_bench.gdc_rung_inputs import (
     RungInputError,
     check_reference,
     expected_counts,
+    is_unpinned,
     load_ladder_spec,
     read_json,
     read_results,
@@ -98,6 +103,15 @@ DEFINITION = "graphforge-gdc-rung-phase-v1"
 DRIVER_NAME = "graphforge-benchmark-gdc-scorecard"
 LAUNCHER_NAME = "graphforge-gdc-phase"
 PHASES = ("convert", "load", "query")
+# The module that builds a declared workload (and reference) in a child process.
+BUILDER_MODULES = {
+    "snb-bi": "gdc_snb_scorecard",
+    "snb-interactive": "gdc_snb_scorecard",
+    "finbench-transaction": "gdc_finbench_transaction_scorecard",
+}
+# The one declaration of the rung's memory envelope (the result schema pins the same
+# value): BenchExec's memory limit for every phase, and the second guard on a
+# phase's largest single-process peak RSS.
 MEMORY_LIMIT_BYTES = 4 * 1024**3
 CORES = 16
 SHARED_IDENTITY_KEYS = (
@@ -133,7 +147,13 @@ BenchExecRunner = Callable[[Path, GdcExecutables, Mapping[str, Any], Path], int]
 def host_benchexec(
     stage: Path, executables: GdcExecutables, identities: Mapping[str, Any], work_root: Path
 ) -> int:
-    """The host's BenchExec, through the progressive host run's own launcher."""
+    """The host's BenchExec, through the progressive host run's own launcher.
+
+    Every phase runs under the rung's declared memory envelope as BenchExec's own
+    memory limit (a cgroup `memory.max`), not the progressive ladder's 96 GB
+    ceiling. GraphForge's bulk builder reads the cgroup it runs in, so it plans a
+    build that fits the envelope.
+    """
     return _run_benchexec(
         stage,
         executables,
@@ -141,6 +161,7 @@ def host_benchexec(
         durable_root=work_root,
         home=work_root,
         rundefinition=DEFINITION,
+        memory_limit=f"{MEMORY_LIMIT_BYTES}B",
     )
 
 
@@ -275,6 +296,8 @@ class Rung:
     documents: dict[str, str] = field(default_factory=dict)
     phases: dict[str, Any] = field(default_factory=dict)
     counts: dict[str, Any] | None = None
+    references: dict[str, Path] = field(default_factory=dict)
+    built: dict[str, Path] = field(default_factory=dict)
 
     @property
     def prefix(self) -> str:
@@ -408,7 +431,14 @@ def classify_phase(
     if measured.get("timed_out") or measured.get("termination_reason") == "walltime":
         return "rung_wall_exceeded", "BenchExec stopped the phase at the rung wall"
     if measured.get("termination_reason") == "memory":
-        return "memory_limit_exceeded", "BenchExec stopped the phase at its memory limit"
+        peaks = [f"BenchExec memory {measured.get('peak_rss_bytes')}"]
+        if telemetry is not None and telemetry.get("peak_rss_bytes"):
+            peaks.append(f"process peak RSS {telemetry['peak_rss_bytes']}")
+        return (
+            "memory_limit_exceeded",
+            f"BenchExec stopped the phase at its {MEMORY_LIMIT_BYTES} byte memory limit; "
+            + ", ".join(peaks),
+        )
     if measured.get("termination_reason") not in (None, ""):
         return "benchexec_failed", f"terminated: {measured.get('termination_reason')}"
     if telemetry is None:
@@ -422,10 +452,56 @@ def classify_phase(
     if peak > MEMORY_LIMIT_BYTES:
         return "memory_limit_exceeded", f"process peak RSS {peak} exceeds {MEMORY_LIMIT_BYTES}"
     if swapped:
-        return "host_swapped", "host swap counters rose during the phase"
+        return "host_swapped", "the host paged out during the phase"
     if benchexec is None or benchexec.get("outcome") != "passed":
         return "benchexec_failed", f"BenchExec outcome {benchexec and benchexec.get('outcome')}"
     return None
+
+
+def swapped_out(before: Mapping[str, int], after: Mapping[str, int]) -> bool:
+    """Whether the host paged anything out while the phase ran.
+
+    Only a rise in `pswpout` marks the phase as swap-exposed. Phase processes are
+    new, so any page of theirs that reaches swap goes out inside the window; a
+    `pswpin` rise with `pswpout` flat reads pages that left memory before the phase
+    began, which are some other process's. Measured on this host (#1914): a daemon
+    such as systemd-journald, woken by the scope BenchExec starts for every phase,
+    reads its cold pages back, so counting `pswpin` fails short phases at random.
+    """
+    return after["pswpout"] > before["pswpout"]
+
+
+def swap_detail(before: Mapping[str, int], after: Mapping[str, int]) -> str:
+    """What the host's swap counters did, so a `host_swapped` rung says what moved."""
+    return (
+        "host paged out during the phase: "
+        f"pswpout +{after['pswpout'] - before['pswpout']} "
+        f"({before['pswpout']} -> {after['pswpout']}), "
+        f"pswpin +{after['pswpin'] - before['pswpin']}; see host-swap.json"
+    )
+
+
+def describe_failed_samples(evidence: Mapping[str, Any]) -> str:
+    """Each distinct failed-sample error with its bindings, from the query evidence.
+
+    The driver's own exit message only counts the failures and points at a
+    workspace the teardown deletes; the per-sample error text is what diagnoses them.
+    """
+    grouped: dict[tuple[str, str, str], list[str]] = {}
+    for variant in evidence.get("variants", []):
+        for sample in variant.get("samples", []):
+            if sample.get("status") == "failed":
+                key = (
+                    str(variant.get("query_id")),
+                    str(sample.get("error_code")),
+                    str(sample.get("error")),
+                )
+                grouped.setdefault(key, []).append(str(sample.get("binding_id")))
+    parts = [
+        f"{query_id} ({', '.join(bindings)}): {code}: {message}"
+        for (query_id, code, message), bindings in grouped.items()
+    ]
+    return "; ".join(parts)[:2048]
 
 
 def run_phase(rung: Rung, name: str, task: dict[str, Any], wall_seconds: int) -> PhaseRun:
@@ -437,8 +513,15 @@ def run_phase(rung: Rung, name: str, task: dict[str, Any], wall_seconds: int) ->
         swap_before = _host_swap_counters()
         status = ladder.benchexec(stage, ladder.executables, ladder.identities, ladder.work_root)
         swap_after = _host_swap_counters()
-        swapped = any(swap_after[key] > value for key, value in swap_before.items())
+        swapped = swapped_out(swap_before, swap_after)
         raw = stage / "raw"
+        if swapped and raw.is_dir():
+            # Retain the counters beside the failed raw output (#1727), even when a
+            # known phase failure stays the primary cause: they record the interference.
+            (raw / "host-swap.json").write_text(
+                json.dumps({"before": swap_before, "after": swap_after}, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
         telemetry = _phase_telemetry(raw) if raw.is_dir() else None
         measured: dict[str, Any] | None
         try:
@@ -457,6 +540,8 @@ def run_phase(rung: Rung, name: str, task: dict[str, Any], wall_seconds: int) ->
             except (EvidenceError, RungInputError) as error:
                 document, invalid = None, str(error)
         cause = classify_phase(measured, telemetry, document, swapped=swapped)
+        if cause is not None and cause[0] == "host_swapped":
+            cause = (cause[0], swap_detail(swap_before, swap_after))
         if invalid is not None:
             cause = ("benchexec_evidence_invalid", invalid)
         elif cause is None and status != 0:
@@ -496,8 +581,110 @@ def _acquire(rung: Rung) -> Path:
         opener=ladder.opener,
     )
     extracted = Path(acquired["extracted"][spec["dataset_id"]])
+    rung.references = {key: Path(path) for key, path in acquired["extracted_references"].items()}
     subdir = spec.get("input_subdir")
     return extracted / subdir if subdir else extracted
+
+
+def _reference_key(rung: Rung) -> str | None:
+    """The pinned reference archive a built workload or reference reads, if any."""
+    workload, reference = rung.spec["workload"], rung.spec["reference"]
+    key = None
+    if isinstance(workload, Mapping) and "short_reads" in workload:
+        key = workload["short_reads"]["workload_key"]
+    if isinstance(reference, Mapping) and "workload_key" in reference:
+        key = reference["workload_key"]
+    return None if key is None else f"{rung.spec['dataset_id']}:{key}"
+
+
+def _build_inputs(rung: Rung, input_root: Path) -> bool:
+    """Build a declared workload (and reference) from pinned LDBC inputs.
+
+    The builder runs as a child process (``gdc_snb_scorecard``), so the
+    Interactive snapshot index it holds is returned before any measured phase.
+    The workload, reference and build notes are published as rung documents.
+    """
+    ladder, spec = rung.ladder, rung.spec
+    workload = spec["workload"]
+    try:
+        parameters = gdc_dataset_cache.acquire(
+            suite_path=ladder.spec.suite_declaration,
+            profile=str(ladder.spec.document["identity_profile"]),
+            dataset_ids=[workload["parameters"]["dataset_id"]],
+            cache_root=ladder.cache_root,
+            work_root=ladder.work_root,
+            root=ladder.spec.profile_root,
+            repo_root=ladder.root.parent,
+            opener=ladder.opener,
+        )
+    except (gdc_dataset_cache.DatasetCacheError, GdcContractError) as error:
+        rung.fail("inputs", error.cause, str(error))
+        return False
+    key = _reference_key(rung)
+    reference_root = rung.references.get(key) if key is not None else None
+    if key is not None and reference_root is None:
+        rung.fail("inputs", "reference_missing", f"no pinned reference {key}")
+        return False
+    directory = rung.workspace / "inputs"
+    directory.mkdir()
+    request = {
+        "workload": workload,
+        "reference": spec["reference"],
+        "profile_root": str(ladder.spec.profile_root.resolve()),
+        "input_root": str(input_root.resolve()),
+        "parameters_root": str(
+            Path(parameters["extracted"][workload["parameters"]["dataset_id"]]).resolve()
+        ),
+        "reference_root": str(reference_root.resolve()) if reference_root else None,
+        "suite_id": ladder.spec.suite_id,
+        "rung_id": spec["id"],
+        "mapping": str(_mapping_path(ladder.spec, spec["id"]).resolve()),
+    }
+    (directory / "request.json").write_text(json.dumps(request, indent=2), encoding="utf-8")
+    harness = Path(__file__).resolve().parents[1]
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            f"graphforge_bench.{BUILDER_MODULES[workload['builder']]}",
+            "--request",
+            str(directory / "request.json"),
+            "--output-dir",
+            str(directory),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "PYTHONPATH": str(harness)},
+    )
+    if completed.returncode != 0:
+        try:
+            error = json.loads(completed.stderr.strip().splitlines()[-1])
+            cause, message = str(error["cause"]), str(error["message"])
+        except (IndexError, KeyError, TypeError, json.JSONDecodeError):
+            cause, message = "inputs_build_failed", completed.stderr.strip()[-2048:]
+        rung.fail("inputs", cause, message)
+        return False
+    for name in ("workload", "reference", "notes"):
+        path = directory / f"{name}.json"
+        if path.is_file():
+            document = read_json(path)
+            if name == "reference":
+                try:
+                    validate_schema(ladder.root, "gdc-rung-reference.json", document)
+                except RungInputError as invalid:
+                    rung.fail("inputs", invalid.cause, str(invalid))
+                    return False
+            rung.built[name] = ladder.output_dir / rung.publish(f"inputs-{name}", document)
+    if "workload" not in rung.built:
+        rung.fail("inputs", "inputs_build_failed", "the builder wrote no workload")
+        return False
+    return True
+
+
+def _workload_path(rung: Rung) -> Path:
+    built = rung.built.get("workload")
+    return built if built is not None else rung.ladder.spec.resolve(rung.spec["workload"])
 
 
 def _execute(rung: Rung) -> None:
@@ -508,8 +695,18 @@ def _execute(rung: Rung) -> None:
     except (gdc_dataset_cache.DatasetCacheError, GdcContractError) as error:
         rung.fail("acquisition", error.cause, str(error))
         return
+    if ladder.spec.document["metric_shape"] == "graphalytics":
+        try:
+            # The archive's .properties must agree with the committed ladder and
+            # workload (counts, direction, algorithms, source vertices).
+            graphalytics.check_archive(ladder.spec, spec, input_root)
+        except RungInputError as error:
+            rung.fail("acquisition", error.cause, str(error))
+            return
     workspace = rung.workspace
     workspace.mkdir(parents=True)
+    if isinstance(spec["workload"], Mapping) and not _build_inputs(rung, input_root):
+        return
     remaining = MAXIMUM_WALL_SECONDS
 
     def phase(name: str, task: dict[str, Any]) -> PhaseRun | None:
@@ -573,7 +770,7 @@ def _execute(rung: Rung) -> None:
             "gf": "gf",
             "driver": DRIVER_NAME,
             "project": str(project),
-            "workload": str(ladder.spec.resolve(spec["workload"]).resolve()),
+            "workload": str(_workload_path(rung).resolve()),
             "expected_counts": str((ladder.output_dir / expected_name).resolve()),
             "evidence": str(evidence_path),
             "results_dir": str(results_dir) if reference is not None else None,
@@ -590,12 +787,14 @@ def _execute(rung: Rung) -> None:
         rung.fail("query", "query_evidence_missing", str(error))
         return
     rung.publish("query-evidence", evidence)
+    if query.failure is not None and (described := describe_failed_samples(evidence)):
+        query.failure["detail"] = described
     try:
         assert_query_latency_authority(evidence)
     except GdcMeasurementBoundaryError as error:
         rung.fail("query", "latency_authority_refused", f"{error.cause}: {error}")
         return
-    _check(rung, evidence, results_dir)
+    _check(rung, evidence, results_dir, input_root)
 
 
 def _mapping_path(spec: LadderSpec, rung_id: str) -> Path:
@@ -606,13 +805,36 @@ def _mapping_path(spec: LadderSpec, rung_id: str) -> Path:
     return spec.resolve(ladder["load_mapping"])
 
 
-def _check(rung: Rung, evidence: Mapping[str, Any], results_dir: Path) -> None:
+def _check(rung: Rung, evidence: Mapping[str, Any], results_dir: Path, input_root: Path) -> None:
     reference_spec = rung.spec["reference"]
     reference = None
     reference_sha256 = None
     try:
-        if reference_spec is not None:
-            path = rung.ladder.spec.resolve(reference_spec["path"])
+        if reference_spec is not None and "archive_outputs" in reference_spec:
+            # Millions of rows at the real rungs: built by code from the
+            # archive's reference outputs, not schema-validated row by row.
+            reference, reference_sha256 = graphalytics.archive_reference(
+                rung.ladder.spec, rung.spec, input_root
+            )
+        elif reference_spec is not None:
+            if "builder" in reference_spec:
+                built = rung.built.get("reference")
+                if built is None:
+                    raise RungInputError("reference_missing", "the builder wrote no reference")
+                path = built
+            elif "cache_path" in reference_spec:
+                # A reference too large for the repository lives in the dataset
+                # cache; the spec pins its bytes.
+                path = rung.ladder.cache_root / reference_spec["cache_path"]
+                if not path.is_file():
+                    raise RungInputError("reference_missing", f"no reference at {path}")
+                if sha256_file(path) != reference_spec["sha256"]:
+                    raise RungInputError(
+                        "reference_digest_mismatch",
+                        f"{path} is not the reference the rung spec pins",
+                    )
+            else:
+                path = rung.ladder.spec.resolve(reference_spec["path"])
             reference = read_json(path)
             validate_schema(rung.ladder.root, "gdc-rung-reference.json", reference)
             if (reference["suite_id"], reference["rung_id"]) != (
@@ -630,6 +852,8 @@ def _check(rung: Rung, evidence: Mapping[str, Any], results_dir: Path) -> None:
         reference_sha256=reference_sha256,
         evidence=evidence,
         results=results,
+        # A pinned cache reference is the suite's whole answer key.
+        complete=reference_spec is not None and "cache_path" in reference_spec,
     )
     rung.publish("correctness", correctness)
     for mismatch in correctness["mismatches"]:
@@ -732,6 +956,22 @@ def not_admitted(
     return _publish_result(rung, result)
 
 
+NOT_PINNED = "rung_not_pinned"
+
+
+def not_pinned(ladder: Ladder, rung_spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Record a declared rung whose dataset is not pinned; nothing is launched."""
+    rung = Rung(ladder, rung_spec)
+    rung.fail("admission", NOT_PINNED, str(rung_spec["not_pinned"]))
+    inventory = _teardown(rung)
+    result = _result(rung, "not_admitted", launch_host=None, capacity=None, inventory=inventory)
+    return _publish_result(rung, result)
+
+
+def skipped_unpinned(result: Mapping[str, Any]) -> bool:
+    return result["status"] == "not_admitted" and result["failure"]["cause"] == NOT_PINNED
+
+
 def _existing_result(ladder: Ladder, rung_spec: Mapping[str, Any]) -> dict[str, Any] | None:
     prefix = f"{ladder.spec.suite_id}-{rung_spec['id']}"
     path = ladder.output_dir / f"{prefix}-result.json"
@@ -764,8 +1004,17 @@ def climb(
             raise LadderError("unknown_rung", through)
         rungs = rungs[: ids.index(through) + 1]
     results: list[dict[str, Any]] = []
-    for rung_spec in rungs:
+    for position, rung_spec in enumerate(rungs):
         result = _existing_result(ladder, rung_spec)
+        if result is None and is_unpinned(rung_spec):
+            result = not_pinned(ladder, rung_spec)
+        if result is not None and skipped_unpinned(result):
+            results.append(result)
+            # #952 decision 2026-10-08: an unpinned rung is recorded and the
+            # climb continues to the next pinned rung; with none left it ends.
+            if any(not is_unpinned(later) for later in rungs[position + 1 :]):
+                continue
+            break
         if result is None:
             try:
                 launch_host = quiet_host(quiet_host_wait_seconds)

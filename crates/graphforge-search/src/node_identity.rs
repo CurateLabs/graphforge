@@ -26,8 +26,8 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use arrow::array::{Array, FixedSizeBinaryArray, UInt64Array};
+use graphforge_storage::SearchArtifactError;
 use graphforge_storage::ordinal_identity_v4::{V4OrdinalIdentityError, V4OrdinalIdentityHandle};
-use graphforge_storage::{SearchArtifactError, UuidIndexKind, UuidMembershipIndex};
 
 /// A facade's generation-pinned ordinal identity authority, the same handle its
 /// queries resolve destination identities through.
@@ -40,7 +40,6 @@ pub(crate) struct NodeIdentityCheck<'a> {
 
 enum Authority<'a> {
     Ordinal(Box<OrdinalCheck<'a>>),
-    Membership(Box<UuidMembershipIndex>),
     Unindexed(BTreeSet<[u8; 16]>),
 }
 
@@ -66,18 +65,13 @@ enum Distinct {
 
 impl<'a> NodeIdentityCheck<'a> {
     /// Select the authority for `project_dir`. A session ordinal authority is
-    /// preferred; without one, the v3 index is used when present.
+    /// preferred; without one, rows are checked for repeats only.
     pub(crate) fn open(
         project_dir: &Path,
         ordinal: Option<&'a SessionOrdinalIdentity>,
     ) -> Result<Self, SearchArtifactError> {
         let authority = if let Some(handle) = ordinal {
             Authority::Ordinal(Box::new(OrdinalCheck::open(project_dir, handle)?))
-        } else if graphforge_storage::uuid_membership_index_present(project_dir) {
-            Authority::Membership(Box::new(
-                UuidMembershipIndex::open(project_dir)
-                    .map_err(|error| source(error.to_string()))?,
-            ))
         } else {
             Authority::Unindexed(BTreeSet::new())
         };
@@ -110,16 +104,6 @@ impl<'a> NodeIdentityCheck<'a> {
             Authority::Ordinal(check) => {
                 check.resolve_batch(&batch_uuids, surrogates, checkpoint)?
             }
-            Authority::Membership(index) => {
-                let (values, _) = index
-                    .lookup_node_surrogates(&batch_uuids)
-                    .map_err(|error| source(error.to_string()))?;
-                values
-                    .iter()
-                    .enumerate()
-                    .map(|(row, value)| *value == Some(surrogates.value(row)))
-                    .collect()
-            }
             Authority::Unindexed(_) => vec![true; batch_uuids.len()],
         };
         // Callers zip the verdicts with the rows; one per row, or none pass.
@@ -133,8 +117,6 @@ impl<'a> NodeIdentityCheck<'a> {
     /// already checked that this row's `node_id` exceeds the previous one.
     pub(crate) fn distinct(&mut self, node_uuid: [u8; 16]) -> bool {
         match &mut self.authority {
-            // The authenticated index maps each UUID to one surrogate.
-            Authority::Membership(_) => true,
             Authority::Unindexed(seen) => seen.insert(node_uuid),
             Authority::Ordinal(check) => match &mut check.distinct {
                 Distinct::Ascending(last) => {
@@ -148,23 +130,11 @@ impl<'a> NodeIdentityCheck<'a> {
     }
 
     /// Prove after the last row that no live node was left out.
-    pub(crate) fn finish<C>(
-        self,
-        rows: usize,
-        checkpoint: &mut C,
-    ) -> Result<(), SearchArtifactError>
+    pub(crate) fn finish<C>(self, checkpoint: &mut C) -> Result<(), SearchArtifactError>
     where
         C: FnMut() -> Result<(), SearchArtifactError>,
     {
         match self.authority {
-            Authority::Membership(index) => {
-                if rows as u64 != index.count(UuidIndexKind::Node) {
-                    return Err(source(
-                        "topology row count disagrees with authenticated UUID index",
-                    ));
-                }
-                Ok(())
-            }
             Authority::Unindexed(_) => Ok(()),
             Authority::Ordinal(mut check) => {
                 if let Some(last) = check.ranges.last().map(|range| *range.end()) {

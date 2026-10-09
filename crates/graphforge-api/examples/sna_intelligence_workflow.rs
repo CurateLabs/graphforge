@@ -249,6 +249,7 @@ fn main() {
         via: Some("COMMUNICATED".into()),
         directed: false,
         write_property: None,
+        ..Default::default()
     };
     let cluster_options = ClusterOptions {
         via: Some("COMMUNICATED".into()),

@@ -295,6 +295,8 @@ fn scan(root: &Path, manifest: &mut SessionManifest) -> Result<u64, GfError> {
                 || record.source.name != source.name
                 || record.source.bytes != source.bytes
                 || record.source.rows != source.rows
+                || record.source.external != source.external
+                || (source.sha256.is_some() && record.source.sha256 != source.sha256)
             {
                 return Err(storage("import journal changes registered source identity"));
             }

@@ -384,12 +384,12 @@ fn reopen_recovers_surrogate_tails_without_full_topology_reads() {
 }
 
 #[test]
-fn authenticated_endpoint_registration_decodes_zero_topology_rows() {
+fn endpoint_registration_decodes_only_the_row_groups_that_can_hold_the_endpoints() {
     const CHILD: &str = "GRAPHFORGE_ENDPOINT_REGISTRATION_IO_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
-            .arg("writer::tests::authenticated_endpoint_registration_decodes_zero_topology_rows")
+            .arg("writer::tests::endpoint_registration_decodes_only_the_row_groups_that_can_hold_the_endpoints")
             .arg("--nocapture")
             .env(CHILD, "1")
             .status()
@@ -410,15 +410,6 @@ fn authenticated_endpoint_registration_decodes_zero_topology_rows() {
     seed.create_node(right, EntityTypeId::decode(0).unwrap())
         .unwrap();
     seed.flush().unwrap();
-    crate::rebuild_uuid_membership_indexes(
-        dir.path(),
-        crate::UuidIndexBuildLimits {
-            scan_batch_rows: 1,
-            run_records: 1,
-            merge_fan_in: 2,
-        },
-    )
-    .unwrap();
 
     let _io_capture = crate::io_stats::CaptureScope::install();
 
@@ -427,16 +418,130 @@ fn authenticated_endpoint_registration_decodes_zero_topology_rows() {
     let metrics = writer.register_existing_endpoints(&[left, right]).unwrap();
     assert_eq!(metrics.found, 2);
     assert_eq!(metrics.per_record_seeks, 0);
+    // One node fragment, one row group; UUIDs and `node_id` are read together.
     assert_eq!(metrics.identity_blocks_read, 1);
-    assert_eq!(metrics.surrogate_blocks_read, 1);
+    assert_eq!(metrics.surrogate_blocks_read, 0);
     assert_eq!(writer.topology_write_work().uuid_per_record_seeks, 0);
-    assert_eq!(writer.topology_write_work().uuid_block_seeks, 2);
+    assert_eq!(writer.topology_write_work().uuid_block_seeks, 1);
     writer
         .create_edge(new_v7(), "KNOWS", &left, &right)
         .unwrap();
     let io = crate::io_stats::snapshot().expect("requested I/O statistics");
     assert_eq!(io.node_full_reads, 0);
     assert_eq!(io.node_filtered_reads, 0);
+}
+
+/// A new generation may not reuse a UUID that names a published node or edge:
+/// node and edge UUIDs share one namespace, and the check reads the published
+/// Parquet (#1902). The writer's own window cannot see these UUIDs, so only the
+/// commit's probe can refuse them.
+#[test]
+fn commit_refuses_a_uuid_the_published_topology_already_holds() {
+    let dir = TempDir::new().unwrap();
+    let (left, right, other, edge) = (new_v7(), new_v7(), new_v7(), new_v7());
+    let label = EntityTypeId::decode(0).unwrap();
+    let mut seed = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
+    for node in [left, right, other] {
+        seed.create_node(node, label).unwrap();
+    }
+    seed.create_edge(edge, "KNOWS", &left, &right).unwrap();
+    seed.flush().unwrap();
+    let published = crate::read_topology_generation(dir.path()).unwrap();
+
+    type Stage = fn(&mut GraphWriter, [Uuid; 4]);
+    let refusals: [(&str, Stage); 4] = [
+        ("a node reusing a node UUID", |writer, [left, ..]| {
+            writer
+                .create_node(left, EntityTypeId::decode(0).unwrap())
+                .unwrap();
+        }),
+        ("a node reusing an edge UUID", |writer, [.., edge]| {
+            writer
+                .create_node(edge, EntityTypeId::decode(0).unwrap())
+                .unwrap();
+        }),
+        (
+            "an edge reusing an edge UUID",
+            |writer, [left, right, _, edge]| {
+                writer.register_existing_endpoints(&[left, right]).unwrap();
+                writer.create_edge(edge, "KNOWS", &left, &right).unwrap();
+            },
+        ),
+        (
+            "an edge reusing a node UUID",
+            |writer, [left, right, other, _]| {
+                writer.register_existing_endpoints(&[left, right]).unwrap();
+                writer.create_edge(other, "KNOWS", &left, &right).unwrap();
+            },
+        ),
+    ];
+    for (name, stage) in refusals {
+        let mut writer =
+            GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS + 1).unwrap();
+        stage(&mut writer, [left, right, other, edge]);
+        let error = writer.flush().unwrap_err().to_string();
+        assert!(error.contains("already exists"), "{name}: {error}");
+        assert_eq!(
+            crate::read_topology_generation(dir.path()).unwrap(),
+            published,
+            "{name}: a refused commit advanced the topology"
+        );
+    }
+
+    // A fresh UUID still commits against the same published topology.
+    let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS + 2).unwrap();
+    writer.create_node(new_v7(), label).unwrap();
+    writer.flush().unwrap();
+    assert_eq!(
+        crate::read_topology_generation(dir.path()).unwrap(),
+        published + 1
+    );
+}
+
+/// The writer's production Parquet carries a page index, and an endpoint lookup
+/// uses it: of a fragment's three pages the lookup decodes the one holding the
+/// endpoints, and the counters say so (#1902).
+#[test]
+fn endpoint_registration_decodes_only_the_pages_that_can_hold_the_endpoints() {
+    const NODES: u128 = 45_000;
+    let node = |index: u128| Uuid::from_u128((0x7 << 76) | (0x2 << 62) | (index + 1));
+    let dir = TempDir::new().unwrap();
+    let label = EntityTypeId::decode(0).unwrap();
+    let mut seed = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
+    for index in 0..NODES {
+        seed.create_node(node(index), label).unwrap();
+    }
+    seed.flush().unwrap();
+
+    let mut lookup = |endpoints: &[Uuid]| {
+        let mut writer =
+            GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS + 1).unwrap();
+        let metrics = writer.register_existing_endpoints(endpoints).unwrap();
+        assert_eq!(metrics.found, endpoints.len() as u64);
+        assert_eq!(metrics.per_record_seeks, 0);
+        (metrics, writer.topology_write_work())
+    };
+
+    let (middle, work) = lookup(&[node(22_000), node(22_001), node(22_002)]);
+    assert!(
+        middle.pages_considered >= 2,
+        "45,000 rows span several 20,000-row pages: {middle:?}"
+    );
+    assert_eq!(middle.pages_read, 1, "{middle:?}");
+    assert_eq!(middle.identity_blocks_read, 1);
+    assert_eq!(work.uuid_pages_read, 1);
+    assert_eq!(work.uuid_pages_considered, middle.pages_considered);
+
+    let (ends, _) = lookup(&[node(0), node(NODES - 1)]);
+    assert_eq!(ends.pages_considered, middle.pages_considered);
+    assert_eq!(ends.pages_read, 2, "first and last page only: {ends:?}");
+    assert!(ends.pages_read < ends.pages_considered);
+    assert!(
+        middle.identity_bytes_read < ends.identity_bytes_read,
+        "one page reads fewer bytes than two: {} against {}",
+        middle.identity_bytes_read,
+        ends.identity_bytes_read
+    );
 }
 
 #[test]
@@ -478,7 +583,6 @@ fn label_only_topology_commits_keep_endpoint_authority_current() {
             .uuid_prior_topology_rows_decoded,
         0
     );
-    assert!(crate::uuid_membership_index_is_fresh(dir.path()).unwrap());
     let mut after_add =
         GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS + 2).unwrap();
     assert_eq!(
@@ -516,7 +620,6 @@ fn label_only_topology_commits_keep_endpoint_authority_current() {
             .uuid_prior_topology_rows_decoded,
         0
     );
-    assert!(crate::uuid_membership_index_is_fresh(dir.path()).unwrap());
     let mut after_remove =
         GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS + 4).unwrap();
     assert_eq!(
@@ -813,7 +916,7 @@ fn same_window_cross_kind_uuid_collisions_fail_before_state_mutation() {
 }
 
 #[test]
-fn ordinary_writer_flush_keeps_v3_uuid_index_fresh_across_generations() {
+fn ordinary_writer_flush_keeps_node_identity_resolvable_across_generations() {
     let dir = TempDir::new().unwrap();
     let first = new_v7();
     let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
@@ -821,12 +924,6 @@ fn ordinary_writer_flush_keeps_v3_uuid_index_fresh_across_generations() {
         .create_node(first, EntityTypeId::decode(0).unwrap())
         .unwrap();
     writer.flush().unwrap();
-    assert!(
-        crate::uuid_membership_index_is_fresh(dir.path()).unwrap(),
-        "generation={} manifest={}",
-        crate::read_topology_generation(dir.path()).unwrap(),
-        std::fs::read_to_string(dir.path().join("topology/uuid-membership/manifest.json")).unwrap()
-    );
 
     let second = new_v7();
     let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS + 1).unwrap();
@@ -834,13 +931,7 @@ fn ordinary_writer_flush_keeps_v3_uuid_index_fresh_across_generations() {
         .create_node(second, EntityTypeId::decode(0).unwrap())
         .unwrap();
     writer.flush().unwrap();
-    assert!(
-        crate::uuid_membership_index_is_fresh(dir.path()).unwrap(),
-        "generation={} manifest={}",
-        crate::read_topology_generation(dir.path()).unwrap(),
-        std::fs::read_to_string(dir.path().join("topology/uuid-membership/manifest.json")).unwrap()
-    );
-    let mut index = crate::UuidMembershipIndex::open(dir.path()).unwrap();
+    let mut index = crate::TopologyIdentityProbe::open_dir(dir.path()).unwrap();
     assert_eq!(
         index.lookup_node_surrogates(&[first, second]).unwrap().0,
         [Some(1), Some(2)]
@@ -1035,29 +1126,6 @@ fn cumulative_topology_and_index_work_doubles_with_bounded_windows() {
         );
     }
 
-    fn assert_linear_first_differences_with_fixed_overhead(
-        label: &str,
-        n: u64,
-        twice: u64,
-        four: u64,
-        fixed_overhead: u64,
-    ) {
-        let first = twice
-            .checked_sub(n)
-            .unwrap_or_else(|| panic!("{label}: 2N bytes regressed below N"));
-        let second = four
-            .checked_sub(twice)
-            .unwrap_or_else(|| panic!("{label}: 4N bytes regressed below 2N"));
-        assert!(first > 0, "{label}: N to 2N added no physical bytes");
-        let expected = first.saturating_mul(2);
-        assert!(
-            second.abs_diff(expected) <= fixed_overhead,
-            "{label}: physical-work first differences are not linear within fixed format \
-                 overhead: N={n}, 2N={twice}, 4N={four}, first={first}, second={second}, \
-                 expected={expected} +/- {fixed_overhead}"
-        );
-    }
-
     fn retained_bytes(path: &Path) -> u64 {
         fs::read_dir(path)
             .unwrap()
@@ -1149,25 +1217,10 @@ fn cumulative_topology_and_index_work_doubles_with_bounded_windows() {
         )
     }
 
-    let (n_bytes, n_topology_writes, n_uuid_writes, n_reads, n_opens, n_syncs, n) = run(8);
-    let (
-        twice_bytes,
-        twice_topology_writes,
-        twice_uuid_writes,
-        twice_reads,
-        twice_opens,
-        twice_syncs,
-        twice,
-    ) = run(16);
-    let (
-        four_bytes,
-        four_topology_writes,
-        four_uuid_writes,
-        four_reads,
-        four_opens,
-        four_syncs,
-        four,
-    ) = run(32);
+    let (n_bytes, n_topology_writes, _, n_reads, n_opens, n_syncs, n) = run(8);
+    let (twice_bytes, twice_topology_writes, _, twice_reads, twice_opens, twice_syncs, twice) =
+        run(16);
+    let (four_bytes, four_topology_writes, _, four_reads, four_opens, four_syncs, four) = run(32);
     assert_linear_first_differences("retained footprint", n_bytes, twice_bytes, four_bytes);
     assert_linear_first_differences(
         "topology staged output",
@@ -1175,50 +1228,17 @@ fn cumulative_topology_and_index_work_doubles_with_bounded_windows() {
         twice_topology_writes,
         four_topology_writes,
     );
-    // This fixture's binary-carry merge levels add run-header, fence, and
-    // manifest writes to an otherwise linear adjacent doubling interval.
-    // Cap that disclosed amplification at a fixed 4 KiB for all size
-    // points: a percentage or multiplicative bound would widen with input
-    // and could conceal increasing super-linear index work.
-    const UUID_INDEX_FIXED_OVERHEAD_BYTES: u64 = 4 * 1024;
-    assert!(n_uuid_writes > 0);
-    assert_linear_first_differences_with_fixed_overhead(
-        "UUID index physical writes",
-        n_uuid_writes,
-        twice_uuid_writes,
-        four_uuid_writes,
-        UUID_INDEX_FIXED_OVERHEAD_BYTES,
-    );
     assert_eq!((n_reads, twice_reads, four_reads), (0, 0, 0));
-    assert!(n.uuid_validation_blocks > 0 && n.uuid_validation_bytes > 0);
-    assert!(n_opens > 0 && n_syncs > 0);
-    assert_linear_first_differences_with_fixed_overhead(
-        "UUID validation blocks",
-        n.uuid_validation_blocks,
-        twice.uuid_validation_blocks,
-        four.uuid_validation_blocks,
-        0,
-    );
-    assert_linear_first_differences_with_fixed_overhead(
-        "UUID validation bytes",
-        n.uuid_validation_bytes,
-        twice.uuid_validation_bytes,
-        four.uuid_validation_bytes,
-        4 * 1024,
-    );
-    assert_linear_first_differences_with_fixed_overhead(
-        "UUID file opens",
-        n_opens,
-        twice_opens,
-        four_opens,
-        32,
-    );
-    assert_linear_first_differences_with_fixed_overhead(
-        "UUID file syncs",
+    // Probing the existing topology reads at most what the run has itself
+    // written: validation work is bounded by the graph, never super-linear.
+    assert!(four.uuid_validation_bytes <= four.output_bytes);
+    let _ = (
         n_syncs,
         twice_syncs,
         four_syncs,
-        0,
+        n_opens,
+        twice_opens,
+        four_opens,
     );
     assert_eq!(
         (
@@ -1781,29 +1801,30 @@ fn flush_into_composes_with_staged_delete_in_one_batch() {
 }
 
 #[test]
-fn committed_snapshot_refresh_failure_never_restages_rows() {
+fn a_flush_commits_once_and_publishes_no_membership_index() {
     let dir = TempDir::new().unwrap();
     let node = new_v7();
     let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
     writer
         .create_node(node, EntityTypeId::decode(0).unwrap())
         .unwrap();
-    crate::uuid_membership::fail_next_snapshot_refresh_for_test();
 
-    let error = writer.flush().unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("committed but UUID index snapshot refresh failed")
-    );
+    writer.flush().unwrap();
     assert!(writer.pending_index_nodes.is_empty());
     assert!(writer.nodes.is_empty());
     let committed_generation = crate::read_topology_generation(dir.path()).unwrap();
     assert_eq!(committed_generation, 1);
+    let index_dir = dir.path().join("topology/uuid-membership");
+    for legacy in ["manifest.json", "topology-receipt.json"] {
+        assert!(!index_dir.join(legacy).exists(), "{legacy}");
+    }
     assert!(
-        dir.path()
-            .join("topology/uuid-membership/topology-receipt.json")
-            .is_file()
+        std::fs::read_dir(&index_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .all(|entry| !entry.file_name().to_string_lossy().contains("-v5-")),
+        "no membership run is written"
     );
 
     writer.flush().unwrap();
@@ -1813,7 +1834,7 @@ fn committed_snapshot_refresh_failure_never_restages_rows() {
     );
     let batches = crate::catalog::read_nodes(dir.path()).unwrap();
     assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
-    let mut index = crate::UuidMembershipIndex::open(dir.path()).unwrap();
+    let mut index = crate::TopologyIdentityProbe::open_dir(dir.path()).unwrap();
     assert_eq!(index.count(crate::UuidIndexKind::Node), 1);
     assert_eq!(
         index.probe(crate::UuidIndexKind::Node, &[node]).unwrap().0,

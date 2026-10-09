@@ -644,7 +644,12 @@ def _rewrite_benchmark_wall(text: str, wall_seconds: int | None) -> str:
 HOST_BENCHEXEC_MEMORY_CEILING = "96GB"
 
 
-def _benchexec_memory_limit(*, durable_root: Path | None = None) -> list[str]:
+def _benchexec_memory_limit(
+    *, durable_root: Path | None = None, memory_limit: str | None = None
+) -> list[str]:
+    """The `--memorylimit` override; a caller's own envelope replaces the host ceiling."""
+    if memory_limit is not None:
+        return ["--memorylimit", memory_limit]
     if durable_root is None:
         return []
     return ["--memorylimit", HOST_BENCHEXEC_MEMORY_CEILING]
@@ -696,6 +701,7 @@ def _run_benchexec(
     durable_root: Path | None = None,
     home: Path | None = None,
     rundefinition: str = PROGRESSIVE_DEFINITION,
+    memory_limit: str | None = None,
 ) -> int:
     raw_output = stage / "raw"
     raw_output.mkdir()
@@ -733,7 +739,7 @@ def _run_benchexec(
         "--tool-directory",
         str(_benchexec_tool_directory(stage, prefer_stage=durable_root is not None)),
         *_benchexec_container_flags(stage, durable_root=durable_root),
-        *_benchexec_memory_limit(durable_root=durable_root),
+        *_benchexec_memory_limit(durable_root=durable_root, memory_limit=memory_limit),
         "--no-compress-results",
         "--outputpath",
         str(raw_output),

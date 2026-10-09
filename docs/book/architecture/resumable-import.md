@@ -1,9 +1,9 @@
 # Resumable graph import
 
 `GraphForge::begin_import_session` creates a Rust-owned, durable import pinned
-to the current project generation. Arrow batches are copied to Arrow IPC and
-Parquet files are copied into session ownership; callers may then checkpoint,
-drop the handle, and resume by UUID.
+to the current project generation. Arrow batches are encoded as Arrow IPC inside
+the session; callers may then checkpoint, drop the handle, and resume by UUID.
+A registered Parquet file stays where it is: see "In-place Parquet sources".
 
 Resumable construction rows do not supply observation timestamps. Their catalog observations
 use the greatest `last_seen` in the authenticated parent runtime catalog across
@@ -112,7 +112,7 @@ emits the whole encoded generation:
    `edge_id` is the rank. A missing endpoint, an endpoint that is an edge, an
    edge UUID that equals a node UUID and a repeated UUID are refused.
 4. **Emit** writes the runtime catalog, node and edge Parquet windows, property
-   overlays, the UUID membership and v4 ordinal artifacts, and the CSR shards.
+   overlays, the v4 ordinal artifacts, and the CSR shards.
    Each artifact is hashed (SHA-256, XXH64) from the bytes written once.
 
 `commit` then installs and publishes the encoded inventory exactly as for any
@@ -124,11 +124,18 @@ The first `validate` chooses the route once and records it in the manifest, so
 later calls (and reruns after a crash) never re-decide it from live memory. Nothing
 is staged, so there is no durable prefix: a crash, cancellation or error
 discards the attempt and the next `validate` reruns from the sources. Appends,
-sessions that already staged chunks, and initial builds made through
-`GraphConstructionSession::append_*` keep the staged path described below. The
-builder holds the ranked graph in memory; an initial build that does not fit
-needs the scratch path planned in #1881. Node and edge counts are limited to
-2^32 - 2.
+and sessions that already staged chunks keep the staged path described below.
+Initial builds made through `GraphConstructionSession::append_*` (the Rust
+facade; the bindings' `add_nodes`/`add_edges` publish atomically and import
+sessions register sources) spool each accepted chunk as one Arrow IPC file,
+synced and renamed into place, which survives a crash and resumes; sealing
+builds from the spool with the same builder, in memory or, when the estimate
+exceeds the budget, on scratch files. Every spooled chunk is authenticated
+against the digests acknowledged at acceptance before it is read, so a file
+that changed afterwards, even at the same size and still valid Arrow IPC, fails
+the build. Only a build whose node tables alone exceed the budget replays the
+spool through the staged path. The route is recorded before any work and read
+back on retry. Node and edge counts are limited to 2^32 - 2.
 
 Validation processes node sources before edge sources. Each batch is normalized
 through the public bulk contract and flushed into a private graph tree. A
@@ -157,6 +164,76 @@ publication and every validation or staging error leave `CURRENT` unchanged.
 manifest; cleanup failures are marked `quarantined`. Operators can call
 `cleanup_stale_import_sessions` with an age threshold to abort abandoned
 non-terminal sessions deterministically.
+
+## In-place Parquet sources
+
+`register_parquet` copies and writes nothing under the session. It records the
+source's canonical path, native file identity (device and inode on Unix), size,
+modification time and Parquet footer length and SHA-256, and refuses a file that
+is not plain Parquet. Every later read re-establishes that identity first, checks
+the open file and its name again before each batch and at the end of the pass, and
+refuses with a typed error if the source is missing (`GF_NOT_FOUND`) or was
+replaced, resized, modified or rewritten (`GF_IDENTITY_CONFLICT`).
+
+Both construction paths read the source in place, and the read that decodes a
+source is the read that digests it. A custom Parquet `ChunkReader` offers every
+range the decoder asks for, including the footer, to the source's digest as it is
+read. SHA-256 is sequential, so bytes that arrive in file order are hashed at once;
+bytes that arrive early are held (the held runs coalesce a streamed column chunk)
+until the gap before them is filled. The bulk builder starts a source's tasks in
+file order (`claim_in_order` in `graphforge-storage`), where a static split would
+start each worker at a far-apart position. That keeps the lead over the hashed
+prefix small in the usual case, which `pending_limit` sizes as the workers times
+the largest task, with a 64 MiB floor and a 1 GiB ceiling. It does not bound the
+lead: a slow task holds the prefix back while the others run ahead, and a range
+beyond the bound is dropped and read again. Bytes the decode never asks for (the
+page index of a file that has one) are read once when the digest completes;
+`source_read` reports those as `reread_bytes`, and every byte offered as
+`observed_bytes`. `tasks_are_claimed_in_index_order_on_every_pass` fails if the
+claim order regresses. The staged path decodes a source sequentially, so its digest
+holds at most the row group being decoded: the columns of a row group are read side
+by side, and all but the first wait for the one before them.
+
+The identity pin (device, inode, size, modification time) is the change detector;
+the digest is provenance. What the receipt's `sha256` guarantees is the SHA-256 of
+the file content read under that pin: the bytes the decode consumed, plus any range
+the bound dropped or the decode never asked for, read from the file when the digest
+completes. The first complete pass records it in the session manifest and, once
+every source is staged, in the import receipt (`source_provenance`); a later
+complete read of the same source must produce the same digest. A rewrite that
+preserves device, inode, size and modification time is not detected, and the
+digest then describes whatever was read. Three consequences are deliberate:
+
+- The pin is re-checked whenever progress is reused. A resumed staged import opens
+  the source through the pin before it skips the batches already staged, so an
+  edit between a stop and the resume is refused. The batches staged earlier and
+  the digest of the final pass are not tied to each other beyond that pin.
+- A source is pinned until it is fully consumed. The frame that marks a source
+  staged also carries its complete SHA-256, so a source whose staging a stop
+  interrupted is re-opened through the pin, while one that finished is not read
+  again: its staged rows are exactly the bytes its digest names, and an edit or
+  deletion afterwards changes nothing that is published. The same holds for
+  `commit` after `validate`, which publishes artifacts already built and reads no
+  source.
+- An initial bulk build restarts rather than resumes. A sealed construction
+  session is reused only if the digest of every in-place source it was built from
+  is already recorded; otherwise it is discarded and the build runs again, so a
+  stop between pinning the encoded inventory and recording the digests cannot pair
+  one file's graph with another's digest.
+
+### Sessions an earlier version began
+
+A session written before sources stayed in place (manifest format 2) holds its own
+copy of each Parquet source under `sources/` and recorded no identity or digest
+for it. It resumes, validates and appends as before, reading the copy it owns:
+nothing outside the session can refuse that build, `abort` removes the copy with
+the session, and the receipt has no digest for it. Registering an in-place source
+into such a session raises its manifest to format 3, which an earlier version
+refuses.
+
+Arrow batches passed to `append_arrow` are not an external file, so they are
+still encoded into the session. `abort` removes only session-owned artifacts and
+never touches a registered source.
 
 Registered paths may not contain `..`; the source itself may not be a symlink
 and must be a regular file. Schema, corrupt-file, UUID, endpoint, resource,

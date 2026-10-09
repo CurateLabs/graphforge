@@ -470,3 +470,51 @@ fn mapping_options_must_fit_their_property_type() {
         assert_eq!(error.cause(), Cause::InvalidMapping, "{why}: {error}");
     }
 }
+
+const STAMPED: &str = r#"{
+  "schema": "graphforge-gdc-load-mapping/1",
+  "node_tables": [{"id": "n", "format": "ldbc-csv", "files": ["n.csv"],
+    "label": "N", "id_column": "id",
+    "properties": [{"column": "at", "name": "timestamp", "type": "int64", "format": "naive-utc"}]}]
+}"#;
+
+#[test]
+fn an_int64_with_a_format_stores_the_instant_as_epoch_milliseconds() {
+    let ws = workspace(&[(
+        "n.csv",
+        b"id|at\n1|2010-01-03 15:10:41.499\n2|2010-01-03 15:10:41.5\n3|1969-12-31 23:59:59.999\n4|\n"
+            .to_vec(),
+    )]);
+    convert(STAMPED.as_bytes(), &ws.input, &ws.out).unwrap();
+    let nodes = read(&ws.out.join("nodes/n.parquet"));
+    let stamps = column::<Int64Array>(&nodes, "timestamp");
+    let schema = nodes.schema();
+    assert_eq!(
+        schema.field_with_name("timestamp").unwrap().data_type(),
+        &DataType::Int64
+    );
+    let stored: Vec<Option<i64>> = (0..stamps.len())
+        .map(|row| (!stamps.is_null(row)).then(|| stamps.value(row)))
+        .collect();
+    assert_eq!(
+        stored,
+        [
+            Some(1_262_531_441_499),
+            Some(1_262_531_441_500),
+            Some(-1),
+            None
+        ]
+    );
+}
+
+#[test]
+fn an_int64_with_a_format_refuses_what_is_not_a_whole_millisecond() {
+    for (row, why) in [
+        ("1|2010-01-03 15:10:41.4995\n", "sub-millisecond fraction"),
+        ("1|2010-01-03T15:10:41.499Z\n", "text in another format"),
+        ("1|1262531441499\n", "plain integer under naive-utc"),
+    ] {
+        let error = run(&[("n.csv", format!("id|at\n{row}").into_bytes())], STAMPED).unwrap_err();
+        assert_eq!(error.cause(), Cause::InvalidValue, "{why}: {error}");
+    }
+}

@@ -1,7 +1,7 @@
 //! The per-operation latency clock, the measured pass, and the result digest.
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -18,7 +18,7 @@ use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use super::workload::{Binding, Operation, Variant};
+use super::workload::{Binding, Operation, SourceSelector, Variant};
 use super::{QueryCause, QueryError};
 use crate::identity::hex;
 
@@ -108,6 +108,9 @@ pub struct VariantMeasurement {
     pub query_id: String,
     pub interface: &'static str,
     pub ordered: bool,
+    /// The kept result columns when the variant names them; see `Variant::columns`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub columns: Option<Vec<String>>,
     /// `measured` when every binding produced a sample, otherwise `failed`.
     pub status: &'static str,
     pub warmup: Warmup,
@@ -121,7 +124,8 @@ enum Prepared {
     Cypher(String, HashMap<String, IrLiteral>),
     Rank(String, RankOptions),
     Cluster(String, ClusterOptions),
-    Paths(NodeSelector, Box<PathsOptions>),
+    /// Source, optional target and options, boxed to keep the variants small.
+    Paths(Box<(NodeSelector, Option<NodeSelector>, PathsOptions)>),
 }
 
 /// The clock. Its interval is exactly one public API call that returns a fully
@@ -146,9 +150,12 @@ impl Prepared {
             Self::Cluster(label, options) => forge
                 .cluster(&label, options)
                 .map(|batch| (batch.schema(), vec![batch])),
-            Self::Paths(source, options) => forge
-                .paths(&source, None, *options)
-                .map(|batch| (batch.schema(), vec![batch])),
+            Self::Paths(call) => {
+                let (source, target, options) = *call;
+                forge
+                    .paths(&source, target.as_ref(), options)
+                    .map(|batch| (batch.schema(), vec![batch]))
+            }
         }
     }
 }
@@ -165,8 +172,35 @@ fn algorithm<T: std::str::FromStr<Err = GfError>>(
     })
 }
 
-/// The selector value for a `paths` source; `parse_workload` checks every binding with it.
-pub(super) fn prop_value(variant: &str, literal: &IrLiteral) -> Result<PropValue, QueryError> {
+/// The `paths` source a binding selects; `parse_workload` checks every binding with it.
+pub(super) fn source_selector(
+    variant: &str,
+    source: &SourceSelector,
+    params: &BTreeMap<String, IrLiteral>,
+) -> Result<NodeSelector, QueryError> {
+    let literal = &params[source.param()];
+    match source {
+        SourceSelector::Uuid(_) => match literal {
+            IrLiteral::Str(value) => NodeSelector::uuid(value).map_err(|error| {
+                QueryError::new(
+                    QueryCause::InvalidWorkload,
+                    format!("variant {variant}: {error}"),
+                )
+            }),
+            other => Err(QueryError::new(
+                QueryCause::InvalidWorkload,
+                format!("variant {variant}: a source UUID must be a string, not {other:?}"),
+            )),
+        },
+        SourceSelector::Match(source) => Ok(NodeSelector::Match {
+            label: source.label.clone(),
+            property: source.property.clone(),
+            value: prop_value(variant, literal)?,
+        }),
+    }
+}
+
+fn prop_value(variant: &str, literal: &IrLiteral) -> Result<PropValue, QueryError> {
     match literal {
         IrLiteral::Int(value) => Ok(PropValue::Int(*value)),
         IrLiteral::Str(value) => Ok(PropValue::Str(value.clone())),
@@ -195,6 +229,8 @@ fn prepare(variant: &Variant, binding: &Binding) -> Result<Prepared, QueryError>
             by,
             directed,
             via,
+            pagerank,
+            clustering_normalization,
         } => Prepared::Rank(
             label.clone(),
             RankOptions {
@@ -202,6 +238,8 @@ fn prepare(variant: &Variant, binding: &Binding) -> Result<Prepared, QueryError>
                 via: via.clone(),
                 directed: *directed,
                 write_property: None,
+                pagerank: pagerank.as_ref().map(|options| options.options()),
+                clustering_normalization: clustering_normalization.map(|mode| mode.normalization()),
             },
         ),
         Operation::Cluster {
@@ -209,6 +247,7 @@ fn prepare(variant: &Variant, binding: &Binding) -> Result<Prepared, QueryError>
             by,
             directed,
             via,
+            synchronous_label_propagation,
         } => Prepared::Cluster(
             label.clone(),
             ClusterOptions {
@@ -217,28 +256,32 @@ fn prepare(variant: &Variant, binding: &Binding) -> Result<Prepared, QueryError>
                 via: via.clone(),
                 directed: *directed,
                 write_property: None,
+                synchronous_label_propagation: synchronous_label_propagation
+                    .as_ref()
+                    .map(|options| options.options()),
             },
         ),
         Operation::Paths {
             by,
             directed,
             source,
+            target,
             via,
             weight,
-        } => Prepared::Paths(
-            NodeSelector::Match {
-                label: source.label.clone(),
-                property: source.property.clone(),
-                value: prop_value(id, &binding.params[&source.param])?,
-            },
-            Box::new(PathsOptions {
+        } => Prepared::Paths(Box::new((
+            source_selector(id, source, &binding.params)?,
+            target
+                .as_ref()
+                .map(|target| source_selector(id, target, &binding.params))
+                .transpose()?,
+            PathsOptions {
                 by: algorithm::<PathAlgorithm>(id, by)?,
                 directed: *directed,
                 via: via.clone(),
                 weight: weight.clone(),
                 ..Default::default()
-            }),
-        ),
+            },
+        ))),
     })
 }
 
@@ -281,7 +324,11 @@ fn sample(
             }));
         }
     };
-    let rendered = match Rendered::new(&schema, &batches) {
+    let projected = match &variant.columns {
+        None => Ok((schema, batches)),
+        Some(columns) => project(&schema, &batches, columns),
+    };
+    let rendered = match projected.and_then(|(schema, batches)| Rendered::new(&schema, &batches)) {
         Ok(rendered) => rendered,
         Err(error) => {
             return Ok(Outcome::Failed(Failure {
@@ -300,6 +347,34 @@ fn sample(
         rows: rendered.rows.len() as u64,
         result_sha256,
     }))
+}
+
+/// Keep only the named columns, in the named order, after the clock stops.
+fn project(
+    schema: &SchemaRef,
+    batches: &[RecordBatch],
+    columns: &[String],
+) -> Result<(SchemaRef, Vec<RecordBatch>), QueryError> {
+    let indices = columns
+        .iter()
+        .map(|name| {
+            schema.index_of(name).map_err(|_| {
+                QueryError::new(
+                    QueryCause::QueryFailed,
+                    format!("the result has no column {name:?} to keep"),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let failed = |error: arrow::error::ArrowError| {
+        QueryError::new(QueryCause::QueryFailed, error.to_string())
+    };
+    let projected = std::sync::Arc::new(schema.project(&indices).map_err(failed)?);
+    let batches = batches
+        .iter()
+        .map(|batch| batch.project(&indices).map_err(failed))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((projected, batches))
 }
 
 /// Nearest-rank percentile: the smallest sample with at least `percent`% of
@@ -352,6 +427,7 @@ pub fn measure_variant(
         query_id: variant.id.clone(),
         interface: variant.operation.interface(),
         ordered: variant.ordered,
+        columns: variant.columns.clone(),
         status: if failed { "failed" } else { "measured" },
         warmup: Warmup {
             binding_id: first.id.clone(),

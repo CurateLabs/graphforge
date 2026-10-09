@@ -30,6 +30,42 @@ pub trait BulkBatchReader: Send + Sync {
     /// copy and an assembled copy never coexist. A task that emits a different
     /// number of rows fails the build.
     fn task_rows(&self, task: usize) -> usize;
+
+    /// Owned bytes of the source's cached Arrow schema, including nested
+    /// fields and metadata. Readers retaining schema buffers report them here
+    /// so the scratch builder reserves them before decoding. A reader with no
+    /// retained schema may use the default.
+    fn schema_resident_bytes(&self) -> u64 {
+        0
+    }
+
+    /// Cached footer/schema memory retained while the plan exists.
+    fn retained_metadata_bytes(&self) -> u64 {
+        self.schema_resident_bytes()
+    }
+
+    /// Maximum raw decoder workspace, including retained dictionaries and
+    /// compressed-message expansion, known without decoding payload arrays.
+    fn decoded_workspace_bytes(&self) -> u64 {
+        0
+    }
+
+    /// The smallest and largest identity UUID among `task`'s rows, when the
+    /// source's footer states them exactly (no nulls, so no derived UUIDs). The
+    /// over-budget route uses them to split edges into UUID ranges of equal
+    /// size without reading any data; without them it samples.
+    fn uuid_bounds(&self, _task: usize) -> Option<([u8; 16], [u8; 16])> {
+        None
+    }
+
+    /// Whether every batch this source emits already passed canonical-schema
+    /// validation and the construction admission windows when it was accepted,
+    /// so the builder need not repeat them. A decoded copy can be larger than
+    /// the batch that was admitted (buffers shared by one IPC body count once
+    /// per column), so repeating the byte window would refuse an admitted batch.
+    fn admitted(&self) -> bool {
+        false
+    }
 }
 
 /// One planned input source (pass 0).
@@ -43,8 +79,8 @@ pub struct BulkSource<'a> {
     pub rows: u64,
     /// Whether the source carries only the required columns.
     pub property_free: bool,
-    /// Decoded size of the source's rows, from its footer. Only a
-    /// property-bearing source retains its decoded batches.
+    /// Decoded size of the source's rows, from its footer. The resident peak
+    /// model charges retained batches only for property-bearing kinds.
     pub decoded_bytes: u64,
 }
 
@@ -55,6 +91,10 @@ pub struct BulkBuildPlan<'a> {
     pub nodes: Vec<BulkSource<'a>>,
     /// Edge sources in registration order.
     pub edges: Vec<BulkSource<'a>>,
+    /// Resident bytes the build may plan to use, or `None` for no limit. A
+    /// build whose in-memory estimate exceeds it runs on scratch files
+    /// (ADR 0058, #1900).
+    pub memory_budget: Option<u64>,
 }
 
 /// Peak-RSS model of the builder, fitted to measured runs (#1883):
@@ -71,7 +111,7 @@ const BYTES_PER_NODE: u64 = 76;
 /// a sorted copy per schema group. Measured at S20 with a `name` node property
 /// and a `weight` edge property: peak RSS exceeded the fitted property-free
 /// model by 5.5 times the footers' uncompressed bytes.
-const RETAINED_FACTOR: u64 = 6;
+pub(super) const RETAINED_FACTOR: u64 = 6;
 /// Safety margin on the sum, as a fraction: 5/4.
 const MARGIN_NUMERATOR: u64 = 5;
 const MARGIN_DENOMINATOR: u64 = 4;
@@ -99,6 +139,15 @@ impl BulkBuildPlan<'_> {
             .saturating_add(rows(&self.edges).saturating_mul(BYTES_PER_EDGE))
             .saturating_add(retained(&self.nodes))
             .saturating_add(retained(&self.edges))
+            .saturating_add(
+                self.nodes
+                    .iter()
+                    .chain(&self.edges)
+                    .map(|source| source.reader.retained_metadata_bytes())
+                    .fold(0_u64, u64::saturating_add),
+            )
+            .saturating_add(self.max_source_schema_bytes().saturating_mul(8))
+            .saturating_add(self.source_decoder_bytes())
             .saturating_mul(MARGIN_NUMERATOR)
             / MARGIN_DENOMINATOR
     }
@@ -133,10 +182,55 @@ pub struct BulkBuildReport {
     /// Edges built.
     pub edges: u64,
     /// Per-pass measurements by pass name (`plan`, `nodes`, `edges`, `catalog`,
-    /// `tables`, `adjacency`, `membership`, `properties`, `finalize`). Keys and
+    /// `tables`, `ordinal`, `adjacency`, `properties`, `finalize`). Keys and
     /// values are numeric-only so receipts stay within the certification
     /// runner's sanitizer.
     pub passes: std::collections::BTreeMap<String, BulkPassReport>,
+    /// Partitions in flight on the over-budget route; zero when the build ran in memory.
+    #[serde(default)]
+    pub scratch_concurrency: u64,
+    /// Edge-UUID range partitions of the over-budget route.
+    #[serde(default)]
+    pub edge_partitions: u64,
+    /// Node-range partitions per direction of the over-budget route.
+    #[serde(default)]
+    pub csr_partitions: u64,
+    /// Bytes the over-budget route wrote to scratch files, block headers included.
+    #[serde(default)]
+    pub scratch_write_bytes: u64,
+    /// Bytes it read back.
+    #[serde(default)]
+    pub scratch_read_bytes: u64,
+    /// Edges in the largest edge-UUID range partition of the over-budget route.
+    #[serde(default)]
+    pub largest_edge_partition: u64,
+    /// Radix refinements of oversized UUID ranges (zero for balanced input).
+    #[serde(default)]
+    pub edge_refinement_steps: u64,
+    /// Additional scratch writes needed to refine skewed edge UUID ranges.
+    #[serde(default)]
+    pub edge_refinement_write_bytes: u64,
+    /// Scratch reads performed by adaptive edge refinement.
+    #[serde(default)]
+    pub edge_refinement_read_bytes: u64,
+    /// Additional scratch writes for relation CSR spools.
+    #[serde(default)]
+    pub csr_spool_write_bytes: u64,
+    /// Scratch reads from relation CSR spools.
+    #[serde(default)]
+    pub csr_spool_read_bytes: u64,
+    /// Largest single unfinished CSR shard. Relation count does not multiply it.
+    #[serde(default)]
+    pub peak_csr_carry_entries: u64,
+    /// Property IPC frames written, including CRC headers and temporary runs.
+    #[serde(default)]
+    pub property_scratch_write_bytes: u64,
+    /// Property IPC frames read; repeated catalog/window scans are included.
+    #[serde(default)]
+    pub property_scratch_read_bytes: u64,
+    /// Fixed property workspace reserved before decoding any source.
+    #[serde(default)]
+    pub property_workspace_reserved_bytes: u64,
 }
 
 #[derive(Clone, Copy, Default)]

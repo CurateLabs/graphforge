@@ -1,0 +1,349 @@
+{
+  "schema": "graphforge-gdc-finbench-query-fixture/1",
+  "dataset_id": "finbench-engineering-queries-v1",
+  "note": "Synthetic FinBench-shaped engineering fixture for the read queries. Timestamps are integer epoch milliseconds. Node ids are unique across labels. Not LDBC data.",
+  "nodes": {
+    "Person": {
+      "columns": ["id", "name", "isBlocked"],
+      "rows": [
+        [1, "Ada", false],
+        [2, "Bo", false],
+        [3, "Cy", false],
+        [4, "Di", false],
+        [5, "Ed", true],
+        [6, "Fay", false]
+      ]
+    },
+    "Company": {
+      "columns": ["id", "name", "isBlocked"],
+      "rows": [
+        [11, "Alpha", false],
+        [12, "Beta", false],
+        [13, "Gamma", false],
+        [14, "Delta", true]
+      ]
+    },
+    "Account": {
+      "columns": ["id", "createTime", "isBlocked", "type", "nickname"],
+      "rows": [
+        [101, 500, false, "internet account", "a101"],
+        [102, 510, false, "debit card", "a102"],
+        [103, 520, true, "credit card", "a103"],
+        [104, 530, false, "brokerage account", "a104"],
+        [105, 540, false, "internet account", "a105"],
+        [106, 550, false, "internet account", "a106"],
+        [107, 560, false, "internet account", "a107"],
+        [108, 570, false, "internet account", "a108"],
+        [109, 580, false, "internet account", "a109"],
+        [110, 590, false, "internet account", "a110"],
+        [111, 600, false, "internet account", "a111"],
+        [112, 610, false, "internet account", "a112"],
+        [120, 620, true, "debit card", "a120"],
+        [121, 630, false, "internet account", "a121"],
+        [122, 640, false, "internet account", "a122"],
+        [123, 650, false, "internet account", "a123"],
+        [124, 660, false, "internet account", "a124"],
+        [125, 670, false, "internet account", "a125"],
+        [126, 680, false, "internet account", "a126"],
+        [127, 690, false, "internet account", "a127"],
+        [128, 700, false, "internet account", "a128"],
+        [130, 710, false, "internet account", "a130"],
+        [131, 720, false, "internet account", "a131"],
+        [132, 730, false, "internet account", "a132"],
+        [133, 740, false, "internet account", "a133"],
+        [134, 750, false, "internet account", "a134"],
+        [135, 760, false, "internet account", "a135"],
+        [136, 770, false, "internet account", "a136"],
+        [137, 780, false, "internet account", "a137"],
+        [138, 790, false, "internet account", "a138"],
+        [139, 800, false, "internet account", "a139"],
+        [140, 810, false, "internet account", "a140"],
+        [141, 820, false, "internet account", "a141"],
+        [142, 830, false, "internet account", "a142"],
+        [143, 840, false, "internet account", "a143"],
+        [144, 850, false, "internet account", "a144"],
+        [145, 860, false, "internet account", "a145"],
+        [146, 870, false, "internet account", "a146"],
+        [147, 880, false, "internet account", "a147"],
+        [150, 890, false, "debit card", "a150"],
+        [151, 900, false, "internet account", "a151"],
+        [152, 910, false, "internet account", "a152"],
+        [153, 920, false, "internet account", "a153"],
+        [154, 930, false, "internet account", "a154"],
+        [155, 940, false, "internet account", "a155"],
+        [156, 950, false, "internet account", "a156"],
+        [157, 960, false, "internet account", "a157"],
+        [158, 970, false, "internet account", "a158"],
+        [159, 980, false, "internet account", "a159"],
+        [160, 990, false, "merchant account", "a160"],
+        [165, 1000, false, "internet account", "a165"],
+        [166, 1010, false, "internet account", "a166"],
+        [167, 1020, false, "internet account", "a167"],
+        [168, 1030, false, "internet account", "a168"],
+        [169, 1040, false, "internet account", "a169"],
+        [170, 1050, false, "internet account", "a170"],
+        [171, 1060, false, "internet account", "a171"],
+        [175, 1070, false, "internet account", "a175"],
+        [176, 1080, false, "internet account", "a176"],
+        [177, 1090, false, "internet account", "a177"],
+        [178, 1100, false, "internet account", "a178"],
+        [179, 1110, false, "debit card", "a179"],
+        [180, 1120, false, "internet account", "a180"],
+        [181, 1130, false, "internet account", "a181"],
+        [182, 1140, false, "internet account", "a182"],
+        [183, 1150, false, "internet account", "a183"],
+        [185, 1160, false, "internet account", "a185"],
+        [186, 1170, true, "internet account", "a186"],
+        [187, 1180, false, "internet account", "a187"],
+        [188, 1190, true, "internet account", "a188"],
+        [189, 1200, false, "internet account", "a189"],
+        [190, 1210, false, "internet account", "a190"],
+        [191, 1220, false, "internet account", "a191"],
+        [192, 1230, false, "corporate account", "a192"],
+        [193, 1240, false, "corporate account", "a193"],
+        [194, 1250, false, "internet account", "a194"],
+        [195, 1260, true, "internet account", "a195"],
+        [196, 1270, true, "internet account", "a196"],
+        [197, 1280, false, "internet account", "a197"],
+        [198, 1290, true, "internet account", "a198"],
+        [199, 1300, false, "internet account", "a199"]
+      ]
+    },
+    "Loan": {
+      "columns": ["id", "loanAmount", "balance"],
+      "rows": [
+        [201, 5000.0, 1200.5],
+        [202, 9000.0, 900.0],
+        [203, 3000.25, 100.0],
+        [204, 4000.0, 400.0],
+        [205, 7000.0, 700.0],
+        [206, 1000.0, 10.0],
+        [207, 2500.0, 250.0],
+        [208, 2500.0, 300.0],
+        [210, 10000.0, 5000.0],
+        [211, 8000.0, 800.0],
+        [212, 6000.0, 600.0],
+        [221, 100.0, 10.0],
+        [222, 200.5, 20.0],
+        [223, 300.0, 30.0],
+        [224, 400.0, 40.0],
+        [225, 500.0, 50.0],
+        [226, 600.0, 60.0],
+        [227, 700.0, 70.0]
+      ]
+    },
+    "Medium": {
+      "columns": ["id", "type", "isBlocked"],
+      "rows": [
+        [301, "POS", true],
+        [302, "IP", false],
+        [303, "IP", true],
+        [304, "MAC", true]
+      ]
+    }
+  },
+  "edges": {
+    "own": {
+      "columns": ["from", "to", "timestamp"],
+      "rows": [
+        [1, 194, 900],
+        [2, 120, 900],
+        [2, 121, 900],
+        [3, 140, 900],
+        [3, 141, 900],
+        [6, 190, 900],
+        [6, 191, 900],
+        [11, 192, 900],
+        [12, 193, 900]
+      ]
+    },
+    "transfer": {
+      "columns": ["from", "to", "timestamp", "amount"],
+      "rows": [
+        [101, 102, 1100, 10.0],
+        [101, 103, 1200, 10.0],
+        [101, 104, 1300, 10.0],
+        [101, 105, 1050, 10.0],
+        [101, 112, 1100, 10.0],
+        [102, 106, 1150, 10.0],
+        [102, 107, 1050, 10.0],
+        [103, 106, 1250, 10.0],
+        [103, 102, 1150, 10.0],
+        [106, 108, 1400, 10.0],
+        [104, 109, 2000, 10.0],
+        [104, 110, 1350, 10.0],
+        [108, 111, 1500, 10.0],
+        [105, 108, 1060, 10.0],
+
+        [122, 120, 1500, 10.0],
+        [123, 122, 1400, 10.0],
+        [124, 123, 1450, 10.0],
+        [124, 123, 1300, 10.0],
+        [125, 120, 1600, 10.0],
+        [125, 120, 1700, 10.0],
+        [126, 121, 1100, 10.0],
+        [127, 126, 2100, 10.0],
+        [128, 120, 1200, 10.0],
+
+        [130, 131, 1100, 10.0],
+        [131, 133, 2500, 10.0],
+        [131, 132, 1200, 10.0],
+        [132, 133, 1300, 10.0],
+
+        [135, 136, 1100, 1.0],
+        [136, 137, 1200, 10.0],
+        [136, 137, 1300, 20.5],
+        [137, 135, 1250, 30.0],
+        [137, 135, 2500, 99.0],
+        [136, 138, 1210, 5.0],
+        [138, 135, 1220, 30.0],
+        [138, 135, 1230, 1.25],
+        [136, 139, 1100, 50.0],
+
+        [140, 142, 1100, 10.0],
+        [140, 142, 1150, 10.0],
+        [142, 143, 1200, 10.0],
+        [143, 140, 1300, 10.0],
+        [143, 144, 1250, 10.0],
+        [142, 145, 1050, 10.0],
+        [141, 146, 1500, 10.0],
+        [146, 147, 1600, 10.0],
+        [141, 140, 1000, 10.0],
+
+        [155, 151, 1100, 200.0],
+        [156, 151, 1200, 250.0],
+        [157, 151, 1300, 300.0],
+        [158, 151, 1400, 350.0],
+        [159, 151, 1050, 50.0],
+        [155, 151, 1600, 150.0],
+        [155, 152, 1100, 120.0],
+        [156, 152, 1110, 130.0],
+        [157, 152, 1120, 140.0],
+        [158, 152, 1130, 150.0],
+        [159, 152, 1140, 160.0],
+        [155, 153, 1100, 500.0],
+        [156, 153, 1200, 500.0],
+        [157, 153, 1300, 500.0],
+
+        [166, 165, 1100, 100.0],
+        [166, 165, 1200, 200.0],
+        [167, 165, 1300, 50.0],
+        [168, 165, 2500, 400.0],
+        [165, 169, 1400, 150.0],
+        [165, 170, 1500, 120.0],
+        [165, 170, 1450, 30.0],
+        [166, 171, 1100, 100.0],
+
+        [199, 175, 1050, 1000.0],
+        [175, 177, 1200, 800.0],
+        [175, 178, 1210, 400.0],
+        [177, 180, 1300, 450.0],
+        [177, 181, 1310, 300.0],
+        [180, 182, 1400, 300.0],
+        [182, 183, 1500, 1000.0],
+
+        [186, 185, 1400, 300.0],
+        [187, 185, 1410, 200.0],
+        [188, 185, 2500, 500.0],
+        [185, 188, 1500, 800.0],
+        [185, 189, 1510, 30.0],
+
+        [190, 192, 1100, 100.5],
+        [190, 192, 1200, 200.0],
+        [191, 193, 1300, 50.0],
+        [190, 194, 1250, 1000.0],
+        [191, 192, 2100, 70.0],
+
+        [122, 195, 1100, 10.0],
+        [125, 196, 2500, 10.0],
+        [128, 197, 1300, 10.0],
+        [125, 195, 1400, 10.0],
+        [128, 198, 1300, 10.0],
+        [122, 120, 1550, 10.0]
+      ]
+    },
+    "withdraw": {
+      "columns": ["from", "to", "timestamp", "amount"],
+      "rows": [
+        [151, 150, 1500, 600.0],
+        [151, 150, 1510, 50.0],
+        [152, 150, 1520, 300.0],
+        [153, 150, 1530, 900.0],
+        [154, 150, 900, 900.0],
+        [151, 160, 1600, 500.0],
+        [175, 179, 1220, 600.0],
+        [177, 179, 1320, 500.0]
+      ]
+    },
+    "deposit": {
+      "columns": ["from", "to", "timestamp", "amount"],
+      "rows": [
+        [201, 122, 1100, 5000.0],
+        [202, 122, 900, 9000.0],
+        [203, 123, 1500, 1500.0],
+        [203, 123, 1600, 1500.25],
+        [204, 124, 1500, 4000.0],
+        [205, 128, 1500, 7000.0],
+        [206, 126, 1500, 1000.0],
+        [207, 125, 1150, 2500.0],
+        [208, 125, 1160, 2500.0],
+        [210, 175, 1100, 10000.0],
+        [210, 176, 900, 10000.0],
+        [211, 185, 1100, 1000.0],
+        [211, 185, 1200, 40.0]
+      ]
+    },
+    "repay": {
+      "columns": ["from", "to", "timestamp", "amount"],
+      "rows": [
+        [185, 212, 1300, 400.0],
+        [185, 212, 2100, 999.0]
+      ]
+    },
+    "signIn": {
+      "columns": ["from", "to", "timestamp"],
+      "rows": [
+        [301, 106, 1100],
+        [302, 108, 1100],
+        [303, 108, 1500],
+        [303, 110, 999],
+        [304, 102, 1200],
+        [304, 112, 1300],
+        [301, 111, 1100]
+      ]
+    },
+    "apply": {
+      "columns": ["from", "to", "timestamp"],
+      "rows": [
+        [1, 221, 900],
+        [2, 222, 900],
+        [3, 223, 900],
+        [4, 224, 900],
+        [5, 225, 900],
+        [5, 226, 900],
+        [11, 227, 900]
+      ]
+    },
+    "invest": {
+      "columns": ["from", "to", "timestamp", "ratio"],
+      "rows": [
+        [4, 11, 1100, 0.1],
+        [4, 12, 1200, 0.2],
+        [5, 12, 1300, 0.3],
+        [5, 13, 1400, 0.4],
+        [4, 13, 2000, 0.5],
+        [5, 14, 900, 0.6]
+      ]
+    },
+    "guarantee": {
+      "columns": ["from", "to", "timestamp"],
+      "rows": [
+        [1, 2, 1100],
+        [2, 3, 1200],
+        [3, 1, 1300],
+        [3, 4, 900],
+        [2, 5, 1150]
+      ]
+    }
+  }
+}

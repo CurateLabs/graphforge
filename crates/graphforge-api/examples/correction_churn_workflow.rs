@@ -148,6 +148,7 @@ fn main() {
                 via: Some("SUPPLIES".into()),
                 directed: false,
                 write_property: None,
+                ..Default::default()
             },
         )
         .unwrap();

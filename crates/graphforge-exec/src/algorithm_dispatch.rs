@@ -12,6 +12,9 @@ use arrow::record_batch::RecordBatch;
 #[cfg(test)]
 use graphforge_core::GfError;
 use graphforge_core::algorithms::{Algorithm, AlgorithmResultSchema};
+use graphforge_core::{
+    ClusteringNormalization, PageRankOptions, RankOptions, SynchronousLabelPropagationOptions,
+};
 
 use crate::algorithm_arrow_sink::{AlgorithmArrowSink, decode_logical_rows};
 use crate::algorithm_graph::AdjacencyGraph;
@@ -95,6 +98,9 @@ pub(crate) struct AlgorithmControl {
     states: AtomicU64,
     /// Optional private compute pool from the owning GraphForge instance (#342).
     compute_pool: Option<crate::SharedComputePool>,
+    pagerank_options: PageRankOptions,
+    clustering_normalization: ClusteringNormalization,
+    synchronous_label_propagation: Option<SynchronousLabelPropagationOptions>,
 }
 
 impl AlgorithmControl {
@@ -105,7 +111,38 @@ impl AlgorithmControl {
             iterations: AtomicU64::new(0),
             states: AtomicU64::new(0),
             compute_pool: None,
+            pagerank_options: PageRankOptions::default(),
+            clustering_normalization: ClusteringNormalization::default(),
+            synchronous_label_propagation: None,
         }
+    }
+
+    pub(crate) fn with_rank_options(mut self, options: &RankOptions) -> Self {
+        self.pagerank_options = options.pagerank.unwrap_or_default();
+        self.clustering_normalization = options.clustering_normalization.unwrap_or_default();
+        self
+    }
+
+    pub(crate) fn pagerank_options(&self) -> PageRankOptions {
+        self.pagerank_options
+    }
+
+    pub(crate) fn clustering_normalization(&self) -> ClusteringNormalization {
+        self.clustering_normalization
+    }
+
+    pub(crate) fn with_synchronous_label_propagation(
+        mut self,
+        options: Option<SynchronousLabelPropagationOptions>,
+    ) -> Self {
+        self.synchronous_label_propagation = options;
+        self
+    }
+
+    pub(crate) fn synchronous_label_propagation(
+        &self,
+    ) -> Option<&SynchronousLabelPropagationOptions> {
+        self.synchronous_label_propagation.as_ref()
     }
 
     /// Attach the instance-owned private CPU pool (#337 / #342).
@@ -144,6 +181,12 @@ impl AlgorithmControl {
     }
 
     /// Check cancellation and consume one cooperative iteration.
+    ///
+    /// Only an iterative algorithm may call this, once per round or sweep: the
+    /// `iterations` limit counts rounds. A single-pass algorithm polls
+    /// [`Self::check_cancelled`] instead, because its work is bounded by the node
+    /// and edge limits and a per-node or per-edge charge would refuse ordinary
+    /// graphs (#1922).
     pub(crate) fn checkpoint(&self) -> Result<u64, AlgorithmError> {
         self.check_cancelled()?;
         let observed = self.iterations.fetch_add(1, Ordering::AcqRel) + 1;
@@ -163,6 +206,7 @@ impl AlgorithmControl {
         }
     }
 
+    /// Poll cancellation without consuming the iteration budget.
     pub(crate) fn check_cancelled(&self) -> Result<(), AlgorithmError> {
         if self.cancellation.is_cancelled() {
             Err(AlgorithmError::Cancelled)

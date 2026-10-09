@@ -200,6 +200,21 @@ pub fn parse_datetime(text: &str, format: TemporalFormat) -> Result<DateTime, St
     }
 }
 
+/// Parses a datetime into the whole epoch milliseconds of the instant it names.
+///
+/// # Errors
+/// A message naming why `text` is not a datetime in `format`, or why its
+/// instant is not a whole number of milliseconds.
+pub fn parse_epoch_millis(text: &str, format: TemporalFormat) -> Result<i64, String> {
+    let nanos = parse_datetime(text, format)?.instant_nanos();
+    let per_milli = i128::from(NANOS_PER_MILLI);
+    if nanos.rem_euclid(per_milli) != 0 {
+        return Err(format!("datetime {text:?} is not a whole millisecond"));
+    }
+    i64::try_from(nanos.div_euclid(per_milli))
+        .map_err(|_| format!("datetime {text:?} is out of range"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +313,32 @@ mod tests {
                 offset_seconds: 0
             })
         );
+    }
+
+    #[test]
+    fn epoch_millis_are_the_instant_in_whole_milliseconds() {
+        assert_eq!(
+            parse_epoch_millis("2010-01-03 15:10:41.499", NaiveUtc),
+            Ok(1_262_531_441_499)
+        );
+        assert_eq!(
+            parse_epoch_millis("2010-01-03 15:10:41.5", NaiveUtc),
+            Ok(1_262_531_441_500)
+        );
+        assert_eq!(
+            parse_epoch_millis("2010-01-03T17:10:41.499+0200", Iso8601),
+            Ok(1_262_531_441_499)
+        );
+        assert_eq!(
+            parse_epoch_millis("1969-12-31 23:59:59.999", NaiveUtc),
+            Ok(-1)
+        );
+        assert_eq!(
+            parse_epoch_millis("1262531441499", EpochMillis),
+            Ok(1_262_531_441_499)
+        );
+        assert!(parse_epoch_millis("2010-01-03 15:10:41.4995", NaiveUtc).is_err());
+        assert!(parse_epoch_millis("2010-01-03", NaiveUtc).is_err());
     }
 
     #[test]

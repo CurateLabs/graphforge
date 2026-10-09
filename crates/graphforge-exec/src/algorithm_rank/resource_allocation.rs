@@ -171,7 +171,7 @@ fn resource_allocation_serial_checkpoint(
     visited: &mut usize,
 ) -> Result<(), AlgorithmError> {
     if (*visited).is_multiple_of(RESOURCE_ALLOCATION_CHECKPOINT_INTERVAL) {
-        control.checkpoint()?;
+        control.check_cancelled()?;
     }
     *visited = visited.saturating_add(1);
     Ok(())

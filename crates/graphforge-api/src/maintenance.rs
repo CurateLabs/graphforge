@@ -191,7 +191,7 @@ impl GraphForge {
                 .lock()
                 .expect("semantic storage binding lock poisoned") = bindings;
             *self
-                .uuid_membership_index
+                .identity_probe
                 .lock()
                 .expect("UUID membership index lock poisoned") = None;
             drop(old_workspace);
@@ -478,8 +478,8 @@ mod tests {
             &graphforge_storage::resolve_project_generation(&root).unwrap(),
         )
         .unwrap();
-        *graph.uuid_membership_index.lock().unwrap() =
-            Some(graphforge_storage::UuidMembershipIndex::open(&graph.dir()).unwrap());
+        *graph.identity_probe.lock().unwrap() =
+            Some(graphforge_storage::TopologyIdentityProbe::open_dir(&graph.dir()).unwrap());
         // Observe reclamation without adding another workspace owner.
         let old_dir = graph.dir().to_path_buf();
         let snapshot = graph
@@ -499,7 +499,7 @@ mod tests {
 
         assert!(report.cleanup.is_some());
         assert_ne!(graph.dir().path(), old_dir.as_path());
-        assert!(graph.uuid_membership_index.lock().unwrap().is_none());
+        assert!(graph.identity_probe.lock().unwrap().is_none());
         assert!(old_dir.exists(), "active stream retains old workspace");
         drop(snapshot);
         assert!(!old_dir.exists(), "last stream releases old workspace");

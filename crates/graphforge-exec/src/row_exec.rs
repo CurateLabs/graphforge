@@ -49,6 +49,7 @@ pub struct OptionalMatchExec {
     /// Inner column indices to append to the output, in order (every shared-
     /// variable column already excluded — those come from the outer side).
     inner_keep_idx: Vec<usize>,
+    null_safe_keys: bool,
     schema: SchemaRef,
     props: Arc<PlanProperties>,
 }
@@ -73,6 +74,7 @@ impl OptionalMatchExec {
             inner,
             join_keys: node.join_keys.clone(),
             inner_keep_idx: node.inner_keep_idx.clone(),
+            null_safe_keys: node.null_safe_keys,
             schema,
             props,
         }
@@ -123,6 +125,7 @@ impl ExecutionPlan for OptionalMatchExec {
             inner,
             join_keys: self.join_keys.clone(),
             inner_keep_idx: self.inner_keep_idx.clone(),
+            null_safe_keys: self.null_safe_keys,
             schema: self.schema.clone(),
             props: self.props.clone(),
         }))
@@ -143,6 +146,7 @@ impl ExecutionPlan for OptionalMatchExec {
         let cfg = OptionalConfig {
             join_keys: self.join_keys.clone(),
             inner_keep_idx: self.inner_keep_idx.clone(),
+            null_safe_keys: self.null_safe_keys,
             out_schema: self.schema.clone(),
             // Carry the child schemas so concat_batches has a schema even when a
             // child yields zero batches (an empty inner must null-shape, not
@@ -169,6 +173,9 @@ pub(super) struct OptionalConfig {
     /// Inner column indices to append (in order); every shared-variable column
     /// already excluded. Source of truth shared with the node's output schema.
     pub(super) inner_keep_idx: Vec<usize>,
+    /// Null keys equal null keys and keys may be any value type (a correlated
+    /// sub-plan keyed on every outer column, #1887 D15).
+    pub(super) null_safe_keys: bool,
     pub(super) out_schema: SchemaRef,
     /// Outer child's schema — used for `concat_batches` so an empty outer
     /// stream still yields a correctly-typed (zero-row) batch.
@@ -182,6 +189,24 @@ pub(super) struct OptionalConfig {
 enum OptionalJoinKey {
     U64(u64),
     Uuid([u8; 16]),
+    /// Any value, null included, for null-safe keys.
+    Value(datafusion::scalar::ScalarValue),
+}
+
+/// Every key column of `row` as a value, null included (null-safe keys).
+fn null_safe_key(
+    batch: &RecordBatch,
+    columns: &[usize],
+    row: usize,
+) -> Result<Vec<OptionalJoinKey>, GfError> {
+    columns
+        .iter()
+        .map(|&index| {
+            datafusion::scalar::ScalarValue::try_from_array(batch.column(index), row)
+                .map(OptionalJoinKey::Value)
+                .map_err(|e| GfError::Execution(e.to_string()))
+        })
+        .collect()
 }
 
 /// Run the LEFT OUTER join with null-shaping and build the output batch.
@@ -221,6 +246,9 @@ pub(super) fn optional_join(
                      columns: &[usize],
                      row: usize|
      -> Result<Option<Vec<OptionalJoinKey>>, GfError> {
+        if cfg.null_safe_keys {
+            return null_safe_key(batch, columns, row).map(Some);
+        }
         columns
             .iter()
             .map(|&index| {

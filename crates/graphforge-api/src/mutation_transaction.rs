@@ -210,7 +210,7 @@ impl FacadeMutationLifecycle<'_> {
         }
         *self
             .graph
-            .uuid_membership_index
+            .identity_probe
             .lock()
             .expect("UUID membership index lock poisoned") = None;
         self.graph.adjacency_provider_for_session().invalidate();
@@ -253,6 +253,7 @@ mod tests {
                         via: Some("KNOWS".into()),
                         directed: true,
                         write_property: property.map(str::to_owned),
+                        ..Default::default()
                     },
                 )
                 .unwrap()

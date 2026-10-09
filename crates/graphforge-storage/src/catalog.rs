@@ -788,6 +788,17 @@ const MAX_ADMITTED_COLUMN_BYTES: i64 = 64 * 1024 * 1024;
 pub(crate) fn admitted_parquet(
     path: &Path,
 ) -> Result<ParquetRecordBatchReaderBuilder<crate::lifecycle_io::ReadPathFile>, DataFusionError> {
+    admitted_parquet_with_options(
+        path,
+        parquet::arrow::arrow_reader::ArrowReaderOptions::new(),
+    )
+}
+
+/// [`admitted_parquet`] with explicit reader options, e.g. to load the page index.
+pub(crate) fn admitted_parquet_with_options(
+    path: &Path,
+    reader_options: parquet::arrow::arrow_reader::ArrowReaderOptions,
+) -> Result<ParquetRecordBatchReaderBuilder<crate::lifecycle_io::ReadPathFile>, DataFusionError> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -804,8 +815,11 @@ pub(crate) fn admitted_parquet(
         )));
     }
     preflight_parquet_handle(&mut file, metadata.len())?;
-    let builder =
-        ParquetRecordBatchReaderBuilder::try_new(admitted_path_file(file)?).map_err(parquet_err)?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new_with_options(
+        admitted_path_file(file)?,
+        reader_options,
+    )
+    .map_err(parquet_err)?;
     admit_decoded_parquet(&builder)?;
     Ok(builder)
 }

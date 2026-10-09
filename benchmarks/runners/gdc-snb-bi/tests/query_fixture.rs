@@ -112,7 +112,8 @@ fn every_analytical_read_is_runnable_or_refused_exactly_once() {
 }
 
 /// Every departure from the LDBC text is labelled as a variance, and one caused
-/// by a GraphForge defect cites its tracking issue (#1887, #1888).
+/// by an open GraphForge gap cites its tracking issue (#1888). #1887 is fixed, so
+/// no rewrite cites it.
 #[test]
 fn rewrites_are_labelled_variances_that_cite_their_cause() {
     let rewritten: Vec<Operation> = BI_QUERIES
@@ -125,9 +126,15 @@ fn rewrites_are_labelled_variances_that_cite_their_cause() {
         [
             Operation::Bi1,
             Operation::Bi2,
+            Operation::Bi3,
             Operation::Bi4,
+            Operation::Bi5,
+            Operation::Bi6,
+            Operation::Bi7,
             Operation::Bi8,
+            Operation::Bi9,
             Operation::Bi10,
+            Operation::Bi12,
             Operation::Bi13,
             Operation::Bi14,
             Operation::Bi16,
@@ -143,8 +150,28 @@ fn rewrites_are_labelled_variances_that_cite_their_cause() {
             "{}",
             query.operation
         );
-        let cites_defect = rewrite.contains("#1887 D") || rewrite.contains("#1888 D");
-        let not_a_defect = matches!(query.operation, Operation::Bi10 | Operation::Bi14);
+        assert!(!rewrite.contains("#1887"), "{}", query.operation);
+        let cites_defect = rewrite.contains("#1888 D");
+        // The `:Message` label rewrite is a data-model variance, not a defect.
+        let not_a_defect = matches!(
+            query.operation,
+            Operation::Bi2
+                | Operation::Bi3
+                | Operation::Bi5
+                | Operation::Bi6
+                | Operation::Bi7
+                | Operation::Bi9
+                | Operation::Bi10
+                | Operation::Bi12
+                | Operation::Bi14
+        );
+        let message_label = query.cypher.contains(":Post OR ");
+        assert_eq!(
+            message_label,
+            rewrite.contains("`:Message` supertype label"),
+            "{}",
+            query.operation
+        );
         assert_eq!(cites_defect, !not_a_defect, "{}", query.operation);
     }
 }
@@ -220,7 +247,7 @@ fn semantic_mutants_do_not_match_the_expectations() {
         // BI13 counting every like rather than likes by zombies.
         (
             Operation::Bi13,
-            "count(CASE WHEN likerZombie.id IN zombieIds THEN likerZombie END)",
+            "count(CASE WHEN likerZombie IN zombies THEN likerZombie END)",
             "count(likerZombie)",
         ),
     ];

@@ -4954,7 +4954,7 @@ fn repeated_node_in_one_hop_filters_against_the_existing_binding() {
 }
 
 #[test]
-fn relationships_are_unique_within_but_not_across_path_patterns() {
+fn relationships_are_unique_within_a_match_but_not_across_clauses() {
     let gf = GraphForge::new(None).expect("in-memory instance");
     gf.execute("CREATE (:A)-[:T]->(:B)").expect("seed");
 
@@ -4968,9 +4968,24 @@ fn relationships_are_unique_within_but_not_across_path_patterns() {
         .value(0);
     assert_eq!(one_path_total, 0, "one edge cannot fill both path hops");
 
-    let separate = rows(
+    // openCypher relationship isomorphism spans the comma-separated patterns
+    // of one MATCH clause (#1887 D6).
+    let comma = rows(
         &gf,
         "MATCH (a)-[r1]->(b), (x)-[r2]->(y) RETURN count(*) AS total",
+    );
+    let comma_total = comma.batches[0]
+        .column_by_name("total")
+        .expect("total")
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("Int64 total")
+        .value(0);
+    assert_eq!(comma_total, 0, "one MATCH cannot bind an edge twice");
+
+    let separate = rows(
+        &gf,
+        "MATCH (a)-[r1]->(b) MATCH (x)-[r2]->(y) RETURN count(*) AS total",
     );
     let separate_total = separate.batches[0]
         .column_by_name("total")
@@ -4979,7 +4994,10 @@ fn relationships_are_unique_within_but_not_across_path_patterns() {
         .downcast_ref::<Int64Array>()
         .expect("Int64 total")
         .value(0);
-    assert_eq!(separate_total, 1, "separate patterns may reuse an edge");
+    assert_eq!(
+        separate_total, 1,
+        "separate MATCH clauses may reuse an edge"
+    );
 }
 
 #[test]

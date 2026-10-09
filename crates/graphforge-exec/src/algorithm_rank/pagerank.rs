@@ -9,7 +9,6 @@ use super::{
 
 pub(super) struct PageRank;
 
-const PAGERANK_DAMPING: f64 = 0.85;
 const PAGERANK_TOLERANCE: f64 = 1.0e-10;
 
 const PAGERANK_CHECKPOINT_DESTINATIONS: usize = 4_096;
@@ -28,6 +27,10 @@ impl RustAlgorithm for PageRank {
         graph: &AdjacencyGraph,
         control: &AlgorithmControl,
     ) -> Result<AlgorithmOutput, AlgorithmError> {
+        let options = control.pagerank_options();
+        if let Some(iterations) = options.iterations {
+            control.check_iterations(iterations as usize)?;
+        }
         let algorithm = Algorithm::Rank(RankAlgorithm::PageRank);
         let node_len = graph.node_ids().len();
         if node_len == 0 {
@@ -38,16 +41,24 @@ impl RustAlgorithm for PageRank {
         let node_count = f64::from(exact_u32(node_len, "node count")?);
         let mut scores = vec![1.0 / node_count; node_len];
         let path = select_pagerank_path(control, prepared.edge_count, node_len);
-        loop {
+        let mut rounds = 0_u32;
+        while options.iterations.is_none_or(|limit| rounds < limit) {
             control.checkpoint()?;
             // Serial dangling reduction in dense ordinal order (accepted oracle).
             let dangling: f64 = prepared.dangling.iter().map(|&index| scores[index]).sum();
             let base =
-                (1.0 - PAGERANK_DAMPING) / node_count + PAGERANK_DAMPING * dangling / node_count;
+                (1.0 - options.damping) / node_count + options.damping * dangling / node_count;
             let mut next = vec![base; node_len];
             match path {
                 PageRankExecutionPath::Serial => {
-                    pagerank_scatter_serial(graph, &prepared.indices, &scores, &mut next)?;
+                    pagerank_scatter_serial(
+                        graph,
+                        &prepared.indices,
+                        &scores,
+                        &mut next,
+                        options.damping,
+                        control,
+                    )?;
                 }
                 PageRankExecutionPath::Parallel { .. } => {
                     pagerank_pull_parallel(
@@ -55,6 +66,7 @@ impl RustAlgorithm for PageRank {
                         &prepared.outdegrees,
                         &scores,
                         base,
+                        options.damping,
                         &mut next,
                         control,
                     )?;
@@ -67,7 +79,8 @@ impl RustAlgorithm for PageRank {
                 .map(|(previous, current)| (previous - current).abs())
                 .sum();
             scores = next;
-            if delta <= node_count * PAGERANK_TOLERANCE {
+            rounds = rounds.saturating_add(1);
+            if options.iterations.is_none() && delta <= node_count * PAGERANK_TOLERANCE {
                 break;
             }
         }
@@ -210,14 +223,19 @@ fn pagerank_scatter_serial(
     indices: &HashMap<u64, usize>,
     scores: &[f64],
     next: &mut [f64],
+    damping: f64,
+    control: &AlgorithmControl,
 ) -> Result<(), AlgorithmError> {
     for (source_index, &source) in graph.node_ids().iter().enumerate() {
+        if source_index.is_multiple_of(PAGERANK_CHECKPOINT_DESTINATIONS) {
+            control.check_cancelled()?;
+        }
         let edges = graph.neighbors(source);
         if edges.is_empty() {
             continue;
         }
         let outdegree = f64::from(exact_u32(edges.len(), "node degree")?);
-        let contribution = PAGERANK_DAMPING * scores[source_index] / outdegree;
+        let contribution = damping * scores[source_index] / outdegree;
         for edge in edges {
             let target = indices
                 .get(&edge.neighbor_id)
@@ -234,6 +252,7 @@ fn pagerank_pull_destination(
     outdegrees: &[f64],
     scores: &[f64],
     base: f64,
+    damping: f64,
     dest: usize,
 ) -> f64 {
     let start = usize::try_from(inbound.offsets[dest]).unwrap_or(0);
@@ -242,7 +261,7 @@ fn pagerank_pull_destination(
     for &source in &inbound.sources[start.min(end)..end.min(inbound.sources.len())] {
         let source = usize::try_from(source).unwrap_or(usize::MAX);
         if source < scores.len() {
-            acc += PAGERANK_DAMPING * scores[source] / outdegrees[source];
+            acc += damping * scores[source] / outdegrees[source];
         }
     }
     acc
@@ -253,6 +272,7 @@ fn pagerank_pull_parallel(
     outdegrees: &[f64],
     scores: &[f64],
     base: f64,
+    damping: f64,
     next: &mut [f64],
     control: &AlgorithmControl,
 ) -> Result<(), AlgorithmError> {
@@ -273,7 +293,7 @@ fn pagerank_pull_parallel(
                         control.check_cancelled()?;
                     }
                     local.push(pagerank_pull_destination(
-                        inbound, outdegrees, scores, base, dest,
+                        inbound, outdegrees, scores, base, damping, dest,
                     ));
                 }
                 Ok((start, local))

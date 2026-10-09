@@ -112,46 +112,37 @@ def family(path):
 
 
 SCRATCH = {
-    ("crates/graphforge-storage/src/uuid_membership/topology_delta.rs", "merge_identity_v3"),
-    ("crates/graphforge-storage/src/uuid_membership/topology_delta.rs", "merge_surrogate_handles"),
-    ("crates/graphforge-storage/src/uuid_membership/rebuild.rs", "flush_surrogate_run"),
-    ("crates/graphforge-storage/src/uuid_membership/rebuild.rs", "merge_runs"),
     (
-        "crates/graphforge-storage/src/uuid_membership/topology_delta.rs",
-        "plan_uuid_membership_delta",
+        "crates/graphforge-storage/src/uuid_membership/rebuild.rs",
+        "flush_surrogate_run",
     ),
     (
         "crates/graphforge-storage/src/uuid_membership/rebuild.rs",
-        "merge_node_surrogate_validation_group",
+        "flush_entity_surrogate_run",
     ),
     (
         "crates/graphforge-storage/src/uuid_membership/rebuild.rs",
-        "scan_node_surrogate_validation_runs",
+        "merge_surrogate_runs",
     ),
-    ("crates/graphforge-storage/src/uuid_membership/rebuild.rs", "flush_entity_surrogate_run"),
-    ("crates/graphforge-storage/src/uuid_membership/rebuild.rs", "merge_surrogate_runs"),
-    ("crates/graphforge-storage/src/uuid_membership.rs", "sync_uuid_file"),
-    ("crates/graphforge-storage/src/uuid_membership/rebuild.rs", "flush_run"),
-    ("crates/graphforge-storage/src/uuid_membership/topology_delta.rs", "write_identity_records"),
-    ("crates/graphforge-storage/src/uuid_membership/topology_delta.rs", "write_surrogate_records"),
-    ("crates/graphforge-storage/src/uuid_membership/rebuild.rs", "build_identity_run"),
-    ("crates/graphforge-storage/src/uuid_membership/topology_delta.rs", "merge_identity_handles"),
-    ("crates/graphforge-storage/src/uuid_membership/rebuild.rs", "scan_to_runs"),
     (
         "crates/graphforge-storage/src/uuid_membership/rebuild.rs",
         "scan_pinned_entity_surrogate_runs",
     ),
-    ("crates/graphforge-storage/src/uuid_membership/rebuild.rs", "merge_node_surrogate_group"),
-    ("crates/graphforge-storage/src/uuid_membership/topology_delta.rs", "external_sort_v4_nodes"),
-    ("crates/graphforge-storage/src/uuid_membership/rebuild.rs", "scan_entity_surrogate_runs"),
-    ("crates/graphforge-storage/src/uuid_membership/rebuild.rs", "build_surrogate_run"),
     (
         "crates/graphforge-storage/src/uuid_membership/rebuild.rs",
-        "flush_node_surrogate_validation_run",
+        "merge_node_surrogate_group",
     ),
     (
         "crates/graphforge-storage/src/uuid_membership/topology_delta.rs",
-        "append_uuid_membership_delta_with_tombstones",
+        "external_sort_v4_nodes",
+    ),
+    (
+        "crates/graphforge-storage/src/uuid_membership/rebuild.rs",
+        "scan_entity_surrogate_runs",
+    ),
+    (
+        "crates/graphforge-storage/src/uuid_membership/rebuild.rs",
+        "build_surrogate_run",
     ),
 }
 

@@ -54,3 +54,11 @@ point launches the same Rust-owned repository CLI used by `gf` and
 - [Installation](https://docs.graphforge.sh/guide/installation/)
 - [Repository integration](https://docs.graphforge.sh/guide/repository-integration/)
 - [Full documentation](https://docs.graphforge.sh/)
+
+## Algorithm definitions
+
+`rank()` supports fixed PageRank `iterations` and `damping`, and directed
+`clustering_normalization="neighbor_edges"`. `cluster()` supports deterministic
+`synchronous_iterations` with an optional Int64 `initial_label_property`.
+Existing calls retain their defaults. See the API reference in the full
+documentation for definitions and invocation descriptors.

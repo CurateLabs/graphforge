@@ -6,7 +6,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use graphforge_api::{ClusterAlgorithm, GfError, IrLiteral, PathAlgorithm, RankAlgorithm};
+use graphforge_api::{
+    ClusterAlgorithm, ClusteringNormalization, GfError, IrLiteral, PageRankOptions, PathAlgorithm,
+    RankAlgorithm, SynchronousLabelPropagationOptions,
+};
 use serde::Deserialize;
 
 use super::{QueryCause, QueryError};
@@ -32,6 +35,12 @@ pub struct Variant {
     /// Whether row order is part of the answer (the query sorts its result).
     /// Unordered results are digested order-independently; see `result_digest`.
     pub ordered: bool,
+    /// The result columns that form the answer, in order. The call is timed
+    /// whole; only these columns are digested and written, after the clock
+    /// stops. `None` keeps every column. A Graphalytics BFS answer is each
+    /// target's depth, so the `path` column `paths` also returns is left out.
+    #[serde(default)]
+    pub columns: Option<Vec<String>>,
     pub bindings: Vec<Binding>,
 }
 
@@ -41,28 +50,37 @@ pub struct Variant {
 pub enum Operation {
     /// `GraphForge::execute_with_params(text, params)`.
     Cypher { text: String },
-    /// `GraphForge::rank(label, RankOptions { by, directed, via })`.
+    /// `GraphForge::rank(label, RankOptions { .. })`.
     Rank {
         label: String,
         by: String,
         directed: bool,
         #[serde(default)]
         via: Option<String>,
+        #[serde(default)]
+        pagerank: Option<PageRankCallOptions>,
+        #[serde(default)]
+        clustering_normalization: Option<ClusteringNormalizationName>,
     },
-    /// `GraphForge::cluster(label, ClusterOptions { by, directed, via })`.
+    /// `GraphForge::cluster(label, ClusterOptions { .. })`.
     Cluster {
         label: String,
         by: String,
         directed: bool,
         #[serde(default)]
         via: Option<String>,
+        #[serde(default)]
+        synchronous_label_propagation: Option<SynchronousLabelPropagationCallOptions>,
     },
-    /// `GraphForge::paths(source, None, PathsOptions { by, directed, via, weight })`,
-    /// where the source node is `(:label {property: $param})`.
+    /// `GraphForge::paths(source, target, PathsOptions { by, directed, via, weight })`,
+    /// where the source node is selected by UUID or by `(:label {property: $param})`,
+    /// and the optional target node the same way (`None` when absent).
     Paths {
         by: String,
         directed: bool,
         source: SourceSelector,
+        #[serde(default)]
+        target: Option<SourceSelector>,
         #[serde(default)]
         via: Option<String>,
         #[serde(default)]
@@ -70,13 +88,87 @@ pub enum Operation {
     },
 }
 
-/// Selects the unique source node by one property whose value is a binding parameter.
+/// Serializable public PageRank options; behavior is owned by the facade.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SourceSelector {
+pub struct PageRankCallOptions {
+    pub damping: f64,
+    pub iterations: u32,
+}
+impl PageRankCallOptions {
+    pub fn options(&self) -> PageRankOptions {
+        PageRankOptions {
+            damping: self.damping,
+            iterations: Some(self.iterations),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum ClusteringNormalizationName {
+    Fagiolo,
+    NeighborEdges,
+}
+impl ClusteringNormalizationName {
+    pub fn normalization(self) -> ClusteringNormalization {
+        match self {
+            Self::Fagiolo => ClusteringNormalization::Fagiolo,
+            Self::NeighborEdges => ClusteringNormalization::NeighborEdges,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SynchronousLabelPropagationCallOptions {
+    pub iterations: u32,
+    pub initial_label_property: Option<String>,
+}
+impl SynchronousLabelPropagationCallOptions {
+    pub fn options(&self) -> SynchronousLabelPropagationOptions {
+        SynchronousLabelPropagationOptions {
+            iterations: self.iterations,
+            initial_label_property: self.initial_label_property.clone(),
+        }
+    }
+}
+
+/// Selects a `paths` source node from one binding parameter.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum SourceSelector {
+    /// `NodeSelector::Uuid`: the parameter is the node's canonical UUID string.
+    Uuid(UuidSource),
+    /// `NodeSelector::Match`: the unique node `(:label {property: $param})`.
+    Match(MatchSource),
+}
+
+/// The source node's UUID is the string parameter `uuid_param`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UuidSource {
+    pub uuid_param: String,
+}
+
+/// The unique node of `label` whose `property` equals the parameter `param`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MatchSource {
     pub label: String,
     pub property: String,
     pub param: String,
+}
+
+impl SourceSelector {
+    /// The binding parameter that selects the source.
+    #[must_use]
+    pub fn param(&self) -> &str {
+        match self {
+            Self::Uuid(source) => &source.uuid_param,
+            Self::Match(source) => &source.param,
+        }
+    }
 }
 
 /// One parameter binding. Values use `IrLiteral`'s tagged JSON encoding,
@@ -117,7 +209,11 @@ impl Operation {
         match self {
             Self::Cypher { .. } => None,
             Self::Rank { .. } | Self::Cluster { .. } => Some(BTreeSet::new()),
-            Self::Paths { source, .. } => Some(BTreeSet::from([source.param.as_str()])),
+            Self::Paths { source, target, .. } => Some(
+                std::iter::once(source.param())
+                    .chain(target.iter().map(SourceSelector::param))
+                    .collect(),
+            ),
         }
     }
 }
@@ -168,6 +264,15 @@ pub fn parse_workload(bytes: &[u8]) -> Result<Workload, QueryError> {
         if let Err(error) = variant.operation.check_algorithm() {
             return fail(format!("variant {}: {error}", variant.id));
         }
+        if let Some(columns) = &variant.columns {
+            let unique: BTreeSet<&str> = columns.iter().map(String::as_str).collect();
+            if columns.is_empty() || unique.len() != columns.len() || unique.contains("") {
+                return fail(format!(
+                    "variant {} columns must be non-empty, unique names",
+                    variant.id
+                ));
+            }
+        }
         let mut binding_ids = BTreeSet::new();
         for binding in &variant.bindings {
             if binding.id.is_empty() || !binding_ids.insert(binding.id.as_str()) {
@@ -185,8 +290,10 @@ pub fn parse_workload(bytes: &[u8]) -> Result<Workload, QueryError> {
                     ));
                 }
             }
-            if let Operation::Paths { source, .. } = &variant.operation {
-                super::measure::prop_value(&variant.id, &binding.params[&source.param])?;
+            if let Operation::Paths { source, target, .. } = &variant.operation {
+                for selector in std::iter::once(source).chain(target) {
+                    super::measure::source_selector(&variant.id, selector, &binding.params)?;
+                }
             }
         }
     }

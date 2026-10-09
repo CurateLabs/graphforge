@@ -1,0 +1,81 @@
+{
+  "schema": "graphforge-gdc-finbench-query-parameters/1",
+  "dataset_id": "finbench-engineering-queries-v1",
+  "bindings": {
+    "TCR1": [
+      {"id": 101, "startTime": 1000, "endTime": 2000, "truncationLimit": 500, "truncationOrder": "TIMESTAMP_DESCENDING"},
+      {"id": 101, "startTime": 1000, "endTime": 2000, "truncationLimit": 3, "truncationOrder": "TIMESTAMP_DESCENDING"}
+    ],
+    "TCR2": [
+      {"id": 2, "startTime": 1000, "endTime": 2000, "truncationLimit": 500, "truncationOrder": "TIMESTAMP_DESCENDING"},
+      {"id": 2, "startTime": 1000, "endTime": 2000, "truncationLimit": 3, "truncationOrder": "TIMESTAMP_DESCENDING"}
+    ],
+    "TCR3": [
+      {"id1": 130, "id2": 133, "startTime": 1000, "endTime": 2000},
+      {"id1": 131, "id2": 132, "startTime": 1000, "endTime": 2000},
+      {"id1": 130, "id2": 134, "startTime": 1000, "endTime": 2000}
+    ],
+    "TCR4": [
+      {"id1": 135, "id2": 136, "startTime": 1000, "endTime": 2000},
+      {"id1": 136, "id2": 135, "startTime": 1000, "endTime": 2000}
+    ],
+    "TCR5": [
+      {"id": 3, "startTime": 1000, "endTime": 2000, "truncationLimit": 500, "truncationOrder": "TIMESTAMP_DESCENDING"},
+      {"id": 3, "startTime": 1000, "endTime": 2000, "truncationLimit": 1, "truncationOrder": "TIMESTAMP_DESCENDING"}
+    ],
+    "TCR6": [
+      {"id": 150, "threshold1": 100.0, "threshold2": 100.0, "startTime": 1000, "endTime": 2000, "truncationLimit": 500, "truncationOrder": "TIMESTAMP_DESCENDING"},
+      {"id": 150, "threshold1": 100.0, "threshold2": 100.0, "startTime": 1000, "endTime": 2000, "truncationLimit": 4, "truncationOrder": "TIMESTAMP_DESCENDING"},
+      {"id": 150, "threshold1": 100.0, "threshold2": 100.0, "startTime": 1000, "endTime": 2000, "truncationLimit": 3, "truncationOrder": "TIMESTAMP_DESCENDING"},
+      {"id": 160, "threshold1": 100.0, "threshold2": 100.0, "startTime": 1000, "endTime": 2000, "truncationLimit": 500, "truncationOrder": "TIMESTAMP_DESCENDING"}
+    ],
+    "TCR7": [
+      {"id": 165, "threshold": 60.0, "startTime": 1000, "endTime": 2000, "truncationLimit": 500, "truncationOrder": "TIMESTAMP_DESCENDING"},
+      {"id": 165, "threshold": 60.0, "startTime": 1000, "endTime": 2000, "truncationLimit": 3, "truncationOrder": "TIMESTAMP_DESCENDING"},
+      {"id": 171, "threshold": 60.0, "startTime": 1000, "endTime": 2000, "truncationLimit": 500, "truncationOrder": "TIMESTAMP_DESCENDING"}
+    ],
+    "TCR8": [
+      {"id": 210, "threshold": 0.5, "startTime": 1000, "endTime": 2000, "truncationLimit": 500, "truncationOrder": "TIMESTAMP_DESCENDING"},
+      {"id": 210, "threshold": 0.5, "startTime": 1000, "endTime": 2000, "truncationLimit": 2, "truncationOrder": "TIMESTAMP_DESCENDING"}
+    ],
+    "TCR9": [
+      {"id": 185, "threshold": 50.0, "startTime": 1000, "endTime": 2000, "truncationLimit": 500, "truncationOrder": "TIMESTAMP_DESCENDING"},
+      {"id": 185, "threshold": 50.0, "startTime": 1000, "endTime": 2000, "truncationLimit": 1, "truncationOrder": "TIMESTAMP_DESCENDING"},
+      {"id": 186, "threshold": 50.0, "startTime": 1000, "endTime": 2000, "truncationLimit": 500, "truncationOrder": "TIMESTAMP_DESCENDING"}
+    ],
+    "TCR10": [
+      {"pid1": 4, "pid2": 5, "startTime": 1000, "endTime": 2000},
+      {"pid1": 4, "pid2": 6, "startTime": 1000, "endTime": 2000}
+    ],
+    "TCR11": [
+      {"id": 1, "startTime": 1000, "endTime": 2000, "truncationLimit": 500, "truncationOrder": "TIMESTAMP_DESCENDING"},
+      {"id": 1, "startTime": 1000, "endTime": 2000, "truncationLimit": 1, "truncationOrder": "TIMESTAMP_DESCENDING"}
+    ],
+    "TCR12": [
+      {"id": 6, "startTime": 1000, "endTime": 2000, "truncationLimit": 500, "truncationOrder": "TIMESTAMP_DESCENDING"},
+      {"id": 6, "startTime": 1000, "endTime": 2000, "truncationLimit": 2, "truncationOrder": "TIMESTAMP_DESCENDING"}
+    ],
+    "TSR1": [
+      {"id": 103}
+    ],
+    "TSR2": [
+      {"id": 165, "startTime": 1000, "endTime": 2000},
+      {"id": 199, "startTime": 1000, "endTime": 2000}
+    ],
+    "TSR3": [
+      {"id": 185, "threshold": 100.0, "startTime": 1000, "endTime": 2000},
+      {"id": 198, "threshold": 100.0, "startTime": 1000, "endTime": 2000},
+      {"id": 199, "threshold": 100.0, "startTime": 1000, "endTime": 2000}
+    ],
+    "TSR4": [
+      {"id": 190, "threshold": 150.0, "startTime": 1000, "endTime": 2000},
+      {"id": 190, "threshold": 0.0, "startTime": 1000, "endTime": 2000}
+    ],
+    "TSR5": [
+      {"id": 151, "threshold": 100.0, "startTime": 1000, "endTime": 2000}
+    ],
+    "TSR6": [
+      {"id": 120, "startTime": 1000, "endTime": 2000}
+    ]
+  }
+}

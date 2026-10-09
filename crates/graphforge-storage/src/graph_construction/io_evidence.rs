@@ -102,9 +102,6 @@ pub struct GraphConstructionEvidence {
     /// Canonical output writer submissions.
     #[serde(default)]
     pub encode_output_write_operations: u64,
-    /// UUID-membership writer submissions, including carry.
-    #[serde(default)]
-    pub encode_membership_write_operations: u64,
     /// Authenticated source-spool writer submissions.
     #[serde(default)]
     pub encode_source_spool_write_operations: u64,
@@ -126,9 +123,6 @@ pub struct GraphConstructionEvidence {
     /// Authenticated source-spool durability barriers.
     #[serde(default)]
     pub encode_source_spool_fsync_operations: u64,
-    /// UUID-membership durability barriers.
-    #[serde(default)]
-    pub encode_membership_fsync_operations: u64,
     /// Ordinal-index payload and publication durability barriers.
     #[serde(default)]
     pub encode_ordinal_fsync_operations: u64,
@@ -234,6 +228,10 @@ pub struct GraphConstructionEvidence {
     pub input_batches: u64,
     /// Immutable Parquet shards.
     pub parquet_shards: u64,
+    /// Arrow IPC files holding accepted chunks of an initial build, each written
+    /// and synced once for the bulk builder to read in place.
+    #[serde(default)]
+    pub spooled_chunks: u64,
     /// Immutable payload artifacts accepted from authenticated chunk receipts.
     #[serde(default)]
     pub immutable_artifacts: u64,
@@ -904,7 +902,6 @@ pub(super) fn copy_post_shape_io(
     target.encode_application_write_bytes = source.encode_application_write_bytes;
     target.encode_application_write_operations = source.encode_application_write_operations;
     target.encode_output_write_operations = source.encode_output_write_operations;
-    target.encode_membership_write_operations = source.encode_membership_write_operations;
     target.encode_source_spool_write_operations = source.encode_source_spool_write_operations;
     target.encode_ordinal_artifact_write_operations =
         source.encode_ordinal_artifact_write_operations;
@@ -914,7 +911,6 @@ pub(super) fn copy_post_shape_io(
     target.canonical_artifact_objects = source.canonical_artifact_objects;
     target.encode_output_fsync_operations = source.encode_output_fsync_operations;
     target.encode_source_spool_fsync_operations = source.encode_source_spool_fsync_operations;
-    target.encode_membership_fsync_operations = source.encode_membership_fsync_operations;
     target.encode_ordinal_fsync_operations = source.encode_ordinal_fsync_operations;
     target.publication_application_read_bytes = source.publication_application_read_bytes;
     target.publication_application_read_operations = source.publication_application_read_operations;
@@ -1106,14 +1102,13 @@ pub(super) fn record_encoding_io_evidence(
     evidence.encode_application_read_bytes = checked_evidence_sum(
         "encoding read bytes",
         evidence.encode_application_read_bytes,
-        &[measured.input_read_bytes, measured.membership_read_bytes],
+        &[measured.input_read_bytes],
     )?;
     evidence.encode_application_read_operations = checked_evidence_sum(
         "encoding read operations",
         evidence.encode_application_read_operations,
         &[
             measured.input_read_operations,
-            measured.membership_read_operations,
             measured.source_spool_read_operations,
         ],
     )?;
@@ -1122,7 +1117,6 @@ pub(super) fn record_encoding_io_evidence(
         evidence.encode_application_write_bytes,
         &[
             measured.output_write_bytes,
-            measured.membership_total_write_bytes,
             measured.source_spool_write_bytes,
             measured.ordinal_artifact_write_bytes,
             measured.ordinal_publication_write_bytes,
@@ -1133,7 +1127,6 @@ pub(super) fn record_encoding_io_evidence(
         evidence.encode_application_write_operations,
         &[
             measured.output_write_operations,
-            measured.membership_write_operations,
             measured.source_spool_write_operations,
             measured.ordinal_artifact_write_operations,
             measured.ordinal_publication_write_operations,
@@ -1144,7 +1137,6 @@ pub(super) fn record_encoding_io_evidence(
         evidence.encode_fsync_operations,
         &[
             measured.fsync_operations,
-            measured.membership_fsync_operations,
             measured.source_spool_fsync_operations,
             measured.ordinal_fsync_operations,
         ],
@@ -1160,18 +1152,7 @@ pub(super) fn record_encoding_io_evidence(
                     .checked_add(artifact.bytes)
                     .ok_or_else(|| storage("canonical output inventory overflows"))
             })?;
-    let retained_bytes = encoded
-        .retained_artifacts
-        .iter()
-        .try_fold(0_u64, |total, artifact| {
-            total
-                .checked_add(artifact.bytes)
-                .ok_or_else(|| storage("retained artifact inventory overflows"))
-        })?;
-    evidence.staged_and_retained_disk_bytes = evidence
-        .write_bytes
-        .checked_add(retained_bytes)
-        .ok_or_else(|| storage("staged and retained inventory overflows"))?;
+    evidence.staged_and_retained_disk_bytes = evidence.write_bytes;
     Ok(())
 }
 
@@ -1184,11 +1165,6 @@ fn record_encoding_components(
             &mut evidence.encode_output_write_operations,
             measured.output_write_operations,
             "encode_output_write_operations",
-        ),
-        (
-            &mut evidence.encode_membership_write_operations,
-            measured.membership_write_operations,
-            "encode_membership_write_operations",
         ),
         (
             &mut evidence.encode_source_spool_write_operations,
@@ -1214,11 +1190,6 @@ fn record_encoding_components(
             &mut evidence.encode_source_spool_fsync_operations,
             measured.source_spool_fsync_operations,
             "encode_source_spool_fsync_operations",
-        ),
-        (
-            &mut evidence.encode_membership_fsync_operations,
-            measured.membership_fsync_operations,
-            "encode_membership_fsync_operations",
         ),
         (
             &mut evidence.encode_ordinal_fsync_operations,
@@ -1263,19 +1234,23 @@ pub(super) fn record_encoded_active_artifacts(
         if usage.logical_bytes != artifact.bytes {
             return Err(storage("encoded artifact allocation authority changed"));
         }
+        // An entry already in the ledger keeps the allocation observed when it
+        // was first recorded. The artifact is not synced, so a later
+        // measurement may differ with no change to identity or content (#1928).
+        let recorded = evidence
+            .storage_active_identity_allocated_bytes
+            .get(&identity_key)
+            .copied();
         if encoded
-            .insert(identity_key.clone(), usage.allocated_bytes)
+            .insert(
+                identity_key.clone(),
+                recorded.unwrap_or(usage.allocated_bytes),
+            )
             .is_some()
         {
             return Err(storage("encoded artifact identity installed twice"));
         }
-        if let Some(existing) = evidence
-            .storage_active_identity_allocated_bytes
-            .get(&identity_key)
-        {
-            if *existing != usage.allocated_bytes {
-                return Err(storage("encoded artifact identity allocation changed"));
-            }
+        if recorded.is_some() {
             continue;
         }
         record_active_identity_install(
@@ -1506,7 +1481,7 @@ pub(super) fn read_run_record<const N: usize>(
 }
 
 pub(super) fn account_probe_work(
-    work: &crate::uuid_membership::UuidProbeMetrics,
+    work: &crate::UuidProbeMetrics,
     evidence: &mut GraphConstructionEvidence,
 ) -> Result<(), GfError> {
     evidence.retained_probe_read_bytes = checked_evidence_sum(

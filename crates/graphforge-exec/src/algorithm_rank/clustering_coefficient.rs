@@ -8,6 +8,8 @@ use super::{
     exact_u64_as_f64, execution, has_arc, rank_scores_output,
 };
 
+use graphforge_core::ClusteringNormalization;
+
 pub(super) struct ClusteringCoefficient;
 
 const CLUSTERING_COEFFICIENT_CHECKPOINT_WORK: usize = 1_024;
@@ -84,7 +86,7 @@ fn prepare_clustering_coefficient(
     for (source, &node_id) in node_ids.iter().enumerate() {
         for edge in graph.neighbors(node_id) {
             if traversed_edges.is_multiple_of(1024) {
-                control.checkpoint()?;
+                control.check_cancelled()?;
             }
             traversed_edges += 1;
             let target = indices
@@ -210,13 +212,42 @@ fn clustering_coefficient_score_node(
     control: &AlgorithmControl,
     work: &mut usize,
 ) -> Result<f64, AlgorithmError> {
-    control.checkpoint()?;
+    control.check_cancelled()?;
     let outgoing = &prepared.outgoing;
     let incoming = &prepared.incoming;
     let mut neighbors = outgoing[node].clone();
     neighbors.extend_from_slice(&incoming[node]);
     neighbors.sort_unstable();
     neighbors.dedup();
+
+    if control.clustering_normalization() == ClusteringNormalization::NeighborEdges {
+        let degree = u64::try_from(neighbors.len())
+            .map_err(|_| execution("clustering coefficient degree exceeds supported range"))?;
+        let denominator = degree
+            .checked_mul(degree.saturating_sub(1))
+            .ok_or_else(|| {
+                execution("clustering coefficient denominator exceeds supported range")
+            })?;
+        let mut edges = 0_u64;
+        for &first in &neighbors {
+            for &second in &neighbors {
+                clustering_coefficient_checkpoint(control, work)?;
+                if first != second && has_arc(outgoing, first, second) {
+                    edges = edges.checked_add(1).ok_or_else(|| {
+                        execution("clustering coefficient edge count exceeds supported range")
+                    })?;
+                }
+            }
+        }
+        return if denominator == 0 {
+            Ok(0.0)
+        } else {
+            Ok(
+                exact_u64_as_f64(edges, "clustering coefficient edge count")?
+                    / exact_u64_as_f64(denominator, "clustering coefficient denominator")?,
+            )
+        };
+    }
 
     let total_degree = outgoing[node]
         .len()
@@ -261,12 +292,15 @@ fn clustering_coefficient_score_node(
     Ok(score)
 }
 
+/// Poll cancellation every [`CLUSTERING_COEFFICIENT_CHECKPOINT_WORK`] units of
+/// pair work. Clustering coefficient is a single pass, so this never consumes the
+/// iteration budget that bounds iterative algorithms (#1922).
 fn clustering_coefficient_checkpoint(
     control: &AlgorithmControl,
     work: &mut usize,
 ) -> Result<(), AlgorithmError> {
     if (*work).is_multiple_of(CLUSTERING_COEFFICIENT_CHECKPOINT_WORK) {
-        control.checkpoint()?;
+        control.check_cancelled()?;
     }
     *work = work.saturating_add(1);
     Ok(())

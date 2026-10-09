@@ -184,13 +184,6 @@ impl GraphForge {
             ));
         }
 
-        if !graphforge_storage::uuid_membership_index_is_fresh(&self.dir())? {
-            graphforge_storage::rebuild_uuid_membership_indexes_with_topology(
-                &self.dir(),
-                graphforge_storage::UuidIndexBuildLimits::default(),
-                std::sync::Arc::clone(&self.dir().topology),
-            )?;
-        }
         let (graph, graph_objects) = compact_graph_participant(
             &self.dir(),
             &parent,
@@ -280,13 +273,6 @@ impl GraphForge {
             return Err(GfError::Validation(
                 "project generation changed before graph publication".into(),
             ));
-        }
-        if !graphforge_storage::uuid_membership_index_is_fresh(&self.dir())? {
-            graphforge_storage::rebuild_uuid_membership_indexes_with_topology(
-                &self.dir(),
-                graphforge_storage::UuidIndexBuildLimits::default(),
-                std::sync::Arc::clone(&self.dir().topology),
-            )?;
         }
         let (graph, graph_objects) =
             compact_graph_participant(&self.dir(), &parent, false, &self.dir().topology_files()?)?;
@@ -444,6 +430,12 @@ impl GraphForge {
             .expect("procedure registry lock")
             .clear();
         self.adjacency_provider_for_session().invalidate();
+        // The topology generation counter restarts at clear(), so a cached
+        // identity probe from before it can match a later generation.
+        *self
+            .identity_probe
+            .lock()
+            .expect("identity probe lock poisoned") = None;
         // The session's read authority still declares the generation's node and
         // edge files, content-store objects the workspace wipe does not touch,
         // and every later catalog lists node files from it (#1388). Re-establish

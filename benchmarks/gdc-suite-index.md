@@ -34,10 +34,10 @@ without sharing workload semantics.
 | Ladder | `profiles/gdc/graphalytics-ladder.json` (begins with bounded `ga-tiny`) |
 | Validation | exact (BFS/CDLP), equivalence (WCC), epsilon=1e-4 (PR/LCC/SSSP) |
 | Execution | Explicit `run-live` in-memory public API proof; `run-suite` is static replay |
-| Unsupported semantics | Typed `semantic_incompatibility` (fixed-iteration PR; synchronous CDLP; directed LCC normalization) |
+| Compatibility modes | Fixed-iteration PageRank with dataset damping, synchronous CDLP with original vertex labels, and neighbor-edge LCC normalization; existing public defaults remain unchanged |
 | Identity | Distinct pins: `profiles/gdc/graphalytics-static-identity.json` (historical `wiki-Talk` markers) and `profiles/gdc/graphalytics-live-identity.json` (`ga-tiny` proof). Suite/acquisition select the profile; cross-use is `identity_drift`. |
-| Scorecard | `profiles/gdc/graphalytics-scorecard-identity.json` pins the `wiki-Talk`, `cit-Patents`, `datagen-7_5-fb` and `graph500-22` archives; `profiles/gdc/graphalytics-scorecard-ladder.json` carries the LDBC-published counts and load mappings. Acquisition and conversion are described in `README.md` (GDC dataset acquisition and conversion). |
-| Authority | Synthetic `ga-tiny` engineering evidence only (edges-only fixture; isolated vertices out of scope); `certification=false`; legacy `wiki-Talk` stub excluded |
+| Scorecard | `profiles/gdc/graphalytics-scorecard-identity.json` pins the `wiki-Talk`, `cit-Patents`, `datagen-7_5-fb` and `graph500-22` archives; `profiles/gdc/graphalytics-scorecard-ladder.json` carries the LDBC-published counts, load mappings and each archive's `.properties` facts; `profiles/gdc/graphalytics-scorecard-ladder-spec.json` is the rung runner's ladder (see Scorecard ladders). Acquisition and conversion are described in `README.md` (GDC dataset acquisition and conversion). |
+| Authority | Synthetic `ga-tiny` engineering evidence (edges-only fixture) plus unchanged upstream bounded validation vectors with explicit vertex rows, including sinks; `certification=false`; legacy `wiki-Talk` stub excluded |
 
 Profiles, validation, and evidence stay under the GDC Graphalytics suite and are
 not shared with Graph500 orchestration.
@@ -66,8 +66,8 @@ PYTHONPATH=harness GRAPHFORGE_GDC_GRAPHALYTICS_BIN=target/debug/graphforge-bench
 Read-only complex/short reads follow the Cypher reference implementation at the
 pinned driver commit (ordering, tie-breakers, `LIMIT`, parameter names); IC13
 uses the public `bfs` path analyst verb. Where GraphForge evaluates a reference
-construct differently (`shortestPath`, node-list `IN`,
-`datetime({epochMillis})`, pattern predicates outside `WHERE`), the query uses
+construct differently (`shortestPath`, pattern predicates outside `WHERE`,
+`OPTIONAL MATCH ... WHERE` over a `WITH` variable), the query uses
 an exactly equivalent form recorded in its definition. Where the reference's
 behaviour differs from the specification prose (for example IS7's
 `CASE r WHEN null`, which never matches), the reference behaviour is kept,
@@ -160,23 +160,52 @@ PYTHONPATH=harness GRAPHFORGE_GDC_SNB_BI_BIN=target/debug/graphforge-benchmark-g
 | Runner | `graphforge-benchmark-gdc-finbench-transaction` (`suites/gdc-finbench-transaction.json`) |
 | Phases | Separate `load`, `warmup`, `execution`, `validation` (see evidence `phases`) |
 | Bounded fixture | `finbench-engineering-tiny-v1` (synthetic engineering data; not an official scale factor) |
-| Live lane | Trusted Rust runner owns in-memory `GraphForge::new(None)` load + official TCR10 `execute_with_params` |
+| Live lane | Trusted Rust runner owns in-memory `GraphForge::new(None)` load; `run-queries` executes every read over `finbench-engineering-queries-v1`, `run-live` the pinned TCR10 seed |
+| Query catalog | `list-queries`: per read, Cypher text, typed parameters, result columns, ordering and truncation (`queries.rs`) |
 | Validation | exact (ordered rows) and normalized (order-insensitive multiset) reference comparison |
-| Unsupported semantics | Typed `semantic_incompatibility`: `recursive_temporal_path_filtering_not_exposed` (TCR1–TCR2); `temporal_shortest_transfer_path_not_exposed` (TCR3); `temporal_transfer_cycle_detection_not_exposed` (TCR4); `hub_vertex_truncation_not_exposed` (TCR5); `finbench_transaction_write_semantics_not_exposed` (TW1–TW19, TRW1–TRW3) |
+| Unsupported semantics | Typed `semantic_incompatibility`: `finbench_transaction_write_semantics_not_exposed` (TW1–TW19, TRW1–TRW3); `truncation_order_not_supported` for any `truncationOrder` other than `TIMESTAMP_DESCENDING` |
 | Scorecard | `profiles/gdc/finbench-transaction-scorecard-identity.json` pins the SF1/SF10 archives and their read parameters (LDBC publishes no reference output); `profiles/gdc/finbench-transaction-load-mapping.json` maps `snapshot/` and `finbench-transaction-scorecard-ladder.json` carries the LDBC-published counts. See `README.md` (LDBC CSV suite pins). |
 
-Complex and simple reads that are ordinary multi-hop traversals, temporal-window
-filters, aggregations, or top-k map to public Cypher (TCR6–TCR12, TSR1–TSR6).
-Reads whose reference result depends on FinBench choke points the public surface
-does not expose fail closed with a specific typed cause: recursive temporal path
-filtering (monotonically increasing transfer timestamps along a path, TCR1–TCR2),
-temporally filtered shortest transfer path (TCR3), temporally constrained
-transfer-cycle detection (TCR4), and native hub-vertex truncation (TCR5). Write
-queries (TW1–TW19) and read-write transactions (TRW1–TRW3) require the official
-driver's ACID transaction, insert/delete/in-place-update stream, truncation, and
-read-before-write risk semantics, which the public property-graph + Cypher
+Every read (TCR1–TCR12, TSR1–TSR6) is exact public Cypher, including the
+specification's `truncationLimit`. Time windows are open
+(`startTime < timestamp < endTime`), amount thresholds strict, and calculated
+floats rounded to three decimals. Truncation follows the FinBench specification
+and the 2026-10-07 decision on #952: when a step expands from a vertex, only the
+`truncationLimit` newest edges of that type and direction at the vertex are
+traversed, before the window and amount filters, so truncation is a property of
+the vertex rather than of the path. Ties on `timestamp` are broken by the far
+endpoint's id ascending; the specification leaves ties undefined, so every
+truncated definition labels this as an accepted variance (`tie_break_variance`).
+The LDBC parameter generator emits limit 500 and `TIMESTAMP_DESCENDING`; other
+orders are refused, never reordered. Each query definition names the steps it
+truncates, and its `semantics` field states the specification reading it
+implements. The scorecard checks these readings against the spec-derived SF1
+reference (see "FinBench Transaction SF1 reference" below), not an LDBC
+implementation; where GPStore reads the specification differently (TCR1, TCR2,
+TCR5, TCR8, TCR9, TCR11), `reference_reading` says how, for information.
+`workarounds` cites the unsupported construct (#1888) or
+the declared variance behind any Cypher that departs from the direct form.
+
+TCR1, TCR2 and TCR5 (monotonically increasing transfer timestamps along a 1–3
+hop trace) use per-vertex admissible-edge lists plus a list predicate over each
+path's hops. TCR3 (temporally filtered shortest path) is an unbounded
+variable-length match with a window predicate; its minimum length is the
+shortest path. TCR4 is plain
+pattern matching and aggregation. TCR3 and TCR11 enumerate edge-distinct paths
+of unbounded length, which is exact but may exceed the rung envelope on large
+graphs; the scorecard lane reports that as a resource failure, never a wrong
+answer. Write queries (TW1–TW19) and read-write transactions (TRW1–TRW3) require
+the official driver's ACID transaction, insert/delete/in-place-update stream,
+and read-before-write risk semantics, which the public property-graph + Cypher
 surface does not expose, so they fail closed with
 `finbench_transaction_write_semantics_not_exposed`.
+
+The query fixture `fixtures/gdc/finbench-transaction-queries` holds a
+FinBench-shaped graph, parameter bindings per read (including bindings where
+truncation changes the answer), and `expected.json`, which
+`graphforge_bench.gdc_finbench_transaction_reference` derives procedurally from
+the graph without running GraphForge. The benchmark unittest regenerates it and
+fails on drift, then runs every binding live and compares rows.
 
 The suite pins the upstream FinBench specification tag `v0.1.0` at
 `d3ec7036bf6919df8cd3eeaa3a986048e779ea02`, DataGen `0.1.0` at
@@ -192,7 +221,7 @@ committed seed, and executes official TCR10 (`pid1`, `pid2`, open
 `startTime < timestamp < endTime` window, single `jaccardSimilarity` column
 rounded to three decimals). A static JSON envelope or `.out` file cannot claim
 live execution. The reference `0.667` is independently derived from the seed
-(`|{10,11} ∩ {10,11,12}| / |union| = 2/3`). TCR1 and TW1 remain typed
+(`|{10,11} ∩ {10,11,12}| / |union| = 2/3`). TW1 remains typed
 unsupported in the same evidence document, and correctness, resource, and
 harness lanes stay distinct. The older `run-suite` command is retained only as
 an explicitly marked `static_replay` regression lane and cannot satisfy live
@@ -219,6 +248,87 @@ CARGO_TARGET_DIR=target cargo build --locked --manifest-path Cargo.toml -p graph
 PYTHONPATH=harness GRAPHFORGE_GDC_FINBENCH_TRANSACTION_BIN=target/debug/graphforge-benchmark-gdc-finbench-transaction \
   uv run --locked python -m unittest tests.test_gdc_finbench_transaction
 ```
+
+### FinBench Transaction SF1 reference
+
+LDBC publishes no FinBench reference output, and the third-party validation
+files interleave writes. Per the #952 decision (revised 2026-10-08), the SF1
+reference comes from the spec-derived module
+`graphforge_bench.gdc_finbench_transaction_reference`, which never runs
+GraphForge. The card says "checked against a spec-derived reference, not an
+LDBC implementation" (#1894).
+
+```bash
+make -C benchmarks gdc-finbench-reference DATASET_CACHE=/home/ubuntu/gdc-cache \
+  OUTPUT=/home/ubuntu/gdc-cache/finbench-reference/sf1-reference.json
+```
+
+The target reads the `snapshot/` CSV and `sf1_read_params/` that `gdc-acquire`
+extracted from the pinned archives. It writes a new
+`graphforge-gdc-rung-reference/1` document, which is never overwritten, and
+`OUTPUT.sha256` with the digests of the module, all 30 input files and the
+output. The output stays out of the repository; its digest and the manifest
+are recorded on #1894.
+
+- **Bindings.** These are the twelve `complex_<n>_param.csv` files, TCR1–TCR12
+  (10,689 bindings). They have no header: eleven start with a literal `...`
+  line, which is not a binding. Binding ids are `line-<n>`, the line in the
+  file. A scorecard workload must use `read_ldbc_parameters` so the ids agree.
+  No simple-read (TSR) parameters are published, because the LDBC driver
+  derives them during a run, so the reference covers the complex reads only.
+  Every published binding uses threshold `0.0`, limit 500 and the window
+  `1627020616747..1669690342640`.
+- **Vertices** are keyed by label and id, because LDBC ids repeat across labels
+  (Person and Company share 1,376; Account and Loan share 190). Timestamps are
+  naive-UTC `createTime` values converted to epoch milliseconds.
+- **Cells** use the query driver's form: Arrow display text. Float64 cells use
+  ryu's shortest round-trip layout, as arrow-cast does. Matching is `exact`.
+  Sums are exactly rounded (`math.fsum`) before half-up rounding to three
+  decimals, so no answer depends on summation or hash order.
+- **Pins.**
+
+  | Item | SHA-256 |
+  |---|---|
+  | `sf1.tar.gz` (identity profile) | `598d82e0bc442150629f3db7b6c6942a3f1bf6414cbc2f4e8ac6d2da89884636` |
+  | `sf1_read_params.zip` (identity profile) | `ca624fc25ef56b22819739e9ee34c49944fc902dd5a7eb8b6f24819e558c50bf` |
+  | module at generation | `0e3af90f494faa5bd53d7b9696ec8bf057083d70ae7c5c9dd4528e0c97146241` |
+  | `sf1-reference.json` (43,860,695 bytes) | `9c73fb5baa71136696fc598f42852505595b1f2b9ea25ae8ae8e5644ec0f822a` |
+
+  The run used Python 3.13.12 from `uv.lock`. Two runs, each in a separate
+  process with its own hash seed, produced byte-identical output. Each run took
+  about 40 s of wall time on one core, with a peak RSS of 1.5 GiB.
+- **Scope.** The reference covers `snapshot/` only. It excludes the
+  `incremental/` rows, consistent with the load mapping.
+- **Readings worth stating**, at SF1, for information only:
+  - TCR6 counts "more than 3 transfer-ins" as transfer edges, not distinct
+    source accounts. Galaxybase, GPStore and Ultipa read it the same way;
+    counting distinct sources would change 901 of 905 bindings.
+  - TCR11 follows guarantee chains of any length ("until end", as GPStore
+    does). Galaxybase, TuGraph and Ultipa stop at 5 hops, which changes 27 of
+    983 bindings (the deepest chain is 11). This is the reference's only
+    disagreement with a third-party result.
+  - Truncation changes 12 answers: TCR6 lines 99, 118, 262, 374 and 686, and
+    TCR8 lines 101, 278, 360, 392, 779, 848 and 903. TCR6 lines 262 and 686
+    also depend on truncating the adjacency before the window and amount
+    filters. No vertex has a timestamp tie at the 500-edge cut-off, so the
+    far-endpoint-id tie-break variance changes no answer. None of the 12 is in
+    Ultipa's validation set, so the truncation reading has no independent
+    corroboration at SF1. It does agree with the Neo4j truncation example,
+    which computes cut-offs before filtering.
+  - TCR1: GPStore reports each account once, at its first breadth-first
+    distance. 6 of 737 bindings have an account at several trace lengths.
+  - TCR5: GPStore keeps traces that revisit an account. 43 of 1,000 bindings
+    have one.
+  - TCR8: GPStore counts every in-window edge from an expanded account into the
+    destination as inflow and expands each account once. This difference is
+    not quantified.
+  - GPStore's extra truncations of own, deposit, repay and apply edges cannot
+    apply at SF1, because those adjacencies have at most 22 edges.
+- **Independent review of #1906.** Against Ultipa's `validation_params.csv`
+  (821 complex-read bindings, with its interleaved writes replayed), 818 match;
+  the 3 misses are TCR11 bindings that the 5-hop cap explains exactly. A
+  separate Decimal re-implementation of TCR1–5, 7, 9, 10 and 12 matched all
+  7,801 of its bindings.
 
 ## SPB (Semantic Publishing Benchmark)
 
@@ -288,21 +398,37 @@ One rung:
    records of the pinned archive's loaded snapshot (the #952 reconciliation
    rule). A column-labelled node table's per-label split is the converter's,
    accepted only when it sums to the ladder's table count.
-5. **Check** every referenced result against the reference: `exact`,
-   `epsilon` (relative tolerance on numeric cells, rows paired by key columns)
-   or `equivalence` (the same partition up to relabelling). A written result
-   must reproduce its measured digest first.
+5. **Check** every referenced result against the reference: `exact` (every
+   cell, or with key columns every reference cell in the row with the same
+   key), `epsilon` (Graphalytics' `|r - s| <= epsilon * |r|` on numeric cells,
+   rows paired by key columns) or `equivalence` (the same partition up to
+   relabelling). A written result must reproduce its measured digest first.
 6. **Tear down**: reclaim `workspace/gdc-<suite>-<rung>` by path and inventory
    the work root. The dataset cache is outside the work root and is kept.
 
 A rung passes only with no failure and an empty inventory. Typed causes include
-`rung_wall_exceeded`, `memory_limit_exceeded` (a phase's largest
-single-process peak RSS above 4 GiB, or BenchExec's memory stop),
+`rung_wall_exceeded`, `memory_limit_exceeded` (BenchExec's memory stop at
+the rung's 4 GiB limit, or a phase's largest single-process peak RSS above 4 GiB),
 `host_swapped`, `convert_failed`, `load_failed`, `count_mismatch`,
 `query_failed`, `reference_mismatch`, `result_digest_mismatch` and
 `teardown_incomplete`. A query that fails at runtime or answers wrongly fails
 the rung, but every query still runs, so the result lists every failure. A
 refused query counts against coverage and is never checked.
+
+Every GDC phase runs with the 4 GiB envelope (`MEMORY_LIMIT_BYTES`) as
+BenchExec's memory limit, unlike the Graph500 ladder's 96 GB ceiling. The
+bulk builder reads its cgroup's limit, so it plans a build that fits; a
+phase BenchExec stops records the limit and the measured peaks in its detail.
+
+`host_swapped` means the host's `pswpout` counter rose while a phase ran. A
+`pswpin` rise alone does not fail the phase: new phase processes cannot have
+had pages swapped out before the window, so swap-ins with a flat `pswpout` are
+other processes' cold pages (measured on OVHC-AGENCY: `systemd-journald`
+reading its pages back when BenchExec's scope logs). A swapped phase publishes
+`<suite>-<rung>-<phase>-benchexec-raw/host-swap.json` with both counters
+before and after, and its failure detail names what moved. A `query_failed`
+rung's detail lists each distinct failed-sample error with its bindings; the
+same text is in `query-evidence.json` and the correctness mismatches.
 
 Each rung publishes, under `<suite>-<rung>-`: three `*-benchexec.json`
 documents (`graphforge-benchexec-run/1`), `expected-counts.json`,
@@ -319,13 +445,181 @@ cache on the host's full-access mounts, as for the Graph500 ladder); on-disk
 bytes are the storage-attribution receipt's allocated bytes; graph counts are
 the driver's reconciliation after reopen. Graphalytics cards report `Tl`, `Tp`
 (the mean of three driver-clock runs per algorithm) and EVPS instead of
-throughput and latency; makespan is not measured yet and says so.
+throughput and latency; makespan is labelled not measured, with the reason
+below.
 
 `fixtures/gdc/rung-fixture/` is a three-rung CI ladder in the SNB Interactive
 v1 CSV shape: sf0 passes, sf1 fails (one query fails at runtime and one
 reference answer is wrong) and sf2 is never attempted.
 `tests/test_gdc_rung.py` drives it with the real converter, `gf` and driver;
 only BenchExec is replaced, because CI runners cannot delegate cgroups.
+
+### Graphalytics bounded algorithm validation
+
+Run `make test-rust ARGS="-p graphforge-benchmark-gdc-graphalytics"` to execute
+all six unchanged `ga-tiny` references through the public Rust facade and the
+upstream PR, CDLP and LCC directed/undirected validation vectors. The inputs and
+outputs under `fixtures/gdc/graphalytics-validation/` are copied unchanged from
+LDBC's v1.0.0 driver resources, identified by commit, upstream paths and SHA-256
+in `README.txt`; semantics remain the pinned v1.0.5 specification. The official
+parameters are PR damping 0.85 with 14 directed or 26 undirected rounds, and
+CDLP with 5 rounds. Vertex-based inputs retain declared sinks instead of
+inferring the vertex set from outgoing edges. Separate sparse-ID isolate and
+zero-round fixtures check vertex coverage; perturbed reference values must fail
+validation with the existing exact/epsilon rules. These tests use product
+algorithms through `graphforge-api`, with no runner implementation or fallback.
+
+### Graphalytics scorecard ladder
+
+`profiles/gdc/graphalytics-scorecard-ladder-spec.json` climbs wiki-Talk (2XS),
+cit-Patents (XS), datagen-7_5-fb (S) and graph500-22 (S) from the pinned
+archives (`graphforge_bench.gdc_graphalytics_scorecard`):
+
+- **Archive check.** Before converting, the archive's `<graph>.properties` must
+  agree with the count ladder (`graphalytics-scorecard-ladder.json`: vertices,
+  published edges, direction, weight, the `algorithms` list and the BFS and
+  SSSP source vertices, PR damping and iteration count, and CDLP iteration count) and with the rung's workload: every listed algorithm is
+  run or refused, and each run is dispatched as the graph needs. Otherwise the
+  rung fails with `archive_properties_mismatch`.
+- **Algorithms** (`graphalytics-scorecard-workload-<graph>.json`), each run
+  three times after one excluded warm-up: BFS as `paths(by=bfs)` and SSSP as
+  `paths(by=dijkstra, weight=weight)`, each from the source vertex selected by
+  `NodeSelector::Uuid` (the converter's node UUID for that vertex); WCC as
+  `cluster(by=components)`; PR as `rank(by=pagerank)` with the archive's
+  damping factor and exact iteration count; CDLP as
+  `cluster(by=label_propagation)` with synchronous rounds, the archive's
+  iteration count, and initial labels from the imported Int64 `id` property;
+  LCC as `rank(by=clustering_coefficient)` with `neighbor_edges` normalization
+  on both directed and undirected graphs. Each variant keeps only its answer
+  columns (`target_uuid, cost` or `id, <value>`); the call is timed whole.
+  The real ladder runs every listed algorithm. Refusals remain explicit and
+  count against coverage in fixtures or future unsupported mappings.
+- **Reference.** The rung spec's `{"archive_outputs": "graphalytics"}` derives
+  the reference at check time from the archive's `<graph>-<ALGORITHM>` files.
+  Each must list every vertex exactly once (`reference_invalid` otherwise).
+  BFS and CDLP match exactly; PR, LCC and SSSP use epsilon 1e-4.
+  BFS and SSSP are keyed by target UUID;
+  `paths` returns only reached vertices, so a vertex the reference marks
+  unreachable (`9223372036854775807`, `infinity`) matches by its absence. WCC
+  matches by equivalence. PR, CDLP, LCC and WCC are keyed by vertex id. The
+  correctness record's `reference_sha256` covers the `.properties` file and
+  every reference output used.
+- **Metrics.** `Tp` is the mean of the three measured runs and EVPS is
+  `(vertices + edges) / Tp`. Makespan is labelled not measured: Graphalytics
+  defines it as the time from issuing one algorithm job to its output for a
+  cold system started for that job, and the driver runs every job warm in one
+  process after one project open, so no such interval exists; the query
+  phase's BenchExec wall spans all jobs together.
+
+`fixtures/gdc/graphalytics-rung-fixture/` holds three tiny archives in the same
+format with hand-derived references: a directed graph (BFS, WCC), an
+undirected weighted one (BFS, WCC, LCC, SSSP) and a directed one with one
+wrong BFS depth, where the ladder stops with `reference_mismatch`.
+`tests/test_gdc_graphalytics_scorecard.py` drives it through the rung runner.
+
+### SNB BI and Interactive v1 scorecard ladders (#1904)
+
+`profiles/gdc/snb-bi-scorecard-ladder-spec.json` (SF1 → SF3 → SF10 → SF30 →
+SF100) and `profiles/gdc/snb-interactive-scorecard-ladder-spec.json` (SF1 →
+SF3 → SF10 → SF30) declare every rung. Only SF1 and SF10 are pinned (#1878);
+the others are `not_pinned` rungs. The climb records an unpinned rung as
+`not_admitted` with cause `rung_not_pinned` and continues to the next pinned
+rung; with no pinned rung left it ends there. The card lists every unpinned
+rung among its variances (#952 decision 2026-10-08).
+
+Their workloads and references are built at rung time, before the measured
+phases, by `graphforge_bench.gdc_snb_scorecard` in a child process, and
+published as `<suite>-<rung>-inputs-{workload,reference,notes}.json`:
+
+- **Query texts** are the runners' `list-queries` output, committed as
+  `profiles/gdc/snb-{bi,interactive}-scorecard-queries.json`; a test requires
+  the committed copies to equal the runners'. Every rewrite and spec variance
+  is on the card. BI matches `:Message` as `(m:Post OR m:Comment)`, as
+  Interactive does, because import sessions store one label per node.
+- **Bindings** are the first 30 rows of each pinned LDBC parameter file, in
+  file order. BI reads `parameters-sfN/bi-<n>[a|b].csv`, one variant per file;
+  these are exactly the bindings of LDBC's Umbra SF10 validation output.
+  Interactive complex reads use `interactive_<n>_param.txt` (IC3 and IC4 bind
+  `endDate = startDate + durationDays` days). Short reads take the first 30
+  distinct ids of their kind from the pinned validation stream, excluding ids
+  that the stream's own updates create. A binding whose person or message is
+  absent from the snapshot is skipped and counted in the notes.
+- **BI reference**: Umbra's SF10 `results.csv` is converted to the driver's
+  cell text by declared column kind. Each line must carry exactly the
+  parameters of the workload binding it is paired with
+  (`reference_binding_mismatch` otherwise). Float columns match with a
+  relative 1e-9, rows in Umbra's order. BI SF1 is not reference-checked.
+- **Interactive reference**: spec-derived. `gdc_snb_interactive_reference`,
+  which never runs GraphForge, evaluates every measured binding over the
+  snapshot read straight from the archive's CSV files with the same load
+  mapping. The LDBC validation set is not used: at SF0.1, SF1 and SF10 the
+  pinned validation stream begins with an update at position 0, so none of its
+  reads describes the bulk-load snapshot. At SF1 the build takes about 5 min
+  and 8.5 GiB, outside the measured phases.
+- **Matching rules** added for these suites: `exact` with `set_columns` (IC1
+  universities and companies, IC12 tagNames compare as element sets),
+  `projection` (IC13 compares the `paths(by=bfs)` verb's `cost` with the hop
+  count; no row stands for -1), and order-preserving `epsilon` for ordered
+  results.
+
+`fixtures/gdc/snb-scorecard/` is the CI fixture, built from the two query
+fixtures by `graphforge_bench.gdc_snb_scorecard_fixture` in the real archives'
+shapes. In each suite's three-rung ladder, sf0 passes against its reference,
+sf1 is not pinned and is passed over, and sf2 runs one deliberately wrong query
+text (BI17, IC2), so its check fails naming exactly that query.
+`tests/test_gdc_snb_scorecard.py` climbs both ladders with the real converter,
+`gf`, driver and builders.
+
+### FinBench Transaction scorecard ladder (#1909)
+
+`profiles/gdc/finbench-transaction-scorecard-ladder-spec.json` declares SF1,
+SF3 and SF10:
+
+- **Rungs.** SF1 and SF10 are pinned (#1878). SF3 is declared but not pinned
+  and sits below the top pinned rung, so the ladder records it as
+  `not_admitted` (`rung_not_pinned`) and continues to SF10; the card lists it.
+- **Queries.** TCR1–TCR12 run as the Cypher of the Rust query catalog (#1890)
+  through `gdc-scorecard query`, one driver clock per binding.
+  `profiles/gdc/finbench-transaction-scorecard-queries.json` is a copy of
+  `graphforge-benchmark-gdc-finbench-transaction list-queries`, because the
+  rung runner does not call that binary; a test fails when the copy drifts.
+  The workload is built at rung time by
+  `graphforge_bench.gdc_finbench_transaction_scorecard` (a `finbench-transaction`
+  workload builder, run as the SNB builders are) from the rung's pinned
+  read-parameter archive with `read_ldbc_parameters`: every published binding
+  (10,689 at SF1) runs under its `line-<n>` id, the id the reference uses.
+  TSR1–TSR6 have no published parameters (LDBC's driver derives them during a
+  run) and are refused with `no_published_parameters`; TW1–TW19 and TRW1–TRW3
+  are refused with `finbench_transaction_write_semantics_not_exposed`. All
+  count against coverage.
+- **Reference.** The SF1 rung pins the spec-derived reference
+  (`finbench-reference/sf1-reference.json`, see "FinBench Transaction SF1
+  reference") as `{"cache_path": ..., "sha256": ...}`: the path is relative to
+  `DATASET_CACHE`, the 44 MB file is never copied into the repository, and a
+  different digest fails the rung (`reference_digest_mismatch`). The reference
+  is complete: a binding it lacks is `reference_binding_missing`, and one the
+  workload never ran is `reference_unmatched`. SF10 carries `reference: null`
+  and is labelled "not reference-checked". The card states that the reference
+  is spec-derived and its readings (TCR6 counts edges, TCR11 is unbounded,
+  truncation follows the Neo4j example); GPStore's readings are for
+  information only.
+- **Load mapping against the Cypher.** The Cypher compares `e.timestamp` and
+  `account.createTime` with epoch-millisecond integers, as LDBC's parameters
+  are. The mapping therefore stores every edge's `createTime` column as an
+  `int64` named `timestamp` and every node's `createTime` as an `int64`, with
+  the converter's `int64` plus `format` (naive-UTC text becomes whole epoch
+  milliseconds; a sub-millisecond value is `invalid_value`). The builder
+  checks this before any query (`mapping_drift`).
+
+`fixtures/gdc/finbench-scorecard-fixture/` is the query fixture's graph and
+bindings in LDBC's published shape (`snapshot/` CSV, `complex_<n>_param.csv`,
+archives), rendered by `tests/finbench_scorecard_fixture.py`.
+`tests/test_gdc_finbench_transaction_scorecard.py` runs the ladder through the
+rung runner with the production mapping and Cypher, derives the reference with
+the spec-derived module, and proves the matching by mutation: a wrong cell, a
+binding the reference lacks or has extra, a query it lacks, different reference
+bytes, a mapping whose `timestamp` was renamed or retyped, and a window start
+that became inclusive. Real SF1 and SF10 cards come from slice 8 (#952).
 
 ## Operator status query
 

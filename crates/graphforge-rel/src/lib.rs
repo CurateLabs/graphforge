@@ -15,7 +15,10 @@
 #![forbid(unsafe_code)]
 
 pub mod expr;
-pub use expr::{ExprLowerer, LoweringError, VarMap, ir_literal_to_scalar, scalar_to_ir_literal};
+pub use expr::{
+    ExprLowerer, LoweringError, VarMap, ir_literal_to_scalar, scalar_to_ir_literal,
+    try_ir_literal_to_scalar,
+};
 
 pub mod lowerer;
 pub use lowerer::GraphPlanLowerer;

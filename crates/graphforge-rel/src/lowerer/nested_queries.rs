@@ -61,7 +61,13 @@ impl GraphPlanLowerer {
             Some(GraphOp::Project { .. }) => (&child.ops[..child.ops.len() - 1], true),
             _ => (child.ops.as_slice(), false),
         };
-        let seed_outer_input = is_full_subquery && full_subquery_needs_outer_input(child, var_map);
+        if child_reads_outer_rows(child, var_map)
+            && let Some(plan) =
+                self.lower_correlated_exists(child_ops, &child.exprs, negated, &input, var_map)?
+        {
+            return Ok(plan);
+        }
+        let seed_outer_input = is_full_subquery && child_reads_outer_rows(child, var_map);
         let mut child_vm = if seed_outer_input {
             var_map.clone()
         } else {
@@ -450,12 +456,113 @@ impl GraphPlanLowerer {
         Ok(result)
     }
 
+    /// A subquery that reads an outer variable its own pattern does not bind
+    /// (in its WHERE, or inside a nested subquery) runs once per distinct outer
+    /// row: its pipeline is seeded with those rows, and the result joins back
+    /// on every outer column with null-safe equality. A null outer value (an
+    /// unmatched earlier OPTIONAL MATCH) is then evaluated by the subquery's
+    /// predicates instead of dropping the row, and duplicate outer rows each
+    /// see their own matches (#1887 D15).
+    ///
+    /// Returns `None` when the subquery's pipeline does not keep every outer
+    /// column (a full subquery projecting with WITH), leaving the identity-key
+    /// correlation in place.
+    fn lower_correlated_exists(
+        &self,
+        child_ops: &[GraphOp],
+        exprs: &ExprArena,
+        negated: bool,
+        input: &LogicalPlan,
+        var_map: &VarMap,
+    ) -> Result<Option<LogicalPlan>, LoweringError> {
+        let seed = distinct_rows(input)?;
+        let mut child_vm = var_map.clone();
+        let child_plan = self.lower_pipeline_from(child_ops, exprs, &mut child_vm, seed, None)?;
+        let Some(keys) = outer_column_keys(input, &child_plan) else {
+            return Ok(None);
+        };
+        let left_keys = keys
+            .iter()
+            .map(|(outer_idx, _)| schema_join_column(input.schema(), *outer_idx))
+            .collect::<Vec<_>>();
+        let right_keys = keys
+            .iter()
+            .map(|(_, inner_idx)| schema_join_column(child_plan.schema(), *inner_idx))
+            .collect::<Vec<_>>();
+        let join_type = if negated {
+            JoinType::LeftAnti
+        } else {
+            JoinType::LeftSemi
+        };
+        LogicalPlanBuilder::from(input.clone())
+            .join_detailed(
+                child_plan,
+                join_type,
+                (left_keys, right_keys),
+                None,
+                datafusion::common::NullEquality::NullEqualsNull,
+            )
+            .and_then(LogicalPlanBuilder::build)
+            .map_unsupported_expr()
+            .map(Some)
+    }
+
+    /// The OPTIONAL MATCH counterpart of [`Self::lower_correlated_exists`]:
+    /// the optional pipeline is seeded with the distinct outer rows and
+    /// left-joined back on every outer column, null-safe.
+    fn lower_correlated_optional_op(
+        &self,
+        child: &GraphPlan,
+        input: LogicalPlan,
+        var_map: &mut VarMap,
+    ) -> Result<Option<LogicalPlan>, LoweringError> {
+        let seed = distinct_rows(&input)?;
+        let mut child_vm = var_map.clone();
+        let child_plan =
+            self.lower_pipeline_from(&child.ops, &child.exprs, &mut child_vm, seed, None)?;
+        let Some(join_keys) = outer_column_keys(&input, &child_plan) else {
+            return Ok(None);
+        };
+        let outer_schema = input.schema().clone();
+        let inner_keep_idx = child_plan
+            .schema()
+            .iter()
+            .enumerate()
+            .filter(|(_, (qualifier, field))| {
+                outer_schema
+                    .index_of_column_by_name(*qualifier, field.name())
+                    .is_none()
+            })
+            .map(|(index, _)| index)
+            .collect();
+        merge_optional_child_vars(&child_vm, var_map);
+        let node = OptionalMatchNode::new(
+            Arc::new(input),
+            Arc::new(child_plan),
+            join_keys,
+            inner_keep_idx,
+        )
+        .with_null_safe_keys();
+        Ok(Some(LogicalPlan::Extension(Extension {
+            node: Arc::new(node),
+        })))
+    }
+
     pub(super) fn lower_optional_op(
         &self,
         child: &GraphPlan,
         input: LogicalPlan,
         var_map: &mut VarMap,
     ) -> Result<LogicalPlan, LoweringError> {
+        if child_reads_outer_rows(child, var_map) {
+            let mut correlated_vm = var_map.clone();
+            if let Some(plan) =
+                self.lower_correlated_optional_op(child, input.clone(), &mut correlated_vm)?
+            {
+                *var_map = correlated_vm;
+                return Ok(plan);
+            }
+        }
         let mut child_vm = VarMap::new();
         let child_plan = self.lower_pipeline(&child.ops, &child.exprs, &mut child_vm)?;
         let (join_keys, inner_keep_idx) =
@@ -544,7 +651,34 @@ fn promote_optional_entity_vars(
     }
 }
 
-fn full_subquery_needs_outer_input(child: &GraphPlan, outer_vm: &VarMap) -> bool {
+/// The distinct rows of `plan`: the seed of a correlated subquery, so each
+/// outer row's matches are produced once however often the row repeats.
+fn distinct_rows(plan: &LogicalPlan) -> Result<LogicalPlan, LoweringError> {
+    LogicalPlanBuilder::from(plan.clone())
+        .distinct()
+        .and_then(LogicalPlanBuilder::build)
+        .map_unsupported_expr()
+}
+
+/// Every outer column paired with the same qualified column of a subquery
+/// pipeline seeded from the outer rows, or `None` if the pipeline dropped one.
+fn outer_column_keys(outer: &LogicalPlan, inner: &LogicalPlan) -> Option<Vec<(usize, usize)>> {
+    outer
+        .schema()
+        .iter()
+        .enumerate()
+        .map(|(outer_idx, (qualifier, field))| {
+            inner
+                .schema()
+                .index_of_column_by_name(qualifier, field.name())
+                .map(|inner_idx| (outer_idx, inner_idx))
+        })
+        .collect()
+}
+
+/// Whether `child` reads an outer variable that none of its own operators
+/// binds — in an expression or inside a nested subquery.
+fn child_reads_outer_rows(child: &GraphPlan, outer_vm: &VarMap) -> bool {
     outer_vm.var_ids().any(|var| {
         plan_references_var(child, var) && !child.ops.iter().any(|op| graph_op_binds_var(op, var))
     })

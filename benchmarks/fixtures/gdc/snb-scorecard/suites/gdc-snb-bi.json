@@ -1,0 +1,17 @@
+{
+  "schema": "graphforge-benchmark-suite/1",
+  "id": "gdc-snb-bi",
+  "family": "gdc",
+  "suite_id": "snb-bi",
+  "disposition": "executable",
+  "pinned_identity": "profiles/gdc/snb-bi-fixture-identity.json",
+  "identity_profiles": {
+    "scorecard": "profiles/gdc/snb-bi-fixture-identity.json"
+  },
+  "runner": "gdc-snb-bi",
+  "datasets": [
+    "bi-fixture-sf0",
+    "bi-fixture-sf2",
+    "bi-fixture-parameters"
+  ]
+}

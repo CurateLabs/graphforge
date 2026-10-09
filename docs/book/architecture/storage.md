@@ -106,7 +106,7 @@ GraphForge uses a **dual-key pattern** for all first-class objects:
 
 ### Why UUIDv7
 
-UUIDv7 (RFC 9562) is time-ordered within a millisecond, globally unique without coordination, fits in Arrow `FixedSizeBinary(16)`, and supports offline generation on mobile devices or air-gapped systems. See [UUID membership indexes](uuid-membership-index.md) for identity lookup.
+UUIDv7 (RFC 9562) is time-ordered within a millisecond, globally unique without coordination, fits in Arrow `FixedSizeBinary(16)`, and supports offline generation on mobile devices or air-gapped systems. See [UUID identity authority](uuid-membership-index.md) for identity lookup, including what changed for projects written before the membership index was removed.
 
 UUID byte order, accepted text form, content-derived UUIDv8 records, canonical
 Arrow bytes, and domain-separated SHA-256 fingerprints follow the frozen
@@ -356,7 +356,7 @@ chosen by path in `graphforge_storage::graph_admission`:
   takes its freshness identity from the same manifest (node and node-property
   objects by name, length and XXH64), so it reads no edge object and re-reads no
   source to recheck freshness.
-- **Self-authenticating.** UUID-membership runs (block checksums in their
+- **Self-authenticating.** Ordinal identity runs (block checksums in their
   manifest), CSR shards (per-shard XXH64) and delta runs (verified at replay)
   carry their own authority; hydration neither reads nor registers them.
 - **Eager.** Every other payload is small metadata or a sidecar with many
@@ -364,7 +364,7 @@ chosen by path in `graphforge_storage::graph_admission`:
   build records, CSR shard manifests, unclassified files). Hydration
   hard-links it from the object store and checks its length and XXH64 as it
   links, so an unforeseen reader fails closed. Only the route table and the
-  small mutable UUID-membership controls (manifests, receipts, lock,
+  small mutable ordinal-identity controls (manifest, receipt, lock,
   tombstones) are copied into single-link private files. The forward and
   ordinal identity runs are hard-linked read-only; the identity handle admits a
   shared inode only when it is read-only and authenticates each block it reads.
@@ -447,9 +447,37 @@ mapping before installing the version-4 manifest. Legacy parent payloads can
 retain their authenticated CAS objects while their logical route paths change.
 
 An initial import builds this same encoded inventory without staging or shaping:
-the bulk builder ranks nodes and edges in memory and emits each artifact once,
-hashed as it is written ([ADR 0058](../../adr/0058-initial-builds-run-on-a-bulk-builder.md),
-[resumable import](resumable-import.md)). Publication is unchanged.
+the bulk builder ranks nodes and edges and emits each artifact once, hashed as it
+is written. Over budget, compact edges, adjacency entries and normalized property
+rows use disposable CRC32C scratch without SHA or fsync
+([ADR 0058](../../adr/0058-initial-builds-run-on-a-bulk-builder.md),
+[resumable import](resumable-import.md)). Property runs sort exact schemas by UUID,
+then stream the existing logical windows, owner projections and 4 MiB fragments.
+Physical scratch frames do not change catalog IDs, cuts, ordinals or published
+bytes. Node identity tables remain resident. The historical
+`edge_properties_exceed_budget` manifest reason remains readable; new plans
+route property payloads through scratch instead of retaining their batches.
+Publication and restart semantics are unchanged.
+
+This bound covers normalized property transport and overlay assembly. Registered
+source decoding and normalization can expand Parquet dictionaries, nested pages
+and row maps before those rows reach the transport; their independent source
+workspace and physical batching work remains under #1918. A property scratch
+reservation therefore describes builder workspace, not a proof that arbitrary
+registered inputs fit the complete process budget.
+
+Publication does not copy those files. On unix it syncs each encoded file, links the same inode to
+`graph-objects/sha256/<2>/<62>`, and acknowledges the bucket directory, so each
+published byte is written once (ADR 0013 barriers unchanged). The encoded name
+stays until the session's private tree is retired, so a publication that stopped
+at any point reruns by deduplicating against the existing object. Nothing reads
+the file back at install: exact length and XXH64 are checked on first read
+([ADR 0049](../../adr/0049-published-payload-checksums.md)) and at the
+commit boundary before `CURRENT` moves. If the object store cannot take a link
+(`EXDEV`), the install copies explicitly; Windows always copies. Every writer of
+the encoded tree creates a fresh file exclusively or by temp-and-rename, and
+the shared inode is sealed read-only, so no later write reaches a published
+object.
 
 Read sessions retain one admitted route inventory with their catalog and
 adjacency provider. Publishing a later generation replaces the facade's
@@ -1048,7 +1076,7 @@ preserving direct single-relation scans.
 Node topology follows the same immutable layout: the first compatible write
 may retain `topology/nodes.parquet`, while later appends create ordered
 `topology/nodes/<first>-<last>.parquet` fragments. Counts, filtered reads,
-surrogate recovery, UUID membership, semantic validation, projection, export,
+surrogate recovery, UUID identity probes, semantic validation, projection, export,
 label mutation, and deletion operate over the logical union. A localized
 rewrite replaces only the fragment containing a changed row; untouched node
 fragments retain their filesystem identity.
@@ -1059,31 +1087,28 @@ the same commit as every topology append. Writer reopen reads this bounded
 record rather than enumerating or decoding the accumulated topology fragments;
 legacy projects without it use the bounded tail migration path once.
 
-Bulk endpoint resolution uses the persistent authenticated
-`topology/uuid-membership/` snapshot published with each immutable graph
-generation. The current wire-version-6 `manifest.json` facet binds the
-topology generation, record counts, exact lengths, publication SHA-256 identities,
-and mandatory file/block XXH64 checksums. Default probes validate checksums
-without recomputing cryptographic payload identities. Nodes have a
-sorted fixed-width `UUID -> node_id` file; edges have a sorted UUID membership
-file. Builds use bounded external sort runs and bounded-fan-in merges. Probes
-sort and deduplicate the caller batch, use authenticated block fences to select
-only candidate blocks, and merge-scan every selected block once. Newest runs
-own tombstone and cross-kind shadowing; node results are batch-validated against
-the surrogate-sorted reverse file before caller order is restored. Production
-work evidence reports identity/surrogate block reads and bytes, runs considered,
-and exactly zero per-record filesystem seeks while decoding zero topology rows.
-Duplicate node or edge UUIDs, reuse of one UUID across the node and edge
-domains, stale manifests, and missing, truncated, checksum-mismatched, or
-identity/reverse-inconsistent index files fail closed.
+Append validation and bulk endpoint resolution read the published topology
+Parquet through `TopologyIdentityProbe`; no derived UUID index is written or read
+(#1902). A probe skips every fragment row group whose `node_uuid`/`edge_uuid`
+min/max statistics exclude all requested UUIDs, then decodes only the UUID
+column (plus `node_id` for node lookups) of the rest. Live counts come from
+footer row counts. A UUID is refused when it names a live node, a live edge, or
+a deleted entity: `topology/deleted_identities.parquet` keeps the sorted UUIDs of
+every deleted node and edge, is rewritten only by a generation that deletes, and
+is an ordinary authenticated graph file. Work evidence reports row groups and
+compressed bytes read, fragments considered, and zero per-record seeks. Projects
+built before #1902 still carry `topology/uuid-membership/manifest.json`,
+`identities-v5-*` and `node-surrogates-v5-*`; those files open, export and
+verify as ordinary entries and are never read. See
+[UUID identity authority](uuid-membership-index.md).
 
 Node ordinal resolution is a distinct, additive authority facet in the same
 directory. Its `ordinal-v4-manifest.json`, `ordinal-v4-receipt.json`, and
-`ordinal-v4.lock` never replace or reinterpret the v3 node-and-edge manifest.
-Both facets name the same topology generation but have independent receipt-bound
-manifest digests. The v4 logical ordinal facet now requires wire version 5
-with file/block XXH64 checksums; earlier wire-version-4 descriptors are refused. If the ordinal facet is absent while current v3 is canonical,
-discovery returns a typed rebuild requirement. A present ordinal path must pass
+`ordinal-v4.lock` live beside the ignored legacy membership files and never
+interpret them. The v4 logical ordinal facet requires wire version 5
+with file/block XXH64 checksums; earlier wire-version-4 descriptors are refused.
+If the ordinal facet is absent, discovery returns a typed rebuild
+requirement. A present ordinal path must pass
 authenticated open and never falls back to v3 when malformed or substituted.
 
 New mapped publications use a compact version-8 `graph/files` root with
@@ -1106,7 +1131,7 @@ The authoritative write census is executable: topology node and edge shards,
 node and edge properties, graph deltas, catalog records, extension-owned graph
 records, and the generation/runtime-catalog/runtime-label control files must
 all appear in the revision descriptor journal and resolve to the same authenticated
-logical inventory. Rebuildable adjacency and UUID-membership artifacts live
+logical inventory. Rebuildable adjacency artifacts live
 under `.graphforge-cache/` and are rejected as graph authority. Parquet write
 sites share `RewriteBatch` plus `commit_topology_aware`; the three control-file
 writers record their descriptor before making replacement bytes visible.
@@ -1312,7 +1337,7 @@ Every applicable graph publisher preserves these authorities together:
 - Complete typed or exploratory schemas, null/concrete property types, latest
   values and tombstones; immutable primary routes and label memberships remain
   distinct. Physical path components never substitute for semantic route names.
-- Authenticated graph-file ownership, route authorities, UUID membership,
+- Authenticated graph-file ownership, route authorities, deleted identities,
   ordinal receipts and applicable adjacency/search generations. Staging reads
   the admitted inventory rather than discovering authority from filenames.
 - All graph, catalog, ontology/composition and other declared publication
