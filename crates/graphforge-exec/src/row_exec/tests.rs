@@ -276,3 +276,79 @@ fn wave11_unwind_explode_preserves_order_and_enforces_list_contract() {
             .contains("requires a struct element")
     );
 }
+
+fn seed_exec(seed: u64, schema: &Arc<Schema>) -> Arc<dyn ExecutionPlan> {
+    Arc::new(CorrelatedSeedExec::with_rows(seed, schema.clone(), None))
+}
+
+fn seed_rows(plan: &Arc<dyn ExecutionPlan>) -> Result<Vec<RecordBatch>, DataFusionError> {
+    let context = datafusion::prelude::SessionContext::new().task_ctx();
+    futures::executor::block_on(collect(plan.clone(), context))
+}
+
+#[test]
+fn correlated_seed_fails_closed_until_the_outer_rows_are_bound() {
+    use arrow::datatypes::Field;
+
+    let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::UInt64, false)]));
+    let error = seed_rows(&seed_exec(7, &schema)).unwrap_err().to_string();
+    assert!(
+        error.contains("before its outer rows were bound"),
+        "{error}"
+    );
+
+    let rows = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(UInt64Array::from(vec![4, 5]))],
+    )
+    .unwrap();
+    let bound = bind_correlated_seed(seed_exec(7, &schema), 7, &[rows]).unwrap();
+    let values: Vec<u64> = seed_rows(&bound)
+        .unwrap()
+        .iter()
+        .flat_map(|batch| {
+            batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap()
+                .values()
+                .to_vec()
+        })
+        .collect();
+    assert_eq!(values, vec![4, 5]);
+}
+
+#[test]
+fn binding_a_correlated_seed_leaves_other_seeds_and_requires_its_own_leaf() {
+    use arrow::datatypes::Field;
+
+    let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::UInt64, false)]));
+    let rows =
+        RecordBatch::try_new(schema.clone(), vec![Arc::new(UInt64Array::from(vec![1]))]).unwrap();
+
+    let error = bind_correlated_seed(seed_exec(2, &schema), 1, std::slice::from_ref(&rows))
+        .err()
+        .expect("no leaf carries the owner's id");
+    assert!(error.to_string().contains("no seed leaf 1"), "{error}");
+
+    // A nested correlated sub-plan's leaf keeps waiting for its own rows.
+    let union = datafusion::physical_plan::union::UnionExec::try_new(vec![
+        seed_exec(1, &schema),
+        seed_exec(2, &schema),
+    ])
+    .unwrap();
+    let bound = bind_correlated_seed(union, 1, &[rows]).unwrap();
+    let bound_leaves: Vec<bool> = bound
+        .children()
+        .iter()
+        .map(|child| {
+            child
+                .downcast_ref::<CorrelatedSeedExec>()
+                .expect("seed leaf")
+                .rows
+                .is_some()
+        })
+        .collect();
+    assert_eq!(bound_leaves, vec![true, false]);
+}

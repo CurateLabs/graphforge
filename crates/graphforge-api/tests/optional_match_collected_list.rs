@@ -184,7 +184,9 @@ fn exists_where_in_collected_list_selects_the_forums_with_listed_creators() {
 }
 
 /// The SNB BI13 shape: the collected list is unwound, and every unwound row
-/// carries the whole list into the `OPTIONAL MATCH ... WHERE x IN <list>`.
+/// carries the whole list into the `OPTIONAL MATCH ... WHERE x IN <list>`. A
+/// second `OPTIONAL MATCH` on the same variable then counts every like, also
+/// for the zombies whose first one matched nothing.
 #[test]
 fn optional_match_where_in_unwound_collected_list_counts_likes_by_listed_persons() {
     let gf = GraphForge::new(None).expect("in-memory instance");
@@ -192,36 +194,41 @@ fn optional_match_where_in_unwound_collected_list_counts_likes_by_listed_persons
         "UNWIND range(1, 40) AS i CREATE (:Person {id: i})",
         "UNWIND range(1, 120) AS i CREATE (:Message {id: i})",
         "MATCH (m:Message), (p:Person) WHERE m.id % 40 + 1 = p.id CREATE (m)-[:HAS_CREATOR]->(p)",
-        "MATCH (m:Message), (p:Person) WHERE (m.id * 5 + p.id * 3) % 7 = 0
+        "MATCH (m:Message), (p:Person) WHERE (m.id * 5 + p.id * 3) % 19 < 2
          CREATE (p)-[:LIKES]->(m)",
     ] {
         gf.execute(statement)
             .unwrap_or_else(|error| panic!("{statement}: {error}"));
     }
-    // Zombies are the persons whose id is divisible by 3.
-    let expected: BTreeMap<i64, i64> = (1..=40_i64)
+    // Zombies are the persons whose id is divisible by 3. Message `m` was
+    // created by person `m % 40 + 1`, and person `p` likes it when
+    // `(5m + 3p) % 19 < 2`.
+    let likes = |zombie: i64, by_zombies_only: bool| -> i64 {
+        let count = (1..=120_i64)
+            .filter(|message| message % 40 + 1 == zombie)
+            .flat_map(|message| (1..=40_i64).map(move |liker| (message, liker)))
+            .filter(|(message, liker)| {
+                (message * 5 + liker * 3) % 19 < 2 && (!by_zombies_only || liker % 3 == 0)
+            })
+            .count();
+        i64::try_from(count).expect("count")
+    };
+    let expected: BTreeMap<i64, (i64, i64)> = (1..=40_i64)
         .filter(|zombie| zombie % 3 == 0)
-        .map(|zombie| {
-            let likes = (1..=120_i64)
-                .filter(|message| message % 40 + 1 == zombie)
-                .flat_map(|message| (1..=40_i64).map(move |liker| (message, liker)))
-                .filter(|(message, liker)| (message * 5 + liker * 3) % 7 == 0 && liker % 3 == 0)
-                .count();
-            (zombie, i64::try_from(likes).expect("count"))
-        })
+        .map(|zombie| (zombie, (likes(zombie, true), likes(zombie, false))))
         .collect();
-    // Likes by persons outside the list exist, so the list filter matters.
-    let all_likes = (1..=120_i64)
-        .flat_map(|message| (1..=40_i64).map(move |liker| (message, liker)))
-        .filter(|(message, liker)| (message * 5 + liker * 3) % 7 == 0 && message % 40 % 3 == 2)
-        .count();
     assert!(
-        expected.values().any(|count| *count > 1)
-            && expected.values().sum::<i64>() < i64::try_from(all_likes).expect("count"),
-        "{expected:?} of {all_likes}"
+        expected.values().any(|(by_zombies, _)| *by_zombies > 1)
+            && expected
+                .values()
+                .any(|(by_zombies, total)| *by_zombies == 0 && *total > 0)
+            && expected
+                .values()
+                .all(|(by_zombies, total)| by_zombies < total),
+        "{expected:?}"
     );
 
-    let counted = pairs(rows(
+    let counted: BTreeMap<i64, (i64, i64)> = rows(
         &gf,
         "MATCH (zombie:Person) WHERE zombie.id % 3 = 0
          WITH collect(zombie) AS zombies
@@ -229,7 +236,20 @@ fn optional_match_where_in_unwound_collected_list_counts_likes_by_listed_persons
          OPTIONAL MATCH (zombie)<-[:HAS_CREATOR]-(message)<-[:LIKES]-(likerZombie:Person)
          WHERE likerZombie IN zombies
          WITH zombie, count(likerZombie) AS zombieLikeCount
-         RETURN zombie.id, zombieLikeCount",
-    ));
+         OPTIONAL MATCH (zombie)<-[:HAS_CREATOR]-(message)<-[:LIKES]-(likerPerson:Person)
+         WITH zombie, zombieLikeCount, count(likerPerson) AS totalLikeCount
+         RETURN zombie.id, zombieLikeCount, totalLikeCount",
+    )
+    .into_iter()
+    .map(|row| {
+        (
+            row[0].parse().expect("zombie"),
+            (
+                row[1].parse().expect("zombie likes"),
+                row[2].parse().expect("total likes"),
+            ),
+        )
+    })
+    .collect();
     assert_eq!(counted, expected);
 }

@@ -534,6 +534,32 @@ impl GraphPlanLowerer {
         .map(Some)
     }
 
+    /// The outer rows with the columns a correlated sub-plan would add for the
+    /// outer nodes it matches again: their identity and properties.
+    ///
+    /// The sub-plan resolves these on its seed, so they would reach the result
+    /// only through its matches and be null on a row that matched nothing,
+    /// although they belong to the outer row. The label of the re-matched node
+    /// stays a filter inside the sub-plan.
+    fn bind_outer_nodes(
+        &self,
+        ops: &[GraphOp],
+        mut input: LogicalPlan,
+        var_map: &VarMap,
+    ) -> Result<LogicalPlan, LoweringError> {
+        for op in ops {
+            let GraphOp::NodeScan { var, ty } = op else {
+                continue;
+            };
+            let Some(alias) = var_map.get(*var) else {
+                continue;
+            };
+            input = self.enrich_bound_node(input, alias)?;
+            input = self.join_node_properties(*var, *ty, input)?;
+        }
+        Ok(input)
+    }
+
     /// The OPTIONAL MATCH counterpart of [`Self::lower_correlated_exists`]:
     /// the optional pipeline is seeded with the distinct outer rows, executed
     /// once, and left-joined back on every outer column, null-safe.
@@ -543,6 +569,7 @@ impl GraphPlanLowerer {
         input: LogicalPlan,
         var_map: &mut VarMap,
     ) -> Result<Option<LogicalPlan>, LoweringError> {
+        let input = self.bind_outer_nodes(&child.ops, input, var_map)?;
         let (seed_id, seed) = correlated_seed(&input)?;
         let mut child_vm = var_map.clone();
         let child_plan =

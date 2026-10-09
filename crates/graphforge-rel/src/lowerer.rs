@@ -16,8 +16,8 @@
 //! | `EdgeScan { var, ty }` | `TableScan("edges__exploratory")` + optional filter |
 //! | `Expand { .. min_hops=1, max_hops=Some(1) }` | provider-backed `ExpandNode` (relational fallback for schema-only/bound-edge plans) |
 //! | `Expand { variable-length }` | `VarLenExpandNode` (`graphforge-plan` Extension stub) |
-//! | `Optional { child }` | `OptionalMatchNode` (`graphforge-plan` Extension stub) |
-//! | `Exists { child, .. }` | `LeftSemi` / `LeftAnti` join; correlated key union for alternatives |
+//! | `Optional { child }` | `OptionalMatchNode` (`graphforge-plan` Extension stub); a child that reads an outer variable starts from a `CorrelatedSeedNode` |
+//! | `Exists { child, .. }` | `LeftSemi` / `LeftAnti` join; correlated key union for alternatives; a child that reads an outer variable is an `OptionalMatchNode` over a `CorrelatedSeedNode` |
 //! | `PatternComprehension { child, .. }` | correlated aggregate + left join |
 //! | `ListElementPatternComprehension { .. }` | ordinal unwind + correlated aggregate + regroup |
 //! | `Unwind { list_expr, alias }` | `UnwindNode` (`graphforge-plan` Extension stub) |
@@ -610,6 +610,28 @@ impl GraphPlanLowerer {
     }
 
     /// Lower an operator pipeline over an existing correlated input.
+    /// `input` with the topology identity (`node_id`, `type_id`, `type_ids`)
+    /// of the node bound under `alias`, when it carries only the node's UUID
+    /// (an element of a collected or unwound node list).
+    fn enrich_bound_node(
+        &self,
+        input: LogicalPlan,
+        alias: &str,
+    ) -> Result<LogicalPlan, LoweringError> {
+        let qualifier = datafusion::common::TableReference::bare(alias);
+        let has = |name| {
+            input
+                .schema()
+                .index_of_column_by_name(Some(&qualifier), name)
+                .is_some()
+        };
+        if has("node_uuid") && !has("node_id") {
+            enrich_bound_node_identity(&input, alias, self.read_snapshot())
+        } else {
+            Ok(input)
+        }
+    }
+
     fn lower_pipeline_from(
         &self,
         ops: &[GraphOp],
@@ -697,20 +719,7 @@ impl GraphPlanLowerer {
                 // and the query failed to plan (#789). `join_node_properties`
                 // preserves the existing multi-var (src + edge + dst) columns.
                 if let Some(alias) = var_map.get(*var) {
-                    let qualifier = datafusion::common::TableReference::bare(alias);
-                    let input = if input
-                        .schema()
-                        .index_of_column_by_name(Some(&qualifier), "node_uuid")
-                        .is_some()
-                        && input
-                            .schema()
-                            .index_of_column_by_name(Some(&qualifier), "node_id")
-                            .is_none()
-                    {
-                        enrich_bound_node_identity(&input, alias, self.read_snapshot())?
-                    } else {
-                        input
-                    };
+                    let input = self.enrich_bound_node(input, alias)?;
                     return match ty {
                         Some(type_id) => {
                             let filtered = filter_node_by_type(input, alias, *type_id)?;
