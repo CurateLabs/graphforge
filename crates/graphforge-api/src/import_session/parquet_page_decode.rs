@@ -155,9 +155,104 @@ impl Shape {
     }
 }
 
-fn raw_lz4(input: &[u8], output: &mut [u8]) -> Result<(), GfError> {
-    let decoded = lz4_flex::block::decompress_into(input, output).map_err(storage)?;
-    if decoded != output.len() {
+fn lz4_length(
+    input: &[u8],
+    cursor: &mut usize,
+    initial: usize,
+    cancellation: Option<&CancellationToken>,
+) -> Result<usize, GfError> {
+    let mut length = initial;
+    if initial != 15 {
+        return Ok(length);
+    }
+    loop {
+        check(cancellation)?;
+        let byte = *input
+            .get(*cursor)
+            .ok_or_else(|| storage("Truncated LZ4 length"))?;
+        *cursor += 1;
+        length = length
+            .checked_add(usize::from(byte))
+            .ok_or_else(|| storage("LZ4 length overflows"))?;
+        if byte != 255 {
+            return Ok(length);
+        }
+    }
+}
+
+/// Decode raw tokens into the fixed destination. Both long literal copies and
+/// overlapping matches check cancellation at most 8KiB of output apart; the
+/// public block decoder has no callback inside a single enormous raw block.
+fn raw_lz4(
+    input: &[u8],
+    output: &mut [u8],
+    cancellation: Option<&CancellationToken>,
+) -> Result<(), GfError> {
+    let (mut cursor, mut written) = (0_usize, 0_usize);
+    while cursor < input.len() {
+        check(cancellation)?;
+        let token = input[cursor];
+        cursor += 1;
+        let literals = lz4_length(input, &mut cursor, usize::from(token >> 4), cancellation)?;
+        let source_end = cursor
+            .checked_add(literals)
+            .ok_or_else(|| storage("LZ4 literal range overflows"))?;
+        let destination_end = written
+            .checked_add(literals)
+            .ok_or_else(|| storage("LZ4 output range overflows"))?;
+        let source = input
+            .get(cursor..source_end)
+            .ok_or_else(|| storage("Truncated LZ4 literal bytes"))?;
+        let destination = output
+            .get_mut(written..destination_end)
+            .ok_or_else(|| storage("LZ4 literals exceed admitted page output"))?;
+        for (source, destination) in source
+            .chunks(BLOCK_BYTES)
+            .zip(destination.chunks_mut(BLOCK_BYTES))
+        {
+            check(cancellation)?;
+            destination.copy_from_slice(source);
+        }
+        cursor = source_end;
+        written = destination_end;
+        if cursor == input.len() {
+            break;
+        }
+        let offset_end = cursor
+            .checked_add(2)
+            .ok_or_else(|| storage("LZ4 offset overflows"))?;
+        let raw = input
+            .get(cursor..offset_end)
+            .ok_or_else(|| storage("Truncated LZ4 match offset"))?;
+        let offset = usize::from(u16::from_le_bytes([raw[0], raw[1]]));
+        cursor = offset_end;
+        if offset == 0 || offset > written {
+            return Err(storage("Invalid LZ4 backwards match offset"));
+        }
+        let length = lz4_length(input, &mut cursor, usize::from(token & 15), cancellation)?
+            .checked_add(4)
+            .ok_or_else(|| storage("LZ4 match length overflows"))?;
+        let end = written
+            .checked_add(length)
+            .ok_or_else(|| storage("LZ4 match range overflows"))?;
+        if end > output.len() {
+            return Err(storage("LZ4 match exceeds admitted page output"));
+        }
+        let mut distance = offset;
+        while written < end {
+            check(cancellation)?;
+            let step = distance.min(BLOCK_BYTES).min(end - written);
+            output.copy_within(written - distance..written - distance + step, written);
+            written += step;
+            // Grow a fully reconstructed, period-aligned history prefix for
+            // tiny offsets instead of copying a one-byte match in a huge loop.
+            if distance < BLOCK_BYTES && step == distance {
+                distance *= 2;
+            }
+        }
+    }
+    check(cancellation)?;
+    if written != output.len() {
         return Err(storage("LZ4 page output disagrees with its stated size"));
     }
     Ok(())
@@ -183,7 +278,7 @@ fn hadoop_lz4(
         let destination = output
             .get_mut(..expanded)
             .ok_or_else(|| storage("Hadoop LZ4 block exceeds admitted output"))?;
-        raw_lz4(source, destination)?;
+        raw_lz4(source, destination, cancellation)?;
         input = &input[compressed..];
         output = &mut output[expanded..];
     }
@@ -235,7 +330,7 @@ fn decompress(
         Compression::GZIP(_) => super::parquet_codec::gzip(input, output, workspace)?,
         Compression::BROTLI(_) => super::parquet_brotli::decode(input, output, workspace)?,
         Compression::ZSTD(_) => super::parquet_codec::zstd(input, output, workspace)?,
-        Compression::LZ4_RAW => raw_lz4(input, output)?,
+        Compression::LZ4_RAW => raw_lz4(input, output, cancellation)?,
         Compression::LZ4 => {
             // Preserve the pinned codec's historical formats on the same
             // immutable owned bytes. A denied frame allocation is never
@@ -248,7 +343,7 @@ fn decompress(
                 if matches!(magic, Some(0x184D_2204 | 0x184C_2102)) {
                     framed_lz4(input, output, workspace, cancellation)?;
                 } else {
-                    raw_lz4(input, output)?;
+                    raw_lz4(input, output, cancellation)?;
                 }
             }
         }

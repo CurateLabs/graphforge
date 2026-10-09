@@ -211,3 +211,20 @@ fn cancellation_is_checked_before_any_page_decode() {
     let compressed = page(vec![0], usize::MAX);
     assert!(decode(compressed, Compression::SNAPPY, usize::MAX, Some(&token)).is_err());
 }
+
+#[test]
+fn raw_lz4_token_decoder_matches_the_pinned_encoder_at_overlap_boundaries() {
+    for period in [1, 3, 7, 17, 255, 8191, 8192, 8193, 32767] {
+        let expected = (0..100_003)
+            .map(|index| ((index % period) % 251) as u8)
+            .collect::<Vec<_>>();
+        let body = lz4_flex::block::compress(&expected);
+        let compressed = page(body, expected.len());
+        let capacity = compressed.body_capacity + expected.len();
+        let decoded = decode(compressed, Compression::LZ4_RAW, capacity, None).unwrap();
+        assert_eq!(&decoded.page.buffer()[..], &expected, "period={period}");
+    }
+    for body in [vec![0xf0], vec![0x10, 1, 0, 0], vec![0x00, 1, 0]] {
+        assert!(decode(page(body, 1), Compression::LZ4_RAW, 1024, None).is_err());
+    }
+}
