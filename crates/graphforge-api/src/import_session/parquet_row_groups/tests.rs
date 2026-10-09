@@ -330,6 +330,51 @@ fn consumed_failure_stops_other_physical_columns_and_row_groups() {
 }
 
 #[test]
+fn a_consumed_task_failure_returns_an_error_instead_of_successful_eof() {
+    let (bytes, metadata) = source();
+    let mut budget = InventoryBudget::new(1 << 20);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let groups = row_groups(bytes, Arc::clone(&metadata), &[0], &mut budget, {
+        let calls = Arc::clone(&calls);
+        move |_, _| {
+            Ok(Probe {
+                calls: Arc::clone(&calls),
+                refusal: false,
+            })
+        }
+    })
+    .unwrap();
+    let levels = parquet_to_arrow_field_levels(
+        metadata.file_metadata().schema_descr(),
+        ProjectionMask::all(),
+        None,
+    )
+    .unwrap();
+    let native =
+        ParquetRecordBatchReader::try_new_with_row_groups(&levels, &groups, 4, None).unwrap();
+    let failures = groups.failures.clone();
+    failures.record(resource_limit("pre-consumed task refusal"));
+    assert!(matches!(
+        failures.take(),
+        Some(GfError::Project {
+            code: ProjectErrorCode::ResourceLimit,
+            ..
+        })
+    ));
+    let mut reader = OwnedBatchReader::new(native, failures);
+    let error = reader
+        .next()
+        .expect("a failed task must never appear to reach successful EOF")
+        .unwrap_err();
+    assert!(matches!(error, GfError::Storage(_)));
+    assert!(error.to_string().contains("page failure was consumed"));
+    for _ in 0..3 {
+        assert!(reader.next().is_none());
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
 fn row_group_selection_and_input_geometry_are_validated() {
     let (bytes, metadata) = source();
     for selection in [&[1, 0][..], &[1, 1][..], &[3][..]] {

@@ -94,7 +94,9 @@ impl Iterator for OwnedBatchReader {
         let reader = self.reader.as_mut()?;
         if self.failures.failed() {
             self.reader = None;
-            return self.failures.take().map(Err);
+            return Some(Err(self.failures.take().unwrap_or_else(|| {
+                storage("Parquet task stopped after its page failure was consumed")
+            })));
         }
         let result = reader.next();
         if self.failures.failed() {
