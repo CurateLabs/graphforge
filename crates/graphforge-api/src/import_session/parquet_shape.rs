@@ -67,6 +67,7 @@ pub(super) struct SchemaShape {
 }
 
 struct VisitTask {
+    physical_node: usize,
     parquet: TypePtr,
     field: FieldRef,
     parent: Option<usize>,
@@ -98,8 +99,26 @@ impl SchemaShape {
     ) -> Result<Self, GfError> {
         check_cancelled(cancellation)?;
         let arrow_fields = metadata.schema().fields();
-        let root = metadata.parquet_schema().root_schema();
-        let parquet_fields = root.get_fields();
+        let physical = physical_topology(
+            metadata.parquet_schema().root_schema_ptr(),
+            budget,
+            cancellation,
+        )?;
+        if physical[0].leaf_end != metadata.parquet_schema().columns().len() {
+            return Err(storage(
+                "physical schema leaf count differs from descriptors",
+            ));
+        }
+
+        for node in &physical {
+            check_cancelled(cancellation)?;
+            if node.parquet.is_primitive() {
+                let descriptor = &metadata.parquet_schema().columns()[node.first_leaf];
+                if !Arc::ptr_eq(&node.parquet, &descriptor.self_type_ptr()) {
+                    return Err(storage("physical leaf identity differs from descriptor"));
+                }
+            }
+        }
 
         let mut nodes = Vec::new();
         let mut leaves = Vec::new();
@@ -111,8 +130,10 @@ impl SchemaShape {
         // The root has no visible Arrow node; its fields are pushed in reverse
         // so the explicit stack visits them in physical DFS order.
         let mut arrow_index = arrow_fields.len();
-        for parquet in parquet_fields.iter().rev() {
-            if !has_physical_leaf(parquet, budget, cancellation)? {
+        for physical_node in reverse_children(&physical, 0) {
+            check_cancelled(cancellation)?;
+            let parquet = &physical[physical_node].parquet;
+            if !physical[physical_node].visible {
                 continue;
             }
             arrow_index = arrow_index
@@ -127,6 +148,7 @@ impl SchemaShape {
             }
             reserve(&mut tasks, 1, budget, "schema visitor stack")?;
             tasks.push(VisitTask {
+                physical_node,
                 parquet: Arc::clone(parquet),
                 field: Arc::clone(field),
                 parent: None,
@@ -189,6 +211,7 @@ impl SchemaShape {
                         &mut leaves,
                         budget,
                         &task.parquet,
+                        physical[task.physical_node].first_leaf,
                         element.clone(),
                         Some(list_idx),
                         definition,
@@ -226,6 +249,7 @@ impl SchemaShape {
                     &mut leaves,
                     budget,
                     &task.parquet,
+                    physical[task.physical_node].first_leaf,
                     task.field,
                     task.parent,
                     definition,
@@ -301,13 +325,16 @@ impl SchemaShape {
                     false,
                     None,
                 )?;
-                for (ordinal, (physical_child, arrow_child)) in source_fields[0]
-                    .get_fields()
-                    .iter()
-                    .zip(entry_fields)
-                    .enumerate()
-                    .rev()
+                let entry_physical = physical[task.physical_node]
+                    .first_child
+                    .ok_or_else(|| storage("MAP is missing its physical entry"))?;
+                for (ordinal, physical_node) in
+                    reverse_children(&physical, entry_physical).enumerate()
                 {
+                    check_cancelled(cancellation)?;
+                    let physical_child = &physical[physical_node].parquet;
+                    let arrow_child = &entry_fields[1 - ordinal];
+                    let ordinal = 1 - ordinal;
                     if physical_child.get_basic_info().repetition() == Repetition::REPEATED {
                         return Err(storage("Parquet MAP key/value fields cannot be repeated"));
                     }
@@ -318,6 +345,7 @@ impl SchemaShape {
                     }
                     reserve(&mut tasks, 1, budget, "schema visitor stack")?;
                     tasks.push(VisitTask {
+                        physical_node,
                         parquet: Arc::clone(physical_child),
                         field: Arc::clone(arrow_child),
                         parent: Some(entry_idx),
@@ -376,13 +404,10 @@ impl SchemaShape {
                 )?;
 
                 let repeated = &fields[0];
-                let preserve_struct = !repeated.is_primitive()
-                    && (repeated.get_fields().len() != 1
-                        || (!is_list_annotation(repeated)
-                            && !has_single_repeated_child(repeated)
-                            && (repeated.name() == "array"
-                                || repeated.name().strip_suffix("_tuple")
-                                    == Some(task.parquet.name()))));
+                let repeated_physical = physical[task.physical_node]
+                    .first_child
+                    .ok_or_else(|| storage("LIST is missing its physical element"))?;
+                let preserve_struct = preserve_list_struct(&task.parquet, repeated);
                 if repeated.is_primitive() {
                     if element.is_nullable() {
                         return Err(storage(
@@ -397,6 +422,7 @@ impl SchemaShape {
                         &mut leaves,
                         budget,
                         repeated,
+                        physical[repeated_physical].first_leaf,
                         element,
                         Some(list_idx),
                         list_definition,
@@ -426,8 +452,10 @@ impl SchemaShape {
                         None,
                     )?;
                     let mut arrow_index = item_fields.len();
-                    for physical_child in repeated.get_fields().iter().rev() {
-                        if !has_physical_leaf(physical_child, budget, cancellation)? {
+                    for physical_node in reverse_children(&physical, repeated_physical) {
+                        check_cancelled(cancellation)?;
+                        let physical_child = &physical[physical_node].parquet;
+                        if !physical[physical_node].visible {
                             continue;
                         }
                         arrow_index = arrow_index.checked_sub(1).ok_or_else(|| {
@@ -439,6 +467,7 @@ impl SchemaShape {
                         }
                         reserve(&mut tasks, 1, budget, "schema visitor stack")?;
                         tasks.push(VisitTask {
+                            physical_node,
                             parquet: Arc::clone(physical_child),
                             field: Arc::clone(arrow_child),
                             parent: Some(struct_idx),
@@ -454,6 +483,9 @@ impl SchemaShape {
                     let child_type = repeated.get_fields()[0].clone();
                     reserve(&mut tasks, 1, budget, "schema visitor stack")?;
                     tasks.push(VisitTask {
+                        physical_node: physical[repeated_physical]
+                            .first_child
+                            .ok_or_else(|| storage("LIST wrapper is missing its item"))?,
                         parquet: child_type,
                         field: element,
                         parent: Some(list_idx),
@@ -541,8 +573,10 @@ impl SchemaShape {
             };
 
             let mut arrow_index = struct_fields.len();
-            for physical_child in task.parquet.get_fields().iter().rev() {
-                if !has_physical_leaf(physical_child, budget, cancellation)? {
+            for physical_node in reverse_children(&physical, task.physical_node) {
+                check_cancelled(cancellation)?;
+                let physical_child = &physical[physical_node].parquet;
+                if !physical[physical_node].visible {
                     continue;
                 }
                 arrow_index = arrow_index
@@ -556,6 +590,7 @@ impl SchemaShape {
                 }
                 reserve(&mut tasks, 1, budget, "schema visitor stack")?;
                 tasks.push(VisitTask {
+                    physical_node,
                     parquet: Arc::clone(physical_child),
                     field: Arc::clone(arrow_child),
                     parent: parent_idx,
@@ -588,14 +623,13 @@ impl SchemaShape {
         }
 
         let descriptors = metadata.parquet_schema().columns();
-        if descriptors.len() != leaves.len() {
-            return Err(storage(
-                "admitted schema leaf count differs from Parquet descriptors",
-            ));
-        }
-        for (ordinal, (leaf, descriptor)) in leaves.iter().zip(descriptors).enumerate() {
+        let mut previous_column = None;
+        for leaf in &leaves {
             check_cancelled(cancellation)?;
-            if leaf.column_index != ordinal
+            let descriptor = descriptors
+                .get(leaf.column_index)
+                .ok_or_else(|| storage("visible leaf has no physical descriptor"))?;
+            if previous_column.is_some_and(|previous| previous >= leaf.column_index)
                 || leaf.max_definition != descriptor.max_def_level()
                 || leaf.max_repetition != descriptor.max_rep_level()
                 || leaf.physical_type != descriptor.physical_type()
@@ -605,7 +639,11 @@ impl SchemaShape {
                     "Parquet structural levels differ from leaf descriptor",
                 ));
             }
+            previous_column = Some(leaf.column_index);
         }
+        let physical_charge = capacity_bytes::<PhysicalNode>(physical.capacity())?;
+        drop(physical);
+        budget.release(physical_charge);
 
         check_cancelled(cancellation)?;
 
@@ -699,13 +737,14 @@ fn append_leaf(
     leaves: &mut Vec<Leaf>,
     budget: &mut InventoryBudget,
     parquet: &TypePtr,
+    descriptor_index: usize,
     field: FieldRef,
     parent: Option<usize>,
     definition: i16,
     repetition: i16,
 ) -> Result<usize, GfError> {
     let index = nodes.len();
-    let descriptor_index = leaves.len();
+    let owner_index = leaves.len();
     let nullable = field.is_nullable();
     reserve(nodes, 1, budget, "schema nodes")?;
     reserve(tails, 1, budget, "schema sibling links")?;
@@ -718,7 +757,7 @@ fn append_leaf(
         definition,
         repetition,
         nullable,
-        owner_leaf: Some(descriptor_index),
+        owner_leaf: Some(owner_index),
         column_index: Some(descriptor_index),
     });
     tails.push(None);
@@ -807,38 +846,181 @@ fn has_single_repeated_child(parquet: &TypePtr) -> bool {
         && fields[0].get_basic_info().repetition() == Repetition::REPEATED
 }
 
-/// Match the pinned resolver's behavior for empty physical groups: they emit
-/// no Arrow field. The explicit stack is budgeted because a schema may be
-/// deeply nested before it reaches any leaf.
-fn has_physical_leaf(
-    parquet: &TypePtr,
+/// Physical ordinals include columns hidden by semantic inference. These facts
+/// are temporary and independently admitted before the visible tree is built.
+struct PhysicalNode {
+    parquet: TypePtr,
+    first_child: Option<usize>,
+    last_child: Option<usize>,
+    previous_sibling: Option<usize>,
+    first_leaf: usize,
+    leaf_end: usize,
+    visible: bool,
+}
+
+struct ReverseChildren<'a> {
+    nodes: &'a [PhysicalNode],
+    next: Option<usize>,
+}
+
+impl Iterator for ReverseChildren<'_> {
+    type Item = usize;
+    fn next(&mut self) -> Option<usize> {
+        let current = self.next?;
+        self.next = self.nodes[current].previous_sibling;
+        Some(current)
+    }
+}
+
+fn reverse_children(nodes: &[PhysicalNode], parent: usize) -> ReverseChildren<'_> {
+    ReverseChildren {
+        nodes,
+        next: nodes[parent].last_child,
+    }
+}
+
+fn preserve_list_struct(outer: &TypePtr, repeated: &TypePtr) -> bool {
+    !repeated.is_primitive()
+        && (repeated.get_fields().len() != 1
+            || (!is_list_annotation(repeated)
+                && !has_single_repeated_child(repeated)
+                && (repeated.name() == "array"
+                    || repeated.name().strip_suffix("_tuple") == Some(outer.name()))))
+}
+
+fn physical_topology(
+    root: TypePtr,
     budget: &mut InventoryBudget,
     cancellation: Option<&CancellationToken>,
+) -> Result<Vec<PhysicalNode>, GfError> {
+    let mut nodes = Vec::new();
+    let mut frames: Vec<(usize, usize)> = Vec::new();
+    reserve(&mut nodes, 1, budget, "physical schema topology")?;
+    nodes.push(PhysicalNode {
+        parquet: root,
+        first_child: None,
+        last_child: None,
+        previous_sibling: None,
+        first_leaf: 0,
+        leaf_end: 0,
+        visible: false,
+    });
+    reserve(&mut frames, 1, budget, "physical schema traversal stack")?;
+    frames.push((0, 0));
+    let mut next_leaf = 0usize;
+    while let Some(&(index, next_child)) = frames.last() {
+        check_cancelled(cancellation)?;
+        let parquet = &nodes[index].parquet;
+        if parquet.is_primitive() {
+            next_leaf = next_leaf
+                .checked_add(1)
+                .ok_or_else(|| storage("physical schema leaf count overflow"))?;
+            nodes[index].leaf_end = next_leaf;
+            nodes[index].visible = true;
+            frames.pop();
+            continue;
+        }
+        let fields = parquet.get_fields();
+        if let Some(child) = fields.get(next_child) {
+            let child = Arc::clone(child);
+            frames.last_mut().expect("schema frame exists").1 += 1;
+            reserve(&mut nodes, 1, budget, "physical schema topology")?;
+            let child_index = nodes.len();
+            let previous_sibling = nodes[index].last_child;
+            nodes.push(PhysicalNode {
+                parquet: child,
+                first_child: None,
+                last_child: None,
+                previous_sibling,
+                first_leaf: next_leaf,
+                leaf_end: next_leaf,
+                visible: false,
+            });
+            if nodes[index].first_child.is_none() {
+                nodes[index].first_child = Some(child_index);
+            }
+            nodes[index].last_child = Some(child_index);
+            reserve(&mut frames, 1, budget, "physical schema traversal stack")?;
+            frames.push((child_index, 0));
+            continue;
+        }
+        nodes[index].leaf_end = next_leaf;
+        nodes[index].visible = semantic_visibility(&nodes, index, cancellation)?;
+        frames.pop();
+    }
+    let charge = capacity_bytes::<(usize, usize)>(frames.capacity())?;
+    drop(frames);
+    budget.release(charge);
+    Ok(nodes)
+}
+
+/// Match the pinned all-column inference dispatch, including a LIST's direct
+/// visit_struct branch (which bypasses the repeated group's own annotation).
+fn semantic_visibility(
+    nodes: &[PhysicalNode],
+    index: usize,
+    cancellation: Option<&CancellationToken>,
 ) -> Result<bool, GfError> {
-    check_cancelled(cancellation)?;
-    if parquet.is_primitive() {
+    let node = &nodes[index];
+    let parquet = &node.parquet;
+    let converted = parquet.get_basic_info().converted_type();
+    let map = matches!(converted, ConvertedType::MAP | ConvertedType::MAP_KEY_VALUE);
+    let entry = node.first_child;
+    let map_as_list = map
+        && parquet.get_fields().len() == 1
+        && entry.is_some_and(|entry| {
+            !nodes[entry].parquet.is_primitive() && nodes[entry].parquet.get_fields().len() == 1
+        });
+    if index != 0 && (converted == ConvertedType::LIST || map_as_list) {
+        // An annotated repeated group may be consumed directly by visit_struct
+        // rather than dispatched. Its unused dispatch shape need not be valid.
+        if parquet.get_fields().len() != 1 {
+            return Ok(false);
+        }
+        let Some(repeated) = entry else {
+            return Ok(false);
+        };
+        if nodes[repeated].parquet.is_primitive() {
+            return Ok(true);
+        }
+        if preserve_list_struct(parquet, &nodes[repeated].parquet) {
+            return any_visible_child(nodes, repeated, cancellation);
+        }
+        return Ok(nodes[repeated]
+            .first_child
+            .is_some_and(|item| nodes[item].visible));
+    }
+    if index != 0 && map {
+        if parquet.get_fields().len() != 1 {
+            return Ok(false);
+        }
+        let Some(entry) = entry else { return Ok(false) };
+        if nodes[entry].parquet.is_primitive() || nodes[entry].parquet.get_fields().len() != 2 {
+            return Ok(false);
+        }
+        for child in reverse_children(nodes, entry) {
+            check_cancelled(cancellation)?;
+            if !nodes[child].visible {
+                return Ok(false);
+            }
+        }
         return Ok(true);
     }
-    let mut stack = Vec::new();
-    reserve(&mut stack, 1, budget, "schema empty-group visitor stack")?;
-    stack.push(Arc::clone(parquet));
-    let mut found = false;
-    while let Some(node) = stack.pop() {
+    any_visible_child(nodes, index, cancellation)
+}
+
+fn any_visible_child(
+    nodes: &[PhysicalNode],
+    parent: usize,
+    cancellation: Option<&CancellationToken>,
+) -> Result<bool, GfError> {
+    for child in reverse_children(nodes, parent) {
         check_cancelled(cancellation)?;
-        if node.is_primitive() {
-            found = true;
-            break;
-        }
-        for child in node.get_fields().iter().rev() {
-            check_cancelled(cancellation)?;
-            reserve(&mut stack, 1, budget, "schema empty-group visitor stack")?;
-            stack.push(Arc::clone(child));
+        if nodes[child].visible {
+            return Ok(true);
         }
     }
-    let charge = capacity_bytes::<TypePtr>(stack.capacity())?;
-    drop(stack);
-    budget.release(charge);
-    Ok(found)
+    Ok(false)
 }
 
 fn check_cancelled(cancellation: Option<&CancellationToken>) -> Result<(), GfError> {

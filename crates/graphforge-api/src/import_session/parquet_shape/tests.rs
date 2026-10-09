@@ -156,3 +156,163 @@ fn cancellation_and_admission_failure_release_only_new_inventory() {
     assert!(SchemaShape::build(&metadata, &mut too_small, None).is_err());
     assert_eq!(too_small.live_bytes(), 7);
 }
+
+/// Infer through the actual public metadata loader, without ARROW:schema hints.
+fn physical_metadata(schema: &str) -> (tempfile::NamedTempFile, ArrowReaderMetadata) {
+    use parquet::file::properties::WriterProperties;
+    use parquet::file::writer::SerializedFileWriter;
+    use parquet::schema::parser::parse_message_type;
+
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let writer = SerializedFileWriter::new(
+        file.reopen().unwrap(),
+        Arc::new(parse_message_type(schema).unwrap()),
+        Arc::new(WriterProperties::builder().build()),
+    )
+    .unwrap();
+    writer.close().unwrap();
+    let metadata =
+        ArrowReaderMetadata::load(&file.reopen().unwrap(), ArrowReaderOptions::new()).unwrap();
+    (file, metadata)
+}
+
+#[test]
+fn omitted_map_retains_physical_ordinals_and_visible_owner_indices() {
+    // All three cases have a real descriptor for the discarded Map's key.
+    // The struct and collapsed-list cases exercise inference beneath containers.
+    for schema in [
+        "message schema {
+            required int32 before;
+            optional group hidden (MAP) {
+                repeated group key_value {
+                    required binary key (UTF8);
+                    optional group value {}
+                }
+            }
+            optional group empty {}
+            optional int64 after;
+        }",
+        "message schema {
+            optional group record {
+                required int32 before;
+                optional group hidden (MAP) {
+                    repeated group key_value {
+                        required binary key (UTF8);
+                        optional group value {}
+                    }
+                }
+                optional group empty {}
+                optional int64 after;
+            }
+        }",
+        "message schema {
+            optional group records (LIST) {
+                repeated group list {
+                    optional group element {
+                        required int32 before;
+                        optional group hidden (MAP) {
+                            repeated group key_value {
+                                required binary key (UTF8);
+                                optional group value {}
+                            }
+                        }
+                        optional int64 after;
+                    }
+                }
+            }
+        }",
+    ] {
+        let (_file, metadata) = physical_metadata(schema);
+        assert_eq!(metadata.parquet_schema().columns().len(), 3);
+        let mut budget = InventoryBudget::new(1 << 20);
+        let shape = SchemaShape::build(&metadata, &mut budget, None).unwrap();
+        assert_eq!(
+            shape
+                .leaves
+                .iter()
+                .map(|leaf| leaf.column_index)
+                .collect::<Vec<_>>(),
+            [0, 2],
+        );
+        assert_eq!(shape.leaves.len(), 2);
+        for (owner, leaf) in shape.leaves.iter().enumerate() {
+            let node = &shape.nodes[leaf.source_node];
+            assert_eq!(node.owner_leaf, Some(owner));
+            assert_eq!(node.column_index, Some(leaf.column_index));
+            let descriptor = &metadata.parquet_schema().columns()[leaf.column_index];
+            assert_eq!(leaf.max_definition, descriptor.max_def_level());
+            assert_eq!(leaf.max_repetition, descriptor.max_rep_level());
+            assert_eq!(leaf.physical_type, descriptor.physical_type());
+        }
+        assert!(!shape.nodes.iter().any(|node| node.field.name() == "hidden"));
+        assert!(!shape.nodes.iter().any(|node| node.field.name() == "empty"));
+        assert_owner_links(&shape);
+        assert_eq!(shape.inventory_bytes().unwrap(), budget.live_bytes());
+        shape.release(&mut budget);
+        assert_eq!(budget.live_bytes(), 0);
+    }
+}
+
+#[test]
+fn one_key_map_uses_the_resolved_legacy_list_structure() {
+    for (entry, key_repetition, element_is_struct) in [
+        ("key_value", "required", false),
+        ("array", "required", true),
+        ("keys_tuple", "required", true),
+        ("key_value", "repeated", false),
+    ] {
+        let schema = format!(
+            "message schema {{
+                optional group keys (MAP) {{
+                    repeated group {entry} {{ {key_repetition} binary key (UTF8); }}
+                }}
+            }}"
+        );
+        let (_file, metadata) = physical_metadata(&schema);
+        assert!(matches!(
+            metadata.schema().field(0).data_type(),
+            DataType::List(_)
+        ));
+        let mut budget = InventoryBudget::new(1 << 20);
+        let shape = SchemaShape::build(&metadata, &mut budget, None).unwrap();
+        let root = shape.root_children.unwrap();
+        assert_eq!(shape.nodes[root].kind, NodeKind::List);
+        let element = shape.nodes[root].first_child.unwrap();
+        if element_is_struct {
+            assert_eq!(shape.nodes[element].kind, NodeKind::Struct);
+        } else if key_repetition == "repeated" {
+            assert_eq!(shape.nodes[element].kind, NodeKind::List);
+        } else {
+            assert_eq!(shape.nodes[element].kind, NodeKind::Primitive);
+        }
+        assert_eq!(shape.leaves.len(), 1);
+        assert_eq!(shape.leaves[0].column_index, 0);
+        assert_owner_links(&shape);
+        shape.release(&mut budget);
+        assert_eq!(budget.live_bytes(), 0);
+    }
+}
+
+#[test]
+fn preserved_list_struct_bypasses_the_repeated_group_map_annotation() {
+    let (_file, metadata) = physical_metadata(
+        "message schema {
+            optional group records (LIST) {
+                repeated group array (MAP_KEY_VALUE) {
+                    required int32 before;
+                    optional int64 after;
+                }
+            }
+        }",
+    );
+    let mut budget = InventoryBudget::new(1 << 20);
+    let shape = SchemaShape::build(&metadata, &mut budget, None).unwrap();
+    let root = shape.root_children.unwrap();
+    assert_eq!(shape.nodes[root].kind, NodeKind::List);
+    let item = shape.nodes[root].first_child.unwrap();
+    assert_eq!(shape.nodes[item].kind, NodeKind::Struct);
+    assert_eq!(shape.leaves.len(), 2);
+    assert_owner_links(&shape);
+    shape.release(&mut budget);
+    assert_eq!(budget.live_bytes(), 0);
+}
