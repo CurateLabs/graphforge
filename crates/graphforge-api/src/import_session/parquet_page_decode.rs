@@ -38,6 +38,7 @@ fn natural(value: Option<i64>, name: &str) -> Result<u32, GfError> {
     u32::try_from(value).map_err(storage)
 }
 
+#[allow(deprecated)] // Decode the legacy BIT_PACKED encoding used by V1 files.
 fn encoding(value: Option<i32>) -> Result<Encoding, GfError> {
     match value {
         Some(0) => Ok(Encoding::PLAIN),

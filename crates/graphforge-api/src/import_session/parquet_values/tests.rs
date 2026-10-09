@@ -212,7 +212,8 @@ fn plain_blocks_stay_bounded_and_honor_cancellation() {
 fn plain_refuses_tiny_bodies_with_huge_negative_or_truncated_headers() {
     // A structurally valid four-byte header claiming the full i32 range:
     // refused without any length-sized allocation.
-    let mut cursor = ValueLengths::new(Encoding::PLAIN, &i32::MAX.to_le_bytes(), 1, None).unwrap();
+    let header = i32::MAX.to_le_bytes();
+    let mut cursor = ValueLengths::new(Encoding::PLAIN, &header, 1, None).unwrap();
     assert!(cursor.next_length().is_err());
 
     let mut negative = Vec::new();

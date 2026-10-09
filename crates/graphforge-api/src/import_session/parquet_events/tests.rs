@@ -133,12 +133,13 @@ fn v1_rle_summary_counts_actual_nonnull_rows_and_preserves_value_suffix() {
 }
 
 #[test]
+#[allow(deprecated)] // Existing V1 files still use the BIT_PACKED level grammar.
 fn v1_bit_packed_repetition_and_rle_definition_use_their_own_grammars() {
     let rep = [0_i16, 1, 1, 0, 1, 0, 1, 1, 0];
     let def = [1_i16, 0, 1, 1, 0, 1, 1, 1, 0];
     let mut writer = BitWriter::new(8);
     for level in rep {
-        writer.put_value(i32::from(level), 1);
+        writer.put_value(u64::try_from(level).unwrap(), 1);
     }
     let mut body = writer.consume();
     // Only bit zero of the final byte is a logical level; the pinned reader
