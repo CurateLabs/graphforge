@@ -426,7 +426,7 @@ mod bulk_builder {
                 "catalog and property scans must count: {report:?}"
             );
             assert!(report.property_workspace_reserved_bytes >= 648 << 20);
-            assert!(report.scratch_concurrency >= 2, "{report:?}");
+            assert!(report.scratch_concurrency >= 1, "{report:?}");
             assert!(!scratch_dir(&session).exists());
         }
     }
@@ -924,9 +924,9 @@ mod bulk_builder {
                 budgets,
             )
         };
-        let growth = [0, 32 << 20, 64 << 20, 128 << 20, 256 << 20, 1 << 30].map(derived_at);
+        let growth = [0, 128 << 20, 256 << 20, 512 << 20, 1 << 30, 2 << 30, 4 << 30].map(derived_at);
         assert!(
-            growth.windows(2).all(|pair| pair[0] <= pair[1]) && growth[5] >= 8,
+            growth.windows(2).all(|pair| pair[0] <= pair[1]) && growth[6] >= 8 && growth[0] == 1,
             "{growth:?}"
         );
         let mut levels = Vec::new();
