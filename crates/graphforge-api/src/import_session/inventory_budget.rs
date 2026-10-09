@@ -83,7 +83,9 @@ pub(super) fn reserve<E>(
     let admitted = cap
         .checked_mul(element)
         .ok_or_else(|| limit("the Parquet page inventory exceeds a countable size"))?;
-    let old = u64::try_from(vec.capacity()).unwrap_or(u64::MAX).saturating_mul(element);
+    let old = u64::try_from(vec.capacity())
+        .unwrap_or(u64::MAX)
+        .saturating_mul(element);
     // The old buffer is charged already; admitting the new one covers both
     // while the reallocation moves the elements across.
     budget.admit(admitted, what)?;

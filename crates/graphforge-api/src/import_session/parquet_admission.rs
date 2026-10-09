@@ -153,7 +153,12 @@ impl SourceScan {
         for index in 0..metadata.num_row_groups() {
             check(cancellation)?;
             reserve(&mut group_start, 1, &mut budget, "the row-group starts")?;
-            reserve(&mut groups, 1, &mut budget, "the row-group page inventories")?;
+            reserve(
+                &mut groups,
+                1,
+                &mut budget,
+                "the row-group page inventories",
+            )?;
             group_start.push(start);
             start += u64::try_from(metadata.row_group(index).num_rows()).unwrap_or(0);
             let group = scan_group(&mut scanner, metadata, index, &mut budget)?;
@@ -171,7 +176,12 @@ impl SourceScan {
         }
         let batches = usize::try_from(start.div_ceil(batch_rows.max(1))).map_err(storage)?;
         let mut value_bytes = Vec::new();
-        reserve(&mut value_bytes, batches, &mut budget, "the per-batch sizes")?;
+        reserve(
+            &mut value_bytes,
+            batches,
+            &mut budget,
+            "the per-batch sizes",
+        )?;
         value_bytes.resize(batches, 0);
         let mut scan = Self {
             groups,
