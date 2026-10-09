@@ -116,6 +116,74 @@ fn oversized_legacy_route_read_streams_without_writes_or_scratch() {
 }
 
 #[test]
+fn oversized_legacy_property_table_sql_reads_without_writes_or_scratch() {
+    let root = TempDir::new().unwrap();
+    let payload = random_ascii(5 * 1024 * 1024);
+    let inventory = Arc::new(legacy_inventory(root.path(), &payload));
+    assert!(
+        fs::metadata(root.path().join("properties/Person.parquet"))
+            .unwrap()
+            .len()
+            > MAX_IN_MEMORY_SNAPSHOT_BYTES
+    );
+
+    let context = datafusion::prelude::SessionContext::new();
+    context
+        .register_table(
+            "props",
+            Arc::new(
+                crate::catalog::PropertyTable::open_authenticated(root.path(), "Person", inventory)
+                    .unwrap(),
+            ),
+        )
+        .unwrap();
+    let _capture = crate::lifecycle_io::CaptureScope::install();
+    let batches = tokio::runtime::Runtime::new().unwrap().block_on(async {
+        context
+            .sql("SELECT payload, node_uuid FROM props")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap()
+    });
+    let result = arrow::compute::concat_batches(&batches[0].schema(), &batches).unwrap();
+    assert_eq!(result.num_rows(), 1);
+    assert_eq!(
+        result
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0),
+        payload
+    );
+    assert_eq!(
+        result
+            .column(1)
+            .as_any()
+            .downcast_ref::<FixedSizeBinaryArray>()
+            .unwrap()
+            .value(0),
+        &[17; 16]
+    );
+    let region = crate::lifecycle_io::snapshot().expect("requested lifecycle measurement");
+    let reads = &region.phases[&crate::StorageIoPhase::ReadPathScan];
+    assert_eq!(reads.write_bytes, 0);
+    assert_eq!(reads.write_calls, 0);
+    assert_eq!(reads.object_count, 0);
+    assert!(
+        fs::read_dir(root.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".gf-property-scratch-"))
+    );
+}
+
+#[test]
 fn uncached_mutated_block_fails_after_whole_file_index_is_cached() {
     let root = TempDir::new().unwrap();
     let payload = random_ascii(5 * 1024 * 1024);
