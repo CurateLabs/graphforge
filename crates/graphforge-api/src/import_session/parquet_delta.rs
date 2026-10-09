@@ -6,7 +6,9 @@
 use graphforge_core::GfError;
 use parquet::basic::Encoding;
 
-use super::storage;
+use crate::CancellationToken;
+
+use super::{cancelled, storage};
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct DeltaFacts {
@@ -159,6 +161,116 @@ impl<'a> Integers<'a> {
     fn finish(&mut self) -> Result<usize, GfError> {
         while self.next()?.is_some() {}
         Ok(self.offset.max(self.end))
+    }
+}
+
+/// Borrowing lengths for the sizing pass. Decoding one repeated logical row
+/// never creates a row-sized length vector or a reconstructed byte value.
+pub(super) struct Lengths<'a> {
+    prefixes: Option<Integers<'a>>,
+    suffixes: Integers<'a>,
+    payload_bytes: u64,
+    consumed_bytes: u64,
+    previous_length: u64,
+    cancellation: Option<&'a CancellationToken>,
+}
+
+fn check_cancel(cancellation: Option<&CancellationToken>) -> Result<(), GfError> {
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+        return Err(cancelled());
+    }
+    Ok(())
+}
+
+fn stream_end(
+    integers: &mut Integers<'_>,
+    cancellation: Option<&CancellationToken>,
+) -> Result<usize, GfError> {
+    check_cancel(cancellation)?;
+    let mut events = 0;
+    while integers.next()?.is_some() {
+        events += 1;
+        if events == 1024 {
+            check_cancel(cancellation)?;
+            events = 0;
+        }
+    }
+    Ok(integers.offset.max(integers.end))
+}
+
+impl<'a> Lengths<'a> {
+    pub(super) fn new(
+        encoding: Encoding,
+        input: &'a [u8],
+        maximum: usize,
+        cancellation: Option<&'a CancellationToken>,
+    ) -> Result<Self, GfError> {
+        check_cancel(cancellation)?;
+        let (prefixes, suffix_input) = match encoding {
+            Encoding::DELTA_LENGTH_BYTE_ARRAY => (None, input),
+            Encoding::DELTA_BYTE_ARRAY => {
+                let mut prefixes = Integers::new(input, maximum, 32)?;
+                let end = stream_end(&mut prefixes, cancellation)?;
+                (Some(Integers::new(input, maximum, 32)?), &input[end..])
+            }
+            _ => return Err(invalid()),
+        };
+        let mut suffixes = Integers::new(suffix_input, maximum, 32)?;
+        if prefixes.as_ref().is_some_and(|p| p.count != suffixes.count) {
+            return Err(invalid());
+        }
+        let end = stream_end(&mut suffixes, cancellation)?;
+        Ok(Self {
+            prefixes,
+            suffixes: Integers::new(suffix_input, maximum, 32)?,
+            payload_bytes: u64::try_from(suffix_input.len() - end).map_err(|_| invalid())?,
+            consumed_bytes: 0,
+            previous_length: 0,
+            cancellation,
+        })
+    }
+
+    pub(super) fn count(&self) -> usize {
+        self.suffixes.count
+    }
+
+    /// At most 1024 events per call. A caller's smaller fixed block remains
+    /// useful; a larger slice cannot turn a logical row into one unbounded step.
+    pub(super) fn next_block(&mut self, output: &mut [u64]) -> Result<usize, GfError> {
+        check_cancel(self.cancellation)?;
+        let mut written = 0;
+        for item in output.iter_mut().take(1024) {
+            let Some(suffix) = self.suffixes.next()? else {
+                if self.consumed_bytes != self.payload_bytes {
+                    return Err(invalid());
+                }
+                break;
+            };
+            let suffix = u64::try_from(suffix).map_err(|_| invalid())?;
+            let prefix = match &mut self.prefixes {
+                Some(prefixes) => {
+                    u64::try_from(prefixes.next()?.ok_or_else(invalid)?).map_err(|_| invalid())?
+                }
+                None => 0,
+            };
+            if prefix > self.previous_length {
+                return Err(invalid());
+            }
+            self.consumed_bytes = self
+                .consumed_bytes
+                .checked_add(suffix)
+                .ok_or_else(invalid)?;
+            if self.consumed_bytes > self.payload_bytes {
+                return Err(invalid());
+            }
+            self.previous_length = prefix.checked_add(suffix).ok_or_else(invalid)?;
+            *item = self.previous_length;
+            written += 1;
+        }
+        if self.suffixes.remaining == 0 && self.consumed_bytes != self.payload_bytes {
+            return Err(invalid());
+        }
+        Ok(written)
     }
 }
 

@@ -89,3 +89,76 @@ fn delta_lengths_reject_negative_values_and_mismatched_suffix_storage() {
     encoded.extend_from_slice(b"a");
     assert!(validate(Encoding::DELTA_LENGTH_BYTE_ARRAY, &encoded, 1, 32).is_err());
 }
+
+#[test]
+fn borrowing_length_blocks_match_real_values_without_row_sized_output() {
+    let values = (0..3073)
+        .map(|index| {
+            ByteArray::from(format!("prefix-{}-{}", index % 3, "x".repeat(index % 91)).as_bytes())
+        })
+        .collect::<Vec<_>>();
+    let mut length_encoder = DeltaLengthByteArrayEncoder::<ByteArrayType>::new();
+    length_encoder.put(&values).unwrap();
+    let mut prefix_encoder = DeltaByteArrayEncoder::<ByteArrayType>::new();
+    prefix_encoder.put(&values).unwrap();
+    for (encoding, encoded) in [
+        (
+            Encoding::DELTA_LENGTH_BYTE_ARRAY,
+            length_encoder.flush_buffer().unwrap(),
+        ),
+        (
+            Encoding::DELTA_BYTE_ARRAY,
+            prefix_encoder.flush_buffer().unwrap(),
+        ),
+    ] {
+        let mut cursor = Lengths::new(encoding, &encoded, values.len(), None).unwrap();
+        assert_eq!(cursor.count(), values.len());
+        let mut block = [u64::MAX; 2048];
+        let mut at = 0;
+        loop {
+            let count = cursor.next_block(&mut block).unwrap();
+            assert!(count <= 1024);
+            assert!(block[1024..].iter().all(|value| *value == u64::MAX));
+            for length in &block[..count] {
+                assert_eq!(*length, values[at].len() as u64);
+                at += 1;
+            }
+            if count == 0 {
+                break;
+            }
+        }
+        assert_eq!(at, values.len());
+        let cancellation = CancellationToken::new();
+        let mut cursor =
+            Lengths::new(encoding, &encoded, values.len(), Some(&cancellation)).unwrap();
+        cancellation.cancel();
+        assert!(cursor.next_block(&mut block).is_err());
+        assert!(Lengths::new(encoding, &encoded, values.len(), Some(&cancellation)).is_err());
+    }
+}
+
+#[test]
+fn borrowing_length_blocks_reject_invalid_prefixes_and_payload_counts() {
+    let mut prefixes = DeltaBitPackEncoder::<Int32Type>::new();
+    prefixes.put(&[1]).unwrap(); // first value has no previous prefix to reuse
+    let mut suffixes = DeltaBitPackEncoder::<Int32Type>::new();
+    suffixes.put(&[0]).unwrap();
+    let mut encoded = prefixes.flush_buffer().unwrap().to_vec();
+    encoded.extend_from_slice(&suffixes.flush_buffer().unwrap());
+    let mut cursor = Lengths::new(Encoding::DELTA_BYTE_ARRAY, &encoded, 1, None).unwrap();
+    assert!(cursor.next_block(&mut [0; 1]).is_err());
+
+    let mut lengths = DeltaBitPackEncoder::<Int32Type>::new();
+    lengths.put(&[2]).unwrap();
+    let mut encoded = lengths.flush_buffer().unwrap().to_vec();
+    encoded.extend_from_slice(b"a");
+    let mut cursor = Lengths::new(Encoding::DELTA_LENGTH_BYTE_ARRAY, &encoded, 1, None).unwrap();
+    assert!(cursor.next_block(&mut [0; 1]).is_err());
+
+    let mut lengths = DeltaBitPackEncoder::<Int32Type>::new();
+    lengths.put(&[0]).unwrap();
+    let mut encoded = lengths.flush_buffer().unwrap().to_vec();
+    encoded.extend_from_slice(b"unused");
+    let mut cursor = Lengths::new(Encoding::DELTA_LENGTH_BYTE_ARRAY, &encoded, 1, None).unwrap();
+    assert!(cursor.next_block(&mut [0; 1]).is_err());
+}
