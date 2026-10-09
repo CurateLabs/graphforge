@@ -74,6 +74,14 @@ use scratch_csr::CsrScratch;
 use scratch_edges::{Endpoints, RankedNodes};
 use tables::{EdgeTable, NodeIndex, NodeTable, check_cancelled};
 
+/// Logical byte cap of one physical endpoint-reference segment, block
+/// headers included. Endpoint references are the one scratch set a skewed
+/// node leaf would otherwise hold whole while the endpoint pass produces its
+/// resolved output (#1929): splitting them bounds the input one resolving
+/// worker retains to one segment, whatever the leaf's reference count. This
+/// is the production bound, not a measured limit.
+const ENDPOINT_REFERENCE_SEGMENT_BYTES: usize = 32 << 20;
+
 /// Run `work` on `pool` while the calling thread polls `cancelled`.
 fn run_pass<T: Send>(
     pool: &rayon::ThreadPool,
@@ -490,11 +498,16 @@ pub(crate) fn encode_bulk(
     let mut node_keys = None::<(scratch_csr::KeyPartitioner, scratch_csr::KeyPartitioner)>;
     let mut edge_side = match (&scratch_plan, &scratch, &nodes) {
         (Some(sized), Some(scratch), NodeSide::Scratch(on_scratch)) => {
-            let leaves = scratch::Partitions::create(
+            // The references split into capped physical segments, so the
+            // endpoint pass can reclaim each one as soon as its verified
+            // read has resolved it (#1929). Probes stay one small file per
+            // leaf: they are read and reclaimed whole, before any reference.
+            let leaves = scratch::Partitions::create_segmented(
                 scratch,
                 "refs",
                 on_scratch.scattered.leaves.len(),
                 scratch_nodes::REF_RECORD,
+                ENDPOINT_REFERENCE_SEGMENT_BYTES,
             )?;
             let probes = scratch::Partitions::create(
                 scratch,

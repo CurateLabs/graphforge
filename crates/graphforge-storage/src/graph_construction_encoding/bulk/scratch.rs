@@ -9,6 +9,15 @@
 //! `crc32c(payload): u32 LE`, then the payload, a whole number of fixed-width
 //! records. Blocks from concurrent writers interleave in arrival order, so a
 //! reader sorts what it loads and nothing depends on that order.
+//!
+//! Most sets keep one physical file per partition. The endpoint references
+//! (#1929) are the exception: a skewed leaf could hold its whole input while
+//! the endpoint pass produces its output, so their set splits every partition
+//! into physical segments of a bounded logical size. A destructive read
+//! ([`Partitions::read_reclaiming`]) verifies a segment, feeds its payload to
+//! the consumer, closes the reader and deletes that segment before the next
+//! opens, so the input a resolving worker retains is one segment, not the
+//! leaf's whole reference list.
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, Read, Write};
@@ -212,11 +221,70 @@ impl Drop for Scratch {
 
 // ------------------------------------------------------------ partitions
 
+/// Whether a segmented partition still accepts writes and reads. A
+/// destructive read is terminal: it either consumes the whole partition or
+/// fails it, and neither a failed nor a consumed partition is reused.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SegmentLifecycle {
+    /// Writers may append; readers may run.
+    Writing,
+    /// A destructive read holds the partition: appends and reads are refused
+    /// until the pass ends one way or the other.
+    Reading,
+    /// A destructive read verified and reclaimed every segment.
+    Consumed,
+    /// A destructive read failed part way. The partition is a partial input:
+    /// no later writer or reader may reuse what it still holds, and the
+    /// first unreclaimed segment ordinal tracks what cleanup owes.
+    Failed,
+}
+
+/// The physical shape of a segmented set: every segment of every partition
+/// holds at most `cap` logical bytes, headers included, and a full staging
+/// block of `payload` record bytes plus its header never exceeds it.
+#[derive(Clone, Copy)]
+struct SegmentLayout {
+    cap: usize,
+    payload: usize,
+}
+
+/// One partition's append progress, behind the lock that orders its appends.
+/// A fixed number of scalars per partition, never a Vec over segments.
+struct Progress {
+    /// Records appended to the partition, across every segment.
+    records: u64,
+    /// The segment new blocks rotate into (segmented partitions only).
+    segment: u64,
+    /// Logical bytes of the current segment, headers included (segmented
+    /// partitions only). The final segment's expected length at read time.
+    segment_bytes: u64,
+    /// Destructive-read lifecycle (segmented partitions only; unsegmented
+    /// partitions never leave [`SegmentLifecycle::Writing`]).
+    lifecycle: SegmentLifecycle,
+    /// The lowest segment ordinal that may still exist on disk: every
+    /// segment below it was verified, read and reclaimed (segmented
+    /// partitions only). Suffix cleanup starts here and never releases a
+    /// segment twice.
+    first_live: u64,
+}
+
+impl Progress {
+    fn writing(records: u64) -> Self {
+        Self {
+            records,
+            segment: 0,
+            segment_bytes: 0,
+            lifecycle: SegmentLifecycle::Writing,
+            first_live: 0,
+        }
+    }
+}
+
 /// A set of scratch files that concurrent writers append blocks to.
 pub(super) struct Partitions {
     paths: Vec<PathBuf>,
     /// Records appended to each file, behind the lock that orders its appends.
-    state: Vec<Mutex<u64>>,
+    state: Vec<Mutex<Progress>>,
     width: usize,
     /// Bytes this set's files received and gave back, block headers included.
     written: AtomicU64,
@@ -227,7 +295,12 @@ pub(super) struct Partitions {
     /// files [`Self::reclaim`] never deletes.
     owned: bool,
     /// Which files a final read has already reclaimed: a file is deleted once.
+    /// Unsegmented sets only; a segmented set tracks its reclaimed prefix per
+    /// partition in [`Progress::first_live`] instead.
     consumed: Vec<AtomicBool>,
+    /// The physical segmentation of this set, when its partitions split into
+    /// capped segments ([`Self::create_segmented`]).
+    segments: Option<SegmentLayout>,
 }
 
 impl Partitions {
@@ -246,13 +319,68 @@ impl Partitions {
             File::create(path).map_err(storage)?;
         }
         Ok(Self {
-            state: (0..count).map(|_| Mutex::new(0)).collect(),
+            state: (0..count)
+                .map(|_| Mutex::new(Progress::writing(0)))
+                .collect(),
             paths,
             width,
             written: AtomicU64::new(0),
             read: AtomicU64::new(0),
             owned: true,
             consumed: (0..count).map(|_| AtomicBool::new(false)).collect(),
+            segments: None,
+        })
+    }
+
+    /// `count` empty files named `{prefix}-{index}` of `width`-byte records,
+    /// split into physical segments of at most `cap` logical bytes, headers
+    /// included. The set owns the files it creates here.
+    ///
+    /// A segment cap must hold a block header and at least one record;
+    /// anything smaller is a typed refusal before any file exists. A
+    /// [`Scatter`] staging this set clamps its buffers to the largest
+    /// record-aligned payload a segment can hold, so a full staging block
+    /// always fits its segment and rotation only happens between blocks.
+    /// Segment 0 keeps the set's base path; later segments derive their
+    /// names from it ([`Self::segment_path`]).
+    pub(super) fn create_segmented(
+        scratch: &Scratch,
+        prefix: &str,
+        count: usize,
+        width: usize,
+        cap: usize,
+    ) -> Result<Self, GfError> {
+        if width == 0 {
+            return Err(storage(
+                "a segmented scratch partition needs a positive record width",
+            ));
+        }
+        if cap < HEADER.saturating_add(width) {
+            return Err(storage(
+                "a segmented scratch partition cap must hold a block header and one record",
+            ));
+        }
+        let layout = SegmentLayout {
+            cap,
+            payload: (cap - HEADER) / width * width,
+        };
+        let paths = (0..count)
+            .map(|index| scratch.file(&format!("{prefix}-{index:06}.blocks")))
+            .collect::<Vec<_>>();
+        for path in &paths {
+            File::create(path).map_err(storage)?;
+        }
+        Ok(Self {
+            state: (0..count)
+                .map(|_| Mutex::new(Progress::writing(0)))
+                .collect(),
+            paths,
+            width,
+            written: AtomicU64::new(0),
+            read: AtomicU64::new(0),
+            owned: true,
+            consumed: (0..count).map(|_| AtomicBool::new(false)).collect(),
+            segments: Some(layout),
         })
     }
 
@@ -278,12 +406,16 @@ impl Partitions {
         let consumed = paths.iter().map(|_| AtomicBool::new(false)).collect();
         Self {
             paths,
-            state: counts.into_iter().map(Mutex::new).collect(),
+            state: counts
+                .into_iter()
+                .map(|records| Mutex::new(Progress::writing(records)))
+                .collect(),
             width,
             written: AtomicU64::new(0),
             read: AtomicU64::new(0),
             owned: true,
             consumed,
+            segments: None,
         }
     }
 
@@ -291,8 +423,28 @@ impl Partitions {
         self.paths.len()
     }
 
+    /// The base path of partition `index`: segment 0 of a segmented set.
+    /// Later segments of a segmented set live beside it under names
+    /// [`Self::segment_path`] derives, so this path alone never enumerates
+    /// the physical files of a segmented partition.
     pub(super) fn path(&self, index: usize) -> &Path {
         &self.paths[index]
+    }
+
+    /// The physical file of segment `segment` of partition `index`. Segment
+    /// 0 is the partition's base path; later segments derive deterministic
+    /// names from it, so a caller can address any segment without a
+    /// directory listing.
+    fn segment_path(&self, index: usize, segment: u64) -> PathBuf {
+        let base = &self.paths[index];
+        if segment == 0 {
+            return base.clone();
+        }
+        let stem = base
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or_default();
+        base.with_file_name(format!("{stem}-seg{segment:06}.blocks"))
     }
 
     /// Append one block. `block` holds [`HEADER`] reserved bytes, then records.
@@ -308,20 +460,70 @@ impl Partitions {
         let crc = crc32c(&block[HEADER..]);
         block[..4].copy_from_slice(&length.to_le_bytes());
         block[4..HEADER].copy_from_slice(&crc.to_le_bytes());
-        let mut records = self.state[index]
+        let mut progress = self.state[index]
             .lock()
             .map_err(|_| storage("scratch partition lock poisoned"))?;
+        // A segmented partition refuses blocks its lifecycle or its segment
+        // cap cannot hold before any byte moves or any file is created.
+        if let Some(layout) = self.segments {
+            if progress.lifecycle != SegmentLifecycle::Writing {
+                return Err(storage(
+                    "a segmented scratch partition no longer accepts appends",
+                ));
+            }
+            if payload == 0 {
+                return Err(storage(
+                    "a segmented scratch partition refuses empty blocks",
+                ));
+            }
+            if block.len() > layout.cap {
+                return Err(storage(
+                    "a scratch block is larger than the segment cap of its partition",
+                ));
+            }
+            // Rotate before this block would take the current segment past
+            // the cap. The next segment is created exclusively, so a
+            // segmented set never appends into another owner's file.
+            let grown = progress
+                .segment_bytes
+                .checked_add(block.len() as u64)
+                .ok_or_else(|| storage("scratch segment length overflowed"))?;
+            if grown > layout.cap as u64 {
+                let next = progress
+                    .segment
+                    .checked_add(1)
+                    .ok_or_else(|| storage("scratch segment ordinal overflowed"))?;
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(self.segment_path(index, next))
+                    .map_err(storage)?;
+                progress.segment = next;
+                progress.segment_bytes = 0;
+            }
+        }
         // Reserve the whole block before the write can grow the file, and
         // keep the reservation when the write fails: a partial write may
         // exist and the attempt tears the tree down either way.
         scratch.occupy(block.len() as u64)?;
-        OpenOptions::new()
-            .append(true)
-            .open(&self.paths[index])
-            .map_err(storage)?
-            .write_all(block)
-            .map_err(storage)?;
-        *records += (payload / self.width) as u64;
+        let opened = if self.segments.is_some() {
+            OpenOptions::new()
+                .append(true)
+                .open(self.segment_path(index, progress.segment))
+        } else {
+            OpenOptions::new().append(true).open(&self.paths[index])
+        };
+        opened.map_err(storage)?.write_all(block).map_err(storage)?;
+        progress.records = progress
+            .records
+            .checked_add((payload / self.width) as u64)
+            .ok_or_else(|| storage("scratch partition record count overflowed"))?;
+        if self.segments.is_some() {
+            progress.segment_bytes = progress
+                .segment_bytes
+                .checked_add(block.len() as u64)
+                .ok_or_else(|| storage("scratch segment length overflowed"))?;
+        }
         scratch
             .written
             .fetch_add(block.len() as u64, Ordering::Relaxed);
@@ -334,13 +536,21 @@ impl Partitions {
     pub(super) fn counts(&self) -> Result<Vec<u64>, GfError> {
         self.state
             .iter()
-            .map(|records| {
-                records
+            .map(|progress| {
+                progress
                     .lock()
-                    .map(|records| *records)
+                    .map(|progress| progress.records)
                     .map_err(|_| storage("scratch partition lock poisoned"))
             })
             .collect()
+    }
+
+    /// Records appended to partition `index`, allocating nothing per call.
+    fn count(&self, index: usize) -> Result<u64, GfError> {
+        self.state[index]
+            .lock()
+            .map(|progress| progress.records)
+            .map_err(|_| storage("scratch partition lock poisoned"))
     }
 
     /// Delete file `index` once its final read has completed and verified:
@@ -348,38 +558,285 @@ impl Partitions {
     /// file exactly once, so a file read on one path is never deleted twice or
     /// read back after its data moved on. The cumulative read and write
     /// counters are unaffected.
+    ///
+    /// A segmented set deletes every segment it still owns, from its first
+    /// live ordinal to its last, each exactly once; it never stops at the
+    /// base path. A partition whose destructive read is still running
+    /// refuses, because the reader owns its remaining segments.
     pub(super) fn reclaim(&self, scratch: &Scratch, index: usize) -> Result<(), GfError> {
         if !self.owned {
             return Ok(());
         }
-        if self.consumed[index].swap(true, Ordering::AcqRel) {
-            return Ok(());
+        if self.segments.is_none() {
+            if self.consumed[index].swap(true, Ordering::AcqRel) {
+                return Ok(());
+            }
+            return scratch.reclaim_file(&self.paths[index]);
         }
-        scratch.reclaim_file(&self.paths[index])
+        let (first, last, lifecycle) = {
+            let progress = self.state[index]
+                .lock()
+                .map_err(|_| storage("scratch partition lock poisoned"))?;
+            (progress.first_live, progress.segment, progress.lifecycle)
+        };
+        if lifecycle == SegmentLifecycle::Reading {
+            return Err(storage(
+                "a segmented scratch partition being destructively read owns its remaining segments",
+            ));
+        }
+        for segment in first..=last {
+            let path = self.segment_path(index, segment);
+            if path.exists() {
+                scratch.reclaim_file(&path)?;
+            }
+            let mut progress = self.state[index]
+                .lock()
+                .map_err(|_| storage("scratch partition lock poisoned"))?;
+            progress.first_live = progress.first_live.max(segment.saturating_add(1));
+        }
+        Ok(())
     }
 
     /// Read file `index` block by block, handing each verified payload to `visit`.
+    ///
+    /// A segmented set reads every physical segment of the partition in
+    /// order and reclaims nothing: the aggregate count and the read counter
+    /// are preserved, so a non-destructive pass sees exactly what a
+    /// destructive one verifies.
     pub(super) fn read(
         &self,
         scratch: &Scratch,
         index: usize,
         mut visit: impl FnMut(&[u8]) -> Result<(), GfError>,
     ) -> Result<(), GfError> {
-        let mut reader = BlockReader::open(scratch, &self.paths[index])?;
-        let mut payload = Vec::new();
-        let outcome = loop {
-            match reader.next_block(&mut payload) {
-                Ok(true) => {
-                    if let Err(error) = visit(&payload) {
-                        break Err(error);
+        let Some(layout) = self.segments else {
+            let mut reader = BlockReader::open(scratch, &self.paths[index])?;
+            let mut payload = Vec::new();
+            let outcome = loop {
+                match reader.next_block(&mut payload) {
+                    Ok(true) => {
+                        if let Err(error) = visit(&payload) {
+                            break Err(error);
+                        }
+                    }
+                    Ok(false) => break Ok(()),
+                    Err(error) => break Err(error),
+                }
+            };
+            self.read.fetch_add(reader.bytes, Ordering::Relaxed);
+            return outcome;
+        };
+        let (last, readable) = {
+            let progress = self.state[index]
+                .lock()
+                .map_err(|_| storage("scratch partition lock poisoned"))?;
+            (
+                progress.segment,
+                progress.lifecycle == SegmentLifecycle::Writing,
+            )
+        };
+        if !readable {
+            return Err(storage(
+                "a segmented scratch partition no longer accepts reads",
+            ));
+        }
+        for segment in 0..=last {
+            let mut reader = BlockReader::open_segment(
+                scratch,
+                &self.segment_path(index, segment),
+                self.width,
+                layout.cap,
+            )?;
+            let mut payload = Vec::new();
+            let outcome = loop {
+                match reader.next_bounded_block(&mut payload) {
+                    Ok(true) => {
+                        if let Err(error) = visit(&payload) {
+                            break Err(error);
+                        }
+                    }
+                    Ok(false) => break Ok(()),
+                    Err(error) => break Err(error),
+                }
+            };
+            self.read.fetch_add(reader.bytes, Ordering::Relaxed);
+            outcome?;
+        }
+        Ok(())
+    }
+
+    /// Read partition `index` once, destructively: every physical segment is
+    /// read in order, each verified payload is handed to `visit`, and the
+    /// segment's file is reclaimed — reader closed first — before the next
+    /// segment opens. A skewed partition therefore retains at most one
+    /// segment of input however many records it holds.
+    ///
+    /// The read is terminal. The partition enters a reading state before the
+    /// first byte, so no append or second read can interleave with the
+    /// destructive pass. The records observed must equal the count scattered
+    /// into the partition exactly, checked at the final segment's end
+    /// *before* that segment is reclaimed: a truncated, empty or missing
+    /// segment is a typed refusal that leaves the current file on disk. Any
+    /// CRC, geometry, callback, cancellation or I/O failure is terminal too —
+    /// the partition is failed, never reports success, keeps its first
+    /// unreclaimed segment for [`Self::reclaim`] or the scratch teardown, and
+    /// the segments verified before the failure may already be gone.
+    #[allow(clippy::too_many_lines)]
+    pub(super) fn read_reclaiming(
+        &self,
+        scratch: &Scratch,
+        index: usize,
+        cancel: &AtomicBool,
+        mut visit: impl FnMut(&[u8]) -> Result<(), GfError>,
+    ) -> Result<(), GfError> {
+        let Some(layout) = self.segments else {
+            // An unsegmented partition keeps its one-file lifetime: the
+            // aggregate count must still verify before the file is reclaimed.
+            let expected = self.count(index)?;
+            let mut observed = 0_u64;
+            let mut reader = BlockReader::open(scratch, &self.paths[index])?;
+            let mut payload = Vec::new();
+            let outcome = loop {
+                match reader.next_block(&mut payload) {
+                    Ok(true) => {
+                        observed = observed
+                            .checked_add((payload.len() / self.width) as u64)
+                            .ok_or_else(|| storage("scratch record count overflowed"))?;
+                        if let Err(error) = visit(&payload) {
+                            break Err(error);
+                        }
+                    }
+                    Ok(false) => break Ok(()),
+                    Err(error) => break Err(error),
+                }
+            };
+            self.read.fetch_add(reader.bytes, Ordering::Relaxed);
+            outcome?;
+            if observed != expected {
+                return Err(storage("a scratch partition lost records"));
+            }
+            return self.reclaim(scratch, index);
+        };
+        // Snapshot the partition's final shape under its lock and enter the
+        // reading lifecycle before any byte moves.
+        let (expected, last, final_bytes) = {
+            let mut progress = self.state[index]
+                .lock()
+                .map_err(|_| storage("scratch partition lock poisoned"))?;
+            if progress.lifecycle != SegmentLifecycle::Writing {
+                return Err(storage(
+                    "a segmented scratch partition no longer accepts reads",
+                ));
+            }
+            progress.lifecycle = SegmentLifecycle::Reading;
+            (progress.records, progress.segment, progress.segment_bytes)
+        };
+        let mut observed = 0_u64;
+        for segment in 0..=last {
+            if cancel.load(Ordering::Acquire) {
+                self.fail_segmented(index);
+                return Err(storage("construction encoding cancelled"));
+            }
+            let mut reader = match BlockReader::open_segment(
+                scratch,
+                &self.segment_path(index, segment),
+                self.width,
+                layout.cap,
+            ) {
+                Ok(reader) => reader,
+                Err(error) => {
+                    self.fail_segmented(index);
+                    return Err(error);
+                }
+            };
+            let mut payload = Vec::new();
+            let outcome = loop {
+                match reader.next_bounded_block(&mut payload) {
+                    Ok(true) => {
+                        observed = observed
+                            .checked_add((payload.len() / self.width) as u64)
+                            .ok_or_else(|| storage("scratch record count overflowed"))?;
+                        if observed > expected {
+                            break Err(storage(
+                                "a scratch partition holds more records than were scattered",
+                            ));
+                        }
+                        if let Err(error) = visit(&payload) {
+                            break Err(error);
+                        }
+                    }
+                    Ok(false) => {
+                        // A missing ordinal is an error, never a clean end.
+                        if segment < last {
+                            break Err(storage("a scratch partition lost a segment"));
+                        }
+                        if observed != expected {
+                            break Err(storage("a scratch partition lost records"));
+                        }
+                        if reader.bytes != final_bytes {
+                            break Err(storage(
+                                "a scratch partition's last segment is shorter than it was written",
+                            ));
+                        }
+                        break Ok(());
+                    }
+                    Err(error) => break Err(error),
+                }
+            };
+            self.read.fetch_add(reader.bytes, Ordering::Relaxed);
+            // Close the reader before unlinking: an open handle would keep
+            // the reclaimed inode alive on the filesystem.
+            drop(reader);
+            match outcome {
+                Ok(()) => {
+                    if cancel.load(Ordering::Acquire) {
+                        self.fail_segmented(index);
+                        return Err(storage("construction encoding cancelled"));
+                    }
+                    if let Err(error) = self.reclaim_segment(scratch, index, segment) {
+                        self.fail_segmented(index);
+                        return Err(error);
                     }
                 }
-                Ok(false) => break Ok(()),
-                Err(error) => break Err(error),
+                Err(error) => {
+                    self.fail_segmented(index);
+                    return Err(error);
+                }
             }
-        };
-        self.read.fetch_add(reader.bytes, Ordering::Relaxed);
-        outcome
+        }
+        match self.state[index].lock() {
+            Ok(mut progress) => progress.lifecycle = SegmentLifecycle::Consumed,
+            Err(_) => return Err(storage("scratch partition lock poisoned")),
+        }
+        Ok(())
+    }
+
+    /// Mark a segmented partition's destructive read terminally failed. The
+    /// first unreclaimed ordinal is already current, so cleanup and the
+    /// scratch teardown owe exactly the segments the failed pass left.
+    fn fail_segmented(&self, index: usize) {
+        if let Ok(mut progress) = self.state[index].lock() {
+            if progress.lifecycle == SegmentLifecycle::Reading {
+                progress.lifecycle = SegmentLifecycle::Failed;
+            }
+        }
+    }
+
+    /// Reclaim segment `segment` of partition `index` once its verified read
+    /// has finished, advancing the first live ordinal so no later pass
+    /// releases it again. The occupancy leaves with the file.
+    fn reclaim_segment(
+        &self,
+        scratch: &Scratch,
+        index: usize,
+        segment: u64,
+    ) -> Result<(), GfError> {
+        scratch.reclaim_file(&self.segment_path(index, segment))?;
+        let mut progress = self.state[index]
+            .lock()
+            .map_err(|_| storage("scratch partition lock poisoned"))?;
+        progress.first_live = progress.first_live.max(segment.saturating_add(1));
+        Ok(())
     }
 }
 
@@ -418,19 +875,64 @@ pub(super) struct BlockReader<'a> {
     file: std::io::BufReader<File>,
     /// Bytes this reader has verified so far, headers included.
     bytes: u64,
+    /// What bounds this reader's frames when the file's length was admitted
+    /// up front: the bytes still unread and the record width every frame
+    /// must align to. A frame that claims more than remains, an empty frame
+    /// or a partial record is refused before its claimed length can drive
+    /// an allocation.
+    admitted: Option<(u64, usize)>,
 }
 
 impl<'a> BlockReader<'a> {
     pub(super) fn open(scratch: &'a Scratch, path: &Path) -> Result<Self, GfError> {
+        Self::open_admitted(scratch, path, None)
+    }
+
+    /// Open one physical segment of a segmented partition. The file's
+    /// physical length is admitted before the first frame: a segment longer
+    /// than its cap is refused here, and that length bounds every frame
+    /// claim the reader will honor.
+    fn open_segment(
+        scratch: &'a Scratch,
+        path: &Path,
+        width: usize,
+        cap: usize,
+    ) -> Result<Self, GfError> {
+        let length = std::fs::metadata(path).map_err(storage)?.len();
+        if length > cap as u64 {
+            return Err(storage(
+                "a scratch segment is longer than its partition's segment cap",
+            ));
+        }
+        Self::open_admitted(scratch, path, Some((length, width)))
+    }
+
+    fn open_admitted(
+        scratch: &'a Scratch,
+        path: &Path,
+        admitted: Option<(u64, usize)>,
+    ) -> Result<Self, GfError> {
         Ok(Self {
             scratch,
             file: std::io::BufReader::with_capacity(1 << 20, File::open(path).map_err(storage)?),
             bytes: 0,
+            admitted,
         })
     }
 
     /// The next verified payload in `payload`, or `false` at a clean end.
     pub(super) fn next_block(&mut self, payload: &mut Vec<u8>) -> Result<bool, GfError> {
+        self.next_frame(payload)
+    }
+
+    /// The next verified payload of a segment whose length was admitted at
+    /// open: the frame geometry is checked against the remaining bytes and
+    /// the record width before the claimed length can reach `resize`.
+    fn next_bounded_block(&mut self, payload: &mut Vec<u8>) -> Result<bool, GfError> {
+        self.next_frame(payload)
+    }
+
+    fn next_frame(&mut self, payload: &mut Vec<u8>) -> Result<bool, GfError> {
         // A clean end lands exactly on a block boundary.
         if self.file.fill_buf().map_err(storage)?.is_empty() {
             return Ok(false);
@@ -441,6 +943,23 @@ impl<'a> BlockReader<'a> {
             .map_err(|_| storage("a scratch block header is truncated"))?;
         let length = u32::from_le_bytes(header[..4].try_into().expect("4 bytes")) as usize;
         let expected = u32::from_le_bytes(header[4..].try_into().expect("4 bytes"));
+        if let Some((remaining, width)) = self.admitted {
+            let usable = remaining
+                .checked_sub(HEADER as u64)
+                .ok_or_else(|| storage("a scratch block header is truncated"))?;
+            if length as u64 > usable {
+                return Err(storage(
+                    "a scratch block claims more payload than its admitted length holds",
+                ));
+            }
+            if length == 0 {
+                return Err(storage("a scratch block frame is empty"));
+            }
+            if !length.is_multiple_of(width) {
+                return Err(storage("a scratch block has a partial record"));
+            }
+            self.admitted = Some((usable - length as u64, width));
+        }
         payload.resize(length, 0);
         self.file
             .read_exact(payload)
@@ -482,9 +1001,16 @@ pub(super) struct Scatter<'a> {
 }
 
 impl<'a> Scatter<'a> {
-    /// `capacity` is the staging size per file, a multiple of the record width.
+    /// `capacity` is the staging size per file, a multiple of the record
+    /// width. A segmented set clamps it to the largest record-aligned
+    /// payload one of its segments can hold, so a full staging block plus
+    /// its header never exceeds the segment cap and rotation happens only
+    /// between blocks.
     pub(super) fn new(scratch: &'a Scratch, partitions: &'a Partitions, capacity: usize) -> Self {
-        let capacity = (capacity / partitions.width).max(1) * partitions.width;
+        let mut capacity = (capacity / partitions.width).max(1) * partitions.width;
+        if let Some(layout) = &partitions.segments {
+            capacity = capacity.min(layout.payload);
+        }
         Self {
             scratch,
             partitions,
@@ -578,6 +1104,10 @@ impl<'a> Appender<'a> {
 #[cfg(test)]
 #[path = "scratch_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "scratch_segments_tests.rs"]
+mod segments_tests;
 
 #[cfg(test)]
 #[path = "scratch_test_support.rs"]

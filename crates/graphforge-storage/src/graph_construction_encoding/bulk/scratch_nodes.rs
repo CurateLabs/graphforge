@@ -511,11 +511,18 @@ pub(super) fn resolve_endpoints(
             let local_collision = verify_probes(scratch, probes, leaf, &records, cancel)?;
             probes.reclaim(scratch, leaf)?;
             // The refs of this leaf, streamed against its sorted records.
+            // The read is destructive: the partition is split into capped
+            // physical segments, and each segment's file is reclaimed as
+            // soon as the reader has verified it and this callback has
+            // resolved its records, so a leaf retains at most one segment of
+            // input however skewed its reference list is (#1929). The read
+            // checks the aggregate reference count against the scatter
+            // before it claims success.
             let mut out_degrees = vec![0_u32; count];
             let mut in_degrees = vec![0_u32; count];
             let mut scatter = Scatter::new(scratch, &resolved, staging);
             let mut local_miss = None::<[u8; 16]>;
-            refs.read(scratch, leaf, |payload| {
+            refs.read_reclaiming(scratch, leaf, cancel, |payload| {
                 check_cancelled(cancel)?;
                 if !payload.len().is_multiple_of(REF_RECORD) {
                     return Err(storage("a node reference block has a partial record"));
@@ -558,9 +565,8 @@ pub(super) fn resolve_endpoints(
                 crate::graph_construction::construction_failpoint(DURING_RESOLVE);
                 Ok(())
             })?;
-            // Every reference this leaf will ever see is resolved; the file is
-            // not read again.
-            refs.reclaim(scratch, leaf)?;
+            // Every reference this leaf will ever see is resolved and every
+            // verified segment is already reclaimed; the read is terminal.
             scatter.finish()?;
             if local_collision {
                 collision.store(true, Ordering::Relaxed);
