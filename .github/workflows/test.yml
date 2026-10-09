@@ -86,7 +86,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master as of 2026-08-05
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master as of 2026-08-05
         with:
           toolchain: "1.96.0"
           components: clippy, rustfmt
@@ -171,7 +171,7 @@ jobs:
           path: target
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master as of 2026-08-05
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master as of 2026-08-05
         with:
           toolchain: "1.96.0"
 
@@ -213,7 +213,7 @@ jobs:
           key: ${{ github.repository }}-rust-extras-rust-1.96.0-target-v1
           path: target
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master as of 2026-08-05
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master as of 2026-08-05
         with:
           toolchain: "1.96.0"
       - name: Install cargo-nextest
@@ -270,7 +270,7 @@ jobs:
           key: ${{ github.repository }}-feature-boundary-rust-1.96.0-target-v1
           path: target
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master as of 2026-08-05
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master as of 2026-08-05
         with:
           toolchain: "1.96.0"
       - name: Cache Cargo registry
@@ -301,7 +301,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master as of 2026-08-05
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master as of 2026-08-05
         with:
           toolchain: "1.96.0"
       - name: Cache Cargo registry
@@ -409,7 +409,7 @@ jobs:
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master as of 2026-08-05
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master as of 2026-08-05
         with:
           toolchain: "1.96.0"
       - name: Cache Cargo registry
@@ -542,7 +542,7 @@ jobs:
           key: ${{ github.repository }}-benchmarks-rust-1.96.0-benchmarks-target-v1
           path: benchmarks/target
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master as of 2026-08-05
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master as of 2026-08-05
         with:
           toolchain: "1.96.0"
       - name: Cache Cargo registry
