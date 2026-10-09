@@ -5,8 +5,18 @@ use std::time::Duration;
 
 use arrow::array::{BooleanArray, FixedSizeBinaryArray, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
+use datafusion::common::{JoinType, NullEquality};
 use datafusion::datasource::MemTable;
+use datafusion::datasource::TableProvider;
+use datafusion::execution::TaskContext;
 use datafusion::execution::session_state::SessionStateBuilder;
+use datafusion::physical_expr::PhysicalExpr;
+use datafusion::physical_expr::expressions::Column;
+use datafusion::physical_optimizer::PhysicalOptimizerRule;
+use datafusion::physical_optimizer::filter_pushdown::FilterPushdown;
+use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::joins::{HashJoinExec, PartitionMode};
+use datafusion::physical_plan::test::TestMemoryExec;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use futures::StreamExt;
 use parquet::arrow::ArrowWriter;
@@ -230,4 +240,143 @@ async fn oversized_limited_scan_emits_nothing_before_a_late_decode_failure() {
         ROWS,
         "a successful over-cap validation pass must replay the limited prefix"
     );
+}
+
+fn property_uuid_join(
+    root: &std::path::Path,
+    inventory: Arc<AuthenticatedPropertyInventory>,
+    limit: Option<usize>,
+    join_type: JoinType,
+) -> Arc<dyn ExecutionPlan> {
+    let table = PropertyTable::open_authenticated(root, "Person", Arc::clone(&inventory)).unwrap();
+    let schema = table.schema();
+    let build_schema = Arc::new(Schema::new(vec![Field::new(
+        "node_uuid",
+        DataType::FixedSizeBinary(16),
+        false,
+    )]));
+    let build_key_bytes = 1_u128.to_be_bytes();
+    let build_batch = RecordBatch::try_new(
+        Arc::clone(&build_schema),
+        vec![Arc::new(
+            FixedSizeBinaryArray::try_from_iter([build_key_bytes.as_slice()].into_iter()).unwrap(),
+        )],
+    )
+    .unwrap();
+    let build: Arc<dyn ExecutionPlan> =
+        TestMemoryExec::try_new_exec(&[vec![build_batch]], build_schema, None).unwrap();
+
+    let probe_key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("node_uuid", 0));
+    let scan = super::PropertyOverlayExec::try_new(
+        root.to_path_buf(),
+        Some(inventory),
+        "Person".into(),
+        false,
+        schema,
+        super::PropertyScanOptions {
+            projection: None,
+            limit,
+            batch_size: 16,
+            footer_statistics: true,
+            equality: None,
+        },
+    )
+    .unwrap();
+
+    Arc::new(
+        HashJoinExec::try_new(
+            build,
+            Arc::new(scan),
+            vec![(
+                Arc::new(Column::new("node_uuid", 0)) as Arc<dyn PhysicalExpr>,
+                probe_key,
+            )],
+            None,
+            &join_type,
+            None,
+            PartitionMode::CollectLeft,
+            NullEquality::NullEqualsNothing,
+            false,
+        )
+        .unwrap(),
+    )
+}
+
+fn post_pushdown(plan: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
+    FilterPushdown::new_post_optimization()
+        .optimize(plan, &datafusion::common::config::ConfigOptions::default())
+        .unwrap()
+}
+
+async fn collect_rows(plan: Arc<dyn ExecutionPlan>) -> usize {
+    let mut stream = plan.execute(0, Arc::new(TaskContext::default())).unwrap();
+    let mut emitted_rows = 0_usize;
+    while let Some(batch) = stream.next().await {
+        emitted_rows += batch.unwrap().num_rows();
+    }
+    emitted_rows
+}
+
+#[tokio::test]
+async fn limited_inner_and_right_semi_scans_preserve_their_prefix_under_uuid_hints() {
+    let root = tempfile::tempdir().unwrap();
+    let inventory = write_property_route(root.path(), 3, 3, "ok");
+
+    for join_type in [JoinType::Inner, JoinType::RightSemi] {
+        // Rows have UUIDs u=0, v=1, w=2. The build owns only v, while the
+        // original scan LIMIT 1 exposes only u. The real physical pushdown
+        // rule must attach a dynamic UUID hint to the limited scan, but final
+        // approval must decline to move it ahead of that LIMIT.
+        let pushed = post_pushdown(property_uuid_join(
+            root.path(),
+            Arc::clone(&inventory),
+            Some(1),
+            join_type,
+        ));
+        let pushed_join = pushed.downcast_ref::<HashJoinExec>().unwrap();
+        assert!(pushed_join.dynamic_filter_expr().is_some());
+        let pushed_scan = pushed_join
+            .right()
+            .downcast_ref::<super::PropertyOverlayExec>()
+            .expect("pushdown keeps the direct limited probe scan");
+        assert!(
+            !pushed_scan.uuid_filters.is_empty(),
+            "DataFusion post-optimization pushdown should retain its dynamic hint"
+        );
+        assert_eq!(pushed_scan.limit, Some(1));
+        assert_eq!(collect_rows(pushed).await, 0);
+
+        let approved = post_pushdown(property_uuid_join(
+            root.path(),
+            Arc::clone(&inventory),
+            Some(1),
+            join_type,
+        ));
+        let approved = crate::PropertyFilterApprovalRule
+            .optimize(
+                approved,
+                &datafusion::common::config::ConfigOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            collect_rows(approved).await,
+            0,
+            "UUID nominations must not change a limited {join_type:?} result"
+        );
+    }
+
+    // An unlimited probe remains eligible and still matches UUID v.
+    let unlimited = post_pushdown(property_uuid_join(
+        root.path(),
+        inventory,
+        None,
+        JoinType::Inner,
+    ));
+    let unlimited = crate::PropertyFilterApprovalRule
+        .optimize(
+            unlimited,
+            &datafusion::common::config::ConfigOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(collect_rows(unlimited).await, 1);
 }
