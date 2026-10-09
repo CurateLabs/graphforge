@@ -5,13 +5,15 @@
 //! stored temporal property component read in a filter and an aggregation, a
 //! parameterized duration constructor map, an `OPTIONAL MATCH` whose WHERE
 //! references a `WITH`-bound value, node-list concatenation feeding `UNWIND`
-//! and a pattern, `UNWIND` of list-of-map parameters across two label schemas,
-//! an `ALL` quantifier indexing variable-length path relationships, a path-node
-//! list comprehension filtered in the same `WITH`, variable-length
-//! multi-type relationship alternation in both directions, `startNode` /
-//! `endNode` and `id` over unwound path hops, `reduce` over scalar lists and
-//! path-hop amounts, a `COUNT { … }` subquery, `CALL { … }` subqueries
-//! (uncorrelated, correlated, `UNION ALL`), and `shortestPath`.
+//! and a pattern, a collected node list deduplicated by `WITH DISTINCT`
+//! feeding `OPTIONAL MATCH`, `UNWIND` of list-of-map parameters across two
+//! label schemas, an `ALL` quantifier indexing variable-length path
+//! relationships, a path-node list comprehension filtered in the same `WITH`,
+//! variable-length multi-type relationship alternation in both directions,
+//! `startNode` / `endNode` and `id` over unwound path hops, `reduce` over
+//! scalar lists and path-hop amounts, a `COUNT { … }` subquery, `CALL { … }`
+//! subqueries (uncorrelated, correlated, `UNION ALL` inside the body), and
+//! `shortestPath` bound in `MATCH` position.
 
 use std::collections::HashMap;
 
@@ -180,6 +182,26 @@ fn concatenated_node_lists_unwind_into_a_pattern_match() {
             strings(&["1", "2"]),
             strings(&["2", "3"]),
         ]
+    );
+}
+
+/// The collected-list shape: a `collect`-built node list grown by
+/// concatenation and deduplicated by `WITH DISTINCT` feeds `OPTIONAL MATCH`
+/// directly, with no fresh required `MATCH` after the `UNWIND` that could
+/// rebind the element.
+#[test]
+fn collected_node_list_with_distinct_feeds_optional_match() {
+    let gf = accounts();
+    assert_eq!(
+        rows(
+            &gf,
+            "MATCH (a:Account {id: 1}) WITH collect(a) AS xs \
+             MATCH (b:Account {id: 2}) WITH xs, xs + collect(b) AS ns \
+             UNWIND ns AS n WITH DISTINCT n \
+             OPTIONAL MATCH (n)-[:transfer]->(m) \
+             RETURN n.id AS source, m.id AS dest ORDER BY source, dest"
+        ),
+        vec![strings(&["1", "2"]), strings(&["2", "3"])]
     );
 }
 
@@ -389,12 +411,15 @@ fn call_subqueries_compose_with_union_all() {
     assert_eq!(
         rows(
             &gf,
-            "CALL { RETURN 1 AS value } UNION ALL CALL { RETURN 1 AS value } RETURN value"
+            "CALL { RETURN 1 AS value UNION ALL RETURN 1 AS value } RETURN value"
         ),
         vec![strings(&["1"]), strings(&["1"])]
     );
 }
 
+/// Official `MATCH`-position binding; hop counts come from `length(p)`
+/// (`size` on a Path is a type error in openCypher). Each fixture pair has a
+/// unique shortest path, so no `ORDER BY` is needed.
 #[test]
 fn shortest_path_returns_the_minimum_hop_count() {
     let gf = accounts();
@@ -402,7 +427,8 @@ fn shortest_path_returns_the_minimum_hop_count() {
         rows(
             &gf,
             "MATCH (a:Account {id: 1}), (b:Account {id: 3}) \
-             WITH shortestPath((a)-[:transfer*]->(b)) AS p RETURN size(p)"
+             MATCH p = shortestPath((a)-[:transfer*]->(b)) \
+             RETURN length(p)"
         ),
         vec![strings(&["2"])]
     );
@@ -410,8 +436,24 @@ fn shortest_path_returns_the_minimum_hop_count() {
         rows(
             &gf,
             "MATCH (a:Account {id: 1}), (b:Account {id: 4}) \
-             WITH shortestPath((a)-[:transfer|withdraw*]->(b)) AS p RETURN size(p)"
+             MATCH p = shortestPath((a)-[:transfer|withdraw*]->(b)) \
+             RETURN length(p)"
         ),
         vec![strings(&["3"])]
+    );
+}
+
+/// A bounded `*1..1` bound over the single direct edge.
+#[test]
+fn shortest_path_bounded_to_one_hop_returns_the_single_edge() {
+    let gf = accounts();
+    assert_eq!(
+        rows(
+            &gf,
+            "MATCH (a:Account {id: 1}), (b:Account {id: 2}) \
+             MATCH p = shortestPath((a)-[:transfer*1..1]->(b)) \
+             RETURN length(p)"
+        ),
+        vec![strings(&["1"])]
     );
 }
