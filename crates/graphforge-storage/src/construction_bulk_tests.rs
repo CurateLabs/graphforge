@@ -863,12 +863,6 @@ mod bulk_builder {
         (nodes, edges)
     }
 
-    /// Sixteen lanes, whatever the host has, so the derived concurrency does
-    /// not depend on the machine running the test.
-    fn sixteen_lanes(session: &mut GraphConstructionSession) {
-        lanes(session, 16);
-    }
-
     fn lanes(session: &mut GraphConstructionSession, count: usize) {
         session.set_cpu_admission(Some(Arc::new(
             cpu_admission::ConstructionCpuAdmission::new(
@@ -941,8 +935,8 @@ mod bulk_builder {
         }
     }
 
-    /// The smallest budget, in 4 MiB steps, whose derived concurrency is at
-    /// least `wanted`, and that concurrency.
+    /// The smallest budget, in 4 MiB steps, that admits the requested workers
+    /// and up to two simultaneous source task reservations.
     fn budget_admitting(
         nodes: &[RecordBatch],
         edges: &[RecordBatch],
@@ -976,7 +970,16 @@ mod bulk_builder {
                 crate::graph_construction_encoding::bulk_test_support::derived_concurrency(
                     &probe, budget, lanes, budgets,
                 );
-            if derived >= wanted {
+            let decode_pool =
+                crate::graph_construction_encoding::bulk_test_support::decode_pool(
+                    &probe, budget, lanes, budgets,
+                );
+            let (_, largest_task) =
+                crate::graph_construction_encoding::bulk_test_support::task_decode_bytes_bounds(
+                    &probe,
+                );
+            let needed_decode = largest_task.checked_mul(wanted.min(2) as u64).unwrap();
+            if derived >= wanted && decode_pool >= needed_decode {
                 assert_eq!(probe.route(), crate::BulkRoute::Scratch, "budget {budget}");
                 return (budget, derived);
             }
