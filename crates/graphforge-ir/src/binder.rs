@@ -471,8 +471,7 @@ impl Binder {
         // A proved node collection binds the alias as a whole node (#1888 D8):
         // the relational `Unwind` still spreads the value's fields under the
         // alias, so no extra scan or rebinding is emitted here. The alias is an
-        // element, never a list, so any stale list fact for the (shadowed) var
-        // is dropped.
+        // element, never a list, so it carries no node-list fact.
         s.node_lists.remove(&alias);
         if let NodeListFact::Nodes(label) = fact {
             s.var_kinds.insert(alias, VarKind::Node);

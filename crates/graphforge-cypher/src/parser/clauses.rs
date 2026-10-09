@@ -483,7 +483,7 @@ fn parse_delete_clause(ts: &mut TokenStream, detach: bool) -> Result<DeleteClaus
 
 /// Parse a CALL clause. Handles two forms:
 /// - `CALL proc.name(args) [YIELD items]` — named procedure call
-/// - `CALL { query } [YIELD items]`       — subquery (procedure is empty)
+/// - `CALL { query }` — recognized subquery, rejected as unsupported
 fn parse_call_clause(ts: &mut TokenStream) -> Result<CallClause, ParseError> {
     let start = ts.current_pos();
     ts.eat(&Tok::Call)?;
@@ -1114,13 +1114,14 @@ mod tests {
     // --- CALL ---
 
     #[test]
-    fn call_subquery() {
-        let q = query("CALL { MATCH (n) RETURN n } YIELD n");
-        let AstClause::Call(c) = &q.clauses[0] else {
-            panic!()
-        };
-        assert!(c.procedure.is_empty()); // empty = subquery form
-        assert_eq!(c.yield_items.len(), 1);
+    fn call_subquery_has_specific_unsupported_diagnostic() {
+        let error = crate::parse("CALL { MATCH (n) RETURN n }").unwrap_err();
+        assert_eq!(
+            error.kind,
+            ParseErrorKind::UnsupportedFeature(
+                graphforge_core::UnsupportedCypherFeature::CallSubquery
+            )
+        );
     }
 
     #[test]
@@ -1161,7 +1162,7 @@ mod tests {
         query("REMOVE n.x");
         query("DELETE n");
         query("DETACH DELETE n");
-        query("CALL { MATCH (n) RETURN n }");
+        query("CALL db.labels() YIELD label");
     }
 
     #[test]

@@ -146,7 +146,7 @@ ORDER BY
         ],
         upstream: "neo4j/queries/bi-1.cypher",
         rewrite: Some(
-            "rewrite: The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` \
+            "rewrite: LDBC text uses a `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` \
              in its WHERE, which selects the same nodes because import sessions assign one \
              label per node. The upstream stored creation-date component expression is preserved.",
         ),
@@ -386,7 +386,7 @@ LIMIT 100",
         columns: &["personId", "score", "friendsScore"],
         upstream: "neo4j/queries/bi-8.cypher",
         rewrite: Some(
-            "rewrite: The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` \
+            "rewrite: LDBC text uses a `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` \
              in its WHERE, which selects the same nodes because import sessions assign one \
              label per node. Upstream collect/concatenate/UNWIND node values are preserved.",
         ),
@@ -583,7 +583,7 @@ LIMIT 100",
         columns: &["zombieId", "zombieLikeCount", "totalLikeCount", "zombieScore"],
         upstream: "neo4j/queries/bi-13.cypher",
         rewrite: Some(
-            "rewrite: The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` \
+            "rewrite: LDBC text uses a `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` \
              in its WHERE, which selects the same nodes because import sessions assign one \
              label per node. The upstream stored creation-date component arithmetic is preserved.",
         ),
