@@ -1372,3 +1372,261 @@ fn an_import_chunk_is_built_from_the_same_rows_whether_or_not_properties_are_kep
         assert!(dropped.rows().iter().all(|row| row.properties.is_empty()));
     }
 }
+
+/// Physical pieces of one logical node batch, normalized at their original row
+/// offsets under the same operation identity, reproduce the single full
+/// normalization exactly: ordinals, generated identities for null UUIDs across
+/// piece boundaries, and the canonical chunk columns (#1918).
+#[test]
+fn node_pieces_at_true_offsets_match_the_full_logical_batch() {
+    let graph = GraphForge::new(None).unwrap();
+    let op = operation(950);
+    let schema = bulk_node_input_schema(vec![Field::new("name", DataType::Utf8, true)]).unwrap();
+    // Rows 1 and 2 are null UUIDs on both sides of a piece boundary; rows 3
+    // and 5 are explicit non-null UUIDv7 identities.
+    let ids: [Option<[u8; 16]>; 6] = [
+        None,
+        None,
+        None,
+        Some(uuid(951).into_bytes()),
+        None,
+        Some(uuid(952).into_bytes()),
+    ];
+    let generated = [true, true, true, false, true, false];
+    let labels = ["Person", "Person", "Host", "Person", "Host", "Person"];
+    let names = [
+        Some("alice"),
+        None,
+        Some("gateway"),
+        Some("cara"),
+        None,
+        Some("dana"),
+    ];
+    let full = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(
+                FixedSizeBinaryArray::try_from_sparse_iter_with_size(ids.into_iter(), 16).unwrap(),
+            ),
+            Arc::new(StringArray::from(labels.to_vec())),
+            Arc::new(StringArray::from(names.to_vec())),
+        ],
+    )
+    .unwrap();
+    let pieces = [(0_usize, 2_usize), (2, 1), (3, 3)];
+
+    let full_rows = graph
+        .normalize_bulk_nodes_at(op, &[full.clone()], false, true, 0)
+        .unwrap();
+    let mut piece_rows = Vec::new();
+    for (offset, len) in pieces {
+        piece_rows.extend(
+            graph
+                .normalize_bulk_nodes_at(op, &[full.slice(offset, len)], false, true, offset as u64)
+                .unwrap()
+                .rows()
+                .iter()
+                .cloned(),
+        );
+    }
+    assert_eq!(piece_rows, full_rows.rows().to_vec());
+    for (ordinal, row) in full_rows.rows().iter().enumerate() {
+        if generated[ordinal] {
+            assert_eq!(
+                row.node_uuid,
+                generated_uuid(op, BulkInputKind::Node, ordinal as u64),
+                "a null UUID must derive from the logical ordinal, not the piece"
+            );
+        }
+    }
+    let unique = piece_rows
+        .iter()
+        .map(|row| row.node_uuid)
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        unique.len(),
+        piece_rows.len(),
+        "derived UUIDs must be unique"
+    );
+
+    let full_chunk = graph.normalize_import_node_chunk_at(op, &full, 0).unwrap();
+    let mut piece_chunks = Vec::new();
+    for (offset, len) in pieces {
+        piece_chunks.push(
+            graph
+                .normalize_import_node_chunk_at(op, &full.slice(offset, len), offset as u64)
+                .unwrap(),
+        );
+    }
+    let combined = arrow::compute::concat_batches(full_chunk.schema(), &piece_chunks).unwrap();
+    assert_eq!(combined, full_chunk);
+}
+
+/// The same proof for edges: nullable edge UUIDs on both sides of a boundary,
+/// an explicit non-null identity, distinct relation types, a nullable weight
+/// column, and endpoints that stay valid in every piece (#1918).
+#[test]
+fn edge_pieces_at_true_offsets_match_the_full_logical_batch() {
+    let graph = GraphForge::new(None).unwrap();
+    let op = operation(953);
+    let hub_a = uuid(955);
+    let hub_b = uuid(956);
+    let hub_c = uuid(957);
+    let nodes = graph
+        .normalize_bulk_nodes_at(
+            operation(954),
+            &[node_batch(
+                &[hub_a, hub_b, hub_c],
+                &["Person", "Person", "Person"],
+                &[None, None, None],
+            )],
+            false,
+            false,
+            0,
+        )
+        .unwrap();
+    let schema =
+        bulk_edge_input_schema(vec![Field::new("weight", DataType::Float64, true)]).unwrap();
+    let edge_ids: [Option<[u8; 16]>; 4] = [
+        Some(uuid(958).into_bytes()),
+        None,
+        None,
+        Some(uuid(959).into_bytes()),
+    ];
+    let generated = [false, true, true, false];
+    let rel_types = ["KNOWS", "KNOWS", "CONNECTS", "LIKES"];
+    let sources = [hub_a, hub_b, hub_c, hub_a];
+    let targets = [hub_b, hub_c, hub_a, hub_c];
+    let weights = [Some(1.0), None, Some(2.5), None];
+    let full = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(
+                FixedSizeBinaryArray::try_from_sparse_iter_with_size(edge_ids.into_iter(), 16)
+                    .unwrap(),
+            ),
+            Arc::new(StringArray::from(rel_types.to_vec())),
+            Arc::new(
+                FixedSizeBinaryArray::try_from_iter(sources.iter().map(Uuid::as_bytes)).unwrap(),
+            ),
+            Arc::new(
+                FixedSizeBinaryArray::try_from_iter(targets.iter().map(Uuid::as_bytes)).unwrap(),
+            ),
+            Arc::new(Float64Array::from(weights.to_vec())),
+        ],
+    )
+    .unwrap();
+    // Every piece carries each hub it references among its own endpoints, so
+    // each piece is a self-contained import chunk.
+    let pieces = [(0_usize, 2_usize), (2, 1), (3, 1)];
+
+    let full_rows = graph
+        .normalize_bulk_edges_at(op, &[full.clone()], &nodes, true, None, false, 0)
+        .unwrap();
+    let mut piece_rows = Vec::new();
+    for (offset, len) in pieces {
+        piece_rows.extend(
+            graph
+                .normalize_bulk_edges_at(
+                    op,
+                    &[full.slice(offset, len)],
+                    &nodes,
+                    true,
+                    None,
+                    false,
+                    offset as u64,
+                )
+                .unwrap()
+                .rows()
+                .iter()
+                .cloned(),
+        );
+    }
+    assert_eq!(piece_rows, full_rows.rows().to_vec());
+    for (ordinal, row) in full_rows.rows().iter().enumerate() {
+        if generated[ordinal] {
+            assert_eq!(
+                row.edge_uuid,
+                generated_uuid(op, BulkInputKind::Edge, ordinal as u64),
+                "a null UUID must derive from the logical ordinal, not the piece"
+            );
+        }
+    }
+    let unique = piece_rows
+        .iter()
+        .map(|row| row.edge_uuid)
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        unique.len(),
+        piece_rows.len(),
+        "derived UUIDs must be unique"
+    );
+
+    let full_chunk = graph.normalize_import_edge_chunk_at(op, &full, 0).unwrap();
+    let mut piece_chunks = Vec::new();
+    for (offset, len) in pieces {
+        piece_chunks.push(
+            graph
+                .normalize_import_edge_chunk_at(op, &full.slice(offset, len), offset as u64)
+                .unwrap(),
+        );
+    }
+    let combined = arrow::compute::concat_batches(full_chunk.schema(), &piece_chunks).unwrap();
+    assert_eq!(combined, full_chunk);
+}
+
+/// A starting ordinal at the `u64` contract edge fails the existing checked
+/// increment with the typed reason instead of wrapping or panicking (#1918).
+#[test]
+fn a_start_ordinal_at_u64_max_fails_the_checked_increment_with_the_typed_reason() {
+    let graph = GraphForge::new(None).unwrap();
+    let node_error = graph
+        .normalize_bulk_nodes_at(
+            operation(960),
+            &[node_batch(
+                &[uuid(961), uuid(962)],
+                &["Person", "Person"],
+                &[None, None],
+            )],
+            false,
+            true,
+            u64::MAX,
+        )
+        .unwrap_err();
+    assert_eq!(node_error.reason, BulkValidationReason::OrdinalOverflow);
+    assert_eq!(node_error.code(), "GF_BULK_VALIDATION");
+    assert_eq!(node_error.message, "logical row ordinal overflow");
+
+    let nodes = graph
+        .normalize_bulk_nodes_at(
+            operation(963),
+            &[node_batch(
+                &[uuid(964), uuid(965)],
+                &["Person", "Person"],
+                &[None, None],
+            )],
+            false,
+            false,
+            0,
+        )
+        .unwrap();
+    let edge_error = graph
+        .normalize_bulk_edges_at(
+            operation(966),
+            &[edge_batch(
+                &[uuid(967), uuid(968)],
+                &["KNOWS", "KNOWS"],
+                &[uuid(964), uuid(964)],
+                &[uuid(965), uuid(965)],
+            )],
+            &nodes,
+            true,
+            None,
+            false,
+            u64::MAX,
+        )
+        .unwrap_err();
+    assert_eq!(edge_error.reason, BulkValidationReason::OrdinalOverflow);
+    assert_eq!(edge_error.code(), "GF_BULK_VALIDATION");
+    assert_eq!(edge_error.message, "logical row ordinal overflow");
+}
