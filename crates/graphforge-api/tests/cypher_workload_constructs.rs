@@ -613,6 +613,8 @@ fn unsupported_features_preserve_ordinary_binding_errors() {
     for query in [
         "RETURN id(missing)",
         "RETURN duration({hours: missing})",
+        "MATCH (a)-[:transfer|withdraw*1..3 {amount: missing}]->(b) RETURN 1",
+        "MATCH (a)-[:transfer|withdraw*1..3]->(b {id: missing}) RETURN 1",
         "UNWIND $rows AS row MATCH (a:L1 {left_key: row.left_key}), (b:L2 {right_key: row.right_key}) RETURN missing",
     ] {
         let error = gf
@@ -633,7 +635,7 @@ fn unsupported_features_preserve_ordinary_binding_errors() {
 }
 
 #[test]
-fn parameter_row_refusal_tracks_with_wildcards_and_aliases() {
+fn parameter_row_matches_keep_independent_owners_after_with() {
     let gf = schemas();
     let params = HashMap::from([(
         "rows".to_owned(),
@@ -646,13 +648,51 @@ fn parameter_row_refusal_tracks_with_wildcards_and_aliases() {
         "UNWIND $rows AS row MATCH (a:L1 {left_key: row.left_key}) WITH * MATCH (b:L2 {right_key: row.right_key}) RETURN a.title, b.enabled",
         "UNWIND $rows AS row MATCH (a:L1 {left_key: row.left_key}) WITH a, row AS next MATCH (b:L2 {right_key: next.right_key}) RETURN a.title, b.enabled",
     ] {
-        unsupported(
-            &gf,
-            query,
-            &params,
-            "Cypher parameter rows matching properties across different node labels",
+        assert_eq!(
+            rows_with(&gf, query, &params),
+            vec![strings(&["left", "true"])]
         );
     }
+}
+
+#[test]
+fn parameter_row_refusal_tracks_duplicated_origins() {
+    let gf = schemas();
+    let params = HashMap::from([(
+        "rows".to_owned(),
+        IrLiteral::List(vec![IrLiteral::Map(vec![
+            ("left_key".to_owned(), IrLiteral::Int(7)),
+            ("right_key".to_owned(), IrLiteral::Str("k".to_owned())),
+        ])]),
+    )]);
+    unsupported(
+        &gf,
+        "UNWIND $rows AS row WITH row AS left_row, row AS right_row MATCH (a:L1 {left_key: left_row.left_key}), (b:L2 {right_key: right_row.right_key}) RETURN a.title, b.enabled",
+        &params,
+        "Cypher parameter rows matching properties across different node labels",
+    );
+}
+
+#[test]
+fn indexed_relationship_all_after_with_has_literal_results() {
+    let gf = accounts();
+    for query in [
+        "MATCH (:Account {id: 1})-[rs:transfer*1..3]->(b) WITH rs, b RETURN ALL(i IN range(0,size(rs)-1) WHERE rs[i].amount > 0) AS ok",
+        "MATCH (:Account {id: 1})-[rs:transfer*1..3]->(b) WITH * RETURN ALL(i IN range(0,size(rs)-1) WHERE rs[i].amount > 0) AS ok",
+        "MATCH (:Account {id: 1})-[rs:transfer*1..3]->(b) WITH rs AS rels, b RETURN ALL(i IN range(0,size(rels)-1) WHERE rels[i].amount > 0) AS ok",
+    ] {
+        assert_eq!(
+            rows(&gf, query),
+            vec![strings(&["true"]), strings(&["true"])]
+        );
+    }
+    assert_eq!(
+        rows(
+            &gf,
+            "MATCH (:Account {id: 1})-[rs:transfer*1..3]->(b) WITH rs, b RETURN ALL(i IN range(0,size(rs)-1) WHERE rs[i].amount > 10) AS ok"
+        ),
+        vec![strings(&["false"]), strings(&["false"])]
+    );
 }
 
 #[test]

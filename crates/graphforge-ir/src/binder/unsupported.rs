@@ -70,13 +70,16 @@ pub(super) fn indexed_relationship_property(expr: &Expr, state: &BinderState) ->
 /// by property-constrained MATCH scans across different labels. Track only row
 /// aliases introduced by UNWIND parameters and their property-dependent scans.
 pub(super) fn parameter_rows_across_labels(query: &AstQuery) -> Option<BindError> {
-    let mut rows: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut rows: HashMap<String, usize> = HashMap::new();
+    let mut labels_by_origin: HashMap<usize, HashSet<String>> = HashMap::new();
+    let mut next_origin = 0;
     for clause in &query.clauses {
         match clause {
             AstClause::Unwind(unwind) => {
                 rows.remove(&unwind.alias);
                 if matches!(strip_parens(&unwind.expr), Expr::Param(_)) {
-                    rows.insert(unwind.alias.clone(), HashSet::new());
+                    rows.insert(unwind.alias.clone(), next_origin);
+                    next_origin += 1;
                 }
             }
             AstClause::With(with) => {
@@ -89,15 +92,13 @@ pub(super) fn parameter_rows_across_labels(query: &AstQuery) -> Option<BindError
                 };
                 for item in &with.items {
                     if let Expr::Var(var) = strip_parens(&item.expr)
-                        && let Some(labels) = rows.get(&var.name)
+                        && let Some(origin) = rows.get(&var.name)
                     {
-                        forwarded.insert(
-                            item.alias.as_ref().unwrap_or(&var.name).clone(),
-                            labels.clone(),
-                        );
+                        forwarded.insert(item.alias.as_ref().unwrap_or(&var.name).clone(), *origin);
                     }
                 }
                 rows = forwarded;
+                labels_by_origin.clear();
             }
             AstClause::Match(matched) | AstClause::OptionalMatch(matched) => {
                 for pattern in &matched.patterns {
@@ -108,13 +109,14 @@ pub(super) fn parameter_rows_across_labels(query: &AstQuery) -> Option<BindError
                         let Some(properties) = &node.properties else {
                             continue;
                         };
-                        for (alias, labels) in &mut rows {
+                        for (alias, origin) in &rows {
                             let depends_on_row = any_expression(properties, &|expr, locals| {
                                 !locals.contains(&alias.as_str())
                                     && matches!(expr, Expr::Property(property)
                                     if matches!(strip_parens(&property.object), Expr::Var(var) if &var.name == alias))
                             });
                             if depends_on_row {
+                                let labels = labels_by_origin.entry(*origin).or_default();
                                 labels.extend(node.labels.iter().cloned());
                                 if labels.len() > 1 {
                                     return Some(diagnostic(
@@ -127,7 +129,10 @@ pub(super) fn parameter_rows_across_labels(query: &AstQuery) -> Option<BindError
                     }
                 }
             }
-            AstClause::Union(_) => rows.clear(),
+            AstClause::Union(_) => {
+                rows.clear();
+                labels_by_origin.clear();
+            }
             _ => {}
         }
     }

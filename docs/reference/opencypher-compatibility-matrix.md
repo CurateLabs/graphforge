@@ -22,9 +22,11 @@ The parser, binder, and relational lowering live in `graphforge-cypher`,
 | Node-list concatenation followed by `UNWIND` and a pattern | Executes for proved whole-node lists | Endpoint rows |
 | `collect`ed node lists, renamed aliases, `WITH DISTINCT`, and `UNWIND` | Executes for proved whole-node lists | Duplicates, null extension, mixed labels, and properties after recollection |
 | `UNWIND` alias already present in the input scope | `GF_PARSE` with `VariableAlreadyBound` diagnostic | Existing scalar and node aliases rejected |
-| `UNWIND $rows` with row-dependent matches across distinct label schemas | `GF_NOT_IMPLEMENTED`: parameter rows matched across different label schemas | Specific error payload |
+| `UNWIND $rows` with row-dependent matches across distinct label schemas in one scope | `GF_NOT_IMPLEMENTED`: parameter rows matched across different label schemas | Specific error payload, including duplicated row aliases |
+| Parameter-row endpoint matches separated by `WITH` | Executes with independent owner projections | Both returned node properties |
 | `ALL` over scalar lists | Executes | Literal Boolean result |
-| `ALL` indexing a variable-length relationship list | `GF_NOT_IMPLEMENTED`: indexed variable-length relationship predicates | Specific error payload |
+| `ALL` indexing a variable-length relationship list directly after `MATCH` | `GF_NOT_IMPLEMENTED`: indexed variable-length relationship predicates | Specific error payload |
+| Indexed relationship `ALL` after a scalar `WITH` projection | Executes | Literal true and false results, forwarding, wildcard, and renamed alias |
 | Path-node list comprehension filtered in the same `WITH` | Executes | Literal node count |
 | Relationship-type alternation on a variable-length hop | `GF_NOT_IMPLEMENTED`: variable-length relationship type alternation | Both directions rejected specifically |
 | `startNode` / `endNode` of an already bound fixed-hop relationship | Executes | Both endpoint properties |

@@ -57,6 +57,14 @@ impl<'input> TokenStream<'input> {
         }
     }
 
+    /// Internal placeholders cannot escape any successful public parse entry point.
+    pub(super) fn finish_supported<T>(&mut self, value: T) -> Result<T, ParseError> {
+        match self.unsupported.take() {
+            Some(error) => Err(error),
+            None => Ok(value),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Lookahead
     // -----------------------------------------------------------------------

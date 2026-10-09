@@ -8,8 +8,10 @@ use graphforge_ast::{
 use graphforge_core::Span;
 
 use super::TokenStream;
-use super::expr::parse_expr;
-use super::patterns::{parse_pattern, parse_pattern_list};
+use super::expr::parse_expr_inner as parse_expr;
+use super::patterns::{
+    parse_pattern_inner as parse_pattern, parse_pattern_list_inner as parse_pattern_list,
+};
 
 // ---------------------------------------------------------------------------
 // Entry point

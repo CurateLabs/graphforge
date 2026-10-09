@@ -241,7 +241,6 @@ impl Binder {
                             graphforge_core::UnsupportedCypherFeature::VariableLengthRelationshipAlternation,
                             rel.span,
                         ));
-                        return;
                     }
                     if is_var_hop && is_scalar_hop {
                         s.scalar_list_edges.insert(edge_var);
