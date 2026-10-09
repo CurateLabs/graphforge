@@ -84,12 +84,12 @@ volume. The container must permit creating these private workspaces, including
 when a compact generation is opened for reading.
 
 An authenticated property read checks each fragment object (at most 4 MiB) against
-the manifest in memory and decodes those bytes, so a query on a durable project
-creates no scratch and writes nothing. Only a legacy fragment larger than one
-object is copied to a `.gf-property-scratch-*` directory beside its source tree
-or in the project container, preserving the same-volume snapshot check; that
-directory is removed when the read ends. Replay and mutation reads, which bound
-their memory separately, keep the scratch copy.
+the manifest in memory and decodes those bytes. Larger legacy fragments use a
+budgeted in-memory block-checksum index: complete-file authentication builds the
+index, and each requested block is authenticated into owned bytes before decoding.
+Queries create no scratch and write nothing on either path. Replay and mutation
+reads, which bound their memory separately, keep a scratch copy beside the source
+tree or in the project container; it is removed when that read ends.
 
 Each workspace has a unique owner; the final retained reader releases and removes
 it. Opening another facade never sweeps another reader's workspace. A killed

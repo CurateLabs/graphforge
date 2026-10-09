@@ -623,12 +623,14 @@ path, native file identity, length, XXH64 checksum, and schema—not one OS hand
 historical fragment. A scan opens fragments on demand without following links,
 requires the admitted device/file identity, and checksums the complete file
 while reading those exact bytes into memory (an object is at most 4 MiB, the
-physical cap), so reading writes nothing. Only a legacy plain fragment larger
-than one object, and the replay and mutation readers that bound their memory
-separately, stream the bytes into an exclusively created, unnamed scratch file
-instead. Identity, length, and checksum must match before Parquet sees the
-snapshot; full, targeted, and SQL readers never decode the mutable source
-handle. The source handle then closes. Consequently live
+physical cap), so reading writes nothing. A larger legacy plain fragment is
+authenticated completely to build a budgeted in-memory index of 4 MiB block
+checksums. Subsequent requests verify the admitted file identity and each owned
+block against that index before Parquet sees its bytes. The index and two block
+buffers are reserved before allocation; no read-path scratch file is created.
+Replay and mutation readers, which bound their memory separately, retain the
+exclusively created, unnamed scratch snapshot. Identity, length, and checksum
+must match before decoding on every path. Consequently live
 fragment handles are bounded by `max_open_runs` rather than total history, and
 same-name replacement, transient in-place mutation (even if restored), symlink,
 scratch planting, and path substitution all fail closed. Parquet page headers
