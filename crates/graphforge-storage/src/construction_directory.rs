@@ -22,17 +22,6 @@ pub(crate) struct ConstructionDirectory {
     commits: Arc<Mutex<ConstructionCommits>>,
 }
 impl ConstructionDirectory {
-    pub(crate) fn from_physical(
-        directory: &StableDirectory,
-        allocation: Option<&StorageAllocationOperation>,
-    ) -> io::Result<Self> {
-        Ok(Self {
-            directory: Arc::new(directory.try_clone()?),
-            allocation: allocation.cloned(),
-            commits: Arc::default(),
-        })
-    }
-
     pub(crate) fn open(path: &Path) -> io::Result<Self> {
         Ok(Self {
             directory: Arc::new(StableDirectory::open(path)?),

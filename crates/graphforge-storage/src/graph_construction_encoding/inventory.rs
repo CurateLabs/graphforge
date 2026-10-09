@@ -6,27 +6,23 @@ use std::io::Read;
 use std::path::{Component, Path};
 
 use super::{
-    AuthenticatedUuidIndexSnapshot, COPY_BUFFER_BYTES, ConstructionEncodedArtifact, ENCODED_ROOT,
-    ENCODING_FORMAT_VERSION, GfError, GraphConstructionEncoding, GraphConstructionEncodingEvidence,
-    StableDirectory, account_cache_release, add_evidence_counter, file_identity, file_link_count,
-    storage,
+    COPY_BUFFER_BYTES, ConstructionEncodedArtifact, ENCODED_ROOT, ENCODING_FORMAT_VERSION, GfError,
+    GraphConstructionEncoding, GraphConstructionEncodingEvidence, StableDirectory,
+    account_cache_release, add_evidence_counter, file_identity, file_link_count, storage,
 };
 
 pub(crate) fn authenticate_inventory(
     root: &StableDirectory,
     inventory: &GraphConstructionEncoding,
-    parent_index: Option<&AuthenticatedUuidIndexSnapshot>,
 ) -> Result<GraphConstructionEncodingEvidence, GfError> {
     let _diagnostic_scope =
         crate::graph_construction::diagnostics::Scope::start("inventory_authentication");
     let evidence = authenticate_inventory_payloads(root, inventory, &mut || false)?;
-    authenticate_inventory_references(inventory, parent_index)?;
     Ok(evidence)
 }
 
 /// The control half of [`authenticate_inventory`]: the inventory's structural
-/// invariants and its retained-parent references, without reading a payload
-/// byte. The encoder runs this after installing the inventory it just wrote.
+/// invariants, without reading a payload byte. The encoder runs this after installing the inventory it just wrote.
 ///
 /// The payloads are not re-read here. Every artifact digest in the inventory
 /// was computed by the single pass that wrote the bytes, and the boundary that
@@ -38,51 +34,8 @@ pub(crate) fn authenticate_inventory(
 /// to shape outputs).
 pub(crate) fn authenticate_inventory_control(
     inventory: &GraphConstructionEncoding,
-    parent_index: Option<&AuthenticatedUuidIndexSnapshot>,
 ) -> Result<(), GfError> {
-    validate_inventory_invariants(inventory)?;
-    authenticate_inventory_references(inventory, parent_index)
-}
-
-fn authenticate_inventory_references(
-    inventory: &GraphConstructionEncoding,
-    parent_index: Option<&AuthenticatedUuidIndexSnapshot>,
-) -> Result<(), GfError> {
-    if inventory.retained_artifacts.is_empty() {
-        if inventory.evidence.retained_index_runs != 0 {
-            return Err(storage("retained-index evidence lacks references"));
-        }
-        return Ok(());
-    }
-    let parent = parent_index
-        .ok_or_else(|| storage("retained artifacts lack authenticated parent snapshot"))?;
-    let mut previous = None;
-    let mut references = Vec::with_capacity(inventory.retained_artifacts.len());
-    for retained in &inventory.retained_artifacts {
-        if previous.is_some_and(|value: &str| value >= retained.target_path.as_str()) {
-            return Err(storage(
-                "retained artifact targets are not unique and sorted",
-            ));
-        }
-        references.push(
-            crate::uuid_membership::ConstructionReferenceAuthentication {
-                source_root: &retained.source_root,
-                source_root_volume: retained.source_root_volume,
-                source_root_file_id: &retained.source_root_file_id,
-                source_path: &retained.source_path,
-                source_volume: retained.source_volume,
-                source_file_id: &retained.source_file_id,
-                target_path: &retained.target_path,
-                bytes: retained.bytes,
-                sha256: &retained.sha256,
-                xxh64: retained.xxh64,
-                parent_manifest_sha256: &retained.parent_manifest_sha256,
-            },
-        );
-        previous = Some(retained.target_path.as_str());
-    }
-    parent.authenticate_construction_references(&references)?;
-    Ok(())
+    validate_inventory_invariants(inventory)
 }
 
 fn validate_inventory_invariants(inventory: &GraphConstructionEncoding) -> Result<(), GfError> {

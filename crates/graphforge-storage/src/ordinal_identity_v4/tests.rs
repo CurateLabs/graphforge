@@ -356,23 +356,19 @@ fn generated_lookup_orders_preserve_identity_and_linear_bounds() {
 }
 
 #[test]
-fn absent_v4_classifies_valid_v3_and_present_malformed_v4_never_falls_back() {
+fn absent_v4_requires_rebuild_and_present_malformed_v4_never_falls_back() {
     let (root, _, _) = crate::uuid_membership::tests::fixture();
     fs::write(
         root.path().join("topology/generation.json"),
         b"{\"topology_generation\":7,\"search_generation\":0,\"property_generation\":0}\n",
     )
     .unwrap();
-    crate::rebuild_uuid_membership_indexes(root.path(), crate::UuidIndexBuildLimits::default())
-        .unwrap();
     let index = root.path().join(INDEX_DIR);
     fs::write(index.join(LOCK_NAME), []).unwrap();
     let v4_path = index.join(MANIFEST_NAME);
-    let v3_path = index.join("manifest.json");
-    let v3 = fs::read(&v3_path).unwrap();
     assert!(matches!(
         V4OrdinalIdentityHandle::discover(root.path(), 7).unwrap(),
-        V4OrdinalIdentityDiscovery::RebuildRequired { found_version: 3 }
+        V4OrdinalIdentityDiscovery::RebuildRequired { found_version: 0 }
     ));
     assert!(matches!(
         V4OrdinalIdentityHandle::open(
@@ -385,23 +381,12 @@ fn absent_v4_classifies_valid_v3_and_present_malformed_v4_never_falls_back() {
         ),
         Err(V4OrdinalIdentityError::Io)
     ));
-    fs::remove_file(&v3_path).unwrap();
+    // Files of a membership index that predates #1902 neither satisfy nor
+    // disturb discovery.
+    fs::write(index.join("manifest.json"), b"legacy").unwrap();
     assert!(matches!(
-        V4OrdinalIdentityHandle::discover(root.path(), 7),
-        Err(V4OrdinalIdentityError::InvalidDescriptor(_))
-    ));
-    fs::write(&v3_path, &v3).unwrap();
-    let v3_manifest: serde_json::Value = serde_json::from_slice(&v3).unwrap();
-    let run_name = v3_manifest["runs"][0]["identities"]["name"]
-        .as_str()
-        .unwrap();
-    let run_path = index.join(run_name);
-    let mut run = fs::read(&run_path).unwrap();
-    run[0] ^= 1;
-    fs::write(&run_path, run).unwrap();
-    assert!(matches!(
-        V4OrdinalIdentityHandle::discover(root.path(), 7),
-        Err(V4OrdinalIdentityError::InvalidDescriptor(_))
+        V4OrdinalIdentityHandle::discover(root.path(), 7).unwrap(),
+        V4OrdinalIdentityDiscovery::RebuildRequired { found_version: 0 }
     ));
 
     fs::write(&v4_path, b"{\"format_version\":4}").unwrap();

@@ -588,9 +588,9 @@ fn a_process_killed_during_the_spooled_build_reruns_to_identical_artifacts() {
         "bulk.after_tables",
         "bulk.after_adjacency",
         "encode.after_inventory_pinned",
-        "uuid_encode.after_intent",
-        "uuid_encode.after_manifest",
-        "bulk.after_membership",
+        "bulk.after_ordinal",
+        "v4_publish.after_artifacts",
+        "v4_publish.after_manifest_install",
         "bulk.before_inventory",
         "bulk.after_inventory_before_intent_removal",
     ] {

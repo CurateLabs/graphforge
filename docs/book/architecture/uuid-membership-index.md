@@ -1,32 +1,92 @@
-# UUID identity authority facets
+# UUID identity authority
 
-GraphForge keeps two generation-coupled authorities under
-`topology/uuid-membership/`. They share a topology generation, not a manifest
-schema or digest.
+GraphForge answers "does this UUID exist" from the published topology Parquet.
+There is no derived UUID membership index. The `topology/uuid-membership/`
+directory name is historical: it now holds only the node ordinal facet below.
 
-## UUID membership facet
+Issue #1902 removed the membership index (`manifest.json`,
+`identities-v5-*.uuidx`, `node-surrogates-v5-*.uuidx`, `topology-receipt.json`).
+It duplicated the UUID columns of the published Parquet at 17-25 B per edge
+(9.28 GiB at S25) and was rewritten with every generation. Under the pre-v1
+policy the format changed in place: no new generation writes those files, no
+reader opens them, and a project that still carries them opens normally with the
+files admitted, exported and ignored.
 
-`manifest.json` is the current v5 authority for both node and edge UUID
-membership and node `UUID -> node_id` resolution. Existing endpoint-resolution,
-construction, and mutation consumers authenticate this facet. Its immutable runs and `topology-receipt.json` remain reachable
-until the v5 manifest no longer selects them.
+## Identity probe
 
+`TopologyIdentityProbe` (`topology_identity.rs`) is the one reader. It is opened
+over a pinned `TopologyFiles` list, or over a compact parent generation whose
+fragments are content-addressed objects, in which case each object is
+authenticated against its inventory checksum and held for the life of the probe.
 
-Membership format 5 encodes UUID16 + kind1, followed by the full big-endian
-surrogate8 for nodes and tombstones (25 bytes). Live edges use 17 bytes because
-their membership surrogate is defined as zero; their canonical edge ID remains
-in topology. Nonzero live-edge membership surrogates are rejected. This removes
-seven reserved zero bytes per record and eight additional bytes per live edge.
-No UUID bits or meaningful surrogate bits are truncated.
+- It reads each fragment footer once and caches it process-wide, keyed by the
+  file's device, inode, length and mtime. A replaced fragment misses the cache.
+- A probe sorts and deduplicates the caller's UUIDs, then skips every row group
+  whose `node_uuid`/`edge_uuid` min/max statistics exclude all of them. Fragments
+  built by an initial build are UUID-ordered, so a small batch touches a few row
+  groups. Appended fragments are `node_id`/`edge_id` ordered and their UUIDs
+  arrive in any order, so their ranges prune less; a probe of them reads every
+  row group whose range overlaps a candidate.
+- Inside a surviving row group the probe prunes again by the Parquet column
+  index: a page whose min/max excludes every candidate is not decoded, and the
+  reader fetches only the selected pages through the offset index. Published
+  Parquet is written with a page index (20,000-row pages in 1,048,576-row row
+  groups), so a small batch into a UUID-ordered fragment decodes a few pages,
+  not a few row groups. A file without a page index is pruned by row group alone.
+- The surviving pages decode only the UUID column (plus `node_id` for node
+  lookups) and row groups run in parallel. Each decoded value is binary-searched
+  against the sorted candidates. The metrics report `pages_considered` and
+  `pages_read` (the difference is what pruning avoided), `identity_blocks_read`
+  (row groups decoded) and `identity_bytes_read` (compressed bytes of the
+  selected pages and their chunks' dictionary pages).
+- Live counts are the sum of footer row counts, so no manifest carries them.
 
-Authenticated blocks are at most 1 MiB and end on complete record boundaries.
-Readers validate kinds, record counts, UUID ordering, first/last fences and SHA;
-probes select blocks by their fences and merge-scan sorted requests. Byte counts
-come from authenticated block lengths, and write-call counters count actual
-whole-record flushes. Private construction input remains a separate 32-byte
-format, hashed before bounded in-place packing. The published manifest and
-receipt select format 5; unsupported prior membership formats are refused.
-There is no compatibility reader or migration requirement before v1.
+Node and edge UUIDs share one namespace. Append validation, the writer's commit
+and the staged construction session all ask the same question: is this UUID a
+live node, a live edge, or a deleted entity? Any yes is refused with the same
+typed `IdentityConflict`.
+
+## Deleted identities
+
+A deleted entity is no longer a row, but its UUID is never reusable. Until
+#1902 the membership index kept a tombstone for every deleted node and edge.
+`topology/deleted_identities.parquet` replaces those tombstones: one
+`FixedSizeBinary(16)` column of the UUIDs of every deleted node and edge, sorted
+and unique. A generation that deletes writes the merged file in the same atomic
+rewrite as the topology change; a generation that deletes nothing carries the
+prior file forward untouched, and a graph that never deletes never has one. Its
+size follows deletions, not graph size. It is an ordinary authenticated graph
+file, so export, import and `gf verify` carry and check it with the rest.
+
+Validation refuses what the commit refuses. Before #1902, `validate_bulk_*`
+accepted a deleted UUID and the commit rejected it later; both now consult the
+same probe.
+
+## Projects that predate the removal
+
+Two behaviours differ for a project written before #1902. Both are accepted
+under the pre-v1 policy, which changes the format in place without a migration:
+
+- **UUIDs deleted before the upgrade become reusable.** The index kept the
+  tombstones of a project's earlier deletions and nothing reads it now.
+  `deleted_identities.parquet` records only deletions made since the upgrade, so
+  an entity deleted before it can be appended again under the same UUID. This
+  holds for edges and nodes alike as far as the identity probe is concerned; the
+  ordinal facet's own checks are unchanged. Entities deleted after the upgrade
+  stay spent.
+- **Search verifies nodes by repeat-check when there is no ordinal facet.**
+  `NodeIdentityCheck` used the ordinal facet when a project had one and the
+  membership index otherwise. With the index gone, a project without an ordinal
+  facet checks only that the rows it reads do not repeat a node UUID; it no longer
+  cross-checks each row's `node_id` against a separate authority. A project with
+  the ordinal facet is unchanged.
+
+The old files are left alone. Nothing reads `manifest.json`,
+`topology-receipt.json`, `identities-v5-*` or `node-surrogates-v5-*` in an
+upgraded project, and nothing removes them: orphan collection considers only the
+canonical ordinal artifact names, so the files stay in the graph-files inventory
+and travel through hydration (the two JSON controls are still copied), export,
+verify and import as ordinary entries until a future cleanup drops them.
 
 ## Node ordinal facet
 
@@ -41,19 +101,18 @@ mapping independently. Ordinal payloads are packed by contiguous node-ID range
 and carry fixed-size authenticated block fences.
 
 Discovery and authenticated open are separate operations. When the ordinal
-manifest is absent, discovery validates that current v5 authority is canonical
-before returning `RebuildRequired`. When the ordinal path exists, discovery
-reports it as present without trusting its contents. Authenticated open then
+manifest is absent, discovery returns `RebuildRequired`. When the ordinal path
+exists, discovery reports it as present without trusting its contents. Authenticated open then
 requires the ordinal digest selected by the project receipt. A malformed,
 substituted, or generation-mismatched ordinal facet fails closed and never
-falls back to v5.
+falls back to another source.
 
 The explicit rebuild API constructs v4 only from canonical topology and returns
 an aggregate `CanonicalTopology` disposition with generation, identity/range,
 artifact-byte, fixed-block, buffer, temporary-run, and fsync evidence. It never
-opens a v5 reverse run as migration input. Durable-rewrite recovery either
-retains the prior v5-only authority or completes the receipt-bound v4 facet;
-there is no mixed-version read state.
+reads legacy membership files. Durable-rewrite recovery either retains the prior
+authority or completes the receipt-bound v4 facet; there is no mixed-version
+read state.
 
 `peak_temporary_bytes` is the total maximum coexisting rebuild scratch, not
 merely the final artifact size. Storage-owned accounting includes scan runs and
@@ -86,17 +145,17 @@ requested/unique/found counts, selected ranges, logical bytes, coalesced calls,
 tombstones, and bounded-buffer charges. A typed failure can be reduced to
 sanitized failure evidence, including an authentication-failure count, without
 emitting UUIDs, paths, or record contents. Consumers must not reopen the index
-per chunk or substitute the v5 membership LSM.
+per chunk or substitute a scan of the node Parquet.
 
-Orphan collection starts from the current authenticated v5 manifest and, when
-the ordinal facet exists, requires the opaque authority resolved from a pinned
-project generation before authenticating the v4 manifest and artifacts. It
-retains the union. Hashing an untrusted manifest or receipt is never treated as
-provenance for deciding reachability.
+Orphan collection requires the opaque authority resolved from a pinned project
+generation before authenticating the v4 manifest and artifacts, and retains
+exactly the files that manifest names. It never collects legacy membership
+files. Hashing an untrusted manifest or receipt is never treated as provenance
+for deciding reachability.
 
-Both facets are persistent graph authority, not `.graphforge-cache/` content.
-Construction and canonical ordinal-facet publication are specified separately by
-#969. The facet version numbers identify separate schemas, not an upgrade order.
+The ordinal facet and the deleted-identity record are persistent graph
+authority, not `.graphforge-cache/` content. Construction and canonical
+ordinal-facet publication are specified separately by #969.
 
 ### Incremental ordinal publication
 
@@ -114,8 +173,8 @@ the manifest and validates every descriptor and block fence, and each lookup
 authenticates the ordinal or tombstone blocks it reads. Complete admission, which
 every writer runs before building on the artifacts, authenticates every run and
 compares the aggregate forward mapping commitment with the aggregate ordinal
-mapping commitment. Historical UUID and surrogate uniqueness is also proved by the
-coupled authenticated v5 participant in the same topology transaction.
+mapping commitment. Historical UUID and surrogate uniqueness is proved at append by the identity
+probe and the deleted-identity record, in the same topology transaction.
 
 The manifest may record `uuid_order_matches_ordinals`: whether UUIDs ascend
 strictly across every ordinal, derived by the publisher from the records it
@@ -146,42 +205,7 @@ expected manifest, so retry never replays a graph mutation. A retained old read
 handle fails stale named-manifest revalidation after the switch; callers advance
 by opening the exact newly receipt-authorized generation.
 
-Orphan maintenance runs only from the union of selected authenticated v5 and v4
-authority. It removes an unreferenced single-link artifact by retained identity,
+Orphan maintenance runs only from the selected authenticated v4 authority. It
+removes an unreferenced single-link artifact by retained identity,
 defers linked or over-budget candidates, and never treats an untrusted sibling
 manifest as reachability evidence.
-
-## Packed membership evidence (#1203)
-
-[Raw integrated measurements](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/packed-membership-1203.json)
-use source `d103c3cb0360e5a76a4b3cbbf60ce3c3cec14d60`, including the merged
-construction Zstd repair. Four permanent fixtures pass exact
-query/reopen/export/full-verify/clean-import checks. The additional boundary test
-verifies full-width encoding; separate production tests cover rebuild, reopen,
-probes and deletion at the ID boundary.
-
-For 4,097 nodes and 65,537 edges, membership payload falls from 2,228,288 to
-1,216,554 bytes: 487,438 bytes of reserved padding and 524,296 bytes of defined-zero
-live-edge fields. For 8,193 nodes it falls from 2,359,360 to 1,318,954 bytes.
-Node reverse-surrogate records remain 24 bytes and the ordinal facet keeps its
-independent current schema.
-
-| Fixture | After Parquet repair: permanent allocation | With packed membership |
-| --- | ---: | ---: |
-| Sequential | 4,112,384 | 3,096,576 |
-| Random | 7,585,792 | 6,541,312 |
-| Eight property routes, CSR built | 18,644,992 | 17,633,280 |
-| Heterogeneous properties | 13,086,720 | 12,075,008 |
-
-The serial integrated assessment took 391.33 seconds and peaked at 247,332 KiB
-RSS on the same ext4 host, versus 393.65 seconds and 270,208 KiB after the Parquet
-repair. These are whole-test measurements, including reads and portable copies;
-they do not establish an isolated codec CPU improvement. Raw process I/O is
-recorded separately from logical storage counters.
-
-Production-path regressions cover full-width rebuild/reopen/probes and a
-`u64::MAX` tombstone, current-format crash recovery, retained snapshots, framing
-corruption and bounded merge/probe work. The write-counter boundary test uses
-123,361 live edges: exactly 2,097,137 payload bytes and three whole-record writes,
-verified through both append paths. Dividing total bytes by 1 MiB would incorrectly
-report two writes.

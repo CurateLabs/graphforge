@@ -10,7 +10,6 @@ pub(crate) use rebase::administrative_contract;
 use rebase::{capture_rebase_baseline, ensure_rebase_compatible};
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::Path;
 
 use arrow::array::{Array, FixedSizeBinaryArray};
 use arrow::record_batch::RecordBatch;
@@ -802,7 +801,6 @@ fn build_validation_snapshot(
 
 fn register_existing_endpoints(
     writer: &mut graphforge_storage::GraphWriter,
-    dir: &Path,
     endpoints: &BTreeSet<Uuid>,
     same_request_nodes: &BTreeSet<Uuid>,
 ) -> Result<(), GfError> {
@@ -812,11 +810,6 @@ fn register_existing_endpoints(
         .collect::<Vec<_>>();
     if existing.is_empty() {
         return Ok(());
-    }
-    if !graphforge_storage::uuid_membership_index_is_fresh(dir)? {
-        return Err(GfError::Storage(
-            "composite endpoint resolution requires a fresh authenticated UUID index; run the explicit bounded index migration first".into(),
-        ));
     }
     writer.register_existing_endpoints(&existing)?;
     Ok(())
@@ -872,7 +865,7 @@ fn apply_graph_mutations(
             _ => None,
         })
         .collect::<BTreeSet<_>>();
-    register_existing_endpoints(&mut writer, &graph.dir(), &endpoints, &same_request_nodes)?;
+    register_existing_endpoints(&mut writer, &endpoints, &same_request_nodes)?;
     let mut node_sets: HashMap<String, HashMap<[u8; 16], HashMap<String, IrLiteral>>> =
         HashMap::new();
     let mut edge_sets: HashMap<String, HashMap<[u8; 16], HashMap<String, IrLiteral>>> =
@@ -1512,15 +1505,6 @@ mod tests {
         seed.create_node(existing, graphforge_value::EntityTypeId::decode(0).unwrap())
             .unwrap();
         seed.flush().unwrap();
-        graphforge_storage::rebuild_uuid_membership_indexes(
-            directory.path(),
-            graphforge_storage::UuidIndexBuildLimits {
-                scan_batch_rows: 1,
-                run_records: 1,
-                merge_fan_in: 2,
-            },
-        )
-        .unwrap();
 
         let same_request = uuid7(181);
         let endpoints = BTreeSet::from([existing, same_request]);
@@ -1530,13 +1514,7 @@ mod tests {
         let mut writer =
             graphforge_storage::GraphWriter::open_at(directory.path(), OntologyMode::Strict, 2)
                 .unwrap();
-        register_existing_endpoints(
-            &mut writer,
-            directory.path(),
-            &endpoints,
-            &same_request_nodes,
-        )
-        .unwrap();
+        register_existing_endpoints(&mut writer, &endpoints, &same_request_nodes).unwrap();
         let io = graphforge_storage::io_stats::snapshot().expect("requested I/O statistics");
         assert_eq!(io.node_full_reads, 0);
         assert_eq!(io.node_filtered_reads, 0);

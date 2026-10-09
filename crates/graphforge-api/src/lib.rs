@@ -666,7 +666,7 @@ pub struct GraphForge {
     /// Generation UUID whose graph snapshot was hydrated into `dir`.
     current_generation_uuid: Arc<Mutex<uuid::Uuid>>,
     /// Authenticated UUID index handle cached for one topology generation.
-    uuid_membership_index: Mutex<Option<graphforge_storage::UuidMembershipIndex>>,
+    identity_probe: Mutex<Option<graphforge_storage::TopologyIdentityProbe>>,
     /// Decoded epistemic ledgers cached for one immutable read generation.
     /// See `epistemic_snapshot::EpistemicLedgerCache` for the invalidation
     /// contract: keyed by `(generation_uuid, manifest_sha256)`, so a publish
@@ -904,7 +904,7 @@ impl GraphForge {
             })),
             read_only: false,
             current_generation_uuid: Arc::new(Mutex::new(generation_uuid)),
-            uuid_membership_index: Mutex::new(None),
+            identity_probe: Mutex::new(None),
             #[cfg(feature = "knowledge")]
             epistemic_ledger_cache: Mutex::new(None),
             ordinal_identities,
@@ -1185,7 +1185,7 @@ impl GraphForge {
             })),
             read_only,
             current_generation_uuid: Arc::new(Mutex::new(generation_uuid)),
-            uuid_membership_index: Mutex::new(None),
+            identity_probe: Mutex::new(None),
             #[cfg(feature = "knowledge")]
             epistemic_ledger_cache: Mutex::new(None),
             ordinal_identities,

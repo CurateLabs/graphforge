@@ -511,7 +511,7 @@ impl GraphConstructionSession<'_> {
         );
         *self
             .graph
-            .uuid_membership_index
+            .identity_probe
             .lock()
             .expect("UUID membership lock poisoned") = None;
         // Release old reader handles before their workspace; streams own their pins.
@@ -1181,7 +1181,7 @@ mod tests {
         drop(resumed);
         assert_construction_relationships(&graph, &original_relationships);
 
-        let index = graphforge_storage::UuidMembershipIndex::open(&graph.dir()).unwrap();
+        let index = graphforge_storage::TopologyIdentityProbe::open_dir(&graph.dir()).unwrap();
         assert_eq!(index.count(graphforge_storage::UuidIndexKind::Node), 3);
         assert_eq!(index.count(graphforge_storage::UuidIndexKind::Edge), 2);
         let catalog = graph.runtime_catalog.lock().unwrap();
@@ -1315,7 +1315,8 @@ mod tests {
             })
         }));
 
-        let child_index = graphforge_storage::UuidMembershipIndex::open(&graph.dir()).unwrap();
+        let child_index =
+            graphforge_storage::TopologyIdentityProbe::open_dir(&graph.dir()).unwrap();
         assert_eq!(
             child_index.count(graphforge_storage::UuidIndexKind::Node),
             4
@@ -1359,7 +1360,8 @@ mod tests {
         );
         drop(historical_replay);
         assert_construction_relationships(&graph, &current_relationships);
-        let current_index = graphforge_storage::UuidMembershipIndex::open(&graph.dir()).unwrap();
+        let current_index =
+            graphforge_storage::TopologyIdentityProbe::open_dir(&graph.dir()).unwrap();
         assert_eq!(
             current_index.count(graphforge_storage::UuidIndexKind::Node),
             4

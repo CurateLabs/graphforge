@@ -534,9 +534,11 @@ fn open_reads_control_bytes_not_payload_bytes() {
             total_read_bytes(&cost.second_query)
         );
     }
-    // The comparison is meaningful only if the payload really grew.
+    // The comparison is meaningful only if the payload really grew. The edge
+    // count grows 16x; the membership index that once added 17-25 B per edge to
+    // the payload is gone (#1902), so the payload grows by less.
     assert!(
-        large.payload_bytes > 6 * small.payload_bytes,
+        large.payload_bytes > 4 * small.payload_bytes,
         "edge payload did not grow: {} -> {}",
         small.payload_bytes,
         large.payload_bytes

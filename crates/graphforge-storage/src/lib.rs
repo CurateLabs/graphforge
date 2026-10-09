@@ -77,11 +77,10 @@ pub use graph_construction::cpu_admission::{ConstructionCpuAdmission, Constructi
 pub use graph_construction::{
     BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkRoute, BulkSource,
     BulkStagedReason, CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, ConstructionChunkKind,
-    ConstructionChunkReceipt, ConstructionRetainedArtifact, ConstructionSemanticAuthority,
-    ConstructionShape, GRAPH_CONSTRUCTION_ENCODING_BUFFER_BYTES, GraphConstructionBudgets,
-    GraphConstructionEncoding, GraphConstructionEncodingEvidence,
-    GraphConstructionEncodingInvocationEvidence, GraphConstructionEvidence,
-    GraphConstructionSession, GraphConstructionState, SealRoute,
+    ConstructionChunkReceipt, ConstructionSemanticAuthority, ConstructionShape,
+    GRAPH_CONSTRUCTION_ENCODING_BUFFER_BYTES, GraphConstructionBudgets, GraphConstructionEncoding,
+    GraphConstructionEncodingEvidence, GraphConstructionEncodingInvocationEvidence,
+    GraphConstructionEvidence, GraphConstructionSession, GraphConstructionState, SealRoute,
 };
 
 pub mod graph_admission;
@@ -451,13 +450,15 @@ pub use lifecycle_io::{
 
 pub mod uuid_membership;
 pub use uuid_membership::{
-    AuthenticatedUuidIndexSnapshot, UuidIndexAppendMetrics, UuidIndexBuildLimits,
-    UuidIndexBuildMetrics, UuidIndexKind, UuidIndexOrphanGcWork, UuidMembershipIndex,
-    UuidProbeMetrics, V4OrdinalRebuildDisposition, V4OrdinalRebuildEvidence,
-    maintain_uuid_membership_orphans, rebuild_uuid_membership_indexes,
-    rebuild_uuid_membership_indexes_with_topology, rebuild_v4_ordinal_identity,
-    rebuild_v4_ordinal_identity_with_evidence, uuid_membership_index_is_fresh,
-    uuid_membership_index_present,
+    UuidIndexBuildLimits, UuidIndexBuildMetrics, UuidIndexOrphanGcWork,
+    V4OrdinalRebuildDisposition, V4OrdinalRebuildEvidence, maintain_uuid_membership_orphans,
+    rebuild_v4_ordinal_identity, rebuild_v4_ordinal_identity_with_evidence,
+};
+
+pub mod topology_identity;
+pub use topology_identity::{
+    DELETED_IDENTITIES_PATH, TopologyIdentityProbe, UuidIndexKind, UuidProbeMetrics,
+    read_deleted_identities, stage_deleted_identities,
 };
 
 pub mod ordinal_identity_v4;

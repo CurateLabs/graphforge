@@ -3619,16 +3619,15 @@ fn run_integrated_certification_config(
     let manifest_bytes = committed_inventory
         .files
         .iter()
-        .find(|entry| entry.relative_path == "topology/uuid-membership/manifest.json")
-        .expect("constructed UUID manifest")
+        .find(|entry| entry.relative_path == "topology/uuid-membership/ordinal-v4-manifest.json")
+        .expect("constructed ordinal manifest")
         .byte_length;
-    // Fresh construction has no topology-mutation receipt yet. If present,
-    // its authenticated bytes are also copied privately during hydration.
     let receipt_bytes = committed_inventory
         .files
         .iter()
-        .find(|entry| entry.relative_path == "topology/uuid-membership/topology-receipt.json")
-        .map_or(0, |entry| entry.byte_length);
+        .find(|entry| entry.relative_path == "topology/uuid-membership/ordinal-v4-receipt.json")
+        .expect("constructed ordinal receipt")
+        .byte_length;
     let hydration_uuid_control_bytes = manifest_bytes + receipt_bytes;
     journal.replace_project_owner("source_project", &committed_generation);
     journal.pass("ingest", phase, Some(input_fingerprint));
@@ -4434,7 +4433,7 @@ struct LifecycleLinearityObservation {
     /// Bytes of every canonical artifact the publication installed or reused.
     canonical_output_bytes: u64,
     cas_publication_io: graphforge_storage::GraphPublicationIo,
-    encode_fsync_components: [u64; 4],
+    encode_fsync_components: [u64; 3],
     hydration_files_copied: u64,
     hydration_uuid_control_bytes: u64,
     /// Files the final source manifest declares, and the catalog objects that
@@ -4445,7 +4444,7 @@ struct LifecycleLinearityObservation {
     hydration_directory_fsync_operations: u64,
     shape_read_component_calls: [u64; 6],
     shape_write_component_calls: [u64; 2],
-    encode_write_component_calls: [u64; 5],
+    encode_write_component_calls: [u64; 4],
     category_metrics: BTreeMap<String, [u64; 6]>,
     category_authority_metrics: BTreeMap<String, [u64; 6]>,
     phase_disk_peaks: BTreeMap<String, u64>,
@@ -4600,9 +4599,6 @@ fn lifecycle_linearity_observation(evidence: &Value) -> LifecycleLinearityObserv
         construction["encode_source_spool_fsync_operations"]
             .as_u64()
             .expect("encode spool fsyncs"),
-        construction["encode_membership_fsync_operations"]
-            .as_u64()
-            .expect("encode membership fsyncs"),
         construction["encode_ordinal_fsync_operations"]
             .as_u64()
             .expect("encode ordinal fsyncs"),
@@ -4648,9 +4644,6 @@ fn lifecycle_linearity_observation(evidence: &Value) -> LifecycleLinearityObserv
         construction["encode_output_write_operations"]
             .as_u64()
             .expect("encode output writes"),
-        construction["encode_membership_write_operations"]
-            .as_u64()
-            .expect("encode membership writes"),
         construction["encode_source_spool_write_operations"]
             .as_u64()
             .expect("encode spool writes"),
@@ -5000,12 +4993,17 @@ fn validate_retained_reconciliation(evidence: &Value) -> Result<(), String> {
         let topology_rows = live_nodes
             .checked_add(live_edges)
             .ok_or_else(|| "live topology denominator overflow".to_owned())?;
-        for category in ["uuid_and_surrogates", "adjacency"] {
+        // The ordinal node-identity facet holds one record per node; the UUID
+        // membership index that held one per edge too is gone (#1902).
+        for (category, denominator) in [
+            ("uuid_and_surrogates", live_nodes),
+            ("adjacency", topology_rows),
+        ] {
             let logical_bytes = evidence_u64(
                 evidence,
                 &format!("/storage/{owner}/categories/{category}/logical_bytes"),
             )?;
-            if logical_bytes < topology_rows {
+            if logical_bytes < denominator {
                 return Err(format!(
                     "{owner}.{category} is below the topology denominator"
                 ));
@@ -5395,7 +5393,7 @@ enum PhaseMetricPolicy {
     /// `materialize_graph_objects` reads the route table once to
     /// authenticate routes, then for every object that
     /// `requires_single_link_materialization` (the route table itself, the
-    /// UUID-membership controls and the private ordinal-v4 authority) reads
+    /// private ordinal-v4 controls) reads
     /// it once while copying (`copy_and_authenticate_materialized_object`)
     /// and once more to verify the installed copy (`verify_file_counted`),
     /// writing it exactly once. Every other object is hard-linked from the
@@ -5572,7 +5570,7 @@ const HYDRATION_ROUTE_TABLE_CONTROL_BYTES: u64 = 2 * 1024;
 //   ceil(bytes / staged block) ..= bytes); object count and fsyncs are zero.
 // encode_write_postwrite_authentication: bytes and read calls are data-
 //   proportional; write calls and fsyncs reconcile to the native encoder
-//   components (output, spool, membership, ordinal barriers).
+//   components (output, spool, ordinal barriers).
 // publication_preauthentication: the encoded-inventory control read is
 //   structure-bounded by one encoding buffer, and its call count derives from
 //   those bytes; every other field is zero.
@@ -6031,7 +6029,6 @@ fn validate_positive_normalized_ceiling(
 enum CategoryBehavior {
     NodeBearing,
     EdgeBearing,
-    Mixed,
     FixedInventory,
     StructurallyZero,
 }
@@ -6124,7 +6121,9 @@ fn category_behavior(category: &str) -> Result<CategoryBehavior, String> {
         // CSR shards do not append trailing rows without edges; its adjacency
         // payload therefore grows on the edge axis. This is fixture-specific.
         "topology_edges" | "adjacency" => Ok(CategoryBehavior::EdgeBearing),
-        "uuid_and_surrogates" => Ok(CategoryBehavior::Mixed),
+        // The ordinal node-identity facet is all that remains; it scales with
+        // nodes only (#1902).
+        "uuid_and_surrogates" => Ok(CategoryBehavior::NodeBearing),
         "catalog_and_manifests" => Ok(CategoryBehavior::FixedInventory),
         "properties"
         | "construction_staging"
@@ -6209,9 +6208,6 @@ fn validate_category_taxonomy(
                     {
                         validate_affine_metric(&name, values, denominators)?;
                     }
-                    (CategoryBehavior::Mixed, 1 | 3) => {
-                        validate_affine_metric(&name, values, denominators)?;
-                    }
                     (CategoryBehavior::NodeBearing, 4 | 5)
                         if matches!(axis, LinearityAxis::Nodes) =>
                     {
@@ -6220,9 +6216,6 @@ fn validate_category_taxonomy(
                     (CategoryBehavior::EdgeBearing, 4 | 5)
                         if matches!(axis, LinearityAxis::Edges) =>
                     {
-                        validate_quantized_allocation(&name, values, denominators)?;
-                    }
-                    (CategoryBehavior::Mixed, 4 | 5) => {
                         validate_quantized_allocation(&name, values, denominators)?;
                     }
                     (_, 1 | 3 | 4 | 5) if values[0] == values[1] && values[0] == values[2] => {}
@@ -6418,9 +6411,12 @@ fn validate_lifecycle_metric_policies_for_axis(
             .checked_add(observation.live_edges)
             .ok_or_else(|| "live topology denominator overflow".to_owned())?;
         for owner in ["source", "clean_import"] {
-            for category in ["uuid_and_surrogates", "adjacency"] {
+            for (category, denominator) in [
+                ("uuid_and_surrogates", observation.live_nodes),
+                ("adjacency", topology_rows),
+            ] {
                 let key = format!("{owner}.{category}");
-                if observation.category_metrics[&key][1] < topology_rows {
+                if observation.category_metrics[&key][1] < denominator {
                     return Err(format!(
                         "{key} logical bytes are below the authoritative topology-row denominator at rung {rung}"
                     ));
@@ -6761,7 +6757,7 @@ fn validate_lifecycle_metric_policies_for_axis(
                             .ok_or_else(|| format!("{name} component sum overflows"))?;
                         if values[rung] != expected {
                             return Err(format!(
-                                "{name} does not reconcile output/spool/membership/ordinal barriers at rung {rung}"
+                                "{name} does not reconcile output/spool/ordinal barriers at rung {rung}"
                             ));
                         }
                         // Floor: a non-empty graph always writes at least one
@@ -6926,7 +6922,6 @@ fn synthetic_category_metrics(axis: LinearityAxis, factor: u64) -> BTreeMap<Stri
             let bearing = match category_behavior(category).unwrap() {
                 CategoryBehavior::NodeBearing => matches!(axis, LinearityAxis::Nodes),
                 CategoryBehavior::EdgeBearing => matches!(axis, LinearityAxis::Edges),
-                CategoryBehavior::Mixed => true,
                 CategoryBehavior::FixedInventory => false,
                 CategoryBehavior::StructurallyZero => {
                     metrics.insert(format!("{owner}.{category}"), [0; 6]);
@@ -7001,7 +6996,7 @@ fn synthetic_linearity_observations_for_axis(
                         factor,
                         0,
                         0,
-                        43,
+                        35,
                     ],
                 ),
                 (
@@ -7153,7 +7148,7 @@ fn synthetic_linearity_observations_for_axis(
                     ..Default::default()
                 },
             },
-            encode_fsync_components: [10, 5, 8, 20],
+            encode_fsync_components: [10, 5, 20],
             hydration_files_copied: 19,
             hydration_uuid_control_bytes: 100,
             manifest_files: SYNTHETIC_MANIFEST_FILES,
@@ -7162,7 +7157,7 @@ fn synthetic_linearity_observations_for_axis(
             hydration_directory_fsync_operations: 19,
             shape_read_component_calls: [factor, 0, 0, 0, 0, 0],
             shape_write_component_calls: [factor, 0],
-            encode_write_component_calls: [factor, 0, 0, 0, 0],
+            encode_write_component_calls: [factor, 0, 0, 0],
             category_metrics: synthetic_category_metrics(axis, factor),
             category_authority_metrics: synthetic_category_metrics(axis, factor),
             phase_disk_peaks: CERTIFICATION_PHASES
@@ -8084,7 +8079,7 @@ fn encode_fsync_inventory_rejects_barriers_that_stop_being_counted() {
             .position(|field| *field == "fsync_calls")
             .unwrap();
         for observation in &mut no_barriers {
-            observation.encode_fsync_components = [0; 4];
+            observation.encode_fsync_components = [0; 3];
             observation
                 .phases
                 .get_mut("encode_write_postwrite_authentication")

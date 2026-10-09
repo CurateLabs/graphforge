@@ -1,0 +1,1 @@
+{"format":"graphforge-graph-manifest-radix-node","format_version":4,"depth":1,"prefix":"36df068263263b5fd050ba0a0d221de726822dfb00605b949a900812951e971","kind":"bucket","entries":[{"relative_path":"semantic-routes.json","byte_length":177,"content_sha256":"e89f6e446520ec6669f4c8b27486370fabd8c152a409d1363efcd9b32d2b15e6","content_xxh64":"17beb01a6e2bfc9f","role":"catalog"}]}

@@ -671,17 +671,22 @@ pub struct TopologyWriteWork {
     pub peak_buffered_bytes: u64,
     /// Conservative peak scratch bytes required while encoding a flush.
     pub peak_flush_scratch_bytes: u64,
-    /// Authenticated UUID-index block-positioning seeks for endpoint lookup.
+    /// Published-Parquet row groups positioned for endpoint lookup.
     pub uuid_block_seeks: u64,
-    /// Authenticated identity blocks read for endpoint lookup.
+    /// Published-Parquet row groups decoded for endpoint lookup.
     pub uuid_identity_blocks_read: u64,
-    /// Authenticated identity bytes read for endpoint lookup.
+    /// Compressed identity-column bytes decoded for endpoint lookup.
     pub uuid_identity_bytes_read: u64,
-    /// Authenticated reverse-surrogate blocks read for pair validation.
+    /// Identity-column pages of every row group considered by identity probes.
+    pub uuid_pages_considered: u64,
+    /// Identity-column pages decoded by identity probes after row-group and
+    /// page-index pruning.
+    pub uuid_pages_read: u64,
+    /// Always zero: node surrogates are decoded with their UUIDs.
     pub uuid_surrogate_blocks_read: u64,
-    /// Authenticated reverse-surrogate bytes read for pair validation.
+    /// Always zero: node surrogates are decoded with their UUIDs.
     pub uuid_surrogate_bytes_read: u64,
-    /// Immutable UUID runs considered with newest-run shadowing.
+    /// Published topology fragments whose row groups identity probes considered.
     pub uuid_runs_considered: u64,
     /// Per-record filesystem seeks. This remains zero for batched lookup.
     pub uuid_per_record_seeks: u64,
@@ -699,9 +704,9 @@ pub struct TopologyWriteWork {
     pub uuid_peak_buffered_records: u64,
     /// Peak charged fixed-width UUID bytes buffered by a committed delta.
     pub uuid_peak_buffered_bytes: u64,
-    /// Retained UUID validation blocks read by committed deltas.
+    /// Published-Parquet row groups decoded by commit-time identity validation.
     pub uuid_validation_blocks: u64,
-    /// Retained UUID validation bytes read by committed deltas.
+    /// Compressed identity-column bytes decoded by commit-time identity validation.
     pub uuid_validation_bytes: u64,
     /// Per-record random seeks during UUID publication validation; always zero.
     pub uuid_validation_random_seeks: u64,
@@ -790,8 +795,7 @@ pub struct GraphWriter {
     pending_delta: Vec<crate::adjacency_delta::DeltaEdge>,
     pending_index_nodes: Vec<(Uuid, u64)>,
     pending_index_edges: Vec<Uuid>,
-    uuid_index_snapshot: Option<crate::AuthenticatedUuidIndexSnapshot>,
-    uuid_snapshot_refresh_needed: Option<u64>,
+    identity_probe: Option<crate::TopologyIdentityProbe>,
     limits: GraphWriterLimits,
     charged_topology_bytes: usize,
     buffered_topology_rows: usize,
@@ -889,8 +893,7 @@ impl GraphWriter {
             pending_delta: Vec::new(),
             pending_index_nodes: Vec::new(),
             pending_index_edges: Vec::new(),
-            uuid_index_snapshot: None,
-            uuid_snapshot_refresh_needed: None,
+            identity_probe: None,
             limits: GraphWriterLimits::default(),
             charged_topology_bytes: 0,
             buffered_topology_rows: 0,
@@ -1154,34 +1157,31 @@ impl GraphWriter {
         Ok(())
     }
 
-    /// Resolve and register persisted edge endpoints through the writer-owned
-    /// authenticated disk-index snapshot. UUIDs are sorted/deduplicated and
-    /// resolved with bounded block merge scans, so repeated construction
-    /// batches decode zero topology rows and perform zero per-record seeks.
+    /// Resolve and register persisted edge endpoints from the published node
+    /// topology. Row groups whose `node_uuid` range holds no requested UUID
+    /// are skipped, and the rest decode only the UUID and `node_id` columns.
     pub fn register_existing_endpoints(
         &mut self,
         node_uuids: &[Uuid],
     ) -> Result<crate::UuidProbeMetrics, GfError> {
-        if let Some(generation) = self.uuid_snapshot_refresh_needed {
-            self.uuid_index_snapshot = Some(
-                crate::AuthenticatedUuidIndexSnapshot::open_at_generation(&self.dir, generation)?,
-            );
-            self.uuid_snapshot_refresh_needed = None;
-        }
-        if self.uuid_index_snapshot.is_none() {
-            crate::uuid_membership::ensure_uuid_membership_migrated_with_topology(
-                &self.dir,
-                self.topology.clone(),
-            )?;
-            let generation = crate::read_topology_generation(&self.dir)?;
-            self.uuid_index_snapshot = Some(
-                crate::AuthenticatedUuidIndexSnapshot::open_at_generation(&self.dir, generation)?,
-            );
+        let generation = crate::read_topology_generation(&self.dir)?;
+        if self
+            .identity_probe
+            .as_ref()
+            .is_none_or(|probe| probe.topology_generation() != generation)
+        {
+            let files = match &self.topology {
+                Some(authority) => crate::enumerate_topology_files(authority, None)?,
+                None => crate::TopologyFiles::discover_legacy(&self.dir)?,
+            };
+            self.identity_probe = Some(crate::TopologyIdentityProbe::open(
+                &self.dir, &files, generation,
+            )?);
         }
         let (surrogates, metrics) = self
-            .uuid_index_snapshot
+            .identity_probe
             .as_mut()
-            .expect("snapshot initialized")
+            .expect("probe initialized")
             .lookup_node_surrogates(node_uuids)?;
         let mut resolved = Vec::new();
         for (uuid, surrogate) in node_uuids.iter().zip(surrogates) {
@@ -1222,6 +1222,14 @@ impl GraphWriter {
             .topology_work
             .uuid_surrogate_bytes_read
             .saturating_add(metrics.surrogate_bytes_read);
+        self.topology_work.uuid_pages_considered = self
+            .topology_work
+            .uuid_pages_considered
+            .saturating_add(metrics.pages_considered);
+        self.topology_work.uuid_pages_read = self
+            .topology_work
+            .uuid_pages_read
+            .saturating_add(metrics.pages_read);
         self.topology_work.uuid_runs_considered = self
             .topology_work
             .uuid_runs_considered
@@ -1839,12 +1847,6 @@ impl GraphWriter {
         deleted_nodes: Vec<Uuid>,
         deleted_edges: Vec<Uuid>,
     ) -> Result<Option<u64>, GfError> {
-        if let Some(generation) = self.uuid_snapshot_refresh_needed {
-            self.uuid_index_snapshot = Some(
-                crate::AuthenticatedUuidIndexSnapshot::open_at_generation(&self.dir, generation)?,
-            );
-            self.uuid_snapshot_refresh_needed = None;
-        }
         let committed = crate::uuid_membership::commit_uuid_topology_rewrite(
             &self.dir,
             staged,
@@ -1854,16 +1856,16 @@ impl GraphWriter {
                 deleted_nodes,
                 deleted_edges,
             },
-            &mut self.uuid_index_snapshot,
+            &mut self.identity_probe,
         )?;
         match committed {
             crate::uuid_membership::CommittedUuidTopologyRewrite::NoTopologyChange => Ok(None),
             crate::uuid_membership::CommittedUuidTopologyRewrite::Committed {
                 generation,
-                metrics,
+                probe,
                 v4_metrics,
             } => {
-                self.record_uuid_append_work(&metrics);
+                self.record_identity_probe_work(&probe);
                 if let Some(metrics) = v4_metrics.as_ref() {
                     self.record_v4_ordinal_append_work(metrics);
                 }
@@ -1871,54 +1873,25 @@ impl GraphWriter {
                 self.pending_index_edges.clear();
                 Ok(Some(generation))
             }
-            crate::uuid_membership::CommittedUuidTopologyRewrite::CommittedNeedsRefresh {
-                generation,
-                metrics,
-                v4_metrics,
-                error,
-            } => {
-                self.record_uuid_append_work(&metrics);
-                if let Some(metrics) = v4_metrics.as_ref() {
-                    self.record_v4_ordinal_append_work(metrics);
-                }
-                self.pending_index_nodes.clear();
-                self.pending_index_edges.clear();
-                self.uuid_snapshot_refresh_needed = Some(generation);
-                Err(GfError::Storage(format!(
-                    "topology generation {generation} committed but UUID index snapshot refresh failed: {error}"
-                )))
-            }
         }
     }
 
-    fn record_uuid_append_work(&mut self, metrics: &crate::UuidIndexAppendMetrics) {
+    fn record_identity_probe_work(&mut self, metrics: &crate::UuidProbeMetrics) {
         let work = &mut self.topology_work;
-        work.uuid_input_records = work
-            .uuid_input_records
-            .saturating_add(metrics.input_records);
-        work.uuid_prior_topology_rows_decoded = work
-            .uuid_prior_topology_rows_decoded
-            .saturating_add(metrics.prior_topology_rows_decoded);
-        work.uuid_physical_bytes_written = work
-            .uuid_physical_bytes_written
-            .saturating_add(metrics.physical_bytes_written);
-        work.uuid_write_blocks = work.uuid_write_blocks.saturating_add(metrics.write_blocks);
-        work.uuid_write_bytes = work.uuid_write_bytes.saturating_add(metrics.write_bytes);
-        work.uuid_peak_buffered_records = work
-            .uuid_peak_buffered_records
-            .max(u64::try_from(metrics.peak_buffered_records).unwrap_or(u64::MAX));
-        work.uuid_peak_buffered_bytes = work
-            .uuid_peak_buffered_bytes
-            .max(u64::try_from(metrics.peak_buffered_bytes).unwrap_or(u64::MAX));
+        work.uuid_input_records = work.uuid_input_records.saturating_add(metrics.requested);
         work.uuid_validation_blocks = work
             .uuid_validation_blocks
-            .saturating_add(metrics.validation_scan_blocks);
+            .saturating_add(metrics.identity_blocks_read);
         work.uuid_validation_bytes = work
             .uuid_validation_bytes
-            .saturating_add(metrics.validation_scan_bytes);
+            .saturating_add(metrics.identity_bytes_read);
+        work.uuid_pages_considered = work
+            .uuid_pages_considered
+            .saturating_add(metrics.pages_considered);
+        work.uuid_pages_read = work.uuid_pages_read.saturating_add(metrics.pages_read);
         work.uuid_validation_random_seeks = work
             .uuid_validation_random_seeks
-            .saturating_add(metrics.validation_random_seeks);
+            .saturating_add(metrics.per_record_seeks);
     }
 
     fn record_v4_ordinal_append_work(
@@ -2544,7 +2517,7 @@ mod promotion_full_width_tests {
         let document = OntologyLoader::load_yaml("ontology_id: wide\nversion: \"1\"\nentity_types:\n  - name: Person\n    abstract: false\nrelation_types:\n  - name: KNOWS\n    src: Person\n    dst: Person\n".as_bytes()).unwrap();
         let ontology = OntologyHandle::new(OntologyCompiler::compile(&document).unwrap());
         crate::promote_runtime_graph_for_ontology(dir.path(), &ontology, &catalog).unwrap();
-        let mut membership = crate::UuidMembershipIndex::open(dir.path()).unwrap();
+        let mut membership = crate::TopologyIdentityProbe::open_dir(dir.path()).unwrap();
         assert_eq!(
             membership.lookup_node_surrogates(&[left, right]).unwrap().0,
             [Some(node_base), Some(node_base + 1)]
@@ -2608,7 +2581,7 @@ mod promotion_full_width_tests {
         );
         writer.flush().unwrap();
         drop(writer);
-        let mut membership = crate::UuidMembershipIndex::open(dir.path()).unwrap();
+        let mut membership = crate::TopologyIdentityProbe::open_dir(dir.path()).unwrap();
         assert_eq!(
             membership
                 .lookup_node_surrogates(&[left, right, created])

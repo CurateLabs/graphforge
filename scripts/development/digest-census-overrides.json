@@ -2367,48 +2367,12 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/uuid_membership.rs",
-      "function": "describe_stream",
-      "role": "durable_artifact",
-      "input_contract": "Actual newly produced UUID identity stream receives one whole-artifact SHA identity and whole/block XXH64 checksums. UUID wire7 retires unused per-block SHA; no block SHA input remains.",
-      "function_bodies_sha256": [
-        "9c9c3537bfad35212e280fabd29d3cc0ce9a5ebab1847865313a8f478abfc12c"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/uuid_membership/construction.rs",
-      "function": "construction_intent_digest",
-      "role": "control_authentication",
-      "input_contract": "Domain-v3 intent version, generation/parent, name, retained native source identity, length and expected XXH64 text authenticate private construction intent metadata; no source payload is hashed here.",
-      "function_bodies_sha256": [
-        "f88d7b2f45f4dce58c4779264935586667490f7eea1a40310127f8355a68b985"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/uuid_membership/construction.rs",
-      "function": "encode_construction_index_inner",
-      "role": "durable_artifact",
-      "input_contract": "Full raw 26-byte identity-run records are SHA-hashed while encoding, independently of their expected XXH64 check; the actual source SHA is forwarded to the existing topology receipt binding. This whole-file work remains Artifact rather than control.",
-      "function_bodies_sha256": [
-        "93281d6e1c5169b3388a03e2880ab6b4bf0fcd271df4b1a745944772a4678e5e"
-      ]
-    },
-    {
       "path": "crates/graphforge-storage/src/uuid_membership/construction.rs",
       "function": "install_construction_bytes",
       "role": "control_authentication",
       "input_contract": "The direct SHA invocation hashes only the empty ordinal-v4.lock control marker at its sole fallback caller; manifest and receipt JSON use the separate control helper. Payload writers retain their own Artifact producers.",
       "function_bodies_sha256": [
-        "f1c682942803d7900f1a9510b1bd958a333bb8fde61770cce573b5b948812e1c"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/uuid_membership/construction.rs",
-      "function": "sha256_reader_streaming",
-      "role": "durable_artifact",
-      "input_contract": "Complete construction-owned artifact input authenticates write/trust boundary.",
-      "function_bodies_sha256": [
-        "900e6bca8e4a3d3db6238c9a752da69f1c091064b351d58ffb0c9ffe84578f83"
+        "533817fd91e1254a5b966da322371cef3ab14dcf89612ed3363cfb8dedde57dd"
       ]
     },
     {
@@ -2436,15 +2400,6 @@
       "input_contract": "Shared helper receives control manifest/receipt bodies, construction payload/block bytes, and constant rebuild contract markers; edge semantics differ despite Control alias.",
       "function_bodies_sha256": [
         "614288861bb729709352f47efdcad228707ed91f50da7c0cd757678e3a56bfa2"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/uuid_membership/topology_delta.rs",
-      "function": "prepare_uuid_membership_delta",
-      "role": "control_authentication",
-      "input_contract": "Canonical UUID index receipt JSON receives control authority commitment.",
-      "function_bodies_sha256": [
-        "6a9da3185acf07710966c030c495186465ab9789fb86ae0a7142baacb075f1f1"
       ]
     },
     {

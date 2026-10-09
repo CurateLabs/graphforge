@@ -3,17 +3,7 @@
 //! makes them available to readers; the final staged artifact owns durability.
 
 use super::BULK_IO_BYTES;
-use super::FORMAT_VERSION;
-#[cfg(test)]
-use super::FileRecord;
-use super::IDENTITY_RECORD_BYTES;
-use super::IDENTITY_RECORD_WIDTH;
 use super::INDEX_DIR;
-use super::MANIFEST;
-use super::Manifest;
-use super::NODE_LOOKUP_RECORD_BYTES;
-use super::RunRecord;
-use super::TOPOLOGY_RECEIPT;
 use super::TopologyIndexReceipt;
 use super::UuidIndexBuildLimits;
 use super::UuidIndexBuildMetrics;
@@ -22,11 +12,6 @@ use super::V4_ORDINAL_RECEIPT;
 use super::V4OrdinalBuildMetrics;
 use super::V4OrdinalRebuildDisposition;
 use super::V4OrdinalRebuildEvidence;
-use super::decode_manifest;
-#[cfg(test)]
-use super::describe_blocks;
-use super::describe_staged_data;
-use super::identity_codec;
 use super::maintenance::selected_generation_for_graph_root;
 use super::ordinal_artifacts::V4AuthorityTransactionProof;
 use super::ordinal_artifacts::V4ConstructionArtifactBundle;
@@ -34,21 +19,13 @@ use super::ordinal_artifacts::V4OrdinalConstructionWriter;
 use super::ordinal_artifacts::commit_v4_publications;
 use super::storage_err;
 use super::topology_delta::hex_sha256;
-use super::uuid_membership_index_is_fresh;
-use super::validate_run_descriptors;
-#[cfg(test)]
-use crate::concurrency_attribution::ObservedSha256 as Sha256;
 use arrow::array::Array;
 use arrow::array::FixedSizeBinaryArray;
 use arrow::array::UInt64Array;
 use graphforge_core::GfError;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-#[cfg(test)]
-use sha2::Digest;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
-#[cfg(test)]
-use std::fmt::Write as _;
 use std::fs;
 use std::fs::File;
 use std::io::BufReader;
@@ -151,24 +128,6 @@ struct StagedV4OrdinalRebuild {
     build: UuidIndexBuildMetrics,
     artifacts: V4OrdinalBuildMetrics,
     scratch: V4RebuildScratchAccounting,
-}
-
-/// Explicit bounded rebuild/migration path. Immutable data files are completed
-/// and synced first; `manifest.json` is atomically replaced last.
-pub fn rebuild_uuid_membership_indexes(
-    project_dir: &Path,
-    limits: UuidIndexBuildLimits,
-) -> Result<UuidIndexBuildMetrics, GfError> {
-    migrate_uuid_membership_indexes(project_dir, limits, true, None)
-}
-
-/// Rebuild a private session index from explicit topology membership.
-pub fn rebuild_uuid_membership_indexes_with_topology(
-    project_dir: &Path,
-    limits: UuidIndexBuildLimits,
-    topology: std::sync::Arc<crate::TopologyFileAuthority>,
-) -> Result<UuidIndexBuildMetrics, GfError> {
-    migrate_uuid_membership_indexes(project_dir, limits, true, Some(topology))
 }
 
 /// Rebuild v4 ordinal identity from canonical topology, never v3 reverse state.
@@ -416,442 +375,6 @@ fn v4_rebuild_evidence(
     })
 }
 
-/// Ensure the current topology generation has a v3 UUID index before a
-/// topology mutation enters its sealed rewrite callback.
-pub(crate) fn ensure_uuid_membership_migrated(project_dir: &Path) -> Result<(), GfError> {
-    migrate_uuid_membership_indexes(project_dir, UuidIndexBuildLimits::default(), false, None)
-        .map(|_| ())
-}
-
-pub(crate) fn ensure_uuid_membership_migrated_with_topology(
-    project_dir: &Path,
-    topology: Option<std::sync::Arc<crate::TopologyFileAuthority>>,
-) -> Result<(), GfError> {
-    migrate_uuid_membership_indexes(
-        project_dir,
-        UuidIndexBuildLimits::default(),
-        false,
-        topology,
-    )
-    .map(|_| ())
-}
-
-fn migrate_uuid_membership_indexes(
-    project_dir: &Path,
-    limits: UuidIndexBuildLimits,
-    force: bool,
-    topology: Option<std::sync::Arc<crate::TopologyFileAuthority>>,
-) -> Result<UuidIndexBuildMetrics, GfError> {
-    if !force && uuid_membership_index_is_fresh(project_dir)? {
-        return Ok(UuidIndexBuildMetrics::default());
-    }
-    let metrics = std::rc::Rc::new(std::cell::RefCell::new(None));
-    let callback_metrics = std::rc::Rc::clone(&metrics);
-    let root = project_dir.to_path_buf();
-    let participant: crate::durable_rewrite::RewriteParticipantPreparer<'_> =
-        Box::new(move |context, batch| {
-            if !force && manifest_generation(context.project_root)? == Some(context.prior.topology)
-            {
-                return Ok(None);
-            }
-            let built = stage_uuid_membership_rebuild_locked(
-                context.project_root,
-                context.prior.topology,
-                limits,
-                batch,
-            )?;
-            *callback_metrics.borrow_mut() = Some(built);
-            let manifest_destination = context.project_root.join(INDEX_DIR).join(MANIFEST);
-            let manifest_temp = batch.staged_temp(&manifest_destination).ok_or_else(|| {
-                storage_err("UUID migration did not stage its canonical manifest")
-            })?;
-            let manifest_bytes = fs::read(manifest_temp).map_err(storage_err)?;
-            let receipt = TopologyIndexReceipt {
-                nonce: Uuid::new_v4().simple().to_string(),
-                expected_generation: context.prior.topology,
-                topology_delta_sha256: hex_sha256(b"uuid-membership-migration"),
-                manifest_sha256: hex_sha256(&manifest_bytes),
-            };
-            let receipt_bytes = serde_json::to_vec(&receipt).map_err(storage_err)?;
-            batch.stage_bytes(
-                &context.project_root.join(INDEX_DIR).join(TOPOLOGY_RECEIPT),
-                &receipt_bytes,
-            )?;
-            Ok(Some(crate::AuxiliaryReceipt {
-                kind: "uuid-membership/v7".to_owned(),
-                schema_version: FORMAT_VERSION,
-                path: format!("{INDEX_DIR}/{TOPOLOGY_RECEIPT}"),
-                digest: hex_sha256(&receipt_bytes),
-                bytes: u64::try_from(receipt_bytes.len())
-                    .map_err(|_| storage_err("receipt length overflow"))?,
-            }))
-        });
-    let mut batch = crate::staging::RewriteBatch::new();
-    if let Some(topology) = topology {
-        batch.bind_topology_authority(topology)?;
-    }
-    crate::generation::commit_topology_aware_with_participant(batch, &root, participant)?;
-    let result = metrics.borrow_mut().take().unwrap_or_default();
-    Ok(result)
-}
-
-#[allow(clippy::too_many_lines)] // Sequential bounded rebuild pipeline with one authority output.
-fn stage_uuid_membership_rebuild_locked(
-    project_dir: &Path,
-    generation: u64,
-    limits: UuidIndexBuildLimits,
-    batch: &mut crate::staging::RewriteBatch,
-) -> Result<UuidIndexBuildMetrics, GfError> {
-    let limits = limits.validate()?;
-    let root = project_dir.join(INDEX_DIR);
-    fs::create_dir_all(&root).map_err(storage_err)?;
-    let staging = project_dir
-        .parent()
-        .ok_or_else(|| storage_err("project directory has no staging parent"))?;
-    let scratch = tempfile::Builder::new()
-        .prefix("uuid-membership-build-")
-        .tempdir_in(staging)
-        .map_err(storage_err)?;
-    let mut metrics = UuidIndexBuildMetrics::default();
-    let files = match batch.topology_authority() {
-        Some(topology) => crate::enumerate_topology_files(topology, None)?,
-        None => crate::TopologyFiles::discover_legacy(project_dir)?,
-    };
-    let node_paths: Vec<_> = files.nodes.iter().map(|(path, _)| path.clone()).collect();
-    let node_runs = scan_to_runs(
-        &node_paths,
-        "node_uuid",
-        scratch.path(),
-        "node",
-        limits,
-        &mut metrics,
-    )?;
-    let node_surrogate_runs = scan_entity_surrogate_runs(
-        &node_paths,
-        "node_uuid",
-        "node_id",
-        "node",
-        scratch.path(),
-        limits,
-        &mut metrics,
-    )?;
-    let node_surrogate_validation_runs =
-        scan_node_surrogate_validation_runs(&node_paths, scratch.path(), limits, &mut metrics)?;
-    let mut edge_paths: Vec<_> = files
-        .edges
-        .iter()
-        .map(|(_, path, _)| path.clone())
-        .collect();
-    edge_paths.sort();
-    let edge_runs = scan_to_runs(
-        &edge_paths,
-        "edge_uuid",
-        scratch.path(),
-        "edge",
-        limits,
-        &mut metrics,
-    )?;
-    let node_tmp = merge_all(
-        node_runs,
-        scratch.path(),
-        "nodes",
-        limits.merge_fan_in,
-        &mut metrics,
-    )?;
-    let node_surrogates_tmp = merge_node_surrogate_runs(
-        node_surrogate_runs,
-        scratch.path(),
-        limits.merge_fan_in,
-        &mut metrics,
-    )?;
-    let validated_surrogates = merge_node_surrogate_validation_runs(
-        node_surrogate_validation_runs,
-        scratch.path(),
-        limits.merge_fan_in,
-        &mut metrics,
-    )?;
-    fs::remove_file(validated_surrogates).map_err(storage_err)?;
-    let edge_tmp = merge_all(
-        edge_runs,
-        scratch.path(),
-        "edges",
-        limits.merge_fan_in,
-        &mut metrics,
-    )?;
-    reject_cross_kind_identities(&node_tmp, &edge_tmp)?;
-    let identity_tmp = scratch.path().join("identities-v5.run");
-    build_identity_run(&node_surrogates_tmp, &edge_tmp, &identity_tmp)?;
-    let surrogate_tmp =
-        build_surrogate_run(&node_surrogates_tmp, scratch.path(), limits, &mut metrics)?;
-    let identities = describe_staged_data(
-        &identity_tmp,
-        "identities-v5",
-        generation,
-        IDENTITY_RECORD_BYTES,
-    )?;
-    let node_surrogates = describe_staged_data(
-        &surrogate_tmp,
-        "node-surrogates-v5",
-        generation,
-        NODE_LOOKUP_RECORD_BYTES,
-    )?;
-    metrics.node_count = node_surrogates.count;
-    metrics.edge_count = identities.count.saturating_sub(metrics.node_count);
-    let manifest = Manifest {
-        format_version: FORMAT_VERSION,
-        base_generation: generation,
-        current_generation: generation,
-        live_node_count: metrics.node_count,
-        live_edge_count: metrics.edge_count,
-        runs: vec![RunRecord {
-            base: true,
-            level: 0,
-            first_generation: 0,
-            last_generation: generation,
-            identities,
-            node_surrogates,
-            node_count: metrics.node_count,
-            edge_count: metrics.edge_count,
-            deleted_node_count: 0,
-            deleted_edge_count: 0,
-        }],
-    };
-    batch.stage_file(&root.join(&manifest.runs[0].identities.name), &identity_tmp)?;
-    batch.stage_file(
-        &root.join(&manifest.runs[0].node_surrogates.name),
-        &surrogate_tmp,
-    )?;
-    batch.stage_bytes(
-        &root.join(MANIFEST),
-        &serde_json::to_vec(&manifest).map_err(storage_err)?,
-    )?;
-    Ok(metrics)
-}
-
-pub(super) fn manifest_generation(project_dir: &Path) -> Result<Option<u64>, GfError> {
-    let bytes = match fs::read(project_dir.join(INDEX_DIR).join(MANIFEST)) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(storage_err(error)),
-    };
-    let manifest = decode_manifest(&bytes)?;
-    validate_run_descriptors(&manifest)?;
-    Ok(Some(manifest.current_generation))
-}
-
-fn scan_to_runs(
-    paths: &[PathBuf],
-    column: &str,
-    scratch: &Path,
-    prefix: &str,
-    limits: UuidIndexBuildLimits,
-    metrics: &mut UuidIndexBuildMetrics,
-) -> Result<Vec<PathBuf>, GfError> {
-    let mut buffer = Vec::<[u8; 16]>::with_capacity(limits.run_records);
-    let mut runs = Vec::new();
-    for path in paths {
-        if !path.exists() {
-            continue;
-        }
-        let file = crate::graph_admission::open_admitted(path)?;
-        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
-            .map_err(storage_err)?
-            .with_batch_size(limits.scan_batch_rows)
-            .build()
-            .map_err(storage_err)?;
-        for batch in reader {
-            let batch = batch.map_err(storage_err)?;
-            let array = batch
-                .column_by_name(column)
-                .ok_or_else(|| storage_err(format!("{} lacks {column}", path.display())))?
-                .as_any()
-                .downcast_ref::<FixedSizeBinaryArray>()
-                .ok_or_else(|| storage_err(format!("{column} is not FixedSizeBinary")))?;
-            for row in 0..array.len() {
-                if array.is_null(row) || array.value(row).len() != 16 {
-                    return Err(storage_err(format!("invalid {column} at row {row}")));
-                }
-                buffer.push(array.value(row).try_into().expect("length checked"));
-                metrics.peak_buffered_records = metrics.peak_buffered_records.max(buffer.len());
-                if buffer.len() == limits.run_records {
-                    flush_run(&mut buffer, scratch, prefix, &mut runs, metrics)?;
-                }
-            }
-        }
-    }
-    if !buffer.is_empty() {
-        flush_run(&mut buffer, scratch, prefix, &mut runs, metrics)?;
-    }
-    if runs.is_empty() {
-        let path = scratch.join(format!("{prefix}-empty.run"));
-        File::create(&path).map_err(storage_err)?;
-        runs.push(path);
-    }
-    Ok(runs)
-}
-
-pub(super) fn build_identity_run(nodes: &Path, edges: &Path, output: &Path) -> Result<(), GfError> {
-    let mut node_reader = BufReader::new(File::open(nodes).map_err(storage_err)?);
-    let mut edge_reader = BufReader::new(File::open(edges).map_err(storage_err)?);
-    let mut node = read_node_surrogate_record(&mut node_reader)?;
-    let mut edge = read_record(&mut edge_reader)?;
-    let mut out = File::create(output).map_err(storage_err)?;
-    let mut block = Vec::with_capacity(BULK_IO_BYTES);
-    while node.is_some() || edge.is_some() {
-        let take_node = match (&node, &edge) {
-            (Some((node_uuid, _)), Some(edge_uuid)) => {
-                if node_uuid == edge_uuid {
-                    return Err(storage_err("UUID occurs in both identity domains"));
-                }
-                node_uuid < edge_uuid
-            }
-            (Some(_), None) => true,
-            _ => false,
-        };
-        let (uuid, surrogate, kind) = if take_node {
-            let (uuid, surrogate) = node.take().expect("node present");
-            node = read_node_surrogate_record(&mut node_reader)?;
-            (uuid, surrogate, 0_u8)
-        } else {
-            let uuid = edge.take().expect("edge present");
-            edge = read_record(&mut edge_reader)?;
-            (uuid, 0, 1_u8)
-        };
-        let mut record = [0_u8; IDENTITY_RECORD_WIDTH];
-        record[..16].copy_from_slice(&uuid);
-        record[16] = kind;
-        record[17..].copy_from_slice(&surrogate.to_be_bytes());
-        if block.len() + IDENTITY_RECORD_WIDTH > BULK_IO_BYTES {
-            out.write_all(&block).map_err(storage_err)?;
-            block.clear();
-        }
-        block.extend_from_slice(identity_codec::encoded(&record)?);
-    }
-    if !block.is_empty() {
-        out.write_all(&block).map_err(storage_err)?;
-    }
-    out.flush().map_err(storage_err)
-}
-
-pub(super) fn build_surrogate_run(
-    nodes: &Path,
-    scratch: &Path,
-    limits: UuidIndexBuildLimits,
-    metrics: &mut UuidIndexBuildMetrics,
-) -> Result<PathBuf, GfError> {
-    let mut reader = BufReader::new(File::open(nodes).map_err(storage_err)?);
-    let mut buffer = Vec::with_capacity(limits.run_records);
-    let mut runs = Vec::new();
-    while let Some((uuid, surrogate)) = read_node_surrogate_record(&mut reader)? {
-        buffer.push((surrogate, uuid));
-        metrics.peak_buffered_records = metrics.peak_buffered_records.max(buffer.len());
-        if buffer.len() == limits.run_records {
-            flush_surrogate_run(&mut buffer, scratch, &mut runs, metrics)?;
-        }
-    }
-    if !buffer.is_empty() {
-        flush_surrogate_run(&mut buffer, scratch, &mut runs, metrics)?;
-    }
-    if runs.is_empty() {
-        let path = scratch.join("surrogates-empty.run");
-        File::create(&path).map_err(storage_err)?;
-        runs.push(path);
-    }
-    let mut round = 0;
-    while runs.len() > 1 {
-        let mut next = Vec::new();
-        for (group, inputs) in runs.chunks(limits.merge_fan_in).enumerate() {
-            let output = scratch.join(format!("surrogates-merge-{round}-{group}.run"));
-            merge_surrogate_runs(inputs, &output)?;
-            next.push(output);
-        }
-        for run in runs {
-            let _ = fs::remove_file(run);
-        }
-        runs = next;
-        round += 1;
-    }
-    Ok(runs.pop().expect("surrogate run exists"))
-}
-
-fn flush_surrogate_run(
-    buffer: &mut Vec<(u64, [u8; 16])>,
-    scratch: &Path,
-    runs: &mut Vec<PathBuf>,
-    metrics: &mut UuidIndexBuildMetrics,
-) -> Result<(), GfError> {
-    buffer.sort_unstable();
-    if buffer.windows(2).any(|pair| pair[0].0 == pair[1].0) {
-        return Err(storage_err("duplicate node surrogate"));
-    }
-    let path = scratch.join(format!("surrogates-{:08}.run", runs.len()));
-    let mut bytes = Vec::with_capacity(buffer.len() * 24);
-    for (surrogate, uuid) in buffer.iter() {
-        bytes.extend_from_slice(&surrogate.to_be_bytes());
-        bytes.extend_from_slice(uuid);
-    }
-    let mut file = File::create(&path).map_err(storage_err)?;
-    file.write_all(&bytes).map_err(storage_err)?;
-    file.flush().map_err(storage_err)?;
-    buffer.clear();
-    runs.push(path);
-    metrics.temporary_runs += 1;
-    Ok(())
-}
-
-pub(super) fn merge_surrogate_runs(inputs: &[PathBuf], output: &Path) -> Result<(), GfError> {
-    let mut readers = inputs
-        .iter()
-        .map(|path| File::open(path).map(BufReader::new).map_err(storage_err))
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut heap = BinaryHeap::<Reverse<((u64, [u8; 16]), usize)>>::new();
-    for (index, reader) in readers.iter_mut().enumerate() {
-        if let Some(record) = read_surrogate_record(reader)? {
-            heap.push(Reverse((record, index)));
-        }
-    }
-    let mut out = File::create(output).map_err(storage_err)?;
-    let mut block = Vec::with_capacity(BULK_IO_BYTES);
-    let mut previous = None;
-    while let Some(Reverse(((surrogate, uuid), index))) = heap.pop() {
-        if previous.is_some_and(|(prior, _)| prior == surrogate) {
-            if previous.is_some_and(|(_, prior_uuid)| prior_uuid == uuid) {
-                if let Some(record) = read_surrogate_record(&mut readers[index])? {
-                    heap.push(Reverse((record, index)));
-                }
-                continue;
-            }
-            return Err(storage_err("duplicate node surrogate across runs"));
-        }
-        if block.len() + 24 > BULK_IO_BYTES {
-            out.write_all(&block).map_err(storage_err)?;
-            block.clear();
-        }
-        block.extend_from_slice(&surrogate.to_be_bytes());
-        block.extend_from_slice(&uuid);
-        previous = Some((surrogate, uuid));
-        if let Some(record) = read_surrogate_record(&mut readers[index])? {
-            heap.push(Reverse((record, index)));
-        }
-    }
-    if !block.is_empty() {
-        out.write_all(&block).map_err(storage_err)?;
-    }
-    out.flush().map_err(storage_err)
-}
-
-pub(super) fn read_surrogate_record(
-    reader: &mut BufReader<File>,
-) -> Result<Option<(u64, [u8; 16])>, GfError> {
-    let Some(record) = read_exact_record::<24>(reader)? else {
-        return Ok(None);
-    };
-    Ok(Some((
-        u64::from_be_bytes(record[..8].try_into().expect("fixed")),
-        record[8..].try_into().expect("fixed"),
-    )))
-}
-
 pub(super) fn read_exact_record<const N: usize>(
     reader: &mut impl Read,
 ) -> Result<Option<[u8; N]>, GfError> {
@@ -865,156 +388,6 @@ pub(super) fn read_exact_record<const N: usize>(
         }
     }
     Ok(Some(record))
-}
-
-fn flush_run(
-    buffer: &mut Vec<[u8; 16]>,
-    scratch: &Path,
-    prefix: &str,
-    runs: &mut Vec<PathBuf>,
-    metrics: &mut UuidIndexBuildMetrics,
-) -> Result<(), GfError> {
-    buffer.sort_unstable();
-    if buffer.windows(2).any(|pair| pair[0] == pair[1]) {
-        return Err(storage_err(format!(
-            "duplicate {prefix} UUID in canonical topology"
-        )));
-    }
-    let path = scratch.join(format!("{prefix}-{:08}.run", runs.len()));
-    let mut out = File::create(&path).map_err(storage_err)?;
-    let mut block = Vec::with_capacity(buffer.len().min(BULK_IO_BYTES / 16) * 16);
-    for value in buffer.iter() {
-        block.extend_from_slice(value);
-    }
-    if !block.is_empty() {
-        out.write_all(&block).map_err(storage_err)?;
-    }
-    out.flush().map_err(storage_err)?;
-    buffer.clear();
-    runs.push(path);
-    metrics.temporary_runs += 1;
-    Ok(())
-}
-
-fn merge_all(
-    mut runs: Vec<PathBuf>,
-    scratch: &Path,
-    prefix: &str,
-    fan_in: usize,
-    metrics: &mut UuidIndexBuildMetrics,
-) -> Result<PathBuf, GfError> {
-    let mut round = 0;
-    while runs.len() > 1 {
-        let mut next = Vec::new();
-        for (group, chunk) in runs.chunks(fan_in).enumerate() {
-            let path = scratch.join(format!("{prefix}-merge-{round}-{group}.run"));
-            merge_runs(chunk, &path)?;
-            next.push(path);
-            metrics.temporary_runs += 1;
-        }
-        for path in runs {
-            let _ = fs::remove_file(path);
-        }
-        runs = next;
-        round += 1;
-    }
-    Ok(runs.pop().expect("at least one run"))
-}
-
-fn merge_runs(inputs: &[PathBuf], output: &Path) -> Result<(), GfError> {
-    let mut readers = inputs
-        .iter()
-        .map(|p| File::open(p).map(BufReader::new).map_err(storage_err))
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut heap = BinaryHeap::<Reverse<([u8; 16], usize)>>::new();
-    for (idx, reader) in readers.iter_mut().enumerate() {
-        if let Some(value) = read_record(reader)? {
-            heap.push(Reverse((value, idx)));
-        }
-    }
-    let mut out = File::create(output).map_err(storage_err)?;
-    let mut block = Vec::with_capacity(BULK_IO_BYTES);
-    let mut previous = None;
-    while let Some(Reverse((value, idx))) = heap.pop() {
-        if previous == Some(value) {
-            return Err(storage_err("duplicate UUID across external index runs"));
-        }
-        if block.len() + 16 > BULK_IO_BYTES {
-            out.write_all(&block).map_err(storage_err)?;
-            block.clear();
-        }
-        block.extend_from_slice(&value);
-        previous = Some(value);
-        if let Some(next) = read_record(&mut readers[idx])? {
-            heap.push(Reverse((next, idx)));
-        }
-    }
-    if !block.is_empty() {
-        out.write_all(&block).map_err(storage_err)?;
-    }
-    out.flush().map_err(storage_err)?;
-    Ok(())
-}
-
-fn scan_entity_surrogate_runs(
-    paths: &[PathBuf],
-    uuid_column: &str,
-    surrogate_column: &str,
-    prefix: &str,
-    scratch: &Path,
-    limits: UuidIndexBuildLimits,
-    metrics: &mut UuidIndexBuildMetrics,
-) -> Result<Vec<PathBuf>, GfError> {
-    let mut buffer = Vec::<([u8; 16], u64)>::with_capacity(limits.run_records);
-    let mut runs = Vec::new();
-    for path in paths {
-        let reader =
-            ParquetRecordBatchReaderBuilder::try_new(crate::graph_admission::open_admitted(path)?)
-                .map_err(storage_err)?
-                .with_batch_size(limits.scan_batch_rows)
-                .build()
-                .map_err(storage_err)?;
-        for batch in reader {
-            let batch = batch.map_err(storage_err)?;
-            let uuids = batch
-                .column_by_name(uuid_column)
-                .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
-                .ok_or_else(|| storage_err(format!("{} lacks {uuid_column}", path.display())))?;
-            let surrogates = batch
-                .column_by_name(surrogate_column)
-                .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
-                .ok_or_else(|| {
-                    storage_err(format!("{} lacks {surrogate_column}", path.display()))
-                })?;
-            if uuids.len() != surrogates.len() {
-                return Err(storage_err(
-                    "identity UUID and surrogate columns differ in length",
-                ));
-            }
-            for row in 0..uuids.len() {
-                if uuids.is_null(row) || uuids.value(row).len() != 16 || surrogates.is_null(row) {
-                    return Err(storage_err(format!("invalid entity identity at row {row}")));
-                }
-                buffer.push((
-                    uuids.value(row).try_into().expect("length checked"),
-                    surrogates.value(row),
-                ));
-                metrics.peak_buffered_records = metrics.peak_buffered_records.max(buffer.len());
-                if buffer.len() == limits.run_records {
-                    flush_entity_surrogate_run(&mut buffer, scratch, prefix, &mut runs, metrics)?;
-                }
-            }
-        }
-    }
-    if !buffer.is_empty() {
-        flush_entity_surrogate_run(&mut buffer, scratch, prefix, &mut runs, metrics)?;
-    }
-    if runs.is_empty() {
-        let path = scratch.join(format!("{prefix}-surrogates-empty.run"));
-        File::create(&path).map_err(storage_err)?;
-        runs.push(path);
-    }
-    Ok(runs)
 }
 
 fn canonical_node_topology_inventory_path(relative: &str) -> bool {
@@ -1103,144 +476,6 @@ fn scan_pinned_entity_surrogate_runs(
         runs.push(path);
     }
     Ok(runs)
-}
-
-fn scan_node_surrogate_validation_runs(
-    paths: &[PathBuf],
-    scratch: &Path,
-    limits: UuidIndexBuildLimits,
-    metrics: &mut UuidIndexBuildMetrics,
-) -> Result<Vec<PathBuf>, GfError> {
-    let mut buffer = Vec::<u64>::with_capacity(limits.run_records);
-    let mut runs = Vec::new();
-    for path in paths {
-        let reader =
-            ParquetRecordBatchReaderBuilder::try_new(crate::graph_admission::open_admitted(path)?)
-                .map_err(storage_err)?
-                .with_batch_size(limits.scan_batch_rows)
-                .build()
-                .map_err(storage_err)?;
-        for batch in reader {
-            let batch = batch.map_err(storage_err)?;
-            let surrogates = batch
-                .column_by_name("node_id")
-                .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
-                .ok_or_else(|| storage_err(format!("{} lacks node_id", path.display())))?;
-            for row in 0..surrogates.len() {
-                if surrogates.is_null(row) || surrogates.value(row) == 0 {
-                    return Err(storage_err(format!("invalid node surrogate at row {row}")));
-                }
-                buffer.push(surrogates.value(row));
-                metrics.peak_buffered_records = metrics.peak_buffered_records.max(buffer.len());
-                if buffer.len() == limits.run_records {
-                    flush_node_surrogate_validation_run(&mut buffer, scratch, &mut runs, metrics)?;
-                }
-            }
-        }
-    }
-    if !buffer.is_empty() {
-        flush_node_surrogate_validation_run(&mut buffer, scratch, &mut runs, metrics)?;
-    }
-    if runs.is_empty() {
-        let path = scratch.join("node-surrogate-validation-empty.run");
-        File::create(&path).map_err(storage_err)?;
-        runs.push(path);
-    }
-    Ok(runs)
-}
-
-fn flush_node_surrogate_validation_run(
-    buffer: &mut Vec<u64>,
-    scratch: &Path,
-    runs: &mut Vec<PathBuf>,
-    metrics: &mut UuidIndexBuildMetrics,
-) -> Result<(), GfError> {
-    buffer.sort_unstable();
-    if buffer.windows(2).any(|pair| pair[0] == pair[1]) {
-        return Err(storage_err(
-            "duplicate node surrogate in canonical topology",
-        ));
-    }
-    let path = scratch.join(format!("node-surrogate-validation-{:08}.run", runs.len()));
-    let mut bytes = Vec::with_capacity(buffer.len() * 8);
-    for surrogate in buffer.iter() {
-        bytes.extend_from_slice(&surrogate.to_le_bytes());
-    }
-    let mut file = File::create(&path).map_err(storage_err)?;
-    if !bytes.is_empty() {
-        file.write_all(&bytes).map_err(storage_err)?;
-    }
-    file.flush().map_err(storage_err)?;
-    buffer.clear();
-    runs.push(path);
-    metrics.temporary_runs += 1;
-    Ok(())
-}
-
-fn merge_node_surrogate_validation_runs(
-    mut runs: Vec<PathBuf>,
-    scratch: &Path,
-    fan_in: usize,
-    metrics: &mut UuidIndexBuildMetrics,
-) -> Result<PathBuf, GfError> {
-    let mut round = 0;
-    while runs.len() > 1 {
-        let mut next = Vec::new();
-        for (group, chunk) in runs.chunks(fan_in).enumerate() {
-            let path = scratch.join(format!(
-                "node-surrogate-validation-merge-{round}-{group}.run"
-            ));
-            merge_node_surrogate_validation_group(chunk, &path)?;
-            next.push(path);
-            metrics.temporary_runs += 1;
-        }
-        for path in runs {
-            let _ = fs::remove_file(path);
-        }
-        runs = next;
-        round += 1;
-    }
-    Ok(runs.pop().expect("surrogate validation run exists"))
-}
-
-fn merge_node_surrogate_validation_group(inputs: &[PathBuf], output: &Path) -> Result<(), GfError> {
-    let mut readers = inputs
-        .iter()
-        .map(|path| File::open(path).map(BufReader::new).map_err(storage_err))
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut heap = BinaryHeap::<Reverse<(u64, usize)>>::new();
-    for (index, reader) in readers.iter_mut().enumerate() {
-        if let Some(value) = read_validation_surrogate(reader)? {
-            heap.push(Reverse((value, index)));
-        }
-    }
-    let mut bytes = Vec::with_capacity(BULK_IO_BYTES);
-    let mut out = File::create(output).map_err(storage_err)?;
-    let mut previous = None;
-    while let Some(Reverse((value, index))) = heap.pop() {
-        if previous == Some(value) {
-            return Err(storage_err(
-                "duplicate node surrogate across external index runs",
-            ));
-        }
-        if bytes.len() + 8 > BULK_IO_BYTES {
-            out.write_all(&bytes).map_err(storage_err)?;
-            bytes.clear();
-        }
-        bytes.extend_from_slice(&value.to_le_bytes());
-        previous = Some(value);
-        if let Some(next) = read_validation_surrogate(&mut readers[index])? {
-            heap.push(Reverse((next, index)));
-        }
-    }
-    if !bytes.is_empty() {
-        out.write_all(&bytes).map_err(storage_err)?;
-    }
-    out.flush().map_err(storage_err)
-}
-
-fn read_validation_surrogate(reader: &mut impl Read) -> Result<Option<u64>, GfError> {
-    Ok(read_exact_record::<8>(reader)?.map(u64::from_le_bytes))
 }
 
 pub(super) fn flush_entity_surrogate_run(
@@ -1345,108 +580,184 @@ pub(super) fn read_node_surrogate_record(
     )))
 }
 
-fn reject_cross_kind_identities(nodes: &Path, edges: &Path) -> Result<(), GfError> {
-    let mut node_reader = BufReader::new(File::open(nodes).map_err(storage_err)?);
-    let mut edge_reader = BufReader::new(File::open(edges).map_err(storage_err)?);
-    let mut node = read_record(&mut node_reader)?;
-    let mut edge = read_record(&mut edge_reader)?;
-    while let (Some(node_uuid), Some(edge_uuid)) = (node, edge) {
-        match node_uuid.cmp(&edge_uuid) {
-            std::cmp::Ordering::Less => node = read_record(&mut node_reader)?,
-            std::cmp::Ordering::Greater => edge = read_record(&mut edge_reader)?,
-            std::cmp::Ordering::Equal => {
+fn scan_entity_surrogate_runs(
+    paths: &[PathBuf],
+    uuid_column: &str,
+    surrogate_column: &str,
+    prefix: &str,
+    scratch: &Path,
+    limits: UuidIndexBuildLimits,
+    metrics: &mut UuidIndexBuildMetrics,
+) -> Result<Vec<PathBuf>, GfError> {
+    let mut buffer = Vec::<([u8; 16], u64)>::with_capacity(limits.run_records);
+    let mut runs = Vec::new();
+    for path in paths {
+        let reader =
+            ParquetRecordBatchReaderBuilder::try_new(crate::graph_admission::open_admitted(path)?)
+                .map_err(storage_err)?
+                .with_batch_size(limits.scan_batch_rows)
+                .build()
+                .map_err(storage_err)?;
+        for batch in reader {
+            let batch = batch.map_err(storage_err)?;
+            let uuids = batch
+                .column_by_name(uuid_column)
+                .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
+                .ok_or_else(|| storage_err(format!("{} lacks {uuid_column}", path.display())))?;
+            let surrogates = batch
+                .column_by_name(surrogate_column)
+                .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
+                .ok_or_else(|| {
+                    storage_err(format!("{} lacks {surrogate_column}", path.display()))
+                })?;
+            if uuids.len() != surrogates.len() {
                 return Err(storage_err(
-                    "UUID occurs in both node and edge identity domains",
+                    "identity UUID and surrogate columns differ in length",
                 ));
+            }
+            for row in 0..uuids.len() {
+                if uuids.is_null(row) || uuids.value(row).len() != 16 || surrogates.is_null(row) {
+                    return Err(storage_err(format!("invalid entity identity at row {row}")));
+                }
+                buffer.push((
+                    uuids.value(row).try_into().expect("length checked"),
+                    surrogates.value(row),
+                ));
+                metrics.peak_buffered_records = metrics.peak_buffered_records.max(buffer.len());
+                if buffer.len() == limits.run_records {
+                    flush_entity_surrogate_run(&mut buffer, scratch, prefix, &mut runs, metrics)?;
+                }
             }
         }
     }
+    if !buffer.is_empty() {
+        flush_entity_surrogate_run(&mut buffer, scratch, prefix, &mut runs, metrics)?;
+    }
+    if runs.is_empty() {
+        let path = scratch.join(format!("{prefix}-surrogates-empty.run"));
+        File::create(&path).map_err(storage_err)?;
+        runs.push(path);
+    }
+    Ok(runs)
+}
+
+pub(super) fn build_surrogate_run(
+    nodes: &Path,
+    scratch: &Path,
+    limits: UuidIndexBuildLimits,
+    metrics: &mut UuidIndexBuildMetrics,
+) -> Result<PathBuf, GfError> {
+    let mut reader = BufReader::new(File::open(nodes).map_err(storage_err)?);
+    let mut buffer = Vec::with_capacity(limits.run_records);
+    let mut runs = Vec::new();
+    while let Some((uuid, surrogate)) = read_node_surrogate_record(&mut reader)? {
+        buffer.push((surrogate, uuid));
+        metrics.peak_buffered_records = metrics.peak_buffered_records.max(buffer.len());
+        if buffer.len() == limits.run_records {
+            flush_surrogate_run(&mut buffer, scratch, &mut runs, metrics)?;
+        }
+    }
+    if !buffer.is_empty() {
+        flush_surrogate_run(&mut buffer, scratch, &mut runs, metrics)?;
+    }
+    if runs.is_empty() {
+        let path = scratch.join("surrogates-empty.run");
+        File::create(&path).map_err(storage_err)?;
+        runs.push(path);
+    }
+    let mut round = 0;
+    while runs.len() > 1 {
+        let mut next = Vec::new();
+        for (group, inputs) in runs.chunks(limits.merge_fan_in).enumerate() {
+            let output = scratch.join(format!("surrogates-merge-{round}-{group}.run"));
+            merge_surrogate_runs(inputs, &output)?;
+            next.push(output);
+        }
+        for run in runs {
+            let _ = fs::remove_file(run);
+        }
+        runs = next;
+        round += 1;
+    }
+    Ok(runs.pop().expect("surrogate run exists"))
+}
+
+pub(super) fn read_surrogate_record(
+    reader: &mut BufReader<File>,
+) -> Result<Option<(u64, [u8; 16])>, GfError> {
+    let Some(record) = read_exact_record::<24>(reader)? else {
+        return Ok(None);
+    };
+    Ok(Some((
+        u64::from_be_bytes(record[..8].try_into().expect("fixed")),
+        record[8..].try_into().expect("fixed"),
+    )))
+}
+
+fn flush_surrogate_run(
+    buffer: &mut Vec<(u64, [u8; 16])>,
+    scratch: &Path,
+    runs: &mut Vec<PathBuf>,
+    metrics: &mut UuidIndexBuildMetrics,
+) -> Result<(), GfError> {
+    buffer.sort_unstable();
+    if buffer.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(storage_err("duplicate node surrogate"));
+    }
+    let path = scratch.join(format!("surrogates-{:08}.run", runs.len()));
+    let mut bytes = Vec::with_capacity(buffer.len() * 24);
+    for (surrogate, uuid) in buffer.iter() {
+        bytes.extend_from_slice(&surrogate.to_be_bytes());
+        bytes.extend_from_slice(uuid);
+    }
+    let mut file = File::create(&path).map_err(storage_err)?;
+    file.write_all(&bytes).map_err(storage_err)?;
+    file.flush().map_err(storage_err)?;
+    buffer.clear();
+    runs.push(path);
+    metrics.temporary_runs += 1;
     Ok(())
 }
 
-fn read_record(reader: &mut BufReader<File>) -> Result<Option<[u8; 16]>, GfError> {
-    read_exact_record::<16>(reader)
-}
-
-#[cfg(test)]
-pub(super) fn publish_data(
-    source: &Path,
-    root: &Path,
-    _staging: &Path,
-    kind: &str,
-    generation: u64,
-    record_bytes: u64,
-) -> Result<FileRecord, GfError> {
-    let length = source.metadata().map_err(storage_err)?.len();
-    if record_bytes != IDENTITY_RECORD_BYTES && length % record_bytes != 0 {
-        return Err(storage_err("internal run has a partial index record"));
-    }
-    let mut input = File::open(source).map_err(storage_err)?;
-    let (sha256, xxh64, blocks, count) = describe_blocks(&mut input, record_bytes)?;
-    let name = format!("{kind}-{generation}-{}.uuidx", &sha256[..16]);
-    let directory = graphforge_filesystem::StableDirectory::open(root).map_err(storage_err)?;
-    let target = std::ffi::OsStr::new(&name);
-    if let Ok(mut existing) = directory.open_child_file(target) {
-        if existing.metadata().map_err(storage_err)?.len() != length
-            || sha256_reader(&mut existing)? != sha256
-        {
-            return Err(storage_err(
-                "existing immutable run does not match its content name",
-            ));
+pub(super) fn merge_surrogate_runs(inputs: &[PathBuf], output: &Path) -> Result<(), GfError> {
+    let mut readers = inputs
+        .iter()
+        .map(|path| File::open(path).map(BufReader::new).map_err(storage_err))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut heap = BinaryHeap::<Reverse<((u64, [u8; 16]), usize)>>::new();
+    for (index, reader) in readers.iter_mut().enumerate() {
+        if let Some(record) = read_surrogate_record(reader)? {
+            heap.push(Reverse((record, index)));
         }
-    } else {
-        let temp_name = std::ffi::OsString::from(format!(".run-{}.tmp", Uuid::new_v4()));
-        let mut temp = directory
-            .create_child_file(&temp_name)
-            .map_err(storage_err)?;
-        let temp_identity = graphforge_filesystem::file_identity(&temp).map_err(storage_err)?;
-        let mut install = || -> Result<(), GfError> {
-            let mut input = File::open(source).map_err(storage_err)?;
-            std::io::copy(&mut input, &mut temp).map_err(storage_err)?;
-            crate::durable_commit::seal_file(&temp).map_err(storage_err)?;
-            match directory.link_child_into(&temp_name, &temp, temp_identity, &directory, target) {
-                Ok(_) => Ok(()),
-                Err(_) => {
-                    let mut existing = directory.open_child_file(target).map_err(storage_err)?;
-                    if existing.metadata().map_err(storage_err)?.len() != length
-                        || sha256_reader(&mut existing)? != sha256
-                    {
-                        return Err(storage_err("concurrent immutable run mismatch"));
-                    }
-                    Ok(())
+    }
+    let mut out = File::create(output).map_err(storage_err)?;
+    let mut block = Vec::with_capacity(BULK_IO_BYTES);
+    let mut previous = None;
+    while let Some(Reverse(((surrogate, uuid), index))) = heap.pop() {
+        if previous.is_some_and(|(prior, _)| prior == surrogate) {
+            if previous.is_some_and(|(_, prior_uuid)| prior_uuid == uuid) {
+                if let Some(record) = read_surrogate_record(&mut readers[index])? {
+                    heap.push(Reverse((record, index)));
                 }
+                continue;
             }
-        };
-        let result = install();
-        let _ = directory.unlink_child_if_identity(&temp_name, temp_identity);
-        result?;
-        crate::durable_commit::acknowledge_directory(&directory).map_err(storage_err)?;
-    }
-    Ok(FileRecord {
-        name,
-        count,
-        sha256,
-        xxh64,
-        blocks,
-    })
-}
-
-#[cfg(test)]
-fn sha256_reader(reader: &mut impl Read) -> Result<String, GfError> {
-    let mut digest = Sha256::new();
-    let mut buffer = vec![0_u8; 64 * 1024];
-    loop {
-        let read = reader.read(&mut buffer).map_err(storage_err)?;
-        if read == 0 {
-            break;
+            return Err(storage_err("duplicate node surrogate across runs"));
         }
-        digest.update(&buffer[..read]);
+        if block.len() + 24 > BULK_IO_BYTES {
+            out.write_all(&block).map_err(storage_err)?;
+            block.clear();
+        }
+        block.extend_from_slice(&surrogate.to_be_bytes());
+        block.extend_from_slice(&uuid);
+        previous = Some((surrogate, uuid));
+        if let Some(record) = read_surrogate_record(&mut readers[index])? {
+            heap.push(Reverse((record, index)));
+        }
     }
-    let mut encoded = String::with_capacity(64);
-    for byte in digest.finalize() {
-        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    if !block.is_empty() {
+        out.write_all(&block).map_err(storage_err)?;
     }
-    Ok(encoded)
+    out.flush().map_err(storage_err)
 }
 
 #[cfg(test)]

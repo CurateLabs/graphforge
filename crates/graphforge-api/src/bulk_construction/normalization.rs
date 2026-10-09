@@ -9,7 +9,7 @@ use super::{
     RecordBatch, Schema, SchemaRef, Sha256, StringArray, StructArray, Time64NanosecondArray,
     TimestampMicrosecondArray, UInt8Array, UInt16Array, UInt32Array, Uuid, ValidatedBulkEdges,
     ValidatedBulkNodes, batch_error, candidate_endpoint_uuids, candidate_uuids, contract_error,
-    existing_edge_context, field_error, indexed_existing, open_membership_index, row_error,
+    existing_edge_context, field_error, open_identity_probe, row_error, taken_identities,
 };
 
 const NODE_REQUIRED: [(&str, DataType, bool); 2] = [
@@ -1095,19 +1095,8 @@ impl GraphForge {
         let mut existing = HashSet::new();
         if reject_existing {
             let candidates = candidate_uuids(batches, BulkInputKind::Node, "node_uuid")?;
-            let mut index = open_membership_index(self, BulkInputKind::Node)?;
-            existing = indexed_existing(
-                index.as_mut(),
-                &candidates,
-                graphforge_storage::UuidIndexKind::Node,
-                BulkInputKind::Node,
-            )?;
-            existing.extend(indexed_existing(
-                index.as_mut(),
-                &candidates,
-                graphforge_storage::UuidIndexKind::Edge,
-                BulkInputKind::Node,
-            )?);
+            let mut probe = open_identity_probe(self, BulkInputKind::Node)?;
+            existing = taken_identities(probe.as_mut(), &candidates, BulkInputKind::Node)?;
         }
         let mut observed = HashSet::new();
         let mut rows = Vec::new();

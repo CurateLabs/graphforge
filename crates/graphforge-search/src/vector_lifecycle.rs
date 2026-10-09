@@ -396,7 +396,7 @@ where
     if let Some(error) = failure {
         return Err(error);
     }
-    identity.finish(rows, &mut checkpoint)?;
+    identity.finish(&mut checkpoint)?;
     let snapshot = SearchSourceSnapshot::from_admitted_files(
         project_dir,
         source_generation,
@@ -593,7 +593,6 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_members(&dir, &[(1, vec![9])]);
         corrupt_node_surrogate_to_null(dir.path());
-        std::fs::remove_dir_all(dir.path().join("topology/uuid-membership")).unwrap();
         assert!(matches!(
             project_label_members(
                 dir.path(),

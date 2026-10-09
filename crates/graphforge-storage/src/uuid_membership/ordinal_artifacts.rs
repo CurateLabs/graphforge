@@ -1006,7 +1006,6 @@ pub(crate) fn publish_v4_construction_artifacts(
     encoded: &graphforge_filesystem::StableDirectory,
     bundle: V4ConstructionArtifactBundle,
     generation: u64,
-    topology_delta_sha256: &str,
     parent: Option<(
         &crate::ResolvedProjectGeneration,
         &crate::V4OrdinalIdentityManifest,
@@ -1052,7 +1051,6 @@ pub(crate) fn publish_v4_construction_artifacts(
             &metrics,
             &mut publications,
             generation,
-            topology_delta_sha256,
             &local_names,
             allocation,
         )?;
@@ -1256,7 +1254,6 @@ fn publish_v4_construction_artifacts_inner(
     metrics: &V4OrdinalBuildMetrics,
     publications: &mut Vec<(String, V4PublicationGuard)>,
     generation: u64,
-    topology_delta_sha256: &str,
     local_names: &BTreeSet<String>,
     allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<
@@ -1277,10 +1274,14 @@ fn publish_v4_construction_artifacts_inner(
         .open_child_directory(std::ffi::OsStr::new("uuid-membership"))
         .map_err(storage_err)?;
     let manifest_body = serde_json::to_vec(manifest).map_err(storage_err)?;
+    // The delta an initial or staged build publishes is exactly its node
+    // mapping, which the manifest's forward artifacts name by content.
+    let mut delta_binding = b"graphforge/v4-construction-delta/v1".to_vec();
+    delta_binding.extend_from_slice(&manifest_body);
     let receipt = TopologyIndexReceipt {
         nonce: Uuid::new_v4().simple().to_string(),
         expected_generation: generation,
-        topology_delta_sha256: topology_delta_sha256.to_owned(),
+        topology_delta_sha256: hex_sha256(&delta_binding),
         manifest_sha256: hex_sha256(&manifest_body),
     };
     let receipt_body = serde_json::to_vec(&receipt).map_err(storage_err)?;

@@ -112,7 +112,7 @@ emits the whole encoded generation:
    `edge_id` is the rank. A missing endpoint, an endpoint that is an edge, an
    edge UUID that equals a node UUID and a repeated UUID are refused.
 4. **Emit** writes the runtime catalog, node and edge Parquet windows, property
-   overlays, the UUID membership and v4 ordinal artifacts, and the CSR shards.
+   overlays, the v4 ordinal artifacts, and the CSR shards.
    Each artifact is hashed (SHA-256, XXH64) from the bytes written once.
 
 `commit` then installs and publishes the encoded inventory exactly as for any

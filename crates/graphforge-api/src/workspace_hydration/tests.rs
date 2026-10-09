@@ -277,13 +277,9 @@ fn compact_graph_root_reopens_through_ordinary_api_and_rematerializes() {
         .execute("MATCH (n:Person) RETURN n.name AS name")
         .expect("ordinary query over compact-root generation");
     assert_eq!(result.stats.rows_produced, 1);
-    // Mutable route and UUID controls are private; immutable payloads stay shared.
-    let controls = [
-        "semantic-routes.json",
-        "topology/uuid-membership/manifest.json",
-        "topology/uuid-membership/topology-receipt.json",
-    ];
-    assert_eq!(reopened.graph_open_evidence().files_copied, 3);
+    // The mutable route control is private; immutable payloads stay shared.
+    let controls = ["semantic-routes.json"];
+    assert_eq!(reopened.graph_open_evidence().files_copied, 1);
     let mut control_bytes = 0;
     for relative in controls {
         let file = std::fs::File::open(reopened.dir().join(relative)).unwrap();

@@ -735,26 +735,25 @@ pub fn delete_nodes<S: BuildHasher>(
     dir: &Path,
     node_uuids: &HashSet<[u8; 16], S>,
 ) -> Result<u64, GfError> {
-    crate::uuid_membership::ensure_uuid_membership_migrated(dir)?;
     let mut staged = RewriteBatch::new();
     let removed = stage_delete_nodes(&mut staged, dir, node_uuids)?;
-    let mut snapshot = None;
-    if let Some(g) =
-        committed_uuid_generation(crate::uuid_membership::commit_uuid_topology_rewrite(
-            dir,
-            staged,
-            &crate::uuid_membership::UuidTopologyDelta {
-                nodes: Vec::new(),
-                edges: Vec::new(),
-                deleted_nodes: if removed == 0 {
-                    Vec::new()
-                } else {
-                    node_uuids.iter().copied().map(Uuid::from_bytes).collect()
-                },
-                deleted_edges: Vec::new(),
+    let mut probe = None;
+    if let Some(g) = crate::uuid_membership::commit_uuid_topology_rewrite(
+        dir,
+        staged,
+        &crate::uuid_membership::UuidTopologyDelta {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            deleted_nodes: if removed == 0 {
+                Vec::new()
+            } else {
+                node_uuids.iter().copied().map(Uuid::from_bytes).collect()
             },
-            &mut snapshot,
-        )?)?
+            deleted_edges: Vec::new(),
+        },
+        &mut probe,
+    )?
+    .generation()
     {
         crate::adjacency_delta::discard_segment(dir, g); // delete writes no segment
     }
@@ -774,26 +773,25 @@ pub fn delete_edges<S: BuildHasher>(
     dir: &Path,
     edge_uuids: &HashSet<[u8; 16], S>,
 ) -> Result<u64, GfError> {
-    crate::uuid_membership::ensure_uuid_membership_migrated(dir)?;
     let mut staged = RewriteBatch::new();
     let removed = stage_delete_edges(&mut staged, dir, edge_uuids)?;
-    let mut snapshot = None;
-    if let Some(g) =
-        committed_uuid_generation(crate::uuid_membership::commit_uuid_topology_rewrite(
-            dir,
-            staged,
-            &crate::uuid_membership::UuidTopologyDelta {
-                nodes: Vec::new(),
-                edges: Vec::new(),
-                deleted_nodes: Vec::new(),
-                deleted_edges: if removed == 0 {
-                    Vec::new()
-                } else {
-                    edge_uuids.iter().copied().map(Uuid::from_bytes).collect()
-                },
+    let mut probe = None;
+    if let Some(g) = crate::uuid_membership::commit_uuid_topology_rewrite(
+        dir,
+        staged,
+        &crate::uuid_membership::UuidTopologyDelta {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            deleted_nodes: Vec::new(),
+            deleted_edges: if removed == 0 {
+                Vec::new()
+            } else {
+                edge_uuids.iter().copied().map(Uuid::from_bytes).collect()
             },
-            &mut snapshot,
-        )?)?
+        },
+        &mut probe,
+    )?
+    .generation()
     {
         crate::adjacency_delta::discard_segment(dir, g); // delete writes no segment
     }
@@ -828,56 +826,37 @@ pub fn delete_nodes_and_edges_with_topology<S: BuildHasher>(
     edge_uuids: &HashSet<[u8; 16], S>,
     topology: Option<std::sync::Arc<crate::TopologyFileAuthority>>,
 ) -> Result<(u64, u64), GfError> {
-    crate::uuid_membership::ensure_uuid_membership_migrated_with_topology(dir, topology.clone())?;
     let mut staged = RewriteBatch::new();
     if let Some(topology) = topology {
         staged.bind_topology_authority(topology)?;
     }
     let edges_removed = stage_delete_edges(&mut staged, dir, edge_uuids)?;
     let nodes_removed = stage_delete_nodes(&mut staged, dir, node_uuids)?;
-    let mut snapshot = None;
-    if let Some(g) =
-        committed_uuid_generation(crate::uuid_membership::commit_uuid_topology_rewrite(
-            dir,
-            staged,
-            &crate::uuid_membership::UuidTopologyDelta {
-                nodes: Vec::new(),
-                edges: Vec::new(),
-                deleted_nodes: if nodes_removed == 0 {
-                    Vec::new()
-                } else {
-                    node_uuids.iter().copied().map(Uuid::from_bytes).collect()
-                },
-                deleted_edges: if edges_removed == 0 {
-                    Vec::new()
-                } else {
-                    edge_uuids.iter().copied().map(Uuid::from_bytes).collect()
-                },
+    let mut probe = None;
+    if let Some(g) = crate::uuid_membership::commit_uuid_topology_rewrite(
+        dir,
+        staged,
+        &crate::uuid_membership::UuidTopologyDelta {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            deleted_nodes: if nodes_removed == 0 {
+                Vec::new()
+            } else {
+                node_uuids.iter().copied().map(Uuid::from_bytes).collect()
             },
-            &mut snapshot,
-        )?)?
+            deleted_edges: if edges_removed == 0 {
+                Vec::new()
+            } else {
+                edge_uuids.iter().copied().map(Uuid::from_bytes).collect()
+            },
+        },
+        &mut probe,
+    )?
+    .generation()
     {
         crate::adjacency_delta::discard_segment(dir, g); // delete writes no segment
     }
     Ok((nodes_removed, edges_removed))
-}
-
-fn committed_uuid_generation(
-    outcome: crate::uuid_membership::CommittedUuidTopologyRewrite,
-) -> Result<Option<u64>, GfError> {
-    match outcome {
-        crate::uuid_membership::CommittedUuidTopologyRewrite::NoTopologyChange => Ok(None),
-        crate::uuid_membership::CommittedUuidTopologyRewrite::Committed { generation, .. } => {
-            Ok(Some(generation))
-        }
-        crate::uuid_membership::CommittedUuidTopologyRewrite::CommittedNeedsRefresh {
-            generation,
-            error,
-            ..
-        } => Err(GfError::Storage(format!(
-            "topology generation {generation} committed but UUID index snapshot refresh failed: {error}"
-        ))),
-    }
 }
 
 /// Return the `edge_uuid`s of every edge incident to any of `node_uuids`

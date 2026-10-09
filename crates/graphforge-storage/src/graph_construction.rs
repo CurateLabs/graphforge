@@ -123,9 +123,19 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use uuid::Uuid;
 
+use crate::TopologyIdentityProbe;
 use crate::UuidIndexKind;
 use crate::construction_detail_codec::{DetailCodec, DetailValidator};
-use crate::uuid_membership::{AuthenticatedUuidIndexSnapshot, UuidConstructionSnapshotWork};
+
+/// What the construction session needs to know about its parent topology.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct UuidConstructionSnapshotWork {
+    pub authentication_bytes: u64,
+    pub authentication_blocks: u64,
+    pub live_nodes: u64,
+    pub live_edges: u64,
+    pub max_node_surrogate: u64,
+}
 
 use crate::construction_record_layout::{
     BASE_IDENTITY_WIDTH, ENDPOINT_WIDTH, FORMAT_VERSION, IDENTITY_SURROGATE_OFFSET,
@@ -650,9 +660,6 @@ pub struct ConstructionShape {
     pub semantic_authority_sha256: Option<String>,
     /// Parent generation retained by the publisher; zero denotes an empty base.
     pub parent_topology_generation: u64,
-    /// Authenticated parent UUID-manifest authority. The shaped identities file
-    /// contains only this session's delta and never copies the parent payload.
-    pub parent_uuid_manifest_sha256: Option<String>,
     /// UUID-sorted node/edge identity records with assigned surrogates.
     pub identities: String,
     /// UUID-sorted node type records, when nodes were staged.
@@ -740,8 +747,8 @@ impl ConstructionSemanticAuthority {
 
 pub use crate::graph_construction_encoding::{
     BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkRoute, BulkSource,
-    BulkStagedReason, ConstructionRetainedArtifact, GraphConstructionEncoding,
-    GraphConstructionEncodingEvidence, GraphConstructionEncodingInvocationEvidence,
+    BulkStagedReason, GraphConstructionEncoding, GraphConstructionEncodingEvidence,
+    GraphConstructionEncodingInvocationEvidence,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1046,7 +1053,7 @@ pub struct GraphConstructionSession {
     project: StableDirectory,
     root: StableDirectory,
     checkpoint: Checkpoint,
-    base_snapshot: Option<AuthenticatedUuidIndexSnapshot>,
+    base_snapshot: Option<TopologyIdentityProbe>,
     parent_catalog: RuntimeCatalog,
     compact_parent: Option<crate::GraphFilesInventory>,
     semantic_authority: Option<ConstructionSemanticAuthority>,
@@ -1619,25 +1626,22 @@ impl GraphConstructionSession {
             }
             (None, UuidConstructionSnapshotWork::default())
         } else {
-            let mut snapshot = if let Some(inventory) = &compact_inventory {
-                AuthenticatedUuidIndexSnapshot::open_from_compact_inventory(
+            let snapshot = if let Some(inventory) = &compact_inventory {
+                TopologyIdentityProbe::open_compact(
                     project_dir,
                     inventory,
                     parent_topology_generation,
                 )?
             } else {
-                AuthenticatedUuidIndexSnapshot::open_at_generation(
-                    graph_source_dir,
-                    parent_topology_generation,
-                )?
+                let files = crate::TopologyFiles::discover_legacy(graph_source_dir)?;
+                TopologyIdentityProbe::open(graph_source_dir, &files, parent_topology_generation)?
             };
             let max_node_surrogate = crate::writer::read_surrogate_tails(graph_source_dir)?
                 .ok_or_else(|| storage("nonempty parent lacks surrogate tails"))?
                 .0;
-            let (authentication_bytes, authentication_blocks) = snapshot.take_authentication_work();
             let work = UuidConstructionSnapshotWork {
-                authentication_bytes,
-                authentication_blocks,
+                authentication_bytes: snapshot.authenticated_bytes(),
+                authentication_blocks: snapshot.authenticated_objects(),
                 live_nodes: snapshot.count(UuidIndexKind::Node),
                 live_edges: snapshot.count(UuidIndexKind::Edge),
                 max_node_surrogate,

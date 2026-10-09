@@ -14,7 +14,7 @@
 //! - Pass 2 decodes edges in parallel, resolves endpoints through the node
 //!   index, orders and ranks edges, and rejects identity collisions.
 //! - Pass 3 emits catalog, node and edge tables, property overlays, the
-//!   membership and ordinal indexes, and the adjacency CSR.
+//!   ordinal node-identity facet, and the adjacency CSR.
 //!
 //! Intermediates are never synced or hashed. A crash discards them and the
 //! build reruns from the sources (ADR 0038 as amended for initial builds).
@@ -30,8 +30,8 @@ use super::{
     GfError, GraphConstructionBudgets, GraphConstructionEncoding,
     GraphConstructionEncodingEvidence, GraphConstructionEncodingInvocationEvidence, INVENTORY,
     OntologyMode, OsStr, Path, RecordBatch, SemanticRouteKind, SemanticStorageBindings, Sha256,
-    StableDirectory, StringArray, SymbolKind, UInt64Array, Uuid, Write, account_cache_release,
-    adjacency, authenticate_inventory_control, copy_artifact, edge_batch, edge_property_batch,
+    StableDirectory, StringArray, SymbolKind, UInt64Array, Uuid, Write, adjacency,
+    authenticate_inventory_control, copy_artifact, edge_batch, edge_property_batch,
     encoded_route_component, hex, index_artifact, install_json, lanes, node_batch,
     node_property_batch, remove_encoding_intent, required_string, resolve_owner, select_rows,
     storage, with_route_metadata_batch, write_surrogate_tails,
@@ -40,7 +40,6 @@ use super::{
 mod budget;
 mod csr;
 mod emit;
-mod identities;
 mod install;
 mod ordered;
 mod plan;
@@ -60,7 +59,6 @@ pub(crate) use property_rows::ForcedPropertyFrames;
 
 use budget::ScratchPlan;
 use emit::{EdgeEmitter, RelationStats, Semantics};
-use identities::EdgeUuids;
 use install::Installer;
 use plan::PassMeter;
 use scratch::Scratch;
@@ -153,46 +151,28 @@ struct ScratchReport {
     peak_csr_carry_entries: u64,
 }
 
-struct Membership {
-    index: crate::uuid_membership::ConstructionIndexEncoding,
-    v4_artifacts: Vec<crate::uuid_membership::ConstructionIndexOutput>,
-    v4_publication: crate::uuid_membership::V4OrdinalPublicationMetrics,
-    v4_metrics: crate::uuid_membership::V4OrdinalBuildMetrics,
+/// The ordinal node-identity facet a build publishes.
+struct OrdinalFacet {
+    artifacts: Vec<crate::uuid_membership::ConstructionIndexOutput>,
+    publication: crate::uuid_membership::V4OrdinalPublicationMetrics,
+    metrics: crate::uuid_membership::V4OrdinalBuildMetrics,
 }
 
-/// UUID membership index (`identities-v5`, `node-surrogates-v5`) and the v4
-/// ordinal artifacts, both streamed from the ranked arrays.
-fn build_membership(
+/// The v4 ordinal artifacts, streamed from the ranked node array.
+fn build_ordinal_facet(
     output: &StableDirectory,
     nodes: &NodeTable,
-    edge_uuids: EdgeUuids<'_>,
-    edge_count: u64,
     generation: u64,
     cancel: &AtomicBool,
-) -> Result<Membership, GfError> {
+) -> Result<OrdinalFacet, GfError> {
     let mut cancelled = || cancel.load(Ordering::Acquire);
-    let stream = identities::IdentityStream::new(&nodes.uuids, edge_uuids, edge_count);
-    let len = stream.byte_len();
-    let index = crate::uuid_membership::encode_construction_index(
-        crate::uuid_membership::ConstructionIdentityInput::Stream {
-            reader: Box::new(stream),
-            len,
-        },
-        output.physical(),
-        generation,
-        0,
-        None,
-        nodes.uuids.len() as u64,
-        edge_count,
-        &mut cancelled,
-        output.allocation(),
-    )?;
+    crate::uuid_membership::clear_private_ordinal_residue(output)?;
     let membership_dir = output
-        .open_child_directory(OsStr::new("graph"))
+        .create_child_directory(OsStr::new("graph"))
         .map_err(storage)?
-        .open_child_directory(OsStr::new("topology"))
+        .create_child_directory(OsStr::new("topology"))
         .map_err(storage)?
-        .open_child_directory(OsStr::new("uuid-membership"))
+        .create_child_directory(OsStr::new("uuid-membership"))
         .map_err(storage)?;
     let cache_window =
         graphforge_filesystem::cache_release_window_for_streams(5).map_err(storage)?;
@@ -206,21 +186,19 @@ fn build_membership(
         writer.push_pair(Uuid::from_bytes(*uuid), position as u64 + 1, &mut cancelled)?;
     }
     let bundle = writer.finish()?;
-    let (v4_artifacts, v4_publication, v4_metrics) =
+    let (artifacts, publication, metrics) =
         crate::uuid_membership::publish_v4_construction_artifacts(
             output.physical(),
             bundle,
             generation,
-            &index.source_sha256,
             None,
             &mut cancelled,
             output.allocation(),
         )?;
-    Ok(Membership {
-        index,
-        v4_artifacts,
-        v4_publication,
-        v4_metrics,
+    Ok(OrdinalFacet {
+        artifacts,
+        publication,
+        metrics,
     })
 }
 
@@ -555,21 +533,13 @@ pub(crate) fn encode_bulk(
     passes.extend([meter.finish()]);
     crate::graph_construction::construction_failpoint("bulk.after_tables");
 
-    // Membership streams the sorted UUIDs; once it has, the edge UUIDs (16 B per
+    // The ordinal facet streams the sorted node UUIDs; the edge UUIDs (16 B per
     // edge) are released before the adjacency pass sorts its entries.
-    let meter = PassMeter::start("membership");
-    let edge_uuids = match (&edge_side, &ranked_edges, &scratch) {
-        (EdgeSide::Scratch(_), Some((_, ranked)), Some(scratch)) => {
-            EdgeUuids::scratch(scratch, ranked.uuid_files.clone())
-        }
-        (EdgeSide::Memory(edges), _, _) => EdgeUuids::memory(&edges.uuids),
-        _ => return Err(storage("the over-budget build lost its scratch state")),
-    };
-    let membership =
-        build_membership(&output, &nodes, edge_uuids, edge_count, generation, &cancel)?;
+    let meter = PassMeter::start("ordinal");
+    let ordinal = build_ordinal_facet(&output, &nodes, generation, &cancel)?;
     check_cancelled(&cancel)?;
     passes.extend([meter.finish()]);
-    crate::graph_construction::construction_failpoint("bulk.after_membership");
+    crate::graph_construction::construction_failpoint("bulk.after_ordinal");
     if let EdgeSide::Memory(edges) = &mut edge_side {
         edges.uuids = Vec::new();
     }
@@ -829,13 +799,13 @@ pub(crate) fn encode_bulk(
     evidence.adjacency.csr_shards = adjacency.shards;
     evidence.output_write_bytes += installer.written_bytes();
 
-    let Membership {
-        index,
-        v4_artifacts,
-        v4_publication,
-        v4_metrics,
-    } = membership;
+    let OrdinalFacet {
+        artifacts: v4_artifacts,
+        publication: v4_publication,
+        metrics: v4_metrics,
+    } = ordinal;
     evidence.ordinal_records = v4_metrics.input_records;
+    evidence.edge_records = edge_count;
     evidence.ordinal_artifact_write_bytes = v4_metrics.artifact_bytes;
     evidence.ordinal_artifact_write_operations = v4_metrics.write_blocks;
     evidence.ordinal_ranges = u64::try_from(v4_metrics.ranges).map_err(storage)?;
@@ -850,19 +820,7 @@ pub(crate) fn encode_bulk(
     evidence.ordinal_peak_temporary_bytes = v4_metrics
         .peak_temporary_bytes
         .max(v4_publication.peak_temporary_bytes);
-    evidence.membership_records = index.input_records;
-    evidence.membership_write_bytes = index.final_write_bytes;
-    evidence.membership_total_write_bytes = index.write_bytes;
-    evidence.membership_read_bytes = index.read_bytes;
-    evidence.membership_read_operations = index.read_operations;
-    evidence.membership_write_operations = index.write_operations;
-    evidence.membership_fsync_operations = index.fsync_operations;
-    evidence.membership_created_runs = index.created_runs;
-    evidence.membership_peak_buffer_bytes = index.peak_buffer_bytes;
-    evidence.membership_peak_temporary_bytes = index.peak_temporary_bytes;
-    account_cache_release(index.cache_release, &mut evidence)?;
     artifacts.extend(installer.into_artifacts()?);
-    artifacts.extend(index.artifacts.into_iter().map(index_artifact));
     artifacts.extend(v4_artifacts.into_iter().map(index_artifact));
 
     artifacts.sort_unstable_by(|left, right| left.path.cmp(&right.path));
@@ -881,14 +839,13 @@ pub(crate) fn encode_bulk(
         shape_inputs_sha256: shape.runtime_catalog_inputs_sha256.clone(),
         shape_authority_sha256: shape_authority_sha256.to_owned(),
         artifacts,
-        retained_artifacts: Vec::new(),
         evidence,
         invocation: GraphConstructionEncodingInvocationEvidence::default(),
     };
     crate::graph_construction::construction_failpoint("bulk.before_inventory");
     install_json(&output, INVENTORY, &completed)?;
     crate::graph_construction::construction_failpoint("bulk.after_inventory_before_intent_removal");
-    authenticate_inventory_control(&completed, None)?;
+    authenticate_inventory_control(&completed)?;
     remove_encoding_intent(&output)?;
     passes.extend([meter.finish()]);
     let invocation = completed.evidence.clone();
