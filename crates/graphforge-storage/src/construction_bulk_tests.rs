@@ -1289,10 +1289,23 @@ mod bulk_builder {
                 .min(lane_count as u64)
                 .min((WIDE_ROWS / WIDE_BATCH / per_task) as u64)
                 as usize;
-            assert!(
-                min_request > report.decode_pool_bytes / 2
-                    && max_request <= report.decode_pool_bytes,
-                "task requests [{min_request},{max_request}] with {report:?}"
+            match per_task {
+                20 => assert!(
+                    min_request > report.decode_pool_bytes / 2
+                        && max_request <= report.decode_pool_bytes,
+                    "task requests [{min_request},{max_request}] with {report:?}"
+                ),
+                10 => assert!(
+                    min_request > report.decode_pool_bytes / 3
+                        && max_request <= report.decode_pool_bytes / 2,
+                    "task requests [{min_request},{max_request}] with {report:?}"
+                ),
+                _ => panic!("unexpected decode grouping {per_task}"),
+            }
+            assert_eq!(
+                report.decode_pool_bytes / min_request,
+                report.decode_pool_bytes / max_request,
+                "all actual task charges must allow the same overlap"
             );
             assert_eq!(overlapped, expected_overlap, "{report:?}");
         }
