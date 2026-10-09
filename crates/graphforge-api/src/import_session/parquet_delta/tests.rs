@@ -160,5 +160,57 @@ fn borrowing_length_blocks_reject_invalid_prefixes_and_payload_counts() {
     let mut encoded = lengths.flush_buffer().unwrap().to_vec();
     encoded.extend_from_slice(b"unused");
     let mut cursor = Lengths::new(Encoding::DELTA_LENGTH_BYTE_ARRAY, &encoded, 1, None).unwrap();
-    assert!(cursor.next_block(&mut [0; 1]).is_err());
+    assert_eq!(cursor.next_block(&mut [0; 1]).unwrap(), 1);
+    assert_eq!(cursor.next_block(&mut [0; 1]).unwrap(), 0);
+}
+
+#[test]
+fn complete_delta_stream_cannot_exceed_its_admitted_value_count() {
+    let mut encoder = DeltaBitPackEncoder::<Int32Type>::new();
+    encoder.put(&[0, 0]).unwrap();
+    let encoded = encoder.flush_buffer().unwrap();
+    // Unlike a truncated malicious header, this stream remains fully valid if
+    // the admission guard is reverted: that mutation must fail this assertion.
+    for encoding in [
+        Encoding::DELTA_BINARY_PACKED,
+        Encoding::DELTA_LENGTH_BYTE_ARRAY,
+    ] {
+        assert!(validate(encoding, &encoded, 1, 32).is_err());
+    }
+    assert!(Lengths::new(Encoding::DELTA_LENGTH_BYTE_ARRAY, &encoded, 1, None).is_err());
+}
+
+#[test]
+fn admitted_delta_pages_preserve_the_consumers_unused_tail() {
+    let values = [
+        ByteArray::from(""),
+        ByteArray::from("prefix"),
+        ByteArray::from("prefix suffix"),
+    ];
+    let mut lengths = DeltaLengthByteArrayEncoder::<ByteArrayType>::new();
+    lengths.put(&values).unwrap();
+    let mut prefixes = DeltaByteArrayEncoder::<ByteArrayType>::new();
+    prefixes.put(&values).unwrap();
+    for (encoding, bytes) in [
+        (
+            Encoding::DELTA_LENGTH_BYTE_ARRAY,
+            lengths.flush_buffer().unwrap(),
+        ),
+        (Encoding::DELTA_BYTE_ARRAY, prefixes.flush_buffer().unwrap()),
+    ] {
+        let mut bytes = bytes.to_vec();
+        bytes.extend_from_slice(b"unused admitted tail");
+        assert_eq!(
+            validate(encoding, &bytes, values.len(), 32)
+                .unwrap()
+                .unwrap()
+                .values,
+            values.len()
+        );
+        let mut cursor = Lengths::new(encoding, &bytes, values.len(), None).unwrap();
+        let mut block = [0; 3];
+        assert_eq!(cursor.next_block(&mut block).unwrap(), 3);
+        assert_eq!(block, [0, 6, 13]);
+        assert_eq!(cursor.next_block(&mut block).unwrap(), 0);
+    }
 }

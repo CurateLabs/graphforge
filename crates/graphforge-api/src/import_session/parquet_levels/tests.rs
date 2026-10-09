@@ -66,7 +66,10 @@ fn drain_indices(source: &mut impl IndexSource) -> Vec<u32> {
 }
 
 fn as_levels(values: &[u64]) -> Vec<i16> {
-    values.iter().map(|&value| i16::try_from(value).unwrap()).collect()
+    values
+        .iter()
+        .map(|&value| i16::try_from(value).unwrap())
+        .collect()
 }
 
 /// Levels mixing RLE-friendly runs with bit-packed variety.
@@ -87,7 +90,9 @@ fn mixed_levels(count: usize, max: i16) -> Vec<i16> {
 
 #[test]
 fn v1_rle_sections_round_trip_pinned_encoder_bytes() {
-    for count in [1_usize, 2, 7, 8, 9, 15, 16, 17, 31, 32, 1023, 1024, 1025, 2500] {
+    for count in [
+        1_usize, 2, 7, 8, 9, 15, 16, 17, 31, 32, 1023, 1024, 1025, 2500,
+    ] {
         let max = 5_i16;
         let levels = mixed_levels(count, max);
         let encoded = encode_v1_levels(max, &levels);
@@ -141,7 +146,9 @@ fn v1_page_with_bit_packed_repetition_and_rle_definition_splits_in_pinned_order(
     let rep = vec![0_i16, 1, 1, 0, 1, 0];
     let def = vec![1_i16, 0, 1, 1, 1, 1];
     let mut body = pack_values(
-        &rep.iter().map(|&level| u64::from(level)).collect::<Vec<_>>(),
+        &rep.iter()
+            .map(|&level| u64::from(level))
+            .collect::<Vec<_>>(),
         1,
     );
     body.extend_from_slice(&encode_v1_levels(max_def, &def));
@@ -208,7 +215,10 @@ fn dictionary_indices_decode_pinned_encoder_streams() {
     let mut indices: Vec<u32> = vec![3; 3000];
     indices.extend((0_u32..250).map(|index| index % 5));
     indices.push(0);
-    let levels: Vec<i16> = indices.iter().map(|&index| i16::try_from(index).unwrap()).collect();
+    let levels: Vec<i16> = indices
+        .iter()
+        .map(|&index| i16::try_from(index).unwrap())
+        .collect();
     let encoded = encode_v2_levels(max_index, &levels);
     let mut stream = vec![width];
     stream.extend_from_slice(&encoded);
@@ -466,10 +476,7 @@ fn v1_rle_section_lengths_are_validated_before_borrowing() {
 
     let body = [0x01_u8, 0x00, 0x00];
     let sections = split_v1(&body, 0, max, 4, Encoding::RLE, Encoding::RLE).unwrap_err();
-    assert!(
-        sections.to_string().contains("length prefix"),
-        "{sections}"
-    );
+    assert!(sections.to_string().contains("length prefix"), "{sections}");
 
     let levels = vec![1_i16, 0, 1, 1];
     let encoded = encode_v1_levels(max, &levels);
@@ -495,7 +502,9 @@ fn v1_bit_packed_section_length_is_checked_before_borrowing() {
     let max = 3_i16;
     let rep = vec![0_i16, 1, 2, 3, 0, 2];
     let mut packed = pack_values(
-        &rep.iter().map(|&level| u64::from(level)).collect::<Vec<_>>(),
+        &rep.iter()
+            .map(|&level| u64::from(level))
+            .collect::<Vec<_>>(),
         2,
     );
     packed.extend_from_slice(b"VALUES");
@@ -527,10 +536,7 @@ fn v1_bit_packed_section_length_is_checked_before_borrowing() {
     assert_eq!(sections.values, &body[..]);
 
     let sections = split_v1(&[0_u8; 4], 0, max, 4, Encoding::RLE, Encoding::PLAIN).unwrap_err();
-    assert!(
-        sections.to_string().contains("unsupported"),
-        "{sections}"
-    );
+    assert!(sections.to_string().contains("unsupported"), "{sections}");
 
     let sections = split_v1(&[0_u8; 8], 0, -1, 4, Encoding::RLE, Encoding::RLE).unwrap_err();
     assert!(
@@ -560,7 +566,10 @@ fn fixed_blocks_fill_at_most_1024_events() {
 
     let dictionary_count = 5_usize;
     let indices: Vec<u32> = (0_u32..1500).map(|index| index % 5).collect();
-    let levels: Vec<i16> = indices.iter().map(|&index| i16::try_from(index).unwrap()).collect();
+    let levels: Vec<i16> = indices
+        .iter()
+        .map(|&index| i16::try_from(index).unwrap())
+        .collect();
     let encoded = encode_v2_levels(4, &levels);
     let mut stream = vec![num_required_bits(4)];
     stream.extend_from_slice(&encoded);

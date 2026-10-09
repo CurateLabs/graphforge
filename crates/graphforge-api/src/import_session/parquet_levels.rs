@@ -123,7 +123,10 @@ pub(super) struct ImplicitZero {
 
 impl ImplicitZero {
     pub(super) fn new(expected: usize) -> Self {
-        Self { expected, emitted: 0 }
+        Self {
+            expected,
+            emitted: 0,
+        }
     }
 }
 
@@ -283,11 +286,16 @@ impl<'a> Hybrid<'a> {
             // Only the logical prefix this run will actually supply needs
             // payload bytes: writers may truncate the final group, and events
             // past `expected` are ignored padding that need not be valid.
-            let decoded = usize::try_from(count).map_err(|_| overflow())?.min(self.remaining());
+            let decoded = usize::try_from(count)
+                .map_err(|_| overflow())?
+                .min(self.remaining());
             let bits = decoded
                 .checked_mul(usize::from(self.width))
                 .ok_or_else(overflow)?;
-            let bit_end = self.packed_bit_offset.checked_add(bits).ok_or_else(overflow)?;
+            let bit_end = self
+                .packed_bit_offset
+                .checked_add(bits)
+                .ok_or_else(overflow)?;
             if bit_end > self.data.len() * 8 {
                 return Err(truncated());
             }
@@ -374,7 +382,9 @@ impl<'a> Hybrid<'a> {
                 }
                 Run::Packed { remaining } if remaining > 0 => {
                     let value = self.read_packed_value()?;
-                    self.run = Run::Packed { remaining: remaining - 1 };
+                    self.run = Run::Packed {
+                        remaining: remaining - 1,
+                    };
                     self.emitted += 1;
                     return Ok(Some(value));
                 }
@@ -447,15 +457,13 @@ impl<'a> DictionaryIndices<'a> {
         dictionary_count: usize,
         expected_nonnull: usize,
     ) -> Result<Self, GfError> {
-        let (&width, rest) = stream.split_first().ok_or_else(|| {
-            storage("Parquet dictionary index stream is missing the width byte")
-        })?;
+        let (&width, rest) = stream
+            .split_first()
+            .ok_or_else(|| storage("Parquet dictionary index stream is missing the width byte"))?;
         // Refused before any shift can use it; matches the pinned consumer's
         // own `> 32` rejection.
         if width > 32 {
-            return Err(storage(
-                "Parquet dictionary index width exceeds 32 bits",
-            ));
+            return Err(storage("Parquet dictionary index width exceeds 32 bits"));
         }
         if dictionary_count == 0 && expected_nonnull != 0 {
             return Err(storage(
@@ -568,9 +576,7 @@ fn v1_section<'a>(
     }
     match encoding {
         Encoding::RLE => {
-            let prefix_end = offset
-                .checked_add(4)
-                .ok_or_else(truncated)?;
+            let prefix_end = offset.checked_add(4).ok_or_else(truncated)?;
             let prefix = body.get(offset..prefix_end).ok_or_else(|| {
                 storage("Parquet V1 RLE level section is missing its length prefix")
             })?;
@@ -579,9 +585,8 @@ fn v1_section<'a>(
             let raw = i32::from_le_bytes(raw);
             // The length is signed; negative values are out of range, and the
             // claimed span must fit the owned body before it is borrowed.
-            let length = usize::try_from(raw).map_err(|_| {
-                storage("Parquet V1 RLE level length is negative")
-            })?;
+            let length = usize::try_from(raw)
+                .map_err(|_| storage("Parquet V1 RLE level length is negative"))?;
             let end = prefix_end
                 .checked_add(length)
                 .ok_or_else(|| storage("Parquet V1 RLE level length is out of range"))?;

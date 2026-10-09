@@ -241,9 +241,6 @@ impl<'a> Lengths<'a> {
         let mut written = 0;
         for item in output.iter_mut().take(1024) {
             let Some(suffix) = self.suffixes.next()? else {
-                if self.consumed_bytes != self.payload_bytes {
-                    return Err(invalid());
-                }
                 break;
             };
             let suffix = u64::try_from(suffix).map_err(|_| invalid())?;
@@ -267,9 +264,8 @@ impl<'a> Lengths<'a> {
             *item = self.previous_length;
             written += 1;
         }
-        if self.suffixes.remaining == 0 && self.consumed_bytes != self.payload_bytes {
-            return Err(invalid());
-        }
+        // Pinned Arrow consumes only the declared values. Any unused tail is
+        // still owned and charged as page bytes, but is not another value.
         Ok(written)
     }
 }
@@ -306,7 +302,7 @@ pub(super) fn validate(
                 largest = largest.max(length);
             }
             let end = lengths.finish()?;
-            if total != (input.len() - end) as u64 {
+            if total > (input.len() - end) as u64 {
                 return Err(invalid());
             }
             Ok(Some(DeltaFacts {
@@ -347,7 +343,7 @@ pub(super) fn validate(
                 previous = prefix.checked_add(suffix).ok_or_else(invalid)?;
                 largest = largest.max(previous);
             }
-            if total != payload as u64 {
+            if total > payload as u64 {
                 return Err(invalid());
             }
             Ok(Some(DeltaFacts {
