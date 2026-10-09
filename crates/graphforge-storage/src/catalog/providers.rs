@@ -648,10 +648,11 @@ fn property_equality(
     if binary.op != Operator::Eq {
         return None;
     }
-    let (column, literal) = match (binary.left.as_ref(), binary.right.as_ref()) {
-        (Expr::Column(column), Expr::Literal(literal, _))
-        | (Expr::Literal(literal, _), Expr::Column(column)) => (column, literal),
-        _ => return None,
+    let ((Expr::Column(column), Expr::Literal(literal, _))
+    | (Expr::Literal(literal, _), Expr::Column(column))) =
+        (binary.left.as_ref(), binary.right.as_ref())
+    else {
+        return None;
     };
     let value = match literal {
         ScalarValue::Int64(Some(value)) => EqualityValue::Int(*value),

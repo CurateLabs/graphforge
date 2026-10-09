@@ -117,10 +117,11 @@ fn is_stored_equality(filter: &Expr, schema: &SchemaRef) -> bool {
     if binary.op != Operator::Eq {
         return false;
     }
-    let (column, literal) = match (binary.left.as_ref(), binary.right.as_ref()) {
-        (Expr::Column(column), Expr::Literal(literal, _))
-        | (Expr::Literal(literal, _), Expr::Column(column)) => (column, literal),
-        _ => return false,
+    let ((Expr::Column(column), Expr::Literal(literal, _))
+    | (Expr::Literal(literal, _), Expr::Column(column))) =
+        (binary.left.as_ref(), binary.right.as_ref())
+    else {
+        return false;
     };
     let data_type = match literal {
         ScalarValue::Int64(Some(_)) => datafusion::arrow::datatypes::DataType::Int64,

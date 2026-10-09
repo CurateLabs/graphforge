@@ -193,7 +193,7 @@ pub(super) fn projected_fragment_rows(
     };
     PropertyParquetRows {
         reader,
-        current: Vec::new().into_iter(),
+        current: Vec::new().into_iter().zip(Vec::new()),
         uuid_field: context.kind.uuid_field(),
         pending_error,
         decoded: Arc::clone(context.decoded),
@@ -372,7 +372,8 @@ pub(super) fn finalize_projected_metrics(
 
 pub(super) struct PropertyParquetRows {
     reader: Option<ParquetRecordBatchReader>,
-    current: std::vec::IntoIter<PropertySnapshotRow>,
+    /// Decoded rows with the byte charge each was admitted at, computed once.
+    current: std::iter::Zip<std::vec::IntoIter<PropertySnapshotRow>, std::vec::IntoIter<u64>>,
     uuid_field: &'static str,
     pending_error: Option<GfError>,
     decoded: Arc<Mutex<DecodedRetention>>,
@@ -433,7 +434,7 @@ impl Iterator for PropertyParquetRows {
                 self.reader = None;
                 return Some(Err(error));
             }
-            if let Some(row) = self.current.next() {
+            if let Some((row, charge)) = self.current.next() {
                 #[cfg(test)]
                 if self
                     .late_failure_row_countdown
@@ -446,16 +447,16 @@ impl Iterator for PropertyParquetRows {
                     })
                     .is_ok_and(|remaining| remaining == 1)
                 {
-                    self.budget.release(snapshot_charge(&row));
+                    self.budget.release(charge);
                     self.reader = None;
                     return Some(Err(corrupt(
                         "injected late authenticated property decoder failure",
                     )));
                 }
-                self.budget.release(snapshot_charge(&row));
+                self.budget.release(charge);
                 let mut decoded = self.decoded.lock().expect("property retention lock");
                 decoded.current_rows = decoded.current_rows.saturating_sub(1);
-                decoded.current_bytes = decoded.current_bytes.saturating_sub(snapshot_charge(&row));
+                decoded.current_bytes = decoded.current_bytes.saturating_sub(charge);
                 return Some(Ok(row));
             }
             self.reader.as_ref()?;
@@ -492,18 +493,16 @@ impl Iterator for PropertyParquetRows {
             }
             match decode_snapshot_batch(&batch, self.uuid_field) {
                 Ok(rows) => {
-                    if rows
-                        .iter()
-                        .any(|row| snapshot_charge(row) > self.max_row_bytes)
-                    {
+                    let charges = rows.iter().map(snapshot_charge).collect::<Vec<_>>();
+                    if charges.iter().any(|charge| *charge > self.max_row_bytes) {
                         self.budget.release(decode_reservation);
                         self.budget.release(self.batch_reservation_bytes);
                         self.reader = None;
                         return Some(Err(corrupt("property snapshot row exceeds byte limit")));
                     }
-                    let bytes = rows.iter().fold(0_u64, |total, row| {
-                        total.saturating_add(snapshot_charge(row))
-                    });
+                    let bytes = charges
+                        .iter()
+                        .fold(0_u64, |total, charge| total.saturating_add(*charge));
                     self.budget.release(decode_reservation);
                     if let Err(error) = self.budget.charge(bytes) {
                         self.budget.release(self.batch_reservation_bytes);
@@ -518,7 +517,7 @@ impl Iterator for PropertyParquetRows {
                     decoded.peak_bytes = decoded.peak_bytes.max(decoded.current_bytes);
                     decoded.batches = decoded.batches.saturating_add(1);
                     drop(decoded);
-                    self.current = rows.into_iter();
+                    self.current = rows.into_iter().zip(charges);
                 }
                 Err(error) => {
                     self.budget.release(decode_reservation);
@@ -659,15 +658,19 @@ pub(crate) fn decode_snapshot_batch(
         return Err(corrupt("property tombstone column contains null slots"));
     }
     let mut rows = Vec::with_capacity(batch.num_rows());
-    crate::writer::decode_property_batch(batch, uuid_field, |uuid, mut values| {
-        values.remove(PROPERTY_TOMBSTONE_FIELD);
-        let index = rows.len();
-        rows.push(PropertySnapshotRow {
-            uuid,
-            tombstone: tombstones.is_some_and(|values| values.value(index)),
-            values: values.into_iter().collect(),
-        });
-    })?;
+    crate::writer::decode_property_batch_into(
+        batch,
+        uuid_field,
+        |uuid, mut values: BTreeMap<String, graphforge_ir::IrLiteral>| {
+            values.remove(PROPERTY_TOMBSTONE_FIELD);
+            let index = rows.len();
+            rows.push(PropertySnapshotRow {
+                uuid,
+                tombstone: tombstones.is_some_and(|values| values.value(index)),
+                values,
+            });
+        },
+    )?;
     Ok(rows)
 }
 

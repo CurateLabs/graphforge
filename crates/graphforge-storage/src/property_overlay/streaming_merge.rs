@@ -132,6 +132,9 @@ impl Cursor {
     }
 }
 
+/// The UUIDs an equality nominates, and the work of finding them.
+pub(crate) type EqualityCandidates = (BTreeSet<[u8; 16]>, PropertyOverlayMetrics);
+
 type HeapKey = Reverse<([u8; 16], Reverse<PropertyFragmentId>, usize)>;
 
 impl AuthenticatedPropertyInventory {
@@ -281,7 +284,7 @@ impl AuthenticatedPropertyInventory {
         limits: PropertyOverlayLimits,
         cap: usize,
         collect: bool,
-    ) -> Result<Option<(BTreeSet<[u8; 16]>, PropertyOverlayMetrics)>, GfError> {
+    ) -> Result<Option<EqualityCandidates>, GfError> {
         let Some(fragments) = self.routes.get(&(kind, route.to_owned())) else {
             return Ok(Some((BTreeSet::new(), PropertyOverlayMetrics::default())));
         };
