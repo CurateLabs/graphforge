@@ -195,7 +195,11 @@ Run size, fan-in and frame size are derived from the budget and the
 concurrency, and the receipt reports them with the retained-byte peak.
 
 Catalog observation streams groups in digest order and rows in UUID order,
-using the same per-row interning operations as the resident route. Overlay
+using the same per-row interning operations as the resident route. A group
+whose schema has no property columns keeps no rows: it writes no overlay, and
+the catalog needs only each owner's first appearance in identity order and its
+row count, which `intern_*_observed_at` records exactly as that many single
+observations would (#1938). Overlay
 encoding preserves the existing logical `max_batch_rows` windows. A disposable
 window spool records payload while a compact owner/active-field inventory finds
 all non-null fields for each owner across that whole window. A second scan

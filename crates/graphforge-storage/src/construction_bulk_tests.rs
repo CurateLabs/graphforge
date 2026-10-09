@@ -1220,7 +1220,6 @@ mod bulk_builder {
         ) else {
             return;
         };
-        let _scratch = crate::graph_construction_encoding::ForcedScratchRoute::new();
         let budgets = small_property_budgets();
         let before = peak_rss_bytes();
         let mut session = GraphConstructionSession::open(
@@ -1233,6 +1232,7 @@ mod bulk_builder {
         session.checkpoint.session_now_micros = CLOCK;
         lanes(&mut session, lane_count.parse().unwrap());
         let plan = generated_plan(budget.parse().unwrap());
+        assert_eq!(plan.route(), crate::BulkRoute::Scratch, "RSS proof must use the natural production route");
         let encoding = session.prepare_bulk_encoding(1, &plan, || false).unwrap();
         let report = session.bulk_build_report();
         println!(
@@ -1248,7 +1248,6 @@ mod bulk_builder {
 
     #[test]
     fn measured_peak_rss_stays_within_the_budget_at_every_concurrency() {
-        let _scratch = crate::graph_construction_encoding::ForcedScratchRoute::new();
         let budgets = small_property_budgets();
         let (nodes, edges) = wide_property_graph();
         let expected = digest(&staged_with(budgets, &nodes, &edges).unwrap());
