@@ -782,9 +782,8 @@ impl<'a> PropertyRows<'a> {
 
     fn struct_row_bytes(data: &arrow::array::ArrayData, offset: usize) -> Result<usize, GfError> {
         data.child_data().iter().try_fold(0_usize, |total, child| {
-            let child_row = offset.saturating_sub(child.offset());
             total
-                .checked_add(Self::array_data_row_bytes(child, child_row)?)
+                .checked_add(Self::array_data_row_bytes(child, offset)?)
                 .ok_or_else(|| storage("property row byte total overflows"))
         })
     }

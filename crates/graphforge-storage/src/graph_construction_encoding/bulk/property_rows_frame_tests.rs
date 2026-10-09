@@ -199,3 +199,77 @@
         assert_eq!(run.frames.len(), 1);
         assert_eq!(run.frames[0].rows, 1024);
     }
+
+#[test]
+fn sliced_struct_rows_keep_the_wide_child_in_its_logical_row() {
+    use arrow::array::{Int64Array, StructArray};
+    use std::sync::Arc;
+
+    let root = tempfile::tempdir().unwrap();
+    let directory = super::super::StableDirectory::open(root.path()).unwrap();
+    let scratch = Scratch::create(&directory).unwrap();
+    let budgets = GraphConstructionBudgets {
+        max_batch_rows: 1024,
+        max_batch_bytes: 256 << 10,
+        ..GraphConstructionBudgets::default()
+    };
+    let rows = PropertyRows::new(
+        &scratch,
+        ConstructionChunkKind::Node,
+        budgets,
+        0,
+        PropertySizing {
+            run_bytes: 8 << 20,
+            retained_bytes: 24 << 20,
+            fan_in: 32,
+            frame_bytes: 192 << 10,
+        },
+    );
+    let wide = "x".repeat(100 << 10);
+    let child_fields = vec![
+        Field::new("timestamp", DataType::Int64, false),
+        Field::new("timezone", DataType::Utf8, false),
+    ];
+    let structure = StructArray::new(
+        child_fields.clone().into(),
+        vec![
+            Arc::new(Int64Array::from(vec![0, 1, 2])),
+            Arc::new(StringArray::from(vec!["hidden", "", wide.as_str()])),
+        ],
+        None,
+    ).slice(1, 2);
+    let data = structure.to_data();
+    assert_eq!(data.offset(), 0);
+    assert_eq!(data.child_data()[1].offset(), 1);
+    let batches = (0..32).map(|task| {
+        let ids = [(32 + task as u128).to_be_bytes(), (task as u128).to_be_bytes()];
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+                Field::new("label", DataType::Utf8, false),
+                Field::new("value", DataType::Struct(child_fields.clone().into()), false),
+            ])),
+            vec![
+                Arc::new(FixedSizeBinaryArray::try_from_iter(ids.iter().map(|id| id.as_slice())).unwrap()) as ArrayRef,
+                Arc::new(StringArray::from(vec!["Person"; 2])),
+                Arc::new(structure.clone()),
+            ],
+        ).unwrap()
+    }).collect::<Vec<_>>();
+    assert!(PropertyRows::row_bytes(&batches[0], 1).unwrap() >= wide.len());
+    let run = rows.write_run(&batches, &AtomicBool::new(false)).unwrap();
+    assert!(run.frames.len() >= 32);
+    let mut reader = rows.reader(&run.path).unwrap();
+    let mut seen = 0_u128;
+    while let Some(batch) = reader.next().unwrap() {
+        let ids = batch.column(0).as_any().downcast_ref::<FixedSizeBinaryArray>().unwrap();
+        let structures = batch.column(2).as_any().downcast_ref::<StructArray>().unwrap();
+        let timezones = structures.column(1).as_any().downcast_ref::<StringArray>().unwrap();
+        for row in 0..batch.num_rows() {
+            assert_eq!(ids.value(row), seen.to_be_bytes());
+            assert_eq!(timezones.value(row), if seen < 32 { wide.as_str() } else { "" });
+            seen += 1;
+        }
+    }
+    assert_eq!(seen, 64);
+}
