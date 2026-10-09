@@ -90,7 +90,7 @@ fn a_denied_constructor_never_reads_the_compressed_input() {
         }
     }
     let budget = shared(fixed_bytes() + INPUT_BYTES);
-    let error = decode_with_budget(Unread, &mut [], &budget).unwrap_err();
+    let error = decode_with_budget(Unread, &mut [], &budget, None).unwrap_err();
     assert!(is_limit(&error), "{error}");
     assert_eq!(budget.borrow().live, fixed_bytes());
 }
@@ -109,7 +109,7 @@ fn constructor_and_initial_table_denials_are_typed_and_do_not_resume_decoding() 
     ] {
         let budget = shared(capacity);
         let mut output = vec![0_u8; input.len()];
-        let error = decode_with_budget(encoded.as_slice(), &mut output, &budget).unwrap_err();
+        let error = decode_with_budget(encoded.as_slice(), &mut output, &budget, None).unwrap_err();
         assert!(is_limit(&error), "capacity={capacity}: {error}");
         assert_eq!(
             budget.borrow().live,
@@ -156,4 +156,43 @@ fn supported_large_window_headers_are_admitted_by_actual_allocation() {
     // final metablock. Admit its actual request instead of imposing a header cap.
     decode(&encoded, &mut output, 8 << 20).unwrap();
     assert_eq!(output, input);
+}
+
+#[test]
+fn cancellation_during_an_actual_brotli_refill_is_typed_and_releases_cells() {
+    struct CancelAfterRead<'a> {
+        inner: &'a [u8],
+        token: &'a crate::CancellationToken,
+    }
+    impl Read for CancelAfterRead<'_> {
+        fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+            let read = self.inner.read(output)?;
+            self.token.cancel();
+            Ok(read)
+        }
+    }
+    let input = vec![b'q'; 128 << 10];
+    let encoded = compressed(&input);
+    let token = crate::CancellationToken::new();
+    let budget = shared(32 << 20);
+    let mut output = vec![0; input.len()];
+    let error = decode_with_budget(
+        CancelAfterRead {
+            inner: &encoded,
+            token: &token,
+        },
+        &mut output,
+        &budget,
+        Some(&token),
+    )
+    .err()
+    .unwrap();
+    assert!(matches!(
+        error,
+        GfError::Api {
+            code: graphforge_core::ApiErrorCode::Cancelled,
+            ..
+        }
+    ));
+    assert_eq!(budget.borrow().live, fixed_bytes());
 }

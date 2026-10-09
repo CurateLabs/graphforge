@@ -332,8 +332,12 @@ fn decompress(
     check(cancellation)?;
     match codec {
         Compression::SNAPPY => super::parquet_codec::snappy(input, output)?,
-        Compression::GZIP(_) => super::parquet_codec::gzip(input, output, workspace)?,
-        Compression::BROTLI(_) => super::parquet_brotli::decode(input, output, workspace)?,
+        Compression::GZIP(_) => {
+            super::parquet_codec::gzip_cancellable(input, output, workspace, cancellation)?
+        }
+        Compression::BROTLI(_) => {
+            super::parquet_brotli::decode_cancellable(input, output, workspace, cancellation)?
+        }
         Compression::ZSTD(_) => super::parquet_codec::zstd(input, output, workspace)?,
         Compression::LZ4_RAW => raw_lz4(input, output, cancellation)?,
         Compression::LZ4 => {

@@ -245,3 +245,41 @@ fn raw_lz4_match_requires_the_pinned_final_literal_token() {
     let compressed = page(bytes.to_vec(), 5);
     assert!(decode(compressed, Compression::LZ4_RAW, 9, None).is_err());
 }
+
+#[test]
+fn gzip_and_brotli_callbacks_return_typed_cancellation_on_otherwise_valid_streams() {
+    let token = CancellationToken::new();
+    token.cancel();
+    let gzip = compress(Compression::GZIP(Default::default()), b"payload");
+    let error = crate::import_session::parquet_codec::gzip_cancellable(
+        &gzip,
+        &mut [0; 7],
+        gzip_workspace(),
+        Some(&token),
+    )
+    .err()
+    .unwrap();
+    assert!(matches!(
+        error,
+        GfError::Api {
+            code: graphforge_core::ApiErrorCode::Cancelled,
+            ..
+        }
+    ));
+    let brotli = compress(Compression::BROTLI(Default::default()), b"payload");
+    let error = crate::import_session::parquet_brotli::decode_cancellable(
+        &brotli,
+        &mut [0; 7],
+        32 << 20,
+        Some(&token),
+    )
+    .err()
+    .unwrap();
+    assert!(matches!(
+        error,
+        GfError::Api {
+            code: graphforge_core::ApiErrorCode::Cancelled,
+            ..
+        }
+    ));
+}
