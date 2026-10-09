@@ -67,6 +67,16 @@ fn correlated_optional_match_preserves_null_collected_node_seeds() {
             vec!["null".to_owned(), "null".to_owned()]
         ],
     );
+
+    let required = rows(
+        &gf,
+        "MATCH (p:Person)
+         WITH collect(p) AS people
+         UNWIND [people[0], people[99]] AS person
+         MATCH (person)
+         RETURN person.id",
+    );
+    assert_eq!(required, vec![vec!["1".to_owned()]]);
 }
 
 const PERSONS: i64 = 60;
