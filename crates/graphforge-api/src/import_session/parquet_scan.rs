@@ -222,13 +222,21 @@ impl<R: Read> Compact<'_, R> {
 
 /// Fields of `PageHeader` and of its three page-specific structs.
 #[derive(Default)]
-struct RawHeader {
-    kind: Option<i32>,
-    uncompressed: Option<i64>,
-    compressed: Option<i64>,
-    values: Option<i64>,
-    encoding: Option<i32>,
-    rows: Option<i64>,
+pub(super) struct RawHeader {
+    pub(super) kind: Option<i32>,
+    pub(super) uncompressed: Option<i64>,
+    pub(super) compressed: Option<i64>,
+    pub(super) values: Option<i64>,
+    pub(super) encoding: Option<i32>,
+    pub(super) rows: Option<i64>,
+    pub(super) nulls: Option<i64>,
+    pub(super) definition_encoding: Option<i32>,
+    pub(super) repetition_encoding: Option<i32>,
+    pub(super) definition_bytes: Option<i64>,
+    pub(super) repetition_bytes: Option<i64>,
+    pub(super) compressed_values: Option<bool>,
+    pub(super) sorted_dictionary: Option<bool>,
+    pub(super) crc: Option<i64>,
 }
 
 fn read_data_page_header<R: Read>(
@@ -243,7 +251,13 @@ fn read_data_page_header<R: Read>(
         match (v2, id) {
             (_, 1) => raw.values = Some(input.int(kind)?),
             (false, 2) | (true, 4) => raw.encoding = Some(small(input.int(kind)?)?),
+            (true, 2) => raw.nulls = Some(input.int(kind)?),
             (true, 3) => raw.rows = Some(input.int(kind)?),
+            (false, 3) => raw.definition_encoding = Some(small(input.int(kind)?)?),
+            (false, 4) => raw.repetition_encoding = Some(small(input.int(kind)?)?),
+            (true, 5) => raw.definition_bytes = Some(input.int(kind)?),
+            (true, 6) => raw.repetition_bytes = Some(input.int(kind)?),
+            (true, 7) if kind == 1 || kind == 2 => raw.compressed_values = Some(kind == 1),
             _ => input.skip(kind, depth)?,
         }
     }
@@ -261,6 +275,7 @@ fn read_dictionary_page_header<R: Read>(
         match id {
             1 => raw.values = Some(input.int(kind)?),
             2 => raw.encoding = Some(small(input.int(kind)?)?),
+            3 if kind == 1 || kind == 2 => raw.sorted_dictionary = Some(kind == 1),
             _ => input.skip(kind, depth)?,
         }
     }
@@ -268,7 +283,7 @@ fn read_dictionary_page_header<R: Read>(
 }
 
 /// Parse one page header from `reader`; returns its length in bytes.
-fn read_header<R: Read>(reader: &mut R) -> Result<(usize, RawHeader), GfError> {
+pub(super) fn read_header<R: Read>(reader: &mut R) -> Result<(usize, RawHeader), GfError> {
     let mut input = Compact {
         reader,
         consumed: 0,
@@ -281,6 +296,7 @@ fn read_header<R: Read>(reader: &mut R) -> Result<(usize, RawHeader), GfError> {
             1 => raw.kind = Some(small(input.int(kind)?)?),
             2 => raw.uncompressed = Some(input.int(kind)?),
             3 => raw.compressed = Some(input.int(kind)?),
+            4 => raw.crc = Some(input.int(kind)?),
             5 if kind == 12 => read_data_page_header(&mut input, &mut raw, false, 1)?,
             7 if kind == 12 => read_dictionary_page_header(&mut input, &mut raw, 1)?,
             8 if kind == 12 => read_data_page_header(&mut input, &mut raw, true, 1)?,

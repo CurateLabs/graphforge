@@ -1,0 +1,91 @@
+use super::*;
+use parquet::data_type::{ByteArray, ByteArrayType, Int32Type};
+use parquet::encodings::encoding::{
+    DeltaBitPackEncoder, DeltaByteArrayEncoder, DeltaLengthByteArrayEncoder, Encoder,
+};
+
+#[test]
+fn delta_integer_validation_tracks_real_miniblocks_and_padding() {
+    for count in [1, 2, 31, 32, 33, 127, 128, 129, 255, 256, 257, 1024] {
+        let values = (0..count)
+            .map(|index| ((index * 17) % 131) - 65)
+            .collect::<Vec<i32>>();
+        let mut encoder = DeltaBitPackEncoder::<Int32Type>::new();
+        encoder.put(&values).unwrap();
+        let encoded = encoder.flush_buffer().unwrap();
+        let mut decoder = Integers::new(&encoded, values.len(), 32).unwrap();
+        for expected in values {
+            assert_eq!(decoder.next().unwrap(), Some(i64::from(expected)));
+        }
+        assert_eq!(decoder.next().unwrap(), None);
+        assert_eq!(decoder.finish().unwrap(), encoded.len());
+    }
+}
+
+#[test]
+fn real_delta_length_and_prefix_pages_validate_across_blocks() {
+    let values = (0..1025)
+        .map(|index| {
+            ByteArray::from(
+                format!("a shared prefix with variable suffix {}", index % 47).as_bytes(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut lengths = DeltaLengthByteArrayEncoder::<ByteArrayType>::new();
+    lengths.put(&values).unwrap();
+    let encoded = lengths.flush_buffer().unwrap();
+    let facts = validate(
+        Encoding::DELTA_LENGTH_BYTE_ARRAY,
+        &encoded,
+        values.len(),
+        32,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(facts.values, values.len());
+    assert_eq!(
+        facts.largest_value,
+        values.iter().map(|value| value.len() as u64).max().unwrap()
+    );
+    assert!(facts.auxiliary_bytes >= values.len() as u64 * 4);
+
+    let mut prefixes = DeltaByteArrayEncoder::<ByteArrayType>::new();
+    prefixes.put(&values).unwrap();
+    let encoded = prefixes.flush_buffer().unwrap();
+    let facts = validate(Encoding::DELTA_BYTE_ARRAY, &encoded, values.len(), 32)
+        .unwrap()
+        .unwrap();
+    assert_eq!(facts.values, values.len());
+    assert_eq!(
+        facts.largest_value,
+        values.iter().map(|value| value.len() as u64).max().unwrap()
+    );
+    assert!(facts.auxiliary_bytes >= values.len() as u64 * 8);
+}
+
+#[test]
+fn tiny_delta_body_cannot_supply_a_count_beyond_the_admitted_header() {
+    // block=128, miniblocks=4, count=2^36. The body ends immediately, before
+    // any miniblock. Third-party length decoders resize from this count first.
+    let body = [128, 1, 4, 128, 128, 128, 128, 128, 2, 0];
+    for encoding in [
+        Encoding::DELTA_BINARY_PACKED,
+        Encoding::DELTA_LENGTH_BYTE_ARRAY,
+        Encoding::DELTA_BYTE_ARRAY,
+    ] {
+        assert!(validate(encoding, &body, 1, 32).is_err());
+    }
+}
+
+#[test]
+fn delta_lengths_reject_negative_values_and_mismatched_suffix_storage() {
+    let mut encoder = DeltaBitPackEncoder::<Int32Type>::new();
+    encoder.put(&[-1]).unwrap();
+    let encoded = encoder.flush_buffer().unwrap();
+    assert!(validate(Encoding::DELTA_LENGTH_BYTE_ARRAY, &encoded, 1, 32).is_err());
+    let mut encoder = DeltaBitPackEncoder::<Int32Type>::new();
+    encoder.put(&[2]).unwrap();
+    let mut encoded = encoder.flush_buffer().unwrap().to_vec();
+    encoded.extend_from_slice(b"a");
+    assert!(validate(Encoding::DELTA_LENGTH_BYTE_ARRAY, &encoded, 1, 32).is_err());
+}

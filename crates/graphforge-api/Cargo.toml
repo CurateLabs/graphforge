@@ -39,7 +39,7 @@ arrow = { workspace = true }
 bytes = "1"
 datafusion = { workspace = true }
 futures = { workspace = true }
-parquet = { workspace = true }
+parquet = { workspace = true, features = ["experimental"] }
 serde_json = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }

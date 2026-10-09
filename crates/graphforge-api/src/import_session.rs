@@ -28,6 +28,7 @@ mod journal;
 mod memory_budget;
 mod normalization;
 mod parquet_admission;
+mod parquet_delta;
 mod parquet_scan;
 
 /// Written by this version: a session may register Parquet sources that stay
