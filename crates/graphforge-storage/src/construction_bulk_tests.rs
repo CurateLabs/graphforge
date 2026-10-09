@@ -960,6 +960,19 @@ mod bulk_builder {
         }
     }
 
+    fn rss_property_budgets() -> GraphConstructionBudgets {
+        // The RSS fixture creates 400-row UTF-8 batches with 5,000 bytes per
+        // value. Eight MiB bounds those measured batches while avoiding the
+        // unrelated 32 MiB default window in the route's shared workspace.
+        GraphConstructionBudgets {
+            max_batch_rows: 512,
+            max_run_records: 4 * 1_024,
+            max_batch_bytes: 8 << 20,
+            max_catalog_identifier_bytes: 1 << 20,
+            ..GraphConstructionBudgets::default()
+        }
+    }
+
     #[test]
     fn property_scratch_concurrency_follows_the_budget_and_publishes_the_same_bytes() {
         let _scratch = crate::graph_construction_encoding::ForcedScratchRoute::new();
@@ -992,7 +1005,7 @@ mod bulk_builder {
             "{growth:?}"
         );
         let mut levels = Vec::new();
-        for wanted in [1, 2, 4, 8] {
+        for wanted in [1, 2, 4, 8, 16] {
             let (budget, derived) = budget_admitting(&nodes, &edges, budgets, wanted, wanted);
             assert_eq!(derived, wanted);
             let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1027,7 +1040,7 @@ mod bulk_builder {
             assert!(overlapped <= derived, "{overlapped} tasks for {derived} workers");
             levels.push(derived);
         }
-        assert_eq!(levels, vec![1, 2, 4, 8]);
+        assert_eq!(levels, vec![1, 2, 4, 8, 16]);
     }
 
     #[test]
@@ -1101,7 +1114,9 @@ mod bulk_builder {
     const RSS_BUDGET: &str = "GF_BULK_RSS_BUDGET";
     const RSS_LANES: &str = "GF_BULK_RSS_LANES";
 
-    const WIDE_ROWS: usize = 24_000;
+    // Keep the natural Memory estimate above the budget that admits 16 scratch
+    // workers; otherwise the planner correctly takes the in-memory route.
+    const WIDE_ROWS: usize = 40_000;
     const WIDE_BATCH: usize = 400;
 
     /// Batch `index` of the wide nodes: 400 identities from across the range.
@@ -1146,6 +1161,19 @@ mod bulk_builder {
             (0..batches).map(wide_node_batch).collect(),
             (0..batches).map(wide_edge_batch).collect(),
         )
+    }
+
+    fn assert_wide_batches_fit(budgets: GraphConstructionBudgets) {
+        let (nodes, edges) = wide_property_graph();
+        for batch in nodes.iter().chain(&edges) {
+            assert!(batch.num_rows() <= budgets.max_batch_rows, "{} rows", batch.num_rows());
+            assert!(
+                batch.get_array_memory_size() <= budgets.max_batch_bytes,
+                "{} source bytes exceed {}",
+                batch.get_array_memory_size(),
+                budgets.max_batch_bytes
+            );
+        }
     }
 
     /// Source batches made on demand, so that a build under test holds none of
@@ -1220,7 +1248,7 @@ mod bulk_builder {
         ) else {
             return;
         };
-        let budgets = small_property_budgets();
+        let budgets = rss_property_budgets();
         let before = peak_rss_bytes();
         let mut session = GraphConstructionSession::open(
             Path::new(&path),
@@ -1248,11 +1276,12 @@ mod bulk_builder {
 
     #[test]
     fn measured_peak_rss_stays_within_the_budget_at_every_concurrency() {
-        let budgets = small_property_budgets();
+        let budgets = rss_property_budgets();
         let (nodes, edges) = wide_property_graph();
+        assert_wide_batches_fit(budgets);
         let expected = digest(&staged_with(budgets, &nodes, &edges).unwrap());
         let mut concurrencies = Vec::new();
-        for wanted in [1, 2, 4, 8] {
+        for wanted in [1, 2, 4, 8, 16] {
             let (budget, derived) =
                 budget_admitting_with(&generated_plan, budgets, wanted, wanted);
             let root = TempDir::new().unwrap();
@@ -1286,7 +1315,7 @@ mod bulk_builder {
             println!("budget {budget} concurrency {derived}: {line}");
             concurrencies.push(derived);
         }
-        assert_eq!(concurrencies, vec![1, 2, 4, 8]);
+        assert_eq!(concurrencies, vec![1, 2, 4, 8, 16]);
     }
 
     const CONCURRENT_CRASH_ROOT: &str = "GF_BULK_CONCURRENT_CRASH_ROOT";

@@ -1,3 +1,186 @@
+    #[test]
+    fn frame_accepts_the_conservative_charge_after_an_all_valid_bitmap_is_elided() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = super::super::StableDirectory::open(root.path()).unwrap();
+        let scratch = Scratch::create(&directory).unwrap();
+        let rows = new_rows(
+            &scratch,
+            ConstructionChunkKind::Node,
+            GraphConstructionBudgets::default(),
+            0,
+            PropertySizing {
+                run_bytes: 1,
+                retained_bytes: 1 << 20,
+                fan_in: 3,
+                frame_bytes: 1,
+            },
+        );
+        let source = batch(0, 2);
+        assert!(source.column(2).nulls().is_some());
+
+        let run = rows.write_run(&[source], &AtomicBool::new(false)).unwrap();
+        assert_eq!(run.frames.len(), 2);
+        let mut reader = rows.reader(&run.path).unwrap();
+        let mut observed_elision = false;
+        for frame in &run.frames {
+            let decoded = reader.next_expected(frame).unwrap().unwrap();
+            if decoded.column(2).nulls().is_none() {
+                let decoded_row_bytes = PropertyRows::row_bytes(&decoded, 0).unwrap();
+                assert_eq!(frame.max_row_bytes, decoded_row_bytes as u64 + 1);
+                observed_elision = true;
+            }
+        }
+        assert!(
+            observed_elision,
+            "the all-valid one-row frame must elide its bitmap"
+        );
+    }
+
+    #[test]
+    fn frame_rejects_decoded_row_bytes_above_the_indexed_charge() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = super::super::StableDirectory::open(root.path()).unwrap();
+        let scratch = Scratch::create(&directory).unwrap();
+        let rows = new_rows(
+            &scratch,
+            ConstructionChunkKind::Node,
+            GraphConstructionBudgets::default(),
+            0,
+            PropertySizing {
+                run_bytes: 1,
+                retained_bytes: 1 << 20,
+                fan_in: 3,
+                frame_bytes: 1,
+            },
+        );
+        let source = batch(0, 1);
+        assert!(source.column(2).nulls().is_some());
+        let source_row_bytes = PropertyRows::row_bytes(&source, 0).unwrap() as u64;
+
+        let mut run = rows.write_run(&[source], &AtomicBool::new(false)).unwrap();
+        assert_eq!(run.frames.len(), 1);
+        assert_eq!(run.frames[0].max_row_bytes, source_row_bytes);
+        run.frames[0].max_row_bytes -= 1;
+
+        let mut reader = rows.reader(&run.path).unwrap();
+        let error = reader.next_expected(&run.frames[0]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("property decoded layout conflicts with its run index"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn gather_charge_covers_validity_bitmaps_before_interleave() {
+        let source_schema = Arc::new(Schema::new(vec![
+            Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+            Field::new("label", DataType::Utf8, false),
+            Field::new("value", DataType::Int64, true),
+        ]));
+        let mut source_id = [0; 16];
+        source_id[8..].copy_from_slice(&0_u64.to_be_bytes());
+        let source_without_bitmap = RecordBatch::try_new(
+            Arc::clone(&source_schema),
+            vec![
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter(std::iter::once(source_id.as_slice()))
+                        .unwrap(),
+                ),
+                Arc::new(StringArray::from(vec!["Person"])),
+                Arc::new(Int64Array::from(vec![Some(7)])),
+            ],
+        )
+        .unwrap();
+        let source_with_bitmap = batch(1, 2);
+        assert!(source_without_bitmap.column(2).nulls().is_none());
+        assert!(source_with_bitmap.column(2).nulls().is_some());
+        let gathered = gather_record_batch(
+            &[&source_without_bitmap, &source_with_bitmap],
+            &[(0, 0), (1, 1)],
+        )
+        .unwrap();
+        assert!(gathered.column(2).nulls().is_some());
+
+        let old_row_bytes = PropertyRows::row_bytes(&source_without_bitmap, 0).unwrap();
+        let pre_gather_charge =
+            PropertyRows::gather_row_charge(&source_without_bitmap, 0).unwrap();
+        let gathered_row_bytes = PropertyRows::row_bytes(&gathered, 0).unwrap();
+        assert!(pre_gather_charge > old_row_bytes);
+        assert!(pre_gather_charge >= gathered_row_bytes);
+
+        let child = Arc::new(Field::new("item", DataType::Int64, true));
+        let list_type = DataType::List(Arc::clone(&child));
+        let struct_fields = vec![Arc::new(Field::new("items", list_type, true))];
+        let nested_schema = Arc::new(Schema::new(vec![
+            Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+            Field::new("label", DataType::Utf8, false),
+            Field::new(
+                "nested",
+                DataType::Struct(struct_fields.clone().into()),
+                true,
+            ),
+        ]));
+        let nested_batch = |id: u64, values: Vec<Option<i64>>| {
+            let mut id_bytes = [0; 16];
+            id_bytes[8..].copy_from_slice(&id.to_be_bytes());
+            let ids = FixedSizeBinaryArray::try_from_iter(std::iter::once(id_bytes.as_slice()))
+                .unwrap();
+            let items = arrow::array::ListArray::from_iter_primitive::<
+                arrow::datatypes::Int64Type,
+                _,
+                _,
+            >(vec![Some(values)]);
+            let nested = arrow::array::StructArray::new(
+                struct_fields.clone().into(),
+                vec![Arc::new(items)],
+                None,
+            );
+            RecordBatch::try_new(
+                Arc::clone(&nested_schema),
+                vec![
+                    Arc::new(ids),
+                    Arc::new(StringArray::from(vec!["Person"])),
+                    Arc::new(nested),
+                ],
+            )
+            .unwrap()
+        };
+        let nested_without_bitmap = nested_batch(0, vec![Some(1), Some(2)]);
+        let nested_with_bitmap = nested_batch(1, vec![Some(3), None]);
+        let nested_source = nested_without_bitmap.column(2)
+            .as_any()
+            .downcast_ref::<arrow::array::StructArray>()
+            .unwrap()
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::ListArray>()
+            .unwrap();
+        let nested_child = nested_source.values();
+        assert!(nested_child.nulls().is_none());
+        let nested_gathered = gather_record_batch(
+            &[&nested_without_bitmap, &nested_with_bitmap],
+            &[(0, 0), (1, 0)],
+        )
+        .unwrap();
+        let nested_output = nested_gathered.column(2)
+            .as_any()
+            .downcast_ref::<arrow::array::StructArray>()
+            .unwrap()
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::ListArray>()
+            .unwrap();
+        assert!(nested_output.values().nulls().is_some());
+        let nested_old_row_bytes = PropertyRows::row_bytes(&nested_without_bitmap, 0).unwrap();
+        let nested_pre_gather_charge =
+            PropertyRows::gather_row_charge(&nested_without_bitmap, 0).unwrap();
+        let nested_gathered_row_bytes = PropertyRows::row_bytes(&nested_gathered, 0).unwrap();
+        assert!(nested_pre_gather_charge > nested_old_row_bytes);
+        assert!(nested_pre_gather_charge >= nested_gathered_row_bytes);
+    }
+
     fn skewed_property_batch(task: usize, large: &str) -> RecordBatch {
         const ROWS: usize = 1024;
         let first_empty = 32 + task * (ROWS - 1);

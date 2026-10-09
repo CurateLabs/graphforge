@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex};
 use arrow::array::{
     Array, BinaryArray, LargeBinaryArray, LargeStringArray, StringArray, UInt32Array,
 };
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, Field};
 use arrow::ipc::{reader::StreamReader, writer::StreamWriter};
 use arrow::record_batch::RecordBatch;
 
@@ -346,6 +346,10 @@ impl RunWriter<'_, '_> {
         last: [u8; 16],
         max_row_bytes: usize,
     ) -> Result<(), GfError> {
+        // Interleave can add a validity bitmap when a nullable field is absent
+        // from one source batch but present in another. Index the gathered
+        // frame's actual row maximum as well as the source charge used to form it.
+        let max_row_bytes = max_row_bytes.max(PropertyRows::max_row_bytes(batch)?);
         self.rows.index_budget.reserve()?;
         self.index_charge = self.index_charge.saturating_add(FRAME_INDEX_ENTRY_BYTES);
         let frame = self.rows.encode_frame(batch)?;
@@ -905,7 +909,7 @@ impl<'a> PropertyRows<'a> {
             check_cancelled(cancel)?;
             let batch = &batches[key.1 as usize];
             let row = key.2 as usize;
-            let row_bytes = Self::row_bytes(batch, row)?;
+            let row_bytes = Self::gather_row_charge(batch, row)?;
             if indices.is_empty()
                 && row_bytes > self.frame_target
                 && batch.get_array_memory_size() > self.budgets.max_batch_bytes
@@ -963,6 +967,170 @@ impl<'a> PropertyRows<'a> {
                 .checked_add(bytes)
                 .ok_or_else(|| storage("property row byte total overflows"))
         })
+    }
+
+    /// Source charge before gathering a row. A nullable source array without
+    /// a validity buffer can acquire one when rows from another batch are
+    /// interleaved; reserve that per-row allowance before sizing the frame.
+    pub(super) fn gather_row_charge(batch: &RecordBatch, row: usize) -> Result<usize, GfError> {
+        batch
+            .columns()
+            .iter()
+            .zip(batch.schema().fields())
+            .try_fold(0_usize, |total, (array, field)| {
+                let bytes = Self::column_row_bytes(array.as_ref(), row)?;
+                let missing = Self::missing_validity_bytes(&array.to_data(), row, field)?;
+                total
+                    .checked_add(bytes)
+                    .and_then(|total| total.checked_add(missing))
+                    .ok_or_else(|| storage("property row byte total overflows"))
+            })
+    }
+
+    fn missing_validity_bytes(
+        data: &arrow::array::ArrayData,
+        row: usize,
+        field: &Field,
+    ) -> Result<usize, GfError> {
+        let offset = data
+            .offset()
+            .checked_add(row)
+            .ok_or_else(|| storage("property row offset overflows"))?;
+        let mut bytes = usize::from(field.is_nullable() && data.nulls().is_none());
+        match field.data_type() {
+            DataType::List(child) | DataType::LargeList(child) | DataType::Map(child, _) => {
+                let (start, len) = Self::list_child_range(
+                    data,
+                    row,
+                    matches!(field.data_type(), DataType::LargeList(_)),
+                )?;
+                let child_data = data
+                    .child_data()
+                    .first()
+                    .ok_or_else(|| storage("property list has no child data"))?;
+                bytes = bytes
+                    .checked_add(Self::missing_validity_range(child_data, start, len, child)?)
+                    .ok_or_else(|| storage("property row byte total overflows"))?;
+            }
+            DataType::ListView(child) | DataType::LargeListView(child) => {
+                let large = matches!(field.data_type(), DataType::LargeListView(_));
+                let (start, len) = if large {
+                    let offsets = data.buffer::<i64>(0);
+                    let sizes = data.buffer::<i64>(1);
+                    (
+                        usize::try_from(offsets[row]).map_err(storage)?,
+                        usize::try_from(sizes[row]).map_err(storage)?,
+                    )
+                } else {
+                    let offsets = data.buffer::<i32>(0);
+                    let sizes = data.buffer::<i32>(1);
+                    (
+                        usize::try_from(offsets[row]).map_err(storage)?,
+                        usize::try_from(sizes[row]).map_err(storage)?,
+                    )
+                };
+                let child_data = data
+                    .child_data()
+                    .first()
+                    .ok_or_else(|| storage("property list view has no child data"))?;
+                bytes = bytes
+                    .checked_add(Self::missing_validity_range(child_data, start, len, child)?)
+                    .ok_or_else(|| storage("property row byte total overflows"))?;
+            }
+            DataType::FixedSizeList(child, width) => {
+                let width = usize::try_from(*width).map_err(storage)?;
+                let start = offset
+                    .checked_mul(width)
+                    .ok_or_else(|| storage("property list offset overflows"))?;
+                let child_data = data
+                    .child_data()
+                    .first()
+                    .ok_or_else(|| storage("property list has no child data"))?;
+                bytes = bytes
+                    .checked_add(Self::missing_validity_range(
+                        child_data, start, width, child,
+                    )?)
+                    .ok_or_else(|| storage("property row byte total overflows"))?;
+            }
+            DataType::Struct(fields) => {
+                let children = data.child_data();
+                if children.len() != fields.len() {
+                    return Err(storage(
+                        "property struct child count differs from its schema",
+                    ));
+                }
+                for (child_data, child_field) in children.iter().zip(fields) {
+                    bytes = bytes
+                        .checked_add(Self::missing_validity_bytes(
+                            child_data,
+                            offset,
+                            child_field,
+                        )?)
+                        .ok_or_else(|| storage("property row byte total overflows"))?;
+                }
+            }
+            DataType::Dictionary(key_type, value_type) if !data.is_null(row) => {
+                let child_data = data
+                    .child_data()
+                    .first()
+                    .ok_or_else(|| storage("property dictionary has no values"))?;
+                let key = Self::dictionary_index(data, key_type, row)?;
+                let value_field = Field::new("dictionary_value", value_type.as_ref().clone(), true);
+                bytes = bytes
+                    .checked_add(Self::missing_validity_bytes(child_data, key, &value_field)?)
+                    .ok_or_else(|| storage("property row byte total overflows"))?;
+            }
+            _ => {}
+        }
+        Ok(bytes)
+    }
+
+    fn list_child_range(
+        data: &arrow::array::ArrayData,
+        row: usize,
+        large: bool,
+    ) -> Result<(usize, usize), GfError> {
+        let (start, end) = if large {
+            let offsets = data.buffer::<i64>(0);
+            (
+                usize::try_from(offsets[row]).map_err(storage)?,
+                usize::try_from(offsets[row + 1]).map_err(storage)?,
+            )
+        } else {
+            let offsets = data.buffer::<i32>(0);
+            (
+                usize::try_from(offsets[row]).map_err(storage)?,
+                usize::try_from(offsets[row + 1]).map_err(storage)?,
+            )
+        };
+        Ok((
+            start,
+            end.checked_sub(start)
+                .ok_or_else(|| storage("property list range is invalid"))?,
+        ))
+    }
+
+    fn missing_validity_range(
+        data: &arrow::array::ArrayData,
+        start: usize,
+        len: usize,
+        field: &Field,
+    ) -> Result<usize, GfError> {
+        let end = start
+            .checked_add(len)
+            .ok_or_else(|| storage("property child range overflows"))?;
+        (start..end).try_fold(0_usize, |total, row| {
+            total
+                .checked_add(Self::missing_validity_bytes(data, row, field)?)
+                .ok_or_else(|| storage("property row byte total overflows"))
+        })
+    }
+
+    fn max_row_bytes(batch: &RecordBatch) -> Result<usize, GfError> {
+        (0..batch.num_rows()).try_fold(
+            0_usize,
+            |max, row| Ok(max.max(Self::row_bytes(batch, row)?)),
+        )
     }
 
     fn column_row_bytes(array: &dyn Array, row: usize) -> Result<usize, GfError> {
@@ -1419,9 +1587,7 @@ impl RowsReader<'_, '_> {
             return Err(storage("property scratch frame row count differs"));
         }
         if let Some(expected) = expected {
-            let max_row_bytes = (0..batch.num_rows()).try_fold(0_usize, |max, row| {
-                Ok::<_, GfError>(max.max(PropertyRows::row_bytes(&batch, row)?))
-            })?;
+            let max_row_bytes = PropertyRows::max_row_bytes(&batch)?;
             let observed = decoded_header_bytes(
                 batch.schema().as_ref(),
                 facts.message_bytes,
@@ -1432,7 +1598,10 @@ impl RowsReader<'_, '_> {
                 facts.message_bytes,
                 facts.buffer_count,
             );
-            if max_row_bytes as u64 != expected.max_row_bytes
+            // The index records the conservative source-row charge. A gathered
+            // frame can drop an all-valid one-row null bitmap, so its decoded
+            // logical bytes may be smaller; it must never exceed that charge.
+            if max_row_bytes as u64 > expected.max_row_bytes
                 || observed > expected.header_bytes
                 || envelope != expected.output_envelope_bytes
             {

@@ -209,7 +209,7 @@ impl PropertyRows<'_> {
         let mut processed_rows = 0_usize;
         while let Some(Reverse((uuid, index))) = heap.pop() {
             let source_batch = inputs[index].batch.as_ref().expect("a loaded frame");
-            let row_bytes = Self::row_bytes(source_batch, inputs[index].row)?;
+            let row_bytes = PropertyRows::gather_row_charge(source_batch, inputs[index].row)?;
             let next_bytes = chunk_bytes
                 .checked_add(row_bytes)
                 .ok_or_else(|| storage("property frame byte total overflows"))?;
