@@ -107,6 +107,27 @@ fn projected_leaves_share_the_same_window_limit() {
 }
 
 #[test]
+fn row_groups_reuse_the_task_window_at_a_batch_boundary() {
+    let mut budget = InventoryBudget::new(4096);
+    let mut ledger = ledger(0, 4, 4, 10, &mut budget);
+    let mut first_group_leaf = progress(0, 2, 4, 2);
+    let mut second_group_leaf = progress(2, 2, 4, 2);
+
+    first_group_leaf
+        .process_block(&mut ledger, &[0, 0], &[3, 3], None)
+        .unwrap();
+    first_group_leaf.finish(None).unwrap();
+    assert_eq!(ledger.batch_bytes(0).unwrap(), 6);
+
+    let error = second_group_leaf
+        .process_block(&mut ledger, &[0, 0], &[3, 3], None)
+        .unwrap_err();
+    assert!(is_resource_limit(&error), "{error}");
+    assert_eq!(ledger.batch_bytes(0).unwrap(), 9);
+    assert_eq!(second_group_leaf.events_seen(), 1);
+}
+
+#[test]
 fn group_rows_cross_global_batch_boundaries() {
     let mut budget = InventoryBudget::new(4096);
     let mut ledger = ledger(3, 4, 4, 10, &mut budget);
@@ -204,13 +225,22 @@ fn empty_progress_and_ledger_paths_observe_cancellation() {
 }
 
 #[test]
+fn an_empty_unaligned_task_range_has_no_window_entries() {
+    let mut budget = InventoryBudget::new(4096);
+    let ledger = WindowLedger::new(1, 0, 4, 10, &mut budget, None).unwrap();
+    assert_eq!(ledger.batch_totals().count(), 0);
+    assert_eq!(ledger.current_bytes().unwrap(), 0);
+    assert_eq!(ledger.inventory_bytes().unwrap(), 0);
+}
+
+#[test]
 fn window_and_leaf_inventories_reserve_before_growing() {
     let mut budget = InventoryBudget::new(64);
     let mut inventory = LeafProgressInventory::new();
     inventory.push(progress(0, 1, 4, 1), &mut budget).unwrap();
     assert_eq!(inventory.len(), 1);
     assert!(!inventory.is_empty());
-    assert!(inventory.inventory_bytes() <= budget.live_bytes());
+    assert!(inventory.inventory_bytes().unwrap() <= budget.live_bytes());
 
     let mut denied_budget = InventoryBudget::new(0);
     let mut denied_inventory = LeafProgressInventory::new();

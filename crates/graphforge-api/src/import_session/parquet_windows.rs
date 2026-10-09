@@ -32,10 +32,12 @@ pub(super) struct WindowLedger {
 }
 
 impl WindowLedger {
-    /// Create zeroed totals for all global windows touched by this row group.
+    /// Create zeroed totals for all global windows touched by the complete
+    /// task/source row range. Keep this ledger alive while visiting every row
+    /// group so groups on opposite sides of a batch boundary share the entry.
     pub(super) fn new(
-        group_start_row: u64,
-        group_rows: u64,
+        task_start_row: u64,
+        task_rows: u64,
         batch_rows: u64,
         window_limit: u64,
         budget: &mut InventoryBudget,
@@ -45,12 +47,16 @@ impl WindowLedger {
         if batch_rows == 0 {
             return Err(storage("Parquet batch row count must be positive"));
         }
-        let group_end = group_start_row
-            .checked_add(group_rows)
-            .ok_or_else(|| storage("Parquet row-group range overflows"))?;
-        let first_batch = group_start_row / batch_rows;
-        let end_batch = div_ceil(group_end, batch_rows);
-        let count = usize::try_from(end_batch - first_batch).map_err(storage)?;
+        let task_end = task_start_row
+            .checked_add(task_rows)
+            .ok_or_else(|| storage("Parquet task row range overflows"))?;
+        let first_batch = task_start_row / batch_rows;
+        let end_batch = div_ceil(task_end, batch_rows);
+        let count = if task_rows == 0 {
+            0
+        } else {
+            usize::try_from(end_batch - first_batch).map_err(storage)?
+        };
         let mut totals = Vec::new();
         reserve(
             &mut totals,
@@ -58,7 +64,26 @@ impl WindowLedger {
             budget,
             "the Parquet shared window ledger",
         )?;
-        totals.resize_with(count, WindowTotal::default);
+        let reserved_bytes =
+            checked_inventory_bytes(totals.capacity(), std::mem::size_of::<WindowTotal>())?;
+        let mut initialized = 0;
+        while initialized < count {
+            if let Err(error) = check_cancel(cancellation) {
+                budget.release(reserved_bytes);
+                return Err(error);
+            }
+            let step = (count - initialized).min(MAX_PROGRESS_EVENTS);
+            let Some(next) = initialized.checked_add(step) else {
+                budget.release(reserved_bytes);
+                return Err(limit("Parquet window initialization count overflows"));
+            };
+            totals.resize_with(next, WindowTotal::default);
+            initialized = next;
+        }
+        if let Err(error) = check_cancel(cancellation) {
+            budget.release(reserved_bytes);
+            return Err(error);
+        }
         Ok(Self {
             first_batch,
             totals,
@@ -119,10 +144,8 @@ impl WindowLedger {
     }
 
     /// Resident vector bytes charged through the inventory budget.
-    pub(super) fn inventory_bytes(&self) -> u64 {
-        u64::try_from(self.totals.capacity())
-            .unwrap_or(u64::MAX)
-            .saturating_mul(u64::try_from(std::mem::size_of::<WindowTotal>()).unwrap_or(u64::MAX))
+    pub(super) fn inventory_bytes(&self) -> Result<u64, GfError> {
+        checked_inventory_bytes(self.totals.capacity(), std::mem::size_of::<WindowTotal>())
     }
 
     fn index(&self, batch: u64) -> Result<usize, GfError> {
@@ -130,7 +153,7 @@ impl WindowLedger {
             .checked_sub(self.first_batch)
             .and_then(|value| usize::try_from(value).ok())
             .filter(|index| *index < self.totals.len())
-            .ok_or_else(|| storage("Parquet event maps outside its row-group windows"))?;
+            .ok_or_else(|| storage("Parquet event maps outside its task windows"))?;
         Ok(index)
     }
 }
@@ -295,10 +318,8 @@ impl LeafProgressInventory {
         self.leaves.is_empty()
     }
 
-    pub(super) fn inventory_bytes(&self) -> u64 {
-        u64::try_from(self.leaves.capacity())
-            .unwrap_or(u64::MAX)
-            .saturating_mul(u64::try_from(std::mem::size_of::<LeafProgress>()).unwrap_or(u64::MAX))
+    pub(super) fn inventory_bytes(&self) -> Result<u64, GfError> {
+        checked_inventory_bytes(self.leaves.capacity(), std::mem::size_of::<LeafProgress>())
     }
 }
 
@@ -326,6 +347,16 @@ fn ensure_fits(bytes: u64, limit_bytes: u64) -> Result<(), GfError> {
 
 fn div_ceil(value: u64, divisor: u64) -> u64 {
     value / divisor + u64::from(value % divisor != 0)
+}
+
+fn checked_inventory_bytes(capacity: usize, element_bytes: usize) -> Result<u64, GfError> {
+    let capacity = u64::try_from(capacity)
+        .map_err(|_| limit("Parquet inventory capacity exceeds a countable size"))?;
+    let element_bytes = u64::try_from(element_bytes)
+        .map_err(|_| limit("Parquet inventory element size exceeds a countable size"))?;
+    capacity
+        .checked_mul(element_bytes)
+        .ok_or_else(|| limit("Parquet inventory byte size exceeds a countable size"))
 }
 
 #[path = "parquet_windows/tests.rs"]
