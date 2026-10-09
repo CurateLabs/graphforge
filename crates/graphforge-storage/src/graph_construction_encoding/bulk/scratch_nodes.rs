@@ -355,10 +355,12 @@ pub(super) struct ResolveContext<'a> {
     pub(super) cancel: &'a AtomicBool,
 }
 
-/// Probe rows between two cancellation checks inside one block. An admitted
-/// block can hold a full staging buffer, so the token is observed at a fixed
-/// row cadence as well as before each block, without testing it per row.
-const PROBE_CANCEL_ROWS: usize = 1 << 12;
+/// Records between two cancellation checks inside one streamed block. An
+/// admitted block is bounded — one physical segment for the references, one
+/// staging buffer for the probes — so the token is observed before each
+/// block and again at this fixed row cadence inside it, without polling per
+/// row.
+const CANCEL_CHECK_ROWS: usize = 1 << 12;
 
 /// Read the identity probes of one leaf — an edge UUID that is a node UUID —
 /// and return whether any of them hit the leaf's sorted `records`.
@@ -371,7 +373,7 @@ const PROBE_CANCEL_ROWS: usize = 1 << 12;
 /// against it, an overshoot is rejected as soon as it is seen, and the exact
 /// match must hold before the caller may reclaim the file or believe what the
 /// probes showed. Cancellation is checked before each block and every
-/// `PROBE_CANCEL_ROWS` records.
+/// `CANCEL_CHECK_ROWS` records.
 pub(super) fn verify_probes(
     scratch: &Scratch,
     probes: &Partitions,
@@ -394,7 +396,7 @@ pub(super) fn verify_probes(
                     "a node probe partition holds more records than were scattered",
                 ));
             }
-            if row % PROBE_CANCEL_ROWS == PROBE_CANCEL_ROWS - 1 {
+            if row % CANCEL_CHECK_ROWS == CANCEL_CHECK_ROWS - 1 {
                 check_cancelled(cancel)?;
             }
             let edge: [u8; 16] = bytes.try_into().expect("16 bytes");
@@ -517,7 +519,9 @@ pub(super) fn resolve_endpoints(
             // resolved its records, so a leaf retains at most one segment of
             // input however skewed its reference list is (#1929). The read
             // checks the aggregate reference count against the scatter
-            // before it claims success.
+            // before it claims success, and cancellation is observed before
+            // every segment frame and every `CANCEL_CHECK_ROWS` records
+            // inside it.
             let mut out_degrees = vec![0_u32; count];
             let mut in_degrees = vec![0_u32; count];
             let mut scatter = Scatter::new(scratch, &resolved, staging);
@@ -527,7 +531,10 @@ pub(super) fn resolve_endpoints(
                 if !payload.len().is_multiple_of(REF_RECORD) {
                     return Err(storage("a node reference block has a partial record"));
                 }
-                for bytes in payload.chunks_exact(REF_RECORD) {
+                for (row, bytes) in payload.chunks_exact(REF_RECORD).enumerate() {
+                    if row % CANCEL_CHECK_ROWS == CANCEL_CHECK_ROWS - 1 {
+                        check_cancelled(cancel)?;
+                    }
                     let reference = RefRecord::decode(bytes);
                     match records.binary_search_by(|record| record.uuid.cmp(&reference.key)) {
                         Ok(position) => match reference.role {
