@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
 use arrow::array::{ArrayRef, StringArray};
@@ -35,7 +35,7 @@ fn write_batch(batch: &RecordBatch) -> tempfile::NamedTempFile {
     file
 }
 
-fn metadata(file: &tempfile::NamedTempFile) -> parquet::file::metadata::ParquetMetaData {
+fn metadata(file: &tempfile::NamedTempFile) -> Arc<parquet::file::metadata::ParquetMetaData> {
     ParquetRecordBatchReaderBuilder::try_new(file.reopen().unwrap())
         .unwrap()
         .metadata()
