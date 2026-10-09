@@ -233,6 +233,10 @@ impl ExecutionPlan for PropertyOverlayExec {
             .map(ExecutionPlanMetricsSet::clone_inner)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one blocking task owns the scan, its limit hold-back and its work counters"
+    )]
     fn execute(
         &self,
         partition: usize,
