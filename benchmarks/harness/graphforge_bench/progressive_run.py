@@ -29,8 +29,11 @@ import xml.etree.ElementTree as ET
 from jsonschema import Draft202012Validator
 
 from graphforge_bench.benchexec_authority import Limits, normalize_run
+from graphforge_bench.benchexec_process import run_bounded
 from graphforge_bench.hybrid_cgroup_v2 import measure_hybrid_pressure
 from graphforge_bench.local_admission import qualify_local_host
+from graphforge_bench.phase_cgroup import EVIDENCE_NAME as PHASE_SWAP_EVIDENCE
+from graphforge_bench.phase_cgroup import PhaseSwapSampler
 from graphforge_bench.progressive_qualification import QualificationError, load_profiles, project
 from graphforge_bench.progressive_queries import ORDERED_LIMIT_ROW_COUNT
 
@@ -561,13 +564,6 @@ def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _benchexec_cli(benchexec_python: Path) -> Path:
-    candidate = benchexec_python.parent / "benchexec"
-    if candidate.is_file():
-        return candidate
-    raise ControllerError("BenchExec CLI is missing beside the configured Python")
-
-
 def _bench_home(stage: Path) -> Path:
     """Use the provider volume as HOME when BenchExec must write durable projects."""
     if _provider_volume_mounted():
@@ -735,7 +731,9 @@ def _run_benchexec(
         environment["TMPDIR"] = str(tmp.resolve())
         environment["GRAPHFORGE_HOST_WORK_ROOT"] = str(durable_root.resolve())
     command = [
-        str(_benchexec_cli(executables.benchexec_python)),
+        str(executables.benchexec_python),
+        "-m",
+        "graphforge_bench.benchexec_launcher",
         "--tool-directory",
         str(_benchexec_tool_directory(stage, prefer_stage=durable_root is not None)),
         *_benchexec_container_flags(stage, durable_root=durable_root),
@@ -750,13 +748,27 @@ def _run_benchexec(
     if _digest(executables.benchexec_python) != identities.get("benchexec_python_sha256"):
         raise ControllerError("BenchExec Python identity changed after planning")
     with measure_hybrid_pressure() as hybrid_pressure:
-        returncode = subprocess.run(command, env=environment, check=False).returncode
+        swap = PhaseSwapSampler()
+        returncode = run_bounded(
+            command,
+            env=environment,
+            raw_output=raw_output,
+            wall_seconds=_staged_wall_seconds(stage),
+            on_poll=swap.sample,
+        )
+    swap.write(stage / PHASE_SWAP_EVIDENCE)
     pressure_path = stage / "hybrid-pressure.json"
     pressure_path.write_text(
         json.dumps(hybrid_pressure(), sort_keys=True) + "\n",
         encoding="utf-8",
     )
     return returncode
+
+
+def _staged_wall_seconds(stage: Path) -> int | None:
+    """The wall limit the staged definition gives BenchExec, or None when it has none."""
+    match = re.search(r' walltimelimit="(\d+) s"', (stage / "benchmark.xml").read_text("utf-8"))
+    return None if match is None else int(match.group(1))
 
 
 def _scaled_number(value: str, *, integral: bool = False) -> int | float:
