@@ -11,7 +11,7 @@ use graphforge_core::GfError;
 
 use crate::CancellationToken;
 
-use super::parquet_scan::{RawHeader, read_header};
+use super::parquet_scan::{RawHeader, read_header as parse_header};
 use super::{cancelled, limit, storage};
 
 const READ_BLOCK: usize = 8 << 10;
@@ -39,22 +39,64 @@ pub(super) fn read<R: Read>(
     capacity: usize,
     cancellation: Option<&CancellationToken>,
 ) -> Result<CompressedPage, GfError> {
+    let (header_bytes, header) = read_header(reader, remaining_chunk_bytes, cancellation)?;
+    let header_length = u64::try_from(header_bytes).map_err(storage)?;
+    let body_remaining = remaining_chunk_bytes
+        .checked_sub(header_length)
+        .ok_or_else(|| storage("Parquet page header extends beyond its column chunk"))?;
+    read_body(
+        reader,
+        header_bytes,
+        header,
+        body_remaining,
+        capacity,
+        cancellation,
+    )
+}
+
+/// Read and validate one bounded header while leaving the reader positioned at
+/// its compressed body.
+pub(super) fn read_header<R: Read>(
+    reader: &mut R,
+    remaining_chunk_bytes: u64,
+    cancellation: Option<&CancellationToken>,
+) -> Result<(usize, RawHeader), GfError> {
     check(cancellation)?;
     let mut bounded = reader.take(remaining_chunk_bytes);
-    let (header_bytes, header) = read_header(&mut bounded)?;
+    let (header_bytes, header) = parse_header(&mut bounded)?;
+    if u64::try_from(header_bytes).map_err(storage)? > remaining_chunk_bytes {
+        return Err(storage(
+            "Parquet page header extends beyond its column chunk",
+        ));
+    }
+    Ok((header_bytes, header))
+}
+
+/// Read one body from the exact header already consumed by `read_header`.
+/// `remaining_chunk_bytes` counts bytes after that header.
+pub(super) fn read_body<R: Read>(
+    reader: &mut R,
+    header_bytes: usize,
+    header: RawHeader,
+    remaining_chunk_bytes: u64,
+    capacity: usize,
+    cancellation: Option<&CancellationToken>,
+) -> Result<CompressedPage, GfError> {
+    check(cancellation)?;
     let compressed = usize::try_from(
         header
             .compressed
             .ok_or_else(|| storage("Missing compressed page size"))?,
     )
     .map_err(storage)?;
-    let physical_bytes = u64::try_from(header_bytes)
-        .map_err(storage)?
-        .checked_add(u64::try_from(compressed).map_err(storage)?)
-        .ok_or_else(|| storage("Parquet page byte range overflows"))?;
-    if physical_bytes > remaining_chunk_bytes {
+    let header_bytes_u64 = u64::try_from(header_bytes).map_err(storage)?;
+    let compressed_u64 = u64::try_from(compressed).map_err(storage)?;
+    if compressed_u64 > remaining_chunk_bytes {
         return Err(storage("Parquet page extends beyond its column chunk"));
     }
+    let physical_bytes = header_bytes_u64
+        .checked_add(compressed_u64)
+        .ok_or_else(|| storage("Parquet page byte range overflows"))?;
     if compressed > capacity {
         return Err(limit(
             "Parquet compressed page exceeds its admitted workspace",
@@ -75,6 +117,7 @@ pub(super) fn read<R: Read>(
         body.resize(end, 0);
     }
     let mut checksum = crc32fast::Hasher::new();
+    let mut bounded = reader.take(remaining_chunk_bytes);
     for block in body.chunks_mut(READ_BLOCK) {
         check(cancellation)?;
         bounded.read_exact(block).map_err(storage)?;

@@ -120,6 +120,28 @@ impl Shape {
             .ok_or_else(|| storage("Parquet V2 level lengths overflow"))
     }
 
+    fn metadata(&self) -> Result<parquet::column::page::PageMetadata, GfError> {
+        let values = usize::try_from(self.values).map_err(storage)?;
+        match self.kind {
+            0 => Ok(parquet::column::page::PageMetadata {
+                num_rows: None,
+                num_levels: Some(values),
+                is_dict: false,
+            }),
+            2 => Ok(parquet::column::page::PageMetadata {
+                num_rows: None,
+                num_levels: None,
+                is_dict: true,
+            }),
+            3 => Ok(parquet::column::page::PageMetadata {
+                num_rows: Some(usize::try_from(self.rows).map_err(storage)?),
+                num_levels: Some(values),
+                is_dict: false,
+            }),
+            _ => Err(storage("Unsupported Parquet page type")),
+        }
+    }
+
     fn page(self, body: Bytes, header: &RawHeader) -> Result<Page, GfError> {
         match self.kind {
             0 => Ok(Page::DataPage {
@@ -154,6 +176,23 @@ impl Shape {
             _ => Err(storage("Unsupported Parquet page type")),
         }
     }
+}
+
+/// Validate the two declared body lengths without allocating either body.
+pub(super) fn body_lengths(header: &RawHeader) -> Result<(usize, usize), GfError> {
+    let compressed =
+        usize::try_from(natural(header.compressed, "compressed page size")?).map_err(storage)?;
+    let uncompressed = usize::try_from(natural(header.uncompressed, "uncompressed page size")?)
+        .map_err(storage)?;
+    Ok((compressed, uncompressed))
+}
+
+/// Validate the header geometry/counts and expose the public reader metadata.
+pub(super) fn page_metadata(
+    header: &RawHeader,
+) -> Result<parquet::column::page::PageMetadata, GfError> {
+    let (compressed, _) = body_lengths(header)?;
+    Shape::new(header, compressed)?.metadata()
 }
 
 fn lz4_length(

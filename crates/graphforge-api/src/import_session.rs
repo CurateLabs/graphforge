@@ -38,6 +38,7 @@ mod parquet_events;
 mod parquet_levels;
 mod parquet_page;
 mod parquet_page_decode;
+mod parquet_reader;
 mod parquet_scan;
 mod parquet_values;
 mod parquet_windows;
