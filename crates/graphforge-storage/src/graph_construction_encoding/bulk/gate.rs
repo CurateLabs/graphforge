@@ -98,26 +98,7 @@ impl ByteGate {
     /// Reserve `bytes` until the guard drops.
     pub(super) fn hold(&self, bytes: u64, cancel: &AtomicBool) -> Result<Held<'_>, GfError> {
         self.acquire(bytes, cancel)?;
-        Ok(Held {
-            gate: self,
-            bytes,
-            trim: false,
-        })
-    }
-
-    /// Reserve what a decoding task holds. When the task is done and the bytes
-    /// are returned, the allocator gives the pages it freed back to the
-    /// system: a pool of threads that each decode and free tens of megabytes
-    /// otherwise leaves them in per-thread arenas, and resident memory ends
-    /// up a multiple of what the tasks hold (#1938: 3.2 GB against 1.7 GB for
-    /// SNB BI SF1 with the arenas capped).
-    pub(super) fn hold_task(&self, bytes: u64, cancel: &AtomicBool) -> Result<Held<'_>, GfError> {
-        self.acquire(bytes, cancel)?;
-        Ok(Held {
-            gate: self,
-            bytes,
-            trim: true,
-        })
+        Ok(Held { gate: self, bytes })
     }
 }
 
@@ -125,29 +106,13 @@ impl ByteGate {
 pub(super) struct Held<'g> {
     gate: &'g ByteGate,
     bytes: u64,
-    trim: bool,
 }
 
 impl Drop for Held<'_> {
     fn drop(&mut self) {
-        if self.trim {
-            return_freed_memory();
-        }
         self.gate.release(self.bytes);
     }
 }
-
-/// Give the pages the allocator has freed back to the system.
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-pub(super) fn return_freed_memory() {
-    // SAFETY: `malloc_trim` takes no pointers and may be called from any thread.
-    unsafe {
-        libc::malloc_trim(0);
-    }
-}
-
-#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-pub(super) fn return_freed_memory() {}
 
 #[cfg(test)]
 mod tests {

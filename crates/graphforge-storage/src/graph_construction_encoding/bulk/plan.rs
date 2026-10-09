@@ -85,8 +85,9 @@ pub struct BulkSource<'a> {
 }
 
 /// Bytes a task holds while it decodes, per byte of the rows it reads: the
-/// row groups' pages as read, and the batches decoded from them.
-const DECODE_EXPANSION: u64 = 2;
+/// row groups' pages as read, the copy the source digest keeps until the file
+/// is hashed in order, and the batches decoded and normalized from them.
+const DECODE_EXPANSION: u64 = 4;
 /// Fewest bytes a decoding task reserves.
 const MIN_TASK_DECODE_BYTES: u64 = 4 << 20;
 
