@@ -245,6 +245,9 @@ impl AuthenticatedPropertyInventory {
                 handle,
             });
         }
+        if scratch.is_lazy() {
+            return open_readonly_fragment(&file, fragment, object, handle);
+        }
         let (
             snapshot,
             authentication_bytes,
@@ -1883,11 +1886,37 @@ impl PropertyAdmission<'_> {
                 metadata,
                 uuid_range,
             })),
+            readonly_index: OnceLock::new(),
             authentication_bytes,
             authentication_block_equivalents,
             authentication_read_calls,
         })
     }
+}
+
+fn open_readonly_fragment(
+    file: &File,
+    fragment: &AuthenticatedPropertyFragment,
+    object: FragmentObject,
+    handle: FragmentHandleGuard,
+) -> Result<OpenPropertyFragment, GfError> {
+    let readonly = super::readonly_snapshot::open(
+        file,
+        fragment.identity,
+        &fragment.entry,
+        super::PropertyOverlayLimits::default().max_buffered_bytes,
+        &fragment.readonly_index,
+    )?;
+    let (authentication_bytes, authentication_block_equivalents, calls) =
+        readonly.opening_authentication();
+    Ok(OpenPropertyFragment {
+        logical_length: object.logical_length,
+        file: Arc::new(PropertyFile::Readonly(Arc::new(readonly))),
+        authentication_bytes,
+        authentication_block_equivalents,
+        authentication_read_calls: calls,
+        handle,
+    })
 }
 
 /// Open one fragment's parts for first-touch admission. Nothing is read: each
@@ -1943,6 +1972,7 @@ fn first_touch_fragment(
         parts,
         object: OnceLock::new(),
         footer: OnceLock::new(),
+        readonly_index: OnceLock::new(),
         authentication_bytes: 0,
         authentication_block_equivalents: 0,
         authentication_read_calls: 0,
@@ -2345,6 +2375,10 @@ impl<'a> SnapshotScratch<'a> {
             Self::Directory(path) => Ok(path),
             Self::Lazy(lazy) => lazy.path(),
         }
+    }
+
+    fn is_lazy(self) -> bool {
+        matches!(self, Self::Lazy(_))
     }
 }
 
