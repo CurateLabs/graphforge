@@ -12,6 +12,7 @@ pub use fragment_cap::{MAX_PROPERTY_FRAGMENT_BYTES, MAX_PROPERTY_FRAGMENT_ROWS};
 pub(crate) mod bounded_object;
 pub use bounded_object::MAX_PROPERTY_OBJECT_BYTES;
 mod inventory;
+mod readonly_snapshot;
 pub(crate) use inventory::SnapshotScratch;
 #[cfg(test)]
 use inventory::digest_hex;
@@ -304,6 +305,7 @@ struct AuthenticatedPropertyFragment {
     /// the first touch, which checks every part's content against the manifest.
     object: OnceLock<Result<FragmentObject, GfError>>,
     footer: OnceLock<Result<FragmentFooter, GfError>>,
+    readonly_index: OnceLock<Result<Arc<readonly_snapshot::ReadonlyIndex>, GfError>>,
     authentication_bytes: u64,
     authentication_block_equivalents: u64,
     authentication_read_calls: u64,
@@ -349,6 +351,9 @@ enum PropertyFile {
     /// The authenticated bytes of one bounded object, held in memory. Reading
     /// a property fragment writes nothing.
     Memory(Bytes),
+    /// A retained legacy file whose reads are authenticated from bounded
+    /// immutable blocks without creating a snapshot file.
+    Readonly(Arc<readonly_snapshot::ReadonlyFile>),
     Segmented {
         source: bounded_object::SegmentedSource,
         authentication: Arc<PartAuthentication>,
@@ -359,6 +364,7 @@ impl PropertyFile {
     fn authentication(&self) -> (u64, u64, u64) {
         match self {
             Self::Plain(_) | Self::Memory(_) => (0, 0, 0),
+            Self::Readonly(file) => file.authentication(),
             Self::Segmented { authentication, .. } => authentication.values(),
         }
     }
@@ -366,6 +372,7 @@ impl PropertyFile {
     fn physical_reads(&self) -> (u64, u64) {
         match self {
             Self::Plain(_) | Self::Memory(_) => (0, 0),
+            Self::Readonly(file) => file.physical_reads(),
             Self::Segmented { authentication, .. } => (
                 authentication.read_bytes.load(Ordering::Relaxed),
                 authentication.read_calls.load(Ordering::Relaxed),
@@ -377,6 +384,7 @@ impl PropertyFile {
         match self {
             Self::Plain(_) => 0,
             Self::Memory(bytes) => bytes.len() as u64,
+            Self::Readonly(file) => file.reservation_bytes(),
             Self::Segmented { .. } => 2 * bounded_object::MAX_PROPERTY_OBJECT_BYTES as u64,
         }
     }
@@ -401,11 +409,12 @@ impl PropertyRead for File {
 
 impl PropertyRead for PropertyFile {
     fn physical(&self) -> bool {
-        matches!(self, Self::Plain(_) | Self::Memory(_))
+        matches!(self, Self::Plain(_) | Self::Memory(_) | Self::Readonly(_))
     }
     fn read_at(&self, buffer: &mut [u8], offset: u64) -> std::io::Result<usize> {
         match self {
             Self::Plain(file) => retained_read_at(file, buffer, offset),
+            Self::Readonly(file) => file.read_at(buffer, offset),
             Self::Memory(bytes) => {
                 let Ok(start) = usize::try_from(offset) else {
                     return Ok(0);
@@ -421,6 +430,7 @@ impl PropertyRead for PropertyFile {
     fn length(&self) -> std::io::Result<u64> {
         match self {
             Self::Plain(file) => file.length(),
+            Self::Readonly(file) => Ok(file.length()),
             Self::Memory(bytes) => Ok(bytes.len() as u64),
             Self::Segmented { source, .. } => Ok(source.len()),
         }
