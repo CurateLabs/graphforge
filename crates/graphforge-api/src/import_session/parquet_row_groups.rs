@@ -105,6 +105,9 @@ where
     }
 
     fn column_chunks(&self, column_index: usize) -> ParquetResult<Box<dyn PageIterator>> {
+        if self.failures.failed() {
+            return Err(as_parquet_error(storage("Parquet task has already failed")));
+        }
         if let Err(error) = check_cancelled(self.cancellation.as_ref()) {
             self.failures.record(error.clone());
             return Err(as_parquet_error(error));
@@ -167,7 +170,7 @@ where
     type Item = ParquetResult<Box<dyn PageReader>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.terminal {
+        if self.terminal || self.failures.failed() {
             return None;
         }
         if let Err(error) = check_cancelled(self.cancellation.as_ref()) {

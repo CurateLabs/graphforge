@@ -7,7 +7,9 @@
 use std::io::Read;
 use std::sync::Arc;
 
+use arrow::record_batch::RecordBatch;
 use graphforge_core::GfError;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
 use parquet::basic::Compression;
 use parquet::column::page::{Page, PageMetadata, PageReader};
 use parquet::errors::ParquetError;
@@ -38,7 +40,13 @@ pub(super) trait PagePreflight: Send {
 /// Arrow's Parquet-to-Arrow error conversion stringifies `ParquetError`, so
 /// callers retain this slot to recover the original GraphForge error.
 #[derive(Clone, Default)]
-pub(super) struct PageFailures(Arc<parking_lot::Mutex<Option<GfError>>>);
+pub(super) struct PageFailures(Arc<parking_lot::Mutex<PageFailureState>>);
+
+#[derive(Default)]
+struct PageFailureState {
+    failed: bool,
+    first: Option<GfError>,
+}
 
 impl PageFailures {
     pub(super) fn new() -> Self {
@@ -46,16 +54,72 @@ impl PageFailures {
     }
 
     pub(super) fn record(&self, error: GfError) {
-        let mut first = self.0.lock();
-        if first.is_none() {
-            *first = Some(error);
+        let mut state = self.0.lock();
+        if !state.failed {
+            state.failed = true;
+            state.first = Some(error);
         }
     }
 
     pub(super) fn take(&self) -> Option<GfError> {
-        self.0.lock().take()
+        self.0.lock().first.take()
+    }
+
+    pub(super) fn failed(&self) -> bool {
+        self.0.lock().failed
     }
 }
+
+/// Source-boundary iterator which preserves typed preflight errors and drops
+/// all native readers after the first failure or EOF. Arrow's own iterator
+/// can continue to poll other columns after returning an error.
+pub(super) struct OwnedBatchReader {
+    reader: Option<ParquetRecordBatchReader>,
+    failures: PageFailures,
+}
+
+impl OwnedBatchReader {
+    pub(super) fn new(reader: ParquetRecordBatchReader, failures: PageFailures) -> Self {
+        Self {
+            reader: Some(reader),
+            failures,
+        }
+    }
+}
+
+impl Iterator for OwnedBatchReader {
+    type Item = Result<RecordBatch, GfError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let reader = self.reader.as_mut()?;
+        if self.failures.failed() {
+            self.reader = None;
+            return self.failures.take().map(Err);
+        }
+        let result = reader.next();
+        if self.failures.failed() {
+            self.reader = None;
+            return Some(Err(self.failures.take().unwrap_or_else(|| {
+                storage("Parquet task stopped after its page failure was consumed")
+            })));
+        }
+        match result {
+            Some(Ok(batch)) => Some(Ok(batch)),
+            Some(Err(error)) => {
+                self.reader = None;
+                let error = storage(error);
+                self.failures.record(error.clone());
+                Some(Err(self.failures.take().unwrap_or(error)))
+            }
+            None => {
+                self.reader = None;
+                None
+            }
+        }
+    }
+}
+
+impl std::iter::FusedIterator for OwnedBatchReader {}
 
 impl<T: PagePreflight + ?Sized> PagePreflight for Box<T> {
     fn remaining_workspace(&self) -> Result<usize, GfError> {
@@ -123,7 +187,7 @@ where
     }
 
     fn next_page(&mut self) -> Result<Option<Page>, GfError> {
-        if self.terminal {
+        if self.terminal || self.failures.failed() {
             return Ok(None);
         }
         self.check_cancel()?;
@@ -315,7 +379,7 @@ where
     }
 
     fn peek_next_page(&mut self) -> parquet::errors::Result<Option<PageMetadata>> {
-        if self.terminal {
+        if self.terminal || self.failures.failed() {
             return Ok(None);
         }
         if let Err(error) = self.check_cancel() {

@@ -17,7 +17,7 @@ use super::OwnedRowGroups;
 use crate::CancellationToken;
 use crate::import_session::inventory_budget::InventoryBudget;
 use crate::import_session::parquet_page_decode::DecodedPage;
-use crate::import_session::parquet_reader::{PageFailures, PagePreflight};
+use crate::import_session::parquet_reader::{OwnedBatchReader, PageFailures, PagePreflight};
 
 #[derive(Clone)]
 struct Probe {
@@ -123,8 +123,9 @@ fn public_arrow_reader_routes_all_selected_physical_columns_through_preflight() 
         None,
     )
     .unwrap();
-    let mut reader =
+    let native =
         ParquetRecordBatchReader::try_new_with_row_groups(&levels, &groups, 6, None).unwrap();
+    let mut reader = OwnedBatchReader::new(native, groups.failures.clone());
     let batches = reader.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
     assert_eq!(
         batches
@@ -190,16 +191,20 @@ fn typed_callback_refusal_reaches_arrow_before_the_page_is_decoded() {
     let (bytes, metadata) = source();
     let mut budget = InventoryBudget::new(1 << 20);
     let failures = PageFailures::new();
+    let calls = Arc::new(AtomicUsize::new(0));
     let groups = OwnedRowGroups::new(
         Arc::new(bytes),
         Arc::clone(&metadata),
         &[0],
         &mut budget,
-        |_, _| {
-            Ok(Probe {
-                calls: Arc::new(AtomicUsize::new(0)),
-                refusal: true,
-            })
+        {
+            let calls = Arc::clone(&calls);
+            move |_, _| {
+                Ok(Probe {
+                    calls: Arc::clone(&calls),
+                    refusal: true,
+                })
+            }
         },
         None,
         failures.clone(),
@@ -211,32 +216,92 @@ fn typed_callback_refusal_reaches_arrow_before_the_page_is_decoded() {
         None,
     )
     .unwrap();
-    let mut reader =
+    let native =
         ParquetRecordBatchReader::try_new_with_row_groups(&levels, &groups, 4, None).unwrap();
+    let mut reader = OwnedBatchReader::new(native, failures.clone());
     let error = reader.next().unwrap().unwrap_err();
-    assert!(error.to_string().contains("test preflight refusal"));
-    failures.record(GfError::Storage(
-        "later failure must not replace the first".into(),
-    ));
-    let typed = failures
-        .take()
-        .expect("the shared slot retains the original typed GraphForge error");
     assert!(matches!(
-        &typed,
+        &error,
         GfError::Project {
             code: ProjectErrorCode::ResourceLimit,
             ..
         }
     ));
-    assert!(typed.to_string().contains("test preflight refusal"));
+    assert!(error.to_string().contains("test preflight refusal"));
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert!(failures.failed());
+    failures.record(GfError::Storage(
+        "later failure must not replace the first".into(),
+    ));
     assert!(
         failures.take().is_none(),
-        "the captured failure is consumed once"
+        "the boundary consumes the original error once and never captures a later replacement"
     );
-    assert!(
-        reader.next().is_none(),
-        "terminal refusal must not retry an unvalidated page"
-    );
+    for _ in 0..3 {
+        assert!(
+            reader.next().is_none(),
+            "the source reader must remain fused"
+        );
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn consumed_failure_stops_other_physical_columns_and_row_groups() {
+    let (bytes, metadata) = source();
+    let mut budget = InventoryBudget::new(1 << 20);
+    let failures = PageFailures::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let factories = Arc::new(AtomicUsize::new(0));
+    let groups = OwnedRowGroups::new(
+        Arc::new(bytes),
+        Arc::clone(&metadata),
+        &[0, 1, 2],
+        &mut budget,
+        {
+            let calls = Arc::clone(&calls);
+            let factories = Arc::clone(&factories);
+            move |_, column| {
+                factories.fetch_add(1, Ordering::Relaxed);
+                Ok(Probe {
+                    calls: Arc::clone(&calls),
+                    refusal: column == 0,
+                })
+            }
+        },
+        None,
+        failures.clone(),
+    )
+    .unwrap();
+    let levels = parquet_to_arrow_field_levels(
+        metadata.file_metadata().schema_descr(),
+        ProjectionMask::all(),
+        None,
+    )
+    .unwrap();
+    let mut native =
+        ParquetRecordBatchReader::try_new_with_row_groups(&levels, &groups, 4, None).unwrap();
+    assert!(native.next().unwrap().is_err());
+    assert!(matches!(
+        failures.take(),
+        Some(GfError::Project {
+            code: ProjectErrorCode::ResourceLimit,
+            ..
+        })
+    ));
+    let calls_after_failure = calls.load(Ordering::Relaxed);
+    let factories_after_failure = factories.load(Ordering::Relaxed);
+    for _ in 0..3 {
+        assert!(
+            !matches!(native.next(), Some(Ok(_))),
+            "the unfused native iterator must not decode a later batch after task failure"
+        );
+    }
+    assert!(groups.column_chunks(1).is_err());
+    assert_eq!(calls.load(Ordering::Relaxed), calls_after_failure);
+    assert_eq!(factories.load(Ordering::Relaxed), factories_after_failure);
+    assert!(failures.failed());
+    assert!(failures.take().is_none());
 }
 
 #[test]
