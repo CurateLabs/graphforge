@@ -54,6 +54,7 @@ pub(crate) struct PropertyOverlayExec {
     planned_rows: Option<usize>,
     equality: Option<crate::property_overlay::PropertyEquality>,
     uuid_filters: Vec<Arc<dyn PhysicalExpr>>,
+    uuid_filters_approved: bool,
     props: Arc<PlanProperties>,
     #[cfg(any(test, feature = "test-support"))]
     digest_context: graphforge_core::hash_observation::operation::Context,
@@ -159,6 +160,7 @@ impl PropertyOverlayExec {
             planned_rows,
             equality: options.equality,
             uuid_filters: Vec::new(),
+            uuid_filters_approved: false,
             props,
             metrics,
             work_counts,
@@ -166,6 +168,20 @@ impl PropertyOverlayExec {
             digest_context: graphforge_core::hash_observation::operation::Context::capture(),
             lifecycle_context: crate::lifecycle_io::CaptureContext::current(),
         })
+    }
+
+    pub(crate) fn approve_uuid_filters(
+        &self,
+        approved_ids: &std::collections::BTreeSet<u64>,
+    ) -> Self {
+        let mut approved = self.clone();
+        approved.uuid_filters.retain(|filter| {
+            filter
+                .expression_id()
+                .is_some_and(|expression_id| approved_ids.contains(&expression_id))
+        });
+        approved.uuid_filters_approved = true;
+        approved
     }
 }
 
@@ -241,6 +257,7 @@ impl ExecutionPlan for PropertyOverlayExec {
     ) -> Result<FilterPushdownPropagation<Arc<dyn ExecutionPlan>>, DataFusionError> {
         let mut replacement = self.clone();
         if phase == FilterPushdownPhase::Post {
+            replacement.uuid_filters_approved = false;
             let key = if self.is_edge {
                 "edge_uuid"
             } else {
@@ -259,6 +276,13 @@ impl ExecutionPlan for PropertyOverlayExec {
             updated_node: (!replacement.uuid_filters.is_empty())
                 .then(|| Arc::new(replacement) as Arc<dyn ExecutionPlan>),
         })
+    }
+
+    fn reset_state(self: Arc<Self>) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        let mut reset = (*self).clone();
+        reset.uuid_filters.clear();
+        reset.uuid_filters_approved = false;
+        Ok(Arc::new(reset))
     }
 
     fn metrics(&self) -> Option<MetricsSet> {
@@ -295,7 +319,11 @@ impl ExecutionPlan for PropertyOverlayExec {
         #[cfg(any(test, feature = "test-support"))]
         let digest_context = self.digest_context.clone();
         let lifecycle_context = self.lifecycle_context.clone();
-        let uuid_filters = self.uuid_filters.clone();
+        let uuid_filters = if self.uuid_filters_approved {
+            self.uuid_filters.clone()
+        } else {
+            Vec::new()
+        };
         let key = if self.is_edge {
             "edge_uuid"
         } else {
@@ -339,13 +367,32 @@ impl ExecutionPlan for PropertyOverlayExec {
                     .map(|names| names.iter().cloned().collect());
                 let mut held = Vec::new();
                 let mut held_bytes = 0_usize;
-                let mut hold_until_validated = hold_until_validated;
+                let limit = remaining;
+                let mut replay_after_validation = false;
                 let send = |batch: RecordBatch| {
                     sender.blocking_send(Ok(batch)).map_err(|_| {
                         DataFusionError::Execution("property scan consumer closed".into())
                     })
                 };
-                let result = crate::catalog::visit_property_overlay_batched_selected(
+                let project_batch = |batch: &RecordBatch| {
+                    projection.as_ref().map_or_else(
+                        || Ok(batch.clone()),
+                        |names| {
+                            let indices = names
+                                .iter()
+                                .map(|name| batch.schema().index_of(name))
+                                .collect::<Result<Vec<_>, _>>()
+                                .map_err(|error| {
+                                    DataFusionError::ArrowError(Box::new(error), None)
+                                })?;
+                            batch
+                                .project(&indices)
+                                .map_err(|error| DataFusionError::ArrowError(Box::new(error), None))
+                        },
+                    )
+                };
+                let mut total_work = None::<crate::PropertyOverlayMetrics>;
+                let first_pass = crate::catalog::visit_property_overlay_batched_selected(
                     &project,
                     inventory.as_deref(),
                     &route,
@@ -355,21 +402,7 @@ impl ExecutionPlan for PropertyOverlayExec {
                     equality.as_ref(),
                     uuids.as_ref(),
                     |batch| {
-                        let mut batch = projection.as_ref().map_or_else(
-                            || Ok(batch.clone()),
-                            |names| {
-                                let indices = names
-                                    .iter()
-                                    .map(|name| batch.schema().index_of(name))
-                                    .collect::<Result<Vec<_>, _>>()
-                                    .map_err(|error| {
-                                        DataFusionError::ArrowError(Box::new(error), None)
-                                    })?;
-                                batch.project(&indices).map_err(|error| {
-                                    DataFusionError::ArrowError(Box::new(error), None)
-                                })
-                            },
-                        )?;
+                        let mut batch = project_batch(batch)?;
                         if let Some(rows) = remaining.as_mut() {
                             if *rows == 0 {
                                 return Ok(true);
@@ -380,34 +413,81 @@ impl ExecutionPlan for PropertyOverlayExec {
                             *rows -= batch.num_rows();
                         }
                         if hold_until_validated {
-                            held_bytes = held_bytes.saturating_add(batch.get_array_memory_size());
-                            held.push(batch);
-                            if held_bytes <= MAX_HELD_BYTES {
+                            if replay_after_validation {
                                 return Ok(true);
                             }
-                            // A limit this large streams: holding it would cost
-                            // more memory than the scan's own bounds allow.
-                            hold_until_validated = false;
-                            for batch in held.drain(..) {
-                                send(batch)?;
+                            let batch_bytes = batch.get_array_memory_size();
+                            if held_bytes.saturating_add(batch_bytes) > MAX_HELD_BYTES {
+                                // Keep memory bounded and preserve the validation
+                                // barrier. A successful first pass is replayed
+                                // from this same pinned inventory for emission.
+                                held.clear();
+                                held_bytes = 0;
+                                replay_after_validation = true;
+                                return Ok(true);
                             }
+                            held_bytes += batch_bytes;
+                            held.push(batch);
                             return Ok(true);
                         }
                         send(batch)?;
                         Ok(true)
                     },
                 );
+                let first_pass = first_pass.map(|work| {
+                    if let Some(work) = work {
+                        total_work.get_or_insert_default().absorb(&work);
+                    }
+                });
                 // A limit stops its consumer after the first rows, so a failure in
                 // the rest of the route would go unobserved. Its rows wait for the
                 // whole route to validate: the limit changes emission, not authority.
-                let result = result.and_then(|work| {
-                    for batch in held {
-                        send(batch)?;
+                // If the held prefix would exceed the cap, the first pass validates
+                // without retaining or emitting it; replay only after validation.
+                let result = first_pass.and_then(|()| {
+                    if replay_after_validation {
+                        let mut replay_remaining = limit;
+                        crate::catalog::visit_property_overlay_batched_selected(
+                            &project,
+                            inventory.as_deref(),
+                            &route,
+                            is_edge,
+                            batch_size,
+                            selected_properties.as_ref(),
+                            equality.as_ref(),
+                            uuids.as_ref(),
+                            |batch| {
+                                let mut batch = project_batch(batch)?;
+                                let Some(rows) = replay_remaining.as_mut() else {
+                                    send(batch)?;
+                                    return Ok(true);
+                                };
+                                if *rows == 0 {
+                                    return Ok(false);
+                                }
+                                if batch.num_rows() > *rows {
+                                    batch = batch.slice(0, *rows);
+                                }
+                                *rows -= batch.num_rows();
+                                send(batch)?;
+                                Ok(*rows > 0)
+                            },
+                        )
+                        .map(|work| {
+                            if let Some(work) = work {
+                                total_work.get_or_insert_default().absorb(&work);
+                            }
+                        })
+                    } else {
+                        for batch in held {
+                            send(batch)?;
+                        }
+                        Ok(())
                     }
-                    Ok(work)
                 });
-                let result = result.and_then(|work| {
-                    let (Some((work_counts, decoder_peak)), Some(work)) = (work_counts, work)
+                let result = result.and_then(|_work| {
+                    let (Some((work_counts, decoder_peak)), Some(work)) =
+                        (work_counts, total_work.as_ref())
                     else {
                         return Ok(());
                     };
@@ -441,3 +521,7 @@ impl ExecutionPlan for PropertyOverlayExec {
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, output)))
     }
 }
+
+#[cfg(test)]
+#[path = "property_scan_tests.rs"]
+mod property_scan_tests;

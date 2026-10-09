@@ -723,6 +723,9 @@ impl ExecutionSession {
             .with_physical_optimizer_rule(Arc::new(crate::sort_runs::SortRunCoalesceRule::new(
                 crate::sort_runs::sort_run_bytes(memory_budget, resources.target_partitions),
             )))
+            // Property scans wait only on completed filters whose producer is
+            // still authoritative in this final physical plan.
+            .with_physical_optimizer_rule(Arc::new(graphforge_storage::PropertyFilterApprovalRule))
             .build();
         let ctx = SessionContext::new_with_state(state);
         let semantic_composition_fingerprint = catalog
