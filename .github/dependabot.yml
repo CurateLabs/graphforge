@@ -98,6 +98,13 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "datafusion-*"
         update-types: ["version-update:semver-major"]
+      # thrift must match the version parquet depends on (0.17 for parquet 58):
+      # graphforge-storage passes thrift::protocol::TCompactInputProtocol to
+      # parquet::thrift::TSerializable (closed #1042, #1850). Dependabot treats
+      # 0.x minor bumps as breaking, so ignore minor too. Lifts with the
+      # coordinated upgrade: parquet 60 no longer depends on thrift.
+      - dependency-name: "thrift"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
     groups:
       cargo-minor-patch:
         patterns:
