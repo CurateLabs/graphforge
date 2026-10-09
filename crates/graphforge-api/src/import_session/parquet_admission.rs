@@ -247,15 +247,17 @@ impl SourceScan {
         capacity: u64,
         cancellation: Option<&CancellationToken>,
     ) -> Result<(), GfError> {
-        for shape_leaf in &self.shape.leaves {
+        for (visible_index, shape_leaf) in self.shape.leaves.iter().enumerate() {
             let column = shape_leaf.column_index;
             for (index, group) in self.groups.iter().enumerate() {
                 check(cancellation)?;
                 let leaf = group
                     .leaves
-                    .iter()
-                    .find(|leaf| leaf.physical_column_index == column)
+                    .get(visible_index)
                     .ok_or_else(|| storage("Parquet row groups disagree on physical columns"))?;
+                if leaf.physical_column_index != column {
+                    return Err(storage("Parquet row-group visible column order differs"));
+                }
                 if !needs_values(leaf) {
                     continue;
                 }

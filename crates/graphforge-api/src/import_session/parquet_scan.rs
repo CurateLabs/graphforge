@@ -554,7 +554,11 @@ pub(super) fn scan_group(
     let mut leaves = Vec::new();
     for visible in visible_leaves {
         let physical_column_index = visible.column_index;
-        let chunk = metadata.row_group(group).column(physical_column_index);
+        let chunk = metadata
+            .row_group(group)
+            .columns()
+            .get(physical_column_index)
+            .ok_or_else(|| storage("Parquet visible column is missing from its row group"))?;
         reserve(&mut leaves, 1, budget, "a row group's leaf scans")?;
         let descriptor = chunk.column_descr();
         let leaf = leaf_of(descriptor);

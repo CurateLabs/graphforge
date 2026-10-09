@@ -428,6 +428,32 @@ fn build_from_path(
 }
 
 #[test]
+fn short_cached_row_group_columns_return_a_typed_error() {
+    let leaves = [
+        leaf("before", PhysicalType::INT32),
+        leaf("middle", PhysicalType::INT32),
+        leaf("after", PhysicalType::INT32),
+    ];
+    let file_schema = schema(&leaves);
+    // A cached public row group can be valid against its own descriptor while
+    // disagreeing with the enclosing file's descriptor. The native footer
+    // parser rejects this mismatch; the public cached-metadata entry also
+    // needs to refuse it without an indexing panic.
+    let group_schema = schema(&leaves[..2]);
+    let columns = leaves[..2]
+        .iter()
+        .map(|leaf| chunk(Arc::clone(leaf), 0, 0))
+        .collect();
+    let metadata = file_metadata(&file_schema, vec![row_group(&group_schema, columns, 0)], 0);
+    let file = write_pages(&[]);
+    let error = expect_refused(
+        build(&file, &metadata, MIB),
+        "short cached column inventory",
+    );
+    assert!(matches!(error, GfError::Storage(_)), "{error}");
+}
+
+#[test]
 fn writer_generated_small_pages_pass_with_exact_counts() {
     // An ordinary writer told to flush a page per row: 3,000 one-value pages
     // across three row groups. A scan with an adequate budget reads them all and
@@ -503,7 +529,7 @@ fn writer_generated_small_pages_pass_with_exact_counts() {
     );
     assert_eq!(
         scan.resident_bytes(),
-        retained as u64,
+        retained as u64 + scan.shape.inventory_bytes().unwrap(),
         "charge allocated slots, not just occupied slots"
     );
 
@@ -519,7 +545,7 @@ fn writer_generated_small_pages_pass_with_exact_counts() {
     let mut budget = InventoryBudget::new(u64::MAX);
     let integers = scan_chunk(
         &mut File::open(file.path()).unwrap(),
-        metadata.row_group(0).column(0),
+        metadata.metadata().row_group(0).column(0),
         &mut budget,
     )
     .unwrap();

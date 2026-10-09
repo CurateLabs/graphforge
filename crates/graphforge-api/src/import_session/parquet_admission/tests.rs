@@ -409,7 +409,7 @@ fn repeated_values_are_sized_by_the_children_each_row_holds() {
 }
 
 #[test]
-fn a_dictionary_of_equal_length_entries_is_sized_without_reading_indices() {
+fn equal_width_dictionary_values_have_exact_sizes() {
     // Thirty-six characters wherever the indices point (a UUID rendered as text).
     let batch = strings(4_000, |row| format!("{:036}", row % 13));
     assert_sizes(&batch, builder().build(), 500, 1.05);
@@ -420,8 +420,8 @@ fn a_dictionary_of_equal_length_entries_is_sized_without_reading_indices() {
     // Four bytes of offset and a validity bit per row, around the 36.
     assert_eq!(scan.value_bytes[0], 500 * (36 + 4) + 500_u64.div_ceil(8));
 
-    // A null breaks the shortcut (the batch is no longer one width per row) and
-    // the values are read instead; the size is still exact.
+    // Null values contribute offsets and validity, but no referenced payload;
+    // every nonnull dictionary index is still validated and the size is exact.
     let with_nulls = (0..4_000)
         .map(|row| (row % 9 != 0).then(|| format!("{:036}", row % 13)))
         .collect::<Vec<_>>();
