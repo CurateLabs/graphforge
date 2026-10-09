@@ -541,7 +541,6 @@ fn dictionary_expanded_refuses_missing_dictionary_and_out_of_range_indices() {
 
     // Out-of-range indices are refused by the existing index cursor. The run
     // grammar is complete and valid; only the referenced entry is missing.
-    let max = i16::try_from(count - 1).unwrap();
     let width = num_required_bits(u64::try_from(count - 1).unwrap());
     let mut stream = vec![width];
     stream.extend_from_slice(&rle_run(2, u64::from(u16::try_from(count).unwrap()), width));

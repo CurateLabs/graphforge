@@ -79,6 +79,7 @@ fn compressed_and_decoded_bodies_coexist_in_the_same_budget() {
     let decoded = decode(compressed, Compression::SNAPPY, capacity, None).unwrap();
     assert_eq!(&decoded.page.buffer()[..], b"payload");
     let compressed = page(bytes, 7);
+    let capacity = compressed.body_capacity + 7;
     assert!(is_limit(
         decode(compressed, Compression::SNAPPY, capacity - 1, None)
             .err()
