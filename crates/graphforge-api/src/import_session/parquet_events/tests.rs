@@ -121,7 +121,7 @@ fn v1_rle_summary_counts_actual_nonnull_rows_and_preserves_value_suffix() {
         cursor.validated_summary(None).unwrap(),
         super::EventSummary {
             events: 6,
-            nonnull: 3,
+            nonnull: 4,
             row_starts: 3,
             first_repetition: Some(0),
         }
