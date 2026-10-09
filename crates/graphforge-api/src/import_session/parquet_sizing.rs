@@ -42,15 +42,6 @@ enum DictionaryFacts {
     Fixed { entries: usize },
 }
 
-impl DictionaryFacts {
-    fn entries(&self) -> usize {
-        match self {
-            Self::Bytes(facts) => facts.entries(),
-            Self::Fixed { entries } => *entries,
-        }
-    }
-}
-
 enum ValueCursor<'a, 'f> {
     Lengths(ValueLengths<'a>),
     DictionaryBytes(DictionaryExpanded<'a, 'f>),

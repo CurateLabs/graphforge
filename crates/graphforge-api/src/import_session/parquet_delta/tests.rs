@@ -18,7 +18,7 @@ fn delta_integer_validation_tracks_real_miniblocks_and_padding() {
             assert_eq!(decoder.next().unwrap(), Some(i64::from(expected)));
         }
         assert_eq!(decoder.next().unwrap(), None);
-        assert_eq!(decoder.finish().unwrap(), encoded.len());
+        assert_eq!(stream_end(&mut decoder, None).unwrap(), encoded.len());
     }
 }
 

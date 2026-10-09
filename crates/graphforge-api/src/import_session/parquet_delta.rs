@@ -157,11 +157,6 @@ impl<'a> Integers<'a> {
         self.remaining -= 1;
         Ok(Some(self.previous))
     }
-
-    fn finish(&mut self) -> Result<usize, GfError> {
-        while self.next()?.is_some() {}
-        Ok(self.offset.max(self.end))
-    }
 }
 
 /// Borrowing lengths for the sizing pass. Decoding one repeated logical row
