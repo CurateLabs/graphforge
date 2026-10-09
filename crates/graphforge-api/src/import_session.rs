@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 use crate::{BulkInputKind, CancellationToken, GraphConstructionBudgets, GraphForge, OperationId};
 
+mod bounded_ipc;
 pub(crate) mod bulk_source;
 #[cfg(test)]
 mod cpu_budget_report;

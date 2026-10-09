@@ -877,6 +877,116 @@ fn compressed_arrow_buffers_import_and_a_buffer_that_advertises_a_huge_size_is_r
     assert!(lied.peak < 48 * MIB, "{} MiB", lied.peak / MIB);
 }
 
+/// The expansion a compressed values buffer states before the frame magic of
+/// each codec, for a batch of 1,000 rows of `width`-byte strings.
+fn lz4_prefix(width: u64) -> [u8; 12] {
+    let mut window = (1_000 * width).to_le_bytes().to_vec();
+    window.extend_from_slice(&[0x04, 0x22, 0x4D, 0x18]);
+    window.try_into().unwrap()
+}
+
+/// An IPC buffer's eight-byte prefix states the length its frame expands to,
+/// and Arrow's own LZ4 path expanded into a buffer of that size before checking
+/// it - so a prefix that lies *downward* passed every plan-time bound and then
+/// allocated without one. The reader now expands every frame itself, in
+/// fixed-size chunks that stop at the advertised length: this file's batches
+/// hold 64 MiB each while advertising 1 KiB, and the import is refused with a
+/// heap that never saw either.
+#[test]
+fn an_lz4_buffer_that_advertises_less_than_it_expands_is_refused_before_it_expands() {
+    let _serial = serial();
+    let batches = (0..2)
+        .map(|batch| canonical_batch(1 + batch * 1_000, 1_000, &"x".repeat(64 << 10)))
+        .collect::<Vec<_>>();
+    let lie = |path: &Path, batches: &[RecordBatch]| {
+        write_ipc(path, batches, Some(arrow::ipc::CompressionType::LZ4_FRAME));
+        let mut bytes = fs::read(path).unwrap();
+        let at = bytes
+            .windows(12)
+            .position(|window| window == lz4_prefix(64 << 10))
+            .expect("a compressed values buffer states its expansion");
+        bytes[at..at + 8].copy_from_slice(&1_024_u64.to_le_bytes());
+        fs::write(path, bytes).unwrap();
+    };
+    for budget in ROUTES {
+        let lied = arrow_import(&batches, lie, budget);
+        assert!(
+            is_resource_limit(lied.error()),
+            "{budget:?}: {}",
+            lied.error()
+        );
+        assert!(
+            lied.error().to_string().contains("advertised"),
+            "{budget:?}: {}",
+            lied.error()
+        );
+        // Expanding honestly would have held 64 MiB; refusing it held none.
+        assert!(lied.peak < 24 * MIB, "{budget:?}: {} MiB", lied.peak / MIB);
+    }
+
+    // The same rows with honest prefixes still import, on both routes, and
+    // publish exactly the rows the file holds. Their text is narrow enough
+    // that the committed properties fit the fixed property-live-byte budget.
+    let honest_batches = (0..2)
+        .map(|batch| canonical_batch(1 + batch * 1_000, 1_000, &"x".repeat(8 << 10)))
+        .collect::<Vec<_>>();
+    let queries = ["MATCH (n:Thing) RETURN count(n) AS n, sum(size(n.text)) AS bytes"];
+    let compress = |path: &Path, batches: &[RecordBatch]| {
+        write_ipc(path, batches, Some(arrow::ipc::CompressionType::LZ4_FRAME));
+    };
+    let mut expected: Option<String> = None;
+    for budget in ROUTES {
+        let mut run = arrow_import(&honest_batches, compress, budget);
+        run.result
+            .as_ref()
+            .unwrap_or_else(|error| panic!("{budget:?}: {error}"));
+        run.commit();
+        let answer = answers(&run.graph, &queries);
+        match &expected {
+            Some(expected) => assert_eq!(&answer, expected, "{budget:?}"),
+            None => expected = Some(answer),
+        }
+    }
+    assert!(
+        expected.unwrap().contains(&(2_000 * (8 << 10)).to_string()),
+        "the honest LZ4 file publishes its rows"
+    );
+}
+
+/// Every block is checked as it is read, not the file once: two batches decode
+/// and emit exactly as before, and the third - whose values buffer advertises
+/// 1 KiB but expands to 64 MiB - is refused when the task reaches it.
+#[test]
+fn a_downward_lie_in_a_later_block_is_refused_when_that_block_is_read() {
+    let _serial = serial();
+    let batches = (0_u128..3)
+        .map(|batch| {
+            let width = [4 << 10, 8 << 10, 64 << 10][batch as usize];
+            canonical_batch(1 + batch * 1_000, 1_000, &"x".repeat(width))
+        })
+        .collect::<Vec<_>>();
+    let lie_last = |path: &Path, batches: &[RecordBatch]| {
+        write_ipc(path, batches, Some(arrow::ipc::CompressionType::LZ4_FRAME));
+        let mut bytes = fs::read(path).unwrap();
+        let at = bytes
+            .windows(12)
+            .position(|window| window == lz4_prefix(64 << 10))
+            .expect("the last batch's values buffer states its expansion");
+        bytes[at..at + 8].copy_from_slice(&1_024_u64.to_le_bytes());
+        fs::write(path, bytes).unwrap();
+    };
+    let lied = arrow_import(&batches, lie_last, Some(SCRATCH_BUDGET));
+    assert!(is_resource_limit(lied.error()), "{}", lied.error());
+    assert!(
+        lied.error().to_string().contains("advertised"),
+        "{}",
+        lied.error()
+    );
+    // Only the first two batches' honest 4 and 8 MiB decodes ran; the third's
+    // 64 MiB never existed.
+    assert!(lied.peak < 24 * MIB, "{} MiB", lied.peak / MIB);
+}
+
 #[test]
 fn an_unsupported_arrow_column_is_refused_before_the_file_decodes_its_dictionaries() {
     let _serial = serial();

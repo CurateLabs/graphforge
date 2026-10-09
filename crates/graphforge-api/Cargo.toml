@@ -39,6 +39,9 @@ arrow = { workspace = true }
 bytes = "1"
 datafusion = { workspace = true }
 futures = { workspace = true }
+# The bounded LZ4 frame verification of IPC sources (issue #1918), locked to
+# the version arrow-ipc already builds against.
+lz4_flex = { version = "0.13.1", default-features = false, features = ["std", "frame"] }
 parquet = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }

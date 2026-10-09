@@ -2211,6 +2211,7 @@ dependencies = [
  "graphforge-search",
  "graphforge-storage",
  "graphforge-value",
+ "lz4_flex",
  "parquet",
  "serde",
  "serde_json",
