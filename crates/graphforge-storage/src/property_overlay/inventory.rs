@@ -255,6 +255,7 @@ impl AuthenticatedPropertyInventory {
             fragment.identity,
             &fragment.entry,
             scratch.path()?,
+            Some(crate::StorageIoPhase::ReadPathScan),
             #[cfg(test)]
             mutation_barrier,
         )?;
@@ -1750,6 +1751,7 @@ impl PropertyAdmission<'_> {
                 identity,
                 &entry,
                 self.scratch,
+                None,
                 #[cfg(test)]
                 None,
             )?;
@@ -2446,6 +2448,7 @@ fn authenticated_snapshot_file(
     expected_identity: graphforge_filesystem::FileIdentity,
     entry: &crate::GraphReadFileEntry,
     scratch: &Path,
+    written_in: Option<crate::StorageIoPhase>,
     #[cfg(test)] mutation_barrier: Option<Arc<TestMutationBarrier>>,
 ) -> Result<(File, u64, u64, u64), GfError> {
     let metadata = source.metadata().map_err(io_error)?;
@@ -2527,6 +2530,10 @@ fn authenticated_snapshot_file(
         ));
     }
     snapshot.rewind().map_err(io_error)?;
+    if let Some(phase) = written_in {
+        // The snapshot is a copy of the object: every byte read was written.
+        crate::lifecycle_io::record_write(phase, bytes, read_calls);
+    }
     Ok((snapshot, bytes, bytes.div_ceil(64 * 1024), read_calls))
 }
 

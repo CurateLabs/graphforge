@@ -1,7 +1,7 @@
 //! Logical descriptors for the current graph's read resources.
 
 use datafusion::arrow::datatypes::SchemaRef;
-use datafusion::logical_expr::TableSource;
+use datafusion::logical_expr::{Expr, TableProviderFilterPushDown, TableSource};
 use graphforge_value::{EntityTypeId, RelationTypeId};
 use std::sync::Arc;
 
@@ -82,4 +82,53 @@ impl TableSource for GraphReadSource {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
+
+    /// A node property route can answer `column = literal` from footer
+    /// statistics. The filter stays in the plan, so the pushdown is a hint:
+    /// the bound provider returns every row the equality can select and the
+    /// plan's own filter decides which of them match.
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&Expr],
+    ) -> datafusion::common::Result<Vec<TableProviderFilterPushDown>> {
+        Ok(filters
+            .iter()
+            .map(|filter| {
+                if matches!(self.table, GraphReadTable::Properties(_))
+                    && is_stored_equality(filter, &self.schema)
+                {
+                    TableProviderFilterPushDown::Inexact
+                } else {
+                    TableProviderFilterPushDown::Unsupported
+                }
+            })
+            .collect())
+    }
+}
+
+/// `column = literal` on a stored column of the literal's own Arrow type, for
+/// the types whose equality needs no coercion.
+fn is_stored_equality(filter: &Expr, schema: &SchemaRef) -> bool {
+    use datafusion::common::ScalarValue;
+    use datafusion::logical_expr::Operator;
+    let Expr::BinaryExpr(binary) = filter else {
+        return false;
+    };
+    if binary.op != Operator::Eq {
+        return false;
+    }
+    let (column, literal) = match (binary.left.as_ref(), binary.right.as_ref()) {
+        (Expr::Column(column), Expr::Literal(literal, _))
+        | (Expr::Literal(literal, _), Expr::Column(column)) => (column, literal),
+        _ => return false,
+    };
+    let data_type = match literal {
+        ScalarValue::Int64(Some(_)) => datafusion::arrow::datatypes::DataType::Int64,
+        ScalarValue::Utf8(Some(_)) => datafusion::arrow::datatypes::DataType::Utf8,
+        ScalarValue::Boolean(Some(_)) => datafusion::arrow::datatypes::DataType::Boolean,
+        _ => return false,
+    };
+    schema
+        .field_with_name(&column.name)
+        .is_ok_and(|field| field.data_type() == &data_type)
 }

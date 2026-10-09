@@ -986,7 +986,7 @@ fn projected_overlay_decodes_only_selected_values_and_mandatory_keys() {
     );
 
     let _capture = crate::lifecycle_io::CaptureScope::install();
-    let mut full_spill = None;
+    let mut full_peak = None;
     for projection in [None, Some(vec![keep, uuid, keep]), Some(vec![])] {
         let expected_schema = projection.as_ref().map_or_else(
             || schema.as_ref().clone(),
@@ -1063,13 +1063,18 @@ fn projected_overlay_decodes_only_selected_values_and_mandatory_keys() {
         let value = |name| metrics.sum_by_name(name).unwrap().as_usize();
         assert_eq!(value("property_physical_rows"), rows);
         assert_eq!(value("property_authentication_bytes"), bytes.len());
-        let spill = value("property_spill_bytes");
+        // A scan spools nothing: the fragments are merged as they are read.
+        assert_eq!(value("property_spill_bytes"), 0);
+        let peak = value("property_decoder_peak_bytes");
         if projection.is_none() {
-            full_spill = Some(spill);
+            full_peak = Some(peak);
         } else {
-            assert!(spill <= rows * 256);
-            assert!(full_spill.unwrap() - spill >= rows * 8192);
-            assert!(value("property_decoder_peak_bytes") <= rows * 256);
+            assert!(peak <= rows * 256);
+            // Admission bounds a decoded batch to two 8 KiB-wide rows.
+            assert!(
+                full_peak.unwrap() - peak >= 2 * 8192,
+                "full {full_peak:?} projected {peak}"
+            );
         }
     }
 }
