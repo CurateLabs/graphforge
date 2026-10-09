@@ -37,6 +37,7 @@ mod parquet_levels;
 mod parquet_page;
 mod parquet_page_decode;
 mod parquet_scan;
+mod parquet_values;
 
 /// Written by this version: a session may register Parquet sources that stay
 /// where they are (#1898).
