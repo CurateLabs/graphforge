@@ -124,7 +124,9 @@ functions.
   re-routed to the staged path by a change in free memory. It is never a
   retry. Whether the bulk route then runs in memory or on scratch is decided
   again on each attempt from the live budget; either produces the same bytes.
-  If that budget can no longer hold the bulk route's node tables or minimum scratch workspace, the attempt returns a resource-limit refusal before loading
+  Since #1929 the node tables belong to that scratch workspace instead of being
+  a residency requirement: a budget that can no longer hold the bulk route's
+  minimum scratch workspace returns a resource-limit refusal before loading
   data. It keeps the bulk route and can retry when the budget is sufficient.
 
 ## Maintainer decisions (2026-10-07, epic #1881)
@@ -164,10 +166,9 @@ functions.
 
 | Issue | What it changes | Until it lands |
 | --- | --- | --- |
-| #1929 | Node identities, the endpoint index and the degree and CSR-offset workspace use bounded scratch, so `node_tables_exceed_budget` has no producer. | A build whose node tables exceed the budget takes the staged path. |
 | #1918 | Registered-source decoding and normalization are bounded before allocation (Parquet dictionary and page expansion, row maps). | The scratch route bounds normalized transport, not every source decoder. A reservation describes builder workspace, not process RSS. |
 | #1938 | Scratch partitions run concurrently, as many as the budget admits. | Over-budget builds run one scratch partition at a time (`scratch_concurrency` 1). |
-| Retirement | Delete the initial-build machinery that nothing reaches once #1929 lands. | The staged initial-build code still exists and is reachable through the route above. |
+| Retirement | Delete the initial-build staged machinery that no new plan reaches now that every initial build runs on the bulk builder. | The staged initial-build code still exists and stays reachable through the explicitly retained staged paths: append sessions, import-session staging, and the historical replay route. |
 
 The throughput floor (1,000,000 edges/s at every ladder rung) and the
 multicore criterion are gated by the integrated ladder under #1881 and #1387.
@@ -351,16 +352,17 @@ staging:
   memory or scratch) and on the staged replay alike.
 - The chunk-API build takes the same route as a registered-source build: the
   plan is built from the receipts and the memory budget (`BulkBuildPlan::route`),
-  so an over-budget estimate runs the scratch passes of #1912 and #1920 over the
-  spool and never stages or refuses. The seal route (`bulk`, or `replay_staged`
-  when even the node tables exceed the budget, the one case an import session
-  also stages) is recorded in the checkpoint before any build or replay work and
-  read back on every retry; a retry never re-decides from live memory, and
-  whether a `bulk` attempt runs in memory or on scratch is decided again from
-  the live budget (a budget that can no longer hold the node tables refuses the
-  attempt before decoding, as for a registered source). `replay_staged`
-  re-appends the authenticated spool through the staged path, chunk by chunk
-  under the same chunk ids, so an interrupted replay resumes.
+  so an over-budget estimate runs the scratch passes of #1912, #1920 and #1929
+  over the spool and never stages or refuses: node tables that exceed the
+  budget go through bounded scratch too. The seal route (`bulk`; a
+  `replay_staged` value can only come from a checkpoint an earlier binary
+  recorded, since no new plan stages) is recorded in the checkpoint before any
+  build or replay work and read back on every retry; a retry never re-decides
+  from live memory, and whether a `bulk` attempt runs in memory or on scratch
+  is decided again from the live budget (a budget below the minimum scratch
+  workspace refuses the attempt before decoding, as for a registered source).
+  `replay_staged` re-appends the authenticated spool through the staged path,
+  chunk by chunk under the same chunk ids, so an interrupted replay resumes.
 - A crash during the build leaves the spool intact; the rerun is identical.
   The spool is deleted once the build's inventory is pinned.
 - Import sessions stage through `begin_staged_graph_construction`: they route
