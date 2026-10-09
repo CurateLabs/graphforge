@@ -162,6 +162,9 @@ fn source_scan_projects_visible_leaves_across_an_omitted_map_gap() {
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
+        assert_eq!(arrow_bytes(before), 16);
+        assert_eq!(arrow_bytes(after), 164);
+        assert!(after.nulls().is_none());
         for row in 0..batch.num_rows() {
             decoded_rows.push((before.value(row), after.value(row).to_owned()));
         }
@@ -174,7 +177,9 @@ fn source_scan_projects_visible_leaves_across_an_omitted_map_gap() {
     assert_eq!(decoded_rows.len(), 4);
     assert_eq!(decoded_rows[0], (10, format!("visible-value-{:064}", 0)));
     assert_eq!(decoded_rows[3], (13, format!("visible-value-{:064}", 3)));
-    assert_eq!(decoded_bytes, 368);
+    // Slice-memory sizing counts two logical offsets, excluding the terminal
+    // offset, and the native reader drops the all-valid null buffer.
+    assert_eq!(decoded_bytes, 360);
     assert_eq!(scan.decoded_bytes(), 364);
 }
 
