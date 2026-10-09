@@ -13,7 +13,7 @@ use parquet::basic::{Compression, Encoding, Type};
 use parquet::column::page::Page;
 use parquet::file::properties::WriterProperties;
 
-use super::SizingPreflight;
+use super::{SizingPreflight, open_page_values};
 use crate::CancellationToken;
 use crate::import_session::inventory_budget::InventoryBudget;
 use crate::import_session::parquet_admission::SourceScan;
@@ -175,23 +175,24 @@ fn flat_dictionary_validity_is_packed_across_row_groups_and_batch_boundaries() {
     }
 }
 
-fn v2_page(repetition: u8, row_starts: u32) -> DecodedPage {
+fn v1_page(repetition: u8) -> DecodedPage {
     // One RLE hybrid event each for repetition=0/1 and definition=1.
-    let body = Bytes::from(vec![2, repetition, 2, 1, 7, 0, 0, 0]);
+    // V1 permits a page to continue a row that started in the prior page;
+    // each level stream carries its own little-endian length prefix.
+    let body = Bytes::from(vec![
+        2, 0, 0, 0, 2, repetition, 2, 0, 0, 0, 2, 1, 7, 0, 0, 0,
+    ]);
     DecodedPage {
-        page: Page::DataPageV2 {
+        page: Page::DataPage {
             buf: body,
             num_values: 1,
             encoding: Encoding::PLAIN,
-            num_nulls: 0,
-            num_rows: row_starts,
-            def_levels_byte_len: 2,
-            rep_levels_byte_len: 2,
-            is_compressed: false,
+            def_level_encoding: Encoding::RLE,
+            rep_level_encoding: Encoding::RLE,
             statistics: None,
         },
-        body_capacity: 8,
-        physical_bytes: 8,
+        body_capacity: 16,
+        physical_bytes: 16,
     }
 }
 
@@ -222,9 +223,54 @@ fn one_repeated_row_can_continue_across_many_owned_pages() {
         add_row: &mut add,
     };
     for index in 0..16 {
-        let page = v2_page(u8::from(index != 0), u32::from(index == 0));
+        let page = v1_page(u8::from(index != 0));
         preflight.validate(&page).unwrap();
     }
     preflight.finish().unwrap();
     assert_eq!(charges, [(0, 16 * 4 + 4 + 2 + 16 * 8)]);
+}
+
+#[test]
+fn fixed_byte_stream_split_validates_whole_value_geometry() {
+    let malformed = [0; 5];
+    assert!(
+        open_page_values(
+            Type::FIXED_LEN_BYTE_ARRAY,
+            4,
+            None,
+            Encoding::BYTE_STREAM_SPLIT,
+            &malformed,
+            1,
+            None,
+        )
+        .is_err()
+    );
+    let ordinary = [0; 8];
+    let mut fixed = open_page_values(
+        Type::FIXED_LEN_BYTE_ARRAY,
+        4,
+        None,
+        Encoding::BYTE_STREAM_SPLIT,
+        &ordinary,
+        1,
+        None,
+    )
+    .unwrap();
+    assert_eq!(fixed.next_length().unwrap(), Some(4));
+    assert_eq!(fixed.next_length().unwrap(), None);
+
+    // The pinned fixed-width numeric decoder permits an unused byte tail.
+    // Keep that behavior distinct from its variable-width binary decoder.
+    let mut numeric = open_page_values(
+        Type::INT32,
+        4,
+        None,
+        Encoding::BYTE_STREAM_SPLIT,
+        &malformed,
+        1,
+        None,
+    )
+    .unwrap();
+    assert_eq!(numeric.next_length().unwrap(), Some(4));
+    assert_eq!(numeric.next_length().unwrap(), None);
 }

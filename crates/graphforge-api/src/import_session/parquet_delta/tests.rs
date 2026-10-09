@@ -39,6 +39,7 @@ fn real_delta_length_and_prefix_pages_validate_across_blocks() {
         &encoded,
         values.len(),
         32,
+        None,
     )
     .unwrap()
     .unwrap();
@@ -52,7 +53,7 @@ fn real_delta_length_and_prefix_pages_validate_across_blocks() {
     let mut prefixes = DeltaByteArrayEncoder::<ByteArrayType>::new();
     prefixes.put(&values).unwrap();
     let encoded = prefixes.flush_buffer().unwrap();
-    let facts = validate(Encoding::DELTA_BYTE_ARRAY, &encoded, values.len(), 32)
+    let facts = validate(Encoding::DELTA_BYTE_ARRAY, &encoded, values.len(), 32, None)
         .unwrap()
         .unwrap();
     assert_eq!(facts.values, values.len());
@@ -73,7 +74,7 @@ fn tiny_delta_body_cannot_supply_a_count_beyond_the_admitted_header() {
         Encoding::DELTA_LENGTH_BYTE_ARRAY,
         Encoding::DELTA_BYTE_ARRAY,
     ] {
-        assert!(validate(encoding, &body, 1, 32).is_err());
+        assert!(validate(encoding, &body, 1, 32, None).is_err());
     }
 }
 
@@ -82,12 +83,12 @@ fn delta_lengths_reject_negative_values_and_mismatched_suffix_storage() {
     let mut encoder = DeltaBitPackEncoder::<Int32Type>::new();
     encoder.put(&[-1]).unwrap();
     let encoded = encoder.flush_buffer().unwrap();
-    assert!(validate(Encoding::DELTA_LENGTH_BYTE_ARRAY, &encoded, 1, 32).is_err());
+    assert!(validate(Encoding::DELTA_LENGTH_BYTE_ARRAY, &encoded, 1, 32, None).is_err());
     let mut encoder = DeltaBitPackEncoder::<Int32Type>::new();
     encoder.put(&[2]).unwrap();
     let mut encoded = encoder.flush_buffer().unwrap().to_vec();
     encoded.extend_from_slice(b"a");
-    assert!(validate(Encoding::DELTA_LENGTH_BYTE_ARRAY, &encoded, 1, 32).is_err());
+    assert!(validate(Encoding::DELTA_LENGTH_BYTE_ARRAY, &encoded, 1, 32, None).is_err());
 }
 
 #[test]
@@ -175,7 +176,7 @@ fn complete_delta_stream_cannot_exceed_its_admitted_value_count() {
         Encoding::DELTA_BINARY_PACKED,
         Encoding::DELTA_LENGTH_BYTE_ARRAY,
     ] {
-        assert!(validate(encoding, &encoded, 1, 32).is_err());
+        assert!(validate(encoding, &encoded, 1, 32, None).is_err());
     }
     assert!(Lengths::new(Encoding::DELTA_LENGTH_BYTE_ARRAY, &encoded, 1, None).is_err());
 }
@@ -201,7 +202,7 @@ fn admitted_delta_pages_preserve_the_consumers_unused_tail() {
         let mut bytes = bytes.to_vec();
         bytes.extend_from_slice(b"unused admitted tail");
         assert_eq!(
-            validate(encoding, &bytes, values.len(), 32)
+            validate(encoding, &bytes, values.len(), 32, None)
                 .unwrap()
                 .unwrap()
                 .values,
@@ -212,5 +213,21 @@ fn admitted_delta_pages_preserve_the_consumers_unused_tail() {
         assert_eq!(cursor.next_block(&mut block).unwrap(), 3);
         assert_eq!(block, [0, 6, 13]);
         assert_eq!(cursor.next_block(&mut block).unwrap(), 0);
+    }
+}
+
+#[test]
+fn cancelled_delta_validation_precedes_body_traversal() {
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    for encoding in [
+        Encoding::DELTA_BINARY_PACKED,
+        Encoding::DELTA_LENGTH_BYTE_ARRAY,
+        Encoding::DELTA_BYTE_ARRAY,
+    ] {
+        // The deliberately invalid body would return Storage if traversal
+        // happened before the cancellation authority was checked.
+        let error = validate(encoding, &[], 0, 32, Some(&cancellation)).unwrap_err();
+        assert_eq!(error, cancelled());
     }
 }

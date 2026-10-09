@@ -278,13 +278,15 @@ pub(super) fn validate(
     input: &[u8],
     maximum: usize,
     integer_width: u8,
+    cancellation: Option<&CancellationToken>,
 ) -> Result<Option<DeltaFacts>, GfError> {
+    check_cancel(cancellation)?;
     match encoding {
         Encoding::DELTA_BINARY_PACKED => {
             let mut values = Integers::new(input, maximum, integer_width)?;
             let count = values.count;
             let auxiliary_bytes = values.minis as u64;
-            values.finish()?;
+            stream_end(&mut values, cancellation)?;
             Ok(Some(DeltaFacts {
                 values: count,
                 auxiliary_bytes,
@@ -296,12 +298,18 @@ pub(super) fn validate(
             let (count, minis) = (lengths.count, lengths.minis);
             let mut total = 0_u64;
             let mut largest = 0_u64;
+            let mut events = 0;
             while let Some(length) = lengths.next()? {
+                events += 1;
+                if events == 1024 {
+                    check_cancel(cancellation)?;
+                    events = 0;
+                }
                 let length = u64::try_from(length).map_err(|_| invalid())?;
                 total = total.checked_add(length).ok_or_else(invalid)?;
                 largest = largest.max(length);
             }
-            let end = lengths.finish()?;
+            let end = stream_end(&mut lengths, cancellation)?;
             if total > (input.len() - end) as u64 {
                 return Err(invalid());
             }
@@ -317,21 +325,24 @@ pub(super) fn validate(
             let mut prefixes = Integers::new(input, maximum, 32)?;
             let count = prefixes.count;
             let prefix_minis = prefixes.minis;
-            let prefix_end = prefixes.finish()?;
+            let prefix_end = stream_end(&mut prefixes, cancellation)?;
             let suffix_input = input.get(prefix_end..).ok_or_else(invalid)?;
             let mut suffixes = Integers::new(suffix_input, maximum, 32)?;
             if suffixes.count != count {
                 return Err(invalid());
             }
             let suffix_minis = suffixes.minis;
-            let suffix_end = suffixes.finish()?;
+            let suffix_end = stream_end(&mut suffixes, cancellation)?;
             let payload = suffix_input.len() - suffix_end;
             let mut prefixes = Integers::new(input, maximum, 32)?;
             let mut suffixes = Integers::new(suffix_input, maximum, 32)?;
             let mut previous = 0_u64;
             let mut largest = 0_u64;
             let mut total = 0_u64;
-            for _ in 0..count {
+            for index in 0..count {
+                if index % 1024 == 0 {
+                    check_cancel(cancellation)?;
+                }
                 let prefix =
                     u64::try_from(prefixes.next()?.ok_or_else(invalid)?).map_err(|_| invalid())?;
                 let suffix =

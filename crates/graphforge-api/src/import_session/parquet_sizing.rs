@@ -216,12 +216,20 @@ fn open_page_values<'a, 'f>(
                     "BYTE_STREAM_SPLIT is invalid for this Parquet type",
                 ));
             }
+            if physical == Type::FIXED_LEN_BYTE_ARRAY {
+                let width = usize::try_from(fixed_width).map_err(storage)?;
+                if width == 0 || suffix.len() % width != 0 {
+                    return Err(storage(
+                        "Parquet fixed-length byte-stream-split body has incomplete values",
+                    ));
+                }
+            }
             require_prefix(suffix, nonnull, fixed_width)?;
             Ok(ValueCursor::Fixed(fixed_width, nonnull, 0))
         }
         Encoding::DELTA_BINARY_PACKED if matches!(physical, Type::INT32 | Type::INT64) => {
             let width = if physical == Type::INT32 { 32 } else { 64 };
-            let facts = parquet_delta::validate(encoding, suffix, nonnull, width)?
+            let facts = parquet_delta::validate(encoding, suffix, nonnull, width, cancellation)?
                 .ok_or_else(|| storage("Parquet delta integer facts are missing"))?;
             if facts.values != nonnull {
                 return Err(storage(
