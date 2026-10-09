@@ -15,7 +15,8 @@ use arrow::array::{Array, FixedSizeBinaryArray};
 use arrow::record_batch::RecordBatch;
 use rayon::prelude::*;
 
-use super::property_rows::{BareOwners, FrameMeta, Groups, PropertyRows, Run, gather_record_batch};
+use super::property_gather::gather_record_batch;
+use super::property_rows::{BareOwners, FrameMeta, Groups, PropertyRows, Run};
 use super::tables::check_cancelled;
 use super::{AtomicBool, GfError, storage};
 
@@ -368,7 +369,7 @@ impl PropertyRows<'_> {
     ) -> Result<(), GfError> {
         if let Some((first, last)) = bounds.take() {
             let refs = batches.iter().collect::<Vec<_>>();
-            let frame = gather_record_batch(&refs, indices)?;
+            let frame = gather_record_batch(&refs, indices).map_err(storage)?;
             writer.append(&frame, first, last, *max_row_bytes)?;
         }
         batches.clear();

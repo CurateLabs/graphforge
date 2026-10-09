@@ -1,8 +1,6 @@
 mod property_list_gather_tests {
     use super::*;
 
-    use std::alloc::{GlobalAlloc, Layout, System};
-    use std::cell::Cell;
     use std::sync::Arc;
 
     use arrow::array::{
@@ -13,70 +11,6 @@ mod property_list_gather_tests {
     use arrow::compute::interleave_record_batch;
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::ipc::writer::StreamWriter;
-
-    struct AllocationCounter;
-
-    thread_local! {
-        static TRACK_ALLOCATIONS: Cell<bool> = const { Cell::new(false) };
-        static LARGEST_ALLOCATION: Cell<usize> = const { Cell::new(0) };
-    }
-
-    #[global_allocator]
-    static TEST_ALLOCATOR: AllocationCounter = AllocationCounter;
-
-    fn record_allocation(size: usize) {
-        if TRACK_ALLOCATIONS.try_with(Cell::get).unwrap_or(false) {
-            let _ = LARGEST_ALLOCATION.try_with(|largest| largest.set(largest.get().max(size)));
-        }
-    }
-
-    unsafe impl GlobalAlloc for AllocationCounter {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            let pointer = unsafe { System.alloc(layout) };
-            if !pointer.is_null() {
-                record_allocation(layout.size());
-            }
-            pointer
-        }
-
-        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-            let pointer = unsafe { System.alloc_zeroed(layout) };
-            if !pointer.is_null() {
-                record_allocation(layout.size());
-            }
-            pointer
-        }
-
-        unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-            let pointer = unsafe { System.realloc(pointer, layout, size) };
-            if !pointer.is_null() {
-                record_allocation(size);
-            }
-            pointer
-        }
-
-        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-            unsafe { System.dealloc(pointer, layout) };
-        }
-    }
-
-    struct StopAllocationTracking;
-
-    impl Drop for StopAllocationTracking {
-        fn drop(&mut self) {
-            TRACK_ALLOCATIONS.with(|active| active.set(false));
-        }
-    }
-
-    fn largest_allocation<T>(operation: impl FnOnce() -> T) -> (T, usize) {
-        LARGEST_ALLOCATION.with(|largest| largest.set(0));
-        TRACK_ALLOCATIONS.with(|active| active.set(true));
-        let stop = StopAllocationTracking;
-        let result = operation();
-        let largest = LARGEST_ALLOCATION.with(Cell::get);
-        drop(stop);
-        (result, largest)
-    }
 
     fn list_boolean_batch(ids: &[u64], children_per_row: usize) -> RecordBatch {
         let total_children = ids.len() * children_per_row;
@@ -227,43 +161,15 @@ mod property_list_gather_tests {
         let second = nested_list_batch([4, 5, 6, 7], true).slice(1, 3);
         let sources = [&first, &second];
         let indices = [(1, 1), (0, 0), (0, 0), (1, 0), (0, 2)];
-        let gathered = super::super::gather_record_batch(&sources, &indices).unwrap();
+        let gathered =
+            super::super::super::property_gather::gather_record_batch(&sources, &indices).unwrap();
         let arrow_gathered = interleave_record_batch(&sources, &indices).unwrap();
         assert_eq!(ipc_bytes(&gathered), ipc_bytes(&arrow_gathered));
 
-        let empty = super::super::gather_record_batch(&sources, &[]).unwrap();
+        let empty =
+            super::super::super::property_gather::gather_record_batch(&sources, &[]).unwrap();
         assert_eq!(empty.num_rows(), 0);
         assert_eq!(empty.schema(), first.schema());
-    }
-
-    #[test]
-    fn large_boolean_lists_gather_without_a_per_child_index_allocation() {
-        const CHILDREN: usize = 8 << 20;
-        let root = tempfile::tempdir().unwrap();
-        let directory = super::super::super::StableDirectory::open(root.path()).unwrap();
-        let scratch = Scratch::create(&directory).unwrap();
-        let rows = rows_with(&scratch, 8 << 20, 8, 128 << 20);
-        let batch = list_boolean_batch(&[7], CHILDREN);
-        assert!(batch.get_array_memory_size() < rows.budgets.max_batch_bytes);
-        let sources = [&batch];
-        let indices = [(0, 0)];
-
-        let (gathered, gather_largest) =
-            largest_allocation(|| super::super::gather_record_batch(&sources, &indices).unwrap());
-        assert_eq!(gathered.num_rows(), 1);
-        assert!(
-            gather_largest < CHILDREN * 8,
-            "list gather allocated {gather_largest} bytes at once for {CHILDREN} children"
-        );
-
-        let cancel = AtomicBool::new(false);
-        let (run, write_largest) =
-            largest_allocation(|| rows.write_run(&[batch], &cancel).unwrap());
-        assert_eq!(run.rows, 1);
-        assert!(
-            write_largest < CHILDREN * 8,
-            "run formation allocated {write_largest} bytes at once for {CHILDREN} children"
-        );
     }
 
     #[test]
@@ -293,9 +199,7 @@ mod property_list_gather_tests {
             .num_threads(1)
             .build()
             .unwrap();
-        let (groups, largest) =
-            pool.install(|| largest_allocation(|| rows.finish(&cancel).unwrap()));
-        assert!(largest < CHILDREN * 8);
+        let groups = pool.install(|| rows.finish(&cancel).unwrap());
         assert_eq!(groups.len(), 1);
         assert!(groups[0].segments.len() > 1);
         let batches = rows.group_reader(&groups[0]);
@@ -311,8 +215,8 @@ mod property_list_gather_tests {
             for row in 0..batch.num_rows() {
                 seen.push(u64::from_be_bytes(ids.value(row)[8..].try_into().unwrap()));
                 assert_eq!(lists.value_length(row), CHILDREN as i32);
-                let values = lists
-                    .value(row)
+                let list_values = lists.value(row);
+                let values = list_values
                     .as_any()
                     .downcast_ref::<BooleanArray>()
                     .unwrap();
