@@ -6,8 +6,8 @@ use std::io::{Read, Seek, Write};
 use std::path::Path;
 
 use super::{
-    GraphFileEntry, HASH_BUFFER_BYTES, RetainedV1InventoryEntry, checksum_reader, corrupt, storage,
-    validation,
+    checksum_reader, corrupt, storage, validation, GraphFileEntry, RetainedV1InventoryEntry,
+    HASH_BUFFER_BYTES,
 };
 
 pub(super) struct ReadCopyIoEvidence {

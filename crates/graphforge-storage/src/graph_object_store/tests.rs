@@ -1,19 +1,5 @@
 use super::*;
 
-use crate::graph_object_store::ACTIVE_DIR;
-use crate::graph_object_store::BTreeSet;
-use crate::graph_object_store::GRAPH_OBJECTS_DIR;
-use crate::graph_object_store::GfError;
-#[cfg(unix)]
-use crate::graph_object_store::GraphFilesInventory;
-use crate::graph_object_store::LIFECYCLE_LOCK;
-use crate::graph_object_store::ProjectErrorCode;
-use crate::graph_object_store::RETURNED_ERROR_BOUNDARY;
-use crate::graph_object_store::ReadOnlyCasRoot;
-use crate::graph_object_store::SHA256_DIR;
-use crate::graph_object_store::Sha256;
-#[cfg(unix)]
-use crate::graph_object_store::TEMP_DIR;
 use crate::graph_object_store::begin_graph_object_gc;
 use crate::graph_object_store::begin_graph_object_publication;
 use crate::graph_object_store::gc_graph_objects;
@@ -28,6 +14,20 @@ use crate::graph_object_store::read_graph_object;
 use crate::graph_object_store::read_graph_object_by_digest;
 use crate::graph_object_store::try_begin_graph_object_gc;
 use crate::graph_object_store::verify_graph_object;
+use crate::graph_object_store::BTreeSet;
+use crate::graph_object_store::GfError;
+#[cfg(unix)]
+use crate::graph_object_store::GraphFilesInventory;
+use crate::graph_object_store::ProjectErrorCode;
+use crate::graph_object_store::ReadOnlyCasRoot;
+use crate::graph_object_store::Sha256;
+use crate::graph_object_store::ACTIVE_DIR;
+use crate::graph_object_store::GRAPH_OBJECTS_DIR;
+use crate::graph_object_store::LIFECYCLE_LOCK;
+use crate::graph_object_store::RETURNED_ERROR_BOUNDARY;
+use crate::graph_object_store::SHA256_DIR;
+#[cfg(unix)]
+use crate::graph_object_store::TEMP_DIR;
 
 #[test]
 fn publication_payload_hash_work_counts_actual_authentication_streams_after_acceptance() {
@@ -359,14 +359,12 @@ fn pure_reads_require_only_existing_digest_namespace_and_never_create() {
             file_count: 1,
             total_byte_length: payload.len() as u64,
         };
-        assert!(
-            materialize_graph_objects(
-                root.path(),
-                &inventory,
-                &target_owner.path().join("readonly-target")
-            )
-            .is_err()
-        );
+        assert!(materialize_graph_objects(
+            root.path(),
+            &inventory,
+            &target_owner.path().join("readonly-target")
+        )
+        .is_err());
         assert_eq!(
             fs::read_dir(&objects)
                 .unwrap()
@@ -441,13 +439,11 @@ fn read_only_lifecycle_rejects_links_fifos_and_sockets_without_blocking() {
     const FIFO_HELPER: &str = "GRAPHFORGE_READ_ONLY_CAS_FIFO_HELPER";
     if std::env::var_os(FIFO_HELPER).is_some() {
         let (root, objects) = prepare();
-        assert!(
-            Command::new("mkfifo")
-                .arg(objects.join(LIFECYCLE_LOCK))
-                .status()
-                .unwrap()
-                .success()
-        );
+        assert!(Command::new("mkfifo")
+            .arg(objects.join(LIFECYCLE_LOCK))
+            .status()
+            .unwrap()
+            .success());
         assert!(ReadOnlyCasRoot::open(root.path()).is_err());
         return;
     }
@@ -701,11 +697,9 @@ fn portable_cas_authentication_has_its_own_domain_and_still_refuses_corruption()
     let error = lease
         .open_for_portable(&digest, payload.len() as u64)
         .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("graph object digest does not match its address")
-    );
+    assert!(error
+        .to_string()
+        .contains("graph object digest does not match its address"));
     assert_eq!(
         capture.snapshot().portable_authentication_sha256_bytes,
         payload.len() as u64

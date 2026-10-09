@@ -1,4 +1,10 @@
 use super::*;
+use crate::writer::fs;
+use crate::writer::set_node_properties;
+use crate::writer::tests::read_node_props;
+use crate::writer::tests::TS;
+use crate::writer::to_bytes;
+use crate::writer::write_replay_overlay_streaming;
 use crate::writer::BTreeMap;
 use crate::writer::EntityTypeId;
 use crate::writer::GraphWriter;
@@ -6,12 +12,6 @@ use crate::writer::HashMap;
 use crate::writer::IrLiteral;
 use crate::writer::OntologyMode;
 use crate::writer::SchemaRef;
-use crate::writer::fs;
-use crate::writer::set_node_properties;
-use crate::writer::tests::TS;
-use crate::writer::tests::read_node_props;
-use crate::writer::to_bytes;
-use crate::writer::write_replay_overlay_streaming;
 use graphforge_core::uuid::new_v7;
 use tempfile::TempDir;
 
@@ -330,7 +330,7 @@ fn delta_replay_new_routes_start_and_continue_live_schema_authority() {
 #[test]
 fn delta_replay_cuts_one_route_at_the_fragment_cap() {
     use crate::property_overlay::fragment_cap::tests::{assert_capped_fragments, wide_value};
-    use crate::property_overlay::{MAX_PROPERTY_FRAGMENT_BYTES, PropertyRouteKind};
+    use crate::property_overlay::{PropertyRouteKind, MAX_PROPERTY_FRAGMENT_BYTES};
     let project = TempDir::new().unwrap();
     let (empty_files, _) = crate::capture_graph_files(project.path()).unwrap();
     let empty = crate::AuthenticatedPropertyInventory::from_inventory_at_root(

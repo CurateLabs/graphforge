@@ -30,12 +30,12 @@
 //! so they apply to merged records as to resident ones. Detail-codec
 //! partitions keep the refusal.
 
-use super::partition_load::{PartitionLoadCounters, abandon_if_stopped};
+use super::partition_load::{abandon_if_stopped, PartitionLoadCounters};
 use super::{merge_cache_release_evidence, open_fixed_reader, read_run_record, storage};
 use crate::construction_directory::ConstructionDirectory as StableDirectory;
 use crate::corruption_checksum::Checksum;
 use graphforge_core::GfError;
-use graphforge_filesystem::{FileIdentity, file_identity};
+use graphforge_filesystem::{file_identity, FileIdentity};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::ffi::OsString;

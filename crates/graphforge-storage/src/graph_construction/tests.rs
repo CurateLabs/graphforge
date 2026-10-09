@@ -591,22 +591,18 @@ fn parent_catalog_streaming_enforces_entry_and_decoded_byte_budgets() {
         max_catalog_entries: 4_999,
         ..GraphConstructionBudgets::default()
     };
-    assert!(
-        load_parent_runtime_catalog(&project, 1, too_few)
-            .unwrap_err()
-            .to_string()
-            .contains("admission budget")
-    );
+    assert!(load_parent_runtime_catalog(&project, 1, too_few)
+        .unwrap_err()
+        .to_string()
+        .contains("admission budget"));
     let too_small = GraphConstructionBudgets {
         max_catalog_decoded_bytes: 1,
         ..GraphConstructionBudgets::default()
     };
-    assert!(
-        load_parent_runtime_catalog(&project, 1, too_small)
-            .unwrap_err()
-            .to_string()
-            .contains("admission budget")
-    );
+    assert!(load_parent_runtime_catalog(&project, 1, too_small)
+        .unwrap_err()
+        .to_string()
+        .contains("admission budget"));
     let (restored, digest, work) =
         load_parent_runtime_catalog(&project, 1, GraphConstructionBudgets::default()).unwrap();
     assert_eq!(restored.to_record_batch().num_rows(), 5_000);
@@ -697,13 +693,11 @@ fn staged_catalog_rejects_entry_and_identifier_overflow_before_interning() {
             )
             .unwrap();
         session.seal().unwrap();
-        assert!(
-            session
-                .shape_canonical_with_cancellation(|| false)
-                .unwrap_err()
-                .to_string()
-                .contains("catalog admission budget")
-        );
+        assert!(session
+            .shape_canonical_with_cancellation(|| false)
+            .unwrap_err()
+            .to_string()
+            .contains("catalog admission budget"));
     }
 }
 
@@ -733,15 +727,13 @@ fn session_drop_unlocks_before_a_duplicated_descriptor_closes() {
 fn node_after_edge_and_concurrent_same_process_open_fail_closed() {
     let root = TempDir::new().unwrap();
     let mut session = open(&root, 400);
-    assert!(
-        GraphConstructionSession::open(
-            root.path(),
-            Uuid::from_u128(400),
-            0,
-            GraphConstructionBudgets::default()
-        )
-        .is_err()
-    );
+    assert!(GraphConstructionSession::open(
+        root.path(),
+        Uuid::from_u128(400),
+        0,
+        GraphConstructionBudgets::default()
+    )
+    .is_err());
     session
         .append(
             ConstructionChunkKind::Edge,
@@ -749,11 +741,9 @@ fn node_after_edge_and_concurrent_same_process_open_fail_closed() {
             &edge_batch(100, 1, 2, 2),
         )
         .unwrap();
-    assert!(
-        session
-            .append(ConstructionChunkKind::Node, "late-node", &node_batch(1, 1))
-            .is_err()
-    );
+    assert!(session
+        .append(ConstructionChunkKind::Node, "late-node", &node_batch(1, 1))
+        .is_err());
 }
 
 #[test]
@@ -972,7 +962,7 @@ fn ordinal_encoding_crashes_recover_every_durable_boundary() {
 /// (#900).
 #[test]
 fn over_bound_encoded_inventory_is_refused_before_pinning_and_resumes() {
-    use crate::graph_construction_encoding::{InventoryBoundOverride, read_inventory};
+    use crate::graph_construction_encoding::{read_inventory, InventoryBoundOverride};
 
     // The encoding intent, a few hundred bytes, fits this bound; the
     // inventory, whose evidence alone takes kilobytes, does not.

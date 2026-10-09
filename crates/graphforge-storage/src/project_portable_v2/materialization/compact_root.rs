@@ -1,5 +1,5 @@
 //! Capture the actual bounded compact-root bytes emitted during import.
-use super::{MaterializedCapture, PortableV2Error, PortableV2ErrorCode, fs};
+use super::{fs, MaterializedCapture, PortableV2Error, PortableV2ErrorCode};
 use graphforge_core::hash_observation::ControlSha256;
 use sha2::Digest;
 

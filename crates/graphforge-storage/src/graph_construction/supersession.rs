@@ -3,13 +3,13 @@
 use std::borrow::Cow;
 
 use super::{
-    ArtifactReceipt, BLOCK_BYTES, GfError, GraphConstructionEncoding, GraphConstructionEvidence,
-    GraphConstructionSession, OsStr, Read, ReadWork, StableDirectory, account_cache_release,
-    canonical_artifact_target, checked_category_remove, compact_parent_inventory,
-    construction_failpoint, control_sha256, decode_bounded, file_identity, file_link_count, hex,
-    is_shape_artifact_name, read_completed_shape, read_completed_shape_outputs,
-    record_active_identity_remove, replace_checkpoint_control, shape_receipt_name, storage,
-    unlink_shape_progress,
+    account_cache_release, canonical_artifact_target, checked_category_remove,
+    compact_parent_inventory, construction_failpoint, control_sha256, decode_bounded,
+    file_identity, file_link_count, hex, is_shape_artifact_name, read_completed_shape,
+    read_completed_shape_outputs, record_active_identity_remove, replace_checkpoint_control,
+    shape_receipt_name, storage, unlink_shape_progress, ArtifactReceipt, GfError,
+    GraphConstructionEncoding, GraphConstructionEvidence, GraphConstructionSession, OsStr, Read,
+    ReadWork, StableDirectory, BLOCK_BYTES,
 };
 
 /// The pinned successor inventory and its authority digest: the one the

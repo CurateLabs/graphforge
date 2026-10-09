@@ -147,16 +147,14 @@ fn legacy_migration_rollback_restores_admitted_table_and_refuses_foreign_table()
                 .map(|entry| entry.relative_path.as_str()),
         )
         .unwrap();
-    assert!(
-        transformed
-            .files
-            .iter()
-            .filter(|entry| entry.relative_path != crate::route_component::TABLE_FILE)
-            .all(|entry| !table
-                .semantic_relative_path(&entry.relative_path)
-                .unwrap()
-                .contains("/KNOWS"))
-    );
+    assert!(transformed
+        .files
+        .iter()
+        .filter(|entry| entry.relative_path != crate::route_component::TABLE_FILE)
+        .all(|entry| !table
+            .semantic_relative_path(&entry.relative_path)
+            .unwrap()
+            .contains("/KNOWS")));
     drop(migration);
     assert_eq!(crate::capture_graph_files(dir.path()).unwrap().0, baseline);
 

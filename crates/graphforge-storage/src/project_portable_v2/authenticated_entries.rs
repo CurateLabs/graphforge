@@ -1,9 +1,9 @@
 //! Bounded semantic reads tied to the entries authenticated by the package scanner.
 
 use super::{
-    AtomicBool, ControlSha256, Digest, Entry, Path, PortableV2Error, PortableV2ErrorCode,
-    PortableV2Limits, PortableV2Report, Read, Seek, SeekFrom, Sha256, canonical_json, check_cancel,
-    fs, has_multiple_links, hex, modified, research, same_identity, semantic_validation,
+    canonical_json, check_cancel, fs, has_multiple_links, hex, modified, research, same_identity,
+    semantic_validation, AtomicBool, ControlSha256, Digest, Entry, Path, PortableV2Error,
+    PortableV2ErrorCode, PortableV2Limits, PortableV2Report, Read, Seek, SeekFrom, Sha256,
 };
 
 /// Authentication for untrusted bytes, or corruption refusal against evidence

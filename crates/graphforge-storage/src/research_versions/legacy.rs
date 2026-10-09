@@ -8,8 +8,8 @@
 //! research capability and its participants to revision 7 through the ordinary
 //! atomic publication; no record's bytes are rewritten.
 use super::{
-    Digest, GfError, ProjectCapability, ProjectParticipant, RESEARCH_CAPABILITY, RESEARCH_REGISTRY,
-    RESEARCH_VERSION, ResearchRegistry, ResearchVersionRecord, Sha256, invalid,
+    invalid, Digest, GfError, ProjectCapability, ProjectParticipant, ResearchRegistry,
+    ResearchVersionRecord, Sha256, RESEARCH_CAPABILITY, RESEARCH_REGISTRY, RESEARCH_VERSION,
 };
 
 /// Oldest research revision this build reads; older revisions are refused.

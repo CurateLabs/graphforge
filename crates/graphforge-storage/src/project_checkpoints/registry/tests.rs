@@ -314,17 +314,15 @@ fn checkpoint_text_and_identity_boundaries_are_canonical() {
     let checkpoint = checkpoint_uuid(operation, digest);
     let encoded = hex(&digest);
     assert_eq!(decode_digest(&encoded).unwrap(), digest);
-    assert!(
-        validate_record_identity(
-            checkpoint,
-            operation,
-            "baseline",
-            Some("desc"),
-            Some(actor),
-            &encoded,
-        )
-        .is_ok()
-    );
+    assert!(validate_record_identity(
+        checkpoint,
+        operation,
+        "baseline",
+        Some("desc"),
+        Some(actor),
+        &encoded,
+    )
+    .is_ok());
     assert_eq!(
         validate_record_identity(
             Uuid::nil(),

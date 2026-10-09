@@ -1,5 +1,5 @@
 //! Immutable Branch creation metadata; context heads remain in the registry.
-use super::{GfError, ResearchRegistry, Uuid, invalid};
+use super::{invalid, GfError, ResearchRegistry, Uuid};
 use serde::{Deserialize, Serialize};
 
 pub(super) fn stage_origin(

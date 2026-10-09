@@ -6,7 +6,7 @@ use std::path::Path;
 use arrow::ipc::{CompressionType, MetadataVersion};
 use graphforge_core::GfError;
 
-use super::{DEFAULT_CSR_SHARD_EDGES, DEFAULT_CSR_SHARD_NODES, storage_err};
+use super::{storage_err, DEFAULT_CSR_SHARD_EDGES, DEFAULT_CSR_SHARD_NODES};
 
 // The fixed schema needs far less metadata. This is an admission limit, not an
 // estimate of Arrow's parser or allocator overhead.
@@ -422,7 +422,7 @@ mod tests {
 
     #[test]
     fn checksum_csr_manifest_refuses_legacy_missing_and_malformed_metadata() {
-        use super::super::{CsrIndex, ShardedCsrIndex, write_sharded_csr};
+        use super::super::{write_sharded_csr, CsrIndex, ShardedCsrIndex};
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.csr");
         let csr = CsrIndex {
@@ -516,15 +516,13 @@ mod tests {
         bytes[start..start + 8].copy_from_slice(&i64::MAX.to_le_bytes());
         assert!(preflight(&bytes, 1, 128).is_err());
         assert!(read(&path, "shard.csr", u64::MAX, encoded_limit(1, 128).unwrap()).is_err());
-        assert!(
-            read(
-                &path,
-                "shard.csr",
-                bytes.len() as u64 + 1,
-                encoded_limit(1, 128).unwrap()
-            )
-            .is_err()
-        );
+        assert!(read(
+            &path,
+            "shard.csr",
+            bytes.len() as u64 + 1,
+            encoded_limit(1, 128).unwrap()
+        )
+        .is_err());
     }
 
     #[test]
@@ -568,11 +566,9 @@ mod tests {
             );
             assert_eq!(output, input);
             assert_eq!(context.sizeof(), context_bytes);
-            assert!(
-                context
-                    .decompress(&mut output[..len - 1], &encoded)
-                    .is_err()
-            );
+            assert!(context
+                .decompress(&mut output[..len - 1], &encoded)
+                .is_err());
         }
         println!("CSR_ZSTD_FIXED_CONTEXT_BYTES {context_bytes}");
     }
@@ -580,7 +576,7 @@ mod tests {
     #[test]
     fn authenticated_size_bomb_is_refused_by_lookup_and_reuse() {
         use super::super::{
-            CsrIndex, ShardedCsrIndex, sha256_hex, shard_set_matches, write_sharded_csr,
+            sha256_hex, shard_set_matches, write_sharded_csr, CsrIndex, ShardedCsrIndex,
         };
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("index.csr");
@@ -623,14 +619,12 @@ mod tests {
         let slot = base + vtable + usize::from(arrow::ipc::Schema::VT_FIELDS);
         let mut missing_fields = bytes.clone();
         missing_fields[slot..slot + 2].fill(0);
-        assert!(
-            arrow::ipc::root_as_footer(&missing_fields[base..trailer])
-                .unwrap()
-                .schema()
-                .unwrap()
-                .fields()
-                .is_none()
-        );
+        assert!(arrow::ipc::root_as_footer(&missing_fields[base..trailer])
+            .unwrap()
+            .schema()
+            .unwrap()
+            .fields()
+            .is_none());
         assert!(preflight(&missing_fields, 1, 128).is_err());
 
         let integer = schema

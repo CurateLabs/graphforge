@@ -1,10 +1,10 @@
-use super::super::INDEX_DIR;
-use super::super::TopologyIndexReceipt;
-use super::super::V4_ORDINAL_MANIFEST;
-use super::super::V4_ORDINAL_RECEIPT;
 use super::super::tests::fixture;
 use super::super::tests::install_test_v4_facet;
 use super::super::topology_delta::hex_sha256;
+use super::super::TopologyIndexReceipt;
+use super::super::INDEX_DIR;
+use super::super::V4_ORDINAL_MANIFEST;
+use super::super::V4_ORDINAL_RECEIPT;
 use super::maintain_uuid_membership_orphans_with_ordinal_authority;
 use std::fs;
 
@@ -43,10 +43,12 @@ fn orphan_collection_authenticates_and_preserves_the_selected_v4_facet() {
     receipt.expected_generation = 8;
     receipt.manifest_sha256 = hex_sha256(&replacement);
     fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
-    assert!(
-        maintain_uuid_membership_orphans_with_ordinal_authority(dir.path(), 16, Some(&authority))
-            .is_err()
-    );
+    assert!(maintain_uuid_membership_orphans_with_ordinal_authority(
+        dir.path(),
+        16,
+        Some(&authority)
+    )
+    .is_err());
 }
 
 #[cfg(unix)]
@@ -68,23 +70,25 @@ fn ordinal_orphan_admission_rejects_link_fifo_and_oversized_manifest() {
 
     fs::remove_file(&manifest).unwrap();
     symlink(&replacement, &manifest).unwrap();
-    assert!(
-        maintain_uuid_membership_orphans_with_ordinal_authority(dir.path(), 16, Some(&authority))
-            .is_err()
-    );
+    assert!(maintain_uuid_membership_orphans_with_ordinal_authority(
+        dir.path(),
+        16,
+        Some(&authority)
+    )
+    .is_err());
     fs::remove_file(&manifest).unwrap();
 
-    assert!(
-        std::process::Command::new("mkfifo")
-            .arg(&manifest)
-            .status()
-            .unwrap()
-            .success()
-    );
-    assert!(
-        maintain_uuid_membership_orphans_with_ordinal_authority(dir.path(), 16, Some(&authority))
-            .is_err()
-    );
+    assert!(std::process::Command::new("mkfifo")
+        .arg(&manifest)
+        .status()
+        .unwrap()
+        .success());
+    assert!(maintain_uuid_membership_orphans_with_ordinal_authority(
+        dir.path(),
+        16,
+        Some(&authority)
+    )
+    .is_err());
     fs::remove_file(&manifest).unwrap();
 
     fs::write(
@@ -92,10 +96,12 @@ fn ordinal_orphan_admission_rejects_link_fifo_and_oversized_manifest() {
         vec![b'x'; crate::ordinal_identity_v4::MAX_MANIFEST_BYTES as usize + 1],
     )
     .unwrap();
-    assert!(
-        maintain_uuid_membership_orphans_with_ordinal_authority(dir.path(), 16, Some(&authority))
-            .is_err()
-    );
+    assert!(maintain_uuid_membership_orphans_with_ordinal_authority(
+        dir.path(),
+        16,
+        Some(&authority)
+    )
+    .is_err());
 }
 
 /// Hydration hard-links forward and ordinal runs from the content store. The

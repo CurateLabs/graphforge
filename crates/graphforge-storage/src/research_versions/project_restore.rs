@@ -1,10 +1,10 @@
 //! Complete Project research replacement within the research publication.
 use super::{
-    BTreeMap, GfError, Path, ProjectCapability, ProjectGenerationRequest, ProjectParticipant,
+    hex, history, inspect_research_version, invalid, materialize_research_graph, BTreeMap, GfError,
+    Path, ProjectCapability, ProjectGenerationRequest, ProjectParticipant,
     ProjectParticipantEncoding, ProjectStageOutcome, ResearchEvidenceReference, ResearchMutation,
     ResearchOperation, ResearchParticipantKey, ResearchRegistry, ResearchVersionRecord,
-    ResolvedProjectGeneration, Uuid, hex, history, inspect_research_version, invalid,
-    materialize_research_graph,
+    ResolvedProjectGeneration, Uuid,
 };
 
 pub(super) fn prepare(

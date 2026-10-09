@@ -128,13 +128,11 @@ mod tests {
         let selected = batch(Arc::new(array.slice(1, 1)));
         let reservation = RowReservation::default().with_batch(&selected).unwrap();
         reservation.admit(0, 4096).unwrap();
-        assert!(
-            RowReservation::default()
-                .with_batch(&batch(Arc::new(array)))
-                .unwrap()
-                .admit(0, 4096)
-                .is_err()
-        );
+        assert!(RowReservation::default()
+            .with_batch(&batch(Arc::new(array)))
+            .unwrap()
+            .admit(0, 4096)
+            .is_err());
     }
 
     #[test]
@@ -164,13 +162,11 @@ mod tests {
             accumulated = accumulated.with_batch(&tiny).unwrap();
         }
         assert!(accumulated.admit(0, 4096).is_err());
-        assert!(
-            RowReservation {
-                buffers: u64::MAX,
-                ..Default::default()
-            }
-            .admit(0, u64::MAX)
-            .is_err()
-        );
+        assert!(RowReservation {
+            buffers: u64::MAX,
+            ..Default::default()
+        }
+        .admit(0, u64::MAX)
+        .is_err());
     }
 }

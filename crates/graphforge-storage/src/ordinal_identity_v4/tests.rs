@@ -285,14 +285,12 @@ fn checksum_ordinal_manifest_refuses_legacy_missing_and_malformed_metadata() {
             "mode={mode}"
         );
     }
-    assert!(
-        parse_manifest(
-            &serde_json::to_vec(&original).unwrap(),
-            fixture.manifest.topology_generation
-        )
-        .unwrap()
-        .is_some()
-    );
+    assert!(parse_manifest(
+        &serde_json::to_vec(&original).unwrap(),
+        fixture.manifest.topology_generation
+    )
+    .unwrap()
+    .is_some());
 }
 
 fn ordinal_blocks(bytes: &[u8]) -> Vec<V4OrdinalBlock> {
@@ -470,15 +468,13 @@ fn cross_process_mutation_with_restored_mtime_fails_block_authentication() {
     let mut handle = fixture.open(V4OrdinalIdentityLimits::default());
     let artifact = fixture.root.path().join(INDEX_DIR).join("ordinal-0.uuidx");
     let reference = fixture.root.path().join("original-time");
-    assert!(
-        Command::new("cp")
-            .args(["-p"])
-            .arg(&artifact)
-            .arg(&reference)
-            .status()
-            .unwrap()
-            .success()
-    );
+    assert!(Command::new("cp")
+        .args(["-p"])
+        .arg(&artifact)
+        .arg(&reference)
+        .status()
+        .unwrap()
+        .success());
     assert!(Command::new("sh")
         .arg("-c")
         .arg("printf '\\001' | dd of=\"$ARTIFACT\" bs=1 seek=0 conv=notrunc 2>/dev/null && touch -r \"$REFERENCE\" \"$ARTIFACT\"")
@@ -1153,13 +1149,11 @@ fn a_recorded_order_is_refused_when_adjacent_held_blocks_meet_out_of_order() {
     let fixture = three_block_fixture(uuids);
     let mut handle = fixture.open(V4OrdinalIdentityLimits::default());
     assert_eq!(handle.uuid_order_matches_ordinals(), Ok(true));
-    assert!(
-        handle
-            .lookup_node_uuids(&[2 * RECORDS_PER_ORDINAL_BLOCK + 1])
-            .unwrap()
-            .values[0]
-            .is_some()
-    );
+    assert!(handle
+        .lookup_node_uuids(&[2 * RECORDS_PER_ORDINAL_BLOCK + 1])
+        .unwrap()
+        .values[0]
+        .is_some());
     assert_eq!(
         handle
             .lookup_node_uuids(&[RECORDS_PER_ORDINAL_BLOCK + 1])
@@ -1179,14 +1173,12 @@ fn recorded_false_is_not_a_claim_a_reader_relies_on() {
     fixture.publish();
     let mut handle = fixture.open(V4OrdinalIdentityLimits::default());
     assert_eq!(handle.uuid_order_matches_ordinals(), Ok(false));
-    assert!(
-        handle
-            .lookup_node_uuids(&[1, 6])
-            .unwrap()
-            .values
-            .iter()
-            .all(Option::is_some)
-    );
+    assert!(handle
+        .lookup_node_uuids(&[1, 6])
+        .unwrap()
+        .values
+        .iter()
+        .all(Option::is_some));
 }
 
 #[test]

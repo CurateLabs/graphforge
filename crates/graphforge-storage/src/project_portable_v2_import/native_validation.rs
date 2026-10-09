@@ -4,8 +4,8 @@ use super::{
     PortableV2Limits, ProjectCapability, Uuid,
 };
 use crate::{
-    ResolvedProjectGeneration,
     research_versions::{ResearchRegistry, ResearchVersionRecord},
+    ResolvedProjectGeneration,
 };
 use std::{collections::BTreeMap, path::Path, sync::atomic::AtomicBool};
 

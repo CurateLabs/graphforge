@@ -1,16 +1,16 @@
-use super::INDEX_DIR;
-use super::TopologyIndexReceipt;
-use super::UuidIndexBuildLimits;
-use super::UuidTopologyDelta;
-use super::V4_ORDINAL_MANIFEST;
-use super::V4_ORDINAL_RECEIPT;
 use super::maintain_uuid_membership_orphans_with_ordinal_authority;
 use super::rebuild::rebuild_v4_ordinal_identity;
 use super::rebuild::rebuild_v4_ordinal_identity_with_evidence;
-use super::topology_delta::V4_PLAN_PREFIX;
-use super::topology_delta::V4_PLAN_ROOT;
 use super::topology_delta::commit_uuid_topology_rewrite;
 use super::topology_delta::hex_sha256;
+use super::topology_delta::V4_PLAN_PREFIX;
+use super::topology_delta::V4_PLAN_ROOT;
+use super::TopologyIndexReceipt;
+use super::UuidIndexBuildLimits;
+use super::UuidTopologyDelta;
+use super::INDEX_DIR;
+use super::V4_ORDINAL_MANIFEST;
+use super::V4_ORDINAL_RECEIPT;
 use arrow::array::FixedSizeBinaryArray;
 use arrow::array::UInt64Array;
 use arrow::datatypes::DataType;
@@ -77,13 +77,11 @@ pub(super) fn write_v4_test_artifact(
 }
 
 pub(super) fn assert_no_v4_temporary(index: &graphforge_filesystem::StableDirectory) {
-    assert!(
-        index
-            .child_names()
-            .unwrap()
-            .into_iter()
-            .all(|name| !name.to_string_lossy().starts_with(".v4-"))
-    );
+    assert!(index
+        .child_names()
+        .unwrap()
+        .into_iter()
+        .all(|name| !name.to_string_lossy().starts_with(".v4-")));
 }
 
 fn v4_plan_sibling_count(project: &Path) -> usize {

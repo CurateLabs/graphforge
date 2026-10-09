@@ -1,4 +1,4 @@
-use crate::durable_commit::{AtomicHooks, Visibility, fault, publish_atomic_in};
+use crate::durable_commit::{fault, publish_atomic_in, AtomicHooks, Visibility};
 use graphforge_filesystem::StableDirectory;
 use std::ffi::OsStr;
 use std::fs::File;

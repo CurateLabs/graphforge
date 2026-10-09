@@ -1,7 +1,16 @@
 //! materialization ownership for immutable graph objects.
 use super::Seek;
 
-use super::BUFFER_BYTES;
+use super::begin_graph_object_publication;
+#[cfg(windows)]
+use super::fs;
+use super::hex_digest;
+use super::read_graph_control_object_counted;
+use super::storage;
+#[cfg(windows)]
+use super::validate_directory_identity;
+use super::validate_logical_path;
+use super::validation;
 use super::CasRoot;
 use super::Component;
 use super::Digest;
@@ -22,16 +31,7 @@ use super::Sha256;
 use super::StableDirectory;
 use super::Uuid;
 use super::Write;
-use super::begin_graph_object_publication;
-#[cfg(windows)]
-use super::fs;
-use super::hex_digest;
-use super::read_graph_control_object_counted;
-use super::storage;
-#[cfg(windows)]
-use super::validate_directory_identity;
-use super::validate_logical_path;
-use super::validation;
+use super::BUFFER_BYTES;
 
 /// Materialize a verified logical inventory into a private graph tree. Ordinary
 /// immutable payloads reuse CAS inodes; the v4 ordinal authority facet is

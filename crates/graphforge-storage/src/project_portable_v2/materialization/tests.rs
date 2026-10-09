@@ -420,12 +420,10 @@ fn portable_captured_cas_refuses_consumed_mutation_restored_before_revalidation(
     drop(observed);
     crate::graph_object_store::set_captured_copy_hook(None);
     assert!(injected.get() && restored.get());
-    assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("checksum or length changed during copy")
-    );
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("checksum or length changed during copy"));
     assert_eq!(work.artifact_payload_sha256_bytes, 0);
     assert_eq!(work.unclassified_sha256_bytes, 0);
     assert!(work.checksum_bytes >= 2);
@@ -508,11 +506,9 @@ fn research_captured_cas_counts_real_bytes_reuses_authority_and_refuses_corrupti
     let current = fs::read(refused.path().join("CURRENT")).unwrap();
     let lease = crate::begin_graph_object_publication(refused.path()).unwrap();
     fs::write(research_path, b"[]").unwrap();
-    assert!(
-        super::super::research::install_captured_with_lease(
-            &stage, &lease, &objects, &captures, None
-        )
-        .is_err()
-    );
+    assert!(super::super::research::install_captured_with_lease(
+        &stage, &lease, &objects, &captures, None
+    )
+    .is_err());
     assert_eq!(fs::read(refused.path().join("CURRENT")).unwrap(), current);
 }

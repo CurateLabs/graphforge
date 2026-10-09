@@ -20,16 +20,16 @@
 //! complete, so a resumed shape never re-routes into a family whose segments
 //! have already been retired.
 
-use super::partition_shaping::{PartitionFamily, parse_segment_name};
+use super::partition_shaping::{parse_segment_name, PartitionFamily};
 use super::progress::LoadedShapeProgress;
 use super::shape::{
     SHAPED_EDGE_DETAILS, SHAPED_EDGE_ENDPOINTS, SHAPED_IDENTITIES, SHAPED_NODE_DETAILS,
     STAGED_ENDPOINTS, STAGED_IDENTITIES,
 };
 use super::{
-    ArtifactReceipt, Checkpoint, GfError, GraphConstructionBudgets, IdentityRecord,
-    MAX_SHAPE_CONTROL_BYTES, OsStr, StableDirectory, Uuid, control_sha256, decode_bounded,
-    install_control, is_canonical_lower_hex, is_canonical_sha256, read_bounded_limit, storage,
+    control_sha256, decode_bounded, install_control, is_canonical_lower_hex, is_canonical_sha256,
+    read_bounded_limit, storage, ArtifactReceipt, Checkpoint, GfError, GraphConstructionBudgets,
+    IdentityRecord, OsStr, StableDirectory, Uuid, MAX_SHAPE_CONTROL_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -466,16 +466,16 @@ pub(super) fn unlink_shape_stages(root: &StableDirectory) -> Result<(), GfError>
 
 #[cfg(test)]
 mod tests {
-    use super::super::partition_shaping::{PartitionFamily, fixed_spill_name};
+    use super::super::partition_shaping::{fixed_spill_name, PartitionFamily};
     use super::super::progress::{
-        IDENTITY_TAG, ShapeProgress, ShapeProgressPartition, install_shape_progress,
-        load_shape_progress_chain,
+        install_shape_progress, load_shape_progress_chain, ShapeProgress, ShapeProgressPartition,
+        IDENTITY_TAG,
     };
     use super::super::tests::open;
     use super::super::{ArtifactReceipt, IDENTITY_WIDTH, MAX_CONTROL_BYTES};
     use super::{
-        ShapeStageKind, ShapeStages, StageResult, load_shape_stages, parse_shape_stage_name,
-        shape_stage_name, unlink_shape_stages,
+        load_shape_stages, parse_shape_stage_name, shape_stage_name, unlink_shape_stages,
+        ShapeStageKind, ShapeStages, StageResult,
     };
     use tempfile::TempDir;
 

@@ -1,5 +1,5 @@
 //! Private captures from the actual typed composition-control writers.
-use super::{MaterializedCapture, Path, PortableV2Error, PortableV2ErrorCode, fs};
+use super::{fs, MaterializedCapture, Path, PortableV2Error, PortableV2ErrorCode};
 use crate::project_publication::{ProjectFileParticipant, ProjectParticipant};
 use graphforge_core::hash_observation::ControlSha256;
 use sha2::Digest;

@@ -200,13 +200,11 @@ fn mapped_inventory_requires_authenticated_exact_route_authority() {
         participant.record_version,
         GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION
     );
-    assert!(
-        decode_versioned_graph_files_participant(
-            GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION,
-            &bytes
-        )
-        .is_ok()
-    );
+    assert!(decode_versioned_graph_files_participant(
+        GRAPH_FILES_MAPPED_CHECKSUM_RECORD_VERSION,
+        &bytes
+    )
+    .is_ok());
     assert!(
         decode_versioned_graph_files_participant(GRAPH_FILES_CHECKSUM_RECORD_VERSION, &bytes)
             .is_err()
@@ -522,11 +520,10 @@ fn staging_like_parquet_name_is_authenticated_and_tamper_detected() {
     fs::write(&injected, b"untrusted-edge-bytes").unwrap();
 
     let (inventory, _) = capture_graph_files(source.path()).unwrap();
-    assert!(
-        inventory.files.iter().any(|entry| {
-            entry.relative_path == "topology/edges/KNOWS/.gf-stage-injected.parquet"
-        })
-    );
+    assert!(inventory
+        .files
+        .iter()
+        .any(|entry| { entry.relative_path == "topology/edges/KNOWS/.gf-stage-injected.parquet" }));
     assert!(
         crate::mutator::edge_parquet_files(source.path(), None).is_err(),
         "non-canonical staged-looking names are authenticated but never topology"
@@ -663,18 +660,14 @@ fn stage_and_materialize_never_assembles_one_payload() {
         "properties/{}.parquet",
         crate::route_component::component("Person")
     ));
-    assert!(
-        fs::metadata(&sealed_source)
-            .unwrap()
-            .permissions()
-            .readonly()
-    );
-    assert!(
-        !fs::metadata(&private_copy)
-            .unwrap()
-            .permissions()
-            .readonly()
-    );
+    assert!(fs::metadata(&sealed_source)
+        .unwrap()
+        .permissions()
+        .readonly());
+    assert!(!fs::metadata(&private_copy)
+        .unwrap()
+        .permissions()
+        .readonly());
     assert_eq!(fs::read(&private_copy).unwrap(), b"person");
     assert_eq!(
         hash_file(&private_copy).unwrap(),
@@ -722,12 +715,10 @@ fn checkpoint_restores_exact_legacy_routes_without_layout_upgrade() {
     checkpoint.restore(target.path()).unwrap();
     assert_eq!(capture_graph_files(target.path()).unwrap().0, before);
     assert_eq!(fs::read(path).unwrap(), b"original");
-    assert!(
-        !target
-            .path()
-            .join(crate::route_component::TABLE_FILE)
-            .exists()
-    );
+    assert!(!target
+        .path()
+        .join(crate::route_component::TABLE_FILE)
+        .exists());
 }
 
 #[test]
@@ -1029,15 +1020,17 @@ fn descriptor_record_version_must_match_graph_files_payload_version() {
     assert!(
         decode_versioned_graph_files_participant(GRAPH_FILES_CHECKSUM_RECORD_VERSION, &v1).is_ok()
     );
-    assert!(
-        decode_versioned_graph_files_participant(GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION, &v2)
-            .is_ok()
-    );
+    assert!(decode_versioned_graph_files_participant(
+        GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION,
+        &v2
+    )
+    .is_ok());
     assert!(
         decode_versioned_graph_files_participant(GRAPH_FILES_CHECKSUM_RECORD_VERSION, &v2).is_err()
     );
-    assert!(
-        decode_versioned_graph_files_participant(GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION, &v1)
-            .is_err()
-    );
+    assert!(decode_versioned_graph_files_participant(
+        GRAPH_FILES_CHECKSUM_ROOT_RECORD_VERSION,
+        &v1
+    )
+    .is_err());
 }

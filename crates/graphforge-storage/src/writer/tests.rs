@@ -1,7 +1,14 @@
 use super::*;
+use crate::writer::decode_edge_property_rows;
+use crate::writer::fs;
+use crate::writer::read_node_property_rows;
+use crate::writer::remove_node_properties;
+use crate::writer::set_node_properties;
+use crate::writer::size_of;
+use crate::writer::to_bytes;
+use crate::writer::uuid_field;
 use crate::writer::Arc;
 use crate::writer::DataType;
-use crate::writer::ENDPOINT_ENTRY_CHARGE;
 use crate::writer::EntityTypeId;
 use crate::writer::Field;
 use crate::writer::FixedSizeBinaryArray;
@@ -11,28 +18,21 @@ use crate::writer::GraphWriterLimits;
 use crate::writer::HashMap;
 use crate::writer::HashSet;
 use crate::writer::IrLiteral;
-use crate::writer::NODE_ROW_CHARGE;
-use crate::writer::NODE_SCRATCH_CHARGE;
 use crate::writer::OntologyMode;
 use crate::writer::Path;
 use crate::writer::RecordBatch;
 use crate::writer::RewriteBatch;
-use crate::writer::SURROGATE_TAILS_FILE;
 use crate::writer::Schema;
-use crate::writer::TOPOLOGY_NODES_SCHEMA;
 use crate::writer::TimestampMicrosecondArray;
 use crate::writer::TopologyWriteWork;
 use crate::writer::UInt32Array;
 use crate::writer::UInt64Array;
 use crate::writer::Uuid;
-use crate::writer::decode_edge_property_rows;
-use crate::writer::fs;
-use crate::writer::read_node_property_rows;
-use crate::writer::remove_node_properties;
-use crate::writer::set_node_properties;
-use crate::writer::size_of;
-use crate::writer::to_bytes;
-use crate::writer::uuid_field;
+use crate::writer::ENDPOINT_ENTRY_CHARGE;
+use crate::writer::NODE_ROW_CHARGE;
+use crate::writer::NODE_SCRATCH_CHARGE;
+use crate::writer::SURROGATE_TAILS_FILE;
+use crate::writer::TOPOLOGY_NODES_SCHEMA;
 use graphforge_core::uuid::new_v7;
 use std::fs::File;
 use tempfile::TempDir;
@@ -857,11 +857,9 @@ fn topology_budget_rejects_before_allocating_or_advancing_surrogates() {
             max_flush_scratch_bytes: usize::MAX,
         });
 
-    assert!(
-        writer
-            .create_node(new_v7(), EntityTypeId::decode(0).unwrap())
-            .is_err()
-    );
+    assert!(writer
+        .create_node(new_v7(), EntityTypeId::decode(0).unwrap())
+        .is_err());
     assert_eq!(writer.next_node_id, 1);
     assert!(writer.nodes.is_empty());
     assert!(writer.uuid_to_node_id.is_empty());
@@ -886,11 +884,9 @@ fn same_window_cross_kind_uuid_collisions_fail_before_state_mutation() {
         .create_edge(collision, "KNOWS", &left, &right)
         .unwrap();
     let next_node = edge_first.next_node_id;
-    assert!(
-        edge_first
-            .create_node(collision, EntityTypeId::decode(0).unwrap())
-            .is_err()
-    );
+    assert!(edge_first
+        .create_node(collision, EntityTypeId::decode(0).unwrap())
+        .is_err());
     assert_eq!(edge_first.next_node_id, next_node);
     assert_eq!(edge_first.nodes.len(), 2);
 
@@ -906,11 +902,9 @@ fn same_window_cross_kind_uuid_collisions_fail_before_state_mutation() {
         .create_node(collision, EntityTypeId::decode(0).unwrap())
         .unwrap();
     let next_edge = node_first.next_edge_id;
-    assert!(
-        node_first
-            .create_edge(collision, "KNOWS", &left, &right)
-            .is_err()
-    );
+    assert!(node_first
+        .create_edge(collision, "KNOWS", &left, &right)
+        .is_err());
     assert_eq!(node_first.next_edge_id, next_edge);
     assert!(node_first.edges.values().all(Vec::is_empty));
 }
@@ -1027,11 +1021,9 @@ fn assert_failed_flush_retains_edge_charge(owned_topology: bool) {
     assert!(writer.charged_topology_bytes <= writer.limits.max_buffered_topology_bytes);
     // Node rows were staged before the edge failure, but the discarded batch
     // must neither publish its node prefix nor extend session membership.
-    assert!(
-        crate::mutator::node_parquet_files(dir.path())
-            .unwrap()
-            .is_empty()
-    );
+    assert!(crate::mutator::node_parquet_files(dir.path())
+        .unwrap()
+        .is_empty());
     assert!(!dir.path().join(SURROGATE_TAILS_FILE).exists());
     if let Some(authority) = authority {
         let files = crate::enumerate_topology_files(&authority, None).unwrap();
@@ -1059,15 +1051,13 @@ fn property_budget_preadmits_dynamic_values_and_releases_on_cancel() {
         .create_node(node, EntityTypeId::decode(0).unwrap())
         .unwrap();
     let before = writer.charged_topology_bytes;
-    assert!(
-        writer
-            .set_properties(
-                &node,
-                Some("Person"),
-                HashMap::from([("payload".into(), IrLiteral::Str("x".repeat(4_096)))]),
-            )
-            .is_err()
-    );
+    assert!(writer
+        .set_properties(
+            &node,
+            Some("Person"),
+            HashMap::from([("payload".into(), IrLiteral::Str("x".repeat(4_096)))]),
+        )
+        .is_err());
     assert!(writer.properties.is_empty());
     assert_eq!(writer.charged_topology_bytes, before);
 
@@ -1540,10 +1530,9 @@ fn pending_incident_edge_uuids_sees_buffered_edges() {
     // Incident from either endpoint; c has none.
     let hits = w.pending_incident_edge_uuids(&HashSet::from([to_bytes(&b)]));
     assert_eq!(hits, vec![to_bytes(&e_ab)]);
-    assert!(
-        w.pending_incident_edge_uuids(&HashSet::from([to_bytes(&c)]))
-            .is_empty()
-    );
+    assert!(w
+        .pending_incident_edge_uuids(&HashSet::from([to_bytes(&c)]))
+        .is_empty());
 }
 
 #[test]
@@ -1598,19 +1587,15 @@ fn pending_query_and_label_edits_are_exact_before_flush_and_reopen() {
         vec![3, 7]
     );
     assert_eq!(matched.4["age"], IrLiteral::Int(42));
-    assert!(
-        writer
-            .find_pending_node(&[EntityTypeId::decode(9).unwrap()], &[])
-            .is_none()
-    );
-    assert!(
-        writer
-            .find_pending_node(
-                &[EntityTypeId::decode(3).unwrap()],
-                &[("name".into(), IrLiteral::Str("Bob".into()))]
-            )
-            .is_none()
-    );
+    assert!(writer
+        .find_pending_node(&[EntityTypeId::decode(9).unwrap()], &[])
+        .is_none());
+    assert!(writer
+        .find_pending_node(
+            &[EntityTypeId::decode(3).unwrap()],
+            &[("name".into(), IrLiteral::Str("Bob".into()))]
+        )
+        .is_none());
 
     assert_eq!(
         writer.add_pending_node_labels(
@@ -1669,21 +1654,15 @@ fn pending_query_and_label_edits_are_exact_before_flush_and_reopen() {
     assert_eq!(direct.1, alice_bytes);
     assert_eq!(direct.2, bob_bytes);
     assert_eq!(direct.3["since"], IrLiteral::Int(2024));
-    assert!(
-        writer
-            .find_pending_edge("KNOWS", &bob_bytes, &alice_bytes, false, &[])
-            .is_none()
-    );
-    assert!(
-        writer
-            .find_pending_edge("KNOWS", &bob_bytes, &alice_bytes, true, &[])
-            .is_some()
-    );
-    assert!(
-        writer
-            .find_pending_edge("IGNORES", &alice_bytes, &bob_bytes, false, &[])
-            .is_none()
-    );
+    assert!(writer
+        .find_pending_edge("KNOWS", &bob_bytes, &alice_bytes, false, &[])
+        .is_none());
+    assert!(writer
+        .find_pending_edge("KNOWS", &bob_bytes, &alice_bytes, true, &[])
+        .is_some());
+    assert!(writer
+        .find_pending_edge("IGNORES", &alice_bytes, &bob_bytes, false, &[])
+        .is_none());
 
     writer.flush().unwrap();
     let mut reopened = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS + 1).unwrap();

@@ -1,7 +1,7 @@
 //! Authenticated CAS placement of immutable research content.
 use super::{
-    BTreeSet, Digest, GfError, Path, ProjectErrorCode, ResearchRegistry, ResearchVersionRecord,
-    Sha256, Uuid, error, hex, inspect_research_version, invalid, read_research_registry,
+    error, hex, inspect_research_version, invalid, read_research_registry, BTreeSet, Digest,
+    GfError, Path, ProjectErrorCode, ResearchRegistry, ResearchVersionRecord, Sha256, Uuid,
 };
 
 const MAX_PARTICIPANT_BYTES: u64 = 256 * 1024 * 1024;

@@ -9,7 +9,7 @@ use std::path::Path;
 use graphforge_core::GfError;
 use graphforge_filesystem::StableDirectory;
 
-use super::{RouteTable, TABLE_FILE, encode_relative_route, invalid, limit};
+use super::{encode_relative_route, invalid, limit, RouteTable, TABLE_FILE};
 
 const MAX_TABLE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ROUTES: u64 = 100_000;
@@ -309,7 +309,7 @@ mod tests {
     use super::*;
     use arrow::array::{Array, FixedSizeBinaryArray, Int64Array, RecordBatch, UInt64Array};
     use arrow::datatypes::{DataType, Field, Schema};
-    use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
+    use parquet::arrow::{arrow_reader::ParquetRecordBatchReaderBuilder, ArrowWriter};
     use std::sync::Arc;
 
     fn write_legacy_fixture(root: &Path, route: &str) -> Vec<u8> {
@@ -626,13 +626,11 @@ mod tests {
             ));
             assert!(source.exists());
             assert!(!root.path().join(TABLE_FILE).exists());
-            assert!(
-                !root
-                    .path()
-                    .join("properties")
-                    .join(format!("{}.parquet", super::super::component("Legacy")))
-                    .exists()
-            );
+            assert!(!root
+                .path()
+                .join("properties")
+                .join(format!("{}.parquet", super::super::component("Legacy")))
+                .exists());
         }
     }
 

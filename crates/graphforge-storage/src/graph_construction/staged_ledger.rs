@@ -26,8 +26,8 @@
 use std::collections::BTreeMap;
 
 use super::{
-    ArtifactReceipt, Checkpoint, ConstructionChunkReceipt, GfError, GraphConstructionState,
-    StableDirectory, control_sha256, storage,
+    control_sha256, storage, ArtifactReceipt, Checkpoint, ConstructionChunkReceipt, GfError,
+    GraphConstructionState, StableDirectory,
 };
 
 /// The identity and allocation of every accepted chunk artifact, by ledger key.

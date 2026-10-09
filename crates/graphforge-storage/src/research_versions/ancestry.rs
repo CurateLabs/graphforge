@@ -4,8 +4,8 @@
 //! keeps every recorded parent list in `ancestry`, which outlives released
 //! payloads exactly as `identities` does, so descent stays walkable.
 use super::{
-    BTreeMap, BTreeSet, GfError, ProjectErrorCode, ResearchRegistry, ResearchVersionRecord, Uuid,
-    error, invalid,
+    error, invalid, BTreeMap, BTreeSet, GfError, ProjectErrorCode, ResearchRegistry,
+    ResearchVersionRecord, Uuid,
 };
 use serde::{Deserialize, Serialize};
 

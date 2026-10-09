@@ -148,7 +148,7 @@ fn publishes_and_reopens_compact_graph_files_v2_root() {
         crate::append_graph_files_v2(&lease, workspace.path(), &mut state, &[relative], &[])
             .unwrap();
     let request = request(vec![
-        crate::graph_files_root_participant(&files_root).unwrap(),
+        crate::graph_files_root_participant(&files_root).unwrap()
     ]);
     let ProjectStageOutcome::Staged(staged) =
         stage_project_generation(root.path(), &request).unwrap()
@@ -220,12 +220,10 @@ fn mutate_compact_payload_preserving_identity_and_length(
         fs::metadata(&payload_path).unwrap().len(),
         entry.byte_length
     );
-    assert!(
-        fs::metadata(&payload_path)
-            .unwrap()
-            .permissions()
-            .readonly()
-    );
+    assert!(fs::metadata(&payload_path)
+        .unwrap()
+        .permissions()
+        .readonly());
 
     mutated
 }
@@ -255,7 +253,7 @@ fn publish_compact_authority_fixture(
     files_root: &crate::GraphFilesRootV2,
 ) -> ProjectPublicationReceipt {
     let request = request(vec![
-        crate::graph_files_root_participant(files_root).unwrap(),
+        crate::graph_files_root_participant(files_root).unwrap()
     ]);
     let lease = crate::begin_graph_object_publication(root).unwrap();
     let ProjectStageOutcome::Staged(staged) = stage_project_generation(root, &request).unwrap()
@@ -332,7 +330,7 @@ fn assert_caller_checksum_cannot_reauthenticate_conflicting_address(publish_pare
     let supplied_root =
         compact_root_with_changed_payload_checksum(root.path(), files_root, &original_entry);
     let request = request(vec![
-        crate::graph_files_root_participant(&supplied_root).unwrap(),
+        crate::graph_files_root_participant(&supplied_root).unwrap()
     ]);
     let lease = crate::begin_graph_object_publication(root.path()).unwrap();
     let result = match stage_project_generation(root.path(), &request) {
@@ -380,7 +378,7 @@ fn healthy_compact_parent_republication_reuses_authenticated_payload_identity() 
     let (files_root, original_entry) = compact_authority_fixture(root.path());
     let parent = publish_compact_authority_fixture(root.path(), &files_root);
     let input = request(vec![
-        crate::graph_files_root_participant(&files_root).unwrap(),
+        crate::graph_files_root_participant(&files_root).unwrap()
     ]);
     let generation_uuid = input.generation_uuid;
     let prepared = PreparedGenerationRequest::new(
@@ -452,7 +450,7 @@ fn compact_payload_is_reverified_only_at_the_lease_backed_commit_boundary() {
         .content_sha256
         .clone();
     let request = request(vec![
-        crate::graph_files_root_participant(&files_root).unwrap(),
+        crate::graph_files_root_participant(&files_root).unwrap()
     ]);
     let ProjectStageOutcome::Staged(staged) =
         stage_project_generation(root.path(), &request).unwrap()
@@ -477,24 +475,21 @@ fn compact_payload_is_reverified_only_at_the_lease_backed_commit_boundary() {
             .generation_uuid(),
         parent
     );
-    assert!(
-        root.path()
-            .join(GENERATIONS_DIR)
-            .join(request.generation_uuid.hyphenated().to_string())
-            .exists()
-    );
+    assert!(root
+        .path()
+        .join(GENERATIONS_DIR)
+        .join(request.generation_uuid.hyphenated().to_string())
+        .exists());
 
     drop(lease);
     let report = crate::recover_project_transactions(root.path()).unwrap();
     assert_eq!(report.aborted_journals, 1);
     assert_eq!(report.removed_generations, 1);
-    assert!(
-        !root
-            .path()
-            .join(GENERATIONS_DIR)
-            .join(request.generation_uuid.hyphenated().to_string())
-            .exists()
-    );
+    assert!(!root
+        .path()
+        .join(GENERATIONS_DIR)
+        .join(request.generation_uuid.hyphenated().to_string())
+        .exists());
     assert_eq!(
         resolve_project_generation(root.path())
             .unwrap()
@@ -863,11 +858,9 @@ fn admitted_parent_from_another_root_is_a_publication_failure() {
     .expect("a prepared parent from another root must fail");
 
     assert_eq!(error.code(), "GF_PUBLICATION_FAILED");
-    assert!(
-        error
-            .to_string()
-            .contains("prepared generation does not belong")
-    );
+    assert!(error
+        .to_string()
+        .contains("prepared generation does not belong"));
 }
 
 #[test]
@@ -896,13 +889,11 @@ fn optimistic_attempts_stage_concurrently_and_compare_parent_at_commit() {
         .publish()
         .expect_err("stale optimistic parent must not publish");
     assert_eq!(error.code(), "GF_WRITE_CONFLICT");
-    assert!(
-        !root
-            .path()
-            .join(GENERATIONS_DIR)
-            .join(second.generation_uuid.hyphenated().to_string())
-            .exists()
-    );
+    assert!(!root
+        .path()
+        .join(GENERATIONS_DIR)
+        .join(second.generation_uuid.hyphenated().to_string())
+        .exists());
 
     let mut rebased = second.clone();
     rebased.participants[0].bytes = b"second-rebased".to_vec();
@@ -1168,11 +1159,9 @@ fn published_transaction_probe_verifies_durable_manifest_on_reopen() {
         receipt.generation_manifest_sha256
     );
     assert!(probed.idempotent_replay);
-    assert!(
-        published_project_transaction(root.path(), Uuid::now_v7())
-            .unwrap()
-            .is_none()
-    );
+    assert!(published_project_transaction(root.path(), Uuid::now_v7())
+        .unwrap()
+        .is_none());
 
     let reopened = resolve_project_generation(root.path()).unwrap();
     assert_eq!(reopened.generation_uuid(), receipt.generation_uuid);

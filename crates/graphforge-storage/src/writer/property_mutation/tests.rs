@@ -1,4 +1,12 @@
 use super::*;
+use crate::writer::fs;
+use crate::writer::property_snapshots_to_batch;
+use crate::writer::read_entity_properties;
+use crate::writer::read_node_property_rows;
+use crate::writer::tests::read_edge_props;
+use crate::writer::tests::read_node_props;
+use crate::writer::tests::TS;
+use crate::writer::to_bytes;
 use crate::writer::BTreeMap;
 use crate::writer::EntityTypeId;
 use crate::writer::GfError;
@@ -9,14 +17,6 @@ use crate::writer::IrLiteral;
 use crate::writer::OntologyMode;
 use crate::writer::ProjectErrorCode;
 use crate::writer::RewriteBatch;
-use crate::writer::fs;
-use crate::writer::property_snapshots_to_batch;
-use crate::writer::read_entity_properties;
-use crate::writer::read_node_property_rows;
-use crate::writer::tests::TS;
-use crate::writer::tests::read_edge_props;
-use crate::writer::tests::read_node_props;
-use crate::writer::to_bytes;
 use graphforge_core::uuid::new_v7;
 use std::fs::File;
 use tempfile::TempDir;
@@ -24,11 +24,9 @@ use tempfile::TempDir;
 #[test]
 fn set_node_properties_sets_new_and_overwrites_existing() {
     let dir = TempDir::new().unwrap();
-    assert!(
-        read_node_property_rows(dir.path(), "_untyped")
-            .unwrap()
-            .is_empty()
-    );
+    assert!(read_node_property_rows(dir.path(), "_untyped")
+        .unwrap()
+        .is_empty());
     fs::create_dir_all(dir.path().join("properties")).unwrap();
     fs::write(dir.path().join("properties/_untyped.parquet"), b"invalid").unwrap();
     assert!(read_node_property_rows(dir.path(), "_untyped").is_err());
@@ -103,15 +101,13 @@ fn set_node_properties_routes_by_stem_in_strict_mode() {
     let updates = HashMap::from([(ab, HashMap::from([("age".to_owned(), IrLiteral::Int(99))]))]);
     set_node_properties(dir.path(), "Person", &updates).unwrap();
 
-    assert!(
-        !crate::property_overlay::enumerate_property_fragments(
-            dir.path(),
-            crate::property_overlay::PropertyRouteKind::Node,
-            &crate::route_component::component("Person"),
-        )
-        .unwrap()
-        .is_empty()
-    );
+    assert!(!crate::property_overlay::enumerate_property_fragments(
+        dir.path(),
+        crate::property_overlay::PropertyRouteKind::Node,
+        &crate::route_component::component("Person"),
+    )
+    .unwrap()
+    .is_empty());
     let props = read_node_props(dir.path(), "Person");
     assert_eq!(props[&ab]["age"], IrLiteral::Int(99));
 }
@@ -237,12 +233,11 @@ fn set_node_properties_empty_map_writes_nothing() {
         search_generation
     );
     // No property file was created from an empty update set.
-    assert!(
-        !dir.path()
-            .join("properties")
-            .join("_untyped.parquet")
-            .exists()
-    );
+    assert!(!dir
+        .path()
+        .join("properties")
+        .join("_untyped.parquet")
+        .exists());
 }
 
 #[test]
@@ -739,8 +734,8 @@ fn node_fragments(dir: &Path, route: &str) -> Vec<crate::property_overlay::Prope
 
 #[test]
 fn set_cuts_one_window_at_the_fragment_cap() {
-    use crate::property_overlay::MAX_PROPERTY_FRAGMENT_BYTES;
     use crate::property_overlay::fragment_cap::tests::{assert_capped_fragments, wide_value};
+    use crate::property_overlay::MAX_PROPERTY_FRAGMENT_BYTES;
     let dir = TempDir::new().unwrap();
     let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
     w.create_node(new_v7(), EntityTypeId::decode(0).unwrap())
@@ -817,8 +812,8 @@ fn set_cuts_one_window_at_the_fragment_cap() {
 
 #[test]
 fn set_gives_a_row_larger_than_the_cap_a_fragment_of_its_own() {
-    use crate::property_overlay::MAX_PROPERTY_FRAGMENT_BYTES;
     use crate::property_overlay::fragment_cap::tests::{fragment_stats, wide_value};
+    use crate::property_overlay::MAX_PROPERTY_FRAGMENT_BYTES;
     let dir = TempDir::new().unwrap();
     let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
     w.create_node(new_v7(), EntityTypeId::decode(0).unwrap())

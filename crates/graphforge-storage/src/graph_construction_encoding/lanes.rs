@@ -2,17 +2,17 @@
 #[cfg(any(test, feature = "test-support"))]
 use super::seam_spike;
 use super::{
-    ConstructionEncodedArtifact, GraphConstructionEncodingEvidence, StableDirectory, storage,
-    write_parquet,
+    account_cache_release, add_evidence_counter, directory_for, hex, CountingInput, CountingWriter,
+    EncodingTempGuard, IoCounter,
 };
 use super::{
-    CountingInput, CountingWriter, EncodingTempGuard, IoCounter, account_cache_release,
-    add_evidence_counter, directory_for, hex,
+    storage, write_parquet, ConstructionEncodedArtifact, GraphConstructionEncodingEvidence,
+    StableDirectory,
 };
 use crate::graph_construction::cpu_admission::{ConstructionCpuAdmission, ConstructionCpuLease};
 use arrow::record_batch::RecordBatch;
-use graphforge_core::GfError;
 use graphforge_core::hash_observation::ArtifactSha256 as Sha256;
+use graphforge_core::GfError;
 use graphforge_filesystem::file_identity;
 use parquet::arrow::ArrowWriter;
 use sha2::Digest;
@@ -22,7 +22,7 @@ use std::io::Write;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -59,25 +59,23 @@ impl Pool {
                 let jobs = jobs.clone();
                 let results = results.clone();
                 let stop = stop.clone();
-                std::thread::spawn(move || {
-                    loop {
-                        let job = jobs
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .recv();
-                        let Ok(job) = job else {
-                            break;
-                        };
-                        #[cfg(any(test, feature = "test-support"))]
-                        let _digest_guard = job.digest_context.attach();
-                        let _lifecycle_capture = job.lifecycle_context.attach();
-                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            compress(&job.batch, &stop)
-                        }))
-                        .unwrap_or_else(|_| Err(storage("encoding lane panicked")));
-                        if results.send((job.index, result)).is_err() {
-                            break;
-                        }
+                std::thread::spawn(move || loop {
+                    let job = jobs
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .recv();
+                    let Ok(job) = job else {
+                        break;
+                    };
+                    #[cfg(any(test, feature = "test-support"))]
+                    let _digest_guard = job.digest_context.attach();
+                    let _lifecycle_capture = job.lifecycle_context.attach();
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        compress(&job.batch, &stop)
+                    }))
+                    .unwrap_or_else(|_| Err(storage("encoding lane panicked")));
+                    if results.send((job.index, result)).is_err() {
+                        break;
                     }
                 })
             })

@@ -1,24 +1,5 @@
 //! Replay property routes and streamed fragment ownership.
 
-use super::Arc;
-use super::ArrayRef;
-use super::BTreeMap;
-use super::BooleanArray;
-use super::ColType;
-use super::DataType;
-use super::EDGE_PROPERTY_UUID_FIELD;
-use super::Field;
-use super::FixedSizeBinaryArray;
-use super::GfError;
-use super::HashMap;
-use super::IrLiteral;
-use super::NODE_PROPERTY_UUID_FIELD;
-use super::Path;
-use super::PropRow;
-use super::RecordBatch;
-use super::RewriteBatch;
-use super::Schema;
-use super::SchemaRef;
 use super::build_property_array;
 use super::col_type_from_field;
 use super::fs;
@@ -30,6 +11,25 @@ use super::replay_writer_properties;
 use super::replay_writer_reservation;
 use super::size_of;
 use super::uuid_field;
+use super::Arc;
+use super::ArrayRef;
+use super::BTreeMap;
+use super::BooleanArray;
+use super::ColType;
+use super::DataType;
+use super::Field;
+use super::FixedSizeBinaryArray;
+use super::GfError;
+use super::HashMap;
+use super::IrLiteral;
+use super::Path;
+use super::PropRow;
+use super::RecordBatch;
+use super::RewriteBatch;
+use super::Schema;
+use super::SchemaRef;
+use super::EDGE_PROPERTY_UUID_FIELD;
+use super::NODE_PROPERTY_UUID_FIELD;
 
 #[allow(clippy::too_many_lines)] // Node and edge property paths deliberately share one writer.
 pub(super) fn stream_replay_properties(
@@ -471,9 +471,9 @@ fn open_replay_property_fragment(
     ordinal: u64,
 ) -> Result<ReplayPropertyFragmentWriter, GfError> {
     use crate::property_overlay::{
-        PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY, PROPERTY_ORDINAL_KEY, PROPERTY_OVERLAY_FORMAT,
-        PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_ROUTE_KEY, PROPERTY_TOMBSTONE_FIELD,
-        PropertyFragmentId,
+        PropertyFragmentId, PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY, PROPERTY_ORDINAL_KEY,
+        PROPERTY_OVERLAY_FORMAT, PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_ROUTE_KEY,
+        PROPERTY_TOMBSTONE_FIELD,
     };
     let component = crate::route_component::component(route);
     let mut metadata = logical_schema.metadata().clone();

@@ -6,9 +6,10 @@ use std::io::Read;
 use std::path::{Component, Path};
 
 use super::{
-    COPY_BUFFER_BYTES, ConstructionEncodedArtifact, ENCODED_ROOT, ENCODING_FORMAT_VERSION, GfError,
-    GraphConstructionEncoding, GraphConstructionEncodingEvidence, StableDirectory,
     account_cache_release, add_evidence_counter, file_identity, file_link_count, storage,
+    ConstructionEncodedArtifact, GfError, GraphConstructionEncoding,
+    GraphConstructionEncodingEvidence, StableDirectory, COPY_BUFFER_BYTES, ENCODED_ROOT,
+    ENCODING_FORMAT_VERSION,
 };
 
 pub(crate) fn authenticate_inventory(

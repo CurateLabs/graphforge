@@ -1,9 +1,8 @@
 //! Prepare selected immutable Branch state without publishing an intermediate head.
 use super::{
-    BTreeSet, Digest, GfError, Path, PreparedBranchContent, RegisterResearchVersion,
-    ResearchGraphSelection, ResearchParticipantCommitment, ResearchParticipantKey,
-    ResearchVersionRecord, Sha256, cancelled, history, invalid, projection, read_research_registry,
-    retained_content,
+    cancelled, history, invalid, projection, read_research_registry, retained_content, BTreeSet,
+    Digest, GfError, Path, PreparedBranchContent, RegisterResearchVersion, ResearchGraphSelection,
+    ResearchParticipantCommitment, ResearchParticipantKey, ResearchVersionRecord, Sha256,
 };
 use std::sync::atomic::AtomicBool;
 

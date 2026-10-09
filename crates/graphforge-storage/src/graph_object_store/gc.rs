@@ -1,9 +1,13 @@
 //! gc ownership for immutable graph objects.
 
+use super::read_graph_object_by_digest_from_cas;
+use super::storage;
+use super::try_begin_graph_object_gc;
+use super::validate_digest;
+use super::validation;
 use super::BTreeMap;
 use super::BTreeSet;
 use super::File;
-use super::GRAPH_OBJECTS_DIR;
 use super::GfError;
 use super::GraphFilesRootV2;
 use super::GraphObjectGcEvidence;
@@ -11,11 +15,7 @@ use super::GraphObjectGcGuard;
 use super::Path;
 use super::ProjectErrorCode;
 use super::ReadOnlyCasRoot;
-use super::read_graph_object_by_digest_from_cas;
-use super::storage;
-use super::try_begin_graph_object_gc;
-use super::validate_digest;
-use super::validation;
+use super::GRAPH_OBJECTS_DIR;
 
 /// Capture every sealed CAS object and its lifecycle control by native identity.
 ///

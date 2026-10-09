@@ -113,12 +113,16 @@ fn generic_publication_rejects_forged_upstream_origin_and_receipt_generation() {
     let mut forged = after.clone();
     let review = forged.upstream.reviews.get_mut(&operation).unwrap();
     review.upstream_version_uuid = origin;
-    assert!(
-        super::super::upstream::preserve(&before, &forged, &parent, generation, Some(&capture))
-            .unwrap_err()
-            .to_string()
-            .contains("Project capture")
-    );
+    assert!(super::super::upstream::preserve(
+        &before,
+        &forged,
+        &parent,
+        generation,
+        Some(&capture)
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("Project capture"));
     assert!(
         super::super::upstream::preserve(&before, &after, &parent, generation, None)
             .unwrap_err()
@@ -127,26 +131,28 @@ fn generic_publication_rejects_forged_upstream_origin_and_receipt_generation() {
     );
     let mut wrong_context = capture.clone();
     wrong_context.context_uuid = Uuid::now_v7();
-    assert!(
-        super::super::upstream::preserve(
-            &before,
-            &after,
-            &parent,
-            generation,
-            Some(&wrong_context)
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("Project capture")
-    );
+    assert!(super::super::upstream::preserve(
+        &before,
+        &after,
+        &parent,
+        generation,
+        Some(&wrong_context)
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("Project capture"));
     let mut forged = after.clone();
     forged.receipts.get_mut(&operation).unwrap().generation_uuid = Uuid::now_v7();
-    assert!(
-        super::super::upstream::preserve(&before, &forged, &parent, generation, Some(&capture))
-            .unwrap_err()
-            .to_string()
-            .contains("publication transition")
-    );
+    assert!(super::super::upstream::preserve(
+        &before,
+        &forged,
+        &parent,
+        generation,
+        Some(&capture)
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("publication transition"));
     assert_eq!(current(root), parent.generation_uuid());
     assert_eq!(state(root), before);
 }

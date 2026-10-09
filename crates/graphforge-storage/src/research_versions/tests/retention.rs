@@ -342,11 +342,9 @@ fn fixed_parent_growing_frozen_roots_release_payloads_and_keep_accepted_dependen
         },
     );
     for (index, root_uuid) in frozen_roots.iter().enumerate() {
-        assert!(
-            state(root)
-                .deletion_blockers(versions[index])
-                .contains(&format!("root:{root_uuid}"))
-        );
+        assert!(state(root)
+            .deletion_blockers(versions[index])
+            .contains(&format!("root:{root_uuid}")));
         mutate(
             root,
             ResearchMutation::ReleaseRoot {
@@ -405,16 +403,14 @@ fn corrupt_materialized_closure_refuses_cleanup_before_releasing_unrelated_gener
         &path,
         b"corrupt CAS registry payload",
     );
-    assert!(
-        crate::project_retention::execute_project_cleanup(
-            root,
-            crate::project_retention::ProjectRetentionPolicy {
-                retained_ancestors: 0
-            },
-            crate::project_retention::ProjectRetentionLimits::default()
-        )
-        .is_err()
-    );
+    assert!(crate::project_retention::execute_project_cleanup(
+        root,
+        crate::project_retention::ProjectRetentionPolicy {
+            retained_ancestors: 0
+        },
+        crate::project_retention::ProjectRetentionLimits::default()
+    )
+    .is_err());
     assert!(crate::resolve_generation_by_uuid(root, old).is_ok());
 }
 

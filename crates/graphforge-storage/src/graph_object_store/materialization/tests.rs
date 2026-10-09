@@ -1,8 +1,8 @@
 use super::*;
-use crate::graph_object_store::File;
 use crate::graph_object_store::fs;
 use crate::graph_object_store::graph_object_path;
 use crate::graph_object_store::install_graph_object_bytes;
+use crate::graph_object_store::File;
 
 #[cfg(windows)]
 #[test]
@@ -45,16 +45,14 @@ fn materialization_rejects_target_and_intermediate_symlink_escape() {
     let target = owner.path().join("real-target");
     let directory = open_empty_materialization_target(&target).unwrap();
     symlink(outside.path(), target.join("nested")).unwrap();
-    assert!(
-        link_materialized_object(
-            &directory,
-            &graph_object_path(objects.path(), &entry.content_sha256).unwrap(),
-            &entry.relative_path,
-            &entry.content_sha256,
-            entry.byte_length,
-        )
-        .is_err()
-    );
+    assert!(link_materialized_object(
+        &directory,
+        &graph_object_path(objects.path(), &entry.content_sha256).unwrap(),
+        &entry.relative_path,
+        &entry.content_sha256,
+        entry.byte_length,
+    )
+    .is_err());
     assert!(!outside.path().join("payload.bin").exists());
 }
 

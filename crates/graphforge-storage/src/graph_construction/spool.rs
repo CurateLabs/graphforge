@@ -38,11 +38,12 @@ use arrow::record_batch::RecordBatch;
 
 use super::intake::{logical_batch_digest, precheck_chunk, validate_chunk_content};
 use super::{
-    ArtifactReceipt, BLOCK_BYTES, ConstructionChunkKind, ConstructionChunkReceipt, Deserialize,
-    GfError, GraphConstructionEncoding, GraphConstructionEvidence, GraphConstructionSession,
-    GraphConstructionState, HashingWriter, IdentityRecord, OsStr, Serialize, StableDirectory, Uuid,
     artifact_temp, construction_failpoint, file_identity, normalized_schema_digest,
-    reject_cancelled, replace_checkpoint_control, storage, unlink_named,
+    reject_cancelled, replace_checkpoint_control, storage, unlink_named, ArtifactReceipt,
+    ConstructionChunkKind, ConstructionChunkReceipt, Deserialize, GfError,
+    GraphConstructionEncoding, GraphConstructionEvidence, GraphConstructionSession,
+    GraphConstructionState, HashingWriter, IdentityRecord, OsStr, Serialize, StableDirectory, Uuid,
+    BLOCK_BYTES,
 };
 use crate::graph_construction_encoding::{BulkBatchReader, BulkBuildPlan, BulkRoute, BulkSource};
 

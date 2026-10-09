@@ -7,7 +7,7 @@ use std::sync::atomic::AtomicBool;
 use graphforge_core::GfError;
 
 use super::{
-    PortableV2Error, PortableV2ErrorCode, ProjectFileParticipant, storage, storage_or_cancel,
+    storage, storage_or_cancel, PortableV2Error, PortableV2ErrorCode, ProjectFileParticipant,
 };
 
 /// Private spill root for the import-time adjacency build, inside the owned
@@ -212,7 +212,7 @@ mod tests {
 
     use super::super::tests::supported;
     use super::*;
-    use crate::{PortableV2Limits, import_complete_portable_v2};
+    use crate::{import_complete_portable_v2, PortableV2Limits};
 
     fn fixed(ids: &[Uuid]) -> FixedSizeBinaryArray {
         FixedSizeBinaryArray::try_from_iter(ids.iter().map(|id| id.as_bytes().as_slice())).unwrap()
@@ -291,15 +291,12 @@ mod tests {
         let topology_generation = crate::read_topology_generation(root).unwrap();
         let rows = crate::adjacency::read_manifest(root).unwrap();
         assert!(!rows.is_empty());
-        assert!(
-            rows.iter()
-                .all(|row| row.topology_generation == topology_generation)
-        );
-        assert!(
-            crate::adjacency::validate_adjacency_index(root)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(rows
+            .iter()
+            .all(|row| row.topology_generation == topology_generation));
+        assert!(crate::adjacency::validate_adjacency_index(root)
+            .unwrap()
+            .is_empty());
     }
 
     fn export_complete(source: &Path) -> (tempfile::TempDir, std::path::PathBuf) {
@@ -520,11 +517,9 @@ mod tests {
     #[test]
     fn reconstructed_adjacency_import_replays_and_changed_generation_conflicts() {
         let (_owner, package) = indexless_package();
-        assert!(
-            !package
-                .join("data/components/graph-data/graph-tree/indexes")
-                .exists()
-        );
+        assert!(!package
+            .join("data/components/graph-data/graph-tree/indexes")
+            .exists());
         let target = tempfile::tempdir().unwrap();
         let transaction = Uuid::now_v7();
         let generation = Uuid::now_v7();
@@ -576,11 +571,9 @@ mod tests {
         let tree = tempfile::tempdir().unwrap();
         crate::materialize_graph_objects(target.path(), &before, tree.path()).unwrap();
         assert_index_current(tree.path());
-        assert!(
-            crate::adjacency::read_manifest(tree.path())
-                .unwrap()
-                .iter()
-                .all(|row| row.built_at_micros == 0)
-        );
+        assert!(crate::adjacency::read_manifest(tree.path())
+            .unwrap()
+            .iter()
+            .all(|row| row.built_at_micros == 0));
     }
 }

@@ -123,12 +123,10 @@ fn persisted_contract_rejects_future_noncanonical_unknown_and_duplicate_fields()
     assert!(
         WorkspaceSavedQueries::from_canonical_json(&serde_json::to_vec(&value).unwrap()).is_err()
     );
-    assert!(
-        WorkspaceSavedQueries::from_canonical_json(
-            b"{\"contract_version\":1,\"queries\":{},\"queries\":{}}\n"
-        )
-        .is_err()
-    );
+    assert!(WorkspaceSavedQueries::from_canonical_json(
+        b"{\"contract_version\":1,\"queries\":{},\"queries\":{}}\n"
+    )
+    .is_err());
     let id = Uuid::new_v4();
     let query = SavedQuery {
         query_uuid: id,
@@ -150,13 +148,11 @@ fn persisted_contract_rejects_future_noncanonical_unknown_and_duplicate_fields()
 fn absent_saved_query_participant_reads_empty_without_initial_layout_change() {
     let root = tempfile::tempdir().unwrap();
     let generation = crate::open_or_initialize_project(root.path()).unwrap();
-    assert!(
-        !generation
-            .participant_descriptors()
-            .unwrap()
-            .iter()
-            .any(|descriptor| descriptor.record_family_id == WORKSPACE_SAVED_QUERIES_FAMILY)
-    );
+    assert!(!generation
+        .participant_descriptors()
+        .unwrap()
+        .iter()
+        .any(|descriptor| descriptor.record_family_id == WORKSPACE_SAVED_QUERIES_FAMILY));
     assert_eq!(
         read_workspace_saved_queries(&generation).unwrap(),
         WorkspaceSavedQueries::default()

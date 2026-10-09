@@ -3,8 +3,8 @@ use std::ffi::OsStr;
 
 #[test]
 fn windows_immutable_link_refreshes_native_allocation_and_preserves_reused_temporary() {
-    use crate::durable_commit::{SealedArtifact, install_immutable, seal_file_witness};
-    use graphforge_filesystem::{FileIdentity, file_identity, file_link_count, file_space_usage};
+    use crate::durable_commit::{install_immutable, seal_file_witness, SealedArtifact};
+    use graphforge_filesystem::{file_identity, file_link_count, file_space_usage, FileIdentity};
     use std::cell::Cell;
     use std::io::Write as _;
 
@@ -83,11 +83,9 @@ fn windows_immutable_link_refreshes_native_allocation_and_preserves_reused_tempo
                     )]),
                 )
                 .unwrap_err();
-            assert!(
-                error
-                    .to_string()
-                    .contains("active identity allocation changed")
-            );
+            assert!(error
+                .to_string()
+                .contains("active identity allocation changed"));
             after_link.set(usage.allocated_bytes);
             assert_eq!(
                 operation.totals().unwrap(),

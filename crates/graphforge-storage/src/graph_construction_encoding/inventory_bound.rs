@@ -43,12 +43,12 @@
 
 use std::io::{BufWriter, Read, Write};
 
-use graphforge_core::ProjectErrorCode;
 use graphforge_core::hash_observation::ControlSha256;
+use graphforge_core::ProjectErrorCode;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
-use super::{ENCODING_FORMAT_VERSION, GfError, GraphConstructionEncoding, hex, storage};
+use super::{hex, storage, GfError, GraphConstructionEncoding, ENCODING_FORMAT_VERSION};
 use crate::graph_manifest::MAX_GRAPH_FILES_PER_GENERATION;
 
 /// Allowance per inventory row; see the module documentation.

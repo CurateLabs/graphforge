@@ -40,13 +40,13 @@
 //! Workers poll the flag between records so an abandoned load exits promptly.
 
 use super::{
-    GraphConstructionEvidence, account_cache_release, account_sequential_read, reject_cancelled,
-    storage,
+    account_cache_release, account_sequential_read, reject_cancelled, storage,
+    GraphConstructionEvidence,
 };
 use graphforge_core::GfError;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;

@@ -114,11 +114,9 @@ fn an_index_that_differs_from_the_journal_refuses_to_write() {
     assert!(index.elide(&ledger, 4).is_err());
     assert!(index.elide(&ledger, 2).is_err());
     // A decoded checkpoint whose index was never rebuilt cannot be written.
-    assert!(
-        StagedIdentityIndex::default()
-            .elide(&BTreeMap::new(), 1)
-            .is_err()
-    );
+    assert!(StagedIdentityIndex::default()
+        .elide(&BTreeMap::new(), 1)
+        .is_err());
 }
 
 /// A closed session with three accepted node chunks: its directory and the

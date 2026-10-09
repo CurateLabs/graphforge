@@ -1,8 +1,9 @@
 //! CSR publication through ordinary Win32 paths beyond MAX_PATH.
 
 use super::super::{
-    CsrIndex, DEFAULT_CSR_SHARD_EDGES, Direction, csr_path, encode_csr_shard_bytes, read_csr,
-    write_csr_shard_bytes, write_csr_shard_bytes_observed, write_sharded_csr,
+    csr_path, encode_csr_shard_bytes, read_csr, write_csr_shard_bytes,
+    write_csr_shard_bytes_observed, write_sharded_csr, CsrIndex, Direction,
+    DEFAULT_CSR_SHARD_EDGES,
 };
 use tempfile::TempDir;
 
@@ -62,12 +63,10 @@ fn csr_shard_publication_supports_long_windows_paths() {
         // The manifest uses a second NamedTempFile creation site.
         write_sharded_csr(&index_path, &csr, DEFAULT_CSR_SHARD_EDGES).unwrap();
         assert_eq!(read_csr(&index_path).unwrap(), csr);
-        assert!(
-            std::fs::read_dir(index_path.parent().unwrap())
-                .unwrap()
-                .map(|entry| entry.unwrap().path())
-                .all(|entry| entry.extension().is_none_or(|extension| extension != "tmp"))
-        );
+        assert!(std::fs::read_dir(index_path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .all(|entry| entry.extension().is_none_or(|extension| extension != "tmp")));
     }
     drop(parent);
     root.close().unwrap();

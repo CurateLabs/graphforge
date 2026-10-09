@@ -1,5 +1,9 @@
 //! Authenticated property mutation staging and completion.
 
+use super::build_property_columns;
+use super::build_property_columns_keyed;
+use super::pq_err;
+use super::property_rows_batch_with_schema;
 use super::Arc;
 use super::Array;
 use super::ArrayRef;
@@ -8,7 +12,6 @@ use super::BTreeSet;
 use super::BooleanArray;
 use super::CompletedPropertyWindow;
 use super::DataType;
-use super::EDGE_PROPERTY_UUID_FIELD;
 use super::EdgePropRow;
 use super::Field;
 use super::FixedSizeBinaryArray;
@@ -16,7 +19,6 @@ use super::GfError;
 use super::HashMap;
 use super::HashSet;
 use super::IrLiteral;
-use super::NODE_PROPERTY_UUID_FIELD;
 use super::Path;
 use super::PathBuf;
 use super::ProjectErrorCode;
@@ -27,10 +29,8 @@ use super::RecordBatch;
 use super::RewriteBatch;
 use super::Schema;
 use super::SchemaRef;
-use super::build_property_columns;
-use super::build_property_columns_keyed;
-use super::pq_err;
-use super::property_rows_batch_with_schema;
+use super::EDGE_PROPERTY_UUID_FIELD;
+use super::NODE_PROPERTY_UUID_FIELD;
 
 // ---------------------------------------------------------------------------
 // SET / REMOVE property rewrite primitives (#791)

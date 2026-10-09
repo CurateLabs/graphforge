@@ -1,7 +1,7 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use super::{MIN_PROBES_PER_LANE, NodeIndex, NodeIndexBuilder};
+use super::{NodeIndex, NodeIndexBuilder, MIN_PROBES_PER_LANE};
 use crate::graph_construction::cpu_admission::ConstructionCpuAdmission;
 
 fn uuid(value: u64) -> [u8; 16] {
@@ -38,11 +38,9 @@ fn refuses_an_endpoint_that_is_not_a_new_node() {
     let error = index
         .resolve(&[uuid(100)], &mut surrogates, None)
         .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("endpoint UUID lacks node surrogate")
-    );
+    assert!(error
+        .to_string()
+        .contains("endpoint UUID lacks node surrogate"));
 }
 
 #[test]
@@ -88,11 +86,9 @@ fn a_missing_endpoint_on_any_lane_is_refused() {
     probes[last] = [0xFF; 16];
     let admission = Arc::new(ConstructionCpuAdmission::new(NonZeroUsize::new(4).unwrap()));
     let mut surrogates = vec![0; probes.len()];
-    assert!(
-        index
-            .resolve(&probes, &mut surrogates, Some(&admission))
-            .is_err()
-    );
+    assert!(index
+        .resolve(&probes, &mut surrogates, Some(&admission))
+        .is_err());
 }
 
 #[test]

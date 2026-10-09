@@ -1,4 +1,3 @@
-use super::super::INDEX_DIR;
 use super::super::inject_v4_compaction_post_write_failure;
 use super::super::inject_v4_input_release_failure;
 use super::super::inject_v4_output_cleanup_failure;
@@ -6,10 +5,11 @@ use super::super::ordinal_artifacts::V4TombstoneStreamWriter;
 use super::super::tests::assert_no_v4_temporary;
 use super::super::tests::pinned_v4_update;
 use super::super::tests::write_v4_test_artifact;
-use super::V4CompactionWork;
+use super::super::INDEX_DIR;
 use super::compact_v4_ordinal_interval;
 use super::compact_v4_tombstone_interval;
 use super::merge_v4_forward_artifacts;
+use super::V4CompactionWork;
 use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
@@ -82,13 +82,11 @@ fn v4_forward_compaction_failure_releases_consumed_input_without_masking_primary
         work.peak_configured_cache_window_bytes
             <= graphforge_filesystem::DEFAULT_CACHE_RELEASE_WINDOW_BYTES
     );
-    assert!(
-        index
-            .child_names()
-            .unwrap()
-            .into_iter()
-            .all(|name| !name.to_string_lossy().starts_with(".v4-"))
-    );
+    assert!(index
+        .child_names()
+        .unwrap()
+        .into_iter()
+        .all(|name| !name.to_string_lossy().starts_with(".v4-")));
     assert!(work.cache_release.sync_operations > 0);
     #[cfg(target_os = "linux")]
     assert!(work.cache_release.release_operations >= 3);

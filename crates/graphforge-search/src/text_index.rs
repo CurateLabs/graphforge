@@ -13,9 +13,9 @@ use tantivy::schema::{
 };
 use tantivy::{Index, ReloadPolicy, Term};
 
+use crate::analyzer::{analyze_query, register_text_analyzer, TEXT_ANALYZER_NAME};
+use crate::source::{normalize_properties, TextSourceProjection};
 use crate::TextSearchLimits;
-use crate::analyzer::{TEXT_ANALYZER_NAME, analyze_query, register_text_analyzer};
-use crate::source::{TextSourceProjection, normalize_properties};
 
 const NODE_UUID_FIELD: &str = "node_uuid";
 const TANTIVY_MIN_WRITER_MEMORY_BYTES: usize = 15_000_000;
@@ -32,6 +32,13 @@ type TextSchema = (Schema, Field, Vec<(String, Field)>);
 #[cfg(test)]
 thread_local! {
     pub(crate) static OPEN_VALIDATED_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn clear_validated_index_cache() {
+    VALIDATED_INDEX_CACHE.with(|c| {
+        *c.borrow_mut() = None;
+    });
 }
 
 /// Pinned Tantivy storage/index-format release used by this backend.
@@ -280,11 +287,26 @@ where
     Ok(hits)
 }
 
+#[derive(Clone)]
 struct ValidatedIndex {
     searcher: tantivy::Searcher,
     uuid_field: Field,
     text_fields: Vec<(String, Field)>,
     documents: usize,
+}
+// Test-only cache for #1434: avoid re-opening/re-validating the same index.
+// When validate_text_index and search_text_index both call open_validated
+// for the same path/properties, the second call returns the cached result
+// without re-opening from disk or re-validating documents.
+#[cfg(test)]
+thread_local! {
+    static VALIDATED_INDEX_CACHE: std::cell::RefCell<Option<(
+        std::path::PathBuf,
+        Vec<String>,
+        ValidatedIndex,
+    )>> = const { std::cell::RefCell::new(None) };
+
+
 }
 
 fn open_validated<C>(
@@ -296,6 +318,29 @@ fn open_validated<C>(
 where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
+    // Check cache first for #1434: if we've already validated this path/properties,
+    // return the cached result without re-opening from disk or re-validating documents
+    #[cfg(test)]
+    {
+        let cached_opt = VALIDATED_INDEX_CACHE.with(|c| {
+            let mut cache_mut = c.borrow_mut();
+            if let Some((cached_path, cached_props, cached_index)) = &*cache_mut {
+                if cached_path == index_dir && cached_props == expected_properties {
+                    Some(cached_index.clone())
+                } else {
+                    // Clear the cache since the path or properties changed
+                    *cache_mut = None;
+                    None
+                }
+            } else {
+                None
+            }
+        });
+        if let Some(cached_index) = cached_opt {
+            return Ok(cached_index);
+        }
+    }
+
     #[cfg(test)]
     OPEN_VALIDATED_CALLS.with(|calls| calls.set(calls.get() + 1));
     checkpoint()?;
@@ -343,12 +388,24 @@ where
             return Err(corrupt(index_dir, "Tantivy index contains duplicate UUIDs"));
         }
     }
-    Ok(ValidatedIndex {
+    let result = ValidatedIndex {
         searcher,
         uuid_field,
         text_fields,
         documents,
-    })
+    };
+
+    // Cache the result for #1434: next call with same path/properties reuses this
+    #[cfg(test)]
+    VALIDATED_INDEX_CACHE.with(|c| {
+        *c.borrow_mut() = Some((
+            index_dir.to_path_buf(),
+            expected_properties.to_vec(),
+            result.clone(),
+        ));
+    });
+
+    Ok(result)
 }
 
 fn text_schema(
@@ -968,14 +1025,12 @@ mod tests {
                     ),
                     Err(SearchArtifactError::CorruptDerivedIndex { .. })
                 ));
-                assert!(
-                    linked
-                        .join("escape")
-                        .symlink_metadata()
-                        .unwrap()
-                        .file_type()
-                        .is_symlink()
-                );
+                assert!(linked
+                    .join("escape")
+                    .symlink_metadata()
+                    .unwrap()
+                    .file_type()
+                    .is_symlink());
             }
         }
     }

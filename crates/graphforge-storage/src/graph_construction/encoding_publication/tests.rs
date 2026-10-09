@@ -682,11 +682,9 @@ fn canonical_encoder_splits_child_and_inherited_properties_by_declaring_route() 
     for (route, property) in [(parent_route, "score"), (child_route, "nickname")] {
         let batches = crate::read_properties(&graph, &route).unwrap();
         assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
-        assert!(
-            batches
-                .iter()
-                .all(|batch| batch.column_by_name(property).is_some())
-        );
+        assert!(batches
+            .iter()
+            .all(|batch| batch.column_by_name(property).is_some()));
         assert!(batches.iter().all(|batch| {
             batch.schema().metadata().get("graphforge.entity_type") == Some(&concrete_route)
         }));
@@ -1153,11 +1151,9 @@ fn canonical_encoder_rejects_same_inode_mutate_restore_during_spool() {
     })));
     let error = session.encode_canonical(&shape, 1).unwrap_err();
     crate::graph_construction_encoding::set_source_spool_hook(None);
-    assert!(
-        error
-            .to_string()
-            .contains("changed during authenticated spooling")
-    );
+    assert!(error
+        .to_string()
+        .contains("changed during authenticated spooling"));
     assert_eq!(std::fs::read(source).unwrap()[0], original);
 }
 
@@ -1374,12 +1370,10 @@ fn canonical_routing_is_checkpoint_bound_in_all_ontology_modes() {
             1
         );
         let property_stem = if mode == graphforge_core::OntologyMode::Exploratory {
-            assert!(
-                graph
-                    .join("topology/edges")
-                    .join(crate::route_component::component("_exploratory"))
-                    .is_dir()
-            );
+            assert!(graph
+                .join("topology/edges")
+                .join(crate::route_component::component("_exploratory"))
+                .is_dir());
             "_untyped".to_owned()
         } else {
             assert!(!graph.join("topology/edges/R").exists());
@@ -1659,13 +1653,11 @@ fn publication_state_is_idempotent_and_rejects_changed_target() {
         session.begin_publication(target, transaction).unwrap(),
         first
     );
-    assert!(
-        session
-            .begin_publication(Uuid::from_u128(9_403), transaction)
-            .unwrap_err()
-            .to_string()
-            .contains("target changed")
-    );
+    assert!(session
+        .begin_publication(Uuid::from_u128(9_403), transaction)
+        .unwrap_err()
+        .to_string()
+        .contains("target changed"));
     let published = publish_session(&mut session, target, transaction);
     let digest = hex(&published.generation_manifest_sha256);
     let receipt = session.finish_publication(target, &digest).unwrap();
@@ -1677,20 +1669,16 @@ fn publication_state_is_idempotent_and_rejects_changed_target() {
         session.finish_publication(target, &digest).unwrap(),
         receipt
     );
-    assert!(
-        session
-            .finish_publication(target, &"cd".repeat(32))
-            .unwrap_err()
-            .to_string()
-            .contains("result changed")
-    );
+    assert!(session
+        .finish_publication(target, &"cd".repeat(32))
+        .unwrap_err()
+        .to_string()
+        .contains("result changed"));
     let private_root = construction_session_root(&root, operation);
     let error = session.discard().unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("published construction belongs to generation recovery")
-    );
+    assert!(error
+        .to_string()
+        .contains("published construction belongs to generation recovery"));
     assert!(private_root.exists());
 }
 
@@ -1851,12 +1839,10 @@ fn construction_ordinal_cancellation_cleans_owned_outputs_and_retries() {
         cancelled.get(),
         "cancel only after actual compaction output"
     );
-    assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("ordinal compaction cancelled")
-    );
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("ordinal compaction cancelled"));
     assert_eq!(std::fs::read(root.path().join("CURRENT")).unwrap(), current);
     let index = session
         .root
@@ -1974,18 +1960,14 @@ fn canonical_publication_installs_compact_graph_and_advances_current_once() {
     let current = crate::resolve_project_generation(root.path()).unwrap();
     assert_eq!(current.generation_uuid(), target);
     let inventory = current.graph_files_inventory().unwrap().unwrap();
-    assert!(
-        inventory
-            .files
-            .iter()
-            .any(|entry| entry.relative_path == "topology/generation.json")
-    );
-    assert!(
-        inventory
-            .files
-            .iter()
-            .any(|entry| entry.relative_path.starts_with("topology/nodes/"))
-    );
+    assert!(inventory
+        .files
+        .iter()
+        .any(|entry| entry.relative_path == "topology/generation.json"));
+    assert!(inventory
+        .files
+        .iter()
+        .any(|entry| entry.relative_path.starts_with("topology/nodes/")));
     assert!(inventory.files.iter().any(|entry| {
         entry.relative_path == "topology/uuid-membership/ordinal-v4-manifest.json"
     }));
@@ -2418,11 +2400,9 @@ fn publication_reopen_rejects_corrupt_or_mismatched_authority() {
         Ok(_) => panic!("corrupt publication intent was accepted"),
         Err(error) => error,
     };
-    assert!(
-        error
-            .to_string()
-            .contains("publication intent authority changed")
-    );
+    assert!(error
+        .to_string()
+        .contains("publication intent authority changed"));
 }
 
 #[test]
@@ -2438,13 +2418,11 @@ fn publication_finish_rejects_wrong_target_and_parent() {
         Uuid::from_u128(9_433),
         Uuid::from_u128(9_434),
     );
-    assert!(
-        session
-            .finish_publication(intended, &hex(&other.generation_manifest_sha256))
-            .unwrap_err()
-            .to_string()
-            .contains("target cannot be authenticated")
-    );
+    assert!(session
+        .finish_publication(intended, &hex(&other.generation_manifest_sha256))
+        .unwrap_err()
+        .to_string()
+        .contains("target cannot be authenticated"));
 
     let wrong_parent_root = TempDir::new().unwrap();
     let mut session = encoded_publication_session(&wrong_parent_root, Uuid::from_u128(9_440));
@@ -2458,13 +2436,11 @@ fn publication_finish_rejects_wrong_target_and_parent() {
     session.begin_publication(target, transaction).unwrap();
     let second = publish_empty_generation(&wrong_parent_root, target, transaction);
     assert_ne!(first.generation_uuid, second.generation_uuid);
-    assert!(
-        session
-            .finish_publication(target, &hex(&second.generation_manifest_sha256))
-            .unwrap_err()
-            .to_string()
-            .contains("not a child of the pinned parent")
-    );
+    assert!(session
+        .finish_publication(target, &hex(&second.generation_manifest_sha256))
+        .unwrap_err()
+        .to_string()
+        .contains("not a child of the pinned parent"));
 }
 
 #[test]
@@ -2505,16 +2481,14 @@ fn persisted_authority_digests_reject_uppercase_hex() {
     let mut session = encoded_publication_session(&root, operation);
     session.begin_publication(target, transaction).unwrap();
     let published = publish_empty_generation(&root, target, transaction);
-    assert!(
-        session
-            .finish_publication(
-                target,
-                &hex(&published.generation_manifest_sha256).to_ascii_uppercase(),
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("digest is invalid")
-    );
+    assert!(session
+        .finish_publication(
+            target,
+            &hex(&published.generation_manifest_sha256).to_ascii_uppercase(),
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("digest is invalid"));
 
     let intent_path = root
         .path()

@@ -515,11 +515,9 @@ mod tests {
                 cpu
             );
         }
-        assert!(
-            !serde_json::to_string(&snapshot)
-                .unwrap()
-                .contains("serial_fraction")
-        );
+        assert!(!serde_json::to_string(&snapshot)
+            .unwrap()
+            .contains("serial_fraction"));
     }
 
     #[test]

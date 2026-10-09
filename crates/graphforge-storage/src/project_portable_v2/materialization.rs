@@ -1,8 +1,8 @@
 //! Single-pass authentication and private component materialization.
 use super::{
-    AtomicBool, BTreeMap, BTreeSet, File, Path, PortableV2Error, PortableV2ErrorCode,
-    PortableV2Limits, PortableV2Mode, PortableV2Report, Read, VerifiedMaterialization,
-    check_cancel, fs, hex, preflight, scan,
+    check_cancel, fs, hex, preflight, scan, AtomicBool, BTreeMap, BTreeSet, File, Path,
+    PortableV2Error, PortableV2ErrorCode, PortableV2Limits, PortableV2Mode, PortableV2Report, Read,
+    VerifiedMaterialization,
 };
 use std::io::Write;
 mod derived;
@@ -11,7 +11,7 @@ mod compact_root;
 pub(crate) use compact_root::publish_compact_import_root;
 mod composition_control;
 pub(crate) use composition_control::{
-    CapturedCompositionControl, persist_composition_authority, persist_staged_composition,
+    persist_composition_authority, persist_staged_composition, CapturedCompositionControl,
 };
 
 /// A private exact-byte capture from the authenticated import copy.

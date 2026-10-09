@@ -424,9 +424,9 @@ fn replay_peak(
 
 #[test]
 fn fixed_partition_finish_is_schedule_independent_across_worker_counts() {
-    use super::super::GraphConstructionSession;
     use super::super::partition::IdentitySampler;
     use super::super::partition_shaping::{FixedRangePartitioner, PartitionFamily};
+    use super::super::GraphConstructionSession;
     use sha2::Digest;
     use std::ffi::OsStr;
     use std::io::Read;
@@ -684,9 +684,9 @@ fn finish_identity_fixture(
     admission: Option<std::sync::Arc<super::super::cpu_admission::ConstructionCpuAdmission>>,
     cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<(String, serde_json::Value), String> {
-    use super::super::GraphConstructionSession;
     use super::super::partition::IdentitySampler;
     use super::super::partition_shaping::{FixedRangePartitioner, PartitionFamily};
+    use super::super::GraphConstructionSession;
     use sha2::Digest;
     use std::ffi::OsStr;
     use std::io::Read;

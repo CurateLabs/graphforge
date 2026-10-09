@@ -155,11 +155,9 @@ fn targeted_presence_retains_removed_owner_without_reviving_values() {
     )
     .unwrap_err();
     assert_eq!(error.code(), "GF_PROJECT_CORRUPT");
-    assert!(
-        error
-            .to_string()
-            .contains("property tombstone carries values")
-    );
+    assert!(error
+        .to_string()
+        .contains("property tombstone carries values"));
 }
 
 #[test]

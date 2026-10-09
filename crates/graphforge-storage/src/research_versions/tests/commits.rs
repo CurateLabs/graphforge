@@ -286,11 +286,9 @@ fn ancestry_of_released_versions_remains_walkable_after_reopen() {
     }
     crate::project_recovery::recover_project_on_open(root).unwrap();
     let registry = state(root);
-    assert!(
-        chain[..3]
-            .iter()
-            .all(|id| !registry.versions.contains_key(id))
-    );
+    assert!(chain[..3]
+        .iter()
+        .all(|id| !registry.versions.contains_key(id)));
     assert_eq!(
         registry.ancestors(chain[3]),
         vec![chain[2], chain[1], chain[0]]

@@ -1,7 +1,7 @@
 //! Transfer a domain-owner prepared effective Branch into the owning Project CAS.
 use super::{
-    Digest, GfError, Path, ResearchEvidenceReference, ResearchVersionRecord,
-    ResolvedProjectGeneration, Sha256, cancelled, commitments, hex, invalid, retained_content,
+    cancelled, commitments, hex, invalid, retained_content, Digest, GfError, Path,
+    ResearchEvidenceReference, ResearchVersionRecord, ResolvedProjectGeneration, Sha256,
 };
 use std::sync::atomic::AtomicBool;
 

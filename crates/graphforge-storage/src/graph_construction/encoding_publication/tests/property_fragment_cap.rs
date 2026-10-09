@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::property_overlay::fragment_cap::tests::{assert_capped_fragments, wide_value};
-use crate::property_overlay::{MAX_PROPERTY_FRAGMENT_BYTES, PropertyFragment, PropertyFragmentId};
+use crate::property_overlay::{PropertyFragment, PropertyFragmentId, MAX_PROPERTY_FRAGMENT_BYTES};
 use std::collections::BTreeMap;
 
 const PAYLOAD_BYTES: usize = 4096;

@@ -1,5 +1,5 @@
 //! Restore-independent immutable submission, review and contribution history.
-use super::{GfError, ResearchRegistry, Uuid, invalid};
+use super::{invalid, GfError, ResearchRegistry, Uuid};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 

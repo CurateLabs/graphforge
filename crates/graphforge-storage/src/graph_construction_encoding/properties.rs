@@ -1,11 +1,11 @@
 //! Per-batch property overlay encoding shared by the staged encoder and the bulk builder.
 
 use super::{
-    BTreeMap, CompositionBindingContext, ConstructionEncodedArtifact, GfError,
+    encoded_route_component, lanes, property_batch, property_projections, required_string,
+    resolve_owner, split_into_fragments, storage, with_route_metadata_batch, BTreeMap,
+    CompositionBindingContext, ConstructionEncodedArtifact, GfError,
     GraphConstructionEncodingEvidence, OntologyMode, PropertyRouteKind, RecordBatch,
     SemanticRouteKind, SemanticStorageBindings, StableDirectory, SymbolKind,
-    encoded_route_component, lanes, property_batch, property_projections, required_string,
-    resolve_owner, split_into_fragments, storage, with_route_metadata_batch,
 };
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]

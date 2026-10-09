@@ -1,11 +1,12 @@
 //! Authenticated registry pairs, bounded admission, and recovery.
 
 use super::{
-    BTreeSet, CHECKSUM_FILE, CheckpointReadLock, CheckpointRecord, CheckpointTombstone,
-    Deserialize, GfError, INTENT_FILE, MAX_ACTIVE, MAX_REGISTRY_BYTES, MAX_TOMBSTONES, OpenOptions,
-    Path, ProjectErrorCode, REGISTRY_FILE, Serialize, Sha256, Uuid, acquire_checkpoint_read_lock,
-    acquire_mutation_locks, delete_request_digest_values, fs, project_error, project_failpoint,
-    storage_io, sync_directory, validate_description, validate_name, validate_record_identity,
+    acquire_checkpoint_read_lock, acquire_mutation_locks, delete_request_digest_values, fs,
+    project_error, project_failpoint, storage_io, sync_directory, validate_description,
+    validate_name, validate_record_identity, BTreeSet, CheckpointReadLock, CheckpointRecord,
+    CheckpointTombstone, Deserialize, GfError, OpenOptions, Path, ProjectErrorCode, Serialize,
+    Sha256, Uuid, CHECKSUM_FILE, INTENT_FILE, MAX_ACTIVE, MAX_REGISTRY_BYTES, MAX_TOMBSTONES,
+    REGISTRY_FILE,
 };
 use sha2::Digest as _;
 use std::fmt::Write as _;

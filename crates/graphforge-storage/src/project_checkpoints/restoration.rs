@@ -1,11 +1,11 @@
 //! Checkpoint restoration identity and publication records.
 
 use super::{
-    Arc, ArrayRef, ArrowWriter, CANONICAL_CONTRACT_VERSION, CanonicalDomain, DataType, Field,
-    FixedSizeBinaryBuilder, GfError, ProjectParticipant, ProjectParticipantEncoding,
-    RESTORATION_CONTRACT_VERSION, RESTORATION_FAMILY, RecordBatch, Schema, Sha256, StringArray,
-    TimeUnit, TimestampMicrosecondArray, UInt32Array, Uuid, append_actor, append_bytes,
-    fingerprint, registry_corrupt,
+    append_actor, append_bytes, fingerprint, registry_corrupt, Arc, ArrayRef, ArrowWriter,
+    CanonicalDomain, DataType, Field, FixedSizeBinaryBuilder, GfError, ProjectParticipant,
+    ProjectParticipantEncoding, RecordBatch, Schema, Sha256, StringArray, TimeUnit,
+    TimestampMicrosecondArray, UInt32Array, Uuid, CANONICAL_CONTRACT_VERSION,
+    RESTORATION_CONTRACT_VERSION, RESTORATION_FAMILY,
 };
 use sha2::Digest as _;
 

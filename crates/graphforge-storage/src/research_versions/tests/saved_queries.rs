@@ -121,10 +121,8 @@ fn signed_historical_saved_query_definitions_are_decoded_before_materialization(
             .generation_uuid(),
         current.generation_uuid()
     );
-    assert!(
-        crate::read_workspace_saved_queries(&current)
-            .unwrap()
-            .queries
-            .is_empty()
-    );
+    assert!(crate::read_workspace_saved_queries(&current)
+        .unwrap()
+        .queries
+        .is_empty());
 }

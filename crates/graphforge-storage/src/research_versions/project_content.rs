@@ -1,7 +1,7 @@
 //! Private complete Project preparation; no intermediate authoritative capture.
 use super::{
-    GfError, Path, PreparedResearchContent, RegisterResearchVersion, ResearchEvidenceReference,
-    ResearchVersionRecord, Uuid, cancelled, invalid,
+    cancelled, invalid, GfError, Path, PreparedResearchContent, RegisterResearchVersion,
+    ResearchEvidenceReference, ResearchVersionRecord, Uuid,
 };
 use std::sync::atomic::AtomicBool;
 

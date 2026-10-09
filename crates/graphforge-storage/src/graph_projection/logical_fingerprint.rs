@@ -1,6 +1,6 @@
 //! Canonical logical fingerprints for projected and portable graph data.
 
-use super::{TransformRoutes, read_parquet, sorted_parquet_files, storage, validation};
+use super::{read_parquet, sorted_parquet_files, storage, validation, TransformRoutes};
 use arrow::array::{
     Array, ArrayRef, BinaryArray, BooleanArray, FixedSizeBinaryArray, FixedSizeListArray,
     Float32Array, Float64Array, Int32Array, Int64Array, LargeBinaryArray, LargeListArray,
@@ -10,10 +10,10 @@ use arrow::array::{
 use arrow::compute::concat_batches;
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
-use graphforge_core::GfError;
 use graphforge_core::canonical::{
-    CANONICAL_CONTRACT_VERSION, CanonicalDomain, CanonicalWriter, fingerprint,
+    fingerprint, CanonicalDomain, CanonicalWriter, CANONICAL_CONTRACT_VERSION,
 };
+use graphforge_core::GfError;
 use graphforge_value::RuntimeEntityId;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};

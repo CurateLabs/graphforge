@@ -1,5 +1,5 @@
 //! Retained no-replace promotion and batched retirement.
-use super::{Visibility, acknowledge_directory};
+use super::{acknowledge_directory, Visibility};
 use graphforge_filesystem::{FileIdentity, StableDirectory};
 use std::ffi::OsStr;
 use std::io;

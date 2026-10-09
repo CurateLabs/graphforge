@@ -20,21 +20,21 @@
 
 use super::partition::{PartitionBalance, PartitionPlan};
 use super::partition_load::{
-    PARTITION_LOAD_WORKERS, PartitionLoadCounters, abandon_if_stopped,
-    consume_in_partition_order_weighted,
+    abandon_if_stopped, consume_in_partition_order_weighted, PartitionLoadCounters,
+    PARTITION_LOAD_WORKERS,
 };
 use super::partition_records::PartitionRecords;
 use super::{
-    ArtifactReceipt, BLOCK_BYTES, CountingChunkReader, GraphConstructionEvidence, HashingWriter,
-    IoCounter, ReadWork, SealDirectoryBatch, account_cache_release, account_fixed_write_operations,
-    account_merge_read_bytes, account_merge_write_bytes, account_sequential_write, artifact_temp,
+    account_cache_release, account_fixed_write_operations, account_merge_read_bytes,
+    account_merge_write_bytes, account_sequential_write, artifact_temp,
     cleanup_failed_shape_output, cleanup_shape_publication, combine_cache_cleanup,
     combine_secondary_cleanup, construction_failpoint, injected_input_release_failure,
     merge_cache_release_evidence, open_fixed_reader, persist_shape_receipt,
     persist_shape_receipt_in_batch, read_run_record, record_shape_artifact_install,
     reject_cancelled, run_record_bytes, sha256, shape_publication_failure,
     shape_publication_io_failure, unlink_shape_artifact, unlink_writer_capability, uuid_column,
-    uuid_value,
+    uuid_value, ArtifactReceipt, CountingChunkReader, GraphConstructionEvidence, HashingWriter,
+    IoCounter, ReadWork, SealDirectoryBatch, BLOCK_BYTES,
 };
 use crate::construction_detail_codec::DetailCodec;
 use crate::construction_directory::ConstructionDirectory as StableDirectory;
@@ -46,9 +46,9 @@ use arrow::buffer::NullBuffer;
 use arrow::compute::{concat_batches, take_record_batch};
 use arrow::datatypes::{DataType, SchemaRef};
 use graphforge_core::GfError;
-use graphforge_filesystem::{FileIdentity, file_identity};
-use parquet::arrow::ArrowWriter;
+use graphforge_filesystem::{file_identity, FileIdentity};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::ArrowWriter;
 use std::cell::RefCell;
 use std::ffi::OsStr;
 use std::io::{BufWriter, Write};

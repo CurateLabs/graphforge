@@ -1,23 +1,23 @@
 //! Bounded binary-carry compaction of ordinal identity artifacts.
 
-use super::V4_ORDINAL_BLOCK_BYTES;
-use super::V4OrdinalBuildMetrics;
 use super::construction::combine_cache_cleanup;
 use super::construction::combine_v4_cleanup;
 use super::construction::merge_cache_release_evidence;
 use super::inject_v4_input_release_result;
+use super::ordinal_artifacts::clone_pinned_v4_file;
+use super::ordinal_artifacts::finish_streamed_v4_artifact;
+use super::ordinal_artifacts::finish_streamed_v4_range;
+use super::ordinal_artifacts::retain_v4_publication;
 use super::ordinal_artifacts::GuardedV4Artifact;
 use super::ordinal_artifacts::StreamingV4Artifact;
 use super::ordinal_artifacts::V4OrdinalRangeWriter;
 use super::ordinal_artifacts::V4PublicationGuard;
 use super::ordinal_artifacts::V4TombstoneStreamWriter;
-use super::ordinal_artifacts::clone_pinned_v4_file;
-use super::ordinal_artifacts::finish_streamed_v4_artifact;
-use super::ordinal_artifacts::finish_streamed_v4_range;
-use super::ordinal_artifacts::retain_v4_publication;
 use super::rebuild::read_exact_record;
 use super::storage_err;
 use super::v4_compaction_post_write_failure;
+use super::V4OrdinalBuildMetrics;
+use super::V4_ORDINAL_BLOCK_BYTES;
 use graphforge_core::GfError;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;

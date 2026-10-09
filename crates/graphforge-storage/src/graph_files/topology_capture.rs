@@ -1,9 +1,9 @@
 //! Capture graph files using explicit topology membership and retained identities.
 
 use super::{
-    ARTIFACT_IDENTITY, GfError, GraphFilesInventory, Path, PathBuf, ProjectParticipant,
     build_inventory_for_owned_layout, collect_source_files_from, encode_inventory,
-    inventory_participant,
+    inventory_participant, GfError, GraphFilesInventory, Path, PathBuf, ProjectParticipant,
+    ARTIFACT_IDENTITY,
 };
 
 /// Capture a writable tree using explicit topology membership.

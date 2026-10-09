@@ -374,11 +374,9 @@ fn compact_graph_and_local_evidence_survive_gc_and_reopen() {
     crate::project_recovery::recover_project_on_open(root).unwrap();
     let version = state(root).versions[&original.version_uuid.unwrap()].clone();
     inspect_research_version(root, &version).unwrap();
-    assert!(
-        crate::graph_object_path(root, &graph_digest)
-            .unwrap()
-            .is_file()
-    );
+    assert!(crate::graph_object_path(root, &graph_digest)
+        .unwrap()
+        .is_file());
     assert_eq!(
         crate::graph_object_store::read_graph_object(root, &hex(&digest), length).unwrap(),
         local
@@ -501,13 +499,11 @@ fn registry_limits_and_cycles_fail_closed() {
     registry
         .identities
         .insert(id, identity_digest(&registry.versions[&id]).unwrap());
-    assert!(
-        registry
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("cycle")
-    );
+    assert!(registry
+        .validate()
+        .unwrap_err()
+        .to_string()
+        .contains("cycle"));
     let mut registry = state(root);
     for _ in 0..MAX_RECEIPTS {
         let mut extra = receipt.clone();
@@ -584,11 +580,9 @@ fn root_lifetime_preserves_accepted_provenance_and_releases_only_explicit_roots(
                 },
             },
         );
-        assert!(
-            state(root)
-                .deletion_blockers(first)
-                .contains(&format!("root:{root_id}"))
-        );
+        assert!(state(root)
+            .deletion_blockers(first)
+            .contains(&format!("root:{root_id}")));
         let release = ResearchOperation {
             operation_uuid: Uuid::now_v7(),
             expected_generation_uuid: current(root),
@@ -608,7 +602,7 @@ fn root_lifetime_preserves_accepted_provenance_and_releases_only_explicit_roots(
 #[test]
 fn checkpoint_replay_survives_research_enablement_but_new_whole_revert_is_refused() {
     use crate::project_checkpoints::{
-        CheckpointCreateRequest, CheckpointRevertRequest, create_checkpoint, revert_checkpoint,
+        create_checkpoint, revert_checkpoint, CheckpointCreateRequest, CheckpointRevertRequest,
     };
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
@@ -882,11 +876,9 @@ fn branch_registry_and_selected_base_publish_with_one_receipt() {
             },
         },
     );
-    assert!(
-        state(root)
-            .deletion_blockers(base)
-            .contains(&format!("branch_base:{branch_uuid}"))
-    );
+    assert!(state(root)
+        .deletion_blockers(base)
+        .contains(&format!("branch_base:{branch_uuid}")));
     crate::project_recovery::recover_project_on_open(root).unwrap();
     let reopened = state(root);
     assert_eq!(reopened.branches[&branch_uuid], creation);

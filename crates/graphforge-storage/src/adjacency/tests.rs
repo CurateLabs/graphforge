@@ -35,44 +35,34 @@ fn sharded_csr_crosses_boundaries_and_rejects_missing_or_corrupt_shards() {
     // decoded cache; a fresh session (cold cache) must re-touch the file.
     let fresh = ShardedCsrIndex::open(&path).unwrap();
     assert!(fresh.row(0).unwrap_err().to_string().contains("checksum"));
-    assert!(
-        fresh
-            .row_len(0)
-            .unwrap_err()
-            .to_string()
-            .contains("checksum")
-    );
-    assert!(
-        fresh
-            .row_chunk(0, 0, 1)
-            .unwrap_err()
-            .to_string()
-            .contains("checksum")
-    );
+    assert!(fresh
+        .row_len(0)
+        .unwrap_err()
+        .to_string()
+        .contains("checksum"));
+    assert!(fresh
+        .row_chunk(0, 0, 1)
+        .unwrap_err()
+        .to_string()
+        .contains("checksum"));
     std::fs::write(&first, original).unwrap();
     let fresh = ShardedCsrIndex::open(&path).unwrap();
     std::fs::remove_file(&first).unwrap();
-    assert!(
-        fresh
-            .row(0)
-            .unwrap_err()
-            .to_string()
-            .contains("missing CSR shard")
-    );
-    assert!(
-        fresh
-            .row_len(0)
-            .unwrap_err()
-            .to_string()
-            .contains("missing CSR shard")
-    );
-    assert!(
-        fresh
-            .row_chunk(0, 0, 1)
-            .unwrap_err()
-            .to_string()
-            .contains("missing CSR shard")
-    );
+    assert!(fresh
+        .row(0)
+        .unwrap_err()
+        .to_string()
+        .contains("missing CSR shard"));
+    assert!(fresh
+        .row_len(0)
+        .unwrap_err()
+        .to_string()
+        .contains("missing CSR shard"));
+    assert!(fresh
+        .row_chunk(0, 0, 1)
+        .unwrap_err()
+        .to_string()
+        .contains("missing CSR shard"));
 }
 
 #[test]
@@ -184,20 +174,16 @@ fn high_degree_row_spans_hard_capped_shards_in_order() {
     write_sharded_csr(&path, &expected, 2).unwrap();
     let reader = ShardedCsrIndex::open(&path).unwrap();
     assert_eq!(reader.manifest.shards.len(), 4);
-    assert!(
-        reader
-            .manifest
-            .shards
-            .iter()
-            .all(|shard| shard.edge_count <= 2)
-    );
-    assert!(
-        reader
-            .manifest
-            .shards
-            .iter()
-            .all(|shard| shard.first_node == 0)
-    );
+    assert!(reader
+        .manifest
+        .shards
+        .iter()
+        .all(|shard| shard.edge_count <= 2));
+    assert!(reader
+        .manifest
+        .shards
+        .iter()
+        .all(|shard| shard.first_node == 0));
     assert_eq!(
         reader.row(0).unwrap(),
         expected.row(0).iter().collect::<Vec<_>>()
@@ -210,12 +196,10 @@ fn high_degree_row_spans_hard_capped_shards_in_order() {
         assert!(chunk.len() <= 3);
         chunks.extend(chunk);
         let cache = reader.cache.lock().unwrap();
-        assert!(
-            cache
-                .entries
-                .iter()
-                .all(|entry| entry.csr.edge_count() <= 2)
-        );
+        assert!(cache
+            .entries
+            .iter()
+            .all(|entry| entry.csr.edge_count() <= 2));
     }
     assert_eq!(chunks, expected.row(0).iter().collect::<Vec<_>>());
     assert!(reader.row_chunk(0, 7, 3).unwrap().is_empty());
@@ -852,9 +836,9 @@ fn csr_path_layout() {
 // -----------------------------------------------------------------------
 
 use crate::GraphWriter;
+use graphforge_core::uuid::{new_v7, Uuid};
 use graphforge_core::OntologyMode;
 use graphforge_core::TypeId;
-use graphforge_core::uuid::{Uuid, new_v7};
 
 /// Fixed timestamp for deterministic fixtures and manifests.
 pub(super) const BUILD_TS: i64 = 1_700_000_000_000_000;

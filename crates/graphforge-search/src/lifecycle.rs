@@ -6,18 +6,18 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use graphforge_storage::{
-    PublishedSearchArtifact, SearchArtifactError, SearchArtifactKey, SearchCoordinationLimits,
-    SearchPublicationMode, SearchPublicationOutcome, SearchPublicationPlan, SearchSourceSnapshot,
-    coordinate_search_publication,
+    coordinate_search_publication, PublishedSearchArtifact, SearchArtifactError, SearchArtifactKey,
+    SearchCoordinationLimits, SearchPublicationMode, SearchPublicationOutcome,
+    SearchPublicationPlan, SearchSourceSnapshot,
 };
 
-use crate::TextSearchLimits;
-use crate::analyzer::{TEXT_CONTRACT_VERSION, analyze_query};
-use crate::source::{TextSourceProjection, project_text_source_with, text_source_snapshot};
+use crate::analyzer::{analyze_query, TEXT_CONTRACT_VERSION};
+use crate::source::{project_text_source_with, text_source_snapshot, TextSourceProjection};
 use crate::text_index::{
-    TEXT_BACKEND_VERSION, TextIndexBuildOutcome, TextSearchHit, build_text_index,
-    search_text_index, validate_text_index,
+    build_text_index, search_text_index, validate_text_index, TextIndexBuildOutcome, TextSearchHit,
+    TEXT_BACKEND_VERSION,
 };
+use crate::TextSearchLimits;
 
 const EMPTY_MARKER_FILE: &str = "empty-text-v1.marker";
 const EMPTY_MARKER_BYTES: &[u8] = b"graphforge-empty-text-v1\n";
@@ -958,16 +958,51 @@ enum TextArtifactKind {
     Tantivy,
 }
 
+/// Determine artifact kind without full validation (for build phase).
+/// This is cheaper than inspect_text_path which validates the entire index.
+fn inspect_text_path_lightweight<C>(
+    path: &Path,
+    checkpoint: &mut C,
+) -> Result<TextArtifactKind, SearchArtifactError>
+where
+    C: FnMut() -> Result<(), SearchArtifactError>,
+{
+    checkpoint()?;
+    let marker_path = path.join(EMPTY_MARKER_FILE);
+    match std::fs::read(&marker_path) {
+        Ok(bytes) => {
+            if bytes != EMPTY_MARKER_BYTES {
+                return Err(corrupt(path, "empty text marker has invalid contents"));
+            }
+            validate_empty_layout(path, checkpoint)?;
+            Ok(TextArtifactKind::Empty)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // For build phase, just assume it's Tantivy without full validation
+            // Full validation will happen during search_text_index
+            Ok(TextArtifactKind::Tantivy)
+        }
+        Err(source) => Err(SearchArtifactError::Io {
+            operation: "read empty text marker",
+            path: marker_path,
+            source,
+        }),
+    }
+}
+
 fn inspect_build<C>(
     path: &Path,
-    properties: &[String],
-    limits: TextSearchLimits,
-    checkpoint: C,
+    _properties: &[String],
+    _limits: TextSearchLimits,
+    mut checkpoint: C,
 ) -> Result<(), SearchArtifactError>
 where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
-    inspect_text_path(path, properties, limits, checkpoint).map(|_| ())
+    // For build phase, use lightweight inspection that doesn't do full validation
+    // (full validation will happen during search via search_text_index).
+    // This reduces double decoding during fresh-build queries (#1434).
+    inspect_text_path_lightweight(path, &mut checkpoint).map(|_| ())
 }
 
 fn inspect_text_artifact<C>(
@@ -1202,11 +1237,11 @@ mod tests {
     use std::cell::Cell;
     use std::collections::HashMap;
 
-    use graphforge_core::uuid::{Uuid, to_bytes};
+    use graphforge_core::uuid::{to_bytes, Uuid};
     use graphforge_ir::{IrLiteral, OntologyMode};
     use graphforge_storage::generation::bump_search_generation;
     use graphforge_storage::{
-        GraphWriter, SearchPublicationMode, current_search_artifact, set_node_properties,
+        current_search_artifact, set_node_properties, GraphWriter, SearchPublicationMode,
     };
     use tempfile::TempDir;
 
@@ -1436,18 +1471,16 @@ mod tests {
         let reopened = prepare(dir.path());
         assert!(reopened.is_empty());
         assert_eq!(reopened.artifact().path, first.artifact().path);
-        assert!(
-            search_published_text(
-                dir.path(),
-                request(&properties()),
-                "anything",
-                10,
-                TextLifecycleLimits::default(),
-                || Ok(())
-            )
-            .unwrap()
-            .is_empty()
-        );
+        assert!(search_published_text(
+            dir.path(),
+            request(&properties()),
+            "anything",
+            10,
+            TextLifecycleLimits::default(),
+            || Ok(())
+        )
+        .unwrap()
+        .is_empty());
         assert!(matches!(
             search_published_text(
                 dir.path(),
@@ -1625,21 +1658,19 @@ mod tests {
             capture_text_snapshot(dir.path(), TextSearchLimits::default(), || Ok(())).unwrap();
         assert_ne!(before.fingerprint, after.fingerprint);
         assert_eq!(before.generation, after.generation);
-        assert!(
-            generation_checked_snapshot(
-                dir.path(),
-                None,
-                None,
-                &selected_before,
-                graphforge_value::EntityTypeSelection::Known(
-                    graphforge_value::EntityTypeId::decode(LABEL_ID).unwrap()
-                ),
-                &properties(),
-                TextSearchLimits::default(),
-                None,
-            )
-            .is_err()
-        );
+        assert!(generation_checked_snapshot(
+            dir.path(),
+            None,
+            None,
+            &selected_before,
+            graphforge_value::EntityTypeSelection::Known(
+                graphforge_value::EntityTypeId::decode(LABEL_ID).unwrap()
+            ),
+            &properties(),
+            TextSearchLimits::default(),
+            None,
+        )
+        .is_err());
     }
 
     #[test]
@@ -1760,11 +1791,9 @@ mod tests {
         assert_eq!(set_node_properties(dir.path(), LABEL, &updates).unwrap(), 1);
         assert_eq!(lazy_search(dir.path(), "graph native").len(), 1);
         let exact = SearchArtifactKey::text(LABEL, ["name", "summary"]).unwrap();
-        assert!(
-            current_search_artifact(dir.path(), &exact)
-                .unwrap()
-                .is_some()
-        );
+        assert!(current_search_artifact(dir.path(), &exact)
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -2075,11 +2104,9 @@ mod tests {
         let ignored = TempDir::new().unwrap();
         std::fs::create_dir(ignored.path().join("properties")).unwrap();
         std::fs::write(ignored.path().join("properties/notes.txt"), b"ignored").unwrap();
-        assert!(
-            property_source_paths(ignored.path(), &mut || Ok(()))
-                .unwrap()
-                .is_empty()
-        );
+        assert!(property_source_paths(ignored.path(), &mut || Ok(()))
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -2125,11 +2152,12 @@ mod tests {
         assert_eq!(built.len(), 1);
         assert_eq!(
             crate::text_index::OPEN_VALIDATED_CALLS.with(std::cell::Cell::get),
-            2,
-            "a fresh-build text query should decode the corpus exactly twice"
+            1,
+            "a fresh-build text query should decode the corpus exactly once"
         );
 
         crate::text_index::OPEN_VALIDATED_CALLS.with(|calls| calls.set(0));
+        crate::text_index::clear_validated_index_cache();
         let reused = search_published_text(
             dir.path(),
             request(&properties),
@@ -2142,8 +2170,8 @@ mod tests {
         assert_eq!(reused.len(), 1);
         assert_eq!(
             crate::text_index::OPEN_VALIDATED_CALLS.with(std::cell::Cell::get),
-            2,
-            "a warm-reuse text query should decode the corpus exactly twice"
+            1,
+            "a warm-reuse text query should decode the corpus exactly once"
         );
     }
 

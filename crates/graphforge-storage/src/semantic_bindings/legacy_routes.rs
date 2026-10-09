@@ -1,9 +1,9 @@
 //! Authenticated legacy route installation and rollback guards.
 
 use super::{
-    BTreeMap, Digest, File, GfError, MAX_SEMANTIC_PARQUET_COLUMNS, Path, PathBuf,
-    SEMANTIC_COMPOSITION_METADATA_KEY, SEMANTIC_ROUTE_METADATA_KEY, SemanticRouteKind,
-    SemanticStorageBinding, SemanticStorageBindings, Sha256, admitted_semantic_parquet, corrupt,
+    admitted_semantic_parquet, corrupt, BTreeMap, Digest, File, GfError, Path, PathBuf,
+    SemanticRouteKind, SemanticStorageBinding, SemanticStorageBindings, Sha256,
+    MAX_SEMANTIC_PARQUET_COLUMNS, SEMANTIC_COMPOSITION_METADATA_KEY, SEMANTIC_ROUTE_METADATA_KEY,
 };
 
 /// Rewrite a preflighted unambiguous legacy workspace to authenticated opaque

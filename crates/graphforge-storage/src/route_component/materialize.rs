@@ -6,7 +6,7 @@ use std::path::Path;
 use graphforge_core::GfError;
 use graphforge_filesystem::StableDirectory;
 
-use super::{RouteTable, TABLE_FILE, authenticate_manifest_routes, encode_relative_route, invalid};
+use super::{authenticate_manifest_routes, encode_relative_route, invalid, RouteTable, TABLE_FILE};
 
 pub(crate) struct MaterializationRoutes {
     pub(crate) destinations: Vec<String>,

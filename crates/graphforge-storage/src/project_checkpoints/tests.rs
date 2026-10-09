@@ -2,7 +2,7 @@ use super::*;
 use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::io::{BufRead, BufReader};
-use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;

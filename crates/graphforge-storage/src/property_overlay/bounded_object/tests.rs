@@ -209,11 +209,9 @@ fn oversized_schema_footer_is_segmented_without_changing_the_logical_schema() {
     let logical = logical_parquet(&batch);
     assert!(logical.len() > MAX_PROPERTY_OBJECT_BYTES);
     let encoded = parts(&logical);
-    assert!(
-        encoded
-            .iter()
-            .all(|part| part.len() <= MAX_PROPERTY_OBJECT_BYTES)
-    );
+    assert!(encoded
+        .iter()
+        .all(|part| part.len() <= MAX_PROPERTY_OBJECT_BYTES));
     let expected = ParquetRecordBatchReaderBuilder::try_new(logical).unwrap();
     let actual = ParquetRecordBatchReaderBuilder::try_new(source(encoded)).unwrap();
     assert!(

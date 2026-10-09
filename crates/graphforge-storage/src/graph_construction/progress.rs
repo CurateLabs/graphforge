@@ -15,9 +15,9 @@
 //! the silent-partial-result hazard this module exists to prevent.
 
 use super::{
-    Checkpoint, GfError, GraphConstructionBudgets, IdentityRecord, MAX_SHAPE_CONTROL_BYTES, OsStr,
-    StableDirectory, Uuid, control_sha256, decode_bounded, install_control, is_canonical_sha256,
-    read_bounded_limit, storage,
+    control_sha256, decode_bounded, install_control, is_canonical_sha256, read_bounded_limit,
+    storage, Checkpoint, GfError, GraphConstructionBudgets, IdentityRecord, OsStr, StableDirectory,
+    Uuid, MAX_SHAPE_CONTROL_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -555,12 +555,12 @@ pub(super) fn charge_segment_reads(
 #[cfg(test)]
 mod tests {
     use super::super::partition_shaping::{
-        PartitionFamily, SegmentName, fixed_spill_name, parse_segment_name,
+        fixed_spill_name, parse_segment_name, PartitionFamily, SegmentName,
     };
     use super::super::tests::open;
     use super::{
-        IDENTITY_TAG, ShapeProgress, ShapeProgressPartition, install_shape_progress,
-        load_shape_progress_chain, parse_shape_progress_name,
+        install_shape_progress, load_shape_progress_chain, parse_shape_progress_name,
+        ShapeProgress, ShapeProgressPartition, IDENTITY_TAG,
     };
     use tempfile::TempDir;
 

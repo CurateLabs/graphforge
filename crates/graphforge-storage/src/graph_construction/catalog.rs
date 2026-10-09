@@ -9,8 +9,8 @@ use std::io::{Read, Seek};
 use std::path::Path;
 
 use arrow::array::{Array, StringArray};
-use graphforge_core::GfError;
 use graphforge_core::hash_observation::ControlSha256 as Sha256;
+use graphforge_core::GfError;
 use graphforge_filesystem::{file_identity, file_link_count};
 use graphforge_ir::RuntimeCatalog;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -19,12 +19,13 @@ use sha2::Digest;
 use crate::construction_directory::ConstructionDirectory as StableDirectory;
 
 use super::{
-    BLOCK_BYTES, ConstructionChunkKind, ConstructionFileHandle, CountingChunkReader, DetailCodec,
-    EDGE_DETAIL_WIDTH, GraphConstructionBudgets, GraphConstructionEvidence, IoCounter,
-    NODE_DETAIL_WIDTH, ReadWork, account_cache_release, account_fixed_read_operations,
-    account_merge_read, account_sequential_write, combine_cache_cleanup, hex, is_canonical_sha256,
+    account_cache_release, account_fixed_read_operations, account_merge_read,
+    account_sequential_write, combine_cache_cleanup, hex, is_canonical_sha256,
     merge_cache_release_evidence, open_counted_fixed_reader, record_shape_artifact_install,
     reject_cancelled, release_counted_reader_cache, storage, write_parquet_with_properties,
+    ConstructionChunkKind, ConstructionFileHandle, CountingChunkReader, DetailCodec,
+    GraphConstructionBudgets, GraphConstructionEvidence, IoCounter, ReadWork, BLOCK_BYTES,
+    EDGE_DETAIL_WIDTH, NODE_DETAIL_WIDTH,
 };
 
 /// Where one kind's runtime-catalog observations are read from (#1455).

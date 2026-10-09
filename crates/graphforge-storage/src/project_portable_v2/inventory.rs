@@ -7,7 +7,7 @@
 //! against the entries it has already authenticated as the bytes stream past.
 //! It holds one row at a time, never the inventory.
 
-use super::{Entry, hex, sha, validate_path};
+use super::{hex, sha, validate_path, Entry};
 use graphforge_core::portable::{PortableV2Error, PortableV2ErrorCode};
 
 pub(super) const INVENTORY_PATH: &str = "manifest-sha256.txt";

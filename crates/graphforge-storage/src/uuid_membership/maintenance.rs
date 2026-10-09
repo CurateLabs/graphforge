@@ -1,13 +1,13 @@
 //! Authenticated identity authority and orphan maintenance.
 
-use super::INDEX_DIR;
-use super::TopologyIndexReceipt;
-use super::UuidIndexOrphanGcWork;
-use super::V4_ORDINAL_MANIFEST;
-use super::V4_ORDINAL_RECEIPT;
 use super::storage_err;
 use super::topology_delta::hex_sha256;
 use super::topology_delta::read_bounded;
+use super::TopologyIndexReceipt;
+use super::UuidIndexOrphanGcWork;
+use super::INDEX_DIR;
+use super::V4_ORDINAL_MANIFEST;
+use super::V4_ORDINAL_RECEIPT;
 use graphforge_core::GfError;
 use std::collections::BTreeSet;
 use std::path::Path;

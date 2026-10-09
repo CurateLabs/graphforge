@@ -2,23 +2,23 @@
 //! Sorting runs are process-owned scratch, not restart checkpoints. Flush/close
 //! makes them available to readers; the final staged artifact owns durability.
 
-use super::BULK_IO_BYTES;
-use super::INDEX_DIR;
-use super::TopologyIndexReceipt;
-use super::UuidIndexBuildLimits;
-use super::UuidIndexBuildMetrics;
-use super::V4_ORDINAL_MANIFEST;
-use super::V4_ORDINAL_RECEIPT;
-use super::V4OrdinalBuildMetrics;
-use super::V4OrdinalRebuildDisposition;
-use super::V4OrdinalRebuildEvidence;
 use super::maintenance::selected_generation_for_graph_root;
+use super::ordinal_artifacts::commit_v4_publications;
 use super::ordinal_artifacts::V4AuthorityTransactionProof;
 use super::ordinal_artifacts::V4ConstructionArtifactBundle;
 use super::ordinal_artifacts::V4OrdinalConstructionWriter;
-use super::ordinal_artifacts::commit_v4_publications;
 use super::storage_err;
 use super::topology_delta::hex_sha256;
+use super::TopologyIndexReceipt;
+use super::UuidIndexBuildLimits;
+use super::UuidIndexBuildMetrics;
+use super::V4OrdinalBuildMetrics;
+use super::V4OrdinalRebuildDisposition;
+use super::V4OrdinalRebuildEvidence;
+use super::BULK_IO_BYTES;
+use super::INDEX_DIR;
+use super::V4_ORDINAL_MANIFEST;
+use super::V4_ORDINAL_RECEIPT;
 use arrow::array::Array;
 use arrow::array::FixedSizeBinaryArray;
 use arrow::array::UInt64Array;

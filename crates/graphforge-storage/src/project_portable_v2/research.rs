@@ -1,6 +1,6 @@
 //! Research component semantic admission before any destination publication.
 use super::{PortableV2Error, PortableV2ErrorCode, PortableV2Limits};
-use crate::research_versions::{ResearchRegistry, interchange::portable};
+use crate::research_versions::{interchange::portable, ResearchRegistry};
 use std::{collections::BTreeMap, path::Path, sync::atomic::AtomicBool};
 
 const PREFIX: &str = "data/components/research/research-content/";

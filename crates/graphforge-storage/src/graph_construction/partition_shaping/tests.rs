@@ -127,20 +127,18 @@ fn concentrated_fixed_partition_is_refused_before_record_allocation() {
     .unwrap();
     assert_eq!(rows.len(), 1024);
     // A corrupt routed count cannot make the Vec grow beyond its reservation.
-    assert!(
-        load_fixed_partition::<33>(
-            &session.root,
-            &[name.clone()],
-            Some(1),
-            None,
-            33,
-            &AtomicBool::new(false)
-        )
-        .err()
-        .unwrap()
-        .to_string()
-        .contains("admitted record count")
-    );
+    assert!(load_fixed_partition::<33>(
+        &session.root,
+        &[name.clone()],
+        Some(1),
+        None,
+        33,
+        &AtomicBool::new(false)
+    )
+    .err()
+    .unwrap()
+    .to_string()
+    .contains("admitted record count"));
 }
 
 #[test]
