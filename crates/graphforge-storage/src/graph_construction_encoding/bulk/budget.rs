@@ -384,6 +384,25 @@ impl ScratchPlan {
     }
 }
 
+/// The fewest resident bytes a scratch build of `plan` can run in.
+#[cfg(test)]
+pub(crate) fn scratch_minimum_bytes(
+    plan: &BulkBuildPlan<'_>,
+    budgets: super::GraphConstructionBudgets,
+) -> u64 {
+    let properties = plan
+        .nodes
+        .iter()
+        .chain(&plan.edges)
+        .any(|source| !source.property_free);
+    plan.node_tables_resident_bytes()
+        .saturating_add(if properties {
+            property_extra_workspace(plan, budgets)
+        } else {
+            0
+        })
+}
+
 /// The concurrency a scratch build of `plan` derives under `budget` with
 /// `workers` available, for tests that choose a budget by the concurrency it
 /// admits.

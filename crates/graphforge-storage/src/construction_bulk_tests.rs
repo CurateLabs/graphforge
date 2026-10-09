@@ -849,13 +849,18 @@ mod bulk_builder {
         wanted: usize,
     ) -> (u64, usize) {
         let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let mut budget = 600_u64 << 20;
+        let floor = crate::graph_construction_encoding::scratch_minimum_bytes(
+            &overlapping_plan(nodes, edges, 2, &peak, 0),
+            budgets,
+        );
+        let mut budget = floor.next_multiple_of(4 << 20);
         loop {
             let probe = overlapping_plan(nodes, edges, 2, &peak, budget);
             let derived = crate::graph_construction_encoding::derived_concurrency(
                 &probe, budget, 16, budgets,
             );
             if derived >= wanted {
+                assert_eq!(probe.route(), crate::BulkRoute::Scratch, "budget {budget}");
                 return (budget, derived);
             }
             budget += 4 << 20;
@@ -869,7 +874,7 @@ mod bulk_builder {
         GraphConstructionBudgets {
             max_batch_rows: 1_024,
             max_run_records: 4 * 1_024,
-            max_batch_bytes: 4 << 20,
+            max_batch_bytes: 32 << 20,
             max_catalog_identifier_bytes: 1 << 20,
             ..GraphConstructionBudgets::default()
         }
@@ -971,19 +976,19 @@ mod bulk_builder {
         let nodes = (0..ids.len())
             .map(|i| scattered(i, ids.len()))
             .collect::<Vec<_>>()
-            .chunks(1_000)
+            .chunks(400)
             .enumerate()
             .map(|(index, rows)| {
                 wide_nodes(
                     &rows.iter().map(|row| ids[*row]).collect::<Vec<_>>(),
-                    index as u64 * 1_000,
+                    index as u64 * 400,
                 )
             })
             .collect::<Vec<_>>();
         let edges = (0..24_000_usize)
             .map(|i| scattered(i, 24_000))
             .collect::<Vec<_>>()
-            .chunks(1_000)
+            .chunks(400)
             .enumerate()
             .map(|(index, rows)| {
                 wide_edges(
@@ -999,7 +1004,7 @@ mod bulk_builder {
                         .iter()
                         .map(|row| ids[(row * 13 + 5) % 24_000])
                         .collect::<Vec<_>>(),
-                    50_000 + index as u64 * 1_000,
+                    50_000 + index as u64 * 400,
                 )
             })
             .collect::<Vec<_>>();
@@ -1154,7 +1159,7 @@ mod bulk_builder {
                 .status()
                 .unwrap();
             assert_eq!(status.code(), Some(86), "{point}");
-            left_scratch += usize::from(root.path().join("bulk-scratch").exists());
+            left_scratch += usize::from(walkdir_has(root.path(), "bulk-scratch"));
             // Recovery: opening the session deletes what the killed attempt left.
             let mut session = pinned_with(&root, budgets);
             sixteen_lanes(&mut session);

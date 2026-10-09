@@ -15,7 +15,7 @@ use arrow::compute::interleave_record_batch;
 use arrow::record_batch::RecordBatch;
 use rayon::prelude::*;
 
-use super::property_rows::{FrameMeta, PropertyRows, Run};
+use super::property_rows::{BareOwners, FrameMeta, Groups, PropertyRows, Run};
 use super::tables::check_cancelled;
 use super::{AtomicBool, GfError, storage};
 
@@ -24,6 +24,28 @@ type Uuid = [u8; 16];
 /// A sorted property group: its segments, in identity order.
 pub(super) struct SortedGroup {
     pub(super) segments: Vec<Run>,
+    /// A group without property columns keeps no rows: its owners, in order of
+    /// first appearance by identity, with how many rows each holds.
+    pub(super) bare_owners: Option<Vec<(String, u64)>>,
+}
+
+impl SortedGroup {
+    fn bare(owners: &BareOwners) -> Self {
+        let mut order = owners
+            .iter()
+            .map(|(owner, (smallest, count))| (*smallest, owner.clone(), *count))
+            .collect::<Vec<_>>();
+        order.sort_unstable();
+        Self {
+            segments: Vec::new(),
+            bare_owners: Some(
+                order
+                    .into_iter()
+                    .map(|(_, owner, count)| (owner, count))
+                    .collect(),
+            ),
+        }
+    }
 }
 
 /// Target size of one merged segment. Ranges of this size keep every core
@@ -166,13 +188,12 @@ impl PropertyRows<'_> {
         let mut bounds = None::<(Uuid, Uuid)>;
         while let Some(Reverse((uuid, index))) = heap.pop() {
             let input = &mut inputs[index];
-            let slot = match input.slot {
-                Some(slot) => slot,
-                None => {
-                    batches.push(input.batch.clone().expect("a loaded frame"));
-                    input.slot = Some(batches.len() - 1);
-                    batches.len() - 1
-                }
+            let slot = if let Some(slot) = input.slot {
+                slot
+            } else {
+                batches.push(input.batch.clone().expect("a loaded frame"));
+                input.slot = Some(batches.len() - 1);
+                batches.len() - 1
             };
             indices.push((slot, input.row));
             bounds = Some(bounds.map_or((uuid, uuid), |(first, _)| (first, uuid)));
@@ -232,18 +253,9 @@ impl PropertyRows<'_> {
         splitters
     }
 
-    /// Sort every schema group: reduce each to at most `fan_in` runs by
-    /// merging its smallest runs in parallel, then merge what is left into
-    /// identity-range segments in parallel.
-    pub(super) fn finish(&self, cancel: &AtomicBool) -> Result<Vec<SortedGroup>, GfError> {
-        let mut groups = std::mem::take(
-            &mut *self
-                .runs
-                .lock()
-                .map_err(|_| storage("property schema lock poisoned"))?,
-        )
-        .into_values()
-        .collect::<Vec<_>>();
+    /// Reduce every group to at most `fan_in` runs by merging its smallest
+    /// runs, in parallel.
+    fn reduce(&self, groups: &mut [Vec<Run>], cancel: &AtomicBool) -> Result<(), GfError> {
         let fan_in = self.sizing.fan_in.max(2);
         // Each merge removes `inputs - 1` runs, so just enough merge, all at
         // once, to leave `fan_in`; if that needs more runs than there are, the
@@ -297,6 +309,20 @@ impl PropertyRows<'_> {
                 groups[group].push(run);
             }
         }
+        Ok(())
+    }
+
+    /// Sort every schema group: reduce each to at most `fan_in` runs, then
+    /// merge what is left into identity-range segments in parallel.
+    pub(super) fn finish(&self, cancel: &AtomicBool) -> Result<Vec<SortedGroup>, GfError> {
+        let Groups { runs, bare } = std::mem::take(
+            &mut *self
+                .groups
+                .lock()
+                .map_err(|_| storage("property schema lock poisoned"))?,
+        );
+        let (digests, mut groups): (Vec<String>, Vec<Vec<Run>>) = runs.into_iter().unzip();
+        self.reduce(&mut groups, cancel)?;
         // One merge per identity range of every group with several runs.
         let mut ranges = Vec::new();
         for (group, runs) in groups.iter().enumerate() {
@@ -322,7 +348,8 @@ impl PropertyRows<'_> {
                 Ok((group, self.merge(&refs, lower, upper, cancel)?))
             })
             .collect::<Result<Vec<_>, GfError>>()?;
-        let mut sorted = Vec::with_capacity(groups.len());
+        // Groups keep the order of their schema digests, bare ones among them.
+        let mut sorted = std::collections::BTreeMap::new();
         let mut merged_groups = (0..groups.len()).map(|_| Vec::new()).collect::<Vec<_>>();
         for (group, segment) in segments {
             if segment.rows == 0 {
@@ -331,18 +358,28 @@ impl PropertyRows<'_> {
                 merged_groups[group].push(segment);
             }
         }
-        for (group, runs) in groups.into_iter().enumerate() {
-            if runs.len() >= 2 {
+        for (group, (digest, runs)) in digests.into_iter().zip(groups).enumerate() {
+            let segments = if runs.len() >= 2 {
                 for run in &runs {
                     std::fs::remove_file(&run.path).map_err(storage)?;
                 }
-                sorted.push(SortedGroup {
-                    segments: std::mem::take(&mut merged_groups[group]),
-                });
-            } else if !runs.is_empty() {
-                sorted.push(SortedGroup { segments: runs });
+                std::mem::take(&mut merged_groups[group])
+            } else {
+                runs
+            };
+            if !segments.is_empty() {
+                sorted.insert(
+                    digest,
+                    SortedGroup {
+                        segments,
+                        bare_owners: None,
+                    },
+                );
             }
         }
-        Ok(sorted)
+        for (digest, owners) in &bare {
+            sorted.insert(digest.clone(), SortedGroup::bare(owners));
+        }
+        Ok(sorted.into_values().collect())
     }
 }

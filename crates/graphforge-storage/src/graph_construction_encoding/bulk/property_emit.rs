@@ -42,7 +42,11 @@ pub(super) fn emit(
     let node = matches!(kind, ConstructionChunkKind::Node);
     let owner_column = if node { "label" } else { "rel_type" };
     for group in groups {
-        let mut reader = rows.group_reader(group)?;
+        // A group without properties writes no overlay.
+        if group.bare_owners.is_some() {
+            continue;
+        }
+        let mut reader = rows.group_reader(group);
         let mut batch = reader.next()?;
         let mut offset = 0;
         while batch.is_some() {

@@ -13,6 +13,10 @@
 //! 3. The remaining runs merge in a single pass into identity-range segments,
 //!    one task per range, so the segments in range order are the sorted group.
 //!
+//! A schema without property columns writes no overlay and, in the catalog,
+//! only says which owners it holds and how often. Such a group keeps a small
+//! summary of its owners instead of its rows (#1938).
+//!
 //! The retained bytes of all workers share one gate, so concurrent intake can
 //! never hold more than the budget derived for it, however many workers run.
 
@@ -31,7 +35,9 @@ use arrow::record_batch::RecordBatch;
 
 use super::scratch::{Scratch, crc32c};
 use super::tables::check_cancelled;
-use super::{AtomicBool, ConstructionChunkKind, GfError, GraphConstructionBudgets, storage};
+use super::{
+    AtomicBool, ConstructionChunkKind, GfError, GraphConstructionBudgets, required_string, storage,
+};
 
 pub(super) use super::property_merge::SortedGroup;
 
@@ -197,11 +203,23 @@ pub(super) struct PropertyRows<'a> {
     pub(super) frame_target: usize,
     pub(super) sizing: PropertySizing,
     gate: Gate,
-    pub(super) runs: Mutex<BTreeMap<String, Vec<Run>>>,
+    pub(super) groups: Mutex<Groups>,
     next_file: AtomicU64,
     written: AtomicU64,
     read: AtomicU64,
     runs_formed: AtomicU64,
+}
+
+/// For each owner of a group without properties: its smallest identity and
+/// its row count.
+pub(super) type BareOwners = BTreeMap<String, ([u8; 16], u64)>;
+
+/// The schema groups of one kind: sorted runs for those with properties, a
+/// summary of owners for those without.
+#[derive(Default)]
+pub(super) struct Groups {
+    pub(super) runs: BTreeMap<String, Vec<Run>>,
+    pub(super) bare: BTreeMap<String, BareOwners>,
 }
 
 /// Pending batches of one schema group in a worker's current run.
@@ -215,6 +233,7 @@ struct Pending {
 pub(super) struct RunSink<'r, 'a> {
     rows: &'r PropertyRows<'a>,
     pending: BTreeMap<String, Pending>,
+    bare: BTreeMap<String, BareOwners>,
     held: u64,
 }
 
@@ -223,6 +242,16 @@ impl RunSink<'_, '_> {
     pub(super) fn push(&mut self, batch: &RecordBatch, cancel: &AtomicBool) -> Result<(), GfError> {
         if batch.num_rows() == 0 {
             return Ok(());
+        }
+        let digest = crate::graph_construction::normalized_schema_digest(batch.schema().as_ref());
+        if !self.pending.contains_key(&digest)
+            && !self.bare.contains_key(&digest)
+            && self.pending.len() + self.bare.len() >= self.rows.budgets.max_schema_groups
+        {
+            return Err(storage("construction schema-group budget exhausted"));
+        }
+        if batch.num_columns() == self.rows.source_required() {
+            return self.note_bare(digest, batch);
         }
         let sizing = self.rows.sizing;
         let need = (batch.get_array_memory_size() as u64)
@@ -240,12 +269,6 @@ impl RunSink<'_, '_> {
             self.rows.gate.acquire(need, cancel)?;
         }
         self.held += need;
-        let digest = crate::graph_construction::normalized_schema_digest(batch.schema().as_ref());
-        if !self.pending.contains_key(&digest)
-            && self.pending.len() >= self.rows.budgets.max_schema_groups
-        {
-            return Err(storage("construction schema-group budget exhausted"));
-        }
         // Grouped by the schema the source stated; stored without an edge's
         // endpoints, which the edge records already carry.
         let kept = self.rows.scratch_columns(batch)?;
@@ -253,8 +276,39 @@ impl RunSink<'_, '_> {
         Ok(())
     }
 
+    /// Count the owners of a batch that has no property columns.
+    fn note_bare(&mut self, digest: String, batch: &RecordBatch) -> Result<(), GfError> {
+        let owners = required_string(batch, self.rows.owner_name())?;
+        let uuids = crate::graph_construction::batch_uuid_column(batch, self.rows.uuid_name())?;
+        let seen = self.bare.entry(digest).or_default();
+        let mut row = 0;
+        while row < batch.num_rows() {
+            let owner = owners.value(row);
+            let mut end = row + 1;
+            while end < batch.num_rows() && owners.value(end) == owner {
+                end += 1;
+            }
+            let smallest = (row..end)
+                .map(|at| <[u8; 16]>::try_from(uuids.value(at)).map_err(storage))
+                .try_fold(None::<[u8; 16]>, |smallest, uuid| {
+                    uuid.map(|uuid| Some(smallest.map_or(uuid, |smallest| smallest.min(uuid))))
+                })?
+                .expect("a nonempty range");
+            let count = (end - row) as u64;
+            if let Some(entry) = seen.get_mut(owner) {
+                entry.0 = entry.0.min(smallest);
+                entry.1 += count;
+            } else {
+                seen.insert(owner.to_owned(), (smallest, count));
+            }
+            row = end;
+        }
+        Ok(())
+    }
+
     /// Sort and write every pending group as one run each.
     fn flush(&mut self, cancel: &AtomicBool) -> Result<(), GfError> {
+        self.rows.add_bare(std::mem::take(&mut self.bare))?;
         for (digest, pending) in std::mem::take(&mut self.pending) {
             check_cancelled(cancel)?;
             let run = self.rows.write_run(&pending.batches, cancel)?;
@@ -406,11 +460,27 @@ impl<'a> PropertyRows<'a> {
             schema_bytes: usize::try_from(schema_bytes).unwrap_or(usize::MAX),
             sizing,
             gate: Gate::new(sizing.retained_bytes),
-            runs: Mutex::new(BTreeMap::new()),
+            groups: Mutex::new(Groups::default()),
             next_file: AtomicU64::new(0),
             written: AtomicU64::new(0),
             read: AtomicU64::new(0),
             runs_formed: AtomicU64::new(0),
+        }
+    }
+
+    /// Columns a source batch of this kind leads with, before its properties.
+    fn source_required(&self) -> usize {
+        match self.kind {
+            ConstructionChunkKind::Node => 2,
+            ConstructionChunkKind::Edge => 4,
+        }
+    }
+
+    /// The column that names the owner of a row's properties.
+    pub(super) fn owner_name(&self) -> &'static str {
+        match self.kind {
+            ConstructionChunkKind::Node => "label",
+            ConstructionChunkKind::Edge => "rel_type",
         }
     }
 
@@ -423,15 +493,11 @@ impl<'a> PropertyRows<'a> {
 
     /// `batch` as scratch rows keep it: identity, owner, properties.
     fn scratch_columns(&self, batch: &RecordBatch) -> Result<RecordBatch, GfError> {
-        let source_required = match self.kind {
-            ConstructionChunkKind::Node => 2,
-            ConstructionChunkKind::Edge => 4,
-        };
-        if source_required == REQUIRED_COLUMNS {
+        if self.source_required() == REQUIRED_COLUMNS {
             return Ok(batch.clone());
         }
         let columns = (0..REQUIRED_COLUMNS)
-            .chain(source_required..batch.num_columns())
+            .chain(self.source_required()..batch.num_columns())
             .collect::<Vec<_>>();
         batch.project(&columns).map_err(storage)
     }
@@ -441,6 +507,7 @@ impl<'a> PropertyRows<'a> {
         RunSink {
             rows: self,
             pending: BTreeMap::new(),
+            bare: BTreeMap::new(),
             held: 0,
         }
     }
@@ -472,14 +539,43 @@ impl<'a> PropertyRows<'a> {
 
     fn add_run(&self, digest: String, run: Run) -> Result<(), GfError> {
         let mut groups = self
-            .runs
+            .groups
             .lock()
             .map_err(|_| storage("property schema lock poisoned"))?;
-        if !groups.contains_key(&digest) && groups.len() >= self.budgets.max_schema_groups {
+        if !groups.runs.contains_key(&digest)
+            && !groups.bare.contains_key(&digest)
+            && groups.runs.len() + groups.bare.len() >= self.budgets.max_schema_groups
+        {
             return Err(storage("construction schema-group budget exhausted"));
         }
-        groups.entry(digest).or_default().push(run);
+        groups.runs.entry(digest).or_default().push(run);
         self.runs_formed.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Fold a worker's owner summaries into the groups.
+    fn add_bare(&self, seen: BTreeMap<String, BareOwners>) -> Result<(), GfError> {
+        if seen.is_empty() {
+            return Ok(());
+        }
+        let mut groups = self
+            .groups
+            .lock()
+            .map_err(|_| storage("property schema lock poisoned"))?;
+        for (digest, owners) in seen {
+            if !groups.runs.contains_key(&digest)
+                && !groups.bare.contains_key(&digest)
+                && groups.runs.len() + groups.bare.len() >= self.budgets.max_schema_groups
+            {
+                return Err(storage("construction schema-group budget exhausted"));
+            }
+            let total = groups.bare.entry(digest).or_default();
+            for (owner, (smallest, count)) in owners {
+                let entry = total.entry(owner).or_insert((smallest, 0));
+                entry.0 = entry.0.min(smallest);
+                entry.1 += count;
+            }
+        }
         Ok(())
     }
 
@@ -618,15 +714,12 @@ impl<'a> PropertyRows<'a> {
     }
 
     /// The rows of a sorted group, in identity order.
-    pub(super) fn group_reader<'r>(
-        &'r self,
-        group: &'r SortedGroup,
-    ) -> Result<GroupReader<'r, 'a>, GfError> {
-        Ok(GroupReader {
+    pub(super) fn group_reader<'r>(&'r self, group: &'r SortedGroup) -> GroupReader<'r, 'a> {
+        GroupReader {
             rows: self,
             segments: group.segments.iter(),
             current: None,
-        })
+        }
     }
 }
 
@@ -973,8 +1066,13 @@ mod tests {
         assert_eq!(rows.read_bytes() - before_read, 2 * file_bytes);
     }
 
+    /// `batch(start, 8)` without its properties.
+    fn narrow(start: u64) -> RecordBatch {
+        batch(start, 8).project(&[0, 1]).unwrap()
+    }
+
     fn rows_of(rows: &PropertyRows<'_>, group: &SortedGroup) -> Vec<u64> {
-        let mut reader = rows.group_reader(group).unwrap();
+        let mut reader = rows.group_reader(group);
         let mut seen = Vec::new();
         while let Some(batch) = reader.next().unwrap() {
             let uuids = crate::graph_construction::batch_uuid_column(&batch, "node_uuid").unwrap();
@@ -1122,7 +1220,7 @@ mod tests {
         let scratch = Scratch::create(&directory).unwrap();
         let rows = rows_with(&scratch, 1, 64, 1 << 20);
         ingest(&rows, 20, 1);
-        let runs = std::mem::take(&mut *rows.runs.lock().unwrap())
+        let runs = std::mem::take(&mut rows.groups.lock().unwrap().runs)
             .into_values()
             .next()
             .unwrap();
@@ -1147,6 +1245,7 @@ mod tests {
                 .unwrap();
             let group = SortedGroup {
                 segments: vec![merged],
+                bare_owners: None,
             };
             let seen = rows_of(&rows, &group);
             let expected = (0..20 * 32)
@@ -1182,10 +1281,6 @@ mod tests {
         let scratch = Scratch::create(&directory).unwrap();
         let rows = rows_with(&scratch, 1 << 20, 4, 1 << 20);
         let cancel = AtomicBool::new(false);
-        let narrow = |start: u64| {
-            let full = batch(start, 8);
-            full.project(&[0, 1]).unwrap()
-        };
         let mut sink = rows.sink();
         sink.push(&batch(0, 8), &cancel).unwrap();
         sink.push(&narrow(8), &cancel).unwrap();
@@ -1193,12 +1288,14 @@ mod tests {
         sink.finish(&cancel).unwrap();
         let groups = rows.finish(&cancel).unwrap();
         assert_eq!(groups.len(), 2);
-        let mut sizes = groups
+        // The schema without properties keeps its owners, not its rows.
+        let (bare, with_rows) = groups
             .iter()
-            .map(|group| rows_of(&rows, group).len())
-            .collect::<Vec<_>>();
-        sizes.sort_unstable();
-        assert_eq!(sizes, vec![8, 16]);
+            .partition::<Vec<_>, _>(|group| group.bare_owners.is_some());
+        assert_eq!((bare.len(), with_rows.len()), (1, 1));
+        assert_eq!(bare[0].bare_owners, Some(vec![("Person".to_owned(), 8)]));
+        assert!(bare[0].segments.is_empty());
+        assert_eq!(rows_of(&rows, with_rows[0]).len(), 16);
 
         let limited = PropertyRows::new(
             &scratch,
@@ -1214,6 +1311,74 @@ mod tests {
         sink.push(&batch(0, 8), &cancel).unwrap();
         let error = sink.push(&narrow(8), &cancel).unwrap_err();
         assert!(error.to_string().contains("schema-group budget"), "{error}");
+    }
+
+    /// A node batch with a label per row and no properties.
+    fn labelled(ids: &[u64], labels: &[&str]) -> RecordBatch {
+        let uuids = ids
+            .iter()
+            .map(|id| {
+                let mut bytes = [0; 16];
+                bytes[8..].copy_from_slice(&id.to_be_bytes());
+                bytes
+            })
+            .collect::<Vec<_>>();
+        RecordBatch::try_new(
+            std::sync::Arc::new(Schema::new(vec![
+                Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+                Field::new("label", DataType::Utf8, false),
+            ])),
+            vec![
+                std::sync::Arc::new(
+                    FixedSizeBinaryArray::try_from_iter(uuids.iter().map(|id| id.as_slice()))
+                        .unwrap(),
+                ) as ArrayRef,
+                std::sync::Arc::new(StringArray::from(labels.to_vec())),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_group_without_properties_orders_owners_by_first_appearance_in_identity_order() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = super::super::StableDirectory::open(root.path()).unwrap();
+        let scratch = Scratch::create(&directory).unwrap();
+        let rows = rows_with(&scratch, 1 << 20, 4, 1 << 20);
+        let cancel = AtomicBool::new(false);
+        // Identity order is 1:Pet 2:Person 3:Person 4:City 5:Pet 6:City 7:Pet; the
+        // batches arrive out of order and from two workers.
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let mut sink = rows.sink();
+                sink.push(&labelled(&[6, 3, 5], &["City", "Person", "Pet"]), &cancel)
+                    .unwrap();
+                sink.push(&labelled(&[7], &["Pet"]), &cancel).unwrap();
+                sink.finish(&cancel).unwrap();
+            });
+            scope.spawn(|| {
+                let mut sink = rows.sink();
+                sink.push(&labelled(&[4, 2, 1], &["City", "Person", "Pet"]), &cancel)
+                    .unwrap();
+                sink.finish(&cancel).unwrap();
+            });
+        });
+        let groups = rows.finish(&cancel).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(
+            groups[0].bare_owners,
+            Some(vec![
+                ("Pet".to_owned(), 3),
+                ("Person".to_owned(), 2),
+                ("City".to_owned(), 2),
+            ])
+        );
+        assert_eq!(
+            rows.written_bytes(),
+            0,
+            "a bare group must write no scratch"
+        );
+        assert_eq!(rows.runs_formed(), 0);
     }
 
     #[test]

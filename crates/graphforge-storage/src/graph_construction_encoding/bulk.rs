@@ -53,7 +53,7 @@ mod tables;
 
 pub use budget::{BulkRoute, BulkStagedReason};
 #[cfg(test)]
-pub(crate) use budget::{ForcedPartitions, derived_concurrency};
+pub(crate) use budget::{ForcedPartitions, derived_concurrency, scratch_minimum_bytes};
 pub use plan::{BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkSource};
 #[cfg(test)]
 pub(crate) use property_rows::{ForcedPropertyFrames, ForcedPropertySizing};
