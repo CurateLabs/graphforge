@@ -264,11 +264,13 @@ pub(super) fn collect_nodes(
         let mut written = 0;
         sources[source].reader.read_task(task, &mut |batch| {
             check_cancelled(cancel)?;
-            crate::graph_construction::validate_canonical_batch(
-                ConstructionChunkKind::Node,
-                &batch,
-            )?;
-            admit_batch(ConstructionChunkKind::Node, &batch, budgets)?;
+            if !sources[source].reader.admitted() {
+                crate::graph_construction::validate_canonical_batch(
+                    ConstructionChunkKind::Node,
+                    &batch,
+                )?;
+                admit_batch(ConstructionChunkKind::Node, &batch, budgets)?;
+            }
             let count = batch.num_rows();
             if written + count > rows {
                 return Err(short_source());
@@ -429,11 +431,13 @@ pub(super) fn collect_edges(
             let mut endpoints = Vec::new();
             sources[source].reader.read_task(task, &mut |batch| {
                 check_cancelled(cancel)?;
-                crate::graph_construction::validate_canonical_batch(
-                    ConstructionChunkKind::Edge,
-                    &batch,
-                )?;
-                admit_batch(ConstructionChunkKind::Edge, &batch, budgets)?;
+                if !sources[source].reader.admitted() {
+                    crate::graph_construction::validate_canonical_batch(
+                        ConstructionChunkKind::Edge,
+                        &batch,
+                    )?;
+                    admit_batch(ConstructionChunkKind::Edge, &batch, budgets)?;
+                }
                 let count = batch.num_rows();
                 if written + count > rows {
                     return Err(short_source());

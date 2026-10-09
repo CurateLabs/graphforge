@@ -517,11 +517,13 @@ pub(super) fn scatter_edges(
         let mut task_bounds = vec![None; partitions.len()];
         sources[source].reader.read_task(task, &mut |batch| {
             check_cancelled(cancel)?;
-            crate::graph_construction::validate_canonical_batch(
-                ConstructionChunkKind::Edge,
-                &batch,
-            )?;
-            admit_batch(ConstructionChunkKind::Edge, &batch, budgets)?;
+            if !sources[source].reader.admitted() {
+                crate::graph_construction::validate_canonical_batch(
+                    ConstructionChunkKind::Edge,
+                    &batch,
+                )?;
+                admit_batch(ConstructionChunkKind::Edge, &batch, budgets)?;
+            }
             let count = batch.num_rows();
             if written + count > rows {
                 return Err(short_source());

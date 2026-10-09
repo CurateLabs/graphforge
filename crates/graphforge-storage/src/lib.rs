@@ -81,7 +81,7 @@ pub use graph_construction::{
     ConstructionShape, GRAPH_CONSTRUCTION_ENCODING_BUFFER_BYTES, GraphConstructionBudgets,
     GraphConstructionEncoding, GraphConstructionEncodingEvidence,
     GraphConstructionEncodingInvocationEvidence, GraphConstructionEvidence,
-    GraphConstructionSession, GraphConstructionState,
+    GraphConstructionSession, GraphConstructionState, SealRoute,
 };
 
 pub mod graph_admission;

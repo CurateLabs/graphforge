@@ -658,7 +658,7 @@ impl BulkBatchReader for SourceReader<'_> {
 /// initial build whose estimate exceeds it uses bounded normalized-row scratch
 /// workspace (ADR 0058). Registered-source decoding and normalization expansion
 /// have a separate admission boundary under #1918.
-pub(super) fn bulk_build_memory_budget() -> Result<u64, GfError> {
+pub(crate) fn bulk_build_memory_budget() -> Result<u64, GfError> {
     #[cfg(test)]
     if let Some(budget) = TEST_BUDGET.with(std::cell::Cell::get) {
         return Ok(budget);
@@ -669,7 +669,7 @@ pub(super) fn bulk_build_memory_budget() -> Result<u64, GfError> {
 #[cfg(test)]
 thread_local! {
     /// Lets a test force the plan-time routing decision.
-    pub(super) static TEST_BUDGET: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    pub(crate) static TEST_BUDGET: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
 
 fn schema_owned_bytes(schema: &arrow::datatypes::Schema) -> u64 {

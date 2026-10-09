@@ -4,7 +4,7 @@ adr: "0058"
 status: "Accepted"
 date: "2026-10-07"
 superseded_by: null
-revisit_when: "Node identity tables must go out of core, a published artifact stops being a projection of the three ranked inputs, or a chunk-API initial build needs the same speedup"
+revisit_when: "Node identity tables must go out of core, or a published artifact stops being a projection of the three ranked inputs"
 ---
 
 # ADR 0058: Initial builds run on a bulk builder derived from the published generation
@@ -79,9 +79,9 @@ functions.
 ### Scope
 
 - The builder serves `import-session` initial builds (Parquet and Arrow IPC
-  sources). Appends keep the staged path, as do initial builds made through the
-  chunk API (`GraphConstructionSession::append_*`), until the builder takes
-  those inputs.
+  sources) and initial builds made through the chunk API
+  (`GraphConstructionSession::append_*`, see *Chunk-API initial builds*).
+  Appends keep the staged path.
 - An initial build whose estimated peak memory fits the plan-time budget keeps
   everything resident. One that does not runs the same passes through scratch
   files (below), bounding normalized builder workspace within its reservation.
@@ -90,8 +90,9 @@ functions.
   three fifths of the process's cgroup-aware memory headroom, or the bytes in
   `GF_BULK_BUILD_MEMORY_BUDGET_BYTES`. Routing is a function of the footers and
   the budget, never of the data, and the bytes are the same on every route.
-- The staged path remains for appends, chunk-API sessions, sessions an earlier
-  binary began staging, and `node_tables_exceed_budget`: the identity tables,
+- The staged path remains for appends, sessions an earlier binary began staging
+  (a chunk-API session replays its spool through it, see *Chunk-API initial
+  builds*), and `node_tables_exceed_budget`: the identity tables,
   labels, endpoint index and degree arrays need a conservative 56 bytes per
   node alongside the fixed workspace. Property payload size does not contribute
   to this identity-table footprint. Out-of-core node identities remain open
@@ -250,5 +251,54 @@ spill file lifecycle is removed from initial builds.
   input and session clock, with one exception: `ordinal-v4-receipt.json`
   carries a random rebuild nonce (named by ADR 0038), in both builds.
 
+### Chunk-API initial builds (#1901)
+
+The chunk API promises that an accepted chunk survives a crash and resumes
+(`accepted_chunks` is "durably accepted", `resume_graph_construction` reopens,
+an exact replay by chunk id is idempotent, and the crash matrix kills the
+append at every boundary). The builder keeps that promise by spooling, not by
+staging:
+
+- On an empty project the facade's `begin_graph_construction` asks for the
+  spool; the first `append` records the route in the checkpoint. Each accepted
+  chunk is one Arrow IPC file: written to a temporary name, synced, renamed to
+  its sequence name, and the directory synced. Its footer carries the chunk id,
+  kind, sequence, row count and digests, so the file is its own receipt: no
+  receipt journal, chunk key or checkpoint is rewritten per chunk. Opening the
+  session scans the spool and rebuilds the accepted chunks from those footers;
+  a temporary file was never acknowledged and is removed.
+- Every chunk-time refusal (identifier, schema, window, ordering, in-chunk
+  duplicate, conflicting replay) fires at the same `append` call, with the same
+  message, as on the staged path. Refusals that need global knowledge fire at
+  seal.
+- At seal the spooled chunks are the builder's sources: row counts come from
+  the receipts, and passes 1 and 2 decode the files in place and in parallel.
+  They were validated and admitted when accepted, so the builder does not repeat
+  it (a decoded copy can report more bytes than the batch that was admitted).
+  Validation is not authentication, so every decode is authenticated first: the
+  file's footer descriptor must equal the accepted chunk's, and the decoded
+  batch's row count, schema digest and logical digest (identities, labels or
+  endpoints and routes, and every property value) must equal those
+  acknowledged at acceptance. A file that changed after acceptance, including
+  one of the same size that is still valid Arrow IPC, fails the build with
+  `spooled chunk differs from its acknowledged digest`, on the bulk route (in
+  memory or scratch) and on the staged replay alike.
+- The chunk-API build takes the same route as a registered-source build: the
+  plan is built from the receipts and the memory budget (`BulkBuildPlan::route`),
+  so an over-budget estimate runs the scratch passes of #1912 and #1920 over the
+  spool and never stages or refuses. The seal route (`bulk`, or `replay_staged`
+  when even the node tables exceed the budget, the one case an import session
+  also stages) is recorded in the checkpoint before any build or replay work and
+  read back on every retry; a retry never re-decides from live memory, and
+  whether a `bulk` attempt runs in memory or on scratch is decided again from
+  the live budget (a budget that can no longer hold the node tables refuses the
+  attempt before decoding, as for a registered source). `replay_staged`
+  re-appends the authenticated spool through the staged path, chunk by chunk
+  under the same chunk ids, so an interrupted replay resumes.
+- A crash during the build leaves the spool intact; the rerun is identical.
+  The spool is deleted once the build's inventory is pinned.
+- Import sessions stage through `begin_staged_graph_construction`: they route
+  their own builds and never spool.
+
 **Does not change.** Intake refusals, the publication protocol, the format of
-any published artifact, appends, and the chunk API.
+any published artifact, and appends.

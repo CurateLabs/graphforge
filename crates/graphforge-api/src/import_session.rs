@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::{BulkInputKind, CancellationToken, GraphConstructionBudgets, GraphForge, OperationId};
 
-mod bulk_source;
+pub(crate) mod bulk_source;
 #[cfg(test)]
 mod cpu_budget_report;
 mod external_source;
@@ -1385,7 +1385,7 @@ impl GraphImportSession {
             }
             return resumed;
         }
-        let session = graph.begin_graph_construction(budgets);
+        let session = graph.begin_staged_graph_construction(budgets);
         if let (Some(timings), Some(started)) = (&mut self.operation_timings, started) {
             timings.begin.record(started, session.is_err());
         }

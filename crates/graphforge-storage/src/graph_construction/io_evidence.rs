@@ -234,6 +234,10 @@ pub struct GraphConstructionEvidence {
     pub input_batches: u64,
     /// Immutable Parquet shards.
     pub parquet_shards: u64,
+    /// Arrow IPC files holding accepted chunks of an initial build, each written
+    /// and synced once for the bulk builder to read in place.
+    #[serde(default)]
+    pub spooled_chunks: u64,
     /// Immutable payload artifacts accepted from authenticated chunk receipts.
     #[serde(default)]
     pub immutable_artifacts: u64,
