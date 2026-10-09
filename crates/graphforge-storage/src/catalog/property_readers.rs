@@ -108,6 +108,7 @@ where
         batch_size,
         selected_properties,
         None,
+        None,
         visit,
     )
 }
@@ -127,6 +128,7 @@ pub(crate) fn visit_property_overlay_batched_selected<F>(
     batch_size: usize,
     selected_properties: Option<&std::collections::BTreeSet<String>>,
     equality: Option<&crate::property_overlay::PropertyEquality>,
+    uuids: Option<&std::collections::BTreeSet<[u8; 16]>>,
     mut visit: F,
 ) -> Result<Option<crate::PropertyOverlayMetrics>, DataFusionError>
 where
@@ -177,10 +179,13 @@ where
             .map_err(|error| DataFusionError::External(Box::new(error)))?,
         None => None,
     };
-    let candidate_uuids = candidates.map(|(uuids, work)| {
-        metrics.absorb(&work);
-        uuids
-    });
+    let candidate_uuids = match (candidates, uuids) {
+        (Some((candidates, work)), wanted) => {
+            metrics.absorb(&work);
+            Some(wanted.map_or(candidates.clone(), |wanted| &candidates & wanted))
+        }
+        (None, wanted) => wanted.cloned(),
+    };
     // The compared column is needed to check the winner of each candidate.
     let streamed_properties = match (equality, selected_properties) {
         (Some(equality), Some(selected)) => {
