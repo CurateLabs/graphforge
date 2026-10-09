@@ -42,6 +42,7 @@ mod parquet_reader;
 mod parquet_row_groups;
 mod parquet_scan;
 mod parquet_shape;
+mod parquet_sizing;
 mod parquet_values;
 mod parquet_windows;
 

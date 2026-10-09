@@ -9,88 +9,20 @@
 //! whatever those turn out to be. This module sizes every logical batch first,
 //! from page headers and, for the encodings whose expansion the headers do not
 //! state, from the dictionary indices or lengths themselves (read through the
-//! typed column readers, which materialize no Arrow array), so the reader can
+//! bounded owned-page cursors, which materialize no Arrow array), so the reader can
 //! refuse a batch before its allocation and reserve exactly what it will hold.
 //!
 //! The sizes are Arrow value bytes (values, offsets and validity), the number
 //! the builder's per-batch window is stated in.
 
-use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom};
-use std::sync::Arc;
-
-use bytes::Bytes;
 use graphforge_core::GfError;
-use parquet::column::reader::{ColumnReader, ColumnReaderImpl};
-use parquet::data_type::DataType;
 use parquet::file::metadata::ParquetMetaData;
-use parquet::file::properties::ReaderProperties;
-use parquet::file::reader::{ChunkReader, Length, RowGroupReader};
-use parquet::file::serialized_reader::SerializedRowGroupReader;
+use std::fs::File;
 
 use super::inventory_budget::{InventoryBudget, reserve};
-use super::parquet_scan::{GroupScan, Leaf, LeafScan, PageKind, encoding, scan_group};
-use super::{limit, storage};
+use super::parquet_scan::{GroupScan, Leaf, LeafScan, PageKind, scan_group};
+use super::storage;
 use crate::CancellationToken;
-
-/// Records the typed readers return per call when sizing a column.
-const RECORD_BLOCK: usize = 1_024;
-/// Bytes the values of one block of a delta-encoded column may take.
-const ORACLE_BLOCK_BYTES: u64 = 16 << 20;
-/// Bytes per level entry (two levels and a value slot) an oracle block holds.
-const LEVEL_ENTRY_BYTES: u64 = 40;
-/// Bytes sizing a column's values may hold at once, however large the budget: the
-/// levels and values of the records of one block.
-const ORACLE_WORKSPACE_BYTES: u64 = 256 << 20;
-
-/// A plain file as a `ChunkReader`, for the page scan and the sizing readers.
-///
-/// It does not feed the source digest: these reads come ahead of the decode's
-/// own, and the decode's reads are the ones the digest is folded from.
-pub(super) struct ScanFile {
-    file: File,
-    length: u64,
-}
-
-impl ScanFile {
-    pub(super) fn new(file: File) -> Result<Self, GfError> {
-        let length = file.metadata().map_err(storage)?.len();
-        Ok(Self { file, length })
-    }
-}
-
-impl Length for ScanFile {
-    fn len(&self) -> u64 {
-        self.length
-    }
-}
-
-impl ChunkReader for ScanFile {
-    type T = BufReader<File>;
-
-    fn get_read(&self, start: u64) -> parquet::errors::Result<Self::T> {
-        let mut file = self.file.try_clone()?;
-        file.seek(SeekFrom::Start(start))?;
-        Ok(BufReader::with_capacity(1 << 10, file))
-    }
-
-    fn get_bytes(&self, start: u64, length: usize) -> parquet::errors::Result<Bytes> {
-        // A length the file cannot hold is refused before it is allocated.
-        if start
-            .checked_add(length as u64)
-            .is_none_or(|end| end > self.length)
-        {
-            return Err(parquet::errors::ParquetError::EOF(
-                "a read extends beyond the end of the source".into(),
-            ));
-        }
-        let mut bytes = vec![0_u8; length];
-        let mut file = self.file.try_clone()?;
-        file.seek(SeekFrom::Start(start))?;
-        file.read_exact(&mut bytes)?;
-        Ok(Bytes::from(bytes))
-    }
-}
 
 /// Whether a column's batch size has to be read from its values rather than
 /// summed from its page headers.
@@ -194,6 +126,7 @@ impl SourceScan {
         scan.size_values(
             file.try_clone().map_err(storage)?,
             metadata,
+            &mut budget,
             capacity,
             cancellation,
         )?;
@@ -207,7 +140,7 @@ impl SourceScan {
                 }
             }
             scan.value_bytes.iter_mut().for_each(|bytes| *bytes = 0);
-            scan.size_values(file, metadata, capacity, cancellation)?;
+            scan.size_values(file, metadata, &mut budget, capacity, cancellation)?;
         }
         // The budget charged actual capacities, including unused geometric
         // slots in groups/leaves. A sum of lengths would understate retained
@@ -309,219 +242,106 @@ impl SourceScan {
         &mut self,
         file: File,
         metadata: &ParquetMetaData,
+        budget: &mut InventoryBudget,
         capacity: u64,
         cancellation: Option<&CancellationToken>,
     ) -> Result<(), GfError> {
-        let reader = Arc::new(ScanFile::new(file)?);
-        let properties = Arc::new(ReaderProperties::builder().build());
-        for (index, group) in self.groups.iter().enumerate() {
-            if !group.leaves.iter().any(needs_values) {
-                continue;
-            }
-            let rows = u64::try_from(metadata.row_group(index).num_rows()).unwrap_or(0);
-            let first_row = self.group_start[index];
-            let row_group = SerializedRowGroupReader::new(
-                Arc::clone(&reader),
-                metadata.row_group(index),
-                None,
-                Arc::clone(&properties),
-            )
-            .map_err(storage)?;
-            for (column, leaf) in group.leaves.iter().enumerate() {
+        for column in 0..metadata.schema_descr().num_columns() {
+            for (index, group) in self.groups.iter().enumerate() {
+                check(cancellation)?;
+                let leaf = group
+                    .leaves
+                    .get(column)
+                    .ok_or_else(|| storage("Parquet row groups disagree on physical columns"))?;
                 if !needs_values(leaf) {
                     continue;
                 }
+                let rows = u64::try_from(metadata.row_group(index).num_rows()).unwrap_or(0);
+                let first_row = self.group_start[index];
+                let descriptor = metadata.row_group(index).column(column).column_descr();
+                let flat = descriptor.max_rep_level() == 0;
                 let mut add = |row: u64, bytes: u64| {
-                    let batch = (first_row + row) / self.batch_rows;
-                    if let Some(slot) = self
+                    let global_row = first_row.checked_add(row).ok_or_else(|| {
+                        storage("Parquet source row index overflows while sizing values")
+                    })?;
+                    let batch = global_row / self.batch_rows;
+                    let slot = self
                         .value_bytes
                         .get_mut(usize::try_from(batch).unwrap_or(usize::MAX))
-                    {
-                        *slot = slot.saturating_add(bytes);
-                    }
+                        .ok_or_else(|| {
+                            storage("Parquet sized row is outside the batch inventory")
+                        })?;
+                    let bytes = if flat {
+                        bytes
+                            .checked_sub(1)
+                            .ok_or_else(|| storage("flat row size omitted its validity bit"))?
+                    } else {
+                        bytes
+                    };
+                    *slot = slot
+                        .checked_add(bytes)
+                        .ok_or_else(|| storage("Parquet per-batch value size overflows"))?;
+                    Ok(())
                 };
-                // Every entry of the dictionary one length: a row's size is that
-                // length wherever the indices point, and no index is read.
-                if let Some(width) = uniform_dictionary_value(
-                    &reader,
+                super::parquet_sizing::size_column(
+                    &file,
                     metadata.row_group(index).column(column),
-                    leaf,
                     rows,
-                )? {
-                    let per_row = width + OFFSET_BYTES;
-                    let mut row = 0_u64;
-                    while row < rows {
-                        let batch_end =
-                            (first_row + row) / self.batch_rows * self.batch_rows + self.batch_rows;
-                        let step = (batch_end - first_row - row).min(rows - row);
-                        add(
-                            row,
-                            step.saturating_mul(per_row)
-                                .saturating_add(step.div_ceil(8)),
-                        );
-                        row += step;
+                    0,
+                    capacity,
+                    budget,
+                    cancellation,
+                    &mut add,
+                )?;
+                drop(add);
+                if flat && rows > 0 {
+                    // Preserve the existing flat validity size while packing
+                    // row-group segments against their global batch bit offset.
+                    let end_row = first_row
+                        .checked_add(rows)
+                        .ok_or_else(|| storage("Parquet source row range overflows"))?;
+                    let mut batch = first_row / self.batch_rows;
+                    while batch
+                        .checked_mul(self.batch_rows)
+                        .is_some_and(|start| start < end_row)
+                    {
+                        let batch_start = batch
+                            .checked_mul(self.batch_rows)
+                            .ok_or_else(|| storage("Parquet batch row range overflows"))?;
+                        let batch_end = batch_start
+                            .checked_add(self.batch_rows)
+                            .ok_or_else(|| storage("Parquet batch row range overflows"))?;
+                        let lo = first_row.max(batch_start);
+                        let hi = end_row.min(batch_end);
+                        let before = lo
+                            .checked_sub(batch_start)
+                            .ok_or_else(|| storage("Parquet batch start is out of range"))?;
+                        let after = hi
+                            .checked_sub(batch_start)
+                            .ok_or_else(|| storage("Parquet batch end is out of range"))?;
+                        let bitmap_before = before.div_ceil(8);
+                        let bitmap_after = after.div_ceil(8);
+                        let bitmap_delta = bitmap_after
+                            .checked_sub(bitmap_before)
+                            .ok_or_else(|| storage("Parquet validity range is out of order"))?;
+                        let slot = self
+                            .value_bytes
+                            .get_mut(usize::try_from(batch).unwrap_or(usize::MAX))
+                            .ok_or_else(|| {
+                                storage("Parquet batch is outside the size inventory")
+                            })?;
+                        *slot = slot
+                            .checked_add(bitmap_delta)
+                            .ok_or_else(|| storage("Parquet validity size overflows"))?;
+                        batch = batch
+                            .checked_add(1)
+                            .ok_or_else(|| storage("Parquet batch index overflows"))?;
                     }
-                    continue;
                 }
-                let values = leaf.pages.as_ref().map_or(0, |pages| {
-                    pages
-                        .iter()
-                        .map(|page| u64::from(page.values))
-                        .max()
-                        .unwrap_or(0)
-                });
-                // A record is at most as long as the page it sits in, and sizing it
-                // holds its levels and values: refuse a page whose records could
-                // not be sized inside the workspace before reading any of them.
-                let workspace = capacity.min(ORACLE_WORKSPACE_BYTES);
-                if values.saturating_mul(LEVEL_ENTRY_BYTES) > workspace {
-                    return Err(limit(format!(
-                        "a Parquet page of {values} values would need more than the \
-                         {workspace}-byte workspace that sizes its records"
-                    )));
-                }
-                // Prefix-shared values are rebuilt one by one, each as long as the
-                // page that holds it may be: keep a block of them to a bounded
-                // number of bytes however large the pages are.
-                let block = if leaf.summary.delta_byte_array {
-                    usize::try_from(
-                        (ORACLE_BLOCK_BYTES / leaf.summary.data_page.max(1))
-                            .clamp(1, RECORD_BLOCK as u64),
-                    )
-                    .unwrap_or(1)
-                } else {
-                    RECORD_BLOCK
-                };
-                let descriptor = metadata.row_group(index).column(column).column_descr_ptr();
-                let column_reader = row_group.get_column_reader(column).map_err(storage)?;
-                let shape = Shape {
-                    max_def: descriptor.max_def_level(),
-                    max_rep: descriptor.max_rep_level(),
-                    rows,
-                    block,
-                };
-                measure_column(column_reader, &shape, cancellation, &mut add)?;
             }
         }
         Ok(())
     }
-}
-
-/// The width every value of a dictionary-encoded byte-array column has, when its
-/// dictionary holds entries of one length only and no row is null.
-fn uniform_dictionary_value(
-    reader: &Arc<ScanFile>,
-    chunk: &parquet::file::metadata::ColumnChunkMetaData,
-    leaf: &LeafScan,
-    rows: u64,
-) -> Result<Option<u64>, GfError> {
-    use parquet::column::page::{Page, PageReader};
-    let Some(pages) = &leaf.pages else {
-        return Ok(None);
-    };
-    let dictionary_only = leaf.leaf == Leaf::Variable
-        && !leaf.nested
-        && !leaf.summary.delta_byte_array
-        && pages
-            .iter()
-            .filter(|page| page.kind == PageKind::Data)
-            .all(|page| {
-                matches!(
-                    page.encoding,
-                    encoding::PLAIN_DICTIONARY | encoding::RLE_DICTIONARY
-                )
-            });
-    let descriptor = chunk.column_descr();
-    let no_nulls = descriptor.max_def_level() == 0
-        || chunk
-            .statistics()
-            .is_some_and(|statistics| statistics.null_count_opt() == Some(0));
-    if !dictionary_only || !no_nulls || leaf.summary.dictionary_entries == 0 {
-        return Ok(None);
-    }
-    let mut dictionary = parquet::file::serialized_reader::SerializedPageReader::new(
-        Arc::clone(reader),
-        chunk,
-        usize::try_from(rows).map_err(storage)?,
-        None,
-    )
-    .map_err(storage)?;
-    let Some(Page::DictionaryPage {
-        buf, num_values, ..
-    }) = dictionary.get_next_page().map_err(storage)?
-    else {
-        return Ok(None);
-    };
-    // Plain byte arrays: a little-endian length, then that many bytes.
-    let (mut offset, mut width, mut entries) = (0_usize, None::<u32>, 0_u32);
-    while offset < buf.len() {
-        let Some(prefix) = buf.get(offset..offset + 4) else {
-            return Ok(None);
-        };
-        let length = u32::from_le_bytes(prefix.try_into().expect("four bytes"));
-        if *width.get_or_insert(length) != length {
-            return Ok(None);
-        }
-        offset = offset.saturating_add(4).saturating_add(length as usize);
-        entries += 1;
-    }
-    Ok((offset == buf.len() && entries == num_values)
-        .then_some(width)
-        .flatten()
-        .map(u64::from))
-}
-
-/// Size the records of one column through its typed reader.
-fn measure_column(
-    reader: ColumnReader,
-    shape: &Shape,
-    cancellation: Option<&CancellationToken>,
-    add: &mut impl FnMut(u64, u64),
-) -> Result<(), GfError> {
-    match reader {
-        ColumnReader::BoolColumnReader(mut r) => {
-            measure(&mut r, shape, cancellation, |_| 1, add)?;
-        }
-        ColumnReader::Int32ColumnReader(mut r) => {
-            measure(&mut r, shape, cancellation, |_| 4, add)?;
-        }
-        ColumnReader::Int64ColumnReader(mut r) => {
-            measure(&mut r, shape, cancellation, |_| 8, add)?;
-        }
-        ColumnReader::Int96ColumnReader(mut r) => {
-            measure(&mut r, shape, cancellation, |_| 12, add)?;
-        }
-        ColumnReader::FloatColumnReader(mut r) => {
-            measure(&mut r, shape, cancellation, |_| 4, add)?;
-        }
-        ColumnReader::DoubleColumnReader(mut r) => {
-            measure(&mut r, shape, cancellation, |_| 8, add)?;
-        }
-        ColumnReader::ByteArrayColumnReader(mut r) => {
-            // A flat column's record offset is its value's offset; a
-            // repeated one has an offset for the list and one per child.
-            let offset = if shape.max_rep > 0 { OFFSET_BYTES } else { 0 };
-            measure(
-                &mut r,
-                shape,
-                cancellation,
-                |value: &parquet::data_type::ByteArray| value.len() as u64 + offset,
-                add,
-            )?;
-        }
-        ColumnReader::FixedLenByteArrayColumnReader(mut r) => {
-            measure(
-                &mut r,
-                shape,
-                cancellation,
-                |value: &parquet::data_type::FixedLenByteArray| {
-                    parquet::data_type::ByteArray::from(value.clone()).len() as u64
-                },
-                add,
-            )?;
-        }
-    }
-    Ok(())
 }
 
 fn check(cancellation: Option<&CancellationToken>) -> Result<(), GfError> {
@@ -565,90 +385,6 @@ fn window_bytes(leaf: &LeafScan, low: u64, high: u64, apportion: bool) -> u64 {
                 .saturating_add(validity)
         }
     }
-}
-
-struct Shape {
-    max_def: i16,
-    max_rep: i16,
-    rows: u64,
-    block: usize,
-}
-
-/// Read a column's records and report `(row within the group, Arrow bytes)` for
-/// each, from the values themselves.
-fn measure<T: DataType>(
-    reader: &mut ColumnReaderImpl<T>,
-    shape: &Shape,
-    cancellation: Option<&CancellationToken>,
-    value_bytes: impl Fn(&T::T) -> u64,
-    add: &mut impl FnMut(u64, u64),
-) -> Result<(), GfError> {
-    let mut definition = Vec::<i16>::new();
-    let mut repetition = Vec::<i16>::new();
-    let mut values = Vec::<T::T>::new();
-    let mut row = 0_u64;
-    while row < shape.rows {
-        check(cancellation)?;
-        definition.clear();
-        repetition.clear();
-        values.clear();
-        let (records, _, levels) = reader
-            .read_records(
-                shape.block,
-                (shape.max_def > 0).then_some(&mut definition),
-                (shape.max_rep > 0).then_some(&mut repetition),
-                &mut values,
-            )
-            .map_err(storage)?;
-        if records == 0 {
-            return Err(storage("a Parquet column ended before its row count"));
-        }
-        let mut value = 0_usize;
-        let mut record_bytes = 0_u64;
-        let mut record_slots = 0_u64;
-        let mut open = false;
-        let mut finished = 0_usize;
-        let per_child = if shape.max_rep > 0 {
-            REPEATED_CHILD_BYTES
-        } else {
-            0
-        };
-        for level in 0..levels {
-            if shape.max_rep == 0 || repetition[level] == 0 {
-                if open {
-                    add(
-                        row,
-                        record_bytes
-                            + OFFSET_BYTES
-                            + record_slots.div_ceil(8)
-                            + record_slots * per_child,
-                    );
-                    row += 1;
-                    finished += 1;
-                }
-                open = true;
-                record_bytes = 0;
-                record_slots = 0;
-            }
-            record_slots += 1;
-            if shape.max_def == 0 || definition[level] == shape.max_def {
-                record_bytes += value_bytes(&values[value]);
-                value += 1;
-            }
-        }
-        if open {
-            add(
-                row,
-                record_bytes + OFFSET_BYTES + record_slots.div_ceil(8) + record_slots * per_child,
-            );
-            row += 1;
-            finished += 1;
-        }
-        if finished != records {
-            return Err(storage("a Parquet column returned a partial record"));
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

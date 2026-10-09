@@ -430,6 +430,17 @@ impl DictionaryByteFacts {
         self.largest_length
     }
 
+    /// Allocated capacity retained by the dictionary facts vector.
+    pub(super) fn inventory_bytes(&self) -> Result<u64, GfError> {
+        u64::try_from(self.lengths.capacity())
+            .map_err(|_| limit("Parquet dictionary capacity is out of range"))?
+            .checked_mul(
+                u64::try_from(size_of::<u64>())
+                    .map_err(|_| limit("Parquet dictionary element size is out of range"))?,
+            )
+            .ok_or_else(|| limit("Parquet dictionary capacity overflows"))
+    }
+
     /// Actual referenced payload length for one admitted entry. Consumers get
     /// the referenced length itself, never a dictionary maximum.
     pub(super) fn length(&self, index: usize) -> Option<u64> {
