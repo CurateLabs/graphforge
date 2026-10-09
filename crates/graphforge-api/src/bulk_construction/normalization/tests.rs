@@ -1458,7 +1458,7 @@ fn node_pieces_at_true_offsets_match_the_full_logical_batch() {
                 .unwrap(),
         );
     }
-    let combined = arrow::compute::concat_batches(full_chunk.schema(), &piece_chunks).unwrap();
+    let combined = arrow::compute::concat_batches(&full_chunk.schema(), &piece_chunks).unwrap();
     assert_eq!(combined, full_chunk);
 }
 
@@ -1571,7 +1571,7 @@ fn edge_pieces_at_true_offsets_match_the_full_logical_batch() {
                 .unwrap(),
         );
     }
-    let combined = arrow::compute::concat_batches(full_chunk.schema(), &piece_chunks).unwrap();
+    let combined = arrow::compute::concat_batches(&full_chunk.schema(), &piece_chunks).unwrap();
     assert_eq!(combined, full_chunk);
 }
 
