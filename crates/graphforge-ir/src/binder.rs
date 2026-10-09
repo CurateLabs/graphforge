@@ -13,6 +13,7 @@ mod patterns;
 mod projection;
 mod writes;
 
+use self::patterns::strip_parens;
 use self::projection::expr_contains_aggregate;
 use crate::catalog::RuntimeCatalog;
 use crate::composition_binding::CompositionBindingContext;
@@ -20,7 +21,8 @@ use crate::expr::{IrExpr, IrLiteral};
 use crate::plan::{GraphOp, GraphPlan, GraphPlanBuilder, OntologyMode};
 use crate::{OntologyVersion, ProcedureRegistry, ProcedureYield, VarId};
 use graphforge_ast::{
-    AstClause, AstQuery, CallClause, DialectVersion, Expr, FunctionCall, Literal, VarRef,
+    AstClause, AstQuery, BinaryOpKind as AstBinOp, CallClause, DialectVersion, Expr, FunctionCall,
+    Literal, VarRef,
 };
 use graphforge_core::Span;
 use graphforge_ontology::OntologyHandle;
@@ -56,6 +58,116 @@ impl std::fmt::Display for VarKind {
             VarKind::Node => "a node",
             VarKind::Relationship => "a relationship",
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Node-list facts
+// ---------------------------------------------------------------------------
+
+/// The proved node-collection fact of a projection or `UNWIND` list expression
+/// (#1888 D8). Inferred only from shapes that *prove* every element is a node —
+/// a `collect` over a directly bound node, a literal list of directly bound
+/// nodes, a reference to an already-proved node-list variable, and `+`
+/// concatenations of the above (parentheses are transparent). Scalars,
+/// relationships, maps, nested lists, and parameters prove nothing and stay
+/// [`NodeListFact::Unknown`], preserving the existing runtime-polymorphic
+/// semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NodeListFact {
+    /// Proved list of nodes. `Some(label)` when every proved element shares one
+    /// owner label; `None` when the labels differ (node kind retained, owner
+    /// label dropped).
+    Nodes(Option<String>),
+    /// An empty list literal — neutral under `+` beside a proved node list.
+    EmptyList,
+    /// No proof that this expression is a collection of nodes.
+    Unknown,
+}
+
+impl NodeListFact {
+    /// Combine the two sides of a `+` list concatenation. A proved list wins
+    /// over a neutral empty literal; two proved lists merge their owner labels,
+    /// dropping to `None` when the labels differ.
+    fn concat(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Unknown, _) | (_, Self::Unknown) | (Self::EmptyList, Self::EmptyList) => {
+                Self::Unknown
+            }
+            (Self::EmptyList, proved) | (proved, Self::EmptyList) => proved,
+            (Self::Nodes(a), Self::Nodes(b)) => Self::Nodes(join_owner_labels(a, b)),
+        }
+    }
+}
+
+/// The common owner label of two proved node elements: equal labels survive,
+/// anything mixed (different or already unknown) drops to `None`.
+fn join_owner_labels(a: Option<String>, b: Option<String>) -> Option<String> {
+    match (a, b) {
+        (Some(a), Some(b)) if a == b => Some(a),
+        _ => None,
+    }
+}
+
+/// Resolves `name` to its variable when it is bound as a direct node pattern
+/// element; `None` otherwise. The owner label is `s.node_vars[&var]`.
+fn direct_node_var(name: &str, s: &BinderState) -> Option<VarId> {
+    s.vars
+        .get(name)
+        .copied()
+        .filter(|var| s.node_vars.contains_key(var))
+}
+
+/// Infer the [`NodeListFact`] of `expr` against the current scope. Purely
+/// syntactic: no property/ownership schema is consulted here.
+fn node_list_fact(expr: &Expr, s: &BinderState) -> NodeListFact {
+    match strip_parens(expr) {
+        Expr::Var(VarRef { name, .. }) => s
+            .vars
+            .get(name)
+            .and_then(|var| s.node_lists.get(var))
+            .map_or(NodeListFact::Unknown, |label| {
+                NodeListFact::Nodes(label.clone())
+            }),
+        // `collect` (with or without DISTINCT) over a directly bound node is a
+        // proved node list; any other argument proves nothing.
+        Expr::FunctionCall(call)
+            if is_function_named(call, "collect") && !call.star && call.args.len() == 1 =>
+        {
+            match strip_parens(&call.args[0]) {
+                Expr::Var(VarRef { name, .. }) => match direct_node_var(name, s) {
+                    Some(var) => NodeListFact::Nodes(s.node_vars.get(&var).cloned().flatten()),
+                    None => NodeListFact::Unknown,
+                },
+                _ => NodeListFact::Unknown,
+            }
+        }
+        Expr::List(list) => {
+            if list.elements.is_empty() {
+                return NodeListFact::EmptyList;
+            }
+            // `None` outer = not yet seeded; `None` inner = proved elements with
+            // no common owner label.
+            let mut label: Option<Option<String>> = None;
+            for element in &list.elements {
+                let Expr::Var(VarRef { name, .. }) = strip_parens(element) else {
+                    return NodeListFact::Unknown;
+                };
+                let Some(var) = direct_node_var(name, s) else {
+                    return NodeListFact::Unknown;
+                };
+                let element_label = s.node_vars.get(&var).cloned().flatten();
+                label = Some(match label {
+                    None => element_label,
+                    Some(previous) => join_owner_labels(previous, element_label),
+                });
+            }
+            NodeListFact::Nodes(label.expect("non-empty list checked above"))
+        }
+        Expr::BinaryOp(binary) if binary.op == AstBinOp::Add => {
+            node_list_fact(&binary.left, s).concat(node_list_fact(&binary.right, s))
+        }
+        _ => NodeListFact::Unknown,
     }
 }
 
@@ -204,6 +316,7 @@ impl Binder {
             edge_rel_names: HashMap::new(),
             scalar_list_edges: HashSet::new(),
             var_kinds: HashMap::new(),
+            node_lists: HashMap::new(),
             next_var: 0,
             builder,
             errors: Vec::new(),
@@ -336,9 +449,22 @@ impl Binder {
     }
 
     fn lower_unwind(&self, u: &graphforge_ast::UnwindClause, s: &mut BinderState) {
+        // Infer the element fact against the pre-UNWIND scope, before `alias`
+        // is (re)bound and could shadow a name the list expression references.
+        let fact = node_list_fact(&u.expr, s);
         let list_expr = self.lower_expr(&u.expr, u.span, s);
         let alias = ensure_var_name(&u.alias, s);
         s.var_kinds.insert(alias, VarKind::Unknown);
+        // A proved node collection binds the alias as a whole node (#1888 D8):
+        // the relational `Unwind` still spreads the value's fields under the
+        // alias, so no extra scan or rebinding is emitted here. The alias is an
+        // element, never a list, so any stale list fact for the (shadowed) var
+        // is dropped.
+        s.node_lists.remove(&alias);
+        if let NodeListFact::Nodes(label) = fact {
+            s.var_kinds.insert(alias, VarKind::Node);
+            s.node_vars.insert(alias, label);
+        }
         s.builder.push_op_mut(GraphOp::Unwind { list_expr, alias });
     }
 
@@ -676,6 +802,14 @@ struct BinderState {
     /// (#956). Keyed by the immutable `VarId`; entries never need clearing
     /// across a WITH scope reset because a fresh scope mints fresh `VarId`s.
     var_kinds: HashMap<VarId, VarKind>,
+    /// Proved node-collection facts for value variables, keyed by the immutable
+    /// `VarId` (#1888 D8): the element owner label (`Some` when every element
+    /// shares one label, `None` when they differ). Only shapes that *prove* the
+    /// elements are nodes are recorded (see [`node_list_fact`]); everything else
+    /// stays unrecorded, so an `UNWIND` over it keeps the existing
+    /// `VarKind::Unknown` element semantics. WITH scope resets prune the map and
+    /// restore each projected alias's fact onto its new output `VarId`.
+    node_lists: HashMap<VarId, Option<String>>,
     next_var: u32,
     builder: GraphPlanBuilder,
     errors: Vec<BindError>,

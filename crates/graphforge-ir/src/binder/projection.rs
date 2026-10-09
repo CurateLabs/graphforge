@@ -2,8 +2,8 @@
 
 use super::patterns::{expr_contains_pattern_predicate, strip_parens};
 use super::{
-    BindError, BindErrorKind, Binder, BinderState, PathBinding, VarKind, alloc_anon_var,
-    ensure_var_name, is_function_named,
+    BindError, BindErrorKind, Binder, BinderState, NodeListFact, PathBinding, VarKind,
+    alloc_anon_var, ensure_var_name, is_function_named, node_list_fact,
 };
 use crate::expr::IrExpr;
 use crate::plan::{GraphOp, SortKey};
@@ -13,9 +13,31 @@ use graphforge_ast::{
     SortOrder as AstSortOrder, UnaryOpKind as AstUnOp, VarRef, WithClause,
 };
 use graphforge_core::Span;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 impl Binder {
+    /// The proved node-collection fact of each ORIGINAL projection item,
+    /// computed before any lowering or scope reset (#1888 D8), keyed by the
+    /// item's output alias. Only proved node lists appear here.
+    fn projection_node_list_facts(
+        items: &[ReturnItem],
+        s: &BinderState,
+    ) -> HashMap<String, Option<String>> {
+        items
+            .iter()
+            .filter_map(|item| {
+                let alias = item.alias.clone().or_else(|| match &item.expr {
+                    Expr::Var(VarRef { name, .. }) => Some(name.clone()),
+                    _ => None,
+                })?;
+                match node_list_fact(&item.expr, s) {
+                    NodeListFact::Nodes(label) => Some((alias, label)),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
     // Item classification (aggregate/node-forward/path/scalar) + scope reset +
     // ORDER BY/SKIP/LIMIT make this long but linear, like the RETURN lowering.
     #[allow(clippy::too_many_lines)]
@@ -78,6 +100,7 @@ impl Binder {
             self.lower_with_aggregate(w, &items_ast, s);
             return;
         }
+        let node_list_facts = Self::projection_node_list_facts(&items_ast, s);
         let mut items: Vec<ProjectItem> = Vec::with_capacity(items_ast.len());
         let mut new_scope: Vec<(String, VarId)> = Vec::new();
         // Entity variables forwarded WHOLE (`WITH n`, `WITH r`): restore the
@@ -318,8 +341,14 @@ impl Binder {
         s.edge_vars.clear();
         s.edge_rel_names.clear();
         s.path_vars.clear();
+        s.node_lists.clear();
         for (name, v) in new_scope {
-            s.vars.insert(name, v);
+            s.vars.insert(name.clone(), v);
+            // Restore each alias's proved node-list fact onto its FINAL output
+            // variable in the new scope (#1888 D8).
+            if let Some(label) = node_list_facts.get(name.as_str()) {
+                s.node_lists.insert(v, label.clone());
+            }
         }
         for (v, label) in forwarded_nodes {
             s.node_vars.insert(v, label);
@@ -364,6 +393,7 @@ impl Binder {
     /// those variables available to downstream graph operators.
     #[allow(clippy::too_many_lines)]
     fn lower_with_aggregate(&self, w: &WithClause, items: &[ReturnItem], s: &mut BinderState) {
+        let node_list_facts = Self::projection_node_list_facts(items, s);
         let mut group_by: Vec<ExprId> = Vec::new();
         let mut group_aliases: Vec<Option<String>> = Vec::new();
         let mut group_vars: Vec<Option<VarId>> = Vec::new();
@@ -480,8 +510,15 @@ impl Binder {
         s.edge_vars.clear();
         s.edge_rel_names.clear();
         s.path_vars.clear();
+        s.node_lists.clear();
         for (name, v) in new_scope {
-            s.vars.insert(name, v);
+            s.vars.insert(name.clone(), v);
+            // Restore each alias's proved node-list fact onto its FINAL output
+            // variable in the new scope (#1888 D8) — e.g. `collect(a) AS xs`
+            // keeps `xs` a proved node list after the aggregation.
+            if let Some(label) = node_list_facts.get(name.as_str()) {
+                s.node_lists.insert(v, label.clone());
+            }
         }
         for (var, label) in forwarded_nodes {
             s.node_vars.insert(var, label);
@@ -524,6 +561,12 @@ impl Binder {
         items: &[ReturnItem],
         s: &mut BinderState,
     ) {
+        // Facts of the ORIGINAL projection expressions, computed before any
+        // scope reset and keyed by output alias (#1888 D8). The intermediate
+        // aggregate scope mints different vars for group keys and synthetic
+        // `__agg_N` outputs, and the final project mints the actual downstream
+        // vars — the fact is restored on each alias's FINAL output variable.
+        let node_list_facts = Self::projection_node_list_facts(items, s);
         let group_items: Vec<&ReturnItem> = items
             .iter()
             .filter(|item| !expr_contains_aggregate(&item.expr))
@@ -675,6 +718,7 @@ impl Binder {
         s.edge_vars.clear();
         s.edge_rel_names.clear();
         s.path_vars.clear();
+        s.node_lists.clear();
         for (name, var) in &aggregate_scope {
             s.vars.insert(name.clone(), *var);
         }
@@ -775,8 +819,16 @@ impl Binder {
         s.edge_vars.clear();
         s.edge_rel_names.clear();
         s.path_vars.clear();
+        s.node_lists.clear();
         for (name, var) in final_scope {
-            s.vars.insert(name, var);
+            s.vars.insert(name.clone(), var);
+            // Restore each alias's proved node-list fact onto the FINAL output
+            // variable of this projection (#1888 D8) — `xs + collect(b) AS ns`
+            // keeps `ns` a proved node list even though its internal aggregate
+            // and projection vars were minted separately.
+            if let Some(label) = node_list_facts.get(name.as_str()) {
+                s.node_lists.insert(var, label.clone());
+            }
         }
         for (var, label) in final_nodes {
             s.node_vars.insert(var, label);

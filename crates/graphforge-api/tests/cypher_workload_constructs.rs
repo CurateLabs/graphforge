@@ -13,7 +13,11 @@
 //! `startNode` / `endNode` and `id` over unwound path hops, `reduce` over
 //! scalar lists and path-hop amounts, a `COUNT { … }` subquery, `CALL { … }`
 //! subqueries (uncorrelated, correlated, `UNION ALL` inside the body), and
-//! `shortestPath` bound in `MATCH` position.
+//! `shortestPath` bound in `MATCH` position, proved node-list facts carrying
+//! `collect`ed (and concatenated, renamed, deduplicated) node lists through
+//! `UNWIND` into `OPTIONAL MATCH` with duplicates and null extensions
+//! preserved, and the element kinds that must stay value-typed at a later node
+//! pattern.
 
 use std::collections::HashMap;
 
@@ -456,4 +460,117 @@ fn shortest_path_bounded_to_one_hop_returns_the_single_edge() {
         ),
         vec![strings(&["1"])]
     );
+}
+
+/// Duplicate elements of a proved node list survive `UNWIND` + `OPTIONAL
+/// MATCH` (the repeated `1` matches its transfer twice), and an element with no
+/// outgoing `transfer` extends the result with a null column instead of
+/// dropping the row.
+#[test]
+fn collected_duplicates_and_null_extension_survive_unwind_optional_match() {
+    let gf = accounts();
+    assert_eq!(
+        rows(
+            &gf,
+            "MATCH (a:Account {id: 1}) WITH collect(a) AS xs \
+             MATCH (b:Account {id: 4}) WITH xs, xs + xs + collect(b) AS ns \
+             UNWIND ns AS n \
+             OPTIONAL MATCH (n)-[:transfer]->(m) \
+             RETURN n.id AS source, m.id AS dest ORDER BY source, dest"
+        ),
+        vec![
+            strings(&["1", "2"]),
+            strings(&["1", "2"]),
+            vec![Some("4".to_owned()), None],
+        ]
+    );
+}
+
+/// Proved node-list facts follow renamed aliases across plain WITH projections
+/// (`collect(b) AS ys`, then `ys AS zs`) before the `UNWIND`; the renamed lists
+/// concatenate, `WITH DISTINCT` deduplicates, and `OPTIONAL MATCH` still sees
+/// whole nodes.
+#[test]
+fn node_list_facts_follow_renamed_aliases_through_multiple_withs() {
+    let gf = accounts();
+    assert_eq!(
+        rows(
+            &gf,
+            "MATCH (a:Account {id: 1}) WITH collect(a) AS xs \
+             MATCH (b:Account {id: 2}) WITH xs, collect(b) AS ys \
+             WITH ys AS zs, xs AS ws \
+             UNWIND ws + zs AS n \
+             WITH DISTINCT n \
+             OPTIONAL MATCH (n)-[:transfer]->(m) \
+             RETURN n.id AS source, m.id AS dest ORDER BY source, dest"
+        ),
+        vec![strings(&["1", "2"]), strings(&["2", "3"])]
+    );
+}
+
+/// Mixed owner labels keep the proved node kind but drop the shared label — the
+/// unwound elements still match patterns by identity, and an element with no
+/// outgoing edge extends the result with a null column.
+#[test]
+fn mixed_label_node_lists_keep_the_node_kind_without_an_owner_label() {
+    let gf = GraphForge::new(None).expect("in-memory instance");
+    gf.execute("CREATE (:A {id: 1})-[:r]->(:B {id: 2})")
+        .expect("create mixed labels");
+    assert_eq!(
+        rows(
+            &gf,
+            "MATCH (a:A {id: 1}) WITH collect(a) AS xs \
+             MATCH (b:B {id: 2}) WITH xs, xs + collect(b) AS ns \
+             UNWIND ns AS n \
+             OPTIONAL MATCH (n)-[:r]->(m) \
+             RETURN n.id AS source, m.id AS dest ORDER BY source, dest"
+        ),
+        vec![strings(&["1", "2"]), vec![Some("2".to_owned()), None]]
+    );
+}
+
+/// Element kinds that prove nothing stay runtime values: `UNWIND` over them
+/// keeps the binder's value-kind conflict at a later node pattern instead of
+/// silently promoting the elements to nodes.
+#[test]
+fn unproved_element_kinds_keep_the_value_kind_conflict_at_a_node_pattern() {
+    let gf = accounts();
+    let conflict = |query: &str| {
+        let error = gf
+            .execute(query)
+            .expect_err("unproved elements must stay value-typed");
+        assert!(
+            error.to_string().contains("bound as a value"),
+            "{query}: {error}"
+        );
+    };
+    // Scalar list.
+    conflict(
+        "MATCH (a:Account {id: 1}) WITH [1, 2] AS ns UNWIND ns AS n \
+         WITH DISTINCT n OPTIONAL MATCH (n)-[:transfer]->(m) RETURN n.id",
+    );
+    // List of relationships.
+    conflict(
+        "MATCH ()-[r:transfer]->() WITH [r] AS rs UNWIND rs AS n \
+         WITH DISTINCT n OPTIONAL MATCH (n)-[:transfer]->(m) RETURN n.id",
+    );
+    // Nested list of nodes.
+    conflict(
+        "MATCH (a:Account {id: 1}) WITH [[a]] AS ns UNWIND ns AS n \
+         WITH DISTINCT n OPTIONAL MATCH (n)-[:transfer]->(m) RETURN n.id",
+    );
+    // List of maps.
+    conflict(
+        "WITH [{k: 1}] AS ns UNWIND ns AS n \
+         WITH DISTINCT n OPTIONAL MATCH (n)-[:transfer]->(m) RETURN n.id",
+    );
+    // Unknown parameter element type.
+    let error = gf
+        .execute_with_params(
+            "UNWIND $list AS n WITH DISTINCT n \
+             OPTIONAL MATCH (n)-[:transfer]->(m) RETURN n.id",
+            &HashMap::from([("list".to_owned(), IrLiteral::List(vec![]))]),
+        )
+        .expect_err("parameter element types prove nothing");
+    assert!(error.to_string().contains("bound as a value"), "{error}");
 }
