@@ -380,7 +380,7 @@ fn anchored_destination_property_reads_do_not_grow_with_unrelated_rows() {
         let mut reads = Vec::new();
         for built in [&small, &large] {
             let forge = open_with_partitions(&built.project, target_partitions);
-            if target_partitions == 1 && reads.is_empty() {
+            if reads.is_empty() {
                 let plan = forge
                     .explain_stage(
                         &query.replace("$ident", "0"),
@@ -388,6 +388,15 @@ fn anchored_destination_property_reads_do_not_grow_with_unrelated_rows() {
                     )
                     .expect("physical plan");
                 assert!(plan.contains("UuidBuildKeyTapExec"), "{plan}");
+                if target_partitions > 1 {
+                    assert!(
+                        plan.contains(&format!(
+                            "RepartitionExec: partitioning=RoundRobinBatch({target_partitions})"
+                        )),
+                        "{plan}"
+                    );
+                    assert!(plan.contains("join_type=Left"), "{plan}");
+                }
             }
             let (warm, _) = measured(&forge, query, 0);
             assert_eq!(count(&warm), FAN_OUT as i64);
@@ -421,6 +430,23 @@ fn large_partitioned_uuid_frontier_preserves_destination_results() {
         assert_eq!(io.write_bytes, 0);
         assert_eq!(io.write_calls, 0);
     }
+
+    // The frontier build nomination must complete even when the parent only
+    // consumes one output row from the restored four-partition result.
+    let limited = forge
+        .execute_with_params(
+            "MATCH (a:Entity {ident: $ident})-[:LINK]->(b) RETURN b.ident LIMIT 1",
+            &HashMap::from([("ident".to_owned(), IrLiteral::Int(0))]),
+        )
+        .expect("limited statement executes");
+    assert_eq!(
+        limited
+            .batches
+            .iter()
+            .map(RecordBatch::num_rows)
+            .sum::<usize>(),
+        1
+    );
 }
 
 /// Statistics cannot exclude a fragment from a scattered column, so its lookup
