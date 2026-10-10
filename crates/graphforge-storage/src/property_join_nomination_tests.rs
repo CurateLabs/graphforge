@@ -412,6 +412,7 @@ fn left_enrichment_scan_nominations_exclude_limits_and_property_equalities() {
 fn partitioned_equality_join(
     scan: PropertyOverlayExec,
     preserve_order: bool,
+    projection: Option<Vec<usize>>,
 ) -> Arc<dyn ExecutionPlan> {
     let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("node_uuid", 0));
     let distribution = datafusion::physical_expr::Partitioning::Hash(vec![Arc::clone(&key)], 4);
@@ -442,7 +443,7 @@ fn partitioned_equality_join(
             vec![(Arc::clone(&key), key)],
             None,
             &JoinType::Inner,
-            Some(vec![0, 2]),
+            projection,
             PartitionMode::Partitioned,
             NullEquality::NullEqualsNothing,
             false,
@@ -458,7 +459,8 @@ fn a_partitioned_equality_anchor_uses_one_build_and_restores_hash_distribution()
         column: "ident".into(),
         value: EqualityValue::Int(7),
     };
-    let original = partitioned_equality_join(property_scan(None, Some(equality)), false);
+    let original =
+        partitioned_equality_join(property_scan(None, Some(equality)), false, Some(vec![0, 2]));
     let original_distribution = original.output_partitioning().clone();
     let original_schema = original.schema();
     let rewritten = PropertyFilterApprovalRule
@@ -491,6 +493,39 @@ fn a_partitioned_equality_anchor_uses_one_build_and_restores_hash_distribution()
 }
 
 #[test]
+fn equality_anchor_skips_projection_that_drops_hash_key() {
+    let equality = PropertyEquality {
+        column: "ident".into(),
+        value: EqualityValue::Int(7),
+    };
+    // Only return the right-side property. The join's UUID output key is
+    // projected away, so the distribution becomes an UnKnownColumn.
+    let original =
+        partitioned_equality_join(property_scan(None, Some(equality)), false, Some(vec![2]));
+    let original_keys = match original.output_partitioning() {
+        datafusion::physical_expr::Partitioning::Hash(keys, _) => keys,
+        partitioning => panic!("expected hash output partitioning, got {partitioning:?}"),
+    };
+    assert_eq!(
+        original_keys[0]
+            .data_type(original.schema().as_ref())
+            .unwrap(),
+        DataType::Null,
+        "the dropped UUID key is represented as an unevaluable partitioning key"
+    );
+    let rewritten = PropertyFilterApprovalRule
+        .optimize(Arc::clone(&original), &ConfigOptions::default())
+        .unwrap();
+    assert!(rewritten.downcast_ref::<HashJoinExec>().is_some());
+    assert!(matches!(
+        rewritten.output_partitioning(),
+        datafusion::physical_expr::Partitioning::Hash(keys, _)
+            if keys[0].data_type(rewritten.schema().as_ref()).unwrap() == DataType::Null
+    ));
+    assert!(rewritten.output_partitioning().partition_count() > 0);
+}
+
+#[test]
 fn equality_anchor_rejects_limits_order_and_stale_nominations() {
     let equality = || {
         Some(PropertyEquality {
@@ -507,7 +542,7 @@ fn equality_anchor_rejects_limits_order_and_stale_nominations() {
             false,
         ),
     ] {
-        let original = partitioned_equality_join(scan, preserve_order);
+        let original = partitioned_equality_join(scan, preserve_order, Some(vec![0, 2]));
         let after = PropertyFilterApprovalRule
             .optimize(original, &ConfigOptions::default())
             .unwrap();
@@ -541,7 +576,7 @@ fn strict_property_filter_pipeline(
 }
 
 fn equality_join_with_pipeline(pipeline: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
-    let original = partitioned_equality_join(property_scan(None, None), false);
+    let original = partitioned_equality_join(property_scan(None, None), false, Some(vec![0, 2]));
     let join = original.downcast_ref::<HashJoinExec>().unwrap();
     let exchange = join.right().downcast_ref::<RepartitionExec>().unwrap();
     let right: Arc<dyn ExecutionPlan> =

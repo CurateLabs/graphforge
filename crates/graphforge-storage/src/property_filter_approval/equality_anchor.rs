@@ -40,6 +40,23 @@ pub(super) fn shared_equality_build(
     if !matches!(&output_partitioning, Partitioning::Hash(_, count) if *count > 0) {
         return Ok(None);
     }
+    let Partitioning::Hash(output_keys, _) = &output_partitioning else {
+        unreachable!("hash partitioning was checked above")
+    };
+    // HashJoinExec projects its partitioning through the join projection. If
+    // that projection drops the UUID key, DataFusion represents it as a
+    // UnKnownColumn expression (whose data type is Null). RepartitionExec
+    // would then fail when it tries to evaluate that key. Keep the original
+    // join in this case; its distribution contract cannot be restored from
+    // the projected output.
+    if output_keys.iter().any(|key| {
+        matches!(
+            key.data_type(plan.schema().as_ref()),
+            Ok(DataType::Null) | Err(_)
+        )
+    }) {
+        return Ok(None);
+    }
     let Some(exchange) = join.right().downcast_ref::<RepartitionExec>() else {
         return Ok(None);
     };
