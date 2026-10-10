@@ -36,6 +36,7 @@ mod parquet_codec;
 mod parquet_compact;
 mod parquet_delta;
 mod parquet_events;
+mod parquet_footer_counts;
 mod parquet_levels;
 mod parquet_page;
 mod parquet_page_decode;
