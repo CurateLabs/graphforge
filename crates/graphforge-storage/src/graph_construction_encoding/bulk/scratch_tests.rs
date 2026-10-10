@@ -1,4 +1,7 @@
 use super::*;
+use crate::StorageAllocationOperation;
+use std::fs::File;
+use std::io::Write as _;
 
 #[test]
 fn crc32c_matches_the_published_check_value() {
@@ -178,4 +181,199 @@ fn occupancy_overflow_is_refused_rather_than_saturated() {
     assert!(error.to_string().contains("overflow"), "{error}");
     assert_eq!(scratch.occupied_bytes(), u64::MAX);
     scratch.remove().unwrap();
+}
+
+fn allocated(file: &File) -> u64 {
+    graphforge_filesystem::file_space_usage(file)
+        .unwrap()
+        .allocated_bytes
+}
+
+fn allocation_context(root: &Path) -> (StorageAllocationOperation, StableDirectory, File, u64) {
+    let allocation = StorageAllocationOperation::default();
+    let unrelated_path = root.join("unrelated-owner.bin");
+    let mut unrelated = File::create(&unrelated_path).unwrap();
+    unrelated.write_all(&vec![0x7b; 32_781]).unwrap();
+    drop(unrelated);
+    let unrelated = File::open(&unrelated_path).unwrap();
+    allocation
+        .replace_file_at(&unrelated_path, &unrelated)
+        .unwrap();
+    let baseline = allocated(&unrelated);
+    let directory = StableDirectory::open(root)
+        .unwrap()
+        .with_allocation(Some(allocation.clone()));
+    (allocation, directory, unrelated, baseline)
+}
+
+fn observe_partition_file(path: &Path) -> u64 {
+    allocated(&File::open(path).unwrap())
+}
+
+#[test]
+fn native_partition_bytes_follow_growth_and_selective_reclaim() {
+    let root = tempfile::tempdir().unwrap();
+    let (allocation, directory, _unrelated, baseline) = allocation_context(root.path());
+    let scratch = Scratch::create(&directory).unwrap();
+    assert_eq!(allocation.totals().unwrap().0, baseline);
+    let partitions = Partitions::create(&scratch, "native", 2, 4).unwrap();
+    let mut scatter = Scatter::new(&scratch, &partitions, 16_384);
+    for value in 0_u32..8_193 {
+        scatter.push(0, &value.to_le_bytes()).unwrap();
+        scatter.push(1, &value.to_le_bytes()).unwrap();
+    }
+    scatter.finish().unwrap();
+
+    let first = observe_partition_file(partitions.path(0));
+    let second = observe_partition_file(partitions.path(1));
+    assert!(first > 0 && second > 0);
+    assert_ne!(
+        std::fs::metadata(partitions.path(0)).unwrap().len(),
+        first,
+        "fixture must distinguish logical length from native allocation"
+    );
+    let live = baseline + first + second;
+    assert_eq!(allocation.totals().unwrap().0, live);
+    assert_eq!(scratch.occupied_bytes(), scratch.written_bytes());
+
+    for index in 0..2 {
+        let mut records = 0;
+        partitions
+            .read(&scratch, index, |payload| {
+                records += payload.len() / 4;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(records, 8_193);
+    }
+    partitions.reclaim(&scratch, 0).unwrap();
+    assert_eq!(allocation.totals().unwrap().0, baseline + second);
+    let after_first = allocation.totals().unwrap().1;
+    partitions.reclaim(&scratch, 0).unwrap();
+    assert_eq!(allocation.totals().unwrap().0, baseline + second);
+    partitions.reclaim(&scratch, 1).unwrap();
+    assert_eq!(allocation.totals().unwrap(), (baseline, live));
+    assert!(after_first <= live);
+    scratch.remove().unwrap();
+}
+
+#[test]
+fn native_segmented_destructive_read_retires_each_file_owner() {
+    let root = tempfile::tempdir().unwrap();
+    let (allocation, directory, _unrelated, baseline) = allocation_context(root.path());
+    let scratch = Scratch::create(&directory).unwrap();
+    let partitions = Partitions::create_segmented(&scratch, "refs", 1, 4, HEADER + 16_384).unwrap();
+    let mut scatter = Scatter::new(&scratch, &partitions, 16_384);
+    for value in 0_u32..8_193 {
+        scatter.push(0, &value.to_le_bytes()).unwrap();
+    }
+    scatter.finish().unwrap();
+    let paths = (0..=2)
+        .map(|segment| partitions.segment_path(0, segment))
+        .collect::<Vec<_>>();
+    let native = paths
+        .iter()
+        .map(|path| observe_partition_file(path))
+        .sum::<u64>();
+    assert!(native > 0);
+    assert_eq!(allocation.totals().unwrap().0, baseline + native);
+
+    let mut records = 0;
+    partitions
+        .read_reclaiming(&scratch, 0, &AtomicBool::new(false), |payload| {
+            records += payload.len() / 4;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(records, 8_193);
+    assert_eq!(allocation.totals().unwrap().0, baseline);
+    assert_eq!(allocation.totals().unwrap().1, baseline + native);
+    assert!(paths.iter().all(|path| !path.exists()));
+    scratch.remove().unwrap();
+}
+
+#[test]
+fn native_appender_observes_triggered_and_finish_only_growth() {
+    let root = tempfile::tempdir().unwrap();
+    let (allocation, directory, _unrelated, baseline) = allocation_context(root.path());
+    let scratch = Scratch::create(&directory).unwrap();
+
+    let triggered_path = scratch.file("triggered.blocks");
+    let mut triggered = Appender::create(&scratch, &triggered_path, 1).unwrap();
+    triggered.push(&vec![0x23; 32_777]).unwrap();
+    let triggered_file = File::open(&triggered_path).unwrap();
+    let triggered_native = allocated(&triggered_file);
+    assert!(triggered_native > 0);
+    assert_eq!(allocation.totals().unwrap().0, baseline + triggered_native);
+    triggered.finish().unwrap();
+    scratch.reclaim_file(&triggered_path).unwrap();
+    assert_eq!(allocation.totals().unwrap().0, baseline);
+
+    let finish_path = scratch.file("finish-only.blocks");
+    let mut finish_only = Appender::create(&scratch, &finish_path, 64).unwrap();
+    finish_only.push(&[0x17; 16]).unwrap();
+    assert_eq!(std::fs::metadata(&finish_path).unwrap().len(), 0);
+    assert_eq!(allocation.totals().unwrap().0, baseline);
+    finish_only.finish().unwrap();
+    let finish_file = File::open(&finish_path).unwrap();
+    let finish_native = allocated(&finish_file);
+    assert!(finish_native > 0);
+    assert_eq!(allocation.totals().unwrap().0, baseline + finish_native);
+    assert_eq!(
+        allocation.totals().unwrap().1,
+        baseline + triggered_native.max(finish_native)
+    );
+    scratch.reclaim_file(&finish_path).unwrap();
+    assert_eq!(allocation.totals().unwrap().0, baseline);
+    scratch.remove().unwrap();
+}
+
+#[test]
+fn native_scratch_teardown_and_stale_create_retire_only_owned_files() {
+    let root = tempfile::tempdir().unwrap();
+    let (allocation, directory, _unrelated, baseline) = allocation_context(root.path());
+    let stale_root = root.path().join(SCRATCH_DIRECTORY);
+    std::fs::create_dir(&stale_root).unwrap();
+    let stale_path = stale_root.join("stale.blocks");
+    std::fs::write(&stale_path, vec![0x55; 32_777]).unwrap();
+    let stale_file = File::open(&stale_path).unwrap();
+    allocation
+        .replace_file_at(&stale_path, &stale_file)
+        .unwrap();
+    assert_eq!(
+        allocation.totals().unwrap().0,
+        baseline + allocated(&stale_file)
+    );
+
+    let scratch = Scratch::create(&directory).unwrap();
+    assert_eq!(allocation.totals().unwrap().0, baseline);
+    let partitions = Partitions::create(&scratch, "explicit", 1, 4).unwrap();
+    let mut scatter = Scatter::new(&scratch, &partitions, 32_768);
+    for value in 0_u32..8_193 {
+        scatter.push(0, &value.to_le_bytes()).unwrap();
+    }
+    scatter.finish().unwrap();
+    let native = observe_partition_file(partitions.path(0));
+    let live = allocation.totals().unwrap().0;
+    assert_eq!(live, baseline + native);
+    partitions.reclaim(&scratch, 0).unwrap();
+    assert_eq!(allocation.totals().unwrap().0, baseline);
+    drop(partitions);
+    scratch.remove().unwrap();
+    assert_eq!(allocation.totals().unwrap(), (baseline, live));
+    assert!(!stale_root.exists());
+
+    let scratch = Scratch::create(&directory).unwrap();
+    let partitions = Partitions::create(&scratch, "drop", 1, 4).unwrap();
+    let mut scatter = Scatter::new(&scratch, &partitions, 32_768);
+    for value in 0_u32..8_193 {
+        scatter.push(0, &value.to_le_bytes()).unwrap();
+    }
+    scatter.finish().unwrap();
+    let live = allocation.totals().unwrap().0;
+    assert!(live > baseline);
+    drop(partitions);
+    drop(scratch);
+    assert_eq!(allocation.totals().unwrap().0, baseline);
+    assert!(!root.path().join(SCRATCH_DIRECTORY).exists());
 }

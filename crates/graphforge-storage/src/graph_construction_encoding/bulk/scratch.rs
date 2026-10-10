@@ -26,6 +26,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::{GfError, StableDirectory, storage};
+use crate::StorageAllocationOperation;
 
 /// Directory name of the scratch tree below the construction root.
 pub(crate) const SCRATCH_DIRECTORY: &str = "bulk-scratch";
@@ -104,10 +105,27 @@ pub(crate) fn discard_scratch(root: &Path) -> Result<(), GfError> {
     }
 }
 
+fn remove_scratch_tree(
+    path: &Path,
+    allocation: Option<&StorageAllocationOperation>,
+) -> Result<(), GfError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(storage(error)),
+    }
+    if let Some(allocation) = allocation {
+        allocation.remove_owned_tree(path)
+    } else {
+        std::fs::remove_dir_all(path).map_err(storage)
+    }
+}
+
 /// The scratch tree of one build attempt. Dropping it deletes the tree, so an
 /// error, a cancellation and a success all leave nothing behind.
 pub(super) struct Scratch {
     path: PathBuf,
+    allocation: Option<StorageAllocationOperation>,
     written: AtomicU64,
     read: AtomicU64,
     /// Bytes reserved for scratch files that still exist, and the largest
@@ -126,11 +144,13 @@ pub(super) struct Scratch {
 impl Scratch {
     /// A fresh, empty scratch tree below `root`.
     pub(super) fn create(root: &StableDirectory) -> Result<Self, GfError> {
-        discard_scratch(root.path())?;
         let path = root.path().join(SCRATCH_DIRECTORY);
+        let allocation = root.allocation().cloned();
+        remove_scratch_tree(&path, allocation.as_ref())?;
         std::fs::create_dir(&path).map_err(storage)?;
         Ok(Self {
             path,
+            allocation,
             written: AtomicU64::new(0),
             read: AtomicU64::new(0),
             occupied: AtomicU64::new(0),
@@ -140,6 +160,13 @@ impl Scratch {
 
     pub(super) fn file(&self, name: &str) -> PathBuf {
         self.path.join(name)
+    }
+
+    pub(super) fn observe_file(&self, path: &Path, file: &File) -> Result<(), GfError> {
+        if let Some(allocation) = &self.allocation {
+            allocation.replace_file_at(path, file)?;
+        }
+        Ok(())
     }
 
     /// Bytes written to scratch so far, headers included.
@@ -198,24 +225,29 @@ impl Scratch {
     pub(super) fn reclaim_file(&self, path: &Path) -> Result<(), GfError> {
         let bytes = std::fs::metadata(path).map_err(storage)?.len();
         std::fs::remove_file(path).map_err(storage)?;
-        self.release(bytes)
+        let owner = self
+            .allocation
+            .as_ref()
+            .map(|allocation| allocation.remove_file_at(path))
+            .transpose();
+        let logical = self.release(bytes);
+        match (owner, logical) {
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+            (Ok(_), Ok(())) => Ok(()),
+        }
     }
 
     /// Delete the tree now and report a failure, instead of leaving it to `Drop`.
     pub(super) fn remove(self) -> Result<(), GfError> {
-        let outcome = std::fs::remove_dir_all(&self.path);
+        let outcome = remove_scratch_tree(&self.path, self.allocation.as_ref());
         std::mem::forget(self);
-        match outcome {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(storage(error)),
-        }
+        outcome
     }
 }
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
+        let _ = remove_scratch_tree(&self.path, self.allocation.as_ref());
     }
 }
 
@@ -249,6 +281,7 @@ struct SegmentLayout {
 }
 
 /// Fixed geometry and aggregate expectations of a segmented read.
+#[derive(Clone, Copy)]
 struct SegmentReadRange {
     layout: SegmentLayout,
     last: u64,
@@ -279,6 +312,17 @@ struct Progress {
     /// partitions only). Suffix cleanup starts here and never releases a
     /// segment twice.
     first_live: u64,
+}
+
+fn append_and_observe(scratch: &Scratch, path: &Path, block: &[u8]) -> Result<(), GfError> {
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(path)
+        .map_err(storage)?;
+    let write = file.write_all(block).map_err(storage);
+    let observation = scratch.observe_file(path, &file);
+    write?;
+    observation
 }
 
 impl Progress {
@@ -329,7 +373,8 @@ impl Partitions {
             .map(|index| scratch.file(&format!("{prefix}-{index:06}.blocks")))
             .collect::<Vec<_>>();
         for path in &paths {
-            File::create(path).map_err(storage)?;
+            let file = File::create(path).map_err(storage)?;
+            scratch.observe_file(path, &file)?;
         }
         Ok(Self {
             state: (0..count)
@@ -387,11 +432,12 @@ impl Partitions {
             .map(|index| scratch.file(&format!("{prefix}-{index:06}.blocks")))
             .collect::<Vec<_>>();
         for path in &paths {
-            OpenOptions::new()
+            let file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(path)
                 .map_err(storage)?;
+            scratch.observe_file(path, &file)?;
         }
         Ok(Self {
             state: (0..count)
@@ -543,14 +589,19 @@ impl Partitions {
             .ok_or_else(|| storage("scratch partition record count overflowed"))?;
         // Past this point the append mutates owned state.
         if let Some(next) = rotate_to {
-            OpenOptions::new()
+            let path = self.segment_path(index, next);
+            let file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .open(self.segment_path(index, next))
+                .open(&path)
                 .map_err(storage)?;
             progress.segment = next;
             progress.segment_bytes = 0;
             grown = block.len() as u64;
+            if let Err(error) = scratch.observe_file(&path, &file) {
+                progress.lifecycle = SegmentLifecycle::Failed;
+                return Err(error);
+            }
         }
         // Reserve the whole block before the write can grow the file, and
         // keep the reservation when the write fails: a partial write may
@@ -563,22 +614,16 @@ impl Partitions {
             }
             return Err(error);
         }
-        let opened = if self.segments.is_some() {
-            OpenOptions::new()
-                .append(true)
-                .open(self.segment_path(index, progress.segment))
+        let path = if self.segments.is_some() {
+            self.segment_path(index, progress.segment)
         } else {
-            OpenOptions::new().append(true).open(&self.paths[index])
+            self.paths[index].clone()
         };
-        let failure = match opened {
-            Ok(mut file) => file.write_all(block).err(),
-            Err(error) => Some(error),
-        };
-        if let Some(error) = failure {
+        if let Err(error) = append_and_observe(scratch, &path, block) {
             if self.segments.is_some() {
                 progress.lifecycle = SegmentLifecycle::Failed;
             }
-            return Err(storage(error));
+            return Err(error);
         }
         // Only a successful write commits totals.
         progress.records = next_records;
@@ -1231,6 +1276,7 @@ impl<'a> Scatter<'a> {
 /// Appends records to a single scratch file in order, as blocks.
 pub(super) struct Appender<'a> {
     scratch: &'a Scratch,
+    path: PathBuf,
     file: File,
     block: Vec<u8>,
     capacity: usize,
@@ -1242,9 +1288,12 @@ impl<'a> Appender<'a> {
         path: &Path,
         capacity: usize,
     ) -> Result<Self, GfError> {
+        let file = File::create(path).map_err(storage)?;
+        scratch.observe_file(path, &file)?;
         Ok(Self {
             scratch,
-            file: File::create(path).map_err(storage)?,
+            path: path.to_path_buf(),
+            file,
             block: vec![0; HEADER],
             capacity: capacity.max(1),
         })
@@ -1270,7 +1319,10 @@ impl<'a> Appender<'a> {
         // keep the reservation when the write fails: a partial write may
         // exist and the attempt tears the tree down either way.
         self.scratch.occupy(self.block.len() as u64)?;
-        self.file.write_all(&self.block).map_err(storage)?;
+        let write = self.file.write_all(&self.block).map_err(storage);
+        let observation = self.scratch.observe_file(&self.path, &self.file);
+        write?;
+        observation?;
         self.scratch
             .written
             .fetch_add(self.block.len() as u64, Ordering::Relaxed);
