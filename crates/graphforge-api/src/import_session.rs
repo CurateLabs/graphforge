@@ -944,10 +944,14 @@ impl GraphImportSession {
                         .all(|source| !source.staged && source.batches_staged == 0)
             };
             let route = if initial {
-                match self
-                    .plan_bulk_build(graph, cancellation, &refusals, &digests)?
-                    .route()
-                {
+                let planned = match self.plan_bulk_build(graph, cancellation, &refusals, &digests) {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        self.record_bulk_refusal(&refusals)?;
+                        return Err(error);
+                    }
+                };
+                match planned.route() {
                     graphforge_storage::BulkRoute::Staged(reason) => {
                         self.manifest.staged_reason = Some(reason);
                         BuildRoute::Staged
@@ -987,7 +991,13 @@ impl GraphImportSession {
                 bulk_source::bulk_build_memory_budget()?,
                 has_external_sources,
             );
-            let plan = self.plan_bulk_build(graph, cancellation, &refusals, &digests)?;
+            let plan = match self.plan_bulk_build(graph, cancellation, &refusals, &digests) {
+                Ok(plan) => plan,
+                Err(error) => {
+                    self.record_bulk_refusal(&refusals)?;
+                    return Err(error);
+                }
+            };
             let built =
                 self.build_initial(&mut construction, &plan, &digests, reused, cancellation);
             if built.is_err() {

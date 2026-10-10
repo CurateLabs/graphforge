@@ -614,13 +614,6 @@ impl DigestState {
 }
 
 impl SourceDigest {
-    /// Planning reads a footer ahead of the file prefix before decode
-    /// workspace has been granted. Do not retain those out-of-order bytes:
-    /// `finish` reads any dropped ranges under the same source identity.
-    pub(super) fn for_planning(length: u64) -> Self {
-        Self::with_pending_limit(length, 0)
-    }
-
     pub(super) fn new(length: u64) -> Self {
         Self::with_pending_limit(
             length,

@@ -40,6 +40,13 @@ fn needs_values(leaf: &LeafScan) -> bool {
 /// Arrow bytes a value of a leaf occupies besides its payload: an offset, and a
 /// validity bit per slot (added per record, rounded up).
 const OFFSET_BYTES: u64 = 4;
+/// How far a decoded byte-array column's buffers can outgrow its values. The
+/// native reader appends each value to a vector that grows by doubling, so a
+/// piece's value and offset buffers can hold up to twice their payload in
+/// capacity, and the builder charges a batch what its buffers hold. Fixed-width
+/// columns are read into buffers reserved for the piece's rows, exactly.
+const VARIABLE_BUFFER_GROWTH: u64 = 2;
+
 /// Everything known about how a source decodes, from its page headers and the
 /// values the headers cannot size.
 pub(super) struct SourceScan {
@@ -388,23 +395,19 @@ impl SourceScan {
             .saturating_add(self.arrow_buffer_floor_bytes)
     }
 
+    /// The widest bound over a task's pieces. Pieces that straddle different
+    /// pages differ, so the task's admission walks all of them.
     pub(super) fn physical_batch_max_bytes(&self, first: u64, count: u64) -> u64 {
-        if self.physical_batch_rows != 1 {
-            return self.physical_batch_bytes(first);
+        if self.physical_batch_rows == 1 {
+            return (first..first.saturating_add(count))
+                .map(|row| self.physical_batch_bytes(row))
+                .max()
+                .unwrap_or(0);
         }
-        let first_logical = first / self.batch_rows;
-        let last_logical = first.saturating_add(count.saturating_sub(1)) / self.batch_rows;
-        (first_logical..=last_logical)
-            .filter_map(|batch| {
-                self.batch_max_row_value_bytes
-                    .get(usize::try_from(batch).ok()?)
-                    .copied()
-            })
+        (first..first.saturating_add(count))
+            .map(|batch| self.physical_batch_bytes(batch))
             .max()
             .unwrap_or(0)
-            .saturating_add(self.flat_leaf_count)
-            .saturating_add(self.offset_boundary_bytes)
-            .saturating_add(self.arrow_buffer_floor_bytes)
     }
 
     pub(super) fn physical_batch_exceeds(&self, batch: u64, limit: u64) -> bool {
@@ -437,7 +440,8 @@ impl SourceScan {
     }
 
     /// Read every visible column whose batch size the headers cannot state, one
-    /// row group at a time, and add its exact Arrow bytes to each batch it touches.
+    /// row group at a time, and add its exact Arrow bytes to each batch it
+    /// touches.
     fn size_values(
         &mut self,
         file: &File,
@@ -670,6 +674,13 @@ impl SourceScan {
                                 let bytes = if flat {
                                     bytes.checked_sub(1).ok_or_else(|| {
                                         storage("flat row size omitted its validity bit")
+                                    })?
+                                } else {
+                                    bytes
+                                };
+                                let bytes = if leaf.leaf == Leaf::Variable {
+                                    bytes.checked_mul(VARIABLE_BUFFER_GROWTH).ok_or_else(|| {
+                                        storage("Parquet per-row output size overflows")
                                     })?
                                 } else {
                                     bytes

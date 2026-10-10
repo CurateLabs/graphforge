@@ -507,15 +507,25 @@ impl SourceReader<'_> {
         task: usize,
         first_batch: u64,
     ) -> Result<TaskAdmission, GfError> {
+        let batch_rows = self.batch_rows as u64;
         let batch_workspace = parquet_task_workspace(
             scan,
             metadata,
             rows,
-            self.batch_rows as u64,
+            batch_rows,
             self.kind,
             first_batch,
-            self.admission_limit(),
-        )?;
+            self.window_bytes,
+        )
+        .map_err(|error| {
+            error.record(
+                self.refusals,
+                self.kind,
+                self.sequence,
+                first_batch,
+                batch_rows.min(rows.saturating_sub(first_batch * batch_rows)),
+            )
+        })?;
         let decode_budget = TaskDecodeBudget::new(batch_workspace.page_workspace);
         let pool = self
             .workspace
@@ -698,6 +708,63 @@ struct TaskAdmission {
     _reservation: Option<graphforge_storage::SourceReservation>,
 }
 
+/// Why a task's workspace could not be planned: a batch refused before it was
+/// decoded, with the rows the refusal rejects, or a failure of the planning
+/// itself.
+enum TaskWorkspaceError {
+    Refused {
+        batch: u64,
+        rows: u64,
+        error: GfError,
+    },
+    Failed(GfError),
+}
+
+impl From<GfError> for TaskWorkspaceError {
+    fn from(error: GfError) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl TaskWorkspaceError {
+    /// Record what the error rejects and return it: the refused batch's own rows,
+    /// or the first batch of the task (`fallback_batch`, `fallback_rows`) when a
+    /// resource limit stopped planning before a batch was named. Other failures
+    /// reject nothing.
+    fn record(
+        self,
+        refusals: &Refusals,
+        kind: BulkInputKind,
+        sequence: u64,
+        fallback_batch: u64,
+        fallback_rows: u64,
+    ) -> GfError {
+        let edge = u8::from(kind == BulkInputKind::Edge);
+        match self {
+            Self::Refused { batch, rows, error } => {
+                refusals.record((edge, sequence, batch), rows);
+                error
+            }
+            Self::Failed(error) => {
+                if is_resource_limit(&error) {
+                    refusals.record((edge, sequence, fallback_batch), fallback_rows);
+                }
+                error
+            }
+        }
+    }
+}
+
+fn is_resource_limit(error: &GfError) -> bool {
+    matches!(
+        error,
+        GfError::Project {
+            code: graphforge_core::ProjectErrorCode::ResourceLimit,
+            ..
+        }
+    )
+}
+
 struct ParquetTaskWorkspace {
     selected_group_count: usize,
     physical_batch_rows: u64,
@@ -712,8 +779,9 @@ fn parquet_task_workspace(
     batch_rows: u64,
     kind: BulkInputKind,
     first_batch: u64,
-    admission_limit: u64,
-) -> Result<ParquetTaskWorkspace, GfError> {
+    window_bytes: u64,
+) -> Result<ParquetTaskWorkspace, TaskWorkspaceError> {
+    let admission_limit = window_bytes.saturating_add(window_bytes / 8);
     let logical_batches = rows.div_ceil(batch_rows);
     let logical_count = BATCHES_PER_TASK.min(logical_batches.saturating_sub(first_batch));
     let first_row = first_batch
@@ -730,11 +798,24 @@ fn parquet_task_workspace(
     let physical_count = last_row
         .saturating_sub(first_row)
         .div_ceil(physical_batch_rows);
-    // Every complete piece has the same conservative max-row bound; only the
-    // source's final piece can be smaller.
-    let widest = scan
-        .physical_batch_max_bytes(first_physical, physical_count)
-        .min(admission_limit);
+    // A piece past the window, the growth of its decoded buffers included, is
+    // refused before the task runs, since no piece size can hold its widest
+    // row; the refusal names the logical batch that holds the piece.
+    if let Some(piece) = (first_physical..first_physical.saturating_add(physical_count))
+        .find(|piece| scan.physical_batch_bytes(*piece) > admission_limit)
+    {
+        let size = scan.physical_batch_bytes(piece);
+        let batch = piece.saturating_mul(physical_batch_rows) / batch_rows;
+        return Err(TaskWorkspaceError::Refused {
+            batch,
+            rows: batch_rows.min(rows.saturating_sub(batch.saturating_mul(batch_rows))),
+            error: super::limit(format!(
+                "Parquet batch {batch} would decode to {size} bytes, above the \
+                 {window_bytes}-byte batch window; refused before it was decoded"
+            )),
+        });
+    }
+    let widest = scan.physical_batch_max_bytes(first_physical, physical_count);
     let (selected_group_count, validator_workspace) =
         super::parquet_sizing::runtime_scratch_capacity(
             metadata.metadata(),
@@ -789,8 +870,8 @@ fn max_parquet_task_workspace(
     rows: u64,
     batch_rows: usize,
     kind: BulkInputKind,
-    admission_limit: u64,
-) -> Result<u64, GfError> {
+    window_bytes: u64,
+) -> Result<u64, TaskWorkspaceError> {
     let batch_rows = u64::try_from(batch_rows).map_err(storage)?.max(1);
     let tasks = rows.div_ceil(batch_rows.saturating_mul(BATCHES_PER_TASK));
     let mut maximum = 0;
@@ -806,7 +887,7 @@ fn max_parquet_task_workspace(
                 batch_rows,
                 kind,
                 first_batch,
-                admission_limit,
+                window_bytes,
             )?
             .reservation_bytes,
         );
@@ -1254,9 +1335,12 @@ pub(super) fn plan<'a>(
                 let metadata = if let Some(external) = source.external.as_ref() {
                     require_footer_fits(external.footer_bytes(), budget)?;
                     // Footer verification precedes the decoder's workspace
-                    // reservation. Hash its reads without retaining an
-                    // out-of-order footer copy in the digest's pending map.
-                    let digest = SourceDigest::for_planning(external.size);
+                    // reservation. Its read arrives ahead of the hashed prefix,
+                    // so the digest holds it under the shared pending bound
+                    // until the decode's own reads reach it: every byte is
+                    // hashed once, and `finish` re-reads only what the decode
+                    // never asks for.
+                    let digest = SourceDigest::new(external.size);
                     digest.attach_pending_budget(digests.pending_budget.clone());
                     let file = external.open_observed(&digest)?;
                     let guard = file.try_clone().map_err(storage)?;
@@ -1308,6 +1392,9 @@ pub(super) fn plan<'a>(
                     Some(held) => held.external.reopen()?,
                     None => File::open(&path).map_err(storage)?,
                 };
+                let task_batch_rows = u64::try_from(batch_rows).unwrap_or(1).max(1);
+                // A source refused while its pages are inventoried rejects its
+                // first batch; a failure of the inventory rejects nothing.
                 let scan = SourceScan::build(
                     &scan_file,
                     &metadata,
@@ -1316,15 +1403,32 @@ pub(super) fn plan<'a>(
                     // A batch past the intake window plus an eighth is refused.
                     window_bytes.saturating_add(window_bytes / 8),
                     cancellation,
-                )?;
+                )
+                .inspect_err(|error| {
+                    if is_resource_limit(error) {
+                        refusals.record(
+                            (u8::from(kind == BulkInputKind::Edge), source.sequence, 0),
+                            task_batch_rows.min(rows),
+                        );
+                    }
+                })?;
                 let max_task_workspace_bytes = max_parquet_task_workspace(
                     &scan,
                     &metadata,
                     rows,
                     batch_rows,
                     kind,
-                    window_bytes.saturating_add(window_bytes / 8),
-                )?;
+                    window_bytes,
+                )
+                .map_err(|error| {
+                    error.record(
+                        refusals,
+                        kind,
+                        source.sequence,
+                        0,
+                        task_batch_rows.min(rows),
+                    )
+                })?;
                 let decoding_bytes = scan.pages_resident_max();
                 (
                     Format::Parquet {

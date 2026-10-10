@@ -242,22 +242,25 @@ fn digest_equals_sha256_for_any_read_order() {
 }
 
 #[test]
-fn planning_footer_verification_keeps_no_pending_copy_and_preserves_provenance() {
+fn planning_footer_verification_holds_the_footer_under_the_pending_floor() {
     let source = source();
     let identity = super::ExternalSource::capture(&source.path).unwrap();
     let original = fs::read(&source.path).unwrap();
-    let digest = SourceDigest::for_planning(identity.size);
+    let digest = SourceDigest::new(identity.size);
 
     // Exercise the real registration-pin and footer-verification transport,
-    // which observes the trailer and footer ahead of the undecoded body.
+    // which observes the trailer and footer ahead of the undecoded body. The
+    // footer is held under the pending floor until the hashed prefix reaches
+    // it, so `finish` re-reads only what nothing observed.
     let file = identity.open_observed(&digest).unwrap();
-    {
+    let held = {
         let state = digest.state();
-        assert_eq!(state.pending_bytes, 0);
-        assert!(state.pending.is_empty());
-    }
+        assert!(state.pending_bytes > 0, "the footer read ahead is held");
+        assert!(state.pending_bytes as u64 <= super::PENDING_FLOOR_BYTES);
+        state.pending_bytes as u64
+    };
     assert_eq!(digest.finish(&identity, &file).unwrap(), sha256(&original));
-    assert!(digest.reread_bytes() >= identity.footer_bytes());
+    assert!(digest.reread_bytes() <= identity.size - held);
     identity.check(&file).unwrap();
 }
 
