@@ -57,27 +57,29 @@ mod property_emit;
 mod property_gather;
 mod property_merge;
 mod property_rows;
+mod resident;
 mod scratch;
 mod scratch_csr;
 mod scratch_edges;
 mod scratch_nodes;
 mod scratch_ranges;
+mod source_workspace;
 mod tables;
 #[cfg(test)]
 #[path = "bulk/bulk_test_support.rs"]
 pub(crate) mod test_support;
 
-pub use budget::{BulkRoute, BulkStagedReason};
-pub use plan::{BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkSource};
-
 use budget::ScratchPlan;
+pub use budget::{BulkRoute, BulkStagedReason};
 use emit::{EdgeEmitter, RelationStats, Semantics};
 use install::Installer;
 use plan::PassMeter;
+pub use plan::{BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkSource};
 use scratch::Scratch;
 pub(crate) use scratch::discard_scratch;
 use scratch_csr::CsrScratch;
 use scratch_edges::{Endpoints, RankedNodes};
+pub use source_workspace::{SourceReservation, SourceWorkspace};
 use tables::{EdgeTable, NodeIndex, NodeTable, check_cancelled};
 
 /// Logical byte cap of one physical endpoint-reference segment, block
@@ -87,6 +89,11 @@ use tables::{EdgeTable, NodeIndex, NodeTable, check_cancelled};
 /// worker retains to one segment, whatever the leaf's reference count. This
 /// is the production bound, not a measured limit.
 const ENDPOINT_REFERENCE_SEGMENT_BYTES: usize = 32 << 20;
+
+/// What a worker's source task may hold when everything else is resident:
+/// the decoded batches the admission limit allows (see `graphforge-api`'s
+/// registered-source reader) and the room to normalize them.
+const MEMORY_TASK_BYTES: u64 = 256 << 20;
 
 /// Run `work` on `pool` while the calling thread polls `cancelled`.
 fn run_pass<T: Send>(
@@ -383,7 +390,7 @@ pub(crate) fn encode_bulk(
             } else {
                 plan.node_tables_resident_bytes()
             }
-            .saturating_add(budget::property_extra_if_any(plan, budgets));
+            .saturating_add(budget::source_phase_extra(plan, budgets));
             if budget < minimum {
                 return Err(GfError::Project {
                     code: graphforge_core::ProjectErrorCode::ResourceLimit,
@@ -407,6 +414,20 @@ pub(crate) fn encode_bulk(
         }
         _ => None,
     };
+    // One pool every source task reserves its decode workspace from (#1918).
+    let source_pool = SourceWorkspace::new(match (&scratch_plan, plan.memory_budget) {
+        (Some(_), Some(budget)) => ScratchPlan::source_pool_bytes(plan, budget, budgets),
+        // Everything is resident: each worker may hold one task's worst case.
+        _ => (workers as u64)
+            .saturating_mul(
+                plan.source_decoder_bytes()
+                    .saturating_add(MEMORY_TASK_BYTES),
+            )
+            .saturating_add(plan.source_level_workspace_bytes()),
+    });
+    for source in plan.nodes.iter().chain(&plan.edges) {
+        source.reader.bind_workspace(&source_pool)?;
+    }
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(
             scratch_plan
@@ -447,6 +468,7 @@ pub(crate) fn encode_bulk(
             budgets,
             plan.max_source_schema_bytes(),
             plan.source_decoder_bytes(),
+            plan.source_level_workspace_bytes(),
             sized.property.retained_bytes,
             sized.decode_bytes,
         )
@@ -1311,6 +1333,9 @@ pub(crate) fn encode_bulk(
             endpoint_scratch_read_bytes: scratch_report.endpoint_read_bytes,
             property_scratch_write_bytes,
             property_scratch_read_bytes,
+            source_workspace_capacity_bytes: source_pool.capacity(),
+            source_workspace_peak_bytes: source_pool.peak_bytes(),
+            source_workspace_reservations: source_pool.reservations(),
             property_source_bytes: if scratch_plan.is_some() {
                 plan.nodes
                     .iter()
@@ -1348,6 +1373,7 @@ pub(crate) fn encode_bulk(
                 budget::property_workspace(budgets)
                     .saturating_add(plan.max_source_schema_bytes().saturating_mul(8))
                     .saturating_add(plan.source_decoder_bytes())
+                    .saturating_add(plan.source_level_workspace_bytes())
             } else {
                 0
             },

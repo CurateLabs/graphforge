@@ -115,6 +115,33 @@ emits the whole encoded generation:
    overlays, the v4 ordinal artifacts, and the CSR shards.
    Each artifact is hashed (SHA-256, XXH64) from the bytes written once.
 
+Before native Parquet footer parsing, admission checks the footer counts and
+reserves the Thrift schema-tree envelope; inferred Arrow schema and Parquet-field
+allocations (including `ARROW:schema` hints) are also admitted before Arrow schema
+inference. The page scan then inventories page headers, dictionary bytes, nested
+shape and values that headers cannot size. Before a task decodes, it reserves its
+page, validator and decoder workspace, selected row-group indexes, overlapping
+Arrow arrays, and normalization/duplicate-check workspace from one
+`SourceWorkspace` shared by registered sources. The reservation remains held
+through the task's output callbacks and drops when the task returns, errors, or is
+cancelled. Footer, schema, scan inventory and task allocations are charged before
+the corresponding native parser, vector, or decoder allocates them.
+
+`batch_rows` defines logical import batches and their operation IDs. A Parquet
+logical batch may be split into smaller physical row pieces to fit the intake
+window. `PhysicalBatchMap` maps those pieces back to the same logical batch and
+assigns contiguous row ordinals; the pieces share the logical batch's operation ID
+and duplicate-UUID set. A decoded piece is copied into buffers of exactly its
+size before it is normalized, since the native reader's buffers grow by doubling
+and the builder charges a batch what its buffers hold; the task's reservation
+admits the reader's capacity beside that copy. Selected row groups remain in ascending source order and
+their retained indexes are included in task admission. A batch that cannot fit
+even as a physical piece is refused with a typed resource limit
+(`GF_RESOURCE_LIMIT`) before decode allocation and counted as rejected rows. Arrow
+IPC schemas and message bodies use their separate plan-time size inventory before
+its checked reader opens. Normalization validates property cells without
+retaining a value map per row.
+
 `commit` then installs and publishes the encoded inventory exactly as for any
 other session. The builder's receipt (`construction.bulk_build`) reports wall
 time, process CPU, effective cores, logical and physical write bytes and peak
@@ -186,9 +213,10 @@ until the gap before them is filled. The bulk builder starts a source's tasks in
 file order (`claim_in_order` in `graphforge-storage`), where a static split would
 start each worker at a far-apart position. That keeps the lead over the hashed
 prefix small in the usual case, which `pending_limit` sizes as the workers times
-the largest task, with a 64 MiB floor and a 1 GiB ceiling. It does not bound the
-lead: a slow task holds the prefix back while the others run ahead, and a range
-beyond the bound is dropped and read again. Bytes the decode never asks for (the
+the largest task, with a 64 MiB floor and a 1 GiB ceiling, never more than a
+sixty-fourth of the memory budget (counted in the reader's planned workspace). It
+does not bound the lead: a slow task holds the prefix back while the others run
+ahead, and a range beyond the bound is dropped and read again. Bytes the decode never asks for (the
 page index of a file that has one) are read once when the digest completes;
 `source_read` reports those as `reread_bytes`, and every byte offered as
 `observed_bytes`. `tasks_are_claimed_in_index_order_on_every_pass` fails if the

@@ -50,6 +50,27 @@ pub trait BulkBatchReader: Send + Sync {
         0
     }
 
+    /// Maximum fully accounted reservation for one task. Readers with a
+    /// source-specific formula report it so the source pool and decode gate
+    /// can admit the task before reading its bytes.
+    fn max_task_workspace_bytes(&self) -> u64 {
+        0
+    }
+
+    /// One build-wide source-level reservation shared across readers, such as
+    /// bounded out-of-order digest bytes. The builder reserves the maximum
+    /// value once from the shared source workspace.
+    fn source_level_workspace_bytes(&self) -> u64 {
+        0
+    }
+
+    /// Give the reader the pool its tasks reserve their decode workspace from
+    /// (#1918). The builder calls it once, before any task runs; a reader with
+    /// no source-controlled allocations may ignore it.
+    fn bind_workspace(&self, _workspace: &Arc<super::SourceWorkspace>) -> Result<(), GfError> {
+        Ok(())
+    }
+
     /// The smallest and largest identity UUID among `task`'s rows, when the
     /// source's footer states them exactly (no nulls, so no derived UUIDs). The
     /// over-budget route uses them to split edges into UUID ranges of equal
@@ -107,6 +128,7 @@ impl BulkSource<'_> {
         share
             .saturating_mul(DECODE_EXPANSION)
             .saturating_add(self.reader.decoded_workspace_bytes())
+            .max(self.reader.max_task_workspace_bytes())
             .max(MIN_TASK_DECODE_BYTES)
     }
 }
@@ -175,6 +197,11 @@ impl BulkBuildPlan<'_> {
             )
             .saturating_add(self.max_source_schema_bytes().saturating_mul(8))
             .saturating_add(self.source_decoder_bytes())
+            // Pending source digests outlive individual decode tasks and are
+            // admitted from the same source pool. Include their shared maximum
+            // once in the resident estimate so the route threshold covers the
+            // workspace the builder actually binds.
+            .saturating_add(self.source_level_workspace_bytes())
             .saturating_mul(MARGIN_NUMERATOR)
             / MARGIN_DENOMINATOR
     }
@@ -269,6 +296,16 @@ pub struct BulkBuildReport {
     /// Fixed property workspace reserved before decoding any source.
     #[serde(default)]
     pub property_workspace_reserved_bytes: u64,
+    /// Bytes of the pool the registered-source readers reserved task workspace
+    /// from (#1918).
+    #[serde(default)]
+    pub source_workspace_capacity_bytes: u64,
+    /// The most workspace bytes the readers held at once.
+    #[serde(default)]
+    pub source_workspace_peak_bytes: u64,
+    /// Task reservations the readers made.
+    #[serde(default)]
+    pub source_workspace_reservations: u64,
     /// Node-UUID range partitions when the node tables ran on scratch (#1929);
     /// zero when they were resident.
     #[serde(default)]

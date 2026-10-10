@@ -19,6 +19,7 @@ discovery = ["dep:graphforge-discovery"]
 research = ["knowledge", "portable"]
 
 [dependencies]
+parking_lot = "0.12"
 graphforge-discovery = { version = "0.6.0-rc.1", path = "../graphforge-discovery", optional = true }
 graphforge-portable-oci = { version = "0.6.0-rc.1", path = "../graphforge-portable-oci", optional = true }
 graphforge-value = { version = "0.6.0-rc.1", path = "../graphforge-value" }
@@ -37,9 +38,16 @@ graphforge-search = { version = "0.6.0-rc.1", path = "../graphforge-search", opt
 graphforge-filesystem = { version = "0.6.0-rc.1", path = "../graphforge-filesystem" }
 arrow = { workspace = true }
 bytes = "1"
+brotli-decompressor = "5.0.3"
+crc32fast = "1"
+miniz_oxide = { version = "=0.8.9", default-features = false, features = ["with-alloc"] }
+snap = "1.1"
+zstd-safe = { version = "=8.0.0", default-features = false, features = ["std"] }
 datafusion = { workspace = true }
 futures = { workspace = true }
-parquet = { workspace = true }
+# The bounded LZ4 frame verifier uses the version pinned by arrow-ipc.
+lz4_flex = { version = "0.13.1", default-features = false, features = ["std", "frame"] }
+parquet = { workspace = true, features = ["experimental"] }
 serde_json = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
@@ -51,6 +59,7 @@ fs4 = "1.1"
 uuid = { workspace = true }
 
 [dev-dependencies]
+brotli = "8.0.3"
 # Assessment-only IPC codec experiments; production writers remain unchanged.
 arrow = { workspace = true, features = ["ipc_compression"] }
 cucumber = { workspace = true }

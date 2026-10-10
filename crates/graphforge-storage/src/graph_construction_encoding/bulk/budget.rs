@@ -114,7 +114,21 @@ impl BulkBuildPlan<'_> {
         self.nodes
             .iter()
             .chain(&self.edges)
-            .map(|source| source.reader.decoded_workspace_bytes())
+            .map(|source| {
+                source
+                    .reader
+                    .decoded_workspace_bytes()
+                    .max(source.reader.max_task_workspace_bytes())
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    pub(super) fn source_level_workspace_bytes(&self) -> u64 {
+        self.nodes
+            .iter()
+            .chain(&self.edges)
+            .map(|source| source.reader.source_level_workspace_bytes())
             .max()
             .unwrap_or(0)
     }
@@ -187,25 +201,33 @@ pub(super) fn node_tables_on_scratch(
     budgets: super::GraphConstructionBudgets,
 ) -> bool {
     plan.node_tables_resident_bytes()
-        .saturating_add(property_extra_if_any(plan, budgets))
+        .saturating_add(source_phase_extra(plan, budgets))
         > budget
 }
 
-/// The property workspace of a plan that has property-bearing sources.
-pub(super) fn property_extra_if_any(
+/// Source allocations that are live beside resident builder state. A task may
+/// reuse the fixed CSR workspace while it decodes, but any task workspace
+/// above that envelope and the digest buffer held through build completion are
+/// additional resident bytes.
+pub(super) fn source_phase_extra(
     plan: &BulkBuildPlan<'_>,
-    budgets: super::GraphConstructionBudgets,
+    budgets: GraphConstructionBudgets,
 ) -> u64 {
-    if plan
-        .nodes
+    if has_properties(plan) {
+        property_extra_workspace(plan, budgets)
+    } else {
+        plan.source_level_workspace_bytes().saturating_add(
+            plan.source_decoder_bytes()
+                .saturating_sub(CSR_WORKSPACE_BYTES),
+        )
+    }
+}
+
+fn has_properties(plan: &BulkBuildPlan<'_>) -> bool {
+    plan.nodes
         .iter()
         .chain(&plan.edges)
         .any(|source| !source.property_free)
-    {
-        property_extra_workspace(plan, budgets)
-    } else {
-        0
-    }
 }
 
 pub(super) fn property_extra_workspace(
@@ -215,6 +237,7 @@ pub(super) fn property_extra_workspace(
     property_workspace(budgets)
         .saturating_add(plan.max_source_schema_bytes().saturating_mul(8))
         .saturating_add(plan.source_decoder_bytes())
+        .saturating_add(plan.source_level_workspace_bytes())
         .saturating_sub(CSR_WORKSPACE_BYTES)
 }
 
@@ -226,6 +249,7 @@ pub(super) fn property_merge_capacity(
     budgets: super::GraphConstructionBudgets,
     source_schema_bytes: u64,
     source_decoder_bytes: u64,
+    source_level_workspace_bytes: u64,
     property_retained_bytes: u64,
     decode_bytes: u64,
 ) -> u64 {
@@ -233,6 +257,7 @@ pub(super) fn property_merge_capacity(
         .saturating_mul(8)
         .saturating_add(source_schema_bytes.saturating_mul(8))
         .saturating_add(source_decoder_bytes)
+        .saturating_add(source_level_workspace_bytes)
         .saturating_add(property_retained_bytes)
         .saturating_add(decode_bytes)
 }
@@ -306,7 +331,7 @@ fn scratch_working_bytes(
     .saturating_add(if properties {
         property_extra_workspace(plan, budgets)
     } else {
-        0
+        source_phase_extra(plan, budgets)
     });
     budget
         .saturating_sub(shared)
@@ -476,6 +501,30 @@ impl ScratchPlan {
             staging_bytes: usize::try_from(staging).unwrap_or(8 << 10),
             property: property_sizing(working / 8 * 3, concurrency, plan.max_source_schema_bytes()),
             decode_bytes,
+        }
+    }
+
+    /// Bytes the registered-source readers' tasks may reserve at once (#1918).
+    ///
+    /// With properties one task runs at a time and shares the property workspace,
+    /// already reserved in the fixed footprint, with the pages its sources hold.
+    /// Without, the decoding quarter of the working set (see `derive`).
+    pub(super) fn source_pool_bytes(
+        plan: &BulkBuildPlan<'_>,
+        budget: u64,
+        budgets: super::GraphConstructionBudgets,
+    ) -> u64 {
+        let decoder = plan.source_decoder_bytes();
+        if has_properties(plan) {
+            property_workspace(budgets)
+                .saturating_add(decoder)
+                .saturating_add(plan.source_level_workspace_bytes())
+        } else {
+            let node_scratch = node_tables_on_scratch(plan, budget, budgets);
+            let working = scratch_working_bytes(plan, budget, budgets, node_scratch, false);
+            (working / 4)
+                .max(decoder)
+                .saturating_add(plan.source_level_workspace_bytes())
         }
     }
 

@@ -62,6 +62,7 @@ fn preserved_spatial_bulk_preflight_accepts_explicit_metadata_and_rejects_malfor
         0,
         0,
         &[(&field, &array)],
+        true,
         |_, _| Ok(()),
     )
     .unwrap();
@@ -391,7 +392,7 @@ fn wave13_property_normalization_and_strict_owner_failures_keep_bulk_context() {
     let array: ArrayRef = Arc::new(arrow::array::Date32Array::from(vec![1]));
     let columns = [(&field, &array)];
     let unsupported =
-        normalize_properties(BulkInputKind::Node, 9, 0, &columns, |_, _| Ok(())).unwrap_err();
+        normalize_properties(BulkInputKind::Node, 9, 0, &columns, true, |_, _| Ok(())).unwrap_err();
     assert_eq!(
         unsupported.reason,
         BulkValidationReason::UnsupportedPropertyType
@@ -399,16 +400,17 @@ fn wave13_property_normalization_and_strict_owner_failures_keep_bulk_context() {
     assert_eq!(unsupported.row_ordinal, Some(9));
     assert_eq!(unsupported.field.as_deref(), Some("when"));
 
-    let owner_error = normalize_properties(BulkInputKind::Edge, 11, 0, &columns, |name, _| {
-        Err(row_error(
-            BulkInputKind::Edge,
-            BulkValidationReason::UnknownOntologyProperty,
-            11,
-            name,
-            "owner rejected property",
-        ))
-    })
-    .unwrap_err();
+    let owner_error =
+        normalize_properties(BulkInputKind::Edge, 11, 0, &columns, true, |name, _| {
+            Err(row_error(
+                BulkInputKind::Edge,
+                BulkValidationReason::UnknownOntologyProperty,
+                11,
+                name,
+                "owner rejected property",
+            ))
+        })
+        .unwrap_err();
     assert_eq!(
         owner_error.reason,
         BulkValidationReason::UnknownOntologyProperty
@@ -1258,4 +1260,393 @@ fn wave13_strict_inherited_properties_and_types_are_validated_without_publicatio
         indexed_uuid_count(&graph, graphforge_storage::UuidIndexKind::Edge),
         0
     );
+}
+
+/// An import keeps its Arrow columns and needs only identities and labels back,
+/// so it checks each property cell without holding the converted value (#1918).
+/// The check must refuse exactly what the conversion refuses, with its message.
+#[test]
+fn checking_a_cell_refuses_what_converting_it_refuses() {
+    use arrow::array::{Int64Builder, LargeListBuilder, ListBuilder, StringBuilder};
+
+    let mut numbers = ListBuilder::new(Int64Builder::new());
+    for children in [0_usize, 3, 1] {
+        for child in 0..children {
+            numbers.values().append_value(child as i64);
+        }
+        numbers.append(true);
+    }
+    numbers.append(false);
+
+    let mut nested = ListBuilder::new(ListBuilder::new(StringBuilder::new()));
+    for outer in [2_usize, 0, 1] {
+        for inner in 0..outer {
+            for leaf in 0..=inner {
+                nested
+                    .values()
+                    .values()
+                    .append_value(format!("leaf-{leaf}"));
+            }
+            nested.values().append(true);
+        }
+        nested.append(true);
+    }
+
+    let mut large = LargeListBuilder::new(Int64Builder::new());
+    large.values().append_value(7);
+    large.append(true);
+    large.append(false);
+
+    // A wall-clock time past midnight is refused inside a list, at its child.
+    let times = Time64NanosecondArray::from(vec![1, 86_400_000_000_000_i64, 2]);
+    let offsets = arrow::buffer::OffsetBuffer::new(vec![0_i32, 1, 3].into());
+    let refused: ArrayRef = Arc::new(ListArray::new(
+        Arc::new(Field::new(
+            "item",
+            DataType::Time64(arrow::datatypes::TimeUnit::Nanosecond),
+            true,
+        )),
+        offsets,
+        Arc::new(times),
+        None,
+    ));
+
+    let unsupported_child: ArrayRef = Arc::new(ListArray::new(
+        Arc::new(Field::new("item", DataType::Binary, true)),
+        arrow::buffer::OffsetBuffer::new(vec![0_i32, 1].into()),
+        Arc::new(arrow::array::BinaryArray::from(vec![b"x".as_slice()])),
+        None,
+    ));
+
+    let arrays: Vec<ArrayRef> = vec![
+        Arc::new(numbers.finish()),
+        Arc::new(nested.finish()),
+        Arc::new(large.finish()),
+        refused,
+        unsupported_child,
+        Arc::new(Int64Array::from(vec![Some(1), None])),
+        Arc::new(StringArray::from(vec![Some("a"), None])),
+    ];
+    let mut failures = 0;
+    for array in arrays {
+        for row in 0..array.len() {
+            let converted = property_value_at(array.as_ref(), row).map(|_| ());
+            assert_eq!(
+                check_property_value_at(array.as_ref(), row),
+                converted,
+                "{:?} row {row}",
+                array.data_type()
+            );
+            failures += usize::from(converted.is_err());
+        }
+    }
+    assert_eq!(failures, 2, "the fixtures must include refusals");
+}
+
+/// Dropping the property values changes nothing a chunk is built from: the
+/// identities, labels and every refusal are the same.
+#[test]
+fn an_import_chunk_is_built_from_the_same_rows_whether_or_not_properties_are_kept() {
+    let graph = GraphForge::new(None).unwrap();
+    for rows in [1_usize, 9, 40] {
+        let ids = (0..rows).map(|i| uuid(100 + i as u128)).collect::<Vec<_>>();
+        let labels = vec!["Person"; rows];
+        let names = (0..rows)
+            .map(|i| Some(["a", "bb"][i % 2]))
+            .collect::<Vec<_>>();
+        let batch = node_batch(&ids, &labels, &names);
+        let kept = graph
+            .normalize_bulk_nodes(operation(1), std::slice::from_ref(&batch), false, true)
+            .unwrap();
+        let dropped = graph
+            .normalize_bulk_nodes(operation(1), std::slice::from_ref(&batch), false, false)
+            .unwrap();
+        let summary = |nodes: &ValidatedBulkNodes| {
+            nodes
+                .rows()
+                .iter()
+                .map(|row| (row.row_ordinal, row.node_uuid, row.label.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(summary(&kept), summary(&dropped));
+        assert!(dropped.rows().iter().all(|row| row.properties.is_empty()));
+    }
+}
+
+/// Physical pieces of one logical node batch, normalized at their original row
+/// offsets under the same operation identity, reproduce the single full
+/// normalization exactly: ordinals, generated identities for null UUIDs across
+/// piece boundaries, and the canonical chunk columns (#1918).
+#[test]
+fn node_pieces_at_true_offsets_match_the_full_logical_batch() {
+    let graph = GraphForge::new(None).unwrap();
+    let op = operation(950);
+    let schema = bulk_node_input_schema(vec![Field::new("name", DataType::Utf8, true)]).unwrap();
+    // Rows 1 and 2 are null UUIDs on both sides of a piece boundary; rows 3
+    // and 5 are explicit non-null UUIDv7 identities.
+    let ids: [Option<[u8; 16]>; 6] = [
+        None,
+        None,
+        None,
+        Some(uuid(951).into_bytes()),
+        None,
+        Some(uuid(952).into_bytes()),
+    ];
+    let generated = [true, true, true, false, true, false];
+    let labels = ["Person", "Person", "Host", "Person", "Host", "Person"];
+    let names = [
+        Some("alice"),
+        None,
+        Some("gateway"),
+        Some("cara"),
+        None,
+        Some("dana"),
+    ];
+    let full = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(
+                FixedSizeBinaryArray::try_from_sparse_iter_with_size(ids.into_iter(), 16).unwrap(),
+            ),
+            Arc::new(StringArray::from(labels.to_vec())),
+            Arc::new(StringArray::from(names.to_vec())),
+        ],
+    )
+    .unwrap();
+    let pieces = [(0_usize, 2_usize), (2, 1), (3, 3)];
+
+    let full_rows = graph
+        .normalize_bulk_nodes_at(op, &[full.clone()], false, true, 0)
+        .unwrap();
+    let mut piece_rows = Vec::new();
+    for (offset, len) in pieces {
+        piece_rows.extend(
+            graph
+                .normalize_bulk_nodes_at(op, &[full.slice(offset, len)], false, true, offset as u64)
+                .unwrap()
+                .rows()
+                .iter()
+                .cloned(),
+        );
+    }
+    assert_eq!(piece_rows, full_rows.rows().to_vec());
+    for (ordinal, row) in full_rows.rows().iter().enumerate() {
+        if generated[ordinal] {
+            assert_eq!(
+                row.node_uuid,
+                generated_uuid(op, BulkInputKind::Node, ordinal as u64),
+                "a null UUID must derive from the logical ordinal, not the piece"
+            );
+        }
+    }
+    let unique = piece_rows
+        .iter()
+        .map(|row| row.node_uuid)
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        unique.len(),
+        piece_rows.len(),
+        "derived UUIDs must be unique"
+    );
+
+    let full_chunk = graph.normalize_import_node_chunk_at(op, &full, 0).unwrap();
+    let mut piece_chunks = Vec::new();
+    for (offset, len) in pieces {
+        piece_chunks.push(
+            graph
+                .normalize_import_node_chunk_at(op, &full.slice(offset, len), offset as u64)
+                .unwrap(),
+        );
+    }
+    let combined = arrow::compute::concat_batches(&full_chunk.schema(), &piece_chunks).unwrap();
+    assert_eq!(combined, full_chunk);
+}
+
+#[test]
+fn node_duplicate_across_physical_pieces_is_still_rejected() {
+    let graph = GraphForge::new(None).unwrap();
+    let op = operation(962);
+    let duplicate = uuid(963);
+    let input = node_batch(
+        &[duplicate, duplicate],
+        &["Person", "Person"],
+        &[None, None],
+    );
+    let mut seen = HashSet::new();
+    graph
+        .normalize_import_node_chunk_at_with_seen(op, &input.slice(0, 1), 0, &mut seen)
+        .unwrap();
+    let error = graph
+        .normalize_import_node_chunk_at_with_seen(op, &input.slice(1, 1), 1, &mut seen)
+        .unwrap_err();
+    assert!(error.to_string().contains("duplicate or existing UUID"));
+}
+
+/// The same proof for edges: nullable edge UUIDs on both sides of a boundary,
+/// an explicit non-null identity, distinct relation types, a nullable weight
+/// column, and endpoints that stay valid in every piece (#1918).
+#[test]
+fn edge_pieces_at_true_offsets_match_the_full_logical_batch() {
+    let graph = GraphForge::new(None).unwrap();
+    let op = operation(953);
+    let hub_a = uuid(955);
+    let hub_b = uuid(956);
+    let hub_c = uuid(957);
+    let nodes = graph
+        .normalize_bulk_nodes_at(
+            operation(954),
+            &[node_batch(
+                &[hub_a, hub_b, hub_c],
+                &["Person", "Person", "Person"],
+                &[None, None, None],
+            )],
+            false,
+            false,
+            0,
+        )
+        .unwrap();
+    let schema =
+        bulk_edge_input_schema(vec![Field::new("weight", DataType::Float64, true)]).unwrap();
+    let edge_ids: [Option<[u8; 16]>; 4] = [
+        Some(uuid(958).into_bytes()),
+        None,
+        None,
+        Some(uuid(959).into_bytes()),
+    ];
+    let generated = [false, true, true, false];
+    let rel_types = ["KNOWS", "KNOWS", "CONNECTS", "LIKES"];
+    let sources = [hub_a, hub_b, hub_c, hub_a];
+    let targets = [hub_b, hub_c, hub_a, hub_c];
+    let weights = [Some(1.0), None, Some(2.5), None];
+    let full = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(
+                FixedSizeBinaryArray::try_from_sparse_iter_with_size(edge_ids.into_iter(), 16)
+                    .unwrap(),
+            ),
+            Arc::new(StringArray::from(rel_types.to_vec())),
+            Arc::new(
+                FixedSizeBinaryArray::try_from_iter(sources.iter().map(Uuid::as_bytes)).unwrap(),
+            ),
+            Arc::new(
+                FixedSizeBinaryArray::try_from_iter(targets.iter().map(Uuid::as_bytes)).unwrap(),
+            ),
+            Arc::new(Float64Array::from(weights.to_vec())),
+        ],
+    )
+    .unwrap();
+    // Every piece carries each hub it references among its own endpoints, so
+    // each piece is a self-contained import chunk.
+    let pieces = [(0_usize, 2_usize), (2, 1), (3, 1)];
+
+    let full_rows = graph
+        .normalize_bulk_edges_at(op, &[full.clone()], &nodes, true, None, false, 0)
+        .unwrap();
+    let mut piece_rows = Vec::new();
+    for (offset, len) in pieces {
+        piece_rows.extend(
+            graph
+                .normalize_bulk_edges_at(
+                    op,
+                    &[full.slice(offset, len)],
+                    &nodes,
+                    true,
+                    None,
+                    false,
+                    offset as u64,
+                )
+                .unwrap()
+                .rows()
+                .iter()
+                .cloned(),
+        );
+    }
+    assert_eq!(piece_rows, full_rows.rows().to_vec());
+    for (ordinal, row) in full_rows.rows().iter().enumerate() {
+        if generated[ordinal] {
+            assert_eq!(
+                row.edge_uuid,
+                generated_uuid(op, BulkInputKind::Edge, ordinal as u64),
+                "a null UUID must derive from the logical ordinal, not the piece"
+            );
+        }
+    }
+    let unique = piece_rows
+        .iter()
+        .map(|row| row.edge_uuid)
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        unique.len(),
+        piece_rows.len(),
+        "derived UUIDs must be unique"
+    );
+
+    let full_chunk = graph.normalize_import_edge_chunk_at(op, &full, 0).unwrap();
+    let mut piece_chunks = Vec::new();
+    for (offset, len) in pieces {
+        piece_chunks.push(
+            graph
+                .normalize_import_edge_chunk_at(op, &full.slice(offset, len), offset as u64)
+                .unwrap(),
+        );
+    }
+    let combined = arrow::compute::concat_batches(&full_chunk.schema(), &piece_chunks).unwrap();
+    assert_eq!(combined, full_chunk);
+}
+
+/// A starting ordinal at the `u64` contract edge fails the existing checked
+/// increment with the typed reason instead of wrapping or panicking (#1918).
+#[test]
+fn a_start_ordinal_at_u64_max_fails_the_checked_increment_with_the_typed_reason() {
+    let graph = GraphForge::new(None).unwrap();
+    let node_error = graph
+        .normalize_bulk_nodes_at(
+            operation(960),
+            &[node_batch(
+                &[uuid(961), uuid(962)],
+                &["Person", "Person"],
+                &[None, None],
+            )],
+            false,
+            true,
+            u64::MAX,
+        )
+        .unwrap_err();
+    assert_eq!(node_error.reason, BulkValidationReason::OrdinalOverflow);
+    assert_eq!(node_error.code(), "GF_BULK_VALIDATION");
+    assert_eq!(node_error.message, "logical row ordinal overflow");
+
+    let nodes = graph
+        .normalize_bulk_nodes_at(
+            operation(963),
+            &[node_batch(
+                &[uuid(964), uuid(965)],
+                &["Person", "Person"],
+                &[None, None],
+            )],
+            false,
+            false,
+            0,
+        )
+        .unwrap();
+    let edge_error = graph
+        .normalize_bulk_edges_at(
+            operation(966),
+            &[edge_batch(
+                &[uuid(967), uuid(968)],
+                &["KNOWS", "KNOWS"],
+                &[uuid(964), uuid(964)],
+                &[uuid(965), uuid(965)],
+            )],
+            &nodes,
+            true,
+            None,
+            false,
+            u64::MAX,
+        )
+        .unwrap_err();
+    assert_eq!(edge_error.reason, BulkValidationReason::OrdinalOverflow);
+    assert_eq!(edge_error.code(), "GF_BULK_VALIDATION");
+    assert_eq!(edge_error.message, "logical row ordinal overflow");
 }

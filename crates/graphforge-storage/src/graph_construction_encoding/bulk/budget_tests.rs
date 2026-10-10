@@ -22,6 +22,33 @@ impl BulkBatchReader for Never {
     }
 }
 
+struct AccountingReader {
+    task: u64,
+    source_level: u64,
+}
+
+impl BulkBatchReader for AccountingReader {
+    fn task_rows(&self, _: usize) -> usize {
+        1
+    }
+
+    fn read_task(
+        &self,
+        _: usize,
+        _: &mut dyn FnMut(RecordBatch) -> Result<(), GfError>,
+    ) -> Result<(), GfError> {
+        unreachable!("planning only")
+    }
+
+    fn max_task_workspace_bytes(&self) -> u64 {
+        self.task
+    }
+
+    fn source_level_workspace_bytes(&self) -> u64 {
+        self.source_level
+    }
+}
+
 fn rung(scale: u32) -> BulkBuildPlan<'static> {
     let source = |rows: u64| BulkSource {
         reader: Arc::new(Never),
@@ -38,6 +65,121 @@ fn rung(scale: u32) -> BulkBuildPlan<'static> {
 }
 
 const GIB: u64 = 1 << 30;
+
+#[test]
+fn source_pool_reserves_full_task_and_shared_source_bytes_once() {
+    let source = |task, source_level| BulkSource {
+        reader: Arc::new(AccountingReader { task, source_level }),
+        tasks: 1,
+        rows: 1,
+        property_free: true,
+        decoded_bytes: 0,
+    };
+    let mut plan = BulkBuildPlan {
+        nodes: vec![source(96 << 20, 8 << 20), source(64 << 20, 8 << 20)],
+        edges: Vec::new(),
+        memory_budget: Some(4 * GIB),
+    };
+    let decoder = plan.source_decoder_bytes();
+    assert_eq!(decoder, 96 << 20);
+    assert_eq!(plan.source_level_workspace_bytes(), 8 << 20);
+    let workspace = ScratchPlan::source_pool_bytes(
+        &plan,
+        4 * GIB,
+        crate::graph_construction_encoding::GraphConstructionBudgets::default(),
+    );
+    let working = scratch_working_bytes(
+        &plan,
+        4 * GIB,
+        crate::graph_construction_encoding::GraphConstructionBudgets::default(),
+        false,
+        false,
+    );
+    assert!(working / 4 > decoder);
+    assert_eq!(workspace, working / 4 + (8 << 20));
+    // Two source readers report the same build-level cap; it is reserved once.
+    plan.nodes[1].reader = Arc::new(AccountingReader {
+        task: 64 << 20,
+        source_level: 8 << 20,
+    });
+    assert_eq!(plan.source_level_workspace_bytes(), 8 << 20);
+}
+
+#[test]
+fn large_task_workspace_moves_node_tables_to_scratch_without_pool_overgrant() {
+    let task = 500 << 20;
+    let source_level = 64 << 20;
+    let source = BulkSource {
+        reader: Arc::new(AccountingReader { task, source_level }),
+        tasks: 1,
+        rows: 1 << 24,
+        property_free: true,
+        decoded_bytes: 0,
+    };
+    let plan = BulkBuildPlan {
+        nodes: vec![source],
+        edges: Vec::new(),
+        memory_budget: Some(3 << 29), // 1.5 GiB
+    };
+    let budget = plan.memory_budget.unwrap();
+    let extra = source_level + task.saturating_sub(CSR_WORKSPACE_BYTES);
+    let workspace = ScratchPlan::source_pool_bytes(
+        &plan,
+        budget,
+        crate::graph_construction_encoding::GraphConstructionBudgets::default(),
+    );
+
+    assert!(node_tables_on_scratch(
+        &plan,
+        budget,
+        crate::graph_construction_encoding::GraphConstructionBudgets::default(),
+    ));
+    assert_eq!(
+        source_phase_extra(
+            &plan,
+            crate::graph_construction_encoding::GraphConstructionBudgets::default(),
+        ),
+        extra
+    );
+    assert_eq!(workspace, task + source_level);
+    assert!(plan.scratch_floor_bytes() + extra <= budget);
+}
+
+#[test]
+fn route_estimate_includes_shared_source_level_workspace() {
+    let source = |source_level| BulkSource {
+        reader: Arc::new(AccountingReader {
+            task: 0,
+            source_level,
+        }),
+        tasks: 1,
+        rows: 1,
+        property_free: true,
+        decoded_bytes: 0,
+    };
+    let baseline = BulkBuildPlan {
+        nodes: vec![source(0)],
+        edges: Vec::new(),
+        memory_budget: None,
+    };
+    let with_pending = BulkBuildPlan {
+        nodes: vec![source(8 << 20)],
+        edges: Vec::new(),
+        memory_budget: None,
+    };
+    let baseline_estimate = baseline.estimated_resident_bytes();
+    let pending_estimate = with_pending.estimated_resident_bytes();
+
+    assert_eq!(pending_estimate - baseline_estimate, (8 << 20) * 5 / 4);
+    assert_eq!(
+        with_pending.route_for(baseline_estimate),
+        super::BulkRoute::Scratch
+    );
+    assert_eq!(
+        with_pending.route_for(pending_estimate),
+        super::BulkRoute::Memory
+    );
+}
 
 #[test]
 fn partition_sizes_and_concurrency_follow_the_budget() {

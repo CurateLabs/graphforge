@@ -261,6 +261,27 @@ fn required_scratch_bytes(error: &GfError) -> u64 {
     required.parse().expect("resident byte requirement is u64")
 }
 
+/// Resolve a scratch minimum that also determines the budget-sized digest
+/// buffer. Replanning at the first reported minimum increases that buffer, so
+/// solve the small monotone fixed point before retrying.
+fn stable_required_scratch_bytes(error: &GfError, initial_budget: u64) -> u64 {
+    let required = required_scratch_bytes(error);
+    let initial_source_level =
+        bulk_source::Digests::for_build_budget(initial_budget, true).pending_budget_bytes();
+    let fixed = required.saturating_sub(initial_source_level);
+    let mut candidate = required;
+    for _ in 0..64 {
+        let source_level =
+            bulk_source::Digests::for_build_budget(candidate, true).pending_budget_bytes();
+        let next = fixed.saturating_add(source_level);
+        if next <= candidate {
+            return candidate;
+        }
+        candidate = next;
+    }
+    panic!("budget-sized source reservation did not converge");
+}
+
 #[test]
 fn routing_is_memory_then_scratch_then_scratch_nodes_and_never_staged() {
     let ids = (1..=30).map(v7).collect::<Vec<_>>();
@@ -288,7 +309,7 @@ fn routing_is_memory_then_scratch_then_scratch_nodes_and_never_staged() {
             .unwrap();
         let construction = if node_scratch {
             let error = session.validate(&graph).unwrap_err();
-            let required = required_scratch_bytes(&error);
+            let required = stable_required_scratch_bytes(&error, NODE_SCRATCH_BUDGET);
             assert_eq!(session.manifest.build_route, Some(BuildRoute::Bulk));
             assert_eq!(session.manifest.staged_reason, None);
             assert_eq!(graph.node_count("Person").unwrap(), 0);
@@ -523,7 +544,7 @@ fn row_groups_that_straddle_task_boundaries_publish_the_staged_bytes() {
         pin_clock(&root);
         let construction = if matches!(budget, Budget::Bytes(NODE_SCRATCH_BUDGET)) {
             let error = session.validate(&graph).unwrap_err();
-            let required = required_scratch_bytes(&error);
+            let required = stable_required_scratch_bytes(&error, NODE_SCRATCH_BUDGET);
             assert_eq!(session.manifest.build_route, Some(BuildRoute::Bulk));
             assert_eq!(session.manifest.staged_reason, None);
             assert_eq!(graph.node_count("Person").unwrap(), 0);
@@ -829,3 +850,49 @@ fn the_bulk_reader_refuses_undeclared_types_under_a_strict_ontology() {
     );
     assert_eq!(rows, Some(1));
 }
+
+/// Pending digest reads use one build-scoped source reservation, separate from
+/// each reader's decoded page workspace (#1918).
+#[test]
+fn the_digest_s_held_reads_are_counted_and_bounded_by_the_budget() {
+    let (_directory, _project, graph) = fixture();
+    let sources = tempfile::tempdir().unwrap();
+    let path = sources.path().join("nodes.parquet");
+    let batch = node_rows(&[v7(1), v7(2), v7(3)], "Person");
+    let mut writer =
+        parquet::arrow::ArrowWriter::try_new(File::create(&path).unwrap(), batch.schema(), None)
+            .unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+
+    let mut needs = Vec::new();
+    for budget in [256_u64 << 20, 4 << 30, 64 << 30] {
+        let mut session = graph
+            .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
+            .unwrap();
+        session
+            .register_parquet(BulkInputKind::Node, &path)
+            .unwrap();
+        bulk_source::TEST_BUDGET.with(|cell| cell.set(Some(budget)));
+        let refusals = bulk_source::Refusals::default();
+        let digests = bulk_source::Digests::for_build_budget(budget, true);
+        let plan = session
+            .plan_bulk_build(&graph, None, &refusals, &digests)
+            .unwrap();
+        bulk_source::TEST_BUDGET.with(|cell| cell.set(None));
+        let needed = plan.nodes[0].reader.decoded_workspace_bytes();
+        // Decoded page workspace and pending digest bytes have separate owners.
+        assert!(needed <= budget / 64 + (1 << 20), "{budget}: {needed}");
+        assert_eq!(
+            u64::try_from(digests.pending_budget_bytes()).unwrap(),
+            budget.min(1 << 30) / 64,
+            "{budget}"
+        );
+        needs.push(needed);
+        session.abort(&graph).unwrap();
+    }
+    // The page requirement is independent from the build-scoped digest cap.
+    assert!(needs.iter().all(|needed| *needed < 1 << 20), "{needs:?}");
+}
+
+mod encodings;

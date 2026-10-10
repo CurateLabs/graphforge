@@ -481,14 +481,14 @@ the staged path above, and the builder never reads a parent generation.
   the import manifest (`build_route`). A later change in free memory cannot send
   a started build to another route.
 
+Registered-source decoding has a separate pre-allocation envelope (#1918):
+Parquet and IPC inventory is admitted before native decoding, and source tasks
+reserve page, Arrow-array and normalization workspace from a shared pool. That
+reservation is distinct from the normalized-property scratch bound and is not a
+whole-process RSS guarantee; see [resumable import](resumable-import.md).
+
 Pending, tracked under epic #1881:
 
-- **Source decoding is not bounded (#1918).** The property scratch bound covers
-  normalized property transport and overlay assembly. Registered source decoding
-  and normalization can expand Parquet dictionaries, nested pages and row maps
-  before those rows reach the transport. A scratch reservation therefore
-  describes builder workspace, not a proof that arbitrary registered inputs fit
-  the complete process budget.
 - **Scratch passes run one at a time (#1938).** Over-budget builds report
   `scratch_concurrency` 1 until partitions run concurrently.
 - **Retired machinery.** The staged initial-build code awaits deletion after

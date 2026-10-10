@@ -7,7 +7,7 @@ publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-arrow = "=58.3.0"
+arrow.workspace = true
 graphforge-api = { version = "0.6.0-rc.1", path = "../../../crates/graphforge-api" }
 serde.workspace = true
 serde_json.workspace = true

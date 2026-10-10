@@ -59,7 +59,7 @@ mod lanes;
 mod properties;
 pub use bulk::{
     BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkRoute, BulkSource,
-    BulkStagedReason,
+    BulkStagedReason, SourceReservation, SourceWorkspace,
 };
 #[cfg(test)]
 #[path = "graph_construction_encoding/bulk_test_support.rs"]

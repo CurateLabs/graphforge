@@ -183,7 +183,7 @@ pub(super) fn admit_batch(
         return Err(storage("construction property-column budget exhausted"));
     }
     if batch.num_rows() > budgets.max_batch_rows
-        || batch.get_array_memory_size() > budgets.max_batch_bytes
+        || super::resident::resident_bytes(batch) > budgets.max_batch_bytes
     {
         return Err(storage("construction resource window exhausted"));
     }

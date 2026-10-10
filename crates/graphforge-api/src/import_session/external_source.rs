@@ -12,6 +12,7 @@
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
@@ -31,12 +32,18 @@ const PARQUET_MAGIC: &[u8; 4] = b"PAR1";
 const PARQUET_TRAILER: u64 = 8;
 const PARQUET_TRAILER_LEN: usize = 8;
 const FOOTER_READ_LIMIT: u64 = 1 << 30;
+/// A footer is read and hashed in pieces of this size.
+const FOOTER_PIECE_BYTES: u64 = 1 << 20;
 /// Out-of-order bytes held while waiting for the gap before them, unless the
 /// source states a larger lead (see [`pending_limit`]). A decode order that
 /// exceeds the bound re-reads the dropped ranges once at the end.
 const PENDING_FLOOR_BYTES: u64 = 64 << 20;
 const PENDING_CEILING_BYTES: u64 = 1 << 30;
 const GAP_READ_BYTES: u64 = 1 << 20;
+/// Conservative per-entry allowance for the Vec/credit/key and BTreeMap node
+/// storage. The shared budget charges this in addition to each run's byte
+/// capacity, so many tiny ranges cannot evade the aggregate ceiling.
+const PENDING_RUN_OVERHEAD_BYTES: usize = 1_024;
 /// Buffer of the reader a Parquet decode gets for a page header. The decode then
 /// reads the page body again with `get_bytes`, so a larger buffer would read the
 /// start of every page twice.
@@ -184,11 +191,21 @@ fn footer_identity(
     if footer_len > FOOTER_READ_LIMIT || footer_len + PARQUET_TRAILER + 4 > size {
         return Err(validation("Parquet source footer length is out of range"));
     }
-    let mut footer = vec![0_u8; usize::try_from(footer_len).map_err(storage)?];
+    // The footer is hashed in pieces: its length is the file's to claim, and
+    // nothing here needs the whole of it at once.
     let footer_start = size - PARQUET_TRAILER - footer_len;
-    read(footer_start, &mut footer)?;
-    observe(footer_start, &footer);
-    Ok((footer_len, hex(&Sha256::digest(&footer))))
+    let mut hasher = Sha256::new();
+    let mut piece =
+        vec![0_u8; usize::try_from(footer_len.min(FOOTER_PIECE_BYTES)).map_err(storage)?];
+    let mut done = 0_u64;
+    while done < footer_len {
+        let step = usize::try_from((footer_len - done).min(FOOTER_PIECE_BYTES)).map_err(storage)?;
+        read(footer_start + done, &mut piece[..step])?;
+        observe(footer_start + done, &piece[..step]);
+        hasher.update(&piece[..step]);
+        done += step as u64;
+    }
+    Ok((footer_len, hex(&hasher.finalize())))
 }
 
 impl ExternalSource {
@@ -229,6 +246,11 @@ impl ExternalSource {
             footer_len,
             footer_sha256,
         })
+    }
+
+    /// Bytes of the Parquet footer registration recorded.
+    pub(super) fn footer_bytes(&self) -> u64 {
+        self.footer_len
     }
 
     fn identity_matches(&self, identity: &FileIdentity) -> bool {
@@ -362,15 +384,92 @@ fn open_named(path: &Path) -> Result<File, GfError> {
 #[derive(Clone)]
 pub(super) struct SourceDigest(Arc<Mutex<DigestState>>);
 
+/// One nonblocking byte allowance shared by all source digests in a build.
+///
+/// Local per-source limits still choose which ranges to keep. This budget puts
+/// one ceiling on their sum, so registering more sources cannot multiply the
+/// pending-memory bound.
+#[derive(Clone)]
+pub(super) struct PendingDigestBudget(Arc<PendingDigestBudgetState>);
+
+struct PendingDigestBudgetState {
+    capacity: usize,
+    used: AtomicUsize,
+}
+
+impl PendingDigestBudget {
+    pub(super) fn new(capacity_bytes: usize) -> Self {
+        Self(Arc::new(PendingDigestBudgetState {
+            capacity: capacity_bytes,
+            used: AtomicUsize::new(0),
+        }))
+    }
+
+    pub(super) fn capacity_bytes(&self) -> usize {
+        self.0.capacity
+    }
+
+    #[cfg(test)]
+    pub(super) fn used_bytes(&self) -> usize {
+        self.0.used.load(Ordering::Acquire)
+    }
+
+    fn try_acquire(&self, bytes: usize) -> Option<PendingDigestCredit> {
+        let mut used = self.0.used.load(Ordering::Acquire);
+        loop {
+            let next = used.checked_add(bytes)?;
+            if next > self.0.capacity {
+                return None;
+            }
+            match self
+                .0
+                .used
+                .compare_exchange_weak(used, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => {
+                    return Some(PendingDigestCredit {
+                        budget: self.0.clone(),
+                        bytes,
+                    });
+                }
+                Err(actual) => used = actual,
+            }
+        }
+    }
+}
+
+/// Credit lives exactly as long as the held bytes in its pending run.
+struct PendingDigestCredit {
+    budget: Arc<PendingDigestBudgetState>,
+    bytes: usize,
+}
+
+impl Drop for PendingDigestCredit {
+    fn drop(&mut self) {
+        self.budget.used.fetch_sub(self.bytes, Ordering::AcqRel);
+    }
+}
+
+struct PendingRun {
+    bytes: Vec<u8>,
+    credit: PendingCreditRequest,
+}
+
+enum PendingCreditRequest {
+    Untracked,
+    Tracked { _credit: PendingDigestCredit },
+}
+
 struct DigestState {
     hasher: Sha256,
     hashed: u64,
     length: u64,
     /// Held runs keyed by their first byte. Runs may overlap; `drain` skips
     /// what is already hashed.
-    pending: std::collections::BTreeMap<u64, Vec<u8>>,
+    pending: std::collections::BTreeMap<u64, PendingRun>,
     pending_bytes: usize,
     pending_limit: usize,
+    pending_budget: Option<PendingDigestBudget>,
     overrun: bool,
     /// Bytes offered to the digest, counting every read of a byte.
     observed: u64,
@@ -407,7 +506,7 @@ impl DigestState {
             match self.pending.last_key_value() {
                 Some((&farthest, _)) if farthest > keep_below => {
                     let (_, dropped) = self.pending.pop_last().expect("last entry exists");
-                    self.pending_bytes -= dropped.len();
+                    self.pending_bytes -= dropped.bytes.len();
                 }
                 _ => return false,
             }
@@ -423,7 +522,7 @@ impl DigestState {
             .pending
             .range(..=offset)
             .next_back()
-            .map(|(&start, run)| (start, start + run.len() as u64));
+            .map(|(&start, run)| (start, start + run.bytes.len() as u64));
         if let Some((start, end)) = continued
             && end >= offset
         {
@@ -432,18 +531,67 @@ impl DigestState {
                 return;
             }
             let extra = &bytes[skip..];
-            if self.make_room(start, extra.len()) {
-                self.pending
-                    .get_mut(&start)
-                    .expect("the run was found above")
-                    .extend_from_slice(extra);
-                self.pending_bytes += extra.len();
+            let Some(new_len) = self.pending[&start].bytes.len().checked_add(extra.len()) else {
+                return;
+            };
+            // Replacing a Vec temporarily keeps both allocations alive. Charge
+            // the complete new run, including its node allowance, while the
+            // old run's full credit remains held.
+            let Some(new_credit) = self.reserve_run_credit(new_len) else {
+                return;
+            };
+            if !self.make_room(start, extra.len()) {
+                return;
             }
+            let run = self
+                .pending
+                .get_mut(&start)
+                .expect("the run was found above");
+            let mut enlarged = Vec::new();
+            if enlarged.try_reserve_exact(new_len).is_err() {
+                return;
+            }
+            enlarged.extend_from_slice(&run.bytes);
+            enlarged.extend_from_slice(extra);
+            let old_bytes = std::mem::replace(&mut run.bytes, enlarged);
+            let old_credit = std::mem::replace(&mut run.credit, new_credit);
+            // Release the old allocation before its credit, keeping accounting
+            // conservative throughout the replacement peak.
+            drop(old_bytes);
+            drop(old_credit);
+            self.pending_bytes += extra.len();
             return;
         }
+        let Some(credit) = self.reserve_run_credit(bytes.len()) else {
+            return;
+        };
         if self.make_room(offset, bytes.len()) {
-            self.pending_bytes += bytes.len();
-            self.pending.insert(offset, bytes.to_vec());
+            let mut held = Vec::new();
+            if held.try_reserve_exact(bytes.len()).is_ok() {
+                held.extend_from_slice(bytes);
+                self.pending_bytes += bytes.len();
+                self.pending.insert(
+                    offset,
+                    PendingRun {
+                        bytes: held,
+                        credit,
+                    },
+                );
+            }
+        }
+    }
+
+    /// An untracked request preserves the planning digest's local-only bound;
+    /// `None` means shared pressure refused the run.
+    fn reserve_run_credit(&self, bytes: usize) -> Option<PendingCreditRequest> {
+        match &self.pending_budget {
+            None => Some(PendingCreditRequest::Untracked),
+            Some(budget) => {
+                let charge = bytes.checked_add(PENDING_RUN_OVERHEAD_BYTES)?;
+                budget
+                    .try_acquire(charge)
+                    .map(|credit| PendingCreditRequest::Tracked { _credit: credit })
+            }
         }
     }
 
@@ -453,12 +601,12 @@ impl DigestState {
             if start > self.hashed {
                 break;
             }
-            let (start, bytes) = self.pending.pop_first().expect("first entry exists");
-            self.pending_bytes -= bytes.len();
-            let end = start + bytes.len() as u64;
+            let (start, run) = self.pending.pop_first().expect("first entry exists");
+            self.pending_bytes -= run.bytes.len();
+            let end = start + run.bytes.len() as u64;
             if end > self.hashed {
                 let skip = usize::try_from(self.hashed - start).unwrap_or(usize::MAX);
-                self.hasher.update(&bytes[skip..]);
+                self.hasher.update(&run.bytes[skip..]);
                 self.hashed = end;
             }
         }
@@ -481,6 +629,7 @@ impl SourceDigest {
             pending: std::collections::BTreeMap::new(),
             pending_bytes: 0,
             pending_limit,
+            pending_budget: None,
             overrun: false,
             observed: 0,
             reread: 0,
@@ -490,6 +639,17 @@ impl SourceDigest {
     /// Replace the bound on held bytes. Called once, before the first task reads.
     pub(super) fn set_pending_limit(&self, limit: usize) {
         self.state().pending_limit = limit;
+    }
+
+    /// Attach the build-level aggregate bound before this source is read. The
+    /// caller shares one budget across all sources in the build.
+    pub(super) fn attach_pending_budget(&self, budget: PendingDigestBudget) {
+        let mut state = self.state();
+        assert!(
+            state.pending.is_empty(),
+            "digest budget must attach before reads"
+        );
+        state.pending_budget = Some(budget);
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, DigestState> {
@@ -593,6 +753,9 @@ pub(super) struct ObservedFile {
     file: File,
     length: u64,
     digest: SourceDigest,
+    /// Serializes every seek and read of the shared file description, so
+    /// streams opened side by side hold stable virtual cursors.
+    lock: Arc<Mutex<()>>,
 }
 
 impl ObservedFile {
@@ -602,6 +765,7 @@ impl ObservedFile {
             file,
             length,
             digest,
+            lock: Arc::new(Mutex::new(())),
         })
     }
 }
@@ -612,21 +776,69 @@ impl Length for ObservedFile {
     }
 }
 
+/// One open read stream over an [`ObservedFile`]: its own virtual cursor,
+/// positioned against the shared file description under the observer's lock.
+/// Cloned handles share one OS cursor, so every seek and read is serialized;
+/// streams held open side by side then never read each other's offsets.
+pub(super) struct PositionedRead {
+    file: File,
+    position: u64,
+    lock: Arc<Mutex<()>>,
+}
+
+impl Read for PositionedRead {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let _guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.file.seek(SeekFrom::Start(self.position))?;
+        let read = self.file.read(buffer)?;
+        self.position += read as u64;
+        Ok(read)
+    }
+}
+
 impl ChunkReader for ObservedFile {
-    type T = std::io::BufReader<DigestingReader<File>>;
+    type T = std::io::BufReader<DigestingReader<PositionedRead>>;
 
     fn get_read(&self, start: u64) -> parquet::errors::Result<Self::T> {
-        let mut file = self.file.try_clone()?;
-        file.seek(SeekFrom::Start(start))?;
+        let file = self.file.try_clone()?;
         Ok(std::io::BufReader::with_capacity(
             PAGE_HEADER_BUFFER_BYTES,
-            DigestingReader::new(file, start, Some(self.digest.clone())),
+            DigestingReader::new(
+                PositionedRead {
+                    file,
+                    position: start,
+                    lock: Arc::clone(&self.lock),
+                },
+                start,
+                Some(self.digest.clone()),
+            ),
         ))
     }
 
     fn get_bytes(&self, start: u64, length: usize) -> parquet::errors::Result<Bytes> {
+        // A length the file cannot hold is the file's claim, not a read: refuse
+        // it before allocating for it.
+        if start
+            .checked_add(length as u64)
+            .is_none_or(|end| end > self.length)
+        {
+            return Err(parquet::errors::ParquetError::EOF(
+                "a read extends beyond the end of the source".into(),
+            ));
+        }
         let mut bytes = vec![0_u8; length];
-        read_exact_at(&self.file, start, &mut bytes)?;
+        {
+            // The clone shares the streams' file description: seek and read
+            // under their lock, so neither side reads the other's offset.
+            let _guard = self
+                .lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            read_exact_at(&self.file, start, &mut bytes)?;
+        }
         self.digest.observe(start, &bytes);
         Ok(Bytes::from(bytes))
     }

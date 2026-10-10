@@ -20,13 +20,37 @@ use uuid::Uuid;
 
 use crate::{BulkInputKind, CancellationToken, GraphConstructionBudgets, GraphForge, OperationId};
 
+mod bounded_ipc;
 pub(crate) mod bulk_source;
 #[cfg(test)]
 mod cpu_budget_report;
 mod external_source;
+mod inventory_budget;
+mod ipc_schema_admission;
 mod journal;
 mod memory_budget;
 mod normalization;
+mod parquet_admission;
+mod parquet_alloc;
+mod parquet_arrow_admission;
+mod parquet_brotli;
+mod parquet_codec;
+mod parquet_compact;
+mod parquet_delta;
+mod parquet_events;
+mod parquet_footer_counts;
+mod parquet_levels;
+mod parquet_page;
+mod parquet_page_decode;
+mod parquet_reader;
+mod parquet_row_groups;
+mod parquet_scan;
+mod parquet_schema_envelope;
+mod parquet_shape;
+mod parquet_sizing;
+mod parquet_values;
+mod parquet_windows;
+mod piece_buffers;
 
 /// Written by this version: a session may register Parquet sources that stay
 /// where they are (#1898).
@@ -880,6 +904,7 @@ impl GraphImportSession {
     }
 
     /// Validate and durably stage every source with cooperative per-batch cancellation.
+    #[allow(clippy::too_many_lines)]
     pub fn validate_with_cancellation(
         &mut self,
         graph: &GraphForge,
@@ -920,10 +945,14 @@ impl GraphImportSession {
                         .all(|source| !source.staged && source.batches_staged == 0)
             };
             let route = if initial {
-                match self
-                    .plan_bulk_build(graph, cancellation, &refusals, &digests)?
-                    .route()
-                {
+                let planned = match self.plan_bulk_build(graph, cancellation, &refusals, &digests) {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        self.record_bulk_refusal(&refusals)?;
+                        return Err(error);
+                    }
+                };
+                match planned.route() {
                     graphforge_storage::BulkRoute::Staged(reason) => {
                         self.manifest.staged_reason = Some(reason);
                         BuildRoute::Staged
@@ -954,8 +983,22 @@ impl GraphImportSession {
             let reused = reused && !self.in_place_digest_missing();
             // The routing plan above read only footers; a fresh one reads the
             // sources, so its digests are the build's.
-            let digests = bulk_source::Digests::default();
-            let plan = self.plan_bulk_build(graph, cancellation, &refusals, &digests)?;
+            let has_external_sources = self
+                .manifest
+                .sources
+                .iter()
+                .any(|source| source.external.is_some());
+            let digests = bulk_source::Digests::for_build_budget(
+                bulk_source::bulk_build_memory_budget()?,
+                has_external_sources,
+            );
+            let plan = match self.plan_bulk_build(graph, cancellation, &refusals, &digests) {
+                Ok(plan) => plan,
+                Err(error) => {
+                    self.record_bulk_refusal(&refusals)?;
+                    return Err(error);
+                }
+            };
             let built =
                 self.build_initial(&mut construction, &plan, &digests, reused, cancellation);
             if built.is_err() {
@@ -1034,7 +1077,40 @@ impl GraphImportSession {
             memory_budget: Some(bulk_source::bulk_build_memory_budget()?),
             ..Default::default()
         };
+        let total_budget = plan.memory_budget.expect("set above");
         for source in &self.manifest.sources {
+            let retained = plan
+                .nodes
+                .iter()
+                .chain(&plan.edges)
+                .map(|source| source.reader.retained_metadata_bytes())
+                .fold(0_u64, u64::saturating_add);
+            let pending = digests.pending_budget_bytes();
+            // The floor is for Parquet's native page inventory, whose scan
+            // holds bounded transient state after the footer. IPC schema
+            // admission must stay within the operation's actual budget.
+            let parquet_source = matches!(
+                source.kind,
+                ImportSourceKind::ParquetNodes | ImportSourceKind::ParquetEdges
+            );
+            let planning_allowance = if parquet_source
+                && retained == 0
+                && total_budget < bulk_source::PLANNING_FLOOR_BYTES
+            {
+                bulk_source::PLANNING_FLOOR_BYTES
+            } else {
+                total_budget
+            };
+            let planning_budget = planning_allowance
+                .saturating_sub(retained)
+                .saturating_sub(pending);
+            if planning_budget == 0 {
+                return Err(GfError::Project {
+                    code: graphforge_core::ProjectErrorCode::ResourceLimit,
+                    message: "registered source metadata leaves no admitted workspace for the next source"
+                        .into(),
+                });
+            }
             let planned = bulk_source::plan(
                 graph,
                 &self.root,
@@ -1044,6 +1120,8 @@ impl GraphImportSession {
                 cancellation,
                 refusals,
                 digests,
+                u64::try_from(self.construction_budgets().max_batch_bytes).unwrap_or(u64::MAX),
+                planning_budget,
             )?;
             match source.kind.input_kind() {
                 BulkInputKind::Node => plan.nodes.push(planned),
@@ -1955,6 +2033,9 @@ mod test_fixtures {
 
 #[cfg(all(test, feature = "portable"))]
 mod bulk_tests;
+
+#[cfg(all(test, feature = "portable"))]
+mod bulk_source_acceptance_tests;
 
 #[cfg(all(test, feature = "portable"))]
 mod tests {

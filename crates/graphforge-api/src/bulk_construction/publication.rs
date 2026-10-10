@@ -194,7 +194,7 @@ impl GraphForge {
         batches: &[RecordBatch],
     ) -> Result<RecordBatch, BulkNodePublicationError> {
         let _visibility = self.graph_visibility.lock()?;
-        let normalized = self.normalize_bulk_nodes(operation_uuid, batches, false)?;
+        let normalized = self.normalize_bulk_nodes(operation_uuid, batches, false, true)?;
         if normalized.rows.is_empty() {
             return Ok(node_receipt(&normalized.rows, operation_uuid, Uuid::nil())?);
         }
@@ -366,7 +366,7 @@ impl GraphForge {
                 .expect("generation UUID lock poisoned"),
         };
         let normalized =
-            self.normalize_bulk_edges(operation_uuid, batches, &empty_nodes, false, None)?;
+            self.normalize_bulk_edges(operation_uuid, batches, &empty_nodes, false, None, true)?;
         if normalized.rows.is_empty() {
             return Ok(edge_receipt(&normalized.rows, operation_uuid, Uuid::nil())?);
         }

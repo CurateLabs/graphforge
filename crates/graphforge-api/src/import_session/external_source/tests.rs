@@ -11,7 +11,7 @@ use parquet::arrow::ArrowWriter;
 use sha2::Digest as _;
 use uuid::Uuid;
 
-use super::{SourceDigest, hex};
+use super::{PendingDigestBudget, SourceDigest, hex};
 use crate::import_session::test_fixtures::{edges, fixture, nodes, seeded_fixture};
 use crate::import_session::{
     BuildRoute, GraphImportSession, ImportPhase, ImportSessionLimits, ImportSourceKind,
@@ -242,6 +242,29 @@ fn digest_equals_sha256_for_any_read_order() {
 }
 
 #[test]
+fn planning_footer_verification_holds_the_footer_under_the_pending_floor() {
+    let source = source();
+    let identity = super::ExternalSource::capture(&source.path).unwrap();
+    let original = fs::read(&source.path).unwrap();
+    let digest = SourceDigest::new(identity.size);
+
+    // Exercise the real registration-pin and footer-verification transport,
+    // which observes the trailer and footer ahead of the undecoded body. The
+    // footer is held under the pending floor until the hashed prefix reaches
+    // it, so `finish` re-reads only what nothing observed.
+    let file = identity.open_observed(&digest).unwrap();
+    let held = {
+        let state = digest.state();
+        assert!(state.pending_bytes > 0, "the footer read ahead is held");
+        assert!(state.pending_bytes as u64 <= super::PENDING_FLOOR_BYTES);
+        state.pending_bytes as u64
+    };
+    assert_eq!(digest.finish(&identity, &file).unwrap(), sha256(&original));
+    assert!(digest.reread_bytes() <= identity.size - held);
+    identity.check(&file).unwrap();
+}
+
+#[test]
 fn digest_rereads_ranges_dropped_beyond_the_pending_bound() {
     let bytes = (0..(1 << 20))
         .map(|index: u32| index as u8)
@@ -328,6 +351,24 @@ fn digest_refuses_a_read_past_the_registered_size() {
     let digest = SourceDigest::new(200);
     let error = digest.finish(&fake_source(&path, 200), &file).unwrap_err();
     assert!(api_error(&error).1.contains("was resized"));
+}
+
+/// A length the file cannot hold is the file's claim, not a read: refused before
+/// anything is allocated for it, whatever the Parquet decoder asked for (#1918).
+#[test]
+fn a_read_the_file_cannot_hold_is_refused_before_it_is_allocated() {
+    use parquet::file::reader::ChunkReader as _;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("blob");
+    fs::write(&path, [1_u8; 100]).unwrap();
+    let input =
+        super::ObservedFile::new(File::open(&path).unwrap(), SourceDigest::new(100)).unwrap();
+    // 2^62 bytes would abort the process if it were allocated.
+    for (start, length) in [(0, 1_usize << 62), (90, 11), (101, 1), (u64::MAX, 1)] {
+        let error = input.get_bytes(start, length).unwrap_err();
+        assert!(error.to_string().contains("beyond the end"), "{error}");
+    }
+    assert_eq!(input.get_bytes(90, 10).unwrap().len(), 10);
 }
 
 fn fake_source(path: &Path, size: u64) -> super::ExternalSource {
@@ -840,7 +881,7 @@ fn a_staged_read_hashes_what_it_reads_and_rereads_almost_nothing() {
     let ids = (0..600_000).map(|_| Uuid::now_v7()).collect::<Vec<_>>();
     let batch = nodes(&ids);
     let properties = WriterProperties::builder()
-        .set_max_row_group_size(100_000)
+        .set_max_row_group_row_count(Some(100_000))
         .set_statistics_enabled(parquet::file::properties::EnabledStatistics::Chunk)
         .build();
     let mut writer = ArrowWriter::try_new(
@@ -1289,6 +1330,74 @@ fn a_fully_staged_source_edited_before_resume_publishes_its_original_rows_and_di
             Some(sha256(&fs::read(&second.path).unwrap()).as_str())
         );
     }
+}
+
+#[test]
+fn source_digests_share_one_nonblocking_pending_byte_budget() {
+    let first_fixture = source();
+    let second_fixture = source();
+    let first_bytes = fs::read(&first_fixture.path).unwrap();
+    let second_bytes = fs::read(&second_fixture.path).unwrap();
+    assert!(first_bytes.len() >= 8 && second_bytes.len() >= 8);
+    let first_source = super::ExternalSource::capture(&first_fixture.path).unwrap();
+    let second_source = super::ExternalSource::capture(&second_fixture.path).unwrap();
+    let first_handle = first_source.reopen().unwrap();
+    let second_handle = second_source.reopen().unwrap();
+
+    // Two bytes cost 1,026 including the fixed per-run/node allowance;
+    // replacing it with a four-byte run needs 1,026 + 1,028 at peak.
+    let budget = PendingDigestBudget::new(2_054);
+    let first = SourceDigest::with_pending_limit(first_bytes.len() as u64, 8);
+    let second = SourceDigest::with_pending_limit(second_bytes.len() as u64, 8);
+    first.attach_pending_budget(budget.clone());
+    second.attach_pending_budget(budget.clone());
+
+    // The first source's replacement peak reaches the aggregate limit. Once
+    // replacement completes, the second source still cannot multiply the cap;
+    // its range is omitted and recovered by finish.
+    first.observe(4, &first_bytes[4..6]);
+    assert_eq!(budget.used_bytes(), 1_026);
+    first.observe(6, &first_bytes[6..8]);
+    second.observe(4, &second_bytes[4..8]);
+    assert_eq!(budget.capacity_bytes(), 2_054);
+    assert_eq!(budget.used_bytes(), 1_028);
+
+    assert_eq!(
+        first.finish(&first_source, &first_handle).unwrap(),
+        sha256(&first_bytes)
+    );
+    assert_eq!(budget.used_bytes(), 0);
+    assert_eq!(first.reread_bytes(), first_bytes.len() as u64 - 4);
+
+    assert_eq!(
+        second.finish(&second_source, &second_handle).unwrap(),
+        sha256(&second_bytes)
+    );
+    assert_eq!(second.reread_bytes(), second_bytes.len() as u64);
+    assert_eq!(budget.used_bytes(), 0);
+}
+
+#[test]
+fn digest_run_extension_keeps_old_bytes_when_replacement_peak_does_not_fit() {
+    let fixture = source();
+    let bytes = fs::read(&fixture.path).unwrap();
+    assert!(bytes.len() >= 8);
+    let external = super::ExternalSource::capture(&fixture.path).unwrap();
+    let handle = external.reopen().unwrap();
+    let budget = PendingDigestBudget::new(2_053);
+    let digest = SourceDigest::with_pending_limit(bytes.len() as u64, 8);
+    digest.attach_pending_budget(budget.clone());
+
+    digest.observe(4, &bytes[4..6]);
+    assert_eq!(budget.used_bytes(), 1_026);
+    // The replacement needs the old 1,026-byte credit plus 1,028 bytes for
+    // the new run. It cannot fit, so the old two bytes stay held.
+    digest.observe(6, &bytes[6..8]);
+    assert_eq!(budget.used_bytes(), 1_026);
+
+    assert_eq!(digest.finish(&external, &handle).unwrap(), sha256(&bytes));
+    assert_eq!(digest.reread_bytes(), bytes.len() as u64 - 2);
+    assert_eq!(budget.used_bytes(), 0);
 }
 
 /// Everything commit publishes was built and its digests recorded by validate, so

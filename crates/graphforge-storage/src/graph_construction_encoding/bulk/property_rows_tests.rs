@@ -61,6 +61,7 @@ fn new_rows(
         budgets,
         schema_bytes,
         0,
+        0,
         sizing.retained_bytes,
         0,
     );

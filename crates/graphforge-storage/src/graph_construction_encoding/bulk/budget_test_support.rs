@@ -118,6 +118,6 @@ impl ScratchPlan {
 
 impl BulkBuildPlan<'_> {
     pub(crate) fn property_floor_bytes(&self, budgets: super::GraphConstructionBudgets) -> u64 {
-        property_extra_if_any(self, budgets)
+        source_phase_extra(self, budgets)
     }
 }
