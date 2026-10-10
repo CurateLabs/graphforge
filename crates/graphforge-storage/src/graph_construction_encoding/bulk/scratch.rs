@@ -248,6 +248,14 @@ struct SegmentLayout {
     payload: usize,
 }
 
+/// Fixed geometry and aggregate expectations of a segmented read.
+struct SegmentReadRange {
+    layout: SegmentLayout,
+    last: u64,
+    final_bytes: u64,
+    expected: u64,
+}
+
 /// One partition's append progress, behind the lock that orders its appends.
 /// A fixed number of scalars per partition, never a Vec over segments: the
 /// state stays O(logical partitions) however many physical segments a
@@ -717,10 +725,12 @@ impl Partitions {
         match self.stream_segments(
             scratch,
             index,
-            layout,
-            last,
-            final_bytes,
-            expected,
+            SegmentReadRange {
+                layout,
+                last,
+                final_bytes,
+                expected,
+            },
             None,
             false,
             &mut visit,
@@ -835,10 +845,12 @@ impl Partitions {
         match self.stream_segments(
             scratch,
             index,
-            layout,
-            last,
-            final_bytes,
-            expected,
+            SegmentReadRange {
+                layout,
+                last,
+                final_bytes,
+                expected,
+            },
             Some(cancel),
             true,
             &mut visit,
@@ -867,13 +879,13 @@ impl Partitions {
     /// cleanup and the scratch teardown still owe, and a failed partition
     /// never returns to Writing.
     fn fail_segmented(&self, index: usize) {
-        if let Ok(mut progress) = self.state[index].lock() {
-            if matches!(
+        if let Ok(mut progress) = self.state[index].lock()
+            && matches!(
                 progress.lifecycle,
                 SegmentLifecycle::Writing | SegmentLifecycle::Reading
-            ) {
-                progress.lifecycle = SegmentLifecycle::Failed;
-            }
+            )
+        {
+            progress.lifecycle = SegmentLifecycle::Failed;
         }
     }
 
@@ -891,14 +903,17 @@ impl Partitions {
         &self,
         scratch: &Scratch,
         index: usize,
-        layout: SegmentLayout,
-        last: u64,
-        final_bytes: u64,
-        expected: u64,
+        range: SegmentReadRange,
         cancel: Option<&AtomicBool>,
         reclaim_segments: bool,
         visit: &mut impl FnMut(&[u8]) -> Result<(), GfError>,
     ) -> Result<(), GfError> {
+        let SegmentReadRange {
+            layout,
+            last,
+            final_bytes,
+            expected,
+        } = range;
         let cancelled =
             |cancel: Option<&AtomicBool>| cancel.is_some_and(|token| token.load(Ordering::Acquire));
         let mut observed = 0_u64;
@@ -906,15 +921,12 @@ impl Partitions {
             if cancelled(cancel) {
                 return Err(storage("construction encoding cancelled"));
             }
-            let mut reader = match BlockReader::open_segment(
+            let mut reader = BlockReader::open_segment(
                 scratch,
                 &self.segment_path(index, segment),
                 self.width,
                 layout.cap,
-            ) {
-                Ok(reader) => reader,
-                Err(error) => return Err(error),
-            };
+            )?;
             let mut payload = Vec::new();
             let outcome = loop {
                 if cancelled(cancel) {

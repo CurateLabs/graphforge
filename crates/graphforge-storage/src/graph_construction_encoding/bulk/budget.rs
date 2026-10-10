@@ -299,6 +299,46 @@ pub(crate) mod test_support;
 use test_support::{
     FORCED_CONCURRENCY, FORCED_GATE, FORCED_NODE_PARTITIONS, FORCED_PARTITIONS, FORCED_STAGGER,
 };
+
+/// Working set available beside the shared node/property footprint.
+fn scratch_working_bytes(
+    plan: &BulkBuildPlan<'_>,
+    budget: u64,
+    budgets: GraphConstructionBudgets,
+    node_scratch: bool,
+    properties: bool,
+) -> u64 {
+    let shared = if node_scratch {
+        plan.scratch_floor_bytes()
+    } else {
+        plan.node_tables_resident_bytes()
+    }
+    .saturating_add(if properties {
+        property_extra_workspace(plan, budgets)
+    } else {
+        0
+    });
+    budget
+        .saturating_sub(shared)
+        .saturating_add(MIN_WORKING_BYTES)
+}
+
+/// Additional property workers retain allocator workspace beyond the pools.
+/// SNB BI SF1 measured about 120 MB per worker (1.27 GB at no workers, 2.10 GB
+/// at seven, 3.05 GB at fifteen); the first worker is in the fixed footprint.
+fn additional_worker_bytes(properties: bool, concurrency: u64) -> u64 {
+    if properties {
+        (concurrency - 1).saturating_mul(WORKER_BYTES)
+    } else {
+        0
+    }
+}
+
+fn initial_partitions(rows: u64, row_bytes: u64, per_partition: u64) -> u64 {
+    rows.saturating_mul(row_bytes)
+        .div_ceil(per_partition.max(1))
+        .clamp(1, MAX_PARTITIONS)
+}
 impl ScratchPlan {
     #[cfg(test)]
     pub(super) fn derive(plan: &BulkBuildPlan<'_>, budget: u64, workers: usize) -> Self {
@@ -329,48 +369,18 @@ impl ScratchPlan {
             .iter()
             .chain(&plan.edges)
             .any(|source| !source.property_free);
-        // Held whatever the concurrency: the node tables, the fixed workspace,
-        // and (with properties) the overlay writer's workspace.
-        let shared = if node_scratch {
-            plan.scratch_floor_bytes()
-        } else {
-            plan.node_tables_resident_bytes()
-        }
-        .saturating_add(if properties {
-            property_extra_workspace(plan, budgets)
-        } else {
-            0
-        });
-        // What the workers share beyond that: staging, the bytes the tasks in
-        // flight decode, the bytes the property sort retains, and the partitions
-        // in flight. Which tasks decode at once is decided by the decode pool at
-        // run time, so the worker count is not charged one decoder each.
-        let available = budget
-            .saturating_sub(shared)
-            .saturating_add(MIN_WORKING_BYTES);
-        // Each further property-bearing worker also keeps what its thread
-        // allocates and frees: measured on SNB BI SF1, peak resident memory grew by about
-        // 120 MB per worker beyond the pools (1.27 GB at no workers, 2.10 GB at
-        // 7, 3.05 GB at 15). Those bytes come off the working set, and the
-        // workers may take at most five eighths of it.
-        let overhead = |concurrency: u64| {
-            if properties {
-                // The first worker is part of the fixed footprint.
-                (concurrency - 1).saturating_mul(WORKER_BYTES)
-            } else {
-                0
-            }
-        };
-        let decoder = DECODE_WINDOW_BYTES;
-        let ceil = |bytes: u64, per: u64| bytes.div_ceil(per.max(1));
+        // One shared footprint; additional property-worker overhead comes off
+        // this working set before partition and scatter staging admission.
+        let available = scratch_working_bytes(plan, budget, budgets, node_scratch, properties);
         let mut best = None;
         for concurrency in (1..=workers.max(1) as u64).rev() {
-            if overhead(concurrency) > available / 8 * 5 {
+            if additional_worker_bytes(properties, concurrency) > available / 8 * 5 {
                 continue;
             }
-            let working = available.saturating_sub(overhead(concurrency));
+            let working =
+                available.saturating_sub(additional_worker_bytes(properties, concurrency));
             // Decoding tasks in flight must fit beside the staging buffers.
-            if !properties && concurrency > 1 && concurrency * decoder > working / 4 {
+            if !properties && concurrency > 1 && concurrency * DECODE_WINDOW_BYTES > working / 4 {
                 continue;
             }
             // Each worker's property run fits the retained pool.
@@ -383,12 +393,10 @@ impl ScratchPlan {
             #[cfg(test)]
             let gate_bytes = FORCED_GATE.with(std::cell::Cell::get).unwrap_or(gate_bytes);
             let per_partition = gate_bytes / (2 * concurrency);
-            let edge_partitions =
-                ceil(edges.saturating_mul(edge_row_bytes), per_partition).clamp(1, MAX_PARTITIONS);
-            let csr_partitions = ceil(edges.saturating_mul(CSR_PARTITION_BYTES), per_partition)
-                .clamp(1, MAX_PARTITIONS);
+            let edge_partitions = initial_partitions(edges, edge_row_bytes, per_partition);
+            let csr_partitions = initial_partitions(edges, CSR_PARTITION_BYTES, per_partition);
             let node_partitions = if node_scratch {
-                ceil(nodes.saturating_mul(node_row_bytes), per_partition).clamp(1, MAX_PARTITIONS)
+                initial_partitions(nodes, node_row_bytes, per_partition)
             } else {
                 0
             };
@@ -428,12 +436,10 @@ impl ScratchPlan {
                 1,
                 working,
                 gate_bytes,
-                ceil(edges.saturating_mul(edge_row_bytes), per_partition).clamp(1, MAX_PARTITIONS),
-                ceil(edges.saturating_mul(CSR_PARTITION_BYTES), per_partition)
-                    .clamp(1, MAX_PARTITIONS),
+                initial_partitions(edges, edge_row_bytes, per_partition),
+                initial_partitions(edges, CSR_PARTITION_BYTES, per_partition),
                 if node_scratch {
-                    ceil(nodes.saturating_mul(node_row_bytes), per_partition)
-                        .clamp(1, MAX_PARTITIONS)
+                    initial_partitions(nodes, node_row_bytes, per_partition)
                 } else {
                     0
                 },
