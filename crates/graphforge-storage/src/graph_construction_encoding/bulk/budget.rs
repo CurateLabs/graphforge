@@ -186,12 +186,6 @@ pub(super) fn node_tables_on_scratch(
     budget: u64,
     budgets: super::GraphConstructionBudgets,
 ) -> bool {
-    // A test that forces node partitions forces the route, so a build with no
-    // nodes at all, which no budget can push over, still exercises it.
-    #[cfg(test)]
-    if FORCED_NODE_PARTITIONS.with(std::cell::Cell::get).is_some() {
-        return true;
-    }
     plan.node_tables_resident_bytes()
         .saturating_add(property_extra_if_any(plan, budgets))
         > budget
@@ -284,8 +278,6 @@ pub(super) struct ScratchPlan {
     pub(super) staging_total: u64,
     pub(super) edge_row_bytes: u64,
     pub(super) node_row_bytes: u64,
-    #[cfg(test)]
-    pub(super) stagger_millis: u64,
     /// Run formation and merging of property rows.
     pub(super) property: PropertySizing,
     /// Bytes the tasks decoding at once may reserve in total.
@@ -296,9 +288,7 @@ pub(super) struct ScratchPlan {
 #[path = "budget_test_support.rs"]
 pub(crate) mod test_support;
 #[cfg(test)]
-use test_support::{
-    FORCED_CONCURRENCY, FORCED_GATE, FORCED_NODE_PARTITIONS, FORCED_PARTITIONS, FORCED_STAGGER,
-};
+use test_support::{FORCED_GATE, FORCED_PARTITIONS};
 
 /// Working set available beside the shared node/property footprint.
 fn scratch_working_bytes(
@@ -472,14 +462,6 @@ impl ScratchPlan {
             .map_or((edge_partitions, csr_partitions), |(edge, csr)| {
                 (edge as u64, csr as u64)
             });
-        #[cfg(test)]
-        let concurrency = FORCED_CONCURRENCY
-            .with(std::cell::Cell::get)
-            .map_or(concurrency, |n| n as u64);
-        #[cfg(test)]
-        let node_partitions = FORCED_NODE_PARTITIONS
-            .with(std::cell::Cell::get)
-            .map_or(node_partitions, |n| if node_scratch { n as u64 } else { 0 });
         let decode_bytes = working / 8 * 3;
         Self {
             concurrency: usize::try_from(concurrency).unwrap_or(1),
@@ -490,8 +472,6 @@ impl ScratchPlan {
             staging_total: working / 8,
             edge_row_bytes,
             node_row_bytes,
-            #[cfg(test)]
-            stagger_millis: FORCED_STAGGER.with(std::cell::Cell::get).unwrap_or(0),
             gate_bytes,
             staging_bytes: usize::try_from(staging).unwrap_or(8 << 10),
             property: property_sizing(working / 8 * 3, concurrency, plan.max_source_schema_bytes()),

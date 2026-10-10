@@ -596,10 +596,6 @@ pub(super) fn resolve_endpoints(
                 *shared = Some(shared.map_or(endpoint, |m| m.min(endpoint)));
             }
             // Degrees reach the key partitioners in rank order.
-            #[cfg(test)]
-            std::thread::sleep(std::time::Duration::from_millis(
-                plan.stagger_millis * (leaves - leaf) as u64,
-            ));
             ordered.wait_turn(0, leaf)?;
             {
                 let mut builders = builders

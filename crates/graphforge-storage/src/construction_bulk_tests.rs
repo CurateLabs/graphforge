@@ -979,10 +979,9 @@ mod bulk_builder {
                 crate::graph_construction_encoding::bulk_test_support::derived_concurrency(
                     &probe, budget, lanes, budgets,
                 );
-            let decode_pool =
-                crate::graph_construction_encoding::bulk_test_support::decode_pool(
-                    &probe, budget, lanes, budgets,
-                );
+            let decode_pool = crate::graph_construction_encoding::bulk_test_support::decode_pool(
+                &probe, budget, lanes, budgets,
+            );
             let (_, largest_task) =
                 crate::graph_construction_encoding::bulk_test_support::task_decode_bytes_bounds(
                     &probe,
@@ -2887,8 +2886,7 @@ mod bulk_builder {
     ) -> BulkBuildPlan<'static> {
         let mut plan = plan(nodes, edges, per_task);
         plan.memory_budget = Some(plan.scratch_floor_bytes() + 1);
-        // A build with no node at all has no node table to push over a budget;
-        // the tests that force node partitions force the route for it.
+        // A build with no node at all has no node table to push over a budget.
         let has_nodes = nodes.iter().any(|batch| batch.num_rows() > 0);
         assert_eq!(
             plan.route(),
@@ -2906,11 +2904,12 @@ mod bulk_builder {
         edges: &[RecordBatch],
         per_task: usize,
         workers: usize,
-        (edge_partitions, csr_partitions, node_partitions): (usize, usize, usize),
+        (edge_partitions, csr_partitions): (usize, usize),
     ) -> Result<ScratchRun, GfError> {
-        let _forced =
-            crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(edge_partitions, csr_partitions)
-                .with_nodes(node_partitions);
+        let _forced = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(
+            edge_partitions,
+            csr_partitions,
+        );
         let root = TempDir::new().unwrap();
         let mut session = pinned(&root);
         session.set_cpu_admission(Some(Arc::new(
@@ -2918,13 +2917,95 @@ mod bulk_builder {
                 std::num::NonZeroUsize::new(workers).unwrap(),
             ),
         )));
-        let encoding = session
-            .prepare_bulk_encoding(1, &node_scratch_plan(nodes, edges, per_task), || false)?;
+        let encoding =
+            session
+                .prepare_bulk_encoding(1, &node_scratch_plan(nodes, edges, per_task), || false)?;
         Ok(ScratchRun {
             inventory: inventory(&encoding),
             report: session.bulk_build_report(),
             scratch_left: scratch_dir(&session).exists(),
         })
+    }
+
+    fn clustered_node_graph(
+        node_count: usize,
+        edge_count: usize,
+    ) -> (Vec<RecordBatch>, Vec<RecordBatch>) {
+        let (nodes, edges, _) = skewed_node_graph(node_count, edge_count);
+        (nodes, edges)
+    }
+
+    /// Put most rows in one task that the 64-task splitter sample omits. The
+    /// surrounding one-row tasks give the sampler a real UUID range while the
+    /// broad footer bounds still exercise adaptive refinement.
+    fn skewed_node_graph(
+        node_count: usize,
+        edge_count: usize,
+    ) -> (Vec<RecordBatch>, Vec<RecordBatch>, Vec<[u8; 16]>) {
+        const SENTINELS: usize = 257;
+        assert!(node_count > SENTINELS);
+        let cluster_rows = node_count - SENTINELS;
+        let mut node_ids = (0..cluster_rows - 1)
+            .map(|index| {
+                let mut value = [0x80; 16];
+                value[6] = 0x70;
+                value[8] = 0x80;
+                value[14..].copy_from_slice(&(index as u16).to_be_bytes());
+                value
+            })
+            .collect::<Vec<_>>();
+        node_ids.push([0xee; 16]);
+        node_ids[cluster_rows - 1][6] = 0x70;
+        node_ids[cluster_rows - 1][8] = 0x80;
+        let mut nodes = Vec::with_capacity(SENTINELS + 1);
+        let sentinel = |index: usize| {
+            let mut value = [0; 16];
+            value[..2].copy_from_slice(&u16::try_from(index + 1).unwrap().to_be_bytes());
+            value[6] = 0x70;
+            value[8] = 0x80;
+            value
+        };
+        for index in 0..3 {
+            nodes.push(node_batch_of(&[sentinel(index)], &["Person"]));
+        }
+        let cluster = &node_ids[..cluster_rows];
+        nodes.push(node_batch_of(cluster, &vec!["Person"; cluster.len()]));
+        for index in 3..SENTINELS {
+            nodes.push(node_batch_of(&[sentinel(index)], &["Person"]));
+        }
+        node_ids.extend((0..SENTINELS).map(sentinel));
+        let edge_ids = (0..edge_count as u64)
+            .map(|index| uuid(0xf0, index))
+            .collect::<Vec<_>>();
+        let relationships = (0..edge_count)
+            .map(|index| ["KNOWS", "LIVES_IN", "OWNS"][index % 3])
+            .collect::<Vec<_>>();
+        let edges = vec![edge_batch_of(
+            &edge_ids,
+            &relationships,
+            &(0..edge_count)
+                .map(|index| node_ids[(index * 7) % node_count])
+                .collect::<Vec<_>>(),
+            &(0..edge_count)
+                .map(|index| node_ids[(index * 11 + 3) % node_count])
+                .collect::<Vec<_>>(),
+        )];
+        (nodes, edges, node_ids)
+    }
+
+    fn scratch_refusal(nodes: &[RecordBatch], edges: &[RecordBatch]) -> String {
+        let mut plan = plan(nodes, edges, 2);
+        plan.memory_budget = Some(plan.node_tables_resident_bytes());
+        assert_eq!(plan.route(), crate::BulkRoute::Scratch);
+        let root = TempDir::new().unwrap();
+        let mut session = pinned(&root);
+        session.set_cpu_admission(Some(Arc::new(
+            cpu_admission::ConstructionCpuAdmission::new(std::num::NonZeroUsize::new(4).unwrap()),
+        )));
+        session
+            .prepare_bulk_encoding(1, &plan, || false)
+            .unwrap_err()
+            .to_string()
     }
 
     /// Every scratch block is written once and read once, and each family of
@@ -2949,19 +3030,27 @@ mod bulk_builder {
             edges * (2 * 33 + 16 + 2 * 37),
             "endpoints",
         );
-        // The edge side moves what it always moved: the 28-byte record and
-        // two 16-byte adjacency entries per edge.
-        within(
-            report.scratch_write_bytes
-                - report.edge_refinement_write_bytes
-                - report.csr_spool_write_bytes
-                - report.node_scratch_write_bytes
-                - report.endpoint_scratch_write_bytes,
-            edges * (28 + 2 * 16),
-            "edges",
+        // The edge side writes one 28-byte raw record and two 16-byte CSR
+        // records per edge. Each record family uses framed blocks; when its
+        // staging holds only one record, each record may add one 8-byte
+        // header. Refinement and relation-spool writes are removed separately
+        // below, so this bounds only the initial raw and CSR record families.
+        let edge_payload = edges * (28 + 2 * 16);
+        let maximum_headers = edges * 3 * 8;
+        let edge_writes = report.scratch_write_bytes
+            - report.edge_refinement_write_bytes
+            - report.csr_spool_write_bytes
+            - report.node_scratch_write_bytes
+            - report.endpoint_scratch_write_bytes;
+        assert!(
+            edge_writes >= edge_payload && edge_writes <= edge_payload + maximum_headers,
+            "edge record families wrote {edge_writes} bytes for {edge_payload} payload bytes +             and at most {maximum_headers} frame-header bytes: {report:?}"
         );
         assert_eq!(report.scratch_read_bytes, report.scratch_write_bytes);
-        assert_eq!(report.node_scratch_read_bytes, report.node_scratch_write_bytes);
+        assert_eq!(
+            report.node_scratch_read_bytes,
+            report.node_scratch_write_bytes
+        );
         assert_eq!(
             report.endpoint_scratch_read_bytes,
             report.endpoint_scratch_write_bytes
@@ -2983,29 +3072,26 @@ mod bulk_builder {
     }
 
     #[test]
-    fn node_tables_on_scratch_publish_the_in_memory_bytes_at_any_partition_count() {
+    fn node_tables_on_scratch_publish_the_in_memory_bytes_at_budget_derived_partitions() {
         let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
         let expected = bulk_with(&nodes, &edges, 2, 4).unwrap();
         assert_same(&staged(&nodes, &edges), &expected);
         for (per_task, workers, partitions) in [
-            (2, 1, (1, 1, 1)),
-            (2, 4, (2, 3, 2)),
-            (3, 2, (7, 5, 7)),
-            (1, 8, (16, 16, 16)),
-            (4, 3, (33, 2, 33)),
-            (5, 2, (1, 9, 40)),
+            (2, 1, (1, 1)),
+            (2, 4, (2, 3)),
+            (3, 2, (7, 5)),
+            (1, 8, (16, 16)),
+            (4, 3, (33, 2)),
+            (5, 2, (1, 9)),
         ] {
             let run = node_scratch_run(&nodes, &edges, per_task, workers, partitions).unwrap();
             assert_eq!(
                 expected, run.inventory,
-                "partitions {partitions:?} workers {workers}"
+                "edge/CSR partitions {partitions:?} workers {workers}"
             );
             assert!(!run.scratch_left, "scratch must be deleted on completion");
             let report = &run.report;
             assert!(report.node_partitions >= 1, "{report:?}");
-            if partitions.2 > 1 {
-                assert!(report.node_partitions > 1, "{report:?}");
-            }
             assert!(report.csr_partitions >= partitions.1 as u64);
             assert_eq!((report.nodes, report.edges), (1_021, 3_001));
             assert_node_scratch_traffic(report, 1_021, 3_001);
@@ -3025,9 +3111,14 @@ mod bulk_builder {
                 .count();
             assert!(files >= 2, "{prefix}: {files} files");
         }
-        for partitions in [(2, 2, 2), (5, 3, 5), (64, 9, 64)] {
+        let _gate =
+            crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(
+                32 << 10,
+            );
+        for partitions in [(2, 2), (5, 3), (64, 9)] {
             let run = node_scratch_run(&nodes, &edges, 2, 4, partitions).unwrap();
             assert_same(&expected, &run.inventory);
+            assert!(run.report.node_partitions > 1, "{:?}", run.report);
             assert_node_scratch_traffic(&run.report, 70_001, 140_003);
         }
     }
@@ -3044,9 +3135,14 @@ mod bulk_builder {
             .filter(|entry| entry.0.ends_with(".csr"))
             .count();
         assert!(shards >= 200, "{shards} shards");
-        for partitions in [(1, 1, 1), (3, 2, 3), (6, 5, 7), (9, 40, 11)] {
+        let _gate =
+            crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(
+                8 << 10,
+            );
+        for partitions in [(1, 1), (3, 2), (6, 5), (9, 40)] {
             let run = node_scratch_run(&nodes, &edges, 2, 4, partitions).unwrap();
             assert_same(&expected, &run.inventory);
+            assert!(run.report.node_partitions > 1, "{:?}", run.report);
         }
     }
 
@@ -3063,8 +3159,11 @@ mod bulk_builder {
             &vec![node_uuids[1]; 3001],
         )];
         let expected = bulk_with(&nodes, &edges, 1, 2).unwrap();
-        let _gate = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(32 << 10);
-        let run = node_scratch_run(&nodes, &edges, 1, 2, (16, 2, 2)).unwrap();
+        let _gate =
+            crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(
+                32 << 10,
+            );
+        let run = node_scratch_run(&nodes, &edges, 1, 2, (16, 2)).unwrap();
         assert_same(&expected, &run.inventory);
         assert_node_scratch_traffic(&run.report, 2, 3001);
         assert_eq!(run.report.csr_spool_write_bytes, 0);
@@ -3072,7 +3171,7 @@ mod bulk_builder {
     }
 
     #[test]
-    fn hubs_empty_partitions_and_missing_sides_publish_the_in_memory_bytes() {
+    fn hubs_and_missing_sides_publish_the_in_memory_bytes() {
         let _limits = ShardLimits::set(5, 100);
         let node_uuids = (0..40_u64).map(|i| uuid(0x10, i)).collect::<Vec<_>>();
         let nodes = vec![node_batch_of(&node_uuids, &vec!["Person"; 40])];
@@ -3098,14 +3197,14 @@ mod bulk_builder {
             &dst.collect::<Vec<_>>(),
         )];
         let expected = bulk_with(&nodes, &edges, 1, 2).unwrap();
-        // Far more partitions than rows: most are empty.
-        for partitions in [(2, 2, 2), (64, 64, 64), (200, 1, 200)] {
+        // Far more edge/CSR partitions than rows: most are empty.
+        for partitions in [(2, 2), (64, 64), (200, 1)] {
             let run = node_scratch_run(&nodes, &edges, 1, 2, partitions).unwrap();
             assert_same(&expected, &run.inventory);
         }
         // Nodes and no edges.
         let expected = bulk_with(&nodes, &[], 1, 2).unwrap();
-        let run = node_scratch_run(&nodes, &[], 1, 2, (4, 4, 4)).unwrap();
+        let run = node_scratch_run(&nodes, &[], 1, 2, (4, 4)).unwrap();
         assert_same(&expected, &run.inventory);
         assert_eq!(run.report.edges, 0);
         assert_node_scratch_traffic(&run.report, 40, 0);
@@ -3118,46 +3217,25 @@ mod bulk_builder {
             &node_uuids[..1],
         )];
         let expected = bulk_with(&one, &loops, 1, 2).unwrap();
-        let run = node_scratch_run(&one, &loops, 1, 2, (3, 3, 3)).unwrap();
+        let run = node_scratch_run(&one, &loops, 1, 2, (3, 3)).unwrap();
         assert_same(&expected, &run.inventory);
     }
 
     #[test]
     fn oversized_node_ranges_refine_and_publish_the_in_memory_bytes() {
-        // Time-ordered identities share their leading bytes, and one outlier
-        // makes every footer span look uniform.
+        // One unsampled task has a broad footer span around many clustered
+        // identities, so both sampled and footer-derived splitters need refine.
         let _limits = ShardLimits::set(31, 100);
-        let mut node_ids = (0..3000_u16)
-            .map(|index| {
-                let mut value = [0x10; 16];
-                value[6] = 0x70;
-                value[8] = 0x80;
-                value[14..].copy_from_slice(&index.to_be_bytes());
-                value
-            })
-            .collect::<Vec<_>>();
-        node_ids.push([0xee; 16]);
-        node_ids[3000][6] = 0x70;
-        node_ids[3000][8] = 0x80;
-        let nodes = vec![node_batch_of(&node_ids, &vec!["Person"; 3001])];
-        let edge_ids = (0..500_u64).map(|i| uuid(0x20, i)).collect::<Vec<_>>();
-        let edges = vec![edge_batch_of(
-            &edge_ids,
-            &vec!["KNOWS"; 500],
-            &(0..500).map(|i| node_ids[(i * 7) % 3001]).collect::<Vec<_>>(),
-            &(0..500)
-                .map(|i| node_ids[(i * 11 + 3) % 3001])
-                .collect::<Vec<_>>(),
-        )];
+        let (nodes, edges, node_ids) = skewed_node_graph(3_001, 500);
         let expected = bulk_with(&nodes, &edges, 1, 2).unwrap();
         assert_same(&staged(&nodes, &edges), &expected);
         for bounded in [false, true] {
-            for (gate, parts) in [(32 << 10, (4, 2, 4)), (64 << 10, (1, 2, 1))] {
+            for (gate, parts) in [(32 << 10, (4, 2)), (64 << 10, (1, 2))] {
                 let _gate = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(gate);
-                let _parts = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(
-                    parts.0, parts.1,
-                )
-                .with_nodes(parts.2);
+                let _parts =
+                    crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(
+                        parts.0, parts.1,
+                    );
                 let mut plan = node_scratch_plan(&nodes, &edges, 1);
                 if bounded {
                     plan.nodes[0].reader = Arc::new(Bounded(Memory {
@@ -3182,14 +3260,22 @@ mod bulk_builder {
             }
         }
         // A duplicate inside the large cluster is a duplicate node, not an overflow.
-        node_ids[2999] = node_ids[0];
-        let nodes = vec![node_batch_of(&node_ids, &vec!["Person"; 3001])];
-        let _gate = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(32 << 10);
-        let error = node_scratch_run(&nodes, &[], 1, 1, (1, 2, 1))
+        let mut duplicate_nodes = nodes.clone();
+        let mut duplicate_cluster = node_ids[..3_001 - 129].to_vec();
+        duplicate_cluster[1] = duplicate_cluster[0];
+        duplicate_nodes[1] =
+            node_batch_of(&duplicate_cluster, &vec!["Person"; duplicate_cluster.len()]);
+        let _gate =
+            crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(
+                32 << 10,
+            );
+        let error = node_scratch_run(&duplicate_nodes, &[], 1, 1, (1, 2))
             .err()
             .unwrap();
         assert!(
-            error.to_string().contains("duplicate identity across construction runs (node)"),
+            error
+                .to_string()
+                .contains("duplicate identity across construction runs (node)"),
             "{error}"
         );
     }
@@ -3200,10 +3286,13 @@ mod bulk_builder {
         // refs leave the occupancy as soon as their reads complete, so the
         // build never holds everything its counters moved, and the relation
         // spools survive until the pass that consumes them.
-        let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
+        let (nodes, edges) = clustered_node_graph(1_021, 3_001);
         let expected = bulk_with(&nodes, &edges, 2, 4).unwrap();
-        let _gate = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(32 << 10);
-        let run = node_scratch_run(&nodes, &edges, 2, 4, (7, 5, 2)).unwrap();
+        let _gate =
+            crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(
+                32 << 10,
+            );
+        let run = node_scratch_run(&nodes, &edges, 2, 4, (7, 5)).unwrap();
         assert_same(&expected, &run.inventory);
         let report = &run.report;
         assert!(report.node_refinement_write_bytes > 0, "{report:?}");
@@ -3274,7 +3363,17 @@ mod bulk_builder {
         ];
         for (index, (nodes, edges)) in cases.iter().enumerate() {
             let in_memory = refusal(nodes, edges);
-            for partitions in [(1, 1, 1), (4, 3, 5)] {
+            if nodes.iter().all(|batch| batch.num_rows() == 0) {
+                // With edges but no nodes, compare an actual ordinary-scratch
+                // plan. An empty graph stays on the resident route.
+                if edges.iter().any(|batch| batch.num_rows() > 0) {
+                    assert_eq!(in_memory, scratch_refusal(nodes, edges));
+                } else {
+                    assert!(in_memory.contains("no identities"), "{in_memory}");
+                }
+                continue;
+            }
+            for partitions in [(1, 1), (4, 3)] {
                 let error = node_scratch_run(nodes, edges, 2, 4, partitions)
                     .err()
                     .unwrap_or_else(|| panic!("case {index} was accepted"))
@@ -3323,10 +3422,14 @@ mod bulk_builder {
 
     #[test]
     fn a_cancelled_node_scratch_build_leaves_no_scratch_and_the_rerun_is_identical() {
-        let _gate = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(32 << 10);
-        let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
+        let _gate =
+            crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(
+                32 << 10,
+            );
+        let (nodes, edges) = clustered_node_graph(1_021, 3_001);
         let expected = bulk_with(&nodes, &edges, 2, 4).unwrap();
-        let _forced = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(6, 4).with_nodes(5);
+        let _forced =
+            crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(6, 4);
         for polls_before_cancel in [0_usize, 1, 40, 400, 2_000, 6_000] {
             let root = TempDir::new().unwrap();
             let mut session = pinned(&root);
@@ -3369,14 +3472,14 @@ mod bulk_builder {
         }
     }
 
-    const CRASH_NODE_PARTITIONS: &str = "GF_BULK_CRASH_NODE_PARTITIONS";
+    const NODE_SCRATCH_CRASH_PARTITIONS: &str = "GF_BULK_NODE_SCRATCH_PARTITIONS";
 
     /// The killed process of the node scratch route.
     #[test]
     fn bulk_node_scratch_crash_child() {
         let (Ok(path), Ok(partitions)) = (
             std::env::var(CRASH_ROOT),
-            std::env::var(CRASH_NODE_PARTITIONS),
+            std::env::var(NODE_SCRATCH_CRASH_PARTITIONS),
         ) else {
             return;
         };
@@ -3384,11 +3487,14 @@ mod bulk_builder {
             .split(',')
             .map(|part| part.parse::<usize>().unwrap())
             .collect::<Vec<_>>();
-        let _forced =
-            crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(parts[0], parts[1])
-                .with_nodes(parts[2]);
-        let _gate = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(32 << 10);
-        let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
+        let _forced = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(
+            parts[0], parts[1],
+        );
+        let _gate =
+            crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(
+                32 << 10,
+            );
+        let (nodes, edges) = clustered_node_graph(1_021, 3_001);
         let mut session = GraphConstructionSession::open(
             Path::new(&path),
             Uuid::from_u128(OPERATION),
@@ -3404,7 +3510,7 @@ mod bulk_builder {
 
     #[test]
     fn a_process_killed_in_any_node_scratch_pass_leaves_scratch_and_the_rerun_is_identical() {
-        let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
+        let (nodes, edges) = clustered_node_graph(1_021, 3_001);
         let expected = bulk_with(&nodes, &edges, 2, 4).unwrap();
         // Every pass that exists only on this route, inside it and at its end,
         // and the passes it shares, whose scratch now includes node files.
@@ -3431,7 +3537,7 @@ mod bulk_builder {
                 .arg("graph_construction::tests::bulk_builder::bulk_node_scratch_crash_child")
                 .arg("--nocapture")
                 .env(CRASH_ROOT, root.path())
-                .env(CRASH_NODE_PARTITIONS, "7,5,1")
+                .env(NODE_SCRATCH_CRASH_PARTITIONS, "7,5")
                 .env(
                     "GF_CONSTRUCTION_FAILPOINT_COOKIE",
                     "graphforge-construction-test-v1",
@@ -3450,8 +3556,11 @@ mod bulk_builder {
                 "recovery kept scratch after {failpoint}"
             );
             let _forced =
-                crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(7, 5).with_nodes(1);
-            let _gate = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(32 << 10);
+                crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(7, 5);
+            let _gate =
+                crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(
+                    32 << 10,
+                );
             let rerun = session
                 .prepare_bulk_encoding(1, &node_scratch_plan(&nodes, &edges, 2), || false)
                 .unwrap();
@@ -3481,11 +3590,13 @@ mod bulk_builder {
         // Room for the property workspace but not for one more byte per node.
         let budget = probe.scratch_floor_bytes()
             + probe.property_floor_bytes(GraphConstructionBudgets::default())
-            + 512;
-        for partitions in [(1, 1, 1), (4, 3, 5)] {
+            + 1;
+        for partitions in [(1, 1), (4, 3)] {
             let _forced =
-                crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(partitions.0, partitions.1)
-                    .with_nodes(partitions.2);
+                crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(
+                    partitions.0,
+                    partitions.1,
+                );
             let root = TempDir::new().unwrap();
             let mut session = pinned(&root);
             let mut plan = plan(&nodes, &edges, 2);
@@ -3499,7 +3610,10 @@ mod bulk_builder {
             assert!(report.scratch_peak_occupied_bytes > 0, "{report:?}");
             // Property scans read more than they write, by design; the node and
             // endpoint scratch is still written once and read once.
-            assert_eq!(report.node_scratch_read_bytes, report.node_scratch_write_bytes);
+            assert_eq!(
+                report.node_scratch_read_bytes,
+                report.node_scratch_write_bytes
+            );
             assert_eq!(
                 report.endpoint_scratch_read_bytes,
                 report.endpoint_scratch_write_bytes
@@ -3533,11 +3647,13 @@ mod bulk_builder {
         let probe = plan(&typed_nodes, &typed_edges, 1);
         let budget = probe.scratch_floor_bytes()
             + probe.property_floor_bytes(GraphConstructionBudgets::default())
-            + 512;
+            + 1;
         let root = TempDir::new().unwrap();
         let mut session = open(&root);
-        let _frames = crate::graph_construction_encoding::bulk_test_support::ForcedPropertyFrames::set(1);
-        let _forced = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(2, 2).with_nodes(2);
+        let _frames =
+            crate::graph_construction_encoding::bulk_test_support::ForcedPropertyFrames::set(1);
+        let _forced =
+            crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(2, 2);
         let mut typed = plan(&typed_nodes, &typed_edges, 1);
         typed.memory_budget = Some(budget);
         let encoding = session.prepare_bulk_encoding(1, &typed, || false).unwrap();
@@ -3546,38 +3662,30 @@ mod bulk_builder {
     }
 
     #[test]
-    fn several_partitions_in_flight_publish_the_in_memory_bytes_over_scratch_node_tables() {
-        // The budget rarely allows more than one partition in flight on a small
-        // graph; force it, so node leaves, edge leaves and CSR partitions run
-        // concurrently and hand their turns over in order.
+    fn budget_derived_node_scratch_builds_publish_the_in_memory_bytes() {
+        // These are real builds on the naturally derived scratch plan. The
+        // direct Ordered test covers the adverse worker schedule.
         let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
         let expected = bulk_with(&nodes, &edges, 2, 4).unwrap();
-        for (in_flight, gate, partitions, stagger) in [
-            (2, 48 << 20, (7, 5, 9), 0),
-            (4, 48 << 20, (16, 16, 16), 0),
-            (3, 96 << 10, (1, 3, 1), 0),
-            (8, 256 << 10, (2, 2, 2), 0),
-            (4, 64 << 10, (33, 2, 33), 0),
-            // Earlier partitions finish last: every turn handed over in
-            // partition order is exercised against the worst schedule.
-            (8, 48 << 20, (12, 6, 12), 4),
-            (4, 48 << 20, (9, 3, 9), 6),
+        for (gate, partitions) in [
+            (48 << 20, (7, 5)),
+            (96 << 10, (1, 3)),
+            (256 << 10, (2, 2)),
+            (64 << 10, (33, 2)),
         ] {
-            let _in_flight = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_concurrency(
-                in_flight,
-            );
-            let _gate = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(gate);
-            let _stagger = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_stagger(stagger);
-            let run = node_scratch_run(&nodes, &edges, 1, in_flight, partitions).unwrap();
+            let _gate =
+                crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(
+                    gate,
+                );
+            let run = node_scratch_run(&nodes, &edges, 1, 4, partitions).unwrap();
             assert_eq!(
                 expected, run.inventory,
-                "{in_flight} in flight, gate {gate}, partitions {partitions:?}, stagger {stagger}"
+                "gate {gate}, edge/CSR partitions {partitions:?}"
             );
-            assert_eq!(run.report.scratch_concurrency, in_flight as u64);
             assert_node_scratch_traffic(&run.report, 1_021, 3_001);
             assert!(!run.scratch_left);
         }
-        // A hub and small shards, with partitions in flight.
+        // A hub and small shards through a real node-scratch build.
         let _limits = ShardLimits::set(17, 100);
         let ids = [uuid(0x10, 0), uuid(0x10, 1)];
         let nodes = vec![node_batch_of(&ids, &["Person", "Person"])];
@@ -3589,13 +3697,13 @@ mod bulk_builder {
             &vec![ids[1]; 3001],
         )];
         let expected = bulk_with(&nodes, &edges, 1, 2).unwrap();
-        // The hub's leaf is the first; its degrees must reach the key
-        // partitioner first although it finishes last, or the heavy node
-        // lands on the wrong rank and its 3,001 entries exceed the gate.
-        let _in_flight = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_concurrency(4);
-        let _gate = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(64 << 10);
-        let _stagger = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_stagger(25);
-        let run = node_scratch_run(&nodes, &edges, 1, 4, (16, 4, 2)).unwrap();
+        // The hub's degrees must reach the key partitioner before its ranks
+        // are used, or its 3,001 entries exceed the gate.
+        let _gate =
+            crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(
+                64 << 10,
+            );
+        let run = node_scratch_run(&nodes, &edges, 1, 4, (16, 4)).unwrap();
         assert_same(&expected, &run.inventory);
     }
 
@@ -3643,7 +3751,7 @@ mod bulk_builder {
         assert!(!report.passes.contains_key("endpoints"));
         // The node tables do not fit: exactly one scatter of the nodes, one of
         // the endpoint references, and one of the resolved endpoints.
-        let run = node_scratch_run(&nodes, &edges, 2, 4, (4, 3, 4)).unwrap();
+        let run = node_scratch_run(&nodes, &edges, 2, 4, (4, 3)).unwrap();
         let report = &run.report;
         assert!(report.node_scratch_write_bytes > 0, "{report:?}");
         assert!(report.endpoint_scratch_write_bytes > 0, "{report:?}");
@@ -3672,7 +3780,7 @@ mod bulk_builder {
         assert!(!report.passes.contains_key("edge-refs"), "{report:?}");
         // The node tables do not fit: the added real source read is its own
         // metered pass, between the edges and the endpoints.
-        let run = node_scratch_run(&nodes, &edges, 2, 4, (4, 3, 4)).unwrap();
+        let run = node_scratch_run(&nodes, &edges, 2, 4, (4, 3)).unwrap();
         let report = &run.report;
         assert!(report.passes.contains_key("edges"), "{report:?}");
         assert!(report.passes.contains_key("edge-refs"), "{report:?}");
@@ -3699,8 +3807,7 @@ mod bulk_builder {
         plan.memory_budget = Some(plan.scratch_floor_bytes() + 1);
         assert_eq!(plan.route(), crate::BulkRoute::ScratchNodes);
         let _forced =
-            crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(4, 3)
-                .with_nodes(4);
+            crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(4, 3);
         let root = TempDir::new().unwrap();
         let mut session = pinned(&root);
         let encoding = session.prepare_bulk_encoding(1, &plan, || false).unwrap();

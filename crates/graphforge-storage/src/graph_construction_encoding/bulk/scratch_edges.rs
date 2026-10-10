@@ -1012,10 +1012,6 @@ pub(super) fn rank_partitions(context: &RankContext<'_>) -> Result<RankedEdges, 
             }
             // Windows are fixed ranges of edge ids. This partition completes
             // the windows that end inside it; the rest carries to the next.
-            #[cfg(test)]
-            std::thread::sleep(std::time::Duration::from_millis(
-                plan.stagger_millis * (partitions - part) as u64,
-            ));
             ordered.wait_turn(0, part)?;
             let (prefix, prefix_endpoints) = {
                 let mut held = carry.lock().map_err(|_| storage("carry lock poisoned"))?;

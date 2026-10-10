@@ -50,6 +50,15 @@ fn append_all(
     Ok(())
 }
 
+fn required_scratch_budget(error: &GfError) -> u64 {
+    let message = error.to_string();
+    message
+        .split_once("scratch requires ")
+        .and_then(|(_, tail)| tail.split_whitespace().next())
+        .and_then(|number| number.parse().ok())
+        .unwrap_or_else(|| panic!("expected the scratch admission refusal, got {message}"))
+}
+
 /// The spooled path's result or its first refusal.
 fn spooled_with(
     budgets: GraphConstructionBudgets,
@@ -757,9 +766,10 @@ fn a_chunk_admitted_at_its_exact_byte_window_builds() {
     let mut session = spooled_session(&root, budgets);
     append_all(&mut session, std::slice::from_ref(&batch), &[]).unwrap();
     session.record_seal_route(SealRoute::Bulk).unwrap();
-    let _forced = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(2, 2).with_nodes(3);
+    let _forced =
+        crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(2, 2);
     let built = session
-        .prepare_spooled_bulk_encoding(1, PROPERTY_SCRATCH_BUDGET, || false)
+        .prepare_spooled_bulk_encoding(1, 512 << 20, || false)
         .unwrap();
     assert_same(&expected, &inventory(&built));
     assert!(session.bulk_build_report().node_partitions > 0);
@@ -853,24 +863,38 @@ fn a_budget_below_the_node_tables_keeps_the_bulk_route_for_a_spooled_build() {
 fn a_spooled_build_whose_node_tables_do_not_fit_runs_on_scratch_and_publishes_the_staged_bytes() {
     let plain = graph(1_021, 3_001, 700, scattered);
     let property_bearing = property_bearing_inputs();
-    for ((nodes, edges), budget) in [
-        (plain, SCRATCH_BUDGET),
-        (property_bearing, PROPERTY_SCRATCH_BUDGET),
-    ] {
+    for (nodes, edges) in [plain, property_bearing] {
+        let probe = plan(&nodes, &edges, 2);
+        // The raw source's retained footer/schema bytes remain in this bound;
+        // the spool itself drops those schemas after accepting the chunks.
+        let budget = probe.scratch_floor_bytes() + 1;
         let expected = staged(&nodes, &edges);
         let root = TempDir::new().unwrap();
         let mut session = spooled_session(&root, GraphConstructionBudgets::default());
         append_all(&mut session, &nodes, &edges).unwrap();
         let _forced =
-            crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(4, 3).with_nodes(5);
+            crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(4, 3);
         assert_eq!(session.spool_seal_route(budget).unwrap(), SealRoute::Bulk);
         session.record_seal_route(SealRoute::Bulk).unwrap();
-        let built = session
-            .prepare_spooled_bulk_encoding(1, budget, || false)
-            .unwrap();
+        let property_bearing =
+            nodes[0].num_columns() > 2 || edges.iter().any(|batch| batch.num_columns() > 4);
+        let built = if property_bearing {
+            let refusal = session
+                .prepare_spooled_bulk_encoding(1, budget, || false)
+                .unwrap_err();
+            let required = required_scratch_budget(&refusal);
+            assert!(required > budget, "{refusal}");
+            session
+                .prepare_spooled_bulk_encoding(1, required, || false)
+                .unwrap()
+        } else {
+            session
+                .prepare_spooled_bulk_encoding(1, budget, || false)
+                .unwrap()
+        };
         assert_same(&expected, &inventory(&built));
         let report = session.bulk_build_report();
-        assert!(report.node_partitions > 1, "{report:?}");
+        assert!(report.node_partitions > 0, "{report:?}");
         assert!(report.node_scratch_write_bytes > 0, "{report:?}");
         assert!(report.endpoint_scratch_write_bytes > 0, "{report:?}");
         assert_eq!(

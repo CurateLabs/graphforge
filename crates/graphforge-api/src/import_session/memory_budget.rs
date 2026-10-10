@@ -90,14 +90,6 @@ pub(super) fn parse_override(value: &str) -> Result<u64, GfError> {
         })
 }
 
-#[cfg(test)]
-thread_local! {
-    /// Puts a test plan's budget one byte under its node tables, so they go to
-    /// scratch however few nodes there are (#1929).
-    pub(super) static TEST_UNDER_NODE_TABLES: std::cell::Cell<bool> =
-        const { std::cell::Cell::new(false) };
-}
-
 /// The budget on this host, for this process.
 pub(super) fn bulk_build_memory_budget() -> Result<u64, GfError> {
     if let Some(value) = std::env::var_os(BUDGET_ENV) {

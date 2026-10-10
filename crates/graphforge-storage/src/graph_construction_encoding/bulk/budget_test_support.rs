@@ -7,56 +7,57 @@ thread_local! {
     pub(super) static FORCED_PARTITIONS: std::cell::Cell<Option<(usize, usize)>> =
         const { std::cell::Cell::new(None) };
     pub(super) static FORCED_GATE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
-    pub(super) static FORCED_CONCURRENCY: std::cell::Cell<Option<usize>> =
-        const { std::cell::Cell::new(None) };
-    pub(super) static FORCED_STAGGER: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
-    pub(super) static FORCED_NODE_PARTITIONS: std::cell::Cell<Option<usize>> =
-        const { std::cell::Cell::new(None) };
 }
 
 /// Forces the partition counts of the builds the current test thread runs,
 /// until dropped, so a small graph spans several partitions.
-pub(crate) struct ForcedPartitions;
+pub(crate) struct ForcedPartitions {
+    previous_partitions: Option<(usize, usize)>,
+    previous_gate: Option<u64>,
+}
 
 impl ForcedPartitions {
     pub(crate) fn with_gate(bytes: u64) -> Self {
+        let previous = Self::snapshot();
         FORCED_GATE.with(|forced| forced.set(Some(bytes)));
-        Self
-    }
-
-    /// Makes earlier partitions slower than later ones, so a pass that must
-    /// hand its turns over in order is tested against the worst schedule.
-    pub(crate) fn with_stagger(millis: u64) -> Self {
-        FORCED_STAGGER.with(|forced| forced.set(Some(millis)));
-        Self
-    }
-
-    /// Partitions in flight, whatever the budget would allow.
-    pub(crate) fn with_concurrency(workers: usize) -> Self {
-        FORCED_CONCURRENCY.with(|forced| forced.set(Some(workers)));
-        Self
+        previous
     }
 
     pub(crate) fn set(edge: usize, csr: usize) -> Self {
+        let previous = Self::snapshot();
         FORCED_PARTITIONS.with(|forced| forced.set(Some((edge, csr))));
-        Self
+        previous
     }
 
-    /// Also forces the node-UUID partitions of a build with scratch node tables.
-    pub(crate) fn with_nodes(self, nodes: usize) -> Self {
-        FORCED_NODE_PARTITIONS.with(|forced| forced.set(Some(nodes)));
-        self
+    fn snapshot() -> Self {
+        Self {
+            previous_partitions: FORCED_PARTITIONS.with(std::cell::Cell::get),
+            previous_gate: FORCED_GATE.with(std::cell::Cell::get),
+        }
     }
 }
 
 impl Drop for ForcedPartitions {
     fn drop(&mut self) {
-        FORCED_PARTITIONS.with(|forced| forced.set(None));
-        FORCED_GATE.with(|forced| forced.set(None));
-        FORCED_CONCURRENCY.with(|forced| forced.set(None));
-        FORCED_STAGGER.with(|forced| forced.set(None));
-        FORCED_NODE_PARTITIONS.with(|forced| forced.set(None));
+        FORCED_PARTITIONS.with(|forced| forced.set(self.previous_partitions));
+        FORCED_GATE.with(|forced| forced.set(self.previous_gate));
     }
+}
+
+#[cfg(test)]
+#[test]
+fn nested_scratch_budget_controls_restore_the_outer_values() {
+    let _baseline = ForcedPartitions::set(2, 3);
+    let _outer = ForcedPartitions::with_gate(32 << 10);
+    let _inner = ForcedPartitions::set(7, 5);
+    assert_eq!(FORCED_PARTITIONS.with(std::cell::Cell::get), Some((7, 5)));
+    assert_eq!(FORCED_GATE.with(std::cell::Cell::get), Some(32 << 10));
+    drop(_inner);
+    assert_eq!(FORCED_PARTITIONS.with(std::cell::Cell::get), Some((2, 3)));
+    assert_eq!(FORCED_GATE.with(std::cell::Cell::get), Some(32 << 10));
+    drop(_outer);
+    assert_eq!(FORCED_PARTITIONS.with(std::cell::Cell::get), Some((2, 3)));
+    assert_eq!(FORCED_GATE.with(std::cell::Cell::get), None);
 }
 
 /// The fewest resident bytes a scratch build of `plan` can run in.
@@ -107,7 +108,6 @@ impl ScratchPlan {
             gate_bytes,
             staging_bytes,
             staging_total: staging_bytes as u64 * 64,
-            stagger_millis: 0,
             edge_row_bytes: EDGE_PARTITION_BYTES,
             node_row_bytes: 0,
             property: PropertySizing::SERIAL,

@@ -1050,10 +1050,6 @@ impl GraphImportSession {
                 BulkInputKind::Edge => plan.edges.push(planned),
             }
         }
-        #[cfg(test)]
-        if memory_budget::TEST_UNDER_NODE_TABLES.with(std::cell::Cell::get) {
-            plan.memory_budget = Some(plan.node_tables_resident_bytes() - 1);
-        }
         Ok(plan)
     }
 
