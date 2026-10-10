@@ -41,12 +41,13 @@ fn needs_values(leaf: &LeafScan) -> bool {
 /// validity bit per slot (added per record, rounded up).
 const OFFSET_BYTES: u64 = 4;
 /// How far a decoded byte-array column's buffers can outgrow its values. The
-/// native reader appends each value to a vector that grows by doubling, so a
-/// piece's value and offset buffers can hold up to twice their payload in
-/// capacity, and the builder charges a batch what its buffers hold. A buffer
-/// filled by one append is reserved exactly, so a one-row piece has no such
-/// growth. Fixed-width columns are read into buffers reserved for the piece's
-/// rows, exactly.
+/// native reader appends each value (each child of a nested value) to a
+/// vector that grows by doubling, after reserving at most the page's average
+/// value per row it reads, which is no more than the piece's widest rows; so
+/// a piece's value and offset buffers hold under twice their byte-array bound
+/// in capacity, one-row pieces included, and the builder charges a batch what
+/// its buffers hold. Fixed-width columns are read into buffers reserved for
+/// the piece's rows, exactly.
 const VARIABLE_BUFFER_GROWTH: u64 = 2;
 
 /// Everything known about how a source decodes, from its page headers and the
@@ -367,11 +368,18 @@ impl SourceScan {
         if self.physical_batch_rows == 1 {
             let row = batch;
             let logical = row / self.batch_rows;
+            // The batch's widest row, the growth of its byte-array buffers
+            // included.
             let max_row = self
                 .batch_max_row_value_bytes
                 .get(usize::try_from(logical).unwrap_or(usize::MAX))
                 .copied()
-                .unwrap_or(self.max_row_value_bytes);
+                .unwrap_or_else(|| {
+                    self.max_row_value_bytes.saturating_add(
+                        self.max_row_variable_bytes
+                            .saturating_mul(VARIABLE_BUFFER_GROWTH - 1),
+                    )
+                });
             return max_row
                 .saturating_add(self.flat_leaf_count)
                 .saturating_add(self.offset_boundary_bytes)
@@ -385,16 +393,13 @@ impl SourceScan {
     }
 
     /// Conservative bound on what a piece of `rows` rows occupies once decoded:
-    /// the widest row's bytes per row, the growth of byte-array buffers filled
-    /// by more than one append, a validity bit per flat leaf and row, and the
-    /// fixed offsets and buffer floors.
+    /// the widest row's bytes per row, the growth of its byte-array buffers, a
+    /// validity bit per flat leaf and row, and the fixed offsets and buffer
+    /// floors.
     fn piece_bound(&self, rows: u64) -> u64 {
-        let growth = if rows > 1 {
-            rows.saturating_mul(self.max_row_variable_bytes)
-                .saturating_mul(VARIABLE_BUFFER_GROWTH - 1)
-        } else {
-            0
-        };
+        let growth = rows
+            .saturating_mul(self.max_row_variable_bytes)
+            .saturating_mul(VARIABLE_BUFFER_GROWTH - 1);
         rows.saturating_mul(self.max_row_value_bytes)
             .saturating_add(growth)
             .saturating_add(self.flat_leaf_count.saturating_mul(rows.div_ceil(8)))
@@ -721,14 +726,21 @@ impl SourceScan {
                 let logical = usize::try_from(batch).map_err(storage)?;
                 let flat_bytes = self.flat_leaf_count;
                 let one_row_boundary = self.offset_boundary_bytes;
-                let maximum = row_costs.iter().copied().max().unwrap_or(0);
+                // A row's bytes once decoded, the growth of its byte-array
+                // buffers included: what a piece of that row alone holds.
+                let grown = |row: usize| {
+                    row_costs[row].saturating_add(
+                        row_variable[row].saturating_mul(VARIABLE_BUFFER_GROWTH - 1),
+                    )
+                };
+                let maximum = (0..row_costs.len()).map(grown).max().unwrap_or(0);
                 let batch_max = self
                     .batch_max_row_value_bytes
                     .get_mut(logical)
                     .ok_or_else(|| storage("Parquet logical batch exceeds row maxima"))?;
                 *batch_max = (*batch_max).max(maximum);
-                for (row, &cost) in row_costs.iter().enumerate() {
-                    let requested = cost
+                for row in 0..row_costs.len() {
+                    let requested = grown(row)
                         .saturating_add(flat_bytes)
                         .saturating_add(one_row_boundary)
                         .saturating_add(self.arrow_buffer_floor_bytes);

@@ -521,6 +521,55 @@ fn a_dictionary_that_expands_past_the_window_is_refused_before_it_is_decoded() {
 }
 
 #[test]
+fn plain_values_that_share_a_page_import_in_pieces_whose_buffers_fit() {
+    let _serial = serial();
+    let directory = tempfile::tempdir().unwrap();
+    // Six 10 MiB values ahead of ninety 100 KiB ones, stored plain in one
+    // page. The reader reserves a piece's values buffer at the page's average
+    // per row, under a megabyte here, and grows it by doubling as the wide
+    // values arrive: a piece of six wide rows would reach 80 MiB of capacity
+    // for 60 MiB of values, over the window. Pieces are sized for that growth,
+    // so the wide rows decode three at a time and every piece fits.
+    let rows = 96;
+    let path = directory.path().join("plain.parquet");
+    write_parquet(
+        &path,
+        &[node_batch(
+            1,
+            rows,
+            vec![(
+                "text",
+                dictionary_strings(rows, |row| {
+                    if row < 6 {
+                        char::from(b'a' + row as u8).to_string().repeat(10 << 20)
+                    } else {
+                        format!("{row:08}{}", "s".repeat((100 << 10) - 8))
+                    }
+                }),
+            )],
+        )],
+        WriterProperties::builder()
+            .set_dictionary_enabled(false)
+            .set_data_page_size_limit(1 << 30)
+            .set_data_page_row_count_limit(usize::MAX)
+            .set_compression(Compression::ZSTD(ZstdLevel::default()))
+            .build(),
+    );
+    // The builder's window is the same on every route; the resident route
+    // reaches it without the scratch route's fixed floor, which with these
+    // reservations is more than the facade's scratch budget. A query
+    // projecting 69 MiB of one property is bounded separately by the property
+    // overlay's read admission, so the count is what is asked.
+    let mut run = import(&path, rows, None);
+    run.result
+        .as_ref()
+        .unwrap_or_else(|error| panic!("{error}"));
+    run.commit();
+    let answer = answers(&run.graph, &["MATCH (n:Thing) RETURN count(n) AS n"]);
+    assert!(answer.contains(&rows.to_string()), "{answer}");
+}
+
+#[test]
 fn a_source_with_no_row_groups_imports_beside_a_full_one() {
     let _serial = serial();
     let directory = tempfile::tempdir().unwrap();
