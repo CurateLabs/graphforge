@@ -1,6 +1,6 @@
 {
   "name": "@curatelabs/graphforge-agent-skills",
-  "version": "0.6.0-dev.0",
+  "version": "0.6.0-rc.1",
   "description": "NPX-distributed agent skills and adapters for GraphForge",
   "license": "Apache-2.0",
   "homepage": "https://docs.graphforge.sh/",
@@ -49,7 +49,7 @@
   },
   "graphforgeCompatibility": {
     "schemaVersion": 1,
-    "release": "0.6.0-dev.0",
+    "release": "0.6.0-rc.1",
     "range": ">=0.6.0-dev <0.7.0"
   },
   "scripts": {
