@@ -17,8 +17,8 @@ use super::super::scratch_nodes::{
     PROBE_RECORD, REF_RECORD, ResolveContext, ScatteredNodes, resolve_endpoints, scatter_nodes,
 };
 use super::super::{BulkBatchReader, BulkBuildPlan, BulkSource};
-use crate::graph_construction::GraphConstructionSession;
 use super::*;
+use crate::graph_construction::GraphConstructionSession;
 use uuid::Uuid;
 
 /// A reader over stored canonical batches, `per_task` batches per task. Its
@@ -385,7 +385,7 @@ fn has_resolved_files(scratch: &Scratch) -> bool {
 /// same fixture under a gate that admits it whole stays one raw leaf, and
 /// the tracked logical occupancy is exactly the node leaf plus that leaf.
 #[test]
-fn raw_edges_without_refinement_leave_no_reference_or_probe_files_and_their_bytes_out_of_the_occupancy() {
+fn raw_edges_without_refinement_leave_no_refs_or_probes_and_no_extra_bytes_in_the_occupancy() {
     let root = tempfile::tempdir().unwrap();
     let directory = crate::graph_construction_encoding::StableDirectory::open(root.path()).unwrap();
     let scratch = Scratch::create(&directory).unwrap();
@@ -1053,7 +1053,9 @@ fn the_session_refuses_a_duplicate_raw_leaf_before_its_changed_replay() {
     let edges = vec![duplicated];
     let reader = Arc::new(Mutating::new(edges.clone(), 1));
     let plan = session_plan(&nodes, reader, &edges, 1);
-    let error = session.prepare_bulk_encoding(1, &plan, || false).unwrap_err();
+    let error = session
+        .prepare_bulk_encoding(1, &plan, || false)
+        .unwrap_err();
     assert!(
         error
             .to_string()
@@ -1080,7 +1082,9 @@ fn a_changed_replay_cannot_publish_through_the_session() {
     let (nodes, edges) = fixture(40, 100);
     let reader = Arc::new(Mutating::new(edges.clone(), 1));
     let plan = session_plan(&nodes, reader, &edges, 1);
-    let error = session.prepare_bulk_encoding(1, &plan, || false).unwrap_err();
+    let error = session
+        .prepare_bulk_encoding(1, &plan, || false)
+        .unwrap_err();
     assert!(
         matches!(
             error,
