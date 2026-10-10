@@ -760,6 +760,9 @@ pub(super) struct ObservedFile {
     file: File,
     length: u64,
     digest: SourceDigest,
+    /// Serializes every seek and read of the shared file description, so
+    /// streams opened side by side hold stable virtual cursors.
+    lock: Arc<Mutex<()>>,
 }
 
 impl ObservedFile {
@@ -769,6 +772,7 @@ impl ObservedFile {
             file,
             length,
             digest,
+            lock: Arc::new(Mutex::new(())),
         })
     }
 }
@@ -779,15 +783,45 @@ impl Length for ObservedFile {
     }
 }
 
+/// One open read stream over an [`ObservedFile`]: its own virtual cursor,
+/// positioned against the shared file description under the observer's lock.
+/// Cloned handles share one OS cursor, so every seek and read is serialized;
+/// streams held open side by side then never read each other's offsets.
+pub(super) struct PositionedRead {
+    file: File,
+    position: u64,
+    lock: Arc<Mutex<()>>,
+}
+
+impl Read for PositionedRead {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let _guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.file.seek(SeekFrom::Start(self.position))?;
+        let read = self.file.read(buffer)?;
+        self.position += read as u64;
+        Ok(read)
+    }
+}
+
 impl ChunkReader for ObservedFile {
-    type T = std::io::BufReader<DigestingReader<File>>;
+    type T = std::io::BufReader<DigestingReader<PositionedRead>>;
 
     fn get_read(&self, start: u64) -> parquet::errors::Result<Self::T> {
-        let mut file = self.file.try_clone()?;
-        file.seek(SeekFrom::Start(start))?;
+        let file = self.file.try_clone()?;
         Ok(std::io::BufReader::with_capacity(
             PAGE_HEADER_BUFFER_BYTES,
-            DigestingReader::new(file, start, Some(self.digest.clone())),
+            DigestingReader::new(
+                PositionedRead {
+                    file,
+                    position: start,
+                    lock: Arc::clone(&self.lock),
+                },
+                start,
+                Some(self.digest.clone()),
+            ),
         ))
     }
 
@@ -803,7 +837,15 @@ impl ChunkReader for ObservedFile {
             ));
         }
         let mut bytes = vec![0_u8; length];
-        read_exact_at(&self.file, start, &mut bytes)?;
+        {
+            // The clone shares the streams' file description: seek and read
+            // under their lock, so neither side reads the other's offset.
+            let _guard = self
+                .lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            read_exact_at(&self.file, start, &mut bytes)?;
+        }
         self.digest.observe(start, &bytes);
         Ok(Bytes::from(bytes))
     }
