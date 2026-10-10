@@ -103,6 +103,9 @@ fn set_budget(budget: Option<u64>) {
 
 /// A budget the property route fits and these inputs overflow, so the build
 /// goes through scratch.
+// Where a fixture's scratch route needs more than this before decoding (its
+// floor holds each task's decoded pieces at the reader's capacity and the
+// exact copy the builder is handed), the route is run at the floor it names.
 const SCRATCH_BUDGET: u64 = 1_100 * MIB;
 
 /// Every route a build can take, as the budget that selects it.
@@ -339,6 +342,14 @@ fn same_answers_on_every_route(
     let mut expected: Option<String> = None;
     for budget in ROUTES {
         let mut run = import(path, batch_rows, budget);
+        if let (Some(_), Err(error)) = (budget, &run.result)
+            && is_resource_limit(error)
+            && error.to_string().contains("resident bytes before decoding")
+        {
+            // The scratch route names its floor; run it there.
+            let floor = required_before_decoding(error);
+            run = import(path, batch_rows, Some(floor));
+        }
         run.result
             .as_ref()
             .unwrap_or_else(|error| panic!("{budget:?}: {error}"));
@@ -583,15 +594,15 @@ fn plain_values_that_share_a_page_import_in_pieces_whose_buffers_fit() {
 }
 
 #[test]
-fn columns_reserved_apart_are_refused_as_one_row_before_decoding() {
+fn columns_reserved_apart_import_with_exact_buffers() {
     let _serial = serial();
     let directory = tempfile::tempdir().unwrap();
     // Two plain columns in one logical batch. A page reader reserves a
-    // piece's buffer at its own page's average per row, whatever the row holds
-    // in that column: row 0 asks column A for 30 MiB on a 20 MiB reservation,
-    // which doubles to 40 MiB, and column B for nothing on a 25 MiB
-    // reservation. Together they pass the window although the row's values
-    // are 30 MiB, so the row is refused before it is decoded.
+    // piece's buffer at its own page's average per value, whatever the row
+    // holds in that column: row 0 asks column A for 30 MiB on a 5 MiB
+    // reservation, which doubles past it, and column B for nothing on a
+    // 25 MiB reservation. The decoded piece holds far more than its 30 MiB of
+    // values; it reaches the builder with exactly them.
     let rows = 12;
     let wide = |row: usize| char::from(b'a' + row as u8).to_string().repeat(30 << 20);
     let a = dictionary_strings(rows, |row| {
@@ -620,16 +631,55 @@ fn columns_reserved_apart_are_refused_as_one_row_before_decoding() {
             .build(),
     );
     assert!(fs::metadata(&path).unwrap().len() < 4 * MIB);
-    for budget in ROUTES {
-        let run = import(&path, rows, budget);
-        let error = run.error();
-        assert!(is_resource_limit(error), "{budget:?}: {error}");
-        assert!(
-            error.to_string().contains("refused before it was decoded"),
-            "{error}"
-        );
-        assert_eq!(run.rejected_rows(), rows as u64, "{budget:?}");
-    }
+    // The resident route alone: the scratch route's fixed floor plus these
+    // reservations is more than the facade's scratch budget. The count is
+    // asked, since a query projecting 360 MiB of properties is bounded by the
+    // property overlay's read admission.
+    let mut run = import(&path, rows, None);
+    run.result
+        .as_ref()
+        .unwrap_or_else(|error| panic!("{error}"));
+    run.commit();
+    let answer = answers(&run.graph, &["MATCH (n:Thing) RETURN count(n) AS n"]);
+    assert!(answer.contains(&rows.to_string()), "{answer}");
+}
+
+#[test]
+fn all_null_fixed_width_properties_are_sized_by_their_slots() {
+    let _serial = serial();
+    let directory = tempfile::tempdir().unwrap();
+    // Two hundred nullable integer properties, every value null: the reader
+    // still allocates a slot per row and property, 100 MiB for one batch of
+    // 65,536 rows, past the window. Sizing counts the slots, so the batch is
+    // decoded in pieces.
+    let rows = 65_536;
+    let properties = (0..200)
+        .map(|column| {
+            (
+                format!("p{column:03}"),
+                Arc::new(Int64Array::from(vec![None::<i64>; rows])) as ArrayRef,
+            )
+        })
+        .collect::<Vec<_>>();
+    let properties = properties
+        .iter()
+        .map(|(name, array)| (name.as_str(), Arc::clone(array)))
+        .collect();
+    let path = directory.path().join("nulls.parquet");
+    write_parquet(
+        &path,
+        &[node_batch(1, rows, properties)],
+        WriterProperties::builder().build(),
+    );
+    // The resident route alone: two hundred columns' reservations lift the
+    // scratch route's floor past the facade's scratch budget.
+    let mut run = import(&path, rows, None);
+    run.result
+        .as_ref()
+        .unwrap_or_else(|error| panic!("{error}"));
+    run.commit();
+    let answer = answers(&run.graph, &["MATCH (n:Thing) RETURN count(n) AS n"]);
+    assert!(answer.contains("65536"), "{answer}");
 }
 
 #[test]

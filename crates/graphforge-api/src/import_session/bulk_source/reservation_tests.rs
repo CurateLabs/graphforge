@@ -23,7 +23,12 @@ use super::super::*;
 const CHILD: &str = "GF_RESERVATION_CHILD";
 const TEST: &str =
     "import_session::bulk_source::reservation_tests::a_task_reserves_what_its_decode_holds";
-const WORKSPACE_BUDGET: u64 = 256 << 20;
+/// What the pool may grant: a task's pieces at the reader's capacity beside
+/// the exact copy the builder is handed, with the task's page and
+/// normalization workspace.
+const WORKSPACE_BUDGET: u64 = 384 << 20;
+/// What the process may actually grow by decoding every task.
+const PROCESS_GROWTH_BOUND: u64 = 256 << 20;
 const PROCESS_OVERHEAD_SLACK: u64 = 64 << 20;
 
 fn v7(value: u128) -> Uuid {
@@ -271,7 +276,7 @@ fn a_task_reserves_what_its_decode_holds() {
     }
     let directory = tempfile::tempdir().unwrap();
     // For each family, source bytes and total decoded payload grow while batch
-    // geometry and the 256 MiB admission cap remain fixed.
+    // geometry, the admission cap and the process growth bound remain fixed.
     let mut previous_source_bytes = 0;
     for rows in [1 << 13, 1 << 15, 1 << 17] {
         let path = directory.path().join(format!("wide-{rows}.parquet"));
@@ -291,9 +296,9 @@ fn a_task_reserves_what_its_decode_holds() {
         assert!(
             measured["after_hwm_bytes"].as_u64().unwrap()
                 <= measured["baseline_hwm_bytes"].as_u64().unwrap()
-                    + WORKSPACE_BUDGET
+                    + PROCESS_GROWTH_BOUND
                     + PROCESS_OVERHEAD_SLACK,
-            "wide pages rows={rows}: absolute process VmHWM exceeded baseline + fixed workspace cap + fixed process overhead"
+            "wide pages rows={rows}: absolute process VmHWM exceeded baseline + fixed process growth bound + fixed process overhead"
         );
     }
 
@@ -319,9 +324,9 @@ fn a_task_reserves_what_its_decode_holds() {
         assert!(
             measured["after_hwm_bytes"].as_u64().unwrap()
                 <= measured["baseline_hwm_bytes"].as_u64().unwrap()
-                    + WORKSPACE_BUDGET
+                    + PROCESS_GROWTH_BOUND
                     + PROCESS_OVERHEAD_SLACK,
-            "fat dictionaries rows={rows}: absolute process VmHWM exceeded baseline + fixed workspace cap + fixed process overhead"
+            "fat dictionaries rows={rows}: absolute process VmHWM exceeded baseline + fixed process growth bound + fixed process overhead"
         );
     }
 }

@@ -131,7 +131,10 @@ the corresponding native parser, vector, or decoder allocates them.
 logical batch may be split into smaller physical row pieces to fit the intake
 window. `PhysicalBatchMap` maps those pieces back to the same logical batch and
 assigns contiguous row ordinals; the pieces share the logical batch's operation ID
-and duplicate-UUID set. Selected row groups remain in ascending source order and
+and duplicate-UUID set. A decoded piece is copied into buffers of exactly its
+size before it is normalized, since the native reader's buffers grow by doubling
+and the builder charges a batch what its buffers hold; the task's reservation
+admits the reader's capacity beside that copy. Selected row groups remain in ascending source order and
 their retained indexes are included in task admission. A batch that cannot fit
 even as a physical piece is refused with a typed resource limit
 (`GF_RESOURCE_LIMIT`) before decode allocation and counted as rejected rows. Arrow
