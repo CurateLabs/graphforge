@@ -173,11 +173,20 @@ impl PropertyOverlayExec {
         })
     }
 
+    fn projects_property_payload(&self) -> bool {
+        let key = if self.is_edge {
+            "edge_uuid"
+        } else {
+            "node_uuid"
+        };
+        self.schema.fields().iter().any(|field| field.name() != key)
+    }
+
     pub(crate) fn uuid_filter_candidates(&self) -> Vec<PropertyUuidFilterCandidate> {
         // A UUID hint must not move filtering ahead of a scan-level LIMIT:
         // `[u, v] LIMIT 1` joined to `{v}` is empty before pruning, but would
         // match if the hint removed `u` before LIMIT.
-        if self.limit.is_some() {
+        if self.limit.is_some() || !self.projects_property_payload() {
             return Vec::new();
         }
         let key = if self.is_edge {
@@ -214,7 +223,10 @@ impl PropertyOverlayExec {
     /// Returns this scan's canonical UUID column only when reading it with a
     /// join-key nomination cannot change LIMIT or equality semantics.
     pub(crate) fn nomination_uuid_column(&self) -> Option<usize> {
-        if self.limit.is_some() || self.equality.is_some() {
+        // Limit this optimization to scans that project property payload. A
+        // full identity frontier can exhaust the query pool on a UUID set even
+        // when the original partitioned identity join fits, as in graph counts.
+        if self.limit.is_some() || self.equality.is_some() || !self.projects_property_payload() {
             return None;
         }
         let key = if self.is_edge {

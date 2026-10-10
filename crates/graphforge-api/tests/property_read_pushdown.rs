@@ -644,3 +644,19 @@ fn optional_enrichment_preserves_fanout_and_missing_properties() {
         }
     }
 }
+
+#[test]
+fn whole_graph_counts_do_not_materialize_property_uuid_nominations() {
+    let _serial = serial();
+    let built = build(SMALL_NODES);
+    let query = "MATCH (n) RETURN count(n) AS n";
+    for partitions in [1, 2, 4] {
+        let forge = open_with_partitions(&built.project, partitions);
+        let plan = forge
+            .explain_stage(query, graphforge_api::ExplainStage::PhysicalPlan)
+            .unwrap();
+        assert!(!plan.contains("UuidBuildKeyTapExec"), "{plan}");
+        let result = forge.execute(query).unwrap();
+        assert_eq!(count(&result.batches), SMALL_NODES as i64);
+    }
+}

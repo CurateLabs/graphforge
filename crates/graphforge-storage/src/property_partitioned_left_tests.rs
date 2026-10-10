@@ -126,3 +126,62 @@ fn partitioned_left_enrichment_is_idempotent_and_rejects_other_exchanges() {
         assert!(Arc::ptr_eq(&plan, &unchanged));
     }
 }
+
+#[test]
+fn identity_only_enrichment_keeps_its_partitioned_join_without_a_uuid_set() {
+    let config = ConfigOptions::default();
+    for partitions in [1, 2, 4] {
+        let scan = PropertyOverlayExec::try_new(
+            std::path::PathBuf::from("unused"),
+            None,
+            "_untyped".into(),
+            false,
+            Arc::new(Schema::new(vec![Field::new(
+                "node_uuid",
+                DataType::FixedSizeBinary(16),
+                false,
+            )])),
+            PropertyScanOptions {
+                projection: None,
+                limit: None,
+                batch_size: 16,
+                footer_statistics: false,
+                equality: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(scan.nomination_uuid_column(), None);
+        let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("node_uuid", 0));
+        let frontier = input_with_values(&[Some([1; 16]), Some([1; 16]), None]);
+        let left = Arc::new(
+            RepartitionExec::try_new(frontier, Partitioning::Hash(vec![key.clone()], partitions))
+                .unwrap(),
+        );
+        let right = Arc::new(
+            RepartitionExec::try_new(
+                Arc::new(scan),
+                Partitioning::Hash(vec![key.clone()], partitions),
+            )
+            .unwrap(),
+        );
+        let original: Arc<dyn ExecutionPlan> = Arc::new(
+            HashJoinExec::try_new(
+                left,
+                right,
+                vec![(key.clone(), key)],
+                None,
+                &JoinType::Left,
+                Some(vec![0]),
+                PartitionMode::Partitioned,
+                NullEquality::NullEqualsNothing,
+                false,
+            )
+            .unwrap(),
+        );
+        let optimized = PropertyFilterApprovalRule
+            .optimize(original.clone(), &config)
+            .unwrap();
+        assert!(Arc::ptr_eq(&original, &optimized));
+        SanityCheckPlan::new().optimize(optimized, &config).unwrap();
+    }
+}
