@@ -66,7 +66,7 @@ fn partition_sizes_and_concurrency_follow_the_budget() {
             // The partitions in flight reserve at most half the gate, so a
             // partition twice its share still fits.
             let edges = 16_u64 << scale;
-            let in_flight = ScratchPlan::edge_cost(edges.div_ceil(sized.edge_partitions as u64))
+            let in_flight = sized.edge_cost(edges.div_ceil(sized.edge_partitions as u64))
                 * sized.concurrency as u64;
             assert!(
                 sized.edge_partitions as u64 == MAX_PARTITIONS || in_flight <= sized.gate_bytes / 2,

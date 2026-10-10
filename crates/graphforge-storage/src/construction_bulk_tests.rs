@@ -678,6 +678,15 @@ mod bulk_builder {
             historical,
             crate::BulkStagedReason::EdgePropertiesExceedBudget
         );
+        // Receipts an earlier binary wrote name the other reason; they stay
+        // readable although no plan produces it any more (#1929).
+        let historical: crate::BulkStagedReason =
+            serde_json::from_str("\"node_tables_exceed_budget\"").unwrap();
+        assert_eq!(historical, crate::BulkStagedReason::NodeTablesExceedBudget);
+        assert_eq!(
+            serde_json::to_string(&historical).unwrap(),
+            "\"node_tables_exceed_budget\""
+        );
     }
 
     fn property_recovery_input() -> (Vec<RecordBatch>, Vec<RecordBatch>) {
@@ -970,10 +979,9 @@ mod bulk_builder {
                 crate::graph_construction_encoding::bulk_test_support::derived_concurrency(
                     &probe, budget, lanes, budgets,
                 );
-            let decode_pool =
-                crate::graph_construction_encoding::bulk_test_support::decode_pool(
-                    &probe, budget, lanes, budgets,
-                );
+            let decode_pool = crate::graph_construction_encoding::bulk_test_support::decode_pool(
+                &probe, budget, lanes, budgets,
+            );
             let (_, largest_task) =
                 crate::graph_construction_encoding::bulk_test_support::task_decode_bytes_bounds(
                     &probe,
@@ -2054,6 +2062,15 @@ mod bulk_builder {
             report.scratch_write_bytes
         );
         assert_eq!(report.scratch_read_bytes, report.scratch_write_bytes);
+        // Reclamation frees files as soon as their final read completes, so
+        // the occupied peak stays behind the cumulative writes.
+        assert!(report.scratch_peak_occupied_bytes > 0, "{report:?}");
+        assert!(
+            report.scratch_peak_occupied_bytes < report.scratch_write_bytes,
+            "peak {} must sit below the {} cumulative bytes: {report:?}",
+            report.scratch_peak_occupied_bytes,
+            report.scratch_write_bytes
+        );
         // A refinement reads parent blocks and writes child blocks. Their
         // payloads match, but different block boundaries have different CRC
         // header counts; only total successful scratch traffic is identical.
@@ -2443,17 +2460,30 @@ mod bulk_builder {
         // One byte short, with room for the node tables: scratch.
         plan.memory_budget = Some(plan.estimated_resident_bytes() - 1);
         assert_eq!(plan.route(), crate::BulkRoute::Scratch);
-        // The node tables do not fit: staged, with the reason.
+        // The node tables do not fit: they go to scratch too (#1929). The
+        // route that used to stage here has no producer.
         plan.memory_budget = Some(plan.node_tables_resident_bytes() - 1);
-        assert_eq!(
-            plan.route(),
-            crate::BulkRoute::Staged(crate::BulkStagedReason::NodeTablesExceedBudget)
-        );
+        assert_eq!(plan.route(), crate::BulkRoute::ScratchNodes);
         plan.memory_budget = Some(1);
-        assert_eq!(
-            plan.route(),
-            crate::BulkRoute::Staged(crate::BulkStagedReason::NodeTablesExceedBudget)
-        );
+        assert_eq!(plan.route(), crate::BulkRoute::ScratchNodes);
+        for budget in [
+            0,
+            1,
+            plan.scratch_floor_bytes() - 1,
+            plan.scratch_floor_bytes(),
+            plan.scratch_floor_bytes() + 1,
+            plan.node_tables_resident_bytes() - 1,
+            plan.node_tables_resident_bytes(),
+            plan.estimated_resident_bytes() - 1,
+            plan.estimated_resident_bytes(),
+            u64::MAX,
+        ] {
+            plan.memory_budget = Some(budget);
+            assert!(
+                !matches!(plan.route(), crate::BulkRoute::Staged(_)),
+                "budget {budget} staged"
+            );
+        }
         // Property payloads do not change the resident node identity footprint.
         let node_uuids = (0..600_u64).map(|i| uuid(0x10, i)).collect::<Vec<_>>();
         let edge_uuids = (0..900_u64).map(|i| uuid(0x20, i)).collect::<Vec<_>>();
@@ -2473,10 +2503,47 @@ mod bulk_builder {
         assert_eq!(plan.route(), crate::BulkRoute::Scratch);
         // The node tables are checked first.
         plan.memory_budget = Some(1);
-        assert_eq!(
-            plan.route(),
-            crate::BulkRoute::Staged(crate::BulkStagedReason::NodeTablesExceedBudget)
-        );
+        assert_eq!(plan.route(), crate::BulkRoute::ScratchNodes);
+    }
+
+    #[test]
+    fn node_counts_that_used_to_stage_route_to_scratch_nodes_at_every_realistic_budget() {
+        // Millions of nodes against the budgets the host derives (3/5 of a
+        // 4 GiB cgroup, 1 GiB, 8 GiB): the planner chooses a bulk route and
+        // never the staged one, and the node tables dominate the decision.
+        let sources = |rows: u64| {
+            let source = |rows| BulkSource {
+                reader: Arc::new(Memory {
+                    batches: Vec::new(),
+                    per_task: 1,
+                }),
+                tasks: 1,
+                rows,
+                property_free: true,
+                decoded_bytes: 0,
+            };
+            BulkBuildPlan {
+                nodes: vec![source(rows)],
+                edges: vec![source(rows * 4)],
+                memory_budget: None,
+            }
+        };
+        const MIB: u64 = 1 << 20;
+        for (nodes, budget, expected) in [
+            // 56 B/node + 512 MiB fits 2.4 GiB up to ~34M nodes, and the whole
+            // build fits memory far below that.
+            (1_000_000, 2_457 * MIB, crate::BulkRoute::Memory),
+            (20_000_000, 2_457 * MIB, crate::BulkRoute::Scratch),
+            (34_000_000, 2_457 * MIB, crate::BulkRoute::Scratch),
+            (40_000_000, 2_457 * MIB, crate::BulkRoute::ScratchNodes),
+            (300_000_000, 2_457 * MIB, crate::BulkRoute::ScratchNodes),
+            (10_000_000, 1024 * MIB, crate::BulkRoute::ScratchNodes),
+            (150_000_000, 8 * 1024 * MIB, crate::BulkRoute::ScratchNodes),
+        ] {
+            let mut plan = sources(nodes);
+            plan.memory_budget = Some(budget);
+            assert_eq!(plan.route(), expected, "{nodes} nodes, budget {budget}");
+        }
     }
 
     /// A reader that states its tasks' identity bounds, as a Parquet footer does.
@@ -2804,4 +2871,8 @@ mod bulk_builder {
     }
 
     include!("construction_chunk_spool_tests.rs");
+
+    mod node_scratch {
+        include!("construction_bulk_tests/node_scratch.rs");
+    }
 }

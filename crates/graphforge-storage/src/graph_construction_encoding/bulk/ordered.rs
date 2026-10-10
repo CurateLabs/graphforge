@@ -203,7 +203,6 @@ mod tests {
                 let cost = 10 + (index as u64 % 4) * 10;
                 let now = in_flight.fetch_add(cost, Ordering::SeqCst) + cost;
                 peak.fetch_max(now, Ordering::SeqCst);
-                std::thread::sleep(Duration::from_millis(1));
                 ordered.wait_turn(0, index)?;
                 order.lock().unwrap().push(index);
                 ordered.pass_turn(0);
@@ -214,6 +213,39 @@ mod tests {
         .unwrap();
         assert!(peak.load(Ordering::SeqCst) <= 100);
         assert_eq!(*order.lock().unwrap(), (0..40).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn later_partitions_finish_pre_turn_work_before_the_first_turn() {
+        const WORKERS: usize = 8;
+        let cancel = AtomicBool::new(false);
+        let ordered = Ordered::new(80, 1, &cancel);
+        let ready = AtomicUsize::new(0);
+        let in_flight = AtomicU64::new(0);
+        let peak = AtomicU64::new(0);
+        let barrier = std::sync::Barrier::new(WORKERS);
+        let order = Mutex::new(Vec::new());
+        run_ordered(
+            WORKERS,
+            WORKERS,
+            &ordered,
+            |_| 10,
+            |index| {
+                let now = in_flight.fetch_add(10, Ordering::SeqCst) + 10;
+                peak.fetch_max(now, Ordering::SeqCst);
+                ready.fetch_add(1, Ordering::SeqCst);
+                barrier.wait();
+                assert_eq!(ready.load(Ordering::SeqCst), WORKERS);
+                ordered.wait_turn(0, index)?;
+                order.lock().unwrap().push(index);
+                ordered.pass_turn(0);
+                in_flight.fetch_sub(10, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(peak.load(Ordering::SeqCst), 80);
+        assert_eq!(*order.lock().unwrap(), (0..WORKERS).collect::<Vec<_>>());
     }
 
     #[test]

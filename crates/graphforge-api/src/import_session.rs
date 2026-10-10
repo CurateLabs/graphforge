@@ -901,10 +901,9 @@ impl GraphImportSession {
         // attempt followed by a memory drop cannot send a sealed session to
         // the staged path, which would refuse every retry. An initial build
         // that has staged nothing runs on the bulk builder, in memory or, when
-        // its estimate exceeds the budget, on scratch files (ADR 0058). An
-        // append, a session an earlier binary began staging, and an initial
-        // build the builder cannot hold the node tables or edge properties of
-        // stage; the last records its typed reason.
+        // its estimate exceeds the budget, on scratch files, node tables
+        // included (ADR 0058). An append and a session an earlier binary
+        // began staging stage; no plan stages for want of memory.
         let refusals = bulk_source::Refusals::default();
         let digests = bulk_source::Digests::default();
         let route = if let Some(route) = self.manifest.build_route {
@@ -930,7 +929,8 @@ impl GraphImportSession {
                         BuildRoute::Staged
                     }
                     graphforge_storage::BulkRoute::Memory
-                    | graphforge_storage::BulkRoute::Scratch => BuildRoute::Bulk,
+                    | graphforge_storage::BulkRoute::Scratch
+                    | graphforge_storage::BulkRoute::ScratchNodes => BuildRoute::Bulk,
                 }
             } else {
                 BuildRoute::Staged
