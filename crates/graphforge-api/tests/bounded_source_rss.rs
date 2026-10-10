@@ -8,9 +8,9 @@
 //! ends. Inputs are written by the parent, so the child's peak is the import's.
 //!
 //! The accepted cases hold the budget fixed and grow the input: the resident set
-//! must not follow the payload. The refused cases are inputs whose decode would
-//! take gigabytes: the child must refuse them with a typed resource limit
-//! while staying small. Every case reports the bytes it read and the scratch it
+//! must not follow the payload. The refused cases are inputs with a value no
+//! piece of the window can hold: the child must refuse them with a typed
+//! resource limit while staying small. Every case reports the bytes it read and the scratch it
 //! wrote; `GF_RSS_REPORT=<file>` appends them as JSON lines for the pull request.
 
 use std::fs::{self, File};
@@ -26,6 +26,7 @@ use graphforge_api::{BulkInputKind, GraphForge, ImportSessionLimits, OperationId
 use graphforge_core::{GfError, ProjectErrorCode};
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_writer::ArrowWriterOptions;
+use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 use uuid::Uuid;
 
@@ -39,7 +40,13 @@ fn v7(value: u128) -> Uuid {
 
 /// `rows` nodes with one dictionary-encoded string property of `distinct` values
 /// of `bytes` each: stored once each, decoded for every row.
-fn write_dictionary_nodes(path: &Path, rows: usize, distinct: usize, bytes: usize) {
+fn write_dictionary_nodes(
+    path: &Path,
+    rows: usize,
+    distinct: usize,
+    bytes: usize,
+    compression: Compression,
+) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("node_uuid", DataType::FixedSizeBinary(16), true),
         Field::new("label", DataType::Utf8, false),
@@ -58,6 +65,7 @@ fn write_dictionary_nodes(path: &Path, rows: usize, distinct: usize, bytes: usiz
             .with_properties(
                 WriterProperties::builder()
                     .set_dictionary_page_size_limit(64 << 20)
+                    .set_compression(compression)
                     .build(),
             )
             .with_skip_arrow_metadata(true),
@@ -234,9 +242,10 @@ fn input(
     rows: usize,
     distinct: usize,
     bytes: usize,
+    compression: Compression,
 ) -> (PathBuf, u64) {
     let path = directory.join(name);
-    write_dictionary_nodes(&path, rows, distinct, bytes);
+    write_dictionary_nodes(&path, rows, distinct, bytes, compression);
     let size = fs::metadata(&path).unwrap().len();
     (path, size)
 }
@@ -257,6 +266,7 @@ fn the_resident_set_does_not_follow_the_payload() {
             rows,
             4,
             8 << 10,
+            Compression::UNCOMPRESSED,
         );
         let run = measure(&format!("dictionary_{rows}_rows"), &path, 1_024, size);
         assert_eq!(run.outcome, "imported", "{}", run.json);
@@ -274,16 +284,24 @@ fn the_resident_set_does_not_follow_the_payload() {
     );
 }
 
-/// Inputs whose decode would take gigabytes are refused, and the process that
+/// Inputs no piece of the window can hold are refused, and the process that
 /// refuses them stays small.
 #[test]
-fn inputs_that_would_decode_past_the_budget_are_refused_while_small() {
+fn inputs_that_would_decode_past_the_window_are_refused_while_small() {
     let directory =
         tempfile::tempdir_in(std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into())).unwrap();
-    // One 1 MiB value used by every row: 2,048 rows in a batch decode to 2 GiB.
-    let (path, size) = input(directory.path(), "expansion.parquet", 2_048, 1, 1 << 20);
+    // One 40 MiB value, stored once and compressed to kilobytes: its decoded
+    // buffers outgrow the 64 MiB window, so no row of it is admitted.
+    let (path, size) = input(
+        directory.path(),
+        "expansion.parquet",
+        2,
+        1,
+        40 << 20,
+        Compression::GZIP(Default::default()),
+    );
     assert!(size < 4 * MIB, "{size} bytes stored");
-    let run = measure("dictionary_expansion_2_gib", &path, 2_048, size);
+    let run = measure("dictionary_expansion_40_mib_value", &path, 2, size);
     assert_eq!(run.outcome, "resource_limit", "{}", run.json);
     assert!(
         run.peak <= BUDGET / 5,

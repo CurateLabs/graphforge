@@ -33,7 +33,7 @@ use graphforge_core::ProjectErrorCode;
 use graphforge_storage::BulkBuildReport;
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_writer::ArrowWriterOptions;
-use parquet::basic::Encoding;
+use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 use uuid::Uuid;
 
@@ -331,11 +331,19 @@ fn same_answers_on_every_route(
             .unwrap_or_else(|error| panic!("{budget:?}: {error}"));
         assert_eq!(run.scratch(), budget.is_some(), "{budget:?}");
         if budget.is_some() {
+            // The builder runs property partition buffers concurrently
+            // (#1960), so the live peak grows with their occupancy; admit that
+            // occupancy, and keep the fixed bound for everything beside it.
+            // Per-row containers would triple the peak without occupying
+            // scratch, and still fail the fixed bound.
+            let report = run.bulk_build();
+            let limit =
+                scratch_heap.max(48 * MIB + report.scratch_peak_occupied_bytes.saturating_mul(2));
             assert!(
-                run.peak < scratch_heap,
+                run.peak < limit,
                 "{budget:?}: peak heap {} MiB, limit {} MiB",
                 run.peak / MIB,
-                scratch_heap / MIB
+                limit / MIB
             );
         }
         run.commit();
@@ -365,6 +373,31 @@ fn dictionary_properties() -> WriterProperties {
     WriterProperties::builder()
         .set_dictionary_page_size_limit(64 << 20)
         .build()
+}
+
+/// A value wider than any piece of the 64 MiB window can hold once its
+/// decoded buffers have grown: no row of it is admitted.
+const OVERSIZED_VALUE_BYTES: usize = 40 << 20;
+
+/// One `OVERSIZED_VALUE_BYTES` value in `rows` rows, stored once in a
+/// compressed dictionary page: a small file no piece can decode.
+fn write_oversized_value(path: &Path, rows: usize) {
+    write_parquet(
+        path,
+        &[node_batch(
+            1,
+            rows,
+            vec![(
+                "text",
+                dictionary_strings(rows, |_| "x".repeat(OVERSIZED_VALUE_BYTES)),
+            )],
+        )],
+        WriterProperties::builder()
+            .set_dictionary_page_size_limit(64 << 20)
+            .set_compression(Compression::ZSTD(ZstdLevel::default()))
+            .build(),
+    );
+    assert!(fs::metadata(path).unwrap().len() < MIB);
 }
 
 fn dictionary_strings(rows: usize, value: impl Fn(usize) -> String) -> ArrayRef {
@@ -420,7 +453,8 @@ fn a_dictionary_that_expands_past_the_window_is_refused_before_it_is_decoded() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("nodes.parquet");
     // One 100 KiB value, stored once; 1,024 rows of it decode to 100 MiB, past
-    // the 64 MiB window.
+    // the 64 MiB window. The batch is decoded in pieces that fit the window,
+    // and no piece outlives its turn.
     let rows = 2_048;
     let batch = node_batch(
         1,
@@ -429,21 +463,37 @@ fn a_dictionary_that_expands_past_the_window_is_refused_before_it_is_decoded() {
     );
     write_parquet(&path, &[batch], dictionary_properties());
     assert!(fs::metadata(&path).unwrap().len() < MIB);
+    let queries = ["MATCH (n:Thing) RETURN count(n) AS n, sum(size(n.text)) AS bytes"];
+    let answer = same_answers_on_every_route(&path, 1_024, &queries, 192 * MIB);
+    assert!(
+        answer.contains(&(rows * (100 << 10)).to_string()),
+        "{answer}"
+    );
 
+    // One value wider than the window fits no piece: it is refused before a
+    // byte of it is decoded, and its batch is counted as rejected.
+    let wide = directory.path().join("wide.parquet");
+    let rows = 2;
+    write_oversized_value(&wide, rows);
     for budget in ROUTES {
-        let run = import(&path, 1_024, budget);
+        let run = import(&wide, 1_024, budget);
         let error = run.error();
         assert!(is_resource_limit(error), "{budget:?}: {error}");
         assert!(
             error.to_string().contains("refused before it was decoded"),
             "{error}"
         );
-        // Decoding it would have taken 100 MiB and more; refusing it takes none.
-        assert!(run.peak < 24 * MIB, "{budget:?}: {} MiB", run.peak / MIB);
+        // Sizing the batch holds its stored dictionary page, admitted against
+        // the inventory budget; decoding the batch would have held 80 MiB and
+        // more, and refusing it adds nothing.
+        assert!(
+            run.peak < (rows * OVERSIZED_VALUE_BYTES) as u64,
+            "{budget:?}: {} MiB",
+            run.peak / MIB
+        );
         assert_eq!(
             run.rejected_rows(),
-            // The session keeps no more than this many rejected rows.
-            ImportSessionLimits::default().max_rejected_rows.min(1_024),
+            rows as u64,
             "the refused batch is counted"
         );
     }
@@ -460,12 +510,55 @@ fn a_dictionary_that_expands_past_the_window_is_refused_before_it_is_decoded() {
         )],
         dictionary_properties(),
     );
-    let queries = ["MATCH (n:Thing) RETURN count(n) AS n, sum(size(n.text)) AS bytes"];
     let answer = same_answers_on_every_route(&fits, 16, &queries, 400 * MIB);
     assert!(
         answer.contains(&(rows * (100 << 10)).to_string()),
         "{answer}"
     );
+}
+
+#[test]
+fn compressed_pages_are_admitted_with_their_codec_state() {
+    let _serial = serial();
+    let directory = tempfile::tempdir().unwrap();
+    // Small pages, each the whole of what its task's workspace admits: the
+    // codec's own state has to be admitted beside them, or every compressed
+    // page is refused for want of it.
+    let rows = 2_048;
+    let queries = ["MATCH (n:Thing) RETURN count(n) AS n, sum(size(n.text)) AS bytes"];
+    for (name, compression) in [
+        ("zstd", Compression::ZSTD(ZstdLevel::default())),
+        ("gzip", Compression::GZIP(Default::default())),
+        ("brotli", Compression::BROTLI(Default::default())),
+    ] {
+        let path = directory.path().join(format!("{name}.parquet"));
+        write_parquet(
+            &path,
+            &[node_batch(
+                1,
+                rows,
+                vec![(
+                    "text",
+                    dictionary_strings(rows, |row| format!("value-{row:04}")),
+                )],
+            )],
+            WriterProperties::builder()
+                .set_compression(compression)
+                .build(),
+        );
+        for budget in ROUTES {
+            let mut run = import(&path, 256, budget);
+            run.result
+                .as_ref()
+                .unwrap_or_else(|error| panic!("{name} {budget:?}: {error}"));
+            run.commit();
+            let answer = answers(&run.graph, &queries);
+            assert!(
+                answer.contains(&(rows * 10).to_string()),
+                "{name} {budget:?}: {answer}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -523,10 +616,11 @@ fn repeated_large_values_import_within_the_window_and_are_refused_beyond_it() {
     let answer = same_answers_on_every_route(&accepted, 24, &queries, 400 * MIB);
     assert!(answer.contains(&(24 << 20).to_string()), "{answer}");
 
-    // 160 MiB in one batch is past it, wherever the budget is.
-    let refused = directory.path().join("refused.parquet");
+    // 160 MiB in one batch is decoded in pieces; a value wider than the window
+    // is past it, wherever the budget is.
+    let split = directory.path().join("split.parquet");
     write_parquet(
-        &refused,
+        &split,
         &[node_batch(
             1,
             160,
@@ -534,6 +628,10 @@ fn repeated_large_values_import_within_the_window_and_are_refused_beyond_it() {
         )],
         dictionary_properties(),
     );
+    let answer = same_answers_on_every_route(&split, 160, &queries, 192 * MIB);
+    assert!(answer.contains(&(160 << 20).to_string()), "{answer}");
+    let refused = directory.path().join("refused.parquet");
+    write_oversized_value(&refused, 2);
     for budget in ROUTES {
         let run = import(&refused, 160, budget);
         assert!(
@@ -541,7 +639,12 @@ fn repeated_large_values_import_within_the_window_and_are_refused_beyond_it() {
             "{budget:?}: {}",
             run.error()
         );
-        assert!(run.peak < 48 * MIB, "{budget:?}: {} MiB", run.peak / MIB);
+        // The stored page, held to size the batch; not the decoded batch.
+        assert!(
+            run.peak < (2 * OVERSIZED_VALUE_BYTES) as u64,
+            "{budget:?}: {} MiB",
+            run.peak / MIB
+        );
     }
 }
 
@@ -560,6 +663,7 @@ fn write_delta_strings(path: &Path, rows: usize, width: usize) {
     let properties = WriterProperties::builder()
         .set_dictionary_enabled(false)
         .set_column_encoding("text".into(), Encoding::DELTA_BYTE_ARRAY)
+        .set_compression(Compression::ZSTD(ZstdLevel::default()))
         .set_data_page_size_limit(1 << 30)
         .set_data_page_row_count_limit(usize::MAX)
         .set_max_row_group_row_count(Some(1 << 20))
@@ -597,9 +701,23 @@ fn write_delta_strings(path: &Path, rows: usize, width: usize) {
 fn delta_encoded_values_are_sized_by_what_they_decode_to() {
     let _serial = serial();
     let directory = tempfile::tempdir().unwrap();
-    // A megabyte per value, a few bytes of it stored per value.
+    // A megabyte per value, a few bytes of it stored per value: 512 MiB in one
+    // batch, decoded in pieces that fit the window.
+    let split = directory.path().join("split.parquet");
+    write_delta_strings(&split, 512, 1 << 20);
+    assert!(
+        fs::metadata(&split).unwrap().len() < 4 * MIB,
+        "{} bytes stored",
+        fs::metadata(&split).unwrap().len()
+    );
+    let queries = ["MATCH (n:Thing) RETURN count(n) AS n, sum(size(n.text)) AS bytes"];
+    let answer = same_answers_on_every_route(&split, 512, &queries, 192 * MIB);
+    assert!(answer.contains(&(512 << 20).to_string()), "{answer}");
+
+    // A value wider than the window fits no piece, however few bytes of it the
+    // page stores.
     let refused = directory.path().join("refused.parquet");
-    write_delta_strings(&refused, 512, 1 << 20);
+    write_delta_strings(&refused, 2, OVERSIZED_VALUE_BYTES);
     assert!(
         fs::metadata(&refused).unwrap().len() < 4 * MIB,
         "{} bytes stored",
@@ -612,12 +730,16 @@ fn delta_encoded_values_are_sized_by_what_they_decode_to() {
             "{budget:?}: {}",
             run.error()
         );
-        assert!(run.peak < 48 * MIB, "{budget:?}: {} MiB", run.peak / MIB);
+        // The stored page, held to size the batch; not the decoded batch.
+        assert!(
+            run.peak < (2 * OVERSIZED_VALUE_BYTES) as u64,
+            "{budget:?}: {} MiB",
+            run.peak / MIB
+        );
     }
 
     let accepted = directory.path().join("accepted.parquet");
     write_delta_strings(&accepted, 24, 1 << 20);
-    let queries = ["MATCH (n:Thing) RETURN count(n) AS n, sum(size(n.text)) AS bytes"];
     let answer = same_answers_on_every_route(&accepted, 24, &queries, 400 * MIB);
     assert!(answer.contains(&(24 << 20).to_string()), "{answer}");
 }
@@ -680,8 +802,8 @@ fn repeated_values_are_bounded_by_their_children() {
 
     // Twenty million booleans in one cell take 2.5 MB of Arrow, but a pair of
     // levels and an index each (160 MB), and 2.2 GB converted to values at once.
-    // The page that holds the cell is refused while the source is planned, before
-    // anything reads its records.
+    // No piece of the window holds the row: it is refused while the source is
+    // planned, before anything decodes it.
     let mut flags = ListBuilder::new(BooleanBuilder::new());
     for row in 0..8_usize {
         let children = if row == 5 { 20_000_000 } else { 3 };
@@ -706,7 +828,7 @@ fn repeated_values_are_bounded_by_their_children() {
         assert!(
             run.error()
                 .to_string()
-                .contains("workspace that sizes its records"),
+                .contains("refused before it was decoded"),
             "{}",
             run.error()
         );
@@ -1276,15 +1398,16 @@ fn every_route_publishes_the_same_graph_for_every_encoding() {
         "MATCH (a)-[r:LINKS]->(b) RETURN r.edge_uuid AS id, a.node_uuid AS source, \
          b.node_uuid AS target, r.a_kind AS kind, r.b_weight AS weight ORDER BY id",
     ];
-    // Resident, through scratch, and (a budget under the node tables) staged
-    // chunk by chunk, which is the path these routes replaced. The routes publish
-    // one graph, so every run answers alike.
+    // Resident, through scratch, and the plain unpadded file again: every bulk
+    // route publishes one graph, so every run answers alike. A budget under the
+    // scratch route's fixed floor is refused by naming what it needs before a
+    // byte is decoded; a durable bulk route cannot fall back to staging (ADR
+    // 0058).
     let mut expected: Option<String> = None;
     for (name, nodes, budget) in [
         ("resident", &padded, None),
         ("scratch", &padded, Some(SCRATCH_BUDGET)),
         ("resident unpadded", &plain, None),
-        ("staged", &plain, Some(256 * MIB)),
     ] {
         let mut run = import_sources(
             &[(BulkInputKind::Node, nodes), (BulkInputKind::Edge, &edges)],
@@ -1294,23 +1417,26 @@ fn every_route_publishes_the_same_graph_for_every_encoding() {
         run.result
             .as_ref()
             .unwrap_or_else(|error| panic!("{name}: {error}"));
-        assert_eq!(run.staged(), name == "staged", "{name}");
+        assert!(!run.staged(), "{name}");
         if name == "scratch" {
             assert!(run.scratch(), "{:?}", run.bulk_build());
         }
         run.commit();
         let answer = answers(&run.graph, &queries);
         match &expected {
-            Some(expected) => {
-                if &answer != expected {
-                    fs::write("/home/ubuntu/t1918/answers-expected.txt", expected).unwrap();
-                    fs::write("/home/ubuntu/t1918/answers-actual.txt", &answer).unwrap();
-                }
-                assert_eq!(&answer, expected, "{name}");
-            }
+            Some(expected) => assert_eq!(&answer, expected, "{name}"),
             None => expected = Some(answer),
         }
     }
+    let under = import_sources(
+        &[(BulkInputKind::Node, &plain), (BulkInputKind::Edge, &edges)],
+        4,
+        Some(256 * MIB),
+    );
+    let error = under.error();
+    assert!(is_resource_limit(error), "{error}");
+    assert!(error.to_string().contains("before decoding"), "{error}");
+    assert!(under.peak < 24 * MIB, "{} MiB", under.peak / MIB);
     let expected = expected.unwrap();
     assert!(expected.contains("entry-3") && expected.contains("kind-2"));
     assert!(expected.contains("240"), "{expected}");

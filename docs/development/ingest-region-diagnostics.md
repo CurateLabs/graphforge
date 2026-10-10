@@ -308,20 +308,22 @@ Three kinds of evidence stand behind the bound, each reproducible from the tree:
   prefix, 700-column schemas, lists with millions of children, compressed Arrow
   buffers that advertise eight gigabytes, and pages and footers whose stated
   lengths the file cannot hold. A counting global allocator measures the process's
-  live heap bytes across `validate`; each input is imported on the resident route,
-  through scratch and (where it is small enough) staged chunk by chunk, and the
-  three must publish the same answers, derived identities included.
+  live heap bytes across `validate`; each input is imported on the resident route
+  and through scratch, and the two must publish the same answers, derived
+  identities included. A logical batch past the 64 MiB window is decoded in
+  pieces that fit it; a value no piece can hold is refused before it is decoded.
 - `crates/graphforge-api/tests/bounded_source_rss.rs` re-executes its test binary
   as a child for each case and reads the child's own `VmHWM` when its import ends,
   under `ulimit -v 12 GiB` so a decode that ignored its budget aborts instead of
   taking the host. Inputs are written by the parent, so the child's peak is the
   import's. A ladder holds `GF_BULK_BUILD_MEMORY_BUDGET_BYTES` at 1,100 MiB and
   grows only the decoded payload (one dictionary column of four 8 KiB strings, so
-  files of a few hundred kilobytes decode to 16, 32 and 64 MB); a second case is
-  refused while small. `GF_RSS_REPORT=<file>` appends each case as a JSON line with
-  its peak and starting RSS, the bytes the import read and wrote (`/proc/self/io`)
-  and the scratch bytes the receipt reports, so source reads and scratch traffic are
-  reported beside the resident set and never inferred from it.
+  files of a few hundred kilobytes decode to 16, 32 and 64 MB); a second case,
+  one value wider than the window, is refused while small. `GF_RSS_REPORT=<file>`
+  appends each case as a JSON line with its peak and starting RSS, the bytes the
+  import read and wrote (`/proc/self/io`) and the scratch bytes the receipt
+  reports, so source reads and scratch traffic are reported beside the resident
+  set and never inferred from it.
 - Real inputs go through the release CLI. Convert SNB BI SF1 with
   `graphforge-benchmark-gdc-scorecard convert --mapping
   benchmarks/profiles/gdc/snb-bi-load-mapping.json --input-root
