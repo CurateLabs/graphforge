@@ -1,9 +1,9 @@
+use super::super::scratch::SCRATCH_DIRECTORY;
 use super::*;
 use crate::StorageAllocationOperation;
 use arrow::array::{Array, ArrayRef, FixedSizeBinaryArray, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use std::fs::File;
-use std::io::Write as _;
 
 include!("property_rows_frame_tests.rs");
 include!("property_merge_admission_tests.rs");

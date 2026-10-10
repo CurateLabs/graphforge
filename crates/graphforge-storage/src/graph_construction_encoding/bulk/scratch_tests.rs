@@ -1,7 +1,6 @@
 use super::*;
 use crate::StorageAllocationOperation;
 use std::fs::File;
-use std::io::Write as _;
 
 #[test]
 fn crc32c_matches_the_published_check_value() {
