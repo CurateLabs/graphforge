@@ -309,8 +309,8 @@ Three kinds of evidence stand behind the bound, each reproducible from the tree:
   buffers that advertise eight gigabytes, and pages and footers whose stated
   lengths the file cannot hold. A counting global allocator measures the process's
   live heap bytes across `validate`; each input is imported on the resident route
-  and through scratch, and the two must publish the same answers, derived
-  identities included. A logical batch past the 64 MiB window is decoded in
+  and, where the facade's scratch budget admits it, through scratch, and the
+  routes must publish the same answers, derived identities included. A logical batch past the 64 MiB window is decoded in
   pieces that fit it; a value no piece can hold is refused before it is decoded.
 - `crates/graphforge-api/tests/bounded_source_rss.rs` re-executes its test binary
   as a child for each case and reads the child's own `VmHWM` when its import ends,

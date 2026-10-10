@@ -509,7 +509,10 @@ fn writer_generated_small_pages_pass_with_exact_counts() {
         * std::mem::size_of::<super::super::parquet_scan::GroupScan>()
         + scan.group_start.capacity() * std::mem::size_of::<u64>()
         + scan.value_bytes.capacity() * std::mem::size_of::<u64>()
-        + scan.batch_max_row_value_bytes.capacity() * std::mem::size_of::<u64>()
+        + scan.batch_max_fixed_bytes.capacity() * std::mem::size_of::<u64>()
+        + scan.batch_growing_bytes.capacity() * std::mem::size_of::<u64>()
+        + scan.leaf_row_max.capacity() * std::mem::size_of::<u64>()
+        + scan.leaf_page_max.capacity() * std::mem::size_of::<u64>()
         + scan.first_oversized_row.capacity() * std::mem::size_of::<u64>()
         + scan
             .groups

@@ -381,10 +381,13 @@ impl SourceReader<'_> {
             failures.clone(),
             Arc::clone(&admission.decode_budget),
         )?;
+        // The admitted Arrow schema carries the file's type hints (large
+        // offsets, dictionaries); the native reader must decode to it, or its
+        // fields differ from the schema every batch is checked against.
         let levels = parquet_to_arrow_field_levels(
             metadata.metadata().file_metadata().schema_descr(),
             ProjectionMask::all(),
-            None,
+            Some(metadata.schema().fields()),
         )
         .map_err(storage)?;
         let native =

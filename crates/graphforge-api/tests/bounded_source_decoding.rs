@@ -20,8 +20,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use arrow::array::{
-    ArrayRef, BooleanBuilder, FixedSizeBinaryBuilder, Int64Array, Int64Builder, ListBuilder,
-    StringArray, StringDictionaryBuilder,
+    ArrayRef, BooleanBuilder, FixedSizeBinaryBuilder, Int64Array, Int64Builder, LargeStringArray,
+    ListBuilder, StringArray, StringDictionaryBuilder,
 };
 use arrow::datatypes::{DataType, Field, Int32Type};
 use arrow::record_batch::RecordBatch;
@@ -168,6 +168,19 @@ fn writer(
             .with_skip_arrow_metadata(true),
     )
     .unwrap()
+}
+
+/// Writes with the Arrow schema kept in the file's metadata, as ArrowWriter
+/// does by default: the reader then decodes to the hinted types.
+fn write_parquet_with_arrow_schema(path: &Path, batch: &RecordBatch) {
+    let mut out = ArrowWriter::try_new(
+        File::create(path).unwrap(),
+        batch.schema(),
+        Some(WriterProperties::builder().build()),
+    )
+    .unwrap();
+    out.write(batch).unwrap();
+    out.close().unwrap();
 }
 
 fn write_parquet(path: &Path, batches: &[RecordBatch], properties: WriterProperties) {
@@ -567,6 +580,87 @@ fn plain_values_that_share_a_page_import_in_pieces_whose_buffers_fit() {
     run.commit();
     let answer = answers(&run.graph, &["MATCH (n:Thing) RETURN count(n) AS n"]);
     assert!(answer.contains(&rows.to_string()), "{answer}");
+}
+
+#[test]
+fn columns_reserved_apart_are_refused_as_one_row_before_decoding() {
+    let _serial = serial();
+    let directory = tempfile::tempdir().unwrap();
+    // Two plain columns in one logical batch. A page reader reserves a
+    // piece's buffer at its own page's average per row, whatever the row holds
+    // in that column: row 0 asks column A for 30 MiB on a 20 MiB reservation,
+    // which doubles to 40 MiB, and column B for nothing on a 25 MiB
+    // reservation. Together they pass the window although the row's values
+    // are 30 MiB, so the row is refused before it is decoded.
+    let rows = 12;
+    let wide = |row: usize| char::from(b'a' + row as u8).to_string().repeat(30 << 20);
+    let a = dictionary_strings(rows, |row| {
+        if row == 0 || row == 2 {
+            wide(row)
+        } else {
+            String::new()
+        }
+    });
+    let b = dictionary_strings(rows, |row| {
+        if row == 0 || row == 2 {
+            String::new()
+        } else {
+            wide(row)
+        }
+    });
+    let path = directory.path().join("apart.parquet");
+    write_parquet(
+        &path,
+        &[node_batch(1, rows, vec![("a", a), ("b", b)])],
+        WriterProperties::builder()
+            .set_dictionary_enabled(false)
+            .set_data_page_size_limit(1 << 30)
+            .set_data_page_row_count_limit(usize::MAX)
+            .set_compression(Compression::ZSTD(ZstdLevel::default()))
+            .build(),
+    );
+    assert!(fs::metadata(&path).unwrap().len() < 4 * MIB);
+    for budget in ROUTES {
+        let run = import(&path, rows, budget);
+        let error = run.error();
+        assert!(is_resource_limit(error), "{budget:?}: {error}");
+        assert!(
+            error.to_string().contains("refused before it was decoded"),
+            "{error}"
+        );
+        assert_eq!(run.rejected_rows(), rows as u64, "{budget:?}");
+    }
+}
+
+#[test]
+fn arrow_schema_hints_decode_to_the_admitted_types() {
+    let _serial = serial();
+    let directory = tempfile::tempdir().unwrap();
+    // A file that keeps its Arrow schema asks for large offsets; the reader
+    // decodes to that type, which the admitted schema already names, instead
+    // of the plain strings the Parquet types alone would suggest.
+    let rows = 1_024;
+    let large: ArrayRef = Arc::new(LargeStringArray::from(
+        (0..rows)
+            .map(|row| format!("large-{row}"))
+            .collect::<Vec<_>>(),
+    ));
+    let path = directory.path().join("hinted.parquet");
+    write_parquet_with_arrow_schema(&path, &node_batch(1, rows, vec![("large", large)]));
+    let queries = ["MATCH (n:Thing) RETURN count(n) AS n, sum(size(n.large)) AS large"];
+    let bytes: usize = (0..rows).map(|row| format!("large-{row}").len()).sum();
+    for budget in ROUTES {
+        let mut run = import(&path, 128, budget);
+        run.result
+            .as_ref()
+            .unwrap_or_else(|error| panic!("{budget:?}: {error}"));
+        run.commit();
+        let answer = answers(&run.graph, &queries);
+        assert!(
+            answer.contains("1024") && answer.contains(&bytes.to_string()),
+            "{budget:?}: {answer}"
+        );
+    }
 }
 
 #[test]
