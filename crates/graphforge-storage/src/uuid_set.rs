@@ -149,7 +149,10 @@ impl UuidMembership for UuidFilter<'_> {
 /// those bytes before allocation and while old storage remains live on growth.
 #[derive(Debug, Default)]
 pub(crate) struct CompactUuidSet {
-    slots: Vec<[u8; 16]>,
+    /// The hash table is split into separately allocated chunks so completed
+    /// nominations can drop unused tail chunks before allocating sorted output.
+    slots: Vec<Vec<[u8; 16]>>,
+    capacity: usize,
     occupied: Vec<u64>,
     len: usize,
     hash_builder: RandomState,
@@ -158,6 +161,7 @@ pub(crate) struct CompactUuidSet {
 
 impl CompactUuidSet {
     pub(crate) const INITIAL_CAPACITY: usize = 16;
+    const SLOT_CHUNK_CAPACITY: usize = 4_096;
 
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
@@ -169,27 +173,37 @@ impl CompactUuidSet {
     }
 
     pub(crate) fn capacity(&self) -> usize {
-        self.slots.len()
+        self.capacity
     }
 
     pub(crate) fn storage_bytes_for_capacity(capacity: usize) -> Option<usize> {
         let slot_bytes = capacity.checked_mul(std::mem::size_of::<[u8; 16]>())?;
+        let chunk_count = capacity.div_ceil(Self::SLOT_CHUNK_CAPACITY);
+        let directory_bytes = chunk_count.checked_mul(std::mem::size_of::<Vec<[u8; 16]>>())?;
         let words = capacity.checked_add(63)?.checked_div(64)?;
         let bitmap_bytes = words.checked_mul(std::mem::size_of::<u64>())?;
-        slot_bytes.checked_add(bitmap_bytes)
+        slot_bytes
+            .checked_add(directory_bytes)?
+            .checked_add(bitmap_bytes)
     }
 
     pub(crate) fn storage_bytes(&self) -> usize {
-        self.slots
+        let directory_bytes = self
+            .slots
             .capacity()
-            .checked_mul(std::mem::size_of::<[u8; 16]>())
-            .and_then(|slots| {
-                self.occupied
+            .saturating_mul(std::mem::size_of::<Vec<[u8; 16]>>());
+        let slot_bytes = self.slots.iter().fold(directory_bytes, |bytes, chunk| {
+            bytes.saturating_add(
+                chunk
                     .capacity()
-                    .checked_mul(std::mem::size_of::<u64>())
-                    .and_then(|bitmap| slots.checked_add(bitmap))
-            })
-            .unwrap_or(usize::MAX)
+                    .saturating_mul(std::mem::size_of::<[u8; 16]>()),
+            )
+        });
+        let bitmap_bytes = self
+            .occupied
+            .capacity()
+            .saturating_mul(std::mem::size_of::<u64>());
+        slot_bytes.saturating_add(bitmap_bytes)
     }
 
     pub(crate) fn contains(&self, uuid: &[u8; 16]) -> bool {
@@ -197,7 +211,7 @@ impl CompactUuidSet {
             return false;
         }
         if self.sorted {
-            return self.slots[..self.len].binary_search(uuid).is_ok();
+            return self.slots[0].binary_search(uuid).is_ok();
         }
         let mask = self.capacity() - 1;
         let mut slot = self.slot_for(uuid, mask);
@@ -205,7 +219,7 @@ impl CompactUuidSet {
             if !self.is_occupied(slot) {
                 return false;
             }
-            if self.slots[slot] == *uuid {
+            if self.slot_at(slot) == *uuid {
                 return true;
             }
             slot = (slot + 1) & mask;
@@ -218,12 +232,12 @@ impl CompactUuidSet {
         let mut slot = self.slot_for(&uuid, mask);
         loop {
             if !self.is_occupied(slot) {
-                self.slots[slot] = uuid;
+                self.set_slot(slot, uuid);
                 self.set_occupied(slot);
                 self.len += 1;
                 return true;
             }
-            if self.slots[slot] == uuid {
+            if self.slot_at(slot) == uuid {
                 return false;
             }
             slot = (slot + 1) & mask;
@@ -235,20 +249,36 @@ impl CompactUuidSet {
     }
 
     pub(crate) fn allocate(capacity: usize) -> Result<Self, String> {
+        let chunk_count = capacity.div_ceil(Self::SLOT_CHUNK_CAPACITY);
         let mut slots = Vec::new();
-        // The pinned standard library's try_reserve_exact preserves the
-        // requested capacity; reject any allocator result that exceeds the
-        // bytes already charged by the caller.
         slots
-            .try_reserve_exact(capacity)
+            .try_reserve_exact(chunk_count)
             .map_err(|error| error.to_string())?;
-        if slots.capacity() != capacity {
+        if slots.capacity() != chunk_count {
             return Err(format!(
-                "UUID slot allocation capacity {} differs from requested {capacity}",
+                "UUID slot directory capacity {} differs from requested {chunk_count}",
                 slots.capacity()
             ));
         }
-        slots.resize(capacity, [0; 16]);
+        let mut remaining = capacity;
+        while remaining > 0 {
+            let chunk_capacity = remaining.min(Self::SLOT_CHUNK_CAPACITY);
+            let mut chunk = Vec::new();
+            // Reject any allocator capacity beyond the amount precharged by
+            // the caller.
+            chunk
+                .try_reserve_exact(chunk_capacity)
+                .map_err(|error| error.to_string())?;
+            if chunk.capacity() != chunk_capacity {
+                return Err(format!(
+                    "UUID slot chunk capacity {} differs from requested {chunk_capacity}",
+                    chunk.capacity()
+                ));
+            }
+            chunk.resize(chunk_capacity, [0; 16]);
+            slots.push(chunk);
+            remaining -= chunk_capacity;
+        }
 
         let bitmap_len = capacity.div_ceil(64);
         let mut occupied = Vec::new();
@@ -265,6 +295,7 @@ impl CompactUuidSet {
 
         Ok(Self {
             slots,
+            capacity,
             occupied,
             len: 0,
             hash_builder: RandomState::new(),
@@ -281,33 +312,100 @@ impl CompactUuidSet {
     }
 
     pub(crate) fn reinsert_all(&mut self, old: &Self) {
-        for (slot, uuid) in old.slots.iter().enumerate() {
+        for slot in 0..old.capacity {
             if old.is_occupied(slot) {
-                self.insert_without_growing(*uuid);
+                self.insert_without_growing(old.slot_at(slot));
             }
         }
     }
 
-    /// Converts the hash table to sorted search storage in place. Sorting is
-    /// allocation-free; only the occupancy bitmap is released.
-    pub(crate) fn finalize(&mut self) -> usize {
+    /// Compacts occupied keys into the table prefix and physically drops its
+    /// unused trailing chunks and bitmap. The caller releases the returned
+    /// reservation only after this method has dropped those allocations.
+    pub(crate) fn compact_occupied_prefix(&mut self) -> usize {
         debug_assert!(!self.sorted);
+        let old_bytes = self.storage_bytes();
         let mut write = 0;
-        for read in 0..self.slots.len() {
+        for read in 0..self.capacity {
             if self.is_occupied(read) {
                 if write != read {
-                    self.slots.copy_within(read..=read, write);
+                    let uuid = self.slot_at(read);
+                    self.set_slot(write, uuid);
                 }
                 write += 1;
             }
         }
         debug_assert_eq!(write, self.len);
-        self.slots[..self.len].sort_unstable();
-        self.sorted = true;
-        let released = self.occupied.capacity() * std::mem::size_of::<u64>();
+        let keep_chunks = self.len.div_ceil(Self::SLOT_CHUNK_CAPACITY);
+        self.slots.truncate(keep_chunks);
+        self.capacity = self.slots.iter().map(Vec::len).sum();
         let bitmap = std::mem::take(&mut self.occupied);
         drop(bitmap);
+        old_bytes.saturating_sub(self.storage_bytes())
+    }
+
+    /// Allocates a compact contiguous sorted copy of the occupied prefix.
+    /// Callers precharge `sorted_storage_bytes()` before invoking this.
+    pub(crate) fn allocate_sorted_prefix(&self) -> Result<Vec<[u8; 16]>, String> {
+        debug_assert!(!self.sorted);
+        let mut sorted = Vec::new();
+        sorted
+            .try_reserve_exact(self.len)
+            .map_err(|error| error.to_string())?;
+        if sorted.capacity() != self.len {
+            return Err(format!(
+                "UUID sorted allocation capacity {} differs from requested {}",
+                sorted.capacity(),
+                self.len
+            ));
+        }
+        sorted.extend((0..self.len).map(|index| self.slot_at(index)));
+        sorted.sort_unstable();
+        Ok(sorted)
+    }
+
+    pub(crate) fn sorted_storage_bytes(&self) -> Option<usize> {
+        self.len.checked_mul(std::mem::size_of::<[u8; 16]>())
+    }
+
+    /// Installs the precharged sorted vector, then returns bytes whose backing
+    /// allocations have already been dropped.
+    pub(crate) fn install_sorted(&mut self, sorted: Vec<[u8; 16]>) -> usize {
+        debug_assert_eq!(sorted.len(), self.len);
+        debug_assert_eq!(sorted.capacity(), self.len);
+        let released = if self.len == 0 {
+            let old_bytes = self.storage_bytes();
+            let old_directory = std::mem::take(&mut self.slots);
+            drop(old_directory);
+            old_bytes
+        } else {
+            let old_slot_bytes = self.slots.iter().fold(0_usize, |bytes, chunk| {
+                bytes.saturating_add(
+                    chunk
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<[u8; 16]>()),
+                )
+            });
+            self.slots.truncate(1);
+            let old_chunk = std::mem::replace(&mut self.slots[0], sorted);
+            drop(old_chunk);
+            old_slot_bytes
+        };
+        self.capacity = self.len;
+        self.sorted = true;
         released
+    }
+
+    fn slot_at(&self, index: usize) -> [u8; 16] {
+        let chunk = index / Self::SLOT_CHUNK_CAPACITY;
+        let offset = index % Self::SLOT_CHUNK_CAPACITY;
+        self.slots[chunk][offset]
+    }
+
+    fn set_slot(&mut self, index: usize, uuid: [u8; 16]) {
+        let chunk = index / Self::SLOT_CHUNK_CAPACITY;
+        let offset = index % Self::SLOT_CHUNK_CAPACITY;
+        self.slots[chunk][offset] = uuid;
     }
 
     fn is_occupied(&self, slot: usize) -> bool {
@@ -343,13 +441,13 @@ impl UuidMembership for CompactUuidSet {
 
     fn min_uuid(&self) -> Option<[u8; 16]> {
         self.sorted
-            .then(|| self.slots.get(..self.len)?.first().copied())
+            .then(|| self.slots.first()?.first().copied())
             .flatten()
     }
 
     fn max_uuid(&self) -> Option<[u8; 16]> {
         self.sorted
-            .then(|| self.slots.get(..self.len)?.last().copied())
+            .then(|| self.slots.first()?.last().copied())
             .flatten()
     }
 
@@ -363,8 +461,11 @@ impl UuidMembership for CompactUuidSet {
             return self.min_uuid().is_none_or(|set_min| set_min <= *max)
                 && self.max_uuid().is_none_or(|set_max| set_max >= *min);
         }
-        let first = self.slots[..self.len].partition_point(|uuid| uuid < min);
-        self.slots[first..self.len]
+        let Some(slots) = self.slots.first() else {
+            return false;
+        };
+        let first = slots.partition_point(|uuid| uuid < min);
+        slots[first..]
             .iter()
             .take_while(|uuid| *uuid <= max)
             .any(matches)
@@ -401,8 +502,11 @@ mod tests {
         }
         assert!(!set.contains(&uuid(9)));
 
-        let bitmap_bytes = set.finalize();
+        let bitmap_bytes = set.compact_occupied_prefix();
         assert_eq!(bitmap_bytes, 8);
+        let sorted = set.allocate_sorted_prefix().unwrap();
+        let released = set.install_sorted(sorted);
+        assert!(released > 0);
         assert!(set.contains(&uuid(0)));
         assert_eq!(set.min_uuid(), Some(uuid(0)));
         assert_eq!(set.max_uuid(), Some(uuid(8)));
@@ -412,7 +516,9 @@ mod tests {
         let mut gaps = CompactUuidSet::allocate(16).unwrap();
         assert!(gaps.insert_without_growing(uuid(0)));
         assert!(gaps.insert_without_growing(uuid(8)));
-        gaps.finalize();
+        gaps.compact_occupied_prefix();
+        let sorted = gaps.allocate_sorted_prefix().unwrap();
+        gaps.install_sorted(sorted);
         assert!(!gaps.may_contain_in_range(&uuid(4), &uuid(5)));
 
         let mut left = CompactUuidSet::allocate(16).unwrap();
@@ -423,8 +529,11 @@ mod tests {
         for value in [2, 4] {
             right.insert_without_growing(uuid(value));
         }
-        left.finalize();
-        right.finalize();
+        for set in [&mut left, &mut right] {
+            set.compact_occupied_prefix();
+            let sorted = set.allocate_sorted_prefix().unwrap();
+            set.install_sorted(sorted);
+        }
         let nominations: [&dyn UuidMembership; 2] = [&left, &right];
         let filter = UuidFilter {
             nominations: &nominations,

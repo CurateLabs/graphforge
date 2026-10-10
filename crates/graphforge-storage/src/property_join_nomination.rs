@@ -142,14 +142,14 @@ impl UuidBuildKeyNomination {
         Ok(())
     }
 
-    fn complete(&self) {
+    fn complete(&self) -> Result<(), DataFusionError> {
         let mut keys = std::mem::take(
             &mut *self
                 .collecting
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
-        let released = keys.finalize();
+        let released = keys.compact_occupied_prefix();
         if released > 0 {
             let reservation = self
                 .reservation
@@ -159,10 +159,95 @@ impl UuidBuildKeyNomination {
                 reservation.shrink(released);
             }
         }
+        if keys.is_empty() {
+            let released = keys.install_sorted(Vec::new());
+            if released > 0 {
+                if let Some(reservation) = self
+                    .reservation
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref()
+                {
+                    reservation.shrink(released);
+                }
+            }
+            self.completed.set(keys).map_err(|_| {
+                DataFusionError::Internal("UUID build nomination completed more than once".into())
+            })?;
+            self.set_terminal(NominationStatus::Complete);
+            return Ok(());
+        }
+        let table_bytes = keys.storage_bytes();
+        let Some(sorted_bytes) = keys.sorted_storage_bytes() else {
+            drop(keys);
+            if let Some(reservation) = self
+                .reservation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_mut()
+            {
+                reservation.shrink(table_bytes);
+            }
+            let error =
+                DataFusionError::ResourcesExhausted("UUID sorted allocation size overflow".into());
+            self.fail(error.to_string());
+            return Err(error);
+        };
+        let mut reservation_guard = self
+            .reservation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let reservation = reservation_guard.as_mut().ok_or_else(|| {
+            DataFusionError::Internal("UUID build nomination has no memory reservation".into())
+        })?;
+        if let Err(error) = reservation.try_grow(sorted_bytes) {
+            drop(reservation_guard);
+            drop(keys);
+            if let Some(reservation) = self
+                .reservation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_mut()
+            {
+                reservation.shrink(table_bytes);
+            }
+            self.fail(error.to_string());
+            return Err(DataFusionError::ResourcesExhausted(format!(
+                "cannot reserve compact UUID nomination: {error}"
+            )));
+        }
+        let sorted = match keys.allocate_sorted_prefix() {
+            Ok(sorted) => sorted,
+            Err(error) => {
+                reservation.shrink(sorted_bytes);
+                drop(reservation_guard);
+                drop(keys);
+                if let Some(reservation) = self
+                    .reservation
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_mut()
+                {
+                    reservation.shrink(table_bytes);
+                }
+                let error = DataFusionError::ResourcesExhausted(format!(
+                    "cannot allocate compact UUID nomination: {error}"
+                ));
+                self.fail(error.to_string());
+                return Err(error);
+            }
+        };
+        let released = keys.install_sorted(sorted);
+        reservation.shrink(released);
+        drop(reservation_guard);
         if self.completed.set(keys).is_ok() {
             self.set_terminal(NominationStatus::Complete);
+            Ok(())
         } else {
             self.fail("UUID build nomination completed more than once");
+            Err(DataFusionError::Internal(
+                "UUID build nomination completed more than once".into(),
+            ))
         }
     }
 
@@ -402,9 +487,14 @@ impl Stream for UuidBuildKeyTapStream {
                 }
             }
             Poll::Ready(None) => {
-                this.nomination.complete();
                 this.completed = true;
-                Poll::Ready(None)
+                match this.nomination.complete() {
+                    Ok(()) => Poll::Ready(None),
+                    Err(error) => {
+                        this.nomination.fail(error.to_string());
+                        Poll::Ready(Some(Err(error)))
+                    }
+                }
             }
         }
     }
@@ -433,6 +523,9 @@ mod compact_set_budget_tests {
     use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
     use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 
+    use crate::uuid_set::CompactUuidSet;
+
+    use super::NOMINATION_BASE_BYTES;
     use super::UuidBuildKeyNomination;
 
     fn context(pool: Arc<dyn MemoryPool>) -> TaskContext {
@@ -464,10 +557,37 @@ mod compact_set_budget_tests {
             .reservation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert_eq!(reservation.as_ref().unwrap().size(), 512 + 16 * 16 + 8);
-        assert_eq!(pool.reserved(), 512 + 16 * 16 + 8);
+        let expected = 512 + CompactUuidSet::storage_bytes_for_capacity(16).unwrap();
+        assert_eq!(reservation.as_ref().unwrap().size(), expected);
+        assert_eq!(pool.reserved(), expected);
         drop(reservation);
         drop(nomination);
+        assert_eq!(pool.reserved(), 0);
+    }
+
+    #[test]
+    fn denied_sorted_compaction_keeps_base_credit_until_the_set_drops() {
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(807));
+        let nomination = UuidBuildKeyNomination::new();
+        nomination.start(&context(Arc::clone(&pool))).unwrap();
+        let mut builder = FixedSizeBinaryBuilder::new(16);
+        builder.append_value(1_u128.to_be_bytes()).unwrap();
+        nomination.observe(&builder.finish()).unwrap();
+
+        let held = MemoryConsumer::new("held memory").register(&pool);
+        held.try_grow(7).unwrap();
+        assert!(nomination.complete().is_err());
+        assert!(nomination.ids().is_none());
+        assert_eq!(pool.reserved(), NOMINATION_BASE_BYTES + 7);
+        let reservation = nomination
+            .reservation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(reservation.as_ref().unwrap().size(), NOMINATION_BASE_BYTES);
+        drop(reservation);
+        drop(nomination);
+        assert_eq!(pool.reserved(), 7);
+        drop(held);
         assert_eq!(pool.reserved(), 0);
     }
 
@@ -497,7 +617,7 @@ mod compact_set_budget_tests {
             .unwrap();
         duplicates.append_null();
         nomination.observe(&duplicates.finish()).unwrap();
-        nomination.complete();
+        nomination.complete().unwrap();
 
         {
             let ids = nomination.ids().expect("complete set is published");
@@ -510,5 +630,70 @@ mod compact_set_budget_tests {
         assert_eq!(pool.reserved(), 32 * MIB);
         drop(held_join_input);
         assert_eq!(pool.reserved(), 0);
+    }
+
+    fn observe_distinct(nomination: &UuidBuildKeyNomination, ids: usize) {
+        for start in (0..ids).step_by(32_768) {
+            let end = (start + 32_768).min(ids);
+            let mut builder = FixedSizeBinaryBuilder::new(16);
+            for value in start..end {
+                builder.append_value((value as u128).to_be_bytes()).unwrap();
+            }
+            nomination.observe(&builder.finish()).unwrap();
+        }
+    }
+
+    #[test]
+    fn compact_completion_frees_unused_chunks_before_sort_allocation_under_join_pressure() {
+        const MIB: usize = 1024 * 1024;
+        const IDS: usize = 2_097_153;
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(512 * MIB));
+        let context = context(Arc::clone(&pool));
+        let left_join_input = MemoryConsumer::new("left hash join input").register(&pool);
+        left_join_input.try_grow(134 * MIB + MIB / 2).unwrap();
+
+        let first = UuidBuildKeyNomination::new();
+        let second = UuidBuildKeyNomination::new();
+        first.start(&context).unwrap();
+        observe_distinct(&first, IDS);
+        first.complete().unwrap();
+
+        second.start(&context).unwrap();
+        observe_distinct(&second, IDS);
+        let right_join_input = MemoryConsumer::new("right hash join input").register(&pool);
+        right_join_input.try_grow(112 * MIB).unwrap();
+        assert!(pool.reserved() > 380 * MIB);
+        second.complete().unwrap();
+
+        for nomination in [&first, &second] {
+            let ids = nomination.ids().expect("completed set is published");
+            assert_eq!(ids.len(), IDS);
+            assert!(ids.contains(&0_u128.to_be_bytes()));
+            assert!(ids.contains(&((IDS - 1) as u128).to_be_bytes()));
+            let reservation = nomination
+                .reservation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(
+                reservation.as_ref().unwrap().size(),
+                NOMINATION_BASE_BYTES + ids.storage_bytes()
+            );
+        }
+        let sorter = MemoryConsumer::new("external sort").register(&pool);
+        sorter.try_grow(10 * MIB).unwrap();
+        drop(first);
+        drop(second);
+        assert_eq!(pool.reserved(), 134 * MIB + MIB / 2 + 112 * MIB + 10 * MIB);
+        drop(sorter);
+        drop(left_join_input);
+        drop(right_join_input);
+        assert_eq!(pool.reserved(), 0);
+    }
+
+    #[test]
+    fn empty_nomination_completes_without_a_memory_reservation() {
+        let nomination = UuidBuildKeyNomination::new();
+        nomination.complete().unwrap();
+        assert!(nomination.ids().unwrap().is_empty());
     }
 }
