@@ -17,7 +17,7 @@ python3 scripts/generate_third_party_notices.py
 
 ## License overview
 
-- Apache License 2.0 (323)
+- Apache License 2.0 (326)
 - MIT License (78)
 - Unicode License v3 (19)
 - BSD 3-Clause "New" or "Revised" License (10)
@@ -7064,6 +7064,9 @@ Used by:
 - objc2-core-foundation 0.3.2
 - objc2-io-kit 0.3.2
 - oneshot 0.1.13
+- parquet-variant 58.4.0
+- parquet-variant-compute 58.4.0
+- parquet-variant-json 58.4.0
 - paste 1.0.15
 - pin-project 1.1.13
 - pin-project-internal 1.1.13
@@ -7760,7 +7763,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 Used by:
 - alloc-no-stdlib 2.0.4
 - brotli 8.0.3
-- brotli-decompressor 5.0.1
+- brotli-decompressor 5.0.3
 
 ```
 Copyright (c) 2016 Dropbox, Inc.
