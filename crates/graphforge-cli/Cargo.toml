@@ -13,13 +13,13 @@ path = "src/main.rs"
 
 [dependencies]
 arrow = { workspace = true }
-graphforge-api = { version = "0.6.0-dev", path = "../graphforge-api", default-features = false, features = ["knowledge", "search", "provenance", "portable", "discovery", "research"] }
-graphforge-discovery = { version = "0.6.0-dev", path = "../graphforge-discovery" }
-graphforge-hub-publish = { version = "0.6.0-dev", path = "../graphforge-hub-publish" }
+graphforge-api = { version = "0.6.0-rc.1", path = "../graphforge-api", default-features = false, features = ["knowledge", "search", "provenance", "portable", "discovery", "research"] }
+graphforge-discovery = { version = "0.6.0-rc.1", path = "../graphforge-discovery" }
+graphforge-hub-publish = { version = "0.6.0-rc.1", path = "../graphforge-hub-publish" }
 clap = { workspace = true }
 ctrlc = "3.5"
 fs4 = "1.1"
-graphforge-filesystem = { version = "0.6.0-dev", path = "../graphforge-filesystem" }
+graphforge-filesystem = { version = "0.6.0-rc.1", path = "../graphforge-filesystem" }
 uuid = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -31,7 +31,7 @@ ureq = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
-graphforge-storage = { version = "0.6.0-dev", path = "../graphforge-storage", features = ["test-failpoints"] }
+graphforge-storage = { version = "0.6.0-rc.1", path = "../graphforge-storage", features = ["test-failpoints"] }
 parquet = { workspace = true }
 
 [lints]

@@ -20,10 +20,10 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-graphforge-ir = { version = "0.6.0-dev", path = "../crates/graphforge-ir" }
-graphforge-cypher = { version = "0.6.0-dev", path = "../crates/graphforge-cypher" }
-graphforge-ontology = { version = "0.6.0-dev", path = "../crates/graphforge-ontology" }
-graphforge-api = { version = "0.6.0-dev", path = "../crates/graphforge-api" }
+graphforge-ir = { version = "0.6.0-rc.1", path = "../crates/graphforge-ir" }
+graphforge-cypher = { version = "0.6.0-rc.1", path = "../crates/graphforge-cypher" }
+graphforge-ontology = { version = "0.6.0-rc.1", path = "../crates/graphforge-ontology" }
+graphforge-api = { version = "0.6.0-rc.1", path = "../crates/graphforge-api" }
 
 [[bin]]
 name = "fuzz_parse"

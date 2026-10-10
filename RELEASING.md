@@ -1,7 +1,7 @@
 # Releasing
 
 One workflow, `.github/workflows/publish.yaml`, builds, publishes, and checks a
-release. GraphForge ships one version across 20 crates (crates.io), the
+release. GraphForge ships one version across 21 crates (crates.io), the
 `graphforge` wheels and sdist (PyPI), and 8 npm packages (five native addons,
 `@curatelabs/graphforge`, `-cli`, `-agent-skills`).
 
@@ -104,5 +104,5 @@ The last job, `verify-published`, waits up to 15 minutes for PyPI and npm to
 serve the version, installs `graphforge` from PyPI and the npm packages
 `@curatelabs/graphforge` and `@curatelabs/graphforge-cli` from npm, and runs
 smoke tests. It does not install the crates or the agent-skills package. Also
-confirm by hand that the 20 crates show the version on crates.io and that the
+confirm by hand that the 21 crates show the version on crates.io and that the
 GitHub Release exists.
