@@ -108,8 +108,7 @@ WITH toFloat(totalMessageCountInt) AS totalMessageCount
 MATCH (message)
 WHERE (message:Post OR message:Comment) AND message.creationDate < $datetime
   AND message.content IS NOT NULL
-WITH totalMessageCount, message, message.creationDate AS creationDate
-WITH totalMessageCount, message, creationDate.year AS year
+WITH totalMessageCount, message, message.creationDate.year AS year
 WITH
   totalMessageCount,
   year,
@@ -147,11 +146,9 @@ ORDER BY
         ],
         upstream: "neo4j/queries/bi-1.cypher",
         rewrite: Some(
-            "rewrite: LDBC text hits #1888 D3 (`message.creationDate.year` fails to plan). The \
-             year is read from a WITH-bound alias of the same property, so every value is \
-             unchanged. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its \
-             WHERE, which selects the same nodes, because import sessions assign one label per \
-             node.",
+            "rewrite: LDBC text uses a `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` \
+             in its WHERE, which selects the same nodes because import sessions assign one \
+             label per node. The upstream stored creation-date component expression is preserved.",
         ),
     },
     BiQuery {
@@ -354,15 +351,14 @@ LIMIT 100",
         cypher: "\
 MATCH (tag:Tag {name: $tag})
 OPTIONAL MATCH (tag)<-[interest:HAS_INTEREST]-(person:Person)
-WITH tag, collect(person.id) AS interestedPersonIds
+WITH tag, collect(person) AS interestedPersons
 OPTIONAL MATCH (tag)<-[:HAS_TAG]-(message)-[:HAS_CREATOR]->(person:Person)
          WHERE (message:Post OR message:Comment)
            AND $startDate < message.creationDate
            AND message.creationDate < $endDate
-WITH tag, interestedPersonIds, interestedPersonIds + collect(person.id) AS personIds
-UNWIND personIds AS personId
-WITH DISTINCT tag, personId
-MATCH (person:Person {id: personId})
+WITH tag, interestedPersons, interestedPersons + collect(person) AS persons
+UNWIND persons AS person
+WITH DISTINCT tag, person
 WITH
   tag,
   person,
@@ -390,12 +386,9 @@ LIMIT 100",
         columns: &["personId", "score", "friendsScore"],
         upstream: "neo4j/queries/bi-8.cypher",
         rewrite: Some(
-            "rewrite: LDBC text hits #1888 D8 (a concatenated node list `a + collect(n)` loses \
-             the node type, so its elements are refused in a pattern). The interested persons and \
-             the message creators are concatenated as person ids and the distinct persons \
-             re-matched by id, which selects the same persons. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its \
-             WHERE, which selects the same nodes, because import sessions assign one label per \
-             node.",
+            "rewrite: LDBC text uses a `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` \
+             in its WHERE, which selects the same nodes because import sessions assign one \
+             label per node. Upstream collect/concatenate/UNWIND node values are preserved.",
         ),
     },
     BiQuery {
@@ -552,13 +545,8 @@ WITH
 WITH
   country,
   zombie,
-  zombie.creationDate AS zombieCreationDate,
-  messageCount
-WITH
-  country,
-  zombie,
-  12 * ($endDate.year  - zombieCreationDate.year )
-     + ($endDate.month - zombieCreationDate.month)
+  12 * ($endDate.year  - zombie.creationDate.year )
+     + ($endDate.month - zombie.creationDate.month)
      + 1 AS months,
   messageCount
 WHERE messageCount / months < 1
@@ -595,11 +583,9 @@ LIMIT 100",
         columns: &["zombieId", "zombieLikeCount", "totalLikeCount", "zombieScore"],
         upstream: "neo4j/queries/bi-13.cypher",
         rewrite: Some(
-            "rewrite: LDBC text hits #1888 D3 (`zombie.creationDate.year` fails to plan). The \
-             creation-date components are read from a WITH-bound alias of the same property. \
-             The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its \
-             WHERE, which selects the same nodes, because import sessions assign one label per \
-             node.",
+            "rewrite: LDBC text uses a `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` \
+             in its WHERE, which selects the same nodes because import sessions assign one \
+             label per node. The upstream stored creation-date component arithmetic is preserved.",
         ),
     },
     BiQuery {

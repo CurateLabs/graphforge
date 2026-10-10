@@ -5,14 +5,32 @@ use graphforge_ast::{
 use graphforge_core::Span;
 
 use super::TokenStream;
-use super::expr::parse_expr;
+use super::expr::parse_expr_inner as parse_expr;
 
 // ---------------------------------------------------------------------------
 // Public entry points
 // ---------------------------------------------------------------------------
 
-/// Parse a single path pattern (optionally named: `p = (...)`).
+/// Parse a path pattern, refusing unsupported constructs after parsing its grammar.
 pub fn parse_pattern(ts: &mut TokenStream) -> Result<PathPattern, ParseError> {
+    let pattern = parse_pattern_inner(ts)?;
+    ts.finish_supported(pattern)
+}
+
+/// Parse a pattern list, validating all its grammar before reporting unsupported forms.
+pub fn parse_pattern_list(ts: &mut TokenStream) -> Result<Vec<PathPattern>, ParseError> {
+    let patterns = parse_pattern_list_inner(ts)?;
+    ts.finish_supported(patterns)
+}
+
+/// Parse a node pattern, refusing unsupported expressions in its properties.
+pub fn parse_node_pattern(ts: &mut TokenStream) -> Result<NodePattern, ParseError> {
+    let node = parse_node_pattern_inner(ts)?;
+    ts.finish_supported(node)
+}
+
+/// Parse a single path pattern (optionally named: `p = (...)`).
+pub(super) fn parse_pattern_inner(ts: &mut TokenStream) -> Result<PathPattern, ParseError> {
     let start = ts.current_pos();
 
     // Named path: `p = (...)`
@@ -24,13 +42,27 @@ pub fn parse_pattern(ts: &mut TokenStream) -> Result<PathPattern, ParseError> {
         None
     };
 
-    let first = parse_node_pattern(ts)?;
+    if matches!(ts.peek(), Some(Tok::ShortestPath | Tok::AllShortestPaths)) {
+        ts.advance();
+        ts.eat(&Tok::LParen)?;
+        let mut pattern = parse_pattern_inner(ts)?;
+        ts.eat(&Tok::RParen)?;
+        ts.record_unsupported(
+            graphforge_core::UnsupportedCypherFeature::ShortestPath,
+            ts.span_from(start),
+        );
+        pattern.var = var;
+        pattern.span = ts.span_from(start);
+        return Ok(pattern);
+    }
+
+    let first = parse_node_pattern_inner(ts)?;
     let mut elements: Vec<PathElement> = vec![PathElement::Node(first)];
 
     while let Some(Tok::RelOpen | Tok::Minus | Tok::LeftArrow) = ts.peek() {
         let rel = parse_rel_pattern(ts)?;
         elements.push(PathElement::Rel(rel));
-        let node = parse_node_pattern(ts)?;
+        let node = parse_node_pattern_inner(ts)?;
         elements.push(PathElement::Node(node));
     }
 
@@ -42,16 +74,18 @@ pub fn parse_pattern(ts: &mut TokenStream) -> Result<PathPattern, ParseError> {
 }
 
 /// Parse a comma-separated list of path patterns.
-pub fn parse_pattern_list(ts: &mut TokenStream) -> Result<Vec<PathPattern>, ParseError> {
-    let mut patterns = vec![parse_pattern(ts)?];
+pub(super) fn parse_pattern_list_inner(
+    ts: &mut TokenStream,
+) -> Result<Vec<PathPattern>, ParseError> {
+    let mut patterns = vec![parse_pattern_inner(ts)?];
     while ts.eat_if(&Tok::Comma) {
-        patterns.push(parse_pattern(ts)?);
+        patterns.push(parse_pattern_inner(ts)?);
     }
     Ok(patterns)
 }
 
 /// Parse a node pattern: `( [var] [:Label]* [{props}] )`.
-pub fn parse_node_pattern(ts: &mut TokenStream) -> Result<NodePattern, ParseError> {
+pub(super) fn parse_node_pattern_inner(ts: &mut TokenStream) -> Result<NodePattern, ParseError> {
     let start = ts.current_pos();
     ts.eat(&Tok::LParen)?;
 
