@@ -64,7 +64,7 @@ fn write_dictionary_nodes(
             // pages, which would store every row's copy.
             .with_properties(
                 WriterProperties::builder()
-                    .set_dictionary_page_size_limit(64 << 20)
+                    .set_dictionary_page_size_limit(128 << 20)
                     .set_compression(compression)
                     .build(),
             )
@@ -290,18 +290,18 @@ fn the_resident_set_does_not_follow_the_payload() {
 fn inputs_that_would_decode_past_the_window_are_refused_while_small() {
     let directory =
         tempfile::tempdir_in(std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into())).unwrap();
-    // One 40 MiB value, stored once and compressed to kilobytes: its decoded
-    // buffers outgrow the 64 MiB window, so no row of it is admitted.
+    // One 65 MiB value, stored once and compressed to kilobytes: wider than
+    // the 64 MiB window, so no piece, even of one row, holds it.
     let (path, size) = input(
         directory.path(),
         "expansion.parquet",
         2,
         1,
-        40 << 20,
+        65 << 20,
         Compression::GZIP(Default::default()),
     );
     assert!(size < 4 * MIB, "{size} bytes stored");
-    let run = measure("dictionary_expansion_40_mib_value", &path, 2, size);
+    let run = measure("dictionary_expansion_65_mib_value", &path, 2, size);
     assert_eq!(run.outcome, "resource_limit", "{}", run.json);
     assert!(
         run.peak <= BUDGET / 5,

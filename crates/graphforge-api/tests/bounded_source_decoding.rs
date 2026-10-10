@@ -331,14 +331,18 @@ fn same_answers_on_every_route(
             .unwrap_or_else(|error| panic!("{budget:?}: {error}"));
         assert_eq!(run.scratch(), budget.is_some(), "{budget:?}");
         if budget.is_some() {
-            // The builder runs property partition buffers concurrently
-            // (#1960), so the live peak grows with their occupancy; admit that
-            // occupancy, and keep the fixed bound for everything beside it.
-            // Per-row containers would triple the peak without occupying
-            // scratch, and still fail the fixed bound.
+            // The scratch route decodes and forms property runs on concurrent
+            // workers (#1960); their live buffers are the source workspace and
+            // property-run budget the build reports. The heap may hold those
+            // reservations beside a fixed allowance for the builder's own
+            // tables, and no more: a container retained per row or per cell
+            // would exceed it.
             let report = run.bulk_build();
-            let limit =
-                scratch_heap.max(48 * MIB + report.scratch_peak_occupied_bytes.saturating_mul(2));
+            let limit = scratch_heap.max(
+                48 * MIB
+                    + report.source_workspace_peak_bytes
+                    + report.property_retained_budget_bytes,
+            );
             assert!(
                 run.peak < limit,
                 "{budget:?}: peak heap {} MiB, limit {} MiB",
@@ -375,9 +379,8 @@ fn dictionary_properties() -> WriterProperties {
         .build()
 }
 
-/// A value wider than any piece of the 64 MiB window can hold once its
-/// decoded buffers have grown: no row of it is admitted.
-const OVERSIZED_VALUE_BYTES: usize = 40 << 20;
+/// A value wider than the 64 MiB window: no piece, even of one row, holds it.
+const OVERSIZED_VALUE_BYTES: usize = 65 << 20;
 
 /// One `OVERSIZED_VALUE_BYTES` value in `rows` rows, stored once in a
 /// compressed dictionary page: a small file no piece can decode.
@@ -393,7 +396,7 @@ fn write_oversized_value(path: &Path, rows: usize) {
             )],
         )],
         WriterProperties::builder()
-            .set_dictionary_page_size_limit(64 << 20)
+            .set_dictionary_page_size_limit(128 << 20)
             .set_compression(Compression::ZSTD(ZstdLevel::default()))
             .build(),
     );
@@ -484,7 +487,7 @@ fn a_dictionary_that_expands_past_the_window_is_refused_before_it_is_decoded() {
             "{error}"
         );
         // Sizing the batch holds its stored dictionary page, admitted against
-        // the inventory budget; decoding the batch would have held 80 MiB and
+        // the inventory budget; decoding the batch would have held 130 MiB and
         // more, and refusing it adds nothing.
         assert!(
             run.peak < (rows * OVERSIZED_VALUE_BYTES) as u64,

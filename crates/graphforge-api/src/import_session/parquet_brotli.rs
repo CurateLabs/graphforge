@@ -150,9 +150,9 @@ type Decoder<R> = DecompressorCustomAlloc<
 /// its largest (256 trees of 1,080 codes for literals, commands and distances,
 /// beside the block-type, block-length and context-map tables), the context
 /// maps, and a ring buffer of the window Parquet writers default to (22 bits),
-/// or twice a shorter final metablock when the decoder shrinks to it, with the
-/// decoder's write-ahead slack. A stream that allocates more is refused by its
-/// own allocation, with a typed limit.
+/// or twice a longer final metablock up to the largest standard window (24
+/// bits), with the decoder's write-ahead slack. A stream that allocates more is
+/// refused by its own allocation, with a typed limit.
 pub(super) fn workspace_bytes(page_bytes: u64) -> u64 {
     const HUFFMAN_TABLE_CODES: u64 = 1_080;
     const MAX_TREES_PER_GROUP: u64 = 256;
@@ -160,6 +160,7 @@ pub(super) fn workspace_bytes(page_bytes: u64) -> u64 {
     const BLOCK_TABLES: u64 = 2 * 3 + 1;
     const CONTEXT_MAP_BYTES: u64 = 256 * 64 + 256 * 4 + 256;
     const DEFAULT_WINDOW_BYTES: u64 = 1 << 22;
+    const LARGEST_WINDOW_BYTES: u64 = 1 << 24;
     const RING_SLACK_BYTES: u64 = 42 + 24 + 16;
     let code = u64::try_from(std::mem::size_of::<HuffmanCode>()).unwrap_or(u64::MAX);
     let tables = HUFFMAN_TABLE_CODES
@@ -176,6 +177,7 @@ pub(super) fn workspace_bytes(page_bytes: u64) -> u64 {
         );
     let ring = DEFAULT_WINDOW_BYTES
         .max(page_bytes.saturating_add(16).saturating_mul(2))
+        .min(LARGEST_WINDOW_BYTES)
         .saturating_add(RING_SLACK_BYTES);
     u64::try_from(fixed_bytes() + INPUT_BYTES)
         .unwrap_or(u64::MAX)

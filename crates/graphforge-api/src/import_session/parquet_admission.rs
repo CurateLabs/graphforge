@@ -43,8 +43,10 @@ const OFFSET_BYTES: u64 = 4;
 /// How far a decoded byte-array column's buffers can outgrow its values. The
 /// native reader appends each value to a vector that grows by doubling, so a
 /// piece's value and offset buffers can hold up to twice their payload in
-/// capacity, and the builder charges a batch what its buffers hold. Fixed-width
-/// columns are read into buffers reserved for the piece's rows, exactly.
+/// capacity, and the builder charges a batch what its buffers hold. A buffer
+/// filled by one append is reserved exactly, so a one-row piece has no such
+/// growth. Fixed-width columns are read into buffers reserved for the piece's
+/// rows, exactly.
 const VARIABLE_BUFFER_GROWTH: u64 = 2;
 
 /// Everything known about how a source decodes, from its page headers and the
@@ -63,6 +65,9 @@ pub(super) struct SourceScan {
     /// Only this scalar is retained; row costs are scanned through one bounded
     /// logical-batch window at a time.
     max_row_value_bytes: u64,
+    /// The widest row's bytes in byte-array leaves alone: the share of a piece
+    /// whose buffers grow past their payload.
+    max_row_variable_bytes: u64,
     /// Exact max row contribution by logical batch. Used when an individual
     /// source row exceeds the window and pieces must be one row each.
     batch_max_row_value_bytes: Vec<u64>,
@@ -198,6 +203,7 @@ impl SourceScan {
             rows: start,
             value_bytes,
             max_row_value_bytes: 0,
+            max_row_variable_bytes: 0,
             batch_max_row_value_bytes,
             first_oversized_row,
             flat_leaf_count: 0,
@@ -219,22 +225,9 @@ impl SourceScan {
             scan.value_bytes.iter_mut().for_each(|bytes| *bytes = 0);
             scan.size_values(file, metadata, &mut budget, capacity, cancellation)?;
         }
-        scan.measure_max_row_cost(
-            file,
-            metadata,
-            &mut budget,
-            capacity,
-            window.saturating_add(window / 8),
-            cancellation,
-        )?;
-        scan.physical_batch_rows = choose_physical_rows(
-            scan.batch_rows,
-            scan.max_row_value_bytes,
-            scan.flat_leaf_count,
-            scan.offset_boundary_bytes,
-            scan.arrow_buffer_floor_bytes,
-            window,
-        );
+        scan.measure_max_row_cost(file, metadata, &mut budget, capacity, window, cancellation)?;
+        scan.physical_batch_rows =
+            choose_physical_rows(scan.batch_rows, window, |rows| scan.piece_bound(rows));
         // The budget charged actual capacities, including unused geometric
         // slots in groups/leaves. A sum of lengths would understate retained
         // inventory after a three-element vector grows to four slots.
@@ -388,9 +381,23 @@ impl SourceScan {
         let count = self
             .physical_batch_rows
             .min(self.rows.saturating_sub(first));
-        count
-            .saturating_mul(self.max_row_value_bytes)
-            .saturating_add(self.flat_leaf_count.saturating_mul(count.div_ceil(8)))
+        self.piece_bound(count)
+    }
+
+    /// Conservative bound on what a piece of `rows` rows occupies once decoded:
+    /// the widest row's bytes per row, the growth of byte-array buffers filled
+    /// by more than one append, a validity bit per flat leaf and row, and the
+    /// fixed offsets and buffer floors.
+    fn piece_bound(&self, rows: u64) -> u64 {
+        let growth = if rows > 1 {
+            rows.saturating_mul(self.max_row_variable_bytes)
+                .saturating_mul(VARIABLE_BUFFER_GROWTH - 1)
+        } else {
+            0
+        };
+        rows.saturating_mul(self.max_row_value_bytes)
+            .saturating_add(growth)
+            .saturating_add(self.flat_leaf_count.saturating_mul(rows.div_ceil(8)))
             .saturating_add(self.offset_boundary_bytes)
             .saturating_add(self.arrow_buffer_floor_bytes)
     }
@@ -599,9 +606,13 @@ impl SourceScan {
                     let rounded = count
                         .checked_next_power_of_two()
                         .ok_or_else(|| limit("Parquet row sizing window overflows"))?;
+                    // Two vectors: every leaf's bytes per row, and the byte-array
+                    // leaves' bytes per row.
                     let request = u64::try_from(rounded)
                         .map_err(storage)?
-                        .checked_mul(u64::try_from(std::mem::size_of::<u64>()).map_err(storage)?)
+                        .checked_mul(
+                            2 * u64::try_from(std::mem::size_of::<u64>()).map_err(storage)?,
+                        )
                         .ok_or_else(|| limit("Parquet row sizing window overflows"))?;
                     let available = budget.remaining().saturating_sub(sizing_floor);
                     if request <= available {
@@ -685,16 +696,17 @@ impl SourceScan {
                                 } else {
                                     bytes
                                 };
-                                let bytes = if leaf.leaf == Leaf::Variable {
-                                    bytes.checked_mul(VARIABLE_BUFFER_GROWTH).ok_or_else(|| {
-                                        storage("Parquet per-row output size overflows")
-                                    })?
-                                } else {
-                                    bytes
-                                };
                                 *slot = slot.checked_add(bytes).ok_or_else(|| {
                                     storage("Parquet per-row output size overflows")
                                 })?;
+                                if leaf.leaf == Leaf::Variable {
+                                    let slot = row_variable.get_mut(local).ok_or_else(|| {
+                                        storage("Parquet row cost maps outside its bounded window")
+                                    })?;
+                                    *slot = slot.checked_add(bytes).ok_or_else(|| {
+                                        storage("Parquet per-row output size overflows")
+                                    })?;
+                                }
                                 Ok(())
                             },
                         )?;
@@ -703,6 +715,9 @@ impl SourceScan {
                 self.max_row_value_bytes = self
                     .max_row_value_bytes
                     .max(row_costs.iter().copied().max().unwrap_or(0));
+                self.max_row_variable_bytes = self
+                    .max_row_variable_bytes
+                    .max(row_variable.iter().copied().max().unwrap_or(0));
                 let logical = usize::try_from(batch).map_err(storage)?;
                 let flat_bytes = self.flat_leaf_count;
                 let one_row_boundary = self.offset_boundary_bytes;
@@ -733,8 +748,10 @@ impl SourceScan {
                 }
                 let charged = u64::try_from(row_costs.capacity())
                     .unwrap_or(u64::MAX)
+                    .saturating_add(u64::try_from(row_variable.capacity()).unwrap_or(u64::MAX))
                     .saturating_mul(u64::try_from(std::mem::size_of::<u64>()).unwrap_or(u64::MAX));
                 drop(row_costs);
+                drop(row_variable);
                 budget.release(charged);
                 first = end;
             }
@@ -743,21 +760,10 @@ impl SourceScan {
     }
 }
 
-fn choose_physical_rows(
-    logical_rows: u64,
-    max_row: u64,
-    flat_leaves: u64,
-    offset_boundary_bytes: u64,
-    arrow_buffer_floor_bytes: u64,
-    window: u64,
-) -> u64 {
-    let fits = |rows: u64| {
-        rows.saturating_mul(max_row)
-            .saturating_add(flat_leaves.saturating_mul(rows.div_ceil(8)))
-            .saturating_add(offset_boundary_bytes)
-            .saturating_add(arrow_buffer_floor_bytes)
-            <= window
-    };
+/// The most rows per piece, dividing `logical_rows`, whose `bound` fits the
+/// window; one row when none does.
+fn choose_physical_rows(logical_rows: u64, window: u64, bound: impl Fn(u64) -> u64) -> u64 {
+    let fits = |rows: u64| bound(rows) <= window;
     let logical_rows = logical_rows.max(1);
     let mut low = 1_u64;
     let mut high = logical_rows;

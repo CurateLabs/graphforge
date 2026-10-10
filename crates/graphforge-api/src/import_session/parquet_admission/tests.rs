@@ -24,11 +24,14 @@ use crate::import_session::parquet_scan::{PageKind, encoding};
 
 #[test]
 fn physical_decoder_window_shrinks_to_fit_row_cost_and_keeps_one_row_minimum() {
-    assert_eq!(super::choose_physical_rows(64, 100, 1, 0, 0, 1_000), 8);
-    assert_eq!(super::choose_physical_rows(64, 100, 1, 4, 0, 200), 1);
-    assert_eq!(super::choose_physical_rows(64, 500, 1, 4, 0, 200), 1);
+    let bound = |max_row: u64, flat_leaves: u64, offsets: u64| {
+        move |rows: u64| rows * max_row + flat_leaves * rows.div_ceil(8) + offsets
+    };
+    assert_eq!(super::choose_physical_rows(64, 1_000, bound(100, 1, 0)), 8);
+    assert_eq!(super::choose_physical_rows(64, 200, bound(100, 1, 4)), 1);
+    assert_eq!(super::choose_physical_rows(64, 200, bound(500, 1, 4)), 1);
     assert_eq!(
-        super::choose_physical_rows(1_000_000_007, 1, 0, 0, 0, 1_000),
+        super::choose_physical_rows(1_000_000_007, 1_000, bound(1, 0, 0)),
         1
     );
 }

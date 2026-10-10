@@ -495,7 +495,7 @@ impl SourceReader<'_> {
         // The window is checked exactly, on the decoded batch, after it is
         // decoded; this limit refuses only what no accepted batch could be,
         // before the decode allocates it.
-        self.window_bytes.saturating_add(self.window_bytes / 8)
+        self.window_bytes
     }
 
     /// Size a Parquet task's batches and reserve what its decode will hold.
@@ -781,7 +781,9 @@ fn parquet_task_workspace(
     first_batch: u64,
     window_bytes: u64,
 ) -> Result<ParquetTaskWorkspace, TaskWorkspaceError> {
-    let admission_limit = window_bytes.saturating_add(window_bytes / 8);
+    // The builder charges a batch what its buffers hold against this window,
+    // so no admitted piece may be bounded above it.
+    let admission_limit = window_bytes;
     let logical_batches = rows.div_ceil(batch_rows);
     let logical_count = BATCHES_PER_TASK.min(logical_batches.saturating_sub(first_batch));
     let first_row = first_batch
@@ -1400,8 +1402,8 @@ pub(super) fn plan<'a>(
                     &metadata,
                     batch_rows as u64,
                     scan_budget,
-                    // A batch past the intake window plus an eighth is refused.
-                    window_bytes.saturating_add(window_bytes / 8),
+                    // Pieces fit the intake window; a row past it is refused.
+                    window_bytes,
                     cancellation,
                 )
                 .inspect_err(|error| {
