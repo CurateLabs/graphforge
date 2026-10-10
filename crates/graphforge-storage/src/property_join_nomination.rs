@@ -142,6 +142,24 @@ impl UuidBuildKeyNomination {
         Ok(())
     }
 
+    fn complete_empty(&self, mut keys: CompactUuidSet) -> Result<(), DataFusionError> {
+        let released = keys.install_sorted(Vec::new());
+        if released > 0
+            && let Some(reservation) = self
+                .reservation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+        {
+            reservation.shrink(released);
+        }
+        self.completed.set(keys).map_err(|_| {
+            DataFusionError::Internal("UUID build nomination completed more than once".into())
+        })?;
+        self.set_terminal(NominationStatus::Complete);
+        Ok(())
+    }
+
     fn complete(&self) -> Result<(), DataFusionError> {
         let mut keys = std::mem::take(
             &mut *self
@@ -160,22 +178,7 @@ impl UuidBuildKeyNomination {
             }
         }
         if keys.is_empty() {
-            let released = keys.install_sorted(Vec::new());
-            if released > 0 {
-                if let Some(reservation) = self
-                    .reservation
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .as_ref()
-                {
-                    reservation.shrink(released);
-                }
-            }
-            self.completed.set(keys).map_err(|_| {
-                DataFusionError::Internal("UUID build nomination completed more than once".into())
-            })?;
-            self.set_terminal(NominationStatus::Complete);
-            return Ok(());
+            return self.complete_empty(keys);
         }
         let table_bytes = keys.storage_bytes();
         let Some(sorted_bytes) = keys.sorted_storage_bytes() else {
