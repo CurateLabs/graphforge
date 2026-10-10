@@ -335,6 +335,7 @@ pub(super) fn schema_element(
     Ok(SchemaElementScalarFacts {
         name_len,
         physical_type: physical_type.then_some(physical_type_id).flatten(),
+        physical_leaf: is_leaf,
         repetition,
         children,
         crs_len: selected_crs_len,
@@ -347,6 +348,9 @@ pub(super) fn schema_element(
 pub(super) struct SchemaElementScalarFacts {
     pub(super) name_len: usize,
     pub(super) physical_type: Option<i32>,
+    /// Whether native schema conversion selects this element as a primitive
+    /// leaf. A raw physical field on the root or a group is ignored by native.
+    pub(super) physical_leaf: bool,
     pub(super) repetition: Option<i32>,
     pub(super) children: Option<usize>,
     pub(super) crs_len: Option<usize>,
@@ -809,8 +813,8 @@ fn row_group(
                         )?;
                         elements_left -= 1;
                         schema_index += 1;
-                        if let Some(physical_type) = element.physical_type {
-                            break physical_type;
+                        if element.physical_leaf {
+                            break element.physical_type.ok_or_else(malformed)?;
                         }
                     };
                     column_chunk(cursor, facts, budget, physical_type)?;

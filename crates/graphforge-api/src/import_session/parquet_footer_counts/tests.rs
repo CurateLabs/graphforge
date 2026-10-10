@@ -57,6 +57,83 @@ fn empty_footer() -> Vec<u8> {
     wire.0
 }
 
+fn footer_with_ignored_group_physical_types(annotated: bool) -> Vec<u8> {
+    let mut wire = Wire::default();
+    wire.byte(0x15); // FileMetaData.version
+    wire.signed(1);
+    wire.byte(0x19); // schema list
+    wire.byte(0x3c); // three SchemaElements
+    if annotated {
+        wire.byte(0x15); // ignored root physical type INT32
+        wire.signed(1);
+    }
+    wire.byte(if annotated { 0x38 } else { 0x48 }); // root name (field 4)
+    wire.text(b"schema");
+    wire.byte(0x15); // root has one child
+    wire.signed(1);
+    wire.byte(0); // root STOP
+    if annotated {
+        wire.byte(0x15); // ignored group physical type INT32
+        wire.signed(1);
+    }
+    wire.byte(if annotated { 0x25 } else { 0x35 }); // REQUIRED, field 3
+    wire.signed(0);
+    wire.byte(0x18);
+    wire.text(b"group");
+    wire.byte(0x15); // group has one child
+    wire.signed(1);
+    wire.byte(0);
+    wire.byte(0x15); // actual leaf is BYTE_ARRAY
+    wire.signed(6);
+    wire.byte(0x25);
+    wire.signed(0);
+    wire.byte(0x18);
+    wire.text(b"value");
+    wire.byte(0);
+    wire.byte(0x16); // num_rows
+    wire.signed(1);
+    wire.byte(0x19); // one row group
+    wire.byte(0x1c);
+    wire.byte(0x19); // one column chunk
+    wire.byte(0x1c);
+    wire.byte(0x26); // ColumnChunk.file_offset (field 2)
+    wire.signed(0);
+    wire.byte(0x1c); // ColumnChunk.meta_data (field 3)
+    wire.byte(0x15); // ColumnMetaData.type
+    wire.signed(6);
+    wire.byte(0x19); // encodings list
+    wire.byte(0);
+    wire.byte(0x19); // path list
+    wire.byte(0);
+    wire.byte(0x15); // codec
+    wire.signed(0);
+    wire.byte(0x16); // num_values
+    wire.signed(1);
+    wire.byte(0x16); // total_uncompressed_size
+    wire.signed(0);
+    wire.byte(0x16); // total_compressed_size
+    wire.signed(0);
+    wire.byte(0x26); // data_page_offset (field 9)
+    wire.signed(0);
+    wire.byte(0x3c); // statistics field 12, struct
+    wire.byte(0x58); // max_value binary (field 5)
+    wire.text(b"max");
+    wire.byte(0x18); // min_value binary
+    wire.text(b"min");
+    wire.byte(0);
+    wire.byte(0); // ColumnMetaData STOP
+    wire.byte(0);
+    wire.byte(0x16); // total_byte_size
+    wire.signed(0);
+    wire.byte(0x16); // num_rows
+    wire.signed(1);
+    wire.byte(0x26); // file_offset (field 5, i64)
+    wire.signed(0);
+    wire.byte(0); // RowGroup STOP
+    wire.byte(0); // FileMetaData STOP
+    wire.0
+}
+
 fn assert_resource_limit(error: GfError) {
     assert!(matches!(
         error,
@@ -89,6 +166,27 @@ fn ordinary_empty_native_footer_returns_zero_facts() {
     assert_eq!(facts.owned_payload_bytes, 0);
     assert_eq!(facts.owned_payloads, 0);
     assert!(facts.vector_bytes >= facts.schema_elements * 1);
+}
+
+#[test]
+fn ignored_root_and_group_physical_types_do_not_change_byte_array_statistics_cost() {
+    let annotated = preflight(
+        &footer_with_ignored_group_physical_types(true),
+        1 << 20,
+        None,
+    )
+    .unwrap();
+    let unannotated = preflight(
+        &footer_with_ignored_group_physical_types(false),
+        1 << 20,
+        None,
+    )
+    .unwrap();
+    assert_eq!(annotated.schema_leaves, 1);
+    assert_eq!(annotated.owned_payload_bytes, 16);
+    assert_eq!(annotated.owned_payloads, 2);
+    assert_eq!(annotated.bytes_control_bytes, 48);
+    assert_eq!(annotated, unannotated);
 }
 
 #[test]
