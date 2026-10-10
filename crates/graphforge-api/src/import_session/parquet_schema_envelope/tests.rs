@@ -41,6 +41,7 @@ struct Element {
     children: Option<i32>,
     physical: bool,
     repetition: Option<i32>,
+    geometry_crs: Option<Vec<u8>>,
 }
 
 fn root(children: Option<i32>) -> Element {
@@ -49,6 +50,7 @@ fn root(children: Option<i32>) -> Element {
         children,
         physical: false,
         repetition: Some(0),
+        geometry_crs: None,
     }
 }
 fn group(name: &[u8], children: i32) -> Element {
@@ -57,6 +59,7 @@ fn group(name: &[u8], children: i32) -> Element {
         children: Some(children),
         physical: false,
         repetition: Some(0),
+        geometry_crs: None,
     }
 }
 fn leaf(name: &[u8], repetition: i32) -> Element {
@@ -65,6 +68,7 @@ fn leaf(name: &[u8], repetition: i32) -> Element {
         children: Some(0),
         physical: true,
         repetition: Some(repetition),
+        geometry_crs: None,
     }
 }
 
@@ -89,6 +93,17 @@ fn element(wire: &mut Wire, value: &Element) {
         let delta = 5 - previous;
         wire.byte(((delta as u8) << 4) | 5);
         wire.signed(i64::from(children));
+        previous = 5;
+    }
+    if let Some(crs) = &value.geometry_crs {
+        let delta = 10 - previous;
+        wire.byte(((delta as u8) << 4) | 12); // SchemaElement.logicalType
+        wire.byte(0x0c); // LogicalType.geometry, explicit field id follows
+        wire.signed(17);
+        wire.byte(0x18); // GeometryType.crs
+        wire.text(crs);
+        wire.byte(0); // GeometryType stop
+        wire.byte(0); // LogicalType stop
     }
     wire.byte(0);
 }
@@ -227,6 +242,36 @@ fn a_physical_type_on_a_positive_child_group_is_ignored() {
     let facts = topology(&[root(Some(1)), physical_group, leaf(b"x", 0)]).unwrap();
     assert_eq!(facts.physical_leaves, 1);
     assert_eq!(facts.group_child_slots, 2);
+}
+
+#[test]
+fn geometry_crs_clones_are_charged_for_primitive_and_all_group_kinds() {
+    let crs = b"EPSG:4326";
+    let mut primitive = leaf(b"x", 0);
+    primitive.geometry_crs = Some(crs.to_vec());
+    let facts = topology(&[root(Some(1)), primitive]).unwrap();
+    assert_eq!(
+        facts.primitive_crs_clone_bytes,
+        u64::try_from(crs.len()).unwrap()
+    );
+    assert_eq!(facts.group_crs_clone_bytes, 0);
+
+    let mut empty_group = group(b"empty", 0);
+    empty_group.geometry_crs = Some(crs.to_vec());
+    let facts = topology(&[root(Some(1)), empty_group]).unwrap();
+    assert_eq!(
+        facts.group_crs_clone_bytes,
+        u64::try_from(crs.len()).unwrap()
+    );
+    assert_eq!(facts.physical_leaves, 0);
+
+    let mut nonempty_group = group(b"group", 1);
+    nonempty_group.geometry_crs = Some(crs.to_vec());
+    let facts = topology(&[root(Some(1)), nonempty_group, leaf(b"x", 0)]).unwrap();
+    assert_eq!(
+        facts.group_crs_clone_bytes,
+        u64::try_from(crs.len()).unwrap()
+    );
 }
 
 #[test]

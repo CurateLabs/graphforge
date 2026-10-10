@@ -260,6 +260,13 @@ pub(super) fn preflight(
                 definition,
                 repetition: repetition_level,
             });
+        } else if let Some(len) = element.crs_len {
+            // Native's zero-child, no-physical-type compatibility case is a
+            // real empty GroupType and clones its logical annotation once.
+            add(
+                &mut result.group_crs_clone_bytes,
+                u64::try_from(len).map_err(|_| overflow())?,
+            )?;
         }
     }
     while stack
