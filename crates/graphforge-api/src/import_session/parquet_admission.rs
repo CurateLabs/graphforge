@@ -40,16 +40,15 @@ fn needs_values(leaf: &LeafScan) -> bool {
 /// Arrow bytes a value of a leaf occupies besides its payload: an offset, and a
 /// validity bit per slot (added per record, rounded up).
 const OFFSET_BYTES: u64 = 4;
-/// How far a growing column's buffers can outgrow its values. The native
-/// reader appends byte-array values, and the children of nested values, to
-/// vectors that grow by doubling, so their capacity stays under twice what
-/// they were asked to hold: the values appended, plus whatever a byte-array
-/// page reader reserved ahead of them, which is at most the page's average
-/// per value read and at most the page. The builder charges a batch what its
-/// buffers hold, so a piece is bounded by this factor over its growing
-/// leaves' values and reservations; a value stored plain as a page of its own
-/// is admitted only up to a quarter of the window. Flat fixed-width columns
-/// are read into buffers reserved for the piece's rows, exactly.
+/// How far a growing column's buffers can outgrow its values while the
+/// native reader decodes a piece. The reader appends byte-array values, and
+/// the children of nested values, to vectors that grow by doubling, so their
+/// capacity stays under twice what they were asked to hold: the values
+/// appended, plus whatever a byte-array page reader reserved ahead of them,
+/// which is at most that page. A piece is made exact before the builder
+/// charges it (`piece_buffers`), so this growth is admitted only in the task's
+/// reservation. Flat fixed-width columns are read into buffers reserved for
+/// the piece's rows, exactly.
 const VARIABLE_BUFFER_GROWTH: u64 = 2;
 
 /// Everything known about how a source decodes, from its page headers and the
@@ -64,30 +63,25 @@ pub(super) struct SourceScan {
     rows: u64,
     /// Exact Arrow bytes per logical batch of the columns `needs_values`.
     value_bytes: Vec<u64>,
-    /// Largest exact per-row Arrow contribution across all visible leaves.
-    /// Only this scalar is retained; row costs are scanned through one bounded
-    /// logical-batch window at a time.
-    /// The widest row's bytes in flat fixed-width leaves, whose buffers are
-    /// reserved exactly.
-    max_row_fixed_bytes: u64,
-    /// For every growing leaf (byte arrays and nested values), the widest
-    /// row's bytes in that leaf, summed over the leaves: what a row of a
-    /// piece can ask those leaves' buffers to hold.
+    /// The widest row's decoded bytes, over every leaf: what a piece holds
+    /// per row once its buffers are exact.
+    max_row_value_bytes: u64,
+    /// The widest row's bytes in growing leaves (byte arrays and nested
+    /// values), over every row: what a row of a piece can ask those leaves'
+    /// growing buffers to hold.
     growing_row_bytes: u64,
-    /// Per visible leaf, the largest decoded data page of a byte-array leaf,
-    /// and zero for any other: the most its page reader reserves ahead of a
-    /// piece's values, however many rows the piece reads.
+    /// Per visible leaf, the largest decoded plain data page of a byte-array
+    /// leaf, and zero for any other: the most its page reader reserves ahead
+    /// of a piece's values, however many rows the piece reads. Dictionary and
+    /// delta pages append without reserving ahead.
     leaf_page_max: Vec<u64>,
-    /// Per logical batch, the widest row's bytes in flat fixed-width leaves.
-    batch_max_fixed_bytes: Vec<u64>,
-    /// Per logical batch, the growing leaves' widest rows, summed over the
-    /// leaves (and over the sizing windows that split a batch).
+    /// Per logical batch, the widest row's decoded bytes.
+    batch_max_row_value_bytes: Vec<u64>,
+    /// Per logical batch, the widest row's bytes in growing leaves.
     batch_growing_bytes: Vec<u64>,
     /// First global row in each logical batch whose one-row request exceeds
     /// the predecode admission threshold; `u64::MAX` means none.
     first_oversized_row: Vec<u64>,
-    /// Per visible leaf that grows, the widest row's bytes in that leaf.
-    leaf_row_max: Vec<u64>,
     flat_leaf_count: u64,
     offset_boundary_bytes: u64,
     /// Arrow's MutableBuffer allocation floor for the visible output arrays.
@@ -193,14 +187,14 @@ impl SourceScan {
             "the per-batch sizes",
         )?;
         value_bytes.resize(batches, 0);
-        let mut batch_max_fixed_bytes = Vec::new();
+        let mut batch_max_row_value_bytes = Vec::new();
         reserve(
-            &mut batch_max_fixed_bytes,
+            &mut batch_max_row_value_bytes,
             batches,
             &mut budget,
             "the per-batch maximum row sizes",
         )?;
-        batch_max_fixed_bytes.resize(batches, 0);
+        batch_max_row_value_bytes.resize(batches, 0);
         let mut batch_growing_bytes = Vec::new();
         reserve(
             &mut batch_growing_bytes,
@@ -217,14 +211,6 @@ impl SourceScan {
             "the per-batch oversized row markers",
         )?;
         first_oversized_row.resize(batches, u64::MAX);
-        let mut leaf_row_max = Vec::new();
-        reserve(
-            &mut leaf_row_max,
-            shape.leaves.len(),
-            &mut budget,
-            "the per-leaf maximum row sizes",
-        )?;
-        leaf_row_max.resize(shape.leaves.len(), 0);
         let mut leaf_page_max = Vec::new();
         reserve(
             &mut leaf_page_max,
@@ -238,7 +224,7 @@ impl SourceScan {
                     .iter()
                     .filter_map(|group| group.leaves.get(visible_index))
                     .filter(|leaf| leaf.leaf == Leaf::Variable)
-                    .map(|leaf| leaf.summary.data_page)
+                    .map(|leaf| leaf.summary.plain_page)
                     .max()
                     .unwrap_or(0),
             );
@@ -250,13 +236,12 @@ impl SourceScan {
             batch_rows: batch_rows.max(1),
             rows: start,
             value_bytes,
-            max_row_fixed_bytes: 0,
+            max_row_value_bytes: 0,
             growing_row_bytes: 0,
             leaf_page_max,
-            batch_max_fixed_bytes,
+            batch_max_row_value_bytes,
             batch_growing_bytes,
             first_oversized_row,
-            leaf_row_max,
             flat_leaf_count: 0,
             offset_boundary_bytes,
             arrow_buffer_floor_bytes,
@@ -278,7 +263,7 @@ impl SourceScan {
         }
         scan.measure_max_row_cost(file, metadata, &mut budget, capacity, window, cancellation)?;
         scan.physical_batch_rows =
-            choose_physical_rows(scan.batch_rows, window, |rows| scan.piece_bound(rows));
+            choose_physical_rows(scan.batch_rows, window, |rows| scan.piece_bytes(rows));
         // The budget charged actual capacities, including unused geometric
         // slots in groups/leaves. A sum of lengths would understate retained
         // inventory after a three-element vector grows to four slots.
@@ -345,9 +330,7 @@ impl SourceScan {
                     .any(|leaf| leaf.summary.delta_byte_array)
             });
         group_peak.saturating_add(if has_delta {
-            self.max_row_fixed_bytes
-                .saturating_add(self.growing_row_bytes)
-                .saturating_mul(2)
+            self.max_row_value_bytes.saturating_mul(2)
         } else {
             0
         })
@@ -415,66 +398,83 @@ impl SourceScan {
         self.sum_batch(batch, false)
     }
 
-    /// Conservative Arrow output bound for one physical decoder piece.
+    /// Conservative bound on the Arrow bytes one physical decoder piece holds
+    /// once its buffers are exact: what the builder is handed.
     pub(super) fn physical_batch_bytes(&self, batch: u64) -> u64 {
         if self.physical_batch_rows == 1 {
-            let row = batch;
-            let logical = usize::try_from(row / self.batch_rows).unwrap_or(usize::MAX);
-            // The batch's widest row, the growth of its growing leaves' buffers
-            // and their page reservations included.
-            let fixed = self
-                .batch_max_fixed_bytes
+            let logical = usize::try_from(batch / self.batch_rows).unwrap_or(usize::MAX);
+            let widest = self
+                .batch_max_row_value_bytes
                 .get(logical)
                 .copied()
-                .unwrap_or(self.max_row_fixed_bytes);
-            let growing = self
-                .batch_growing_bytes
-                .get(logical)
-                .copied()
-                .unwrap_or(self.growing_row_bytes);
-            return self.row_bound(fixed, growing, 1);
+                .unwrap_or(self.max_row_value_bytes);
+            return self.piece_bytes_of(widest, 1);
         }
         let first = batch.saturating_mul(self.physical_batch_rows);
         let count = self
             .physical_batch_rows
             .min(self.rows.saturating_sub(first));
-        self.piece_bound(count)
+        self.piece_bytes(count)
     }
 
-    /// Conservative bound on what a piece of `rows` rows occupies once decoded:
-    /// the widest row's flat fixed-width bytes per row, the growing leaves'
-    /// widest rows and their page readers' reservations under their growth, a
-    /// validity bit per flat leaf and row, and the fixed offsets and buffer
-    /// floors.
-    fn piece_bound(&self, rows: u64) -> u64 {
-        self.row_bound(
-            rows.saturating_mul(self.max_row_fixed_bytes),
-            rows.saturating_mul(self.growing_row_bytes),
-            rows,
+    /// Conservative bound on what the native reader's buffers hold while it
+    /// decodes one physical piece, before they are made exact: the piece's
+    /// bytes, the growth of its growing leaves' buffers, and the byte-array
+    /// page readers' reservations, under the growth factor.
+    pub(super) fn physical_batch_capacity_bytes(&self, batch: u64) -> u64 {
+        if self.physical_batch_rows == 1 {
+            let logical = usize::try_from(batch / self.batch_rows).unwrap_or(usize::MAX);
+            let growing = self
+                .batch_growing_bytes
+                .get(logical)
+                .copied()
+                .unwrap_or(self.growing_row_bytes);
+            return self.capacity_of(self.physical_batch_bytes(batch), growing);
+        }
+        let first = batch.saturating_mul(self.physical_batch_rows);
+        let count = self
+            .physical_batch_rows
+            .min(self.rows.saturating_sub(first));
+        self.capacity_of(
+            self.piece_bytes(count),
+            count.saturating_mul(self.growing_row_bytes),
         )
     }
 
-    /// What `rows` rows holding `fixed` flat fixed-width bytes and asking
-    /// their growing leaves' buffers for `growing` bytes occupy once decoded.
-    /// A byte-array page reader reserves ahead of the values it reads: at most
-    /// the page's average per value for each, which the leaf's widest row
-    /// bounds, and at most the page itself.
-    fn row_bound(&self, fixed: u64, growing: u64, rows: u64) -> u64 {
-        let reserved = self
-            .leaf_row_max
-            .iter()
-            .zip(&self.leaf_page_max)
-            .map(|(row_max, page_max)| rows.saturating_mul(*row_max).min(*page_max))
-            .fold(0_u64, u64::saturating_add);
-        fixed
-            .saturating_add(
-                growing
-                    .saturating_add(reserved)
-                    .saturating_mul(VARIABLE_BUFFER_GROWTH),
-            )
+    /// The widest capacity over a task's pieces.
+    pub(super) fn physical_batch_max_capacity_bytes(&self, first: u64, count: u64) -> u64 {
+        (first..first.saturating_add(count))
+            .map(|batch| self.physical_batch_capacity_bytes(batch))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Conservative bound on what a piece of `rows` rows occupies once decoded
+    /// and made exact: the widest row's bytes per row, a validity bit per flat
+    /// leaf and row, and the fixed offsets and buffer floors.
+    fn piece_bytes(&self, rows: u64) -> u64 {
+        self.piece_bytes_of(rows.saturating_mul(self.max_row_value_bytes), rows)
+    }
+
+    fn piece_bytes_of(&self, values: u64, rows: u64) -> u64 {
+        values
             .saturating_add(self.flat_leaf_count.saturating_mul(rows.div_ceil(8)))
             .saturating_add(self.offset_boundary_bytes)
             .saturating_add(self.arrow_buffer_floor_bytes)
+    }
+
+    /// What the reader's buffers can hold decoding a piece of `bytes` whose
+    /// growing leaves are asked for `growing` of them: those buffers grow to
+    /// under twice what they are asked for, the byte-array page readers'
+    /// reservations included, which are at most a page each.
+    fn capacity_of(&self, bytes: u64, growing: u64) -> u64 {
+        let reserved = self
+            .leaf_page_max
+            .iter()
+            .fold(0_u64, |sum, page| sum.saturating_add(*page));
+        bytes
+            .saturating_add(growing.saturating_mul(VARIABLE_BUFFER_GROWTH - 1))
+            .saturating_add(reserved.saturating_mul(VARIABLE_BUFFER_GROWTH))
     }
 
     /// The widest bound over a task's pieces. Pieces that straddle different
@@ -682,7 +682,7 @@ impl SourceScan {
                         .checked_next_power_of_two()
                         .ok_or_else(|| limit("Parquet row sizing window overflows"))?;
                     // Three vectors: a row's bytes in the leaf being sized, in
-                    // the flat fixed-width leaves, and in the growing leaves.
+                    // every leaf, and in the growing leaves.
                     let request = u64::try_from(rounded)
                         .map_err(storage)?
                         .checked_mul(
@@ -706,9 +706,9 @@ impl SourceScan {
                     .min(batch_end);
                 count = usize::try_from(end - first).map_err(storage)?;
                 let mut row_leaf = Vec::new();
-                let mut row_fixed = Vec::new();
+                let mut row_total = Vec::new();
                 let mut row_growing = Vec::new();
-                for vector in [&mut row_leaf, &mut row_fixed, &mut row_growing] {
+                for vector in [&mut row_leaf, &mut row_total, &mut row_growing] {
                     reserve(
                         vector,
                         count,
@@ -717,7 +717,6 @@ impl SourceScan {
                     )?;
                     vector.resize(count, 0_u64);
                 }
-                let mut window_growing = 0_u64;
                 for (visible_index, shape_leaf) in self.shape.leaves.iter().enumerate() {
                     let column = shape_leaf.column_index;
                     let descriptor = schema
@@ -743,6 +742,12 @@ impl SourceScan {
                             return Err(storage("Parquet row-group visible column order differs"));
                         }
                         growing |= leaf.leaf == Leaf::Variable;
+                        // A flat fixed-width leaf keeps a slot per row, null or
+                        // not: the reader allocates and pads it.
+                        let slot_floor = match leaf.leaf {
+                            Leaf::Fixed(width) if flat => width.saturating_add(1),
+                            _ => 0,
+                        };
                         super::parquet_sizing::size_column(
                             super::parquet_sizing::SizeColumnInput {
                                 file,
@@ -765,7 +770,7 @@ impl SourceScan {
                                     storage("Parquet row cost maps outside its bounded window")
                                 })?;
                                 let bytes = if flat {
-                                    bytes.checked_sub(1).ok_or_else(|| {
+                                    bytes.max(slot_floor).checked_sub(1).ok_or_else(|| {
                                         storage("flat row size omitted its validity bit")
                                     })?
                                 } else {
@@ -778,48 +783,36 @@ impl SourceScan {
                             },
                         )?;
                     }
-                    let into = if growing {
-                        &mut row_growing
-                    } else {
-                        &mut row_fixed
-                    };
-                    for (slot, bytes) in into.iter_mut().zip(&row_leaf) {
+                    for (slot, bytes) in row_total.iter_mut().zip(&row_leaf) {
                         *slot = slot
                             .checked_add(*bytes)
                             .ok_or_else(|| storage("Parquet per-row output size overflows"))?;
                     }
                     if growing {
-                        let widest = row_leaf.iter().copied().max().unwrap_or(0);
-                        window_growing = window_growing
-                            .checked_add(widest)
-                            .ok_or_else(|| storage("Parquet per-row output size overflows"))?;
-                        let leaf_max = self
-                            .leaf_row_max
-                            .get_mut(visible_index)
-                            .ok_or_else(|| storage("Parquet leaf maxima are short a leaf"))?;
-                        *leaf_max = (*leaf_max).max(widest);
+                        for (slot, bytes) in row_growing.iter_mut().zip(&row_leaf) {
+                            *slot = slot
+                                .checked_add(*bytes)
+                                .ok_or_else(|| storage("Parquet per-row output size overflows"))?;
+                        }
                     }
                 }
-                self.max_row_fixed_bytes = self
-                    .max_row_fixed_bytes
-                    .max(row_fixed.iter().copied().max().unwrap_or(0));
-                self.growing_row_bytes = self
-                    .leaf_row_max
-                    .iter()
-                    .fold(0_u64, |sum, max| sum.saturating_add(*max));
+                let widest_row = row_total.iter().copied().max().unwrap_or(0);
+                let widest_growing = row_growing.iter().copied().max().unwrap_or(0);
+                self.max_row_value_bytes = self.max_row_value_bytes.max(widest_row);
+                self.growing_row_bytes = self.growing_row_bytes.max(widest_growing);
                 let logical = usize::try_from(batch).map_err(storage)?;
-                let batch_fixed = self
-                    .batch_max_fixed_bytes
+                let batch_max = self
+                    .batch_max_row_value_bytes
                     .get_mut(logical)
                     .ok_or_else(|| storage("Parquet logical batch exceeds row maxima"))?;
-                *batch_fixed = (*batch_fixed).max(row_fixed.iter().copied().max().unwrap_or(0));
+                *batch_max = (*batch_max).max(widest_row);
                 let batch_growing = self
                     .batch_growing_bytes
                     .get_mut(logical)
                     .ok_or_else(|| storage("Parquet logical batch exceeds row maxima"))?;
-                *batch_growing = batch_growing.saturating_add(window_growing);
-                for row in 0..count {
-                    if self.row_bound(row_fixed[row], row_growing[row], 1) > single_row_limit {
+                *batch_growing = (*batch_growing).max(widest_growing);
+                for (row, &bytes) in row_total.iter().enumerate() {
+                    if self.piece_bytes_of(bytes, 1) > single_row_limit {
                         let global = first
                             .checked_add(u64::try_from(row).map_err(storage)?)
                             .ok_or_else(|| storage("Parquet oversized row index overflows"))?;
@@ -833,13 +826,13 @@ impl SourceScan {
                         break;
                     }
                 }
-                let charged = [&row_leaf, &row_fixed, &row_growing]
+                let charged = [&row_leaf, &row_total, &row_growing]
                     .iter()
                     .map(|vector| u64::try_from(vector.capacity()).unwrap_or(u64::MAX))
                     .fold(0_u64, u64::saturating_add)
                     .saturating_mul(u64::try_from(std::mem::size_of::<u64>()).unwrap_or(u64::MAX));
                 drop(row_leaf);
-                drop(row_fixed);
+                drop(row_total);
                 drop(row_growing);
                 budget.release(charged);
                 first = end;

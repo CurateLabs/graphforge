@@ -38,6 +38,7 @@ const DATA_PAGE_V2: i32 = 3;
 
 /// Parquet `Encoding` values this module distinguishes.
 pub(super) mod encoding {
+    pub(super) const PLAIN: i32 = 0;
     pub(in crate::import_session) const PLAIN_DICTIONARY: i32 = 2;
     pub(in crate::import_session) const DELTA_LENGTH_BYTE_ARRAY: i32 = 6;
     pub(in crate::import_session) const DELTA_BYTE_ARRAY: i32 = 7;
@@ -451,6 +452,9 @@ pub(super) fn leaf_of(descriptor: &ColumnDescriptor) -> Leaf {
 pub(super) struct ChunkSummary {
     /// The largest decompressed data page.
     pub(super) data_page: u64,
+    /// The largest decompressed data page stored plain: the most a byte-array
+    /// page reader reserves ahead of the values it reads from it.
+    pub(super) plain_page: u64,
     /// The largest compressed page, held beside its decompressed form while the
     /// decoder decompresses it.
     pub(super) compressed_page: u64,
@@ -484,6 +488,9 @@ impl ChunkSummary {
                 }
                 PageKind::Data => {
                     summary.data_page = summary.data_page.max(u64::from(page.uncompressed));
+                    if page.encoding == encoding::PLAIN {
+                        summary.plain_page = summary.plain_page.max(u64::from(page.uncompressed));
+                    }
                     summary.dictionary_encoded |= matches!(
                         page.encoding,
                         encoding::PLAIN_DICTIONARY | encoding::RLE_DICTIONARY

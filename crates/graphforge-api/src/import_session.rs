@@ -50,6 +50,7 @@ mod parquet_shape;
 mod parquet_sizing;
 mod parquet_values;
 mod parquet_windows;
+mod piece_buffers;
 
 /// Written by this version: a session may register Parquet sources that stay
 /// where they are (#1898).

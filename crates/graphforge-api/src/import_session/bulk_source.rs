@@ -236,7 +236,11 @@ impl SourceReader<'_> {
         let rows = batch.num_rows() as u64;
         let refused = (|| {
             let batch = match self.format {
-                Format::Parquet { .. } => canonicalize_parquet_batch(self.kind, &batch)?,
+                // The decoded piece's buffers may hold slack; the builder is
+                // handed exactly its values.
+                Format::Parquet { .. } => {
+                    canonicalize_parquet_batch(self.kind, &super::piece_buffers::exact(batch)?)?
+                }
                 Format::Arrow { .. } => batch,
             };
             let operation = import_batch_operation(self.operation_uuid, self.sequence, index);
@@ -820,7 +824,11 @@ fn parquet_task_workspace(
             )),
         });
     }
-    let widest = scan.physical_batch_max_bytes(first_physical, physical_count);
+    // The reservation holds the reader's buffers at their capacity and the
+    // exact copy the builder is handed, side by side.
+    let widest = scan
+        .physical_batch_max_capacity_bytes(first_physical, physical_count)
+        .saturating_add(scan.physical_batch_max_bytes(first_physical, physical_count));
     let (selected_group_count, validator_workspace) =
         super::parquet_sizing::runtime_scratch_capacity(
             metadata.metadata(),
