@@ -1578,6 +1578,7 @@ impl RowsReader<'_, '_> {
             return Err(storage(
                 "property scratch decoded frame exceeds its reservation",
             ));
+        }
         if let Some(expected) = expected {
             let max_row_bytes = PropertyRows::max_row_bytes(&batch)?;
             let observed = decoded_header_bytes(
