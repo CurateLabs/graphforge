@@ -608,6 +608,26 @@ not write. A scan that carries a `LIMIT` holds its rows until the whole route
 has validated, as before. The merge reads rows in UUID order, so results keep
 the order of the spooled merge.
 
+A completed join frontier can nominate destination UUIDs before a property
+scan opens its fragments. Key-only destination scans require proof that the
+frontier comes from the exact expansion source selected by a strict equality
+join; an unrelated equality or ambiguous source identity does not qualify.
+The join still decides matches, NULL preservation, and output multiplicity.
+When an embedded LEFT join projection hides the UUID, the rewrite retains it
+through repartitioning and removes it afterward. General rewrites reject
+unknown partition keys rather than turning optimizer metadata into an
+executable hash expression. Frontier memory remains subject to the query pool.
+
+The Rust facade regression `property_read_pushdown` compares fixed-fanout
+anchored queries while unrelated destination rows and fragments grow, at one,
+two, and four partitions. It warms authentication metadata, checks read-path
+byte growth and zero application write counters, and preserves result counts.
+Run it with `cargo nextest run --locked -p graphforge-api --test
+property_read_pushdown` in an isolated `CARGO_TARGET_DIR`. SF1 syscall evidence
+must distinguish query file-content writes from startup materialization and
+empty spill-directory creation; application counters alone do not cover all
+process filesystem activity. Measurement results belong on the producing issue.
+
 A node-property scan also accepts `column = literal` for `Int64`, `Utf8` and
 `Boolean` columns, offered by the plan as a hint (the filter stays in the
 plan). Row-group statistics select the fragments and row groups that can hold

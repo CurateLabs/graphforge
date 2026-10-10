@@ -37,7 +37,9 @@ mod property_filter_approval;
 mod property_join_nomination;
 #[cfg(test)]
 mod property_join_nomination_tests;
-pub use property_filter_approval::PropertyFilterApprovalRule;
+pub use property_filter_approval::{
+    PropertyFilterApprovalRule, SelectedEndpointPropertyFilterApprovalRule, is_filtered_uuid_seed,
+};
 pub mod storage_attribution;
 pub mod transient_composition;
 pub use private_storage_ownership::{

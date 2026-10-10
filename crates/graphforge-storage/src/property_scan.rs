@@ -257,10 +257,48 @@ impl PropertyOverlayExec {
             .flatten()
     }
 
+    /// A key-only destination scan is eligible only when the exec-owned
+    /// selected-endpoint callback proves that this exact frontier nominates
+    /// it. Ordinary nomination keeps the stricter payload and identity rules.
+    pub(crate) fn fresh_selected_endpoint_uuid_column(&self) -> Option<usize> {
+        if self.limit.is_some() || self.equality.is_some() || !self.uuid_nominations.is_empty() {
+            return None;
+        }
+        let key = if self.is_edge {
+            "edge_uuid"
+        } else {
+            "node_uuid"
+        };
+        let mut matching = self
+            .schema
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(_, field)| {
+                field.name() == key
+                    && field.data_type() == &arrow::datatypes::DataType::FixedSizeBinary(16)
+                    && !field.is_nullable()
+            })
+            .map(|(index, _)| index);
+        let index = matching.next()?;
+        matching.next().is_none().then_some(index)
+    }
+
     /// A strict equality scan can be an INNER join's build side. It must not
     /// wait on a nomination that was produced by that same join's old build.
     pub(crate) fn equality_build_uuid_column(&self) -> Option<usize> {
-        if self.limit.is_some() || self.equality.is_none() || !self.uuid_nominations.is_empty() {
+        if !self.uuid_nominations.is_empty() {
+            return None;
+        }
+        self.equality_uuid_column()
+    }
+
+    /// Return this strict equality scan's canonical UUID column even when an
+    /// earlier optimizer pass has already attached a nomination. This is only
+    /// used to verify an existing equality-seed join; it does not authorize a
+    /// new build nomination.
+    pub(crate) fn equality_uuid_column(&self) -> Option<usize> {
+        if self.limit.is_some() || self.equality.is_none() {
             return None;
         }
         let key = if self.is_edge {

@@ -225,6 +225,10 @@ impl UuidBuildKeyTapExec {
             nomination,
         }
     }
+
+    pub(crate) fn uuid_column(&self) -> usize {
+        self.uuid_column
+    }
 }
 
 impl DisplayAs for UuidBuildKeyTapExec {

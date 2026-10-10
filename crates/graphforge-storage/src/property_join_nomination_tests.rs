@@ -679,3 +679,86 @@ fn equality_anchor_rejects_unmatched_null_and_computed_residual_predicates() {
         assert!(Arc::ptr_eq(&original, &rewritten));
     }
 }
+
+#[test]
+fn selected_endpoint_seed_requires_its_uuid_and_node_id_from_the_same_graph_row() {
+    use datafusion::common::ScalarValue;
+    use datafusion::logical_expr::Operator;
+    use datafusion::physical_expr::expressions::{BinaryExpr, Literal};
+
+    let predicate: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+        Arc::new(Column::new("ident", 1)),
+        Operator::Eq,
+        Arc::new(Literal::new(ScalarValue::Int64(Some(7)))),
+    ));
+    let property = strict_property_filter_pipeline(predicate, false);
+    let graph_schema = Arc::clone(&crate::TOPOLOGY_NODES_SCHEMA);
+    let graph_uuid_index = graph_schema
+        .fields()
+        .iter()
+        .position(|field| field.name() == "node_uuid")
+        .unwrap();
+    let graph_node_id_index = graph_schema
+        .fields()
+        .iter()
+        .position(|field| field.name() == "node_id")
+        .unwrap();
+    let graph = crate::parquet_scan::GraphForgeParquetExec::try_new(
+        graph_schema,
+        Vec::new(),
+        None,
+        None,
+        1024,
+    )
+    .unwrap();
+    let graph: Arc<dyn ExecutionPlan> = Arc::new(graph);
+    let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("node_uuid", graph_uuid_index));
+    let accepted: Arc<dyn ExecutionPlan> = Arc::new(
+        HashJoinExec::try_new(
+            graph,
+            property,
+            vec![(key.clone(), key)],
+            None,
+            &JoinType::Inner,
+            Some(vec![graph_node_id_index]),
+            PartitionMode::CollectLeft,
+            NullEquality::NullEqualsNothing,
+            false,
+        )
+        .unwrap(),
+    );
+    assert!(crate::is_filtered_uuid_seed(accepted.as_ref(), 0));
+
+    // An arbitrary in-memory source with the same fields cannot impersonate
+    // the row-preserving topology Parquet pipeline.
+    let graph_schema = Arc::new(Schema::new(vec![
+        Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+        Field::new("node_id", DataType::UInt64, false),
+    ]));
+    let graph = TestMemoryExec::try_new_exec(&[vec![]], graph_schema, None).unwrap();
+    let property = strict_property_filter_pipeline(
+        Arc::new(BinaryExpr::new(
+            Arc::new(Column::new("ident", 1)),
+            Operator::Eq,
+            Arc::new(Literal::new(ScalarValue::Int64(Some(7)))),
+        )),
+        false,
+    );
+    let graph_key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("node_uuid", 0));
+    let property_key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("node_uuid", 0));
+    let unrelated: Arc<dyn ExecutionPlan> = Arc::new(
+        HashJoinExec::try_new(
+            graph,
+            property,
+            vec![(graph_key, property_key)],
+            None,
+            &JoinType::Inner,
+            Some(vec![1]),
+            PartitionMode::CollectLeft,
+            NullEquality::NullEqualsNothing,
+            false,
+        )
+        .unwrap(),
+    );
+    assert!(!crate::is_filtered_uuid_seed(unrelated.as_ref(), 0));
+}

@@ -1,4 +1,5 @@
 use super::*;
+use crate::SelectedEndpointPropertyFilterApprovalRule;
 use datafusion::physical_expr::Partitioning;
 use datafusion::physical_optimizer::sanity_checker::SanityCheckPlan;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
@@ -42,6 +43,28 @@ fn enrichment_with_projection(
     )
 }
 
+fn key_only_property_scan() -> PropertyOverlayExec {
+    PropertyOverlayExec::try_new(
+        std::path::PathBuf::from("unused"),
+        None,
+        "_untyped".into(),
+        false,
+        Arc::new(Schema::new(vec![Field::new(
+            "node_uuid",
+            DataType::FixedSizeBinary(16),
+            false,
+        )])),
+        PropertyScanOptions {
+            projection: None,
+            limit: None,
+            batch_size: 16,
+            footer_statistics: false,
+            equality: None,
+        },
+    )
+    .unwrap()
+}
+
 #[test]
 fn partitioned_left_enrichment_keeps_projected_away_hash_keys_as_metadata() {
     for partitions in [1, 2, 4] {
@@ -69,6 +92,115 @@ fn partitioned_left_enrichment_keeps_projected_away_hash_keys_as_metadata() {
             .unwrap();
         assert!(Arc::ptr_eq(&original, &optimized));
     }
+}
+
+#[test]
+fn selected_endpoint_lifts_only_its_hidden_uuid_for_repartitioning() {
+    let config = ConfigOptions::default();
+    for partitions in [1, 2, 4] {
+        let original = enrichment_with_projection(property_scan(None, None), partitions, vec![2]);
+        let optimized = SelectedEndpointPropertyFilterApprovalRule::new(|_, index| index == 0)
+            .optimize(original.clone(), &config)
+            .unwrap();
+        assert!(!Arc::ptr_eq(&original, &optimized));
+        assert_eq!(optimized.schema().as_ref(), original.schema().as_ref());
+        let projection = optimized
+            .downcast_ref::<datafusion::physical_plan::projection::ProjectionExec>()
+            .unwrap();
+        let repartition = projection
+            .input()
+            .downcast_ref::<RepartitionExec>()
+            .unwrap();
+        let Partitioning::Hash(keys, count) = repartition.partitioning() else {
+            panic!("selected frontier must be repartitioned by the lifted UUID");
+        };
+        assert_eq!(*count, partitions);
+        assert_eq!(keys.len(), 1);
+        assert!(
+            keys[0]
+                .data_type(repartition.input().schema().as_ref())
+                .is_ok_and(|data_type| data_type == DataType::FixedSizeBinary(16))
+        );
+        SanityCheckPlan::new().optimize(optimized, &config).unwrap();
+    }
+
+    // An unrelated equality or a different selected ordinal cannot authorize
+    // the hidden-key rewrite.
+    let original = enrichment_with_projection(key_only_property_scan(), 2, vec![1]);
+    let unchanged = SelectedEndpointPropertyFilterApprovalRule::new(|_, index| index == 1)
+        .optimize(original.clone(), &config)
+        .unwrap();
+    assert!(Arc::ptr_eq(&original, &unchanged));
+}
+
+#[test]
+fn selected_key_only_scan_supports_existing_collect_left_and_right_shapes() {
+    let config = ConfigOptions::default();
+    let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("node_uuid", 0));
+
+    let frontier = input_with_values(&[Some([1; 16]), Some([2; 16])]);
+    let left_collect: Arc<dyn ExecutionPlan> = Arc::new(
+        HashJoinExec::try_new(
+            frontier.clone(),
+            Arc::new(key_only_property_scan()),
+            vec![(key.clone(), key.clone())],
+            None,
+            &JoinType::Left,
+            Some(vec![1]),
+            PartitionMode::CollectLeft,
+            NullEquality::NullEqualsNothing,
+            false,
+        )
+        .unwrap(),
+    );
+    let left_result = SelectedEndpointPropertyFilterApprovalRule::new(|_, index| index == 0)
+        .optimize(left_collect.clone(), &config)
+        .unwrap();
+    let left_join = left_result.downcast_ref::<HashJoinExec>().unwrap();
+    assert_eq!(*left_join.partition_mode(), PartitionMode::CollectLeft);
+    assert!(
+        left_join
+            .left()
+            .downcast_ref::<UuidBuildKeyTapExec>()
+            .is_some()
+    );
+    assert!(
+        left_join
+            .right()
+            .downcast_ref::<PropertyOverlayExec>()
+            .is_some()
+    );
+    assert_eq!(left_join.schema().as_ref(), left_collect.schema().as_ref());
+
+    let right_frontier: Arc<dyn ExecutionPlan> =
+        Arc::new(RepartitionExec::try_new(frontier, Partitioning::RoundRobinBatch(2)).unwrap());
+    let right_plan: Arc<dyn ExecutionPlan> = Arc::new(
+        HashJoinExec::try_new(
+            Arc::new(key_only_property_scan()),
+            right_frontier,
+            vec![(key.clone(), key)],
+            None,
+            &JoinType::Right,
+            Some(vec![1]),
+            PartitionMode::CollectLeft,
+            NullEquality::NullEqualsNothing,
+            false,
+        )
+        .unwrap(),
+    );
+    let right_result = SelectedEndpointPropertyFilterApprovalRule::new(|_, index| index == 0)
+        .optimize(right_plan.clone(), &config)
+        .unwrap();
+    let restored = right_result.downcast_ref::<RepartitionExec>().unwrap();
+    assert_eq!(restored.schema().as_ref(), right_plan.schema().as_ref());
+    let swapped = restored.input().downcast_ref::<HashJoinExec>().unwrap();
+    assert_eq!(*swapped.join_type(), JoinType::Left);
+    assert!(
+        swapped
+            .left()
+            .downcast_ref::<UuidBuildKeyTapExec>()
+            .is_some()
+    );
 }
 
 #[test]

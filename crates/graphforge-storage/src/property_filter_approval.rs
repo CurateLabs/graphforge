@@ -34,6 +34,111 @@ use crate::property_scan::PropertyOverlayExec;
 #[derive(Debug, Default)]
 pub struct PropertyFilterApprovalRule;
 
+/// Opt-in authority for a selected expansion endpoint whose UUID is hidden by
+/// a join projection. The callback is supplied by the execution crate, which
+/// owns the expansion node and can prove the exact output-column lineage.
+type SelectedEndpointPredicate = dyn Fn(&dyn ExecutionPlan, usize) -> bool + Send + Sync;
+
+/// Optimizer rule that nominates only a proven selected expansion endpoint.
+#[derive(Clone)]
+pub struct SelectedEndpointPropertyFilterApprovalRule {
+    selected_endpoint: Arc<SelectedEndpointPredicate>,
+}
+
+/// Check whether a physical node is the strict INNER UUID equality join used
+/// to choose an expansion seed.
+pub fn is_filtered_uuid_seed(plan: &dyn ExecutionPlan, source_node_id_index: usize) -> bool {
+    equality_anchor::is_filtered_uuid_seed(plan, source_node_id_index)
+}
+
+impl std::fmt::Debug for SelectedEndpointPropertyFilterApprovalRule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SelectedEndpointPropertyFilterApprovalRule")
+            .finish()
+    }
+}
+
+impl SelectedEndpointPropertyFilterApprovalRule {
+    /// Create a selected-endpoint rule with exec-owned column-lineage proof.
+    #[must_use]
+    pub fn new(
+        selected_endpoint: impl Fn(&dyn ExecutionPlan, usize) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            selected_endpoint: Arc::new(selected_endpoint),
+        }
+    }
+}
+
+impl PhysicalOptimizerRule for SelectedEndpointPropertyFilterApprovalRule {
+    fn optimize(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        _config: &ConfigOptions,
+    ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        plan.transform_up(|node| {
+            let Some(join) = node.downcast_ref::<HashJoinExec>() else {
+                return Ok(Transformed::no(node));
+            };
+            if *join.join_type() == JoinType::Right
+                && *join.partition_mode() == PartitionMode::CollectLeft
+            {
+                let Some((_, frontier_key)) = join.on().first() else {
+                    return Ok(Transformed::no(node));
+                };
+                let Some(frontier_key) = frontier_key.downcast_ref::<Column>() else {
+                    return Ok(Transformed::no(node));
+                };
+                let selected =
+                    (self.selected_endpoint)(join.right().as_ref(), frontier_key.index());
+                if !selected {
+                    return Ok(Transformed::no(node));
+                }
+                let Some(rebuilt) = nominate_collect_left_right_selected(join)? else {
+                    return Ok(Transformed::no(node));
+                };
+                return Ok(Transformed::yes(rebuilt));
+            }
+            if *join.join_type() != JoinType::Left || join.on().len() != 1 {
+                return Ok(Transformed::no(node));
+            }
+            let Some((left_key, _)) = join.on().first() else {
+                return Ok(Transformed::no(node));
+            };
+            let Some(left_key) = left_key.downcast_ref::<Column>() else {
+                return Ok(Transformed::no(node));
+            };
+            let selected = (self.selected_endpoint)(join.left().as_ref(), left_key.index());
+            if !selected {
+                return Ok(Transformed::no(node));
+            }
+            let rebuilt = match *join.partition_mode() {
+                PartitionMode::Partitioned => left_enrichment::nominate_partitioned_left_selected(
+                    join,
+                    Some(left_key.index()),
+                )?,
+                PartitionMode::CollectLeft => {
+                    nominate_existing_collect_left_selected(join, Some(left_key.index()))?
+                }
+                PartitionMode::Auto => None,
+            };
+            let Some(rebuilt) = rebuilt else {
+                return Ok(Transformed::no(node));
+            };
+            Ok(Transformed::yes(rebuilt))
+        })
+        .map(|transformed| transformed.data)
+    }
+
+    fn name(&self) -> &'static str {
+        "graphforge_selected_endpoint_property_filter_approval"
+    }
+
+    fn schema_check(&self) -> bool {
+        true
+    }
+}
+
 impl PhysicalOptimizerRule for PropertyFilterApprovalRule {
     fn optimize(
         &self,
@@ -172,31 +277,34 @@ fn has_unknown_hash_key(partitioning: &Partitioning, plan: &dyn ExecutionPlan) -
 fn nominate_collect_left_right(
     join: &HashJoinExec,
 ) -> Result<Option<Arc<dyn ExecutionPlan>>, DataFusionError> {
-    let join_plan: &dyn ExecutionPlan = join;
-    if *join.partition_mode() != PartitionMode::CollectLeft
-        || !join.contains_projection()
-        || join.fetch().is_some()
-        || join_plan.output_ordering().is_some()
-        || join.left().boundedness().is_unbounded()
-        || join.right().boundedness().is_unbounded()
-        || join_plan
-            .equivalence_properties()
-            .constants()
-            .iter()
-            .any(|constant| constant.across_partitions == AcrossPartitions::Heterogeneous)
-    {
+    nominate_collect_left_right_inner(join, false)
+}
+
+fn nominate_collect_left_right_selected(
+    join: &HashJoinExec,
+) -> Result<Option<Arc<dyn ExecutionPlan>>, DataFusionError> {
+    nominate_collect_left_right_inner(join, true)
+}
+
+fn nominate_collect_left_right_inner(
+    join: &HashJoinExec,
+    selected_endpoint: bool,
+) -> Result<Option<Arc<dyn ExecutionPlan>>, DataFusionError> {
+    if !collect_left_right_is_eligible(join) {
         return Ok(None);
     }
 
+    let join_plan: &dyn ExecutionPlan = join;
     let output_partitioning = join_plan.output_partitioning().clone();
-    if !matches!(&output_partitioning, Partitioning::RoundRobinBatch(partitions) if *partitions > 0)
-    {
-        return Ok(None);
-    }
     let Some(scan) = join.left().downcast_ref::<PropertyOverlayExec>() else {
         return Ok(None);
     };
-    let Some(uuid_index) = scan.nomination_uuid_column() else {
+    let uuid_index = if selected_endpoint {
+        scan.fresh_selected_endpoint_uuid_column()
+    } else {
+        scan.nomination_uuid_column()
+    };
+    let Some(uuid_index) = uuid_index else {
         return Ok(None);
     };
     let scan_schema = scan.schema();
@@ -277,6 +385,22 @@ fn nominate_collect_left_right(
     Ok(Some(restored))
 }
 
+fn collect_left_right_is_eligible(join: &HashJoinExec) -> bool {
+    let join_plan: &dyn ExecutionPlan = join;
+    *join.partition_mode() == PartitionMode::CollectLeft
+        && join.contains_projection()
+        && join.fetch().is_none()
+        && join_plan.output_ordering().is_none()
+        && !join.left().boundedness().is_unbounded()
+        && !join.right().boundedness().is_unbounded()
+        && !join_plan
+            .equivalence_properties()
+            .constants()
+            .iter()
+            .any(|constant| constant.across_partitions == AcrossPartitions::Heterogeneous)
+        && matches!(join_plan.output_partitioning(), Partitioning::RoundRobinBatch(partitions) if *partitions > 0)
+}
+
 struct MatchingCandidate {
     original_probe_key: Arc<dyn PhysicalExpr>,
 }
@@ -314,6 +438,20 @@ fn find_matching_candidate(
 fn nominate_existing_collect_left(
     join: &HashJoinExec,
 ) -> Result<Option<Arc<dyn ExecutionPlan>>, DataFusionError> {
+    nominate_existing_collect_left_inner(join, None)
+}
+
+fn nominate_existing_collect_left_selected(
+    join: &HashJoinExec,
+    selected_key: Option<usize>,
+) -> Result<Option<Arc<dyn ExecutionPlan>>, DataFusionError> {
+    nominate_existing_collect_left_inner(join, selected_key)
+}
+
+fn nominate_existing_collect_left_inner(
+    join: &HashJoinExec,
+    selected_key: Option<usize>,
+) -> Result<Option<Arc<dyn ExecutionPlan>>, DataFusionError> {
     if *join.partition_mode() != PartitionMode::CollectLeft
         || join.left().output_partitioning().partition_count() != 1
         || join.left().boundedness().is_unbounded()
@@ -325,7 +463,12 @@ fn nominate_existing_collect_left(
     let Some(scan) = join.right().downcast_ref::<PropertyOverlayExec>() else {
         return Ok(None);
     };
-    let Some(uuid_index) = scan.nomination_uuid_column() else {
+    let uuid_index = if selected_key.is_some() {
+        scan.fresh_selected_endpoint_uuid_column()
+    } else {
+        scan.nomination_uuid_column()
+    };
+    let Some(uuid_index) = uuid_index else {
         return Ok(None);
     };
     let scan_schema = scan.schema();
@@ -350,6 +493,9 @@ fn nominate_existing_collect_left(
     let Some(build_column) = matching_build_column else {
         return Ok(None);
     };
+    if selected_key.is_some_and(|selected| selected != build_column) {
+        return Ok(None);
+    }
 
     let nomination = UuidBuildKeyNomination::new();
     let tapped_left: Arc<dyn ExecutionPlan> = Arc::new(UuidBuildKeyTapExec::new(

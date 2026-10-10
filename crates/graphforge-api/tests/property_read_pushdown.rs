@@ -334,37 +334,35 @@ fn an_anchored_lookup_reads_what_the_match_costs_not_what_the_route_costs() {
     );
 }
 
-/// The destination's route is joined by key, which authenticates every
-/// fragment of it once per statement: the one-hop adds one pass over the
-/// route's key columns to the lookup, and no decode of its values.
+/// A selected one-hop destination frontier must not scan unrelated destination
+/// rows; doubling the destination route leaves the read path bounded.
 #[test]
-fn an_anchored_one_hop_adds_one_authentication_pass_of_the_destination_route() {
+fn an_anchored_one_hop_reads_only_its_selected_destination_frontier() {
     let _serial = serial();
-    let built = build(SMALL_NODES);
-    let route_bytes = {
-        let inventory = graphforge_storage::resolve_project_generation(&built.project)
-            .expect("project resolves")
-            .unadmitted_graph_files_inventory()
-            .expect("inventory reads")
-            .expect("a constructed generation declares an inventory");
-        inventory
-            .files
-            .iter()
-            .filter(|file| file.relative_path.starts_with("properties/"))
-            .map(|file| file.byte_length)
-            .sum::<u64>()
-    };
-    let forge = open(&built.project);
-    let (_, _) = measured(&forge, ANCHORED_HOP, 0);
-    let (_, lookup) = measured(&forge, ANCHORED_LOOKUP, 5);
-    let (hop, one_hop) = measured(&forge, ANCHORED_HOP, 5);
-    assert_eq!(count(&hop), FAN_OUT as i64);
-    assert!(
-        one_hop.read_bytes <= lookup.read_bytes + route_bytes + (1 << 20),
-        "one-hop read {} against lookup {} + route {route_bytes}",
-        one_hop.read_bytes,
-        lookup.read_bytes
-    );
+    let small = build(SMALL_NODES);
+    let large = build(LARGE_NODES);
+    assert!(large.fragments >= 2 * small.fragments - 1);
+    let mut reads_by_partitions = Vec::new();
+    for target_partitions in [1, 2, 4] {
+        let mut reads = Vec::new();
+        for built in [&small, &large] {
+            let forge = open_with_partitions(&built.project, target_partitions);
+            let (warm, _) = measured(&forge, ANCHORED_HOP, 0);
+            assert_eq!(count(&warm), FAN_OUT as i64);
+            let (hop, io) = measured(&forge, ANCHORED_HOP, 5);
+            assert_eq!(count(&hop), FAN_OUT as i64);
+            assert_eq!(io.write_bytes, 0, "{io:?}");
+            assert_eq!(io.write_calls, 0, "{io:?}");
+            reads.push(io.read_bytes);
+        }
+        reads_by_partitions.push((target_partitions, reads));
+    }
+    for (target_partitions, reads) in reads_by_partitions {
+        assert!(
+            reads[1] <= reads[0] + (256 << 10),
+            "target_partitions={target_partitions}: one-hop reads grew with unrelated nodes: {reads:?}"
+        );
+    }
 }
 
 /// An anchored expansion reads destination properties for the matching UUIDs.

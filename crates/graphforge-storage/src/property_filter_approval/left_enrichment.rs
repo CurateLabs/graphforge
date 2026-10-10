@@ -29,6 +29,13 @@ fn unordered_bounded(plan: &dyn ExecutionPlan) -> bool {
 pub(super) fn nominate_partitioned_left(
     join: &HashJoinExec,
 ) -> Result<Option<Arc<dyn ExecutionPlan>>, DataFusionError> {
+    nominate_partitioned_left_selected(join, None)
+}
+
+pub(super) fn nominate_partitioned_left_selected(
+    join: &HashJoinExec,
+    selected_key: Option<usize>,
+) -> Result<Option<Arc<dyn ExecutionPlan>>, DataFusionError> {
     let original: &dyn ExecutionPlan = join;
     if *join.join_type() != JoinType::Left
         || *join.partition_mode() != PartitionMode::Partitioned
@@ -44,12 +51,15 @@ pub(super) fn nominate_partitioned_left(
     if !matches!(&output, Partitioning::Hash(_, count) if *count > 0) {
         return Ok(None);
     }
-    if super::has_unknown_hash_key(&output, original) {
+    if selected_key.is_none() && super::has_unknown_hash_key(&output, original) {
         return Ok(None);
     }
-    let Some((scan, build_column)) = matching_scan(join) else {
+    let Some((scan, build_column)) = matching_scan(join, selected_key.is_some()) else {
         return Ok(None);
     };
+    if selected_key.is_some_and(|selected| selected != build_column) {
+        return Ok(None);
+    }
 
     // Keep the preserved side's operators. NULL keys are omitted
     // from the nomination, but their unmatched LEFT rows remain in the join.
@@ -63,27 +73,68 @@ pub(super) fn nominate_partitioned_left(
         Arc::clone(&nomination),
     ));
     let nominated: Arc<dyn ExecutionPlan> = Arc::new(scan.with_uuid_nomination(nomination));
+    let original_projection = join.projection.as_ref().map(|p| p.to_vec());
+    let mut lifted_projection = original_projection.clone().unwrap_or_else(|| {
+        (0..join.left().schema().fields().len() + join.right().schema().fields().len()).collect()
+    });
+    let hidden_output_index = lifted_projection.len();
+    lifted_projection.push(build_column);
+
     let rebuilt = join
         .builder()
+        .with_projection(Some(lifted_projection))
         .with_new_children(vec![tapped, nominated])?
         .with_partition_mode(PartitionMode::CollectLeft)
         .reset_state()
         .recompute_properties()
         .build_exec()?;
-    if rebuilt.schema().as_ref() != original.schema().as_ref() {
+    if original_projection.is_none() {
         return Ok(None);
     }
-    Ok(Some(Arc::new(RepartitionExec::try_new(rebuilt, output)?)))
+    if rebuilt.schema().fields().len() != original.schema().fields().len() + 1 {
+        return Ok(None);
+    }
+    let key_name = rebuilt.schema().field(hidden_output_index).name().clone();
+    let repartition = Arc::new(RepartitionExec::try_new(
+        rebuilt,
+        Partitioning::Hash(
+            vec![Arc::new(Column::new(&key_name, hidden_output_index))],
+            match output {
+                Partitioning::Hash(_, count) => count,
+                _ => unreachable!(),
+            },
+        ),
+    )?);
+    let projection: Vec<(Arc<dyn datafusion::physical_expr::PhysicalExpr>, String)> =
+        (0..original.schema().fields().len())
+            .map(|index| {
+                (
+                    Arc::new(Column::new(repartition.schema().field(index).name(), index))
+                        as Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+                    repartition.schema().field(index).name().clone(),
+                )
+            })
+            .collect();
+    Ok(Some(Arc::new(
+        datafusion::physical_plan::projection::ProjectionExec::try_new(projection, repartition)?,
+    )))
 }
 
 /// Bind only the exact direct scan behind its ordinary UUID hash exchange.
-fn matching_scan(join: &HashJoinExec) -> Option<(&PropertyOverlayExec, usize)> {
+fn matching_scan(
+    join: &HashJoinExec,
+    selected_endpoint: bool,
+) -> Option<(&PropertyOverlayExec, usize)> {
     let exchange = join.right().downcast_ref::<RepartitionExec>()?;
     if exchange.preserve_order() || !unordered_bounded(exchange) {
         return None;
     }
     let scan = exchange.input().downcast_ref::<PropertyOverlayExec>()?;
-    let uuid_index = scan.fresh_nomination_uuid_column()?;
+    let uuid_index = if selected_endpoint {
+        scan.fresh_selected_endpoint_uuid_column()?
+    } else {
+        scan.fresh_nomination_uuid_column()?
+    };
     if !unordered_bounded(scan) || exchange.schema().as_ref() != scan.schema().as_ref() {
         return None;
     }
