@@ -143,6 +143,61 @@ fn empty_uuid_build() -> Arc<dyn ExecutionPlan> {
     TestMemoryExec::try_new_exec(&[Vec::new()], schema, None).unwrap()
 }
 
+fn equality_seed_uuid_frontier() -> Arc<dyn ExecutionPlan> {
+    use datafusion::common::ScalarValue;
+    use datafusion::logical_expr::Operator;
+    use datafusion::physical_expr::expressions::{BinaryExpr, Literal};
+    use datafusion::physical_plan::filter::FilterExec;
+
+    let graph_schema = Arc::clone(&crate::TOPOLOGY_NODES_SCHEMA);
+    let uuid_index = graph_schema
+        .fields()
+        .iter()
+        .position(|field| field.name() == "node_uuid")
+        .unwrap();
+    let node_id_index = graph_schema
+        .fields()
+        .iter()
+        .position(|field| field.name() == "node_id")
+        .unwrap();
+    let graph: Arc<dyn ExecutionPlan> = Arc::new(
+        crate::parquet_scan::GraphForgeParquetExec::try_new(
+            graph_schema,
+            Vec::new(),
+            None,
+            None,
+            1024,
+        )
+        .unwrap(),
+    );
+    let equality = PropertyEquality {
+        column: "ident".into(),
+        value: EqualityValue::Int(7),
+    };
+    let property: Arc<dyn ExecutionPlan> = Arc::new(property_scan(None, Some(equality)));
+    let filter = Arc::new(BinaryExpr::new(
+        Arc::new(Column::new("ident", 1)),
+        Operator::Eq,
+        Arc::new(Literal::new(ScalarValue::Int64(Some(7)))),
+    ));
+    let property = Arc::new(FilterExec::try_new(filter, property).unwrap());
+    let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("node_uuid", uuid_index));
+    Arc::new(
+        HashJoinExec::try_new(
+            graph,
+            property,
+            vec![(key.clone(), Arc::new(Column::new("node_uuid", 0)))],
+            None,
+            &JoinType::Inner,
+            Some(vec![uuid_index, node_id_index]),
+            PartitionMode::CollectLeft,
+            NullEquality::NullEqualsNothing,
+            false,
+        )
+        .unwrap(),
+    )
+}
+
 fn property_scan(limit: Option<usize>, equality: Option<PropertyEquality>) -> PropertyOverlayExec {
     let schema = Arc::new(Schema::new(vec![
         Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
@@ -171,7 +226,7 @@ fn join_with_scan(join_type: JoinType, mode: PartitionMode) -> Arc<dyn Execution
     let right: Arc<dyn ExecutionPlan> = Arc::new(property_scan(None, None));
     Arc::new(
         HashJoinExec::try_new(
-            empty_uuid_build(),
+            equality_seed_uuid_frontier(),
             right,
             vec![(left_key, right_key)],
             None,
@@ -211,7 +266,7 @@ fn left_join_with_wrong_uuid_index() -> Arc<dyn ExecutionPlan> {
     );
     Arc::new(
         HashJoinExec::try_new(
-            empty_uuid_build(),
+            equality_seed_uuid_frontier(),
             right,
             vec![(left_key, wrong_probe_key)],
             None,
@@ -233,7 +288,7 @@ fn right_enrichment_join(
     let scan: Arc<dyn ExecutionPlan> = Arc::new(scan);
     let frontier: Arc<dyn ExecutionPlan> = Arc::new(
         RepartitionExec::try_new(
-            empty_uuid_build(),
+            equality_seed_uuid_frontier(),
             datafusion::physical_expr::Partitioning::RoundRobinBatch(partitions),
         )
         .unwrap(),
@@ -311,6 +366,10 @@ fn partitioned_collect_left_right_enrichment_swaps_and_restores_parent_contract(
             original.output_partitioning(),
             &datafusion::physical_expr::Partitioning::RoundRobinBatch(partitions)
         );
+        assert!(crate::property_filter_approval::is_filtered_seed_uuid_key(
+            original_join.right().as_ref(),
+            0,
+        ));
 
         let optimized = rule.optimize(Arc::clone(&original), &config).unwrap();
         let restored = optimized.downcast_ref::<RepartitionExec>().unwrap();
@@ -728,6 +787,14 @@ fn selected_endpoint_seed_requires_its_uuid_and_node_id_from_the_same_graph_row(
         .unwrap(),
     );
     assert!(crate::is_filtered_uuid_seed(accepted.as_ref(), 0));
+    assert!(!crate::property_filter_approval::is_filtered_seed_uuid_key(
+        accepted.as_ref(),
+        0,
+    ));
+    assert!(crate::property_filter_approval::is_filtered_seed_uuid_key(
+        equality_seed_uuid_frontier().as_ref(),
+        0,
+    ));
 
     // An arbitrary in-memory source with the same fields cannot impersonate
     // the row-preserving topology Parquet pipeline.

@@ -12,6 +12,7 @@ use datafusion::physical_expr::{Partitioning, PhysicalExpr};
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::joins::{HashJoinExec, PartitionMode};
+use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 use std::sync::Arc;
@@ -174,107 +175,190 @@ fn equality_build_scan(input: &Arc<dyn ExecutionPlan>) -> Option<&PropertyOverla
 /// strict property equality. Kept here so private scan and tap implementations
 /// can be checked without exposing either physical node.
 pub fn is_filtered_uuid_seed(plan: &dyn ExecutionPlan, source_node_id_index: usize) -> bool {
-    let Some(join) = plan.downcast_ref::<HashJoinExec>() else {
-        return false;
-    };
+    filtered_uuid_seed_node_id(plan)
+        .is_some_and(|node_id_index| node_id_index == source_node_id_index)
+}
+
+fn filtered_uuid_seed_node_id(plan: &dyn ExecutionPlan) -> Option<usize> {
+    filtered_uuid_seed_columns_with_optional_uuid(plan).map(|(_, node_id_index)| node_id_index)
+}
+
+/// Return the output UUID/node-id pair proved by the strict equality seed.
+/// Keeping both ordinals lets downstream rules verify that the exact UUID
+/// they nominate belongs to the same filtered graph row as the selected ID.
+pub(super) fn filtered_uuid_seed_columns(plan: &dyn ExecutionPlan) -> Option<(usize, usize)> {
+    let (uuid_index, node_id_index) = filtered_uuid_seed_columns_with_optional_uuid(plan)?;
+    Some((uuid_index?, node_id_index))
+}
+
+fn filtered_uuid_seed_columns_with_optional_uuid(
+    plan: &dyn ExecutionPlan,
+) -> Option<(Option<usize>, usize)> {
+    let join = plan.downcast_ref::<HashJoinExec>()?;
     if *join.join_type() != JoinType::Inner || join.on().len() != 1 || join.filter().is_some() {
-        return false;
+        return None;
     }
     let (left_key, right_key) = &join.on()[0];
     for (tap_is_left, tap_side, property_side, tap_key, property_key) in [
         (true, join.left(), join.right(), left_key, right_key),
         (false, join.right(), join.left(), right_key, left_key),
     ] {
-        let tap = tap_side
-            .downcast_ref::<crate::property_join_nomination::UuidBuildKeyTapExec>()
-            .or_else(|| {
-                tap_side
-                    .downcast_ref::<CoalescePartitionsExec>()
-                    .and_then(|coalesce| {
-                        coalesce
-                            .input()
-                            .downcast_ref::<crate::property_join_nomination::UuidBuildKeyTapExec>()
-                    })
+        if let Some(columns) = filtered_uuid_seed_side_columns(
+            join,
+            tap_is_left,
+            tap_side,
+            property_side,
+            tap_key,
+            property_key,
+        ) {
+            return Some(columns);
+        }
+    }
+    None
+}
+
+fn filtered_uuid_seed_side_columns(
+    join: &HashJoinExec,
+    tap_is_left: bool,
+    tap_side: &Arc<dyn ExecutionPlan>,
+    property_side: &Arc<dyn ExecutionPlan>,
+    tap_key: &Arc<dyn PhysicalExpr>,
+    property_key: &Arc<dyn PhysicalExpr>,
+) -> Option<(Option<usize>, usize)> {
+    let tap = tap_side
+        .downcast_ref::<crate::property_join_nomination::UuidBuildKeyTapExec>()
+        .or_else(|| {
+            tap_side
+                .downcast_ref::<CoalescePartitionsExec>()
+                .and_then(|coalesce| {
+                    coalesce
+                        .input()
+                        .downcast_ref::<crate::property_join_nomination::UuidBuildKeyTapExec>()
+                })
+        });
+    let (_, uuid_index) = selected_equality_seed_scan(property_side)?;
+    let graph_key = tap_key.downcast_ref::<Column>()?;
+    let property_key = property_key.downcast_ref::<Column>()?;
+    // The source side may already have a nomination tap, but the exact graph
+    // UUID/node_id pair in the join input remains the authority.
+    let graph_schema = tap_side.schema();
+    let mut node_id_indices = graph_schema
+        .fields()
+        .iter()
+        .enumerate()
+        .filter(|(_, field)| field.name() == "node_id")
+        .map(|(index, _)| index);
+    let node_id_index = node_id_indices.next()?;
+    if node_id_indices.next().is_some() {
+        return None;
+    }
+    let mut uuid_indices = graph_schema
+        .fields()
+        .iter()
+        .enumerate()
+        .filter(|(_, field)| {
+            field.name() == "node_uuid" && field.data_type() == &DataType::FixedSizeBinary(16)
+        })
+        .map(|(index, _)| index);
+    let graph_uuid_index = uuid_indices.next()?;
+    if uuid_indices.next().is_some()
+        || graph_key.index() != graph_uuid_index
+        || tap.is_some_and(|tap| tap.uuid_column() != graph_uuid_index)
+        || !crate::parquet_scan::is_graph_node_identity_pipeline(
+            tap_side.as_ref(),
+            graph_uuid_index,
+            node_id_index,
+        )
+    {
+        return None;
+    }
+    let side_offset = if tap_is_left {
+        0
+    } else {
+        join.left().schema().fields().len()
+    };
+    let global_node_id_index = node_id_index + side_offset;
+    let global_uuid_index = graph_uuid_index + side_offset;
+    let projected_node_id_index =
+        join.projection
+            .as_ref()
+            .map_or(Some(global_node_id_index), |projection| {
+                projection
+                    .iter()
+                    .position(|&index| index == global_node_id_index)
+            })?;
+    let projected_uuid_index =
+        join.projection
+            .as_ref()
+            .map_or(Some(global_uuid_index), |projection| {
+                projection
+                    .iter()
+                    .position(|&index| index == global_uuid_index)
             });
-        let Some((_scan, uuid_index)) = selected_equality_seed_scan(property_side) else {
-            continue;
-        };
-        let (Some(graph_key), Some(property_key)) = (
-            tap_key.downcast_ref::<Column>(),
-            property_key.downcast_ref::<Column>(),
-        ) else {
-            continue;
-        };
-        // The source side may already have a nomination tap (some one
-        // partition plans do), but the exact graph UUID/node_id pair in the
-        // join input is the authority in either case.
-        let graph_schema = tap_side.schema();
-        let mut node_id_indices = graph_schema
-            .fields()
-            .iter()
-            .enumerate()
-            .filter(|(_, field)| field.name() == "node_id")
-            .map(|(index, _)| index);
-        let Some(node_id_index) = node_id_indices.next() else {
-            continue;
-        };
-        if node_id_indices.next().is_some() {
-            continue;
-        }
-        let mut uuid_indices = graph_schema
-            .fields()
-            .iter()
-            .enumerate()
-            .filter(|(_, field)| {
-                field.name() == "node_uuid" && field.data_type() == &DataType::FixedSizeBinary(16)
+    let property_schema = property_side.schema();
+    if projected_uuid_index == Some(projected_node_id_index)
+        || projected_uuid_index.is_some_and(|index| {
+            join.schema().fields().get(index).is_none_or(|field| {
+                field.name() != "node_uuid" || field.data_type() != &DataType::FixedSizeBinary(16)
             })
-            .map(|(index, _)| index);
-        let Some(graph_uuid_index) = uuid_indices.next() else {
-            continue;
-        };
-        if uuid_indices.next().is_some()
-            || graph_key.index() != graph_uuid_index
-            || tap.is_some_and(|tap| tap.uuid_column() != graph_uuid_index)
-            || !crate::parquet_scan::is_graph_node_identity_pipeline(
-                tap_side.as_ref(),
-                graph_uuid_index,
-                node_id_index,
-            )
-        {
-            continue;
+        })
+        || graph_schema
+            .fields()
+            .get(graph_uuid_index)
+            .is_none_or(|field| field.name() != graph_key.name())
+        || graph_key.data_type(graph_schema.as_ref()).ok() != Some(DataType::FixedSizeBinary(16))
+        || property_key.index() != uuid_index
+        || property_schema
+            .fields()
+            .get(uuid_index)
+            .is_none_or(|field| field.name() != property_key.name())
+        || property_key.data_type(property_schema.as_ref()).ok()
+            != Some(DataType::FixedSizeBinary(16))
+    {
+        return None;
+    }
+    Some((projected_uuid_index, projected_node_id_index))
+}
+
+/// Prove that one exact output column is the UUID from a strict equality seed.
+/// Only schema-preserving wrappers and direct-column projections may sit
+/// between the seed join and the nominated build key.
+pub(super) fn filtered_seed_uuid_key(plan: &dyn ExecutionPlan, output_index: usize) -> bool {
+    if let Some((uuid_index, _)) = filtered_uuid_seed_columns(plan) {
+        return uuid_index == output_index;
+    }
+    if let Some(coalesce) = plan.downcast_ref::<CoalescePartitionsExec>() {
+        return plan.schema().as_ref() == coalesce.input().schema().as_ref()
+            && filtered_seed_uuid_key(coalesce.input().as_ref(), output_index);
+    }
+    if let Some(exchange) = plan.downcast_ref::<RepartitionExec>() {
+        return plan.schema().as_ref() == exchange.input().schema().as_ref()
+            && filtered_seed_uuid_key(exchange.input().as_ref(), output_index);
+    }
+    if let Some(filter) = plan.downcast_ref::<FilterExec>() {
+        if plan.fetch().is_some() || plan.output_ordering().is_some() {
+            return false;
         }
-        let global_node_id_index = node_id_index
-            + if tap_is_left {
-                0
-            } else {
-                join.left().schema().fields().len()
-            };
-        let projected_node_id_index =
-            join.projection
-                .as_ref()
-                .map_or(Some(global_node_id_index), |projection| {
-                    projection
-                        .iter()
-                        .position(|&index| index == global_node_id_index)
-                });
-        let property_schema = property_side.schema();
-        if projected_node_id_index == Some(source_node_id_index)
-            && graph_schema
-                .fields()
-                .get(graph_uuid_index)
-                .is_some_and(|field| field.name() == graph_key.name())
-            && graph_key.data_type(graph_schema.as_ref()).ok()
-                == Some(DataType::FixedSizeBinary(16))
-            && property_key.index() == uuid_index
-            && property_schema
-                .fields()
-                .get(uuid_index)
-                .is_some_and(|field| field.name() == property_key.name())
-            && property_key.data_type(property_schema.as_ref()).ok()
-                == Some(DataType::FixedSizeBinary(16))
-        {
-            return true;
+        let input_index = filter
+            .projection()
+            .as_ref()
+            .map_or(Some(output_index), |projection| {
+                projection.get(output_index).copied()
+            });
+        return input_index
+            .is_some_and(|index| filtered_seed_uuid_key(filter.input().as_ref(), index));
+    }
+    if let Some(projection) = plan.downcast_ref::<ProjectionExec>() {
+        if plan.fetch().is_some() || plan.output_ordering().is_some() {
+            return false;
         }
+        return projection
+            .expr()
+            .get(output_index)
+            .and_then(|expression| expression.expr.downcast_ref::<Column>())
+            .is_some_and(|column| {
+                filtered_seed_uuid_key(projection.input().as_ref(), column.index())
+            });
     }
     false
 }

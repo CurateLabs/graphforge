@@ -60,6 +60,11 @@ pub(super) fn nominate_partitioned_left_selected(
     if selected_key.is_some_and(|selected| selected != build_column) {
         return Ok(None);
     }
+    if selected_key.is_none()
+        && !super::equality_anchor::filtered_seed_uuid_key(join.left().as_ref(), build_column)
+    {
+        return Ok(None);
+    }
 
     // Keep the preserved side's operators. NULL keys are omitted
     // from the nomination, but their unmatched LEFT rows remain in the join.

@@ -13,9 +13,39 @@ fn enrichment_with_projection(
     partitions: usize,
     projection: Vec<usize>,
 ) -> Arc<dyn ExecutionPlan> {
+    enrichment_from_frontier(
+        input_with_values(&[Some([1; 16]), Some([1; 16]), None]),
+        scan,
+        partitions,
+        projection,
+    )
+}
+
+fn anchored_enrichment(scan: PropertyOverlayExec, partitions: usize) -> Arc<dyn ExecutionPlan> {
+    anchored_enrichment_with_projection(scan, partitions, vec![0, 1, 2, 3])
+}
+
+fn anchored_enrichment_with_projection(
+    scan: PropertyOverlayExec,
+    partitions: usize,
+    projection: Vec<usize>,
+) -> Arc<dyn ExecutionPlan> {
+    enrichment_from_frontier(
+        super::equality_seed_uuid_frontier(),
+        scan,
+        partitions,
+        projection,
+    )
+}
+
+fn enrichment_from_frontier(
+    frontier: Arc<dyn ExecutionPlan>,
+    scan: PropertyOverlayExec,
+    partitions: usize,
+    projection: Vec<usize>,
+) -> Arc<dyn ExecutionPlan> {
     let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("node_uuid", 0));
     // A nullable frontier is legal: its unmatched rows must survive LEFT.
-    let frontier = input_with_values(&[Some([1; 16]), Some([1; 16]), None]);
     let left: Arc<dyn ExecutionPlan> = Arc::new(
         RepartitionExec::try_new(frontier, Partitioning::Hash(vec![key.clone()], partitions))
             .unwrap(),
@@ -68,10 +98,15 @@ fn key_only_property_scan() -> PropertyOverlayExec {
 #[test]
 fn partitioned_left_enrichment_keeps_projected_away_hash_keys_as_metadata() {
     for partitions in [1, 2, 4] {
-        // Return only the property, dropping both UUID columns. The original
-        // join may describe its distribution with an unknown key, but that
-        // metadata must never become an executable repartition expression.
-        let original = enrichment_with_projection(property_scan(None, None), partitions, vec![2]);
+        // Drop the preserved UUID from a valid equality-seeded frontier. The
+        // original join may describe its distribution with an unknown key,
+        // but that metadata must never become an executable repartition key.
+        let original = anchored_enrichment_with_projection(
+            property_scan(None, None),
+            partitions,
+            vec![1, 2, 3],
+        );
+        let original_join = original.downcast_ref::<HashJoinExec>().unwrap();
         let Partitioning::Hash(keys, _) = original.output_partitioning() else {
             panic!("expected hash partitioning");
         };
@@ -80,6 +115,10 @@ fn partitioned_left_enrichment_keeps_projected_away_hash_keys_as_metadata() {
                 .downcast_ref::<datafusion::physical_expr::expressions::UnKnownColumn>()
                 .is_some()
         );
+        assert!(crate::property_filter_approval::is_filtered_seed_uuid_key(
+            original_join.left().as_ref(),
+            0,
+        ));
         let error = keys[0]
             .evaluate(&arrow::record_batch::RecordBatch::new_empty(
                 original.schema(),
@@ -204,10 +243,10 @@ fn selected_key_only_scan_supports_existing_collect_left_and_right_shapes() {
 }
 
 #[test]
-fn partitioned_left_enrichment_nominates_the_complete_nullable_frontier() {
+fn partitioned_left_enrichment_nominates_an_anchored_frontier() {
     let config = ConfigOptions::default();
     for partitions in [1, 2, 4] {
-        let original = enrichment(property_scan(None, None), partitions);
+        let original = anchored_enrichment(property_scan(None, None), partitions);
         SanityCheckPlan::new()
             .optimize(original.clone(), &config)
             .unwrap();
@@ -237,6 +276,26 @@ fn partitioned_left_enrichment_nominates_the_complete_nullable_frontier() {
 }
 
 #[test]
+fn partitioned_left_enrichment_rejects_an_unanchored_broad_frontier() {
+    let config = ConfigOptions::default();
+    let original = enrichment(property_scan(None, None), 4);
+    let optimized = PropertyFilterApprovalRule
+        .optimize(original.clone(), &config)
+        .unwrap();
+    assert!(Arc::ptr_eq(&original, &optimized));
+    let join = optimized.downcast_ref::<HashJoinExec>().unwrap();
+    assert!(join.left().downcast_ref::<UuidBuildKeyTapExec>().is_none());
+    let scan = join
+        .right()
+        .downcast_ref::<RepartitionExec>()
+        .unwrap()
+        .input()
+        .downcast_ref::<PropertyOverlayExec>()
+        .unwrap();
+    assert_eq!(scan.fresh_nomination_uuid_column(), Some(0));
+}
+
+#[test]
 fn partitioned_left_enrichment_excludes_scan_limits_and_equalities() {
     let config = ConfigOptions::default();
     for scan in [
@@ -261,7 +320,7 @@ fn partitioned_left_enrichment_excludes_scan_limits_and_equalities() {
 #[test]
 fn partitioned_left_enrichment_is_idempotent_and_rejects_other_exchanges() {
     let config = ConfigOptions::default();
-    let original = enrichment(property_scan(None, None), 4);
+    let original = anchored_enrichment(property_scan(None, None), 4);
     let optimized = PropertyFilterApprovalRule
         .optimize(original.clone(), &config)
         .unwrap();

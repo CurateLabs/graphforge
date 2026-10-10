@@ -51,6 +51,11 @@ pub fn is_filtered_uuid_seed(plan: &dyn ExecutionPlan, source_node_id_index: usi
     equality_anchor::is_filtered_uuid_seed(plan, source_node_id_index)
 }
 
+#[cfg(test)]
+pub(super) fn is_filtered_seed_uuid_key(plan: &dyn ExecutionPlan, uuid_index: usize) -> bool {
+    equality_anchor::filtered_seed_uuid_key(plan, uuid_index)
+}
+
 impl std::fmt::Debug for SelectedEndpointPropertyFilterApprovalRule {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SelectedEndpointPropertyFilterApprovalRule")
@@ -202,6 +207,10 @@ impl PhysicalOptimizerRule for PropertyFilterApprovalRule {
             let Some(build_column) = build_column.downcast_ref::<Column>() else {
                 return Ok(Transformed::no(node));
             };
+            if !equality_anchor::filtered_seed_uuid_key(join.left().as_ref(), build_column.index())
+            {
+                return Ok(Transformed::no(node));
+            }
             let Some(probe_column) = probe_expression.downcast_ref::<Column>() else {
                 return Ok(Transformed::no(node));
             };
@@ -329,6 +338,11 @@ fn nominate_collect_left_right_inner(
     let Some(frontier_column) = frontier_column else {
         return Ok(None);
     };
+    if !selected_endpoint
+        && !equality_anchor::filtered_seed_uuid_key(join.right().as_ref(), frontier_column)
+    {
+        return Ok(None);
+    }
 
     // The public swap remaps join keys, JoinFilter, and embedded projection.
     // Only the exact embedded-projection shape is eligible here; rebuilding a
@@ -494,6 +508,11 @@ fn nominate_existing_collect_left_inner(
         return Ok(None);
     };
     if selected_key.is_some_and(|selected| selected != build_column) {
+        return Ok(None);
+    }
+    if selected_key.is_none()
+        && !equality_anchor::filtered_seed_uuid_key(join.left().as_ref(), build_column)
+    {
         return Ok(None);
     }
 
