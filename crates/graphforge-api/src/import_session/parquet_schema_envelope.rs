@@ -97,10 +97,14 @@ fn reserve_frame(
     stack: &mut Vec<Frame>,
     budget: &mut InventoryBudget,
     peak: &mut u64,
+    cancellation: Option<&CancellationToken>,
 ) -> Result<(), GfError> {
     let required = stack.len().checked_add(1).ok_or_else(overflow)?;
     if required <= stack.capacity() {
         return Ok(());
+    }
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+        return Err(cancelled());
     }
     let request =
         super::parquet_alloc::vector(stack.capacity(), required, size_of::<Frame>(), false)?;
@@ -119,6 +123,7 @@ fn reserve_frame(
         .checked_sub(stack.len())
         .ok_or_else(overflow)?;
     if stack.try_reserve_exact(additional).is_err() {
+        budget.release(request.retained_bytes);
         return Err(overflow());
     }
     budget.release(old);
@@ -180,7 +185,12 @@ pub(super) fn preflight(
                     u64::try_from(len).map_err(|_| overflow())?,
                 )?;
             }
-            reserve_frame(&mut stack, budget, &mut result.preflight_peak_bytes)?;
+            reserve_frame(
+                &mut stack,
+                budget,
+                &mut result.preflight_peak_bytes,
+                cancellation,
+            )?;
             stack.push(Frame {
                 remaining_children: children,
                 path_name_bytes: 0,
@@ -252,7 +262,12 @@ pub(super) fn preflight(
                     u64::try_from(len).map_err(|_| overflow())?,
                 )?;
             }
-            reserve_frame(&mut stack, budget, &mut result.preflight_peak_bytes)?;
+            reserve_frame(
+                &mut stack,
+                budget,
+                &mut result.preflight_peak_bytes,
+                cancellation,
+            )?;
             stack.push(Frame {
                 remaining_children: children,
                 path_name_bytes,
