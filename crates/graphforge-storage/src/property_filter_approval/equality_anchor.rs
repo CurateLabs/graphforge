@@ -46,7 +46,7 @@ pub(super) fn shared_equality_build(
     // would then fail when it tries to evaluate that key. Keep the original
     // join in this case; its distribution contract cannot be restored from
     // the projected output.
-    if has_unknown_hash_key(&output_partitioning, plan) {
+    if super::has_unknown_hash_key(&output_partitioning, plan) {
         return Ok(None);
     }
     let Some(exchange) = join.right().downcast_ref::<RepartitionExec>() else {
@@ -119,18 +119,6 @@ pub(super) fn shared_equality_build(
         rebuilt,
         output_partitioning,
     )?)))
-}
-
-fn has_unknown_hash_key(partitioning: &Partitioning, plan: &dyn ExecutionPlan) -> bool {
-    let Partitioning::Hash(keys, _) = partitioning else {
-        return false;
-    };
-    keys.iter().any(|key| {
-        matches!(
-            key.data_type(plan.schema().as_ref()),
-            Ok(DataType::Null) | Err(_)
-        )
-    })
 }
 
 /// Inspect only the schema-preserving residual equality pipeline. Its filter

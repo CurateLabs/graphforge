@@ -150,6 +150,20 @@ impl PhysicalOptimizerRule for PropertyFilterApprovalRule {
     }
 }
 
+/// A projected-away hash key is valid distribution metadata but cannot be
+/// evaluated by a repartition inserted after a join rewrite.
+fn has_unknown_hash_key(partitioning: &Partitioning, plan: &dyn ExecutionPlan) -> bool {
+    let Partitioning::Hash(keys, _) = partitioning else {
+        return false;
+    };
+    keys.iter().any(|key| {
+        matches!(
+            key.data_type(plan.schema().as_ref()),
+            Ok(arrow::datatypes::DataType::Null) | Err(_)
+        )
+    })
+}
+
 /// Reorient the exact physical shape used for a partitioned destination
 /// enrichment: a direct property scan is the build side of CollectLeft RIGHT,
 /// and the preserved frontier produces the parent's RoundRobin partitions.

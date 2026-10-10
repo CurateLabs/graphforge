@@ -4,6 +4,14 @@ use datafusion::physical_optimizer::sanity_checker::SanityCheckPlan;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 
 fn enrichment(scan: PropertyOverlayExec, partitions: usize) -> Arc<dyn ExecutionPlan> {
+    enrichment_with_projection(scan, partitions, vec![0, 1, 2])
+}
+
+fn enrichment_with_projection(
+    scan: PropertyOverlayExec,
+    partitions: usize,
+    projection: Vec<usize>,
+) -> Arc<dyn ExecutionPlan> {
     let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("node_uuid", 0));
     // A nullable frontier is legal: its unmatched rows must survive LEFT.
     let frontier = input_with_values(&[Some([1; 16]), Some([1; 16]), None]);
@@ -25,13 +33,42 @@ fn enrichment(scan: PropertyOverlayExec, partitions: usize) -> Arc<dyn Execution
             vec![(key.clone(), key)],
             None,
             &JoinType::Left,
-            Some(vec![0, 1, 2]),
+            Some(projection),
             PartitionMode::Partitioned,
             NullEquality::NullEqualsNothing,
             false,
         )
         .unwrap(),
     )
+}
+
+#[test]
+fn partitioned_left_enrichment_keeps_projected_away_hash_keys_as_metadata() {
+    for partitions in [1, 2, 4] {
+        // Return only the property, dropping both UUID columns. The original
+        // join may describe its distribution with an unknown key, but that
+        // metadata must never become an executable repartition expression.
+        let original = enrichment_with_projection(property_scan(None, None), partitions, vec![2]);
+        let Partitioning::Hash(keys, _) = original.output_partitioning() else {
+            panic!("expected hash partitioning");
+        };
+        assert!(
+            keys[0]
+                .downcast_ref::<datafusion::physical_expr::expressions::UnKnownColumn>()
+                .is_some()
+        );
+        let error = keys[0]
+            .evaluate(&arrow::record_batch::RecordBatch::new_empty(
+                original.schema(),
+            ))
+            .unwrap_err();
+        assert!(error.to_string().contains("UnKnownColumn::evaluate()"));
+
+        let optimized = PropertyFilterApprovalRule
+            .optimize(Arc::clone(&original), &ConfigOptions::default())
+            .unwrap();
+        assert!(Arc::ptr_eq(&original, &optimized));
+    }
 }
 
 #[test]

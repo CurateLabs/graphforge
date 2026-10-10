@@ -44,6 +44,9 @@ pub(super) fn nominate_partitioned_left(
     if !matches!(&output, Partitioning::Hash(_, count) if *count > 0) {
         return Ok(None);
     }
+    if super::has_unknown_hash_key(&output, original) {
+        return Ok(None);
+    }
     let Some((scan, build_column)) = matching_scan(join) else {
         return Ok(None);
     };
