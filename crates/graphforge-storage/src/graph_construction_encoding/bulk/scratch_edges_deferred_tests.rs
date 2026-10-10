@@ -16,8 +16,10 @@ use super::super::scratch::SCRATCH_DIRECTORY;
 use super::super::scratch_nodes::{
     PROBE_RECORD, REF_RECORD, ResolveContext, ScatteredNodes, resolve_endpoints, scatter_nodes,
 };
-use super::super::{BulkBatchReader, BulkSource};
+use super::super::{BulkBatchReader, BulkBuildPlan, BulkSource};
+use crate::graph_construction::GraphConstructionSession;
 use super::*;
+use uuid::Uuid;
 
 /// A reader over stored canonical batches, `per_task` batches per task. Its
 /// read counter counts across the passes, exactly as a production source is
@@ -270,14 +272,20 @@ fn uuid(kind: u8, index: u64) -> [u8; 16] {
     value
 }
 
-/// A plan whose passes keep every fixture in one partition without
-/// refinement.
-fn plan(staging_bytes: usize) -> ScratchPlan {
-    let mut sized = ScratchPlan::sized(1, 1, 1, 1 << 20, staging_bytes);
+/// A plan assembled by hand with `gate` bytes of partitions-in-flight
+/// allowance, whose admitted leaf size is `gate / 2 / edge_row_bytes` rows.
+fn sized_plan(gate: u64, staging_bytes: usize) -> ScratchPlan {
+    let mut sized = ScratchPlan::sized(1, 1, 1, gate, staging_bytes);
     sized.node_tables_on_scratch = true;
     sized.node_partitions = 1;
     sized.node_row_bytes = 40;
     sized
+}
+
+/// A plan whose passes keep every fixture in one partition without
+/// refinement.
+fn plan(staging_bytes: usize) -> ScratchPlan {
+    sized_plan(1 << 20, staging_bytes)
 }
 
 /// The real node scatter followed by the real raw edge pass, in the state the
@@ -373,8 +381,11 @@ fn has_resolved_files(scratch: &Scratch) -> bool {
         .any(|name| name.starts_with("resolved-") || name.starts_with("node-runs-"))
 }
 
+/// The no-refinement control of the refinement occupancy test below: the
+/// same fixture under a gate that admits it whole stays one raw leaf, and
+/// the tracked logical occupancy is exactly the node leaf plus that leaf.
 #[test]
-fn raw_edge_refinement_leaves_no_reference_or_probe_files_and_their_bytes_out_of_the_occupancy() {
+fn raw_edges_without_refinement_leave_no_reference_or_probe_files_and_their_bytes_out_of_the_occupancy() {
     let root = tempfile::tempdir().unwrap();
     let directory = crate::graph_construction_encoding::StableDirectory::open(root.path()).unwrap();
     let scratch = Scratch::create(&directory).unwrap();
@@ -480,7 +491,9 @@ fn a_replay_that_differs_refuses_as_a_source_identity_conflict_before_resolution
     // The replay read a different tuple stream; the production guard refuses
     // it before anything is resolved or published.
     assert_ne!(replayed.proof, scattered_edges.topology_proof.unwrap());
-    let error = replay_refusal(scattered_edges.topology_proof, replayed.proof).unwrap_err();
+    let error = scattered_edges
+        .ensure_replay_matches(&scratch, &sized, replayed.proof, &cancel)
+        .unwrap_err();
     assert!(
         matches!(
             error,
@@ -666,4 +679,418 @@ fn multi_source_edges_replay_stable_rows_under_one_proof() {
     assert_eq!(refs.counts().unwrap(), vec![200]);
     assert_eq!(probes.counts().unwrap(), vec![100]);
     scratch.remove().unwrap();
+}
+
+#[test]
+fn raw_edge_refinement_keeps_reference_and_probe_bytes_out_of_the_tracked_occupancy() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = crate::graph_construction_encoding::StableDirectory::open(root.path()).unwrap();
+    let scratch = Scratch::create(&directory).unwrap();
+    // A legitimately smaller gate, as a smaller budget would derive: its
+    // admitted leaf size is below the 100-edge raw leaf, so the raw pass
+    // must refine it.
+    let sized = sized_plan(8192, 4096);
+    let limit = sized.gate_bytes / (2 * sized.concurrency as u64) / sized.edge_row_bytes;
+    assert!(limit < 100, "{limit}");
+    let (nodes, edges) = fixture(40, 100);
+    let reader = Arc::new(Fixed::new(edges.clone(), 1));
+    let sources = [edge_source(reader, &edges, 1)];
+    let (_, scattered) = build(&scratch, &sized, &nodes, &sources).unwrap();
+    assert_eq!(scattered.total, 100);
+    // The raw leaf refined into several ordered leaves, none over the
+    // admitted size; the fixture pins the input, not which leaves come out.
+    let counts = scattered.counts.clone();
+    assert!(counts.len() >= 2, "{counts:?}");
+    assert_eq!(counts.iter().sum::<u64>(), 100);
+    assert!(counts.iter().all(|count| *count <= limit), "{counts:?}");
+    assert!(scattered.refinement_steps > 0);
+    assert!(scattered.refinement_read_bytes > 0);
+    assert!(scattered.refinement_write_bytes > 0);
+    // No reference or probe writer ever existed: the only live scratch is
+    // the node leaf and the leaves the refinement kept (`edge-*` names the
+    // refinement's own outputs).
+    assert!(!has_reference_files(&scratch));
+    for name in scratch_names(&scratch) {
+        assert!(
+            name.starts_with("nodes-") || name.starts_with("edge"),
+            "{name}"
+        );
+    }
+    // The tracked occupancy is logical reserved bytes, headers included —
+    // not the filesystem's allocated volume. At rest it is exactly the node
+    // leaf plus the leaves the refinement kept: at this gate the refinement
+    // stages one record per block, so every record it kept occupies one
+    // 28-byte record plus one 8-byte header.
+    let node_bytes = 8 + 20 * 40;
+    let leaf_bytes: u64 = counts.iter().map(|count| count * (8 + 28)).sum();
+    assert_eq!(scratch.occupied_bytes(), node_bytes + leaf_bytes);
+    // The peak is the parent-and-children overlap of the one radix step:
+    // the raw parent was still live once every child had been written (one
+    // record per staged block at this gate), and nothing else — no
+    // reference or probe — ever entered the tree.
+    let parent_bytes = 8 + 28 * 100;
+    let child_bytes = (8 + 28) * 100;
+    assert_eq!(
+        scratch.peak_occupied_bytes(),
+        node_bytes + parent_bytes + child_bytes
+    );
+    scratch.remove().unwrap();
+}
+
+/// A reader that arms the token just after the final sink call of a replayed
+/// task returned: the reader owes nothing more, so only a check after
+/// `read_task` can stop the task before it completes and publishes.
+struct ArmingAfterFinalSink {
+    fixed: Fixed,
+    cancel: Arc<AtomicBool>,
+}
+
+impl BulkBatchReader for ArmingAfterFinalSink {
+    fn task_rows(&self, task: usize) -> usize {
+        self.fixed.task_rows(task)
+    }
+
+    fn read_task(
+        &self,
+        task: usize,
+        sink: &mut dyn FnMut(RecordBatch) -> Result<(), GfError>,
+    ) -> Result<(), GfError> {
+        let replayed = self.fixed.read(task) > 0;
+        for batch in self.fixed.stored(task) {
+            sink(batch.clone())?;
+        }
+        if replayed {
+            self.cancel.store(true, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn a_token_armed_after_the_final_sink_call_refuses_the_task_before_it_completes() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = crate::graph_construction_encoding::StableDirectory::open(root.path()).unwrap();
+    let scratch = Scratch::create(&directory).unwrap();
+    // Per-record staging, so every replayed row's references are in their
+    // files by the time the final sink call returns and the token arms.
+    let sized = plan(2);
+    let (nodes, edges) = fixture(40, 100);
+    let replay_cancel = Arc::new(AtomicBool::new(false));
+    let reader = Arc::new(ArmingAfterFinalSink {
+        fixed: Fixed::new(edges.clone(), 1),
+        cancel: Arc::clone(&replay_cancel),
+    });
+    let sources = [edge_source(reader, &edges, 1)];
+    let (scattered_nodes, _) = build(&scratch, &sized, &nodes, &sources).unwrap();
+    let (refs, probes) = references(&scratch, scattered_nodes.leaves.len()).unwrap();
+    let sink = RefSink {
+        router: &scattered_nodes.router,
+        refs: &refs,
+        probes: &probes,
+    };
+    let decode = ByteGate::new(0);
+    let error = replay_edges(
+        &sources,
+        GraphConstructionBudgets::default(),
+        &decode,
+        &sink,
+        &sized,
+        &scratch,
+        &replay_cancel,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("cancelled"), "{error}");
+    // The token armed only after every row had been handed over and written:
+    // the task must still refuse before its writers finish or its proof
+    // publishes, and nothing was resolved.
+    assert_eq!(refs.counts().unwrap(), vec![200]);
+    assert_eq!(probes.counts().unwrap(), vec![100]);
+    assert!(has_reference_files(&scratch));
+    assert!(!has_resolved_files(&scratch));
+    scratch.remove().unwrap();
+}
+
+/// Arms the token the moment the replay's reference leaf holds `records`
+/// records on disk. The replay of the single admitted batch is then still in
+/// flight, so only a check inside the replay's row loop can observe the
+/// token before the batch ends. An ordinary spin on the file's length: no
+/// sleep, no retry, no product hook.
+fn arm_once_references_reach(path: &std::path::Path, records: u64, cancel: &AtomicBool) {
+    let target = 8 + records * REF_RECORD as u64;
+    loop {
+        let length = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+        if length >= target {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    cancel.store(true, Ordering::SeqCst);
+}
+
+#[test]
+fn a_token_armed_mid_batch_stops_the_replay_inside_the_batch() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = crate::graph_construction_encoding::StableDirectory::open(root.path()).unwrap();
+    let scratch = Scratch::create(&directory).unwrap();
+    // Per-record staging, so the reference leaf's length tracks the rows the
+    // replay has processed. One batch of 60_000 rows stays within the
+    // admission window, so the whole task is a single batch.
+    let sized = plan(2);
+    let (nodes, edges) = fixture(40, 60_000);
+    let reader = Arc::new(Fixed::new(edges.clone(), 1));
+    let sources = [edge_source(reader, &edges, 1)];
+    let (scattered_nodes, scattered_edges) = build(&scratch, &sized, &nodes, &sources).unwrap();
+    assert_eq!(scattered_edges.total, 60_000);
+    let (refs, probes) = references(&scratch, scattered_nodes.leaves.len()).unwrap();
+    let sink = RefSink {
+        router: &scattered_nodes.router,
+        refs: &refs,
+        probes: &probes,
+    };
+    let decode = ByteGate::new(0);
+    let mid_batch_cancel = Arc::new(AtomicBool::new(false));
+    let watcher_path = refs.path(0).to_path_buf();
+    let watcher_cancel = Arc::clone(&mid_batch_cancel);
+    let watcher =
+        std::thread::spawn(move || arm_once_references_reach(&watcher_path, 64, &watcher_cancel));
+    let error = replay_edges(
+        &sources,
+        GraphConstructionBudgets::default(),
+        &decode,
+        &sink,
+        &sized,
+        &scratch,
+        &mid_batch_cancel,
+    )
+    .unwrap_err();
+    watcher.join().unwrap();
+    assert!(error.to_string().contains("cancelled"), "{error}");
+    // The batch stopped inside the row loop: the token armed while a few
+    // dozen rows were written, and the bounded-row check refused the rest
+    // of the batch's 120_000 references instead of replaying them all.
+    let written = refs.counts().unwrap()[0];
+    assert!(written > 0, "{written}");
+    assert!(written < 60_000, "{written}");
+    assert!(!has_resolved_files(&scratch));
+    scratch.remove().unwrap();
+}
+
+fn edge_uuid_at(batch: &RecordBatch, row: usize) -> [u8; 16] {
+    let uuids = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<FixedSizeBinaryArray>()
+        .unwrap();
+    <[u8; 16]>::try_from(uuids.value(row)).unwrap()
+}
+
+/// The batch with row `row`'s edge UUID replaced, keeping every other column.
+fn with_edge_uuid(batch: &RecordBatch, row: usize, value: [u8; 16]) -> RecordBatch {
+    let uuids = (0..batch.num_rows())
+        .map(|index| {
+            if index == row {
+                value
+            } else {
+                edge_uuid_at(batch, index)
+            }
+        })
+        .collect::<Vec<_>>();
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(fixed(&uuids)),
+        batch.column(1).clone(),
+        batch.column(2).clone(),
+        batch.column(3).clone(),
+    ];
+    RecordBatch::try_new(batch.schema(), columns).unwrap()
+}
+
+#[test]
+fn a_mismatched_replay_of_a_duplicate_raw_leaf_refuses_the_duplicate_first() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = crate::graph_construction_encoding::StableDirectory::open(root.path()).unwrap();
+    let scratch = Scratch::create(&directory).unwrap();
+    let sized = plan(4096);
+    let (nodes, edges) = fixture(40, 100);
+    // Two identical edge UUIDs inside the one in-budget raw leaf, and a
+    // replay that changes an endpoint: the mismatch is terminal either way,
+    // but the duplicate is the refusal the input deserves.
+    let duplicated = with_edge_uuid(&edges[0], 9, edge_uuid_at(&edges[0], 3));
+    let edges = vec![duplicated];
+    let reader = Arc::new(Mutating::new(edges.clone(), 1));
+    let sources = [edge_source(reader, &edges, 1)];
+    let (scattered_nodes, scattered_edges) = build(&scratch, &sized, &nodes, &sources).unwrap();
+    let (refs, probes) = references(&scratch, scattered_nodes.leaves.len()).unwrap();
+    let sink = RefSink {
+        router: &scattered_nodes.router,
+        refs: &refs,
+        probes: &probes,
+    };
+    let decode = ByteGate::new(0);
+    let cancel = AtomicBool::new(false);
+    let replayed = replay_edges(
+        &sources,
+        GraphConstructionBudgets::default(),
+        &decode,
+        &sink,
+        &sized,
+        &scratch,
+        &cancel,
+    )
+    .unwrap();
+    assert_ne!(replayed.proof, scattered_edges.topology_proof.unwrap());
+    let raw_reads_before = scattered_edges.partitions.read_bytes();
+    let error = scattered_edges
+        .ensure_replay_matches(&scratch, &sized, replayed.proof, &cancel)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("duplicate identity across construction runs (edge)"),
+        "{error}"
+    );
+    assert!(
+        !matches!(
+            error,
+            GfError::Api {
+                code: ApiErrorCode::IdentityConflict,
+                ..
+            }
+        ),
+        "{error}"
+    );
+    // The mismatch path validated the accepted raw leaves with the bounded
+    // ordered reads, and nothing was resolved or published.
+    assert!(scattered_edges.partitions.read_bytes() > raw_reads_before);
+    assert!(!has_resolved_files(&scratch));
+    scratch.remove().unwrap();
+}
+
+#[test]
+fn a_matching_replay_validates_no_raw_leaf_and_reads_the_source_once_per_pass() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = crate::graph_construction_encoding::StableDirectory::open(root.path()).unwrap();
+    let scratch = Scratch::create(&directory).unwrap();
+    let sized = plan(4096);
+    let (nodes, edges) = fixture(40, 100);
+    let reader = Arc::new(Fixed::new(edges.clone(), 1));
+    let shared: Arc<dyn BulkBatchReader> = reader.clone();
+    let sources = [edge_source(shared, &edges, 1)];
+    let (scattered_nodes, scattered_edges) = build(&scratch, &sized, &nodes, &sources).unwrap();
+    let accepted = scattered_edges.topology_proof.unwrap();
+    let (refs, probes) = references(&scratch, scattered_nodes.leaves.len()).unwrap();
+    let sink = RefSink {
+        router: &scattered_nodes.router,
+        refs: &refs,
+        probes: &probes,
+    };
+    let decode = ByteGate::new(0);
+    let cancel = AtomicBool::new(false);
+    let replayed = replay_edges(
+        &sources,
+        GraphConstructionBudgets::default(),
+        &decode,
+        &sink,
+        &sized,
+        &scratch,
+        &cancel,
+    )
+    .unwrap();
+    assert_eq!(replayed.proof, accepted);
+    // The matching path reads no raw leaf at all.
+    let raw_reads_before = scattered_edges.partitions.read_bytes();
+    scattered_edges
+        .ensure_replay_matches(&scratch, &sized, replayed.proof, &cancel)
+        .unwrap();
+    assert_eq!(scattered_edges.partitions.read_bytes(), raw_reads_before);
+    // Each edge task was read exactly twice: once by the raw pass, once by
+    // the reference pass.
+    assert_eq!(reader.reads[0].load(Ordering::SeqCst), 2);
+    scratch.remove().unwrap();
+}
+
+// ----------------------------------------------------
+// The same phase order through the real session encoder: the full bulk
+// build on the node-scratch route, not the passes in isolation.
+
+/// A real session whose bulk plan's budget puts the node tables on scratch,
+/// so `prepare_bulk_encoding` runs the deferred route end to end.
+fn session(root: &std::path::Path) -> GraphConstructionSession {
+    GraphConstructionSession::open_with_mode(
+        root,
+        Uuid::from_u128(0x5f4d_9c31_a20b_4e77_9d10_33c8_41ab_6e52),
+        0,
+        graphforge_core::OntologyMode::Exploratory,
+        GraphConstructionBudgets::default(),
+    )
+    .unwrap()
+}
+
+fn session_plan(
+    node_batches: &[RecordBatch],
+    edge_reader: Arc<dyn BulkBatchReader>,
+    edge_batches: &[RecordBatch],
+    per_task: usize,
+) -> BulkBuildPlan<'static> {
+    let mut plan = BulkBuildPlan {
+        nodes: vec![node_source(node_batches)],
+        edges: vec![edge_source(edge_reader, edge_batches, per_task)],
+        memory_budget: None,
+    };
+    plan.memory_budget = Some(plan.scratch_floor_bytes() + 1);
+    assert!(matches!(plan.route(), crate::BulkRoute::ScratchNodes));
+    plan
+}
+
+#[test]
+fn the_session_refuses_a_duplicate_raw_leaf_before_its_changed_replay() {
+    let root = tempfile::tempdir().unwrap();
+    let mut session = session(root.path());
+    let (nodes, edges) = fixture(40, 100);
+    // Two identical edge UUIDs inside the one in-budget raw leaf, and a
+    // replay whose second read changes an endpoint: the established
+    // duplicate-edge refusal must outrank the replay mismatch.
+    let duplicated = with_edge_uuid(&edges[0], 9, edge_uuid_at(&edges[0], 3));
+    let edges = vec![duplicated];
+    let reader = Arc::new(Mutating::new(edges.clone(), 1));
+    let plan = session_plan(&nodes, reader, &edges, 1);
+    let error = session.prepare_bulk_encoding(1, &plan, || false).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("duplicate identity across construction runs (edge)"),
+        "{error}"
+    );
+    assert!(
+        !matches!(
+            error,
+            GfError::Api {
+                code: ApiErrorCode::IdentityConflict,
+                ..
+            }
+        ),
+        "{error}"
+    );
+    assert!(!session.publication_committed());
+}
+
+#[test]
+fn a_changed_replay_cannot_publish_through_the_session() {
+    let root = tempfile::tempdir().unwrap();
+    let mut session = session(root.path());
+    let (nodes, edges) = fixture(40, 100);
+    let reader = Arc::new(Mutating::new(edges.clone(), 1));
+    let plan = session_plan(&nodes, reader, &edges, 1);
+    let error = session.prepare_bulk_encoding(1, &plan, || false).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            GfError::Api {
+                code: ApiErrorCode::IdentityConflict,
+                ..
+            }
+        ),
+        "{error}"
+    );
+    assert!(error.to_string().contains("topology versions"), "{error}");
+    assert!(!session.publication_committed());
 }

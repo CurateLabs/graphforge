@@ -9,7 +9,9 @@
 //! per task, and a second pass over the same planned tasks sends the
 //! endpoints to the node leaves (#1929) only after the raw partitions have
 //! refined — so the refinement never overlaps live reference files — and only
-//! after its replay proof equals pass 2's (#1929 phase order). The node
+//! after its replay proof equals pass 2's; a mismatch re-checks the accepted
+//! raw leaves for duplicate identities first, so the established duplicate
+//! refusal keeps its precedence over the version conflict (#1929). The node
 //! leaves' resolved records pass 3 joins back.
 //!
 //! Pass 3 builds the partitions in order, several at a time within the memory
@@ -562,6 +564,12 @@ pub(super) fn replay_refusal(
     })
 }
 
+/// Rows between two cancellation checks inside one replayed batch: the token
+/// is observed at every batch boundary and again at this fixed row cadence
+/// inside it, so a token armed while a batch is being replayed stops the
+/// replay within a bounded number of rows, without polling per row.
+const REPLAY_CANCEL_CHECK_ROWS: usize = 1 << 12;
+
 /// The second edge pass of the deferred route: replay every planned task of
 /// the same fixed task plan, send each row's two endpoint references and its
 /// identity probe to the node leaves, and hash the same canonical tuple
@@ -570,6 +578,9 @@ pub(super) fn replay_refusal(
 /// first pass's accepted output. Validation, admission, the decode gate and
 /// cancellation run exactly as in the first pass, and every task's exact row
 /// count must match the footer plan before its proof enters the accumulator.
+/// A task completes only if the token stayed clear through its last batch:
+/// the token is checked again after the reader returns, before any flush or
+/// proof, so a task that was cancelled part way never publishes.
 pub(super) fn replay_edges(
     sources: &[BulkSource<'_>],
     budgets: GraphConstructionBudgets,
@@ -629,6 +640,9 @@ pub(super) fn replay_edges(
                 );
             }
             for row in 0..count {
+                if row % REPLAY_CANCEL_CHECK_ROWS == 0 {
+                    check_cancelled(cancel)?;
+                }
                 hasher.row(
                     &uuids[row],
                     &source_uuids[row],
@@ -658,6 +672,12 @@ pub(super) fn replay_edges(
         if written != rows {
             return Err(short_source());
         }
+        // The reader returned every row it owed, but the token may have been
+        // armed while the final batch was still in flight or just after it:
+        // the task succeeds only if the token is still clear, before any
+        // writer is flushed and before this task's hash may enter the
+        // accumulator.
+        check_cancelled(cancel)?;
         refs.finish()?;
         probes.finish()?;
         proof.add_task(hasher.finish())?;
@@ -677,6 +697,38 @@ pub(super) fn replay_edges(
 }
 
 impl ScatteredEdges {
+    /// The deferred route's guard between its two edge passes: the replayed
+    /// canonical topology must equal the accepted first pass's before any
+    /// endpoint resolves or anything is published. On a mismatch — which is
+    /// terminal either way — the accepted raw leaves get the identity check
+    /// every other route gives its edges, through the same bounded ordered
+    /// reads the refusal itself uses: a first pass that accepted duplicate
+    /// edge UUIDs is refused as the duplicate it is, ahead of the replay
+    /// mismatch, so the same input is refused the same way on either route
+    /// (#1929). The matching path returns before any raw leaf is read, and
+    /// the block reads keep their CRC verification and cancellation checks.
+    pub(super) fn ensure_replay_matches(
+        &self,
+        scratch: &Scratch,
+        plan: &ScratchPlan,
+        replayed: [u8; 32],
+        cancel: &AtomicBool,
+    ) -> Result<(), GfError> {
+        if self.topology_proof == Some(replayed) {
+            return Ok(());
+        }
+        let ordered = Ordered::new(plan.gate_bytes, 0, cancel);
+        for part in 0..self.partitions.len() {
+            check_cancelled(cancel)?;
+            let cost = plan.edge_cost(self.counts[part]);
+            ordered.acquire(part, cost)?;
+            let loaded = self.load_sorted(scratch, part, None);
+            ordered.release(cost);
+            loaded.map(|_| ())?;
+        }
+        replay_refusal(self.topology_proof, replayed)
+    }
+
     /// Partition `part`'s records in UUID order, with identities checked.
     /// `node_uuids` are the sorted node UUIDs, when they are resident.
     fn load_sorted(

@@ -633,7 +633,13 @@ pub(crate) fn encode_bulk(
         })?;
         refs = Some(leaves);
         identity_probes = Some(probes);
-        scratch_edges::replay_refusal(scattered.topology_proof, replayed.proof)?;
+        // A replay that differs is refused before anything resolves or
+        // publishes — but the accepted raw leaves are checked for duplicate
+        // identities first, so an accepted first pass that already held
+        // duplicate edge UUIDs keeps its established duplicate refusal,
+        // ahead of the replay mismatch, exactly as on the resident route
+        // (#1929). The matching path reads no raw leaf here.
+        scattered.ensure_replay_matches(scratch, sized, replayed.proof, &cancel)?;
         // A missing endpoint keeps its established refusal, ahead of the
         // endpoint resolution that would name it again.
         if let Some(endpoint) = replayed.miss {
