@@ -1,6 +1,5 @@
 //! Bounded DataFusion execution for authenticated immutable property overlays.
 
-use std::collections::BTreeSet;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,8 +10,6 @@ use datafusion::common::stats::Precision;
 use datafusion::common::{ColumnStatistics, Statistics};
 use datafusion::error::DataFusionError;
 use datafusion::execution::TaskContext;
-use datafusion::execution::memory_pool::MemoryConsumer;
-use datafusion::execution::memory_pool::MemoryReservation;
 use datafusion::physical_expr::expressions::{Column, DynamicFilterPhysicalExpr};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType, SchedulingType};
@@ -507,7 +504,7 @@ impl ExecutionPlan for PropertyOverlayExec {
     fn execute(
         &self,
         partition: usize,
-        context: Arc<TaskContext>,
+        _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream, DataFusionError> {
         if partition != 0 {
             return Err(DataFusionError::Internal(
@@ -529,7 +526,6 @@ impl ExecutionPlan for PropertyOverlayExec {
         let digest_context = self.digest_context.clone();
         let lifecycle_context = self.lifecycle_context.clone();
         let uuid_nominations = self.uuid_nominations.clone();
-        let memory_pool = Arc::clone(context.memory_pool());
         tokio::spawn(async move {
             for nomination in &uuid_nominations {
                 let ready = tokio::select! {
@@ -561,47 +557,11 @@ impl ExecutionPlan for PropertyOverlayExec {
                 let _digest_guard = digest_context.attach();
                 let _lifecycle_capture = lifecycle_context.attach();
 
-                let mut uuid_intersection = None::<BTreeSet<[u8; 16]>>;
-                let mut uuid_intersection_reservation = None::<MemoryReservation>;
-                if uuid_nominations.len() > 1 {
-                    let smallest = uuid_nominations
-                        .iter()
-                        .filter_map(|nomination| nomination.ids())
-                        .min_by_key(|ids| ids.len())
-                        .expect("completed nominations have key sets");
-                    let Some(reserve_bytes) = smallest
-                        .len()
-                        .checked_mul(crate::property_join_nomination::NOMINATION_BYTES_PER_UUID)
-                        .and_then(|bytes| {
-                            bytes
-                                .checked_add(crate::property_join_nomination::NOMINATION_BASE_BYTES)
-                        })
-                    else {
-                        let _ = sender.blocking_send(Err(DataFusionError::ResourcesExhausted(
-                            "UUID nomination intersection size overflow".into(),
-                        )));
-                        return;
-                    };
-                    let reservation = MemoryConsumer::new("GraphForge UUID scan intersection")
-                        .register(&memory_pool);
-                    if let Err(error) = reservation.try_grow(reserve_bytes) {
-                        let _ = sender.blocking_send(Err(error));
-                        return;
-                    }
-                    let mut intersection = smallest.clone();
-                    for nomination in &uuid_nominations {
-                        let ids = nomination.ids().expect("completed nomination");
-                        intersection.retain(|uuid| ids.contains(uuid));
-                    }
-                    uuid_intersection = Some(intersection);
-                    uuid_intersection_reservation = Some(reservation);
-                }
-                let _uuid_intersection_reservation = uuid_intersection_reservation;
-                let uuids = uuid_intersection.as_ref().or_else(|| {
-                    uuid_nominations
-                        .first()
-                        .and_then(|nomination| nomination.ids())
-                });
+                let uuid_sets = uuid_nominations
+                    .iter()
+                    .filter_map(|nomination| nomination.ids())
+                    .map(|ids| ids as &dyn crate::uuid_set::UuidMembership)
+                    .collect::<Vec<_>>();
                 let selected_properties = projection
                     .as_ref()
                     .map(|names| names.iter().cloned().collect());
@@ -640,7 +600,7 @@ impl ExecutionPlan for PropertyOverlayExec {
                     batch_size,
                     selected_properties.as_ref(),
                     equality.as_ref(),
-                    uuids,
+                    &uuid_sets,
                     |batch| {
                         let mut batch = project_batch(batch)?;
                         if let Some(rows) = remaining.as_mut() {
@@ -695,7 +655,7 @@ impl ExecutionPlan for PropertyOverlayExec {
                             batch_size,
                             selected_properties.as_ref(),
                             equality.as_ref(),
-                            uuids,
+                            &uuid_sets,
                             |batch| {
                                 let mut batch = project_batch(batch)?;
                                 let Some(rows) = replay_remaining.as_mut() else {

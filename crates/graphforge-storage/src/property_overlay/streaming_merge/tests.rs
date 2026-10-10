@@ -172,7 +172,7 @@ fn spooled(inventory: &AuthenticatedPropertyInventory) -> Vec<PropertySnapshotRo
 
 fn streamed(
     inventory: &AuthenticatedPropertyInventory,
-    uuids: Option<&BTreeSet<[u8; 16]>>,
+    uuids: Option<&dyn crate::uuid_set::UuidMembership>,
 ) -> (Vec<PropertySnapshotRow>, PropertyOverlayMetrics) {
     let mut rows = Vec::new();
     let metrics = inventory
@@ -258,7 +258,7 @@ fn a_uuid_restricted_read_resolves_each_target_against_newer_fragments() {
     let all = spooled(&inventory);
     // 5 is resurrected, 60 is deleted, 17 and 45 are rewritten, 70 is untouched
     // and 99 does not exist.
-    let targets = [5, 17, 45, 60, 70, 99].map(uuid).into_iter().collect();
+    let targets: BTreeSet<_> = [5, 17, 45, 60, 70, 99].map(uuid).into_iter().collect();
     let (rows, metrics) = streamed(&inventory, Some(&targets));
     let expected = all
         .into_iter()

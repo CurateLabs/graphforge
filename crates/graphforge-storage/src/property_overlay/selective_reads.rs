@@ -8,8 +8,6 @@
 //! Pruning only ever removes work that cannot change the answer. A missing,
 //! deprecated or non-comparable statistic keeps its row group.
 
-use std::collections::BTreeSet;
-
 use arrow::datatypes::DataType;
 use graphforge_ir::IrLiteral;
 use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
@@ -72,7 +70,7 @@ pub(crate) enum RowGroupSelection<'a> {
     /// Every row group.
     All,
     /// Row groups whose UUID range can hold one of these UUIDs.
-    Uuids(&'a BTreeSet<[u8; 16]>),
+    Uuids(&'a dyn crate::uuid_set::UuidMembership),
     /// Row groups whose statistics admit the equality.
     Equals(&'a PropertyEquality),
 }
@@ -88,7 +86,7 @@ impl RowGroupSelection<'_> {
             Self::All => return None,
             Self::Uuids(targets) => {
                 let leaf = column_leaf(metadata, uuid_field)?;
-                Box::new(move |group| group_may_hold_uuid(group, leaf, targets))
+                Box::new(move |group| group_may_hold_uuid(group, leaf, *targets))
             }
             Self::Equals(equality) => {
                 // A fragment without the column has no value to compare, and
@@ -148,9 +146,9 @@ fn uuid_bounds(group: &RowGroupMetaData, leaf: usize) -> Option<([u8; 16], [u8; 
 fn group_may_hold_uuid(
     group: &RowGroupMetaData,
     leaf: usize,
-    targets: &BTreeSet<[u8; 16]>,
+    targets: &dyn crate::uuid_set::UuidMembership,
 ) -> bool {
-    uuid_bounds(group, leaf).is_none_or(|(min, max)| targets.range(min..=max).next().is_some())
+    uuid_bounds(group, leaf).is_none_or(|(min, max)| targets.may_contain_in_range(&min, &max))
 }
 
 /// Whether a fragment can hold a row with `value` in the column.

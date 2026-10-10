@@ -276,23 +276,20 @@ fn partitioned_left_enrichment_nominates_an_anchored_frontier() {
 }
 
 #[test]
-fn partitioned_left_enrichment_rejects_an_unanchored_broad_frontier() {
+fn partitioned_left_enrichment_nominates_a_broad_frontier_with_compact_keys() {
     let config = ConfigOptions::default();
     let original = enrichment(property_scan(None, None), 4);
     let optimized = PropertyFilterApprovalRule
         .optimize(original.clone(), &config)
         .unwrap();
-    assert!(Arc::ptr_eq(&original, &optimized));
-    let join = optimized.downcast_ref::<HashJoinExec>().unwrap();
-    assert!(join.left().downcast_ref::<UuidBuildKeyTapExec>().is_none());
-    let scan = join
-        .right()
-        .downcast_ref::<RepartitionExec>()
-        .unwrap()
-        .input()
-        .downcast_ref::<PropertyOverlayExec>()
-        .unwrap();
-    assert_eq!(scan.fresh_nomination_uuid_column(), Some(0));
+    assert!(!Arc::ptr_eq(&original, &optimized));
+    let restored = optimized.downcast_ref::<RepartitionExec>().unwrap();
+    assert_eq!(restored.partitioning(), original.output_partitioning());
+    let join = restored.input().downcast_ref::<HashJoinExec>().unwrap();
+    assert_eq!(*join.partition_mode(), PartitionMode::CollectLeft);
+    assert!(join.left().downcast_ref::<UuidBuildKeyTapExec>().is_some());
+    let scan = join.right().downcast_ref::<PropertyOverlayExec>().unwrap();
+    assert_eq!(scan.fresh_nomination_uuid_column(), None);
 }
 
 #[test]

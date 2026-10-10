@@ -1,6 +1,5 @@
 //! Bounded UUID nominations observed on approved hash-join build inputs.
 
-use std::collections::BTreeSet;
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -11,6 +10,7 @@ use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
 
+use crate::uuid_set::CompactUuidSet;
 use arrow::array::Array;
 use arrow::array::FixedSizeBinaryArray;
 use arrow::datatypes::SchemaRef;
@@ -30,9 +30,6 @@ use futures::Stream;
 use tokio::sync::watch;
 
 pub(crate) const NOMINATION_BASE_BYTES: usize = 512;
-// BTreeSet nodes are not reserve-capable. This deliberately conservative per
-// UUID charge covers node metadata and unused key slots before each insertion.
-pub(crate) const NOMINATION_BYTES_PER_UUID: usize = 256;
 
 #[derive(Clone, Debug)]
 enum NominationStatus {
@@ -46,8 +43,8 @@ enum NominationStatus {
 #[derive(Debug)]
 pub(crate) struct UuidBuildKeyNomination {
     status: watch::Sender<NominationStatus>,
-    collecting: Mutex<BTreeSet<[u8; 16]>>,
-    completed: OnceLock<BTreeSet<[u8; 16]>>,
+    collecting: Mutex<CompactUuidSet>,
+    completed: OnceLock<CompactUuidSet>,
     reservation: Mutex<Option<MemoryReservation>>,
     started: AtomicBool,
 }
@@ -57,7 +54,7 @@ impl UuidBuildKeyNomination {
         let (status, _) = watch::channel(NominationStatus::Pending);
         Arc::new(Self {
             status,
-            collecting: Mutex::new(BTreeSet::new()),
+            collecting: Mutex::new(CompactUuidSet::default()),
             completed: OnceLock::new(),
             reservation: Mutex::new(None),
             started: AtomicBool::new(false),
@@ -91,53 +88,77 @@ impl UuidBuildKeyNomination {
                 )
             })?;
 
-            let exists = self
+            let mut collecting = self
                 .collecting
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .contains(&uuid);
-            if exists {
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if collecting.contains(&uuid) {
                 continue;
             }
-
-            {
-                let reservation = self
-                    .reservation
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let reservation = reservation.as_ref().ok_or_else(|| {
-                    DataFusionError::Internal(
-                        "UUID build nomination tap has no memory reservation".into(),
-                    )
-                })?;
-                reservation.try_grow(NOMINATION_BYTES_PER_UUID)?;
-            }
-
-            let inserted = self
-                .collecting
+            let mut reservation = self
+                .reservation
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(uuid);
-            if !inserted {
-                let reservation = self
-                    .reservation
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Some(reservation) = reservation.as_ref() {
-                    reservation.shrink(NOMINATION_BYTES_PER_UUID);
-                }
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let reservation = reservation.as_mut().ok_or_else(|| {
+                DataFusionError::Internal(
+                    "UUID build nomination tap has no memory reservation".into(),
+                )
+            })?;
+
+            if collecting.needs_growth_for(&uuid) {
+                let new_capacity = collecting.capacity_for_next_insert().map_err(|()| {
+                    DataFusionError::ResourcesExhausted("UUID nomination capacity overflow".into())
+                })?;
+                let requested_bytes = CompactUuidSet::storage_bytes_for_capacity(new_capacity)
+                    .ok_or_else(|| {
+                        DataFusionError::ResourcesExhausted(
+                            "UUID nomination allocation size overflow".into(),
+                        )
+                    })?;
+                let old_bytes = collecting.storage_bytes();
+                reservation.try_grow(requested_bytes)?;
+                let mut replacement = match CompactUuidSet::allocate(new_capacity) {
+                    Ok(set) => set,
+                    Err(error) => {
+                        reservation.shrink(requested_bytes);
+                        return Err(DataFusionError::ResourcesExhausted(format!(
+                            "cannot allocate UUID nomination set: {error}"
+                        )));
+                    }
+                };
+                let actual_bytes = replacement.storage_bytes();
+                debug_assert_eq!(actual_bytes, requested_bytes);
+                replacement.reinsert_all(&collecting);
+                let inserted = replacement.insert_without_growing(uuid);
+                debug_assert!(inserted);
+                let old = std::mem::replace(&mut *collecting, replacement);
+                drop(old);
+                reservation.shrink(old_bytes);
+            } else {
+                let inserted = collecting.insert_without_growing(uuid);
+                debug_assert!(inserted);
             }
         }
         Ok(())
     }
 
     fn complete(&self) {
-        let keys = std::mem::take(
+        let mut keys = std::mem::take(
             &mut *self
                 .collecting
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
+        let released = keys.finalize();
+        if released > 0 {
+            let reservation = self
+                .reservation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(reservation) = reservation.as_ref() {
+                reservation.shrink(released);
+            }
+        }
         if self.completed.set(keys).is_ok() {
             self.set_terminal(NominationStatus::Complete);
         } else {
@@ -164,7 +185,7 @@ impl UuidBuildKeyNomination {
         });
     }
 
-    pub(crate) fn ids(&self) -> Option<&BTreeSet<[u8; 16]>> {
+    pub(crate) fn ids(&self) -> Option<&CompactUuidSet> {
         self.completed.get()
     }
 
@@ -400,5 +421,94 @@ impl Drop for UuidBuildKeyTapStream {
         if !self.completed {
             self.nomination.unknown();
         }
+    }
+}
+
+#[cfg(test)]
+mod compact_set_budget_tests {
+    use std::sync::Arc;
+
+    use arrow::array::FixedSizeBinaryBuilder;
+    use datafusion::execution::TaskContext;
+    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
+    use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+
+    use super::UuidBuildKeyNomination;
+
+    fn context(pool: Arc<dyn MemoryPool>) -> TaskContext {
+        let runtime = RuntimeEnvBuilder::new()
+            .with_memory_pool(pool)
+            .build_arc()
+            .unwrap();
+        TaskContext::default().with_runtime(runtime)
+    }
+
+    #[test]
+    fn denied_growth_keeps_old_credit_until_the_set_drops() {
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1_200));
+        let nomination = UuidBuildKeyNomination::new();
+        nomination.start(&context(Arc::clone(&pool))).unwrap();
+        let mut builder = FixedSizeBinaryBuilder::new(16);
+        for value in 0..9_u128 {
+            builder.append_value(value.to_be_bytes()).unwrap();
+        }
+
+        assert!(nomination.observe(&builder.finish()).is_err());
+        let collecting = nomination
+            .collecting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(collecting.len(), 8);
+        drop(collecting);
+        let reservation = nomination
+            .reservation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(reservation.as_ref().unwrap().size(), 512 + 16 * 16 + 8);
+        assert_eq!(pool.reserved(), 512 + 16 * 16 + 8);
+        drop(reservation);
+        drop(nomination);
+        assert_eq!(pool.reserved(), 0);
+    }
+
+    #[test]
+    fn two_million_distinct_uuids_fit_a_bounded_reservation() {
+        const MIB: usize = 1024 * 1024;
+        const IDS: usize = 2_000_000;
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(144 * MIB));
+        let held_join_input = MemoryConsumer::new("test hash join input").register(&pool);
+        held_join_input.try_grow(32 * MIB).unwrap();
+        let nomination = UuidBuildKeyNomination::new();
+        nomination.start(&context(Arc::clone(&pool))).unwrap();
+
+        let batch_rows = 32_768;
+        for start in (0..IDS).step_by(batch_rows) {
+            let end = (start + batch_rows).min(IDS);
+            let mut builder = FixedSizeBinaryBuilder::new(16);
+            for value in start..end {
+                builder.append_value((value as u128).to_be_bytes()).unwrap();
+            }
+            nomination.observe(&builder.finish()).unwrap();
+        }
+        let mut duplicates = FixedSizeBinaryBuilder::new(16);
+        duplicates.append_value((0_u128).to_be_bytes()).unwrap();
+        duplicates
+            .append_value(((IDS - 1) as u128).to_be_bytes())
+            .unwrap();
+        duplicates.append_null();
+        nomination.observe(&duplicates.finish()).unwrap();
+        nomination.complete();
+
+        {
+            let ids = nomination.ids().expect("complete set is published");
+            assert_eq!(ids.len(), IDS);
+            assert!(ids.contains(&0_u128.to_be_bytes()));
+            assert!(ids.contains(&((IDS - 1) as u128).to_be_bytes()));
+        }
+        assert!(pool.reserved() < 100 * MIB);
+        drop(nomination);
+        assert_eq!(pool.reserved(), 32 * MIB);
+        drop(held_join_input);
+        assert_eq!(pool.reserved(), 0);
     }
 }

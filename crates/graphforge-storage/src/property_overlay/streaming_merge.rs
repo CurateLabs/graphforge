@@ -14,7 +14,8 @@
 //! must not write.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeSet, BinaryHeap};
+use std::collections::BTreeSet;
+use std::collections::BinaryHeap;
 
 use super::projected_reads::{
     DecodedRetention, ProjectedMetricSources, ProjectedReaderContext, PropertyParquetRows,
@@ -35,7 +36,7 @@ pub(crate) struct RouteRead<'a> {
     pub(crate) selected_properties: Option<&'a BTreeSet<String>>,
     /// Restrict the read to these UUIDs. The newest snapshot of each is still
     /// resolved against every fragment that can hold it.
-    pub(crate) uuids: Option<&'a BTreeSet<[u8; 16]>>,
+    pub(crate) uuids: Option<&'a dyn crate::uuid_set::UuidMembership>,
     pub(crate) limits: PropertyOverlayLimits,
     /// Collect exact returned work.
     pub(crate) collect: bool,
@@ -105,7 +106,7 @@ impl Cursor {
     /// Move to the next row this read wants, validating the fragment's order.
     fn advance(
         &mut self,
-        uuids: Option<&BTreeSet<[u8; 16]>>,
+        uuids: Option<&dyn crate::uuid_set::UuidMembership>,
         metrics: &mut PropertyOverlayMetrics,
     ) -> Result<bool, GfError> {
         self.head = None;
@@ -127,7 +128,7 @@ impl Cursor {
             }
             self.prior = Some(row.uuid);
             metrics.physical_rows = metrics.physical_rows.saturating_add(1);
-            if uuids.is_some_and(|wanted| !wanted.contains(&row.uuid)) {
+            if uuids.is_some_and(|wanted| !wanted.contains_uuid(&row.uuid)) {
                 continue;
             }
             self.head = Some(row);
@@ -164,7 +165,7 @@ impl AuthenticatedPropertyInventory {
             let footer = self.fragment_footer_of(fragment, read.kind, read.route)?;
             let range = footer.uuid_range;
             if let (Some(wanted), Some((min, max))) = (read.uuids, range)
-                && wanted.range(min..=max).next().is_none()
+                && !wanted.may_contain_in_range(&min, &max)
             {
                 continue;
             }
@@ -250,7 +251,7 @@ impl AuthenticatedPropertyInventory {
     fn take_head(
         cursors: &mut [Option<Cursor>],
         index: usize,
-        uuids: Option<&BTreeSet<[u8; 16]>>,
+        uuids: Option<&dyn crate::uuid_set::UuidMembership>,
         heap: &mut BinaryHeap<HeapKey>,
         metrics: &mut PropertyOverlayMetrics,
     ) -> Result<PropertySnapshotRow, GfError> {

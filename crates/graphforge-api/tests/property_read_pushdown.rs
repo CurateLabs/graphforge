@@ -411,6 +411,35 @@ fn anchored_destination_property_reads_do_not_grow_with_unrelated_rows() {
     }
 }
 
+#[test]
+fn topk_variable_length_frontier_nominates_only_its_enrichment_keys() {
+    let _serial = serial();
+    let built = build(SMALL_NODES);
+    let query = "MATCH path = (a:Entity {ident: $ident})-[:LINK*1..3]-(b:Entity) \
+                 WHERE NOT a = b \
+                 WITH b, min(length(path)) AS distance \
+                 ORDER BY distance ASC, b.ident ASC \
+                 LIMIT 20 \
+                 OPTIONAL MATCH (b)-[:LINK]->(c:Entity) \
+                 RETURN b.ident AS selected, b.padding AS payload, c.ident AS neighbor";
+    let forge = open(&built.project);
+    let plan = forge
+        .explain_stage(
+            &query.replace("$ident", "5"),
+            graphforge_api::ExplainStage::PhysicalPlan,
+        )
+        .expect("physical plan");
+    assert!(
+        plan.contains("VarLenExpandExec: rel=LINK, hops=1..3"),
+        "{plan}"
+    );
+    assert!(plan.contains("TopK(fetch=20)"), "{plan}");
+    assert!(
+        plan.contains("UuidBuildKeyTapExec"),
+        "the selected top-K endpoint must nominate its exact enrichment UUIDs:\n{plan}"
+    );
+}
+
 /// A partitioned hash join switches to its map representation for a larger
 /// UUID frontier. The producer tap must still finish and preserve the exact
 /// result when that frontier contains more than 150 destinations.

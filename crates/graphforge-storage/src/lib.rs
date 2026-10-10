@@ -37,6 +37,7 @@ mod property_filter_approval;
 mod property_join_nomination;
 #[cfg(test)]
 mod property_join_nomination_tests;
+mod uuid_set;
 pub use property_filter_approval::{
     PropertyFilterApprovalRule, SelectedEndpointPropertyFilterApprovalRule, is_filtered_uuid_seed,
 };

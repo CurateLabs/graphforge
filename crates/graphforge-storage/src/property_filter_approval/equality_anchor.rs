@@ -12,6 +12,7 @@ use datafusion::physical_expr::{Partitioning, PhysicalExpr};
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::joins::{HashJoinExec, PartitionMode};
+#[cfg(test)]
 use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
@@ -186,6 +187,7 @@ fn filtered_uuid_seed_node_id(plan: &dyn ExecutionPlan) -> Option<usize> {
 /// Return the output UUID/node-id pair proved by the strict equality seed.
 /// Keeping both ordinals lets downstream rules verify that the exact UUID
 /// they nominate belongs to the same filtered graph row as the selected ID.
+#[cfg(test)]
 pub(super) fn filtered_uuid_seed_columns(plan: &dyn ExecutionPlan) -> Option<(usize, usize)> {
     let (uuid_index, node_id_index) = filtered_uuid_seed_columns_with_optional_uuid(plan)?;
     Some((uuid_index?, node_id_index))
@@ -323,6 +325,7 @@ fn filtered_uuid_seed_side_columns(
 /// Prove that one exact output column is the UUID from a strict equality seed.
 /// Only schema-preserving wrappers and direct-column projections may sit
 /// between the seed join and the nominated build key.
+#[cfg(test)]
 pub(super) fn filtered_seed_uuid_key(plan: &dyn ExecutionPlan, output_index: usize) -> bool {
     if let Some((uuid_index, _)) = filtered_uuid_seed_columns(plan) {
         return uuid_index == output_index;

@@ -110,7 +110,7 @@ where
         batch_size,
         selected_properties,
         None,
-        None,
+        &[],
         visit,
     )
 }
@@ -130,7 +130,7 @@ pub(crate) fn visit_property_overlay_batched_selected<F>(
     batch_size: usize,
     selected_properties: Option<&std::collections::BTreeSet<String>>,
     equality: Option<&crate::property_overlay::PropertyEquality>,
-    uuids: Option<&std::collections::BTreeSet<[u8; 16]>>,
+    uuid_sets: &[&dyn crate::uuid_set::UuidMembership],
     mut visit: F,
 ) -> Result<Option<crate::PropertyOverlayMetrics>, DataFusionError>
 where
@@ -181,13 +181,19 @@ where
             .map_err(|error| DataFusionError::External(Box::new(error)))?,
         None => None,
     };
-    let candidate_uuids = match (candidates, uuids) {
-        (Some((candidates, work)), wanted) => {
+    let candidate_uuids = match candidates {
+        Some((candidates, work)) => {
             metrics.absorb(&work);
-            Some(wanted.map_or(candidates.clone(), |wanted| &candidates & wanted))
+            Some(candidates)
         }
-        (None, wanted) => wanted.cloned(),
+        None => None,
     };
+    let uuid_filter = (!uuid_sets.is_empty() || candidate_uuids.is_some()).then_some(
+        crate::uuid_set::UuidFilter {
+            nominations: uuid_sets,
+            candidates: candidate_uuids.as_ref(),
+        },
+    );
     // The compared column is needed to check the winner of each candidate.
     let streamed_properties = match (equality, selected_properties) {
         (Some(equality), Some(selected)) => {
@@ -200,15 +206,14 @@ where
     let mut rows = Vec::with_capacity(batch_size.max(1));
     let mut stopped = false;
     let mut failure = None;
-    if candidate_uuids
-        .as_ref()
-        .is_none_or(|uuids| !uuids.is_empty())
-    {
+    if uuid_filter.as_ref().is_none_or(|uuids| !uuids.is_empty()) {
         let read = crate::property_overlay::RouteRead {
             kind,
             route: stem,
             selected_properties: streamed_properties.as_ref(),
-            uuids: candidate_uuids.as_ref(),
+            uuids: uuid_filter
+                .as_ref()
+                .map(|uuids| uuids as &dyn crate::uuid_set::UuidMembership),
             limits,
             collect,
         };
@@ -216,7 +221,7 @@ where
             .visit_route_streaming(&read, |row| {
                 // A candidate's newest snapshot may differ from the value the
                 // candidate scan saw; the predicate decides.
-                if candidate_uuids.is_some()
+                if uuid_filter.is_some()
                     && equality.is_some_and(|equality| !equality.holds(&row.values))
                 {
                     return Ok(true);

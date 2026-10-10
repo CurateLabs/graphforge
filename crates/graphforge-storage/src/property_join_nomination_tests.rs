@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -61,7 +60,10 @@ async fn tap_forwards_batches_and_publishes_deduplicated_non_null_uuid_keys() {
     let forwarded = stream.next().await.unwrap().unwrap();
     assert_eq!(forwarded.num_rows(), 4);
     assert!(stream.next().await.is_none());
-    assert_eq!(nomination.ids(), Some(&BTreeSet::from([second, first])));
+    let ids = nomination.ids().expect("complete tap publishes keys");
+    assert_eq!(ids.len(), 2);
+    assert!(ids.contains(&first));
+    assert!(ids.contains(&second));
 }
 
 #[tokio::test]
@@ -118,7 +120,7 @@ async fn empty_build_publishes_a_complete_empty_uuid_set() {
     let mut stream = tap.execute(0, Arc::new(TaskContext::default())).unwrap();
 
     assert!(stream.next().await.is_none());
-    assert_eq!(nomination.ids(), Some(&BTreeSet::new()));
+    assert!(nomination.ids().is_some_and(|ids| ids.is_empty()));
 }
 
 #[tokio::test]
