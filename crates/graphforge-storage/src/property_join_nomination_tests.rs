@@ -511,3 +511,116 @@ fn equality_anchor_rejects_limits_order_and_stale_nominations() {
         assert!(after.downcast_ref::<HashJoinExec>().is_some());
     }
 }
+
+fn strict_property_filter_pipeline(
+    predicate: Arc<dyn PhysicalExpr>,
+    round_robin: bool,
+) -> Arc<dyn ExecutionPlan> {
+    let scan: Arc<dyn ExecutionPlan> = Arc::new(property_scan(
+        None,
+        Some(PropertyEquality {
+            column: "ident".into(),
+            value: EqualityValue::Int(7),
+        }),
+    ));
+    let input = if round_robin {
+        Arc::new(
+            RepartitionExec::try_new(
+                scan,
+                datafusion::physical_expr::Partitioning::RoundRobinBatch(4),
+            )
+            .unwrap(),
+        ) as Arc<dyn ExecutionPlan>
+    } else {
+        scan
+    };
+    Arc::new(datafusion::physical_plan::filter::FilterExec::try_new(predicate, input).unwrap())
+}
+
+fn equality_join_with_pipeline(pipeline: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
+    let original = partitioned_equality_join(property_scan(None, None), false);
+    let join = original.downcast_ref::<HashJoinExec>().unwrap();
+    let exchange = join.right().downcast_ref::<RepartitionExec>().unwrap();
+    let right: Arc<dyn ExecutionPlan> =
+        Arc::new(RepartitionExec::try_new(pipeline, exchange.partitioning().clone()).unwrap());
+    join.builder()
+        .with_new_children(vec![Arc::clone(join.left()), right])
+        .unwrap()
+        .reset_state()
+        .recompute_properties()
+        .build_exec()
+        .unwrap()
+}
+
+#[test]
+fn equality_anchor_retains_the_real_filtered_round_robin_build_pipeline() {
+    use datafusion::common::ScalarValue;
+    use datafusion::logical_expr::Operator;
+    use datafusion::physical_expr::expressions::{BinaryExpr, Literal};
+    use datafusion::physical_optimizer::sanity_checker::SanityCheckPlan;
+    use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+
+    for round_robin in [false, true] {
+        for reversed in [false, true] {
+            let column: Arc<dyn PhysicalExpr> = Arc::new(Column::new("ident", 1));
+            let literal: Arc<dyn PhysicalExpr> =
+                Arc::new(Literal::new(ScalarValue::Int64(Some(7))));
+            let (left, right) = if reversed {
+                (literal, column)
+            } else {
+                (column, literal)
+            };
+            let predicate = Arc::new(BinaryExpr::new(left, Operator::Eq, right));
+            let pipeline = strict_property_filter_pipeline(predicate, round_robin);
+            let original = equality_join_with_pipeline(Arc::clone(&pipeline));
+            let schema = original.schema();
+            let distribution = original.output_partitioning().clone();
+            let rewritten = PropertyFilterApprovalRule
+                .optimize(original, &ConfigOptions::default())
+                .unwrap();
+            assert_eq!(rewritten.schema(), schema);
+            assert_eq!(rewritten.output_partitioning(), &distribution);
+            let restored = rewritten.downcast_ref::<RepartitionExec>().unwrap();
+            let join = restored.input().downcast_ref::<HashJoinExec>().unwrap();
+            assert_eq!(*join.partition_mode(), PartitionMode::CollectLeft);
+            let coalesced = join
+                .left()
+                .downcast_ref::<CoalescePartitionsExec>()
+                .unwrap();
+            assert!(Arc::ptr_eq(coalesced.input(), &pipeline));
+            SanityCheckPlan::new()
+                .optimize(rewritten, &ConfigOptions::default())
+                .expect("residual filter and parent distribution remain valid");
+        }
+    }
+}
+
+#[test]
+fn equality_anchor_rejects_unmatched_null_and_computed_residual_predicates() {
+    use datafusion::common::ScalarValue;
+    use datafusion::logical_expr::Operator;
+    use datafusion::physical_expr::expressions::{BinaryExpr, Literal};
+
+    let column: Arc<dyn PhysicalExpr> = Arc::new(Column::new("ident", 1));
+    let seven: Arc<dyn PhysicalExpr> = Arc::new(Literal::new(ScalarValue::Int64(Some(7))));
+    let eight: Arc<dyn PhysicalExpr> = Arc::new(Literal::new(ScalarValue::Int64(Some(8))));
+    let null: Arc<dyn PhysicalExpr> = Arc::new(Literal::new(ScalarValue::Int64(None)));
+    let computed: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+        Arc::clone(&column),
+        Operator::Plus,
+        Arc::clone(&seven),
+    ));
+    for (left, right) in [
+        (Arc::clone(&column), eight),
+        (column, null),
+        (computed, seven),
+    ] {
+        let predicate = Arc::new(BinaryExpr::new(left, Operator::Eq, right));
+        let pipeline = strict_property_filter_pipeline(predicate, true);
+        let original = equality_join_with_pipeline(pipeline);
+        let rewritten = PropertyFilterApprovalRule
+            .optimize(Arc::clone(&original), &ConfigOptions::default())
+            .unwrap();
+        assert!(Arc::ptr_eq(&original, &rewritten));
+    }
+}

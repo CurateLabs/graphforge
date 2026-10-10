@@ -32,7 +32,10 @@ fn rows(graph: &GraphForge, query: &str) -> Vec<Vec<String>> {
                     .columns()
                     .iter()
                     .map(|column| {
-                        if column.is_null(row) {
+                        if column
+                            .logical_nulls()
+                            .is_some_and(|nulls| nulls.is_null(row))
+                        {
                             "null".to_owned()
                         } else {
                             array_value_to_string(column, row).unwrap()
@@ -43,6 +46,18 @@ fn rows(graph: &GraphForge, query: &str) -> Vec<Vec<String>> {
         }
     }
     rows
+}
+
+#[test]
+fn a_scalar_null_optional_anchor_keeps_null_path_functions() {
+    for graph in [GraphForge::new(None).unwrap(), graph()] {
+        for function in ["nodes", "relationships"] {
+            let query = format!(
+                "WITH null AS a OPTIONAL MATCH p = (a)-[r]->() RETURN {function}(p), {function}(null)"
+            );
+            assert_eq!(rows(&graph, &query), vec![vec!["null", "null"]]);
+        }
+    }
 }
 
 #[test]

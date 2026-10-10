@@ -263,6 +263,59 @@ impl PropertyOverlayExec {
         matching.next().is_none().then_some(index)
     }
 
+    /// Recognize the retained, strict physical predicate for this scan's hint.
+    /// Computed expressions and coercions cannot authorize moving its build.
+    pub(crate) fn equality_filter_matches(&self, expression: &dyn PhysicalExpr) -> bool {
+        use crate::property_overlay::EqualityValue;
+        use datafusion::common::ScalarValue;
+        use datafusion::logical_expr::Operator;
+        use datafusion::physical_expr::expressions::{BinaryExpr, Literal};
+
+        let Some(equality) = &self.equality else {
+            return false;
+        };
+        let Some(binary) = expression.downcast_ref::<BinaryExpr>() else {
+            return false;
+        };
+        if binary.op() != &Operator::Eq {
+            return false;
+        }
+        [
+            (binary.left(), binary.right()),
+            (binary.right(), binary.left()),
+        ]
+        .into_iter()
+        .any(|(column, literal)| {
+            let Some(column) = column.downcast_ref::<Column>() else {
+                return false;
+            };
+            let Some(literal) = literal.downcast_ref::<Literal>() else {
+                return false;
+            };
+            let Some(field) = self.schema.fields().get(column.index()) else {
+                return false;
+            };
+            if column.name() != equality.column
+                || field.name() != column.name()
+                || field.data_type() != &equality.value.data_type()
+            {
+                return false;
+            }
+            match (&equality.value, literal.value()) {
+                (EqualityValue::Int(expected), ScalarValue::Int64(Some(actual))) => {
+                    expected == actual
+                }
+                (EqualityValue::Str(expected), ScalarValue::Utf8(Some(actual))) => {
+                    expected == actual
+                }
+                (EqualityValue::Bool(expected), ScalarValue::Boolean(Some(actual))) => {
+                    expected == actual
+                }
+                _ => false,
+            }
+        })
+    }
+
     pub(crate) fn with_uuid_nomination(
         &self,
         nomination: Arc<crate::property_join_nomination::UuidBuildKeyNomination>,

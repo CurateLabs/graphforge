@@ -10,6 +10,7 @@ use datafusion::physical_expr::equivalence::AcrossPartitions;
 use datafusion::physical_expr::expressions::Column;
 use datafusion::physical_expr::{Partitioning, PhysicalExpr};
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::joins::{HashJoinExec, PartitionMode};
 use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
@@ -49,7 +50,7 @@ pub(super) fn shared_equality_build(
     {
         return Ok(None);
     }
-    let Some(scan) = exchange.input().downcast_ref::<PropertyOverlayExec>() else {
+    let Some(scan) = equality_build_scan(exchange.input()) else {
         return Ok(None);
     };
     let Some(uuid_index) = scan.equality_build_uuid_column() else {
@@ -107,4 +108,42 @@ pub(super) fn shared_equality_build(
         rebuilt,
         output_partitioning,
     )?)))
+}
+
+/// Inspect only the schema-preserving residual equality pipeline. Its filter
+/// and round-robin exchange remain in the shared build in their original order.
+fn equality_build_scan(input: &Arc<dyn ExecutionPlan>) -> Option<&PropertyOverlayExec> {
+    if let Some(scan) = input.downcast_ref::<PropertyOverlayExec>() {
+        return Some(scan);
+    }
+    let filter = input.downcast_ref::<FilterExec>()?;
+    if filter.projection().is_some()
+        || input.fetch().is_some()
+        || input.output_ordering().is_some()
+        || input.schema().as_ref() != filter.input().schema().as_ref()
+        || input
+            .equivalence_properties()
+            .constants()
+            .iter()
+            .any(|constant| constant.across_partitions == AcrossPartitions::Heterogeneous)
+    {
+        return None;
+    }
+    let scan_input = if let Some(exchange) = filter.input().downcast_ref::<RepartitionExec>() {
+        let plan: &dyn ExecutionPlan = exchange;
+        if !matches!(exchange.partitioning(), Partitioning::RoundRobinBatch(count) if *count > 0)
+            || exchange.preserve_order()
+            || exchange.fetch().is_some()
+            || plan.output_ordering().is_some()
+            || plan.schema().as_ref() != exchange.input().schema().as_ref()
+        {
+            return None;
+        }
+        exchange.input()
+    } else {
+        filter.input()
+    };
+    let scan = scan_input.downcast_ref::<PropertyOverlayExec>()?;
+    scan.equality_filter_matches(filter.predicate().as_ref())
+        .then_some(scan)
 }
