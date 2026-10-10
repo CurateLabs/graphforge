@@ -1098,3 +1098,44 @@ fn a_changed_replay_cannot_publish_through_the_session() {
     assert!(error.to_string().contains("topology versions"), "{error}");
     assert!(!session.publication_committed());
 }
+
+#[test]
+fn crc_valid_raw_edge_block_with_a_partial_record_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = crate::graph_construction_encoding::StableDirectory::open(root.path()).unwrap();
+    let scratch = Scratch::create(&directory).unwrap();
+    let partitions = Partitions::create(&scratch, "edges", 1, EDGE_RECORD).unwrap();
+    let record = EdgeRecord {
+        uuid: uuid(0x20, 1),
+        src: 1,
+        dst: 2,
+        rel: 0,
+    };
+    let mut block = vec![0; 8];
+    block.extend_from_slice(&record.encode());
+    block.push(0xff);
+    // append supplies a valid CRC: the record shape, rather than corruption
+    // of the transport checksum, must be rejected by the actual reader.
+    partitions.append(&scratch, 0, &mut block).unwrap();
+    let scattered = ScatteredEdges {
+        partitions,
+        lows: vec![Some(record.uuid)],
+        refinement_write_bytes: 0,
+        refinement_read_bytes: 0,
+        refinement_steps: 0,
+        counts: vec![1],
+        rel_names: vec!["KNOWS".to_owned()],
+        histogram: None,
+        total: 1,
+        topology_proof: None,
+    };
+    let error = match scattered.load_sorted(&scratch, 0, None) {
+        Err(error) => error,
+        Ok(_) => panic!("a CRC-valid partial edge record was silently accepted"),
+    };
+    assert!(error.to_string().contains("partial edge record"), "{error}");
+    assert!(
+        scattered.partitions.path(0).exists(),
+        "invalid input stays owned until teardown"
+    );
+}

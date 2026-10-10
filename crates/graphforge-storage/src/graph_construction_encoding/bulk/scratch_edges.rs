@@ -739,6 +739,11 @@ impl ScatteredEdges {
     ) -> Result<Vec<EdgeRecord>, GfError> {
         let mut records = Vec::with_capacity(usize::try_from(self.counts[part]).map_err(storage)?);
         self.partitions.read(scratch, part, |payload| {
+            if !payload.len().is_multiple_of(EDGE_RECORD) {
+                return Err(storage(
+                    "an edge scratch block contains a partial edge record",
+                ));
+            }
             records.extend(payload.chunks_exact(EDGE_RECORD).map(EdgeRecord::decode));
             Ok(())
         })?;
