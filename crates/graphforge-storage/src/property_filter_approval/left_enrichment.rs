@@ -73,6 +73,20 @@ pub(super) fn nominate_partitioned_left_selected(
         Arc::clone(&nomination),
     ));
     let nominated: Arc<dyn ExecutionPlan> = Arc::new(scan.with_uuid_nomination(nomination));
+    if selected_key.is_none() {
+        let rebuilt = join
+            .builder()
+            .with_new_children(vec![tapped, nominated])?
+            .with_partition_mode(PartitionMode::CollectLeft)
+            .reset_state()
+            .recompute_properties()
+            .build_exec()?;
+        if rebuilt.schema().as_ref() != original.schema().as_ref() {
+            return Ok(None);
+        }
+        return Ok(Some(Arc::new(RepartitionExec::try_new(rebuilt, output)?)));
+    }
+
     let original_projection = join.projection.as_ref().map(|p| p.to_vec());
     let mut lifted_projection = original_projection.clone().unwrap_or_else(|| {
         (0..join.left().schema().fields().len() + join.right().schema().fields().len()).collect()
