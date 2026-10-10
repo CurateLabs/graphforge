@@ -37,9 +37,18 @@ pub(super) struct IpcSchemaEnvelope {
     pub(super) peak_request_bytes: u64,
 }
 
-#[derive(Default)]
 struct Requests {
+    capacity: u64,
     envelope: IpcSchemaEnvelope,
+}
+
+impl Requests {
+    fn new(capacity: u64) -> Self {
+        Self {
+            capacity,
+            envelope: IpcSchemaEnvelope::default(),
+        }
+    }
 }
 
 fn malformed() -> GfError {
@@ -71,10 +80,15 @@ fn add_request(requests: &mut Requests, request: Request) -> Result<(), GfError>
         &mut requests.envelope.retained_request_bytes,
         request.retained_bytes,
     )?;
-    add(
-        &mut requests.envelope.peak_request_bytes,
-        request.peak_bytes,
-    )
+    add_peak(requests, request.peak_bytes)
+}
+
+fn add_peak(requests: &mut Requests, bytes: u64) -> Result<(), GfError> {
+    add(&mut requests.envelope.peak_request_bytes, bytes)?;
+    if requests.envelope.peak_request_bytes > requests.capacity {
+        return Err(overflow());
+    }
+    Ok(())
 }
 
 fn add_exact_layout(requests: &mut Requests, bytes: u64) -> Result<(), GfError> {
@@ -88,10 +102,7 @@ fn add_exact_layout(requests: &mut Requests, bytes: u64) -> Result<(), GfError> 
 }
 
 fn add_temporary_request(requests: &mut Requests, request: Request) -> Result<(), GfError> {
-    add(
-        &mut requests.envelope.peak_request_bytes,
-        request.peak_bytes,
-    )
+    add_peak(requests, request.peak_bytes)
 }
 
 fn vector_growth<T>(requests: &mut Requests, elements: usize) -> Result<(), GfError> {
@@ -185,7 +196,7 @@ pub(super) fn preflight(
         return Err(cancelled());
     }
     let fields = schema.fields().ok_or_else(malformed)?;
-    let mut requests = Requests::default();
+    let mut requests = Requests::new(capacity);
     let field_count = fields.len();
     vector_growth::<arrow::datatypes::Field>(&mut requests, field_count)?;
     for index in 0..field_count {

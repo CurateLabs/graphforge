@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit, UnionFields, UnionMode};
 use arrow::ipc::convert::{IpcSchemaEncoder, fb_to_schema};
 use arrow::ipc::root_as_schema;
+use graphforge_core::{GfError, ProjectErrorCode};
 
 use super::preflight;
 use crate::CancellationToken;
@@ -174,4 +175,74 @@ fn nesting_limit_is_applied_to_converted_fields_only() {
     // verifier tables; 30 wrappers stay below FlatBuffers' default depth 64.
     let accepted = encoded(&schema_at_depth(30));
     assert!(preflight(root_as_schema(&accepted).unwrap(), u64::MAX, None).is_ok());
+}
+
+#[test]
+fn aliased_field_budget_refuses_before_later_malformed_field() {
+    let schema = Schema::new(vec![
+        Field::new("repeated-name", DataType::Utf8, true),
+        Field::new("alias-target", DataType::Utf8, true),
+        Field::new("invalid-later", DataType::Int32, true),
+    ]);
+    let mut bytes = encoded(&schema);
+    let schema_table = read_u32(&bytes, 0);
+    let fields_field = field_slot(&bytes, schema_table, 6).unwrap();
+    let fields_vector = fields_field + read_u32(&bytes, fields_field);
+    let first_slot = fields_vector + 4;
+    let first_table = first_slot + read_u32(&bytes, first_slot);
+    let second_slot = first_slot + 4;
+    let alias_offset = first_table.checked_sub(second_slot).unwrap();
+    bytes[second_slot..second_slot + 4]
+        .copy_from_slice(&u32::try_from(alias_offset).unwrap().to_le_bytes());
+
+    let third_slot = first_slot + 8;
+    let third_table = third_slot + read_u32(&bytes, third_slot);
+    let type_field = field_slot(&bytes, third_table, 10).unwrap();
+    let int_table = type_field + read_u32(&bytes, type_field);
+    let width_field = field_slot(&bytes, int_table, 4).unwrap();
+    bytes[width_field..width_field + 4].copy_from_slice(&7_i32.to_le_bytes());
+
+    let borrowed = root_as_schema(&bytes).expect("aliased and malformed-semantic tables verify");
+    assert!(matches!(
+        preflight(root_as_schema(&bytes).unwrap(), u64::MAX, None),
+        Err(GfError::Storage(_))
+    ));
+
+    // Derive a threshold after the first occurrence but before the second
+    // alias. This ensures the budget refusal occurs before the malformed third
+    // field can be visited and reported as a storage/schema error.
+    let fields = borrowed.fields().unwrap();
+    let mut requests = super::Requests::new(u64::MAX);
+    super::vector_growth::<Field>(&mut requests, fields.len()).unwrap();
+    super::walk_field(
+        &mut requests,
+        fields.get(0),
+        0,
+        true,
+        borrowed.endianness(),
+        None,
+    )
+    .unwrap();
+    let first_peak = requests.envelope.peak_request_bytes;
+    super::walk_field(
+        &mut requests,
+        fields.get(1),
+        0,
+        true,
+        borrowed.endianness(),
+        None,
+    )
+    .unwrap();
+    let second_peak = requests.envelope.peak_request_bytes;
+    assert!(second_peak > first_peak);
+    let capacity = first_peak + (second_peak - first_peak - 1) / 2;
+    assert!(capacity >= first_peak && capacity < second_peak);
+
+    assert!(matches!(
+        preflight(root_as_schema(&bytes).unwrap(), capacity, None),
+        Err(GfError::Project {
+            code: ProjectErrorCode::ResourceLimit,
+            ..
+        })
+    ));
 }
