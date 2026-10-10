@@ -373,10 +373,10 @@ fn decompress(
     match codec {
         Compression::SNAPPY => super::parquet_codec::snappy(input, output)?,
         Compression::GZIP(_) => {
-            super::parquet_codec::gzip_cancellable(input, output, workspace, cancellation)?
+            super::parquet_codec::gzip_cancellable(input, output, workspace, cancellation)?;
         }
         Compression::BROTLI(_) => {
-            super::parquet_brotli::decode_cancellable(input, output, workspace, cancellation)?
+            super::parquet_brotli::decode_cancellable(input, output, workspace, cancellation)?;
         }
         Compression::ZSTD(_) => super::parquet_codec::zstd(input, output, workspace)?,
         Compression::LZ4_RAW => raw_lz4(input, output, cancellation)?,
@@ -397,7 +397,7 @@ fn decompress(
             }
         }
         Compression::UNCOMPRESSED => return Err(storage("Unexpected uncompressed codec dispatch")),
-        _ => return Err(storage("Unsupported Parquet compression codec")),
+        Compression::LZO => return Err(storage("Unsupported Parquet compression codec")),
     }
     check(cancellation)
 }

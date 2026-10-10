@@ -12,7 +12,9 @@ use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::properties::WriterProperties;
 
-use super::{FOOTER_PARSE_FACTOR, require_footer_fits};
+use super::{
+    FOOTER_PARSE_FACTOR, PLANNING_FLOOR_BYTES, load_admitted_parquet_metadata, require_footer_fits,
+};
 
 /// Parsed metadata bytes per footer byte of a file of this shape.
 fn parse_ratio(columns: usize, groups: usize, rows_per_group: usize) -> f64 {
@@ -89,5 +91,44 @@ fn a_footer_the_budget_cannot_parse_is_refused_before_it_is_read() {
         }
     ));
     // Under a gigabyte the build is staged, which this check does not gate.
-    require_footer_fits(19_313, 512 << 10).unwrap();
+    require_footer_fits(19_313, PLANNING_FLOOR_BYTES).unwrap();
+}
+
+#[test]
+fn native_footer_and_schema_parsing_share_the_owned_footer_budget() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "value",
+        DataType::Int64,
+        false,
+    )]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(Int64Array::from(vec![7_i64]))],
+    )
+    .unwrap();
+    let mut writer = ArrowWriter::try_new(file.reopen().unwrap(), schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+
+    let mut source = File::open(file.path()).unwrap();
+    let (metadata, _) = load_admitted_parquet_metadata(&source, 1 << 20, None).unwrap();
+    assert_eq!(metadata.metadata().file_metadata().num_rows(), 1);
+
+    let length = source.metadata().unwrap().len();
+    source.seek(SeekFrom::Start(length - 8)).unwrap();
+    let mut tail = [0_u8; 8];
+    source.read_exact(&mut tail).unwrap();
+    let footer = u64::from(u32::from_le_bytes(tail[..4].try_into().unwrap())) + 8;
+    let error = match load_admitted_parquet_metadata(&source, footer, None) {
+        Ok(_) => panic!("footer metadata allocations exceeded their admitted envelope"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        graphforge_core::GfError::Project {
+            code: graphforge_core::ProjectErrorCode::ResourceLimit,
+            ..
+        }
+    ));
 }

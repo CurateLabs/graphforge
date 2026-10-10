@@ -49,6 +49,22 @@ pub(super) struct FooterCountFacts {
 }
 
 impl FooterCountFacts {
+    pub(super) fn retained_bytes(&self) -> Result<u64, GfError> {
+        self.vector_bytes
+            .checked_add(self.owned_payload_bytes)
+            .and_then(|bytes| bytes.checked_add(self.fixed_allocation_bytes))
+            .and_then(|bytes| bytes.checked_add(self.bytes_control_bytes))
+            .ok_or_else(allocation_limit)
+    }
+
+    pub(super) fn peak_bytes(&self) -> Result<u64, GfError> {
+        self.vector_peak_bytes
+            .checked_add(self.owned_payload_bytes)
+            .and_then(|bytes| bytes.checked_add(self.fixed_allocation_bytes))
+            .and_then(|bytes| bytes.checked_add(self.bytes_control_bytes))
+            .ok_or_else(allocation_limit)
+    }
+
     fn account_vector(&mut self, bytes: usize, budget: u64) -> Result<(), GfError> {
         let bytes = u64::try_from(bytes).map_err(|_| allocation_limit())?;
         self.vector_bytes = self
@@ -203,7 +219,7 @@ fn admit_list(
         .and_then(|value| value.checked_add(facts.fixed_allocation_bytes))
         .and_then(|value| value.checked_add(facts.bytes_control_bytes))
         .ok_or_else(allocation_limit)?;
-    let remaining = budget.checked_sub(used).unwrap_or(0);
+    let remaining = budget.saturating_sub(used);
     let list = cursor.allocating_list(width, remaining)?;
     let bytes = list.count.checked_mul(width).ok_or_else(allocation_limit)?;
     facts.account_vector(bytes, budget)?;
@@ -621,7 +637,7 @@ fn page_encoding_stats(cursor: &mut CompactSlice<'_>) -> Result<(), GfError> {
     let mut required = 0u8;
     while let Some((id, kind)) = field(cursor, &mut previous)? {
         match id {
-            1 | 2 | 3 => {
+            1..=3 => {
                 let _ = cursor.read_i32()?;
                 required |= 1 << (id - 1);
             }
@@ -729,10 +745,9 @@ fn column_chunk(
                 let mut meta_previous = 0;
                 while let Some((meta_id, meta_kind)) = field(cursor, &mut meta_previous)? {
                     match meta_id {
-                        1 | 4 => skip(cursor, Kind::I32)?,
+                        1 | 4 | 15 => skip(cursor, Kind::I32)?,
                         2 => encoding_mask_list(cursor)?,
                         5 | 6 | 7 | 9 | 10 | 11 | 14 => skip(cursor, Kind::I64)?,
-                        15 => skip(cursor, Kind::I32)?,
                         12 => statistics(cursor, facts, budget, physical_type >= 6)?,
                         13 => encoding_stats_mask(cursor)?, // Default options retain only a mask.
                         16 => size_statistics(cursor, facts, budget)?,
@@ -744,10 +759,7 @@ fn column_chunk(
             _ => skip(cursor, kind)?,
         }
     }
-    if !has_file_offset {
-        return Err(malformed());
-    }
-    Ok(())
+    has_file_offset.then_some(()).ok_or_else(malformed)
 }
 
 fn row_group(
@@ -778,10 +790,7 @@ fn row_group(
                 if count > cursor.remaining().len() {
                     return Err(malformed());
                 }
-                if !columns_seen {
-                    columns_seen = true;
-                    columns_appended = count;
-                } else {
+                if columns_seen {
                     columns_appended = columns_appended
                         .checked_add(count)
                         .ok_or_else(allocation_limit)?;
@@ -795,6 +804,9 @@ fn row_group(
                     let peak =
                         usize::try_from(envelope.peak_bytes).map_err(|_| allocation_limit())?;
                     facts.account_vector(peak, budget)?;
+                } else {
+                    columns_seen = true;
+                    columns_appended = count;
                 }
                 let mut schema_cursor = CompactSlice::new(schema_bytes, cancellation);
                 let mut elements_left = schema_elements;
@@ -823,7 +835,11 @@ fn row_group(
             }
             2 | 3 => {
                 skip(cursor, Kind::I64)?;
-                required |= if id == 2 { 2 } else { 4 };
+                required |= match id {
+                    2 => 2,
+                    3 => 4,
+                    _ => unreachable!("matched row-group field id"),
+                };
             }
             4 => {
                 let count = admit_list(cursor, facts, size_of::<SortingColumn>(), budget)?;
@@ -834,10 +850,9 @@ fn row_group(
             5 => {
                 let _ = cursor.read_zig_zag()?;
             }
-            // total_compressed_size is deliberately skipped by the native
-            // decoder, so preserve its wire-kind dispatch.
-            6 => skip(cursor, kind)?,
             7 => skip(cursor, Kind::I16)?,
+            // Other fields, including total_compressed_size, are skipped by
+            // the native decoder using their wire-kind dispatch.
             _ => skip(cursor, kind)?,
         }
     }
@@ -845,6 +860,66 @@ fn row_group(
         return Err(malformed());
     }
     Ok(())
+}
+
+fn row_groups_list(
+    cursor: &mut CompactSlice<'_>,
+    facts: &mut FooterCountFacts,
+    budget: u64,
+    footer: &[u8],
+    schema_source: Option<(usize, usize)>,
+    cancellation: Option<&CancellationToken>,
+) -> Result<(), GfError> {
+    let (schema_offset, schema_elements) = schema_source.ok_or_else(malformed)?;
+    let count = admit_list(cursor, facts, size_of::<RowGroupMetaData>(), budget)?;
+    if count > usize::try_from(i16::MAX).map_err(|_| allocation_limit())? + 1 {
+        return Err(malformed());
+    }
+    facts.row_groups = facts
+        .row_groups
+        .checked_add(u64::try_from(count).map_err(|_| allocation_limit())?)
+        .ok_or_else(allocation_limit)?;
+    for _ in 0..count {
+        row_group(
+            cursor,
+            facts,
+            budget,
+            &footer[schema_offset..],
+            schema_elements,
+            cancellation,
+        )?;
+    }
+    Ok(())
+}
+
+fn column_orders_list(
+    cursor: &mut CompactSlice<'_>,
+    facts: &mut FooterCountFacts,
+    budget: u64,
+) -> Result<usize, GfError> {
+    let count = admit_list(
+        cursor,
+        facts,
+        size_of::<parquet::basic::ColumnOrder>(),
+        budget,
+    )?;
+    for _ in 0..count {
+        // ColumnOrder is a union: native accepts one struct field and rejects
+        // an empty or multi-field union.
+        let mut union_previous = 0;
+        let Some((variant, union_kind)) = field(cursor, &mut union_previous)? else {
+            return Err(malformed());
+        };
+        if variant == 1 {
+            empty_struct(cursor)?;
+        } else {
+            skip(cursor, union_kind)?;
+        }
+        if field(cursor, &mut union_previous)?.is_some() {
+            return Err(malformed());
+        }
+    }
+    Ok(count)
 }
 
 /// Count allocations requested by the default parquet 58.4 footer reader.
@@ -915,30 +990,14 @@ pub(super) fn preflight(
                 if !schema_seen {
                     return Err(malformed());
                 }
-                let count = admit_list(
+                row_groups_list(
                     &mut cursor,
                     &mut facts,
-                    size_of::<RowGroupMetaData>(),
                     remaining_budget,
+                    footer,
+                    schema_source,
+                    cancellation,
                 )?;
-                if count > usize::try_from(i16::MAX).map_err(|_| allocation_limit())? + 1 {
-                    return Err(malformed());
-                }
-                facts.row_groups = facts
-                    .row_groups
-                    .checked_add(u64::try_from(count).map_err(|_| allocation_limit())?)
-                    .ok_or_else(allocation_limit)?;
-                for _ in 0..count {
-                    let (schema_offset, schema_elements) = schema_source.ok_or_else(malformed)?;
-                    row_group(
-                        &mut cursor,
-                        &mut facts,
-                        remaining_budget,
-                        &footer[schema_offset..],
-                        schema_elements,
-                        cancellation,
-                    )?;
-                }
                 row_groups_seen = true;
             }
             5 => {
@@ -954,30 +1013,11 @@ pub(super) fn preflight(
             }
             6 => read_utf8_payload(&mut cursor, &mut facts, remaining_budget)?,
             7 => {
-                let count = admit_list(
+                column_orders_len = Some(column_orders_list(
                     &mut cursor,
                     &mut facts,
-                    size_of::<parquet::basic::ColumnOrder>(),
                     remaining_budget,
-                )?;
-                for _ in 0..count {
-                    // ColumnOrder is a union: native accepts one struct field
-                    // and rejects an empty or multi-field union.
-                    let mut union_previous = 0;
-                    let Some((variant, union_kind)) = field(&mut cursor, &mut union_previous)?
-                    else {
-                        return Err(malformed());
-                    };
-                    if variant == 1 {
-                        empty_struct(&mut cursor)?;
-                    } else {
-                        skip(&mut cursor, union_kind)?;
-                    }
-                    if field(&mut cursor, &mut union_previous)?.is_some() {
-                        return Err(malformed());
-                    }
-                }
-                column_orders_len = Some(count);
+                )?);
             }
             _ => skip(&mut cursor, kind)?,
         }

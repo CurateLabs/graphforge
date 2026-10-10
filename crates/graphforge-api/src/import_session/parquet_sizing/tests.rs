@@ -53,7 +53,7 @@ fn scan(
         ArrowReaderMetadata::try_new(Arc::new(metadata.clone()), ArrowReaderOptions::new())
             .unwrap();
     SourceScan::build(
-        File::open(file.path()).unwrap(),
+        &File::open(file.path()).unwrap(),
         &metadata,
         batch_rows,
         1 << 30,
@@ -245,7 +245,7 @@ fn one_repeated_row_can_continue_across_many_owned_pages() {
         rows: 1,
         row_base: 0,
         capacity: 32 << 10,
-        budget: &mut budget,
+        budget: super::SizingBudget::Inventory(&mut budget),
         cancellation: Option::<CancellationToken>::None,
         dictionary: None,
         dictionary_charge: 0,

@@ -33,6 +33,7 @@ fn check(cancellation: Option<&CancellationToken>) -> Result<(), GfError> {
 
 /// Caller read-ahead and retained decoder bodies have separate live credits.
 /// `capacity` is the remaining credit for this newly owned compressed body.
+#[cfg(test)]
 pub(super) fn read<R: Read>(
     reader: &mut R,
     remaining_chunk_bytes: u64,

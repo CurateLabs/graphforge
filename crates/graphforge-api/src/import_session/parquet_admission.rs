@@ -15,15 +15,17 @@
 //! The sizes are Arrow value bytes (values, offsets and validity), the number
 //! the builder's per-batch window is stated in.
 
+use arrow::datatypes::DataType;
 use graphforge_core::GfError;
 use parquet::arrow::arrow_reader::ArrowReaderMetadata;
 use parquet::file::metadata::ParquetMetaData;
 use std::fs::File;
 
 use super::inventory_budget::{InventoryBudget, reserve};
+use super::parquet_alloc::mutable_envelope;
 use super::parquet_scan::{GroupScan, Leaf, LeafScan, PageKind, scan_group};
 use super::parquet_shape::SchemaShape;
-use super::storage;
+use super::{limit, storage};
 use crate::CancellationToken;
 
 /// Whether a column's batch size has to be read from its values rather than
@@ -50,6 +52,24 @@ pub(super) struct SourceScan {
     rows: u64,
     /// Exact Arrow bytes per logical batch of the columns `needs_values`.
     value_bytes: Vec<u64>,
+    /// Largest exact per-row Arrow contribution across all visible leaves.
+    /// Only this scalar is retained; row costs are scanned through one bounded
+    /// logical-batch window at a time.
+    max_row_value_bytes: u64,
+    /// Exact max row contribution by logical batch. Used when an individual
+    /// source row exceeds the window and pieces must be one row each.
+    batch_max_row_value_bytes: Vec<u64>,
+    /// First global row in each logical batch whose one-row request exceeds
+    /// the predecode admission threshold; `u64::MAX` means none.
+    first_oversized_row: Vec<u64>,
+    flat_leaf_count: u64,
+    offset_boundary_bytes: u64,
+    /// Arrow's MutableBuffer allocation floor for the visible output arrays.
+    /// Wide schemas with tiny batches can be dominated by one 64-byte buffer
+    /// per values/offsets/validity buffer, even when their payload estimate is
+    /// only a few bytes.
+    arrow_buffer_floor_bytes: u64,
+    physical_batch_rows: u64,
     /// Bytes of this inventory, resident for the life of the plan.
     resident_bytes: u64,
 }
@@ -67,8 +87,11 @@ impl SourceScan {
     /// size past which a batch is refused: a page-bounded size that exceeds it
     /// is replaced by the exact one, so a coarse bound never refuses a batch
     /// that fits.
+    // One pass constructs the bounded facts from the same footer and schema;
+    // splitting it would duplicate ordering state across admission phases.
+    #[allow(clippy::too_many_lines)]
     pub(super) fn build(
-        file: File,
+        file: &File,
         metadata: &ArrowReaderMetadata,
         batch_rows: u64,
         capacity: u64,
@@ -78,6 +101,35 @@ impl SourceScan {
         let mut scanner = file.try_clone().map_err(storage)?;
         let mut budget = InventoryBudget::new(capacity);
         let shape = SchemaShape::build(metadata, &mut budget, cancellation)?;
+        let offset_boundary_bytes = shape.nodes.iter().fold(0_u64, |bytes, node| {
+            let width = match node.field.data_type() {
+                DataType::Utf8
+                | DataType::Binary
+                | DataType::List(_)
+                | DataType::Map(_, _)
+                | DataType::ListView(_) => 4,
+                DataType::LargeUtf8
+                | DataType::LargeBinary
+                | DataType::LargeList(_)
+                | DataType::LargeListView(_) => 8,
+                _ => 0,
+            };
+            bytes.saturating_add(width)
+        });
+        let mutable_floor = mutable_envelope(0, 1)?.peak_bytes;
+        let arrow_buffer_floor_bytes = shape.nodes.iter().try_fold(0_u64, |bytes, node| {
+            bytes
+                .checked_add(
+                    mutable_floor
+                        .checked_mul(output_buffer_count(
+                            node.kind,
+                            node.field.data_type(),
+                            node.nullable,
+                        ))
+                        .ok_or_else(|| limit("Parquet Arrow buffer floor overflows"))?,
+                )
+                .ok_or_else(|| limit("Parquet Arrow buffer floor overflows"))
+        })?;
         let metadata = metadata.metadata();
         let mut groups = Vec::new();
         let mut group_start = Vec::new();
@@ -115,6 +167,22 @@ impl SourceScan {
             "the per-batch sizes",
         )?;
         value_bytes.resize(batches, 0);
+        let mut batch_max_row_value_bytes = Vec::new();
+        reserve(
+            &mut batch_max_row_value_bytes,
+            batches,
+            &mut budget,
+            "the per-batch maximum row sizes",
+        )?;
+        batch_max_row_value_bytes.resize(batches, 0);
+        let mut first_oversized_row = Vec::new();
+        reserve(
+            &mut first_oversized_row,
+            batches,
+            &mut budget,
+            "the per-batch oversized row markers",
+        )?;
+        first_oversized_row.resize(batches, u64::MAX);
         let mut scan = Self {
             shape,
             groups,
@@ -122,15 +190,16 @@ impl SourceScan {
             batch_rows: batch_rows.max(1),
             rows: start,
             value_bytes,
+            max_row_value_bytes: 0,
+            batch_max_row_value_bytes,
+            first_oversized_row,
+            flat_leaf_count: 0,
+            offset_boundary_bytes,
+            arrow_buffer_floor_bytes,
+            physical_batch_rows: batch_rows.max(1),
             resident_bytes: 0,
         };
-        scan.size_values(
-            file.try_clone().map_err(storage)?,
-            metadata,
-            &mut budget,
-            capacity,
-            cancellation,
-        )?;
+        scan.size_values(file, metadata, &mut budget, capacity, cancellation)?;
         // A column stored plain is bounded by the pages a batch touches, which
         // overstates a batch smaller than a page. Where that bound alone would
         // refuse a batch, size those columns from their values as well.
@@ -143,6 +212,22 @@ impl SourceScan {
             scan.value_bytes.iter_mut().for_each(|bytes| *bytes = 0);
             scan.size_values(file, metadata, &mut budget, capacity, cancellation)?;
         }
+        scan.measure_max_row_cost(
+            file,
+            metadata,
+            &mut budget,
+            capacity,
+            window.saturating_add(window / 8),
+            cancellation,
+        )?;
+        scan.physical_batch_rows = choose_physical_rows(
+            scan.batch_rows,
+            scan.max_row_value_bytes,
+            scan.flat_leaf_count,
+            scan.offset_boundary_bytes,
+            scan.arrow_buffer_floor_bytes,
+            window,
+        );
         // The budget charged actual capacities, including unused geometric
         // slots in groups/leaves. A sum of lengths would understate retained
         // inventory after a three-element vector grows to four slots.
@@ -165,6 +250,18 @@ impl SourceScan {
             .unwrap_or(0)
     }
 
+    /// Scratch floor for a sizing pass over one leaf while retaining one
+    /// bounded row-cost vector. Reserve this before choosing the vector size so
+    /// its allocation cannot starve the page reader and dictionary validator.
+    fn sizing_floor(&self) -> u64 {
+        self.groups
+            .iter()
+            .flat_map(|group| group.leaves.iter())
+            .map(|leaf| leaf.summary.sizing_floor())
+            .max()
+            .unwrap_or(super::parquet_sizing::WORKSPACE_RESERVE)
+    }
+
     /// The most a task's decoder holds beside its batches: the largest of the
     /// row groups it reads.
     pub(super) fn pages_resident(&self, first_row: u64, last_row: u64) -> u64 {
@@ -172,6 +269,49 @@ impl SourceScan {
             .map(|(_, _, _, group)| group.pages_resident())
             .max()
             .unwrap_or(0)
+    }
+
+    /// Maximum native decoder scratch in any selected row group. These are
+    /// retained alongside each group's owned pages, unlike validator vectors
+    /// which are included in the separate page-credit envelope.
+    pub(super) fn native_decoder_auxiliary(&self, first_row: u64, last_row: u64) -> u64 {
+        let group_peak = self
+            .overlapping(first_row, last_row)
+            .map(|(_, _, _, group)| group.native_decoder_auxiliary())
+            .max()
+            .unwrap_or(0);
+        // DELTA_BYTE_ARRAY reconstruction may keep both the previous and the
+        // current full value live. The exact largest reconstructed row is
+        // established by the bounded values pass; use its source-wide maximum
+        // because the decoder may materialize values from a touched page while
+        // applying row selection.
+        let has_delta = self
+            .overlapping(first_row, last_row)
+            .any(|(_, _, _, group)| {
+                group
+                    .leaves
+                    .iter()
+                    .any(|leaf| leaf.summary.delta_byte_array)
+            });
+        group_peak.saturating_add(if has_delta {
+            self.max_row_value_bytes.saturating_mul(2)
+        } else {
+            0
+        })
+    }
+
+    /// Validator dictionary vectors and bounded level/value cursor blocks for
+    /// one selected row group. The current row-group validators retain their
+    /// dictionaries together, so sum those actual header entry counts.
+    pub(super) fn validator_workspace(&self, first_row: u64, last_row: u64) -> u64 {
+        self.overlapping(first_row, last_row)
+            .map(|(_, _, _, group)| {
+                group
+                    .validator_dictionary_bytes()
+                    .saturating_add(super::parquet_sizing::WORKSPACE_RESERVE)
+            })
+            .max()
+            .unwrap_or(super::parquet_sizing::WORKSPACE_RESERVE)
     }
 
     /// Row groups overlapping `[first, last)`, with the rows of each that fall
@@ -222,6 +362,65 @@ impl SourceScan {
         self.sum_batch(batch, false)
     }
 
+    /// Conservative Arrow output bound for one physical decoder piece.
+    pub(super) fn physical_batch_bytes(&self, batch: u64) -> u64 {
+        if self.physical_batch_rows == 1 {
+            let row = batch;
+            let logical = row / self.batch_rows;
+            let max_row = self
+                .batch_max_row_value_bytes
+                .get(usize::try_from(logical).unwrap_or(usize::MAX))
+                .copied()
+                .unwrap_or(self.max_row_value_bytes);
+            return max_row
+                .saturating_add(self.flat_leaf_count)
+                .saturating_add(self.offset_boundary_bytes)
+                .saturating_add(self.arrow_buffer_floor_bytes);
+        }
+        let first = batch.saturating_mul(self.physical_batch_rows);
+        let count = self
+            .physical_batch_rows
+            .min(self.rows.saturating_sub(first));
+        count
+            .saturating_mul(self.max_row_value_bytes)
+            .saturating_add(self.flat_leaf_count.saturating_mul(count.div_ceil(8)))
+            .saturating_add(self.offset_boundary_bytes)
+            .saturating_add(self.arrow_buffer_floor_bytes)
+    }
+
+    pub(super) fn physical_batch_max_bytes(&self, first: u64, count: u64) -> u64 {
+        if self.physical_batch_rows != 1 {
+            return self.physical_batch_bytes(first);
+        }
+        let first_logical = first / self.batch_rows;
+        let last_logical = first.saturating_add(count.saturating_sub(1)) / self.batch_rows;
+        (first_logical..=last_logical)
+            .filter_map(|batch| {
+                self.batch_max_row_value_bytes
+                    .get(usize::try_from(batch).ok()?)
+                    .copied()
+            })
+            .max()
+            .unwrap_or(0)
+            .saturating_add(self.flat_leaf_count)
+            .saturating_add(self.offset_boundary_bytes)
+            .saturating_add(self.arrow_buffer_floor_bytes)
+    }
+
+    pub(super) fn physical_batch_exceeds(&self, batch: u64, limit: u64) -> bool {
+        if self.physical_batch_rows != 1 {
+            return self.physical_batch_bytes(batch) > limit;
+        }
+        let logical = batch / self.batch_rows;
+        self.first_oversized_row
+            .get(usize::try_from(logical).unwrap_or(usize::MAX))
+            .is_some_and(|row| *row == batch)
+    }
+
+    pub(super) fn physical_batch_rows(&self) -> u64 {
+        self.physical_batch_rows
+    }
+
     fn sum_batch(&self, batch: u64, apportion: bool) -> u64 {
         let first = batch * self.batch_rows;
         let last = ((batch + 1) * self.batch_rows).min(self.rows);
@@ -241,7 +440,7 @@ impl SourceScan {
     /// row group at a time, and add its exact Arrow bytes to each batch it touches.
     fn size_values(
         &mut self,
-        file: File,
+        file: &File,
         metadata: &ParquetMetaData,
         budget: &mut InventoryBudget,
         capacity: u64,
@@ -265,40 +464,43 @@ impl SourceScan {
                 let first_row = self.group_start[index];
                 let descriptor = metadata.row_group(index).column(column).column_descr();
                 let flat = descriptor.max_rep_level() == 0;
-                let mut add = |row: u64, bytes: u64| {
-                    let global_row = first_row.checked_add(row).ok_or_else(|| {
-                        storage("Parquet source row index overflows while sizing values")
-                    })?;
-                    let batch = global_row / self.batch_rows;
-                    let slot = self
-                        .value_bytes
-                        .get_mut(usize::try_from(batch).unwrap_or(usize::MAX))
-                        .ok_or_else(|| {
-                            storage("Parquet sized row is outside the batch inventory")
+                {
+                    let mut add = |row: u64, bytes: u64| {
+                        let global_row = first_row.checked_add(row).ok_or_else(|| {
+                            storage("Parquet source row index overflows while sizing values")
                         })?;
-                    let bytes = if flat {
-                        bytes
-                            .checked_sub(1)
-                            .ok_or_else(|| storage("flat row size omitted its validity bit"))?
-                    } else {
-                        bytes
+                        let batch = global_row / self.batch_rows;
+                        let slot = self
+                            .value_bytes
+                            .get_mut(usize::try_from(batch).unwrap_or(usize::MAX))
+                            .ok_or_else(|| {
+                                storage("Parquet sized row is outside the batch inventory")
+                            })?;
+                        let bytes = if flat {
+                            bytes
+                                .checked_sub(1)
+                                .ok_or_else(|| storage("flat row size omitted its validity bit"))?
+                        } else {
+                            bytes
+                        };
+                        *slot = slot
+                            .checked_add(bytes)
+                            .ok_or_else(|| storage("Parquet per-batch value size overflows"))?;
+                        Ok(())
                     };
-                    *slot = slot
-                        .checked_add(bytes)
-                        .ok_or_else(|| storage("Parquet per-batch value size overflows"))?;
-                    Ok(())
-                };
-                super::parquet_sizing::size_column(
-                    &file,
-                    metadata.row_group(index).column(column),
-                    rows,
-                    0,
-                    capacity,
-                    budget,
-                    cancellation,
-                    &mut add,
-                )?;
-                drop(add);
+                    super::parquet_sizing::size_column(
+                        super::parquet_sizing::SizeColumnInput {
+                            file,
+                            column: metadata.row_group(index).column(column),
+                            rows,
+                            row_base: 0,
+                            capacity,
+                            budget,
+                            cancellation,
+                        },
+                        &mut add,
+                    )?;
+                }
                 if flat && rows > 0 {
                     // Preserve the existing flat validity size while packing
                     // row-group segments against their global batch bit offset.
@@ -346,6 +548,260 @@ impl SourceScan {
             }
         }
         Ok(())
+    }
+
+    /// Measure all projected columns together, keeping only one logical
+    /// batch's row costs live. This yields an exact maximum row contribution
+    /// for a conservative physical chunk size without a source-wide row map.
+    // The scan repeatedly reduces its per-window scratch before admitting it;
+    // keep that retry/charge sequence together to preserve the budget proof.
+    #[allow(clippy::too_many_lines)]
+    fn measure_max_row_cost(
+        &mut self,
+        file: &File,
+        metadata: &ParquetMetaData,
+        budget: &mut InventoryBudget,
+        capacity: u64,
+        single_row_limit: u64,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<(), GfError> {
+        let logical_batches = self.rows.div_ceil(self.batch_rows);
+        let sizing_floor = self.sizing_floor();
+        for shape_leaf in &self.shape.leaves {
+            let descriptor = metadata
+                .row_groups()
+                .iter()
+                .find_map(|group| group.columns().get(shape_leaf.column_index))
+                .ok_or_else(|| storage("Parquet schema has no visible physical column"))?
+                .column_descr();
+            if descriptor.max_rep_level() == 0 {
+                self.flat_leaf_count = self
+                    .flat_leaf_count
+                    .checked_add(1)
+                    .ok_or_else(|| storage("Parquet flat leaf count overflows"))?;
+            }
+        }
+        for batch in 0..logical_batches {
+            check(cancellation)?;
+            let batch_first = batch * self.batch_rows;
+            let batch_end = (batch_first + self.batch_rows).min(self.rows);
+            let mut first = batch_first;
+            while first < batch_end {
+                let mut count = usize::try_from(batch_end - first)
+                    .map_err(storage)?
+                    .min(usize::try_from(self.batch_rows).unwrap_or(usize::MAX));
+                loop {
+                    let rounded = count
+                        .checked_next_power_of_two()
+                        .ok_or_else(|| limit("Parquet row sizing window overflows"))?;
+                    let request = u64::try_from(rounded)
+                        .map_err(storage)?
+                        .checked_mul(u64::try_from(std::mem::size_of::<u64>()).map_err(storage)?)
+                        .ok_or_else(|| limit("Parquet row sizing window overflows"))?;
+                    let available = budget.remaining().saturating_sub(sizing_floor);
+                    if request <= available {
+                        break;
+                    }
+                    if count == 1 {
+                        return Err(limit(
+                            "Parquet row sizing and its required page workspace do not fit the inventory budget",
+                        ));
+                    }
+                    count = (count / 2).max(1);
+                }
+                let end = first
+                    .checked_add(u64::try_from(count).map_err(storage)?)
+                    .ok_or_else(|| storage("Parquet row sizing range overflows"))?
+                    .min(batch_end);
+                count = usize::try_from(end - first).map_err(storage)?;
+                let mut row_costs = Vec::new();
+                reserve(
+                    &mut row_costs,
+                    count,
+                    budget,
+                    "the bounded per-row Parquet sizing window",
+                )?;
+                row_costs.resize(count, 0_u64);
+                for (visible_index, shape_leaf) in self.shape.leaves.iter().enumerate() {
+                    let column = shape_leaf.column_index;
+                    let descriptor = metadata
+                        .row_groups()
+                        .iter()
+                        .find_map(|group| group.columns().get(column))
+                        .ok_or_else(|| storage("Parquet schema has no visible physical column"))?
+                        .column_descr();
+                    let flat = descriptor.max_rep_level() == 0;
+                    for (group_index, group) in self.groups.iter().enumerate() {
+                        let group_first = self.group_start[group_index];
+                        let group_rows =
+                            u64::try_from(metadata.row_group(group_index).num_rows()).unwrap_or(0);
+                        let group_end = group_first.saturating_add(group_rows);
+                        if group_end <= first || group_first >= end {
+                            continue;
+                        }
+                        check(cancellation)?;
+                        let leaf = group.leaves.get(visible_index).ok_or_else(|| {
+                            storage("Parquet row groups disagree on physical columns")
+                        })?;
+                        if leaf.physical_column_index != column {
+                            return Err(storage("Parquet row-group visible column order differs"));
+                        }
+                        super::parquet_sizing::size_column(
+                            super::parquet_sizing::SizeColumnInput {
+                                file,
+                                column: metadata.row_group(group_index).column(column),
+                                rows: group_rows,
+                                row_base: 0,
+                                capacity,
+                                budget,
+                                cancellation,
+                            },
+                            &mut |row, bytes| {
+                                let global_row = group_first.checked_add(row).ok_or_else(|| {
+                                    storage("Parquet source row index overflows while sizing")
+                                })?;
+                                if global_row < first || global_row >= end {
+                                    return Ok(());
+                                }
+                                let local = usize::try_from(global_row - first).map_err(storage)?;
+                                let slot = row_costs.get_mut(local).ok_or_else(|| {
+                                    storage("Parquet row cost maps outside its bounded window")
+                                })?;
+                                let bytes = if flat {
+                                    bytes.checked_sub(1).ok_or_else(|| {
+                                        storage("flat row size omitted its validity bit")
+                                    })?
+                                } else {
+                                    bytes
+                                };
+                                *slot = slot.checked_add(bytes).ok_or_else(|| {
+                                    storage("Parquet per-row output size overflows")
+                                })?;
+                                Ok(())
+                            },
+                        )?;
+                    }
+                }
+                self.max_row_value_bytes = self
+                    .max_row_value_bytes
+                    .max(row_costs.iter().copied().max().unwrap_or(0));
+                let logical = usize::try_from(batch).map_err(storage)?;
+                let flat_bytes = self.flat_leaf_count;
+                let one_row_boundary = self.offset_boundary_bytes;
+                let maximum = row_costs.iter().copied().max().unwrap_or(0);
+                let batch_max = self
+                    .batch_max_row_value_bytes
+                    .get_mut(logical)
+                    .ok_or_else(|| storage("Parquet logical batch exceeds row maxima"))?;
+                *batch_max = (*batch_max).max(maximum);
+                for (row, &cost) in row_costs.iter().enumerate() {
+                    let requested = cost
+                        .saturating_add(flat_bytes)
+                        .saturating_add(one_row_boundary)
+                        .saturating_add(self.arrow_buffer_floor_bytes);
+                    if requested > single_row_limit {
+                        let global = first
+                            .checked_add(u64::try_from(row).map_err(storage)?)
+                            .ok_or_else(|| storage("Parquet oversized row index overflows"))?;
+                        let marker = self
+                            .first_oversized_row
+                            .get_mut(logical)
+                            .ok_or_else(|| storage("Parquet batch exceeds refusal inventory"))?;
+                        if *marker == u64::MAX {
+                            *marker = global;
+                        }
+                        break;
+                    }
+                }
+                let charged = u64::try_from(row_costs.capacity())
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(u64::try_from(std::mem::size_of::<u64>()).unwrap_or(u64::MAX));
+                drop(row_costs);
+                budget.release(charged);
+                first = end;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn choose_physical_rows(
+    logical_rows: u64,
+    max_row: u64,
+    flat_leaves: u64,
+    offset_boundary_bytes: u64,
+    arrow_buffer_floor_bytes: u64,
+    window: u64,
+) -> u64 {
+    let fits = |rows: u64| {
+        rows.saturating_mul(max_row)
+            .saturating_add(flat_leaves.saturating_mul(rows.div_ceil(8)))
+            .saturating_add(offset_boundary_bytes)
+            .saturating_add(arrow_buffer_floor_bytes)
+            <= window
+    };
+    let logical_rows = logical_rows.max(1);
+    let mut low = 1_u64;
+    let mut high = logical_rows;
+    while low < high {
+        let middle = low + (high - low).div_ceil(2);
+        if fits(middle) {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    let cap = low;
+    let mut largest = 1_u64;
+    let mut divisor = 1_u64;
+    while divisor <= logical_rows / divisor {
+        if logical_rows.is_multiple_of(divisor) {
+            let paired = logical_rows / divisor;
+            if divisor <= cap {
+                largest = largest.max(divisor);
+            }
+            if paired <= cap {
+                largest = largest.max(paired);
+            }
+        }
+        divisor += 1;
+    }
+    largest
+}
+
+/// Mutable Arrow output buffers created for one visible schema node. Child
+/// nodes are counted independently, so a nested field's children are not
+/// hidden in this node's estimate.
+fn output_buffer_count(
+    kind: super::parquet_shape::NodeKind,
+    data_type: &DataType,
+    nullable: bool,
+) -> u64 {
+    use super::parquet_shape::NodeKind;
+
+    let validity = u64::from(nullable);
+    match kind {
+        NodeKind::Primitive => {
+            let offsets_or_views = matches!(
+                data_type,
+                DataType::Utf8
+                    | DataType::Binary
+                    | DataType::LargeUtf8
+                    | DataType::LargeBinary
+                    | DataType::Utf8View
+                    | DataType::BinaryView
+            );
+            if matches!(data_type, DataType::Null) {
+                0
+            } else if matches!(data_type, DataType::Utf8View | DataType::BinaryView) {
+                // View descriptors and their optional backing data buffers.
+                2 + validity
+            } else {
+                1 + u64::from(offsets_or_views) + validity
+            }
+        }
+        NodeKind::List | NodeKind::LargeList | NodeKind::Map => 1 + validity,
+        NodeKind::Struct | NodeKind::FixedSizeList => validity,
     }
 }
 

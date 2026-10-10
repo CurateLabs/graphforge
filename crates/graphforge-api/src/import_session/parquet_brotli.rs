@@ -165,6 +165,7 @@ fn check(shared: &Shared) -> Result<(), GfError> {
 
 /// Decode into an already admitted exact output. `capacity` is workspace beside
 /// the caller-owned input/output, not another full copy of the source budget.
+#[cfg(test)]
 pub(super) fn decode(input: &[u8], output: &mut [u8], capacity: usize) -> Result<(), GfError> {
     decode_cancellable(input, output, capacity, None)
 }

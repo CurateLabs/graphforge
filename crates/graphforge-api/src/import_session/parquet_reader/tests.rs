@@ -1,11 +1,12 @@
 use std::error::Error;
 use std::io::Cursor;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use arrow::array::Int32Array;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
+use bytes::Bytes;
 use graphforge_core::{ApiErrorCode, GfError, ProjectErrorCode};
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -15,7 +16,10 @@ use parquet::file::properties::{WriterProperties, WriterVersion};
 
 use crate::CancellationToken;
 
-use super::{OwnedPageReader, PageFailures, PagePreflight};
+use super::{
+    BoundedPageReaderConfig, OwnedPageReader, PageFailures, PagePreflight, TaskDecodeBudget,
+    retain_page_credit,
+};
 use crate::import_session::parquet_page_decode::DecodedPage;
 
 struct Preflight {
@@ -527,4 +531,76 @@ fn checksum_failure_on_an_owned_body_never_reaches_preflight() {
     assert!(matches!(external_gf_error(&error), GfError::Storage(_)));
     assert_eq!(reader.preflight.validated_pages, 0);
     assert!(reader.next().is_none());
+}
+
+#[test]
+fn task_page_credit_follows_arrow_bytes_clones_until_the_last_owner_drops() {
+    let budget = TaskDecodeBudget::new(64);
+    let mut credit = budget.reserve(64).unwrap();
+    credit.shrink_to(4).unwrap();
+    let page = retain_page_credit(
+        Page::DictionaryPage {
+            buf: Bytes::from_static(b"body"),
+            num_values: 1,
+            encoding: parquet::basic::Encoding::PLAIN,
+            is_sorted: false,
+        },
+        credit,
+    );
+
+    assert_eq!(budget.remaining().unwrap(), 60);
+    let retained = page.buffer().clone();
+    drop(page);
+    assert_eq!(budget.remaining().unwrap(), 60);
+    drop(retained);
+    assert_eq!(budget.remaining().unwrap(), 64);
+}
+
+struct HoldingFailure {
+    retained: Arc<Mutex<Option<Bytes>>>,
+}
+
+impl PagePreflight for HoldingFailure {
+    fn remaining_workspace(&self) -> Result<usize, GfError> {
+        Ok(64 << 20)
+    }
+
+    fn validate(&mut self, page: &DecodedPage) -> Result<(), GfError> {
+        *self.retained.lock().unwrap() = Some(page.page.buffer().clone());
+        Err(GfError::Storage("intentional preflight refusal".into()))
+    }
+
+    fn finish(&mut self) -> Result<(), GfError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn page_credit_survives_preflight_failure_while_a_page_clone_is_retained() {
+    let fixture = Fixture::numeric(Compression::UNCOMPRESSED);
+    let budget = TaskDecodeBudget::new(64 << 20);
+    let retained = Arc::new(Mutex::new(None));
+    let end = fixture.start + fixture.length;
+    let mut reader = OwnedPageReader::new_bounded(
+        Cursor::new(fixture.bytes[fixture.start..end].to_vec()),
+        BoundedPageReaderConfig {
+            chunk_bytes: u64::try_from(fixture.length).unwrap(),
+            compression: fixture.compression,
+            expected_data_events: fixture.events,
+            cancellation: None,
+            failures: PageFailures::new(),
+            decode_budget: Arc::clone(&budget),
+        },
+        HoldingFailure {
+            retained: Arc::clone(&retained),
+        },
+    );
+
+    assert!(reader.next().unwrap().is_err());
+    assert!(budget.remaining().unwrap() < budget.capacity());
+    let retained = retained.lock().unwrap().take().unwrap();
+    drop(reader);
+    assert!(budget.remaining().unwrap() < budget.capacity());
+    drop(retained);
+    assert_eq!(budget.remaining().unwrap(), budget.capacity());
 }

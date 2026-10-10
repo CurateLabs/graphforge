@@ -87,7 +87,9 @@ fn gzip_header(input: &[u8], cancellation: Option<&CancellationToken>) -> Result
             .get(offset..offset + 2)
             .ok_or_else(|| storage("Truncated gzip header checksum"))?;
         let expected = u16::from_le_bytes([checksum_bytes[0], checksum_bytes[1]]);
-        if checksum(&input[..offset], cancellation)? as u16 != expected {
+        let actual = u16::try_from(checksum(&input[..offset], cancellation)? & u32::from(u16::MAX))
+            .map_err(|_| storage("Gzip header checksum exceeds its 16-bit field"))?;
+        if actual != expected {
             return Err(storage("Gzip header checksum mismatch"));
         }
         offset += 2;
@@ -97,6 +99,7 @@ fn gzip_header(input: &[u8], cancellation: Option<&CancellationToken>) -> Result
 
 /// Multi-member GZIP, matching Parquet's ordinary MultiGzDecoder consumer.
 /// Input/output are already charged; workspace covers only the fixed state.
+#[cfg(test)]
 pub(super) fn gzip(input: &[u8], output: &mut [u8], workspace: usize) -> Result<(), GfError> {
     gzip_cancellable(input, output, workspace, None)
 }
@@ -155,7 +158,7 @@ pub(super) fn gzip_cancellable(
                 .ok_or_else(|| storage("Gzip trailer offset overflow"))?,
         )?;
         if checksum(&output[member_start..written], cancellation)? != expected_checksum
-            || (written - member_start) as u32 != expected_length
+            || (written - member_start).to_le_bytes()[..4] != expected_length.to_le_bytes()
         {
             return Err(storage("Gzip member checksum or length mismatch"));
         }

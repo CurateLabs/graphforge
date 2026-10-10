@@ -85,6 +85,7 @@ pub(super) fn round64(bytes: usize) -> Result<usize, GfError> {
 
 /// Arrow MutableBuffer's request transition. An imported Vec buffer can have
 /// an unaligned old capacity; only the newly required allocation is rounded.
+#[cfg(test)]
 pub(super) fn mutable(capacity: usize, required: usize) -> Result<Request, GfError> {
     payload(capacity, 1)?;
     if required <= capacity {

@@ -1479,6 +1479,36 @@ pub(super) struct RowsReader<'r, 's> {
 }
 
 impl RowsReader<'_, '_> {
+    fn validate_expected_layout(
+        batch: &RecordBatch,
+        facts: IpcReadFacts,
+        expected: &FrameMeta,
+    ) -> Result<(), GfError> {
+        let max_row_bytes = PropertyRows::max_row_bytes(batch)?;
+        let observed = decoded_header_bytes(
+            batch.schema().as_ref(),
+            facts.message_bytes,
+            facts.buffer_count,
+        );
+        let envelope = output_envelope_bytes(
+            batch.schema().as_ref(),
+            facts.message_bytes,
+            facts.buffer_count,
+        );
+        // The index records the conservative source-row charge. A gathered
+        // frame can drop an all-valid one-row null bitmap, so its decoded
+        // logical bytes may be smaller; it must never exceed that charge.
+        if max_row_bytes as u64 > expected.max_row_bytes
+            || observed > expected.header_bytes
+            || envelope != expected.output_envelope_bytes
+        {
+            return Err(storage(
+                "property decoded layout conflicts with its run index",
+            ));
+        }
+        Ok(())
+    }
+
     /// Continue reading at the frame that starts `offset` bytes into the file.
     pub(super) fn seek(&mut self, offset: u64) -> Result<(), GfError> {
         self.file.seek(SeekFrom::Start(offset)).map_err(storage)?;
@@ -1580,28 +1610,7 @@ impl RowsReader<'_, '_> {
             ));
         }
         if let Some(expected) = expected {
-            let max_row_bytes = PropertyRows::max_row_bytes(&batch)?;
-            let observed = decoded_header_bytes(
-                batch.schema().as_ref(),
-                facts.message_bytes,
-                facts.buffer_count,
-            );
-            let envelope = output_envelope_bytes(
-                batch.schema().as_ref(),
-                facts.message_bytes,
-                facts.buffer_count,
-            );
-            // The index records the conservative source-row charge. A gathered
-            // frame can drop an all-valid one-row null bitmap, so its decoded
-            // logical bytes may be smaller; it must never exceed that charge.
-            if max_row_bytes as u64 > expected.max_row_bytes
-                || observed > expected.header_bytes
-                || envelope != expected.output_envelope_bytes
-            {
-                return Err(storage(
-                    "property decoded layout conflicts with its run index",
-                ));
-            }
+            Self::validate_expected_layout(&batch, facts, expected)?;
         }
         Ok(Some(batch))
     }

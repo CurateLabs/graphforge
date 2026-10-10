@@ -8,9 +8,11 @@
 
 use std::io::Read;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::{RecordBatch, RecordBatchReader};
+use bytes::Bytes;
 use graphforge_core::GfError;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
 use parquet::basic::Compression;
@@ -23,6 +25,168 @@ use super::parquet_page;
 use super::parquet_page_decode::{self, DecodedPage};
 use super::parquet_scan::RawHeader;
 use super::{cancelled, storage};
+
+/// One task's bounded Parquet decode sublease. The enclosing task admission
+/// reserves this envelope from the source pool; page and validator owners use
+/// this counter to divide it without reserving from the pool again.
+pub(super) struct TaskDecodeBudget {
+    capacity: u64,
+    charged: AtomicU64,
+}
+
+impl TaskDecodeBudget {
+    pub(super) fn new(capacity: u64) -> Arc<Self> {
+        Arc::new(Self {
+            capacity,
+            charged: AtomicU64::new(0),
+        })
+    }
+
+    pub(super) fn capacity(&self) -> u64 {
+        self.capacity
+    }
+
+    pub(super) fn remaining(&self) -> Result<u64, GfError> {
+        self.capacity
+            .checked_sub(self.charged.load(Ordering::Acquire))
+            .ok_or_else(|| storage("Parquet task decode credits exceed their reservation"))
+    }
+
+    pub(super) fn reserve(self: &Arc<Self>, bytes: u64) -> Result<TaskDecodeCredit, GfError> {
+        let mut charged = self.charged.load(Ordering::Acquire);
+        loop {
+            let next = charged
+                .checked_add(bytes)
+                .ok_or_else(|| storage("Parquet task decode credit overflows"))?;
+            if next > self.capacity {
+                return Err(super::limit(
+                    "Parquet page and validator workspace exceeds its task reservation",
+                ));
+            }
+            match self.charged.compare_exchange_weak(
+                charged,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Ok(TaskDecodeCredit {
+                        budget: Arc::clone(self),
+                        bytes,
+                    });
+                }
+                Err(actual) => charged = actual,
+            }
+        }
+    }
+}
+
+/// A task-budget charge whose lifetime follows the allocation it protects.
+pub(super) struct TaskDecodeCredit {
+    budget: Arc<TaskDecodeBudget>,
+    bytes: u64,
+}
+
+pub(super) struct BoundedPageReaderConfig {
+    pub(super) chunk_bytes: u64,
+    pub(super) compression: Compression,
+    pub(super) expected_data_events: u64,
+    pub(super) cancellation: Option<CancellationToken>,
+    pub(super) failures: PageFailures,
+    pub(super) decode_budget: Arc<TaskDecodeBudget>,
+}
+
+impl TaskDecodeCredit {
+    pub(super) fn shrink_to(&mut self, bytes: u64) -> Result<(), GfError> {
+        if bytes > self.bytes {
+            return Err(storage(
+                "Parquet retained page exceeds its workspace credit",
+            ));
+        }
+        let released = self.bytes - bytes;
+        self.budget.charged.fetch_sub(released, Ordering::AcqRel);
+        self.bytes = bytes;
+        Ok(())
+    }
+}
+
+impl Drop for TaskDecodeCredit {
+    fn drop(&mut self) {
+        self.budget.charged.fetch_sub(self.bytes, Ordering::AcqRel);
+    }
+}
+
+struct CreditedPageBytes {
+    bytes: Bytes,
+    _credit: TaskDecodeCredit,
+}
+
+impl AsRef<[u8]> for CreditedPageBytes {
+    fn as_ref(&self) -> &[u8] {
+        self.bytes.as_ref()
+    }
+}
+
+fn retain_page_credit(page: Page, credit: TaskDecodeCredit) -> Page {
+    match page {
+        Page::DataPage {
+            buf,
+            num_values,
+            encoding,
+            def_level_encoding,
+            rep_level_encoding,
+            statistics,
+        } => Page::DataPage {
+            buf: Bytes::from_owner(CreditedPageBytes {
+                bytes: buf,
+                _credit: credit,
+            }),
+            num_values,
+            encoding,
+            def_level_encoding,
+            rep_level_encoding,
+            statistics,
+        },
+        Page::DataPageV2 {
+            buf,
+            num_values,
+            encoding,
+            num_nulls,
+            num_rows,
+            def_levels_byte_len,
+            rep_levels_byte_len,
+            is_compressed,
+            statistics,
+        } => Page::DataPageV2 {
+            buf: Bytes::from_owner(CreditedPageBytes {
+                bytes: buf,
+                _credit: credit,
+            }),
+            num_values,
+            encoding,
+            num_nulls,
+            num_rows,
+            def_levels_byte_len,
+            rep_levels_byte_len,
+            is_compressed,
+            statistics,
+        },
+        Page::DictionaryPage {
+            buf,
+            num_values,
+            encoding,
+            is_sorted,
+        } => Page::DictionaryPage {
+            buf: Bytes::from_owner(CreditedPageBytes {
+                bytes: buf,
+                _credit: credit,
+            }),
+            num_values,
+            encoding,
+            is_sorted,
+        },
+    }
+}
 
 const INDEX_READ_BLOCK: usize = 8 << 10;
 const INDEX_PAGE: i32 = 1;
@@ -193,6 +357,7 @@ pub(super) struct OwnedPageReader<R, C> {
     data_events: u64,
     cancellation: Option<CancellationToken>,
     failures: PageFailures,
+    decode_budget: Option<Arc<TaskDecodeBudget>>,
     preflight: C,
     pending: Option<PendingHeader>,
     finish_called: bool,
@@ -221,11 +386,26 @@ where
             data_events: 0,
             cancellation,
             failures,
+            decode_budget: None,
             preflight,
             pending: None,
             finish_called: false,
             terminal: false,
         }
+    }
+
+    pub(super) fn new_bounded(reader: R, config: BoundedPageReaderConfig, preflight: C) -> Self {
+        let mut page_reader = Self::new(
+            reader,
+            config.chunk_bytes,
+            config.compression,
+            config.expected_data_events,
+            config.cancellation,
+            config.failures,
+            preflight,
+        );
+        page_reader.decode_budget = Some(config.decode_budget);
+        page_reader
     }
 
     fn next_page(&mut self) -> Result<Option<Page>, GfError> {
@@ -245,6 +425,11 @@ where
             .take()
             .ok_or_else(|| storage("Parquet page header cache is unexpectedly empty"))?;
         let workspace = self.preflight.remaining_workspace()?;
+        let transient_credit = self
+            .decode_budget
+            .as_ref()
+            .map(|budget| budget.reserve(u64::try_from(workspace).map_err(storage)?))
+            .transpose()?;
         let compressed = parquet_page::read_body(
             &mut self.reader,
             pending.header_bytes,
@@ -281,6 +466,19 @@ where
             None
         };
 
+        let body_capacity = decoded.body_capacity;
+        let page = match transient_credit {
+            Some(mut credit) => {
+                credit.shrink_to(u64::try_from(body_capacity).map_err(storage)?)?;
+                retain_page_credit(decoded.page, credit)
+            }
+            None => decoded.page,
+        };
+        let decoded = DecodedPage {
+            page,
+            body_capacity,
+            physical_bytes: decoded.physical_bytes,
+        };
         self.preflight.validate(&decoded)?;
         if let Some(events) = next_events {
             self.data_events = events;

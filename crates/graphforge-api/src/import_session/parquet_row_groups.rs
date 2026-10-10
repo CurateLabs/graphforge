@@ -12,10 +12,12 @@ use parquet::file::reader::ChunkReader;
 
 use crate::CancellationToken;
 
+#[cfg(test)]
 use super::inventory_budget::{self, InventoryBudget};
-use super::parquet_reader::{OwnedPageReader, PageFailures, PagePreflight};
+use super::parquet_reader::{OwnedPageReader, PageFailures, PagePreflight, TaskDecodeBudget};
 use super::{cancelled, limit, storage};
 
+#[cfg(test)]
 const ROW_GROUP_INIT_BLOCK: usize = 1024;
 
 /// Runtime row groups whose every column page passes the same owned-byte
@@ -28,6 +30,7 @@ pub(super) struct OwnedRowGroups<T, F, C> {
     factory: Arc<F>,
     cancellation: Option<CancellationToken>,
     failures: PageFailures,
+    decode_budget: Option<Arc<TaskDecodeBudget>>,
     _callback: std::marker::PhantomData<fn() -> C>,
 }
 
@@ -41,7 +44,77 @@ where
     /// Build a selection, charging its retained row-group indices before the
     /// vector allocation. Selection must be strictly increasing so row order
     /// and checked aggregate row counts have one unambiguous authority.
+    #[cfg(test)]
     pub(super) fn new(
+        input: Arc<T>,
+        metadata: Arc<ParquetMetaData>,
+        selected_row_groups: &[usize],
+        budget: &mut InventoryBudget,
+        factory: F,
+        cancellation: Option<CancellationToken>,
+        failures: PageFailures,
+    ) -> Result<Self, GfError> {
+        Self::new_inner(
+            input,
+            metadata,
+            selected_row_groups,
+            budget,
+            factory,
+            cancellation,
+            failures,
+        )
+    }
+
+    pub(super) fn new_bounded(
+        input: Arc<T>,
+        metadata: Arc<ParquetMetaData>,
+        selected: Arc<Vec<usize>>,
+        factory: F,
+        cancellation: Option<CancellationToken>,
+        failures: PageFailures,
+        decode_budget: Arc<TaskDecodeBudget>,
+    ) -> Result<Self, GfError> {
+        check_cancelled(cancellation.as_ref())?;
+
+        let file_len = input.len();
+        check_cancelled(cancellation.as_ref())?;
+        let mut num_rows = 0_usize;
+        let mut previous = None;
+        for &group_index in selected.iter() {
+            check_cancelled(cancellation.as_ref())?;
+            if group_index >= metadata.num_row_groups()
+                || previous.is_some_and(|previous| previous >= group_index)
+            {
+                return Err(storage(
+                    "selected Parquet row groups must be valid, unique, and ascending",
+                ));
+            }
+            previous = Some(group_index);
+            let group = metadata.row_group(group_index);
+            let rows = usize::try_from(group.num_rows())
+                .map_err(|_| storage("Parquet row-group row count is negative or too large"))?;
+            num_rows = num_rows
+                .checked_add(rows)
+                .ok_or_else(|| limit("selected Parquet row count exceeds a countable size"))?;
+            validate_group_columns(group, file_len, cancellation.as_ref())?;
+        }
+        check_cancelled(cancellation.as_ref())?;
+
+        Ok(Self {
+            input,
+            metadata,
+            selected,
+            num_rows,
+            factory: Arc::new(factory),
+            cancellation,
+            failures,
+            decode_budget: Some(decode_budget),
+            _callback: std::marker::PhantomData,
+        })
+    }
+
+    #[cfg(test)]
+    fn new_inner(
         input: Arc<T>,
         metadata: Arc<ParquetMetaData>,
         selected_row_groups: &[usize],
@@ -118,6 +191,7 @@ where
             factory: Arc::new(factory),
             cancellation,
             failures,
+            decode_budget: None,
             _callback: std::marker::PhantomData,
         })
     }
@@ -164,6 +238,7 @@ where
             factory: Arc::clone(&self.factory),
             cancellation: self.cancellation.clone(),
             failures: self.failures.clone(),
+            decode_budget: self.decode_budget.clone(),
             column_index,
             next_group: 0,
             terminal: false,
@@ -191,6 +266,7 @@ struct OwnedColumnPageIterator<T, F, C> {
     factory: Arc<F>,
     cancellation: Option<CancellationToken>,
     failures: PageFailures,
+    decode_budget: Option<Arc<TaskDecodeBudget>>,
     column_index: usize,
     next_group: usize,
     terminal: bool,
@@ -223,13 +299,10 @@ where
                 return Some(self.fail(error));
             }
         };
-        let event_count = match u64::try_from(column.num_values()) {
-            Ok(events) => events,
-            Err(_) => {
-                return Some(self.fail(storage(
-                    "Parquet column event count is negative or too large",
-                )));
-            }
+        let Ok(event_count) = u64::try_from(column.num_values()) else {
+            return Some(self.fail(storage(
+                "Parquet column event count is negative or too large",
+            )));
         };
         let reader = match self.input.get_read(start) {
             Ok(reader) => reader,
@@ -243,15 +316,29 @@ where
                 return Some(self.fail(error));
             }
         };
-        let page_reader = OwnedPageReader::new(
-            reader,
-            length,
-            column.compression(),
-            event_count,
-            self.cancellation.clone(),
-            self.failures.clone(),
-            preflight,
-        );
+        let page_reader = match &self.decode_budget {
+            Some(budget) => OwnedPageReader::new_bounded(
+                reader,
+                super::parquet_reader::BoundedPageReaderConfig {
+                    chunk_bytes: length,
+                    compression: column.compression(),
+                    expected_data_events: event_count,
+                    cancellation: self.cancellation.clone(),
+                    failures: self.failures.clone(),
+                    decode_budget: Arc::clone(budget),
+                },
+                preflight,
+            ),
+            None => OwnedPageReader::new(
+                reader,
+                length,
+                column.compression(),
+                event_count,
+                self.cancellation.clone(),
+                self.failures.clone(),
+                preflight,
+            ),
+        };
         Some(Ok(Box::new(page_reader)))
     }
 }
@@ -287,6 +374,7 @@ fn validate_group_columns(
     Ok(())
 }
 
+#[cfg(test)]
 fn release_selection_charge(
     budget: &mut InventoryBudget,
     charged_before: u64,

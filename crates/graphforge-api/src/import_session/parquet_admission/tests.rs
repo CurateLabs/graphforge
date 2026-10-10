@@ -22,6 +22,147 @@ use parquet::schema::parser::parse_message_type;
 use super::{SourceScan, needs_values};
 use crate::import_session::parquet_scan::{PageKind, encoding};
 
+#[test]
+fn physical_decoder_window_shrinks_to_fit_row_cost_and_keeps_one_row_minimum() {
+    assert_eq!(super::choose_physical_rows(64, 100, 1, 0, 0, 1_000), 8);
+    assert_eq!(super::choose_physical_rows(64, 100, 1, 4, 0, 200), 1);
+    assert_eq!(super::choose_physical_rows(64, 500, 1, 4, 0, 200), 1);
+    assert_eq!(
+        super::choose_physical_rows(1_000_000_007, 1, 0, 0, 0, 1_000),
+        1
+    );
+}
+
+#[test]
+fn narrow_wide_schema_charges_mutable_buffer_floors_per_output_buffer() {
+    use super::output_buffer_count;
+    use crate::import_session::parquet_alloc::mutable_envelope;
+    use crate::import_session::parquet_shape::NodeKind;
+
+    let floor = mutable_envelope(0, 1).unwrap().peak_bytes;
+    let tiny_nullable_bool = output_buffer_count(NodeKind::Primitive, &DataType::Boolean, true);
+    let nullable_utf8 = output_buffer_count(NodeKind::Primitive, &DataType::Utf8, true);
+    let nullable_list = output_buffer_count(
+        NodeKind::List,
+        &DataType::List(Arc::new(Field::new("item", DataType::Boolean, true))),
+        true,
+    );
+
+    assert_eq!(tiny_nullable_bool, 2);
+    assert_eq!(nullable_utf8, 3);
+    assert_eq!(nullable_list, 2);
+    assert_eq!(floor, 64);
+    assert!(1_000_u64 * tiny_nullable_bool * floor > 64);
+}
+
+#[test]
+fn one_row_variable_array_bound_includes_terminal_offset_and_validity_buffers() {
+    let schema = Arc::new(Schema::new(vec![Field::new("value", DataType::Utf8, true)]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef],
+    )
+    .unwrap();
+    let file = write(&batch, builder().build());
+    let metadata = ParquetRecordBatchReaderBuilder::try_new(file.reopen().unwrap())
+        .unwrap()
+        .metadata()
+        .clone();
+    let metadata = ArrowReaderMetadata::try_new(
+        Arc::new(metadata.as_ref().clone()),
+        ArrowReaderOptions::new(),
+    )
+    .unwrap();
+    let scan = SourceScan::build(
+        &File::open(file.path()).unwrap(),
+        &metadata,
+        1,
+        1 << 20,
+        1 << 20,
+        None,
+    )
+    .unwrap();
+    let decoded = ParquetRecordBatchReaderBuilder::try_new(file.reopen().unwrap())
+        .unwrap()
+        .build()
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+    let data = decoded.column(0).to_data();
+    let actual = data
+        .buffers()
+        .iter()
+        .map(|buffer| buffer.len() as u64)
+        .sum::<u64>()
+        + data.nulls().map_or(0, |nulls| nulls.buffer().len() as u64);
+
+    assert_eq!(actual, 9);
+    assert!(scan.physical_batch_bytes(0) >= actual);
+}
+
+#[test]
+fn physical_decoder_chunks_allow_a_logical_batch_that_fits_when_split() {
+    let batch = strings(1_024, |_| "x".repeat(4 << 10));
+    let file = write(&batch, builder().build());
+    let metadata = ParquetRecordBatchReaderBuilder::try_new(file.reopen().unwrap())
+        .unwrap()
+        .metadata()
+        .clone();
+    let metadata = ArrowReaderMetadata::try_new(
+        Arc::new(metadata.as_ref().clone()),
+        ArrowReaderOptions::new(),
+    )
+    .unwrap();
+    let scan = SourceScan::build(
+        &File::open(file.path()).unwrap(),
+        &metadata,
+        1_024,
+        1 << 30,
+        512 << 10,
+        None,
+    )
+    .unwrap();
+
+    assert!(scan.physical_batch_rows() < 1_024);
+    assert!(scan.physical_batch_bytes(0) <= 512 << 10);
+}
+
+#[test]
+fn one_oversized_row_does_not_refuse_earlier_rows_in_the_same_logical_batch() {
+    let batch = strings(2, |row| {
+        if row == 0 {
+            "ok".to_owned()
+        } else {
+            "x".repeat(700 << 10)
+        }
+    });
+    let file = write(&batch, builder().build());
+    let metadata = ParquetRecordBatchReaderBuilder::try_new(file.reopen().unwrap())
+        .unwrap()
+        .metadata()
+        .clone();
+    let metadata = ArrowReaderMetadata::try_new(
+        Arc::new(metadata.as_ref().clone()),
+        ArrowReaderOptions::new(),
+    )
+    .unwrap();
+    let scan = SourceScan::build(
+        &File::open(file.path()).unwrap(),
+        &metadata,
+        2,
+        32 << 20,
+        512 << 10,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(scan.physical_batch_rows(), 1);
+    let limit = (512 << 10) + ((512 << 10) / 8);
+    assert!(!scan.physical_batch_exceeds(0, limit));
+    assert!(scan.physical_batch_exceeds(1, limit));
+}
+
 fn write(batch: &RecordBatch, properties: WriterProperties) -> tempfile::NamedTempFile {
     let file = tempfile::NamedTempFile::new().unwrap();
     let mut writer =
@@ -42,7 +183,7 @@ fn scan(file: &tempfile::NamedTempFile, batch_rows: u64) -> SourceScan {
         ArrowReaderOptions::new(),
     )
     .unwrap();
-    SourceScan::build(handle, &metadata, batch_rows, 1 << 40, u64::MAX, None).unwrap()
+    SourceScan::build(&handle, &metadata, batch_rows, 1 << 40, u64::MAX, None).unwrap()
 }
 
 /// Bytes Arrow holds for the data of `array`: values, offsets and validity, not
@@ -113,7 +254,7 @@ fn source_scan_projects_visible_leaves_across_an_omitted_map_gap() {
     let metadata =
         ArrowReaderMetadata::load(&file.reopen().unwrap(), ArrowReaderOptions::new()).unwrap();
     let scan = SourceScan::build(
-        File::open(file.path()).unwrap(),
+        &File::open(file.path()).unwrap(),
         &metadata,
         2,
         1 << 20,
@@ -462,7 +603,7 @@ fn a_page_that_bounds_a_small_batch_too_coarsely_is_replaced_by_the_exact_size()
     .unwrap();
     // Admitting by the bound alone: a 1 MiB window refuses every batch.
     let coarse = SourceScan::build(
-        handle.try_clone().unwrap(),
+        &handle.try_clone().unwrap(),
         &metadata,
         100,
         1 << 40,
@@ -476,7 +617,7 @@ fn a_page_that_bounds_a_small_batch_too_coarsely_is_replaced_by_the_exact_size()
         coarse.batch_bytes(0)
     );
     // With the window known, the columns it would refuse are sized from their values.
-    let exact = SourceScan::build(handle, &metadata, 100, 1 << 40, 1 << 20, None).unwrap();
+    let exact = SourceScan::build(&handle, &metadata, 100, 1 << 40, 1 << 20, None).unwrap();
     let sizes = (0..20)
         .map(|batch| exact.batch_bytes(batch))
         .collect::<Vec<_>>();

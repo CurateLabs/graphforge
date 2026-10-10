@@ -324,6 +324,33 @@ Three kinds of evidence stand behind the bound, each reproducible from the tree:
   alternate them, and report per-pair deltas with the host load; keep raw output on
   the pull request.
 
+The focused source-workspace series is
+`crates/graphforge-api/src/import_session/bulk_source/reservation_tests.rs`:
+
+```bash
+CARGO_TARGET_DIR=/tmp/gf-1918-runtime-validation-target \
+  cargo nextest run --locked -p graphforge-api --lib --no-capture \
+  -E 'test(import_session::bulk_source::reservation_tests::a_task_reserves_what_its_decode_holds)'
+```
+
+It generates fixtures in the parent test process and measures each import in a
+fresh child. Each size in a family uses the same 256 MiB `SourceWorkspace` cap
+and batch size: 96 non-dictionary `int64` columns at 8,192, 32,768 and 131,072
+rows (8,192-row batches), then four dictionary `utf8` columns at 512, 2,048 and
+8,192 rows (512-row batches). Each dictionary has 256 distinct values of 16 KiB
+plus its decimal entry suffix. The test's separate 4 GiB planning budget selects
+the source plan; it is not the 256 MiB task-workspace cap. It reports the child's
+baseline and final absolute `VmHWM`, pre-decode and final `VmRSS`, planned and peak
+reserved workspace, encoded file size, decoded value bytes, and `/proc/self/io`
+`rchar`, `read_bytes` and `write_bytes` snapshots. Those I/O counters are
+process-wide (including reads of `/proc`), not source-attributed; this direct
+reader test does not exercise scratch I/O. Its RSS assertion is baseline
+`VmHWM` plus the fixed workspace cap and a 64 MiB process-overhead allowance, not
+a claim that the reservation equals RSS or limits the whole process. The generated
+fixture method is pinned by SHA-256
+`d93a4eacbbf7bb9bed558774dfd73a935b15c1a2a09a9c445bb3f78793d9adde` for that
+source file revision. This documents the reproducer, not a test result.
+
 Input identities used by the #1918 process measurements:
 
 | Input | SHA-256 |

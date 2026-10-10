@@ -1,9 +1,9 @@
 //! What a task reserves covers what its decode holds (#1918).
 //!
-//! Each case decodes every task of a source in a fresh process, reading the
-//! process's own high-water resident set around the reads, and compares the growth
-//! with the most the task reservations asked of the pool. A bound that the decode
-//! outgrew would be a promise broken; one far above it would refuse inputs that fit.
+//! Each case decodes every task of a source in a fresh process. The size series
+//! holds the source workspace cap constant while encoded and decoded input grows.
+//! It reports the absolute high-water mark and its pre-decode baseline: subtracting
+//! two high-water marks can hide a later peak when planning already set an earlier one.
 
 use std::fs::File;
 use std::path::Path;
@@ -23,6 +23,8 @@ use super::super::*;
 const CHILD: &str = "GF_RESERVATION_CHILD";
 const TEST: &str =
     "import_session::bulk_source::reservation_tests::a_task_reserves_what_its_decode_holds";
+const WORKSPACE_BUDGET: u64 = 256 << 20;
+const PROCESS_OVERHEAD_SLACK: u64 = 64 << 20;
 
 fn v7(value: u128) -> Uuid {
     Uuid::from_u128((value << 80) | (0x7 << 76) | (0x2 << 62) | value)
@@ -49,8 +51,7 @@ fn nodes(rows: usize, properties: Vec<(String, ArrayRef)>) -> RecordBatch {
 }
 
 /// 96 integer columns in 2 MiB pages: the pages are what a decode holds.
-fn write_wide(path: &Path) {
-    let rows = 1 << 18;
+fn write_wide(path: &Path, rows: usize) {
     let properties = (0..96)
         .map(|column| {
             let values = (0..rows as i64)
@@ -82,8 +83,7 @@ fn write_wide(path: &Path) {
 
 /// Four strings columns of 256 distinct 16 KiB values: 4 MiB dictionaries, and 8 MiB
 /// of strings per 512 rows each.
-fn write_dictionaries(path: &Path) {
-    let rows = 8_192;
+fn write_dictionaries(path: &Path, rows: usize) {
     let values = (0..256)
         .map(|entry| {
             char::from(b'a' + (entry % 26) as u8)
@@ -119,6 +119,14 @@ fn write_dictionaries(path: &Path) {
     writer.close().unwrap();
 }
 
+fn decoded_dictionary_payload_bytes(rows: usize) -> u64 {
+    let bytes = (0..rows)
+        .flat_map(|row| (0..4).map(move |column| (row * 7 + column) % 256))
+        .map(|entry| (16 << 10) + entry.to_string().len())
+        .sum::<usize>();
+    u64::try_from(bytes).unwrap()
+}
+
 fn status_kib(field: &str) -> u64 {
     std::fs::read_to_string("/proc/self/status")
         .unwrap()
@@ -128,16 +136,38 @@ fn status_kib(field: &str) -> u64 {
         .unwrap()
 }
 
-/// In the child: decode every task of the source and print what it reserved and
-/// how far the resident set rose.
+fn io_counters() -> (u64, u64, u64) {
+    let io = std::fs::read_to_string("/proc/self/io").unwrap();
+    let value = |name: &str| {
+        io.lines()
+            .find_map(|line| line.strip_prefix(name))
+            .and_then(|rest| rest.trim().parse().ok())
+            .unwrap()
+    };
+    (value("rchar:"), value("read_bytes:"), value("write_bytes:"))
+}
+
+/// In the child: decode every task and report absolute process and reservation
+/// measurements. Scratch I/O is not exercised by this direct source-reader test.
 fn child(spec: &str) {
-    let (path, batch_rows) = spec.split_once('|').unwrap();
-    let (_directory, _project, graph) = fixture();
+    let mut parts = spec.split('|');
+    let path = parts.next().unwrap();
+    let project_path = parts.next().unwrap();
+    let batch_rows: usize = parts.next().unwrap().parse().unwrap();
+    let decoded_payload_bytes: u64 = parts.next().unwrap().parse().unwrap();
+    assert!(parts.next().is_none());
+    let source_bytes = std::fs::metadata(path).unwrap().len();
+    let graph = GraphForge::new(Some(project_path)).unwrap();
+    let baseline_hwm = status_kib("VmHWM:") * 1024;
+    let before_rss = status_kib("VmRSS:") * 1024;
+    // Reading /proc/self/io contributes a small amount to rchar; keep both raw
+    // endpoints so the measurement remains transparent.
+    let io_before = io_counters();
     let mut session = graph
         .begin_import_session(
             OperationId(Uuid::now_v7()),
             ImportSessionLimits {
-                batch_rows: batch_rows.parse().unwrap(),
+                batch_rows,
                 ..ImportSessionLimits::default()
             },
         )
@@ -152,9 +182,11 @@ fn child(spec: &str) {
         .plan_bulk_build(&graph, None, &refusals, &digests)
         .unwrap();
     let source = &plan.nodes[0];
-    let pool = SourceWorkspace::new(u64::MAX / 2);
-    source.reader.bind_workspace(&pool);
-    let before = status_kib("VmHWM:") * 1024;
+    let pool = SourceWorkspace::new(WORKSPACE_BUDGET);
+    source.reader.bind_workspace(&pool).unwrap();
+    let pre_decode_hwm = status_kib("VmHWM:") * 1024;
+    let pre_decode_rss = status_kib("VmRSS:") * 1024;
+    let io_pre_decode = io_counters();
     let mut rows = 0_usize;
     for task in 0..source.tasks {
         source
@@ -165,24 +197,58 @@ fn child(spec: &str) {
             })
             .unwrap();
     }
-    let after = status_kib("VmHWM:") * 1024;
+    let after_hwm = status_kib("VmHWM:") * 1024;
+    let after_rss = status_kib("VmRSS:") * 1024;
+    let io_after = io_counters();
     println!(
         "RESERVATION {}",
         serde_json::json!({
             "rows": rows,
+            "source_bytes": source_bytes,
+            "decoded_payload_bytes": decoded_payload_bytes,
+            "workspace_capacity_bytes": pool.capacity(),
             "reserved": pool.peak_bytes(),
-            "rise": after - before,
+            "baseline_hwm_bytes": baseline_hwm,
+            "before_rss_bytes": before_rss,
+            "pre_decode_hwm_bytes": pre_decode_hwm,
+            "pre_decode_rss_bytes": pre_decode_rss,
+            "after_hwm_bytes": after_hwm,
+            "after_rss_bytes": after_rss,
+            "process_io_before": {"rchar": io_before.0, "read_bytes": io_before.1, "write_bytes": io_before.2},
+            "process_io_pre_decode": {"rchar": io_pre_decode.0, "read_bytes": io_pre_decode.1, "write_bytes": io_pre_decode.2},
+            "process_io_after": {"rchar": io_after.0, "read_bytes": io_after.1, "write_bytes": io_after.2},
             "planned": source.reader.decoded_workspace_bytes(),
+            "source_io": "rchar/read_bytes/write_bytes are process-wide, not source-attributed; /proc reads are included",
+            "scratch_io": "not exercised by direct registered-source reads",
         })
     );
 }
 
-fn measure(path: &Path, batch_rows: usize) -> serde_json::Value {
+fn measure(
+    path: &Path,
+    project_path: &Path,
+    batch_rows: usize,
+    decoded_payload_bytes: u64,
+) -> serde_json::Value {
     let output = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", TEST, "--nocapture", "--test-threads", "1"])
-        .env(CHILD, format!("{}|{batch_rows}", path.display()))
+        .env(
+            CHILD,
+            format!(
+                "{}|{}|{batch_rows}|{decoded_payload_bytes}",
+                path.display(),
+                project_path.display()
+            ),
+        )
         .output()
         .unwrap();
+    assert!(
+        output.status.success(),
+        "child measurement failed ({:?}):\n{}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let line = stdout
         .lines()
@@ -204,29 +270,58 @@ fn a_task_reserves_what_its_decode_holds() {
         return;
     }
     let directory = tempfile::tempdir().unwrap();
-    let wide = directory.path().join("wide.parquet");
-    write_wide(&wide);
-    let dictionaries = directory.path().join("dictionaries.parquet");
-    write_dictionaries(&dictionaries);
-    for (name, path, batch_rows) in [
-        ("wide pages", &wide, 65_536),
-        ("fat dictionaries", &dictionaries, 512),
-    ] {
-        let measured = measure(path, batch_rows);
-        let reserved = measured["reserved"].as_u64().unwrap();
-        let rise = measured["rise"].as_u64().unwrap();
-        println!("{name}: {measured}");
-        // The reads the digest holds ahead of its hashed prefix (a sixty-fourth of
-        // the 4 GiB budget, planned apart from the task) and the process's own
-        // allocator arenas and thread stacks are not the task's.
-        let slack = (4_u64 << 30) / 64 + (24 << 20);
+    // For each family, source bytes and total decoded payload grow while batch
+    // geometry and the 256 MiB admission cap remain fixed.
+    let mut previous_source_bytes = 0;
+    for rows in [1 << 13, 1 << 15, 1 << 17] {
+        let path = directory.path().join(format!("wide-{rows}.parquet"));
+        write_wide(&path, rows);
+        let (_project_directory, project_path, graph) = fixture();
+        drop(graph);
+        let decoded = u64::try_from(rows).unwrap() * 96 * 8;
+        let measured = measure(&path, &project_path, 8_192, decoded);
+        println!("wide pages rows={rows}: {measured}");
+        assert_eq!(measured["rows"].as_u64().unwrap(), rows as u64);
+        let source_bytes = measured["source_bytes"].as_u64().unwrap();
+        assert!(source_bytes > previous_source_bytes);
+        previous_source_bytes = source_bytes;
+        assert_eq!(measured["workspace_capacity_bytes"], WORKSPACE_BUDGET);
+        assert!(measured["reserved"].as_u64().unwrap() <= WORKSPACE_BUDGET);
+        assert_eq!(measured["decoded_payload_bytes"], decoded);
         assert!(
-            rise <= reserved + slack,
-            "{name}: the decode's resident set rose {rise} bytes; the task reserved {reserved}"
+            measured["after_hwm_bytes"].as_u64().unwrap()
+                <= measured["baseline_hwm_bytes"].as_u64().unwrap()
+                    + WORKSPACE_BUDGET
+                    + PROCESS_OVERHEAD_SLACK,
+            "wide pages rows={rows}: absolute process VmHWM exceeded baseline + fixed workspace cap + fixed process overhead"
         );
+    }
+
+    previous_source_bytes = 0;
+    for rows in [512, 2_048, 8_192] {
+        let path = directory
+            .path()
+            .join(format!("dictionaries-{rows}.parquet"));
+        write_dictionaries(&path, rows);
+        let (_project_directory, project_path, graph) = fixture();
+        drop(graph);
+        // Count the exact UTF-8 payload bytes, including each value's suffix.
+        let decoded = decoded_dictionary_payload_bytes(rows);
+        let measured = measure(&path, &project_path, 512, decoded);
+        println!("fat dictionaries rows={rows}: {measured}");
+        assert_eq!(measured["rows"].as_u64().unwrap(), rows as u64);
+        let source_bytes = measured["source_bytes"].as_u64().unwrap();
+        assert!(source_bytes > previous_source_bytes);
+        previous_source_bytes = source_bytes;
+        assert_eq!(measured["workspace_capacity_bytes"], WORKSPACE_BUDGET);
+        assert!(measured["reserved"].as_u64().unwrap() <= WORKSPACE_BUDGET);
+        assert_eq!(measured["decoded_payload_bytes"], decoded);
         assert!(
-            rise * 2 >= reserved,
-            "{name}: the task reserved {reserved} bytes for a decode that held {rise}"
+            measured["after_hwm_bytes"].as_u64().unwrap()
+                <= measured["baseline_hwm_bytes"].as_u64().unwrap()
+                    + WORKSPACE_BUDGET
+                    + PROCESS_OVERHEAD_SLACK,
+            "fat dictionaries rows={rows}: absolute process VmHWM exceeded baseline + fixed workspace cap + fixed process overhead"
         );
     }
 }

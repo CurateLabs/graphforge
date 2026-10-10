@@ -112,7 +112,21 @@ impl BulkBuildPlan<'_> {
         self.nodes
             .iter()
             .chain(&self.edges)
-            .map(|source| source.reader.decoded_workspace_bytes())
+            .map(|source| {
+                source
+                    .reader
+                    .decoded_workspace_bytes()
+                    .max(source.reader.max_task_workspace_bytes())
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    pub(super) fn source_level_workspace_bytes(&self) -> u64 {
+        self.nodes
+            .iter()
+            .chain(&self.edges)
+            .map(|source| source.reader.source_level_workspace_bytes())
             .max()
             .unwrap_or(0)
     }
@@ -175,6 +189,7 @@ pub(super) fn property_extra_workspace(
     property_workspace(budgets)
         .saturating_add(plan.max_source_schema_bytes().saturating_mul(8))
         .saturating_add(plan.source_decoder_bytes())
+        .saturating_add(plan.source_level_workspace_bytes())
         .saturating_sub(CSR_WORKSPACE_BYTES)
 }
 
@@ -186,6 +201,7 @@ pub(super) fn property_merge_capacity(
     budgets: super::GraphConstructionBudgets,
     source_schema_bytes: u64,
     source_decoder_bytes: u64,
+    source_level_workspace_bytes: u64,
     property_retained_bytes: u64,
     decode_bytes: u64,
 ) -> u64 {
@@ -193,6 +209,7 @@ pub(super) fn property_merge_capacity(
         .saturating_mul(8)
         .saturating_add(source_schema_bytes.saturating_mul(8))
         .saturating_add(source_decoder_bytes)
+        .saturating_add(source_level_workspace_bytes)
         .saturating_add(property_retained_bytes)
         .saturating_add(decode_bytes)
 }
@@ -270,7 +287,7 @@ impl ScratchPlan {
             .saturating_add(if properties {
                 property_extra_workspace(plan, budgets)
             } else {
-                0
+                plan.source_level_workspace_bytes()
             });
         // What the workers share beyond that: staging, the bytes the tasks in
         // flight decode, the bytes the property sort retains, and the partitions
@@ -388,12 +405,16 @@ impl ScratchPlan {
             .chain(&plan.edges)
             .any(|source| !source.property_free)
         {
-            property_workspace(budgets).saturating_add(decoder)
+            property_workspace(budgets)
+                .saturating_add(decoder)
+                .saturating_add(plan.source_level_workspace_bytes())
         } else {
             let working = budget
                 .saturating_sub(plan.node_tables_resident_bytes())
                 .saturating_add(MIN_WORKING_BYTES);
-            (working / 4).max(decoder)
+            (working / 4)
+                .max(decoder)
+                .saturating_add(plan.source_level_workspace_bytes())
         }
     }
 

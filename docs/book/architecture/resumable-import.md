@@ -115,12 +115,29 @@ emits the whole encoded generation:
    overlays, the v4 ordinal artifacts, and the CSR shards.
    Each artifact is hashed (SHA-256, XXH64) from the bytes written once.
 
-Before a Parquet batch is decoded, the plan has sized it from the page headers and
-the values they cannot state, and the task has reserved what it will hold. A batch
-that would decode past the intake window is refused with a typed resource limit
-(`GF_RESOURCE_LIMIT`) before its allocation, and counted as rejected rows; an
-Arrow file's schema is checked before its reader opens. Normalization validates
-property cells without retaining a value map per row.
+Before native Parquet footer parsing, admission checks the footer counts and
+reserves the Thrift schema-tree envelope; inferred Arrow schema and Parquet-field
+allocations (including `ARROW:schema` hints) are also admitted before Arrow schema
+inference. The page scan then inventories page headers, dictionary bytes, nested
+shape and values that headers cannot size. Before a task decodes, it reserves its
+page, validator and decoder workspace, selected row-group indexes, overlapping
+Arrow arrays, and normalization/duplicate-check workspace from one
+`SourceWorkspace` shared by registered sources. The reservation remains held
+through the task's output callbacks and drops when the task returns, errors, or is
+cancelled. Footer, schema, scan inventory and task allocations are charged before
+the corresponding native parser, vector, or decoder allocates them.
+
+`batch_rows` defines logical import batches and their operation IDs. A Parquet
+logical batch may be split into smaller physical row pieces to fit the intake
+window. `PhysicalBatchMap` maps those pieces back to the same logical batch and
+assigns contiguous row ordinals; the pieces share the logical batch's operation ID
+and duplicate-UUID set. Selected row groups remain in ascending source order and
+their retained indexes are included in task admission. A batch that cannot fit
+even as a physical piece is refused with a typed resource limit
+(`GF_RESOURCE_LIMIT`) before decode allocation and counted as rejected rows. Arrow
+IPC schemas and message bodies use their separate plan-time size inventory before
+its checked reader opens. Normalization validates property cells without
+retaining a value map per row.
 
 `commit` then installs and publishes the encoded inventory exactly as for any
 other session. The builder's receipt (`construction.bulk_build`) reports wall

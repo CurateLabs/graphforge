@@ -92,6 +92,9 @@ impl SchemaShape {
         }
     }
 
+    // The schema traversal uses one shared budget and ordered node inventory;
+    // keep the exhaustive traversal together so every allocation is charged.
+    #[allow(clippy::too_many_lines)]
     fn build_inner(
         metadata: &ArrowReaderMetadata,
         budget: &mut InventoryBudget,
@@ -429,13 +432,10 @@ impl SchemaShape {
                         list_repetition,
                     )?;
                 } else if preserve_struct {
-                    let item_fields = match element.data_type() {
-                        DataType::Struct(fields) => fields,
-                        _ => {
-                            return Err(storage(
-                                "legacy LIST element is not an admitted Arrow Struct",
-                            ));
-                        }
+                    let DataType::Struct(item_fields) = element.data_type() else {
+                        return Err(storage(
+                            "legacy LIST element is not an admitted Arrow Struct",
+                        ));
                     };
                     let struct_idx = append_node(
                         &mut nodes,
@@ -658,18 +658,23 @@ impl SchemaShape {
 
     /// Actual retained vector capacity after all visitor temporaries have
     /// dropped. Arrow fields are shared references to the admitted schema.
+    #[cfg(test)]
     pub(super) fn inventory_bytes(&self) -> Result<u64, GfError> {
         self.node_charge
             .checked_add(self.leaf_charge)
             .ok_or_else(|| storage("Parquet schema inventory size overflow"))
     }
 
+    #[cfg(test)]
     pub(super) fn release(self, budget: &mut InventoryBudget) {
         budget.release(self.node_charge);
         budget.release(self.leaf_charge);
     }
 }
 
+// These append helpers write the tightly coupled node/parent/leaf topology
+// state in one checked operation; a context object would obscure that mapping.
+#[allow(clippy::too_many_arguments)]
 fn append_node(
     nodes: &mut Vec<Node>,
     tails: &mut Vec<Option<usize>>,
@@ -729,6 +734,7 @@ fn attach_node(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_leaf(
     nodes: &mut Vec<Node>,
     tails: &mut Vec<Option<usize>>,

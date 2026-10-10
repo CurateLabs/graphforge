@@ -12,6 +12,7 @@
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
@@ -39,6 +40,10 @@ const FOOTER_PIECE_BYTES: u64 = 1 << 20;
 const PENDING_FLOOR_BYTES: u64 = 64 << 20;
 const PENDING_CEILING_BYTES: u64 = 1 << 30;
 const GAP_READ_BYTES: u64 = 1 << 20;
+/// Conservative per-entry allowance for the Vec/credit/key and BTreeMap node
+/// storage. The shared budget charges this in addition to each run's byte
+/// capacity, so many tiny ranges cannot evade the aggregate ceiling.
+const PENDING_RUN_OVERHEAD_BYTES: usize = 1_024;
 /// Buffer of the reader a Parquet decode gets for a page header. The decode then
 /// reads the page body again with `get_bytes`, so a larger buffer would read the
 /// start of every page twice.
@@ -379,15 +384,92 @@ fn open_named(path: &Path) -> Result<File, GfError> {
 #[derive(Clone)]
 pub(super) struct SourceDigest(Arc<Mutex<DigestState>>);
 
+/// One nonblocking byte allowance shared by all source digests in a build.
+///
+/// Local per-source limits still choose which ranges to keep. This budget puts
+/// one ceiling on their sum, so registering more sources cannot multiply the
+/// pending-memory bound.
+#[derive(Clone)]
+pub(super) struct PendingDigestBudget(Arc<PendingDigestBudgetState>);
+
+struct PendingDigestBudgetState {
+    capacity: usize,
+    used: AtomicUsize,
+}
+
+impl PendingDigestBudget {
+    pub(super) fn new(capacity_bytes: usize) -> Self {
+        Self(Arc::new(PendingDigestBudgetState {
+            capacity: capacity_bytes,
+            used: AtomicUsize::new(0),
+        }))
+    }
+
+    pub(super) fn capacity_bytes(&self) -> usize {
+        self.0.capacity
+    }
+
+    #[cfg(test)]
+    pub(super) fn used_bytes(&self) -> usize {
+        self.0.used.load(Ordering::Acquire)
+    }
+
+    fn try_acquire(&self, bytes: usize) -> Option<PendingDigestCredit> {
+        let mut used = self.0.used.load(Ordering::Acquire);
+        loop {
+            let next = used.checked_add(bytes)?;
+            if next > self.0.capacity {
+                return None;
+            }
+            match self
+                .0
+                .used
+                .compare_exchange_weak(used, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => {
+                    return Some(PendingDigestCredit {
+                        budget: self.0.clone(),
+                        bytes,
+                    });
+                }
+                Err(actual) => used = actual,
+            }
+        }
+    }
+}
+
+/// Credit lives exactly as long as the held bytes in its pending run.
+struct PendingDigestCredit {
+    budget: Arc<PendingDigestBudgetState>,
+    bytes: usize,
+}
+
+impl Drop for PendingDigestCredit {
+    fn drop(&mut self) {
+        self.budget.used.fetch_sub(self.bytes, Ordering::AcqRel);
+    }
+}
+
+struct PendingRun {
+    bytes: Vec<u8>,
+    credit: PendingCreditRequest,
+}
+
+enum PendingCreditRequest {
+    Untracked,
+    Tracked { _credit: PendingDigestCredit },
+}
+
 struct DigestState {
     hasher: Sha256,
     hashed: u64,
     length: u64,
     /// Held runs keyed by their first byte. Runs may overlap; `drain` skips
     /// what is already hashed.
-    pending: std::collections::BTreeMap<u64, Vec<u8>>,
+    pending: std::collections::BTreeMap<u64, PendingRun>,
     pending_bytes: usize,
     pending_limit: usize,
+    pending_budget: Option<PendingDigestBudget>,
     overrun: bool,
     /// Bytes offered to the digest, counting every read of a byte.
     observed: u64,
@@ -424,7 +506,7 @@ impl DigestState {
             match self.pending.last_key_value() {
                 Some((&farthest, _)) if farthest > keep_below => {
                     let (_, dropped) = self.pending.pop_last().expect("last entry exists");
-                    self.pending_bytes -= dropped.len();
+                    self.pending_bytes -= dropped.bytes.len();
                 }
                 _ => return false,
             }
@@ -440,7 +522,7 @@ impl DigestState {
             .pending
             .range(..=offset)
             .next_back()
-            .map(|(&start, run)| (start, start + run.len() as u64));
+            .map(|(&start, run)| (start, start + run.bytes.len() as u64));
         if let Some((start, end)) = continued
             && end >= offset
         {
@@ -449,18 +531,67 @@ impl DigestState {
                 return;
             }
             let extra = &bytes[skip..];
-            if self.make_room(start, extra.len()) {
-                self.pending
-                    .get_mut(&start)
-                    .expect("the run was found above")
-                    .extend_from_slice(extra);
-                self.pending_bytes += extra.len();
+            let Some(new_len) = self.pending[&start].bytes.len().checked_add(extra.len()) else {
+                return;
+            };
+            // Replacing a Vec temporarily keeps both allocations alive. Charge
+            // the complete new run, including its node allowance, while the
+            // old run's full credit remains held.
+            let Some(new_credit) = self.reserve_run_credit(new_len) else {
+                return;
+            };
+            if !self.make_room(start, extra.len()) {
+                return;
             }
+            let run = self
+                .pending
+                .get_mut(&start)
+                .expect("the run was found above");
+            let mut enlarged = Vec::new();
+            if enlarged.try_reserve_exact(new_len).is_err() {
+                return;
+            }
+            enlarged.extend_from_slice(&run.bytes);
+            enlarged.extend_from_slice(extra);
+            let old_bytes = std::mem::replace(&mut run.bytes, enlarged);
+            let old_credit = std::mem::replace(&mut run.credit, new_credit);
+            // Release the old allocation before its credit, keeping accounting
+            // conservative throughout the replacement peak.
+            drop(old_bytes);
+            drop(old_credit);
+            self.pending_bytes += extra.len();
             return;
         }
+        let Some(credit) = self.reserve_run_credit(bytes.len()) else {
+            return;
+        };
         if self.make_room(offset, bytes.len()) {
-            self.pending_bytes += bytes.len();
-            self.pending.insert(offset, bytes.to_vec());
+            let mut held = Vec::new();
+            if held.try_reserve_exact(bytes.len()).is_ok() {
+                held.extend_from_slice(bytes);
+                self.pending_bytes += bytes.len();
+                self.pending.insert(
+                    offset,
+                    PendingRun {
+                        bytes: held,
+                        credit,
+                    },
+                );
+            }
+        }
+    }
+
+    /// An untracked request preserves the planning digest's local-only bound;
+    /// `None` means shared pressure refused the run.
+    fn reserve_run_credit(&self, bytes: usize) -> Option<PendingCreditRequest> {
+        match &self.pending_budget {
+            None => Some(PendingCreditRequest::Untracked),
+            Some(budget) => {
+                let charge = bytes.checked_add(PENDING_RUN_OVERHEAD_BYTES)?;
+                budget
+                    .try_acquire(charge)
+                    .map(|credit| PendingCreditRequest::Tracked { _credit: credit })
+            }
         }
     }
 
@@ -470,12 +601,12 @@ impl DigestState {
             if start > self.hashed {
                 break;
             }
-            let (start, bytes) = self.pending.pop_first().expect("first entry exists");
-            self.pending_bytes -= bytes.len();
-            let end = start + bytes.len() as u64;
+            let (start, run) = self.pending.pop_first().expect("first entry exists");
+            self.pending_bytes -= run.bytes.len();
+            let end = start + run.bytes.len() as u64;
             if end > self.hashed {
                 let skip = usize::try_from(self.hashed - start).unwrap_or(usize::MAX);
-                self.hasher.update(&bytes[skip..]);
+                self.hasher.update(&run.bytes[skip..]);
                 self.hashed = end;
             }
         }
@@ -505,6 +636,7 @@ impl SourceDigest {
             pending: std::collections::BTreeMap::new(),
             pending_bytes: 0,
             pending_limit,
+            pending_budget: None,
             overrun: false,
             observed: 0,
             reread: 0,
@@ -514,6 +646,17 @@ impl SourceDigest {
     /// Replace the bound on held bytes. Called once, before the first task reads.
     pub(super) fn set_pending_limit(&self, limit: usize) {
         self.state().pending_limit = limit;
+    }
+
+    /// Attach the build-level aggregate bound before this source is read. The
+    /// caller shares one budget across all sources in the build.
+    pub(super) fn attach_pending_budget(&self, budget: PendingDigestBudget) {
+        let mut state = self.state();
+        assert!(
+            state.pending.is_empty(),
+            "digest budget must attach before reads"
+        );
+        state.pending_budget = Some(budget);
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, DigestState> {

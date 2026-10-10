@@ -6,6 +6,7 @@
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+use std::sync::Arc;
 
 use graphforge_core::GfError;
 use parquet::basic::{Encoding, Type};
@@ -21,13 +22,79 @@ use super::parquet_levels::{
     DictionaryIndices, HybridLevels, IndexSource, LevelSource, MAX_BLOCK_EVENTS,
 };
 use super::parquet_page_decode::DecodedPage;
-use super::parquet_reader::{OwnedPageReader, PageFailures, PagePreflight};
+use super::parquet_reader::{
+    OwnedPageReader, PageFailures, PagePreflight, TaskDecodeBudget, TaskDecodeCredit,
+};
 use super::parquet_values::{DictionaryByteFacts, DictionaryExpanded, LengthSource, ValueLengths};
 use super::{cancelled, limit, storage};
 
 const OFFSET_BYTES: u64 = 4;
 const REPEATED_CHILD_BYTES: u64 = 8;
-const WORKSPACE_RESERVE: u64 = (MAX_BLOCK_EVENTS as u64) * (2 * 2 + 8 + 4) + 1024;
+pub(super) const WORKSPACE_RESERVE: u64 = (MAX_BLOCK_EVENTS as u64) * (2 * 2 + 8 + 4) + 1024;
+
+pub(super) fn runtime_scratch_capacity(
+    metadata: &parquet::file::metadata::ParquetMetaData,
+    scan: &super::parquet_admission::SourceScan,
+    first_row: u64,
+    last_row: u64,
+) -> Result<(usize, u64), GfError> {
+    let mut selected = 0_usize;
+    let mut group_start = 0_u64;
+    for group in metadata.row_groups() {
+        let group_rows = u64::try_from(group.num_rows()).map_err(storage)?;
+        let group_end = group_start
+            .checked_add(group_rows)
+            .ok_or_else(|| storage("Parquet runtime preflight row-group range overflows"))?;
+        if group_end > first_row && group_start < last_row {
+            selected = selected
+                .checked_add(1)
+                .ok_or_else(|| limit("selected Parquet row-group count overflows"))?;
+        }
+        group_start = group_end;
+    }
+    let scratch = scan.validator_workspace(first_row, last_row);
+    Ok((selected, scratch))
+}
+
+pub(super) fn runtime_preflight<F>(
+    column: &ColumnChunkMetaData,
+    rows: u64,
+    budget: Arc<TaskDecodeBudget>,
+    cancellation: Option<CancellationToken>,
+    add_row: F,
+) -> Result<SizingPreflight<'static, F>, GfError>
+where
+    F: FnMut(u64, u64) -> Result<(), GfError> + Send,
+{
+    let descriptor = column.column_descr();
+    let physical = descriptor.physical_type();
+    let fixed_width = match physical {
+        Type::BOOLEAN => 1,
+        Type::INT32 | Type::FLOAT => 4,
+        Type::INT64 | Type::DOUBLE => 8,
+        Type::INT96 => 12,
+        Type::FIXED_LEN_BYTE_ARRAY => u64::try_from(descriptor.type_length()).map_err(storage)?,
+        Type::BYTE_ARRAY => 0,
+    };
+    Ok(SizingPreflight {
+        physical,
+        fixed_width,
+        max_rep: descriptor.max_rep_level(),
+        max_def: descriptor.max_def_level(),
+        rows,
+        row_base: 0,
+        capacity: budget.capacity(),
+        budget: SizingBudget::Runtime(budget),
+        cancellation,
+        dictionary: None,
+        dictionary_charge: 0,
+        row_slots: 0,
+        row_payload: 0,
+        row_open: false,
+        finished_rows: 0,
+        add_row,
+    })
+}
 
 fn check_cancel(cancellation: Option<&CancellationToken>) -> Result<(), GfError> {
     if cancellation.is_some_and(CancellationToken::is_cancelled) {
@@ -40,6 +107,13 @@ fn check_cancel(cancellation: Option<&CancellationToken>) -> Result<(), GfError>
 enum DictionaryFacts {
     Bytes(DictionaryByteFacts),
     Fixed { entries: usize },
+}
+
+/// Couples retained dictionary inventory with the credit that admits it.
+/// The allocation field drops before its credit is returned.
+struct DictionaryOwner {
+    facts: DictionaryFacts,
+    _credit: Option<TaskDecodeCredit>,
 }
 
 enum ValueCursor<'a, 'f> {
@@ -109,9 +183,8 @@ impl ValueCursor<'_, '_> {
 
     fn emitted(&self) -> usize {
         match self {
-            Self::Lengths(source) => source.emitted(),
+            Self::Lengths(source) | Self::DeltaFixedLength(source, _) => source.emitted(),
             Self::DictionaryBytes(source) => source.emitted(),
-            Self::DeltaFixedLength(source, _) => source.emitted(),
             Self::DictionaryFixed(_, _, _, emitted) | Self::Fixed(_, _, emitted) => *emitted,
             Self::DeltaFixed(_, facts, emitted) => (*emitted).min(facts.values),
             Self::BooleanRle(levels, _) => levels.emitted(),
@@ -119,7 +192,12 @@ impl ValueCursor<'_, '_> {
     }
 }
 
-struct SizingPreflight<'a, 'b, F> {
+enum SizingBudget<'a> {
+    Inventory(&'a mut InventoryBudget),
+    Runtime(Arc<TaskDecodeBudget>),
+}
+
+pub(super) struct SizingPreflight<'a, F> {
     physical: Type,
     fixed_width: u64,
     max_rep: i16,
@@ -127,15 +205,15 @@ struct SizingPreflight<'a, 'b, F> {
     rows: u64,
     row_base: u64,
     capacity: u64,
-    budget: &'a mut InventoryBudget,
+    budget: SizingBudget<'a>,
     cancellation: Option<CancellationToken>,
-    dictionary: Option<DictionaryFacts>,
+    dictionary: Option<DictionaryOwner>,
     dictionary_charge: u64,
     row_slots: u64,
     row_payload: u64,
     row_open: bool,
     finished_rows: u64,
-    add_row: &'b mut F,
+    add_row: F,
 }
 
 fn open_page_values<'a, 'f>(
@@ -167,12 +245,16 @@ fn open_page_values<'a, 'f>(
                 Ok(ValueCursor::Fixed(fixed_width, nonnull, 0))
             }
         },
-        Encoding::DELTA_LENGTH_BYTE_ARRAY if physical == Type::BYTE_ARRAY => Ok(
-            ValueCursor::Lengths(ValueLengths::new(encoding, suffix, nonnull, cancellation)?),
-        ),
-        Encoding::DELTA_BYTE_ARRAY if physical == Type::BYTE_ARRAY => Ok(ValueCursor::Lengths(
-            ValueLengths::new(encoding, suffix, nonnull, cancellation)?,
-        )),
+        Encoding::DELTA_LENGTH_BYTE_ARRAY | Encoding::DELTA_BYTE_ARRAY
+            if physical == Type::BYTE_ARRAY =>
+        {
+            Ok(ValueCursor::Lengths(ValueLengths::new(
+                encoding,
+                suffix,
+                nonnull,
+                cancellation,
+            )?))
+        }
         Encoding::DELTA_BYTE_ARRAY if physical == Type::FIXED_LEN_BYTE_ARRAY => {
             Ok(ValueCursor::DeltaFixedLength(
                 ValueLengths::new(encoding, suffix, nonnull, cancellation)?,
@@ -209,7 +291,7 @@ fn open_page_values<'a, 'f>(
             }
             if physical == Type::FIXED_LEN_BYTE_ARRAY {
                 let width = usize::try_from(fixed_width).map_err(storage)?;
-                if width == 0 || suffix.len() % width != 0 {
+                if width == 0 || !suffix.len().is_multiple_of(width) {
                     return Err(storage(
                         "Parquet fixed-length byte-stream-split body has incomplete values",
                     ));
@@ -266,7 +348,7 @@ where
     add_row(row, bytes)
 }
 
-impl<F> SizingPreflight<'_, '_, F>
+impl<F> SizingPreflight<'_, F>
 where
     F: FnMut(u64, u64) -> Result<(), GfError> + Send,
 {
@@ -274,13 +356,29 @@ where
         check_cancel(self.cancellation.as_ref())
     }
 
+    fn available_workspace(&self) -> Result<u64, GfError> {
+        match &self.budget {
+            SizingBudget::Inventory(budget) => self
+                .capacity
+                .checked_sub(budget.live_bytes())
+                .ok_or_else(|| limit("Parquet sizing inventory exceeds its source workspace")),
+            SizingBudget::Runtime(budget) => budget
+                .remaining()?
+                .checked_sub(WORKSPACE_RESERVE)
+                .ok_or_else(|| limit("Parquet task workspace cannot hold bounded sizing cursors")),
+        }
+    }
+
+    // A page's levels, values, dictionary state, and row transitions are one
+    // admission event and must stay in the same order.
+    #[allow(clippy::too_many_lines)]
     fn process_data_page(&mut self, decoded: &DecodedPage) -> Result<(), GfError> {
         self.check_cancel()?;
         let (encoding, page) = match &decoded.page {
             Page::DataPage { encoding, .. } | Page::DataPageV2 { encoding, .. } => {
                 (*encoding, &decoded.page)
             }
-            _ => return Ok(()),
+            Page::DictionaryPage { .. } => return Ok(()),
         };
         let mut events = PageEvents::new(page, self.max_rep, self.max_def)?;
         let summary = events.validated_summary(self.cancellation.as_ref())?;
@@ -290,7 +388,7 @@ where
         let fixed_width = self.fixed_width;
         let max_rep = self.max_rep;
         let max_def = self.max_def;
-        let dictionary = self.dictionary.as_ref();
+        let dictionary = self.dictionary.as_ref().map(|owner| &owner.facts);
         let cancellation = self.cancellation.as_ref();
         let mut values = open_page_values(
             physical,
@@ -310,7 +408,7 @@ where
         let mut finished_rows = self.finished_rows;
         let row_base = self.row_base;
         let rows = self.rows;
-        let add_row = &mut *self.add_row;
+        let add_row = &mut self.add_row;
         loop {
             check_cancel(cancellation)?;
             let count = events.next_block(&mut repetition, &mut definition, cancellation)?;
@@ -399,18 +497,29 @@ where
         }
         let entries = usize::try_from(*num_values).map_err(storage)?;
         if self.physical == Type::BYTE_ARRAY {
-            let live = self.budget.live_bytes();
-            let available = self
-                .capacity
-                .checked_sub(live)
-                .ok_or_else(|| limit("Parquet sizing inventory exceeds its source workspace"))?;
             let body = u64::try_from(decoded.body_capacity).map_err(storage)?;
-            let credit = available.checked_sub(body).ok_or_else(|| {
-                limit("Parquet dictionary facts do not fit beside the owned page")
-            })?;
+            let available = match &self.budget {
+                SizingBudget::Inventory(budget) => self
+                    .capacity
+                    .checked_sub(budget.live_bytes())
+                    .ok_or_else(|| {
+                    limit("Parquet sizing inventory exceeds its source workspace")
+                })?,
+                SizingBudget::Runtime(budget) => budget.remaining()?,
+            };
+            let credit = match &self.budget {
+                SizingBudget::Inventory(_) => available.checked_sub(body),
+                SizingBudget::Runtime(_) => Some(available),
+            }
+            .ok_or_else(|| limit("Parquet dictionary facts do not fit beside the owned page"))?;
             let credit_usize = usize::try_from(credit).map_err(storage)?;
-            self.budget
-                .admit(credit, "sizing dictionary value lengths")?;
+            let mut runtime_credit = match &mut self.budget {
+                SizingBudget::Inventory(budget) => {
+                    budget.admit(credit, "sizing dictionary value lengths")?;
+                    None
+                }
+                SizingBudget::Runtime(budget) => Some(budget.reserve(credit)?),
+            };
             let facts = match DictionaryByteFacts::new(
                 buf,
                 entries,
@@ -419,17 +528,31 @@ where
             ) {
                 Ok(facts) => facts,
                 Err(error) => {
-                    self.budget.release(credit);
+                    match &mut self.budget {
+                        SizingBudget::Inventory(budget) => budget.release(credit),
+                        SizingBudget::Runtime(_) => drop(runtime_credit.take()),
+                    }
                     return Err(error);
                 }
             };
             let actual = facts.inventory_bytes()?;
-            self.budget
-                .release(credit.checked_sub(actual).ok_or_else(|| {
-                    limit("Parquet dictionary facts exceed their admitted workspace")
-                })?);
+            let unused = credit
+                .checked_sub(actual)
+                .ok_or_else(|| limit("Parquet dictionary facts exceed their admitted workspace"))?;
+            match (&mut self.budget, &mut runtime_credit) {
+                (SizingBudget::Inventory(budget), _) => budget.release(unused),
+                (SizingBudget::Runtime(_), Some(credit)) => {
+                    credit.shrink_to(actual)?;
+                }
+                (SizingBudget::Runtime(_), None) => {
+                    return Err(storage("Parquet dictionary credit is missing"));
+                }
+            }
             self.dictionary_charge = actual;
-            self.dictionary = Some(DictionaryFacts::Bytes(facts));
+            self.dictionary = Some(DictionaryOwner {
+                facts: DictionaryFacts::Bytes(facts),
+                _credit: runtime_credit,
+            });
         } else {
             if self.physical == Type::BOOLEAN {
                 if buf.len() < entries.div_ceil(8) {
@@ -438,31 +561,36 @@ where
             } else {
                 require_prefix(buf, entries, self.fixed_width)?;
             }
-            self.dictionary = Some(DictionaryFacts::Fixed { entries });
+            self.dictionary = Some(DictionaryOwner {
+                facts: DictionaryFacts::Fixed { entries },
+                _credit: None,
+            });
         }
         Ok(())
     }
 }
 
-impl<F> PagePreflight for SizingPreflight<'_, '_, F>
+impl<F> PagePreflight for SizingPreflight<'_, F>
 where
     F: FnMut(u64, u64) -> Result<(), GfError> + Send,
 {
     fn remaining_workspace(&self) -> Result<usize, GfError> {
-        let available = self
-            .capacity
-            .checked_sub(self.budget.live_bytes())
-            .ok_or_else(|| limit("Parquet sizing inventory exceeds its source workspace"))?;
+        let available = self.available_workspace()?;
         usize::try_from(available).map_err(storage)
     }
 
     fn validate(&mut self, page: &DecodedPage) -> Result<(), GfError> {
         self.check_cancel()?;
+        let scratch_credit = match &self.budget {
+            SizingBudget::Runtime(budget) => Some(budget.reserve(WORKSPACE_RESERVE)?),
+            SizingBudget::Inventory(_) => None,
+        };
         match &page.page {
             Page::DictionaryPage { .. } => self.dictionary_page(page),
             Page::DataPage { .. } | Page::DataPageV2 { .. } => self.process_data_page(page),
-            _ => Ok(()),
-        }
+        }?;
+        drop(scratch_credit);
+        Ok(())
     }
 
     fn finish(&mut self) -> Result<(), GfError> {
@@ -474,7 +602,7 @@ where
                 self.row_payload,
                 self.row_slots,
                 self.max_rep,
-                self.add_row,
+                &mut self.add_row,
             )?;
             self.finished_rows = self
                 .finished_rows
@@ -491,7 +619,9 @@ where
         // become available to the next physical column's sizing pass.
         self.dictionary = None;
         if self.dictionary_charge > 0 {
-            self.budget.release(self.dictionary_charge);
+            if let SizingBudget::Inventory(budget) = &mut self.budget {
+                budget.release(self.dictionary_charge);
+            }
             self.dictionary_charge = 0;
         }
         Ok(())
@@ -499,19 +629,29 @@ where
 }
 
 /// Size one physical leaf by validating its owned page stream.
-pub(super) fn size_column<F>(
-    file: &File,
-    column: &ColumnChunkMetaData,
-    rows: u64,
-    row_base: u64,
-    capacity: u64,
-    budget: &mut InventoryBudget,
-    cancellation: Option<&CancellationToken>,
-    add_row: &mut F,
-) -> Result<(), GfError>
+pub(super) struct SizeColumnInput<'a> {
+    pub(super) file: &'a File,
+    pub(super) column: &'a ColumnChunkMetaData,
+    pub(super) rows: u64,
+    pub(super) row_base: u64,
+    pub(super) capacity: u64,
+    pub(super) budget: &'a mut InventoryBudget,
+    pub(super) cancellation: Option<&'a CancellationToken>,
+}
+
+pub(super) fn size_column<F>(input: SizeColumnInput<'_>, add_row: &mut F) -> Result<(), GfError>
 where
     F: FnMut(u64, u64) -> Result<(), GfError> + Send,
 {
+    let SizeColumnInput {
+        file,
+        column,
+        rows,
+        row_base,
+        capacity,
+        budget,
+        cancellation,
+    } = input;
     let descriptor = column.column_descr();
     let physical = descriptor.physical_type();
     let fixed_width = match physical {
@@ -539,7 +679,8 @@ where
     let expected_data_events = u64::try_from(column.num_values()).map_err(storage)?;
     let failures = PageFailures::new();
     let cancellation = cancellation.cloned();
-    let mut preflight = SizingPreflight {
+    budget.admit(WORKSPACE_RESERVE, "bounded Parquet sizing cursors")?;
+    let preflight = SizingPreflight {
         physical,
         fixed_width,
         max_rep: descriptor.max_rep_level(),
@@ -547,7 +688,7 @@ where
         rows,
         row_base,
         capacity,
-        budget,
+        budget: SizingBudget::Inventory(budget),
         cancellation: cancellation.clone(),
         dictionary: None,
         dictionary_charge: 0,
@@ -557,9 +698,6 @@ where
         finished_rows: 0,
         add_row,
     };
-    preflight
-        .budget
-        .admit(WORKSPACE_RESERVE, "bounded Parquet sizing cursors")?;
     let page_reader = OwnedPageReader::new(
         chunk_reader,
         chunk_bytes,
@@ -570,7 +708,7 @@ where
         preflight,
     );
     let mut page_reader = page_reader;
-    while let Some(result) = page_reader.next() {
+    for result in page_reader.by_ref() {
         if let Err(error) = result {
             return Err(failures.take().unwrap_or_else(|| storage(error)));
         }
@@ -606,9 +744,8 @@ fn length_prefixed(body: &[u8]) -> Result<&[u8], GfError> {
     let end = 4_usize
         .checked_add(length)
         .ok_or_else(|| storage("Parquet RLE boolean length overflows"))?;
-    Ok(body
-        .get(4..end)
-        .ok_or_else(|| storage("Parquet RLE boolean values are truncated"))?)
+    body.get(4..end)
+        .ok_or_else(|| storage("Parquet RLE boolean values are truncated"))
 }
 
 #[cfg(test)]

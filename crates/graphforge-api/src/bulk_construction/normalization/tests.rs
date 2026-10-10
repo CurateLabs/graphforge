@@ -1462,6 +1462,26 @@ fn node_pieces_at_true_offsets_match_the_full_logical_batch() {
     assert_eq!(combined, full_chunk);
 }
 
+#[test]
+fn node_duplicate_across_physical_pieces_is_still_rejected() {
+    let graph = GraphForge::new(None).unwrap();
+    let op = operation(962);
+    let duplicate = uuid(963);
+    let input = node_batch(
+        &[duplicate, duplicate],
+        &["Person", "Person"],
+        &[None, None],
+    );
+    let mut seen = HashSet::new();
+    graph
+        .normalize_import_node_chunk_at_with_seen(op, &input.slice(0, 1), 0, &mut seen)
+        .unwrap();
+    let error = graph
+        .normalize_import_node_chunk_at_with_seen(op, &input.slice(1, 1), 1, &mut seen)
+        .unwrap_err();
+    assert!(error.to_string().contains("duplicate or existing UUID"));
+}
+
 /// The same proof for edges: nullable edge UUIDs on both sides of a boundary,
 /// an explicit non-null identity, distinct relation types, a nullable weight
 /// column, and endpoints that stay valid in every piece (#1918).

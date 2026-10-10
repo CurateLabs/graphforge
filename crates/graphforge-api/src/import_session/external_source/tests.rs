@@ -11,7 +11,7 @@ use parquet::arrow::ArrowWriter;
 use sha2::Digest as _;
 use uuid::Uuid;
 
-use super::{SourceDigest, hex};
+use super::{PendingDigestBudget, SourceDigest, hex};
 use crate::import_session::test_fixtures::{edges, fixture, nodes, seeded_fixture};
 use crate::import_session::{
     BuildRoute, GraphImportSession, ImportPhase, ImportSessionLimits, ImportSourceKind,
@@ -878,7 +878,7 @@ fn a_staged_read_hashes_what_it_reads_and_rereads_almost_nothing() {
     let ids = (0..600_000).map(|_| Uuid::now_v7()).collect::<Vec<_>>();
     let batch = nodes(&ids);
     let properties = WriterProperties::builder()
-        .set_max_row_group_size(100_000)
+        .set_max_row_group_row_count(Some(100_000))
         .set_statistics_enabled(parquet::file::properties::EnabledStatistics::Chunk)
         .build();
     let mut writer = ArrowWriter::try_new(
@@ -1327,6 +1327,74 @@ fn a_fully_staged_source_edited_before_resume_publishes_its_original_rows_and_di
             Some(sha256(&fs::read(&second.path).unwrap()).as_str())
         );
     }
+}
+
+#[test]
+fn source_digests_share_one_nonblocking_pending_byte_budget() {
+    let first_fixture = source();
+    let second_fixture = source();
+    let first_bytes = fs::read(&first_fixture.path).unwrap();
+    let second_bytes = fs::read(&second_fixture.path).unwrap();
+    assert!(first_bytes.len() >= 8 && second_bytes.len() >= 8);
+    let first_source = super::ExternalSource::capture(&first_fixture.path).unwrap();
+    let second_source = super::ExternalSource::capture(&second_fixture.path).unwrap();
+    let first_handle = first_source.reopen().unwrap();
+    let second_handle = second_source.reopen().unwrap();
+
+    // Two bytes cost 1,026 including the fixed per-run/node allowance;
+    // replacing it with a four-byte run needs 1,026 + 1,028 at peak.
+    let budget = PendingDigestBudget::new(2_054);
+    let first = SourceDigest::with_pending_limit(first_bytes.len() as u64, 8);
+    let second = SourceDigest::with_pending_limit(second_bytes.len() as u64, 8);
+    first.attach_pending_budget(budget.clone());
+    second.attach_pending_budget(budget.clone());
+
+    // The first source's replacement peak reaches the aggregate limit. Once
+    // replacement completes, the second source still cannot multiply the cap;
+    // its range is omitted and recovered by finish.
+    first.observe(4, &first_bytes[4..6]);
+    assert_eq!(budget.used_bytes(), 1_026);
+    first.observe(6, &first_bytes[6..8]);
+    second.observe(4, &second_bytes[4..8]);
+    assert_eq!(budget.capacity_bytes(), 2_054);
+    assert_eq!(budget.used_bytes(), 1_028);
+
+    assert_eq!(
+        first.finish(&first_source, &first_handle).unwrap(),
+        sha256(&first_bytes)
+    );
+    assert_eq!(budget.used_bytes(), 0);
+    assert_eq!(first.reread_bytes(), first_bytes.len() as u64 - 4);
+
+    assert_eq!(
+        second.finish(&second_source, &second_handle).unwrap(),
+        sha256(&second_bytes)
+    );
+    assert_eq!(second.reread_bytes(), second_bytes.len() as u64);
+    assert_eq!(budget.used_bytes(), 0);
+}
+
+#[test]
+fn digest_run_extension_keeps_old_bytes_when_replacement_peak_does_not_fit() {
+    let fixture = source();
+    let bytes = fs::read(&fixture.path).unwrap();
+    assert!(bytes.len() >= 8);
+    let external = super::ExternalSource::capture(&fixture.path).unwrap();
+    let handle = external.reopen().unwrap();
+    let budget = PendingDigestBudget::new(2_053);
+    let digest = SourceDigest::with_pending_limit(bytes.len() as u64, 8);
+    digest.attach_pending_budget(budget.clone());
+
+    digest.observe(4, &bytes[4..6]);
+    assert_eq!(budget.used_bytes(), 1_026);
+    // The replacement needs the old 1,026-byte credit plus 1,028 bytes for
+    // the new run. It cannot fit, so the old two bytes stay held.
+    digest.observe(6, &bytes[6..8]);
+    assert_eq!(budget.used_bytes(), 1_026);
+
+    assert_eq!(digest.finish(&external, &handle).unwrap(), sha256(&bytes));
+    assert_eq!(digest.reread_bytes(), bytes.len() as u64 - 2);
+    assert_eq!(budget.used_bytes(), 0);
 }
 
 /// Everything commit publishes was built and its digests recorded by validate, so

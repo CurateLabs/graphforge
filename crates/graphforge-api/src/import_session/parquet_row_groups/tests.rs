@@ -8,7 +8,9 @@ use arrow::record_batch::{RecordBatch, RecordBatchReader};
 use bytes::Bytes;
 use graphforge_core::{GfError, ProjectErrorCode};
 use parquet::arrow::array_reader::RowGroups;
-use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
+use parquet::arrow::arrow_reader::{
+    ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder, RowSelection, RowSelector,
+};
 use parquet::arrow::schema::parquet_to_arrow_field_levels;
 use parquet::arrow::{ArrowWriter, ProjectionMask};
 use parquet::basic::Compression;
@@ -20,7 +22,7 @@ use crate::CancellationToken;
 use crate::import_session::inventory_budget::InventoryBudget;
 use crate::import_session::parquet_page_decode::DecodedPage;
 use crate::import_session::parquet_reader::{
-    OwnedBatchReader, PageFailures, PagePreflight, attach_admitted_schema,
+    OwnedBatchReader, PageFailures, PagePreflight, TaskDecodeBudget, attach_admitted_schema,
 };
 
 #[derive(Clone)]
@@ -181,6 +183,116 @@ fn public_arrow_reader_routes_all_selected_physical_columns_through_preflight() 
         calls.load(Ordering::Relaxed) >= 6,
         "each dispatched data page must pass through the preflight callback"
     );
+}
+
+#[test]
+fn bounded_task_reader_keeps_the_selected_row_window_and_page_credits() {
+    let (bytes, metadata) = source();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let failures = PageFailures::new();
+    let decode_budget = TaskDecodeBudget::new(128 << 20);
+    let selected = Arc::new(vec![0, 1, 2]);
+    let groups = OwnedRowGroups::new_bounded(
+        Arc::new(bytes.clone()),
+        Arc::clone(&metadata),
+        Arc::clone(&selected),
+        {
+            let calls = Arc::clone(&calls);
+            move |_, _| {
+                Ok(Probe {
+                    calls: Arc::clone(&calls),
+                    refusal: false,
+                })
+            }
+        },
+        None,
+        failures.clone(),
+        Arc::clone(&decode_budget),
+    )
+    .unwrap();
+    assert!(Arc::ptr_eq(&groups.selected, &selected));
+    let levels = parquet_to_arrow_field_levels(
+        metadata.file_metadata().schema_descr(),
+        ProjectionMask::all(),
+        None,
+    )
+    .unwrap();
+    let native = ParquetRecordBatchReader::try_new_with_row_groups(
+        &levels,
+        &groups,
+        2,
+        Some(RowSelection::from(vec![
+            RowSelector::skip(4),
+            RowSelector::select(4),
+            RowSelector::skip(4),
+        ])),
+    )
+    .unwrap();
+    let admitted = native.schema().clone();
+    let mut reader = OwnedBatchReader::new(native, admitted, failures).unwrap();
+    let batches = reader.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+    let values = batches
+        .iter()
+        .flat_map(|batch| {
+            let values = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap();
+            (0..values.len())
+                .map(|row| values.value(row))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(values, [4, 5, 6, 7]);
+    assert!(calls.load(Ordering::Relaxed) >= 6);
+    assert_eq!(decode_budget.remaining().unwrap(), 128 << 20);
+}
+
+#[test]
+fn bounded_reader_reuses_one_index_vector_for_many_small_row_groups() {
+    const ROWS: i32 = 256;
+    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![Arc::new(Int32Array::from_iter_values(0..ROWS))],
+    )
+    .unwrap();
+    let properties = WriterProperties::builder()
+        .set_max_row_group_row_count(Some(1))
+        .build();
+    let mut output = Vec::new();
+    {
+        let mut writer = ArrowWriter::try_new(&mut output, schema, Some(properties)).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+    let bytes = Bytes::from(output);
+    let metadata = ParquetRecordBatchReaderBuilder::try_new(bytes.clone())
+        .unwrap()
+        .metadata()
+        .clone();
+    let row_count = usize::try_from(ROWS).unwrap();
+    assert_eq!(metadata.num_row_groups(), row_count);
+    let selected = Arc::new((0..metadata.num_row_groups()).collect::<Vec<_>>());
+    let groups = OwnedRowGroups::new_bounded(
+        Arc::new(bytes),
+        metadata,
+        Arc::clone(&selected),
+        |_, _| {
+            Ok(Probe {
+                calls: Arc::new(AtomicUsize::new(0)),
+                refusal: false,
+            })
+        },
+        None,
+        PageFailures::new(),
+        TaskDecodeBudget::new(1 << 20),
+    )
+    .unwrap();
+    assert!(Arc::ptr_eq(&groups.selected, &selected));
+    assert_eq!(groups.num_rows(), row_count);
+    assert_eq!(selected.capacity(), row_count);
 }
 
 #[test]

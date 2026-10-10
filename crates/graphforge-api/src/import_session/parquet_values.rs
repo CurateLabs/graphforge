@@ -54,6 +54,7 @@ fn count_mismatch() -> GfError {
 /// bounded state, plus fixed-block fills for the shape accountant.
 pub(super) trait LengthSource {
     /// Nonnull values the caller declared for this section.
+    #[cfg(test)]
     fn expected(&self) -> usize;
     /// Values already consumed and validated.
     fn emitted(&self) -> usize;
@@ -61,6 +62,7 @@ pub(super) trait LengthSource {
     fn next_length(&mut self) -> Result<Option<u64>, GfError>;
 
     /// Values still required.
+    #[cfg(test)]
     fn remaining(&self) -> usize {
         self.expected() - self.emitted()
     }
@@ -115,6 +117,7 @@ impl<'a> PlainByteLengths<'a> {
 }
 
 impl LengthSource for PlainByteLengths<'_> {
+    #[cfg(test)]
     fn expected(&self) -> usize {
         self.expected
     }
@@ -192,6 +195,7 @@ impl<'a> DeltaByteLengths<'a> {
 }
 
 impl LengthSource for DeltaByteLengths<'_> {
+    #[cfg(test)]
     fn expected(&self) -> usize {
         self.expected
     }
@@ -225,7 +229,7 @@ impl LengthSource for DeltaByteLengths<'_> {
 /// validates every dangerous count before a decoder can be initialized.
 pub(super) enum ValueLengths<'a> {
     Plain(PlainByteLengths<'a>),
-    Delta(DeltaByteLengths<'a>),
+    Delta(Box<DeltaByteLengths<'a>>),
 }
 
 impl<'a> ValueLengths<'a> {
@@ -244,15 +248,21 @@ impl<'a> ValueLengths<'a> {
                 expected_nonnull,
                 cancellation,
             ))),
-            Encoding::DELTA_LENGTH_BYTE_ARRAY | Encoding::DELTA_BYTE_ARRAY => Ok(Self::Delta(
-                DeltaByteLengths::new(encoding, body, expected_nonnull, cancellation)?,
-            )),
+            Encoding::DELTA_LENGTH_BYTE_ARRAY | Encoding::DELTA_BYTE_ARRAY => {
+                Ok(Self::Delta(Box::new(DeltaByteLengths::new(
+                    encoding,
+                    body,
+                    expected_nonnull,
+                    cancellation,
+                )?)))
+            }
             _ => Err(storage("unsupported Parquet value length encoding")),
         }
     }
 }
 
 impl LengthSource for ValueLengths<'_> {
+    #[cfg(test)]
     fn expected(&self) -> usize {
         match self {
             Self::Plain(plain) => plain.expected(),
@@ -287,7 +297,9 @@ impl LengthSource for ValueLengths<'_> {
 /// or storing per-row lengths. The consumed value count is the caller's
 /// `expected_nonnull` itself.
 pub(super) struct PlainValueFacts {
+    #[cfg(test)]
     pub(super) payload_bytes: u64,
+    #[cfg(test)]
     pub(super) largest_length: u64,
 }
 
@@ -298,23 +310,32 @@ pub(super) fn plain_value_facts(
 ) -> Result<PlainValueFacts, GfError> {
     check_cancel(cancellation)?;
     let mut cursor = PlainByteLengths::new(body, expected_nonnull, cancellation);
+    #[cfg(test)]
     let mut payload_bytes = 0_u64;
+    #[cfg(test)]
     let mut largest_length = 0_u64;
     let mut block = [0_u64; MAX_BLOCK_EVENTS];
     loop {
         let count = cursor.next_block(&mut block)?;
         for &length in &block[..count] {
-            payload_bytes = payload_bytes
-                .checked_add(length)
-                .ok_or_else(|| storage("Parquet plain payload total overflows"))?;
-            largest_length = largest_length.max(length);
+            #[cfg(test)]
+            {
+                payload_bytes = payload_bytes
+                    .checked_add(length)
+                    .ok_or_else(|| storage("Parquet plain payload total overflows"))?;
+                largest_length = largest_length.max(length);
+            }
+            #[cfg(not(test))]
+            let _ = length;
         }
         if count == 0 {
             break;
         }
     }
     Ok(PlainValueFacts {
+        #[cfg(test)]
         payload_bytes,
+        #[cfg(test)]
         largest_length,
     })
 }
@@ -345,7 +366,9 @@ fn dictionary_body_preflight(
 /// charged by their owners.
 pub(super) struct DictionaryByteFacts {
     lengths: Vec<u64>,
+    #[cfg(test)]
     payload_bytes: u64,
+    #[cfg(test)]
     largest_length: u64,
 }
 
@@ -380,7 +403,7 @@ impl DictionaryByteFacts {
         // reserve/resize: a tiny malformed body plus a huge admitted count is
         // refused here before any allocation is requested, however large the
         // admitted credit is.
-        let facts = dictionary_body_preflight(body, entry_count, cancellation)?;
+        let _facts = dictionary_body_preflight(body, entry_count, cancellation)?;
         let mut lengths: Vec<u64> = Vec::new();
         lengths
             .try_reserve_exact(entry_count)
@@ -413,8 +436,10 @@ impl DictionaryByteFacts {
         debug_assert_eq!(at, entry_count);
         Ok(Self {
             lengths,
-            payload_bytes: facts.payload_bytes,
-            largest_length: facts.largest_length,
+            #[cfg(test)]
+            payload_bytes: _facts.payload_bytes,
+            #[cfg(test)]
+            largest_length: _facts.largest_length,
         })
     }
 
@@ -422,10 +447,12 @@ impl DictionaryByteFacts {
         self.lengths.len()
     }
 
+    #[cfg(test)]
     pub(super) fn payload_bytes(&self) -> u64 {
         self.payload_bytes
     }
 
+    #[cfg(test)]
     pub(super) fn largest_length(&self) -> u64 {
         self.largest_length
     }
@@ -505,6 +532,7 @@ impl<'a, 'f> DictionaryExpanded<'a, 'f> {
 }
 
 impl LengthSource for DictionaryExpanded<'_, '_> {
+    #[cfg(test)]
     fn expected(&self) -> usize {
         self.expected
     }

@@ -49,6 +49,7 @@ fn invalid_descriptor() -> GfError {
     storage("Parquet level descriptor has a negative maximum")
 }
 
+#[cfg(test)]
 fn block_contract() -> GfError {
     storage("Parquet level block exceeds the 1024 event bound")
 }
@@ -57,6 +58,7 @@ fn block_contract() -> GfError {
 /// state, plus fixed-block fills for the schema shape accountant.
 pub(super) trait LevelSource {
     /// Event count the caller declared for this section.
+    #[cfg(test)]
     fn expected(&self) -> usize;
     /// Events already consumed and validated.
     fn emitted(&self) -> usize;
@@ -64,6 +66,7 @@ pub(super) trait LevelSource {
     fn next_level(&mut self) -> Result<Option<i16>, GfError>;
 
     /// Events still required.
+    #[cfg(test)]
     fn remaining(&self) -> usize {
         self.expected() - self.emitted()
     }
@@ -71,6 +74,7 @@ pub(super) trait LevelSource {
     /// Fill `block` with up to [`MAX_BLOCK_EVENTS`] validated levels and
     /// return how many were written. Stops at section end, which before
     /// `expected` events is an error surfaced by [`Self::next_level`].
+    #[cfg(test)]
     fn next_block(&mut self, block: &mut [i16]) -> Result<usize, GfError> {
         if block.len() > MAX_BLOCK_EVENTS {
             return Err(block_contract());
@@ -89,14 +93,18 @@ pub(super) trait LevelSource {
 
 /// Uniform interface for the dictionary index cursor.
 pub(super) trait IndexSource {
+    #[cfg(test)]
     fn expected(&self) -> usize;
+    #[cfg(test)]
     fn emitted(&self) -> usize;
     fn next_index(&mut self) -> Result<Option<u32>, GfError>;
 
+    #[cfg(test)]
     fn remaining(&self) -> usize {
         self.expected() - self.emitted()
     }
 
+    #[cfg(test)]
     fn next_block(&mut self, block: &mut [u32]) -> Result<usize, GfError> {
         if block.len() > MAX_BLOCK_EVENTS {
             return Err(block_contract());
@@ -131,6 +139,7 @@ impl ImplicitZero {
 }
 
 impl LevelSource for ImplicitZero {
+    #[cfg(test)]
     fn expected(&self) -> usize {
         self.expected
     }
@@ -180,12 +189,14 @@ impl<'a> PackedLevels<'a> {
 
     /// Bytes of `data` actually consumed by emitted events; trailing padding
     /// is not attributed.
+    #[cfg(test)]
     pub(super) fn consumed_bytes(&self) -> usize {
         self.bit_offset.div_ceil(8)
     }
 }
 
 impl LevelSource for PackedLevels<'_> {
+    #[cfg(test)]
     fn expected(&self) -> usize {
         self.expected
     }
@@ -259,6 +270,7 @@ impl<'a> Hybrid<'a> {
         }
     }
 
+    #[cfg(test)]
     fn consumed_bytes(&self) -> usize {
         self.offset.max(self.packed_bit_offset.div_ceil(8))
     }
@@ -436,12 +448,14 @@ impl<'a> HybridLevels<'a> {
     /// Bytes consumed by the logical prefix, including run headers. The
     /// declared section span, not this prefix count, locates the value suffix:
     /// unused final packed padding may remain in the admitted section.
+    #[cfg(test)]
     pub(super) fn consumed_bytes(&self) -> usize {
         self.engine.consumed_bytes()
     }
 }
 
 impl LevelSource for HybridLevels<'_> {
+    #[cfg(test)]
     fn expected(&self) -> usize {
         self.engine.expected
     }
@@ -500,16 +514,19 @@ impl<'a> DictionaryIndices<'a> {
     }
 
     /// Bytes of the stream consumed so far, including the width byte.
+    #[cfg(test)]
     pub(super) fn consumed_bytes(&self) -> usize {
         self.engine.consumed_bytes() + 1
     }
 }
 
 impl IndexSource for DictionaryIndices<'_> {
+    #[cfg(test)]
     fn expected(&self) -> usize {
         self.engine.expected
     }
 
+    #[cfg(test)]
     fn emitted(&self) -> usize {
         self.engine.emitted
     }
@@ -536,14 +553,14 @@ pub(super) struct V1Sections<'a> {
 /// validating every length before borrowing. `RLE` sections carry a signed
 /// four-byte length; `BIT_PACKED` sections are exactly
 /// `ceil(num_values * width / 8)` bytes with no length prefix.
-pub(super) fn split_v1<'a>(
-    body: &'a [u8],
+pub(super) fn split_v1(
+    body: &[u8],
     max_repetition: i16,
     max_definition: i16,
     num_values: u32,
     repetition_encoding: Encoding,
     definition_encoding: Encoding,
-) -> Result<V1Sections<'a>, GfError> {
+) -> Result<V1Sections<'_>, GfError> {
     if max_repetition < 0 || max_definition < 0 {
         return Err(invalid_descriptor());
     }
@@ -582,13 +599,13 @@ pub(super) fn split_v1<'a>(
     })
 }
 
-fn v1_section<'a>(
-    body: &'a [u8],
+fn v1_section(
+    body: &[u8],
     offset: usize,
     max_level: i16,
     num_values: u32,
     encoding: Encoding,
-) -> Result<(usize, &'a [u8]), GfError> {
+) -> Result<(usize, &[u8]), GfError> {
     if max_level < 0 {
         return Err(invalid_descriptor());
     }

@@ -238,9 +238,12 @@ fn check_cancelled(cancellation: Option<&CancellationToken>) -> Result<(), GfErr
     }
 }
 
-fn walk_field<'a>(
+// The exhaustive Arrow type match is the schema admission boundary; keeping
+// its type-specific checks together makes unsupported variants explicit.
+#[allow(clippy::too_many_lines)]
+fn walk_field(
     requests: &mut Requests,
-    field: arrow::ipc::Field<'a>,
+    field: arrow::ipc::Field<'_>,
     depth: usize,
     top_level: bool,
     endianness: Endianness,
@@ -284,7 +287,14 @@ fn walk_field<'a>(
     }
 
     match field.type_type() {
-        Type::Null | Type::Bool => {}
+        Type::Null
+        | Type::Bool
+        | Type::Binary
+        | Type::BinaryView
+        | Type::LargeBinary
+        | Type::Utf8
+        | Type::Utf8View
+        | Type::LargeUtf8 => {}
         Type::Int => {
             let int = field.type_as_int().ok_or_else(malformed)?;
             if !matches!(int.bitWidth(), 8 | 16 | 32 | 64) {
@@ -300,12 +310,6 @@ fn walk_field<'a>(
                 return Err(malformed());
             }
         }
-        Type::Binary
-        | Type::BinaryView
-        | Type::LargeBinary
-        | Type::Utf8
-        | Type::Utf8View
-        | Type::LargeUtf8 => {}
         Type::FixedSizeBinary => {
             field.type_as_fixed_size_binary().ok_or_else(malformed)?;
         }
@@ -443,11 +447,12 @@ fn walk_field<'a>(
                 let mut seen = 0_u128;
                 for id_index in 0..ids.len() {
                     check_cancelled(cancellation)?;
-                    let id = ids.get(id_index) as i8;
+                    let id = i8::try_from(ids.get(id_index)).map_err(|_| malformed())?;
                     if id < 0 {
                         return Err(malformed());
                     }
-                    let bit = 1_u128.checked_shl(id as u32).ok_or_else(malformed)?;
+                    let shift = u32::try_from(id).map_err(|_| malformed())?;
+                    let bit = 1_u128.checked_shl(shift).ok_or_else(malformed)?;
                     if seen & bit != 0 {
                         return Err(malformed());
                     }
@@ -507,14 +512,14 @@ fn add_hash_map<K, V>(requests: &mut Requests, entries: usize) -> Result<(), GfE
 }
 
 fn hash_map_layouts<K, V>(entries: usize) -> Result<(u64, u64), GfError> {
-    let mut buckets = capacity_to_buckets::<K, V>(1)?;
+    let mut buckets = capacity_to_buckets(1)?;
     let first = table_layout::<K, V>(buckets)?;
     let mut retained = u64::try_from(first).map_err(|_| overflow())?;
     let mut peak = retained;
     let mut capacity = table_capacity(buckets)?;
     while entries > capacity {
         let needed = capacity.checked_add(1).ok_or_else(overflow)?;
-        let next_buckets = capacity_to_buckets::<K, V>(needed)?;
+        let next_buckets = capacity_to_buckets(needed)?;
         let next = table_layout::<K, V>(next_buckets)?;
         peak = peak.max(
             u64::try_from(table_layout::<K, V>(buckets)?)
@@ -537,7 +542,7 @@ fn table_capacity(buckets: usize) -> Result<usize, GfError> {
     }
 }
 
-fn capacity_to_buckets<K, V>(capacity: usize) -> Result<usize, GfError> {
+fn capacity_to_buckets(capacity: usize) -> Result<usize, GfError> {
     if capacity == 0 {
         return Err(overflow());
     }

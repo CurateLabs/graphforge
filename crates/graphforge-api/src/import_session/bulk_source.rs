@@ -5,23 +5,33 @@
 //! operation identity every batch normalizes under, match a sequential read of
 //! the file.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File};
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use arrow::record_batch::RecordBatch;
+use bytes::Bytes;
 use graphforge_core::GfError;
-use graphforge_storage::{BulkBatchReader, BulkSource, SourceWorkspace};
+use graphforge_storage::{BulkBatchReader, BulkSource, SourceReservation, SourceWorkspace};
+use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{
-    ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder, RowSelection,
-    RowSelector,
+    ArrowReaderMetadata, ArrowReaderOptions, RowSelection, RowSelector,
 };
+use parquet::arrow::schema::parquet_to_arrow_field_levels;
+use parquet::errors::ParquetError;
+use parquet::file::metadata::ParquetMetaDataReader;
+use parquet::file::reader::{ChunkReader, Length};
 use uuid::Uuid;
 
 use super::bounded_ipc::{self, CheckedIpcReader};
 use super::external_source::{self, ExternalSource, ObservedFile, SourceDigest};
+use super::inventory_budget::InventoryBudget;
 use super::parquet_admission::SourceScan;
+use super::parquet_reader::{OwnedBatchReader, PageFailures, TaskDecodeBudget};
+use super::parquet_row_groups::OwnedRowGroups;
+use super::parquet_windows::PhysicalBatchMap;
 use super::{
     ImportSourceKind, SourceRecord, cancelled, canonicalize_parquet_batch, import_batch_operation,
     normalize_batch, storage, validation,
@@ -51,8 +61,9 @@ enum Format {
     Parquet {
         metadata: ArrowReaderMetadata,
         rows: u64,
+        arrow_inference_bytes: u64,
         /// What the source's pages hold and what its batches decode to (#1918).
-        scan: SourceScan,
+        scan: Box<SourceScan>,
     },
     /// The planned IPC source (`bounded_ipc`): footer version, block
     /// inventory, schema and the rows of every record batch, so a task reads
@@ -95,12 +106,61 @@ impl Refusals {
 /// `graphforge-storage`): the bytes read ahead of the hashed prefix are held,
 /// bounded by `external_source::pending_limit`, and whatever the decode never
 /// reads, such as the page index, is read once by [`Digests::finish`].
-#[derive(Default)]
 pub(super) struct Digests {
     sources: Mutex<Vec<(u64, ExternalSource, SourceDigest)>>,
+    pending_budget: external_source::PendingDigestBudget,
+    source_level_reservation: Mutex<Option<SourceReservation>>,
+}
+
+impl Default for Digests {
+    fn default() -> Self {
+        Self::for_build_budget(0, false)
+    }
 }
 
 impl Digests {
+    pub(super) fn for_build_budget(budget: u64, has_external_sources: bool) -> Self {
+        let capacity = if has_external_sources {
+            budget.min(1 << 30) / 64
+        } else {
+            0
+        };
+        Self {
+            sources: Mutex::new(Vec::new()),
+            pending_budget: external_source::PendingDigestBudget::new(
+                usize::try_from(capacity).unwrap_or(usize::MAX),
+            ),
+            source_level_reservation: Mutex::new(None),
+        }
+    }
+
+    pub(super) fn pending_budget_bytes(&self) -> u64 {
+        u64::try_from(self.pending_budget.capacity_bytes()).unwrap_or(u64::MAX)
+    }
+
+    fn hold_source_level_reservation(
+        &self,
+        workspace: &Arc<SourceWorkspace>,
+        cancelled: &dyn Fn() -> Result<(), GfError>,
+    ) -> Result<(), GfError> {
+        let capacity = self.pending_budget_bytes();
+        if capacity == 0 {
+            return Ok(());
+        }
+        let mut reservation = self
+            .source_level_reservation
+            .lock()
+            .expect("source digest reservation lock poisoned");
+        if reservation.is_none() {
+            *reservation = Some(workspace.reserve(
+                capacity,
+                "shared source-level digest workspace",
+                cancelled,
+            )?);
+        }
+        Ok(())
+    }
+
     fn register(&self, sequence: u64, external: &ExternalSource, digest: &SourceDigest) {
         self.sources
             .lock()
@@ -136,6 +196,7 @@ struct InPlace {
 
 struct SourceReader<'a> {
     graph: &'a GraphForge,
+    digests: &'a Digests,
     path: PathBuf,
     /// `None` for a source an earlier version copied into the session.
     in_place: Option<InPlace>,
@@ -146,6 +207,8 @@ struct SourceReader<'a> {
     format: Format,
     schema_bytes: u64,
     decoding_bytes: u64,
+    max_task_workspace_bytes: u64,
+    source_level_workspace_bytes: u64,
     /// The canonical batch window; a batch that decodes to more than the window
     /// allows is refused before it is decoded.
     window_bytes: u64,
@@ -159,7 +222,9 @@ impl SourceReader<'_> {
     fn emit(
         &self,
         index: u64,
+        first_ordinal: u64,
         batch: RecordBatch,
+        seen: &mut HashSet<Uuid>,
         sink: &mut dyn FnMut(RecordBatch) -> Result<(), GfError>,
     ) -> Result<(), GfError> {
         if self
@@ -174,12 +239,30 @@ impl SourceReader<'_> {
                 Format::Parquet { .. } => canonicalize_parquet_batch(self.kind, &batch)?,
                 Format::Arrow { .. } => batch,
             };
-            let normalized = normalize_batch(
-                self.graph,
-                import_batch_operation(self.operation_uuid, self.sequence, index),
-                self.kind,
-                &batch,
-            )?;
+            let operation = import_batch_operation(self.operation_uuid, self.sequence, index);
+            let normalized = match (&self.format, self.kind) {
+                (Format::Parquet { .. }, BulkInputKind::Node) => self
+                    .graph
+                    .normalize_import_node_chunk_at_with_seen(
+                        operation,
+                        &batch,
+                        first_ordinal,
+                        seen,
+                    )
+                    .map_err(|error| validation(error.to_string()))?,
+                (Format::Parquet { .. }, BulkInputKind::Edge) => self
+                    .graph
+                    .normalize_import_edge_chunk_at_with_seen(
+                        operation,
+                        &batch,
+                        first_ordinal,
+                        seen,
+                    )
+                    .map_err(|error| validation(error.to_string()))?,
+                (Format::Arrow { .. }, _) => {
+                    normalize_batch(self.graph, operation, self.kind, &batch)?
+                }
+            };
             let canonical = crate::resumable_construction::canonical_property_columns(
                 match self.kind {
                     BulkInputKind::Node => graphforge_storage::ConstructionChunkKind::Node,
@@ -210,17 +293,26 @@ impl SourceReader<'_> {
 impl SourceReader<'_> {
     /// The reader over `task`'s rows: whole row groups, trimmed by a row
     /// selection where the task starts or ends inside one.
-    fn parquet_reader<T: parquet::file::reader::ChunkReader + 'static>(
+    fn parquet_reader<T>(
         &self,
         input: T,
         metadata: &ArrowReaderMetadata,
         rows: u64,
         first_batch: u64,
-    ) -> Result<parquet::arrow::arrow_reader::ParquetRecordBatchReader, GfError> {
+        admission: &TaskAdmission,
+    ) -> Result<OwnedBatchReader, GfError>
+    where
+        T: parquet::file::reader::ChunkReader + 'static,
+        T::T: Read + Send + 'static,
+    {
         let batch_rows = self.batch_rows as u64;
         let start = first_batch * batch_rows;
         let end = (start + BATCHES_PER_TASK * batch_rows).min(rows);
+        let physical_rows = admission.physical_batch_rows;
         let mut groups = Vec::new();
+        groups
+            .try_reserve_exact(admission.selected_group_count)
+            .map_err(|_| super::limit("Cannot allocate admitted Parquet row-group indices"))?;
         let mut group_start = 0_u64;
         let mut first_group_start = 0_u64;
         for (index, group) in metadata.metadata().row_groups().iter().enumerate() {
@@ -233,16 +325,18 @@ impl SourceReader<'_> {
             }
             group_start = group_end;
         }
+        if groups.len() != admission.selected_group_count {
+            return Err(storage(
+                "Parquet task row-group selection differs from its admission",
+            ));
+        }
         let covered = groups
             .iter()
             .map(|index| {
                 u64::try_from(metadata.metadata().row_group(*index).num_rows()).unwrap_or(0)
             })
             .sum::<u64>();
-        let mut builder =
-            ParquetRecordBatchReaderBuilder::new_with_metadata(input, metadata.clone())
-                .with_batch_size(self.batch_rows)
-                .with_row_groups(groups);
+        let mut selection = None;
         if first_group_start != start || first_group_start + covered != end {
             let mut selectors = Vec::new();
             let skip_before = start - first_group_start;
@@ -260,9 +354,48 @@ impl SourceReader<'_> {
                     usize::try_from(skip_after).map_err(storage)?,
                 ));
             }
-            builder = builder.with_row_selection(RowSelection::from(selectors));
+            selection = Some(RowSelection::from(selectors));
         }
-        builder.build().map_err(storage)
+        let failures = PageFailures::new();
+        let decode_budget = Arc::clone(&admission.decode_budget);
+        let cancellation = self.cancellation.cloned();
+        let parquet_metadata = Arc::clone(metadata.metadata());
+        let preflight_metadata = Arc::clone(&parquet_metadata);
+        let row_groups = OwnedRowGroups::new_bounded(
+            Arc::new(input),
+            parquet_metadata,
+            Arc::new(groups),
+            move |group_index, column_index| {
+                let group = preflight_metadata.row_group(group_index);
+                let column = group.column(column_index);
+                let rows = u64::try_from(group.num_rows()).map_err(storage)?;
+                super::parquet_sizing::runtime_preflight(
+                    column,
+                    rows,
+                    Arc::clone(&decode_budget),
+                    cancellation.clone(),
+                    |_, _| Ok(()),
+                )
+            },
+            self.cancellation.cloned(),
+            failures.clone(),
+            Arc::clone(&admission.decode_budget),
+        )?;
+        let levels = parquet_to_arrow_field_levels(
+            metadata.metadata().file_metadata().schema_descr(),
+            ProjectionMask::all(),
+            None,
+        )
+        .map_err(storage)?;
+        let native =
+            parquet::arrow::arrow_reader::ParquetRecordBatchReader::try_new_with_row_groups(
+                &levels,
+                &row_groups,
+                usize::try_from(physical_rows).map_err(storage)?,
+                selection,
+            )
+            .map_err(storage)?;
+        OwnedBatchReader::new(native, metadata.schema().clone(), failures)
     }
 
     /// Decode an in-place task, confirming before every batch and at the end that
@@ -281,23 +414,27 @@ impl SourceReader<'_> {
     ) -> Result<(), GfError> {
         let changed = |error: GfError| in_place.external.reclassify(guard, error);
         let mut reader = self
-            .parquet_reader(input, metadata, rows, first_batch)
+            .parquet_reader(input, metadata, rows, first_batch, admission)
             .map_err(changed)?;
         let mut offset = 0_u64;
+        let mut seen = HashSet::new();
+        let mut seen_batch = None;
         loop {
             // The next batch is sized before the reader decodes it.
             self.admit_batch(admission, rows, first_batch, offset)?;
             let Some(batch) = reader.next() else { break };
+            let (logical_batch, ordinal, _) =
+                self.physical_identity(rows, first_batch, offset, admission)?;
+            if seen_batch != Some(logical_batch) {
+                seen.clear();
+                seen_batch = Some(logical_batch);
+            }
             #[cfg(test)]
-            super::external_source::pass_hook(
-                &in_place.external.path,
-                "batch",
-                first_batch + offset,
-            );
+            super::external_source::pass_hook(&in_place.external.path, "batch", logical_batch);
             // The source can change between any two batches.
             in_place.external.check(guard)?;
             let batch = batch.map_err(|error| changed(storage(error)))?;
-            self.emit(first_batch + offset, batch, sink)?;
+            self.emit(logical_batch, ordinal, batch, &mut seen, sink)?;
             offset += 1;
         }
         in_place.external.check(guard)
@@ -365,23 +502,21 @@ impl SourceReader<'_> {
     fn admit(
         &self,
         scan: &SourceScan,
+        metadata: &ArrowReaderMetadata,
         rows: u64,
         task: usize,
         first_batch: u64,
     ) -> Result<TaskAdmission, GfError> {
-        let batch_rows = self.batch_rows as u64;
-        let batches = rows.div_ceil(batch_rows);
-        let count = BATCHES_PER_TASK.min(batches.saturating_sub(first_batch));
-        let sizes = (0..count)
-            .map(|offset| scan.batch_bytes(first_batch + offset))
-            .collect::<Vec<_>>();
-        let widest = sizes
-            .iter()
-            .map(|size| (*size).min(self.admission_limit()))
-            .max()
-            .unwrap_or(0);
-        let first_row = first_batch * batch_rows;
-        let last_row = ((first_batch + count) * batch_rows).min(rows);
+        let batch_workspace = parquet_task_workspace(
+            scan,
+            metadata,
+            rows,
+            self.batch_rows as u64,
+            self.kind,
+            first_batch,
+            self.admission_limit(),
+        )?;
+        let decode_budget = TaskDecodeBudget::new(batch_workspace.page_workspace);
         let pool = self
             .workspace
             .lock()
@@ -391,19 +526,20 @@ impl SourceReader<'_> {
             .as_ref()
             .map(|pool| {
                 // The decompressed pages every column holds, the batch being
-                // decoded and the copy that normalization hands the builder, and
-                // the per-row state of normalizing it.
-                let need = scan
-                    .pages_resident(first_row, last_row)
-                    .saturating_add(widest.saturating_mul(2))
-                    .saturating_add(batch_rows.saturating_mul(NORMALIZATION_ROW_BYTES));
-                pool.reserve(need, &format!("Parquet task {task}"), &|| {
-                    self.check_cancelled()
-                })
+                // decoded and the copy handed to the builder, plus normalization
+                // row vectors, edge endpoint candidates, and the logical-batch
+                // duplicate set retained across physical pieces.
+                pool.reserve(
+                    batch_workspace.reservation_bytes,
+                    &format!("Parquet task {task}"),
+                    &|| self.check_cancelled(),
+                )
             })
             .transpose()?;
         Ok(TaskAdmission {
-            sizes,
+            decode_budget,
+            selected_group_count: batch_workspace.selected_group_count,
+            physical_batch_rows: batch_workspace.physical_batch_rows,
             _reservation: reservation,
         })
     }
@@ -418,6 +554,23 @@ impl SourceReader<'_> {
         Ok(())
     }
 
+    fn physical_identity(
+        &self,
+        rows: u64,
+        first_batch: u64,
+        offset: u64,
+        admission: &TaskAdmission,
+    ) -> Result<(u64, u64, u64), GfError> {
+        let logical_rows = self.batch_rows as u64;
+        let physical_index = first_batch
+            .checked_mul(logical_rows)
+            .and_then(|row| row.checked_div(admission.physical_batch_rows))
+            .and_then(|index| index.checked_add(offset))
+            .ok_or_else(|| storage("Parquet physical batch index overflows"))?;
+        PhysicalBatchMap::new(rows, logical_rows, admission.physical_batch_rows)?
+            .identity(physical_index)
+    }
+
     /// Refuse the batch at `offset` of a task if it would decode to more than
     /// the window allows, before it is decoded.
     fn admit_batch(
@@ -427,17 +580,24 @@ impl SourceReader<'_> {
         first_batch: u64,
         offset: u64,
     ) -> Result<(), GfError> {
-        let Some(size) = usize::try_from(offset)
-            .ok()
-            .and_then(|offset| admission.sizes.get(offset))
-        else {
-            return Ok(());
+        let batch_rows = self.batch_rows as u64;
+        let physical_rows = admission.physical_batch_rows;
+        let physical_index = first_batch
+            .saturating_mul(batch_rows)
+            .checked_div(physical_rows)
+            .unwrap_or(0)
+            .saturating_add(offset);
+        let oversized = match &self.format {
+            Format::Parquet { scan, .. } => {
+                scan.physical_batch_exceeds(physical_index, self.admission_limit())
+            }
+            Format::Arrow { .. } => return Ok(()),
         };
-        if *size <= self.admission_limit() {
+        if !oversized {
             return Ok(());
         }
-        let index = first_batch + offset;
-        let batch_rows = self.batch_rows as u64;
+        let (index, _, _) =
+            PhysicalBatchMap::new(rows, batch_rows, physical_rows)?.identity(physical_index)?;
         self.refusals.record(
             (
                 u8::from(self.kind == BulkInputKind::Edge),
@@ -447,21 +607,211 @@ impl SourceReader<'_> {
             batch_rows.min(rows.saturating_sub(index * batch_rows)),
         );
         Err(super::limit(format!(
-            "Parquet batch {index} would decode to {size} bytes, above the {}-byte batch window;              refused before it was decoded",
+            "Parquet batch {index} exceeds the {}-byte batch window; refused before it was decoded",
             self.window_bytes
         )))
     }
 }
 
-/// Bytes of per-row state normalizing a batch keeps beside the batch: the
-/// identity and label it rebuilds for every row.
-const NORMALIZATION_ROW_BYTES: u64 = 64;
+/// Import normalization retains duplicate IDs for the whole logical batch,
+/// even when Parquet supplies several physical pieces for that batch.
+const SEEN_UUID_PEAK_BYTES_PER_ROW: u64 = 64;
+
+#[derive(Clone, Copy)]
+struct TaskReservationSizing {
+    page_workspace: u64,
+    selected_group_count: usize,
+    widest_batch: u64,
+    physical_rows: u64,
+    logical_rows: u64,
+    kind: BulkInputKind,
+    native_auxiliary: u64,
+    property_columns_bytes: u64,
+}
+
+fn task_reservation_bytes(sizing: TaskReservationSizing) -> Result<u64, GfError> {
+    let TaskReservationSizing {
+        page_workspace,
+        selected_group_count,
+        widest_batch,
+        physical_rows,
+        logical_rows,
+        kind,
+        native_auxiliary,
+        property_columns_bytes,
+    } = sizing;
+    let group_indices = u64::try_from(selected_group_count)
+        .map_err(storage)?
+        .checked_mul(u64::try_from(std::mem::size_of::<usize>()).map_err(storage)?)
+        .and_then(|bytes| {
+            bytes.checked_add(
+                u64::try_from(std::mem::size_of::<Vec<usize>>() + 2 * std::mem::size_of::<usize>())
+                    .ok()?,
+            )
+        })
+        .ok_or_else(|| super::limit("Parquet row-group index workspace overflows"))?;
+    let physical_row_bytes = match kind {
+        BulkInputKind::Node => 3_u64
+            .checked_mul(u64::try_from(std::mem::size_of::<crate::BulkNodeRow>()).map_err(storage)?)
+            .ok_or_else(|| super::limit("Parquet node normalization workspace overflows"))?,
+        BulkInputKind::Edge => 3_u64
+            .checked_mul(u64::try_from(std::mem::size_of::<crate::BulkEdgeRow>()).map_err(storage)?)
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    6_u64.checked_mul(
+                        u64::try_from(std::mem::size_of::<crate::BulkNodeRow>()).ok()?,
+                    )?,
+                )
+            })
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    4_u64.checked_mul(u64::try_from(std::mem::size_of::<Uuid>()).ok()?)?,
+                )
+            })
+            .ok_or_else(|| super::limit("Parquet edge normalization workspace overflows"))?,
+    };
+    let normalization_rows = physical_rows
+        .checked_mul(physical_row_bytes)
+        .and_then(|bytes| {
+            bytes.checked_add(logical_rows.checked_mul(SEEN_UUID_PEAK_BYTES_PER_ROW)?)
+        })
+        .ok_or_else(|| super::limit("Parquet normalization workspace overflows"))?;
+    page_workspace
+        .checked_add(native_auxiliary)
+        .and_then(|bytes| bytes.checked_add(property_columns_bytes))
+        .and_then(|bytes| bytes.checked_add(group_indices))
+        // Source Arrow arrays, copied labels/identity arrays, and a one-cell
+        // property conversion may coexist while import validation runs.
+        .and_then(|bytes| bytes.checked_add(widest_batch.checked_mul(3)?))
+        .and_then(|bytes| bytes.checked_add(normalization_rows))
+        .ok_or_else(|| super::limit("Parquet task reservation overflows"))
+}
 
 /// What a task reserved and what its batches will decode to.
 struct TaskAdmission {
-    /// Arrow bytes of each of the task's batches, in order.
-    sizes: Vec<u64>,
+    /// Shared bounded credit for owned Parquet pages and their preflight.
+    decode_budget: Arc<TaskDecodeBudget>,
+    /// Number of selected row groups; their single retained index vector is
+    /// included in the source-pool reservation.
+    selected_group_count: usize,
+    physical_batch_rows: u64,
     _reservation: Option<graphforge_storage::SourceReservation>,
+}
+
+struct ParquetTaskWorkspace {
+    selected_group_count: usize,
+    physical_batch_rows: u64,
+    page_workspace: u64,
+    reservation_bytes: u64,
+}
+
+fn parquet_task_workspace(
+    scan: &SourceScan,
+    metadata: &ArrowReaderMetadata,
+    rows: u64,
+    batch_rows: u64,
+    kind: BulkInputKind,
+    first_batch: u64,
+    admission_limit: u64,
+) -> Result<ParquetTaskWorkspace, GfError> {
+    let logical_batches = rows.div_ceil(batch_rows);
+    let logical_count = BATCHES_PER_TASK.min(logical_batches.saturating_sub(first_batch));
+    let first_row = first_batch
+        .checked_mul(batch_rows)
+        .ok_or_else(|| super::limit("Parquet task row start overflows"))?;
+    let last_row = first_batch
+        .checked_add(logical_count)
+        .and_then(|batch| batch.checked_mul(batch_rows))
+        .ok_or_else(|| super::limit("Parquet task row end overflows"))?
+        .min(rows);
+    let physical_batch_rows = scan.physical_batch_rows();
+    let map = PhysicalBatchMap::new(rows, batch_rows, physical_batch_rows)?;
+    let first_physical = first_row / physical_batch_rows;
+    let physical_count = last_row
+        .saturating_sub(first_row)
+        .div_ceil(physical_batch_rows);
+    // Every complete piece has the same conservative max-row bound; only the
+    // source's final piece can be smaller.
+    let widest = scan
+        .physical_batch_max_bytes(first_physical, physical_count)
+        .min(admission_limit);
+    let (selected_group_count, validator_workspace) =
+        super::parquet_sizing::runtime_scratch_capacity(
+            metadata.metadata(),
+            scan,
+            first_row,
+            last_row,
+        )?;
+    let page_workspace = scan
+        .pages_resident(first_row, last_row)
+        .checked_add(validator_workspace)
+        .ok_or_else(|| super::limit("Parquet task page workspace overflows"))?;
+    let required_fields = match kind {
+        BulkInputKind::Node => 2,
+        BulkInputKind::Edge => 4,
+    };
+    let property_fields = metadata
+        .schema()
+        .fields()
+        .len()
+        .saturating_sub(required_fields);
+    let property_columns_bytes = u64::try_from(property_fields)
+        .map_err(storage)?
+        .checked_mul(
+            u64::try_from(std::mem::size_of::<(
+                &arrow::datatypes::Field,
+                &arrow::array::ArrayRef,
+            )>())
+            .map_err(storage)?,
+        )
+        .ok_or_else(|| super::limit("Parquet property-column workspace overflows"))?;
+    let reservation_bytes = task_reservation_bytes(TaskReservationSizing {
+        page_workspace,
+        selected_group_count,
+        widest_batch: widest,
+        physical_rows: physical_batch_rows,
+        logical_rows: batch_rows,
+        kind,
+        native_auxiliary: scan.native_decoder_auxiliary(first_row, last_row),
+        property_columns_bytes,
+    })?;
+    Ok(ParquetTaskWorkspace {
+        selected_group_count,
+        physical_batch_rows: map.physical_rows(),
+        page_workspace,
+        reservation_bytes,
+    })
+}
+
+fn max_parquet_task_workspace(
+    scan: &SourceScan,
+    metadata: &ArrowReaderMetadata,
+    rows: u64,
+    batch_rows: usize,
+    kind: BulkInputKind,
+    admission_limit: u64,
+) -> Result<u64, GfError> {
+    let batch_rows = u64::try_from(batch_rows).map_err(storage)?.max(1);
+    let tasks = rows.div_ceil(batch_rows.saturating_mul(BATCHES_PER_TASK));
+    let mut maximum = 0;
+    for task in 0..tasks {
+        let first_batch = task
+            .checked_mul(BATCHES_PER_TASK)
+            .ok_or_else(|| super::limit("Parquet task batch start overflows"))?;
+        maximum = maximum.max(
+            parquet_task_workspace(
+                scan,
+                metadata,
+                rows,
+                batch_rows,
+                kind,
+                first_batch,
+                admission_limit,
+            )?
+            .reservation_bytes,
+        );
+    }
+    Ok(maximum)
 }
 
 impl BulkBatchReader for SourceReader<'_> {
@@ -470,9 +820,14 @@ impl BulkBatchReader for SourceReader<'_> {
     }
     fn retained_metadata_bytes(&self) -> u64 {
         self.schema_bytes.saturating_add(match &self.format {
-            Format::Parquet { metadata, scan, .. } => {
-                (metadata.metadata().memory_size() as u64).saturating_add(scan.resident_bytes())
-            }
+            Format::Parquet {
+                metadata,
+                scan,
+                arrow_inference_bytes,
+                ..
+            } => (metadata.metadata().memory_size() as u64)
+                .saturating_add(scan.resident_bytes())
+                .saturating_add(*arrow_inference_bytes),
             Format::Arrow { plan } => plan.inventory_bytes,
         })
     }
@@ -481,8 +836,21 @@ impl BulkBatchReader for SourceReader<'_> {
         self.decoding_bytes
     }
 
-    fn bind_workspace(&self, workspace: &Arc<SourceWorkspace>) {
+    fn max_task_workspace_bytes(&self) -> u64 {
+        self.max_task_workspace_bytes
+    }
+
+    fn source_level_workspace_bytes(&self) -> u64 {
+        self.source_level_workspace_bytes
+    }
+
+    fn bind_workspace(&self, workspace: &Arc<SourceWorkspace>) -> Result<(), GfError> {
+        if self.source_level_workspace_bytes > 0 {
+            self.digests
+                .hold_source_level_reservation(workspace, &|| self.check_cancelled())?;
+        }
         *self.workspace.lock().expect("workspace binding poisoned") = Some(Arc::clone(workspace));
+        Ok(())
     }
     fn task_rows(&self, task: usize) -> usize {
         let first_batch = task as u64 * BATCHES_PER_TASK;
@@ -541,6 +909,7 @@ impl BulkBatchReader for SourceReader<'_> {
                 metadata,
                 rows,
                 scan,
+                ..
             } => {
                 if let Some(in_place) = &self.in_place {
                     let file = in_place.external.reopen()?;
@@ -550,7 +919,7 @@ impl BulkBatchReader for SourceReader<'_> {
                         "opened",
                         task as u64,
                     );
-                    let admission = self.admit(scan, *rows, task, first_batch)?;
+                    let admission = self.admit(scan, metadata, *rows, task, first_batch)?;
                     let guard = file.try_clone().map_err(storage)?;
                     let input = ObservedFile::new(file, in_place.digest.clone())?;
                     self.decode_parquet(
@@ -566,13 +935,28 @@ impl BulkBatchReader for SourceReader<'_> {
                 } else {
                     // A session an earlier version began holds its own copy.
                     let file = File::open(&self.path).map_err(storage)?;
-                    let admission = self.admit(scan, *rows, task, first_batch)?;
-                    let mut decoded = self.parquet_reader(file, metadata, *rows, first_batch)?;
+                    let admission = self.admit(scan, metadata, *rows, task, first_batch)?;
+                    let mut decoded =
+                        self.parquet_reader(file, metadata, *rows, first_batch, &admission)?;
                     let mut offset = 0_u64;
+                    let mut seen = HashSet::new();
+                    let mut seen_batch = None;
                     loop {
                         self.admit_batch(&admission, *rows, first_batch, offset)?;
                         let Some(batch) = decoded.next() else { break };
-                        self.emit(first_batch + offset, batch.map_err(storage)?, sink)?;
+                        let (logical_batch, ordinal, _) =
+                            self.physical_identity(*rows, first_batch, offset, &admission)?;
+                        if seen_batch != Some(logical_batch) {
+                            seen.clear();
+                            seen_batch = Some(logical_batch);
+                        }
+                        self.emit(
+                            logical_batch,
+                            ordinal,
+                            batch.map_err(storage)?,
+                            &mut seen,
+                            sink,
+                        )?;
                         offset += 1;
                     }
                 }
@@ -603,7 +987,7 @@ impl BulkBatchReader for SourceReader<'_> {
                 for index in first_batch..(first_batch + BATCHES_PER_TASK).min(total) {
                     let batch =
                         reader.read_record_batch(usize::try_from(index).map_err(storage)?)?;
-                    self.emit(index, batch, sink)?;
+                    self.emit(index, 0, batch, &mut HashSet::new(), sink)?;
                 }
             }
         }
@@ -667,6 +1051,153 @@ fn largest_task_bytes(metadata: &ArrowReaderMetadata, batch_rows: usize) -> u64 
     largest
 }
 
+/// A single owned Parquet footer snapshot exposed at its original file offsets
+/// to parquet's metadata reader. The compact accounting and native parser both
+/// consume these same bytes.
+struct FooterWindow {
+    file_len: u64,
+    start: u64,
+    bytes: Bytes,
+}
+
+impl Length for FooterWindow {
+    fn len(&self) -> u64 {
+        self.file_len
+    }
+}
+
+impl ChunkReader for FooterWindow {
+    type T = Cursor<Bytes>;
+
+    fn get_read(&self, start: u64) -> parquet::errors::Result<Self::T> {
+        let offset = start.checked_sub(self.start).ok_or_else(|| {
+            ParquetError::EOF("Parquet metadata read is outside the admitted footer".into())
+        })?;
+        let offset = usize::try_from(offset).map_err(|_| {
+            ParquetError::EOF("Parquet metadata offset is not representable".into())
+        })?;
+        if offset > self.bytes.len() {
+            return Err(ParquetError::EOF(
+                "Parquet metadata read is outside the admitted footer".into(),
+            ));
+        }
+        Ok(Cursor::new(self.bytes.slice(offset..)))
+    }
+
+    fn get_bytes(&self, start: u64, length: usize) -> parquet::errors::Result<Bytes> {
+        let offset = start.checked_sub(self.start).ok_or_else(|| {
+            ParquetError::EOF("Parquet metadata read is outside the admitted footer".into())
+        })?;
+        let offset = usize::try_from(offset).map_err(|_| {
+            ParquetError::EOF("Parquet metadata offset is not representable".into())
+        })?;
+        let end = offset
+            .checked_add(length)
+            .ok_or_else(|| ParquetError::EOF("Parquet metadata range overflows".into()))?;
+        if end > self.bytes.len() {
+            return Err(ParquetError::EOF(
+                "Parquet metadata read is outside the admitted footer".into(),
+            ));
+        }
+        Ok(self.bytes.slice(offset..end))
+    }
+}
+
+fn load_admitted_parquet_metadata<T: ChunkReader>(
+    input: &T,
+    capacity: u64,
+    cancellation: Option<&CancellationToken>,
+) -> Result<(ArrowReaderMetadata, u64), GfError> {
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+        return Err(cancelled());
+    }
+    let file_len = input.len();
+    if file_len < 8 {
+        return Err(storage("Parquet source is too short for its footer"));
+    }
+
+    let mut budget = InventoryBudget::new(capacity);
+    budget.admit(8, "the Parquet footer tail")?;
+    let tail = input.get_bytes(file_len - 8, 8).map_err(storage)?;
+    let magic = &tail[4..];
+    if magic != b"PAR1" && magic != b"PARE" {
+        return Err(storage("Parquet source has an invalid footer magic"));
+    }
+    let metadata_len = u64::from(u32::from_le_bytes(
+        tail[..4]
+            .try_into()
+            .map_err(|_| storage("Parquet footer length is malformed"))?,
+    ));
+    let footer_len = metadata_len
+        .checked_add(8)
+        .ok_or_else(|| super::limit("Parquet footer size overflows"))?;
+    if footer_len > file_len {
+        return Err(storage("Parquet footer extends before its source"));
+    }
+    budget.admit(metadata_len, "the Parquet footer snapshot")?;
+    let footer_start = file_len - footer_len;
+    let footer_bytes = input
+        .get_bytes(footer_start, usize::try_from(footer_len).map_err(storage)?)
+        .map_err(storage)?;
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+        return Err(cancelled());
+    }
+
+    let footer_body_len = usize::try_from(metadata_len).map_err(storage)?;
+    let window = FooterWindow {
+        file_len,
+        start: footer_start,
+        bytes: footer_bytes,
+    };
+    let footer_body = window
+        .bytes
+        .get(..footer_body_len)
+        .ok_or_else(|| storage("Parquet footer snapshot is truncated"))?;
+    let footer_facts =
+        super::parquet_footer_counts::preflight(footer_body, budget.remaining(), cancellation)?;
+    let footer_peak = footer_facts.peak_bytes()?;
+    let footer_retained = footer_facts.retained_bytes()?;
+    budget.admit(footer_peak, "native Parquet footer metadata")?;
+
+    // The native thrift reader constructs the nested Type tree and schema
+    // descriptor while decoding the footer. Validate and reserve that tree
+    // before entering the native parser, while the footer bytes and footer
+    // metadata envelope are still included in the same peak.
+    let schema_facts = super::parquet_schema_envelope::preflight(
+        footer_body,
+        &footer_facts,
+        &mut budget,
+        cancellation,
+    )?;
+    budget.admit(
+        schema_facts.native_request_bytes,
+        "the native Parquet schema",
+    )?;
+
+    let metadata = ParquetMetaDataReader::new()
+        .parse_and_finish(&window)
+        .map_err(storage)?;
+    budget.release(footer_peak.saturating_sub(footer_retained));
+    let arrow_envelope = super::parquet_arrow_admission::preflight(
+        &metadata,
+        schema_facts,
+        budget.remaining(),
+        cancellation,
+    )?;
+    budget.admit(
+        arrow_envelope.peak_request_bytes,
+        "inferred Arrow schema and Parquet fields",
+    )?;
+    let metadata = ArrowReaderMetadata::try_new(Arc::new(metadata), ArrowReaderOptions::new())
+        .map_err(storage)?;
+    budget.release(
+        arrow_envelope
+            .peak_request_bytes
+            .saturating_sub(arrow_envelope.retained_request_bytes),
+    );
+    Ok((metadata, arrow_envelope.retained_request_bytes))
+}
+
 /// Parsed footer metadata is at most this many times the footer's own bytes
 /// (measured in `bulk_source::footer_tests`), and the footer is held beside it.
 const FOOTER_PARSE_FACTOR: u64 = 12;
@@ -677,10 +1208,9 @@ const FOOTER_PARSE_FACTOR: u64 = 12;
 /// cannot take the build and `validate` stages it instead, which has its own
 /// admission. The limits below describe the bulk route; they must not refuse an
 /// input that the staged path takes.
-const PLANNING_FLOOR_BYTES: u64 = 1 << 30;
+pub(super) const PLANNING_FLOOR_BYTES: u64 = 1 << 30;
 
 fn require_footer_fits(footer_bytes: u64, budget: u64) -> Result<(), GfError> {
-    let budget = budget.max(PLANNING_FLOOR_BYTES);
     let needed = footer_bytes.saturating_mul(FOOTER_PARSE_FACTOR + 1);
     if needed > budget / 4 {
         return Err(super::limit(format!(
@@ -707,6 +1237,7 @@ pub(super) fn plan<'a>(
     refusals: &'a Refusals,
     digests: &'a Digests,
     window_bytes: u64,
+    planning_budget: u64,
 ) -> Result<BulkSource<'a>, GfError> {
     let path = root.join("sources").join(&source.name);
     let kind = source.kind.input_kind();
@@ -715,97 +1246,121 @@ pub(super) fn plan<'a>(
         BulkInputKind::Node => 2,
         BulkInputKind::Edge => 4,
     };
-    let mut pending_bytes = 0_u64;
-    let (format, rows, columns, schema_bytes, decoding_bytes) = match source.kind {
-        ImportSourceKind::ParquetNodes | ImportSourceKind::ParquetEdges => {
-            let budget = bulk_build_memory_budget()?;
-            let metadata = if let Some(external) = source.external.as_ref() {
-                require_footer_fits(external.footer_bytes(), budget)?;
-                // Footer verification precedes the decoder's workspace
-                // reservation. Hash its reads without retaining an
-                // out-of-order footer copy in the digest's pending map.
-                let digest = SourceDigest::for_planning(external.size);
-                let file = external.open_observed(&digest)?;
-                let guard = file.try_clone().map_err(storage)?;
-                let input = ObservedFile::new(file, digest.clone())?;
-                // The footer is read whole and parsed into structures many times
-                // its size; refuse one the budget cannot hold before reading it.
-                let metadata = ArrowReaderMetadata::load(&input, ArrowReaderOptions::new())
-                    .map_err(|error| external.reclassify(&guard, storage(error)))?;
-                // Reads ahead of the hashed prefix are held, so the bound on
-                // them is resident workspace like any other: it never exceeds
-                // a sixty-fourth of the budget, and the digest reads again what
-                // it had to drop.
-                pending_bytes = u64::try_from(external_source::pending_limit(
-                    std::thread::available_parallelism().map_or(1, usize::from),
-                    largest_task_bytes(&metadata, batch_rows),
-                ))
-                .unwrap_or(u64::MAX)
-                .min(budget / 64)
-                .max(1 << 20);
-                digest.set_pending_limit(usize::try_from(pending_bytes).unwrap_or(usize::MAX));
-                digests.register(source.sequence, external, &digest);
-                in_place = Some(InPlace {
-                    external: external.clone(),
-                    digest,
-                });
-                metadata
-            } else {
-                // A session an earlier version began holds its own copy.
-                let file = File::open(&path).map_err(storage)?;
-                ArrowReaderMetadata::load(&file, ArrowReaderOptions::new()).map_err(storage)?
-            };
-            let rows =
-                u64::try_from(metadata.metadata().file_metadata().num_rows()).map_err(storage)?;
-            let columns = metadata.schema().fields().len();
-            let schema_bytes = schema_owned_bytes(metadata.schema().as_ref());
-            // Page headers and the values whose expansion they do not state.
-            let scan_file = match &in_place {
-                Some(held) => held.external.reopen()?,
-                None => File::open(&path).map_err(storage)?,
-            };
-            let scan = SourceScan::build(
-                scan_file,
-                &metadata,
-                batch_rows as u64,
-                budget.max(PLANNING_FLOOR_BYTES),
-                // A batch past the intake window plus an eighth is refused.
-                window_bytes.saturating_add(window_bytes / 8),
-                cancellation,
-            )?;
-            let decoding_bytes = scan.pages_resident_max().saturating_add(pending_bytes);
-            (
-                Format::Parquet {
-                    metadata,
+    let mut source_level_workspace_bytes = 0_u64;
+    let (format, rows, columns, schema_bytes, decoding_bytes, max_task_workspace_bytes) =
+        match source.kind {
+            ImportSourceKind::ParquetNodes | ImportSourceKind::ParquetEdges => {
+                let budget = planning_budget;
+                let metadata = if let Some(external) = source.external.as_ref() {
+                    require_footer_fits(external.footer_bytes(), budget)?;
+                    // Footer verification precedes the decoder's workspace
+                    // reservation. Hash its reads without retaining an
+                    // out-of-order footer copy in the digest's pending map.
+                    let digest = SourceDigest::for_planning(external.size);
+                    digest.attach_pending_budget(digests.pending_budget.clone());
+                    let file = external.open_observed(&digest)?;
+                    let guard = file.try_clone().map_err(storage)?;
+                    let input = ObservedFile::new(file, digest.clone())?;
+                    // The footer is read whole and parsed into structures many times
+                    // its size; refuse one the budget cannot hold before reading it.
+                    let (metadata, arrow_inference_bytes) =
+                        load_admitted_parquet_metadata(&input, budget, cancellation)
+                            .map_err(|error| external.reclassify(&guard, error))?;
+                    // Reads ahead of the hashed prefix are held, so the bound on
+                    // them is resident workspace like any other: it never exceeds
+                    // a sixty-fourth of the budget, and the digest reads again what
+                    // it had to drop.
+                    let pending_bytes = u64::try_from(external_source::pending_limit(
+                        std::thread::available_parallelism().map_or(1, usize::from),
+                        largest_task_bytes(&metadata, batch_rows),
+                    ))
+                    .unwrap_or(u64::MAX)
+                    .min(digests.pending_budget_bytes());
+                    source_level_workspace_bytes = digests.pending_budget_bytes();
+                    digest.set_pending_limit(usize::try_from(pending_bytes).unwrap_or(usize::MAX));
+                    digests.register(source.sequence, external, &digest);
+                    in_place = Some(InPlace {
+                        external: external.clone(),
+                        digest,
+                    });
+                    (metadata, arrow_inference_bytes)
+                } else {
+                    // A session an earlier version began holds its own copy.
+                    let file = File::open(&path).map_err(storage)?;
+                    load_admitted_parquet_metadata(&file, budget, cancellation)?
+                };
+                let (metadata, arrow_inference_bytes) = metadata;
+                let rows = u64::try_from(metadata.metadata().file_metadata().num_rows())
+                    .map_err(storage)?;
+                let columns = metadata.schema().fields().len();
+                let schema_bytes = schema_owned_bytes(metadata.schema().as_ref());
+                let retained_metadata_bytes = (metadata.metadata().memory_size() as u64)
+                    .saturating_add(schema_bytes)
+                    .saturating_add(arrow_inference_bytes);
+                let scan_budget = budget.saturating_sub(retained_metadata_bytes);
+                if scan_budget == 0 {
+                    return Err(super::limit(
+                        "Parquet footer and schema leave no admitted workspace for page inventory",
+                    ));
+                }
+                // Page headers and the values whose expansion they do not state.
+                let scan_file = match &in_place {
+                    Some(held) => held.external.reopen()?,
+                    None => File::open(&path).map_err(storage)?,
+                };
+                let scan = SourceScan::build(
+                    &scan_file,
+                    &metadata,
+                    batch_rows as u64,
+                    scan_budget,
+                    // A batch past the intake window plus an eighth is refused.
+                    window_bytes.saturating_add(window_bytes / 8),
+                    cancellation,
+                )?;
+                let max_task_workspace_bytes = max_parquet_task_workspace(
+                    &scan,
+                    &metadata,
                     rows,
-                    scan,
-                },
-                rows,
-                columns,
-                schema_bytes,
-                decoding_bytes,
-            )
-        }
-        ImportSourceKind::ArrowNodes | ImportSourceKind::ArrowEdges => {
-            let sizing = Arc::new(bounded_ipc::ipc_plan(&path)?);
-            let rows = sizing
-                .rows
-                .iter()
-                .try_fold(0_u64, |total, rows| total.checked_add(*rows))
-                .ok_or_else(|| {
-                    super::limit("Arrow source row count exceeds construction capacity")
-                })?;
-            (
-                Format::Arrow {
-                    plan: Arc::clone(&sizing),
-                },
-                rows,
-                sizing.columns,
-                sizing.schema_bytes,
-                sizing.decoding_bytes,
-            )
-        }
-    };
+                    batch_rows,
+                    kind,
+                    window_bytes.saturating_add(window_bytes / 8),
+                )?;
+                let decoding_bytes = scan.pages_resident_max();
+                (
+                    Format::Parquet {
+                        metadata,
+                        rows,
+                        arrow_inference_bytes,
+                        scan: Box::new(scan),
+                    },
+                    rows,
+                    columns,
+                    schema_bytes,
+                    decoding_bytes,
+                    max_task_workspace_bytes,
+                )
+            }
+            ImportSourceKind::ArrowNodes | ImportSourceKind::ArrowEdges => {
+                let sizing = Arc::new(bounded_ipc::ipc_plan_with_budget(&path, planning_budget)?);
+                let rows = sizing
+                    .rows
+                    .iter()
+                    .try_fold(0_u64, |total, rows| total.checked_add(*rows))
+                    .ok_or_else(|| {
+                        super::limit("Arrow source row count exceeds construction capacity")
+                    })?;
+                (
+                    Format::Arrow {
+                        plan: Arc::clone(&sizing),
+                    },
+                    rows,
+                    sizing.columns,
+                    sizing.schema_bytes,
+                    sizing.decoding_bytes,
+                    0,
+                )
+            }
+        };
     if columns < required {
         return Err(validation("Parquet import schema lacks required columns"));
     }
@@ -822,6 +1377,7 @@ pub(super) fn plan<'a>(
     Ok(BulkSource {
         reader: Arc::new(SourceReader {
             graph,
+            digests,
             path,
             in_place,
             kind,
@@ -831,6 +1387,8 @@ pub(super) fn plan<'a>(
             format,
             schema_bytes,
             decoding_bytes,
+            max_task_workspace_bytes,
+            source_level_workspace_bytes,
             window_bytes,
             workspace: Mutex::new(None),
             cancellation,
@@ -848,7 +1406,7 @@ mod bounds_tests {
     use parquet::data_type::FixedLenByteArray;
     use parquet::file::statistics::{Statistics, ValueStatistics};
 
-    use super::exact_uuid_bounds;
+    use super::{BulkInputKind, TaskReservationSizing, exact_uuid_bounds, task_reservation_bytes};
 
     #[test]
     fn inexact_or_nullable_footer_bounds_require_sampling() {
@@ -878,6 +1436,69 @@ mod bounds_tests {
         ] {
             assert_eq!(exact_uuid_bounds(&bounds(low, high, nulls)), None);
         }
+    }
+
+    #[test]
+    fn many_small_row_groups_are_charged_for_the_retained_index_vector() {
+        let groups = 4096;
+        let baseline = task_reservation_bytes(TaskReservationSizing {
+            page_workspace: 1,
+            selected_group_count: 0,
+            widest_batch: 0,
+            physical_rows: 0,
+            logical_rows: 0,
+            kind: BulkInputKind::Node,
+            native_auxiliary: 0,
+            property_columns_bytes: 0,
+        })
+        .unwrap();
+        let admitted = task_reservation_bytes(TaskReservationSizing {
+            page_workspace: 1,
+            selected_group_count: groups,
+            widest_batch: 0,
+            physical_rows: 0,
+            logical_rows: 0,
+            kind: BulkInputKind::Node,
+            native_auxiliary: 0,
+            property_columns_bytes: 0,
+        })
+        .unwrap();
+        let index_capacity =
+            u64::try_from(groups).unwrap() * u64::try_from(std::mem::size_of::<usize>()).unwrap();
+        // The fixed Vec/header overhead is present in both totals; their
+        // difference isolates the retained group's index capacity.
+        assert_eq!(admitted - baseline, index_capacity);
+    }
+
+    #[test]
+    fn edge_and_logical_duplicate_workspaces_are_charged_across_physical_pieces() {
+        let sizing =
+            |kind, logical_rows, native_auxiliary, property_columns_bytes| TaskReservationSizing {
+                page_workspace: 1,
+                selected_group_count: 0,
+                widest_batch: 0,
+                physical_rows: 2,
+                logical_rows,
+                kind,
+                native_auxiliary,
+                property_columns_bytes,
+            };
+        let node = task_reservation_bytes(sizing(BulkInputKind::Node, 8, 0, 0)).unwrap();
+        let edge = task_reservation_bytes(sizing(BulkInputKind::Edge, 8, 0, 0)).unwrap();
+        let edge_without_seen =
+            task_reservation_bytes(sizing(BulkInputKind::Edge, 0, 0, 0)).unwrap();
+        let edge_with_native_aux =
+            task_reservation_bytes(sizing(BulkInputKind::Edge, 0, 4_096, 0)).unwrap();
+        let edge_with_property_refs =
+            task_reservation_bytes(sizing(BulkInputKind::Edge, 0, 0, 16_000)).unwrap();
+
+        assert!(edge > node);
+        assert_eq!(
+            edge - edge_without_seen,
+            8 * super::SEEN_UUID_PEAK_BYTES_PER_ROW
+        );
+        assert_eq!(edge_with_native_aux - edge_without_seen, 4_096);
+        assert_eq!(edge_with_property_refs - edge_without_seen, 16_000);
     }
 }
 

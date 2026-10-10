@@ -654,9 +654,8 @@ fn the_bulk_reader_refuses_undeclared_types_under_a_strict_ontology() {
     assert_eq!(rows, Some(1));
 }
 
-/// The reads a source's digest holds ahead of its hashed prefix are resident
-/// workspace: they are counted in what the reader says it needs, and they never
-/// exceed a sixty-fourth of the budget (#1918).
+/// Pending digest reads use one build-scoped source reservation, separate from
+/// each reader's decoded page workspace (#1918).
 #[test]
 fn the_digest_s_held_reads_are_counted_and_bounded_by_the_budget() {
     let (_directory, _project, graph) = fixture();
@@ -679,20 +678,24 @@ fn the_digest_s_held_reads_are_counted_and_bounded_by_the_budget() {
             .unwrap();
         bulk_source::TEST_BUDGET.with(|cell| cell.set(Some(budget)));
         let refusals = bulk_source::Refusals::default();
-        let digests = bulk_source::Digests::default();
+        let digests = bulk_source::Digests::for_build_budget(budget, true);
         let plan = session
             .plan_bulk_build(&graph, None, &refusals, &digests)
             .unwrap();
         bulk_source::TEST_BUDGET.with(|cell| cell.set(None));
         let needed = plan.nodes[0].reader.decoded_workspace_bytes();
-        // Three rows of pages are a few kilobytes: nearly all of it is the held reads.
+        // Decoded page workspace and pending digest bytes have separate owners.
         assert!(needed <= budget / 64 + (1 << 20), "{budget}: {needed}");
-        assert!(needed >= 1 << 20, "{budget}: {needed}");
+        assert_eq!(
+            u64::try_from(digests.pending_budget_bytes()).unwrap(),
+            budget.min(1 << 30) / 64,
+            "{budget}"
+        );
         needs.push(needed);
         session.abort(&graph).unwrap();
     }
-    // A larger budget lets the digest hold more, up to the bound it always had.
-    assert!(needs[0] < needs[1] && needs[1] <= needs[2], "{needs:?}");
+    // The page requirement is independent from the build-scoped digest cap.
+    assert!(needs.iter().all(|needed| *needed < 1 << 20), "{needs:?}");
 }
 
 mod encodings;

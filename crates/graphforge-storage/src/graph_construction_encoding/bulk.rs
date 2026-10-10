@@ -60,9 +60,9 @@ pub(crate) mod test_support;
 
 pub use budget::{BulkRoute, BulkStagedReason};
 pub use plan::{BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkSource};
-#[cfg(test)]
-pub(crate) use property_rows::ForcedPropertyFrames;
 pub use source_workspace::{SourceReservation, SourceWorkspace};
+#[cfg(test)]
+pub(crate) use test_support::ForcedPropertyFrames;
 
 use budget::ScratchPlan;
 use emit::{EdgeEmitter, RelationStats, Semantics};
@@ -287,7 +287,7 @@ pub(crate) fn encode_bulk(
                 .saturating_add(if has_properties {
                     budget::property_extra_workspace(plan, budgets)
                 } else {
-                    0
+                    plan.source_level_workspace_bytes()
                 });
             if budget < minimum {
                 return Err(GfError::Project {
@@ -316,13 +316,15 @@ pub(crate) fn encode_bulk(
     let source_pool = SourceWorkspace::new(match (&scratch_plan, plan.memory_budget) {
         (Some(_), Some(budget)) => ScratchPlan::source_pool_bytes(plan, budget, budgets),
         // Everything is resident: each worker may hold one task's worst case.
-        _ => (workers as u64).saturating_mul(
-            plan.source_decoder_bytes()
-                .saturating_add(MEMORY_TASK_BYTES),
-        ),
+        _ => (workers as u64)
+            .saturating_mul(
+                plan.source_decoder_bytes()
+                    .saturating_add(MEMORY_TASK_BYTES),
+            )
+            .saturating_add(plan.source_level_workspace_bytes()),
     });
     for source in plan.nodes.iter().chain(&plan.edges) {
-        source.reader.bind_workspace(&source_pool);
+        source.reader.bind_workspace(&source_pool)?;
     }
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(
@@ -364,6 +366,7 @@ pub(crate) fn encode_bulk(
             budgets,
             plan.max_source_schema_bytes(),
             plan.source_decoder_bytes(),
+            plan.source_level_workspace_bytes(),
             sized.property.retained_bytes,
             sized.decode_bytes,
         )
@@ -993,6 +996,7 @@ pub(crate) fn encode_bulk(
                 budget::property_workspace(budgets)
                     .saturating_add(plan.max_source_schema_bytes().saturating_mul(8))
                     .saturating_add(plan.source_decoder_bytes())
+                    .saturating_add(plan.source_level_workspace_bytes())
             } else {
                 0
             },

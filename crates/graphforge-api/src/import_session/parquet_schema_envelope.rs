@@ -184,123 +184,16 @@ fn preflight_topology(
         )?;
 
         if index == 0 {
-            let (children, _) = selected_shape(element, true)?;
-            if children == 0 {
-                if count != 1 {
-                    return Err(malformed());
-                }
-                result.max_visited_depth = 0;
-                continue;
-            }
-            if children > count - 1 {
-                return Err(malformed());
-            }
-            add(
-                &mut result.group_child_slots,
-                u64::try_from(children).map_err(|_| overflow())?,
-            )?;
-            if let Some(len) = element.crs_len {
-                add(
-                    &mut result.group_crs_clone_bytes,
-                    u64::try_from(len).map_err(|_| overflow())?,
-                )?;
-            }
-            reserve_frame(
-                stack,
+            visit_root(element, count, &mut result, budget, cancellation, stack)?;
+        } else {
+            visit_child(
+                element,
+                index,
+                count,
+                &mut result,
                 budget,
-                &mut result.preflight_peak_bytes,
                 cancellation,
-            )?;
-            stack.push(Frame {
-                remaining_children: children,
-                path_name_bytes: 0,
-                depth: 0,
-                definition: 0,
-                repetition: 0,
-            });
-            continue;
-        }
-
-        while stack
-            .last()
-            .is_some_and(|frame| frame.remaining_children == 0)
-        {
-            stack.pop();
-        }
-        let parent = stack.last_mut().ok_or_else(malformed)?;
-        parent.remaining_children -= 1;
-        let depth = parent.depth.checked_add(1).ok_or_else(overflow)?;
-        let path_name_bytes = parent
-            .path_name_bytes
-            .checked_add(u64::try_from(element.name_len).map_err(|_| overflow())?)
-            .ok_or_else(overflow)?;
-        let repetition = element.repetition.ok_or_else(malformed)?;
-        if !(0..=2).contains(&repetition) {
-            return Err(malformed());
-        }
-        let def_increment = i16::from(repetition != 0);
-        let rep_increment = i16::from(repetition == 2);
-        let definition = parent
-            .definition
-            .checked_add(def_increment)
-            .ok_or_else(malformed)?;
-        let repetition_level = parent
-            .repetition
-            .checked_add(rep_increment)
-            .ok_or_else(malformed)?;
-        result.max_definition_level = result.max_definition_level.max(definition);
-        result.max_repetition_level = result.max_repetition_level.max(repetition_level);
-        result.max_visited_depth = result
-            .max_visited_depth
-            .max(u64::try_from(depth).map_err(|_| overflow())?);
-
-        let (children, primitive) = selected_shape(element, false)?;
-        if primitive {
-            add(&mut result.physical_leaves, 1)?;
-            if let Some(len) = element.crs_len {
-                add(
-                    &mut result.primitive_crs_clone_bytes,
-                    u64::try_from(len).map_err(|_| overflow())?,
-                )?;
-            }
-            add(
-                &mut result.path_string_slots,
-                u64::try_from(depth.max(4)).map_err(|_| overflow())?,
-            )?;
-            add(&mut result.path_name_bytes, path_name_bytes)?;
-        } else if children > 0 {
-            if children > count - index - 1 {
-                return Err(malformed());
-            }
-            add(
-                &mut result.group_child_slots,
-                u64::try_from(children).map_err(|_| overflow())?,
-            )?;
-            if let Some(len) = element.crs_len {
-                add(
-                    &mut result.group_crs_clone_bytes,
-                    u64::try_from(len).map_err(|_| overflow())?,
-                )?;
-            }
-            reserve_frame(
                 stack,
-                budget,
-                &mut result.preflight_peak_bytes,
-                cancellation,
-            )?;
-            stack.push(Frame {
-                remaining_children: children,
-                path_name_bytes,
-                depth,
-                definition,
-                repetition: repetition_level,
-            });
-        } else if let Some(len) = element.crs_len {
-            // Native's zero-child, no-physical-type compatibility case is a
-            // real empty GroupType and clones its logical annotation once.
-            add(
-                &mut result.group_crs_clone_bytes,
-                u64::try_from(len).map_err(|_| overflow())?,
             )?;
         }
     }
@@ -317,57 +210,198 @@ fn preflight_topology(
         return Err(malformed());
     }
 
+    result.native_request_bytes = native_request_bytes(&result)?;
+    Ok(result)
+}
+
+fn visit_root(
+    element: SchemaElementScalarFacts,
+    count: usize,
+    result: &mut SchemaTopologyFacts,
+    budget: &mut InventoryBudget,
+    cancellation: Option<&CancellationToken>,
+    stack: &mut Vec<Frame>,
+) -> Result<(), GfError> {
+    let (children, _) = selected_shape(element, true)?;
+    if children == 0 {
+        if count != 1 {
+            return Err(malformed());
+        }
+        result.max_visited_depth = 0;
+        return Ok(());
+    }
+    if children > count - 1 {
+        return Err(malformed());
+    }
+    add(
+        &mut result.group_child_slots,
+        u64::try_from(children).map_err(|_| overflow())?,
+    )?;
+    if let Some(len) = element.crs_len {
+        add(
+            &mut result.group_crs_clone_bytes,
+            u64::try_from(len).map_err(|_| overflow())?,
+        )?;
+    }
+    reserve_frame(
+        stack,
+        budget,
+        &mut result.preflight_peak_bytes,
+        cancellation,
+    )?;
+    stack.push(Frame {
+        remaining_children: children,
+        path_name_bytes: 0,
+        depth: 0,
+        definition: 0,
+        repetition: 0,
+    });
+    Ok(())
+}
+
+fn visit_child(
+    element: SchemaElementScalarFacts,
+    index: usize,
+    count: usize,
+    result: &mut SchemaTopologyFacts,
+    budget: &mut InventoryBudget,
+    cancellation: Option<&CancellationToken>,
+    stack: &mut Vec<Frame>,
+) -> Result<(), GfError> {
+    while stack
+        .last()
+        .is_some_and(|frame| frame.remaining_children == 0)
+    {
+        stack.pop();
+    }
+    let parent = stack.last_mut().ok_or_else(malformed)?;
+    parent.remaining_children -= 1;
+    let depth = parent.depth.checked_add(1).ok_or_else(overflow)?;
+    let path_name_bytes = parent
+        .path_name_bytes
+        .checked_add(u64::try_from(element.name_len).map_err(|_| overflow())?)
+        .ok_or_else(overflow)?;
+    let repetition = element.repetition.ok_or_else(malformed)?;
+    if !(0..=2).contains(&repetition) {
+        return Err(malformed());
+    }
+    let definition = parent
+        .definition
+        .checked_add(i16::from(repetition != 0))
+        .ok_or_else(malformed)?;
+    let repetition_level = parent
+        .repetition
+        .checked_add(i16::from(repetition == 2))
+        .ok_or_else(malformed)?;
+    result.max_definition_level = result.max_definition_level.max(definition);
+    result.max_repetition_level = result.max_repetition_level.max(repetition_level);
+    result.max_visited_depth = result
+        .max_visited_depth
+        .max(u64::try_from(depth).map_err(|_| overflow())?);
+
+    let (children, primitive) = selected_shape(element, false)?;
+    if primitive {
+        add(&mut result.physical_leaves, 1)?;
+        if let Some(len) = element.crs_len {
+            add(
+                &mut result.primitive_crs_clone_bytes,
+                u64::try_from(len).map_err(|_| overflow())?,
+            )?;
+        }
+        add(
+            &mut result.path_string_slots,
+            u64::try_from(depth.max(4)).map_err(|_| overflow())?,
+        )?;
+        add(&mut result.path_name_bytes, path_name_bytes)?;
+    } else if children > 0 {
+        if children > count - index - 1 {
+            return Err(malformed());
+        }
+        add(
+            &mut result.group_child_slots,
+            u64::try_from(children).map_err(|_| overflow())?,
+        )?;
+        if let Some(len) = element.crs_len {
+            add(
+                &mut result.group_crs_clone_bytes,
+                u64::try_from(len).map_err(|_| overflow())?,
+            )?;
+        }
+        reserve_frame(
+            stack,
+            budget,
+            &mut result.preflight_peak_bytes,
+            cancellation,
+        )?;
+        stack.push(Frame {
+            remaining_children: children,
+            path_name_bytes,
+            depth,
+            definition,
+            repetition: repetition_level,
+        });
+    } else if let Some(len) = element.crs_len {
+        // Native's zero-child, no-physical-type compatibility case is a real
+        // empty GroupType and clones its logical annotation once.
+        add(
+            &mut result.group_crs_clone_bytes,
+            u64::try_from(len).map_err(|_| overflow())?,
+        )?;
+    }
+    Ok(())
+}
+
+fn native_request_bytes(facts: &SchemaTopologyFacts) -> Result<u64, GfError> {
     let mut native = 0u64;
     let type_arc = arc_allocation::<Type>()?;
     let schema_arc = arc_allocation::<SchemaDescriptor>()?;
     let column_arc = arc_allocation::<ColumnDescriptor>()?;
     add(
         &mut native,
-        result.nodes.checked_mul(type_arc).ok_or_else(overflow)?,
+        facts.nodes.checked_mul(type_arc).ok_or_else(overflow)?,
     )?;
-    add(&mut native, result.name_bytes)?;
+    add(&mut native, facts.name_bytes)?;
     add(
         &mut native,
-        result
+        facts
             .primitive_crs_clone_bytes
             .checked_mul(2)
             .ok_or_else(overflow)?,
     )?;
-    add(&mut native, result.group_crs_clone_bytes)?;
+    add(&mut native, facts.group_crs_clone_bytes)?;
     add(
         &mut native,
-        bytes(result.group_child_slots, size_of::<Arc<Type>>())?,
+        bytes(facts.group_child_slots, size_of::<Arc<Type>>())?,
     )?;
     add(&mut native, schema_arc)?;
     add(
         &mut native,
-        bytes(result.physical_leaves, size_of::<Arc<ColumnDescriptor>>())?,
+        bytes(facts.physical_leaves, size_of::<Arc<ColumnDescriptor>>())?,
     )?;
     add(
         &mut native,
-        bytes(result.physical_leaves, size_of::<usize>())?,
+        bytes(facts.physical_leaves, size_of::<usize>())?,
     )?;
     add(
         &mut native,
-        result
+        facts
             .physical_leaves
             .checked_mul(column_arc)
             .ok_or_else(overflow)?,
     )?;
     add(
         &mut native,
-        bytes(result.path_string_slots, size_of::<String>())?,
+        bytes(facts.path_string_slots, size_of::<String>())?,
     )?;
-    add(&mut native, result.path_name_bytes)?;
+    add(&mut native, facts.path_name_bytes)?;
     add(&mut native, bytes(1, size_of::<Arc<Type>>())?)?;
     let scratch = super::parquet_alloc::vector_envelope(
         16,
-        usize::try_from(result.max_visited_depth).map_err(|_| overflow())?,
+        usize::try_from(facts.max_visited_depth).map_err(|_| overflow())?,
         size_of::<&str>(),
     )?;
     add(&mut native, scratch.peak_bytes)?;
-    result.native_request_bytes = native;
-    Ok(result)
+    Ok(native)
 }
 
 #[cfg(test)]

@@ -60,6 +60,11 @@ impl InventoryBudget {
     pub(super) fn live_bytes(&self) -> u64 {
         self.charged
     }
+
+    /// Remaining workspace available before the next source allocation.
+    pub(super) fn remaining(&self) -> u64 {
+        self.capacity.saturating_sub(self.charged)
+    }
 }
 
 /// Grow `vec` to hold `additional` more elements, admitting the growth against

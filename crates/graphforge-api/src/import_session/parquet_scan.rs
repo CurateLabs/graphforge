@@ -39,6 +39,7 @@ const DATA_PAGE_V2: i32 = 3;
 /// Parquet `Encoding` values this module distinguishes.
 pub(super) mod encoding {
     pub(in crate::import_session) const PLAIN_DICTIONARY: i32 = 2;
+    pub(in crate::import_session) const DELTA_LENGTH_BYTE_ARRAY: i32 = 6;
     pub(in crate::import_session) const DELTA_BYTE_ARRAY: i32 = 7;
     pub(in crate::import_session) const RLE_DICTIONARY: i32 = 8;
 }
@@ -462,6 +463,10 @@ pub(super) struct ChunkSummary {
     /// Some data page stores each value as a prefix shared with the one before,
     /// so its decoded size is not bounded by its bytes.
     pub(super) delta_byte_array: bool,
+    /// Native Arrow decoder auxiliaries that can coexist with the owned page:
+    /// level vectors and delta length/prefix state. Payload reconstruction is
+    /// separately bounded by the physical batch row-cost scan.
+    native_auxiliary: u64,
 }
 
 impl ChunkSummary {
@@ -481,6 +486,19 @@ impl ChunkSummary {
                         encoding::PLAIN_DICTIONARY | encoding::RLE_DICTIONARY
                     );
                     summary.delta_byte_array |= page.encoding == encoding::DELTA_BYTE_ARRAY;
+                    let events = u64::from(page.values);
+                    let levels = events.saturating_mul(4);
+                    let delta = match page.encoding {
+                        encoding::DELTA_LENGTH_BYTE_ARRAY => events
+                            .saturating_mul(4)
+                            .saturating_add(u64::from(page.uncompressed)),
+                        encoding::DELTA_BYTE_ARRAY => events
+                            .saturating_mul(8)
+                            .saturating_add(u64::from(page.uncompressed)),
+                        _ => 0,
+                    };
+                    summary.native_auxiliary =
+                        summary.native_auxiliary.max(levels.saturating_add(delta));
                 }
             }
         }
@@ -494,6 +512,27 @@ impl ChunkSummary {
         self.data_page
             .saturating_add(self.dictionary_page)
             .saturating_add(self.dictionary_entries.saturating_mul(4))
+    }
+
+    /// Minimum workspace a one-column value sizing pass may need beside its
+    /// bounded row-cost vector: page input/output, retained dictionary facts,
+    /// and the fixed level/value cursor blocks.
+    pub(super) fn sizing_floor(&self) -> u64 {
+        self.data_page
+            .saturating_add(self.compressed_page)
+            .saturating_add(self.dictionary_page)
+            .saturating_add(self.dictionary_entries.saturating_mul(8))
+            .saturating_add(super::parquet_sizing::WORKSPACE_RESERVE)
+    }
+
+    /// Native dictionary builders copy a retained dictionary page and its
+    /// value offsets while the owned page and its validator facts remain live.
+    pub(super) fn native_auxiliary(&self) -> u64 {
+        self.native_auxiliary.saturating_add(
+            self.dictionary_page
+                .saturating_add(self.dictionary_entries.saturating_mul(4))
+                .saturating_add(8),
+        )
     }
 }
 
@@ -535,6 +574,25 @@ impl GroupScan {
             .max()
             .unwrap_or(0);
         resident.saturating_add(transient)
+    }
+
+    /// Peak native decoder auxiliary storage summed across the columns in this
+    /// row group, whose page readers may all be live during one Arrow batch.
+    pub(super) fn native_decoder_auxiliary(&self) -> u64 {
+        self.leaves
+            .iter()
+            .map(|leaf| leaf.summary.native_auxiliary())
+            .fold(0_u64, u64::saturating_add)
+    }
+
+    /// Dictionary value-length facts retained by the validators for this row
+    /// group. Fixed-width dictionaries need no such vector.
+    pub(super) fn validator_dictionary_bytes(&self) -> u64 {
+        self.leaves
+            .iter()
+            .filter(|leaf| leaf.leaf == Leaf::Variable)
+            .map(|leaf| leaf.summary.dictionary_entries.saturating_mul(8))
+            .fold(0_u64, u64::saturating_add)
     }
 }
 

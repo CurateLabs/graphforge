@@ -13,7 +13,9 @@ use super::{cancelled, storage};
 #[derive(Clone, Copy, Debug)]
 pub(super) struct DeltaFacts {
     pub(super) values: usize,
+    #[cfg(test)]
     pub(super) auxiliary_bytes: u64,
+    #[cfg(test)]
     pub(super) largest_value: u64,
 }
 
@@ -268,6 +270,8 @@ impl<'a> Lengths<'a> {
 /// Check a complete delta payload without allocating according to body data.
 /// `maximum` is the already admitted page value count; nulls can make the body
 /// count smaller. Non-delta encodings return None and keep their own validators.
+// Encoding variants share count validation and bounded replay invariants.
+#[allow(clippy::too_many_lines)]
 pub(super) fn validate(
     encoding: Encoding,
     input: &[u8],
@@ -280,18 +284,24 @@ pub(super) fn validate(
         Encoding::DELTA_BINARY_PACKED => {
             let mut values = Integers::new(input, maximum, integer_width)?;
             let count = values.count;
+            #[cfg(test)]
             let auxiliary_bytes = values.minis as u64;
             stream_end(&mut values, cancellation)?;
             Ok(Some(DeltaFacts {
                 values: count,
+                #[cfg(test)]
                 auxiliary_bytes,
+                #[cfg(test)]
                 largest_value: u64::from(integer_width) / 8,
             }))
         }
         Encoding::DELTA_LENGTH_BYTE_ARRAY => {
             let mut lengths = Integers::new(input, maximum, 32)?;
-            let (count, minis) = (lengths.count, lengths.minis);
+            let count = lengths.count;
+            #[cfg(test)]
+            let minis = lengths.minis;
             let mut total = 0_u64;
+            #[cfg(test)]
             let mut largest = 0_u64;
             let mut events = 0;
             while let Some(length) = lengths.next()? {
@@ -302,7 +312,10 @@ pub(super) fn validate(
                 }
                 let length = u64::try_from(length).map_err(|_| invalid())?;
                 total = total.checked_add(length).ok_or_else(invalid)?;
-                largest = largest.max(length);
+                #[cfg(test)]
+                {
+                    largest = largest.max(length);
+                }
             }
             let end = stream_end(&mut lengths, cancellation)?;
             if total > (input.len() - end) as u64 {
@@ -310,15 +323,18 @@ pub(super) fn validate(
             }
             Ok(Some(DeltaFacts {
                 values: count,
+                #[cfg(test)]
                 auxiliary_bytes: (count as u64)
                     .saturating_mul(4)
                     .saturating_add(minis as u64),
+                #[cfg(test)]
                 largest_value: largest,
             }))
         }
         Encoding::DELTA_BYTE_ARRAY => {
             let mut prefixes = Integers::new(input, maximum, 32)?;
             let count = prefixes.count;
+            #[cfg(test)]
             let prefix_minis = prefixes.minis;
             let prefix_end = stream_end(&mut prefixes, cancellation)?;
             let suffix_input = input.get(prefix_end..).ok_or_else(invalid)?;
@@ -326,12 +342,14 @@ pub(super) fn validate(
             if suffixes.count != count {
                 return Err(invalid());
             }
+            #[cfg(test)]
             let suffix_minis = suffixes.minis;
             let suffix_end = stream_end(&mut suffixes, cancellation)?;
             let payload = suffix_input.len() - suffix_end;
             let mut prefixes = Integers::new(input, maximum, 32)?;
             let mut suffixes = Integers::new(suffix_input, maximum, 32)?;
             let mut previous = 0_u64;
+            #[cfg(test)]
             let mut largest = 0_u64;
             let mut total = 0_u64;
             for index in 0..count {
@@ -347,18 +365,23 @@ pub(super) fn validate(
                 }
                 total = total.checked_add(suffix).ok_or_else(invalid)?;
                 previous = prefix.checked_add(suffix).ok_or_else(invalid)?;
-                largest = largest.max(previous);
+                #[cfg(test)]
+                {
+                    largest = largest.max(previous);
+                }
             }
             if total > payload as u64 {
                 return Err(invalid());
             }
             Ok(Some(DeltaFacts {
                 values: count,
+                #[cfg(test)]
                 auxiliary_bytes: (count as u64)
                     .saturating_mul(8)
                     .saturating_add(prefix_minis as u64)
                     .saturating_add(suffix_minis as u64)
                     .saturating_add(largest.saturating_mul(2)),
+                #[cfg(test)]
                 largest_value: largest,
             }))
         }

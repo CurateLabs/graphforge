@@ -74,6 +74,7 @@ fn integer_width() -> GfError {
     storage("Parquet footer compact integer exceeds its declared width")
 }
 
+#[cfg(test)]
 fn invalid_bool() -> GfError {
     storage("Parquet footer compact boolean value is not 0, 1 or 2")
 }
@@ -181,9 +182,10 @@ pub(super) struct BorrowedUtf8<'a> {
     bytes: &'a [u8],
 }
 
-impl<'a> BorrowedUtf8<'a> {
+impl BorrowedUtf8<'_> {
     /// The admitted UTF-8 bytes.
-    pub(super) fn as_bytes(&self) -> &'a [u8] {
+    #[cfg(test)]
+    pub(super) fn as_bytes(&self) -> &[u8] {
         self.bytes
     }
 
@@ -313,6 +315,7 @@ impl<'a> CompactSlice<'a> {
 
     /// Read a boolean list-element value. The native decoder accepts 1 as
     /// true and both 0 and 2 as false.
+    #[cfg(test)]
     pub(super) fn read_bool_value(&mut self) -> Result<bool, GfError> {
         self.cancelled()?;
         match self.read_byte()? {
@@ -421,11 +424,11 @@ impl<'a> CompactSlice<'a> {
             _ => return Err(malformed()),
         };
         let nibble = (header & 0xF0) >> 4;
-        let count = if nibble != 15 {
-            usize::from(nibble)
-        } else {
+        let count = if nibble == 15 {
             let declared = i32::try_from(self.read_vlq()?).map_err(|_| list_count_overflow())?;
             usize::try_from(declared).map_err(|_| list_count_overflow())?
+        } else {
+            usize::from(nibble)
         };
         Ok(List { count, element })
     }

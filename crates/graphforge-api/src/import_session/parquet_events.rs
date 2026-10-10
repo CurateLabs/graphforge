@@ -38,6 +38,13 @@ enum PageVersion {
     V2 { nulls: u32, rows: u32 },
 }
 
+struct PageParts<'a> {
+    version: PageVersion,
+    repetition: Levels<'a>,
+    definition: Levels<'a>,
+    values: &'a [u8],
+}
+
 /// Complete facts derived from the actual logical level events in a page.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct EventSummary {
@@ -118,56 +125,13 @@ impl<'a> PageEvents<'a> {
                     sections.values,
                 )
             }
-            Page::DataPageV2 {
-                buf,
-                num_nulls,
-                num_rows,
-                def_levels_byte_len,
-                rep_levels_byte_len,
-                ..
-            } => {
-                if *num_nulls > page.num_values() || *num_rows > page.num_values() {
-                    return Err(storage("Parquet V2 row/null counts exceed its value count"));
-                }
-                let rep_len = usize::try_from(*rep_levels_byte_len).map_err(storage)?;
-                let def_len = usize::try_from(*def_levels_byte_len).map_err(storage)?;
-                let prefix_len = rep_len
-                    .checked_add(def_len)
-                    .ok_or_else(|| storage("Parquet V2 level lengths overflow"))?;
-                let body = buf.as_ref();
-                if prefix_len > body.len() {
-                    return Err(storage("Parquet V2 level sections exceed the page body"));
-                }
-                // V2 declares the spans even when a descriptor maximum is
-                // zero. They still locate the value suffix; the pinned reader
-                // supplies implicit zeroes for that descriptor.
-                let repetition_bytes = body
-                    .get(..rep_len)
-                    .ok_or_else(|| storage("Parquet V2 repetition levels exceed the page body"))?;
-                let definition_bytes = body
-                    .get(rep_len..prefix_len)
-                    .ok_or_else(|| storage("Parquet V2 definition levels exceed the page body"))?;
-                let values = body
-                    .get(prefix_len..)
-                    .ok_or_else(|| storage("Parquet V2 value suffix exceeds the page body"))?;
+            Page::DataPageV2 { .. } => {
+                let parts = v2_parts(page, max_repetition, max_definition, expected)?;
                 (
-                    PageVersion::V2 {
-                        nulls: *num_nulls,
-                        rows: *num_rows,
-                    },
-                    make_level(
-                        Some(repetition_bytes),
-                        max_repetition,
-                        expected,
-                        Encoding::RLE,
-                    )?,
-                    make_level(
-                        Some(definition_bytes),
-                        max_definition,
-                        expected,
-                        Encoding::RLE,
-                    )?,
-                    values,
+                    parts.version,
+                    parts.repetition,
+                    parts.definition,
+                    parts.values,
                 )
             }
             Page::DictionaryPage { .. } => {
@@ -220,10 +184,10 @@ impl<'a> PageEvents<'a> {
             return Err(cancelled());
         }
 
-        let count = repetition
-            .len()
-            .min(MAX_BLOCK_EVENTS)
-            .min(self.expected.saturating_sub(self.emitted as usize));
+        let count = repetition.len().min(MAX_BLOCK_EVENTS).min(
+            self.expected
+                .saturating_sub(usize::try_from(self.emitted).map_err(storage)?),
+        );
         for index in 0..count {
             let rep = self
                 .repetition
@@ -239,11 +203,11 @@ impl<'a> PageEvents<'a> {
                 .ok_or_else(|| storage("Parquet level event count overflows"))?;
             let nonnull = self
                 .nonnull
-                .checked_add(if def == self.max_definition { 1 } else { 0 })
+                .checked_add(u64::from(def == self.max_definition))
                 .ok_or_else(|| storage("Parquet non-null event count overflows"))?;
             let row_starts = self
                 .row_starts
-                .checked_add(if rep == 0 { 1 } else { 0 })
+                .checked_add(u64::from(rep == 0))
                 .ok_or_else(|| storage("Parquet row-start count overflows"))?;
             self.first_repetition.get_or_insert(rep);
             self.emitted = emitted;
@@ -319,12 +283,74 @@ impl<'a> PageEvents<'a> {
     }
 }
 
-fn make_level<'a>(
-    section: Option<&'a [u8]>,
+fn v2_parts(
+    page: &Page,
+    max_repetition: i16,
+    max_definition: i16,
+    expected: usize,
+) -> Result<PageParts<'_>, GfError> {
+    let Page::DataPageV2 {
+        buf,
+        num_nulls,
+        num_rows,
+        def_levels_byte_len,
+        rep_levels_byte_len,
+        ..
+    } = page
+    else {
+        return Err(storage("Expected a Parquet V2 data page"));
+    };
+    if *num_nulls > page.num_values() || *num_rows > page.num_values() {
+        return Err(storage("Parquet V2 row/null counts exceed its value count"));
+    }
+    let rep_len = usize::try_from(*rep_levels_byte_len).map_err(storage)?;
+    let def_len = usize::try_from(*def_levels_byte_len).map_err(storage)?;
+    let prefix_len = rep_len
+        .checked_add(def_len)
+        .ok_or_else(|| storage("Parquet V2 level lengths overflow"))?;
+    let body = buf.as_ref();
+    if prefix_len > body.len() {
+        return Err(storage("Parquet V2 level sections exceed the page body"));
+    }
+    // V2 declares the spans even when a descriptor maximum is zero. They
+    // still locate the value suffix; the pinned reader supplies implicit
+    // zeroes for that descriptor.
+    let repetition_bytes = body
+        .get(..rep_len)
+        .ok_or_else(|| storage("Parquet V2 repetition levels exceed the page body"))?;
+    let definition_bytes = body
+        .get(rep_len..prefix_len)
+        .ok_or_else(|| storage("Parquet V2 definition levels exceed the page body"))?;
+    let values = body
+        .get(prefix_len..)
+        .ok_or_else(|| storage("Parquet V2 value suffix exceeds the page body"))?;
+    Ok(PageParts {
+        version: PageVersion::V2 {
+            nulls: *num_nulls,
+            rows: *num_rows,
+        },
+        repetition: make_level(
+            Some(repetition_bytes),
+            max_repetition,
+            expected,
+            Encoding::RLE,
+        )?,
+        definition: make_level(
+            Some(definition_bytes),
+            max_definition,
+            expected,
+            Encoding::RLE,
+        )?,
+        values,
+    })
+}
+
+fn make_level(
+    section: Option<&[u8]>,
     max_level: i16,
     expected: usize,
     encoding: Encoding,
-) -> Result<Levels<'a>, GfError> {
+) -> Result<Levels<'_>, GfError> {
     if max_level == 0 {
         return Ok(Levels::Implicit(ImplicitZero::new(expected)));
     }

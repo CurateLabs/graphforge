@@ -41,7 +41,10 @@ use arrow::ipc::reader::FileDecoder;
 use arrow::record_batch::RecordBatch;
 use graphforge_core::GfError;
 
-use super::bulk_source::{bulk_build_memory_budget, schema_owned_bytes};
+#[cfg(test)]
+use super::bulk_source::bulk_build_memory_budget;
+use super::bulk_source::schema_owned_bytes;
+use super::inventory_budget::InventoryBudget;
 use super::{limit, storage};
 
 /// Output chunk the bounded frame verification reads through: no expanded
@@ -307,9 +310,15 @@ pub(super) struct IpcPlan {
 
 /// Footer-only sizing precedes any decode: Arrow's file reader eagerly decodes
 /// every dictionary, so constructing one is already a payload allocation.
-#[allow(clippy::too_many_lines)]
+#[cfg(test)]
 pub(super) fn ipc_plan(path: &Path) -> Result<IpcPlan, GfError> {
-    let budget = bulk_build_memory_budget()?;
+    ipc_plan_with_budget(path, bulk_build_memory_budget()?)
+}
+
+// Keep the footer and every message header checked in one ordered pass so no
+// IPC decoder can observe metadata before its workspace has been admitted.
+#[allow(clippy::too_many_lines)]
+pub(super) fn ipc_plan_with_budget(path: &Path, budget: u64) -> Result<IpcPlan, GfError> {
     let mut file = File::open(path).map_err(storage)?;
     let length = file.metadata().map_err(storage)?.len();
     if length < 10 {
@@ -328,7 +337,14 @@ pub(super) fn ipc_plan(path: &Path) -> Result<IpcPlan, GfError> {
             "Arrow source footer exceeds construction memory budget",
         ));
     }
-    let mut footer_bytes = vec![0; usize::try_from(footer_length).map_err(storage)?];
+    let mut workspace = InventoryBudget::new(budget);
+    workspace.admit(footer_length, "the Arrow IPC footer snapshot")?;
+    let footer_size = usize::try_from(footer_length).map_err(storage)?;
+    let mut footer_bytes = Vec::new();
+    footer_bytes
+        .try_reserve_exact(footer_size)
+        .map_err(|_| super::limit("the allocator refused the Arrow IPC footer snapshot"))?;
+    footer_bytes.resize(footer_size, 0);
     file.seek(SeekFrom::Start(length - 10 - footer_length))
         .map_err(storage)?;
     file.read_exact(&mut footer_bytes).map_err(storage)?;
@@ -336,28 +352,19 @@ pub(super) fn ipc_plan(path: &Path) -> Result<IpcPlan, GfError> {
     let ipc_schema = footer
         .schema()
         .ok_or_else(|| storage("Arrow footer has no schema"))?;
-    let mut schema_charge =
-        (std::mem::size_of::<arrow::datatypes::Schema>() as u64).saturating_add(256);
-    if let Some(fields) = ipc_schema.fields() {
-        for field in fields {
-            ipc_field_bytes(field, &mut schema_charge, budget, 0)?;
-        }
-    }
-    if let Some(metadata) = ipc_schema.custom_metadata() {
-        for entry in metadata {
-            schema_charge = schema_charge
-                .saturating_add(entry.key().map_or(0, str::len) as u64)
-                .saturating_add(entry.value().map_or(0, str::len) as u64)
-                .saturating_add(128);
-        }
-    }
-    if footer_length.saturating_add(schema_charge) > budget {
-        return Err(super::limit(
-            "Arrow source schema exceeds construction memory budget",
-        ));
-    }
+    let schema_facts =
+        super::ipc_schema_admission::preflight(ipc_schema, workspace.remaining(), None)?;
+    workspace.admit(
+        schema_facts.peak_request_bytes,
+        "the converted Arrow IPC schema",
+    )?;
     let schema = arrow::ipc::convert::fb_to_schema(ipc_schema);
     let schema_bytes = schema_owned_bytes(&schema);
+    workspace.release(
+        schema_facts
+            .peak_request_bytes
+            .saturating_sub(schema_facts.retained_request_bytes),
+    );
     let columns = schema.fields().len();
     let version = footer.version();
     let batch_count = footer.recordBatches().map_or(0, |blocks| blocks.len());
@@ -367,19 +374,30 @@ pub(super) fn ipc_plan(path: &Path) -> Result<IpcPlan, GfError> {
         .saturating_mul(std::mem::size_of::<IpcBlock>() as u64)
         .saturating_add(rows_bytes)
         .saturating_add(256);
+    workspace.admit(inventory_bytes, "the Arrow IPC row and block inventory")?;
+    // Keep the pre-existing logical-size estimate in the check as well; the
+    // conversion request envelope is an allocator bound, while this captures
+    // schema values retained by the planned reader.
     if footer_length
         .saturating_add(schema_bytes)
         .saturating_add(rows_bytes)
-        .saturating_add(inventory_bytes)
         > budget
     {
         return Err(super::limit(
             "Arrow source row inventory exceeds construction memory budget",
         ));
     }
-    let mut rows = Vec::with_capacity(batch_count);
-    let mut dictionaries = Vec::with_capacity(dictionary_count);
-    let mut batches = Vec::with_capacity(batch_count);
+    let mut rows = Vec::new();
+    rows.try_reserve_exact(batch_count)
+        .map_err(|_| super::limit("the allocator refused the Arrow IPC row inventory"))?;
+    let mut dictionaries = Vec::new();
+    dictionaries
+        .try_reserve_exact(dictionary_count)
+        .map_err(|_| super::limit("the allocator refused the Arrow IPC dictionary inventory"))?;
+    let mut batches = Vec::new();
+    batches
+        .try_reserve_exact(batch_count)
+        .map_err(|_| super::limit("the allocator refused the Arrow IPC batch inventory"))?;
     let mut dictionary_workspace = 0_u64;
     let mut batch_workspace = 0_u64;
     let mut frames = IpcFrames::default();
@@ -429,7 +447,13 @@ pub(super) fn ipc_plan(path: &Path) -> Result<IpcPlan, GfError> {
                     "Arrow footer block allocation exceeds construction memory budget",
                 ));
             }
-            let mut header = vec![0; usize::try_from(metadata_length).map_err(storage)?];
+            workspace.admit(metadata_length, "an Arrow IPC message header")?;
+            let header_len = usize::try_from(metadata_length).map_err(storage)?;
+            let mut header = Vec::new();
+            header
+                .try_reserve_exact(header_len)
+                .map_err(|_| super::limit("the allocator refused an Arrow IPC message header"))?;
+            header.resize(header_len, 0);
             file.seek(SeekFrom::Start(offset)).map_err(storage)?;
             file.read_exact(&mut header).map_err(storage)?;
             let skip = if header.starts_with(&[0xff; 4]) { 8 } else { 4 };
@@ -458,6 +482,11 @@ pub(super) fn ipc_plan(path: &Path) -> Result<IpcPlan, GfError> {
             .ok_or_else(|| storage("Arrow footer block has the wrong message kind"))?;
             let (decoded, block_frames) =
                 ipc_buffer_bytes(&mut file, batch, body_start, body_length)?;
+            let batch_rows = (!dictionary)
+                .then(|| u64::try_from(batch.length()).map_err(storage))
+                .transpose()?;
+            drop(header);
+            workspace.release(metadata_length);
             frames.peak = frames.peak.max(block_frames.peak);
             frames.present |= block_frames.present;
             let workspace = block_workspace(metadata_length.saturating_add(body_length), decoded);
@@ -475,7 +504,9 @@ pub(super) fn ipc_plan(path: &Path) -> Result<IpcPlan, GfError> {
                     metadata_length,
                     body_length,
                 });
-                rows.push(u64::try_from(batch.length()).map_err(storage)?);
+                rows.push(
+                    batch_rows.ok_or_else(|| storage("IPC record batch row count is missing"))?,
+                );
             }
         }
     }
@@ -513,48 +544,6 @@ pub(super) fn ipc_plan(path: &Path) -> Result<IpcPlan, GfError> {
         codec_context,
         inventory_bytes,
     })
-}
-
-fn ipc_field_bytes(
-    field: arrow::ipc::Field<'_>,
-    bytes: &mut u64,
-    budget: u64,
-    depth: usize,
-) -> Result<(), GfError> {
-    *bytes = bytes
-        .saturating_add(field.name().map_or(0, str::len) as u64)
-        .saturating_add(256);
-    if let Some(timestamp) = field.type_as_timestamp() {
-        *bytes = bytes.saturating_add(timestamp.timezone().map_or(0, str::len) as u64);
-    }
-    if let Some(union) = field.type_as_union() {
-        *bytes = bytes.saturating_add(
-            union
-                .typeIds()
-                .map_or(0, |ids| ids.len() as u64)
-                .saturating_mul(4),
-        );
-    }
-
-    if let Some(metadata) = field.custom_metadata() {
-        for entry in metadata {
-            *bytes = bytes
-                .saturating_add(entry.key().map_or(0, str::len) as u64)
-                .saturating_add(entry.value().map_or(0, str::len) as u64)
-                .saturating_add(128);
-        }
-    }
-    if *bytes > budget || depth > 64 {
-        return Err(super::limit(
-            "Arrow source schema exceeds construction memory budget",
-        ));
-    }
-    if let Some(children) = field.children() {
-        for child in children {
-            ipc_field_bytes(child, bytes, budget, depth + 1)?;
-        }
-    }
-    Ok(())
 }
 
 /// The codec charge one batch message's LZ4 frames add: `present` when any
