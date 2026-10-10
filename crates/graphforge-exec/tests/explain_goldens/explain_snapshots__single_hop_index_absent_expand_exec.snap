@@ -10,13 +10,10 @@ ProjectionExec: expr=[name@0 as bn]
             RepartitionExec: partitioning=RoundRobinBatch(<N>), input_partitions=1
               ProjectionExec: expr=[node_uuid@9 as node_uuid, type_ids@12 as type_ids]
                 ExpandExec: rel=KNOWS, dir=->, adjacency=building, identity=legacy, fetch=all, demand_batch=all, projection=2, cancel=none
-                  RepartitionExec: partitioning=RoundRobinBatch(<N>), input_partitions=1
-                    HashJoinExec: mode=CollectLeft, join_type=Left, on=[(node_uuid@0, node_uuid@0)], projection=[node_id@1]
-                      UuidBuildKeyTapExec: column=0
-                        CoalescePartitionsExec
-                          FilterExec: array_has(type_ids@2, 1073741824), projection=[node_uuid@0, node_id@1]
-                            RepartitionExec: partitioning=RoundRobinBatch(<N>), input_partitions=1
-                              OrderedPartitionStreamExec: input_partitions=3
-                                GraphForgeParquetExec: fragments=3, batch_size=8192, limit=none
-                      PropertyOverlayExec: route=_untyped
+                  HashJoinExec: mode=CollectLeft, join_type=Right, on=[(node_uuid@0, node_uuid@0)], projection=[node_id@2]
+                    PropertyOverlayExec: route=_untyped
+                    FilterExec: array_has(type_ids@2, 1073741824), projection=[node_uuid@0, node_id@1]
+                      RepartitionExec: partitioning=RoundRobinBatch(<N>), input_partitions=1
+                        OrderedPartitionStreamExec: input_partitions=3
+                          GraphForgeParquetExec: fragments=3, batch_size=8192, limit=none
       PropertyOverlayExec: route=_untyped
