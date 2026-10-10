@@ -7,7 +7,9 @@ use super::io_err;
 use super::parquet_err;
 use super::preflight_parquet_handle;
 use super::property_relative_name;
-use arrow::array::RecordBatch;
+use arrow::array::{
+    Array, ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray,
+};
 use arrow::datatypes::SchemaRef;
 use datafusion::error::DataFusionError;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -95,6 +97,40 @@ pub(crate) fn visit_property_overlay_batched_projected<F>(
     is_edge: bool,
     batch_size: usize,
     selected_properties: Option<&std::collections::BTreeSet<String>>,
+    visit: F,
+) -> Result<Option<crate::PropertyOverlayMetrics>, DataFusionError>
+where
+    F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
+{
+    visit_property_overlay_batched_selected(
+        dir,
+        inventory,
+        stem,
+        is_edge,
+        batch_size,
+        selected_properties,
+        None,
+        &[],
+        visit,
+    )
+}
+
+/// The most rows a pushed-down equality may nominate before the read gives up
+/// pruning and streams the route.
+const MAX_EQUALITY_CANDIDATES: usize = 1 << 18;
+
+/// Visit a route's newest live rows, optionally only those that can satisfy a
+/// pushed-down equality. The read streams the fragments and writes nothing.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(crate) fn visit_property_overlay_batched_selected<F>(
+    dir: &Path,
+    inventory: Option<&crate::AuthenticatedPropertyInventory>,
+    stem: &str,
+    is_edge: bool,
+    batch_size: usize,
+    selected_properties: Option<&std::collections::BTreeSet<String>>,
+    equality: Option<&crate::property_overlay::PropertyEquality>,
+    uuid_sets: &[&dyn crate::uuid_set::UuidMembership],
     mut visit: F,
 ) -> Result<Option<crate::PropertyOverlayMetrics>, DataFusionError>
 where
@@ -127,21 +163,68 @@ where
                 .transpose()
         })
         .map_err(|error| DataFusionError::External(Box::new(error)))?;
-    let scratch = inventory
-        .create_snapshot_scratch()
-        .map_err(|error| DataFusionError::External(Box::new(error)))?;
+    let collect = crate::lifecycle_io::is_active();
+    let limits = crate::property_overlay::PropertyOverlayLimits::default();
+    let mut metrics = crate::PropertyOverlayMetrics::default();
+    // Only a node route's equality is answered from statistics; the candidate
+    // read decodes the compared column alone.
+    let candidates = match equality.filter(|_| !is_edge) {
+        Some(equality) => inventory
+            .equality_candidates(
+                kind,
+                stem,
+                equality,
+                limits,
+                MAX_EQUALITY_CANDIDATES,
+                collect,
+            )
+            .map_err(|error| DataFusionError::External(Box::new(error)))?,
+        None => None,
+    };
+    let candidate_uuids = match candidates {
+        Some((candidates, work)) => {
+            metrics.absorb(&work);
+            Some(candidates)
+        }
+        None => None,
+    };
+    let uuid_filter = (!uuid_sets.is_empty() || candidate_uuids.is_some()).then_some(
+        crate::uuid_set::UuidFilter {
+            nominations: uuid_sets,
+            candidates: candidate_uuids.as_ref(),
+        },
+    );
+    // The compared column is needed to check the winner of each candidate.
+    let streamed_properties = match (equality, selected_properties) {
+        (Some(equality), Some(selected)) => {
+            let mut selected = selected.clone();
+            selected.insert(equality.column.clone());
+            Some(selected)
+        }
+        _ => selected_properties.cloned(),
+    };
     let mut rows = Vec::with_capacity(batch_size.max(1));
     let mut stopped = false;
-    let metrics = inventory
-        .visit_route_projected_optional(
+    let mut failure = None;
+    if uuid_filter.as_ref().is_none_or(|uuids| !uuids.is_empty()) {
+        let read = crate::property_overlay::RouteRead {
             kind,
-            stem,
-            scratch.path(),
-            crate::property_overlay::PropertyOverlayLimits::default(),
-            selected_properties,
-            |row| {
-                if stopped {
-                    return Ok(());
+            route: stem,
+            selected_properties: streamed_properties.as_ref(),
+            uuids: uuid_filter
+                .as_ref()
+                .map(|uuids| uuids as &dyn crate::uuid_set::UuidMembership),
+            limits,
+            collect,
+        };
+        let work = inventory
+            .visit_route_streaming(&read, |row| {
+                // A candidate's newest snapshot may differ from the value the
+                // candidate scan saw; the predicate decides.
+                if uuid_filter.is_some()
+                    && equality.is_some_and(|equality| !equality.holds(&row.values))
+                {
+                    return Ok(true);
                 }
                 rows.push(row);
                 if rows.len() >= batch_size.max(1) {
@@ -156,13 +239,23 @@ where
                     let batch = normalize_property_batch(batch, schema.as_ref())?;
                     let batch =
                         project_property_batch(batch, kind.uuid_field(), selected_properties)?;
-                    stopped =
-                        !visit(&batch).map_err(graphforge_core::GfError::from_execution_error)?;
+                    match visit(&batch) {
+                        Ok(true) => {}
+                        Ok(false) => stopped = true,
+                        Err(error) => {
+                            failure = Some(error);
+                            stopped = true;
+                        }
+                    }
                 }
-                Ok(())
-            },
-        )
-        .map_err(|error| DataFusionError::External(Box::new(error)))?;
+                Ok(!stopped)
+            })
+            .map_err(|error| DataFusionError::External(Box::new(error)))?;
+        metrics.absorb(&work);
+    }
+    if let Some(error) = failure {
+        return Err(error);
+    }
     if !stopped && !rows.is_empty() {
         let batch = crate::writer::property_snapshots_to_batch(stem, is_edge, rows)
             .map_err(|error| DataFusionError::External(Box::new(error)))?
@@ -173,7 +266,7 @@ where
             .map_err(|error| DataFusionError::External(Box::new(error)))?;
         let _ = visit(&batch)?;
     }
-    Ok(metrics)
+    Ok(collect.then_some(metrics))
 }
 
 // Normalize decoded columns against their selected schema. Omitted required
@@ -235,7 +328,7 @@ fn normalize_property_batch(
         .fields()
         .iter()
         .map(|field| {
-            if field.data_type() == &arrow::datatypes::DataType::Null {
+            let column = if field.data_type() == &arrow::datatypes::DataType::Null {
                 arrow::array::new_null_array(field.data_type(), batch.num_rows())
             } else {
                 batch
@@ -244,11 +337,52 @@ fn normalize_property_batch(
                     .unwrap_or_else(|| {
                         arrow::array::new_null_array(field.data_type(), batch.num_rows())
                     })
-            }
+            };
+            normalize_property_column(column, field.data_type())
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, graphforge_core::GfError>>()?;
     RecordBatch::try_new(Arc::clone(schema), columns)
         .map_err(|error| graphforge_core::GfError::Storage(error.to_string()))
+}
+
+/// Rebuild a homogeneous scalar batch column in the route's authenticated
+/// heterogeneous representation. A filtered read can contain only one of the
+/// historical scalar types even though the complete route schema is tagged.
+fn normalize_property_column(
+    column: ArrayRef,
+    expected: &arrow::datatypes::DataType,
+) -> Result<ArrayRef, graphforge_core::GfError> {
+    use graphforge_value::heterogeneous::{Scalar, encode_scalar};
+
+    if expected != &arrow::datatypes::DataType::Struct(crate::writer::heterogeneous_scalar_fields())
+    {
+        return Ok(column);
+    }
+    macro_rules! encode_values {
+        ($array_type:ty, $variant:ident) => {{
+            let values = column
+                .as_any()
+                .downcast_ref::<$array_type>()
+                .ok_or_else(|| {
+                    graphforge_core::GfError::Storage(
+                        "property scalar column does not match its Arrow type".into(),
+                    )
+                })?;
+            Arc::new(encode_scalar((0..values.len()).map(|row| {
+                (!values.is_null(row)).then(|| Scalar::$variant(values.value(row)))
+            }))) as ArrayRef
+        }};
+    }
+    let encoded = match column.data_type() {
+        arrow::datatypes::DataType::Int64 => encode_values!(Int64Array, Int),
+        arrow::datatypes::DataType::Float64 => encode_values!(Float64Array, Float),
+        arrow::datatypes::DataType::Utf8 => encode_values!(StringArray, Str),
+        arrow::datatypes::DataType::Boolean => encode_values!(BooleanArray, Bool),
+        // Null-only columns are handled by the route-schema projection above;
+        // the tagged array is already correct when a canonical tag is present.
+        _ => return Ok(column),
+    };
+    Ok(encoded)
 }
 
 /// Stream `properties/<stem>.parquet` as bounded batches without concatenating

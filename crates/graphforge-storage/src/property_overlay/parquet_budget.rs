@@ -184,6 +184,25 @@ impl ChunkReader for CountingChunkReader {
     }
 
     fn get_bytes(&self, start: u64, length: usize) -> parquet::errors::Result<Bytes> {
+        if let PropertyFile::Memory(bytes) = self.file.as_ref() {
+            // The authenticated bytes are already resident: share them rather
+            // than copy, and count the same 64 KiB reads a copy would make.
+            let range = usize::try_from(start)
+                .ok()
+                .and_then(|start| Some(start..start.checked_add(length)?))
+                .filter(|range| range.end <= bytes.len())
+                .ok_or_else(|| {
+                    parquet::errors::ParquetError::EOF("property range exceeds the object".into())
+                })?;
+            self.counts.seek();
+            let mut remaining = length;
+            while remaining > 0 {
+                let block = remaining.min(64 * 1024);
+                self.counts.record(block as u64);
+                remaining -= block;
+            }
+            return Ok(bytes.slice(range));
+        }
         let mut reader = self.get_read(start)?;
         let mut buffer = vec![0; length];
         std::io::Read::read_exact(&mut reader, &mut buffer)?;

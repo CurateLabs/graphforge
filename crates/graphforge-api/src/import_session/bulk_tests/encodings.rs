@@ -1,7 +1,8 @@
 //! Rows of every encoding whose expansion differs from its stored bytes
 //! (dictionary, delta-encoded and plain strings, nullable integers, lists), with
 //! derived identities, in row groups that straddle tasks: the resident route, the
-//! route through scratch and the staged path publish the same artifacts (path,
+//! route through scratch and the route with node tables on scratch publish the
+//! same artifacts (path,
 //! length and SHA-256), catalog IDs and derived identities included (#1918).
 
 use arrow::array::{Int64Array, Int64Builder, ListBuilder, StringDictionaryBuilder};
@@ -14,7 +15,9 @@ use parquet::file::properties::WriterProperties;
 use super::*;
 
 const SCRATCH: u64 = 1_100 << 20;
-const STAGED: u64 = 512 << 10;
+// Start below the bounded node-scratch minimum, then retry at its stable
+// budget-sized digest boundary. Initial builds no longer stage on this route.
+const NODE_SCRATCH_PROBE: u64 = 512 << 10;
 const ROWS: usize = 120;
 const EDGES: usize = 90;
 
@@ -145,7 +148,7 @@ fn write(path: &Path, batch: &RecordBatch, properties: WriterProperties) {
 }
 
 #[test]
-fn every_encoding_publishes_the_staged_bytes_on_every_route() {
+fn every_encoding_publishes_identical_bytes_across_bulk_routes() {
     let (node_batch, anchors) = nodes();
     let sources = tempfile::tempdir().unwrap();
     let nodes_path = sources.path().join("nodes.parquet");
@@ -170,7 +173,7 @@ fn every_encoding_publishes_the_staged_bytes_on_every_route() {
     );
 
     let mut inventories = Vec::new();
-    for budget in [None, Some(SCRATCH), Some(STAGED)] {
+    for budget in [None, Some(SCRATCH), Some(NODE_SCRATCH_PROBE)] {
         bulk_source::TEST_BUDGET.with(|cell| cell.set(budget));
         let (_directory, _project, graph) = fixture();
         let limits = ImportSessionLimits {
@@ -187,20 +190,43 @@ fn every_encoding_publishes_the_staged_bytes_on_every_route() {
             .register_parquet(BulkInputKind::Edge, &edges_path)
             .unwrap();
         let construction = session.open_construction(&graph).unwrap();
-        let root = graph
+        let mut root = graph
             .resolved_generation
             .container_root()
             .join(".graphforge-construction")
             .join(construction.session_uuid().simple().to_string());
         drop(construction);
         pin_clock(&root);
-        let progress = session.validate(&graph);
-        bulk_source::TEST_BUDGET.with(|cell| cell.set(None));
+        let progress = if budget == Some(NODE_SCRATCH_PROBE) {
+            let error = session.validate(&graph).unwrap_err();
+            let required = stable_required_scratch_bytes(&error, NODE_SCRATCH_PROBE);
+            assert_eq!(session.manifest.build_route, Some(BuildRoute::Bulk));
+            assert_eq!(session.manifest.staged_reason, None);
+            let failed = session.open_construction(&graph).unwrap();
+            let replacement = session.restart_construction(&graph, failed).unwrap();
+            root = graph
+                .resolved_generation
+                .container_root()
+                .join(".graphforge-construction")
+                .join(replacement.session_uuid().simple().to_string());
+            drop(replacement);
+            pin_clock(&root);
+            pin_budget(Budget::Bytes(required));
+            let progress = session.validate(&graph);
+            pin_budget(Budget::Host);
+            progress
+        } else {
+            let progress = session.validate(&graph);
+            bulk_source::TEST_BUDGET.with(|cell| cell.set(None));
+            progress
+        };
         let construction = progress.unwrap().construction.unwrap();
-        assert_eq!(construction.bulk_build.is_some(), budget != Some(STAGED));
+        let report = construction.bulk_build.as_ref().expect("a bulk build");
         if budget == Some(SCRATCH) {
-            let report = construction.bulk_build.as_ref().unwrap();
             assert!(report.property_scratch_write_bytes > 0, "{report:?}");
+        }
+        if budget == Some(NODE_SCRATCH_PROBE) {
+            assert!(report.node_partitions > 0, "{report:?}");
         }
         session.commit(&graph, None).unwrap();
         assert_eq!(graph.node_count("Thing").unwrap(), ROWS as u64);

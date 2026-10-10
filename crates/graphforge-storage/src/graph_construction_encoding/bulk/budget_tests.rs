@@ -88,14 +88,61 @@ fn source_pool_reserves_full_task_and_shared_source_bytes_once() {
         4 * GIB,
         crate::graph_construction_encoding::GraphConstructionBudgets::default(),
     );
-    let working = 4 * GIB - plan.node_tables_resident_bytes() + MIN_WORKING_BYTES;
-    assert_eq!(workspace, (working / 4).max(decoder) + (8 << 20));
+    let working = scratch_working_bytes(
+        &plan,
+        4 * GIB,
+        crate::graph_construction_encoding::GraphConstructionBudgets::default(),
+        false,
+        false,
+    );
+    assert!(working / 4 > decoder);
+    assert_eq!(workspace, working / 4 + (8 << 20));
     // Two source readers report the same build-level cap; it is reserved once.
     plan.nodes[1].reader = Arc::new(AccountingReader {
         task: 64 << 20,
         source_level: 8 << 20,
     });
     assert_eq!(plan.source_level_workspace_bytes(), 8 << 20);
+}
+
+#[test]
+fn large_task_workspace_moves_node_tables_to_scratch_without_pool_overgrant() {
+    let task = 500 << 20;
+    let source_level = 64 << 20;
+    let source = BulkSource {
+        reader: Arc::new(AccountingReader { task, source_level }),
+        tasks: 1,
+        rows: 1 << 24,
+        property_free: true,
+        decoded_bytes: 0,
+    };
+    let plan = BulkBuildPlan {
+        nodes: vec![source],
+        edges: Vec::new(),
+        memory_budget: Some(3 << 29), // 1.5 GiB
+    };
+    let budget = plan.memory_budget.unwrap();
+    let extra = source_level + task.saturating_sub(CSR_WORKSPACE_BYTES);
+    let workspace = ScratchPlan::source_pool_bytes(
+        &plan,
+        budget,
+        crate::graph_construction_encoding::GraphConstructionBudgets::default(),
+    );
+
+    assert!(node_tables_on_scratch(
+        &plan,
+        budget,
+        crate::graph_construction_encoding::GraphConstructionBudgets::default(),
+    ));
+    assert_eq!(
+        source_phase_extra(
+            &plan,
+            crate::graph_construction_encoding::GraphConstructionBudgets::default(),
+        ),
+        extra
+    );
+    assert_eq!(workspace, task + source_level);
+    assert!(plan.scratch_floor_bytes() + extra <= budget);
 }
 
 #[test]
@@ -161,7 +208,7 @@ fn partition_sizes_and_concurrency_follow_the_budget() {
             // The partitions in flight reserve at most half the gate, so a
             // partition twice its share still fits.
             let edges = 16_u64 << scale;
-            let in_flight = ScratchPlan::edge_cost(edges.div_ceil(sized.edge_partitions as u64))
+            let in_flight = sized.edge_cost(edges.div_ceil(sized.edge_partitions as u64))
                 * sized.concurrency as u64;
             assert!(
                 sized.edge_partitions as u64 == MAX_PARTITIONS || in_flight <= sized.gate_bytes / 2,

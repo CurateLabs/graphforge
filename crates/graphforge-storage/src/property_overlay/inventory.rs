@@ -171,7 +171,7 @@ impl AuthenticatedPropertyInventory {
     pub(super) fn open_fragment(
         &self,
         fragment: &AuthenticatedPropertyFragment,
-        scratch: &Path,
+        scratch: SnapshotScratch<'_>,
     ) -> Result<OpenPropertyFragment, GfError> {
         let root = self
             .root
@@ -187,7 +187,6 @@ impl AuthenticatedPropertyInventory {
                     root,
                     &fragment.parts,
                     layout,
-                    scratch,
                     #[cfg(test)]
                     self.mutation_barrier
                         .lock()
@@ -222,6 +221,33 @@ impl AuthenticatedPropertyInventory {
             .lock()
             .expect("mutation barrier lock")
             .take();
+        if scratch.holds_in_memory(fragment.entry.byte_length) {
+            let (bytes, authentication_bytes, authentication_block_equivalents, calls) =
+                authenticated_snapshot_bytes(
+                    &file,
+                    fragment.identity,
+                    &fragment.entry,
+                    #[cfg(test)]
+                    mutation_barrier,
+                )?;
+            // The authentication read is a read of the project's own bytes.
+            crate::lifecycle_io::record_read(
+                crate::StorageIoPhase::ReadPathScan,
+                authentication_bytes,
+                calls,
+            );
+            return Ok(OpenPropertyFragment {
+                logical_length: object.logical_length,
+                file: Arc::new(PropertyFile::Memory(bytes)),
+                authentication_bytes,
+                authentication_block_equivalents,
+                authentication_read_calls: calls,
+                handle,
+            });
+        }
+        if scratch.is_lazy() {
+            return open_readonly_fragment(&file, fragment, object, handle);
+        }
         let (
             snapshot,
             authentication_bytes,
@@ -231,7 +257,8 @@ impl AuthenticatedPropertyInventory {
             &file,
             fragment.identity,
             &fragment.entry,
-            scratch,
+            scratch.path()?,
+            Some(crate::StorageIoPhase::ReadPathScan),
             #[cfg(test)]
             mutation_barrier,
         )?;
@@ -259,6 +286,15 @@ impl AuthenticatedPropertyInventory {
                 generation.generation_uuid(),
                 generation.container_root().to_path_buf(),
             )
+        })
+    }
+
+    /// Scratch for a read that writes nothing unless a legacy object is too
+    /// large to authenticate in memory. Nothing is created until it is needed.
+    pub(crate) fn lazy_snapshot_scratch(&self) -> Result<LazySnapshotScratch, GfError> {
+        Ok(LazySnapshotScratch {
+            parent: self.scratch_parent()?.to_path_buf(),
+            directory: OnceLock::new(),
         })
     }
 
@@ -359,7 +395,7 @@ impl AuthenticatedPropertyInventory {
             .get(&(kind, route.to_owned()))
             .and_then(|fragments| fragments.iter().find(|fragment| fragment.id == id))
             .ok_or_else(|| corrupt("property fragment is not in retained authority"))?;
-        let opened = self.open_fragment(fragment, scratch)?;
+        let opened = self.open_fragment(fragment, SnapshotScratch::Directory(scratch))?;
         let source = super::CountingChunkReader {
             file: Arc::clone(&opened.file),
             length: opened.logical_length,
@@ -944,14 +980,7 @@ impl AuthenticatedPropertyInventory {
             if admission == FragmentAdmission::Eager {
                 // Footers are already decoded; summarize now so a conflicting
                 // route is refused at admission exactly as before.
-                // The scratch parent is unused: eager admission decoded every footer.
-                let outcome = summarize_route(
-                    &root,
-                    root_path.parent().unwrap_or(root_path),
-                    *kind,
-                    route,
-                    fragments,
-                );
+                let outcome = summarize_route(&root, *kind, route, fragments);
                 if let Err(error) = &outcome {
                     return Err(error.clone());
                 }
@@ -993,11 +1022,20 @@ impl AuthenticatedPropertyInventory {
             return Ok(None);
         };
         let root = self.retained_root()?;
-        let scratch_parent = self.scratch_parent()?;
         let fragments = self.routes.get(&key).map_or(&[][..], Vec::as_slice);
-        cell.get_or_init(|| summarize_route(root, scratch_parent, kind, route, fragments))
+        cell.get_or_init(|| summarize_route(root, kind, route, fragments))
             .clone()
             .map(Some)
+    }
+
+    /// Footer facts of one fragment, read on first use and memoized.
+    pub(super) fn fragment_footer_of<'a>(
+        &self,
+        fragment: &'a AuthenticatedPropertyFragment,
+        kind: PropertyRouteKind,
+        route: &str,
+    ) -> Result<&'a FragmentFooter, GfError> {
+        fragment_footer(self.retained_root()?, fragment, kind, route)
     }
 
     fn retained_root(&self) -> Result<&graphforge_filesystem::StableDirectory, GfError> {
@@ -1149,10 +1187,8 @@ impl AuthenticatedPropertyInventory {
             return Ok(0);
         };
         let root = self.retained_root()?;
-        let scratch_parent = self.scratch_parent()?;
         fragments.iter().try_fold(0usize, |rows, fragment| {
-            let physical_rows =
-                fragment_footer(root, scratch_parent, fragment, kind, route)?.physical_rows;
+            let physical_rows = fragment_footer(root, fragment, kind, route)?.physical_rows;
             Ok(rows.saturating_add(physical_rows))
         })
     }
@@ -1718,6 +1754,7 @@ impl PropertyAdmission<'_> {
                 identity,
                 &entry,
                 self.scratch,
+                None,
                 #[cfg(test)]
                 None,
             )?;
@@ -1797,7 +1834,6 @@ impl PropertyAdmission<'_> {
                 self.root,
                 &parts,
                 layout,
-                self.scratch,
                 #[cfg(test)]
                 None,
             )?
@@ -1820,6 +1856,8 @@ impl PropertyAdmission<'_> {
             .map_err(|_| corrupt("property fragment row count is not representable"))?;
         validate_fragment_schema(builder.schema().as_ref(), id, layout, kind, route)?;
         let schema = builder.schema().clone();
+        let metadata = Arc::clone(builder.metadata());
+        let uuid_range = super::selective_reads::uuid_range(&metadata, kind.uuid_field());
         let (bytes, blocks, calls) = source.authentication();
         let (read_bytes, read_calls) = source.physical_reads();
         crate::lifecycle_io::record_read(
@@ -1845,12 +1883,40 @@ impl PropertyAdmission<'_> {
             footer: OnceLock::from(Ok(FragmentFooter {
                 physical_rows,
                 schema,
+                metadata,
+                uuid_range,
             })),
+            readonly_index: OnceLock::new(),
             authentication_bytes,
             authentication_block_equivalents,
             authentication_read_calls,
         })
     }
+}
+
+fn open_readonly_fragment(
+    file: &File,
+    fragment: &AuthenticatedPropertyFragment,
+    object: FragmentObject,
+    handle: FragmentHandleGuard,
+) -> Result<OpenPropertyFragment, GfError> {
+    let readonly = super::readonly_snapshot::open(
+        file,
+        fragment.identity,
+        &fragment.entry,
+        super::PropertyOverlayLimits::default().max_buffered_bytes,
+        &fragment.readonly_index,
+    )?;
+    let (authentication_bytes, authentication_block_equivalents, calls) =
+        readonly.opening_authentication();
+    Ok(OpenPropertyFragment {
+        logical_length: object.logical_length,
+        file: Arc::new(PropertyFile::Readonly(Arc::new(readonly))),
+        authentication_bytes,
+        authentication_block_equivalents,
+        authentication_read_calls: calls,
+        handle,
+    })
 }
 
 /// Open one fragment's parts for first-touch admission. Nothing is read: each
@@ -1906,6 +1972,7 @@ fn first_touch_fragment(
         parts,
         object: OnceLock::new(),
         footer: OnceLock::new(),
+        readonly_index: OnceLock::new(),
         authentication_bytes: 0,
         authentication_block_equivalents: 0,
         authentication_read_calls: 0,
@@ -2034,6 +2101,8 @@ fn decode_fragment_footer<R: parquet::file::reader::ChunkReader + 'static>(
     Ok(FragmentFooter {
         physical_rows,
         schema: builder.schema().clone(),
+        uuid_range: super::selective_reads::uuid_range(builder.metadata(), kind.uuid_field()),
+        metadata: Arc::clone(builder.metadata()),
     })
 }
 
@@ -2044,7 +2113,6 @@ fn decode_fragment_footer<R: parquet::file::reader::ChunkReader + 'static>(
 /// refused before it influences planning.
 fn fragment_footer<'a>(
     root: &graphforge_filesystem::StableDirectory,
-    scratch_parent: &Path,
     fragment: &'a AuthenticatedPropertyFragment,
     kind: PropertyRouteKind,
     route: &str,
@@ -2067,15 +2135,10 @@ fn fragment_footer<'a>(
                     decode_fragment_footer(file, fragment, kind, route)
                 }
                 Some(layout) => {
-                    let scratch = tempfile::Builder::new()
-                        .prefix(".gf-property-scratch-")
-                        .tempdir_in(scratch_parent)
-                        .map_err(io_error)?;
                     let source = Arc::new(segmented_file(
                         root,
                         &fragment.parts,
                         layout,
-                        scratch.path(),
                         #[cfg(test)]
                         None,
                     )?);
@@ -2109,14 +2172,13 @@ fn fragment_footer<'a>(
 /// live-schema sequence and cross-fragment compatibility.
 fn summarize_route(
     root: &graphforge_filesystem::StableDirectory,
-    scratch_parent: &Path,
     kind: PropertyRouteKind,
     route: &str,
     fragments: &[AuthenticatedPropertyFragment],
 ) -> RouteSummaryOutcome {
     let footers = fragments
         .iter()
-        .map(|fragment| fragment_footer(root, scratch_parent, fragment, kind, route))
+        .map(|fragment| fragment_footer(root, fragment, kind, route))
         .collect::<Result<Vec<_>, GfError>>()?;
     let inputs = footers
         .iter()
@@ -2170,12 +2232,10 @@ fn segmented_file(
     root: &graphforge_filesystem::StableDirectory,
     parts: &[PropertyObjectPart],
     layout: super::bounded_object::EnvelopeLayout,
-    scratch: &Path,
     #[cfg(test)] mutation_barrier: Option<Arc<TestMutationBarrier>>,
 ) -> Result<PropertyFile, GfError> {
     let root = root.try_clone().map_err(io_error)?;
     let parts = parts.to_vec();
-    let scratch = scratch.to_path_buf();
     let authentication = Arc::new(PartAuthentication::default());
     let counts = Arc::clone(&authentication);
     #[cfg(test)]
@@ -2195,11 +2255,12 @@ fn segmented_file(
                     "property fragment identity changed after admission",
                 ));
             }
-            let (mut snapshot, bytes, blocks, calls) = authenticated_snapshot_file(
+            // A part is at most one bounded object, so it is authenticated in
+            // memory: reading a segmented fragment writes nothing.
+            let (data, bytes, blocks, calls) = authenticated_snapshot_bytes(
                 &file,
                 part.identity,
                 &part.entry,
-                &scratch,
                 #[cfg(test)]
                 mutation_barrier
                     .lock()
@@ -2207,21 +2268,13 @@ fn segmented_file(
                     .take(),
             )?;
             counts.add(bytes, blocks, calls);
-            let mut data = Vec::with_capacity(
-                usize::try_from(part.entry.byte_length)
-                    .map_err(|_| corrupt("property part length overflows"))?,
-            );
-            let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
-            loop {
-                let read = snapshot.read(&mut buffer).map_err(io_error)?;
-                if read == 0 {
-                    break;
-                }
-                counts.read_bytes.fetch_add(read as u64, Ordering::Relaxed);
-                counts.read_calls.fetch_add(1, Ordering::Relaxed);
-                data.extend_from_slice(&buffer[..read]);
-            }
-            Ok(Bytes::from(data))
+            counts
+                .read_bytes
+                .fetch_add(data.len() as u64, Ordering::Relaxed);
+            counts
+                .read_calls
+                .fetch_add((data.len() as u64).div_ceil(64 * 1024), Ordering::Relaxed);
+            Ok(data)
         }),
     )?;
     Ok(PropertyFile::Segmented {
@@ -2296,11 +2349,140 @@ fn authenticate_inventory_file(
     Ok((bytes, bytes.div_ceil(64 * 1024), read_calls))
 }
 
+/// Largest object authenticated in memory. Writers cap every object at the
+/// physical-object bound; only a legacy fragment can exceed it.
+pub(super) const MAX_IN_MEMORY_SNAPSHOT_BYTES: u64 =
+    super::bounded_object::MAX_PROPERTY_OBJECT_BYTES as u64;
+
+/// Where a read stages an authenticated snapshot that cannot live in memory.
+#[derive(Clone, Copy)]
+pub(crate) enum SnapshotScratch<'a> {
+    /// An existing directory. Every snapshot is copied into it.
+    Directory(&'a Path),
+    /// A directory created on first use. An object within
+    /// [`MAX_IN_MEMORY_SNAPSHOT_BYTES`] is held in memory instead, so a read of
+    /// current fragments creates and writes nothing.
+    Lazy(&'a LazySnapshotScratch),
+}
+
+impl<'a> SnapshotScratch<'a> {
+    fn holds_in_memory(self, byte_length: u64) -> bool {
+        matches!(self, Self::Lazy(_)) && byte_length <= MAX_IN_MEMORY_SNAPSHOT_BYTES
+    }
+
+    fn path(self) -> Result<&'a Path, GfError> {
+        match self {
+            Self::Directory(path) => Ok(path),
+            Self::Lazy(lazy) => lazy.path(),
+        }
+    }
+
+    fn is_lazy(self) -> bool {
+        matches!(self, Self::Lazy(_))
+    }
+}
+
+/// Scratch directory created only when a legacy oversize object needs it.
+pub(crate) struct LazySnapshotScratch {
+    parent: PathBuf,
+    directory: OnceLock<Result<tempfile::TempDir, GfError>>,
+}
+
+impl LazySnapshotScratch {
+    fn path(&self) -> Result<&Path, GfError> {
+        self.directory
+            .get_or_init(|| {
+                tempfile::Builder::new()
+                    .prefix(".gf-property-scratch-")
+                    .tempdir_in(&self.parent)
+                    .map_err(io_error)
+            })
+            .as_ref()
+            .map(tempfile::TempDir::path)
+            .map_err(Clone::clone)
+    }
+}
+
+/// Authenticate one object into memory: the bytes are read once, checked
+/// against the manifest's exact length and XXH64, and the decoder then reads
+/// those bytes, never the file again.
+fn authenticated_snapshot_bytes(
+    source: &File,
+    expected_identity: graphforge_filesystem::FileIdentity,
+    entry: &crate::GraphReadFileEntry,
+    #[cfg(test)] mutation_barrier: Option<Arc<TestMutationBarrier>>,
+) -> Result<(Bytes, u64, u64, u64), GfError> {
+    let metadata = source.metadata().map_err(io_error)?;
+    if !metadata.is_file() || metadata.len() != entry.byte_length {
+        return Err(corrupt(
+            "property handle length or kind conflicts with inventory",
+        ));
+    }
+    if graphforge_filesystem::file_identity(source).map_err(io_error)? != expected_identity {
+        return Err(corrupt(
+            "property fragment identity changed during snapshot",
+        ));
+    }
+    let mut data = Vec::with_capacity(
+        usize::try_from(entry.byte_length).map_err(|_| corrupt("property object is too large"))?,
+    );
+    let mut checksum = crate::corruption_checksum::Checksum::new();
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    let mut bytes = 0_u64;
+    let mut read_calls = 0_u64;
+    loop {
+        let read = retained_read_at(source, &mut buffer, bytes).map_err(io_error)?;
+        if read == 0 {
+            break;
+        }
+        data.extend_from_slice(&buffer[..read]);
+        bytes = bytes
+            .checked_add(u64::try_from(read).map_err(|_| corrupt("authentication byte overflow"))?)
+            .ok_or_else(|| corrupt("authentication byte overflow"))?;
+        read_calls = read_calls
+            .checked_add(1)
+            .ok_or_else(|| corrupt("authentication read call overflow"))?;
+        checksum.update(&buffer[..read]);
+        if bytes > entry.byte_length {
+            return Err(corrupt("property checksum digest conflicts with inventory"));
+        }
+        #[cfg(test)]
+        if read_calls == 1
+            && let Some(barrier) = mutation_barrier.as_ref()
+        {
+            barrier.authenticated.wait();
+            barrier.proceed.wait();
+        } else if read_calls == 2
+            && let Some(barrier) = mutation_barrier.as_ref()
+        {
+            barrier.copied.wait();
+            barrier.restored.wait();
+        }
+    }
+    if bytes != entry.byte_length || checksum.finish() != entry.content_xxh64 {
+        return Err(corrupt("property checksum digest conflicts with inventory"));
+    }
+    if graphforge_filesystem::file_identity(source).map_err(io_error)? != expected_identity
+        || source.metadata().map_err(io_error)?.len() != entry.byte_length
+    {
+        return Err(corrupt(
+            "property fragment identity changed during snapshot",
+        ));
+    }
+    Ok((
+        Bytes::from(data),
+        bytes,
+        bytes.div_ceil(64 * 1024),
+        read_calls,
+    ))
+}
+
 fn authenticated_snapshot_file(
     source: &File,
     expected_identity: graphforge_filesystem::FileIdentity,
     entry: &crate::GraphReadFileEntry,
     scratch: &Path,
+    written_in: Option<crate::StorageIoPhase>,
     #[cfg(test)] mutation_barrier: Option<Arc<TestMutationBarrier>>,
 ) -> Result<(File, u64, u64, u64), GfError> {
     let metadata = source.metadata().map_err(io_error)?;
@@ -2382,6 +2564,10 @@ fn authenticated_snapshot_file(
         ));
     }
     snapshot.rewind().map_err(io_error)?;
+    if let Some(phase) = written_in {
+        // The snapshot is a copy of the object: every byte read was written.
+        crate::lifecycle_io::record_write(phase, bytes, read_calls);
+    }
     Ok((snapshot, bytes, bytes.div_ceil(64 * 1024), read_calls))
 }
 

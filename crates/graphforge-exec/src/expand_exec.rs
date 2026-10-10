@@ -1124,6 +1124,8 @@ pub struct ExpandExec {
     edge_prop_count: usize,
     /// Number of columns contributed by the input (schema prefix length).
     pub(super) input_width: usize,
+    /// Exact qualified destination UUID output slot from the logical expand.
+    selected_destination_uuid_index: usize,
     pub(super) schema: SchemaRef,
     props: Arc<PlanProperties>,
     provider: Arc<dyn AdjacencyProvider>,
@@ -1173,6 +1175,11 @@ impl ExpandExec {
             .schema()
             .index_of_column_by_name(Some(&src_qual), "node_id")
             .unwrap_or(0);
+        let dst_qual = datafusion::common::TableReference::bare(format!("var_{}", node.dst_var));
+        let selected_destination_uuid_index = node
+            .schema()
+            .index_of_column_by_name(Some(&dst_qual), "node_uuid")
+            .unwrap_or(usize::MAX);
         Self {
             input,
             rel_type_name: node.rel_type_name.clone(),
@@ -1182,6 +1189,7 @@ impl ExpandExec {
             src_col_idx,
             edge_prop_count: node.edge_prop_count,
             input_width: node.input.schema().fields().len(),
+            selected_destination_uuid_index,
             schema,
             props,
             provider,
@@ -1211,6 +1219,7 @@ impl ExpandExec {
             src_col_idx: self.src_col_idx,
             edge_prop_count: self.edge_prop_count,
             input_width: self.input_width,
+            selected_destination_uuid_index: self.selected_destination_uuid_index,
             schema: Arc::clone(&self.schema),
             props: Arc::clone(&self.props),
             provider: Arc::clone(&self.provider),
@@ -1235,6 +1244,7 @@ impl ExpandExec {
             src_col_idx: self.src_col_idx,
             edge_prop_count: self.edge_prop_count,
             input_width: self.input_width,
+            selected_destination_uuid_index: self.selected_destination_uuid_index,
             schema: Arc::clone(&self.schema),
             props: Arc::clone(&self.props),
             provider: Arc::clone(&self.provider),
@@ -1270,6 +1280,60 @@ impl ExpandExec {
             reservation: std::sync::Mutex::new(crate::fast_path::expand_reservation(context)),
         }
     }
+}
+
+/// Whether `column_index` is the exact UUID emitted for the selected
+/// destination by an expansion, after following only direct-column
+/// projections and schema-preserving unary operators.
+pub(crate) fn is_selected_endpoint_uuid(plan: &dyn ExecutionPlan, column_index: usize) -> bool {
+    if let Some(expand) = plan.downcast_ref::<ExpandExec>() {
+        let seed_proof = expand.children().first().is_some_and(|seed| {
+            graphforge_storage::is_filtered_uuid_seed(seed.as_ref(), expand.src_col_idx)
+        });
+        return expand.selected_destination_uuid_index == column_index && seed_proof;
+    }
+
+    if let Some(projection) =
+        plan.downcast_ref::<datafusion::physical_plan::projection::ProjectionExec>()
+    {
+        let Some(expression) = projection.expr().get(column_index) else {
+            return false;
+        };
+        let Some(column) = expression
+            .expr
+            .downcast_ref::<datafusion::physical_expr::expressions::Column>()
+        else {
+            return false;
+        };
+        return projection
+            .input()
+            .schema()
+            .fields()
+            .get(column.index())
+            .is_some_and(|field| {
+                field.name() == column.name()
+                    && is_selected_endpoint_uuid(projection.input().as_ref(), column.index())
+            });
+    }
+
+    if let Some(filter) = plan.downcast_ref::<datafusion::physical_plan::filter::FilterExec>() {
+        return filter.projection().is_none()
+            && filter.schema().as_ref() == filter.input().schema().as_ref()
+            && is_selected_endpoint_uuid(filter.input().as_ref(), column_index);
+    }
+    if let Some(exchange) =
+        plan.downcast_ref::<datafusion::physical_plan::repartition::RepartitionExec>()
+    {
+        return exchange.schema().as_ref() == exchange.input().schema().as_ref()
+            && is_selected_endpoint_uuid(exchange.input().as_ref(), column_index);
+    }
+    if let Some(coalesce) = plan
+        .downcast_ref::<datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec>(
+    ) {
+        return coalesce.schema().as_ref() == coalesce.input().schema().as_ref()
+            && is_selected_endpoint_uuid(coalesce.input().as_ref(), column_index);
+    }
+    false
 }
 
 impl fmt::Debug for ExpandExec {
@@ -1349,6 +1413,7 @@ impl ExecutionPlan for ExpandExec {
             src_col_idx: self.src_col_idx,
             edge_prop_count: self.edge_prop_count,
             input_width: self.input_width,
+            selected_destination_uuid_index: self.selected_destination_uuid_index,
             schema: self.schema.clone(),
             props: self.props.clone(),
             provider: self.provider.clone(),
@@ -1373,6 +1438,7 @@ impl ExecutionPlan for ExpandExec {
             src_col_idx: self.src_col_idx,
             edge_prop_count: self.edge_prop_count,
             input_width: self.input_width,
+            selected_destination_uuid_index: self.selected_destination_uuid_index,
             schema: Arc::clone(&self.schema),
             props: Arc::clone(&self.props),
             provider: Arc::clone(&self.provider),

@@ -473,6 +473,10 @@ the staged path above, and the builder never reads a parent generation.
   UUID, then stream the existing logical windows, owner projections and 4 MiB
   fragments. Physical scratch frames do not change catalog IDs, cuts, ordinals
   or published bytes.
+- **Node tables use scratch when needed.** When about 56 bytes per node plus
+  fixed workspace exceeds the budget, node identities, endpoint resolution,
+  degrees and CSR key ranges use bounded node-UUID range partitions on scratch
+  (#1929).
 - **Route.** The route is chosen once by the first `validate` and recorded in
   the import manifest (`build_route`). A later change in free memory cannot send
   a started build to another route.
@@ -485,19 +489,15 @@ whole-process RSS guarantee; see [resumable import](resumable-import.md).
 
 Pending, tracked under epic #1881:
 
-- **Node tables are resident (#1929).** The node UUIDs, endpoint lookup, degrees
-  and CSR offsets still need about 56 bytes per node plus a fixed share. A build
-  whose node tables exceed the budget still takes the staged path
-  (`node_tables_exceed_budget`; the chunk API replays its spool through it)
-  until #1929 moves them to scratch.
 - **Scratch passes run one at a time (#1938).** Over-budget builds report
   `scratch_concurrency` 1 until partitions run concurrently.
-- **Retired machinery.** The staged initial-build code is deleted after #1929;
-  until then it remains reachable through the route above.
+- **Retired machinery.** The staged initial-build code awaits deletion after
+  #1929. No new initial-build plan selects it; old staged sessions remain
+  readable until the retirement change lands.
 
-The historical `edge_properties_exceed_budget` manifest reason remains readable;
-new plans route property payloads through scratch instead of retaining their
-batches. Publication semantics are unchanged.
+The historical `node_tables_exceed_budget` and `edge_properties_exceed_budget`
+manifest reasons remain readable; new plans use bounded scratch instead of
+selecting either reason. Publication semantics are unchanged.
 
 Publication does not copy the encoded files. On unix it syncs each encoded file, links the same inode to
 `graph-objects/sha256/<2>/<62>`, and acknowledges the bucket directory, so each
@@ -595,14 +595,62 @@ Arrow, row-order, tombstone, and live-byte checks succeed. A late decoder or
 resource failure therefore discards the runs and returns a typed error with zero
 rows observed by direct callbacks or DataFusion—even for a projected `LIMIT 1`
 plan.
-Admission retains the stable root capability plus each fragment's authenticated
+
+The query scan (`PropertyOverlayExec`, shared by Cypher and SQL) does not spool.
+Every fragment is already a run sorted by UUID, so the newest snapshot of each
+UUID is a k-way merge of the fragments. A fragment opens when the merge
+frontier reaches its smallest UUID (from its footer statistics) and closes at
+EOF: disjoint base fragments are read one after another and an overlapping
+mutation fragment stays open beside the current one. The merge shares the same
+live-byte budget; a route whose overlapping fragments cannot be open within it
+is refused with that budget's error rather than spilled, because a read must
+not write. A scan that carries a `LIMIT` holds its rows until the whole route
+has validated, as before. The merge reads rows in UUID order, so results keep
+the order of the spooled merge.
+
+A completed join frontier can nominate destination UUIDs before a property
+scan opens its fragments. Key-only destination scans require proof that the
+frontier comes from the exact expansion source selected by a strict equality
+join; an unrelated equality or ambiguous source identity does not qualify.
+The join still decides matches, NULL preservation, and output multiplicity.
+When an embedded LEFT join projection hides the UUID, the rewrite retains it
+through repartitioning and removes it afterward. General rewrites reject
+unknown partition keys rather than turning optimizer metadata into an
+executable hash expression. Frontier memory remains subject to the query pool.
+
+The Rust facade regression `property_read_pushdown` compares fixed-fanout
+anchored queries while unrelated destination rows and fragments grow, at one,
+two, and four partitions. It warms authentication metadata, checks read-path
+byte growth and zero application write counters, and preserves result counts.
+Run it with `cargo nextest run --locked -p graphforge-api --test
+property_read_pushdown` in an isolated `CARGO_TARGET_DIR`. SF1 syscall evidence
+must distinguish query file-content writes from startup materialization and
+empty spill-directory creation; application counters alone do not cover all
+process filesystem activity. Measurement results belong on the producing issue.
+
+A node-property scan also accepts `column = literal` for `Int64`, `Utf8` and
+`Boolean` columns, offered by the plan as a hint (the filter stays in the
+plan). Row-group statistics select the fragments and row groups that can hold
+the value; their rows nominate candidate UUIDs; the candidates are then
+resolved against every fragment whose UUID range can hold one, so a newer
+snapshot or tombstone still decides the value. More than 262,144 candidates, or
+a column stored with another type in any fragment, declines the hint and the
+scan streams the route. A lookup on a column whose values rise with the UUID
+therefore authenticates the fragment that holds the value; a scattered column
+reads that column of every fragment. Admission retains the stable root
+capability plus each fragment's authenticated
 path, native file identity, length, XXH64 checksum, and schema—not one OS handle per
 historical fragment. A scan opens fragments on demand without following links,
 requires the admitted device/file identity, and checksums the complete file
-while streaming those exact bytes into an exclusively created, unnamed scratch
-file. Identity, length, and checksum must match before Parquet sees the scratch
-handle; full, targeted, and SQL readers never decode the mutable source handle.
-The source handle then closes. Consequently live
+while reading those exact bytes into memory (an object is at most 4 MiB, the
+physical cap), so reading writes nothing. A larger legacy plain fragment is
+authenticated completely to build a budgeted in-memory index of 4 MiB block
+checksums. Subsequent requests verify the admitted file identity and each owned
+block against that index before Parquet sees its bytes. The index and two block
+buffers are reserved before allocation; no read-path scratch file is created.
+Replay and mutation readers, which bound their memory separately, retain the
+exclusively created, unnamed scratch snapshot. Identity, length, and checksum
+must match before decoding on every path. Consequently live
 fragment handles are bounded by `max_open_runs` rather than total history, and
 same-name replacement, transient in-place mutation (even if restored), symlink,
 scratch planting, and path substitution all fail closed. Parquet page headers

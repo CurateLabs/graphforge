@@ -4,13 +4,18 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use datafusion::common::stats::Precision;
 use datafusion::common::{ColumnStatistics, Statistics};
 use datafusion::error::DataFusionError;
 use datafusion::execution::TaskContext;
-use datafusion::physical_expr::EquivalenceProperties;
+use datafusion::physical_expr::expressions::{Column, DynamicFilterPhysicalExpr};
+use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType, SchedulingType};
+use datafusion::physical_plan::filter_pushdown::{
+    ChildPushdownResult, FilterPushdownPhase, FilterPushdownPropagation, PushedDown,
+};
 use datafusion::physical_plan::metrics::{
     Count, ExecutionPlanMetricsSet, Gauge, MetricBuilder, MetricsSet,
 };
@@ -21,6 +26,9 @@ use datafusion::physical_plan::{
 };
 use futures::stream;
 
+/// The most a limited scan holds back while the rest of its route validates.
+const MAX_HELD_BYTES: usize = 64 << 20;
+
 pub(crate) struct PropertyScanOptions<'a> {
     pub(crate) projection: Option<&'a Vec<usize>>,
     pub(crate) limit: Option<usize>,
@@ -28,6 +36,9 @@ pub(crate) struct PropertyScanOptions<'a> {
     /// Whether planning may admit the route for a footer row bound. A
     /// key-only scan of an unread route reports a manifest estimate instead.
     pub(crate) footer_statistics: bool,
+    /// An equality the scan answers from footer statistics. The plan keeps the
+    /// filter above the scan, so the scan may return more rows than match.
+    pub(crate) equality: Option<crate::property_overlay::PropertyEquality>,
 }
 
 #[derive(Clone)]
@@ -41,6 +52,9 @@ pub(crate) struct PropertyOverlayExec {
     limit: Option<usize>,
     batch_size: usize,
     planned_rows: Option<usize>,
+    equality: Option<crate::property_overlay::PropertyEquality>,
+    uuid_filters: Vec<Arc<dyn PhysicalExpr>>,
+    uuid_nominations: Vec<Arc<crate::property_join_nomination::UuidBuildKeyNomination>>,
     props: Arc<PlanProperties>,
     #[cfg(any(test, feature = "test-support"))]
     digest_context: graphforge_core::hash_observation::operation::Context,
@@ -144,6 +158,9 @@ impl PropertyOverlayExec {
             limit: options.limit,
             batch_size: options.batch_size.max(1),
             planned_rows,
+            equality: options.equality,
+            uuid_filters: Vec::new(),
+            uuid_nominations: Vec::new(),
             props,
             metrics,
             work_counts,
@@ -152,11 +169,236 @@ impl PropertyOverlayExec {
             lifecycle_context: crate::lifecycle_io::CaptureContext::current(),
         })
     }
+
+    fn projects_property_payload(&self) -> bool {
+        let key = if self.is_edge {
+            "edge_uuid"
+        } else {
+            "node_uuid"
+        };
+        self.schema.fields().iter().any(|field| field.name() != key)
+    }
+
+    pub(crate) fn uuid_filter_candidates(&self) -> Vec<PropertyUuidFilterCandidate> {
+        // A UUID hint must not move filtering ahead of a scan-level LIMIT:
+        // `[u, v] LIMIT 1` joined to `{v}` is empty before pruning, but would
+        // match if the hint removed `u` before LIMIT.
+        if self.limit.is_some() || !self.projects_property_payload() {
+            return Vec::new();
+        }
+        let key = if self.is_edge {
+            "edge_uuid"
+        } else {
+            "node_uuid"
+        };
+        self.uuid_filters
+            .iter()
+            .filter_map(|filter| {
+                let dynamic = filter.downcast_ref::<DynamicFilterPhysicalExpr>()?;
+                let expression_id = dynamic.expression_id()?;
+                let original = dynamic.original_children();
+                let remapped = dynamic.remapped_children().unwrap_or(original);
+                if original.len() != 1 || remapped.len() != 1 {
+                    return None;
+                }
+                let source = remapped[0].downcast_ref::<Column>()?;
+                let field = self.schema.fields().get(source.index())?;
+                if source.name() != key
+                    || field.name() != source.name()
+                    || field.data_type() != &arrow::datatypes::DataType::FixedSizeBinary(16)
+                {
+                    return None;
+                }
+                Some(PropertyUuidFilterCandidate {
+                    expression_id,
+                    original_probe_key: Arc::clone(&original[0]),
+                })
+            })
+            .collect()
+    }
+
+    /// Returns this scan's canonical UUID column only when reading it with a
+    /// join-key nomination cannot change LIMIT or equality semantics.
+    pub(crate) fn nomination_uuid_column(&self) -> Option<usize> {
+        // Limit this optimization to scans that project property payload. A
+        // full identity frontier can exhaust the query pool on a UUID set even
+        // when the original partitioned identity join fits, as in graph counts.
+        if self.limit.is_some() || self.equality.is_some() || !self.projects_property_payload() {
+            return None;
+        }
+        let key = if self.is_edge {
+            "edge_uuid"
+        } else {
+            "node_uuid"
+        };
+        let mut matching = self
+            .schema
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(_, field)| {
+                field.name() == key
+                    && field.data_type() == &arrow::datatypes::DataType::FixedSizeBinary(16)
+                    && !field.is_nullable()
+            })
+            .map(|(index, _)| index);
+        let index = matching.next()?;
+        matching.next().is_none().then_some(index)
+    }
+
+    /// A new physical join association must not reuse another producer's scan.
+    pub(crate) fn fresh_nomination_uuid_column(&self) -> Option<usize> {
+        self.uuid_nominations
+            .is_empty()
+            .then(|| self.nomination_uuid_column())
+            .flatten()
+    }
+
+    /// A key-only destination scan is eligible only when the exec-owned
+    /// selected-endpoint callback proves that this exact frontier nominates
+    /// it. Ordinary nomination keeps the stricter payload and identity rules.
+    pub(crate) fn fresh_selected_endpoint_uuid_column(&self) -> Option<usize> {
+        if self.limit.is_some() || self.equality.is_some() || !self.uuid_nominations.is_empty() {
+            return None;
+        }
+        let key = if self.is_edge {
+            "edge_uuid"
+        } else {
+            "node_uuid"
+        };
+        let mut matching = self
+            .schema
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(_, field)| {
+                field.name() == key
+                    && field.data_type() == &arrow::datatypes::DataType::FixedSizeBinary(16)
+                    && !field.is_nullable()
+            })
+            .map(|(index, _)| index);
+        let index = matching.next()?;
+        matching.next().is_none().then_some(index)
+    }
+
+    /// A strict equality scan can be an INNER join's build side. It must not
+    /// wait on a nomination that was produced by that same join's old build.
+    pub(crate) fn equality_build_uuid_column(&self) -> Option<usize> {
+        if !self.uuid_nominations.is_empty() {
+            return None;
+        }
+        self.equality_uuid_column()
+    }
+
+    /// Return this strict equality scan's canonical UUID column even when an
+    /// earlier optimizer pass has already attached a nomination. This is only
+    /// used to verify an existing equality-seed join; it does not authorize a
+    /// new build nomination.
+    pub(crate) fn equality_uuid_column(&self) -> Option<usize> {
+        if self.limit.is_some() || self.equality.is_none() {
+            return None;
+        }
+        let key = if self.is_edge {
+            "edge_uuid"
+        } else {
+            "node_uuid"
+        };
+        let mut matching = self
+            .schema
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(_, field)| {
+                field.name() == key
+                    && field.data_type() == &arrow::datatypes::DataType::FixedSizeBinary(16)
+                    && !field.is_nullable()
+            })
+            .map(|(index, _)| index);
+        let index = matching.next()?;
+        matching.next().is_none().then_some(index)
+    }
+
+    /// Recognize the retained, strict physical predicate for this scan's hint.
+    /// Computed expressions and coercions cannot authorize moving its build.
+    pub(crate) fn equality_filter_matches(&self, expression: &dyn PhysicalExpr) -> bool {
+        use crate::property_overlay::EqualityValue;
+        use datafusion::common::ScalarValue;
+        use datafusion::logical_expr::Operator;
+        use datafusion::physical_expr::expressions::{BinaryExpr, Literal};
+
+        let Some(equality) = &self.equality else {
+            return false;
+        };
+        let Some(binary) = expression.downcast_ref::<BinaryExpr>() else {
+            return false;
+        };
+        if binary.op() != &Operator::Eq {
+            return false;
+        }
+        [
+            (binary.left(), binary.right()),
+            (binary.right(), binary.left()),
+        ]
+        .into_iter()
+        .any(|(column, literal)| {
+            let Some(column) = column.downcast_ref::<Column>() else {
+                return false;
+            };
+            let Some(literal) = literal.downcast_ref::<Literal>() else {
+                return false;
+            };
+            let Some(field) = self.schema.fields().get(column.index()) else {
+                return false;
+            };
+            if column.name() != equality.column
+                || field.name() != column.name()
+                || field.data_type() != &equality.value.data_type()
+            {
+                return false;
+            }
+            match (&equality.value, literal.value()) {
+                (EqualityValue::Int(expected), ScalarValue::Int64(Some(actual))) => {
+                    expected == actual
+                }
+                (EqualityValue::Str(expected), ScalarValue::Utf8(Some(actual))) => {
+                    expected == actual
+                }
+                (EqualityValue::Bool(expected), ScalarValue::Boolean(Some(actual))) => {
+                    expected == actual
+                }
+                _ => false,
+            }
+        })
+    }
+
+    pub(crate) fn with_uuid_nomination(
+        &self,
+        nomination: Arc<crate::property_join_nomination::UuidBuildKeyNomination>,
+    ) -> Self {
+        let mut replacement = self.clone();
+        if !replacement
+            .uuid_nominations
+            .iter()
+            .any(|existing| Arc::ptr_eq(existing, &nomination))
+        {
+            replacement.uuid_nominations.push(nomination);
+        }
+        replacement
+    }
+}
+
+pub(crate) struct PropertyUuidFilterCandidate {
+    pub(crate) expression_id: u64,
+    pub(crate) original_probe_key: Arc<dyn PhysicalExpr>,
 }
 
 impl DisplayAs for PropertyOverlayExec {
     fn fmt_as(&self, _: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "PropertyOverlayExec: route={}", self.route)
+        write!(f, "PropertyOverlayExec: route={}", self.route)?;
+        if let Some(equality) = &self.equality {
+            write!(f, ", equality={}={:?}", equality.column, equality.value)?;
+        }
+        Ok(())
     }
 }
 
@@ -214,12 +456,51 @@ impl ExecutionPlan for PropertyOverlayExec {
         }))
     }
 
+    fn handle_child_pushdown_result(
+        &self,
+        phase: FilterPushdownPhase,
+        child_pushdown_result: ChildPushdownResult,
+        _config: &datafusion::common::config::ConfigOptions,
+    ) -> Result<FilterPushdownPropagation<Arc<dyn ExecutionPlan>>, DataFusionError> {
+        let mut replacement = self.clone();
+        if phase == FilterPushdownPhase::Post {
+            let key = if self.is_edge {
+                "edge_uuid"
+            } else {
+                "node_uuid"
+            };
+            for filter in &child_pushdown_result.parent_filters {
+                if super::property_scan_filter::is_uuid_dynamic_filter(&filter.filter, key) {
+                    replacement.uuid_filters.push(Arc::clone(&filter.filter));
+                }
+            }
+        }
+        // These are pruning hints. Keep the join's own predicate authoritative,
+        // including filters whose final form cannot nominate an exact UUID set.
+        Ok(FilterPushdownPropagation {
+            filters: vec![PushedDown::No; child_pushdown_result.parent_filters.len()],
+            updated_node: (!replacement.uuid_filters.is_empty())
+                .then(|| Arc::new(replacement) as Arc<dyn ExecutionPlan>),
+        })
+    }
+
+    fn reset_state(self: Arc<Self>) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        let mut reset = (*self).clone();
+        reset.uuid_filters.clear();
+        reset.uuid_nominations.clear();
+        Ok(Arc::new(reset))
+    }
+
     fn metrics(&self) -> Option<MetricsSet> {
         self.metrics
             .as_ref()
             .map(ExecutionPlanMetricsSet::clone_inner)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one blocking task owns the scan, its limit hold-back and its work counters"
+    )]
     fn execute(
         &self,
         partition: usize,
@@ -237,27 +518,64 @@ impl ExecutionPlan for PropertyOverlayExec {
         let is_edge = self.is_edge;
         let projection = self.projection.clone();
         let mut remaining = self.limit;
+        let hold_until_validated = self.limit.is_some();
         let batch_size = self.batch_size;
         let work_counts = self.work_counts.clone();
+        let equality = self.equality.clone();
         #[cfg(any(test, feature = "test-support"))]
         let digest_context = self.digest_context.clone();
         let lifecycle_context = self.lifecycle_context.clone();
-        tokio::task::spawn_blocking(move || {
-            #[cfg(any(test, feature = "test-support"))]
-            let _digest_guard = digest_context.attach();
-            let _lifecycle_capture = lifecycle_context.attach();
-            let selected_properties = projection
-                .as_ref()
-                .map(|names| names.iter().cloned().collect());
-            let result = crate::catalog::visit_property_overlay_batched_projected(
-                &project,
-                inventory.as_deref(),
-                &route,
-                is_edge,
-                batch_size,
-                selected_properties.as_ref(),
-                |batch| {
-                    let mut batch = projection.as_ref().map_or_else(
+        let uuid_nominations = self.uuid_nominations.clone();
+        tokio::spawn(async move {
+            for nomination in &uuid_nominations {
+                let ready = tokio::select! {
+                    result = nomination.wait(&sender) => result,
+                    () = sender.closed() => return,
+                };
+                match ready {
+                    Ok(true) => {}
+                    Ok(false) => return,
+                    Err(error) => {
+                        let _ = sender.send(Err(error)).await;
+                        return;
+                    }
+                }
+            }
+            if uuid_nominations
+                .iter()
+                .any(|nomination| nomination.ids().is_none())
+            {
+                let _ = sender
+                    .send(Err(DataFusionError::Internal(
+                        "completed UUID nomination has no key set".into(),
+                    )))
+                    .await;
+                return;
+            }
+            tokio::task::spawn_blocking(move || {
+                #[cfg(any(test, feature = "test-support"))]
+                let _digest_guard = digest_context.attach();
+                let _lifecycle_capture = lifecycle_context.attach();
+
+                let uuid_sets = uuid_nominations
+                    .iter()
+                    .filter_map(|nomination| nomination.ids())
+                    .map(|ids| ids as &dyn crate::uuid_set::UuidMembership)
+                    .collect::<Vec<_>>();
+                let selected_properties = projection
+                    .as_ref()
+                    .map(|names| names.iter().cloned().collect());
+                let mut held = Vec::new();
+                let mut held_bytes = 0_usize;
+                let limit = remaining;
+                let mut replay_after_validation = false;
+                let send = |batch: RecordBatch| {
+                    sender.blocking_send(Ok(batch)).map_err(|_| {
+                        DataFusionError::Execution("property scan consumer closed".into())
+                    })
+                };
+                let project_batch = |batch: &RecordBatch| {
+                    projection.as_ref().map_or_else(
                         || Ok(batch.clone()),
                         |names| {
                             let indices = names
@@ -271,45 +589,130 @@ impl ExecutionPlan for PropertyOverlayExec {
                                 .project(&indices)
                                 .map_err(|error| DataFusionError::ArrowError(Box::new(error), None))
                         },
-                    )?;
-                    if let Some(rows) = remaining.as_mut() {
-                        if *rows == 0 {
+                    )
+                };
+                let mut total_work = None::<crate::PropertyOverlayMetrics>;
+                let first_pass = crate::catalog::visit_property_overlay_batched_selected(
+                    &project,
+                    inventory.as_deref(),
+                    &route,
+                    is_edge,
+                    batch_size,
+                    selected_properties.as_ref(),
+                    equality.as_ref(),
+                    &uuid_sets,
+                    |batch| {
+                        let mut batch = project_batch(batch)?;
+                        if let Some(rows) = remaining.as_mut() {
+                            if *rows == 0 {
+                                return Ok(true);
+                            }
+                            if batch.num_rows() > *rows {
+                                batch = batch.slice(0, *rows);
+                            }
+                            *rows -= batch.num_rows();
+                        }
+                        if hold_until_validated {
+                            if replay_after_validation {
+                                return Ok(true);
+                            }
+                            let batch_bytes = batch.get_array_memory_size();
+                            if held_bytes.saturating_add(batch_bytes) > MAX_HELD_BYTES {
+                                // Keep memory bounded and preserve the validation
+                                // barrier. A successful first pass is replayed
+                                // from this same pinned inventory for emission.
+                                held.clear();
+                                held_bytes = 0;
+                                replay_after_validation = true;
+                                return Ok(true);
+                            }
+                            held_bytes += batch_bytes;
+                            held.push(batch);
                             return Ok(true);
                         }
-                        if batch.num_rows() > *rows {
-                            batch = batch.slice(0, *rows);
-                        }
-                        *rows -= batch.num_rows();
+                        send(batch)?;
+                        Ok(true)
+                    },
+                );
+                let first_pass = first_pass.map(|work| {
+                    if let Some(work) = work {
+                        total_work.get_or_insert_default().absorb(&work);
                     }
-                    sender.blocking_send(Ok(batch)).map_err(|_| {
-                        DataFusionError::Execution("property scan consumer closed".into())
-                    })?;
-                    Ok(true)
-                },
-            );
-            let result = result.and_then(|work| {
-                let (Some((work_counts, decoder_peak)), Some(work)) = (work_counts, work) else {
-                    return Ok(());
-                };
-                // Completed reader work only; these logical counters are not native RSS.
-                let measured = |value| {
-                    usize::try_from(value).map_err(|_| {
-                        DataFusionError::Execution("property metric exceeds platform range".into())
-                    })
-                };
-                for (counter, value) in work_counts.iter().zip([
-                    work.spill_bytes,
-                    work.authentication_bytes,
-                    work.physical_rows,
-                ]) {
-                    counter.add(measured(value)?);
+                });
+                // A limit stops its consumer after the first rows, so a failure in
+                // the rest of the route would go unobserved. Its rows wait for the
+                // whole route to validate: the limit changes emission, not authority.
+                // If the held prefix would exceed the cap, the first pass validates
+                // without retaining or emitting it; replay only after validation.
+                let result = first_pass.and_then(|()| {
+                    if replay_after_validation {
+                        let mut replay_remaining = limit;
+                        crate::catalog::visit_property_overlay_batched_selected(
+                            &project,
+                            inventory.as_deref(),
+                            &route,
+                            is_edge,
+                            batch_size,
+                            selected_properties.as_ref(),
+                            equality.as_ref(),
+                            &uuid_sets,
+                            |batch| {
+                                let mut batch = project_batch(batch)?;
+                                let Some(rows) = replay_remaining.as_mut() else {
+                                    send(batch)?;
+                                    return Ok(true);
+                                };
+                                if *rows == 0 {
+                                    return Ok(false);
+                                }
+                                if batch.num_rows() > *rows {
+                                    batch = batch.slice(0, *rows);
+                                }
+                                *rows -= batch.num_rows();
+                                send(batch)?;
+                                Ok(*rows > 0)
+                            },
+                        )
+                        .map(|work| {
+                            if let Some(work) = work {
+                                total_work.get_or_insert_default().absorb(&work);
+                            }
+                        })
+                    } else {
+                        for batch in held {
+                            send(batch)?;
+                        }
+                        Ok(())
+                    }
+                });
+                let result = result.and_then(|_work| {
+                    let (Some((work_counts, decoder_peak)), Some(work)) =
+                        (work_counts, total_work.as_ref())
+                    else {
+                        return Ok(());
+                    };
+                    // Completed reader work only; these logical counters are not native RSS.
+                    let measured = |value| {
+                        usize::try_from(value).map_err(|_| {
+                            DataFusionError::Execution(
+                                "property metric exceeds platform range".into(),
+                            )
+                        })
+                    };
+                    for (counter, value) in work_counts.iter().zip([
+                        work.spill_bytes,
+                        work.authentication_bytes,
+                        work.physical_rows,
+                    ]) {
+                        counter.add(measured(value)?);
+                    }
+                    decoder_peak.set_max(measured(work.decoder_peak_bytes)?);
+                    Ok(())
+                });
+                if let Err(error) = result {
+                    let _ = sender.blocking_send(Err(error));
                 }
-                decoder_peak.set_max(measured(work.decoder_peak_bytes)?);
-                Ok(())
             });
-            if let Err(error) = result {
-                let _ = sender.blocking_send(Err(error));
-            }
         });
         let schema = Arc::clone(&self.schema);
         let output = stream::unfold(receiver, |mut receiver| async move {
@@ -318,3 +721,7 @@ impl ExecutionPlan for PropertyOverlayExec {
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, output)))
     }
 }
+
+#[cfg(test)]
+#[path = "property_scan_tests.rs"]
+mod property_scan_tests;

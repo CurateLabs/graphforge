@@ -498,6 +498,27 @@ impl UserDefinedLogicalNodeCore for ExpandNode {
         )
     }
 
+    /// The input columns the expansion needs: the ones its parent reads, which
+    /// it passes through, and the seed's node id, which it reads itself. Without
+    /// this DataFusion keeps every input column, so a property join feeding an
+    /// expansion decoded every property of the anchor (#1931).
+    fn necessary_children_exprs(&self, output_columns: &[usize]) -> Option<Vec<Vec<usize>>> {
+        let input_width = self.input.schema().fields().len();
+        let seed = self.input.schema().index_of_column_by_name(
+            Some(&TableReference::bare(format!("var_{}", self.src_var))),
+            "node_id",
+        )?;
+        let mut needed: Vec<usize> = output_columns
+            .iter()
+            .copied()
+            .filter(|index| *index < input_width)
+            .chain(std::iter::once(seed))
+            .collect();
+        needed.sort_unstable();
+        needed.dedup();
+        Some(vec![needed])
+    }
+
     fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, inputs: Vec<LogicalPlan>) -> DfResult<Self> {
         let input = Arc::new(
             inputs

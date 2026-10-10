@@ -92,8 +92,9 @@ pub(super) enum ChunkPreference {
 pub enum SealRoute {
     /// Read the spooled chunks in place with the bulk builder.
     Bulk,
-    /// Replay the chunks through the staged path, for a build whose node tables
-    /// exceed the memory budget.
+    /// Replay the chunks through the staged path: the storage-level seal, and
+    /// a session that recorded this route before node tables could go to
+    /// scratch (#1929). No plan chooses it for want of memory any more.
     ReplayStaged,
 }
 
@@ -849,16 +850,17 @@ impl GraphConstructionSession {
     }
 
     /// How the spooled chunks build under `memory_budget` resident bytes, from
-    /// the chunk receipts alone. The bulk builder takes every build whose node
-    /// tables fit, in memory or on bounded scratch files, exactly as it does for
-    /// registered sources; only a build whose node tables alone exceed the
-    /// budget replays through the staged path.
+    /// the chunk receipts alone. The bulk builder takes every build, in memory
+    /// or on bounded scratch files with the node tables on scratch too when
+    /// they do not fit, exactly as it does for registered sources. A budget
+    /// below the fixed workspace refuses the attempt before decoding instead.
     ///
     /// # Errors
     /// Refuses a session without an open spool.
     pub fn spool_seal_route(&self, memory_budget: u64) -> Result<SealRoute, GfError> {
         Ok(match self.spool_bulk_plan(Some(memory_budget))?.route() {
-            BulkRoute::Memory | BulkRoute::Scratch => SealRoute::Bulk,
+            BulkRoute::Memory | BulkRoute::Scratch | BulkRoute::ScratchNodes => SealRoute::Bulk,
+            // No plan stages; a historical route would replay.
             BulkRoute::Staged(_) => SealRoute::ReplayStaged,
         })
     }

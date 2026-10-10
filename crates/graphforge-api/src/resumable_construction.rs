@@ -1640,7 +1640,8 @@ mod tests {
     /// is interrupted under one memory condition is completed under another
     /// without re-deciding: a build that recorded the bulk route keeps it and
     /// runs on scratch when memory shrank; one that recorded the staged replay
-    /// keeps it when memory grew.
+    /// (as a binary did before node tables could go to scratch, #1929) keeps it
+    /// when memory grew.
     #[test]
     fn a_retried_seal_keeps_the_route_it_recorded_whatever_the_budget_now_says() {
         for (first_budget, second_budget, expected) in [
@@ -1654,6 +1655,11 @@ mod tests {
             let graph = GraphForge::new(None).unwrap();
             let mut session = graph.begin_graph_construction(Default::default()).unwrap();
             let (node_ids, edge_ids) = accept_chain(&mut session);
+            if expected == graphforge_storage::SealRoute::ReplayStaged {
+                // No plan chooses this route for want of memory any more; an
+                // earlier binary recorded it.
+                session.inner.record_seal_route(expected).unwrap();
+            }
             let cancelled = crate::CancellationToken::new();
             cancelled.cancel();
             force_budget(Some(first_budget));
@@ -1680,6 +1686,64 @@ mod tests {
             }
             assert_construction_relationships(&graph, &chain_relationships(&node_ids, &edge_ids));
         }
+    }
+
+    /// Above the fixed workspace and below the node tables of the test chain:
+    /// the node tables go to scratch too. (512 MiB is the fixed workspace of
+    /// ADR 0058; the report below fails loudly if the constants drift.)
+    const NODE_SCRATCH_BUDGET: u64 = (512 << 20) + 100;
+
+    /// A chunk-API build whose node tables do not fit takes the bulk route and
+    /// puts them on scratch; a budget below the fixed workspace is refused
+    /// before decoding, keeps the bulk route and builds once memory returns.
+    /// Neither stages.
+    #[test]
+    fn a_chunk_api_build_whose_node_tables_exceed_the_budget_stays_on_the_bulk_route() {
+        let graph = GraphForge::new(None).unwrap();
+        let mut session = graph.begin_graph_construction(Default::default()).unwrap();
+        let (node_ids, edge_ids) = accept_chain(&mut session);
+        force_budget(Some(NODE_SCRATCH_BUDGET));
+        let sealed = session.seal_and_publish();
+        force_budget(None);
+        sealed.unwrap();
+        assert_eq!(
+            session.inner.seal_route(),
+            Some(graphforge_storage::SealRoute::Bulk)
+        );
+        let report = session.inner.bulk_build_report();
+        assert_eq!((report.nodes, report.edges), (4, 3));
+        assert!(report.node_partitions > 0, "{report:?}");
+        assert!(report.endpoint_scratch_write_bytes > 0, "{report:?}");
+        assert_eq!(
+            report.endpoint_scratch_read_bytes,
+            report.endpoint_scratch_write_bytes
+        );
+        assert_eq!(session.progress().evidence.parquet_shards, 0);
+        assert_construction_relationships(&graph, &chain_relationships(&node_ids, &edge_ids));
+
+        let graph = GraphForge::new(None).unwrap();
+        let mut session = graph.begin_graph_construction(Default::default()).unwrap();
+        let (node_ids, edge_ids) = accept_chain(&mut session);
+        force_budget(Some(1));
+        let refused = session.seal_and_publish().unwrap_err();
+        force_budget(None);
+        assert!(
+            matches!(
+                refused,
+                GfError::Project {
+                    code: graphforge_core::ProjectErrorCode::ResourceLimit,
+                    ..
+                }
+            ),
+            "{refused}"
+        );
+        assert_eq!(
+            session.inner.seal_route(),
+            Some(graphforge_storage::SealRoute::Bulk)
+        );
+        session.seal_and_publish().unwrap();
+        assert_eq!(session.progress().evidence.input_batches, 3);
+        assert_construction_relationships(&graph, &chain_relationships(&node_ids, &edge_ids));
     }
 
     /// An over-budget initial build through the chunk API runs the bulk

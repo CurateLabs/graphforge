@@ -103,6 +103,16 @@ comparisons are recorded in
 [the #1241 evidence](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/input-predicates-1241.json).
 Timing observations are not CI assertions; sampled peaks are not hard bounds.
 
+## Property equality before the property scan
+
+`StoredEqualityHints`, the last optimizer rule, offers each `column = literal`
+conjunct of a filter to the node-property scan beneath it, looking through
+column projections and the nullable side of a left join only. The filter stays
+in the plan, so the hint can only remove rows the filter would discard anyway.
+`ExpandNode` reports which input
+columns it needs, so an anchor's property join feeding an expansion decodes only
+the properties the query reads.
+
 ## Delete frontier demand
 
 For a terminal sequence of direct-variable `DELETE` clauses, the Rust write

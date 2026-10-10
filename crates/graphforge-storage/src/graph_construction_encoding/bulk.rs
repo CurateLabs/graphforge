@@ -16,6 +16,15 @@
 //! - Pass 3 emits catalog, node and edge tables, property overlays, the
 //!   ordinal node-identity facet, and the adjacency CSR.
 //!
+//! When the arrays do not fit the memory budget the same passes run through
+//! scratch files: edges (`scratch_edges`, #1900) and, when the node tables do
+//! not fit either, nodes as well (`scratch_nodes`, #1929). On that node-scratch
+//! route the raw edge pass is followed by a separately metered
+//! endpoint-reference pass that replays the planned edge tasks, sends the
+//! references and probes to the node leaves, and proves the replayed topology
+//! equals the first pass's before the endpoint pass resolves anything
+//! (#1929): the edge refinement then never overlaps live reference files.
+//!
 //! Intermediates are never synced or hashed. A crash discards them and the
 //! build reruns from the sources (ADR 0038 as amended for initial builds).
 
@@ -52,26 +61,34 @@ mod resident;
 mod scratch;
 mod scratch_csr;
 mod scratch_edges;
+mod scratch_nodes;
+mod scratch_ranges;
 mod source_workspace;
 mod tables;
 #[cfg(test)]
 #[path = "bulk/bulk_test_support.rs"]
 pub(crate) mod test_support;
 
-pub use budget::{BulkRoute, BulkStagedReason};
-pub use plan::{BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkSource};
-pub use source_workspace::{SourceReservation, SourceWorkspace};
-#[cfg(test)]
-pub(crate) use test_support::ForcedPropertyFrames;
-
 use budget::ScratchPlan;
+pub use budget::{BulkRoute, BulkStagedReason};
 use emit::{EdgeEmitter, RelationStats, Semantics};
 use install::Installer;
 use plan::PassMeter;
+pub use plan::{BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkSource};
 use scratch::Scratch;
 pub(crate) use scratch::discard_scratch;
 use scratch_csr::CsrScratch;
+use scratch_edges::{Endpoints, RankedNodes};
+pub use source_workspace::{SourceReservation, SourceWorkspace};
 use tables::{EdgeTable, NodeIndex, NodeTable, check_cancelled};
+
+/// Logical byte cap of one physical endpoint-reference segment, block
+/// headers included. Endpoint references are the one scratch set a skewed
+/// node leaf would otherwise hold whole while the endpoint pass produces its
+/// resolved output (#1929): splitting them bounds the input one resolving
+/// worker retains to one segment, whatever the leaf's reference count. This
+/// is the production bound, not a measured limit.
+const ENDPOINT_REFERENCE_SEGMENT_BYTES: usize = 32 << 20;
 
 /// What a worker's source task may hold when everything else is resident:
 /// the decoded batches the admission limit allows (see `graphforge-api`'s
@@ -146,14 +163,71 @@ impl EdgeSide {
     }
 }
 
+/// The ranked nodes: resident tables, or runs on scratch.
+#[allow(clippy::large_enum_variant)] // one value per build; boxing buys nothing
+enum NodeSide {
+    Memory(NodeTable),
+    Scratch(ScratchNodes),
+}
+
+/// Nodes on scratch: scattered by the node pass, then ranked and resolved by
+/// the endpoint pass.
+struct ScratchNodes {
+    scattered: scratch_nodes::ScatteredNodes,
+    resolved: Option<scratch_nodes::ResolvedNodes>,
+}
+
+impl NodeSide {
+    fn count(&self) -> u64 {
+        match self {
+            Self::Memory(nodes) => nodes.uuids.len() as u64,
+            Self::Scratch(nodes) => nodes.scattered.total,
+        }
+    }
+
+    fn table(&self) -> Option<&NodeTable> {
+        match self {
+            Self::Memory(nodes) => Some(nodes),
+            Self::Scratch(_) => None,
+        }
+    }
+
+    fn labels(&self) -> Result<emit::NodeLabels<'_>, GfError> {
+        match self {
+            Self::Memory(nodes) => Ok(emit::NodeLabels::Table(nodes)),
+            Self::Scratch(ScratchNodes {
+                resolved: Some(resolved),
+                ..
+            }) => Ok(emit::NodeLabels::Stats(&resolved.labels)),
+            Self::Scratch(_) => Err(storage(
+                "the node labels were requested before the nodes ranked",
+            )),
+        }
+    }
+}
+
 /// What a scratch build reports about its scratch files.
 #[derive(Default)]
 struct ScratchReport {
+    node_partitions: u64,
+    largest_node_partition: u64,
+    node_refinement_steps: u64,
+    node_refinement_write_bytes: u64,
+    node_refinement_read_bytes: u64,
+    node_write_bytes: u64,
+    node_read_bytes: u64,
+    endpoint_write_bytes: u64,
+    endpoint_read_bytes: u64,
     concurrency: u64,
     edge_partitions: u64,
     csr_partitions: u64,
     write_bytes: u64,
     read_bytes: u64,
+    /// The largest number of bytes reserved for scratch files at once: a
+    /// writer reserves each append before its file can grow, and a file's
+    /// final read reclaims it, so this is a conservative bound on the
+    /// scratch the build really held, not the bytes it moved.
+    peak_occupied_bytes: u64,
     largest_partition: u64,
     refinement_steps: u64,
     refinement_write_bytes: u64,
@@ -170,15 +244,32 @@ struct OrdinalFacet {
     metrics: crate::uuid_membership::V4OrdinalBuildMetrics,
 }
 
+/// How the ordinal facet reads the nodes.
+enum OrdinalNodes<'a> {
+    /// The resident, sorted node table.
+    Memory(&'a NodeTable),
+    /// Node runs on scratch: one sweep over them writes the canonical node
+    /// files and feeds the ordinal pushes, so every scratch block is read once.
+    Scratch {
+        sweep: scratch_nodes::NodeSweep<'a>,
+        pool: &'a rayon::ThreadPool,
+        count: u64,
+    },
+}
+
 /// The v4 ordinal artifacts, streamed from the ranked node array.
 fn build_ordinal_facet(
     output: &StableDirectory,
-    nodes: &NodeTable,
+    nodes: &OrdinalNodes<'_>,
     generation: u64,
     cancel: &AtomicBool,
 ) -> Result<OrdinalFacet, GfError> {
     let mut cancelled = || cancel.load(Ordering::Acquire);
     crate::uuid_membership::clear_private_ordinal_residue(output)?;
+    let node_count = match nodes {
+        OrdinalNodes::Memory(table) => table.uuids.len() as u64,
+        OrdinalNodes::Scratch { count, .. } => *count,
+    };
     let membership_dir = output
         .create_child_directory(OsStr::new("graph"))
         .map_err(storage)?
@@ -194,8 +285,22 @@ fn build_ordinal_facet(
         cache_window,
         membership_dir.allocation(),
     )?;
-    for (position, uuid) in nodes.uuids.iter().enumerate() {
-        writer.push_pair(Uuid::from_bytes(*uuid), position as u64 + 1, &mut cancelled)?;
+    match nodes {
+        OrdinalNodes::Memory(table) => {
+            for (position, uuid) in table.uuids.iter().enumerate() {
+                writer.push_pair(Uuid::from_bytes(*uuid), position as u64 + 1, &mut cancelled)?;
+            }
+        }
+        OrdinalNodes::Scratch { sweep, pool, .. } => {
+            let seen = pool.install(|| {
+                scratch_nodes::sweep_nodes(sweep, |uuid, rank| {
+                    writer.push_pair(Uuid::from_bytes(*uuid), rank, &mut cancelled)
+                })
+            })?;
+            if seen != node_count {
+                return Err(storage("the node runs lost nodes"));
+            }
+        }
     }
     let bundle = writer.finish()?;
     let (artifacts, publication, metrics) =
@@ -275,25 +380,22 @@ pub(crate) fn encode_bulk(
     // The route is a function of the footers and the budget (ADR 0058). A
     // A durable bulk route cannot switch to staging after a budget drop.
     // Refuse that attempt before loading data; it can retry when memory returns.
-    let scratch_plan = match (plan.route(), plan.memory_budget) {
-        (BulkRoute::Scratch, Some(budget)) => {
-            let has_properties = plan
-                .nodes
-                .iter()
-                .chain(&plan.edges)
-                .any(|source| !source.property_free);
-            let minimum = plan
-                .node_tables_resident_bytes()
-                .saturating_add(if has_properties {
-                    budget::property_extra_workspace(plan, budgets)
-                } else {
-                    plan.source_level_workspace_bytes()
-                });
+    let route = plan.route();
+    let scratch_plan = match (route, plan.memory_budget) {
+        (BulkRoute::Scratch | BulkRoute::ScratchNodes, Some(budget)) => {
+            // The route sees only the node tables; the property workspace can
+            // also tip them onto scratch.
+            let minimum = if budget::node_tables_on_scratch(plan, budget, budgets) {
+                plan.scratch_floor_bytes()
+            } else {
+                plan.node_tables_resident_bytes()
+            }
+            .saturating_add(budget::source_phase_extra(plan, budgets));
             if budget < minimum {
                 return Err(GfError::Project {
                     code: graphforge_core::ProjectErrorCode::ResourceLimit,
                     message: format!(
-                        "graph construction encoding: property scratch requires {minimum} resident bytes before decoding; budget is {budget}"
+                        "graph construction encoding: scratch requires {minimum} resident bytes before decoding; budget is {budget}"
                     ),
                 });
             }
@@ -398,53 +500,225 @@ pub(crate) fn encode_bulk(
         )
     });
 
-    // Pass 1: nodes.
+    // Pass 1: nodes. When the node tables do not fit the budget they scatter
+    // into node-UUID range partitions on scratch instead (#1929).
     let meter = PassMeter::start("nodes");
     let decode = gate::ByteGate::new(scratch_plan.as_ref().map_or(0, |sized| sized.decode_bytes));
-    let mut nodes = run_pass(&pool, cancelled, &cancel, || {
-        tables::collect_nodes(
-            &plan.nodes,
-            retain_nodes && node_properties.is_none(),
-            node_properties.as_ref(),
-            scratch_plan.as_ref().map(|_| &decode),
-            budgets,
-            &cancel,
-        )
-    })?;
+    let mut nodes = match (&scratch_plan, &scratch) {
+        (Some(sized), Some(scratch)) if sized.node_tables_on_scratch => {
+            NodeSide::Scratch(ScratchNodes {
+                scattered: run_pass(&pool, cancelled, &cancel, || {
+                    scratch_nodes::scatter_nodes(
+                        &plan.nodes,
+                        budgets,
+                        node_properties.as_ref(),
+                        &decode,
+                        sized,
+                        scratch,
+                        &cancel,
+                    )
+                })?,
+                resolved: None,
+            })
+        }
+        _ => NodeSide::Memory(run_pass(&pool, cancelled, &cancel, || {
+            tables::collect_nodes(
+                &plan.nodes,
+                retain_nodes && node_properties.is_none(),
+                node_properties.as_ref(),
+                scratch_plan.as_ref().map(|_| &decode),
+                budgets,
+                &cancel,
+            )
+        })?),
+    };
+    let node_count = nodes.count();
+    // What the node scatter and its refinement moved; the endpoint pass adds
+    // its own reads below.
+    let node_scatter_traffic = scratch.as_ref().map_or((0, 0), |scratch| {
+        (scratch.written_bytes(), scratch.read_bytes())
+    });
+    let mut node_leaf_read = 0_u64;
     passes.extend([meter.finish()]);
     crate::graph_construction::construction_failpoint("bulk.after_nodes");
 
-    // Pass 2: edges and endpoint resolution. Over budget, the edges scatter
-    // into scratch partitions instead of landing in resident columns.
+    // Pass 2: edges. Over budget, the edges scatter into scratch partitions
+    // instead of landing in resident columns. When the node tables are on
+    // scratch too, that pass writes only the raw 28-byte records, assigns the
+    // relation ids and ingests the properties once, and hashes a canonical
+    // topology proof: the endpoint references and identity probes are
+    // deferred to their own pass below, so the edge refinement never
+    // overlaps live reference files (#1929).
     let meter = PassMeter::start("edges");
-    let index = pool.install(|| NodeIndex::build(&nodes.uuids));
-    let mut edge_side = match (&scratch_plan, &scratch) {
-        (Some(sized), Some(scratch)) => {
+    // Endpoint references and the identity probes of the edges, and the CSR
+    // key partitions the endpoint pass derives from the exact degrees, when
+    // the nodes are on scratch.
+    let mut refs = None::<scratch::Partitions>;
+    let mut identity_probes = None::<scratch::Partitions>;
+    let mut node_keys = None::<(scratch_csr::KeyPartitioner, scratch_csr::KeyPartitioner)>;
+    let mut edge_side = match (&scratch_plan, &scratch, &nodes) {
+        (Some(sized), Some(scratch), NodeSide::Scratch(_)) => {
             EdgeSide::Scratch(run_pass(&pool, cancelled, &cancel, || {
                 scratch_edges::scatter_edges(
                     &plan.edges,
                     budgets,
                     edge_properties.as_ref(),
                     &decode,
-                    &nodes,
-                    &index,
+                    &Endpoints::Deferred,
                     sized,
                     scratch,
                     &cancel,
                 )
             })?)
         }
-        _ => EdgeSide::Memory(run_pass(&pool, cancelled, &cancel, || {
-            tables::collect_edges(&plan.edges, retain_edges, budgets, &nodes, &index, &cancel)
-        })?),
+        (Some(sized), Some(scratch), NodeSide::Memory(table)) => {
+            let index = pool.install(|| NodeIndex::build(&table.uuids));
+            EdgeSide::Scratch(run_pass(&pool, cancelled, &cancel, || {
+                scratch_edges::scatter_edges(
+                    &plan.edges,
+                    budgets,
+                    edge_properties.as_ref(),
+                    &decode,
+                    &Endpoints::Resident {
+                        nodes: table,
+                        index: &index,
+                    },
+                    sized,
+                    scratch,
+                    &cancel,
+                )
+            })?)
+        }
+        (_, _, NodeSide::Memory(table)) => {
+            let index = pool.install(|| NodeIndex::build(&table.uuids));
+            EdgeSide::Memory(run_pass(&pool, cancelled, &cancel, || {
+                tables::collect_edges(&plan.edges, retain_edges, budgets, table, &index, &cancel)
+            })?)
+        }
+        _ => return Err(storage("the over-budget build lost its scratch state")),
     };
-    drop(index);
     let edge_count = edge_side.count();
-    if nodes.uuids.is_empty() && edge_count == 0 {
+    if node_count == 0 && edge_count == 0 {
         return Err(storage("construction contains no identities"));
     }
     passes.extend([meter.finish()]);
     crate::graph_construction::construction_failpoint("bulk.after_edges");
+
+    // Endpoint references over scratch node tables, now that the raw edge
+    // partitions have refined: the pass replays the same fixed task plan,
+    // sends two references and one probe per row to the node leaves, and
+    // proves the replayed topology equals the first pass's before anything is
+    // resolved or published (#1929). The property rows, the relation
+    // dictionary and the raw edge records stay the first pass's accepted
+    // output; a replay that differs is a source identity conflict, never a
+    // mix of topology versions.
+    if let (
+        NodeSide::Scratch(on_scratch),
+        EdgeSide::Scratch(scattered),
+        Some(sized),
+        Some(scratch),
+    ) = (&nodes, &edge_side, &scratch_plan, &scratch)
+    {
+        let meter = PassMeter::start("edge-refs");
+        // The references split into capped physical segments, so the
+        // endpoint pass can reclaim each one as soon as its verified read
+        // has resolved it (#1929). Probes stay one small file per leaf: they
+        // are read and reclaimed whole, before any reference.
+        let leaves = scratch::Partitions::create_segmented(
+            scratch,
+            "refs",
+            on_scratch.scattered.leaves.len(),
+            scratch_nodes::REF_RECORD,
+            ENDPOINT_REFERENCE_SEGMENT_BYTES,
+        )?;
+        let probes = scratch::Partitions::create(
+            scratch,
+            "probes",
+            on_scratch.scattered.leaves.len(),
+            scratch_nodes::PROBE_RECORD,
+        )?;
+        let sink = scratch_nodes::RefSink {
+            router: &on_scratch.scattered.router,
+            refs: &leaves,
+            probes: &probes,
+        };
+        let replayed = run_pass(&pool, cancelled, &cancel, || {
+            scratch_edges::replay_edges(
+                &plan.edges,
+                budgets,
+                &decode,
+                &sink,
+                sized,
+                scratch,
+                &cancel,
+            )
+        })?;
+        refs = Some(leaves);
+        identity_probes = Some(probes);
+        // A replay that differs is refused before anything resolves or
+        // publishes — but the accepted raw leaves are checked for duplicate
+        // identities first, so an accepted first pass that already held
+        // duplicate edge UUIDs keeps its established duplicate refusal,
+        // ahead of the replay mismatch, exactly as on the resident route
+        // (#1929). The matching path reads no raw leaf here.
+        scattered.ensure_replay_matches(scratch, sized, replayed.proof, &cancel)?;
+        // A missing endpoint keeps its established refusal, ahead of the
+        // endpoint resolution that would name it again.
+        if let Some(endpoint) = replayed.miss {
+            return Err(scattered.refusal(scratch, sized, None, false, Some(endpoint), &cancel));
+        }
+        passes.extend([meter.finish()]);
+    }
+
+    // Endpoints over scratch node tables: rank every node leaf, resolve the
+    // endpoint references routed to it, and learn the exact degrees.
+    if let (
+        NodeSide::Scratch(on_scratch),
+        EdgeSide::Scratch(scattered),
+        Some(refs),
+        Some(probes),
+        Some(sized),
+        Some(scratch),
+    ) = (
+        &mut nodes,
+        &edge_side,
+        &refs,
+        &identity_probes,
+        &scratch_plan,
+        &scratch,
+    ) {
+        let meter = PassMeter::start("endpoints");
+        let read_before = scratch.read_bytes();
+        let (resolved, keys) = run_pass(&pool, cancelled, &cancel, || {
+            scratch_nodes::resolve_endpoints(&scratch_nodes::ResolveContext {
+                scratch,
+                plan: sized,
+                nodes: &on_scratch.scattered,
+                refs,
+                probes,
+                edges: scattered,
+                cancel: &cancel,
+            })
+        })?;
+        if resolved.collision || resolved.miss.is_some() {
+            return Err(scattered.refusal(
+                scratch,
+                sized,
+                None,
+                resolved.collision,
+                resolved.miss,
+                &cancel,
+            ));
+        }
+        // Reads of the endpoint pass that were neither references nor probes:
+        // the node leaves.
+        node_leaf_read =
+            scratch.read_bytes() - read_before - refs.read_bytes() - probes.read_bytes();
+        on_scratch.resolved = Some(resolved);
+        node_keys = Some(keys);
+        passes.extend([meter.finish()]);
+        crate::graph_construction::construction_failpoint("bulk.after_endpoints");
+    }
 
     // The catalog's schema groups, routes and windows.
     let meter = PassMeter::start("catalog");
@@ -457,7 +731,10 @@ pub(crate) fn encode_bulk(
         bindings: semantic_authority.map(|authority| &authority.bindings),
     };
     // The decoded batches are released as soon as their sorted schema groups exist.
-    let node_kept = std::mem::take(&mut nodes.kept);
+    let node_kept = match &mut nodes {
+        NodeSide::Memory(table) => std::mem::take(&mut table.kept),
+        NodeSide::Scratch(_) => Vec::new(),
+    };
     let edge_kept = match &mut edge_side {
         EdgeSide::Memory(edges) => std::mem::take(&mut edges.kept),
         EdgeSide::Scratch(_) => Vec::new(),
@@ -492,7 +769,7 @@ pub(crate) fn encode_bulk(
         || {
             node_groups
                 .as_ref()
-                .map_or(usize::from(!nodes.uuids.is_empty()), Vec::len)
+                .map_or(usize::from(node_count != 0), Vec::len)
         },
         Vec::len,
     ) + edge_scratch_groups.as_ref().map_or_else(
@@ -517,7 +794,7 @@ pub(crate) fn encode_bulk(
     let now = shape.runtime_catalog_now_micros;
     let emitter = EdgeEmitter {
         installer: &installer,
-        nodes: &nodes,
+        nodes: nodes.table(),
         relations: &relations,
         components: &components,
         semantics: &semantics,
@@ -529,13 +806,40 @@ pub(crate) fn encode_bulk(
     let ranked_edges = match (&edge_side, &scratch_plan, &scratch) {
         (EdgeSide::Scratch(scattered), Some(sized), Some(scratch)) => {
             let meter = PassMeter::start("ranks");
-            let csr = CsrScratch::create(scratch, &scattered.histogram, sized.csr_partitions)?;
+            let (csr, ranked_nodes) = match &nodes {
+                NodeSide::Memory(table) => (
+                    CsrScratch::create(
+                        scratch,
+                        scattered
+                            .histogram
+                            .as_ref()
+                            .ok_or_else(|| storage("the edge pass kept no degrees"))?,
+                        sized.csr_partitions,
+                    )?,
+                    RankedNodes::Resident(table),
+                ),
+                NodeSide::Scratch(ScratchNodes {
+                    resolved: Some(resolved),
+                    ..
+                }) => {
+                    let (out_keys, in_keys) = node_keys
+                        .take()
+                        .ok_or_else(|| storage("the node pass kept no key partitions"))?;
+                    (
+                        CsrScratch::with_partitioners(scratch, out_keys, in_keys)?,
+                        RankedNodes::Resolved(&resolved.resolved),
+                    )
+                }
+                NodeSide::Scratch(_) => {
+                    return Err(storage("the over-budget build lost its node pass"));
+                }
+            };
             let ranked = run_pass(&pool, cancelled, &cancel, || {
                 scratch_edges::rank_partitions(&scratch_edges::RankContext {
                     scratch,
                     scattered,
                     csr: &csr,
-                    nodes: &nodes,
+                    nodes: ranked_nodes,
                     emitter: &emitter,
                     plan: sized,
                     window: edge_window,
@@ -559,10 +863,11 @@ pub(crate) fn encode_bulk(
         },
         _ => RelationStats::unused(),
     };
+    let node_labels = nodes.labels()?;
     let built = run_pass(&pool, cancelled, &cancel, || {
         emit::build_catalog(
             budgets,
-            &nodes,
+            node_labels,
             &relation_stats,
             node_groups.as_deref(),
             edge_groups.as_deref(),
@@ -572,13 +877,16 @@ pub(crate) fn encode_bulk(
         )
     })?;
     drop(relation_stats);
-    let types = emit::node_types(&nodes.label_names, &built.entity_ids, &semantics)?;
+    let types = emit::node_types(node_labels.names(), &built.entity_ids, &semantics)?;
     run_pass(&pool, cancelled, &cancel, || {
         installer.install_parquet(
             "topology/runtime_catalog.parquet",
             &built.catalog.to_record_batch(),
         )?;
-        emit::emit_nodes(&installer, &nodes, &types, node_window, now, &cancel)?;
+        // Nodes on scratch stream to their files in the ordinal sweep below.
+        if let NodeSide::Memory(table) = &nodes {
+            emit::emit_nodes(&installer, table, &types, node_window, now, &cancel)?;
+        }
         if let EdgeSide::Memory(edges) = &edge_side {
             emit::emit_edges(&emitter, edges, edge_window, &cancel)?;
         }
@@ -590,7 +898,31 @@ pub(crate) fn encode_bulk(
     // The ordinal facet streams the sorted node UUIDs; the edge UUIDs (16 B per
     // edge) are released before the adjacency pass sorts its entries.
     let meter = PassMeter::start("ordinal");
-    let ordinal = build_ordinal_facet(&output, &nodes, generation, &cancel)?;
+    let ordinal_nodes = match &nodes {
+        NodeSide::Memory(table) => OrdinalNodes::Memory(table),
+        NodeSide::Scratch(ScratchNodes {
+            resolved: Some(resolved),
+            ..
+        }) => OrdinalNodes::Scratch {
+            sweep: scratch_nodes::NodeSweep {
+                scratch: scratch
+                    .as_ref()
+                    .ok_or_else(|| storage("the over-budget build lost its scratch state"))?,
+                runs: &resolved.runs,
+                installer: &installer,
+                types: &types,
+                window: node_window,
+                now,
+                cancel: &cancel,
+            },
+            pool: &pool,
+            count: node_count,
+        },
+        NodeSide::Scratch(_) => {
+            return Err(storage("the over-budget build lost its node pass"));
+        }
+    };
+    let ordinal = build_ordinal_facet(&output, &ordinal_nodes, generation, &cancel)?;
     check_cancelled(&cancel)?;
     passes.extend([meter.finish()]);
     crate::graph_construction::construction_failpoint("bulk.after_ordinal");
@@ -679,8 +1011,39 @@ pub(crate) fn encode_bulk(
             peak_csr_carry_entries: ranked_edges
                 .as_ref()
                 .map_or(0, |(csr, _)| csr.peak_carry_entries()),
+            ..ScratchReport::default()
         };
         drop(ranked_edges);
+        // Node tables on scratch: every written block was read once. The
+        // UUID-only runs were read to their end by the identity stream.
+        if let NodeSide::Scratch(ScratchNodes {
+            scattered,
+            resolved: Some(resolved),
+        }) = &nodes
+        {
+            scratch_report.node_partitions = scattered.leaves.len() as u64;
+            scratch_report.largest_node_partition =
+                scattered.counts.iter().copied().max().unwrap_or(0);
+            scratch_report.node_refinement_steps = scattered.refinement_steps;
+            scratch_report.node_refinement_write_bytes = scattered.refinement_write_bytes;
+            scratch_report.node_refinement_read_bytes = scattered.refinement_read_bytes;
+            scratch_report.node_write_bytes =
+                node_scatter_traffic.0 + resolved.runs.written_bytes();
+            scratch_report.node_read_bytes =
+                node_scatter_traffic.1 + node_leaf_read + resolved.runs.read_bytes();
+            if let EdgeSide::Scratch(_) = &edge_side {
+                let refs = refs.as_ref();
+                let probes = identity_probes.as_ref();
+                scratch_report.endpoint_write_bytes = refs
+                    .map_or(0, scratch::Partitions::written_bytes)
+                    + probes.map_or(0, scratch::Partitions::written_bytes)
+                    + resolved.resolved.written_bytes();
+                scratch_report.endpoint_read_bytes = refs
+                    .map_or(0, scratch::Partitions::read_bytes)
+                    + probes.map_or(0, scratch::Partitions::read_bytes)
+                    + resolved.resolved.read_bytes();
+            }
+        }
     }
 
     // Property overlays: sequential, through the staged encoder's own writer,
@@ -823,6 +1186,11 @@ pub(crate) fn encode_bulk(
         .unwrap_or(0);
     scratch_report.write_bytes += property_scratch_write_bytes;
     scratch_report.read_bytes += property_scratch_read_bytes;
+    // The peak is a high-water mark the appends have kept current all along;
+    // read it before the tree goes away.
+    scratch_report.peak_occupied_bytes = scratch
+        .as_ref()
+        .map_or(0, scratch::Scratch::peak_occupied_bytes);
     drop((node_properties, edge_properties));
     if let Some(scratch) = scratch {
         scratch.remove()?;
@@ -839,7 +1207,7 @@ pub(crate) fn encode_bulk(
     )?;
     write_surrogate_tails(
         &output,
-        nodes.uuids.len() as u64,
+        node_count,
         edge_count,
         cancelled,
         &mut artifacts,
@@ -864,7 +1232,6 @@ pub(crate) fn encode_bulk(
         &mut artifacts,
         &mut evidence,
     )?;
-    let node_count = nodes.uuids.len() as u64;
     drop((nodes, edge_side, node_groups, edge_groups));
 
     installer_extend_adjacency(
@@ -947,6 +1314,7 @@ pub(crate) fn encode_bulk(
             csr_partitions: scratch_report.csr_partitions,
             scratch_write_bytes: scratch_report.write_bytes,
             scratch_read_bytes: scratch_report.read_bytes,
+            scratch_peak_occupied_bytes: scratch_report.peak_occupied_bytes,
             largest_edge_partition: scratch_report.largest_partition,
             edge_refinement_steps: scratch_report.refinement_steps,
             edge_refinement_write_bytes: scratch_report.refinement_write_bytes,
@@ -954,6 +1322,15 @@ pub(crate) fn encode_bulk(
             csr_spool_write_bytes: scratch_report.csr_spool_write_bytes,
             csr_spool_read_bytes: scratch_report.csr_spool_read_bytes,
             peak_csr_carry_entries: scratch_report.peak_csr_carry_entries,
+            node_partitions: scratch_report.node_partitions,
+            largest_node_partition: scratch_report.largest_node_partition,
+            node_refinement_steps: scratch_report.node_refinement_steps,
+            node_refinement_write_bytes: scratch_report.node_refinement_write_bytes,
+            node_refinement_read_bytes: scratch_report.node_refinement_read_bytes,
+            node_scratch_write_bytes: scratch_report.node_write_bytes,
+            node_scratch_read_bytes: scratch_report.node_read_bytes,
+            endpoint_scratch_write_bytes: scratch_report.endpoint_write_bytes,
+            endpoint_scratch_read_bytes: scratch_report.endpoint_read_bytes,
             property_scratch_write_bytes,
             property_scratch_read_bytes,
             source_workspace_capacity_bytes: source_pool.capacity(),

@@ -235,10 +235,11 @@ pub struct BulkBuildReport {
     pub nodes: u64,
     /// Edges built.
     pub edges: u64,
-    /// Per-pass measurements by pass name (`plan`, `nodes`, `edges`, `catalog`,
-    /// `tables`, `ordinal`, `adjacency`, `properties`, `finalize`). Keys and
-    /// values are numeric-only so receipts stay within the certification
-    /// runner's sanitizer.
+    /// Per-pass measurements by pass name (`plan`, `nodes`, `edges`,
+    /// `edge-refs` and `endpoints` (node tables on scratch only), `ranks`
+    /// (scratch only), `catalog`, `tables`, `ordinal`, `adjacency`,
+    /// `properties`, `finalize`). Keys and values are numeric-only so receipts
+    /// stay within the certification runner's sanitizer.
     pub passes: std::collections::BTreeMap<String, BulkPassReport>,
     /// Partitions in flight on the over-budget route; zero when the build ran in memory.
     #[serde(default)]
@@ -255,6 +256,16 @@ pub struct BulkBuildReport {
     /// Bytes it read back.
     #[serde(default)]
     pub scratch_read_bytes: u64,
+    /// The largest number of bytes reserved for its scratch files at once,
+    /// block headers and bytes still buffered in a writer included. Files
+    /// leave the occupancy as soon as their final read reclaims them, so on
+    /// a successful build this is strictly less than the cumulative
+    /// `scratch_write_bytes` when anything was reclaimed early. This is a
+    /// conservative bound on logical reserved file bytes, not the
+    /// filesystem's allocated blocks or an exact physical overlap, and it
+    /// says nothing about input, output or process memory.
+    #[serde(default)]
+    pub scratch_peak_occupied_bytes: u64,
     /// Edges in the largest edge-UUID range partition of the over-budget route.
     #[serde(default)]
     pub largest_edge_partition: u64,
@@ -295,6 +306,37 @@ pub struct BulkBuildReport {
     /// Task reservations the readers made.
     #[serde(default)]
     pub source_workspace_reservations: u64,
+    /// Node-UUID range partitions when the node tables ran on scratch (#1929);
+    /// zero when they were resident.
+    #[serde(default)]
+    pub node_partitions: u64,
+    /// Nodes in the largest node-UUID range partition after refinement.
+    #[serde(default)]
+    pub largest_node_partition: u64,
+    /// Radix refinements of oversized node UUID ranges.
+    #[serde(default)]
+    pub node_refinement_steps: u64,
+    /// Additional scratch writes needed to refine skewed node UUID ranges.
+    #[serde(default)]
+    pub node_refinement_write_bytes: u64,
+    /// Scratch reads performed by node refinement.
+    #[serde(default)]
+    pub node_refinement_read_bytes: u64,
+    /// Scratch bytes written for nodes: the scatter, its refinement, and the
+    /// sorted runs.
+    #[serde(default)]
+    pub node_scratch_write_bytes: u64,
+    /// Scratch bytes read back for nodes.
+    #[serde(default)]
+    pub node_scratch_read_bytes: u64,
+    /// Scratch bytes written to resolve edge endpoints over scratch node
+    /// tables: the references routed to node leaves and the resolved records
+    /// routed back to edge leaves.
+    #[serde(default)]
+    pub endpoint_scratch_write_bytes: u64,
+    /// Scratch bytes read back for endpoint resolution.
+    #[serde(default)]
+    pub endpoint_scratch_read_bytes: u64,
     /// Uncompressed bytes of the property-bearing sources, from their footers:
     /// the denominator of the property scratch traffic per input byte.
     #[serde(default)]

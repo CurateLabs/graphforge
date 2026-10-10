@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use datafusion::datasource::TableProvider;
 use datafusion::datasource::TableType;
 use datafusion::error::DataFusionError;
+use datafusion::logical_expr::TableProviderFilterPushDown;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::Expr;
 use datafusion_catalog::Session;
@@ -568,6 +569,7 @@ impl TableProvider for EdgePropertyTable {
                     limit,
                     batch_size: state.config().batch_size(),
                     footer_statistics: !self.keys_only,
+                    equality: None,
                 },
             )?,
         ))
@@ -588,7 +590,7 @@ impl TableProvider for PropertyTable {
         &self,
         state: &dyn Session,
         projection: Option<&Vec<usize>>,
-        _filters: &[Expr],
+        filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
         Ok(Arc::new(
@@ -603,10 +605,66 @@ impl TableProvider for PropertyTable {
                     limit,
                     batch_size: state.config().batch_size(),
                     footer_statistics: !self.keys_only,
+                    equality: filters
+                        .iter()
+                        .find_map(|filter| property_equality(filter, &self.schema)),
                 },
             )?,
         ))
     }
+
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&Expr],
+    ) -> Result<Vec<TableProviderFilterPushDown>, DataFusionError> {
+        // A pushed-down equality prunes by statistics and reads less; the plan
+        // keeps the filter, so the answer does not depend on how far the scan
+        // narrows it.
+        Ok(filters
+            .iter()
+            .map(|filter| {
+                if self.keys_only || property_equality(filter, &self.schema).is_none() {
+                    TableProviderFilterPushDown::Unsupported
+                } else {
+                    TableProviderFilterPushDown::Inexact
+                }
+            })
+            .collect())
+    }
+}
+
+/// `column = literal` on a stored property column of the same Arrow type.
+/// Anything that needs a coercion is left to the plan.
+fn property_equality(
+    filter: &Expr,
+    schema: &SchemaRef,
+) -> Option<crate::property_overlay::PropertyEquality> {
+    use crate::property_overlay::{EqualityValue, PropertyEquality};
+    use datafusion::logical_expr::Operator;
+    use datafusion::scalar::ScalarValue;
+    let Expr::BinaryExpr(binary) = filter else {
+        return None;
+    };
+    if binary.op != Operator::Eq {
+        return None;
+    }
+    let ((Expr::Column(column), Expr::Literal(literal, _))
+    | (Expr::Literal(literal, _), Expr::Column(column))) =
+        (binary.left.as_ref(), binary.right.as_ref())
+    else {
+        return None;
+    };
+    let value = match literal {
+        ScalarValue::Int64(Some(value)) => EqualityValue::Int(*value),
+        ScalarValue::Utf8(Some(value)) => EqualityValue::Str(value.clone()),
+        ScalarValue::Boolean(Some(value)) => EqualityValue::Bool(*value),
+        _ => return None,
+    };
+    let field = schema.field_with_name(&column.name).ok()?;
+    (field.data_type() == &value.data_type()).then(|| PropertyEquality {
+        column: column.name.clone(),
+        value,
+    })
 }
 
 #[cfg(test)]

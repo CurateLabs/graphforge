@@ -308,7 +308,12 @@ fn optional_child_with_shared_var_excludes_outer_columns() {
     // The shared var_0 is a join key, so the inner output drops all 6 of its
     // columns — keeping only the exploratory edge (var_1, 8 cols) and dst
     // (var_2, 6).
-    assert_eq!(node.join_keys.len(), 1, "var_0 is the shared join key");
+    assert!(node.correlated_seed.is_some(), "the shared node is seeded");
+    assert_eq!(
+        node.join_keys.len(),
+        6,
+        "every outer field identifies its seed row"
+    );
     let schema = UserDefinedLogicalNodeCore::schema(node);
     // outer var_0 (6) ++ inner kept (edge 8 + var_2 6 = 14) = 20.
     assert_eq!(schema.fields().len(), 20, "no duplicate var_0 columns");

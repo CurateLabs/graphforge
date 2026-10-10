@@ -608,7 +608,22 @@ impl GraphPlanLowerer {
         input: LogicalPlan,
         var_map: &mut VarMap,
     ) -> Result<LogicalPlan, LoweringError> {
-        if child_reads_outer_rows(child, var_map) {
+        // A leading scan of the same bound variable re-matches the outer
+        // node. Seed that pattern from these rows instead of independently
+        // scanning every node before joining its matches back.
+        let leading_shared_node = matches!(
+            child.ops.first(),
+            Some(GraphOp::NodeScan { var, .. }) if var_map.get(*var).is_some_and(|alias| {
+                let qualifier = datafusion::common::TableReference::bare(alias);
+                input.schema()
+                    .index_of_column_by_name(Some(&qualifier), "node_uuid")
+                    .is_some_and(|index| {
+                        input.schema().field(index).data_type()
+                            == &datafusion::arrow::datatypes::DataType::FixedSizeBinary(16)
+                    })
+            })
+        );
+        if leading_shared_node || child_reads_outer_rows(child, var_map) {
             let mut correlated_vm = var_map.clone();
             if let Some(plan) =
                 self.lower_correlated_optional_op(child, input.clone(), &mut correlated_vm)?

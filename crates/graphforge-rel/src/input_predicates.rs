@@ -26,6 +26,9 @@ pub fn optimizer_rules() -> Vec<Arc<dyn OptimizerRule + Send + Sync>> {
         .position(|rule| rule.name() == "push_down_filter")
         .expect("pinned DataFusion optimizer includes filter pushdown");
     rules.insert(position + 1, Arc::new(FixedExpandInputPredicates));
+    // Last, so every filter has reached its final place before it is offered
+    // to the property scan that can use it.
+    rules.push(Arc::new(crate::stored_equality::StoredEqualityHints));
     rules
 }
 

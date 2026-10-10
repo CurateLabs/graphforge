@@ -321,7 +321,7 @@ impl Drop for RunSink<'_, '_> {
 pub(super) struct RunWriter<'p, 'a> {
     rows: &'p PropertyRows<'a>,
     path: PathBuf,
-    file: std::io::BufWriter<File>,
+    file: Option<std::io::BufWriter<File>>,
     offset: u64,
     frames: Vec<FrameMeta>,
     total: u64,
@@ -330,6 +330,10 @@ pub(super) struct RunWriter<'p, 'a> {
 
 impl Drop for RunWriter<'_, '_> {
     fn drop(&mut self) {
+        if let Some(writer) = self.file.take() {
+            let (_, buffer) = writer.into_parts();
+            drop(buffer);
+        }
         if self.index_charge > 0 {
             self.rows.index_budget.release(self.index_charge);
         }
@@ -352,7 +356,15 @@ impl RunWriter<'_, '_> {
         self.index_charge = self.index_charge.saturating_add(FRAME_INDEX_ENTRY_BYTES);
         let frame = self.rows.encode_frame(batch)?;
         let facts = inspect_frame(&frame, batch.schema().as_ref())?;
-        self.file.write_all(&frame).map_err(storage)?;
+        self.rows.scratch.occupy(frame.len() as u64)?;
+        let writer = self
+            .file
+            .as_mut()
+            .ok_or_else(|| storage("property run writer is already finished"))?;
+        let write = writer.write_all(&frame).map_err(storage);
+        let observation = self.rows.scratch.observe_file(&self.path, writer.get_ref());
+        write?;
+        observation?;
         self.rows
             .written
             .fetch_add(frame.len() as u64, Ordering::Relaxed);
@@ -377,7 +389,16 @@ impl RunWriter<'_, '_> {
     }
 
     pub(super) fn finish(mut self) -> Result<Run, GfError> {
-        self.file.flush().map_err(storage)?;
+        let mut writer = self
+            .file
+            .take()
+            .ok_or_else(|| storage("property run writer is already finished"))?;
+        let flush = writer.flush().map_err(storage);
+        let observation = self.rows.scratch.observe_file(&self.path, writer.get_ref());
+        let (_, buffer) = writer.into_parts();
+        drop(buffer);
+        flush?;
+        observation?;
         Ok(Run {
             path: std::mem::take(&mut self.path),
             frames: std::mem::take(&mut self.frames),
@@ -774,7 +795,8 @@ impl<'a> PropertyRows<'a> {
         let path = self
             .scratch
             .file(&format!("property-{:?}-{id:016}.frames", self.kind));
-        File::create(&path).map_err(storage)?;
+        let file = File::create(&path).map_err(storage)?;
+        self.scratch.observe_file(&path, &file)?;
         Ok(path)
     }
 
@@ -860,7 +882,7 @@ impl<'a> PropertyRows<'a> {
         Ok(RunWriter {
             rows: self,
             path,
-            file: std::io::BufWriter::with_capacity(1 << 20, file),
+            file: Some(std::io::BufWriter::with_capacity(1 << 20, file)),
             offset: 0,
             frames: Vec::new(),
             total: 0,
@@ -1392,15 +1414,23 @@ impl<'a> PropertyRows<'a> {
     /// Append `batch` to the frame file `path` (windows and projections).
     pub(super) fn write(&self, path: &Path, batch: &RecordBatch) -> Result<(), GfError> {
         let frame = self.encode_frame(batch)?;
-        OpenOptions::new()
+        self.scratch.occupy(frame.len() as u64)?;
+        let mut file = OpenOptions::new()
             .append(true)
             .open(path)
-            .map_err(storage)?
-            .write_all(&frame)
             .map_err(storage)?;
+        let write = file.write_all(&frame).map_err(storage);
+        let observation = self.scratch.observe_file(path, &file);
+        write?;
+        observation?;
         self.written
             .fetch_add(frame.len() as u64, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Release a verified final property scratch file after its reader closes.
+    pub(super) fn reclaim(&self, path: &Path) -> Result<(), GfError> {
+        self.scratch.reclaim_file(path)
     }
 
     pub(super) fn frame_limit(&self) -> usize {

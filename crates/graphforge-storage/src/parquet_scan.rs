@@ -223,6 +223,107 @@ pub fn is_complete_node_id_scan(plan: &dyn ExecutionPlan, column: usize) -> bool
             .all(|fragment| fragment.normalize_topology)
 }
 
+/// Verify that two output columns still identify one node row from a direct
+/// topology Parquet scan. Only row preserving execution nodes with direct
+/// column projections are accepted; joins, computed projections, and arbitrary
+/// sources cannot authorize selected-frontier admission.
+pub(crate) fn is_graph_node_identity_pipeline(
+    plan: &dyn ExecutionPlan,
+    uuid_column: usize,
+    node_id_column: usize,
+) -> bool {
+    if let Some(scan) = plan.downcast_ref::<GraphForgeParquetExec>() {
+        let base_column = |output_column| match &scan.projection {
+            Some(indices) => indices.get(output_column).copied(),
+            None => Some(output_column),
+        };
+        return scan.limit.is_none()
+            && scan.base_schema.as_ref() == crate::TOPOLOGY_NODES_SCHEMA.as_ref()
+            && scan.schema.fields().get(uuid_column).is_some_and(|field| {
+                field.name() == "node_uuid"
+                    && field.data_type() == &arrow::datatypes::DataType::FixedSizeBinary(16)
+            })
+            && scan
+                .schema
+                .fields()
+                .get(node_id_column)
+                .is_some_and(|field| field.name() == "node_id")
+            && base_column(uuid_column).is_some_and(|index| {
+                scan.base_schema
+                    .fields()
+                    .get(index)
+                    .is_some_and(|field| field.name() == "node_uuid")
+            })
+            && base_column(node_id_column).is_some_and(|index| {
+                scan.base_schema
+                    .fields()
+                    .get(index)
+                    .is_some_and(|field| field.name() == "node_id")
+            });
+    }
+    if let Some(ordered) = plan.downcast_ref::<OrderedPartitionStreamExec>() {
+        return plan.schema().as_ref() == ordered.input.schema().as_ref()
+            && is_graph_node_identity_pipeline(
+                ordered.input.as_ref(),
+                uuid_column,
+                node_id_column,
+            );
+    }
+    if let Some(tap) = plan.downcast_ref::<crate::property_join_nomination::UuidBuildKeyTapExec>() {
+        return tap.uuid_column() == uuid_column
+            && plan.children().first().is_some_and(|input| {
+                is_graph_node_identity_pipeline(input.as_ref(), uuid_column, node_id_column)
+            });
+    }
+    if let Some(filter) = plan.downcast_ref::<datafusion::physical_plan::filter::FilterExec>() {
+        if plan.fetch().is_some() || plan.output_ordering().is_some() {
+            return false;
+        }
+        let input_uuid = filter
+            .projection()
+            .as_ref()
+            .map_or(Some(uuid_column), |projection| {
+                projection.get(uuid_column).copied()
+            });
+        let input_node_id = filter
+            .projection()
+            .as_ref()
+            .map_or(Some(node_id_column), |projection| {
+                projection.get(node_id_column).copied()
+            });
+        return input_uuid
+            .zip(input_node_id)
+            .is_some_and(|(uuid, node_id)| {
+                is_graph_node_identity_pipeline(filter.input().as_ref(), uuid, node_id)
+            });
+    }
+    if let Some(exchange) =
+        plan.downcast_ref::<datafusion::physical_plan::repartition::RepartitionExec>()
+    {
+        return !exchange.preserve_order()
+            && exchange.fetch().is_none()
+            && plan.output_ordering().is_none()
+            && plan.schema().as_ref() == exchange.input().schema().as_ref()
+            && is_graph_node_identity_pipeline(
+                exchange.input().as_ref(),
+                uuid_column,
+                node_id_column,
+            );
+    }
+    if let Some(coalesce) = plan
+        .downcast_ref::<datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec>(
+    ) {
+        return plan.schema().as_ref() == coalesce.input().schema().as_ref()
+            && plan.output_ordering().is_none()
+            && is_graph_node_identity_pipeline(
+                coalesce.input().as_ref(),
+                uuid_column,
+                node_id_column,
+            );
+    }
+    false
+}
+
 /// Session extension carrying the #337 I/O concurrency semaphore.
 #[derive(Clone, Debug)]
 pub struct IoConcurrencyExt(pub Arc<tokio::sync::Semaphore>);
