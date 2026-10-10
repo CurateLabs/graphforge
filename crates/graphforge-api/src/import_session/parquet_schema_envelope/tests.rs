@@ -197,19 +197,50 @@ fn missing_descendants_extra_root_and_missing_repetition_are_refused() {
     assert!(storage_error(
         topology(&[root(Some(1)), missing_rep]).unwrap_err()
     ));
+    assert!(storage_error(
+        topology(&[root(Some(1)), group(b"g", -1)]).unwrap_err()
+    ));
+    assert!(storage_error(topology(&[]).unwrap_err()));
 }
 
 #[test]
 fn empty_root_and_native_empty_nonroot_group_have_distinct_topology() {
-    let empty_root = topology(&[root(None)]).unwrap();
+    let mut ignored_root = root(None);
+    ignored_root.physical = true;
+    ignored_root.repetition = None;
+    let empty_root = topology(&[ignored_root]).unwrap();
     assert_eq!(empty_root.nodes, 1);
     assert_eq!(empty_root.physical_leaves, 0);
+    assert_eq!(topology(&[root(Some(0))]).unwrap().nodes, 1);
     let mut empty = group(b"empty", 0);
     empty.physical = false;
     let facts = topology(&[root(Some(1)), empty]).unwrap();
     assert_eq!(facts.nodes, 2);
     assert_eq!(facts.physical_leaves, 0);
     assert_eq!(facts.max_visited_depth, 1);
+}
+
+#[test]
+fn a_physical_type_on_a_positive_child_group_is_ignored() {
+    let mut physical_group = group(b"g", 1);
+    physical_group.physical = true;
+    let facts = topology(&[root(Some(1)), physical_group, leaf(b"x", 0)]).unwrap();
+    assert_eq!(facts.physical_leaves, 1);
+    assert_eq!(facts.group_child_slots, 2);
+}
+
+#[test]
+fn checked_levels_refuse_a_deep_optional_chain() {
+    let mut elements = vec![root(Some(1))];
+    for _ in 0..i16::MAX {
+        let mut node = group(b"g", 1);
+        node.repetition = Some(1);
+        elements.push(node);
+    }
+    let mut final_leaf = leaf(b"x", 1);
+    final_leaf.repetition = Some(1);
+    elements.push(final_leaf);
+    assert!(storage_error(topology(&elements).unwrap_err()));
 }
 
 #[test]
