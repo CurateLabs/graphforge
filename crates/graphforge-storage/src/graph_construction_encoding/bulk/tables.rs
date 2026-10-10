@@ -244,6 +244,7 @@ pub(super) fn collect_nodes(
     sources: &[BulkSource<'_>],
     retain: bool,
     properties: Option<&super::property_rows::PropertyRows<'_>>,
+    decode: Option<&super::gate::ByteGate>,
     budgets: GraphConstructionBudgets,
     cancel: &AtomicBool,
 ) -> Result<NodeTable, GfError> {
@@ -260,8 +261,13 @@ pub(super) fn collect_nodes(
         .collect::<Vec<_>>();
     let chunks = claim_in_order(jobs, |(((source, task, rows), uuids), labels)| {
         check_cancelled(cancel)?;
+        // The bytes this task decodes are reserved before it reads.
+        let _decoding = decode
+            .map(|pool| pool.hold(sources[source].task_decode_bytes(task), cancel))
+            .transpose()?;
         let mut chunk = NodeChunk::default();
         let mut written = 0;
+        let mut sink = properties.map(super::property_rows::PropertyRows::sink);
         sources[source].reader.read_task(task, &mut |batch| {
             check_cancelled(cancel)?;
             if !sources[source].reader.admitted() {
@@ -287,8 +293,8 @@ pub(super) fn collect_nodes(
                 &mut labels[written..written + count],
             );
             written += count;
-            if let Some(properties) = properties {
-                properties.ingest(&batch, cancel)?;
+            if let Some(sink) = &mut sink {
+                sink.push(&batch, cancel)?;
             }
             if retain {
                 chunk.kept.push(batch);
@@ -297,6 +303,9 @@ pub(super) fn collect_nodes(
         })?;
         if written != rows {
             return Err(short_source());
+        }
+        if let Some(sink) = sink {
+            sink.finish(cancel)?;
         }
         Ok(chunk)
     })?;

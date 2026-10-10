@@ -1,12 +1,14 @@
 //! Structured parse error type for the GraphForge Cypher parser.
 
-use crate::Span;
+use crate::{Span, UnsupportedCypherFeature};
 use serde::{Deserialize, Serialize};
 
 /// The kind of parse error.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum ParseErrorKind {
+    /// Valid grammar for a recognized construct whose execution is unavailable.
+    UnsupportedFeature(UnsupportedCypherFeature),
     /// The lexer encountered a byte sequence it could not tokenize.
     UnexpectedChar,
     /// The parser encountered a token that does not fit the grammar at this
@@ -55,6 +57,9 @@ pub struct ParseError {
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let kind_str = match &self.kind {
+            ParseErrorKind::UnsupportedFeature(feature) => {
+                format!("{} is not supported", feature.description())
+            }
             ParseErrorKind::UnexpectedChar => "unexpected character".to_owned(),
             ParseErrorKind::UnexpectedToken { found, .. } => {
                 format!("unexpected token '{found}'")

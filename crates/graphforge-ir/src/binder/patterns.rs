@@ -34,6 +34,7 @@ impl Binder {
                 edge_rel_names: s.edge_rel_names.clone(),
                 scalar_list_edges: s.scalar_list_edges.clone(),
                 var_kinds: s.var_kinds.clone(),
+                node_lists: s.node_lists.clone(),
                 next_var: s.next_var,
                 builder: GraphPlan::builder("openCypher").ontology_mode(self.mode),
                 errors: Vec::new(),
@@ -235,6 +236,12 @@ impl Binder {
                         (1, Some(1))
                     };
                     let is_scalar_hop = min_hops == 1 && max_hops == Some(1);
+                    if !is_scalar_hop && rel.types.len() > 1 {
+                        s.errors.push(super::unsupported::diagnostic(
+                            graphforge_core::UnsupportedCypherFeature::VariableLengthRelationshipAlternation,
+                            rel.span,
+                        ));
+                    }
                     if is_var_hop && is_scalar_hop {
                         s.scalar_list_edges.insert(edge_var);
                     }
@@ -581,6 +588,7 @@ impl Binder {
             edge_rel_names: s.edge_rel_names.clone(),
             scalar_list_edges: s.scalar_list_edges.clone(),
             var_kinds: s.var_kinds.clone(),
+            node_lists: s.node_lists.clone(),
             next_var: s.next_var,
             builder: GraphPlan::builder("openCypher").ontology_mode(self.mode),
             errors: Vec::new(),
@@ -776,6 +784,7 @@ impl Binder {
             edge_rel_names: s.edge_rel_names.clone(),
             scalar_list_edges: s.scalar_list_edges.clone(),
             var_kinds: s.var_kinds.clone(),
+            node_lists: s.node_lists.clone(),
             next_var: s.next_var,
             builder: GraphPlan::builder("openCypher").ontology_mode(self.mode),
             errors: Vec::new(),
@@ -838,6 +847,7 @@ impl Binder {
                 edge_rel_names: s.edge_rel_names.clone(),
                 scalar_list_edges: s.scalar_list_edges.clone(),
                 var_kinds: s.var_kinds.clone(),
+                node_lists: s.node_lists.clone(),
                 next_var: s.next_var,
                 builder: GraphPlan::builder("openCypher").ontology_mode(self.mode),
                 errors: Vec::new(),

@@ -4,22 +4,29 @@ adr: "0058"
 status: "Accepted"
 date: "2026-10-07"
 superseded_by: null
-revisit_when: "Node identity tables must go out of core, or a published artifact stops being a projection of the three ranked inputs"
+revisit_when: "A published artifact stops being a projection of the three ranked inputs, appends adopt the builder as a delta build and merge, or a build on an adequate budget cannot hold its node tables once out-of-core node identities (#1929) have landed"
 ---
 
 # ADR 0058: Initial builds run on a bulk builder derived from the published generation
 
 **Status:** Accepted
 
-**Implementation:** #1883, #1900 and #1916 (slices of epic #1881).
+**Implementation:** epic #1881. Merged: #1883 (the builder), #1900 (edge and
+adjacency scratch), #1916 (property scratch), #1898 (sources read in place),
+#1899 (direct-to-CAS writes), #1901 (chunk-API initial builds), #1902 (no UUID
+membership index) and #1928 (no allocated-block comparison of unsynced encoded
+artifacts). Pending: #1929 (out-of-core node tables), #1918 (bounded source
+decoding), #1938 (parallel scratch passes), the retirement of the old
+initial-build machinery, and the integrated acceptance audit and ladder. The
+epic's throughput close gate is #1387.
 
 **Related:**
 - ADR 0013 (project generation protocol; the `CURRENT` swap is unchanged)
 - ADR 0038 (determinism at the publication boundary; property 1 is amended below)
 - ADR 0046 (construction keeps its own sorting and partitioning)
 - ADR 0047 (one construction CPU budget)
-- ADR 0056 (shaping stays serial within stages; this record removes shaping for initial builds instead)
-- ADR 0057 (node-index endpoint resolution, which the builder keeps)
+- ADR 0056 (shaping stays serial within stages; this record removes shaping for initial builds instead, and appends keep it)
+- ADR 0057 (node-index endpoint resolution; the builder uses its own index, and the staged index is retired with the staged initial-build path)
 - #1387 (ingest floor), #1881 (epic)
 
 ## Context
@@ -86,20 +93,33 @@ functions.
 - An initial build whose estimated peak memory fits the plan-time budget keeps
   everything resident. One that does not runs the same passes through scratch
   files (below), bounding normalized builder workspace within its reservation.
-  Registered-source decoding and normalization are sized and reserved before
-  they allocate (below). The budget is
+  The registered-source decoding and normalization boundary is described below;
+  its complete memory bound remains a prerequisite under #1918. The budget is
   three fifths of the process's cgroup-aware memory headroom, or the bytes in
-  `GF_BULK_BUILD_MEMORY_BUDGET_BYTES`. Routing is a function of the footers,
-  the page headers and the budget, never of the order of the rows, and the bytes
-  are the same on every route.
-- The staged path remains for appends, sessions an earlier binary began staging
+  `GF_BULK_BUILD_MEMORY_BUDGET_BYTES`. Routing is a function of the footers and
+  the budget, never of the data, and the bytes are the same on every route.
+- The staged path remains for appends and for sessions an earlier binary began
+  staging. **Pending (#1929):** it also remains for `node_tables_exceed_budget`
   (a chunk-API session replays its spool through it, see *Chunk-API initial
-  builds*), and `node_tables_exceed_budget`: the identity tables,
-  labels, endpoint index and degree arrays need a conservative 56 bytes per
-  node alongside the fixed workspace. Property payload size does not contribute
-  to this identity-table footprint. Out-of-core node identities remain open
-  under #1881. The historical `edge_properties_exceed_budget` manifest reason
-  remains readable but new builds do not select it.
+  builds*): the identity tables, labels, endpoint index and degree arrays need
+  a conservative 56 bytes per node alongside the fixed workspace. Property
+  payload size does not contribute to this identity-table footprint. #1929
+  moves the node tables to bounded scratch and removes that reason. The
+  historical `edge_properties_exceed_budget` manifest reason remains readable
+  but new builds do not select it.
+- Once #1929 lands, no plan sends an initial build to the staged path. Deleting
+  the machinery that only that path used is the last code slice of #1881. It
+  keeps the append engine. The maintainer's 2026-10-09 retirement decision
+  removes compatibility for staged initial-build sessions from unreleased
+  0.6.0-dev builds: a session with parent generation zero and staged chunks
+  must restart its import. Endpoint-index resume, staged route reasons,
+  chunk-spool replay, format-2 copied-source sessions and the persisted
+  `build_route` are pending removal. The facade will refuse staged construction
+  on an empty project; storage tests may still use the staged engine.
+  The staged-versus-bulk test oracle is also retired. Bulk correctness is
+  established by byte identity across resident, scratch and node-scratch
+  routes, forced worker counts, kill and rerun, and equality of recorded
+  queries and exact node and edge counts.
 - The route is chosen once, by the first `validate`, and written to the import
   manifest (`build_route`); every later `validate`, in any process, reads it
   back. A refused, cancelled or killed bulk attempt therefore cannot be
@@ -108,6 +128,52 @@ functions.
   again on each attempt from the live budget; either produces the same bytes.
   If that budget can no longer hold the bulk route's node tables or minimum scratch workspace, the attempt returns a resource-limit refusal before loading
   data. It keeps the bulk route and can retry when the budget is sufficient.
+
+## Maintainer decisions (2026-10-07, epic #1881)
+
+1. **Initial builds restart instead of resuming.** A crash, cancellation or
+   error discards the build's scratch and the next `validate` reruns from the
+   sources; objects already installed are content-addressed and skipped. This
+   amends ADR 0038 property 1 for initial builds (below). Publication
+   atomicity and the preservation of the prior `CURRENT` are unchanged.
+   Implemented by #1883.
+2. **Registered sources are read in place.** `register-parquet` no longer
+   copies and fsyncs the whole source. It records the file's canonical path,
+   native identity, size, modification time and footer. Every read
+   re-establishes that pin, and the whole-file SHA-256 is folded from the bytes
+   the build's own read pass decodes, so a source that is deleted, replaced,
+   resized or touched is refused. The pin is the change detector and the digest
+   is provenance: a rewrite that preserves the whole pin is not detected.
+   Sessions that copied sources under an earlier version still resume, validate
+   and append. Implemented by #1898.
+3. **Each published object is written once.** The encoded file is hashed while
+   it is written, synced, and linked into the content-addressed store; it is
+   not copied or read back at install (a copy remains where the filesystem
+   cannot link, and on Windows). Exact length and XXH64 are checked on first
+   read (ADR 0049). Implemented by #1899.
+4. **Initial builds only.** Appends keep the staged path. The builder does not
+   read a parent generation, and the CSR is still published only by initial
+   builds. Appends can adopt the builder later as a delta build followed by a
+   merge, which this record does not decide.
+5. **The UUID membership index is no longer produced or read.** It duplicated
+   the UUID columns of the published Parquet at 17-25 B per edge. Append
+   validation probes the published Parquet with page-index pruning. Under the
+   pre-v1 policy the format changed in place: projects that still carry the
+   files open, export and verify them as ordinary entries and never read them.
+   Implemented by #1902 (see [UUID identity authority](../book/architecture/uuid-membership-index.md)).
+
+## Pending work
+
+| Issue | What it changes | Until it lands |
+| --- | --- | --- |
+| #1929 | Node identities, the endpoint index and the degree and CSR-offset workspace use bounded scratch, so `node_tables_exceed_budget` has no producer. | A build whose node tables exceed the budget takes the staged path. |
+| #1918 | Registered-source decoding and normalization are bounded before allocation (Parquet dictionary and page expansion, row maps). | The scratch route bounds normalized transport, not every source decoder. A reservation describes builder workspace, not process RSS. |
+| #1938 | Scratch partitions run concurrently, as many as the budget admits. | Over-budget builds run one scratch partition at a time (`scratch_concurrency` 1). |
+| Retirement | Delete the initial-build machinery that nothing reaches once #1929 lands. | The staged initial-build code still exists and is reachable through the route above. |
+
+The throughput floor (1,000,000 edges/s at every ladder rung) and the
+multicore criterion are gated by the integrated ladder under #1881 and #1387.
+This record claims neither.
 
 ## Scratch route
 
@@ -127,7 +193,8 @@ When the estimate exceeds the budget:
   Consecutive small child ranges coalesce through one streaming output, so
   bookkeeping follows the number of bounded partitions rather than the radix
   fanout. Already-fitting initial ranges keep their original scratch files.
-- Pass 3 builds the partitions in order, several at a time. Sorting a partition
+- Pass 3 currently builds the partitions in order, one at a time. #1938 will
+  admit concurrent partitions from their workspace reservations. Sorting a partition
   ranks its edges (the first `edge_id` is the number of earlier edges plus
   one). It checks identities, writes its canonical edge files, and scatters
   its adjacency entries once into node-range partitions bounded by exact node degrees. A node larger than a
@@ -159,6 +226,13 @@ When the estimate exceeds the budget:
   canonical CSR carry and Arrow IPC encoder, and a reusable minimum 64 MiB
   decoding/scatter/sort working set. The remaining budget expands that working
   set; the planner does not invent headroom after exhausting the budget.
+  The partitions in flight are also the threads that run every scratch pass.
+  A property-bearing build charges an additional 128 MiB per worker after the
+  first, based on measured allocator/runtime growth. The remaining working set
+  assigns three eighths to the shared property-retention pool and three eighths
+  to decode. The planner selects the largest worker count, up to available
+  lanes, for which each worker can still hold an 8 MiB property run (#1938).
+  Before #1938, property-bearing input ran on one worker.
   Relation metadata and published artifact inventories remain proportional to
   the number of output groups and files; edge-bearing CSR workspace is fixed.
 
@@ -171,12 +245,34 @@ Property-bearing kinds on the scratch route keep no decoded source batches.
 Every admitted batch, including a bare schema in a property-bearing kind, enters
 an exact-schema group identified by the existing normalized schema digest.
 Sorted Arrow IPC runs preserve full UUID order, field order, field metadata,
-values and nulls. Two-way merges bound decoded fan-in; physical transport frames
-have a small target size, with one admitted wide row allowed its own frame.
-Scratch frames have length bounds and CRC32C, without hashing or fsync.
+values and nulls. An edge's scratch rows leave out its endpoints, which the
+edge records already carry (#1938). Physical transport frames have a small
+target size, with one admitted wide row allowed its own frame. Scratch frames
+have length bounds and CRC32C, without hashing or fsync.
+
+Each worker retains the batches of its current task, per schema group, until
+a run's worth of bytes is held, then sorts them once and writes one run. The
+retained bytes of all workers draw on one gate sized from the budget, so
+concurrent intake cannot exceed it. Reduction continues until both the run
+count is within the derived fan-in and the complete selected frame set fits one
+strict merge reservation. This can require reducing a group below nominal
+fan-in when wide frames make its whole-job reservation too large. Each level
+merges only the smallest admitted runs needed to satisfy those limits. The
+runs that remain merge into identity-range segments, one task per range; the
+segments in range order are the sorted group. Input bytes are written once as
+a run and once as a final segment, plus any reduction rewrites required by
+fan-in or the shared byte budget. (#1920's two-way tree rewrote every row once
+per level: 20.4 GB of property scratch for the 1.19 GB SNB BI SF1 input, #1938.)
+Run size, fan-in and frame size are derived from the budget and the
+concurrency, and the receipt reports them with retained and merge-reservation
+peaks.
 
 Catalog observation streams groups in digest order and rows in UUID order,
-using the same per-row interning operations as the resident route. Overlay
+using the same per-row interning operations as the resident route. A group
+whose schema has no property columns keeps no rows: it writes no overlay, and
+the catalog needs only each owner's first appearance in identity order and its
+row count, which `intern_*_observed_at` records exactly as that many single
+observations would (#1938). Overlay
 encoding preserves the existing logical `max_batch_rows` windows. A disposable
 window spool records payload while a compact owner/active-field inventory finds
 all non-null fields for each owner across that whole window. A second scan
@@ -197,9 +293,12 @@ decoding. Property scratch reads and writes are reported separately; catalog,
 window and projected-row scans all count. Cancellation and recovery discard this
 transport using the same restart policy as edge and CSR scratch.
 
-Registered-source decoding precedes this transport and has its own bound (next
-section). Property traffic and fixed reservations remain distinct from measured
-process RSS.
+Registered-source decoding precedes this transport. Parquet dictionary/page
+expansion and the normalizer's row maps need their own bounded physical batching
+and admission (#1918); this decision does not claim that normalized-row transport
+alone bounds every source decoder. Available IPC footer/body expansion and schema
+metadata reservations are checked before creating eager source readers. Property
+traffic and fixed reservations remain distinct from measured process RSS.
 
 **Alternatives.** Reusing the staged range partitioner would retain partition
 writers, SHA receipts and fsyncs and would inherit its sorted-chunk and skew
@@ -208,95 +307,6 @@ I/O with graph size. Arrow row conversion is not an exact transport: hidden
 children of null lists or temporal structs can affect the existing fragment
 charge. IPC preserves those children. This is an internal reversible storage
 choice; no public API or published format changes.
-
-## Source decoding is sized and reserved before it allocates (#1918)
-
-A source's stored bytes do not state what it decodes to. A dictionary-encoded
-column stores each distinct value once and expands it for every row that uses it;
-a delta-encoded one stores a value as a suffix of its predecessor; a repeated
-column holds as many children as a row has; and the Arrow reader keeps one
-decompressed page and one decoded dictionary per column resident while it
-advances. None of that is in the footer. The reader therefore sizes what it will
-hold before it reads, and refuses what cannot fit before it allocates.
-
-- **Plan.** For each Parquet source the planner reads every page header (never a
-  body) and checks each against the bytes left in its column chunk and against
-  the footer's totals. That fixes, for every row group, what a decode holds before
-  it reads a row: each column's largest decompressed page, its decompressed
-  dictionary (and a 4-byte offset per entry), and the one compressed page being
-  decompressed. The largest such row group is `decoded_workspace_bytes`, which the
-  fixed footprint already includes for IPC sources. The bytes the source's digest
-  holds ahead of its hashed prefix are counted there too, and never exceed a
-  sixty-fourth of the budget: what exceeds them is read again when the digest
-  completes, as before. The page and column indexes are not read; nothing the
-  decoder needs depends on them. A footer is refused before it is read if parsing it (the
-  metadata measures about 4 bytes per footer byte; the plan assumes 12, beside the
-  footer itself) would take more than a quarter of the budget.
-- **Size.** Each logical batch's Arrow bytes follow from those headers and, where
-  they cannot say, from the values. Fixed-width columns are rows times width.
-  Byte-array columns stored plain or as `DELTA_LENGTH_BYTE_ARRAY` hold their values
-  back to back, so the decompressed pages a batch touches bound it. Dictionary-
-  and `DELTA_BYTE_ARRAY`-encoded columns and repeated columns are measured through
-  the typed Parquet column readers, which materialize no Arrow array: the lengths
-  of the values each row selects, and the children each row holds. A dictionary
-  whose entries are all one length is sized without reading its indices. Each
-  child of a repeated value also costs a pair of 16-bit levels and the sink's
-  32-bit take index (8 bytes), because those scale with the child count and not
-  with its bytes. A bound from pages overstates a batch smaller than a page; where
-  that bound alone would put any batch of a source past the admission limit, the
-  plain columns of that source are sized from their values too, so the page bound
-  never decides a refusal. `BulkSource::decoded_bytes`, which the route estimate retains for
-  property-bearing kinds, is these sizes, not the footer's stored bytes. Sizing is
-  deterministic in the file, so it does not make routing depend on the data's
-  order.
-- **Admit.** Before the Arrow reader decodes a batch, a batch whose size exceeds
-  the intake window (`max_batch_bytes`) by more than an eighth is refused with a
-  typed resource limit, counted as rejected rows. Anything smaller is decoded and
-  meets the same exact window check as before, so no input the earlier decoder
-  accepted is refused by an estimate. That exact check, and the one on a decoded
-  property-scratch frame, count each buffer allocation once: an Arrow file's reader
-  slices all the columns of a batch out of one message body, which
-  `get_array_memory_size` reports once per column, so a 2.6 MB batch of forty
-  integer columns read as 105 MB and was refused.
-- **Reserve.** A task reserves the pages it will hold, two copies of its widest
-  batch (the decoded batch and the identities and labels normalization rebuilds)
-  and 64 bytes per row, from one pool before it opens its file. The pool is the
-  property workspace plus the reader's planned workspace when properties force one
-  task at a time, a quarter of the working set otherwise, and one worst-case task
-  per worker when everything is resident. A task the pool could never grant is
-  refused with a typed resource limit; one it could grant later waits for a running
-  task to release. The report names the pool's capacity and the
-  most it held (`source_workspace_*`).
-- **Normalize.** An import needs identities and labels back from normalization and
-  keeps its Arrow property columns as they are, so normalization validates each
-  property cell and drops its value with its row instead of holding a map per row.
-  A list's children are converted one at a time. The refusals, their order and their
-  messages are those of the retaining path (a unit test compares the two on cells
-  that fail at every depth).
-- **IPC.** The footer sizing that refuses unallocatable files before a reader is
-  built is unchanged and its bound is reserved per task. The file's schema is run
-  through normalization on an empty batch first, so an unsupported column type is
-  refused before the file reader decodes every dictionary eagerly.
-
-*Limits, stated.* A page whose values the sizing readers could not hold at once
-(40 bytes each, 256 MiB at most) is refused while planning. The resident route
-retains its decoded batches by design; what it retains is now estimated from what
-they decode to. The sink copies a repeated column with a take index per child, which
-the 8 bytes per child above anticipates but does not make smaller. The Parquet
-crate reserves capacity for the decompressed size a page header states, which the
-header checks above bound but a rewrite that preserves the whole file pin
-(documented in resumable import) could still misstate; the decompressor then
-rejects the length mismatch. Sizing dictionary-, delta- and repeated columns
-decodes their indices or lengths once more while planning.
-
-**Alternatives.** Splitting a logical batch into smaller physical pieces would
-keep the decoder inside a smaller reservation, but the batch is the unit the
-builder's window, derived identities and refusal order are defined over, and it
-is already bounded by `max_batch_bytes`; what was unbounded was allocating before
-learning a batch exceeded it. Estimating a batch from its dictionary's largest
-entry refuses ordinary inputs whose dictionary holds one large value few rows
-use. Bounding by footer bytes understates dictionary and delta expansion by
-orders of magnitude.
 
 ## Restart instead of resume (amends ADR 0038 property 1)
 

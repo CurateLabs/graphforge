@@ -24,6 +24,7 @@ import xml.etree.ElementTree as ET
 
 from jsonschema import Draft202012Validator
 
+from graphforge_bench import phase_cgroup
 from graphforge_bench.native_rung import read_native_rung
 from graphforge_bench.progressive_qualification import (
     UNBOUNDED_SCALES,
@@ -656,20 +657,6 @@ def _plan_wall_seconds(plan: Mapping[str, Any]) -> int | None:
     return value
 
 
-def _host_swap_counters() -> dict[str, int]:
-    """Use the same host-wide counters as BenchExec's SwapCheck."""
-    counters = {}
-    for line in Path("/proc/vmstat").read_text(encoding="utf-8").splitlines():
-        fields = line.split()
-        if fields and fields[0] in {"pswpin", "pswpout"}:
-            if len(fields) != 2 or not fields[1].isdigit():
-                raise ControllerError("host swap counters are malformed")
-            counters[fields[0]] = int(fields[1])
-    if counters.keys() != {"pswpin", "pswpout"}:
-        raise ControllerError("host swap counters are missing")
-    return counters
-
-
 def run(
     *,
     root: Path,
@@ -707,7 +694,6 @@ def run(
                 work_root=work_root,
                 wall_seconds=_plan_wall_seconds(plan),
             )
-            swap_before = _host_swap_counters()
             status = _run_benchexec(
                 stage,
                 executables,
@@ -715,25 +701,30 @@ def run(
                 durable_root=work_root,
                 home=work_root,
             )
-            try:
-                swap_after = _host_swap_counters()
-            except (ControllerError, OSError, ValueError) as error:
+            # The swap that counts is the phase's own: the counters of BenchExec's run
+            # cgroup, sampled while it ran (#1914). The host-wide /proc/vmstat counted
+            # every process on a shared host, so another process's page-out failed
+            # the rung. Occupied swap alone is not a failure.
+            swap = phase_cgroup.load_evidence(stage / phase_cgroup.EVIDENCE_NAME)
+            swapped = phase_cgroup.verdict(swap)
+            if swapped is None and status == 0:
+                # BenchExec reported a result but its cgroup was never read, so whether
+                # the rung swapped is unknown: reject it rather than trust it.
                 _preserve_failure_artifacts(stage, output_dir, scale)
                 failed = _result(plan, "failed", "host_swap_unavailable")
                 _validate(root, "progressive-host-run-result.json", failed)
                 publish_json_no_clobber(result_path, failed)
-                raise HostRunError("host_swap_unavailable") from error
+                raise HostRunError("host_swap_unavailable")
             # BenchExec logs unreliable measurements but still exits zero.
-            # Reject host interference before publishing a usable rung; occupied
-            # swap alone is not a failure and does not imply GraphForge swapped.
-            if any(swap_after[key] > value for key, value in swap_before.items()):
-                (stage / "raw" / "host-swap.json").write_text(
-                    json.dumps({"before": swap_before, "after": swap_after}, sort_keys=True) + "\n",
-                    encoding="utf-8",
+            # Reject the phase's own swapping before publishing a usable rung.
+            if swapped:
+                shutil.copyfile(
+                    stage / phase_cgroup.EVIDENCE_NAME,
+                    stage / "raw" / phase_cgroup.EVIDENCE_NAME,
                 )
                 _preserve_failure_artifacts(stage, output_dir, scale)
                 # Keep a known execution failure as the primary cause. The
-                # retained counters still record concurrent host interference.
+                # retained counters still record the swapping.
                 phase_failure = _certify_phase_failure(stage)
                 if phase_failure is not None:
                     code = "rung_phase_failed"

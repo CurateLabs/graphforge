@@ -108,8 +108,7 @@ WITH toFloat(totalMessageCountInt) AS totalMessageCount
 MATCH (message)
 WHERE (message:Post OR message:Comment) AND message.creationDate < $datetime
   AND message.content IS NOT NULL
-WITH totalMessageCount, message, message.creationDate AS creationDate
-WITH totalMessageCount, message, creationDate.year AS year
+WITH totalMessageCount, message, message.creationDate.year AS year
 WITH
   totalMessageCount,
   year,
@@ -147,11 +146,9 @@ ORDER BY
         ],
         upstream: "neo4j/queries/bi-1.cypher",
         rewrite: Some(
-            "rewrite: LDBC text hits #1888 D3 (`message.creationDate.year` fails to plan). The \
-             year is read from a WITH-bound alias of the same property, so every value is \
-             unchanged. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its \
-             WHERE, which selects the same nodes, because import sessions assign one label per \
-             node.",
+            "rewrite: LDBC text uses a `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` \
+             in its WHERE, which selects the same nodes because import sessions assign one \
+             label per node. The upstream stored creation-date component expression is preserved.",
         ),
     },
     BiQuery {
@@ -234,8 +231,8 @@ MATCH (topForum:Forum)-[:HAS_MEMBER]->(person:Person)
 WHERE topForum IN topForums
 WITH DISTINCT topForums, person
 OPTIONAL MATCH (forum:Forum)-[:CONTAINER_OF]->(:Post)<-[:REPLY_OF*0..]-(message)-[:HAS_CREATOR]->(person)
-WHERE (message:Post OR message:Comment)
-WITH person, count(DISTINCT CASE WHEN forum IN topForums THEN message END) AS messageCount
+WHERE (message:Post OR message:Comment) AND forum IN topForums
+WITH person, count(DISTINCT message) AS messageCount
 RETURN
   person.id AS personId,
   person.firstName AS personFirstName,
@@ -261,9 +258,7 @@ LIMIT 100",
              LDBC ORDER BY + WITH DISTINCT yields and Umbra's maxNumberOfMembers. The UNION ALL \
              of members with their messages and members with 0 becomes every member of a top \
              forum with an OPTIONAL MATCH count of distinct messages in top-forum threads. \
-             Top-forum membership of a thread's forum is tested inside the count, not in the \
-             OPTIONAL MATCH WHERE: that shape returns wrong answers in BI13 and IC5 (#1919), \
-             though it matches the reference on BI4's own query fixture. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its \
+             The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its \
              WHERE, which selects the same nodes, because import sessions assign one label per \
              node.",
         ),
@@ -356,15 +351,14 @@ LIMIT 100",
         cypher: "\
 MATCH (tag:Tag {name: $tag})
 OPTIONAL MATCH (tag)<-[interest:HAS_INTEREST]-(person:Person)
-WITH tag, collect(person.id) AS interestedPersonIds
+WITH tag, collect(person) AS interestedPersons
 OPTIONAL MATCH (tag)<-[:HAS_TAG]-(message)-[:HAS_CREATOR]->(person:Person)
          WHERE (message:Post OR message:Comment)
            AND $startDate < message.creationDate
            AND message.creationDate < $endDate
-WITH tag, interestedPersonIds, interestedPersonIds + collect(person.id) AS personIds
-UNWIND personIds AS personId
-WITH DISTINCT tag, personId
-MATCH (person:Person {id: personId})
+WITH tag, interestedPersons, interestedPersons + collect(person) AS persons
+UNWIND persons AS person
+WITH DISTINCT tag, person
 WITH
   tag,
   person,
@@ -392,12 +386,9 @@ LIMIT 100",
         columns: &["personId", "score", "friendsScore"],
         upstream: "neo4j/queries/bi-8.cypher",
         rewrite: Some(
-            "rewrite: LDBC text hits #1888 D8 (a concatenated node list `a + collect(n)` loses \
-             the node type, so its elements are refused in a pattern). The interested persons and \
-             the message creators are concatenated as person ids and the distinct persons \
-             re-matched by id, which selects the same persons. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its \
-             WHERE, which selects the same nodes, because import sessions assign one label per \
-             node.",
+            "rewrite: LDBC text uses a `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` \
+             in its WHERE, which selects the same nodes because import sessions assign one \
+             label per node. Upstream collect/concatenate/UNWIND node values are preserved.",
         ),
     },
     BiQuery {
@@ -554,13 +545,8 @@ WITH
 WITH
   country,
   zombie,
-  zombie.creationDate AS zombieCreationDate,
-  messageCount
-WITH
-  country,
-  zombie,
-  12 * ($endDate.year  - zombieCreationDate.year )
-     + ($endDate.month - zombieCreationDate.month)
+  12 * ($endDate.year  - zombie.creationDate.year )
+     + ($endDate.month - zombie.creationDate.month)
      + 1 AS months,
   messageCount
 WHERE messageCount / months < 1
@@ -570,10 +556,10 @@ WITH
 UNWIND zombies AS zombie
 OPTIONAL MATCH
   (zombie)<-[:HAS_CREATOR]-(message)<-[:LIKES]-(likerZombie:Person)
-WHERE (message:Post OR message:Comment)
+WHERE (message:Post OR message:Comment) AND likerZombie IN zombies
 WITH
   zombie,
-  count(CASE WHEN likerZombie IN zombies THEN likerZombie END) AS zombieLikeCount
+  count(likerZombie) AS zombieLikeCount
 OPTIONAL MATCH
   (zombie)<-[:HAS_CREATOR]-(message)<-[:LIKES]-(likerPerson:Person)
 WHERE (message:Post OR message:Comment) AND likerPerson.creationDate < $endDate
@@ -597,13 +583,9 @@ LIMIT 100",
         columns: &["zombieId", "zombieLikeCount", "totalLikeCount", "zombieScore"],
         upstream: "neo4j/queries/bi-13.cypher",
         rewrite: Some(
-            "rewrite: LDBC text hits #1888 D3 (`zombie.creationDate.year` fails to plan) and \
-             #1919 (`OPTIONAL MATCH ... WHERE likerZombie IN zombies` returns zero like counts \
-             on the query fixture). The creation-date components are read from a WITH-bound alias of the same property, and likes by \
-             zombies are counted with a conditional count inside the aggregate, which counts \
-             the same like edges. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its \
-             WHERE, which selects the same nodes, because import sessions assign one label per \
-             node.",
+            "rewrite: LDBC text uses a `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` \
+             in its WHERE, which selects the same nodes because import sessions assign one \
+             label per node. The upstream stored creation-date component arithmetic is preserved.",
         ),
     },
     BiQuery {

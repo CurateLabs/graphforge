@@ -1,9 +1,11 @@
 //! Binder diagnostics shared with the facade.
-use crate::Span;
+use crate::{Span, UnsupportedCypherFeature};
 
 /// The kind of a binder error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BindErrorKind {
+    /// A recognized construct has no executable implementation.
+    UnsupportedFeature(UnsupportedCypherFeature),
     /// A label name was not found in the ontology (strict mode).
     UnknownLabel,
     /// A relation type name was not found in the ontology (strict mode).

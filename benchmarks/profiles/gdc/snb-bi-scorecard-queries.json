@@ -10,7 +10,7 @@
         "sumMessageLength",
         "percentageOfMessages"
       ],
-      "cypher": "MATCH (message)\nWHERE (message:Post OR message:Comment) AND message.creationDate < $datetime\nWITH count(message) AS totalMessageCountInt\nWITH toFloat(totalMessageCountInt) AS totalMessageCount\nMATCH (message)\nWHERE (message:Post OR message:Comment) AND message.creationDate < $datetime\n  AND message.content IS NOT NULL\nWITH totalMessageCount, message, message.creationDate AS creationDate\nWITH totalMessageCount, message, creationDate.year AS year\nWITH\n  totalMessageCount,\n  year,\n  message:Comment AS isComment,\n  CASE\n    WHEN message.length <  40 THEN 0\n    WHEN message.length <  80 THEN 1\n    WHEN message.length < 160 THEN 2\n    ELSE                           3\n  END AS lengthCategory,\n  count(message) AS messageCount,\n  sum(message.length) / toFloat(count(message)) AS averageMessageLength,\n  sum(message.length) AS sumMessageLength\nRETURN\n  year,\n  isComment,\n  lengthCategory,\n  messageCount,\n  averageMessageLength,\n  sumMessageLength,\n  messageCount / totalMessageCount AS percentageOfMessages\nORDER BY\n  year DESC,\n  isComment ASC,\n  lengthCategory ASC",
+      "cypher": "MATCH (message)\nWHERE (message:Post OR message:Comment) AND message.creationDate < $datetime\nWITH count(message) AS totalMessageCountInt\nWITH toFloat(totalMessageCountInt) AS totalMessageCount\nMATCH (message)\nWHERE (message:Post OR message:Comment) AND message.creationDate < $datetime\n  AND message.content IS NOT NULL\nWITH totalMessageCount, message, message.creationDate.year AS year\nWITH\n  totalMessageCount,\n  year,\n  message:Comment AS isComment,\n  CASE\n    WHEN message.length <  40 THEN 0\n    WHEN message.length <  80 THEN 1\n    WHEN message.length < 160 THEN 2\n    ELSE                           3\n  END AS lengthCategory,\n  count(message) AS messageCount,\n  sum(message.length) / toFloat(count(message)) AS averageMessageLength,\n  sum(message.length) AS sumMessageLength\nRETURN\n  year,\n  isComment,\n  lengthCategory,\n  messageCount,\n  averageMessageLength,\n  sumMessageLength,\n  messageCount / totalMessageCount AS percentageOfMessages\nORDER BY\n  year DESC,\n  isComment ASC,\n  lengthCategory ASC",
       "operation": "BI1",
       "parameters": [
         {
@@ -19,7 +19,7 @@
           "name": "datetime"
         }
       ],
-      "rewrite": "rewrite: LDBC text hits #1888 D3 (`message.creationDate.year` fails to plan). The year is read from a WITH-bound alias of the same property, so every value is unchanged. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node.",
+      "rewrite": "rewrite: LDBC text uses a `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes because import sessions assign one label per node. The upstream stored creation-date component expression is preserved.",
       "upstream": "neo4j/queries/bi-1.cypher"
     },
     {
@@ -79,7 +79,7 @@
         "personCreationDate",
         "messageCount"
       ],
-      "cypher": "MATCH (country:Country)<-[:IS_PART_OF]-(:City)<-[:IS_LOCATED_IN]-(person:Person)<-[:HAS_MEMBER]-(forum:Forum)\nWHERE forum.creationDate > $date\nWITH country, forum, count(person) AS numberOfMembers\nWITH forum, max(numberOfMembers) AS maxNumberOfMembers\nORDER BY maxNumberOfMembers DESC, forum.id ASC\nLIMIT 100\nWITH collect(forum) AS topForums\nMATCH (topForum:Forum)-[:HAS_MEMBER]->(person:Person)\nWHERE topForum IN topForums\nWITH DISTINCT topForums, person\nOPTIONAL MATCH (forum:Forum)-[:CONTAINER_OF]->(:Post)<-[:REPLY_OF*0..]-(message)-[:HAS_CREATOR]->(person)\nWHERE (message:Post OR message:Comment)\nWITH person, count(DISTINCT CASE WHEN forum IN topForums THEN message END) AS messageCount\nRETURN\n  person.id AS personId,\n  person.firstName AS personFirstName,\n  person.lastName AS personLastName,\n  person.creationDate AS personCreationDate,\n  messageCount\nORDER BY\n  messageCount DESC,\n  personId ASC\nLIMIT 100",
+      "cypher": "MATCH (country:Country)<-[:IS_PART_OF]-(:City)<-[:IS_LOCATED_IN]-(person:Person)<-[:HAS_MEMBER]-(forum:Forum)\nWHERE forum.creationDate > $date\nWITH country, forum, count(person) AS numberOfMembers\nWITH forum, max(numberOfMembers) AS maxNumberOfMembers\nORDER BY maxNumberOfMembers DESC, forum.id ASC\nLIMIT 100\nWITH collect(forum) AS topForums\nMATCH (topForum:Forum)-[:HAS_MEMBER]->(person:Person)\nWHERE topForum IN topForums\nWITH DISTINCT topForums, person\nOPTIONAL MATCH (forum:Forum)-[:CONTAINER_OF]->(:Post)<-[:REPLY_OF*0..]-(message)-[:HAS_CREATOR]->(person)\nWHERE (message:Post OR message:Comment) AND forum IN topForums\nWITH person, count(DISTINCT message) AS messageCount\nRETURN\n  person.id AS personId,\n  person.firstName AS personFirstName,\n  person.lastName AS personLastName,\n  person.creationDate AS personCreationDate,\n  messageCount\nORDER BY\n  messageCount DESC,\n  personId ASC\nLIMIT 100",
       "operation": "BI4",
       "parameters": [
         {
@@ -88,7 +88,7 @@
           "name": "date"
         }
       ],
-      "rewrite": "rewrite: LDBC text hits #1888 D5 (CALL subquery). The top-100 forums are ordered by their largest per-country member count, then id, which is the order the LDBC ORDER BY + WITH DISTINCT yields and Umbra's maxNumberOfMembers. The UNION ALL of members with their messages and members with 0 becomes every member of a top forum with an OPTIONAL MATCH count of distinct messages in top-forum threads. Top-forum membership of a thread's forum is tested inside the count, not in the OPTIONAL MATCH WHERE: that shape returns wrong answers in BI13 and IC5 (#1919), though it matches the reference on BI4's own query fixture. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node.",
+      "rewrite": "rewrite: LDBC text hits #1888 D5 (CALL subquery). The top-100 forums are ordered by their largest per-country member count, then id, which is the order the LDBC ORDER BY + WITH DISTINCT yields and Umbra's maxNumberOfMembers. The UNION ALL of members with their messages and members with 0 becomes every member of a top forum with an OPTIONAL MATCH count of distinct messages in top-forum threads. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node.",
       "upstream": "neo4j/queries/bi-4.cypher"
     },
     {
@@ -151,7 +151,7 @@
         "score",
         "friendsScore"
       ],
-      "cypher": "MATCH (tag:Tag {name: $tag})\nOPTIONAL MATCH (tag)<-[interest:HAS_INTEREST]-(person:Person)\nWITH tag, collect(person.id) AS interestedPersonIds\nOPTIONAL MATCH (tag)<-[:HAS_TAG]-(message)-[:HAS_CREATOR]->(person:Person)\n         WHERE (message:Post OR message:Comment)\n           AND $startDate < message.creationDate\n           AND message.creationDate < $endDate\nWITH tag, interestedPersonIds, interestedPersonIds + collect(person.id) AS personIds\nUNWIND personIds AS personId\nWITH DISTINCT tag, personId\nMATCH (person:Person {id: personId})\nWITH\n  tag,\n  person,\n  100 * size([(tag)<-[interest:HAS_INTEREST]-(person) | interest]) + size([(tag)<-[:HAS_TAG]-(message)-[:HAS_CREATOR]->(person) WHERE (message:Post OR message:Comment) AND $startDate < message.creationDate AND message.creationDate < $endDate | message])\n  AS score\nOPTIONAL MATCH (person)-[:KNOWS]-(friend)\nWITH\n  person,\n  score,\n  100 * size([(tag)<-[interest:HAS_INTEREST]-(friend) | interest]) + size([(tag)<-[:HAS_TAG]-(message)-[:HAS_CREATOR]->(friend) WHERE (message:Post OR message:Comment) AND $startDate < message.creationDate AND message.creationDate < $endDate | message])\n  AS friendScore\nRETURN\n  person.id AS personId,\n  score,\n  sum(friendScore) AS friendsScore\nORDER BY\n  score + friendsScore DESC,\n  personId ASC\nLIMIT 100",
+      "cypher": "MATCH (tag:Tag {name: $tag})\nOPTIONAL MATCH (tag)<-[interest:HAS_INTEREST]-(person:Person)\nWITH tag, collect(person) AS interestedPersons\nOPTIONAL MATCH (tag)<-[:HAS_TAG]-(message)-[:HAS_CREATOR]->(person:Person)\n         WHERE (message:Post OR message:Comment)\n           AND $startDate < message.creationDate\n           AND message.creationDate < $endDate\nWITH tag, interestedPersons, interestedPersons + collect(person) AS persons\nUNWIND persons AS person\nWITH DISTINCT tag, person\nWITH\n  tag,\n  person,\n  100 * size([(tag)<-[interest:HAS_INTEREST]-(person) | interest]) + size([(tag)<-[:HAS_TAG]-(message)-[:HAS_CREATOR]->(person) WHERE (message:Post OR message:Comment) AND $startDate < message.creationDate AND message.creationDate < $endDate | message])\n  AS score\nOPTIONAL MATCH (person)-[:KNOWS]-(friend)\nWITH\n  person,\n  score,\n  100 * size([(tag)<-[interest:HAS_INTEREST]-(friend) | interest]) + size([(tag)<-[:HAS_TAG]-(message)-[:HAS_CREATOR]->(friend) WHERE (message:Post OR message:Comment) AND $startDate < message.creationDate AND message.creationDate < $endDate | message])\n  AS friendScore\nRETURN\n  person.id AS personId,\n  score,\n  sum(friendScore) AS friendsScore\nORDER BY\n  score + friendsScore DESC,\n  personId ASC\nLIMIT 100",
       "operation": "BI8",
       "parameters": [
         {
@@ -170,7 +170,7 @@
           "name": "endDate"
         }
       ],
-      "rewrite": "rewrite: LDBC text hits #1888 D8 (a concatenated node list `a + collect(n)` loses the node type, so its elements are refused in a pattern). The interested persons and the message creators are concatenated as person ids and the distinct persons re-matched by id, which selects the same persons. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node.",
+      "rewrite": "rewrite: LDBC text uses a `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes because import sessions assign one label per node. Upstream collect/concatenate/UNWIND node values are preserved.",
       "upstream": "neo4j/queries/bi-8.cypher"
     },
     {
@@ -296,7 +296,7 @@
         "totalLikeCount",
         "zombieScore"
       ],
-      "cypher": "MATCH (country:Country {name: $country})<-[:IS_PART_OF]-(:City)<-[:IS_LOCATED_IN]-(zombie:Person)\nWHERE zombie.creationDate < $endDate\nWITH country, zombie\nOPTIONAL MATCH (zombie)<-[:HAS_CREATOR]-(message)\nWHERE (message:Post OR message:Comment) AND message.creationDate < $endDate\nWITH\n  country,\n  zombie,\n  count(message) AS messageCount\nWITH\n  country,\n  zombie,\n  zombie.creationDate AS zombieCreationDate,\n  messageCount\nWITH\n  country,\n  zombie,\n  12 * ($endDate.year  - zombieCreationDate.year )\n     + ($endDate.month - zombieCreationDate.month)\n     + 1 AS months,\n  messageCount\nWHERE messageCount / months < 1\nWITH\n  country,\n  collect(zombie) AS zombies\nUNWIND zombies AS zombie\nOPTIONAL MATCH\n  (zombie)<-[:HAS_CREATOR]-(message)<-[:LIKES]-(likerZombie:Person)\nWHERE (message:Post OR message:Comment)\nWITH\n  zombie,\n  count(CASE WHEN likerZombie IN zombies THEN likerZombie END) AS zombieLikeCount\nOPTIONAL MATCH\n  (zombie)<-[:HAS_CREATOR]-(message)<-[:LIKES]-(likerPerson:Person)\nWHERE (message:Post OR message:Comment) AND likerPerson.creationDate < $endDate\nWITH\n  zombie,\n  zombieLikeCount,\n  count(likerPerson) AS totalLikeCount\nRETURN\n  zombie.id AS zombieId,\n  zombieLikeCount,\n  totalLikeCount,\n  CASE totalLikeCount\n    WHEN 0 THEN 0.0\n    ELSE zombieLikeCount / toFloat(totalLikeCount)\n  END AS zombieScore\nORDER BY\n  zombieScore DESC,\n  zombieId ASC\nLIMIT 100",
+      "cypher": "MATCH (country:Country {name: $country})<-[:IS_PART_OF]-(:City)<-[:IS_LOCATED_IN]-(zombie:Person)\nWHERE zombie.creationDate < $endDate\nWITH country, zombie\nOPTIONAL MATCH (zombie)<-[:HAS_CREATOR]-(message)\nWHERE (message:Post OR message:Comment) AND message.creationDate < $endDate\nWITH\n  country,\n  zombie,\n  count(message) AS messageCount\nWITH\n  country,\n  zombie,\n  12 * ($endDate.year  - zombie.creationDate.year )\n     + ($endDate.month - zombie.creationDate.month)\n     + 1 AS months,\n  messageCount\nWHERE messageCount / months < 1\nWITH\n  country,\n  collect(zombie) AS zombies\nUNWIND zombies AS zombie\nOPTIONAL MATCH\n  (zombie)<-[:HAS_CREATOR]-(message)<-[:LIKES]-(likerZombie:Person)\nWHERE (message:Post OR message:Comment) AND likerZombie IN zombies\nWITH\n  zombie,\n  count(likerZombie) AS zombieLikeCount\nOPTIONAL MATCH\n  (zombie)<-[:HAS_CREATOR]-(message)<-[:LIKES]-(likerPerson:Person)\nWHERE (message:Post OR message:Comment) AND likerPerson.creationDate < $endDate\nWITH\n  zombie,\n  zombieLikeCount,\n  count(likerPerson) AS totalLikeCount\nRETURN\n  zombie.id AS zombieId,\n  zombieLikeCount,\n  totalLikeCount,\n  CASE totalLikeCount\n    WHEN 0 THEN 0.0\n    ELSE zombieLikeCount / toFloat(totalLikeCount)\n  END AS zombieScore\nORDER BY\n  zombieScore DESC,\n  zombieId ASC\nLIMIT 100",
       "operation": "BI13",
       "parameters": [
         {
@@ -310,7 +310,7 @@
           "name": "endDate"
         }
       ],
-      "rewrite": "rewrite: LDBC text hits #1888 D3 (`zombie.creationDate.year` fails to plan) and #1919 (`OPTIONAL MATCH ... WHERE likerZombie IN zombies` returns zero like counts on the query fixture). The creation-date components are read from a WITH-bound alias of the same property, and likes by zombies are counted with a conditional count inside the aggregate, which counts the same like edges. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes, because import sessions assign one label per node.",
+      "rewrite": "rewrite: LDBC text uses a `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its WHERE, which selects the same nodes because import sessions assign one label per node. The upstream stored creation-date component arithmetic is preserved.",
       "upstream": "neo4j/queries/bi-13.cypher"
     },
     {

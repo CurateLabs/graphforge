@@ -91,7 +91,11 @@ fn intern_rows(
     budgets: GraphConstructionBudgets,
 ) -> Result<(), GfError> {
     for group in groups {
-        intern_batch(catalog, &group.batch, kind, budgets)?;
+        let required = match kind {
+            ConstructionChunkKind::Node => 2,
+            ConstructionChunkKind::Edge => 4,
+        };
+        intern_batch(catalog, &group.batch, kind, required, budgets)?;
     }
     Ok(())
 }
@@ -100,11 +104,12 @@ pub(super) fn intern_batch(
     catalog: &mut RuntimeCatalog,
     batch: &RecordBatch,
     kind: ConstructionChunkKind,
+    required: usize,
     budgets: GraphConstructionBudgets,
 ) -> Result<(), GfError> {
-    let (required, owner_column) = match kind {
-        ConstructionChunkKind::Node => (2, "label"),
-        ConstructionChunkKind::Edge => (4, "rel_type"),
+    let owner_column = match kind {
+        ConstructionChunkKind::Node => "label",
+        ConstructionChunkKind::Edge => "rel_type",
     };
     let owners = required_string(batch, owner_column)?;
     let schema = batch.schema();
@@ -178,6 +183,48 @@ impl<'a> RelationStats<'a> {
     }
 }
 
+/// Intern the sorted scratch groups in the order of their digests. A group
+/// with properties streams its rows. One without kept only its owners, by
+/// first appearance in identity order, and how many rows each holds, which is
+/// what repeated single observations leave in the catalog.
+fn intern_scratch(
+    catalog: &mut RuntimeCatalog,
+    rows: &super::property_rows::PropertyRows<'_>,
+    groups: &[super::property_rows::SortedGroup],
+    kind: ConstructionChunkKind,
+    budgets: GraphConstructionBudgets,
+    cancel: &AtomicBool,
+) -> Result<(), GfError> {
+    for group in groups {
+        if let Some(owners) = &group.bare_owners {
+            for (owner, observed) in owners {
+                match kind {
+                    ConstructionChunkKind::Node => {
+                        catalog.intern_label_observed_at(owner, 0, *observed)?;
+                    }
+                    ConstructionChunkKind::Edge => {
+                        catalog.intern_relation_type_observed_at(owner, 0, *observed)?;
+                    }
+                }
+                admit(catalog, budgets)?;
+            }
+            continue;
+        }
+        let mut reader = rows.group_reader(group);
+        while let Some(batch) = reader.next()? {
+            super::tables::check_cancelled(cancel)?;
+            intern_batch(
+                catalog,
+                &batch,
+                kind,
+                super::property_rows::REQUIRED_COLUMNS,
+                budgets,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// Intern in the order the staged path does: every node observation in UUID
 /// order (by schema group for property-bearing input), then every edge's.
 #[allow(clippy::too_many_arguments)]
@@ -199,13 +246,14 @@ pub(super) fn build_catalog(
 ) -> Result<BuiltCatalog, GfError> {
     let mut catalog = RuntimeCatalog::new();
     if let Some((rows, groups)) = node_scratch {
-        for group in groups {
-            let mut reader = rows.reader(&group.path)?;
-            while let Some(batch) = reader.next()? {
-                super::tables::check_cancelled(cancel)?;
-                intern_batch(&mut catalog, &batch, ConstructionChunkKind::Node, budgets)?;
-            }
-        }
+        intern_scratch(
+            &mut catalog,
+            rows,
+            groups,
+            ConstructionChunkKind::Node,
+            budgets,
+            cancel,
+        )?;
     } else if let Some(groups) = node_groups {
         intern_rows(&mut catalog, groups, ConstructionChunkKind::Node, budgets)?;
     } else {
@@ -222,13 +270,14 @@ pub(super) fn build_catalog(
         }
     }
     if let Some((rows, groups)) = edge_scratch {
-        for group in groups {
-            let mut reader = rows.reader(&group.path)?;
-            while let Some(batch) = reader.next()? {
-                super::tables::check_cancelled(cancel)?;
-                intern_batch(&mut catalog, &batch, ConstructionChunkKind::Edge, budgets)?;
-            }
-        }
+        intern_scratch(
+            &mut catalog,
+            rows,
+            groups,
+            ConstructionChunkKind::Edge,
+            budgets,
+            cancel,
+        )?;
     } else if let Some(groups) = edge_groups {
         intern_rows(&mut catalog, groups, ConstructionChunkKind::Edge, budgets)?;
     } else {

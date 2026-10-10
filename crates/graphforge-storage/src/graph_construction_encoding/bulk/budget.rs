@@ -12,7 +12,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::GraphConstructionBudgets;
 use super::plan::BulkBuildPlan;
+use super::property_rows::PropertySizing;
 
 /// Allocator, thread stacks, and the Parquet and Arrow runtime.
 const RUNTIME_BYTES: u64 = 192 << 20;
@@ -41,6 +43,21 @@ const EDGE_PARTITION_BYTES: u64 = 44;
 /// Bytes per adjacency entry a CSR partition holds: the sorted records, the
 /// per-relation view, and its share of the shard encoder.
 const CSR_PARTITION_BYTES: u64 = 40;
+/// Resident bytes a property-bearing worker adds beyond the pools it draws on.
+const WORKER_BYTES: u64 = 128 << 20;
+/// Smallest and largest bytes one worker retains to form a property run. A
+/// smaller run gives more runs to merge, a larger one more retained bytes.
+const MIN_RUN_BYTES: u64 = 8 << 20;
+const MAX_RUN_BYTES: u64 = 64 << 20;
+/// Most runs one property merge holds open, and the frame sizes it may use.
+const MAX_FAN_IN: u64 = 64;
+const TARGET_FAN_IN: u64 = 32;
+const MIN_FRAME_BYTES: u64 = 64 << 10;
+const MAX_FRAME_BYTES: u64 = 1 << 20;
+/// Bytes a merge holds per input and per frame byte: the IPC payload, the
+/// decoded batch, the batch gathered into the chunk, and a share of the
+/// output frame and its encoding.
+const MERGE_FRAMES_PER_INPUT: u64 = 4;
 /// Smallest and largest staging buffer per partition per worker.
 const MIN_STAGING_BYTES: u64 = 8 << 10;
 const MAX_STAGING_BYTES: u64 = 256 << 10;
@@ -153,12 +170,50 @@ pub(super) fn property_workspace(budgets: super::GraphConstructionBudgets) -> u6
 
 pub(super) fn property_extra_workspace(
     plan: &BulkBuildPlan<'_>,
-    budgets: super::GraphConstructionBudgets,
+    budgets: GraphConstructionBudgets,
 ) -> u64 {
     property_workspace(budgets)
         .saturating_add(plan.max_source_schema_bytes().saturating_mul(8))
         .saturating_add(plan.source_decoder_bytes())
         .saturating_sub(CSR_WORKSPACE_BYTES)
+}
+
+/// Bytes available to all property merge jobs after intake has finished.
+/// The schema and decoder terms are shared with the source phase, while both
+/// idle property pools are reusable because node and edge finishes are
+/// sequential.
+pub(super) fn property_merge_capacity(
+    budgets: super::GraphConstructionBudgets,
+    source_schema_bytes: u64,
+    source_decoder_bytes: u64,
+    property_retained_bytes: u64,
+    decode_bytes: u64,
+) -> u64 {
+    (budgets.max_batch_bytes as u64)
+        .saturating_mul(8)
+        .saturating_add(source_schema_bytes.saturating_mul(8))
+        .saturating_add(source_decoder_bytes)
+        .saturating_add(property_retained_bytes)
+        .saturating_add(decode_bytes)
+}
+
+/// Run formation and merging of property rows within `pool` bytes, shared by
+/// `concurrency` workers. Formation retains whole runs; the merge, which runs
+/// after it, holds one frame per input, so both draw on the same pool.
+fn property_sizing(pool: u64, concurrency: u64, schema_bytes: u64) -> PropertySizing {
+    let run_bytes = (pool / concurrency).clamp(1 << 20, MAX_RUN_BYTES);
+    let frame_bytes = (pool / (concurrency * TARGET_FAN_IN * MERGE_FRAMES_PER_INPUT))
+        .clamp(MIN_FRAME_BYTES, MAX_FRAME_BYTES);
+    let per_input = MERGE_FRAMES_PER_INPUT
+        .saturating_mul(frame_bytes)
+        .saturating_add(schema_bytes);
+    PropertySizing {
+        run_bytes: usize::try_from(run_bytes).unwrap_or(usize::MAX),
+        retained_bytes: pool.max(run_bytes),
+        fan_in: usize::try_from((pool / (concurrency * per_input)).clamp(2, MAX_FAN_IN))
+            .unwrap_or(2),
+        frame_bytes: usize::try_from(frame_bytes).unwrap_or(usize::MAX),
+    }
 }
 
 /// Sizes of one scratch build.
@@ -174,42 +229,17 @@ pub(super) struct ScratchPlan {
     pub(super) gate_bytes: u64,
     /// Staging buffer per partition per worker.
     pub(super) staging_bytes: usize,
+    /// Run formation and merging of property rows.
+    pub(super) property: PropertySizing,
+    /// Bytes the tasks decoding at once may reserve in total.
+    pub(super) decode_bytes: u64,
 }
 
 #[cfg(test)]
-thread_local! {
-    /// Forces the partition counts of a test build (edge, CSR).
-    static FORCED_PARTITIONS: std::cell::Cell<Option<(usize, usize)>> =
-        const { std::cell::Cell::new(None) };
-    static FORCED_GATE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
-}
-
-/// Forces the partition counts of the builds the current test thread runs,
-/// until dropped, so a small graph spans several partitions.
+#[path = "budget_test_support.rs"]
+pub(crate) mod test_support;
 #[cfg(test)]
-pub(crate) struct ForcedPartitions;
-
-#[cfg(test)]
-impl ForcedPartitions {
-    pub(crate) fn with_gate(bytes: u64) -> Self {
-        FORCED_GATE.with(|forced| forced.set(Some(bytes)));
-        Self
-    }
-
-    pub(crate) fn set(edge: usize, csr: usize) -> Self {
-        FORCED_PARTITIONS.with(|forced| forced.set(Some((edge, csr))));
-        Self
-    }
-}
-
-#[cfg(test)]
-impl Drop for ForcedPartitions {
-    fn drop(&mut self) {
-        FORCED_PARTITIONS.with(|forced| forced.set(None));
-        FORCED_GATE.with(|forced| forced.set(None));
-    }
-}
-
+use test_support::{FORCED_GATE, FORCED_PARTITIONS};
 impl ScratchPlan {
     #[cfg(test)]
     pub(super) fn derive(plan: &BulkBuildPlan<'_>, budget: u64, workers: usize) -> Self {
@@ -233,70 +263,111 @@ impl ScratchPlan {
             .iter()
             .chain(&plan.edges)
             .any(|source| !source.property_free);
-        let fixed = plan
+        // Held whatever the concurrency: the node tables, the fixed workspace,
+        // and (with properties) the overlay writer's workspace.
+        let shared = plan
             .node_tables_resident_bytes()
             .saturating_add(if properties {
                 property_extra_workspace(plan, budgets)
             } else {
                 0
             });
-        let working = budget
-            .saturating_sub(fixed)
+        // What the workers share beyond that: staging, the bytes the tasks in
+        // flight decode, the bytes the property sort retains, and the partitions
+        // in flight. Which tasks decode at once is decided by the decode pool at
+        // run time, so the worker count is not charged one decoder each.
+        let available = budget
+            .saturating_sub(shared)
             .saturating_add(MIN_WORKING_BYTES);
-        // Three quarters of the working set hold partitions; the rest stages
-        // scatter buffers and decoded input.
-        let gate_bytes = working / 4 * 3;
-        #[cfg(test)]
-        let gate_bytes = FORCED_GATE.with(std::cell::Cell::get).unwrap_or(gate_bytes);
-        let staging_total = working / 8;
-        // A task's decode window is the larger of the planning constant and what
-        // the sources need to open one row group (#1918).
-        let decode_window = DECODE_WINDOW_BYTES.max(plan.source_decoder_bytes());
+        // Each further property-bearing worker also keeps what its thread
+        // allocates and frees: measured on SNB BI SF1, peak resident memory grew by about
+        // 120 MB per worker beyond the pools (1.27 GB at no workers, 2.10 GB at
+        // 7, 3.05 GB at 15). Those bytes come off the working set, and the
+        // workers may take at most five eighths of it.
+        let overhead = |concurrency: u64| {
+            if properties {
+                // The first worker is part of the fixed footprint.
+                (concurrency - 1).saturating_mul(WORKER_BYTES)
+            } else {
+                0
+            }
+        };
+        let decoder = DECODE_WINDOW_BYTES.max(plan.source_decoder_bytes());
         let ceil = |bytes: u64, per: u64| bytes.div_ceil(per.max(1));
         let mut best = None;
-        for concurrency in (1..=if properties { 1 } else { workers.max(1) as u64 }).rev() {
-            // Decoding tasks in flight must fit beside the staging buffers.
-            if concurrency > 1 && concurrency * decode_window > working / 4 {
+        for concurrency in (1..=workers.max(1) as u64).rev() {
+            if overhead(concurrency) > available / 8 * 5 {
                 continue;
             }
+            let working = available.saturating_sub(overhead(concurrency));
+            // Decoding tasks in flight must fit beside the staging buffers.
+            if !properties && concurrency > 1 && concurrency * decoder > working / 4 {
+                continue;
+            }
+            // Each worker's property run fits the retained pool.
+            if properties && concurrency > 1 && working / 8 * 3 / concurrency < MIN_RUN_BYTES {
+                continue;
+            }
+            // Three quarters of the working set hold partitions; the rest stages
+            // scatter buffers and decoded input.
+            let gate_bytes = working / 4 * 3;
+            #[cfg(test)]
+            let gate_bytes = FORCED_GATE.with(std::cell::Cell::get).unwrap_or(gate_bytes);
             let per_partition = gate_bytes / (2 * concurrency);
             let edge_partitions = ceil(edges.saturating_mul(EDGE_PARTITION_BYTES), per_partition)
                 .clamp(1, MAX_PARTITIONS);
             let csr_partitions = ceil(edges.saturating_mul(CSR_PARTITION_BYTES), per_partition)
                 .clamp(1, MAX_PARTITIONS);
             let widest = edge_partitions.max(2 * csr_partitions);
-            let staging = (staging_total / (concurrency * widest)).min(MAX_STAGING_BYTES);
+            let staging = (working / 8 / (concurrency * widest)).min(MAX_STAGING_BYTES);
             if staging >= MIN_STAGING_BYTES {
-                best = Some((concurrency, edge_partitions, csr_partitions, staging));
+                best = Some((
+                    concurrency,
+                    working,
+                    gate_bytes,
+                    edge_partitions,
+                    csr_partitions,
+                    staging,
+                ));
                 break;
             }
         }
         // If even one worker cannot stage at the preferred minimum, smaller
         // blocks preserve the same total buffer reservation. Radix refinement
         // will bound sorting independently of the initial partition cap.
-        let (concurrency, edge_partitions, csr_partitions, staging) = best.unwrap_or_else(|| {
-            let per_partition = gate_bytes / 2;
-            (
-                1,
-                ceil(edges.saturating_mul(EDGE_PARTITION_BYTES), per_partition)
-                    .clamp(1, MAX_PARTITIONS),
-                ceil(edges.saturating_mul(CSR_PARTITION_BYTES), per_partition)
-                    .clamp(1, MAX_PARTITIONS),
-                (staging_total / (2 * MAX_PARTITIONS)).max(32),
-            )
-        });
+        let (concurrency, working, gate_bytes, edge_partitions, csr_partitions, staging) = best
+            .unwrap_or_else(|| {
+                let working = available;
+                let gate_bytes = working / 4 * 3;
+                #[cfg(test)]
+                let gate_bytes = FORCED_GATE.with(std::cell::Cell::get).unwrap_or(gate_bytes);
+                let per_partition = gate_bytes / 2;
+                (
+                    1,
+                    working,
+                    gate_bytes,
+                    ceil(edges.saturating_mul(EDGE_PARTITION_BYTES), per_partition)
+                        .clamp(1, MAX_PARTITIONS),
+                    ceil(edges.saturating_mul(CSR_PARTITION_BYTES), per_partition)
+                        .clamp(1, MAX_PARTITIONS),
+                    (working / 8 / (2 * MAX_PARTITIONS)).max(32),
+                )
+            });
         #[cfg(test)]
         let (edge_partitions, csr_partitions) = FORCED_PARTITIONS
             .with(std::cell::Cell::get)
             .map_or((edge_partitions, csr_partitions), |(edge, csr)| {
                 (edge as u64, csr as u64)
             });
+        let decode_bytes = working / 8 * 3;
         Self {
             concurrency: usize::try_from(concurrency).unwrap_or(1),
             edge_partitions: usize::try_from(edge_partitions).unwrap_or(1),
             csr_partitions: usize::try_from(csr_partitions).unwrap_or(1),
             gate_bytes,
             staging_bytes: usize::try_from(staging).unwrap_or(8 << 10),
+            property: property_sizing(working / 8 * 3, concurrency, plan.max_source_schema_bytes()),
+            decode_bytes,
         }
     }
 
@@ -338,101 +409,5 @@ impl ScratchPlan {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use arrow::record_batch::RecordBatch;
-    use graphforge_core::GfError;
-
-    use super::*;
-    use crate::graph_construction_encoding::{BulkBatchReader, BulkSource};
-
-    struct Never;
-
-    impl BulkBatchReader for Never {
-        fn task_rows(&self, _: usize) -> usize {
-            unreachable!("planning only")
-        }
-
-        fn read_task(
-            &self,
-            _: usize,
-            _: &mut dyn FnMut(RecordBatch) -> Result<(), GfError>,
-        ) -> Result<(), GfError> {
-            unreachable!("planning only")
-        }
-    }
-
-    fn rung(scale: u32) -> BulkBuildPlan<'static> {
-        let source = |rows: u64| BulkSource {
-            reader: Arc::new(Never),
-            tasks: 1,
-            rows,
-            property_free: true,
-            decoded_bytes: 0,
-        };
-        BulkBuildPlan {
-            nodes: vec![source(1 << scale)],
-            edges: vec![source(16 << scale)],
-            memory_budget: None,
-        }
-    }
-
-    const GIB: u64 = 1 << 30;
-
-    #[test]
-    fn partition_sizes_and_concurrency_follow_the_budget() {
-        for scale in [22, 24, 26] {
-            let plan = rung(scale);
-            let mut previous = None::<ScratchPlan>;
-            for budget in [8 * GIB, 4 * GIB, 2 * GIB, GIB + GIB / 2] {
-                if budget < plan.node_tables_resident_bytes() {
-                    continue;
-                }
-                let sized = ScratchPlan::derive(&plan, budget, 16);
-                assert!((1..=16).contains(&sized.concurrency), "{sized:?}");
-                assert!(sized.staging_bytes >= 32, "{sized:?}");
-                let working = budget - plan.node_tables_resident_bytes() + MIN_WORKING_BYTES;
-                let buffers = sized.concurrency as u64
-                    * (sized.edge_partitions.max(2 * sized.csr_partitions) as u64)
-                    * sized.staging_bytes as u64;
-                assert!(buffers <= working / 8, "{sized:?}");
-                assert!(
-                    plan.node_tables_resident_bytes() - MIN_WORKING_BYTES
-                        + sized.gate_bytes
-                        + working / 4
-                        <= budget,
-                    "{sized:?}"
-                );
-                // The partitions in flight reserve at most half the gate, so a
-                // partition twice its share still fits.
-                let edges = 16_u64 << scale;
-                let in_flight =
-                    ScratchPlan::edge_cost(edges.div_ceil(sized.edge_partitions as u64))
-                        * sized.concurrency as u64;
-                assert!(
-                    sized.edge_partitions as u64 == MAX_PARTITIONS
-                        || in_flight <= sized.gate_bytes / 2,
-                    "S{scale} budget {budget}: {sized:?} reserves {in_flight}"
-                );
-                // A smaller budget reserves no more in flight.
-                if let Some(larger) = previous {
-                    assert!(
-                        sized.gate_bytes <= larger.gate_bytes,
-                        "{sized:?} {larger:?}"
-                    );
-                }
-                previous = Some(sized);
-            }
-        }
-    }
-
-    #[test]
-    fn a_tiny_input_is_one_partition_and_the_largest_is_bounded() {
-        let tiny = ScratchPlan::derive(&rung(4), GIB, 16);
-        assert_eq!((tiny.edge_partitions, tiny.csr_partitions), (1, 1));
-        let huge = ScratchPlan::derive(&rung(30), 4 * GIB, 16);
-        assert!(huge.edge_partitions as u64 <= MAX_PARTITIONS);
-        assert!(huge.csr_partitions as u64 <= MAX_PARTITIONS);
-    }
-}
+#[path = "budget_tests.rs"]
+mod tests;

@@ -8,8 +8,10 @@ use graphforge_ast::{
 use graphforge_core::Span;
 
 use super::TokenStream;
-use super::expr::parse_expr;
-use super::patterns::{parse_pattern, parse_pattern_list};
+use super::expr::parse_expr_inner as parse_expr;
+use super::patterns::{
+    parse_pattern_inner as parse_pattern, parse_pattern_list_inner as parse_pattern_list,
+};
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -17,7 +19,11 @@ use super::patterns::{parse_pattern, parse_pattern_list};
 
 /// Parse a full Cypher query into an [`AstQuery`].
 pub fn parse_query(ts: &mut TokenStream) -> Result<AstQuery, ParseError> {
-    parse_query_until(ts, false)
+    let query = parse_query_until(ts, false)?;
+    if let Some(error) = ts.unsupported.take() {
+        return Err(error);
+    }
+    Ok(query)
 }
 
 pub(super) fn parse_subquery(ts: &mut TokenStream) -> Result<AstQuery, ParseError> {
@@ -483,43 +489,27 @@ fn parse_delete_clause(ts: &mut TokenStream, detach: bool) -> Result<DeleteClaus
 
 /// Parse a CALL clause. Handles two forms:
 /// - `CALL proc.name(args) [YIELD items]` — named procedure call
-/// - `CALL { query } [YIELD items]`       — subquery (procedure is empty)
+/// - `CALL { query }` — recognized subquery, rejected as unsupported
 fn parse_call_clause(ts: &mut TokenStream) -> Result<CallClause, ParseError> {
     let start = ts.current_pos();
     ts.eat(&Tok::Call)?;
 
     if ts.at(&Tok::LBrace) {
-        // CALL { ... } subquery form
-        ts.advance(); // consume {
-        // Consume tokens until matching } (depth-aware)
-        let mut depth = 1usize;
-        while !ts.is_empty() {
-            match ts.peek() {
-                Some(Tok::LBrace) => {
-                    depth += 1;
-                    ts.advance();
-                }
-                Some(Tok::RBrace) => {
-                    depth -= 1;
-                    ts.advance();
-                    if depth == 0 {
-                        break;
-                    }
-                }
-                _ => {
-                    ts.advance();
-                }
-            }
+        ts.eat(&Tok::LBrace)?;
+        let body = parse_subquery(ts)?;
+        if body.clauses.is_empty() {
+            return Err(ts.err("CALL subquery requires a query body"));
         }
-        if depth != 0 {
-            return Err(ts.err("unterminated CALL subquery: expected `}`"));
-        }
-        let yield_items = parse_opt_yield(ts)?;
+        ts.eat(&Tok::RBrace)?;
+        ts.record_unsupported(
+            graphforge_core::UnsupportedCypherFeature::CallSubquery,
+            ts.span_from(start),
+        );
         Ok(CallClause {
-            procedure: vec![],
-            args: vec![],
+            procedure: Vec::new(),
+            args: Vec::new(),
             args_explicit: false,
-            yield_items,
+            yield_items: Vec::new(),
             span: ts.span_from(start),
         })
     } else {
@@ -1134,13 +1124,14 @@ mod tests {
     // --- CALL ---
 
     #[test]
-    fn call_subquery() {
-        let q = query("CALL { MATCH (n) RETURN n } YIELD n");
-        let AstClause::Call(c) = &q.clauses[0] else {
-            panic!()
-        };
-        assert!(c.procedure.is_empty()); // empty = subquery form
-        assert_eq!(c.yield_items.len(), 1);
+    fn call_subquery_has_specific_unsupported_diagnostic() {
+        let error = crate::parse("CALL { MATCH (n) RETURN n }").unwrap_err();
+        assert_eq!(
+            error.kind,
+            ParseErrorKind::UnsupportedFeature(
+                graphforge_core::UnsupportedCypherFeature::CallSubquery
+            )
+        );
     }
 
     #[test]
@@ -1181,7 +1172,7 @@ mod tests {
         query("REMOVE n.x");
         query("DELETE n");
         query("DETACH DELETE n");
-        query("CALL { MATCH (n) RETURN n }");
+        query("CALL db.labels() YIELD label");
     }
 
     #[test]

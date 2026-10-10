@@ -40,10 +40,13 @@ use super::{
 mod budget;
 mod csr;
 mod emit;
+mod gate;
 mod install;
 mod ordered;
 mod plan;
 mod property_emit;
+mod property_gather;
+mod property_merge;
 mod property_rows;
 mod resident;
 mod scratch;
@@ -51,9 +54,10 @@ mod scratch_csr;
 mod scratch_edges;
 mod source_workspace;
 mod tables;
-
 #[cfg(test)]
-pub(crate) use budget::ForcedPartitions;
+#[path = "bulk/bulk_test_support.rs"]
+pub(crate) mod test_support;
+
 pub use budget::{BulkRoute, BulkStagedReason};
 pub use plan::{BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkSource};
 #[cfg(test)]
@@ -350,30 +354,56 @@ pub(crate) fn encode_bulk(
         .as_ref()
         .map(|_| Scratch::create(source))
         .transpose()?;
+    let property_sizing = scratch_plan
+        .as_ref()
+        .map_or(property_rows::PropertySizing::SERIAL, |sized| {
+            sized.property
+        });
+    let merge_budget_bytes = scratch_plan.as_ref().map_or(0, |sized| {
+        budget::property_merge_capacity(
+            budgets,
+            plan.max_source_schema_bytes(),
+            plan.source_decoder_bytes(),
+            sized.property.retained_bytes,
+            sized.decode_bytes,
+        )
+    });
+    let merge_gate = Arc::new(gate::ByteGate::new(merge_budget_bytes));
+    let frame_index_budget = Arc::new(property_rows::FrameIndexBudget::new(
+        property_rows::FRAME_INDEX_LIMIT_BYTES,
+    ));
     let node_properties = scratch.as_ref().filter(|_| retain_nodes).map(|scratch| {
-        property_rows::PropertyRows::new(
+        property_rows::PropertyRows::new_with_merge_gate(
             scratch,
             ConstructionChunkKind::Node,
             budgets,
             plan.max_source_schema_bytes(),
+            property_sizing,
+            Arc::clone(&merge_gate),
+            Arc::clone(&frame_index_budget),
         )
     });
     let edge_properties = scratch.as_ref().filter(|_| retain_edges).map(|scratch| {
-        property_rows::PropertyRows::new(
+        property_rows::PropertyRows::new_with_merge_gate(
             scratch,
             ConstructionChunkKind::Edge,
             budgets,
             plan.max_source_schema_bytes(),
+            property_sizing,
+            Arc::clone(&merge_gate),
+            Arc::clone(&frame_index_budget),
         )
     });
 
     // Pass 1: nodes.
     let meter = PassMeter::start("nodes");
+    let decode = gate::ByteGate::new(scratch_plan.as_ref().map_or(0, |sized| sized.decode_bytes));
     let mut nodes = run_pass(&pool, cancelled, &cancel, || {
         tables::collect_nodes(
             &plan.nodes,
             retain_nodes && node_properties.is_none(),
             node_properties.as_ref(),
+            scratch_plan.as_ref().map(|_| &decode),
             budgets,
             &cancel,
         )
@@ -392,6 +422,7 @@ pub(crate) fn encode_bulk(
                     &plan.edges,
                     budgets,
                     edge_properties.as_ref(),
+                    &decode,
                     &nodes,
                     &index,
                     sized,
@@ -657,10 +688,18 @@ pub(crate) fn encode_bulk(
     {
         let cache_window =
             graphforge_filesystem::cache_release_window_for_streams(2).map_err(storage)?;
-        let mut lanes = lanes::ParquetLanes::new(
-            if scratch.is_some() { None } else { admission },
-            budgets.max_batch_bytes,
-        );
+        // Parquet compression keeps its lanes on the scratch route when the
+        // plan runs more than one worker: the lanes hold at most
+        // `max_batch_bytes` of fragments, inside the property workspace.
+        let lanes_admission = if scratch_plan
+            .as_ref()
+            .is_some_and(|sized| sized.concurrency <= 1)
+        {
+            None
+        } else {
+            admission
+        };
+        let mut lanes = lanes::ParquetLanes::new(lanes_admission, budgets.max_batch_bytes);
         let mut property_evidence = GraphConstructionEncodingEvidence::default();
         for (rows, groups, kind) in [
             (
@@ -761,6 +800,24 @@ pub(crate) fn encode_bulk(
         + edge_properties
             .as_ref()
             .map_or(0, property_rows::PropertyRows::read_bytes);
+    let property_runs = node_properties
+        .as_ref()
+        .map_or(0, property_rows::PropertyRows::runs_formed)
+        + edge_properties
+            .as_ref()
+            .map_or(0, property_rows::PropertyRows::runs_formed);
+    let property_merge_inputs_peak = [&node_properties, &edge_properties]
+        .into_iter()
+        .flatten()
+        .map(property_rows::PropertyRows::merge_inputs_peak)
+        .max()
+        .unwrap_or(0);
+    let property_peak_retained_bytes = [&node_properties, &edge_properties]
+        .into_iter()
+        .flatten()
+        .map(property_rows::PropertyRows::peak_retained_bytes)
+        .max()
+        .unwrap_or(0);
     scratch_report.write_bytes += property_scratch_write_bytes;
     scratch_report.read_bytes += property_scratch_read_bytes;
     drop((node_properties, edge_properties));
@@ -899,6 +956,37 @@ pub(crate) fn encode_bulk(
             source_workspace_capacity_bytes: source_pool.capacity(),
             source_workspace_peak_bytes: source_pool.peak_bytes(),
             source_workspace_reservations: source_pool.reservations(),
+            property_source_bytes: if scratch_plan.is_some() {
+                plan.nodes
+                    .iter()
+                    .chain(&plan.edges)
+                    .filter(|source| !source.property_free)
+                    .map(|source| source.decoded_bytes)
+                    .fold(0_u64, u64::saturating_add)
+            } else {
+                0
+            },
+            property_runs,
+            property_merge_inputs_peak,
+            property_merge_budget_bytes: merge_gate.capacity(),
+            property_merge_peak_reserved_bytes: merge_gate.peak(),
+            decode_pool_bytes: decode.capacity(),
+            decode_peak_bytes: decode.peak(),
+            property_peak_retained_bytes,
+            property_retained_budget_bytes: if retain_nodes || retain_edges {
+                scratch_plan
+                    .as_ref()
+                    .map_or(0, |sized| sized.property.retained_bytes)
+            } else {
+                0
+            },
+            property_merge_fan_in: if retain_nodes || retain_edges {
+                scratch_plan
+                    .as_ref()
+                    .map_or(0, |sized| sized.property.fan_in as u64)
+            } else {
+                0
+            },
             property_workspace_reserved_bytes: if scratch_plan.is_some()
                 && (retain_nodes || retain_edges)
             {

@@ -10,6 +10,7 @@
 //! | [`ExpandNode`] | Fixed-hop graph expansion |
 //! | [`VarLenExpandNode`] | Variable-length graph expansion |
 //! | [`OptionalMatchNode`] | Optional graph-pattern matching |
+//! | [`CorrelatedSeedNode`] | The outer rows a correlated sub-plan starts from |
 //! | [`PathUniqueNode`] | Path uniqueness constraints |
 //! | [`OntologyInferNode`] | Ontology-derived relation expansion |
 //! | [`GraphMergeNode`] | Match-or-create graph patterns |
@@ -32,6 +33,7 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use datafusion::arrow::datatypes::{DataType, Field, Fields, Schema};
 use datafusion::common::{DFSchema, DFSchemaRef, Result as DfResult, TableReference};
@@ -571,12 +573,14 @@ pub struct OptionalMatchNode {
     /// `MATCH (a) OPTIONAL MATCH (a)-[:R]->(b)`) is carried by the outer side;
     /// appending its columns again would duplicate the `var_<shared>` fields.
     pub inner_keep_idx: Vec<usize>,
-    /// Whether a null key equals a null key. Set for a correlated optional
-    /// sub-plan seeded with the outer rows, whose keys are every outer column:
-    /// an outer row with a null value must still find the sub-plan rows seeded
-    /// from it (#1887 D15). Pattern joins on identities leave it unset, so a
-    /// null identity never matches.
-    pub null_safe_keys: bool,
+    /// The [`CorrelatedSeedNode`] the optional sub-plan starts from, set for a
+    /// correlated sub-plan whose keys are every outer column. The physical
+    /// node executes the outer input once and binds those rows as the seed, so
+    /// the keys on both sides come from one evaluation (#1919). Keys of such a
+    /// sub-plan are null-safe: an outer row with a null value must still find
+    /// the sub-plan rows seeded from it (#1887 D15). Pattern joins on
+    /// identities leave it unset, so a null identity never matches.
+    pub correlated_seed: Option<u64>,
     schema: DFSchemaRef,
 }
 
@@ -603,16 +607,17 @@ impl OptionalMatchNode {
             optional,
             join_keys,
             inner_keep_idx,
-            null_safe_keys: false,
+            correlated_seed: None,
             schema,
         }
     }
 
-    /// The same node with null-safe key equality (see
-    /// [`null_safe_keys`](Self::null_safe_keys)).
+    /// The same node, whose optional sub-plan starts from the
+    /// [`CorrelatedSeedNode`] with this id (see
+    /// [`correlated_seed`](Self::correlated_seed)).
     #[must_use]
-    pub fn with_null_safe_keys(mut self) -> Self {
-        self.null_safe_keys = true;
+    pub fn with_correlated_seed(mut self, seed: u64) -> Self {
+        self.correlated_seed = Some(seed);
         self
     }
 
@@ -685,11 +690,81 @@ impl UserDefinedLogicalNodeCore for OptionalMatchNode {
             self.join_keys.clone(),
             self.inner_keep_idx.clone(),
         );
-        Ok(if self.null_safe_keys {
-            node.with_null_safe_keys()
-        } else {
-            node
+        Ok(match self.correlated_seed {
+            Some(seed) => node.with_correlated_seed(seed),
+            None => node,
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CorrelatedSeedNode
+// ---------------------------------------------------------------------------
+
+static NEXT_CORRELATED_SEED: AtomicU64 = AtomicU64::new(1);
+
+/// The outer rows a correlated sub-plan starts from.
+///
+/// A sub-plan that reads an outer variable its own pattern does not bind (an
+/// `OPTIONAL MATCH ... WHERE x IN <collected list>`) is seeded with the outer
+/// rows and joined back on every outer column. This leaf stands for those
+/// rows: the owning [`OptionalMatchNode`] executes its outer input once and
+/// binds the result here at execution time. Planning the outer input a second
+/// time as the seed would evaluate it twice, and an aggregate such as
+/// `collect` need not return its list in the same order both times, so the
+/// rows would not join back to themselves (#1919).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CorrelatedSeedNode {
+    id: u64,
+    schema: DFSchemaRef,
+}
+
+impl CorrelatedSeedNode {
+    /// A seed with the schema of the outer rows and a process-unique id.
+    #[must_use]
+    pub fn new(schema: DFSchemaRef) -> Self {
+        Self {
+            id: NEXT_CORRELATED_SEED.fetch_add(1, AtomicOrdering::Relaxed),
+            schema,
+        }
+    }
+
+    /// The id the owning [`OptionalMatchNode::correlated_seed`] refers to.
+    #[must_use]
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+}
+
+impl_partial_ord!(CorrelatedSeedNode);
+
+impl UserDefinedLogicalNodeCore for CorrelatedSeedNode {
+    fn name(&self) -> &str {
+        "CorrelatedSeed"
+    }
+
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
+    }
+
+    fn schema(&self) -> &DFSchemaRef {
+        &self.schema
+    }
+
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+
+    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "CorrelatedSeed")
+    }
+
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<Expr>,
+        _inputs: Vec<LogicalPlan>,
+    ) -> DfResult<Self> {
+        Ok(self.clone())
     }
 }
 

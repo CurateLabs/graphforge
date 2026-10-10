@@ -20,8 +20,10 @@ use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::physical_plan::collect;
 use datafusion::physical_plan::execution_plan::Boundedness;
 use datafusion::physical_plan::execution_plan::EmissionType;
+use datafusion::physical_plan::memory::MemoryStream;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use graphforge_core::GfError;
+use graphforge_plan::CorrelatedSeedNode;
 use graphforge_plan::OptionalMatchNode;
 use graphforge_plan::UnwindNode;
 use std::fmt;
@@ -49,7 +51,9 @@ pub struct OptionalMatchExec {
     /// Inner column indices to append to the output, in order (every shared-
     /// variable column already excluded — those come from the outer side).
     inner_keep_idx: Vec<usize>,
-    null_safe_keys: bool,
+    /// The [`CorrelatedSeedExec`] leaves of `inner` that stand for the outer
+    /// rows; bound to the executed outer rows on every execution.
+    correlated_seed: Option<u64>,
     schema: SchemaRef,
     props: Arc<PlanProperties>,
 }
@@ -74,7 +78,7 @@ impl OptionalMatchExec {
             inner,
             join_keys: node.join_keys.clone(),
             inner_keep_idx: node.inner_keep_idx.clone(),
-            null_safe_keys: node.null_safe_keys,
+            correlated_seed: node.correlated_seed,
             schema,
             props,
         }
@@ -125,7 +129,7 @@ impl ExecutionPlan for OptionalMatchExec {
             inner,
             join_keys: self.join_keys.clone(),
             inner_keep_idx: self.inner_keep_idx.clone(),
-            null_safe_keys: self.null_safe_keys,
+            correlated_seed: self.correlated_seed,
             schema: self.schema.clone(),
             props: self.props.clone(),
         }))
@@ -143,10 +147,11 @@ impl ExecutionPlan for OptionalMatchExec {
         }
         let outer = self.outer.clone();
         let inner = self.inner.clone();
+        let correlated_seed = self.correlated_seed;
         let cfg = OptionalConfig {
             join_keys: self.join_keys.clone(),
             inner_keep_idx: self.inner_keep_idx.clone(),
-            null_safe_keys: self.null_safe_keys,
+            null_safe_keys: self.correlated_seed.is_some(),
             out_schema: self.schema.clone(),
             // Carry the child schemas so concat_batches has a schema even when a
             // child yields zero batches (an empty inner must null-shape, not
@@ -157,6 +162,12 @@ impl ExecutionPlan for OptionalMatchExec {
         let schema = self.schema.clone();
         let fut = async move {
             let outer_batches = collect(outer, context.clone()).await?;
+            // A correlated sub-plan starts from the rows just collected, not
+            // from a second evaluation of the outer plan (#1919).
+            let inner = match correlated_seed {
+                Some(seed) => bind_correlated_seed(inner, seed, &outer_batches)?,
+                None => inner,
+            };
             let inner_batches = collect(inner, context).await?;
             optional_join(&cfg, &outer_batches, &inner_batches).map_err(to_df_err)
         };
@@ -164,6 +175,136 @@ impl ExecutionPlan for OptionalMatchExec {
             schema,
             futures::stream::once(fut),
         )))
+    }
+}
+
+/// Replace every [`CorrelatedSeedExec`] with this `seed` id in `plan` by one
+/// that yields `rows`.
+fn bind_correlated_seed(
+    plan: Arc<dyn ExecutionPlan>,
+    seed: u64,
+    rows: &[RecordBatch],
+) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+    use datafusion::common::tree_node::{Transformed, TreeNode};
+
+    let bound = plan.transform_up(|node| {
+        let leaf = node
+            .downcast_ref::<CorrelatedSeedExec>()
+            .filter(|leaf| leaf.seed == seed);
+        match leaf {
+            Some(leaf) => Ok(Transformed::yes(Arc::new(CorrelatedSeedExec::with_rows(
+                seed,
+                leaf.schema.clone(),
+                Some(rows.to_vec()),
+            )) as Arc<dyn ExecutionPlan>)),
+            None => Ok(Transformed::no(node)),
+        }
+    })?;
+    if !bound.transformed {
+        return Err(DataFusionError::Internal(format!(
+            "correlated optional match has no seed leaf {seed} in its sub-plan"
+        )));
+    }
+    Ok(bound.data)
+}
+
+/// Physical leaf of a correlated sub-plan: the outer rows of the
+/// [`OptionalMatchExec`] that owns it, the counterpart of
+/// [`graphforge_plan::CorrelatedSeedNode`].
+///
+/// Planned unbound; the owning [`OptionalMatchExec`] replaces it with a bound
+/// copy holding the rows it collected from its outer input. Executing an
+/// unbound seed is an error.
+pub struct CorrelatedSeedExec {
+    seed: u64,
+    schema: SchemaRef,
+    rows: Option<Vec<RecordBatch>>,
+    props: Arc<PlanProperties>,
+}
+
+impl CorrelatedSeedExec {
+    /// An unbound seed leaf for `node`.
+    #[must_use]
+    pub fn new(node: &CorrelatedSeedNode) -> Self {
+        let schema: SchemaRef = Arc::new(node.schema().as_arrow().clone());
+        Self::with_rows(node.id(), schema, None)
+    }
+
+    fn with_rows(seed: u64, schema: SchemaRef, rows: Option<Vec<RecordBatch>>) -> Self {
+        let props = Arc::new(PlanProperties::new(
+            EquivalenceProperties::new(schema.clone()),
+            Partitioning::UnknownPartitioning(1),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        ));
+        Self {
+            seed,
+            schema,
+            rows,
+            props,
+        }
+    }
+}
+
+impl fmt::Debug for CorrelatedSeedExec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "CorrelatedSeedExec {{ seed: {} }}", self.seed)
+    }
+}
+
+impl DisplayAs for CorrelatedSeedExec {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "CorrelatedSeedExec")
+    }
+}
+
+impl ExecutionPlan for CorrelatedSeedExec {
+    fn name(&self) -> &str {
+        "CorrelatedSeedExec"
+    }
+
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.props
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        if children.is_empty() {
+            Ok(self)
+        } else {
+            Err(DataFusionError::Internal(
+                "CorrelatedSeedExec has no children".into(),
+            ))
+        }
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream, DataFusionError> {
+        if partition != 0 {
+            return Err(DataFusionError::Internal(format!(
+                "CorrelatedSeedExec only has partition 0, got {partition}"
+            )));
+        }
+        let rows = self.rows.clone().ok_or_else(|| {
+            DataFusionError::Internal(format!(
+                "correlated seed {} executed before its outer rows were bound",
+                self.seed
+            ))
+        })?;
+        Ok(Box::pin(MemoryStream::try_new(
+            rows,
+            self.schema.clone(),
+            None,
+        )?))
     }
 }
 
