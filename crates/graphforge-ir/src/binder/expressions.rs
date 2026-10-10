@@ -433,6 +433,15 @@ impl Binder {
                     // resolves against that var's columns. A terminal RETURN
                     // upgrades it to a whole node value in `lower_return_item_expr`.
                     s.builder.push_expr(IrExpr::VarRef(node_var))
+                } else if let Some(feature) = super::unsupported::function(call) {
+                    // Validate argument scope before reporting the missing
+                    // implementation; an undefined name remains a bind error.
+                    for arg in &call.args {
+                        self.lower_expr(arg, parent_span, s);
+                    }
+                    s.errors
+                        .push(super::unsupported::diagnostic(feature, call.span));
+                    s.builder.push_expr(IrExpr::Literal(IrLiteral::Null))
                 } else {
                     let fn_name = call.name.join(".");
                     let ir_args: Vec<ExprId> = call
@@ -641,6 +650,14 @@ impl Binder {
                 s.next_var += 1;
                 s.vars.insert(q.var.clone(), loop_var);
                 let predicate = self.lower_expr(&q.predicate, parent_span, s);
+                if q.kind == graphforge_ast::QuantifierKind::All
+                    && super::unsupported::indexed_relationship_property(&q.predicate, s)
+                {
+                    s.errors.push(super::unsupported::diagnostic(
+                        graphforge_core::UnsupportedCypherFeature::IndexedPathRelationshipPredicate,
+                        q.span,
+                    ));
+                }
                 match prev {
                     Some(v) => {
                         s.vars.insert(q.var.clone(), v);

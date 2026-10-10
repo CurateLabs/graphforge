@@ -9,7 +9,9 @@ use graphforge_core::Span;
 use std::collections::HashMap;
 
 use super::TokenStream;
-use super::patterns::{parse_node_pattern, parse_pattern};
+use super::patterns::{
+    parse_node_pattern_inner as parse_node_pattern, parse_pattern_inner as parse_pattern,
+};
 
 // ---------------------------------------------------------------------------
 // Binding powers
@@ -111,7 +113,13 @@ fn infix_binding_power(op: InfixOp) -> (u8, u8) {
 // Public entry point
 // ---------------------------------------------------------------------------
 
+/// Parse one expression, refusing unsupported constructs after its grammar is validated.
 pub fn parse_expr(ts: &mut TokenStream, min_bp: u8) -> Result<Expr, ParseError> {
+    let expr = parse_expr_inner(ts, min_bp)?;
+    ts.finish_supported(expr)
+}
+
+pub(super) fn parse_expr_inner(ts: &mut TokenStream, min_bp: u8) -> Result<Expr, ParseError> {
     let mut lhs = parse_prefix(ts)?;
     while let Some(op) = peek_infix_op(ts) {
         let (l_bp, r_bp) = infix_binding_power(op);
@@ -176,6 +184,12 @@ fn parse_prefix(ts: &mut TokenStream) -> Result<Expr, ParseError> {
         // --- Block-form existential subquery or exists(...) function ---
         Some(Tok::Exists) => parse_exists(ts, start),
 
+        Some(Tok::Count) if ts.peek_n(1) == Some(&Tok::LBrace) => parse_count_block(ts, start),
+        Some(Tok::Reduce) if ts.peek_n(1) == Some(&Tok::LParen) => parse_reduce(ts, start),
+        Some(Tok::ShortestPath | Tok::AllShortestPaths) if ts.peek_n(1) == Some(&Tok::LParen) => {
+            parse_shortest_path(ts, start)
+        }
+
         // --- Keyword-named functions ---
         Some(
             Tok::Count
@@ -184,23 +198,12 @@ fn parse_prefix(ts: &mut TokenStream) -> Result<Expr, ParseError> {
             | Tok::Reduce
             | Tok::ShortestPath
             | Tok::AllShortestPaths,
-        ) => {
-            let name = tok_keyword_name(ts.peek().unwrap());
-            ts.advance();
-            if ts.eat_if(&Tok::LParen) {
-                parse_function_call_args(ts, vec![name], false, start)
-            } else {
-                Ok(Expr::Var(VarRef {
-                    name,
-                    span: ts.span_from(start),
-                }))
-            }
-        }
+        ) => parse_keyword_function(ts, start),
 
         // --- NOT prefix ---
         Some(Tok::Not) => {
             ts.advance();
-            let expr = parse_expr(ts, 35)?;
+            let expr = parse_expr_inner(ts, 35)?;
             Ok(Expr::UnaryOp(UnaryOp {
                 op: UnaryOpKind::Not,
                 expr: Box::new(expr),
@@ -217,7 +220,7 @@ fn parse_prefix(ts: &mut TokenStream) -> Result<Expr, ParseError> {
                 return Ok(pattern_predicate);
             }
             ts.advance();
-            let inner = parse_expr(ts, 0)?;
+            let inner = parse_expr_inner(ts, 0)?;
             ts.eat(&Tok::RParen)?;
             Ok(Expr::Parenthesized {
                 inner: Box::new(inner),
@@ -252,6 +255,61 @@ fn parse_prefix(ts: &mut TokenStream) -> Result<Expr, ParseError> {
             ts.current_span(),
             "expected expression, found end of input",
         )),
+    }
+}
+
+fn parse_count_block(ts: &mut TokenStream, start: usize) -> Result<Expr, ParseError> {
+    // COUNT and EXISTS share block grammar; retain syntax errors.
+    parse_exists(ts, start)?;
+    Ok(unsupported(
+        ts,
+        start,
+        graphforge_core::UnsupportedCypherFeature::CountSubquery,
+    ))
+}
+
+fn parse_reduce(ts: &mut TokenStream, start: usize) -> Result<Expr, ParseError> {
+    ts.advance();
+    ts.eat(&Tok::LParen)?;
+    eat_ident(ts)?;
+    ts.eat(&Tok::Eq)?;
+    parse_expr_inner(ts, 0)?;
+    ts.eat(&Tok::Comma)?;
+    eat_ident(ts)?;
+    ts.eat(&Tok::In)?;
+    parse_expr_inner(ts, 0)?;
+    ts.eat(&Tok::Pipe)?;
+    parse_expr_inner(ts, 0)?;
+    ts.eat(&Tok::RParen)?;
+    Ok(unsupported(
+        ts,
+        start,
+        graphforge_core::UnsupportedCypherFeature::Reduce,
+    ))
+}
+
+fn parse_shortest_path(ts: &mut TokenStream, start: usize) -> Result<Expr, ParseError> {
+    ts.advance();
+    ts.eat(&Tok::LParen)?;
+    parse_pattern(ts)?;
+    ts.eat(&Tok::RParen)?;
+    Ok(unsupported(
+        ts,
+        start,
+        graphforge_core::UnsupportedCypherFeature::ShortestPath,
+    ))
+}
+
+fn parse_keyword_function(ts: &mut TokenStream, start: usize) -> Result<Expr, ParseError> {
+    let name = tok_keyword_name(ts.peek().expect("keyword was matched"));
+    ts.advance();
+    if ts.eat_if(&Tok::LParen) {
+        parse_function_call_args(ts, vec![name], false, start)
+    } else {
+        Ok(Expr::Var(VarRef {
+            name,
+            span: ts.span_from(start),
+        }))
     }
 }
 
@@ -305,7 +363,7 @@ fn parse_infix(ts: &mut TokenStream, lhs: Expr, op: InfixOp, r_bp: u8) -> Result
         // --- Regex match ---
         InfixOp::RegexMatch => {
             ts.advance();
-            let rhs = parse_expr(ts, r_bp)?;
+            let rhs = parse_expr_inner(ts, r_bp)?;
             let span = Span::new(start, rhs.span().end);
             Ok(Expr::RegexMatch {
                 expr: Box::new(lhs),
@@ -337,7 +395,7 @@ fn parse_infix(ts: &mut TokenStream, lhs: Expr, op: InfixOp, r_bp: u8) -> Result
         // --- IN / NOT IN ---
         InfixOp::In => {
             ts.advance();
-            let rhs = parse_expr(ts, r_bp)?;
+            let rhs = parse_expr_inner(ts, r_bp)?;
             let span = Span::new(start, rhs.span().end);
             Ok(Expr::InList {
                 expr: Box::new(lhs),
@@ -348,7 +406,7 @@ fn parse_infix(ts: &mut TokenStream, lhs: Expr, op: InfixOp, r_bp: u8) -> Result
         }
         InfixOp::NotIn => {
             ts.advance();
-            let rhs = parse_expr(ts, r_bp)?;
+            let rhs = parse_expr_inner(ts, r_bp)?;
             let span = Span::new(start, rhs.span().end);
             Ok(Expr::InList {
                 expr: Box::new(lhs),
@@ -367,7 +425,7 @@ fn parse_infix(ts: &mut TokenStream, lhs: Expr, op: InfixOp, r_bp: u8) -> Result
                 _ => unreachable!(),
             };
             ts.advance();
-            let rhs = parse_expr(ts, r_bp)?;
+            let rhs = parse_expr_inner(ts, r_bp)?;
             let span = Span::new(start, rhs.span().end);
             Ok(Expr::StringOp {
                 expr: Box::new(lhs),
@@ -444,6 +502,18 @@ fn parse_identifier(ts: &mut TokenStream, name: String, start: usize) -> Result<
     }
 }
 
+fn unsupported(
+    ts: &mut TokenStream<'_>,
+    start: usize,
+    feature: graphforge_core::UnsupportedCypherFeature,
+) -> Expr {
+    let span = ts.span_from(start);
+    ts.record_unsupported(feature, span);
+    // This internal placeholder cannot leave the full-query parse boundary:
+    // parse_query returns the recorded feature error after grammar validation.
+    Expr::Literal(Literal::Null(span))
+}
+
 fn parse_exists(ts: &mut TokenStream, start: usize) -> Result<Expr, ParseError> {
     ts.advance();
     if ts.eat_if(&Tok::LBrace) {
@@ -468,7 +538,7 @@ fn parse_exists(ts: &mut TokenStream, start: usize) -> Result<Expr, ParseError> 
         } else {
             let pattern = parse_pattern(ts)?;
             let filter = if ts.eat_if(&Tok::Where) {
-                Some(Box::new(parse_expr(ts, 0)?))
+                Some(Box::new(parse_expr_inner(ts, 0)?))
             } else {
                 None
             };
@@ -495,7 +565,7 @@ fn parse_negation(ts: &mut TokenStream, start: usize) -> Result<Expr, ParseError
             span,
         )));
     }
-    let expr = parse_expr(ts, 75)?;
+    let expr = parse_expr_inner(ts, 75)?;
     Ok(Expr::UnaryOp(UnaryOp {
         op: UnaryOpKind::Neg,
         expr: Box::new(expr),
@@ -511,7 +581,7 @@ fn parse_binary(
     start: usize,
 ) -> Result<Expr, ParseError> {
     ts.advance(); // consume the operator token
-    let rhs = parse_expr(ts, r_bp)?;
+    let rhs = parse_expr_inner(ts, r_bp)?;
     let span = Span::new(start, rhs.span().end);
     let comparison_left = comparison_chain_tail(&lhs, op);
     let binary = Expr::BinaryOp(BinaryOp {
@@ -570,7 +640,7 @@ fn parse_subscript(ts: &mut TokenStream, lhs: Expr, start: usize) -> Result<Expr
     // with no lower bound.
     if ts.eat_if(&Tok::DotDot) {
         // [..hi]
-        let hi = parse_expr(ts, 0)?;
+        let hi = parse_expr_inner(ts, 0)?;
         ts.eat(&Tok::RBracket)?;
         let span = Span::new(start, ts.current_pos());
         // Encode as BinaryOp Slice — use a special representation via
@@ -587,13 +657,13 @@ fn parse_subscript(ts: &mut TokenStream, lhs: Expr, start: usize) -> Result<Expr
             span,
         }));
     }
-    let idx = parse_expr(ts, 0)?;
+    let idx = parse_expr_inner(ts, 0)?;
     if ts.eat_if(&Tok::DotDot) {
         // [lo..hi] or [lo..]
         let (name, args) = if ts.at(&Tok::RBracket) {
             ("_slice_to_end", vec![lhs, idx])
         } else {
-            ("_slice", vec![lhs, idx, parse_expr(ts, 0)?])
+            ("_slice", vec![lhs, idx, parse_expr_inner(ts, 0)?])
         };
         ts.eat(&Tok::RBracket)?;
         let span = Span::new(start, ts.current_pos());
@@ -678,9 +748,9 @@ fn parse_function_call_args(
     let distinct = ts.eat_if(&Tok::Distinct);
     let mut args = Vec::new();
     if !ts.at(&Tok::RParen) {
-        args.push(parse_expr(ts, 0)?);
+        args.push(parse_expr_inner(ts, 0)?);
         while ts.eat_if(&Tok::Comma) {
-            args.push(parse_expr(ts, 0)?);
+            args.push(parse_expr_inner(ts, 0)?);
         }
     }
     ts.eat(&Tok::RParen)?;
@@ -717,14 +787,14 @@ fn parse_list_or_comprehension(ts: &mut TokenStream, start: usize) -> Result<Exp
             unreachable!()
         };
         ts.eat(&Tok::In)?;
-        let list = parse_expr(ts, 0)?;
+        let list = parse_expr_inner(ts, 0)?;
         let filter = if ts.eat_if(&Tok::Where) {
-            Some(Box::new(parse_expr(ts, 0)?))
+            Some(Box::new(parse_expr_inner(ts, 0)?))
         } else {
             None
         };
         let projection = if ts.eat_if(&Tok::Pipe) {
-            Some(Box::new(parse_expr(ts, 0)?))
+            Some(Box::new(parse_expr_inner(ts, 0)?))
         } else {
             None
         };
@@ -739,9 +809,9 @@ fn parse_list_or_comprehension(ts: &mut TokenStream, start: usize) -> Result<Exp
     }
 
     // List literal
-    let mut elements = vec![parse_expr(ts, 0)?];
+    let mut elements = vec![parse_expr_inner(ts, 0)?];
     while ts.eat_if(&Tok::Comma) {
-        elements.push(parse_expr(ts, 0)?);
+        elements.push(parse_expr_inner(ts, 0)?);
     }
     ts.eat(&Tok::RBracket)?;
     Ok(Expr::List(ListLiteral {
@@ -768,12 +838,12 @@ fn try_parse_pattern_comprehension(
     let mut pattern = parse_pattern(&mut probe)?;
     let var = pattern.var.take();
     let filter = if probe.eat_if(&Tok::Where) {
-        Some(Box::new(parse_expr(&mut probe, 0)?))
+        Some(Box::new(parse_expr_inner(&mut probe, 0)?))
     } else {
         None
     };
     probe.eat(&Tok::Pipe)?;
-    let projection = Box::new(parse_expr(&mut probe, 0)?);
+    let projection = Box::new(parse_expr_inner(&mut probe, 0)?);
     probe.eat(&Tok::RBracket)?;
     *ts = probe;
 
@@ -797,9 +867,9 @@ fn parse_quantifier(
         unreachable!("dispatch checked `Ident IN`")
     };
     ts.eat(&Tok::In)?;
-    let list = parse_expr(ts, 0)?;
+    let list = parse_expr_inner(ts, 0)?;
     ts.eat(&Tok::Where)?;
-    let predicate = parse_expr(ts, 0)?;
+    let predicate = parse_expr_inner(ts, 0)?;
     ts.eat(&Tok::RParen)?;
     Ok(Expr::Quantifier(Quantifier {
         kind,
@@ -821,7 +891,7 @@ fn parse_map_literal(ts: &mut TokenStream, start: usize) -> Result<Expr, ParseEr
         loop {
             let (key, key_span) = eat_ident_with_span(ts)?;
             ts.eat(&Tok::Colon)?;
-            let val = parse_expr(ts, 0)?;
+            let val = parse_expr_inner(ts, 0)?;
             if entries.insert(key.clone(), val).is_some() {
                 return Err(ts.err(format!("duplicate key '{key}' in map literal")));
             }
@@ -850,15 +920,15 @@ fn parse_case_expr(ts: &mut TokenStream, start: usize) -> Result<Expr, ParseErro
     let subject = if ts.at(&Tok::When) {
         None
     } else {
-        Some(Box::new(parse_expr(ts, 0)?))
+        Some(Box::new(parse_expr_inner(ts, 0)?))
     };
 
     let mut when_clauses = Vec::new();
     while ts.eat_if(&Tok::When) {
         let when_start = ts.current_pos();
-        let condition = parse_expr(ts, 0)?;
+        let condition = parse_expr_inner(ts, 0)?;
         ts.eat(&Tok::Then)?;
-        let result = parse_expr(ts, 0)?;
+        let result = parse_expr_inner(ts, 0)?;
         when_clauses.push(WhenClause {
             condition,
             result,
@@ -867,7 +937,7 @@ fn parse_case_expr(ts: &mut TokenStream, start: usize) -> Result<Expr, ParseErro
     }
 
     let else_expr = if ts.eat_if(&Tok::Else) {
-        Some(Box::new(parse_expr(ts, 0)?))
+        Some(Box::new(parse_expr_inner(ts, 0)?))
     } else {
         None
     };
