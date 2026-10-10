@@ -1,6 +1,7 @@
 //! Final-plan authority for exact property-scan UUID nominations.
 
 mod equality_anchor;
+mod exchanges;
 mod left_enrichment;
 
 use std::sync::Arc;

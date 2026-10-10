@@ -57,7 +57,11 @@ fn partitioned_left_enrichment_nominates_the_complete_nullable_frontier() {
             .downcast_ref::<CoalescePartitionsExec>()
             .unwrap();
         let original_join = original.downcast_ref::<HashJoinExec>().unwrap();
-        assert!(Arc::ptr_eq(coalesced.input(), original_join.left()));
+        let original_exchange = original_join
+            .left()
+            .downcast_ref::<RepartitionExec>()
+            .unwrap();
+        assert!(Arc::ptr_eq(coalesced.input(), original_exchange.input()));
         assert!(join.right().downcast_ref::<PropertyOverlayExec>().is_some());
         SanityCheckPlan::new().optimize(optimized, &config).unwrap();
     }

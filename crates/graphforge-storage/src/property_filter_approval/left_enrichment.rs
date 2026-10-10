@@ -48,11 +48,12 @@ pub(super) fn nominate_partitioned_left(
         return Ok(None);
     };
 
-    // Keep the preserved side and its full pipeline. NULL keys are omitted
+    // Keep the preserved side's operators. NULL keys are omitted
     // from the nomination, but their unmatched LEFT rows remain in the join.
     let nomination = UuidBuildKeyNomination::new();
-    let frontier: Arc<dyn ExecutionPlan> =
-        Arc::new(CoalescePartitionsExec::new(Arc::clone(join.left())));
+    let frontier: Arc<dyn ExecutionPlan> = Arc::new(CoalescePartitionsExec::new(
+        super::exchanges::elide(Arc::clone(join.left()))?,
+    ));
     let tapped: Arc<dyn ExecutionPlan> = Arc::new(UuidBuildKeyTapExec::new(
         frontier,
         build_column,

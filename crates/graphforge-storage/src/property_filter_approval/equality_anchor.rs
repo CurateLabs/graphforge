@@ -1,7 +1,7 @@
 //! Share the strict property-equality build of an anchored INNER join.
 //!
 //! Logical null rejection admits the INNER join. The final physical rule runs
-//! after distribution enforcement, so it removes only the build hash exchange
+//! after distribution enforcement, so it removes redundant input exchanges
 //! and restores the original output hash distribution after the public swap.
 use crate::property_scan::PropertyOverlayExec;
 use arrow::datatypes::DataType;
@@ -93,11 +93,13 @@ pub(super) fn shared_equality_build(
     if swapped_join.schema().as_ref() != join.schema().as_ref() {
         return Ok(None);
     }
-    let shared: Arc<dyn ExecutionPlan> =
-        Arc::new(CoalescePartitionsExec::new(Arc::clone(exchange.input())));
+    let shared: Arc<dyn ExecutionPlan> = Arc::new(CoalescePartitionsExec::new(
+        super::exchanges::elide(Arc::clone(exchange.input()))?,
+    ));
+    let probe = super::exchanges::elide(Arc::clone(join.left()))?;
     let rebuilt = swapped_join
         .builder()
-        .with_new_children(vec![shared, Arc::clone(join.left())])?
+        .with_new_children(vec![shared, probe])?
         .reset_state()
         .recompute_properties()
         .build_exec()?;
@@ -111,7 +113,7 @@ pub(super) fn shared_equality_build(
 }
 
 /// Inspect only the schema-preserving residual equality pipeline. Its filter
-/// and round-robin exchange remain in the shared build in their original order.
+/// remains authoritative when its redundant round-robin exchange is removed.
 fn equality_build_scan(input: &Arc<dyn ExecutionPlan>) -> Option<&PropertyOverlayExec> {
     if let Some(scan) = input.downcast_ref::<PropertyOverlayExec>() {
         return Some(scan);

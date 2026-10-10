@@ -590,7 +590,24 @@ fn equality_anchor_retains_the_real_filtered_round_robin_build_pipeline() {
                 .left()
                 .downcast_ref::<CoalescePartitionsExec>()
                 .unwrap();
-            assert!(Arc::ptr_eq(coalesced.input(), &pipeline));
+            let retained = coalesced
+                .input()
+                .downcast_ref::<datafusion::physical_plan::filter::FilterExec>()
+                .unwrap();
+            let prior = pipeline
+                .downcast_ref::<datafusion::physical_plan::filter::FilterExec>()
+                .unwrap();
+            assert!(retained.predicate().dyn_eq(prior.predicate().as_ref()));
+            let prior_scan = if round_robin {
+                prior
+                    .input()
+                    .downcast_ref::<RepartitionExec>()
+                    .unwrap()
+                    .input()
+            } else {
+                prior.input()
+            };
+            assert!(Arc::ptr_eq(retained.input(), prior_scan));
             SanityCheckPlan::new()
                 .optimize(rewritten, &ConfigOptions::default())
                 .expect("residual filter and parent distribution remain valid");
