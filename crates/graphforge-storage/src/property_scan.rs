@@ -237,6 +237,14 @@ impl PropertyOverlayExec {
         matching.next().is_none().then_some(index)
     }
 
+    /// A new physical join association must not reuse another producer's scan.
+    pub(crate) fn fresh_nomination_uuid_column(&self) -> Option<usize> {
+        self.uuid_nominations
+            .is_empty()
+            .then(|| self.nomination_uuid_column())
+            .flatten()
+    }
+
     /// A strict equality scan can be an INNER join's build side. It must not
     /// wait on a nomination that was produced by that same join's old build.
     pub(crate) fn equality_build_uuid_column(&self) -> Option<usize> {

@@ -1,6 +1,7 @@
 //! Final-plan authority for exact property-scan UUID nominations.
 
 mod equality_anchor;
+mod left_enrichment;
 
 use std::sync::Arc;
 
@@ -52,6 +53,9 @@ impl PhysicalOptimizerRule for PropertyFilterApprovalRule {
                 return Ok(Transformed::yes(rebuilt));
             }
             if *join.join_type() == JoinType::Left {
+                if let Some(rebuilt) = left_enrichment::nominate_partitioned_left(join)? {
+                    return Ok(Transformed::yes(rebuilt));
+                }
                 let Some(rebuilt) = nominate_existing_collect_left(join)? else {
                     return Ok(Transformed::no(node));
                 };

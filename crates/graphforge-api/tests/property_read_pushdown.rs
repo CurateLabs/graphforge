@@ -590,3 +590,57 @@ fn strict_property_anchors_stream_topology_against_the_equality_build() {
         }
     }
 }
+
+#[test]
+fn optional_enrichment_preserves_fanout_and_missing_properties() {
+    let _serial = serial();
+    let built = build(SMALL_NODES);
+    let query = "MATCH (a:Entity {ident: $ident})-[:LINK]->(b) \
+                 OPTIONAL MATCH (b)-[:LINK]->(c) \
+                 OPTIONAL MATCH (c)-[:ABSENT]->(d:Entity) \
+                 RETURN a.ident AS anchor, b.ident AS neighbor, \
+                        c.ident AS destination, d.ident AS missing";
+    for partitions in [1, 2, 4] {
+        let forge = open_with_partitions(&built.project, partitions);
+        let plan = forge
+            .explain_stage(
+                &query.replace("$ident", "5"),
+                graphforge_api::ExplainStage::PhysicalPlan,
+            )
+            .unwrap();
+        assert!(plan.contains("UuidBuildKeyTapExec"), "{plan}");
+        assert!(
+            plan.contains("HashJoinExec: mode=CollectLeft, join_type=Left"),
+            "{plan}"
+        );
+        let (batches, io) = measured(&forge, query, 5);
+        let mut rows = Vec::new();
+        for batch in &batches {
+            let values = ["anchor", "neighbor", "destination"].map(|name| {
+                batch
+                    .column_by_name(name)
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+            });
+            let missing = batch.column_by_name("missing").unwrap();
+            for row in 0..batch.num_rows() {
+                assert!(values.iter().all(|array| !array.is_null(row)));
+                assert!(
+                    missing
+                        .logical_nulls()
+                        .is_some_and(|nulls| nulls.is_null(row))
+                );
+                rows.push(values.map(|array| array.value(row)));
+            }
+        }
+        rows.sort_unstable();
+        assert_eq!(rows, vec![[5, 6, 7], [5, 6, 8], [5, 7, 8], [5, 7, 9]]);
+        assert_eq!(io.write_bytes, 0, "{io:?}");
+        assert_eq!(io.write_calls, 0, "{io:?}");
+        if partitions == 1 {
+            assert_eq!(io.wchar.unwrap_or(0), 0, "{io:?}");
+        }
+    }
+}

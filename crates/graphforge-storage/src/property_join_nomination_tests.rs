@@ -24,6 +24,9 @@ use crate::property_join_nomination::{UuidBuildKeyNomination, UuidBuildKeyTapExe
 use crate::property_overlay::{EqualityValue, PropertyEquality};
 use crate::property_scan::{PropertyOverlayExec, PropertyScanOptions};
 
+#[path = "property_partitioned_left_tests.rs"]
+mod partitioned_left_tests;
+
 fn input_with_values(values: &[Option<[u8; 16]>]) -> Arc<dyn ExecutionPlan> {
     let schema = Arc::new(Schema::new(vec![Field::new(
         "node_uuid",
