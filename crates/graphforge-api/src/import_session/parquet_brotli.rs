@@ -145,7 +145,46 @@ type Decoder<R> = DecompressorCustomAlloc<
     BoundedAlloc<HuffmanCode>,
 >;
 
-fn fixed_bytes() -> usize {
+/// Bytes the pinned decoder can hold decoding one page that decompresses to
+/// `page_bytes`: its fixed state and input buffer, every Huffman table group at
+/// its largest (256 trees of 1,080 codes for literals, commands and distances,
+/// beside the block-type, block-length and context-map tables), the context
+/// maps, and a ring buffer of the window Parquet writers default to (22 bits),
+/// or twice a shorter final metablock when the decoder shrinks to it, with the
+/// decoder's write-ahead slack. A stream that allocates more is refused by its
+/// own allocation, with a typed limit.
+pub(super) fn workspace_bytes(page_bytes: u64) -> u64 {
+    const HUFFMAN_TABLE_CODES: u64 = 1_080;
+    const MAX_TREES_PER_GROUP: u64 = 256;
+    const TREE_GROUPS: u64 = 3;
+    const BLOCK_TABLES: u64 = 2 * 3 + 1;
+    const CONTEXT_MAP_BYTES: u64 = 256 * 64 + 256 * 4 + 256;
+    const DEFAULT_WINDOW_BYTES: u64 = 1 << 22;
+    const RING_SLACK_BYTES: u64 = 42 + 24 + 16;
+    let code = u64::try_from(std::mem::size_of::<HuffmanCode>()).unwrap_or(u64::MAX);
+    let tables = HUFFMAN_TABLE_CODES
+        .saturating_mul(
+            MAX_TREES_PER_GROUP
+                .saturating_mul(TREE_GROUPS)
+                .saturating_add(BLOCK_TABLES),
+        )
+        .saturating_mul(code)
+        .saturating_add(
+            MAX_TREES_PER_GROUP
+                .saturating_mul(TREE_GROUPS)
+                .saturating_mul(4),
+        );
+    let ring = DEFAULT_WINDOW_BYTES
+        .max(page_bytes.saturating_add(16).saturating_mul(2))
+        .saturating_add(RING_SLACK_BYTES);
+    u64::try_from(fixed_bytes() + INPUT_BYTES)
+        .unwrap_or(u64::MAX)
+        .saturating_add(tables)
+        .saturating_add(CONTEXT_MAP_BYTES)
+        .saturating_add(ring)
+}
+
+pub(super) fn fixed_bytes() -> usize {
     std::mem::size_of::<Decoder<&[u8]>>()
         + std::mem::size_of::<RefCell<Budget>>()
         + 2 * std::mem::size_of::<usize>() // Rc counters

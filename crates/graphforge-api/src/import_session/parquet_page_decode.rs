@@ -402,6 +402,24 @@ fn decompress(
     check(cancellation)
 }
 
+/// State a codec holds while decompressing one page of up to `page_bytes`,
+/// beside the page's compressed and decompressed bodies: what a task's page
+/// workspace must admit over the bodies for `decompress` to run. Snappy and
+/// raw or Hadoop-framed LZ4 decode block by block without a decoder heap; a
+/// framed LZ4 page sizes its own frame buffers when it is read.
+pub(super) fn codec_state_bytes(codec: Compression, page_bytes: u64) -> u64 {
+    match codec {
+        Compression::GZIP(_) => {
+            u64::try_from(super::parquet_codec::gzip_workspace()).unwrap_or(u64::MAX)
+        }
+        Compression::BROTLI(_) => super::parquet_brotli::workspace_bytes(page_bytes),
+        Compression::ZSTD(_) => {
+            u64::try_from(super::parquet_codec::ZSTD_WORKSPACE).unwrap_or(u64::MAX)
+        }
+        _ => 0,
+    }
+}
+
 /// `capacity` covers the currently owned compressed body PLUS new decoded
 /// output PLUS codec state. Retained dictionaries/decoder bodies are separate
 /// live credits held by the caller and must already have been subtracted.

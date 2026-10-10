@@ -467,6 +467,9 @@ pub(super) struct ChunkSummary {
     /// level vectors and delta length/prefix state. Payload reconstruction is
     /// separately bounded by the physical batch row-cost scan.
     native_auxiliary: u64,
+    /// State the chunk's codec holds while it decompresses its largest page,
+    /// beside the page's compressed and decompressed bodies.
+    pub(super) codec_state: u64,
 }
 
 impl ChunkSummary {
@@ -559,8 +562,8 @@ pub(super) struct LeafScan {
 
 impl GroupScan {
     /// Bytes a decoder holds opening this row group before it reads a row: every
-    /// column's decompressed page and dictionary, and the one compressed page it
-    /// is decompressing.
+    /// column's decompressed page and dictionary, the one compressed page it is
+    /// decompressing, and the codec state that decompression holds.
     pub(super) fn pages_resident(&self) -> u64 {
         let resident = self
             .leaves
@@ -573,7 +576,15 @@ impl GroupScan {
             .map(|leaf| leaf.summary.compressed_page)
             .max()
             .unwrap_or(0);
-        resident.saturating_add(transient)
+        let codec_state = self
+            .leaves
+            .iter()
+            .map(|leaf| leaf.summary.codec_state)
+            .max()
+            .unwrap_or(0);
+        resident
+            .saturating_add(transient)
+            .saturating_add(codec_state)
     }
 
     /// Peak native decoder auxiliary storage summed across the columns in this
@@ -622,7 +633,11 @@ pub(super) fn scan_group(
         let leaf = leaf_of(descriptor);
         let nested = descriptor.max_rep_level() > 0;
         let pages = scan_chunk(file, chunk, budget)?;
-        let summary = ChunkSummary::of(&pages);
+        let mut summary = ChunkSummary::of(&pages);
+        summary.codec_state = super::parquet_page_decode::codec_state_bytes(
+            chunk.compression(),
+            summary.data_page.max(summary.dictionary_page),
+        );
         let retained = leaf == Leaf::Variable || nested;
         if !retained {
             budget.release(
