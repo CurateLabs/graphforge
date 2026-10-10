@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, GenericStringBuilder, Int64Array, ListBuilder, StringBuilder};
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::array::{
+    Array, ArrayRef, GenericStringBuilder, Int64Array, ListBuilder, StringBuilder, StructArray,
+};
+use arrow::datatypes::{DataType, Field, Fields, Schema};
 use arrow::record_batch::RecordBatch;
 
 use super::{exact, has_slack};
@@ -62,5 +64,33 @@ fn nested_children_are_copied_exactly_too() {
     .unwrap();
     let exact = exact(batch).unwrap();
     assert_eq!(exact.column(0).as_ref(), lists.as_ref());
+    assert!(!has_slack(&exact.column(0).to_data()));
+}
+
+#[test]
+fn a_struct_column_is_rebuilt_from_exact_children() {
+    let text = grown_strings();
+    let numbers: ArrayRef = Arc::new(Int64Array::from((0..1_000).collect::<Vec<i64>>()));
+    let fields = Fields::from(vec![
+        Field::new("text", DataType::Utf8, false),
+        Field::new("n", DataType::Int64, false),
+    ]);
+    let structs: ArrayRef = Arc::new(StructArray::new(
+        fields.clone(),
+        vec![Arc::clone(&text), numbers],
+        None,
+    ));
+    assert!(has_slack(&structs.to_data()));
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new(
+            "pair",
+            DataType::Struct(fields),
+            false,
+        )])),
+        vec![Arc::clone(&structs)],
+    )
+    .unwrap();
+    let exact = exact(batch).unwrap();
+    assert_eq!(exact.column(0).as_ref(), structs.as_ref());
     assert!(!has_slack(&exact.column(0).to_data()));
 }

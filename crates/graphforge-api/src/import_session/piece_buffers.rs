@@ -54,6 +54,25 @@ fn has_slack(data: &ArrayData) -> bool {
 }
 
 fn exact_array(data: &ArrayData) -> ArrayRef {
+    if let DataType::Struct(_) = data.data_type() {
+        // `MutableArrayData` sizes a struct's children only inside a list. A
+        // struct column is its children side by side: copy each exactly and
+        // keep the struct's own validity.
+        let children = data
+            .child_data()
+            .iter()
+            .map(|child| exact_array(&child.slice(data.offset(), data.len())).to_data())
+            .collect::<Vec<_>>();
+        let rebuilt = ArrayData::builder(data.data_type().clone())
+            .len(data.len())
+            .nulls(data.nulls().cloned())
+            .child_data(children)
+            .build();
+        return match rebuilt {
+            Ok(rebuilt) => make_array(rebuilt),
+            Err(_) => make_array(data.clone()),
+        };
+    }
     let Some(capacities) = capacities(data) else {
         // A type the copy cannot size exactly keeps its buffers.
         return make_array(data.clone());
