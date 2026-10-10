@@ -323,3 +323,21 @@ fn cancellation_is_reported_during_topology_replay() {
         }
     ));
 }
+
+#[test]
+fn failed_topology_releases_only_its_temporary_stack() {
+    let mut missing_repetition = leaf(b"bad", 0);
+    missing_repetition.repetition = None;
+    let bytes = footer(&[root(Some(1)), missing_repetition]);
+    let facts = footer_preflight(&bytes, u64::MAX, None).unwrap();
+    let mut budget = InventoryBudget::new(u64::MAX);
+    budget.admit(37, "preexisting retained metadata").unwrap();
+    assert!(storage_error(
+        preflight(&bytes, &facts, &mut budget, None).unwrap_err()
+    ));
+    assert_eq!(budget.live_bytes(), 37);
+    let valid = footer(&[root(Some(1)), leaf(b"good", 0)]);
+    let valid_facts = footer_preflight(&valid, u64::MAX, None).unwrap();
+    preflight(&valid, &valid_facts, &mut budget, None).unwrap();
+    assert_eq!(budget.live_bytes(), 37);
+}

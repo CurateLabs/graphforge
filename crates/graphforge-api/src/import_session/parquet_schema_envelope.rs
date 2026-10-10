@@ -142,6 +142,24 @@ pub(super) fn preflight(
     budget: &mut InventoryBudget,
     cancellation: Option<&CancellationToken>,
 ) -> Result<SchemaTopologyFacts, GfError> {
+    let mut stack = Vec::<Frame>::new();
+    let result = preflight_topology(footer, footer_facts, budget, cancellation, &mut stack);
+    let stack_bytes = u64::try_from(stack.capacity())
+        .map_err(|_| overflow())?
+        .checked_mul(u64::try_from(size_of::<Frame>()).map_err(|_| overflow())?)
+        .ok_or_else(overflow)?;
+    drop(stack);
+    budget.release(stack_bytes);
+    result
+}
+
+fn preflight_topology(
+    footer: &[u8],
+    footer_facts: &FooterCountFacts,
+    budget: &mut InventoryBudget,
+    cancellation: Option<&CancellationToken>,
+    stack: &mut Vec<Frame>,
+) -> Result<SchemaTopologyFacts, GfError> {
     if cancellation.is_some_and(CancellationToken::is_cancelled) {
         return Err(cancelled());
     }
@@ -151,7 +169,6 @@ pub(super) fn preflight(
         return Err(malformed());
     }
     let mut result = SchemaTopologyFacts::default();
-    let mut stack = Vec::<Frame>::new();
     let mut cursor = CompactSlice::new(&footer[offset..], cancellation);
     let mut parser_facts = FooterCountFacts::default();
 
@@ -189,7 +206,7 @@ pub(super) fn preflight(
                 )?;
             }
             reserve_frame(
-                &mut stack,
+                stack,
                 budget,
                 &mut result.preflight_peak_bytes,
                 cancellation,
@@ -266,7 +283,7 @@ pub(super) fn preflight(
                 )?;
             }
             reserve_frame(
-                &mut stack,
+                stack,
                 budget,
                 &mut result.preflight_peak_bytes,
                 cancellation,
@@ -350,12 +367,6 @@ pub(super) fn preflight(
     )?;
     add(&mut native, scratch.peak_bytes)?;
     result.native_request_bytes = native;
-    let stack_bytes = u64::try_from(stack.capacity())
-        .map_err(|_| overflow())?
-        .checked_mul(u64::try_from(size_of::<Frame>()).map_err(|_| overflow())?)
-        .ok_or_else(overflow)?;
-    drop(stack);
-    budget.release(stack_bytes);
     Ok(result)
 }
 
