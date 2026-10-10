@@ -533,3 +533,49 @@ fn projected_schema_still_rejects_a_null_required_selected_field() {
     assert!(matches!(error, graphforge_core::GfError::Storage(message)
         if message.contains("'x'") && message.contains("non-nullable")));
 }
+
+#[test]
+fn filtered_scalar_batches_are_promoted_to_the_authenticated_union_schema() {
+    use arrow::array::{Int8Array, StructArray};
+
+    let uuid = FixedSizeBinaryArray::try_from_iter([[1_u8; 16], [2_u8; 16]].iter()).unwrap();
+    let source = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+            Field::new("var", DataType::Utf8, true),
+        ])),
+        vec![
+            Arc::new(uuid),
+            Arc::new(StringArray::from(vec![Some("text"), None])),
+        ],
+    )
+    .unwrap();
+    let expected = Arc::new(Schema::new(vec![
+        Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+        Field::new(
+            "var",
+            DataType::Struct(crate::writer::heterogeneous_scalar_fields()),
+            true,
+        ),
+    ]));
+
+    let normalized = super::normalize_property_batch(source, Some(&expected)).unwrap();
+    let values = normalized
+        .column_by_name("var")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    let tags = values
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int8Array>()
+        .unwrap();
+    assert_eq!(
+        tags.value(0),
+        2,
+        "the string keeps the canonical string tag"
+    );
+    assert_eq!(values.null_count(), 1, "null remains a null property slot");
+    assert_eq!(normalized.schema(), expected);
+}

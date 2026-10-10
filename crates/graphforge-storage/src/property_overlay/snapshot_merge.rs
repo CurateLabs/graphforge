@@ -257,6 +257,7 @@ fn write_sorted_run(
     }
     writer.flush().map_err(io_error)?;
     let bytes = writer.get_ref().metadata().map_err(io_error)?.len();
+    crate::lifecycle_io::record_write(crate::StorageIoPhase::ReadPathScan, bytes, 1);
     metrics.spill_runs = metrics.spill_runs.saturating_add(1);
     metrics.spill_bytes = metrics.spill_bytes.saturating_add(bytes);
     metrics.spool_input_bytes = metrics
@@ -383,6 +384,7 @@ where
     if let Some(out) = writer.as_mut() {
         out.flush().map_err(io_error)?;
         let bytes = out.get_ref().metadata().map_err(io_error)?.len();
+        crate::lifecycle_io::record_write(crate::StorageIoPhase::ReadPathScan, bytes, 1);
         metrics.spill_runs = metrics.spill_runs.saturating_add(1);
         metrics.spill_bytes = metrics.spill_bytes.saturating_add(bytes);
     }

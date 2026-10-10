@@ -1,14 +1,16 @@
 //! Projected reads for authenticated property overlays.
 
+use super::selective_reads::RowGroupSelection;
 use super::{
     Arc, Array, AtomicU64, AuthenticatedPropertyFragment, AuthenticatedPropertyInventory, BTreeMap,
     BTreeSet, BooleanArray, CountingChunkReader, FragmentHandleGuard, GfError, LiveByteBudget,
     Mutex, Ordering, PROPERTY_TOMBSTONE_FIELD, ParquetError, ParquetRecordBatchReader,
     ParquetRecordBatchReaderBuilder, Path, PropertyFile, PropertyInventoryOpenMetrics,
     PropertyOverlayLimits, PropertyOverlayMetrics, PropertyRouteKind, PropertySnapshotRow,
-    ReadCounts, RecordBatch, admitted_batch_rows, authenticated_property_inventory_for_route,
-    corrupt, io_error, read_property_targets, snapshot_charge, validate_fragment_schema,
-    validate_parquet_resource_admission, visit_newest_property_snapshots,
+    ReadCounts, RecordBatch, SnapshotScratch, admitted_batch_rows,
+    authenticated_property_inventory_for_route, corrupt, io_error, read_property_targets,
+    snapshot_charge, validate_fragment_schema, validate_parquet_resource_admission,
+    visit_newest_property_snapshots,
 };
 
 impl AuthenticatedPropertyInventory {
@@ -112,7 +114,8 @@ impl AuthenticatedPropertyInventory {
         let decoded = Arc::new(Mutex::new(DecodedRetention::default()));
         let reader_context = ProjectedReaderContext {
             inventory: self,
-            scratch,
+            scratch: SnapshotScratch::Directory(scratch),
+            row_groups: RowGroupSelection::All,
             limits,
             kind,
             route,
@@ -125,42 +128,11 @@ impl AuthenticatedPropertyInventory {
             authentication_read_calls: &authentication_read_calls,
         };
         let inputs = fragments.iter().map(|fragment| {
-            let reader = open_projected_fragment(fragment, &reader_context);
-            let (reader, pending_error, page_reservation_bytes, source, handle) = match reader {
-                Ok((reader, page_reservation_bytes, file, handle)) => (
-                    Some(reader),
-                    None,
-                    page_reservation_bytes,
-                    Some(file),
-                    Some(handle),
-                ),
-                Err(error) => (None, Some(error), 0, None, None),
-            };
             (
                 fragment.id,
                 0,
                 0,
-                PropertyParquetRows {
-                    reader,
-                    current: Vec::new().into_iter(),
-                    uuid_field: kind.uuid_field(),
-                    pending_error,
-                    decoded: Arc::clone(&decoded),
-                    budget: Arc::clone(&budget),
-                    max_row_bytes: limits.max_row_bytes,
-                    page_reservation_bytes,
-                    batch_reservation_bytes: limits.max_buffered_bytes / 4,
-                    source,
-                    counts: counts.clone(),
-                    authentication_bytes: authentication_bytes.clone(),
-                    authentication_block_equivalents: authentication_block_equivalents.clone(),
-                    authentication_read_calls: authentication_read_calls.clone(),
-                    _handle: handle,
-                    #[cfg(test)]
-                    late_failure_row_countdown: Arc::clone(
-                        &self.late_decoder_failure_row_countdown,
-                    ),
-                },
+                projected_fragment_rows(fragment, &reader_context),
             )
         });
         let mut metrics =
@@ -185,19 +157,61 @@ impl AuthenticatedPropertyInventory {
     }
 }
 
-struct ProjectedReaderContext<'a> {
-    inventory: &'a AuthenticatedPropertyInventory,
-    scratch: &'a Path,
-    limits: PropertyOverlayLimits,
-    kind: PropertyRouteKind,
-    route: &'a str,
-    selected_properties: Option<&'a BTreeSet<String>>,
-    counts: &'a ReadCounts,
-    budget: &'a Arc<LiveByteBudget>,
-    decoded: &'a Arc<Mutex<DecodedRetention>>,
-    authentication_bytes: &'a Option<Arc<AtomicU64>>,
-    authentication_block_equivalents: &'a Option<Arc<AtomicU64>>,
-    authentication_read_calls: &'a Option<Arc<AtomicU64>>,
+pub(super) struct ProjectedReaderContext<'a> {
+    pub(super) inventory: &'a AuthenticatedPropertyInventory,
+    pub(super) scratch: SnapshotScratch<'a>,
+    pub(super) row_groups: RowGroupSelection<'a>,
+    pub(super) limits: PropertyOverlayLimits,
+    pub(super) kind: PropertyRouteKind,
+    pub(super) route: &'a str,
+    pub(super) selected_properties: Option<&'a BTreeSet<String>>,
+    pub(super) counts: &'a ReadCounts,
+    pub(super) budget: &'a Arc<LiveByteBudget>,
+    pub(super) decoded: &'a Arc<Mutex<DecodedRetention>>,
+    pub(super) authentication_bytes: &'a Option<Arc<AtomicU64>>,
+    pub(super) authentication_block_equivalents: &'a Option<Arc<AtomicU64>>,
+    pub(super) authentication_read_calls: &'a Option<Arc<AtomicU64>>,
+}
+
+/// Open one fragment's decoder. A fragment that cannot be opened yields its
+/// error from the first `next`, so a lazily consumed sequence reports it in
+/// order.
+pub(super) fn projected_fragment_rows(
+    fragment: &AuthenticatedPropertyFragment,
+    context: &ProjectedReaderContext<'_>,
+) -> PropertyParquetRows {
+    let reader = open_projected_fragment(fragment, context);
+    let (reader, pending_error, page_reservation_bytes, source, handle) = match reader {
+        Ok((reader, page_reservation_bytes, file, handle)) => (
+            Some(reader),
+            None,
+            page_reservation_bytes,
+            Some(file),
+            Some(handle),
+        ),
+        Err(error) => (None, Some(error), 0, None, None),
+    };
+    PropertyParquetRows {
+        reader,
+        current: Vec::new().into_iter().zip(Vec::new()),
+        uuid_field: context.kind.uuid_field(),
+        pending_error,
+        decoded: Arc::clone(context.decoded),
+        budget: Arc::clone(context.budget),
+        max_row_bytes: context.limits.max_row_bytes,
+        page_reservation_bytes,
+        batch_reservation_bytes: context.limits.max_buffered_bytes / 4,
+        source,
+        counts: context.counts.clone(),
+        authentication_bytes: context.authentication_bytes.clone(),
+        authentication_block_equivalents: context.authentication_block_equivalents.clone(),
+        authentication_read_calls: context.authentication_read_calls.clone(),
+        _handle: handle,
+        #[cfg(test)]
+        late_failure_row_countdown: Arc::clone(
+            &context.inventory.late_decoder_failure_row_countdown,
+        ),
+    }
 }
 
 fn open_projected_fragment(
@@ -268,6 +282,13 @@ fn open_projected_fragment(
     } else {
         builder
     };
+    let selected_groups = context
+        .row_groups
+        .select(builder.metadata(), context.kind.uuid_field());
+    let builder = match selected_groups {
+        Some(groups) => builder.with_row_groups(groups),
+        None => builder,
+    };
     let reader = builder
         .with_batch_size(admitted_batch_rows(context.limits))
         .build()
@@ -275,14 +296,14 @@ fn open_projected_fragment(
     Ok((reader, page_reservation_bytes, opened.file, opened.handle))
 }
 
-struct ProjectedMetricSources<'a> {
-    counts: &'a ReadCounts,
-    authentication_bytes: &'a Option<Arc<AtomicU64>>,
-    authentication_block_equivalents: &'a Option<Arc<AtomicU64>>,
-    authentication_read_calls: &'a Option<Arc<AtomicU64>>,
-    decoded: &'a Mutex<DecodedRetention>,
-    budget: &'a LiveByteBudget,
-    authenticated_snapshot_peak_bytes: u64,
+pub(super) struct ProjectedMetricSources<'a> {
+    pub(super) counts: &'a ReadCounts,
+    pub(super) authentication_bytes: &'a Option<Arc<AtomicU64>>,
+    pub(super) authentication_block_equivalents: &'a Option<Arc<AtomicU64>>,
+    pub(super) authentication_read_calls: &'a Option<Arc<AtomicU64>>,
+    pub(super) decoded: &'a Mutex<DecodedRetention>,
+    pub(super) budget: &'a LiveByteBudget,
+    pub(super) authenticated_snapshot_peak_bytes: u64,
 }
 
 fn projected_property_columns(
@@ -305,7 +326,7 @@ fn projected_property_columns(
     })
 }
 
-fn finalize_projected_metrics(
+pub(super) fn finalize_projected_metrics(
     metrics: &mut PropertyOverlayMetrics,
     sources: &ProjectedMetricSources<'_>,
 ) {
@@ -349,9 +370,10 @@ fn finalize_projected_metrics(
     metrics.peak_buffered_bytes = sources.budget.peak();
 }
 
-struct PropertyParquetRows {
+pub(super) struct PropertyParquetRows {
     reader: Option<ParquetRecordBatchReader>,
-    current: std::vec::IntoIter<PropertySnapshotRow>,
+    /// Decoded rows with the byte charge each was admitted at, computed once.
+    current: std::iter::Zip<std::vec::IntoIter<PropertySnapshotRow>, std::vec::IntoIter<u64>>,
     uuid_field: &'static str,
     pending_error: Option<GfError>,
     decoded: Arc<Mutex<DecodedRetention>>,
@@ -390,7 +412,7 @@ impl Drop for PropertyParquetRows {
 }
 
 #[derive(Debug, Default)]
-struct DecodedRetention {
+pub(super) struct DecodedRetention {
     current_rows: u64,
     current_bytes: u64,
     peak_rows: u64,
@@ -412,7 +434,7 @@ impl Iterator for PropertyParquetRows {
                 self.reader = None;
                 return Some(Err(error));
             }
-            if let Some(row) = self.current.next() {
+            if let Some((row, charge)) = self.current.next() {
                 #[cfg(test)]
                 if self
                     .late_failure_row_countdown
@@ -425,16 +447,16 @@ impl Iterator for PropertyParquetRows {
                     })
                     .is_ok_and(|remaining| remaining == 1)
                 {
-                    self.budget.release(snapshot_charge(&row));
+                    self.budget.release(charge);
                     self.reader = None;
                     return Some(Err(corrupt(
                         "injected late authenticated property decoder failure",
                     )));
                 }
-                self.budget.release(snapshot_charge(&row));
+                self.budget.release(charge);
                 let mut decoded = self.decoded.lock().expect("property retention lock");
                 decoded.current_rows = decoded.current_rows.saturating_sub(1);
-                decoded.current_bytes = decoded.current_bytes.saturating_sub(snapshot_charge(&row));
+                decoded.current_bytes = decoded.current_bytes.saturating_sub(charge);
                 return Some(Ok(row));
             }
             self.reader.as_ref()?;
@@ -471,18 +493,16 @@ impl Iterator for PropertyParquetRows {
             }
             match decode_snapshot_batch(&batch, self.uuid_field) {
                 Ok(rows) => {
-                    if rows
-                        .iter()
-                        .any(|row| snapshot_charge(row) > self.max_row_bytes)
-                    {
+                    let charges = rows.iter().map(snapshot_charge).collect::<Vec<_>>();
+                    if charges.iter().any(|charge| *charge > self.max_row_bytes) {
                         self.budget.release(decode_reservation);
                         self.budget.release(self.batch_reservation_bytes);
                         self.reader = None;
                         return Some(Err(corrupt("property snapshot row exceeds byte limit")));
                     }
-                    let bytes = rows.iter().fold(0_u64, |total, row| {
-                        total.saturating_add(snapshot_charge(row))
-                    });
+                    let bytes = charges
+                        .iter()
+                        .fold(0_u64, |total, charge| total.saturating_add(*charge));
                     self.budget.release(decode_reservation);
                     if let Err(error) = self.budget.charge(bytes) {
                         self.budget.release(self.batch_reservation_bytes);
@@ -497,7 +517,7 @@ impl Iterator for PropertyParquetRows {
                     decoded.peak_bytes = decoded.peak_bytes.max(decoded.current_bytes);
                     decoded.batches = decoded.batches.saturating_add(1);
                     drop(decoded);
-                    self.current = rows.into_iter();
+                    self.current = rows.into_iter().zip(charges);
                 }
                 Err(error) => {
                     self.budget.release(decode_reservation);
@@ -638,15 +658,19 @@ pub(crate) fn decode_snapshot_batch(
         return Err(corrupt("property tombstone column contains null slots"));
     }
     let mut rows = Vec::with_capacity(batch.num_rows());
-    crate::writer::decode_property_batch(batch, uuid_field, |uuid, mut values| {
-        values.remove(PROPERTY_TOMBSTONE_FIELD);
-        let index = rows.len();
-        rows.push(PropertySnapshotRow {
-            uuid,
-            tombstone: tombstones.is_some_and(|values| values.value(index)),
-            values: values.into_iter().collect(),
-        });
-    })?;
+    crate::writer::decode_property_batch_into(
+        batch,
+        uuid_field,
+        |uuid, mut values: BTreeMap<String, graphforge_ir::IrLiteral>| {
+            values.remove(PROPERTY_TOMBSTONE_FIELD);
+            let index = rows.len();
+            rows.push(PropertySnapshotRow {
+                uuid,
+                tombstone: tombstones.is_some_and(|values| values.value(index)),
+                values,
+            });
+        },
+    )?;
     Ok(rows)
 }
 

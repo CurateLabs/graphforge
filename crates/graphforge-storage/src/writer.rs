@@ -2603,7 +2603,7 @@ use property_codec::build_property_columns;
 use property_codec::build_property_columns_keyed;
 use property_codec::col_type_from_field;
 use property_codec::decode_edge_property_rows;
-pub(crate) use property_codec::decode_property_batch;
+pub(crate) use property_codec::decode_property_batch_into;
 use property_codec::decode_property_rows;
 pub use property_codec::decode_property_value;
 pub use property_codec::decode_spatial_property_value;

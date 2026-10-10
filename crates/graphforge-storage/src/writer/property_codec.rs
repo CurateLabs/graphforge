@@ -1078,8 +1078,25 @@ pub(crate) fn validate_property_values(
 pub(crate) fn decode_property_batch(
     batch: &RecordBatch,
     uuid_field_name: &str,
-    mut emit: impl FnMut([u8; 16], HashMap<String, IrLiteral>),
+    emit: impl FnMut([u8; 16], HashMap<String, IrLiteral>),
 ) -> Result<(), GfError> {
+    decode_property_batch_into(batch, uuid_field_name, emit)
+}
+
+/// [`decode_property_batch`] collecting each row into the map type the caller
+/// wants: a reader that orders its rows by key avoids hashing every name.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one decode arm per Arrow type, plus per-shape struct dispatch; clearest inline"
+)]
+pub(crate) fn decode_property_batch_into<M>(
+    batch: &RecordBatch,
+    uuid_field_name: &str,
+    mut emit: impl FnMut([u8; 16], M),
+) -> Result<(), GfError>
+where
+    M: Default + Extend<(String, IrLiteral)>,
+{
     use arrow::array::Array;
 
     validate_property_values(batch).map_err(|error| GfError::Project {
@@ -1096,7 +1113,7 @@ pub(crate) fn decode_property_batch(
     for r in 0..batch.num_rows() {
         let mut uuid = [0u8; 16];
         uuid.copy_from_slice(uuid_col.value(r));
-        let mut props: HashMap<String, IrLiteral> = HashMap::new();
+        let mut props = M::default();
         for (c, field) in schema.fields().iter().enumerate() {
             if field.name() == uuid_field_name {
                 continue;
@@ -1109,7 +1126,7 @@ pub(crate) fn decode_property_batch(
                 continue; // null slot: omit the key (never fabricate a value)
             }
             let lit = decode_value(col, field, r)?;
-            props.insert(field.name().clone(), lit);
+            props.extend(std::iter::once((field.name().clone(), lit)));
         }
         emit(uuid, props);
     }
