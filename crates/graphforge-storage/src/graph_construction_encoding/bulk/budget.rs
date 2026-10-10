@@ -339,6 +339,36 @@ fn initial_partitions(rows: u64, row_bytes: u64, per_partition: u64) -> u64 {
         .div_ceil(per_partition.max(1))
         .clamp(1, MAX_PARTITIONS)
 }
+
+/// Smaller staging blocks preserve the same reservation when one worker
+/// cannot meet the preferred staging minimum; refinement bounds leaf sorting.
+fn serial_partition_geometry(
+    working: u64,
+    edges: u64,
+    nodes: u64,
+    edge_row_bytes: u64,
+    node_row_bytes: u64,
+    node_scratch: bool,
+) -> (u64, u64, u64, u64, u64, u64, u64) {
+    let gate_bytes = working / 4 * 3;
+    #[cfg(test)]
+    let gate_bytes = FORCED_GATE.with(std::cell::Cell::get).unwrap_or(gate_bytes);
+    let per_partition = gate_bytes / 2;
+    (
+        1,
+        working,
+        gate_bytes,
+        initial_partitions(edges, edge_row_bytes, per_partition),
+        initial_partitions(edges, CSR_PARTITION_BYTES, per_partition),
+        if node_scratch {
+            initial_partitions(nodes, node_row_bytes, per_partition)
+        } else {
+            0
+        },
+        (working / 8 / (2 * MAX_PARTITIONS)).max(32),
+    )
+}
+
 impl ScratchPlan {
     #[cfg(test)]
     pub(super) fn derive(plan: &BulkBuildPlan<'_>, budget: u64, workers: usize) -> Self {
@@ -427,23 +457,13 @@ impl ScratchPlan {
             node_partitions,
             staging,
         ) = best.unwrap_or_else(|| {
-            let working = available;
-            let gate_bytes = working / 4 * 3;
-            #[cfg(test)]
-            let gate_bytes = FORCED_GATE.with(std::cell::Cell::get).unwrap_or(gate_bytes);
-            let per_partition = gate_bytes / 2;
-            (
-                1,
-                working,
-                gate_bytes,
-                initial_partitions(edges, edge_row_bytes, per_partition),
-                initial_partitions(edges, CSR_PARTITION_BYTES, per_partition),
-                if node_scratch {
-                    initial_partitions(nodes, node_row_bytes, per_partition)
-                } else {
-                    0
-                },
-                (working / 8 / (2 * MAX_PARTITIONS)).max(32),
+            serial_partition_geometry(
+                available,
+                edges,
+                nodes,
+                edge_row_bytes,
+                node_row_bytes,
+                node_scratch,
             )
         });
         #[cfg(test)]
