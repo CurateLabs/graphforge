@@ -354,12 +354,7 @@ pub(super) fn preflight(
         .map_err(|_| overflow())?
         .checked_mul(u64::try_from(size_of::<Frame>()).map_err(|_| overflow())?)
         .ok_or_else(overflow)?;
-    let stack_bytes = u64::try_from(stack.capacity())
-        .map_err(|_| overflow())?
-        .checked_mul(u64::try_from(size_of::<Frame>()).map_err(|_| overflow())?)
-        .ok_or_else(overflow)?;
     drop(stack);
-    budget.release(stack_bytes);
     budget.release(stack_bytes);
     Ok(result)
 }
