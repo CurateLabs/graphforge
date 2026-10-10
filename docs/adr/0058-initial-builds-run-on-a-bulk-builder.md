@@ -15,7 +15,7 @@ revisit_when: "A published artifact stops being a projection of the three ranked
 adjacency scratch), #1916 (property scratch), #1898 (sources read in place),
 #1899 (direct-to-CAS writes), #1901 (chunk-API initial builds), #1902 (no UUID
 membership index) and #1928 (no allocated-block comparison of unsynced encoded
-artifacts). Pending: #1929 (out-of-core node tables), #1918 (bounded source
+artifacts) and #1929 (out-of-core node tables). Pending: #1918 (bounded source
 decoding), #1938 (parallel scratch passes), the retirement of the old
 initial-build machinery, and the integrated acceptance audit and ladder. The
 epic's throughput close gate is #1387.
@@ -99,15 +99,13 @@ functions.
   `GF_BULK_BUILD_MEMORY_BUDGET_BYTES`. Routing is a function of the footers and
   the budget, never of the data, and the bytes are the same on every route.
 - The staged path remains for appends and for sessions an earlier binary began
-  staging. **Pending (#1929):** it also remains for `node_tables_exceed_budget`
-  (a chunk-API session replays its spool through it, see *Chunk-API initial
-  builds*): the identity tables, labels, endpoint index and degree arrays need
-  a conservative 56 bytes per node alongside the fixed workspace. Property
-  payload size does not contribute to this identity-table footprint. #1929
-  moves the node tables to bounded scratch and removes that reason. The
-  historical `edge_properties_exceed_budget` manifest reason remains readable
-  but new builds do not select it.
-- Once #1929 lands, no plan sends an initial build to the staged path. Deleting
+  staging. When the identity tables, labels, endpoint index and degree arrays
+  (a conservative 56 bytes per node alongside the fixed workspace) do not fit,
+  node identities, endpoint resolution, degrees and CSR key ranges use bounded
+  node-UUID range partitions on scratch. The historical
+  `node_tables_exceed_budget` and `edge_properties_exceed_budget` manifest
+  reasons remain readable, but new builds do not select either.
+- No plan sends an initial build to the staged path. Deleting
   the machinery that only that path used is the last code slice of #1881. It
   keeps the append engine. The maintainer's 2026-10-09 retirement decision
   removes compatibility for staged initial-build sessions from unreleased
@@ -126,7 +124,9 @@ functions.
   re-routed to the staged path by a change in free memory. It is never a
   retry. Whether the bulk route then runs in memory or on scratch is decided
   again on each attempt from the live budget; either produces the same bytes.
-  If that budget can no longer hold the bulk route's node tables or minimum scratch workspace, the attempt returns a resource-limit refusal before loading
+  Since #1929 the node tables belong to that scratch workspace instead of being
+  a residency requirement: a budget that can no longer hold the bulk route's
+  minimum scratch workspace returns a resource-limit refusal before loading
   data. It keeps the bulk route and can retry when the budget is sufficient.
 
 ## Maintainer decisions (2026-10-07, epic #1881)
@@ -166,10 +166,9 @@ functions.
 
 | Issue | What it changes | Until it lands |
 | --- | --- | --- |
-| #1929 | Node identities, the endpoint index and the degree and CSR-offset workspace use bounded scratch, so `node_tables_exceed_budget` has no producer. | A build whose node tables exceed the budget takes the staged path. |
 | #1918 | Registered-source decoding and normalization are bounded before allocation (Parquet dictionary and page expansion, row maps). | The scratch route bounds normalized transport, not every source decoder. A reservation describes builder workspace, not process RSS. |
 | #1938 | Scratch partitions run concurrently, as many as the budget admits. | Over-budget builds run one scratch partition at a time (`scratch_concurrency` 1). |
-| Retirement | Delete the initial-build machinery that nothing reaches once #1929 lands. | The staged initial-build code still exists and is reachable through the route above. |
+| Retirement | Delete the initial-build staged machinery that no new plan reaches now that every initial build runs on the bulk builder. | The staged initial-build code still exists and stays reachable through the explicitly retained staged paths: append sessions, import-session staging, and the historical replay route. |
 
 The throughput floor (1,000,000 edges/s at every ladder rung) and the
 multicore criterion are gated by the integrated ladder under #1881 and #1387.
@@ -382,16 +381,17 @@ staging:
   memory or scratch) and on the staged replay alike.
 - The chunk-API build takes the same route as a registered-source build: the
   plan is built from the receipts and the memory budget (`BulkBuildPlan::route`),
-  so an over-budget estimate runs the scratch passes of #1912 and #1920 over the
-  spool and never stages or refuses. The seal route (`bulk`, or `replay_staged`
-  when even the node tables exceed the budget, the one case an import session
-  also stages) is recorded in the checkpoint before any build or replay work and
-  read back on every retry; a retry never re-decides from live memory, and
-  whether a `bulk` attempt runs in memory or on scratch is decided again from
-  the live budget (a budget that can no longer hold the node tables refuses the
-  attempt before decoding, as for a registered source). `replay_staged`
-  re-appends the authenticated spool through the staged path, chunk by chunk
-  under the same chunk ids, so an interrupted replay resumes.
+  so an over-budget estimate runs the scratch passes of #1912, #1920 and #1929
+  over the spool and never stages or refuses: node tables that exceed the
+  budget go through bounded scratch too. The seal route (`bulk`; a
+  `replay_staged` value can only come from a checkpoint an earlier binary
+  recorded, since no new plan stages) is recorded in the checkpoint before any
+  build or replay work and read back on every retry; a retry never re-decides
+  from live memory, and whether a `bulk` attempt runs in memory or on scratch
+  is decided again from the live budget (a budget below the minimum scratch
+  workspace refuses the attempt before decoding, as for a registered source).
+  `replay_staged` re-appends the authenticated spool through the staged path,
+  chunk by chunk under the same chunk ids, so an interrupted replay resumes.
 - A crash during the build leaves the spool intact; the rerun is identical.
   The spool is deleted once the build's inventory is pinned.
 - Import sessions stage through `begin_staged_graph_construction`: they route

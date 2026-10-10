@@ -1,6 +1,9 @@
+use super::super::scratch::SCRATCH_DIRECTORY;
 use super::*;
+use crate::StorageAllocationOperation;
 use arrow::array::{Array, ArrayRef, FixedSizeBinaryArray, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
+use std::fs::File;
 
 include!("property_rows_frame_tests.rs");
 include!("property_merge_admission_tests.rs");
@@ -550,4 +553,376 @@ fn frames_reject_crc_corruption_truncation_and_unbounded_ipc_bodies() {
             .to_string()
             .contains("IPC lengths")
     );
+}
+
+fn live_scratch_bytes(directory: &super::super::StableDirectory) -> u64 {
+    let scratch = directory
+        .path()
+        .join(super::super::scratch::SCRATCH_DIRECTORY);
+    std::fs::read_dir(scratch)
+        .unwrap()
+        .map(|entry| entry.unwrap().metadata().unwrap().len())
+        .sum()
+}
+
+#[test]
+fn repeated_property_merges_track_live_files_and_the_final_consume_releases_everything() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = super::super::StableDirectory::open(root.path()).unwrap();
+    let scratch = Scratch::create(&directory).unwrap();
+    // Real one-batch runs and a two-input merge require repeated levels.
+    let rows = rows_with(&scratch, 1, 2, 1 << 20);
+    let cancel = AtomicBool::new(false);
+    for index in (0..65).rev() {
+        let mut sink = rows.sink();
+        sink.push(&batch(index * 32, 32), &cancel).unwrap();
+        sink.finish(&cancel).unwrap();
+    }
+    assert!(scratch.occupied_bytes() > 0);
+    assert_eq!(scratch.occupied_bytes(), live_scratch_bytes(&directory));
+    let groups = rows.finish(&cancel).unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(scratch.occupied_bytes(), live_scratch_bytes(&directory));
+    assert!(scratch.peak_occupied_bytes() < rows.written_bytes());
+    let mut reader = rows.group_reader(&groups[0]);
+    let mut expected = 0_u64;
+    while let Some(batch) = reader.next().unwrap() {
+        let uuids = crate::graph_construction::batch_uuid_column(&batch, "node_uuid").unwrap();
+        for row in 0..batch.num_rows() {
+            assert_eq!(&uuids.value(row)[8..], &expected.to_be_bytes());
+            expected += 1;
+        }
+    }
+    assert_eq!(expected, 65 * 32);
+    drop(reader);
+    for segment in &groups[0].segments {
+        rows.reclaim(&segment.path).unwrap();
+        assert!(!segment.path.exists());
+    }
+    assert_eq!(scratch.occupied_bytes(), 0);
+    scratch.remove().unwrap();
+}
+
+#[test]
+fn a_failed_property_write_keeps_its_reservation() {
+    // Reserve-before-write: the frame is charged before its write can grow
+    // the file, and the charge survives the failure because a partial write
+    // may exist. The target is removed so the write fails on open, before
+    // any byte moves; a charge after the write would leave the tracker empty.
+    let root = tempfile::tempdir().unwrap();
+    let directory = super::super::StableDirectory::open(root.path()).unwrap();
+    let scratch = Scratch::create(&directory).unwrap();
+    let rows = new_rows(
+        &scratch,
+        ConstructionChunkKind::Node,
+        GraphConstructionBudgets::default(),
+        0,
+        PropertySizing::SERIAL,
+    );
+    let path = rows.path().unwrap();
+    std::fs::remove_file(&path).unwrap();
+    rows.write(&path, &batch(0, 3)).unwrap_err();
+    assert_eq!(rows.written_bytes(), 0);
+    let reserved = scratch.occupied_bytes();
+    assert!(reserved > 0);
+    assert_eq!(scratch.peak_occupied_bytes(), reserved);
+    scratch.remove().unwrap();
+}
+
+#[test]
+fn reclaiming_bytes_no_writer_reserved_is_an_accounting_error() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = super::super::StableDirectory::open(root.path()).unwrap();
+    let scratch = Scratch::create(&directory).unwrap();
+    let path = scratch.file("unaccounted.frames");
+    std::fs::write(&path, b"sevenish").unwrap();
+    let error = scratch.reclaim_file(&path).unwrap_err();
+    assert!(error.to_string().contains("underflow"), "{error}");
+    scratch.remove().unwrap();
+}
+
+fn native_file_allocation(file: &File) -> u64 {
+    graphforge_filesystem::file_space_usage(file)
+        .unwrap()
+        .allocated_bytes
+}
+
+fn native_allocation_context(
+    root: &std::path::Path,
+) -> (
+    StorageAllocationOperation,
+    super::super::StableDirectory,
+    File,
+    u64,
+) {
+    let allocation = StorageAllocationOperation::default();
+    let unrelated_path = root.join("unrelated-property-owner.bin");
+    let mut unrelated = File::create(&unrelated_path).unwrap();
+    unrelated.write_all(&vec![0x4d; 32_779]).unwrap();
+    drop(unrelated);
+    let unrelated = File::open(&unrelated_path).unwrap();
+    allocation
+        .replace_file_at(&unrelated_path, &unrelated)
+        .unwrap();
+    let baseline = native_file_allocation(&unrelated);
+    let directory = super::super::StableDirectory::open(root)
+        .unwrap()
+        .with_allocation(Some(allocation.clone()));
+    (allocation, directory, unrelated, baseline)
+}
+
+#[test]
+fn native_property_write_tracks_actual_file_growth_and_reclaim() {
+    let root = tempfile::tempdir().unwrap();
+    let (allocation, directory, _unrelated, baseline) = native_allocation_context(root.path());
+    let scratch = Scratch::create(&directory).unwrap();
+    let rows = new_rows(
+        &scratch,
+        ConstructionChunkKind::Node,
+        GraphConstructionBudgets::default(),
+        0,
+        PropertySizing::SERIAL,
+    );
+    let path = rows.path().unwrap();
+    let data = batch(0, 1_024);
+    rows.write(&path, &data).unwrap();
+    let file = File::open(&path).unwrap();
+    let native = native_file_allocation(&file);
+    assert!(native > 0);
+    assert_eq!(allocation.totals().unwrap().0, baseline + native);
+    assert!(scratch.occupied_bytes() > 0);
+    let decoded = rows.reader(&path).unwrap().next().unwrap().unwrap();
+    assert_eq!(decoded.num_rows(), 1_024);
+    assert_eq!(
+        decoded
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0),
+        "Person"
+    );
+    drop(file);
+    rows.reclaim(&path).unwrap();
+    assert_eq!(allocation.totals().unwrap().0, baseline);
+    drop(rows);
+    scratch.remove().unwrap();
+}
+
+#[test]
+fn native_run_writer_observes_buffered_automatic_and_direct_growth() {
+    let root = tempfile::tempdir().unwrap();
+    let (allocation, directory, _unrelated, baseline) = native_allocation_context(root.path());
+    let scratch = Scratch::create(&directory).unwrap();
+    let rows = new_rows(
+        &scratch,
+        ConstructionChunkKind::Node,
+        GraphConstructionBudgets::default(),
+        0,
+        PropertySizing::SERIAL,
+    );
+
+    let mut buffered = rows.run_writer().unwrap();
+    let small = batch(0, 4);
+    let small_frame = rows.encode_frame(&small).unwrap();
+    assert!(small_frame.len() < (1 << 20));
+    buffered
+        .append(
+            &small,
+            [0; 16],
+            [1; 16],
+            PropertyRows::max_row_bytes(&small).unwrap(),
+        )
+        .unwrap();
+    let buffered_file = buffered.file.as_ref().unwrap().get_ref();
+    assert_eq!(buffered_file.metadata().unwrap().len(), 0);
+    assert_eq!(allocation.totals().unwrap().0, baseline);
+    assert!(scratch.occupied_bytes() > 0);
+    let run = buffered.finish().unwrap();
+    let native = native_file_allocation(&File::open(&run.path).unwrap());
+    assert!(native > 0);
+    assert_eq!(allocation.totals().unwrap().0, baseline + native);
+    let decoded = rows
+        .reader(&run.path)
+        .unwrap()
+        .next_expected(&run.frames[0])
+        .unwrap()
+        .unwrap();
+    assert_eq!(decoded.num_rows(), 4);
+    rows.reclaim(&run.path).unwrap();
+    drop(run);
+    assert_eq!(allocation.totals().unwrap().0, baseline);
+
+    let mut automatic = rows.run_writer().unwrap();
+    let ordinary = batch(0, 512);
+    let ordinary_frame = rows.encode_frame(&ordinary).unwrap();
+    assert!(ordinary_frame.len() < (1 << 20));
+    let max_row_bytes = PropertyRows::max_row_bytes(&ordinary).unwrap();
+    for index in 0..128_u32 {
+        automatic
+            .append(
+                &ordinary,
+                index.to_le_bytes().repeat(4).try_into().unwrap(),
+                (index + 1).to_le_bytes().repeat(4).try_into().unwrap(),
+                max_row_bytes,
+            )
+            .unwrap();
+        let file = automatic.file.as_ref().unwrap().get_ref();
+        let actual = native_file_allocation(file);
+        assert_eq!(allocation.totals().unwrap().0, baseline + actual);
+    }
+    assert!(
+        automatic
+            .file
+            .as_ref()
+            .unwrap()
+            .get_ref()
+            .metadata()
+            .unwrap()
+            .len()
+            > 0
+    );
+    let run = automatic.finish().unwrap();
+    let auto_native = native_file_allocation(&File::open(&run.path).unwrap());
+    assert_eq!(allocation.totals().unwrap().0, baseline + auto_native);
+    rows.reclaim(&run.path).unwrap();
+    drop(run);
+    assert_eq!(allocation.totals().unwrap().0, baseline);
+
+    let one = batch(0, 1);
+    let schema = one.schema();
+    let label = "x".repeat((1 << 20) + 128);
+    let mut id = [0_u8; 16];
+    id[15] = 1;
+    let large = RecordBatch::try_new(
+        schema,
+        vec![
+            std::sync::Arc::new(
+                FixedSizeBinaryArray::try_from_iter(std::iter::once(id.as_slice())).unwrap(),
+            ) as ArrayRef,
+            std::sync::Arc::new(StringArray::from(vec![label.as_str()])) as ArrayRef,
+            std::sync::Arc::new(Int64Array::from(vec![Some(7)])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    let large_frame = rows.encode_frame(&large).unwrap();
+    assert!(large_frame.len() > (1 << 20));
+    let mut direct = rows.run_writer().unwrap();
+    direct
+        .append(&large, id, id, PropertyRows::max_row_bytes(&large).unwrap())
+        .unwrap();
+    let direct_file = direct.file.as_ref().unwrap().get_ref();
+    assert_eq!(
+        direct_file.metadata().unwrap().len(),
+        large_frame.len() as u64
+    );
+    let direct_native = native_file_allocation(direct_file);
+    assert!(direct_native > 0);
+    assert_eq!(allocation.totals().unwrap().0, baseline + direct_native);
+    let run = direct.finish().unwrap();
+    let decoded = rows
+        .reader(&run.path)
+        .unwrap()
+        .next_expected(&run.frames[0])
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        decoded
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0)
+            .len(),
+        label.len()
+    );
+    rows.reclaim(&run.path).unwrap();
+    drop(run);
+    drop(rows);
+    assert_eq!(allocation.totals().unwrap().0, baseline);
+    scratch.remove().unwrap();
+}
+
+#[test]
+fn abandoned_native_run_writer_discards_unflushed_buffer_before_tree_cleanup() {
+    let root = tempfile::tempdir().unwrap();
+    let (allocation, directory, _unrelated, baseline) = native_allocation_context(root.path());
+    let scratch = Scratch::create(&directory).unwrap();
+    let rows = new_rows(
+        &scratch,
+        ConstructionChunkKind::Node,
+        GraphConstructionBudgets::default(),
+        0,
+        PropertySizing::SERIAL,
+    );
+    let mut writer = rows.run_writer().unwrap();
+    let path = writer.path.clone();
+    let data = batch(0, 4);
+    writer
+        .append(
+            &data,
+            [0; 16],
+            [1; 16],
+            PropertyRows::max_row_bytes(&data).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        writer
+            .file
+            .as_ref()
+            .unwrap()
+            .get_ref()
+            .metadata()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(allocation.totals().unwrap().0, baseline);
+    drop(writer);
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+    drop(rows);
+    drop(scratch);
+    assert!(!root.path().join(SCRATCH_DIRECTORY).exists());
+    assert_eq!(allocation.totals().unwrap().0, baseline);
+}
+
+#[test]
+fn run_writer_finish_preserves_flush_error_over_observation_error() {
+    let root = tempfile::tempdir().unwrap();
+    let (allocation, directory, _unrelated, baseline) = native_allocation_context(root.path());
+    let scratch = Scratch::create(&directory).unwrap();
+    let rows = new_rows(
+        &scratch,
+        ConstructionChunkKind::Node,
+        GraphConstructionBudgets::default(),
+        0,
+        PropertySizing::SERIAL,
+    );
+    let mut writer = rows.run_writer().unwrap();
+    let path = writer.path.clone();
+    let readonly = File::open(&path).unwrap();
+    let mut probe = readonly.try_clone().unwrap();
+    let expected = storage(probe.write_all(b"probe").unwrap_err()).to_string();
+    drop(probe);
+    writer.file = Some(std::io::BufWriter::new(readonly));
+
+    let data = batch(0, 4);
+    writer
+        .append(
+            &data,
+            [0; 16],
+            [1; 16],
+            PropertyRows::max_row_bytes(&data).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+    // Make the post-flush observer fail too. Finish must preserve the earlier
+    // write failure, and into_parts must prevent Drop from retrying the flush.
+    writer.path = PathBuf::from("relative-scratch-file");
+    let error = writer.finish().unwrap_err().to_string();
+    assert_eq!(error, expected);
+    assert!(!error.contains("requires a resolved absolute path"));
+    drop(rows);
+    drop(scratch);
+    assert_eq!(allocation.totals().unwrap().0, baseline);
 }

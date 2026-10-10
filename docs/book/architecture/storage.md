@@ -473,17 +473,16 @@ the staged path above, and the builder never reads a parent generation.
   UUID, then stream the existing logical windows, owner projections and 4 MiB
   fragments. Physical scratch frames do not change catalog IDs, cuts, ordinals
   or published bytes.
+- **Node tables use scratch when needed.** When about 56 bytes per node plus
+  fixed workspace exceeds the budget, node identities, endpoint resolution,
+  degrees and CSR key ranges use bounded node-UUID range partitions on scratch
+  (#1929).
 - **Route.** The route is chosen once by the first `validate` and recorded in
   the import manifest (`build_route`). A later change in free memory cannot send
   a started build to another route.
 
 Pending, tracked under epic #1881:
 
-- **Node tables are resident (#1929).** The node UUIDs, endpoint lookup, degrees
-  and CSR offsets still need about 56 bytes per node plus a fixed share. A build
-  whose node tables exceed the budget still takes the staged path
-  (`node_tables_exceed_budget`; the chunk API replays its spool through it)
-  until #1929 moves them to scratch.
 - **Source decoding is not bounded (#1918).** The property scratch bound covers
   normalized property transport and overlay assembly. Registered source decoding
   and normalization can expand Parquet dictionaries, nested pages and row maps
@@ -492,12 +491,13 @@ Pending, tracked under epic #1881:
   the complete process budget.
 - **Scratch passes run one at a time (#1938).** Over-budget builds report
   `scratch_concurrency` 1 until partitions run concurrently.
-- **Retired machinery.** The staged initial-build code is deleted after #1929;
-  until then it remains reachable through the route above.
+- **Retired machinery.** The staged initial-build code awaits deletion after
+  #1929. No new initial-build plan selects it; old staged sessions remain
+  readable until the retirement change lands.
 
-The historical `edge_properties_exceed_budget` manifest reason remains readable;
-new plans route property payloads through scratch instead of retaining their
-batches. Publication semantics are unchanged.
+The historical `node_tables_exceed_budget` and `edge_properties_exceed_budget`
+manifest reasons remain readable; new plans use bounded scratch instead of
+selecting either reason. Publication semantics are unchanged.
 
 Publication does not copy the encoded files. On unix it syncs each encoded file, links the same inode to
 `graph-objects/sha256/<2>/<62>`, and acknowledges the bucket directory, so each

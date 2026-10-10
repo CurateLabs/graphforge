@@ -482,7 +482,7 @@ impl PropertyRows<'_> {
                     let refs = inputs.iter().collect::<Vec<_>>();
                     let run = self.merge(&refs, None, None, cancel)?;
                     for input in &inputs {
-                        std::fs::remove_file(&input.path).map_err(storage)?;
+                        self.reclaim(&input.path)?;
                     }
                     Ok((group, run))
                 })
@@ -535,7 +535,7 @@ impl PropertyRows<'_> {
         let mut merged_groups = (0..groups.len()).map(|_| Vec::new()).collect::<Vec<_>>();
         for (group, segment) in segments {
             if segment.rows == 0 {
-                std::fs::remove_file(&segment.path).map_err(storage)?;
+                self.reclaim(&segment.path)?;
             } else {
                 merged_groups[group].push(segment);
             }
@@ -543,7 +543,7 @@ impl PropertyRows<'_> {
         for (group, (digest, runs)) in digests.into_iter().zip(groups).enumerate() {
             let segments = if runs.len() >= 2 {
                 for run in &runs {
-                    std::fs::remove_file(&run.path).map_err(storage)?;
+                    self.reclaim(&run.path)?;
                 }
                 std::mem::take(&mut merged_groups[group])
             } else {

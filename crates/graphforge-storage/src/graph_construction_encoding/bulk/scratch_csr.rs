@@ -132,7 +132,7 @@ impl KeyHistogram {
         }
         let count = (part as usize + 1).max(wanted);
         KeyPartitioner {
-            table,
+            lookup: Lookup::Dense(table),
             span: limit,
             count,
             seen,
@@ -143,10 +143,91 @@ impl KeyHistogram {
 /// A light node shares one partition with consecutive light nodes. A heavy
 /// node occupies consecutive partitions split by increasing occurrence ordinal.
 pub(super) struct KeyPartitioner {
-    table: Vec<(u32, u32)>,
+    lookup: Lookup,
     span: u64,
     count: usize,
     seen: Vec<AtomicU32>,
+}
+
+/// Where a node's partition comes from.
+enum Lookup {
+    /// `(partition, heavy counter)` for every node, from resident degrees.
+    Dense(Vec<(u32, u32)>),
+    /// `(first rank, partition, heavy counter)` for every run of nodes that
+    /// share a partition, and for every heavy node. Memory follows the number
+    /// of partitions and heavy nodes, never the number of nodes.
+    Runs(Vec<(u32, u32, u32)>),
+}
+
+/// Builds a [`KeyPartitioner`] from out or in degrees streamed in rank order,
+/// assigning exactly the partitions [`KeyHistogram::partitioner`] assigns to
+/// resident degrees.
+pub(super) struct KeyPartitionerBuilder {
+    limit: u64,
+    wanted: usize,
+    runs: Vec<(u32, u32, u32)>,
+    heavy: u32,
+    part: u32,
+    used: u64,
+    next: u32,
+}
+
+impl KeyPartitionerBuilder {
+    /// Partitions of at most `max_entries` entries, and at most
+    /// `ceil(edges / wanted)` so `wanted` partitions share the edges.
+    pub(super) fn new(max_entries: u64, edges: u64, wanted: usize) -> Self {
+        Self {
+            limit: max_entries
+                .max(1)
+                .min(edges.div_ceil(wanted.max(1) as u64).max(1)),
+            wanted,
+            runs: Vec::new(),
+            heavy: 0,
+            part: 0,
+            used: 0,
+            next: 1,
+        }
+    }
+
+    /// The degrees of the next nodes in rank order.
+    pub(super) fn extend(&mut self, degrees: &[u32]) {
+        for &degree in degrees {
+            let rank = self.next;
+            self.next += 1;
+            let degree = u64::from(degree);
+            if degree > self.limit {
+                if self.used != 0 {
+                    self.part += 1;
+                    self.used = 0;
+                }
+                self.heavy += 1;
+                self.runs.push((rank, self.part, self.heavy));
+                self.part += u32::try_from(degree.div_ceil(self.limit)).expect("dense edge ids");
+            } else {
+                if self.used + degree > self.limit {
+                    self.part += 1;
+                    self.used = 0;
+                }
+                if self
+                    .runs
+                    .last()
+                    .is_none_or(|&(_, part, counter)| counter != 0 || part != self.part)
+                {
+                    self.runs.push((rank, self.part, 0));
+                }
+                self.used += degree;
+            }
+        }
+    }
+
+    pub(super) fn finish(self) -> KeyPartitioner {
+        KeyPartitioner {
+            seen: (0..self.heavy).map(|_| AtomicU32::new(0)).collect(),
+            lookup: Lookup::Runs(self.runs),
+            span: self.limit,
+            count: (self.part as usize + 1).max(self.wanted),
+        }
+    }
 }
 
 impl KeyPartitioner {
@@ -156,7 +237,13 @@ impl KeyPartitioner {
 
     /// Heavy nodes require calls in increasing edge-id order.
     pub(super) fn partition(&self, key: u32) -> usize {
-        let (base, counter) = self.table[key as usize - 1];
+        let (base, counter) = match &self.lookup {
+            Lookup::Dense(table) => table[key as usize - 1],
+            Lookup::Runs(runs) => {
+                let run = runs[runs.partition_point(|run| run.0 <= key) - 1];
+                (run.1, run.2)
+            }
+        };
         base as usize
             + if counter == 0 {
                 0
@@ -198,8 +285,19 @@ impl CsrScratch {
         histogram: &KeyHistogram,
         partitions: usize,
     ) -> Result<Self, GfError> {
-        let out_keys = histogram.partitioner(Direction::Out, partitions);
-        let in_keys = histogram.partitioner(Direction::In, partitions);
+        Self::with_partitioners(
+            scratch,
+            histogram.partitioner(Direction::Out, partitions),
+            histogram.partitioner(Direction::In, partitions),
+        )
+    }
+
+    /// Partition files for key partitioners built from streamed degrees.
+    pub(super) fn with_partitioners(
+        scratch: &Scratch,
+        out_keys: KeyPartitioner,
+        in_keys: KeyPartitioner,
+    ) -> Result<Self, GfError> {
         Ok(Self {
             out: Partitions::create(scratch, "csr-out", out_keys.count, CSR_RECORD)?,
             inn: Partitions::create(scratch, "csr-in", in_keys.count, CSR_RECORD)?,
@@ -416,6 +514,9 @@ fn write_direction(
         ordered.acquire(index, cost)?;
         let outcome = (|| {
             let mut sorted = load_sorted(context.scratch, partitions, index, count)?;
+            // The entries are sorted in memory; this partition file is not
+            // read again.
+            partitions.reclaim(context.scratch, index)?;
             for chunk in sorted.chunks(4096) {
                 check_cancelled(context.cancel)?;
                 for entry in chunk {
@@ -461,6 +562,8 @@ fn write_direction(
         if carry.entries != spool_counts[group] {
             return Err(storage("a CSR relation spool lost entries"));
         }
+        // This group's spool is fully consumed; it is not read again.
+        spools.reclaim(context.scratch, group)?;
         carry.flush(&mut emit)?;
         totals[group] = (carry.entries, carry.node_count());
     }
@@ -640,15 +743,7 @@ mod tests {
         scatter.finish().unwrap();
         let histogram = KeyHistogram::new(41, entries.len() as u64, 21);
         let csr = CsrScratch::create(&scratch, &histogram, 1).unwrap();
-        let plan = ScratchPlan {
-            concurrency: 1,
-            edge_partitions: 1,
-            csr_partitions: partitions.len(),
-            gate_bytes: ScratchPlan::csr_cost(21),
-            staging_bytes: 64,
-            property: super::super::property_rows::PropertySizing::SERIAL,
-            decode_bytes: 0,
-        };
+        let plan = ScratchPlan::sized(1, 1, partitions.len(), ScratchPlan::csr_cost(21), 64);
         let cancel = AtomicBool::new(false);
         let options = AdjacencyBuildOptions {
             shard_max_edges: 64,
@@ -759,7 +854,67 @@ mod tests {
         assert!(counts.iter().all(|count| *count <= 100));
         for key in 0..100 {
             assert_eq!(&counts[2 * key..2 * key + 2], &[100, 1]);
-            assert_eq!(partitioner.table[key].0 as usize, 2 * key);
+            let Lookup::Dense(table) = &partitioner.lookup else {
+                panic!("resident degrees build a dense table");
+            };
+            assert_eq!(table[key].0 as usize, 2 * key);
+        }
+    }
+
+    /// Degrees with light nodes, runs of empty nodes, nodes that exactly fill a
+    /// partition, and heavy nodes of several multiples of the limit.
+    fn mixed_degrees() -> Vec<u32> {
+        let mut degrees = Vec::new();
+        for round in 0..40_u32 {
+            degrees.extend([0, 1, 3, 7, 7, 0, 0, 2]);
+            degrees.push(10); // exactly the limit
+            degrees.push(11 + round % 3); // heavy
+            degrees.push(35 + round); // heavy, several partitions
+            degrees.extend([4, 4, 4, 4]);
+        }
+        degrees
+    }
+
+    #[test]
+    fn streamed_degrees_assign_the_partitions_resident_degrees_assign() {
+        let degrees = mixed_degrees();
+        let edges: u64 = degrees.iter().map(|degree| u64::from(*degree)).sum();
+        for (limit, wanted) in [(10, 1), (10, 64), (7, 3), (1_000_000, 1), (3, 500)] {
+            let histogram = KeyHistogram::new(degrees.len() as u64, edges, limit);
+            for (index, degree) in degrees.iter().enumerate() {
+                for _ in 0..*degree {
+                    histogram.add(index as u32 + 1, 1);
+                }
+            }
+            // Arrive in arbitrary chunk sizes, as node leaves do.
+            for chunk in [1_usize, 5, 64, degrees.len()] {
+                let resident = histogram.partitioner(Direction::Out, wanted);
+                let mut builder = KeyPartitionerBuilder::new(limit, edges, wanted);
+                for piece in degrees.chunks(chunk) {
+                    builder.extend(piece);
+                }
+                let streamed = builder.finish();
+                assert_eq!(streamed.count, resident.count, "{limit} {wanted} {chunk}");
+                assert_eq!(streamed.span, resident.span);
+                assert_eq!(streamed.has_heavy(), resident.has_heavy());
+                let (mut left, mut right) = (Vec::new(), Vec::new());
+                for (index, degree) in degrees.iter().enumerate() {
+                    let key = index as u32 + 1;
+                    for _ in 0..(*degree).max(1) {
+                        left.push(resident.partition(key));
+                        right.push(streamed.partition(key));
+                    }
+                }
+                assert_eq!(left, right, "{limit} {wanted} {chunk}");
+                let Lookup::Runs(runs) = &streamed.lookup else {
+                    panic!("streamed degrees build runs");
+                };
+                // Runs, not nodes: far fewer entries than nodes when partitions are large.
+                if limit >= 1_000_000 {
+                    assert_eq!(runs.len(), 1);
+                }
+                assert!(runs.windows(2).all(|pair| pair[0].0 < pair[1].0));
+            }
         }
     }
 
