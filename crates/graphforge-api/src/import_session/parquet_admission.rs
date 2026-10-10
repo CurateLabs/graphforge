@@ -571,13 +571,14 @@ impl SourceScan {
     ) -> Result<(), GfError> {
         let logical_batches = self.rows.div_ceil(self.batch_rows);
         let sizing_floor = self.sizing_floor();
+        // The leaf's descriptor comes from the schema, which a file of no row
+        // groups still carries.
+        let schema = metadata.file_metadata().schema_descr();
         for shape_leaf in &self.shape.leaves {
-            let descriptor = metadata
-                .row_groups()
-                .iter()
-                .find_map(|group| group.columns().get(shape_leaf.column_index))
-                .ok_or_else(|| storage("Parquet schema has no visible physical column"))?
-                .column_descr();
+            let descriptor = schema
+                .columns()
+                .get(shape_leaf.column_index)
+                .ok_or_else(|| storage("Parquet schema has no visible physical column"))?;
             if descriptor.max_rep_level() == 0 {
                 self.flat_leaf_count = self
                     .flat_leaf_count
@@ -626,14 +627,20 @@ impl SourceScan {
                     "the bounded per-row Parquet sizing window",
                 )?;
                 row_costs.resize(count, 0_u64);
+                let mut row_variable = Vec::new();
+                reserve(
+                    &mut row_variable,
+                    count,
+                    budget,
+                    "the bounded per-row Parquet sizing window",
+                )?;
+                row_variable.resize(count, 0_u64);
                 for (visible_index, shape_leaf) in self.shape.leaves.iter().enumerate() {
                     let column = shape_leaf.column_index;
-                    let descriptor = metadata
-                        .row_groups()
-                        .iter()
-                        .find_map(|group| group.columns().get(column))
-                        .ok_or_else(|| storage("Parquet schema has no visible physical column"))?
-                        .column_descr();
+                    let descriptor = schema
+                        .columns()
+                        .get(column)
+                        .ok_or_else(|| storage("Parquet schema has no visible physical column"))?;
                     let flat = descriptor.max_rep_level() == 0;
                     for (group_index, group) in self.groups.iter().enumerate() {
                         let group_first = self.group_start[group_index];

@@ -518,6 +518,50 @@ fn a_dictionary_that_expands_past_the_window_is_refused_before_it_is_decoded() {
 }
 
 #[test]
+fn a_source_with_no_row_groups_imports_beside_a_full_one() {
+    let _serial = serial();
+    let directory = tempfile::tempdir().unwrap();
+    // A converter writes an empty table as a Parquet file of schema and footer
+    // alone: no row group, so no column chunk to size a row by.
+    let rows = 512;
+    let full = directory.path().join("full.parquet");
+    write_parquet(
+        &full,
+        &[node_batch(
+            1,
+            rows,
+            vec![("text", dictionary_strings(rows, |row| format!("v{row}")))],
+        )],
+        WriterProperties::builder().build(),
+    );
+    let empty = directory.path().join("empty.parquet");
+    write_parquet(
+        &empty,
+        &[node_batch(
+            1,
+            0,
+            vec![("text", dictionary_strings(0, |row| format!("v{row}")))],
+        )],
+        WriterProperties::builder().build(),
+    );
+    let queries = ["MATCH (n:Thing) RETURN count(n) AS n"];
+    for budget in ROUTES {
+        let mut run = import_sources(
+            &[(BulkInputKind::Node, &full), (BulkInputKind::Node, &empty)],
+            128,
+            budget,
+        );
+        let progress = run
+            .result
+            .as_ref()
+            .unwrap_or_else(|error| panic!("{budget:?}: {error}"));
+        assert_eq!(progress.rows_accepted, rows as u64, "{budget:?}");
+        run.commit();
+        assert!(answers(&run.graph, &queries).contains("512"), "{budget:?}");
+    }
+}
+
+#[test]
 fn compressed_pages_are_admitted_with_their_codec_state() {
     let _serial = serial();
     let directory = tempfile::tempdir().unwrap();
