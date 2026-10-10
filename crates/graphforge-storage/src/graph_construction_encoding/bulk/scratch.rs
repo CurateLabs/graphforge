@@ -126,6 +126,7 @@ fn remove_scratch_tree(
 pub(super) struct Scratch {
     path: PathBuf,
     allocation: Option<StorageAllocationOperation>,
+    removed: bool,
     written: AtomicU64,
     read: AtomicU64,
     /// Bytes reserved for scratch files that still exist, and the largest
@@ -151,6 +152,7 @@ impl Scratch {
         Ok(Self {
             path,
             allocation,
+            removed: false,
             written: AtomicU64::new(0),
             read: AtomicU64::new(0),
             occupied: AtomicU64::new(0),
@@ -238,16 +240,17 @@ impl Scratch {
     }
 
     /// Delete the tree now and report a failure, instead of leaving it to `Drop`.
-    pub(super) fn remove(self) -> Result<(), GfError> {
-        let outcome = remove_scratch_tree(&self.path, self.allocation.as_ref());
-        std::mem::forget(self);
-        outcome
+    pub(super) fn remove(mut self) -> Result<(), GfError> {
+        self.removed = true;
+        remove_scratch_tree(&self.path, self.allocation.as_ref())
     }
 }
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        let _ = remove_scratch_tree(&self.path, self.allocation.as_ref());
+        if !self.removed {
+            let _ = remove_scratch_tree(&self.path, self.allocation.as_ref());
+        }
     }
 }
 

@@ -702,6 +702,7 @@ fn native_property_write_tracks_actual_file_growth_and_reclaim() {
             .value(0),
         "Person"
     );
+    drop(file);
     rows.reclaim(&path).unwrap();
     assert_eq!(allocation.totals().unwrap().0, baseline);
     drop(rows);
@@ -901,7 +902,8 @@ fn run_writer_finish_preserves_flush_error_over_observation_error() {
     let path = writer.path.clone();
     let readonly = File::open(&path).unwrap();
     let mut probe = readonly.try_clone().unwrap();
-    let expected = probe.write_all(b"probe").unwrap_err().to_string();
+    let expected = storage(probe.write_all(b"probe").unwrap_err()).to_string();
+    drop(probe);
     writer.file = Some(std::io::BufWriter::new(readonly));
 
     let data = batch(0, 4);

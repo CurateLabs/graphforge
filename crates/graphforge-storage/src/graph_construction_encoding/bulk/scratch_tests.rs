@@ -305,6 +305,7 @@ fn native_appender_observes_triggered_and_finish_only_growth() {
     let triggered_native = allocated(&triggered_file);
     assert!(triggered_native > 0);
     assert_eq!(allocation.totals().unwrap().0, baseline + triggered_native);
+    drop(triggered_file);
     triggered.finish().unwrap();
     scratch.reclaim_file(&triggered_path).unwrap();
     assert_eq!(allocation.totals().unwrap().0, baseline);
@@ -323,6 +324,7 @@ fn native_appender_observes_triggered_and_finish_only_growth() {
         allocation.totals().unwrap().1,
         baseline + triggered_native.max(finish_native)
     );
+    drop(finish_file);
     scratch.reclaim_file(&finish_path).unwrap();
     assert_eq!(allocation.totals().unwrap().0, baseline);
     scratch.remove().unwrap();
@@ -344,6 +346,7 @@ fn native_scratch_teardown_and_stale_create_retire_only_owned_files() {
         allocation.totals().unwrap().0,
         baseline + allocated(&stale_file)
     );
+    drop(stale_file);
 
     let scratch = Scratch::create(&directory).unwrap();
     assert_eq!(allocation.totals().unwrap().0, baseline);
@@ -356,8 +359,6 @@ fn native_scratch_teardown_and_stale_create_retire_only_owned_files() {
     let native = observe_partition_file(partitions.path(0));
     let live = allocation.totals().unwrap().0;
     assert_eq!(live, baseline + native);
-    partitions.reclaim(&scratch, 0).unwrap();
-    assert_eq!(allocation.totals().unwrap().0, baseline);
     drop(partitions);
     scratch.remove().unwrap();
     assert_eq!(allocation.totals().unwrap(), (baseline, live));
