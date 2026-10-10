@@ -26,6 +26,7 @@ pub(crate) mod bulk_source;
 mod cpu_budget_report;
 mod external_source;
 mod inventory_budget;
+mod ipc_schema_admission;
 mod journal;
 mod memory_budget;
 mod normalization;
