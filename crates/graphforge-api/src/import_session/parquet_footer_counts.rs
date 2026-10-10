@@ -40,6 +40,8 @@ pub(super) struct FooterCountFacts {
     pub(super) schema_name_bytes: u64,
     /// Root's declared child count, for the later flattened-topology check.
     pub(super) root_children: Option<u64>,
+    /// Start of the selected first schema in the borrowed footer.
+    pub(super) schema_offset: Option<usize>,
     /// Number of elements requested in native row-group lists.
     pub(super) row_groups: u64,
     /// Number of copied payload allocation requests.
@@ -278,26 +280,29 @@ fn read_binary_payload(
     payload(facts, value.len(), true, budget)
 }
 
-fn schema_element(
+pub(super) fn schema_element(
     cursor: &mut CompactSlice<'_>,
     facts: &mut FooterCountFacts,
     budget: u64,
     is_root_node: bool,
-) -> Result<(Option<usize>, Option<i32>), GfError> {
+) -> Result<SchemaElementScalarFacts, GfError> {
     let mut previous = 0;
     let mut name_len = None;
     let mut physical_type = false;
     let mut physical_type_id = None;
     let mut children = None;
+    let mut repetition = None;
+    let mut selected_crs_len = None;
     while let Some((id, kind)) = field(cursor, &mut previous)? {
         match id {
             1 => {
                 physical_type_id = Some(cursor.read_i32()?);
                 physical_type = true;
             }
-            2 | 3 | 6 | 7 | 8 | 9 => {
+            2 | 6 | 7 | 8 | 9 => {
                 let _ = cursor.read_i32()?;
             }
+            3 => repetition = Some(cursor.read_i32()?),
             4 => {
                 name_len = Some(read_utf8_payload_borrowed(cursor)?);
             }
@@ -308,7 +313,7 @@ fn schema_element(
                 }
                 children = Some(usize::try_from(value).map_err(|_| malformed())?);
             }
-            10 => logical_type(cursor, facts, budget)?,
+            10 => selected_crs_len = logical_type(cursor, facts, budget)?,
             _ => skip(cursor, kind)?,
         }
     }
@@ -327,7 +332,24 @@ fn schema_element(
             .checked_add(1)
             .ok_or_else(allocation_limit)?;
     }
-    Ok((children, is_leaf.then_some(physical_type_id).flatten()))
+    Ok(SchemaElementScalarFacts {
+        name_len,
+        physical_type: physical_type.then_some(physical_type_id).flatten(),
+        repetition,
+        children,
+        crs_len: selected_crs_len,
+    })
+}
+
+/// Borrowed wire facts needed to replay native schema topology. The parser
+/// retains no names or CRS payloads; lengths are from each field's final value.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct SchemaElementScalarFacts {
+    pub(super) name_len: usize,
+    pub(super) physical_type: Option<i32>,
+    pub(super) repetition: Option<i32>,
+    pub(super) children: Option<usize>,
+    pub(super) crs_len: Option<usize>,
 }
 
 fn read_utf8_payload_borrowed(cursor: &mut CompactSlice<'_>) -> Result<usize, GfError> {
@@ -338,25 +360,41 @@ fn logical_type(
     cursor: &mut CompactSlice<'_>,
     facts: &mut FooterCountFacts,
     budget: u64,
-) -> Result<(), GfError> {
+) -> Result<Option<usize>, GfError> {
     let mut previous = 0;
     let mut variants = 0usize;
+    let mut selected_crs_len = None;
     while let Some((id, kind)) = field(cursor, &mut previous)? {
         variants = variants.checked_add(1).ok_or_else(allocation_limit)?;
         match id {
-            1..=4 | 6 | 11..=15 => empty_struct(cursor)?,
-            5 => decimal_type(cursor)?,
-            7 | 8 => timestamp_type(cursor)?,
-            10 => int_type(cursor)?,
-            16 => variant_type(cursor)?,
-            17 | 18 => geometry_type(cursor, facts, budget, id == 18)?,
+            1..=4 | 6 | 11..=15 => {
+                empty_struct(cursor)?;
+                selected_crs_len = None;
+            }
+            5 => {
+                decimal_type(cursor)?;
+                selected_crs_len = None;
+            }
+            7 | 8 => {
+                timestamp_type(cursor)?;
+                selected_crs_len = None;
+            }
+            10 => {
+                int_type(cursor)?;
+                selected_crs_len = None;
+            }
+            16 => {
+                variant_type(cursor)?;
+                selected_crs_len = None;
+            }
+            17 | 18 => selected_crs_len = geometry_type(cursor, facts, budget, id == 18)?,
             _ => skip(cursor, kind)?,
         }
     }
     if variants > 1 {
         return Err(malformed());
     }
-    Ok(())
+    Ok(selected_crs_len)
 }
 
 fn empty_struct(cursor: &mut CompactSlice<'_>) -> Result<(), GfError> {
@@ -465,18 +503,23 @@ fn geometry_type(
     facts: &mut FooterCountFacts,
     budget: u64,
     geography: bool,
-) -> Result<(), GfError> {
+) -> Result<Option<usize>, GfError> {
     let mut previous = 0;
+    let mut crs_len = None;
     while let Some((id, kind)) = field(cursor, &mut previous)? {
         match id {
-            1 => read_utf8_payload(cursor, facts, budget)?,
+            1 => {
+                let len = cursor.read_utf8()?.len();
+                payload(facts, len, false, budget)?;
+                crs_len = Some(len);
+            }
             2 if geography => {
                 let _ = cursor.read_i32()?;
             }
             _ => skip(cursor, kind)?,
         }
     }
-    Ok(())
+    Ok(crs_len)
 }
 
 fn key_value(
@@ -758,7 +801,7 @@ fn row_group(
                         if elements_left == 0 {
                             return Err(malformed());
                         }
-                        let (_, physical_type) = schema_element(
+                        let element = schema_element(
                             &mut schema_cursor,
                             &mut schema_facts,
                             u64::MAX,
@@ -766,7 +809,7 @@ fn row_group(
                         )?;
                         elements_left -= 1;
                         schema_index += 1;
-                        if let Some(physical_type) = physical_type {
+                        if let Some(physical_type) = element.physical_type {
                             break physical_type;
                         }
                     };
@@ -843,11 +886,12 @@ pub(super) fn preflight(
                     .ok_or_else(allocation_limit)?;
                 let mut root_children = None;
                 for index in 0..count {
-                    let (children, _) =
+                    let element =
                         schema_element(&mut cursor, &mut facts, remaining_budget, index == 0)?;
                     if index == 0 {
-                        root_children = children;
-                        facts.root_children = children
+                        root_children = element.children;
+                        facts.root_children = element
+                            .children
                             .map(|value| u64::try_from(value).map_err(|_| allocation_limit()))
                             .transpose()?;
                     }
@@ -856,6 +900,7 @@ pub(super) fn preflight(
                     return Err(malformed());
                 }
                 schema_seen = true;
+                facts.schema_offset = Some(schema_body_offset);
                 schema_source = Some((schema_body_offset, count));
             }
             3 => {

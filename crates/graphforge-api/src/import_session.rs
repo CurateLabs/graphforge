@@ -43,6 +43,7 @@ mod parquet_page_decode;
 mod parquet_reader;
 mod parquet_row_groups;
 mod parquet_scan;
+mod parquet_schema_envelope;
 mod parquet_shape;
 mod parquet_sizing;
 mod parquet_values;
