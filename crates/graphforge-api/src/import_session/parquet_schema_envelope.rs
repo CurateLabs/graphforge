@@ -58,9 +58,12 @@ fn add(total: &mut u64, amount: u64) -> Result<(), GfError> {
 }
 
 fn bytes(count: u64, width: usize) -> Result<u64, GfError> {
-    count
-        .checked_mul(u64::try_from(width).map_err(|_| overflow())?)
-        .ok_or_else(overflow)
+    let count = usize::try_from(count).map_err(|_| overflow())?;
+    let requested = count.checked_mul(width).ok_or_else(overflow)?;
+    if requested > isize::MAX as usize {
+        return Err(overflow());
+    }
+    u64::try_from(requested).map_err(|_| overflow())
 }
 
 fn arc_allocation<T>() -> Result<u64, GfError> {
