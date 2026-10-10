@@ -50,6 +50,9 @@ impl GfError {
 
 impl From<crate::ParseError> for GfError {
     fn from(error: crate::ParseError) -> Self {
+        if let crate::ParseErrorKind::UnsupportedFeature(feature) = error.kind {
+            return Self::NotImplemented(feature.description());
+        }
         Self::Parse {
             msg: error.message.clone(),
             span: error.span,
@@ -74,6 +77,9 @@ impl GfError {
     /// Preserve the legacy EXPLAIN display while retaining the full parser diagnostic.
     #[must_use]
     pub fn from_parse_display(error: crate::ParseError) -> Self {
+        if let crate::ParseErrorKind::UnsupportedFeature(feature) = error.kind {
+            return Self::NotImplemented(feature.description());
+        }
         Self::Parse {
             msg: error.to_string(),
             span: error.span,
@@ -84,6 +90,16 @@ impl GfError {
     /// Preserve legacy cypher EXPLAIN's planning domain and message.
     #[must_use]
     pub fn from_bind_plan_errors(errors: &[crate::BindError]) -> Self {
+        if errors
+            .iter()
+            .all(|error| matches!(error.kind, crate::BindErrorKind::UnsupportedFeature(_)))
+            && let Some(crate::BindError {
+                kind: crate::BindErrorKind::UnsupportedFeature(feature),
+                ..
+            }) = errors.first()
+        {
+            return Self::NotImplemented(feature.description());
+        }
         Self::BindPlan {
             msg: format!(
                 "bind errors: {}",
@@ -100,6 +116,16 @@ impl GfError {
     /// Preserve every binder diagnostic and the established primary span/message.
     #[must_use]
     pub fn from_bind_errors(errors: &[crate::BindError]) -> Self {
+        if errors
+            .iter()
+            .all(|error| matches!(error.kind, crate::BindErrorKind::UnsupportedFeature(_)))
+            && let Some(crate::BindError {
+                kind: crate::BindErrorKind::UnsupportedFeature(feature),
+                ..
+            }) = errors.first()
+        {
+            return Self::NotImplemented(feature.description());
+        }
         // This existing UUID validation policy is shared with parser clients.
         if let Some(error) = errors
             .iter()

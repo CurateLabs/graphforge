@@ -156,14 +156,17 @@ fn rewrites_are_labelled_variances_that_cite_their_cause() {
         // The `:Message` label rewrite is a data-model variance, not a defect.
         let not_a_defect = matches!(
             query.operation,
-            Operation::Bi2
+            Operation::Bi1
+                | Operation::Bi2
                 | Operation::Bi3
                 | Operation::Bi5
                 | Operation::Bi6
                 | Operation::Bi7
+                | Operation::Bi8
                 | Operation::Bi9
                 | Operation::Bi10
                 | Operation::Bi12
+                | Operation::Bi13
                 | Operation::Bi14
         );
         let message_label = query.cypher.contains(":Post OR ");

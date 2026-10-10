@@ -27,6 +27,7 @@ pub(super) fn empty_state(mode: OntologyMode) -> BinderState {
         edge_rel_names: HashMap::new(),
         scalar_list_edges: HashSet::new(),
         var_kinds: HashMap::new(),
+        node_lists: HashMap::new(),
         next_var: 0,
         builder: GraphPlan::builder("openCypher").ontology_mode(mode),
         errors: Vec::new(),

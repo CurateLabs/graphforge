@@ -607,6 +607,7 @@ fn advisory_unknown_label_produces_warnings() {
         edge_rel_names: HashMap::new(),
         scalar_list_edges: HashSet::new(),
         var_kinds: HashMap::new(),
+        node_lists: HashMap::new(),
         next_var: 0,
         builder: GraphPlan::builder("openCypher").ontology_mode(OntologyMode::Advisory),
         errors: Vec::new(),

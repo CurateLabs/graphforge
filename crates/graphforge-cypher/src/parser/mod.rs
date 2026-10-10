@@ -26,6 +26,7 @@ pub struct TokenStream<'input> {
     tokens: Vec<(usize, Tok, usize)>,
     pos: usize,
     input: &'input str,
+    unsupported: Option<ParseError>,
 }
 
 impl<'input> TokenStream<'input> {
@@ -36,7 +37,32 @@ impl<'input> TokenStream<'input> {
             tokens,
             pos: 0,
             input,
+            unsupported: None,
         })
+    }
+
+    /// Keep recognizing grammar after a known unsupported construct, so a
+    /// malformed enclosing query still reports its syntax error first.
+    pub(super) fn record_unsupported(
+        &mut self,
+        feature: graphforge_core::UnsupportedCypherFeature,
+        span: Span,
+    ) {
+        if self.unsupported.is_none() {
+            self.unsupported = Some(ParseError::new(
+                ParseErrorKind::UnsupportedFeature(feature),
+                span,
+                format!("{} are not supported", feature.description()),
+            ));
+        }
+    }
+
+    /// Internal placeholders cannot escape any successful public parse entry point.
+    pub(super) fn finish_supported<T>(&mut self, value: T) -> Result<T, ParseError> {
+        match self.unsupported.take() {
+            Some(error) => Err(error),
+            None => Ok(value),
+        }
     }
 
     // -----------------------------------------------------------------------

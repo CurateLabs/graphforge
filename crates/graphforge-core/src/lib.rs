@@ -9,10 +9,12 @@
 
 mod algorithm_error;
 mod bind_error;
+mod cypher_feature;
 mod lowering_error;
 mod parse_error;
 pub use algorithm_error::AlgorithmError;
 pub use bind_error::{BindError, BindErrorKind};
+pub use cypher_feature::UnsupportedCypherFeature;
 pub use lowering_error::LoweringError;
 pub use parse_error::{ParseError, ParseErrorKind};
 
