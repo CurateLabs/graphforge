@@ -9,8 +9,12 @@
 //!
 //! - the lifecycle read-path counters, which count the application's reads and
 //!   writes through the storage layer, and
-//! - on Linux, the process's own `wchar`, which counts every byte handed to a
-//!   `write` system call and so also catches a write the counters do not see.
+//! - on Linux, `/proc/self/io`'s `write_bytes`, which counts bytes this process
+//!   caused to be sent to the storage layer, including scratch writes the
+//!   lifecycle counters do not see. `wchar` was the wrong gate: it counts every
+//!   byte handed to `write`, including async-runtime eventfd and pipe writes.
+//!   `write_bytes` is accounted only for filesystems with writeback accounting,
+//!   so tmpfs is not counted. Durable projects require ext4, xfs, or btrfs.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -166,12 +170,30 @@ struct Io {
     read_bytes: u64,
     write_bytes: u64,
     write_calls: u64,
-    /// Bytes this process handed to `write` system calls; `None` off Linux.
-    wchar: Option<u64>,
+    /// Bytes this process caused to be sent to the storage layer; `None` off Linux.
+    storage_write_bytes: Option<u64>,
+    /// Bytes this process handed to `write` system calls, for paired evidence.
+    process_write_chars: Option<u64>,
 }
 
 #[cfg(target_os = "linux")]
-fn wchar() -> Option<u64> {
+fn storage_write_bytes() -> Option<u64> {
+    let io = std::fs::read_to_string("/proc/self/io")
+        .expect("task I/O accounting unavailable: cannot read /proc/self/io");
+    Some(
+        io.lines()
+            .find_map(|line| line.strip_prefix("write_bytes: ")?.trim().parse().ok())
+            .expect("task I/O accounting unavailable: /proc/self/io has no valid write_bytes line"),
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn storage_write_bytes() -> Option<u64> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn process_write_chars() -> Option<u64> {
     std::fs::read_to_string("/proc/self/io")
         .ok()?
         .lines()
@@ -179,21 +201,23 @@ fn wchar() -> Option<u64> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn wchar() -> Option<u64> {
+fn process_write_chars() -> Option<u64> {
     None
 }
 
 fn measured(forge: &GraphForge, query: &str, ident: i64) -> (Vec<RecordBatch>, Io) {
     let _capture = LifecycleIoCapture::install();
     let before = lifecycle_io_snapshot().expect("requested observation");
-    let wchar_before = wchar();
+    let storage_write_bytes_before = storage_write_bytes();
+    let process_write_chars_before = process_write_chars();
     let result = forge
         .execute_with_params(
             query,
             &HashMap::from([("ident".to_owned(), IrLiteral::Int(ident))]),
         )
         .expect("statement executes");
-    let wchar_after = wchar();
+    let storage_write_bytes_after = storage_write_bytes();
+    let process_write_chars_after = process_write_chars();
     let delta = lifecycle_io_snapshot()
         .expect("requested observation")
         .since(&before)
@@ -203,7 +227,12 @@ fn measured(forge: &GraphForge, query: &str, ident: i64) -> (Vec<RecordBatch>, I
         read_bytes: delta.phases[&StorageIoPhase::ReadPathScan].read_bytes,
         write_bytes: delta.totals.write_bytes,
         write_calls: delta.totals.write_calls,
-        wchar: wchar_before.zip(wchar_after).map(|(b, a)| a - b),
+        storage_write_bytes: storage_write_bytes_before
+            .zip(storage_write_bytes_after)
+            .map(|(b, a)| a - b),
+        process_write_chars: process_write_chars_before
+            .zip(process_write_chars_after)
+            .map(|(b, a)| a - b),
     };
     (result.batches, io)
 }
@@ -219,8 +248,9 @@ fn count(batches: &[RecordBatch]) -> i64 {
         .value(0)
 }
 
-/// The `wchar` gate counts the whole process, so the tests of this binary,
-/// whose fixtures write, run one at a time.
+/// Process-wide I/O measurements share one counter, and fixtures in this
+/// binary write files, so measured tests run one at a time. `wchar` also sees
+/// runtime eventfd and pipe writes; it is diagnostic evidence, not the gate.
 static SERIAL: Mutex<()> = Mutex::new(());
 
 fn serial() -> MutexGuard<'static, ()> {
@@ -527,7 +557,7 @@ fn a_newer_snapshot_shadows_an_older_match() {
 }
 
 /// A read statement writes nothing: no scratch copy of a fragment and no
-/// spooled run, in the application counters or in the bytes handed to `write`.
+/// spooled run, in the lifecycle counters or storage-layer write accounting.
 #[test]
 fn a_read_statement_writes_nothing() {
     let _serial = serial();
@@ -538,7 +568,10 @@ fn a_read_statement_writes_nothing() {
         assert_eq!(count(&batches), FAN_OUT as i64);
         assert_eq!(io.write_bytes, 0, "{query}: {io:?}");
         assert_eq!(io.write_calls, 0, "{query}: {io:?}");
-        if let Some(written) = io.wchar {
+        #[cfg(target_os = "linux")]
+        assert_eq!(io.storage_write_bytes, Some(0), "{query}: {io:?}");
+        #[cfg(not(target_os = "linux"))]
+        if let Some(written) = io.storage_write_bytes {
             assert_eq!(written, 0, "{query}: {io:?}");
         }
     }
@@ -546,7 +579,53 @@ fn a_read_statement_writes_nothing() {
     let (batches, io) = measured(&forge, "MATCH (a:Entity) RETURN count(a.padding) AS n", 0);
     assert_eq!(count(&batches), SMALL_NODES as i64);
     assert_eq!(io.write_bytes, 0, "{io:?}");
-    assert_eq!(io.wchar.unwrap_or(0), 0, "{io:?}");
+    #[cfg(target_os = "linux")]
+    assert_eq!(io.storage_write_bytes, Some(0), "{io:?}");
+}
+
+#[test]
+fn the_storage_write_gate_sees_a_file_write() {
+    use std::io::Write;
+
+    let _serial = serial();
+    let built = build(SMALL_NODES);
+    let path = built.project.join("storage-write-gate-positive.bin");
+    let before = storage_write_bytes();
+    let mut file = std::fs::File::create(&path).expect("create project-local file");
+    file.write_all(&vec![0x5a; 64 * 1024])
+        .expect("write project-local file");
+    file.sync_all().expect("fsync project-local file");
+    drop(file);
+    let after = storage_write_bytes();
+    #[cfg(target_os = "linux")]
+    assert!(
+        after.unwrap() - before.unwrap() >= 65_536,
+        "project-local file write was not visible to storage accounting: before={before:?}, after={after:?}"
+    );
+}
+
+#[test]
+fn paired_write_counters_distinguish_runtime_writes_from_storage_writes() {
+    let _serial = serial();
+    let built = build(SMALL_NODES);
+    let forge = open(&built.project);
+    let queries = [ANCHORED_HOP, SCATTERED_HOP, UNPUSHED_HOP];
+    let mut iterations_with_wchar = 0;
+    for _ in 0..300 {
+        let mut iteration_wchar = 0;
+        for query in queries {
+            let (batches, io) = measured(&forge, query, 5);
+            assert_eq!(count(&batches), FAN_OUT as i64);
+            assert_eq!(io.storage_write_bytes, Some(0), "{query}: {io:?}");
+            iteration_wchar += io.process_write_chars.unwrap_or(0);
+        }
+        if iteration_wchar > 0 {
+            iterations_with_wchar += 1;
+        }
+    }
+    eprintln!(
+        "paired I/O evidence: iterations=300, wchar_positive_iterations={iterations_with_wchar}, storage_write_bytes_positive_iterations=0"
+    );
 }
 
 #[test]
@@ -572,11 +651,10 @@ fn strict_property_anchors_stream_topology_against_the_equality_build() {
         let (batches, io) = measured(&forge, ANCHORED_HOP, 5);
         assert_eq!(count(&batches), FAN_OUT as i64);
         assert_eq!(io.write_bytes, 0, "{io:?}");
-        // Parallel execution wakes Tokio through eventfd write(8). The
-        // process-wide syscall counter is a zero-file-write gate only when
-        // execution stays on the calling thread, as in the existing control.
+        // Storage accounting is process-wide; parallel execution may also
+        // produce eventfd and pipe writes, which this gate correctly ignores.
         if partitions == 1 {
-            assert_eq!(io.wchar.unwrap_or(0), 0, "{io:?}");
+            assert_eq!(io.storage_write_bytes, Some(0), "{io:?}");
         }
         let (values, io) = measured(
             &forge,
@@ -607,13 +685,13 @@ fn strict_property_anchors_stream_topology_against_the_equality_build() {
         assert_eq!(pairs, vec![(5, 6), (5, 7)]);
         assert_eq!(io.write_bytes, 0, "{io:?}");
         if partitions == 1 {
-            assert_eq!(io.wchar.unwrap_or(0), 0, "{io:?}");
+            assert_eq!(io.storage_write_bytes, Some(0), "{io:?}");
         }
         let (batches, io) = measured(&forge, ANCHORED_LOOKUP, i64::MAX);
         assert_eq!(count(&batches), 0);
         assert_eq!(io.write_bytes, 0, "{io:?}");
         if partitions == 1 {
-            assert_eq!(io.wchar.unwrap_or(0), 0, "{io:?}");
+            assert_eq!(io.storage_write_bytes, Some(0), "{io:?}");
         }
     }
 }
@@ -667,7 +745,7 @@ fn optional_enrichment_preserves_fanout_and_missing_properties() {
         assert_eq!(io.write_bytes, 0, "{io:?}");
         assert_eq!(io.write_calls, 0, "{io:?}");
         if partitions == 1 {
-            assert_eq!(io.wchar.unwrap_or(0), 0, "{io:?}");
+            assert_eq!(io.storage_write_bytes, Some(0), "{io:?}");
         }
     }
 }
