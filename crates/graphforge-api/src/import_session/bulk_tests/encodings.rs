@@ -200,8 +200,6 @@ fn every_encoding_publishes_identical_bytes_across_bulk_routes() {
         let progress = if budget == Some(NODE_SCRATCH_PROBE) {
             let error = session.validate(&graph).unwrap_err();
             let required = stable_required_scratch_bytes(&error, NODE_SCRATCH_PROBE);
-            assert_eq!(session.manifest.build_route, Some(BuildRoute::Bulk));
-            assert_eq!(session.manifest.staged_reason, None);
             let failed = session.open_construction(&graph).unwrap();
             let replacement = session.restart_construction(&graph, failed).unwrap();
             root = graph

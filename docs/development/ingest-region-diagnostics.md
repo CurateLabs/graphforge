@@ -113,10 +113,10 @@ inside `generation_commit`, immediately before `CURRENT`: the receipts nest
 failure leaves `CURRENT` unchanged (fail-closed) instead of committing a
 generation that cannot be hydrated. Candidate verification before that callback
 (the durable manifest and lease authentication) remains in `generation_commit`'s
-residual. Adjacency CSR encoding runs
-inside `stage+seal/seal/canonical_encoding/adjacency_encoding`, not inside
-publish; reconcile publication against that region rather than assuming CSR
-cost lands in `commit`. Measured attribution on the integrated tree is recorded in
+residual. An initial build publishes its adjacency CSR from the bulk builder,
+inside `stage+seal/bulk_build`, not inside publish; reconcile publication
+against that region rather than assuming CSR cost lands in `commit`. An append
+publishes no CSR and keeps the lazy rebuild. Measured attribution on the integrated tree is recorded in
 [`evidence/publication-attribution-1481.md`](https://github.com/CurateLabs/graphforge/blob/29a7b34ebe441a85ffb9274164d58aaeeb68dc8a/docs/development/evidence/publication-attribution-1481.md).
 
 Registration reports successfully owned bytes (Arrow registration reports rows),

@@ -147,20 +147,19 @@ therefore survive process replacement and are reused on re-entry.
 
 The scale client has one authoritative construction boundary: 65,536 rows,
 matching `GraphConstructionBudgets::default().max_batch_rows`. Each full Arrow
-batch is submitted as one durable construction chunk. There is no smaller
-8,192-row subdivision and no larger outer edge buffer. This matters because a
-chunk intentionally owns authenticated artifacts, intent/receipt/checkpoint
-updates, and file/directory durability barriers; choosing a smaller Arrow
-window multiplies that fixed durability work without improving the session's
-bounded-memory guarantee. Ingest evidence records the configured rows per
-chunk, submitted chunks, artifact and synchronization counts, append elapsed
-time, reconciliation elapsed time, and combined seal/publication elapsed time.
-Fresh staging reports append time and a null reconciliation time; published
-re-entry reports reconciliation time and a null append time. The immutable
-artifact count is storage-owned evidence reconstructed, for legacy
-checkpoints, from the authenticated receipt chain. Deterministic 1x/2x/4x
-tests require exact chunk counts and bounded peak windows while aggregate
-merge work remains linear in accepted rows.
+batch is submitted as one durable construction chunk: the session spools it as
+one fsynced Arrow IPC file, and sealing builds the generation from the spool
+with the bulk builder (ADR 0058). There is no smaller 8,192-row subdivision and
+no larger outer edge buffer. This matters because a chunk intentionally owns a
+file and its durability barriers; choosing a smaller Arrow window multiplies
+that fixed durability work without improving the session's bounded-memory
+guarantee. Ingest evidence records the configured rows per chunk, submitted
+chunks, spooled-chunk and synchronization counts, append elapsed time,
+reconciliation elapsed time, and combined seal/publication elapsed time.
+Fresh ingest reports append time and a null reconciliation time; published
+re-entry reports reconciliation time and a null append time. Deterministic
+1x/2x/4x tests require exact chunk, row and node/edge counts, bounded batch
+windows, and phase I/O within a documented 2x of linear growth.
 
 Query-phase ordered-LIMIT evidence must distinguish complete candidate
 examination from materialization amplification. For the canonical fixed-hop
@@ -291,7 +290,7 @@ staging, the portable package, drills, or the clean imported project.
 
 The lifecycle peak is not reconstructed by adding category peaks or directory
 sizes. Storage owns a reference-counted union keyed by authenticated native
-`(volume, file-id)` identities. Append, shaping, encoding, CAS publication,
+`(volume, file-id)` identities. Chunk acceptance, the bulk build, CAS publication,
 portable export, private import materialization, clean publication, corruption
 drills, and interrupted-import cleanup install or remove exact owners. The
 high-water mark advances at each transition, so aliases count once and files

@@ -197,7 +197,7 @@ fn colliding_module_authority() -> ConstructionSemanticAuthority {
 }
 
 #[test]
-fn canonical_encoder_outputs_feed_ordinary_readers_index_and_adjacency() {
+fn canonical_encoder_outputs_feed_ordinary_readers_and_index() {
     let root = TempDir::new().unwrap();
     let operation = Uuid::from_u128(9_320);
     let authority = semantic_authority(graphforge_core::OntologyMode::Strict);
@@ -353,14 +353,6 @@ fn canonical_encoder_outputs_feed_ordinary_readers_index_and_adjacency() {
     let index = crate::TopologyIdentityProbe::open_dir(&graph).unwrap();
     assert_eq!(index.count(crate::UuidIndexKind::Node), 3);
     assert_eq!(index.count(crate::UuidIndexKind::Edge), 2);
-    // ADR 0037: the encoder publishes the adjacency CSR with the generation, so
-    // an ordinary reader reads that index instead of building its own. Rebuilding
-    // here would replace artifacts the checkpoint's identity ledger has already
-    // pinned, and the resume below would then refuse them as changed -- which is
-    // the ledger doing its job, not a defect.
-    let adjacency = crate::adjacency::read_manifest(&graph).unwrap();
-    assert!(!adjacency.is_empty());
-
     drop(session);
     let mut resumed_session = GraphConstructionSession::open_with_semantic_authority(
         root.path(),

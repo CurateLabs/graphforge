@@ -69,8 +69,8 @@ mod tables;
 #[path = "bulk/bulk_test_support.rs"]
 pub(crate) mod test_support;
 
+pub use budget::BulkRoute;
 use budget::ScratchPlan;
-pub use budget::{BulkRoute, BulkStagedReason};
 use emit::{EdgeEmitter, RelationStats, Semantics};
 use install::Installer;
 use plan::PassMeter;
@@ -378,8 +378,8 @@ pub(crate) fn encode_bulk(
         |lease| lease.lanes().get(),
     );
     // The route is a function of the footers and the budget (ADR 0058). A
-    // A durable bulk route cannot switch to staging after a budget drop.
-    // Refuse that attempt before loading data; it can retry when memory returns.
+    // budget below the route's floor is refused before loading data; the build
+    // can retry when memory returns.
     let route = plan.route();
     let scratch_plan = match (route, plan.memory_budget) {
         (BulkRoute::Scratch | BulkRoute::ScratchNodes, Some(budget)) => {
@@ -402,15 +402,6 @@ pub(crate) fn encode_bulk(
             Some(ScratchPlan::derive_with_budgets(
                 plan, budget, workers, budgets,
             ))
-        }
-        (BulkRoute::Staged(reason), _) => {
-            return Err(GfError::Project {
-                code: graphforge_core::ProjectErrorCode::ResourceLimit,
-                message: format!(
-                    "graph construction encoding: the fixed bulk route cannot fit the current \
-                     memory budget ({reason:?}); retry with an adequate budget"
-                ),
-            });
         }
         _ => None,
     };

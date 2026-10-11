@@ -852,6 +852,17 @@ impl GraphForge {
         )
     }
 
+    /// Abort one import session by UUID, including a retired-format session
+    /// that cannot be resumed.
+    #[napi]
+    pub fn abort_import_session(
+        &self,
+        session_uuid: String,
+    ) -> Result<import_session::ImportProgressOutput> {
+        let graph = self.open_guard()?;
+        import_session::abort_import_session(&graph, session_uuid)
+    }
+
     /// Abort and remove non-terminal sessions older than `maxAgeSecs`.
     #[napi]
     pub fn cleanup_stale_import_sessions(&self, max_age_secs: BigInt) -> Result<BigInt> {

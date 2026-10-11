@@ -1,17 +1,25 @@
 ---
 title: "ADR 0057: Initial builds resolve edge endpoints by a node-surrogate index instead of two endpoint sorts"
 adr: "0057"
-status: "Accepted"
+status: "Superseded by ADR 0058"
 date: "2026-10-05"
-superseded_by: null
-revisit_when: "The tracer's laned probe cost exceeds a third of the endpoint work it removes at S20, an append onto a large base needs the same saving, or new-node count outgrows the recorded index budget on a supported workload"
+superseded_by: "0058"
+revisit_when: "Historical; ADR 0058 owns initial-build endpoint resolution"
 ---
 
 # ADR 0057: Initial builds resolve edge endpoints by a node-surrogate index instead of two endpoint sorts
 
-**Status:** Accepted
+> **Superseded.** This record is retained for history. Every initial build
+> now runs on the bulk builder, which resolves edge endpoints with its own
+> node index (see
+> [ADR 0058: Initial builds run on a bulk builder](../0058-initial-builds-run-on-a-bulk-builder.md)).
+> The staged node index, its `max_node_index_bytes` budget and its shaping and
+> encoding plumbing described here were deleted in #1964. Appends keep the
+> endpoint family.
 
-**Implementation:** Slice A is implemented by #1862; see the implementation update below. Slice B is not started.
+**Status:** Superseded by ADR 0058
+
+**Implementation:** Slice A was implemented by #1862 and deleted by #1964. Slice B was never started.
 
 **Related:**
 - ADR 0038 (determinism at the publication boundary)

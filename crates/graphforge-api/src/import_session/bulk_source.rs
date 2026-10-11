@@ -198,7 +198,8 @@ struct SourceReader<'a> {
     graph: &'a GraphForge,
     digests: &'a Digests,
     path: PathBuf,
-    /// `None` for a source an earlier version copied into the session.
+    /// The registered Parquet file this reader decodes where it is. `None` for
+    /// an Arrow source, which the session owns.
     in_place: Option<InPlace>,
     kind: BulkInputKind,
     operation_uuid: Uuid,
@@ -1005,55 +1006,26 @@ impl BulkBatchReader for SourceReader<'_> {
                 scan,
                 ..
             } => {
-                if let Some(in_place) = &self.in_place {
-                    let file = in_place.external.reopen()?;
-                    #[cfg(test)]
-                    super::external_source::pass_hook(
-                        &in_place.external.path,
-                        "opened",
-                        task as u64,
-                    );
-                    let admission = self.admit(scan, metadata, *rows, task, first_batch)?;
-                    let guard = file.try_clone().map_err(storage)?;
-                    let input = ObservedFile::new(file, in_place.digest.clone())?;
-                    self.decode_parquet(
-                        input,
-                        metadata,
-                        *rows,
-                        first_batch,
-                        in_place,
-                        &guard,
-                        &admission,
-                        sink,
-                    )?;
-                } else {
-                    // A session an earlier version began holds its own copy.
-                    let file = File::open(&self.path).map_err(storage)?;
-                    let admission = self.admit(scan, metadata, *rows, task, first_batch)?;
-                    let mut decoded =
-                        self.parquet_reader(file, metadata, *rows, first_batch, &admission)?;
-                    let mut offset = 0_u64;
-                    let mut seen = HashSet::new();
-                    let mut seen_batch = None;
-                    loop {
-                        self.admit_batch(&admission, *rows, first_batch, offset)?;
-                        let Some(batch) = decoded.next() else { break };
-                        let (logical_batch, ordinal, _) =
-                            self.physical_identity(*rows, first_batch, offset, &admission)?;
-                        if seen_batch != Some(logical_batch) {
-                            seen.clear();
-                            seen_batch = Some(logical_batch);
-                        }
-                        self.emit(
-                            logical_batch,
-                            ordinal,
-                            batch.map_err(storage)?,
-                            &mut seen,
-                            sink,
-                        )?;
-                        offset += 1;
-                    }
-                }
+                let in_place = self
+                    .in_place
+                    .as_ref()
+                    .ok_or_else(|| storage("a Parquet source is read where it was registered"))?;
+                let file = in_place.external.reopen()?;
+                #[cfg(test)]
+                super::external_source::pass_hook(&in_place.external.path, "opened", task as u64);
+                let admission = self.admit(scan, metadata, *rows, task, first_batch)?;
+                let guard = file.try_clone().map_err(storage)?;
+                let input = ObservedFile::new(file, in_place.digest.clone())?;
+                self.decode_parquet(
+                    input,
+                    metadata,
+                    *rows,
+                    first_batch,
+                    in_place,
+                    &guard,
+                    &admission,
+                    sink,
+                )?;
             }
             Format::Arrow { plan } => {
                 // Everything the checked reader allocates (its dictionaries,
@@ -1345,48 +1317,44 @@ pub(super) fn plan<'a>(
         match source.kind {
             ImportSourceKind::ParquetNodes | ImportSourceKind::ParquetEdges => {
                 let budget = planning_budget;
-                let metadata = if let Some(external) = source.external.as_ref() {
-                    require_footer_fits(external.footer_bytes(), budget)?;
-                    // Footer verification precedes the decoder's workspace
-                    // reservation. Its read arrives ahead of the hashed prefix,
-                    // so the digest holds it under the shared pending bound
-                    // until the decode's own reads reach it: every byte is
-                    // hashed once, and `finish` re-reads only what the decode
-                    // never asks for.
-                    let digest = SourceDigest::new(external.size);
-                    digest.attach_pending_budget(digests.pending_budget.clone());
-                    let file = external.open_observed(&digest)?;
-                    let guard = file.try_clone().map_err(storage)?;
-                    let input = ObservedFile::new(file, digest.clone())?;
-                    // The footer is read whole and parsed into structures many times
-                    // its size; refuse one the budget cannot hold before reading it.
-                    let (metadata, arrow_inference_bytes) =
-                        load_admitted_parquet_metadata(&input, budget, cancellation)
-                            .map_err(|error| external.reclassify(&guard, error))?;
-                    // Reads ahead of the hashed prefix are held, so the bound on
-                    // them is resident workspace like any other: it never exceeds
-                    // a sixty-fourth of the budget, and the digest reads again what
-                    // it had to drop.
-                    let pending_bytes = u64::try_from(external_source::pending_limit(
-                        std::thread::available_parallelism().map_or(1, usize::from),
-                        largest_task_bytes(&metadata, batch_rows),
-                    ))
-                    .unwrap_or(u64::MAX)
-                    .min(digests.pending_budget_bytes());
-                    source_level_workspace_bytes = digests.pending_budget_bytes();
-                    digest.set_pending_limit(usize::try_from(pending_bytes).unwrap_or(usize::MAX));
-                    digests.register(source.sequence, external, &digest);
-                    in_place = Some(InPlace {
-                        external: external.clone(),
-                        digest,
-                    });
-                    (metadata, arrow_inference_bytes)
-                } else {
-                    // A session an earlier version began holds its own copy.
-                    let file = File::open(&path).map_err(storage)?;
-                    load_admitted_parquet_metadata(&file, budget, cancellation)?
-                };
-                let (metadata, arrow_inference_bytes) = metadata;
+                let external = source
+                    .external
+                    .as_ref()
+                    .ok_or_else(|| storage("a Parquet source is registered where it stays"))?;
+                require_footer_fits(external.footer_bytes(), budget)?;
+                // Footer verification precedes the decoder's workspace
+                // reservation. Its read arrives ahead of the hashed prefix,
+                // so the digest holds it under the shared pending bound
+                // until the decode's own reads reach it: every byte is
+                // hashed once, and `finish` re-reads only what the decode
+                // never asks for.
+                let digest = SourceDigest::new(external.size);
+                digest.attach_pending_budget(digests.pending_budget.clone());
+                let file = external.open_observed(&digest)?;
+                let guard = file.try_clone().map_err(storage)?;
+                let input = ObservedFile::new(file, digest.clone())?;
+                // The footer is read whole and parsed into structures many times
+                // its size; refuse one the budget cannot hold before reading it.
+                let (metadata, arrow_inference_bytes) =
+                    load_admitted_parquet_metadata(&input, budget, cancellation)
+                        .map_err(|error| external.reclassify(&guard, error))?;
+                // Reads ahead of the hashed prefix are held, so the bound on
+                // them is resident workspace like any other: it never exceeds
+                // a sixty-fourth of the budget, and the digest reads again what
+                // it had to drop.
+                let pending_bytes = u64::try_from(external_source::pending_limit(
+                    std::thread::available_parallelism().map_or(1, usize::from),
+                    largest_task_bytes(&metadata, batch_rows),
+                ))
+                .unwrap_or(u64::MAX)
+                .min(digests.pending_budget_bytes());
+                source_level_workspace_bytes = digests.pending_budget_bytes();
+                digest.set_pending_limit(usize::try_from(pending_bytes).unwrap_or(usize::MAX));
+                digests.register(source.sequence, external, &digest);
+                in_place = Some(InPlace {
+                    external: external.clone(),
+                    digest,
+                });
                 let rows = u64::try_from(metadata.metadata().file_metadata().num_rows())
                     .map_err(storage)?;
                 let columns = metadata.schema().fields().len();
@@ -1401,10 +1369,7 @@ pub(super) fn plan<'a>(
                     ));
                 }
                 // Page headers and the values whose expansion they do not state.
-                let scan_file = match &in_place {
-                    Some(held) => held.external.reopen()?,
-                    None => File::open(&path).map_err(storage)?,
-                };
+                let scan_file = external.reopen()?;
                 let task_batch_rows = u64::try_from(batch_rows).unwrap_or(1).max(1);
                 // A source refused while its pages are inventoried rejects its
                 // first batch; a failure of the inventory rejects nothing.

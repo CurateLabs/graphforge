@@ -52,12 +52,9 @@ mod parquet_values;
 mod parquet_windows;
 mod piece_buffers;
 
-/// Written by this version: a session may register Parquet sources that stay
-/// where they are (#1898).
+/// The one session format: Parquet sources stay where they are (#1898) and
+/// Arrow sources are session-owned encodings.
 const FORMAT_VERSION: u32 = 3;
-/// Sessions an earlier version began copied Parquet sources into the session;
-/// they still resume, validate and append.
-const OLDEST_FORMAT_VERSION: u32 = 2;
 const SESSION_DIR: &str = "import-sessions";
 const MANIFEST: &str = "manifest.json";
 
@@ -390,24 +387,6 @@ struct SessionManifest {
     construction_session_uuid: Option<Uuid>,
     #[serde(default)]
     updated_unix_millis: u64,
-    /// How `validate` builds this session's generation, fixed by its first call
-    /// and read back by every later one (ADR 0058). `None` until then.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    build_route: Option<BuildRoute>,
-    /// Why an initial build staged instead of running on the bulk builder, when
-    /// the plan said so (ADR 0058). `None` for builds that did not stage on a plan.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    staged_reason: Option<graphforge_storage::BulkStagedReason>,
-}
-
-/// The two ways `validate` builds a generation (ADR 0058).
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-enum BuildRoute {
-    /// The bulk builder reads the registered sources and stages nothing.
-    Bulk,
-    /// Chunk-by-chunk staging, shaping and encoding.
-    Staged,
 }
 
 /// Monotonic wall time and process CPU for attempted calls, including returned
@@ -560,8 +539,6 @@ impl GraphForge {
             sources: Vec::new(),
             construction_session_uuid: None,
             updated_unix_millis: unix_millis()?,
-            build_route: None,
-            staged_reason: None,
         };
         let journal = journal::Journal::open(&root, &manifest, self.allocation_operation.as_ref())?;
         write_manifest_with_allocation(&root, &manifest, self.allocation_operation.as_ref())?;
@@ -612,6 +589,58 @@ impl GraphForge {
         Ok((manifest.phase, manifest.progress))
     }
 
+    /// Abort the import session `session_uuid`, removing its durable staging.
+    ///
+    /// A session in a format this build no longer reads cannot be resumed, but
+    /// it can be aborted: its directory (and the construction it names) is
+    /// removed through owned, identity-checked removal, reading nothing of its
+    /// manifest but the format. The returned progress is empty for it.
+    pub fn abort_import_session(&self, session_uuid: Uuid) -> Result<ImportProgress, GfError> {
+        let root = import_root(self, session_uuid)?;
+        let body = fs::read(root.join(MANIFEST)).map_err(storage)?;
+        let recorded = recorded_format(&body)?;
+        if supported_format(recorded.format_version) {
+            return self.resume_import_session(session_uuid)?.abort(self);
+        }
+        self.remove_retired_import_session(&root, &recorded)?;
+        Ok(ImportProgress::default())
+    }
+
+    /// Remove a session recorded in a retired format and the construction it
+    /// names.
+    fn remove_retired_import_session(
+        &self,
+        root: &Path,
+        recorded: &RecordedFormat,
+    ) -> Result<(), GfError> {
+        if let Some(construction) = recorded.construction_session_uuid
+            && self
+                .resolved_generation
+                .container_root()
+                .join(".graphforge-construction")
+                .join(construction.simple().to_string())
+                .exists()
+        {
+            let budgets = recorded
+                .limits
+                .as_ref()
+                .map_or_else(GraphConstructionBudgets::default, |limits| {
+                    construction_budgets_for(limits.batch_rows)
+                });
+            self.discard_construction(construction, budgets)?;
+        }
+        let name = root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| validation("import session directory name is not Unicode"))?;
+        graphforge_storage::remove_owned_directory(
+            root.parent()
+                .ok_or_else(|| validation("import session directory has no parent"))?,
+            name,
+            MANIFEST,
+        )
+    }
+
     /// Abort and remove durable staging for non-terminal sessions older than `max_age`.
     pub fn cleanup_stale_import_sessions(&self, max_age: Duration) -> Result<u64, GfError> {
         let sessions = self.resolved_generation.container_root().join(SESSION_DIR);
@@ -631,6 +660,27 @@ impl GraphForge {
                 continue;
             }
             let root = entry.path();
+            let body = fs::read(root.join(MANIFEST)).map_err(storage)?;
+            let recorded = recorded_format(&body)?;
+            if !supported_format(recorded.format_version) {
+                // A retired session is read no further: it is finished if it
+                // says so, stale by its manifest's age, and removed whole.
+                let age = fs::metadata(root.join(MANIFEST))
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+                    .and_then(|modified| modified.elapsed().ok())
+                    .map_or(u64::MAX, |elapsed| {
+                        u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+                    });
+                if matches!(recorded.phase.as_deref(), Some("committed" | "aborted"))
+                    || age < threshold
+                {
+                    continue;
+                }
+                self.remove_retired_import_session(&root, &recorded)?;
+                cleaned = cleaned.saturating_add(1);
+                continue;
+            }
             let manifest = read_manifest(&root)?;
             if matches!(
                 manifest.phase,
@@ -919,56 +969,14 @@ impl GraphImportSession {
         let mut construction = self.open_construction(graph)?;
         let session_root = self.root.clone();
         let batch_rows = self.manifest.limits.batch_rows;
-        // Pass 0 routing. The route is a function of durable state: the first
-        // `validate` decides it from the session and the footers, writes it to
-        // the manifest, and every later call reads it back. Live memory is
-        // consulted exactly once, so a refused, cancelled or killed bulk
-        // attempt followed by a memory drop cannot send a sealed session to
-        // the staged path, which would refuse every retry. An initial build
-        // that has staged nothing runs on the bulk builder, in memory or, when
-        // its estimate exceeds the budget, on scratch files, node tables
-        // included (ADR 0058). An append and a session an earlier binary
-        // began staging stage; no plan stages for want of memory.
+        // The route is a function of durable state, never of free memory
+        // (ADR 0058): an initial build, whose parent has no topology, runs on
+        // the bulk builder, in memory or, when its estimate exceeds the
+        // budget, on scratch files with the node tables included. An append
+        // stages. Resuming a construction that holds staged initial chunks is
+        // refused when it opens.
         let refusals = bulk_source::Refusals::default();
-        let digests = bulk_source::Digests::default();
-        let route = if let Some(route) = self.manifest.build_route {
-            route
-        } else {
-            let initial = {
-                let progress = construction.progress();
-                progress.parent_topology_generation == 0
-                    && progress.accepted_chunks == 0
-                    && self
-                        .manifest
-                        .sources
-                        .iter()
-                        .all(|source| !source.staged && source.batches_staged == 0)
-            };
-            let route = if initial {
-                let planned = match self.plan_bulk_build(graph, cancellation, &refusals, &digests) {
-                    Ok(plan) => plan,
-                    Err(error) => {
-                        self.record_bulk_refusal(&refusals)?;
-                        return Err(error);
-                    }
-                };
-                match planned.route() {
-                    graphforge_storage::BulkRoute::Staged(reason) => {
-                        self.manifest.staged_reason = Some(reason);
-                        BuildRoute::Staged
-                    }
-                    graphforge_storage::BulkRoute::Memory
-                    | graphforge_storage::BulkRoute::Scratch
-                    | graphforge_storage::BulkRoute::ScratchNodes => BuildRoute::Bulk,
-                }
-            } else {
-                BuildRoute::Staged
-            };
-            self.manifest.build_route = Some(route);
-            self.persist_manifest()?;
-            route
-        };
-        if route == BuildRoute::Bulk {
+        if construction.progress().parent_topology_generation == 0 {
             // An initial build restarts rather than resumes (#1881). An encoded
             // inventory is reused only if the digest of every in-place source it
             // was built from is already recorded, which binds the two: otherwise
@@ -981,8 +989,6 @@ impl GraphImportSession {
                 construction = self.restart_construction(graph, construction)?;
             }
             let reused = reused && !self.in_place_digest_missing();
-            // The routing plan above read only footers; a fresh one reads the
-            // sources, so its digests are the build's.
             let has_external_sources = self
                 .manifest
                 .sources
@@ -1359,9 +1365,7 @@ impl GraphImportSession {
         }
         let cleanup = (|| {
             if let Some(session_uuid) = self.manifest.construction_session_uuid {
-                graph
-                    .resume_graph_construction(session_uuid, self.construction_budgets())?
-                    .discard()?;
+                graph.discard_construction(session_uuid, self.construction_budgets())?;
                 self.manifest.construction_session_uuid = None;
             }
             let sources = self.root.join("sources");
@@ -1458,12 +1462,7 @@ impl GraphImportSession {
     }
 
     fn construction_budgets(&self) -> GraphConstructionBudgets {
-        let mut budgets = GraphConstructionBudgets::default();
-        budgets.max_batch_rows = self.manifest.limits.batch_rows;
-        budgets.max_run_records = budgets
-            .max_run_records
-            .max(self.manifest.limits.batch_rows.saturating_mul(4));
-        budgets
+        construction_budgets_for(self.manifest.limits.batch_rows)
     }
 
     fn open_construction<'a>(
@@ -1481,7 +1480,7 @@ impl GraphImportSession {
             }
             return resumed;
         }
-        let session = graph.begin_staged_graph_construction(budgets);
+        let session = graph.begin_import_construction(budgets);
         if let (Some(timings), Some(started)) = (&mut self.operation_timings, started) {
             timings.begin.record(started, session.is_err());
         }
@@ -1610,16 +1609,6 @@ impl GraphImportSession {
             external,
             sha256: None,
         });
-        if self
-            .manifest
-            .sources
-            .last()
-            .is_some_and(|source| source.external.is_some())
-        {
-            // A session an earlier version began cannot be read by that version
-            // once it holds a source that stays where it is.
-            self.manifest.format_version = FORMAT_VERSION;
-        }
         self.manifest.phase = ImportPhase::Open;
         self.manifest.progress.bytes_accepted = total;
         self.manifest.progress.files_accepted += 1;
@@ -1627,6 +1616,13 @@ impl GraphImportSession {
         self.checkpoint_with_source_cleanup(owned.as_deref())
             .map(|_| ())
     }
+}
+
+fn construction_budgets_for(batch_rows: usize) -> GraphConstructionBudgets {
+    let mut budgets = GraphConstructionBudgets::default();
+    budgets.max_batch_rows = batch_rows;
+    budgets.max_run_records = budgets.max_run_records.max(batch_rows.saturating_mul(4));
+    budgets
 }
 
 fn unix_millis() -> Result<u64, GfError> {
@@ -1677,35 +1673,16 @@ fn for_each_source_batch(
         }
         ImportSourceKind::ParquetNodes | ImportSourceKind::ParquetEdges => {
             let result = (|| {
-                // A source registered before sources stayed in place was copied
-                // into the session, which owns it: nothing to pin or digest.
-                let Some(external) = source.external.as_ref() else {
-                    let file =
-                        File::open(root.join("sources").join(&source.name)).map_err(storage)?;
-                    let chunk_reader = ImportChunkReader::new(file, tracker.clone(), None)?;
-                    let reader = ParquetRecordBatchReaderBuilder::try_new(chunk_reader)
-                        .map_err(storage)?
-                        .with_batch_size(batch_rows)
-                        .build()
-                        .map_err(storage)?;
-                    consume_source_batches(
-                        reader.map(|batch| {
-                            canonicalize_parquet_batch(
-                                source.kind.input_kind(),
-                                &batch.map_err(storage)?,
-                            )
-                        }),
-                        &mut consume,
-                    )?;
-                    return Ok(None);
-                };
+                let external = source
+                    .external
+                    .as_ref()
+                    .ok_or_else(|| storage("a Parquet source is registered where it stays"))?;
                 let digest = external_source::SourceDigest::new(external.size);
                 let file = external.open_observed(&digest)?;
                 #[cfg(test)]
                 external_source::pass_hook(&external.path, "opened", 0);
                 let guard = file.try_clone().map_err(storage)?;
-                let chunk_reader =
-                    ImportChunkReader::new(file, tracker.clone(), Some(digest.clone()))?;
+                let chunk_reader = ImportChunkReader::new(file, tracker.clone(), digest.clone())?;
                 // A read that fails because the file changed under it is that
                 // change, not an I/O or format error.
                 let reader = ParquetRecordBatchReaderBuilder::try_new(chunk_reader)
@@ -1769,15 +1746,15 @@ struct ImportChunkReader {
     file: std::sync::Arc<File>,
     length: u64,
     tracker: graphforge_filesystem::FileCacheReleaseTracker,
-    /// The digest an in-place source's reads feed; none for a session-owned copy.
-    digest: Option<external_source::SourceDigest>,
+    /// The digest the in-place source's reads feed.
+    digest: external_source::SourceDigest,
 }
 
 impl ImportChunkReader {
     fn new(
         file: File,
         tracker: graphforge_filesystem::FileCacheReleaseTracker,
-        digest: Option<external_source::SourceDigest>,
+        digest: external_source::SourceDigest,
     ) -> Result<Self, GfError> {
         let length = file.metadata().map_err(storage)?.len();
         Ok(Self {
@@ -1809,7 +1786,7 @@ impl ChunkReader for ImportChunkReader {
         reader.seek(SeekFrom::Start(start))?;
         Ok(BufReader::with_capacity(
             external_source::PAGE_HEADER_BUFFER_BYTES,
-            external_source::DigestingReader::new(reader, start, self.digest.clone()),
+            external_source::DigestingReader::new(reader, start, Some(self.digest.clone())),
         ))
     }
 
@@ -1823,9 +1800,7 @@ impl ChunkReader for ImportChunkReader {
         let mut bytes = vec![0_u8; length];
         reader.read_exact(&mut bytes)?;
         reader.finish()?;
-        if let Some(digest) = &self.digest {
-            digest.observe(start, &bytes);
-        }
+        self.digest.observe(start, &bytes);
         Ok(Bytes::from(bytes))
     }
 }
@@ -1889,17 +1864,42 @@ fn write_manifest_with_allocation(
 }
 
 const fn supported_format(version: u32) -> bool {
-    version >= OLDEST_FORMAT_VERSION && version <= FORMAT_VERSION
+    version == FORMAT_VERSION
+}
+
+/// The refusal for a session recorded in a format this build no longer reads.
+const RETIRED_FORMAT: &str = "this import session was recorded in a format that is retired and cannot resume; restart the import";
+
+/// What a session manifest says before anything else of it is read: its format,
+/// whether it is finished, and the construction session it names. This is all
+/// that is read of a manifest in a retired format.
+#[derive(Deserialize)]
+struct RecordedFormat {
+    format_version: u32,
+    #[serde(default)]
+    phase: Option<String>,
+    #[serde(default)]
+    construction_session_uuid: Option<Uuid>,
+    /// The batch size its construction was opened with.
+    #[serde(default)]
+    limits: Option<RecordedLimits>,
+}
+
+#[derive(Deserialize)]
+struct RecordedLimits {
+    batch_rows: usize,
+}
+
+fn recorded_format(body: &[u8]) -> Result<RecordedFormat, GfError> {
+    serde_json::from_slice(body).map_err(storage)
 }
 
 fn read_manifest(root: &Path) -> Result<SessionManifest, GfError> {
-    let mut manifest: SessionManifest = serde_json::from_reader(BufReader::new(
-        File::open(root.join(MANIFEST)).map_err(storage)?,
-    ))
-    .map_err(storage)?;
-    if !supported_format(manifest.format_version) {
-        return Err(validation("incompatible import manifest format"));
+    let body = fs::read(root.join(MANIFEST)).map_err(storage)?;
+    if !supported_format(recorded_format(&body)?.format_version) {
+        return Err(validation(RETIRED_FORMAT));
     }
+    let mut manifest: SessionManifest = serde_json::from_slice(&body).map_err(storage)?;
     journal::replay(root, &mut manifest)?;
     if let Some(construction) = manifest.progress.construction.as_mut()
         && construction.publication_work.contract.is_empty()
@@ -2688,7 +2688,7 @@ mod tests {
 
     #[test]
     fn interrupted_batch_replays_and_stale_cleanup_removes_private_artifacts() {
-        let (_directory, _project, graph) = fixture();
+        let (_directory, _project, graph) = seeded_fixture();
         let operation = OperationId(Uuid::now_v7());
         let batch = nodes(&[Uuid::now_v7()]);
         let mut session = graph

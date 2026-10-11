@@ -258,14 +258,150 @@ fn query_snapshot(graph: &GraphForge, property: &str) -> String {
     )
 }
 
+/// The non-null cells of every property column of `batches` past their first
+/// `required` columns, keyed by the UUIDs in column 0 and typed as Arrow.
+type Columns = BTreeMap<String, (ArrayRef, ArrayRef)>;
+
+fn property_columns(batches: &[RecordBatch], required: usize) -> Columns {
+    use arrow::compute::{concat, filter, sort_to_indices, take};
+    let mut parts = BTreeMap::<String, Vec<(ArrayRef, ArrayRef)>>::new();
+    for batch in batches {
+        let owners = batch.column(0);
+        for (field, column) in batch
+            .schema()
+            .fields()
+            .iter()
+            .zip(batch.columns())
+            .skip(required)
+        {
+            if matches!(field.name().as_str(), "__gf_property_tombstone") {
+                continue;
+            }
+            let valid = arrow::array::BooleanArray::from(
+                (0..column.len())
+                    .map(|row| column.is_valid(row))
+                    .collect::<Vec<_>>(),
+            );
+            parts.entry(field.name().clone()).or_default().push((
+                filter(owners, &valid).unwrap(),
+                filter(column, &valid).unwrap(),
+            ));
+        }
+    }
+    parts
+        .into_iter()
+        .filter_map(|(name, parts)| {
+            let owners =
+                concat(&parts.iter().map(|part| part.0.as_ref()).collect::<Vec<_>>()).unwrap();
+            if owners.is_empty() {
+                return None;
+            }
+            let values =
+                concat(&parts.iter().map(|part| part.1.as_ref()).collect::<Vec<_>>()).unwrap();
+            let order = sort_to_indices(&owners, None, None).unwrap();
+            Some((
+                name,
+                (
+                    take(&owners, &order, None).unwrap(),
+                    take(&values, &order, None).unwrap(),
+                ),
+            ))
+        })
+        .collect()
+}
+
+fn parquet_files(directory: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            parquet_files(&path, files);
+        } else if path
+            .extension()
+            .is_some_and(|extension| extension == "parquet")
+        {
+            files.push(path);
+        }
+    }
+}
+
+/// Every non-null cell of every property column the source holds is published,
+/// owner for owner, with its Arrow type. The expectation is the source after the
+/// intake normalization an append also runs, so a row without an identity has
+/// the one the operation derives for it.
+fn assert_every_cell_published(
+    graph: &GraphForge,
+    root: &Path,
+    batch: &RecordBatch,
+    batch_rows: usize,
+) {
+    let mut normalized = Vec::new();
+    for (index, first) in (0..batch.num_rows()).step_by(batch_rows).enumerate() {
+        let slice = batch.slice(first, batch_rows.min(batch.num_rows() - first));
+        let canonical = super::canonicalize_parquet_batch(BulkInputKind::Node, &slice).unwrap();
+        normalized.push(
+            graph
+                .normalize_import_node_chunk_at(
+                    super::import_batch_operation(v7(1918), 0, index as u64),
+                    &canonical,
+                    0,
+                )
+                .unwrap(),
+        );
+    }
+    let mut files = Vec::new();
+    parquet_files(&root.join("encoded-v1/graph/properties"), &mut files);
+    assert!(!files.is_empty(), "no property fragment was published");
+    let fragments = files
+        .iter()
+        .flat_map(|path| {
+            parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+                File::open(path).unwrap(),
+            )
+            .unwrap()
+            .build()
+            .unwrap()
+            .map(|batch| batch.unwrap())
+        })
+        .collect::<Vec<_>>();
+    let expected = property_columns(&normalized, 2);
+    let published = property_columns(&fragments, 1);
+    assert_eq!(
+        expected.keys().collect::<Vec<_>>(),
+        published.keys().collect::<Vec<_>>(),
+        "published property columns"
+    );
+    for (name, (owners, values)) in &expected {
+        let (published_owners, published_values) = &published[name];
+        assert_eq!(
+            values.data_type(),
+            published_values.data_type(),
+            "{name} type"
+        );
+        assert!(
+            owners.to_data() == published_owners.to_data(),
+            "{name} owners"
+        );
+        assert!(
+            values.to_data() == published_values.to_data(),
+            "{name} values"
+        );
+    }
+}
+
 fn publish(
     batch: &RecordBatch,
     format: SourceFormat,
     batch_rows: usize,
     property: &str,
-    route: BuildRoute,
+    lanes: usize,
 ) -> Published {
-    let (_directory, project, graph) = fixture();
+    let (_directory, project, mut graph) = fixture();
+    graph.construction_cpu_admission = Arc::new(graphforge_storage::ConstructionCpuAdmission::new(
+        std::num::NonZeroUsize::new(lanes).unwrap(),
+    ));
     let source_directory = tempfile::tempdir().unwrap();
     let source = source_directory.path().join(match format {
         SourceFormat::Parquet { .. } => "registered.parquet",
@@ -290,11 +426,6 @@ fn publish(
             register_compressed_ipc(&mut session, &source, batch.num_rows() as u64);
         }
     }
-    // Exercise both runtime routes at the same ordinary source-workspace
-    // budget. A 512 KiB planning budget cannot admit the wide source footer,
-    // so it is not a valid way to force the staged reference path.
-    session.manifest.build_route = Some(route);
-    session.persist_manifest().unwrap();
     let construction = session.open_construction(&graph).unwrap();
     let root = construction_root(&graph, construction.session_uuid());
     drop(construction);
@@ -305,11 +436,13 @@ fn publish(
     let progress = progress.unwrap();
     let construction = progress.construction.unwrap();
     assert_eq!(progress.rows_accepted, batch.num_rows() as u64);
-    assert_eq!(construction.bulk_build.is_some(), route == BuildRoute::Bulk);
+    assert!(construction.bulk_build.is_some());
+    assert_eq!(construction.accepted_chunks, 0);
     session.commit(&graph, None).unwrap();
     assert_eq!(graph.node_count("Person").unwrap(), batch.num_rows() as u64);
     let current_query = query_snapshot(&graph, property);
     let current_catalog = catalog_ids(&graph);
+    assert_every_cell_published(&graph, &root, batch, batch_rows);
     drop(session);
     drop(graph);
 
@@ -340,72 +473,25 @@ fn publish(
     }
 }
 
-fn compare_bulk_and_staged(
+/// Publish the source into fresh projects on one construction lane and on four:
+/// each publishes every cell of every column as the input holds it
+/// (`publish`), and the two publish the same artifacts, answers and catalog ids.
+fn publish_and_read_back(
     batch: &RecordBatch,
     format: SourceFormat,
     batch_rows: usize,
     property: &str,
 ) {
-    let bulk = publish(batch, format, batch_rows, property, BuildRoute::Bulk);
-    let staged = publish(batch, format, batch_rows, property, BuildRoute::Staged);
-    assert_eq!(bulk.rows, staged.rows);
-    assert_eq!(bulk.inventory, staged.inventory);
-    assert_eq!(bulk.query, staged.query);
-    assert_eq!(bulk.catalog_ids, staged.catalog_ids);
-}
-
-fn publish_wide_staged_reference(batch: &RecordBatch, property: &str) -> Published {
-    let (_directory, project, graph) = fixture();
-    let logical_operation = super::import_batch_operation(v7(1918), 0, 0);
-    let canonical = super::canonicalize_parquet_batch(BulkInputKind::Node, batch).unwrap();
-    let normalized = graph
-        .normalize_import_node_chunk_at(logical_operation, &canonical, 0)
-        .unwrap();
-    let mut budgets = graphforge_storage::GraphConstructionBudgets::default();
-    budgets.max_batch_rows = batch.num_rows();
-    budgets.max_batch_bytes = normalized.get_array_memory_size().saturating_mul(2);
-    let construction = graph
-        .begin_staged_graph_construction(budgets.clone())
-        .unwrap();
-    let session_uuid = construction.session_uuid();
-    let root = construction_root(&graph, session_uuid);
-    drop(construction);
-    pin_clock(&root);
-    let mut construction = graph
-        .resume_graph_construction(session_uuid, budgets)
-        .unwrap();
-    assert!(normalized.get_array_memory_size() > LARGE_BATCH_WINDOW);
-    // Normalize and append the original logical batch once to preserve row
-    // identity and fragment partitioning. The wider batch budget applies only
-    // to this trusted staged oracle; the registered Bulk source keeps its
-    // 64 MiB intake window and must split before decoding.
-    construction
-        .append_nodes("wide-reference", &normalized)
-        .unwrap();
-    construction.seal_and_publish().unwrap();
-    assert_eq!(graph.node_count("Person").unwrap(), batch.num_rows() as u64);
-    let query = query_snapshot(&graph, property);
-    let ids = catalog_ids(&graph);
-    drop(construction);
-
-    let reopened = GraphForge::new(project.to_str()).unwrap();
-    assert_eq!(
-        reopened.node_count("Person").unwrap(),
-        batch.num_rows() as u64
-    );
-    let reopened_query = query_snapshot(&reopened, property);
-    assert_eq!(query, reopened_query);
-    assert_eq!(ids, catalog_ids(&reopened));
-    Published {
-        inventory: inventory(&root),
-        query: reopened_query,
-        catalog_ids: ids,
-        rows: batch.num_rows(),
-    }
+    let first = publish(batch, format, batch_rows, property, 4);
+    let second = publish(batch, format, batch_rows, property, 1);
+    assert_eq!(first.rows, second.rows);
+    assert_eq!(first.inventory, second.inventory);
+    assert_eq!(first.query, second.query);
+    assert_eq!(first.catalog_ids, second.catalog_ids);
 }
 
 #[test]
-fn large_unused_dictionary_values_match_staged_facade_publication() {
+fn large_unused_dictionary_values_publish_and_read_back_exactly() {
     let rows = 5_000;
     let properties = (0..16)
         .map(|column| {
@@ -430,7 +516,7 @@ fn large_unused_dictionary_values_match_staged_facade_publication() {
     assert!(batch.slice(0, 4_096).get_array_memory_size() < 8 << 20);
     // Keep the rare value in the same row-group dictionary while the first
     // task reads only the small values.
-    compare_bulk_and_staged(
+    publish_and_read_back(
         &batch,
         SourceFormat::Parquet {
             row_group_rows: rows,
@@ -441,7 +527,7 @@ fn large_unused_dictionary_values_match_staged_facade_publication() {
 }
 
 #[test]
-fn repeated_and_nested_properties_match_staged_facade_publication() {
+fn repeated_and_nested_properties_publish_and_read_back_exactly() {
     let rows = 512;
     let mut repeated = ListBuilder::new(StringBuilder::new());
     let value = "x".repeat(256);
@@ -476,7 +562,7 @@ fn repeated_and_nested_properties_match_staged_facade_publication() {
         ],
     );
     assert!(batch.get_array_memory_size() > LARGE_BATCH_WINDOW);
-    compare_bulk_and_staged(
+    publish_and_read_back(
         &batch,
         SourceFormat::Parquet {
             row_group_rows: 113,
@@ -487,7 +573,7 @@ fn repeated_and_nested_properties_match_staged_facade_publication() {
 }
 
 #[test]
-fn wide_small_properties_match_staged_facade_publication_when_split() {
+fn wide_small_properties_publish_and_read_back_exactly_when_split() {
     let rows = 4_096;
     let properties = (0..2_400)
         .map(|column| {
@@ -518,24 +604,18 @@ fn wide_small_properties_match_staged_facade_publication_when_split() {
     assert!(physical_rows < rows as u64);
     assert_eq!(u64::try_from(rows).unwrap() % physical_rows, 0);
     assert!(rows as u64 / physical_rows > 1);
-    let bulk = publish(
+    publish_and_read_back(
         &batch,
         SourceFormat::Parquet {
             row_group_rows: rows,
         },
         rows,
         "p0000",
-        BuildRoute::Bulk,
     );
-    let staged = publish_wide_staged_reference(&batch, "p0000");
-    assert_eq!(bulk.rows, staged.rows);
-    assert_eq!(bulk.inventory, staged.inventory);
-    assert_eq!(bulk.query, staged.query);
-    assert_eq!(bulk.catalog_ids, staged.catalog_ids);
 }
 
 #[test]
-fn compressed_ipc_matches_staged_facade_publication_after_reopen() {
+fn compressed_ipc_publishes_and_reads_back_exactly_after_reopen() {
     let rows = 1_024;
     let values = (0..rows)
         .map(|row| format!("payload-{}", row % 11).repeat(32))
@@ -545,7 +625,7 @@ fn compressed_ipc_matches_staged_facade_publication_after_reopen() {
         &nullable_ids(rows),
         vec![("payload".to_owned(), DataType::Utf8, values)],
     );
-    compare_bulk_and_staged(&batch, SourceFormat::CompressedIpc, 128, "payload");
+    publish_and_read_back(&batch, SourceFormat::CompressedIpc, 128, "payload");
 }
 
 #[test]

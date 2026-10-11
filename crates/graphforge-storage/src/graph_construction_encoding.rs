@@ -59,7 +59,7 @@ mod lanes;
 mod properties;
 pub use bulk::{
     BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkRoute, BulkSource,
-    BulkStagedReason, SourceReservation, SourceWorkspace,
+    SourceReservation, SourceWorkspace,
 };
 #[cfg(test)]
 #[path = "graph_construction_encoding/bulk_test_support.rs"]
@@ -759,7 +759,6 @@ pub(crate) fn encode(
         semantic_context.as_ref(),
         semantic_authority.map(|authority| &authority.bindings),
         budgets,
-        admission,
         cancelled,
         &mut artifacts,
         &mut evidence,
@@ -796,18 +795,6 @@ pub(crate) fn encode(
             &mut evidence,
         )?;
     }
-    let adjacency_region = crate::concurrency_attribution::RegionScope::named("adjacency_encoding");
-    adjacency::encode_adjacency(
-        &output,
-        shape,
-        generation,
-        &routes,
-        admission,
-        cancelled,
-        &mut artifacts,
-        &mut evidence,
-    )?;
-    drop(adjacency_region);
 
     evidence.edge_records = shape.edge_count;
     artifacts.sort_unstable_by(|left, right| left.path.cmp(&right.path));
@@ -1385,7 +1372,6 @@ fn encode_edges(
     semantic_context: Option<&CompositionBindingContext>,
     semantic_bindings: Option<&SemanticStorageBindings>,
     budgets: GraphConstructionBudgets,
-    admission: Option<&Arc<crate::graph_construction::cpu_admission::ConstructionCpuAdmission>>,
     cancelled: &mut impl FnMut() -> bool,
     artifacts: &mut Vec<ConstructionEncodedArtifact>,
     evidence: &mut GraphConstructionEncodingEvidence,
@@ -1399,22 +1385,8 @@ fn encode_edges(
     };
     let cache_window =
         graphforge_filesystem::cache_release_window_for_streams(4).map_err(storage)?;
-    // A shape without an endpoint family resolved by the node index (ADR
-    // 0057): only an initial build may, and shaping already proved every
-    // endpoint names a new node.
-    let node_index = match shape.edge_endpoints {
-        Some(_) => None,
-        None if shape.parent_topology_generation == 0 => {
-            let _build = crate::concurrency_attribution::RegionScope::named("endpoint_index_build");
-            Some(encoding_node_index(
-                source,
-                shape_outputs,
-                &shape.identities,
-                cache_window,
-                evidence,
-            )?)
-        }
-        None => return Err(storage("edge rows lack resolved endpoints")),
+    let Some(endpoints_name) = shape.edge_endpoints.as_deref() else {
+        return Err(storage("edge rows lack resolved endpoints"));
     };
     let mut identities = FixedReader::<IDENTITY_WIDTH>::open(
         source,
@@ -1429,18 +1401,12 @@ fn encode_edges(
         cache_window,
         Some(detail_codec),
     )?;
-    let mut endpoints = shape
-        .edge_endpoints
-        .as_deref()
-        .map(|endpoints_name| {
-            FixedReader::<RESOLVED_ENDPOINT_WIDTH>::open(
-                source,
-                shape_outputs,
-                endpoints_name,
-                cache_window,
-            )
-        })
-        .transpose()?;
+    let mut endpoints = FixedReader::<RESOLVED_ENDPOINT_WIDTH>::open(
+        source,
+        shape_outputs,
+        endpoints_name,
+        cache_window,
+    )?;
     let rows_per_window = budgets
         .max_batch_rows
         .min((budgets.max_batch_bytes / 192).max(1));
@@ -1466,34 +1432,27 @@ fn encode_edges(
                 if identity[..16] != uuid || detail[..16] != uuid || identity[17] != 0 {
                     return Err(storage("edge row/detail/identity/endpoint streams differ"));
                 }
-                // The node-index path fills both surrogates per window below.
-                let (source_id, target_id) = match endpoints.as_mut() {
-                    Some(endpoints) => {
-                        let (Some(source_endpoint), Some(target_endpoint)) =
-                            (endpoints.next()?, endpoints.next()?)
-                        else {
-                            return Err(storage("edge endpoint stream ended early"));
-                        };
-                        if source_endpoint[..16] != uuid
-                            || target_endpoint[..16] != uuid
-                            || source_endpoint[16] != 0
-                            || target_endpoint[16] != 1
-                        {
-                            return Err(storage(
-                                "edge row/detail/identity/endpoint streams differ",
-                            ));
-                        }
-                        let surrogate = |endpoint: [u8; RESOLVED_ENDPOINT_WIDTH]| {
-                            u64::from_be_bytes(
-                                endpoint[RESOLVED_SURROGATE_OFFSET..RESOLVED_ENDPOINT_WIDTH]
-                                    .try_into()
-                                    .expect("fixed"),
-                            )
-                        };
-                        (surrogate(source_endpoint), surrogate(target_endpoint))
-                    }
-                    None => (0, 0),
+                let (Some(source_endpoint), Some(target_endpoint)) =
+                    (endpoints.next()?, endpoints.next()?)
+                else {
+                    return Err(storage("edge endpoint stream ended early"));
                 };
+                if source_endpoint[..16] != uuid
+                    || target_endpoint[..16] != uuid
+                    || source_endpoint[16] != 0
+                    || target_endpoint[16] != 1
+                {
+                    return Err(storage("edge row/detail/identity/endpoint streams differ"));
+                }
+                let surrogate = |endpoint: [u8; RESOLVED_ENDPOINT_WIDTH]| {
+                    u64::from_be_bytes(
+                        endpoint[RESOLVED_SURROGATE_OFFSET..RESOLVED_ENDPOINT_WIDTH]
+                            .try_into()
+                            .expect("fixed"),
+                    )
+                };
+                let (source_id, target_id) =
+                    (surrogate(source_endpoint), surrogate(target_endpoint));
                 let route_len = usize::from(detail[48]);
                 let route = std::str::from_utf8(&detail[49..49 + route_len]).map_err(storage)?;
                 out_uuid.push(uuid);
@@ -1516,12 +1475,6 @@ fn encode_edges(
             }
             if out_id.is_empty() {
                 break;
-            }
-            if let Some(index) = &node_index {
-                let _probe =
-                    crate::concurrency_attribution::RegionScope::named("endpoint_index_probe");
-                index.resolve(&out_src, &mut out_src_id, admission)?;
-                index.resolve(&out_dst, &mut out_dst_id, admission)?;
             }
             let canonical = edge_batch(
                 &out_uuid,
@@ -1621,12 +1574,7 @@ fn encode_edges(
             }
         }
         if details.next()?.is_some()
-            || endpoints
-                .as_mut()
-                .map(FixedReader::next)
-                .transpose()?
-                .flatten()
-                .is_some()
+            || endpoints.next()?.is_some()
             || next_kind(&mut identities, 1)?.is_some()
         {
             return Err(storage("edge streams contain unconsumed rows"));
@@ -1644,14 +1592,11 @@ fn encode_edges(
         details.finish_and_account(authenticate, evidence),
         "edge detail",
     );
-    let encoded = match endpoints.as_mut() {
-        Some(endpoints) => combine_reader_cleanup(
-            encoded,
-            endpoints.finish_and_account(authenticate, evidence),
-            "edge endpoint",
-        ),
-        None => encoded,
-    };
+    let encoded = combine_reader_cleanup(
+        encoded,
+        endpoints.finish_and_account(authenticate, evidence),
+        "edge endpoint",
+    );
     encoded?;
     encode_edge_properties(
         source,
@@ -1774,39 +1719,6 @@ fn encode_edge_properties(
         )?;
     }
     Ok(())
-}
-
-/// The node index (ADR 0057) over the node records of the shaped identities.
-fn encoding_node_index(
-    source: &StableDirectory,
-    shape_outputs: &[ArtifactReceipt],
-    identities_name: &str,
-    cache_window: std::num::NonZeroU64,
-    evidence: &mut GraphConstructionEncodingEvidence,
-) -> Result<crate::graph_construction::node_index::NodeIndex, GfError> {
-    let mut identities =
-        FixedReader::<IDENTITY_WIDTH>::open(source, shape_outputs, identities_name, cache_window)?;
-    let mut builder = crate::graph_construction::node_index::NodeIndexBuilder::default();
-    let built = (|| {
-        while let Some(record) = next_kind(&mut identities, 0)? {
-            builder.push(
-                record[..16].try_into().expect("fixed UUID"),
-                u64::from_be_bytes(
-                    record[IDENTITY_SURROGATE_OFFSET..IDENTITY_WIDTH]
-                        .try_into()
-                        .expect("fixed surrogate"),
-                ),
-            )?;
-        }
-        Ok(())
-    })();
-    let authenticate = built.is_ok();
-    combine_reader_cleanup(
-        built,
-        identities.finish_and_account(authenticate, evidence),
-        "node index identity",
-    )?;
-    Ok(builder.finish())
 }
 
 fn next_kind(

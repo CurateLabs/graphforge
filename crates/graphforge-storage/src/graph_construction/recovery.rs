@@ -198,6 +198,18 @@ pub(super) fn remove_owned_directory_tree(
     expected: FileIdentity,
     remaining: &mut u64,
 ) -> Result<(), GfError> {
+    remove_owned_directory_tree_last(parent, name, expected, remaining, OsStr::new(CHECKPOINT))
+}
+
+/// [`remove_owned_directory_tree`] with `last` the entry removed after every
+/// other, the record that keeps an interrupted removal readable.
+pub(super) fn remove_owned_directory_tree_last(
+    parent: &StableDirectory,
+    name: &OsStr,
+    expected: FileIdentity,
+    remaining: &mut u64,
+    last: &OsStr,
+) -> Result<(), GfError> {
     if *remaining == 0 {
         return Err(storage(
             "construction discard exceeded authenticated entry bound",
@@ -215,7 +227,7 @@ pub(super) fn remove_owned_directory_tree(
     // The checkpoint goes last: until every other file is gone it still
     // records the session as aborted, so a discard interrupted at any point
     // reopens as an aborted session and the retry converges (#900).
-    names.sort_by_key(|child| child.as_os_str() == OsStr::new(CHECKPOINT));
+    names.sort_by_key(|child| child.as_os_str() == last);
     for child_name in names {
         if *remaining == 0 {
             return Err(storage(
@@ -246,7 +258,13 @@ pub(super) fn remove_owned_directory_tree(
                     })?;
                 let identity = child.identity();
                 drop(child);
-                remove_owned_directory_tree(&directory, &child_name, identity, remaining)?;
+                remove_owned_directory_tree_last(
+                    &directory,
+                    &child_name,
+                    identity,
+                    remaining,
+                    last,
+                )?;
             }
         }
     }
