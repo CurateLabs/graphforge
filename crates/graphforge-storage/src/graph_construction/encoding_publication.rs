@@ -358,10 +358,11 @@ impl GraphConstructionSession {
     }
 
     /// Seal an empty initial session and build its generation from the planned
-    /// sources with the bulk builder (#1883). The shape is empty: every row
-    /// comes from `plan`, and the builder emits the same inventory the staged
-    /// encoder would. A crash discards the build and the next call reruns it;
-    /// an inventory the checkpoint already pins is reused.
+    /// sources with the bulk builder (#1883, ADR 0058). The shape is empty:
+    /// every row comes from `plan`, and the builder emits the whole encoded
+    /// inventory, adjacency CSR included, identically on its resident, scratch
+    /// and node-scratch routes. A crash discards the build and the next call
+    /// reruns it; an inventory the checkpoint already pins is reused.
     ///
     /// # Errors
     /// Refuses a session that is not an empty initial build, and returns the

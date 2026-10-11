@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import tempfile
 import uuid
@@ -38,6 +39,51 @@ def check_import_session_lifecycle() -> None:
         assert aborted["files_accepted"] >= 1
         cleaned = forge.cleanup_stale_import_sessions(max_age_secs=0)
         assert cleaned == 0
+
+
+def check_import_session_abort_by_uuid() -> None:
+    """An import in a retired format is refused on resume and removed by abort."""
+    import graphforge as gf
+
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp) / "project"
+        project.mkdir()
+        forge = gf.GraphForge(str(project))
+        session = forge.begin_import_session(operation_uuid=str(uuid.uuid4()))
+        table = pa.table(
+            {
+                "node_uuid": pa.array([uuid.uuid4().bytes], type=pa.binary(16)),
+                "label": pa.array(["Person"]),
+            }
+        )
+        session.append_arrow("node", table)
+        session.checkpoint()
+        session_uuid = session.session_uuid
+        del session
+
+        root = project / "import-sessions" / session_uuid
+        manifest_path = root / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["format_version"] = 2
+        manifest_path.write_text(json.dumps(manifest))
+
+        try:
+            forge.resume_import_session(session_uuid)
+        except Exception as error:
+            assert "restart the import" in str(error), str(error)
+        else:
+            raise AssertionError("a retired-format import must not resume")
+
+        progress = forge.abort_import_session(session_uuid)
+        assert progress["files_accepted"] == 0
+        assert not root.exists()
+
+        try:
+            forge.abort_import_session(session_uuid)
+        except Exception:
+            pass
+        else:
+            raise AssertionError("aborting an absent import must fail")
 
 
 def check_import_session_narrow_integer_reads_back() -> None:
@@ -88,6 +134,7 @@ def check_import_session_narrow_integer_reads_back() -> None:
 
 def main() -> None:
     check_import_session_lifecycle()
+    check_import_session_abort_by_uuid()
     check_import_session_narrow_integer_reads_back()
 
 

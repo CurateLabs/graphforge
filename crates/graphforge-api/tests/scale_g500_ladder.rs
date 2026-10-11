@@ -1556,8 +1556,10 @@ fn open_persisted_construction<'a>(
             .resume_graph_construction(session_uuid, budgets)
             .expect("resume persisted construction session");
     }
+    // An empty project builds on the bulk builder: the chunks are spooled and
+    // sealing builds the generation from them.
     let session = graph
-        .begin_staged_graph_construction(budgets)
+        .begin_graph_construction(budgets)
         .expect("begin persisted construction session");
     let parent = path.parent().expect("construction session parent");
     fs::create_dir_all(parent).expect("construction session parent");
@@ -3551,10 +3553,10 @@ fn run_integrated_certification_config(
     let initial_generation = graphforge_storage::resolve_project_generation(&source)
         .expect("resolve initial source generation");
     journal.replace_project_owner("source_project", &initial_generation);
-    // The staged lifecycle is what the phase metric policies certify; the
-    // chunk API's default spools and builds with the bulk builder instead.
+    // The chunk API spools an initial build's chunks and builds the generation
+    // with the bulk builder: the certified phases measure that builder.
     let mut construction = graph
-        .begin_staged_graph_construction(Default::default())
+        .begin_graph_construction(Default::default())
         .expect("begin certification construction");
     let node_count = (1_u64 << scale)
         .checked_mul(u64::from(preflight_node_factor))
@@ -3588,6 +3590,7 @@ fn run_integrated_certification_config(
     construction
         .seal_and_publish()
         .expect("publish certification construction");
+    let shape_files = shape_control_files(&source, construction.session_uuid());
     let construction_evidence = construction.progress().evidence;
     let mut construction_phases =
         graphforge_storage::ConstructionPhaseAttribution::from_construction(&construction_evidence)
@@ -4171,6 +4174,7 @@ fn run_integrated_certification_config(
             "construction": construction_storage,
             "application_io_phases": construction_phases,
             "hydration_uuid_control_bytes": hydration_uuid_control_bytes,
+            "shape_control_files": shape_files,
             "workspace_current_allocated_bytes": workspace_current_allocated_bytes,
             "workspace_peak_allocated_bytes": workspace_peak_allocated_bytes,
             "workspace_components": workspace_components,
@@ -4390,7 +4394,9 @@ const LINEARITY_RETAINED_FIELDS: [(&str, &str, RetainedMetricPolicy); 33] = [
     (
         "construction.staged_and_retained_disk_bytes",
         "/storage/construction/staged_and_retained_disk_bytes",
-        RetainedMetricPolicy::ScaleBearing,
+        // An initial build runs on the bulk builder, which stages and retains
+        // nothing once it has published.
+        RetainedMetricPolicy::StructurallyZero,
     ),
     (
         "construction.transient_peak_total_allocated_bytes",
@@ -4419,6 +4425,76 @@ const LINEARITY_RETAINED_FIELDS: [(&str, &str, RetainedMetricPolicy); 33] = [
     ),
 ];
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ShapeComponents {
+    /// Input validation, merge, Parquet, shaped-output authentication, parent
+    /// catalog and retained-probe bytes read.
+    read_bytes: [u64; 6],
+    /// The same six components, in read calls.
+    read_calls: [u64; 6],
+    /// Merge and Parquet bytes written.
+    write_bytes: [u64; 2],
+    /// Merge and Parquet write calls.
+    write_calls: [u64; 2],
+    /// Merge blocks read and written.
+    blocks: [u64; 2],
+}
+
+impl ShapeComponents {
+    /// What the bulk builder's empty shape must have counted, derived from the
+    /// files it left in the construction session and not from any counter: it
+    /// authenticated each `shape-receipt-*.json` it wrote (their lengths are
+    /// the bytes read, their number the calls), wrote each output the receipts
+    /// name (their `bytes` and `write_operations`), and counted
+    /// `ceil(bytes / block)` blocks for each.
+    fn from_files(files: &Value) -> Self {
+        let field = |name: &str| {
+            files[name]
+                .as_u64()
+                .unwrap_or_else(|| panic!("shape control file total {name} is an integer"))
+        };
+        Self {
+            read_bytes: [0, 0, 0, field("authentication_bytes"), 0, 0],
+            read_calls: [0, 0, 0, field("authentication_calls"), 0, 0],
+            write_bytes: [field("run_bytes"), field("parquet_bytes")],
+            write_calls: [field("run_write_calls"), field("parquet_write_calls")],
+            blocks: [0, field("blocks")],
+        }
+    }
+
+    fn from_evidence(construction: &Value) -> Self {
+        let field = |name: &str| {
+            construction[name]
+                .as_u64()
+                .unwrap_or_else(|| panic!("shape component {name} is an integer"))
+        };
+        Self {
+            read_bytes: [
+                field("shape_input_validation_read_bytes"),
+                field("merge_read_bytes"),
+                field("parquet_read_bytes"),
+                field("shaped_output_authentication_bytes"),
+                field("parent_catalog_read_bytes"),
+                field("retained_probe_read_bytes"),
+            ],
+            read_calls: [
+                field("shape_input_validation_read_operations"),
+                field("merge_read_operations"),
+                field("parquet_read_operations"),
+                field("shaped_output_authentication_operations"),
+                field("parent_catalog_read_operations"),
+                field("retained_probe_block_loads"),
+            ],
+            write_bytes: [field("merge_written_bytes"), field("parquet_write_bytes")],
+            write_calls: [
+                field("merge_write_operations"),
+                field("parquet_write_operations"),
+            ],
+            blocks: [field("merge_read_blocks"), field("merge_write_blocks")],
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LifecycleLinearityObservation {
     phases: BTreeMap<String, [u64; LINEARITY_PHASE_FIELDS.len()]>,
@@ -4427,8 +4503,11 @@ struct LifecycleLinearityObservation {
     input_rows: u64,
     live_nodes: u64,
     live_edges: u64,
-    shape_merge_bytes: [u64; 2],
-    shape_block_components: [u64; 2],
+    /// The native counters the shape phase's totals are the sums of: read
+    /// bytes, read calls, written bytes, write calls and blocks.
+    shape_components: ShapeComponents,
+    /// The same components as the files the empty shape left say they are.
+    shape_expected: ShapeComponents,
     canonical_artifact_objects: u64,
     /// Bytes of every canonical artifact the publication installed or reused.
     canonical_output_bytes: u64,
@@ -4442,8 +4521,6 @@ struct LifecycleLinearityObservation {
     catalog_fixed_objects: u64,
     hydration_file_fsync_operations: u64,
     hydration_directory_fsync_operations: u64,
-    shape_read_component_calls: [u64; 6],
-    shape_write_component_calls: [u64; 2],
     encode_write_component_calls: [u64; 4],
     category_metrics: BTreeMap<String, [u64; 6]>,
     category_authority_metrics: BTreeMap<String, [u64; 6]>,
@@ -4538,6 +4615,55 @@ fn phase_fields(totals: &graphforge_storage::PhaseIoTotals) -> [u64; LINEARITY_P
     ]
 }
 
+/// Read the files the empty shape of a bulk build left in its construction
+/// session and total what they say it authenticated and wrote.
+fn shape_control_files(project: &Path, session: Uuid) -> Value {
+    let root = project
+        .join(".graphforge-construction")
+        .join(session.simple().to_string());
+    let mut totals = [0_u64; 7];
+    for entry in fs::read_dir(&root).expect("construction session directory") {
+        let path = entry.expect("construction session entry").path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if !(name.starts_with("shape-receipt-") && name.ends_with(".json")) {
+            continue;
+        }
+        let body = fs::read(&path).expect("shape receipt");
+        let receipt: Value = serde_json::from_slice(&body).expect("shape receipt JSON");
+        let bytes = receipt["bytes"].as_u64().expect("receipt bytes");
+        let writes = receipt["write_operations"]
+            .as_u64()
+            .expect("receipt write operations");
+        // The receipt's own length is what authenticating it reads.
+        totals[0] += body.len() as u64;
+        totals[1] += 1;
+        let first = if receipt["name"]
+            .as_str()
+            .is_some_and(|name| name.ends_with(".parquet"))
+        {
+            4
+        } else {
+            2
+        };
+        totals[first] += bytes;
+        totals[first + 1] += writes;
+        totals[6] += bytes.div_ceil(STAGING_BUFFER_BYTES);
+    }
+    assert!(totals[1] > 0, "the empty shape left no receipt");
+    json!({
+        "authentication_bytes": totals[0],
+        "authentication_calls": totals[1],
+        "run_bytes": totals[2],
+        "run_write_calls": totals[3],
+        "parquet_bytes": totals[4],
+        "parquet_write_calls": totals[5],
+        "blocks": totals[6],
+    })
+}
+
 fn lifecycle_linearity_observation(evidence: &Value) -> LifecycleLinearityObservation {
     let attribution: graphforge_storage::ConstructionPhaseAttribution =
         serde_json::from_value(evidence["storage"]["application_io_phases"].clone())
@@ -4572,20 +4698,6 @@ fn lifecycle_linearity_observation(evidence: &Value) -> LifecycleLinearityObserv
         .as_u64()
         .expect("authoritative live edge count");
     let construction = &evidence["storage"]["construction"];
-    let merge_read_bytes = construction["merge_read_bytes"]
-        .as_u64()
-        .expect("merge read bytes");
-    let merge_write_bytes = construction["merge_written_bytes"]
-        .as_u64()
-        .expect("merge write bytes");
-    let shape_block_components = [
-        construction["merge_read_blocks"]
-            .as_u64()
-            .expect("merge read block authority"),
-        construction["merge_write_blocks"]
-            .as_u64()
-            .expect("merge write block authority"),
-    ];
     let canonical_artifact_objects = construction["canonical_artifact_objects"]
         .as_u64()
         .expect("canonical artifact inventory");
@@ -4612,34 +4724,6 @@ fn lifecycle_linearity_observation(evidence: &Value) -> LifecycleLinearityObserv
     let hydration_directory_fsync_operations = construction["hydration_directory_fsync_operations"]
         .as_u64()
         .expect("hydration directory barrier inventory");
-    let shape_read_component_calls = [
-        construction["shape_input_validation_read_operations"]
-            .as_u64()
-            .expect("shape input reads"),
-        construction["merge_read_operations"]
-            .as_u64()
-            .expect("merge reads"),
-        construction["parquet_read_operations"]
-            .as_u64()
-            .expect("Parquet reads"),
-        construction["shaped_output_authentication_operations"]
-            .as_u64()
-            .expect("shape authentication reads"),
-        construction["parent_catalog_read_operations"]
-            .as_u64()
-            .expect("parent catalog reads"),
-        construction["retained_probe_block_loads"]
-            .as_u64()
-            .expect("retained probe reads"),
-    ];
-    let shape_write_component_calls = [
-        construction["merge_write_operations"]
-            .as_u64()
-            .expect("merge writes"),
-        construction["parquet_write_operations"]
-            .as_u64()
-            .expect("Parquet writes"),
-    ];
     let encode_write_component_calls = [
         construction["encode_output_write_operations"]
             .as_u64()
@@ -4750,8 +4834,8 @@ fn lifecycle_linearity_observation(evidence: &Value) -> LifecycleLinearityObserv
         input_rows,
         live_nodes,
         live_edges,
-        shape_merge_bytes: [merge_read_bytes, merge_write_bytes],
-        shape_block_components,
+        shape_components: ShapeComponents::from_evidence(construction),
+        shape_expected: ShapeComponents::from_files(&evidence["storage"]["shape_control_files"]),
         canonical_artifact_objects,
         canonical_output_bytes,
         cas_publication_io: serde_json::from_value(construction["cas_publication_io"].clone())
@@ -4769,8 +4853,6 @@ fn lifecycle_linearity_observation(evidence: &Value) -> LifecycleLinearityObserv
             .expect("source catalog objects outside the manifest"),
         hydration_file_fsync_operations,
         hydration_directory_fsync_operations,
-        shape_read_component_calls,
-        shape_write_component_calls,
         encode_write_component_calls,
         category_metrics,
         category_authority_metrics,
@@ -5384,6 +5466,22 @@ enum MetricRegime {
     Reconciled,
 }
 
+/// The shape total a [`PhaseMetricPolicy::ShapeControl`] polices.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShapeControlField {
+    ReadBytes,
+    ReadCalls,
+    WriteBytes,
+    WriteCalls,
+    Blocks,
+}
+
+/// One small control record: a filesystem block.
+const CONTROL_RECORD_MAX_BYTES: u64 = 4096;
+/// The smallest authenticated record: a Parquet file's two magics and footer
+/// length.
+const CONTROL_RECORD_MIN_BYTES: u64 = 12;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PhaseMetricPolicy {
     ScaleBearing,
@@ -5430,11 +5528,24 @@ enum PhaseMetricPolicy {
     InventoryControlBytes {
         maximum: u64,
     },
-    ShapeReadComponentCalls,
-    ShapeWriteComponentCalls,
     EncodeWriteComponentCalls,
     AppendObjectInventory,
-    ShapeBlockInventory,
+    /// A fixed control read or write: the same on every rung, within
+    /// `minimum..=maximum`. The ceiling is the size of one small control
+    /// record, so a payload-sized read added to the phase fails it, and the
+    /// floor is the smallest record that can be authenticated at all, so a
+    /// read that stops or shrinks to nothing fails it.
+    ConstantControl {
+        minimum: u64,
+        maximum: u64,
+    },
+    /// The bulk builder runs no shaping stage; its session records an empty
+    /// shape, which writes the shaped runtime catalog of an empty parent once
+    /// and authenticates its receipts. Each shape total is the sum of its
+    /// native components, and each component equals what the files the shape
+    /// left record (their lengths, their number, the sizes and write counts
+    /// in their receipts), on every rung.
+    ShapeControl(ShapeControlField),
     /// Unix links the encoder's file into the object store instead of copying
     /// it. Payload read bytes are then only the authentication of objects that
     /// already existed, and together with the bytes installed they account for
@@ -5470,12 +5581,10 @@ impl PhaseMetricPolicy {
             Self::BoundedObjectCalls { .. } | Self::InventoryControlBytes { .. } => {
                 MetricRegime::StructureBounded
             }
-            Self::StructurallyZero => MetricRegime::FixedProtocol,
+            Self::StructurallyZero | Self::ConstantControl { .. } => MetricRegime::FixedProtocol,
             Self::HydrationReadReconciliation { .. }
-            | Self::ShapeReadComponentCalls
-            | Self::ShapeWriteComponentCalls
             | Self::EncodeWriteComponentCalls
-            | Self::ShapeBlockInventory
+            | Self::ShapeControl(_)
             | Self::LinkedPayloadReadBytes
             | Self::LinkedPayloadWriteBytes
             | Self::CasFsyncInventory
@@ -5495,6 +5604,10 @@ struct PhasePolicyRow {
 
 const ZERO: PhaseMetricPolicy = PhaseMetricPolicy::StructurallyZero;
 const SCALE: PhaseMetricPolicy = PhaseMetricPolicy::ScaleBearing;
+const CONTROL: PhaseMetricPolicy = PhaseMetricPolicy::ConstantControl {
+    minimum: CONTROL_RECORD_MIN_BYTES,
+    maximum: CONTROL_RECORD_MAX_BYTES,
+};
 /// Windows copies each encoded file into the object store, so its bytes follow
 /// the data. Everywhere else the install links the encoder's file (#1899) and
 /// the invariant is that the object store writes no payload byte at all.
@@ -5565,12 +5678,17 @@ const HYDRATION_ROUTE_TABLE_CONTROL_BYTES: u64 = 2 * 1024;
 //   are accounted in fsync_synchronization).
 // seal_authentication: fixed-protocol zero on every field; no I/O is
 //   attributed to the seal itself (#1623 split it from append).
-// shape_consume_reauthentication: bytes are data-proportional; calls and
-//   blocks reconcile to the native component counters (blocks additionally to
-//   ceil(bytes / staged block) ..= bytes); object count and fsyncs are zero.
-// encode_write_postwrite_authentication: bytes and read calls are data-
-//   proportional; write calls and fsyncs reconcile to the native encoder
-//   components (output, spool, ordinal barriers).
+// shape_consume_reauthentication: the bulk builder shapes nothing, so the phase
+//   is the fixed control I/O of the empty shape its session records: the
+//   shaped runtime catalog of an empty parent, written once and authenticated.
+//   Each total equals the sum of its native components, each component equals
+//   what the files the shape left record, on every rung; object count and
+//   fsyncs are zero.
+// encode_write_postwrite_authentication: write bytes are data-proportional.
+//   The bulk builder emits each artifact once and authenticates nothing it
+//   wrote, so read bytes are the fixed control read, the same on every rung;
+//   read calls derive from them. Write calls and fsyncs reconcile to the
+//   native encoder components (output, spool, ordinal barriers).
 // publication_preauthentication: the encoded-inventory control read is
 //   structure-bounded by one encoding buffer, and its call count derives from
 //   those bytes; every other field is zero.
@@ -5620,19 +5738,19 @@ const PHASE_METRIC_POLICIES: [PhasePolicyRow; 9] = [
     PhasePolicyRow {
         phase: "shape_consume_reauthentication",
         fields: [
-            SCALE,
-            SCALE,
-            PhaseMetricPolicy::ShapeReadComponentCalls,
-            PhaseMetricPolicy::ShapeWriteComponentCalls,
+            PhaseMetricPolicy::ShapeControl(ShapeControlField::ReadBytes),
+            PhaseMetricPolicy::ShapeControl(ShapeControlField::WriteBytes),
+            PhaseMetricPolicy::ShapeControl(ShapeControlField::ReadCalls),
+            PhaseMetricPolicy::ShapeControl(ShapeControlField::WriteCalls),
             ZERO,
-            PhaseMetricPolicy::ShapeBlockInventory,
+            PhaseMetricPolicy::ShapeControl(ShapeControlField::Blocks),
             ZERO,
         ],
     },
     PhasePolicyRow {
         phase: "encode_write_postwrite_authentication",
         fields: [
-            SCALE,
+            CONTROL,
             SCALE,
             PhaseMetricPolicy::BufferedCalls {
                 byte_field: 0,
@@ -5753,6 +5871,49 @@ fn validate_phase_policy_table(
     if policy_names.len() != PHASE_METRIC_POLICIES.len() || policy_names != observed_names {
         return Err(format!(
             "phase policy inventory differs from evidence: policy={policy_names:?} observed={observed_names:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// A shape total of the bulk route: the sum of its native components, and each
+/// component exactly what the files the empty shape left say it must be
+/// (see [`ShapeComponents::from_files`]), however large or small the counters
+/// are made to report.
+fn validate_shape_control(
+    name: &str,
+    field: ShapeControlField,
+    observed: u64,
+    observation: &LifecycleLinearityObservation,
+    rung: usize,
+) -> Result<(), String> {
+    let (components, expected): (&[u64], &[u64]) = {
+        let (actual, wanted) = (&observation.shape_components, &observation.shape_expected);
+        match field {
+            ShapeControlField::ReadBytes => (&actual.read_bytes, &wanted.read_bytes),
+            ShapeControlField::WriteBytes => (&actual.write_bytes, &wanted.write_bytes),
+            ShapeControlField::ReadCalls => (&actual.read_calls, &wanted.read_calls),
+            ShapeControlField::WriteCalls => (&actual.write_calls, &wanted.write_calls),
+            ShapeControlField::Blocks => (&actual.blocks, &wanted.blocks),
+        }
+    };
+    let sum = components
+        .iter()
+        .try_fold(0_u64, |total, part| total.checked_add(*part))
+        .ok_or_else(|| format!("{name} native component sum overflows at rung {rung}"))?;
+    if observed != sum {
+        return Err(format!(
+            "{name} does not reconcile to its native components at rung {rung}: observed={observed} components={components:?}"
+        ));
+    }
+    if components != expected {
+        return Err(format!(
+            "{name} differs from what the empty shape's files record at rung {rung}: components={components:?} files={expected:?}"
+        ));
+    }
+    if observed == 0 && !matches!(field, ShapeControlField::Blocks) {
+        return Err(format!(
+            "{name} is zero although the empty shape authenticated and wrote its record at rung {rung}"
         ));
     }
     Ok(())
@@ -5928,60 +6089,6 @@ fn validate_bounded_object_calls(
         return Err(format!(
             "{name} bounded-object call spread exceeds {max_growth_percent}% of the minimum: {calls:?}"
         ));
-    }
-    Ok(())
-}
-
-fn validate_shape_block_inventory(
-    name: &str,
-    observed: u64,
-    observation: &LifecycleLinearityObservation,
-    rung: usize,
-) -> Result<(), String> {
-    let expected = observation
-        .shape_block_components
-        .into_iter()
-        .try_fold(0_u64, u64::checked_add)
-        .ok_or_else(|| format!("{name} native component sum overflows at rung {rung}"))?;
-    if observed != expected {
-        return Err(format!(
-            "{name} does not reconcile to merge_read_blocks + merge_write_blocks at rung {rung}: observed={observed} expected={expected}"
-        ));
-    }
-    for (direction, blocks, bytes) in [
-        (
-            "read",
-            observation.shape_block_components[0],
-            observation.shape_merge_bytes[0],
-        ),
-        (
-            "write",
-            observation.shape_block_components[1],
-            observation.shape_merge_bytes[1],
-        ),
-    ] {
-        // Floor: `validate_axis_denominators` rejects an empty graph, so the
-        // shape consumed identity records through the counted reader
-        // (merge_read_bytes, shape.rs) and routed them through the partition
-        // writer (merge_written_bytes, partition_shaping.rs). Zero bytes with
-        // zero blocks reconciles trivially and is what a shape that stopped
-        // running (or counting) would report; the ceiling bound below then
-        // forces at least one block.
-        if bytes == 0 {
-            return Err(format!(
-                "{name} {direction} has no merge bytes although a non-empty graph was shaped at rung {rung}"
-            ));
-        }
-        // Production accumulates ceil(artifact_bytes / block_bytes) for every
-        // authenticated artifact. Therefore ceil(total_bytes / block_bytes) is
-        // a strict lower bound, while one-byte blocks are the fail-closed upper
-        // bound without exposing per-artifact sizes.
-        let minimum = checked_ceil_div(name, bytes, STAGING_BUFFER_BYTES)?;
-        if blocks < minimum || blocks > bytes {
-            return Err(format!(
-                "{name} {direction} component violates per-artifact ceiling bounds {minimum}..={bytes} at rung {rung}: blocks={blocks}"
-            ));
-        }
     }
     Ok(())
 }
@@ -6527,22 +6634,23 @@ fn validate_lifecycle_metric_policies_for_axis(
                         ));
                     }
                 }
-                PhaseMetricPolicy::ShapeReadComponentCalls
-                | PhaseMetricPolicy::ShapeWriteComponentCalls
-                | PhaseMetricPolicy::EncodeWriteComponentCalls => {
+                PhaseMetricPolicy::ConstantControl { minimum, maximum } => {
+                    if !(minimum..=maximum).contains(&values[0]) {
+                        return Err(format!(
+                            "{name} is outside the control record bounds {minimum}..={maximum}: {values:?}"
+                        ));
+                    }
+                    validate_fixed_protocol_metric(&name, values, values[0], values[0])?;
+                }
+                PhaseMetricPolicy::ShapeControl(field) => {
                     for (rung, observation) in observations.iter().enumerate() {
-                        let components: &[u64] = match policy {
-                            PhaseMetricPolicy::ShapeReadComponentCalls => {
-                                &observation.shape_read_component_calls
-                            }
-                            PhaseMetricPolicy::ShapeWriteComponentCalls => {
-                                &observation.shape_write_component_calls
-                            }
-                            PhaseMetricPolicy::EncodeWriteComponentCalls => {
-                                &observation.encode_write_component_calls
-                            }
-                            _ => unreachable!("matched component policy"),
-                        };
+                        validate_shape_control(&name, field, values[rung], observation, rung)?;
+                    }
+                    validate_fixed_protocol_metric(&name, values, values[0], values[0])?;
+                }
+                PhaseMetricPolicy::EncodeWriteComponentCalls => {
+                    for (rung, observation) in observations.iter().enumerate() {
+                        let components: &[u64] = &observation.encode_write_component_calls;
                         let expected = components.iter().try_fold(0_u64, |total, value| {
                             total
                                 .checked_add(*value)
@@ -6563,11 +6671,6 @@ fn validate_lifecycle_metric_policies_for_axis(
                                 "{name} does not reconcile to append inventory at rung {rung}"
                             ));
                         }
-                    }
-                }
-                PhaseMetricPolicy::ShapeBlockInventory => {
-                    for (rung, observation) in observations.iter().enumerate() {
-                        validate_shape_block_inventory(&name, values[rung], observation, rung)?;
                     }
                 }
                 PhaseMetricPolicy::LinkedPayloadReadBytes => {
@@ -6967,6 +7070,16 @@ fn synthetic_category_metrics(axis: LinearityAxis, factor: u64) -> BTreeMap<Stri
     metrics
 }
 
+fn synthetic_shape_components() -> ShapeComponents {
+    ShapeComponents {
+        read_bytes: [0, 0, 0, 434, 0, 0],
+        read_calls: [0, 0, 0, 2, 0, 0],
+        write_bytes: [0, 963],
+        write_calls: [0, 1],
+        blocks: [0, 1],
+    }
+}
+
 fn synthetic_linearity_observations_for_axis(
     axis: LinearityAxis,
 ) -> [LifecycleLinearityObservation; 3] {
@@ -6985,27 +7098,11 @@ fn synthetic_linearity_observations_for_axis(
                 ("seal_authentication".into(), [0, 0, 0, 0, 0, 0, 0]),
                 (
                     "shape_consume_reauthentication".into(),
-                    [
-                        100 + 900 * factor,
-                        100 + 800 * factor,
-                        factor,
-                        factor,
-                        0,
-                        6 + 2 * factor,
-                        0,
-                    ],
+                    [434, 963, 2, 1, 0, 1, 0],
                 ),
                 (
                     "encode_write_postwrite_authentication".into(),
-                    [
-                        100 + 900 * factor,
-                        100 + 800 * factor,
-                        807,
-                        factor,
-                        0,
-                        0,
-                        35,
-                    ],
+                    [1000, 100 + 800 * factor, 807, factor, 0, 0, 35],
                 ),
                 (
                     "publication_preauthentication".into(),
@@ -7099,8 +7196,8 @@ fn synthetic_linearity_observations_for_axis(
             input_rows: live_nodes + live_edges,
             live_nodes,
             live_edges,
-            shape_merge_bytes: [100 + 900 * factor, 100 + 800 * factor],
-            shape_block_components: [3 + factor, 3 + factor],
+            shape_components: synthetic_shape_components(),
+            shape_expected: synthetic_shape_components(),
             canonical_artifact_objects: 19,
             canonical_output_bytes: if cfg!(windows) {
                 900 * factor
@@ -7163,8 +7260,6 @@ fn synthetic_linearity_observations_for_axis(
             catalog_fixed_objects: 0,
             hydration_file_fsync_operations: 19,
             hydration_directory_fsync_operations: 19,
-            shape_read_component_calls: [factor, 0, 0, 0, 0, 0],
-            shape_write_component_calls: [factor, 0],
             encode_write_component_calls: [factor, 0, 0, 0],
             category_metrics: synthetic_category_metrics(axis, factor),
             category_authority_metrics: synthetic_category_metrics(axis, factor),
@@ -7827,7 +7922,11 @@ fn phase_metric_regimes_are_declared_and_structure_bounds_carry_a_floor() {
                     row.phase
                 ),
                 (MetricRegime::FixedProtocol, other)
-                    if other != PhaseMetricPolicy::StructurallyZero =>
+                    if !matches!(
+                        other,
+                        PhaseMetricPolicy::StructurallyZero
+                            | PhaseMetricPolicy::ConstantControl { .. }
+                    ) =>
                 {
                     panic!("{}.{field}: {other:?} is not a fixed protocol", row.phase)
                 }
@@ -7894,7 +7993,7 @@ fn every_declared_nonzero_phase_metric_rejects_a_uniform_drop_to_zero() {
             for (index, (field, policy)) in
                 LINEARITY_PHASE_FIELDS.iter().zip(row.fields).enumerate()
             {
-                if policy.regime() == MetricRegime::FixedProtocol {
+                if policy == PhaseMetricPolicy::StructurallyZero {
                     continue;
                 }
                 let mut dropped = base.clone();
@@ -8089,27 +8188,81 @@ fn linked_payload_policies_reject_a_reintroduced_copy_or_read_back() {
 }
 
 #[test]
-fn shape_block_inventory_rejects_a_shape_that_merged_no_bytes() {
-    // A non-empty graph's identity records are read through the counted
-    // reader and routed through the partition writer, so both merge byte
-    // totals are positive. Zero bytes with zero blocks reconciles trivially.
+fn the_shape_phase_is_the_empty_shapes_own_control_record() {
+    // The bulk builder shapes nothing: its session records an empty shape, and
+    // the phase is the one record that shape writes and authenticates.
+    let phase = "shape_consume_reauthentication";
     for axis in [LinearityAxis::Nodes, LinearityAxis::Edges] {
-        let mut no_merge = synthetic_linearity_observations_for_axis(axis);
-        for observation in &mut no_merge {
-            observation.shape_merge_bytes = [0, 0];
-            observation.shape_block_components = [0, 0];
-            observation
-                .phases
-                .get_mut("shape_consume_reauthentication")
-                .unwrap()[5] = 0;
+        let base = synthetic_linearity_observations_for_axis(axis);
+        validate_lifecycle_metric_policies_for_axis(axis, &base)
+            .expect("the empty shape's record passes");
+        // (field, mutation of the aggregate and of its components)
+        type Mutation = fn(&mut LifecycleLinearityObservation, usize);
+        let cases: Vec<(&str, &str, Mutation)> = vec![
+            // A shape stage that came back and follows the data.
+            ("read_bytes", "grows", |o, rung| {
+                o.phases.get_mut("shape_consume_reauthentication").unwrap()[0] += rung as u64;
+                o.shape_components.read_bytes[3] += rung as u64;
+            }),
+            ("write_calls", "grows", |o, rung| {
+                o.phases.get_mut("shape_consume_reauthentication").unwrap()[3] += rung as u64;
+                o.shape_components.write_calls[1] += rung as u64;
+            }),
+            // The record stops being authenticated, or is read as one byte.
+            ("read_bytes", "vanishes", |o, _| {
+                o.phases.get_mut("shape_consume_reauthentication").unwrap()[0] = 0;
+                o.shape_components.read_bytes[3] = 0;
+            }),
+            ("read_bytes", "shrinks to one byte", |o, _| {
+                o.phases.get_mut("shape_consume_reauthentication").unwrap()[0] = 1;
+                o.shape_components.read_bytes[3] = 1;
+            }),
+            // Every counter reports twice what the files record, aggregate and
+            // components alike: a self-consistent doubling, caught only by the
+            // files.
+            ("read_bytes", "doubles with its components", |o, _| {
+                o.phases.get_mut("shape_consume_reauthentication").unwrap()[0] *= 2;
+                o.shape_components.read_bytes[3] *= 2;
+            }),
+            ("read_calls", "doubles with its components", |o, _| {
+                o.phases.get_mut("shape_consume_reauthentication").unwrap()[2] *= 2;
+                o.shape_components.read_calls[3] *= 2;
+            }),
+            ("write_bytes", "doubles with its components", |o, _| {
+                o.phases.get_mut("shape_consume_reauthentication").unwrap()[1] *= 2;
+                o.shape_components.write_bytes[1] *= 2;
+            }),
+            // A payload-sized fixed read is added.
+            ("read_bytes", "gains a large fixed read", |o, _| {
+                o.phases.get_mut("shape_consume_reauthentication").unwrap()[0] = 1 << 20;
+                o.shape_components.read_bytes[3] = 1 << 20;
+            }),
+            // Shaping work that the bulk builder does not do.
+            ("read_bytes", "reads merge runs", |o, _| {
+                o.phases.get_mut("shape_consume_reauthentication").unwrap()[0] += 100;
+                o.shape_components.read_bytes[1] = 100;
+            }),
+            ("write_bytes", "writes merge runs", |o, _| {
+                o.phases.get_mut("shape_consume_reauthentication").unwrap()[1] += 100;
+                o.shape_components.write_bytes[0] = 100;
+            }),
+            // An aggregate that does not reconcile to its components.
+            ("read_calls", "overreports", |o, _| {
+                o.phases.get_mut("shape_consume_reauthentication").unwrap()[2] += 1;
+            }),
+            ("blocks", "lose their component", |o, _| {
+                o.shape_components.blocks[1] = 0;
+            }),
+        ];
+        for (name, what, mutate) in cases {
+            let mut mutated = base.clone();
+            for (rung, observation) in mutated.iter_mut().enumerate() {
+                mutate(observation, rung);
+            }
+            let error = validate_lifecycle_metric_policies_for_axis(axis, &mutated)
+                .expect_err(&format!("{axis:?}: shape {name} that {what} must fail"));
+            assert!(error.contains(phase), "{axis:?} {name} {what}: {error}");
         }
-        let error = validate_lifecycle_metric_policies_for_axis(axis, &no_merge)
-            .expect_err("a non-empty graph shaped with zero merge bytes must fail");
-        assert!(
-            error.contains("shape_consume_reauthentication.block_count")
-                && error.contains("no merge bytes"),
-            "{axis:?}: {error}"
-        );
     }
 }
 
@@ -8224,7 +8377,6 @@ fn lifecycle_metric_policy_accepts_bounded_fixed_protocol_and_rejects_false_grow
     for (phase, field, field_name) in [
         ("append_merge", 1, "append write bytes"),
         ("append_merge", 4, "append objects"),
-        ("shape_consume_reauthentication", 5, "shape logical blocks"),
         ("fsync_synchronization", 6, "append/merge fsync work"),
         ("recovery_reauthentication", 0, "recovery read bytes"),
     ] {
@@ -8297,51 +8449,6 @@ fn lifecycle_metric_policy_accepts_bounded_fixed_protocol_and_rejects_false_grow
         "recovery read calls dropped uniformly below the absolute floor must still fail"
     );
 
-    let mut underreported_shape_aggregate = observations.clone();
-    underreported_shape_aggregate[2]
-        .phases
-        .get_mut("shape_consume_reauthentication")
-        .unwrap()[5] -= 1;
-    assert!(validate_lifecycle_metric_policies(&underreported_shape_aggregate).is_err());
-
-    let mut overreported_shape_aggregate = observations.clone();
-    overreported_shape_aggregate[2]
-        .phases
-        .get_mut("shape_consume_reauthentication")
-        .unwrap()[5] += 1;
-    assert!(validate_lifecycle_metric_policies(&overreported_shape_aggregate).is_err());
-
-    let mut underreported_shape_component = observations.clone();
-    underreported_shape_component[2].shape_block_components[0] = 0;
-    underreported_shape_component[2]
-        .phases
-        .get_mut("shape_consume_reauthentication")
-        .unwrap()[5] = underreported_shape_component[2].shape_block_components[1];
-    assert!(validate_lifecycle_metric_policies(&underreported_shape_component).is_err());
-
-    let mut overreported_shape_component = observations.clone();
-    overreported_shape_component[2].shape_block_components[1] = overreported_shape_component[2]
-        .shape_merge_bytes[1]
-        .checked_add(1)
-        .expect("synthetic overreported component");
-    overreported_shape_component[2]
-        .phases
-        .get_mut("shape_consume_reauthentication")
-        .unwrap()[5] = overreported_shape_component[2]
-        .shape_block_components
-        .into_iter()
-        .try_fold(0_u64, u64::checked_add)
-        .expect("synthetic component total");
-    assert!(validate_lifecycle_metric_policies(&overreported_shape_component).is_err());
-
-    let mut overflowing_shape_components = observations.clone();
-    overflowing_shape_components[2].shape_block_components = [u64::MAX, 1];
-    overflowing_shape_components[2]
-        .phases
-        .get_mut("shape_consume_reauthentication")
-        .unwrap()[5] = u64::MAX;
-    assert!(validate_lifecycle_metric_policies(&overflowing_shape_components).is_err());
-
     let mut nonzero_structural_field = observations.clone();
     nonzero_structural_field[2]
         .phases
@@ -8385,30 +8492,12 @@ fn lifecycle_metric_policy_accepts_bounded_fixed_protocol_and_rejects_false_grow
         .unwrap()[2] = 0;
     assert!(validate_lifecycle_metric_policies(&underreported_buffered_calls).is_err());
 
-    let mut underreported_shape_calls = observations.clone();
-    underreported_shape_calls[2]
-        .phases
-        .get_mut("shape_consume_reauthentication")
-        .unwrap()[2] = 1;
-    assert!(validate_lifecycle_metric_policies(&underreported_shape_calls).is_err());
-
     let mut inflated_encode_calls = observations.clone();
     inflated_encode_calls[2]
         .phases
         .get_mut("encode_write_postwrite_authentication")
         .unwrap()[3] += 1;
     assert!(validate_lifecycle_metric_policies(&inflated_encode_calls).is_err());
-
-    let mut component_call_plateau = observations.clone();
-    for observation in &mut component_call_plateau {
-        observation
-            .phases
-            .get_mut("shape_consume_reauthentication")
-            .unwrap()[2] = 2;
-        observation.shape_read_component_calls = [2, 0, 0, 0, 0, 0];
-    }
-    validate_lifecycle_metric_policies(&component_call_plateau)
-        .expect("native component-call plateau");
 
     let mut oversized_inventory_control = observations.clone();
     oversized_inventory_control[2]
@@ -8873,16 +8962,24 @@ fn graph500_driver_has_no_bulk_publication_escape_hatch() {
     }
 }
 
+/// An append stages its chunks: the project gets its two nodes from the bulk
+/// builder, and a staged construction appends a million edges between them as
+/// sixteen durable chunks that a resumed process replays stably.
 #[test]
-fn million_edge_sink_uses_sixteen_durable_chunks_and_replays_stably() {
+fn million_edge_append_uses_sixteen_durable_staged_chunks_and_replays_stably() {
     let project = TempDir::new().expect("million-edge construction project");
     let graph = GraphForge::new(project.path().to_str()).expect("open million-edge project");
     let budgets = GraphConstructionBudgets::default();
     assert_eq!(CONSTRUCTION_BATCH_ROWS, budgets.max_batch_rows);
+    let mut base = graph
+        .begin_graph_construction(budgets)
+        .expect("begin base construction");
+    publish_nodes(&mut base, 2, None);
+    base.seal_and_publish().expect("publish base nodes");
+    drop(base);
     let mut session = graph
         .begin_staged_graph_construction(budgets)
-        .expect("begin million-edge construction");
-    publish_nodes(&mut session, 2, None);
+        .expect("begin million-edge append");
     let session_uuid = session.session_uuid();
     let mut sink = EdgeSink::new(&mut session, None);
     for _ in 0..1_048_576 {
@@ -8891,18 +8988,17 @@ fn million_edge_sink_uses_sixteen_durable_chunks_and_replays_stably() {
     sink.flush();
     let first_digest = sink.finish();
     let first = session.progress();
-    assert_eq!(
-        first.accepted_chunks, 17,
-        "one node plus sixteen edge chunks"
-    );
-    assert_eq!(first.evidence.input_batches, 17);
-    assert_eq!(first.evidence.parquet_shards, 17);
-    assert_eq!(first.evidence.immutable_artifacts, 67);
+    assert_eq!(first.accepted_chunks, 16, "sixteen edge chunks");
+    assert_eq!(first.evidence.input_batches, 16);
+    assert_eq!(first.evidence.parquet_shards, 16);
+    assert_eq!(first.evidence.spooled_chunks, 0);
+    let staged_artifacts = first.evidence.immutable_artifacts;
+    assert!(staged_artifacts >= 16);
     drop(session);
 
     let mut replay = graph
         .resume_graph_construction(session_uuid, budgets)
-        .expect("resume million-edge construction");
+        .expect("resume million-edge append");
     let mut sink = EdgeSink::new(&mut replay, None);
     for _ in 0..1_048_576 {
         sink.push(0, 1);
@@ -8910,11 +9006,11 @@ fn million_edge_sink_uses_sixteen_durable_chunks_and_replays_stably() {
     sink.flush();
     assert_eq!(sink.finish(), first_digest);
     let replayed = replay.progress();
-    assert_eq!(replayed.accepted_chunks, 17);
-    assert_eq!(replayed.evidence.input_batches, 17);
-    assert_eq!(replayed.evidence.immutable_artifacts, 67);
+    assert_eq!(replayed.accepted_chunks, 16);
+    assert_eq!(replayed.evidence.input_batches, 16);
+    assert_eq!(replayed.evidence.immutable_artifacts, staged_artifacts);
     assert_eq!(replayed.evidence.replayed_chunks, 16);
-    assert_eq!(submitted_chunk_count(&replayed.evidence), 33);
+    assert_eq!(submitted_chunk_count(&replayed.evidence), 32);
 }
 
 #[test]
@@ -9041,7 +9137,6 @@ fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
         ..GraphConstructionBudgets::default()
     };
     let base_nodes = CONSTRUCTION_BATCH_ROWS as u64;
-    let mut baseline_peaks: Option<[u64; 11]> = None;
     let mut baseline_storage: Option<(u64, u64)> = None;
     let mut baseline_phase_io: Option<(u64, u64, u64, u64)> = None;
     for factor in [1_u64, 2, 4] {
@@ -9079,145 +9174,44 @@ fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
             .seal_and_publish()
             .expect("publish tiny construction");
         let progress = resumed.progress();
+        // The initial build ran on the bulk builder over the spooled chunks:
+        // every row was accepted as one durable spool file per chunk, nothing
+        // was staged, and the builder built exactly the rows submitted (the counts read back below).
+        let chunks = 2 * factor + 1;
         assert_eq!(progress.evidence.input_rows, 2 * base_nodes * factor - 1);
-        assert_eq!(progress.evidence.input_batches, 2 * factor + 1);
+        assert_eq!(progress.evidence.input_batches, chunks);
+        assert_eq!(progress.accepted_chunks, chunks);
+        assert_eq!(progress.evidence.spooled_chunks, chunks);
+        assert_eq!(progress.evidence.parquet_shards, 0);
+        assert_eq!(progress.evidence.immutable_artifacts, 0);
+        assert_eq!(progress.evidence.merge_read_records, 0);
+        assert_eq!(graph.node_count(NODE_LABEL).unwrap(), base_nodes * factor);
         assert_eq!(
-            progress.evidence.parquet_shards,
-            progress.evidence.input_batches
+            scalar_count(&graph.execute(COUNT_EDGES).unwrap()),
+            base_nodes * factor - 1
         );
-        assert_eq!(progress.evidence.immutable_artifacts, 7 * factor + 4);
-        // Compact Node details use 16 + 1 + 4 = 21 bytes per row, and
-        // LINK details use 48 + 1 + 4 = 53. At 65,536 rows their streams
-        // remain below the 16 MiB cache window, as do the fixed identity
-        // and endpoint streams. No cache-window rollover adds a barrier
-        // to the artifact publication protocol.
-        assert_eq!(progress.evidence.fsync_operations, 23 * factor + 13);
+        assert!(progress.evidence.write_bytes > 0 && progress.evidence.write_operations > 0);
+        // The final process durably accepted every chunk but the node chunks and
+        // the replayed first edge chunk, which earlier processes accepted; each
+        // cost a file barrier and a directory barrier.
+        assert!(progress.evidence.fsync_operations >= 2 * (chunks - factor - 1));
+        // Accepting a chunk holds one batch window, whatever the scale.
         assert!(progress.evidence.peak_batch_rows <= CONSTRUCTION_BATCH_ROWS as u64);
         assert!(progress.evidence.peak_accounted_live_bytes <= 64 * 1024 * 1024);
-        assert!(progress.evidence.peak_run_records <= budgets.max_run_records as u64);
-        assert!(progress.evidence.peak_merge_inputs <= 64);
-        assert!(progress.evidence.peak_merge_name_slots <= 64);
-        assert!(progress.evidence.peak_resolved_endpoint_name_slots <= 64);
-        assert!(progress.evidence.peak_catalog_entries <= 64);
-        assert!(progress.evidence.peak_catalog_identifier_bytes <= 64 * 1024);
-        let observed_peaks = [
-            progress.evidence.peak_batch_rows,
-            progress.evidence.peak_batch_bytes,
-            progress.evidence.peak_run_records,
-            progress.evidence.peak_merge_inputs,
-            progress.evidence.peak_merge_temporary_bytes,
-            progress.evidence.peak_accounted_live_bytes,
-            progress.evidence.peak_merge_name_slots,
-            progress.evidence.peak_resolved_endpoint_name_slots,
-            progress.evidence.peak_catalog_entries,
-            progress.evidence.peak_catalog_identifier_bytes,
-            progress.evidence.peak_catalog_decoded_batch_bytes,
-        ];
-        if let Some(baseline) = baseline_peaks {
-            // Arrow buffer accounting includes small alignment/offset metadata
-            // differences; the N rung's edge set is N-1 (eight fixed run
-            // records below its window). All other saturated windows plateau.
-            let allocator_tolerance = [0, 1_024, 8, 0, 0, 4_096, 0, 4, 0, 0, 0];
-            for (index, ((observed, base), tolerance)) in observed_peaks
-                .iter()
-                .zip(baseline)
-                .zip(allocator_tolerance)
-                .enumerate()
-            {
-                if index == 4 {
-                    // One bounded edge merge window may overlap its immutable
-                    // identity, endpoint, and detail inputs with the unified
-                    // identity output. These are the construction format's
-                    // wire widths for this fixture, so this is a derived bound,
-                    // not general-purpose disk slack.
-                    const IDENTITY_RECORD_BYTES: u64 = 16;
-                    const ENDPOINT_RECORD_BYTES: u64 = 48;
-                    const EDGE_DETAIL_RECORD_BYTES: u64 = 48 + 1 + REL_TYPE.len() as u64;
-                    const UNIFIED_IDENTITY_RECORD_BYTES: u64 = 32;
-                    let fixed_edge_merge_window_bytes = CONSTRUCTION_BATCH_ROWS as u64
-                        * (IDENTITY_RECORD_BYTES
-                            + ENDPOINT_RECORD_BYTES
-                            + EDGE_DETAIL_RECORD_BYTES
-                            + UNIFIED_IDENTITY_RECORD_BYTES);
-                    assert!(
-                        *observed
-                            <= base
-                                .checked_mul(factor)
-                                .and_then(|bound| {
-                                    bound.checked_add(fixed_edge_merge_window_bytes)
-                                })
-                                .expect("merge footprint bound overflow"),
-                        "disk-backed merge footprint exceeded linear work: baseline={base} observed={observed} factor={factor}"
-                    );
-                    continue;
-                }
-                if index == 6 {
-                    assert!(
-                        *observed <= 64,
-                        "merge scheduler name slots exceeded fixed bound"
-                    );
-                    continue;
-                }
-                assert!(
-                    *observed
-                        <= base
-                            .checked_add(tolerance)
-                            .expect("saturated peak tolerance overflow"),
-                    "saturated peak field {index} grew with scale: baseline={base} observed={observed} tolerance={tolerance}"
-                );
-            }
-        } else {
-            baseline_peaks = Some(observed_peaks);
-        }
-        assert!(progress.evidence.merge_read_records <= 128 * base_nodes * factor);
-        assert!(progress.evidence.merge_written_records <= 128 * base_nodes * factor);
-        assert!(progress.evidence.parquet_write_operations > 0);
         assert_ne!(receipt.generation_uuid, before);
         assert_eq!(current_generation_uuid(&graph), receipt.generation_uuid);
         let phases =
             graphforge_storage::ConstructionPhaseAttribution::from_construction(&progress.evidence)
                 .unwrap();
         phases.validate_reconciliation().unwrap();
-        let shape =
-            &phases.phases[&graphforge_storage::StorageIoPhase::ShapeConsumeReauthentication];
-        assert!(progress.evidence.merge_read_operations > 0);
-        assert!(progress.evidence.merge_write_operations > 0);
-        assert_eq!(
-            shape.write_bytes,
-            progress
-                .evidence
-                .merge_written_bytes
-                .checked_add(progress.evidence.parquet_write_bytes)
-                .expect("shape write-byte reconciliation overflow")
-        );
-        assert_eq!(
-            shape.write_calls,
-            progress
-                .evidence
-                .merge_write_operations
-                .checked_add(progress.evidence.parquet_write_operations)
-                .expect("shape write-operation reconciliation overflow")
-        );
-        assert_eq!(
-            shape.read_calls,
-            [
-                progress.evidence.shape_input_validation_read_operations,
-                progress.evidence.merge_read_operations,
-                progress.evidence.parquet_read_operations,
-                progress.evidence.shaped_output_authentication_operations,
-                progress.evidence.parent_catalog_read_operations,
-                progress.evidence.retained_probe_block_loads,
-            ]
-            .into_iter()
-            .try_fold(0_u64, u64::checked_add)
-            .expect("shape read-operation reconciliation overflow")
-        );
+        phases.validate_for_qualification().unwrap();
         let phase_observation = (
             phases.totals.read_bytes,
             phases.totals.write_bytes,
             phases.totals.read_calls,
             phases.totals.write_calls,
         );
+        assert!(phase_observation.1 > 0 && phase_observation.3 > 0);
         if let Some(baseline) = baseline_phase_io {
             // Each lifecycle has fixed authenticated control work. Preserve a
             // documented 2x constant-factor ceiling around ideal linear growth

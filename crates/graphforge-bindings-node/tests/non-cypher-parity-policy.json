@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 350,
-  "releaseSurfaceDigest": "f00f608db7d933aab9a53f21237fde7750d2ea5a993e3a46ce0210c0dd4b6cd2",
+  "releaseSurfaceCount": 351,
+  "releaseSurfaceDigest": "031e08c64ae835103331a8a40e76195477ac7d510e0e6404d2b81f0624a058eb",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -89,6 +89,7 @@
       "GraphForge.validate_ontology_bridge",
       "GraphForge.validate_ontology_composition",
       "GraphForge.validate_ontology_module",
+      "GraphForge.abort_import_session",
       "GraphForge.add_edge",
       "GraphForge.add_node",
       "GraphForge.adopt_ontology",
@@ -691,7 +692,8 @@
     },
     "importSession": {
       "import_session.test.mjs": [
-        "import session begin checkpoint resume abort lifecycle"
+        "import session begin checkpoint resume abort lifecycle",
+        "aborting an import by uuid removes one recorded in a retired format"
       ]
     },
     "resumableConstruction": {

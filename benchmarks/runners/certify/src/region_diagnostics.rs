@@ -104,7 +104,7 @@ const WORK_UNITS_V2: [&str; 11] = [
     "observed_bytes",
     "reread_bytes",
 ];
-const REGIONS: [&str; 62] = [
+const REGIONS: [&str; 58] = [
     "import_command",
     "begin_import",
     "resume_import",
@@ -150,16 +150,12 @@ const REGIONS: [&str; 62] = [
     "publication_receipt",
     "hydration",
     "read_authority",
-    "adjacency_encoding",
     "shape_planning",
     "shape_routing",
     "shape_family_finish",
     "partition_load_wait",
     "surrogate_assignment",
     "endpoint_resolution",
-    "endpoint_index_validation",
-    "endpoint_index_build",
-    "endpoint_index_probe",
     "shape_row_finish",
     "runtime_catalog",
     "shape_completion",

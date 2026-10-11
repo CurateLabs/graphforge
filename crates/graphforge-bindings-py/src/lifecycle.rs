@@ -527,6 +527,13 @@ impl GraphForge {
         import_session::resume_import_session(slf, py, session_uuid)
     }
 
+    /// Abort one import session by UUID, including a retired-format session
+    /// that cannot be resumed.
+    #[pyo3(signature = (session_uuid,))]
+    fn abort_import_session(&self, py: Python<'_>, session_uuid: &str) -> PyResult<Py<PyAny>> {
+        import_session::abort_import_session(self, py, session_uuid)
+    }
+
     /// Abort and remove non-terminal sessions older than `max_age_secs`.
     #[pyo3(signature = (*, max_age_secs))]
     fn cleanup_stale_import_sessions(&self, py: Python<'_>, max_age_secs: u64) -> PyResult<u64> {
