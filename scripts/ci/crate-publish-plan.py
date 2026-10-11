@@ -7,9 +7,10 @@ Usage:
     python3 scripts/ci/crate-publish-plan.py dry-run-commands
 
 Language-binding implementation crates are not published to crates.io; their
-public distributions ship through PyPI and npm. Versioned dev-dependencies are
-kept in published manifests and therefore contribute publish-order edges;
-path-only dev-dependencies are stripped by Cargo and do not.
+public distributions ship through PyPI and npm. The Rust CLI is part of the
+crates.io surface. Versioned dev-dependencies are kept in published manifests and
+therefore contribute publish-order edges; path-only dev-dependencies are
+stripped by Cargo and do not.
 """
 
 from __future__ import annotations
@@ -80,8 +81,8 @@ def classify_dependencies(
     return deps_by_crate, missing_versions
 
 
-def load_workspace() -> dict[str, set[str]]:
-    """Map crate name → workspace dependencies that affect publish order."""
+def _classify_workspace() -> tuple[dict[str, set[str]], dict[str, list[str]]]:
+    """Classify the dependencies of every crates/*/Cargo.toml package."""
     manifests = _workspace_manifests()
     packages = [
         package
@@ -89,7 +90,12 @@ def load_workspace() -> dict[str, set[str]]:
         if Path(package["manifest_path"]).resolve() in manifests
     ]
     crate_names = {package["name"] for package in packages}
-    deps, _ = classify_dependencies(packages, crate_names)
+    return classify_dependencies(packages, crate_names)
+
+
+def load_workspace() -> dict[str, set[str]]:
+    """Map crate name → workspace dependencies that affect publish order."""
+    deps, _ = _classify_workspace()
     return deps
 
 
@@ -120,14 +126,7 @@ def topological_publish_order(crates: dict[str, set[str]]) -> list[str]:
 
 def path_deps_missing_versions() -> dict[str, list[str]]:
     """Return crate → path deps that lack version= (blocks cargo publish)."""
-    manifests = _workspace_manifests()
-    packages = [
-        package
-        for package in _cargo_metadata()["packages"]
-        if Path(package["manifest_path"]).resolve() in manifests
-    ]
-    crate_names = {package["name"] for package in packages}
-    _, missing = classify_dependencies(packages, crate_names)
+    _, missing = _classify_workspace()
     return {name: deps for name, deps in missing.items() if name not in CRATES_IO_EXCLUDED}
 
 
