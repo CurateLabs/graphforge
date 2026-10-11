@@ -49,6 +49,22 @@ pub struct GraphConstructionSession<'a> {
     _parent_workspace: super::GraphWorkspace,
 }
 
+/// How a facade opens a storage construction session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConstructionOpen {
+    /// A new construction, pinned to whatever the project holds.
+    Begin,
+    /// A new construction that stages its chunks: only an append may.
+    BeginAppend,
+    /// An existing construction that continues. A session that staged the
+    /// chunks of an initial build cannot, because an initial build now runs on
+    /// the bulk builder.
+    Resume,
+    /// An existing construction that is about to be discarded, whatever it
+    /// holds.
+    Discard,
+}
+
 impl GraphForge {
     /// Begin a bounded construction pinned to the current committed graph.
     ///
@@ -60,7 +76,8 @@ impl GraphForge {
         &self,
         budgets: GraphConstructionBudgets,
     ) -> Result<GraphConstructionSession<'_>, GfError> {
-        let mut session = self.open_graph_construction(Uuid::now_v7(), budgets, false, false)?;
+        let mut session =
+            self.open_graph_construction(Uuid::now_v7(), budgets, ConstructionOpen::Begin)?;
         session.inner.spool_chunks();
         Ok(session)
     }
@@ -79,7 +96,7 @@ impl GraphForge {
         &self,
         budgets: GraphConstructionBudgets,
     ) -> Result<GraphConstructionSession<'_>, GfError> {
-        self.open_graph_construction(Uuid::now_v7(), budgets, false, true)
+        self.open_graph_construction(Uuid::now_v7(), budgets, ConstructionOpen::BeginAppend)
     }
 
     /// Open the construction an import session builds on. The bulk builder
@@ -89,7 +106,7 @@ impl GraphForge {
         &self,
         budgets: GraphConstructionBudgets,
     ) -> Result<GraphConstructionSession<'_>, GfError> {
-        self.open_graph_construction(Uuid::now_v7(), budgets, false, false)
+        self.open_graph_construction(Uuid::now_v7(), budgets, ConstructionOpen::Begin)
     }
 
     /// Resume a construction using the opaque durable identifier returned at begin.
@@ -98,7 +115,19 @@ impl GraphForge {
         session_uuid: Uuid,
         budgets: GraphConstructionBudgets,
     ) -> Result<GraphConstructionSession<'_>, GfError> {
-        self.open_graph_construction(session_uuid, budgets, true, false)
+        self.open_graph_construction(session_uuid, budgets, ConstructionOpen::Resume)
+    }
+
+    /// Reopen a construction only to discard it. Unlike
+    /// [`Self::resume_graph_construction`] this opens a session that holds the
+    /// staged chunks of an initial build, so that aborting its import can
+    /// reclaim it.
+    pub(crate) fn resume_graph_construction_to_discard(
+        &self,
+        session_uuid: Uuid,
+        budgets: GraphConstructionBudgets,
+    ) -> Result<GraphConstructionSession<'_>, GfError> {
+        self.open_graph_construction(session_uuid, budgets, ConstructionOpen::Discard)
     }
 
     /// Open or resume the storage session for `open_graph_construction`,
@@ -205,9 +234,9 @@ impl GraphForge {
         &self,
         session_uuid: Uuid,
         budgets: GraphConstructionBudgets,
-        resume: bool,
-        append_only: bool,
+        open: ConstructionOpen,
     ) -> Result<GraphConstructionSession<'_>, GfError> {
+        let resume = matches!(open, ConstructionOpen::Resume | ConstructionOpen::Discard);
         if self.read_only {
             return Err(validation("historical graph views cannot construct"));
         }
@@ -215,7 +244,7 @@ impl GraphForge {
         let workspace = self.workspace_for_session();
         let dir = workspace.path();
         let parent_topology_generation = graphforge_storage::read_topology_generation(dir)?;
-        if append_only && parent_topology_generation == 0 {
+        if open == ConstructionOpen::BeginAppend && parent_topology_generation == 0 {
             return Err(validation(
                 "staged construction appends to a non-empty graph; an empty project builds on \
                  the bulk builder through begin_graph_construction or an import session",
@@ -228,7 +257,7 @@ impl GraphForge {
             budgets,
             resume,
         )?;
-        if resume
+        if open == ConstructionOpen::Resume
             && inner.parent_topology_generation() == 0
             && !inner.is_spooled()
             && inner.accepted_chunks() > 0
@@ -1435,6 +1464,9 @@ mod tests {
         // object so they follow the payload; elsewhere the install links the
         // encoder's file and they are only the small manifest controls (#1899).
         let mut cas_reads = Vec::new();
+        // The append starts from a one-node base whose authentication the seal
+        // already accounts for; it is the same at every scale.
+        let mut seal_reads = Vec::new();
         // Each node retains 16 identity bytes and at least 18 compact detail bytes.
         // 4,096 rows therefore exceed 100,000 payload bytes before Parquet/control
         // overhead; retain the same dominance threshold and every phase ceiling.
@@ -1454,7 +1486,7 @@ mod tests {
             session.append_nodes("nodes", &nodes(&ids)).unwrap();
             session.seal_and_publish().unwrap();
             let evidence = &session.progress().evidence;
-            assert_eq!(evidence.seal_application_read_bytes, 0);
+            seal_reads.push(evidence.seal_application_read_bytes);
             assert!(evidence.shape_application_read_bytes > 0);
             assert!(evidence.encode_application_read_bytes > 0);
             assert!(evidence.publication_application_read_bytes > 0);
@@ -1498,11 +1530,15 @@ mod tests {
                 // the source once.
                 assert_eq!(cas.payload.read_bytes, evidence.canonical_output_bytes);
             } else {
-                // Elsewhere the install links the encoder's file (#1899): a fresh
-                // store has no existing object to authenticate, so nothing is read.
-                assert_eq!(cas.payload.read_bytes, 0);
+                // Elsewhere the install links the encoder's file (#1899): the only
+                // payload reads authenticate objects the one-node base already
+                // holds, and what is read plus what is installed is the
+                // canonical output, once each.
                 assert_eq!(cas.payload.write_bytes, 0);
-                assert_eq!(cas.payload.installed_bytes, evidence.canonical_output_bytes);
+                assert_eq!(
+                    cas.payload.installed_bytes + cas.payload.read_bytes,
+                    evidence.canonical_output_bytes
+                );
             }
             assert!(cas.manifest_reads.read_bytes > 0);
             assert!(cas.manifest_reads.read_calls > 0);
@@ -1533,6 +1569,11 @@ mod tests {
             cas_reads.push((payload, evidence.cas_application_read_bytes));
             hydration_reads.push((scale as u64, evidence.hydration_application_read_bytes));
         }
+        assert!(seal_reads[0] > 0, "the base's authentication is accounted");
+        assert!(
+            seal_reads.windows(2).all(|pair| pair[0] == pair[1]),
+            "seal reads followed the payload instead of the one-node base: {seal_reads:?}"
+        );
         if !cfg!(windows) {
             for adjacent in cas_reads.windows(2) {
                 let ((prior_payload, prior), (next_payload, next)) = (adjacent[0], adjacent[1]);
@@ -1671,7 +1712,7 @@ mod tests {
         // The only way to stage on an empty project is below the facade's
         // public entry point, as an earlier build did.
         let mut session = graph
-            .open_graph_construction(Uuid::now_v7(), Default::default(), false, false)
+            .open_graph_construction(Uuid::now_v7(), Default::default(), ConstructionOpen::Begin)
             .unwrap();
         accept_chain(&mut session);
         assert_eq!(session.progress().accepted_chunks, 3);
@@ -1686,6 +1727,18 @@ mod tests {
             refused.to_string().contains("restart the import"),
             "{refused}"
         );
+        // Restarting reclaims it: a session being discarded reopens.
+        graph
+            .resume_graph_construction_to_discard(uuid, Default::default())
+            .unwrap()
+            .discard()
+            .unwrap();
+        let root = graph
+            .resolved_generation
+            .container_root()
+            .join(".graphforge-construction")
+            .join(uuid.simple().to_string());
+        assert!(!root.exists());
 
         // A spooled initial session resumes: its chunks are the bulk builder's input.
         let mut spooled = graph.begin_graph_construction(Default::default()).unwrap();

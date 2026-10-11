@@ -716,7 +716,23 @@ fn an_import_holding_staged_initial_chunks_is_refused_and_asks_for_a_restart() {
         );
     }
     assert_eq!(graph.node_count("Person").unwrap(), 0);
+    // Restarting means aborting it: the refusal does not stop the abort from
+    // reclaiming the staged chunks.
+    let construction_root = graph
+        .resolved_generation
+        .container_root()
+        .join(".graphforge-construction")
+        .join(
+            session
+                .manifest
+                .construction_session_uuid
+                .expect("the construction session was opened")
+                .simple()
+                .to_string(),
+        );
+    assert!(construction_root.exists());
     session.abort(&graph).unwrap();
+    assert!(!construction_root.exists());
 
     let mut restarted = graph
         .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())

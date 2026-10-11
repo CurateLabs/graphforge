@@ -261,15 +261,19 @@ mod tests {
             crate::GraphConstructionBudgets::default(),
         )
         .unwrap();
+        // An initial build: the chunks are spooled and the bulk builder
+        // publishes the CSR with the generation.
+        session.spool_chunks();
         session
             .append(crate::ConstructionChunkKind::Node, "nodes", &nodes)
             .unwrap();
         session
             .append(crate::ConstructionChunkKind::Edge, "edges", &edges)
             .unwrap();
-        session.seal().unwrap();
-        let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
-        let encoding = session.encode_canonical(&shape, 1).unwrap();
+        session.record_seal_route(crate::SealRoute::Bulk).unwrap();
+        let encoding = session
+            .prepare_spooled_bulk_encoding(1, u64::MAX, || false)
+            .unwrap();
         session
             .publish_canonical(&encoding, Uuid::from_u128(0x32), Uuid::from_u128(0x33))
             .unwrap();

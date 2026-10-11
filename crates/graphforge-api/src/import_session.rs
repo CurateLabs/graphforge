@@ -1293,7 +1293,10 @@ impl GraphImportSession {
         let cleanup = (|| {
             if let Some(session_uuid) = self.manifest.construction_session_uuid {
                 graph
-                    .resume_graph_construction(session_uuid, self.construction_budgets())?
+                    .resume_graph_construction_to_discard(
+                        session_uuid,
+                        self.construction_budgets(),
+                    )?
                     .discard()?;
                 self.manifest.construction_session_uuid = None;
             }
@@ -2572,7 +2575,7 @@ mod tests {
 
     #[test]
     fn interrupted_batch_replays_and_stale_cleanup_removes_private_artifacts() {
-        let (_directory, _project, graph) = fixture();
+        let (_directory, _project, graph) = seeded_fixture();
         let operation = OperationId(Uuid::now_v7());
         let batch = nodes(&[Uuid::now_v7()]);
         let mut session = graph

@@ -105,10 +105,11 @@ fn external_ingest(
     let workspace = TempDir::new().unwrap();
     crate::materialize_graph_objects(generation.container_root(), &inventory, workspace.path())
         .map_err(|error| error.to_string())?;
+    // The wildcard reads every published edge file, whatever its route name.
     let reopened_edges = crate::read_edges(
         workspace.path(),
         "*",
-        graphforge_core::OntologyMode::Exploratory,
+        graphforge_core::OntologyMode::Strict,
     )
     .map_err(|error| error.to_string())?
     .iter()
