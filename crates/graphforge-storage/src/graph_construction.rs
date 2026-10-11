@@ -2157,7 +2157,11 @@ std::thread_local! {
     pub(crate) static REVERSE_LANE_JOBS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[cfg(test)]
+// The cookie-protected process failpoint is also compiled under the
+// `test-support` feature, like the session-clock pin above, so higher-level
+// tests can kill a child process in any construction pass. Production builds
+// compile it to a no-op.
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn construction_failpoint(name: &str) {
     if std::env::var("GF_CONSTRUCTION_FAILPOINT_COOKIE").as_deref()
         == Ok("graphforge-construction-test-v1")
@@ -2165,6 +2169,12 @@ pub(crate) fn construction_failpoint(name: &str) {
     {
         std::process::exit(86);
     }
+    #[cfg(test)]
+    armed_failpoint(name);
+}
+
+#[cfg(test)]
+fn armed_failpoint(name: &str) {
     let mut armed = ARMED_FAILPOINT
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2185,7 +2195,7 @@ pub(crate) fn construction_failpoint(name: &str) {
 #[cfg(test)]
 pub(crate) static ARMED_FAILPOINT: Mutex<Option<(String, u32)>> = Mutex::new(None);
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 pub(crate) fn construction_failpoint(_name: &str) {}
 
 fn sha256(bytes: &[u8]) -> String {

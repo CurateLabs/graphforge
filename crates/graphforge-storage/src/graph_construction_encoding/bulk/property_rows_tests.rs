@@ -92,13 +92,15 @@ fn scratch_traffic_matches_file_lengths_including_repeated_scans() {
     );
     let path = rows.path().unwrap();
     let before_write = rows.written_bytes();
-    rows.write(&path, &batch(0, 3)).unwrap();
-    rows.write(&path, &batch(3, 4)).unwrap();
+    rows.write_for(&path, &batch(0, 3), Stage::WindowWrite)
+        .unwrap();
+    rows.write_for(&path, &batch(3, 4), Stage::WindowWrite)
+        .unwrap();
     let file_bytes = std::fs::metadata(&path).unwrap().len();
     assert_eq!(rows.written_bytes() - before_write, file_bytes);
     let before_read = rows.read_bytes();
     for _ in 0..2 {
-        let mut reader = rows.reader(&path).unwrap();
+        let mut reader = rows.reader_for(&path, Stage::WindowRead).unwrap();
         let mut count = 0;
         while let Some(batch) = reader.next().unwrap() {
             count += batch.num_rows();
@@ -452,9 +454,9 @@ fn ipc_type_metadata_is_charged_before_schema_instantiation() {
     )]));
     let input = RecordBatch::try_new(schema, vec![std::sync::Arc::new(temporal)]).unwrap();
     let path = rows.path().unwrap();
-    rows.write(&path, &input).unwrap();
+    rows.write_for(&path, &input, Stage::WindowWrite).unwrap();
     assert!(
-        rows.reader(&path)
+        rows.reader_for(&path, Stage::WindowRead)
             .unwrap()
             .next()
             .unwrap_err()
@@ -476,13 +478,14 @@ fn frames_reject_crc_corruption_truncation_and_unbounded_ipc_bodies() {
         PropertySizing::SERIAL,
     );
     let path = rows.path().unwrap();
-    rows.write(&path, &batch(0, 3)).unwrap();
+    rows.write_for(&path, &batch(0, 3), Stage::WindowWrite)
+        .unwrap();
     let original = std::fs::read(&path).unwrap();
     let mut corrupt = original.clone();
     *corrupt.last_mut().unwrap() ^= 1;
     std::fs::write(&path, corrupt).unwrap();
     assert!(
-        rows.reader(&path)
+        rows.reader_for(&path, Stage::WindowRead)
             .unwrap()
             .next()
             .unwrap_err()
@@ -491,7 +494,7 @@ fn frames_reject_crc_corruption_truncation_and_unbounded_ipc_bodies() {
     );
     std::fs::write(&path, &original[..original.len() - 1]).unwrap();
     assert!(
-        rows.reader(&path)
+        rows.reader_for(&path, Stage::WindowRead)
             .unwrap()
             .next()
             .unwrap_err()
@@ -524,7 +527,7 @@ fn frames_reject_crc_corruption_truncation_and_unbounded_ipc_bodies() {
     corrupt[8..12].copy_from_slice(&crc.to_le_bytes());
     std::fs::write(&path, corrupt).unwrap();
     assert!(
-        rows.reader(&path)
+        rows.reader_for(&path, Stage::WindowRead)
             .unwrap()
             .next()
             .unwrap_err()
@@ -547,7 +550,7 @@ fn frames_reject_crc_corruption_truncation_and_unbounded_ipc_bodies() {
     corrupt[8..12].copy_from_slice(&crc.to_le_bytes());
     std::fs::write(&path, corrupt).unwrap();
     assert!(
-        rows.reader(&path)
+        rows.reader_for(&path, Stage::WindowRead)
             .unwrap()
             .next()
             .unwrap_err()
@@ -622,7 +625,8 @@ fn a_failed_property_write_keeps_its_reservation() {
     );
     let path = rows.path().unwrap();
     std::fs::remove_file(&path).unwrap();
-    rows.write(&path, &batch(0, 3)).unwrap_err();
+    rows.write_for(&path, &batch(0, 3), Stage::WindowWrite)
+        .unwrap_err();
     assert_eq!(rows.written_bytes(), 0);
     let reserved = scratch.occupied_bytes();
     assert!(reserved > 0);
@@ -686,13 +690,18 @@ fn native_property_write_tracks_actual_file_growth_and_reclaim() {
     );
     let path = rows.path().unwrap();
     let data = batch(0, 1_024);
-    rows.write(&path, &data).unwrap();
+    rows.write_for(&path, &data, Stage::WindowWrite).unwrap();
     let file = File::open(&path).unwrap();
     let native = native_file_allocation(&file);
     assert!(native > 0);
     assert_eq!(allocation.totals().unwrap().0, baseline + native);
     assert!(scratch.occupied_bytes() > 0);
-    let decoded = rows.reader(&path).unwrap().next().unwrap().unwrap();
+    let decoded = rows
+        .reader_for(&path, Stage::WindowRead)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
     assert_eq!(decoded.num_rows(), 1_024);
     assert_eq!(
         decoded
@@ -744,7 +753,7 @@ fn native_run_writer_observes_buffered_automatic_and_direct_growth() {
     assert!(native > 0);
     assert_eq!(allocation.totals().unwrap().0, baseline + native);
     let decoded = rows
-        .reader(&run.path)
+        .reader_for(&run.path, Stage::MergeRead)
         .unwrap()
         .next_expected(&run.frames[0])
         .unwrap()
@@ -822,7 +831,7 @@ fn native_run_writer_observes_buffered_automatic_and_direct_growth() {
     assert_eq!(allocation.totals().unwrap().0, baseline + direct_native);
     let run = direct.finish().unwrap();
     let decoded = rows
-        .reader(&run.path)
+        .reader_for(&run.path, Stage::MergeRead)
         .unwrap()
         .next_expected(&run.frames[0])
         .unwrap()

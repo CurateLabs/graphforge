@@ -16,7 +16,9 @@ use arrow::record_batch::RecordBatch;
 use rayon::prelude::*;
 
 use super::property_gather::gather_record_batch;
-use super::property_rows::{BareOwners, FrameMeta, Groups, PropertyRows, Run};
+use std::sync::atomic::Ordering;
+
+use super::property_rows::{BareOwners, FrameMeta, Groups, PropertyRows, Run, Stage};
 use super::tables::check_cancelled;
 use super::{AtomicBool, GfError, storage};
 
@@ -98,7 +100,7 @@ impl<'r, 'a> Input<'r, 'a> {
         let first = lower.map_or(0, |lower| {
             run.frames.partition_point(|frame| frame.last < lower)
         });
-        let mut reader = rows.reader(&run.path)?;
+        let mut reader = rows.reader_for(&run.path, Stage::MergeRead)?;
         if let Some(frame) = run.frames.get(first) {
             reader.seek(frame.offset)?;
         }
@@ -188,6 +190,18 @@ impl PropertyRows<'_> {
         upper: Option<Uuid>,
         cancel: &AtomicBool,
     ) -> Result<Run, GfError> {
+        self.merge_into(runs, lower, upper, cancel, Stage::SegmentWrite)
+    }
+
+    /// As [`Self::merge`], attributing the bytes it writes to `output`.
+    pub(super) fn merge_into(
+        &self,
+        runs: &[&Run],
+        lower: Option<Uuid>,
+        upper: Option<Uuid>,
+        cancel: &AtomicBool,
+        output: Stage,
+    ) -> Result<Run, GfError> {
         let uuid_name = self.uuid_name();
         check_cancelled(cancel)?;
         let job_cost = self.merge_job_cost(runs, lower, upper);
@@ -200,7 +214,7 @@ impl PropertyRows<'_> {
             .collect::<Result<Vec<_>, _>>()?;
         let max_rows = self.budgets.max_batch_rows;
         let mut heap = Self::initial_heap(&mut inputs, uuid_name, cancel)?;
-        let mut writer = self.run_writer()?;
+        let mut writer = self.run_writer_for(output)?;
         let mut batches = Vec::<RecordBatch>::new();
         let mut indices = Vec::<(usize, usize)>::with_capacity(max_rows);
         let mut chunk_bytes = 0_usize;
@@ -480,7 +494,7 @@ impl PropertyRows<'_> {
                 .into_par_iter()
                 .map(|(group, inputs)| {
                     let refs = inputs.iter().collect::<Vec<_>>();
-                    let run = self.merge(&refs, None, None, cancel)?;
+                    let run = self.merge_into(&refs, None, None, cancel, Stage::ReductionWrite)?;
                     for input in &inputs {
                         self.reclaim(&input.path)?;
                     }
@@ -512,6 +526,7 @@ impl PropertyRows<'_> {
                 continue;
             }
             let bytes = runs.iter().map(Run::bytes).sum::<u64>();
+            self.merged_input_bytes.fetch_add(bytes, Ordering::Relaxed);
             let parts = usize::try_from(bytes.div_ceil(SEGMENT_BYTES).clamp(1, MAX_SEGMENTS))
                 .map_err(storage)?;
             let splitters = Self::splitters(runs, parts);
@@ -549,6 +564,10 @@ impl PropertyRows<'_> {
             } else {
                 runs
             };
+            self.segment_bytes.fetch_add(
+                segments.iter().map(Run::bytes).sum::<u64>(),
+                Ordering::Relaxed,
+            );
             if !segments.is_empty() {
                 sorted.insert(
                     digest,
