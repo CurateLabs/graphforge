@@ -471,18 +471,34 @@ fn link_staged(
         ));
     }
     let staged_path = source.parent().path().join(source.name());
-    // Objects are immutable. Seal the exact inode before it can gain the
-    // content-addressed name, then make its bytes durable with the sole file
-    // barrier of this object.
+    // Objects are immutable. Make the exact inode read-only before it can gain
+    // the content-addressed name, and make its bytes durable with the one file
+    // barrier of this object (ADR 0058 decision 3). A producer that already
+    // ran that barrier on this very inode, unchanged since, has made the
+    // object durable: running it again would be a second barrier for the same
+    // bytes. Across a restart the producer's witness is gone, so the barrier
+    // runs here. The bucket barrier below makes the content address durable
+    // before it can be referenced (ADR 0013).
     seal_graph_object(source.source(), &staged_path, &cas.diagnostic_root)?;
     let (sealed, file_fsyncs) = observe_barriers(|| {
-        crate::durable_commit::SealedArtifact::seal_recoverable_existing(
-            source.parent().physical(),
-            source.name(),
-            source.source().try_clone()?,
-            source.identity(),
-            cas.allocation.as_ref(),
-        )
+        let file = source.source().try_clone()?;
+        if crate::durable_commit::producer_seals::take(&file)? {
+            crate::durable_commit::SealedArtifact::adopt_producer_sealed(
+                source.parent().physical(),
+                source.name(),
+                file,
+                source.identity(),
+                cas.allocation.as_ref(),
+            )
+        } else {
+            crate::durable_commit::SealedArtifact::seal_recoverable_existing(
+                source.parent().physical(),
+                source.name(),
+                file,
+                source.identity(),
+                cas.allocation.as_ref(),
+            )
+        }
     });
     let staged =
         sealed.map_err(|error| storage("seal staged encoded source", &staged_path, error))?;
