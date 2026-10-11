@@ -22,77 +22,30 @@ pub fn inode_generation(file: &File) -> io::Result<u32> {
     platform(file)
 }
 
-/// The architectures whose ioctl request numbers use the generic layout
-/// (direction in the top two bits), the only one this reads with.
-macro_rules! generic_ioctl_linux {
-    ($($item:item)*) => {
-        $(
-            #[cfg(all(
-                target_os = "linux",
-                any(
-                    target_arch = "x86",
-                    target_arch = "x86_64",
-                    target_arch = "arm",
-                    target_arch = "aarch64",
-                    target_arch = "riscv32",
-                    target_arch = "riscv64",
-                    target_arch = "loongarch64",
-                    target_arch = "s390x"
-                )
-            ))]
-            $item
-        )*
-    };
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn platform(file: &File) -> io::Result<u32> {
+    use rustix::ioctl::{Getter, ioctl, opcode};
+
+    /// `FS_IOC_GETVERSION`, `_IOR('v', 1, long)`. The request number says
+    /// `long`; the kernel stores an `int` (the generation) at the address, so
+    /// the output is read as the `u32` it is.
+    type GetVersion = Getter<{ opcode::read::<core::ffi::c_long>(b'v', 1) }, u32>;
+
+    // SAFETY: the opcode is `FS_IOC_GETVERSION`, whose kernel implementations
+    // (ext4, XFS, btrfs and others) write exactly one `int` to the pointer; a
+    // filesystem that does not implement it answers `ENOTTY` and writes
+    // nothing, and the output is then never read.
+    let generation = unsafe { ioctl(file, GetVersion::new()) };
+    generation.map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("the filesystem reports no inode generation (FS_IOC_GETVERSION): {error}"),
+        )
+    })
 }
 
-generic_ioctl_linux! {
-    /// `_IOR('v', 1, long)`: the direction, size, type and number fields of a
-    /// Linux ioctl request.
-    const FS_IOC_GETVERSION: u64 = (2 << 30)
-        | ((std::mem::size_of::<libc::c_long>() as u64) << 16)
-        | ((b'v' as u64) << 8)
-        | 1;
-
-    fn platform(file: &File) -> io::Result<u32> {
-        use std::os::fd::AsRawFd as _;
-
-        // The kernel stores an `int` at the address; the buffer is larger and
-        // aligned, and read back as the `u32` it was written as.
-        let mut generation = [0_u32; 2];
-        // SAFETY: `ioctl` with `FS_IOC_GETVERSION` writes at most one `int` to
-        // the pointer, which addresses eight writable, aligned bytes that
-        // outlive the call; the descriptor is open while `file` is borrowed.
-        let status = unsafe {
-            libc::ioctl(
-                file.as_raw_fd(),
-                FS_IOC_GETVERSION as _,
-                generation.as_mut_ptr(),
-            )
-        };
-        if status < 0 {
-            let error = io::Error::last_os_error();
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!("the filesystem reports no inode generation (FS_IOC_GETVERSION): {error}"),
-            ));
-        }
-        Ok(generation[0])
-    }
-}
-
-#[cfg(not(all(
-    target_os = "linux",
-    any(
-        target_arch = "x86",
-        target_arch = "x86_64",
-        target_arch = "arm",
-        target_arch = "aarch64",
-        target_arch = "riscv32",
-        target_arch = "riscv64",
-        target_arch = "loongarch64",
-        target_arch = "s390x"
-    )
-)))]
+#[cfg(not(target_os = "linux"))]
 fn platform(_file: &File) -> io::Result<u32> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,

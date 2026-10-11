@@ -215,16 +215,41 @@ mod tests {
         file.observed_sync_all().unwrap();
     }
 
+    /// How many barriers of `identity` the log holds. Where the platform names
+    /// inodes (Linux) these are the records of that inode; elsewhere no barrier
+    /// can be attributed, so the log's entries, all unattributed, are counted:
+    /// the lifecycle properties below do not depend on attribution, and a test
+    /// there is the only user of the audit in its process.
     fn mine(log: &BarrierLog, identity: FileIdentity) -> usize {
-        log.records
-            .iter()
-            .filter(|record| record.identity == identity)
-            .count()
+        if cfg!(target_os = "linux") {
+            assert!(log.unattributed.is_empty(), "{:?}", log.unattributed);
+            log.records
+                .iter()
+                .filter(|record| record.identity == identity)
+                .count()
+        } else {
+            // Never a weaker name: without a generation number nothing is
+            // recorded as attributed.
+            assert!(log.records.is_empty(), "{:?}", log.records);
+            log.unattributed.len()
+        }
+    }
+
+    /// The log holds at least `expected` barriers of the file: exactly where
+    /// barriers are attributed, and the barriers of any other thread's audit
+    /// too where they are not.
+    fn assert_mine(log: &BarrierLog, identity: FileIdentity, expected: usize, what: &str) {
+        let held = mine(log, identity);
+        if cfg!(target_os = "linux") {
+            assert_eq!(held, expected, "{what}");
+        } else {
+            assert!(held >= expected, "{what}: {held} < {expected}");
+        }
     }
 
     /// Audits nest and overlap: one ending clears nothing another still needs,
     /// and the log is only cleared with the last, under the same lock that
-    /// starts them.
+    /// starts them. Nothing here depends on attributing a barrier to a file.
     #[test]
     fn overlapping_audits_keep_their_logs_until_the_last_ends() {
         let directory = tempfile::tempdir().unwrap();
@@ -235,30 +260,30 @@ mod tests {
         let second = BarrierAudit::start();
         barrier_on(&file);
         // The first audit, ending, leaves the second's records intact.
-        let first = first.finish();
-        assert_eq!(mine(&first, identity), 2);
-        assert!(first.unattributed.is_empty());
+        assert_mine(&first.finish(), identity, 2, "first");
         barrier_on(&file);
         let second = second.finish();
-        assert_eq!(mine(&second, identity), 2);
-        assert!(second.unattributed.is_empty());
-        assert!(
-            second
-                .records
-                .iter()
-                .filter(|record| record.identity == identity)
-                .all(|record| !record.directory)
-        );
+        assert_mine(&second, identity, 2, "second");
+        if cfg!(target_os = "linux") {
+            assert!(
+                second
+                    .records
+                    .iter()
+                    .filter(|record| record.identity == identity)
+                    .all(|record| !record.directory)
+            );
+        }
         // Nothing is recorded, or kept, once no audit is alive.
         barrier_on(&file);
         assert!(audit().log.is_empty());
         // A later audit starts from an empty log.
-        assert_eq!(mine(&BarrierAudit::start().finish(), identity), 0);
+        assert_mine(&BarrierAudit::start().finish(), identity, 0, "later");
     }
 
     /// Many threads start, use and end audits that overlap one another, some
     /// ending by `finish` and some by drop. None may panic, and each audit's
-    /// slice holds exactly the barriers its own thread made while it lived.
+    /// slice holds the barriers its own thread made while it lived (exactly
+    /// them, where barriers are attributed to files).
     ///
     /// Start and drop used to adjust the live-audit count before taking the lock
     /// that guards the log, so a start could read a log length that the last
@@ -283,9 +308,7 @@ mod tests {
                         if round % 4 == 3 {
                             drop(audit);
                         } else {
-                            let log = audit.finish();
-                            assert_eq!(mine(&log, identity), barriers, "thread {thread}");
-                            assert!(log.unattributed.is_empty(), "{:?}", log.unattributed);
+                            assert_mine(&audit.finish(), identity, barriers, "own slice");
                         }
                     }
                 });
