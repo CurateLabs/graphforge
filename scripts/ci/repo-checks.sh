@@ -11,6 +11,7 @@ python3 scripts/license_check.py
 python3 scripts/source_size_policy.py
 python3 scripts/ci/check-direct-fsync.py
 python3 scripts/ci/test-direct-fsync.py
+python3 scripts/ci/test-crate-publish-plan.py
 python3 scripts/ci/check-domain-dependencies.py
 python3 scripts/ci/test-uuid-derivation-policy.py
 python3 scripts/ci/test-text-checkout-policy.py

@@ -43,6 +43,39 @@ def run(*args: str) -> subprocess.CompletedProcess[str]:
 
 mod = load_module()
 
+# Metadata edges include normal/build dependencies and versioned dev-dependencies.
+metadata_packages = [
+    {
+        "name": "graphforge-consumer",
+        "dependencies": [
+            {"name": "graphforge-normal", "req": "^1", "kind": None},
+            {"name": "graphforge-dev", "req": "^1", "kind": "dev"},
+            {"name": "graphforge-path-dev", "req": "*", "kind": "dev"},
+            {"name": "graphforge-build", "req": "^1", "kind": "build"},
+            {"name": "graphforge-unversioned", "req": "*", "kind": None},
+            {"name": "serde", "req": "^1", "kind": None},
+        ],
+    }
+]
+metadata_crates = {
+    "graphforge-consumer",
+    "graphforge-normal",
+    "graphforge-dev",
+    "graphforge-path-dev",
+    "graphforge-build",
+    "graphforge-unversioned",
+}
+metadata_deps, metadata_missing = mod.classify_dependencies(metadata_packages, metadata_crates)
+assert metadata_deps == {
+    "graphforge-consumer": {
+        "graphforge-normal",
+        "graphforge-dev",
+        "graphforge-build",
+        "graphforge-unversioned",
+    }
+}, metadata_deps
+assert metadata_missing == {"graphforge-consumer": ["graphforge-unversioned"]}, metadata_missing
+
 # Synthetic topo: leaf libraries only.
 synthetic = {
     "graphforge-core": set(),
@@ -92,7 +125,9 @@ assert names.index("graphforge-core") < names.index("graphforge-value")
 for consumer in ("graphforge-ontology", "graphforge-ir", "graphforge-storage"):
     assert names.index("graphforge-value") < names.index(consumer)
 assert names.index("graphforge-ast") < names.index("graphforge-ir")
+assert names.index("graphforge-ir") < names.index("graphforge-cypher")
 assert names.index("graphforge-filesystem") < names.index("graphforge-storage")
+assert names.index("graphforge-storage") < names.index("graphforge-rel")
 assert names.index("graphforge-storage") < names.index("graphforge-api")
 assert names.index("graphforge-observability") < names.index("graphforge-api")
 assert names.index("graphforge-discovery") < names.index("graphforge-hub-publish")
