@@ -217,6 +217,79 @@ fn measured(forge: &GraphForge, query: &str, ident: i64) -> (Vec<RecordBatch>, I
     (result.batches, io)
 }
 
+/// Make a read statement's storage-write gate depend only on the statement.
+///
+/// Reading a file can update its atime, and on some admitted filesystems
+/// (ext4 without a journal, btrfs) that dirties a metadata page charged to
+/// the reader's `write_bytes`. Under `relatime` a file's atime is updated by
+/// a read only while it is not newer than its mtime, so reading every project
+/// file once, until each atime is newer than its mtime, leaves nothing for
+/// the measured statement to update. `strictatime` updates atime on every
+/// read, so the gate cannot hold there and refuses to run.
+#[cfg(target_os = "linux")]
+fn settle_for_write_gate(project: &Path) {
+    use std::io::Read;
+
+    let canonical = project.canonicalize().expect("canonical project path");
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").expect("mountinfo");
+    let mount = mountinfo
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split(' ').collect();
+            let point = Path::new(fields.get(4)?);
+            let super_options = line.split(" - ").nth(1)?.split(' ').nth(2).unwrap_or("");
+            canonical.starts_with(point).then(|| {
+                (
+                    point.as_os_str().len(),
+                    fields[5].to_owned(),
+                    super_options.to_owned(),
+                )
+            })
+        })
+        .max_by_key(|(depth, _, _)| *depth)
+        .expect("the project's mount is listed");
+    let options: Vec<&str> = mount.1.split(',').chain(mount.2.split(',')).collect();
+    assert!(
+        options
+            .iter()
+            .any(|option| matches!(*option, "relatime" | "noatime" | "lazytime")),
+        "the storage-write gate needs a relatime, noatime or lazytime mount; options {options:?}"
+    );
+    fn files(directory: &Path, found: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(directory).expect("read project directory") {
+            let entry = entry.expect("project entry");
+            let kind = entry.file_type().expect("entry type");
+            if kind.is_dir() {
+                files(&entry.path(), found);
+            } else if kind.is_file() {
+                found.push(entry.path());
+            }
+        }
+    }
+    let mut found = Vec::new();
+    files(&canonical, &mut found);
+    for _ in 0..50 {
+        let mut settled = true;
+        for path in &found {
+            let mut byte = [0_u8; 1];
+            if let Ok(mut file) = std::fs::File::open(path) {
+                let _ = file.read(&mut byte);
+                let metadata = file.metadata().expect("project file metadata");
+                settled &=
+                    metadata.accessed().expect("atime") > metadata.modified().expect("mtime");
+            }
+        }
+        if settled {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("project file atimes did not settle after their mtimes");
+}
+
+#[cfg(not(target_os = "linux"))]
+fn settle_for_write_gate(_project: &Path) {}
+
 fn count(batches: &[RecordBatch]) -> i64 {
     assert_eq!(batches.len(), 1);
     batches[0]
@@ -542,6 +615,7 @@ fn a_read_statement_writes_nothing() {
     let _serial = serial();
     let built = build(SMALL_NODES);
     let forge = open(&built.project);
+    settle_for_write_gate(&built.project);
     for query in [ANCHORED_HOP, SCATTERED_HOP, UNPUSHED_HOP] {
         let (batches, io) = measured(&forge, query, 5);
         assert_eq!(count(&batches), FAN_OUT as i64);
@@ -583,12 +657,38 @@ fn the_storage_write_gate_sees_a_file_write() {
     );
 }
 
+/// The gate's negative control: 64 KiB handed to `write` on a pipe, as an
+/// eventfd wakeup is, dirties no page, so the gate does not see it. `wchar`
+/// counts all of it (a socket would not do: `send` bypasses `wchar`).
+#[cfg(target_os = "linux")]
+#[test]
+fn the_storage_write_gate_ignores_pipe_writes() {
+    use std::io::{Read, Write};
+
+    let _serial = serial();
+    let (mut reader, mut writer) = std::io::pipe().expect("pipe");
+    let drain = std::thread::spawn(move || {
+        let mut received = Vec::new();
+        reader.read_to_end(&mut received).expect("drain pipe");
+        received.len()
+    });
+    let before = storage_write_bytes().expect("write_bytes on Linux");
+    writer
+        .write_all(&vec![0x5a; 64 * 1024])
+        .expect("write pipe");
+    drop(writer);
+    let after = storage_write_bytes().expect("write_bytes on Linux");
+    assert_eq!(drain.join().expect("drain thread"), 64 * 1024);
+    assert_eq!(after - before, 0, "pipe writes reached storage accounting");
+}
+
 #[test]
 fn strict_property_anchors_stream_topology_against_the_equality_build() {
     let _serial = serial();
     let built = build(SMALL_NODES);
     for partitions in [1, 2, 4] {
         let forge = open_with_partitions(&built.project, partitions);
+        settle_for_write_gate(&built.project);
         let query = "MATCH (a:Entity {ident: 5})-[:LINK]->(b) RETURN count(*) AS n";
         let physical = forge
             .explain_stage(query, graphforge_api::ExplainStage::PhysicalPlan)
@@ -659,6 +759,7 @@ fn optional_enrichment_preserves_fanout_and_missing_properties() {
                         c.ident AS destination, d.ident AS missing";
     for partitions in [1, 2, 4] {
         let forge = open_with_partitions(&built.project, partitions);
+        settle_for_write_gate(&built.project);
         let plan = forge
             .explain_stage(
                 &query.replace("$ident", "5"),
