@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "b163156aa96a6519472b411a966839592cc48989550459291574b2ce77900d49",
+  "public_method_digest": "e404f548d91b2b5149f56e803e8c5b637d30dc15b4bfcb189c12434c20fe74cd",
   "method_policy": {
     "receiver_defaults": {
       "PortableV2ImportResult": "release-tested",
@@ -975,6 +975,7 @@
     },
     "resumable-import": {
       "ids": [
+        "GraphForge.abort_import_session",
         "GraphForge.begin_import_session",
         "GraphForge.cleanup_stale_import_sessions",
         "GraphForge.import_session_status",
@@ -1013,6 +1014,10 @@
         {
           "path": "crates/graphforge-api/src/import_session.rs",
           "symbol": "operation_timings_are_scoped_non_durable_and_preserve_cancelled_commit"
+        },
+        {
+          "path": "crates/graphforge-api/src/import_session/external_source/tests.rs",
+          "symbol": "a_session_that_copied_its_sources_is_refused_rather_than_resumed"
         }
       ]
     },

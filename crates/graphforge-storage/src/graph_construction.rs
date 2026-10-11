@@ -84,7 +84,7 @@ use catalog::{
 };
 mod finish_stages;
 mod retired;
-pub use retired::discard_retired_construction;
+pub use retired::{discard_retired_construction, remove_owned_directory};
 mod partition_load;
 mod partition_memory;
 mod partition_records;
@@ -1455,7 +1455,7 @@ impl GraphConstructionSession {
             Ok(mut file) => {
                 let body = controls::read_bounded_limit(&mut file, MAX_CONTROL_BYTES)?;
                 let checkpoint: Checkpoint = serde_json::from_slice(&body).map_err(storage)?;
-                if retired::is_retired(&body, &checkpoint) {
+                if retired::is_retired(&body, &checkpoint)? {
                     return Err(retired::refusal());
                 }
                 Some(checkpoint)

@@ -3590,6 +3590,7 @@ fn run_integrated_certification_config(
     construction
         .seal_and_publish()
         .expect("publish certification construction");
+    let shape_files = shape_control_files(&source, construction.session_uuid());
     let construction_evidence = construction.progress().evidence;
     let mut construction_phases =
         graphforge_storage::ConstructionPhaseAttribution::from_construction(&construction_evidence)
@@ -4173,6 +4174,7 @@ fn run_integrated_certification_config(
             "construction": construction_storage,
             "application_io_phases": construction_phases,
             "hydration_uuid_control_bytes": hydration_uuid_control_bytes,
+            "shape_control_files": shape_files,
             "workspace_current_allocated_bytes": workspace_current_allocated_bytes,
             "workspace_peak_allocated_bytes": workspace_peak_allocated_bytes,
             "workspace_components": workspace_components,
@@ -4439,6 +4441,27 @@ struct ShapeComponents {
 }
 
 impl ShapeComponents {
+    /// What the bulk builder's empty shape must have counted, derived from the
+    /// files it left in the construction session and not from any counter: it
+    /// authenticated each `shape-receipt-*.json` it wrote (their lengths are
+    /// the bytes read, their number the calls), wrote each output the receipts
+    /// name (their `bytes` and `write_operations`), and counted
+    /// `ceil(bytes / block)` blocks for each.
+    fn from_files(files: &Value) -> Self {
+        let field = |name: &str| {
+            files[name]
+                .as_u64()
+                .unwrap_or_else(|| panic!("shape control file total {name} is an integer"))
+        };
+        Self {
+            read_bytes: [0, 0, 0, field("authentication_bytes"), 0, 0],
+            read_calls: [0, 0, 0, field("authentication_calls"), 0, 0],
+            write_bytes: [field("run_bytes"), field("parquet_bytes")],
+            write_calls: [field("run_write_calls"), field("parquet_write_calls")],
+            blocks: [0, field("blocks")],
+        }
+    }
+
     fn from_evidence(construction: &Value) -> Self {
         let field = |name: &str| {
             construction[name]
@@ -4483,6 +4506,8 @@ struct LifecycleLinearityObservation {
     /// The native counters the shape phase's totals are the sums of: read
     /// bytes, read calls, written bytes, write calls and blocks.
     shape_components: ShapeComponents,
+    /// The same components as the files the empty shape left say they are.
+    shape_expected: ShapeComponents,
     canonical_artifact_objects: u64,
     /// Bytes of every canonical artifact the publication installed or reused.
     canonical_output_bytes: u64,
@@ -4588,6 +4613,55 @@ fn phase_fields(totals: &graphforge_storage::PhaseIoTotals) -> [u64; LINEARITY_P
         *block_count,
         *fsync_calls,
     ]
+}
+
+/// Read the files the empty shape of a bulk build left in its construction
+/// session and total what they say it authenticated and wrote.
+fn shape_control_files(project: &Path, session: Uuid) -> Value {
+    let root = project
+        .join(".graphforge-construction")
+        .join(session.simple().to_string());
+    let mut totals = [0_u64; 7];
+    for entry in fs::read_dir(&root).expect("construction session directory") {
+        let path = entry.expect("construction session entry").path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if !(name.starts_with("shape-receipt-") && name.ends_with(".json")) {
+            continue;
+        }
+        let body = fs::read(&path).expect("shape receipt");
+        let receipt: Value = serde_json::from_slice(&body).expect("shape receipt JSON");
+        let bytes = receipt["bytes"].as_u64().expect("receipt bytes");
+        let writes = receipt["write_operations"]
+            .as_u64()
+            .expect("receipt write operations");
+        // The receipt's own length is what authenticating it reads.
+        totals[0] += body.len() as u64;
+        totals[1] += 1;
+        let first = if receipt["name"]
+            .as_str()
+            .is_some_and(|name| name.ends_with(".parquet"))
+        {
+            4
+        } else {
+            2
+        };
+        totals[first] += bytes;
+        totals[first + 1] += writes;
+        totals[6] += bytes.div_ceil(STAGING_BUFFER_BYTES);
+    }
+    assert!(totals[1] > 0, "the empty shape left no receipt");
+    json!({
+        "authentication_bytes": totals[0],
+        "authentication_calls": totals[1],
+        "run_bytes": totals[2],
+        "run_write_calls": totals[3],
+        "parquet_bytes": totals[4],
+        "parquet_write_calls": totals[5],
+        "blocks": totals[6],
+    })
 }
 
 fn lifecycle_linearity_observation(evidence: &Value) -> LifecycleLinearityObservation {
@@ -4761,6 +4835,7 @@ fn lifecycle_linearity_observation(evidence: &Value) -> LifecycleLinearityObserv
         live_nodes,
         live_edges,
         shape_components: ShapeComponents::from_evidence(construction),
+        shape_expected: ShapeComponents::from_files(&evidence["storage"]["shape_control_files"]),
         canonical_artifact_objects,
         canonical_output_bytes,
         cas_publication_io: serde_json::from_value(construction["cas_publication_io"].clone())
@@ -5401,19 +5476,11 @@ enum ShapeControlField {
     Blocks,
 }
 
-/// Components of the empty shape's own record: the shaped-output
-/// authentication reads, the Parquet write of the shaped runtime catalog, and
-/// the merge-writer block that carries it.
-const SHAPE_AUTHENTICATION_COMPONENT: usize = 3;
-const SHAPE_PARQUET_WRITE_COMPONENT: usize = 1;
-const SHAPE_WRITE_BLOCK_COMPONENT: usize = 1;
 /// One small control record: a filesystem block.
 const CONTROL_RECORD_MAX_BYTES: u64 = 4096;
 /// The smallest authenticated record: a Parquet file's two magics and footer
 /// length.
 const CONTROL_RECORD_MIN_BYTES: u64 = 12;
-/// A control record is read or written in a handful of calls.
-const CONTROL_RECORD_MAX_CALLS: u64 = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PhaseMetricPolicy {
@@ -5474,9 +5541,10 @@ enum PhaseMetricPolicy {
     },
     /// The bulk builder runs no shaping stage; its session records an empty
     /// shape, which writes the shaped runtime catalog of an empty parent once
-    /// and authenticates it. Each shape total is the sum of its native
-    /// components, of which only that record's component is nonzero, and it is
-    /// the same on every rung and within one control record.
+    /// and authenticates its receipts. Each shape total is the sum of its
+    /// native components, and each component equals what the files the shape
+    /// left record (their lengths, their number, the sizes and write counts
+    /// in their receipts), on every rung.
     ShapeControl(ShapeControlField),
     /// Unix links the encoder's file into the object store instead of copying
     /// it. Payload read bytes are then only the authentication of objects that
@@ -5613,9 +5681,9 @@ const HYDRATION_ROUTE_TABLE_CONTROL_BYTES: u64 = 2 * 1024;
 // shape_consume_reauthentication: the bulk builder shapes nothing, so the phase
 //   is the fixed control I/O of the empty shape its session records: the
 //   shaped runtime catalog of an empty parent, written once and authenticated.
-//   Each total equals the sum of its native components, only that record's
-//   component is nonzero, and it is the same on every rung and within one
-//   control record; object count and fsyncs are zero.
+//   Each total equals the sum of its native components, each component equals
+//   what the files the shape left record, on every rung; object count and
+//   fsyncs are zero.
 // encode_write_postwrite_authentication: write bytes are data-proportional.
 //   The bulk builder emits each artifact once and authenticates nothing it
 //   wrote, so read bytes are the fixed control read, the same on every rung;
@@ -5808,9 +5876,10 @@ fn validate_phase_policy_table(
     Ok(())
 }
 
-/// A shape total of the bulk route: the sum of its native components, all of
-/// which are zero but the empty shape's own record, and within one control
-/// record (see [`PhaseMetricPolicy::ShapeControl`]).
+/// A shape total of the bulk route: the sum of its native components, and each
+/// component exactly what the files the empty shape left say it must be
+/// (see [`ShapeComponents::from_files`]), however large or small the counters
+/// are made to report.
 fn validate_shape_control(
     name: &str,
     field: ShapeControlField,
@@ -5818,60 +5887,33 @@ fn validate_shape_control(
     observation: &LifecycleLinearityObservation,
     rung: usize,
 ) -> Result<(), String> {
-    let components = &observation.shape_components;
-    let (parts, record, minimum, maximum): (&[u64], usize, u64, u64) = match field {
-        ShapeControlField::ReadBytes => (
-            &components.read_bytes,
-            SHAPE_AUTHENTICATION_COMPONENT,
-            CONTROL_RECORD_MIN_BYTES,
-            CONTROL_RECORD_MAX_BYTES,
-        ),
-        ShapeControlField::WriteBytes => (
-            &components.write_bytes,
-            SHAPE_PARQUET_WRITE_COMPONENT,
-            CONTROL_RECORD_MIN_BYTES,
-            CONTROL_RECORD_MAX_BYTES,
-        ),
-        ShapeControlField::ReadCalls => (
-            &components.read_calls,
-            SHAPE_AUTHENTICATION_COMPONENT,
-            1,
-            CONTROL_RECORD_MAX_CALLS,
-        ),
-        ShapeControlField::WriteCalls => (
-            &components.write_calls,
-            SHAPE_PARQUET_WRITE_COMPONENT,
-            1,
-            CONTROL_RECORD_MAX_CALLS,
-        ),
-        ShapeControlField::Blocks => (
-            &components.blocks,
-            SHAPE_WRITE_BLOCK_COMPONENT,
-            1,
-            CONTROL_RECORD_MAX_CALLS,
-        ),
+    let (components, expected): (&[u64], &[u64]) = {
+        let (actual, wanted) = (&observation.shape_components, &observation.shape_expected);
+        match field {
+            ShapeControlField::ReadBytes => (&actual.read_bytes, &wanted.read_bytes),
+            ShapeControlField::WriteBytes => (&actual.write_bytes, &wanted.write_bytes),
+            ShapeControlField::ReadCalls => (&actual.read_calls, &wanted.read_calls),
+            ShapeControlField::WriteCalls => (&actual.write_calls, &wanted.write_calls),
+            ShapeControlField::Blocks => (&actual.blocks, &wanted.blocks),
+        }
     };
-    let sum = parts
+    let sum = components
         .iter()
         .try_fold(0_u64, |total, part| total.checked_add(*part))
         .ok_or_else(|| format!("{name} native component sum overflows at rung {rung}"))?;
     if observed != sum {
         return Err(format!(
-            "{name} does not reconcile to its native components at rung {rung}: observed={observed} components={parts:?}"
+            "{name} does not reconcile to its native components at rung {rung}: observed={observed} components={components:?}"
         ));
     }
-    if parts
-        .iter()
-        .enumerate()
-        .any(|(index, part)| index != record && *part != 0)
-    {
+    if components != expected {
         return Err(format!(
-            "{name} has work outside the empty shape's own record at rung {rung}: {parts:?}"
+            "{name} differs from what the empty shape's files record at rung {rung}: components={components:?} files={expected:?}"
         ));
     }
-    if !(minimum..=maximum).contains(&observed) {
+    if observed == 0 && !matches!(field, ShapeControlField::Blocks) {
         return Err(format!(
-            "{name} is outside the control record bounds {minimum}..={maximum} at rung {rung}: {observed}"
+            "{name} is zero although the empty shape authenticated and wrote its record at rung {rung}"
         ));
     }
     Ok(())
@@ -7020,6 +7062,16 @@ fn synthetic_category_metrics(axis: LinearityAxis, factor: u64) -> BTreeMap<Stri
     metrics
 }
 
+fn synthetic_shape_components() -> ShapeComponents {
+    ShapeComponents {
+        read_bytes: [0, 0, 0, 434, 0, 0],
+        read_calls: [0, 0, 0, 2, 0, 0],
+        write_bytes: [0, 963],
+        write_calls: [0, 1],
+        blocks: [0, 1],
+    }
+}
+
 fn synthetic_linearity_observations_for_axis(
     axis: LinearityAxis,
 ) -> [LifecycleLinearityObservation; 3] {
@@ -7136,13 +7188,8 @@ fn synthetic_linearity_observations_for_axis(
             input_rows: live_nodes + live_edges,
             live_nodes,
             live_edges,
-            shape_components: ShapeComponents {
-                read_bytes: [0, 0, 0, 434, 0, 0],
-                read_calls: [0, 0, 0, 2, 0, 0],
-                write_bytes: [0, 963],
-                write_calls: [0, 1],
-                blocks: [0, 1],
-            },
+            shape_components: synthetic_shape_components(),
+            shape_expected: synthetic_shape_components(),
             canonical_artifact_objects: 19,
             canonical_output_bytes: if cfg!(windows) {
                 900 * factor
@@ -8123,6 +8170,21 @@ fn the_shape_phase_is_the_empty_shapes_own_control_record() {
             ("read_bytes", "shrinks to one byte", |o, _| {
                 o.phases.get_mut("shape_consume_reauthentication").unwrap()[0] = 1;
                 o.shape_components.read_bytes[3] = 1;
+            }),
+            // Every counter reports twice what the files record, aggregate and
+            // components alike: a self-consistent doubling, caught only by the
+            // files.
+            ("read_bytes", "doubles with its components", |o, _| {
+                o.phases.get_mut("shape_consume_reauthentication").unwrap()[0] *= 2;
+                o.shape_components.read_bytes[3] *= 2;
+            }),
+            ("read_calls", "doubles with its components", |o, _| {
+                o.phases.get_mut("shape_consume_reauthentication").unwrap()[2] *= 2;
+                o.shape_components.read_calls[3] *= 2;
+            }),
+            ("write_bytes", "doubles with its components", |o, _| {
+                o.phases.get_mut("shape_consume_reauthentication").unwrap()[1] *= 2;
+                o.shape_components.write_bytes[1] *= 2;
             }),
             // A payload-sized fixed read is added.
             ("read_bytes", "gains a large fixed read", |o, _| {

@@ -936,8 +936,35 @@ fn historical_session(graph: &GraphForge, kept: &Path) -> Uuid {
     fs::copy(kept, &copy).unwrap();
     session.manifest.format_version = 2;
     session.manifest.sources[0].external = None;
+    // It had opened its construction session.
+    drop(session.open_construction(graph).unwrap());
     session.checkpoint().unwrap();
     session.session_uuid()
+}
+
+fn session_directory(graph: &GraphForge, id: Uuid) -> PathBuf {
+    graph
+        .resolved_generation
+        .container_root()
+        .join("import-sessions")
+        .join(id.hyphenated().to_string())
+}
+
+fn construction_directory(graph: &GraphForge, id: Uuid) -> PathBuf {
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(session_directory(graph, id).join("manifest.json")).unwrap(),
+    )
+    .unwrap();
+    graph
+        .resolved_generation
+        .container_root()
+        .join(".graphforge-construction")
+        .join(
+            Uuid::parse_str(manifest["construction_session_uuid"].as_str().unwrap())
+                .unwrap()
+                .simple()
+                .to_string(),
+        )
 }
 
 #[test]
@@ -951,19 +978,33 @@ fn a_session_that_copied_its_sources_is_refused_rather_than_resumed() {
             .err()
             .expect("resumed")
             .to_string();
-        assert!(
-            resumed.contains("incompatible import manifest format"),
-            "{resumed}"
-        );
+        assert!(resumed.contains("restart the import"), "{resumed}");
         let status = graph
             .import_session_status(id)
             .err()
             .expect("reported")
             .to_string();
-        assert!(
-            status.contains("incompatible import manifest format"),
-            "{status}"
+        assert!(status.contains("restart the import"), "{status}");
+        // It is aborted through the facade: its private copy and the construction
+        // it opened go, though its manifest is read no further than its format.
+        let session = session_directory(&graph, id);
+        let construction = construction_directory(&graph, id);
+        assert!(session.join("sources").exists() && construction.exists());
+        graph.abort_import_session(id).unwrap();
+        assert!(!session.exists() && !construction.exists());
+        // And stale cleanup removes another one the same way.
+        let other = historical_session(&graph, &historical.path);
+        let (session, construction) = (
+            session_directory(&graph, other),
+            construction_directory(&graph, other),
         );
+        assert_eq!(
+            graph
+                .cleanup_stale_import_sessions(std::time::Duration::ZERO)
+                .unwrap(),
+            1
+        );
+        assert!(!session.exists() && !construction.exists());
         // Nothing else reads it either: a fresh session over the same source is fine.
         let mut session = begin(&graph);
         session

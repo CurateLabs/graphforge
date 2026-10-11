@@ -8,7 +8,7 @@
 //! with a typed error before anything of it runs, and it stays discardable
 //! without being opened: [`discard_retired_construction`] removes its tree.
 
-use super::controls::read_bounded_limit;
+use super::controls::{read_bounded_limit, replace_control};
 use super::recovery::remove_owned_directory_tree;
 use super::spool::{ChunkRoute, SealRoute};
 use super::{
@@ -30,13 +30,35 @@ pub(super) fn refusal() -> GfError {
 
 /// Whether the checkpoint `body` was recorded by a build whose staged initial
 /// builds are retired: its budgets name the retired bound, or it recorded a
-/// route that only that build had.
-pub(super) fn is_retired(body: &[u8], checkpoint: &Checkpoint) -> bool {
-    checkpoint.chunk_route == ChunkRoute::Staged
+/// route that only that build had. A `body` that is not JSON is corrupt and
+/// refused, not taken for a current record.
+pub(super) fn is_retired(body: &[u8], checkpoint: &Checkpoint) -> Result<bool, GfError> {
+    let value: serde_json::Value = serde_json::from_slice(body).map_err(storage)?;
+    Ok(checkpoint.chunk_route == ChunkRoute::Staged
         || checkpoint.seal_route == Some(SealRoute::ReplayStaged)
-        || serde_json::from_slice::<serde_json::Value>(body)
-            .ok()
-            .is_some_and(|value| value["budgets"].get(RETIRED_BUDGET_FIELD).is_some())
+        || value["budgets"].get(RETIRED_BUDGET_FIELD).is_some())
+}
+
+/// Remove the directory `name` of `parent`, entry by entry, each unlinked only
+/// if it is still the file that was listed: the owned removal a construction
+/// discard performs, for a private session directory outside the construction
+/// root.
+///
+/// # Errors
+/// Refuses a name that is not one path component and a directory whose
+/// identity changes while it is removed.
+pub fn remove_owned_directory(parent: &Path, name: &str) -> Result<(), GfError> {
+    if name.is_empty() || name.contains(['/', '\\']) || name == "." || name == ".." {
+        return Err(storage("owned directory name is not one path component"));
+    }
+    let parent = StableDirectory::open(parent).map_err(storage)?;
+    let child = parent
+        .open_child_directory(OsStr::new(name))
+        .map_err(storage)?;
+    let identity = child.identity();
+    drop(child);
+    let mut remaining = 1 << 22;
+    remove_owned_directory_tree(&parent, OsStr::new(name), identity, &mut remaining)
 }
 
 /// Remove the session `operation_uuid` of the project at `project_dir` if it
@@ -70,11 +92,11 @@ pub fn discard_retired_construction(
         Err(error) if absent(&error) => return Ok(false),
         Err(error) => return Err(storage(error)),
     };
-    let lock = match root.open_child_file(OsStr::new(SESSION_LOCK)) {
-        Ok(lock) => lock,
-        Err(error) if absent(&error) => return Ok(false),
-        Err(error) => return Err(storage(error)),
-    };
+    // A removal interrupted after it unlinked the lock leaves the record; the
+    // retry takes a fresh lock, as opening a session does.
+    let lock = root
+        .open_or_create_child_file(OsStr::new(SESSION_LOCK))
+        .map_err(storage)?;
     if file_link_count(&lock).map_err(storage)? != 1 {
         return Err(storage("construction session lock has unexpected links"));
     }
@@ -91,7 +113,7 @@ pub fn discard_retired_construction(
     let body = read_bounded_limit(&mut file, MAX_CONTROL_BYTES)?;
     drop(file);
     let checkpoint: Checkpoint = serde_json::from_slice(&body).map_err(storage)?;
-    if !is_retired(&body, &checkpoint) {
+    if !is_retired(&body, &checkpoint)? {
         return Ok(false);
     }
     if matches!(
@@ -102,6 +124,18 @@ pub fn discard_retired_construction(
             "published construction belongs to generation recovery",
         ));
     }
+    // Exclusion is held until the tree is gone, and the record says so first:
+    // the checkpoint becomes aborted, durably, before anything is unlinked, as
+    // an ordinary discard does. Another process that takes the lock once it is
+    // released finds an aborted session, which can only be discarded; it can
+    // neither resume nor publish what is being removed.
+    let mut aborted: serde_json::Value = serde_json::from_slice(&body).map_err(storage)?;
+    aborted["state"] = serde_json::json!("aborted");
+    aborted
+        .as_object_mut()
+        .ok_or_else(|| storage("checkpoint is not a JSON object"))?
+        .remove("publication_state");
+    replace_control(&root, CHECKPOINT, &aborted)?;
     let session_identity = root.identity();
     // The same traversal bound the ordinary discard derives from the budgets.
     let mut remaining = checkpoint
@@ -115,14 +149,16 @@ pub fn discard_retired_construction(
         })
         .and_then(|limit| limit.checked_add(4_096))
         .ok_or_else(|| storage("construction discard traversal bound overflow"))?;
-    crate::file_lock::unlock(&lock).map_err(storage)?;
-    drop(lock);
     drop(root);
-    remove_owned_directory_tree(
+    // The lock is released only after the tree is removed; the removal takes
+    // the lock file with the rest.
+    let removed = remove_owned_directory_tree(
         &private,
         OsStr::new(&name),
         session_identity,
         &mut remaining,
-    )?;
+    );
+    let _ = crate::file_lock::unlock(&lock);
+    removed?;
     Ok(true)
 }

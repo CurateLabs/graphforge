@@ -589,6 +589,57 @@ impl GraphForge {
         Ok((manifest.phase, manifest.progress))
     }
 
+    /// Abort the import session `session_uuid`, removing its durable staging.
+    ///
+    /// A session in a format this build no longer reads cannot be resumed, but
+    /// it can be aborted: its directory (and the construction it names) is
+    /// removed through owned, identity-checked removal, reading nothing of its
+    /// manifest but the format. The returned progress is empty for it.
+    pub fn abort_import_session(&self, session_uuid: Uuid) -> Result<ImportProgress, GfError> {
+        let root = import_root(self, session_uuid)?;
+        let body = fs::read(root.join(MANIFEST)).map_err(storage)?;
+        let recorded = recorded_format(&body)?;
+        if supported_format(recorded.format_version) {
+            return self.resume_import_session(session_uuid)?.abort(self);
+        }
+        self.remove_retired_import_session(&root, &recorded)?;
+        Ok(ImportProgress::default())
+    }
+
+    /// Remove a session recorded in a retired format and the construction it
+    /// names.
+    fn remove_retired_import_session(
+        &self,
+        root: &Path,
+        recorded: &RecordedFormat,
+    ) -> Result<(), GfError> {
+        if let Some(construction) = recorded.construction_session_uuid
+            && self
+                .resolved_generation
+                .container_root()
+                .join(".graphforge-construction")
+                .join(construction.simple().to_string())
+                .exists()
+        {
+            let budgets = recorded
+                .limits
+                .as_ref()
+                .map_or_else(GraphConstructionBudgets::default, |limits| {
+                    construction_budgets_for(limits.batch_rows)
+                });
+            self.discard_construction(construction, budgets)?;
+        }
+        let name = root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| validation("import session directory name is not Unicode"))?;
+        graphforge_storage::remove_owned_directory(
+            root.parent()
+                .ok_or_else(|| validation("import session directory has no parent"))?,
+            name,
+        )
+    }
+
     /// Abort and remove durable staging for non-terminal sessions older than `max_age`.
     pub fn cleanup_stale_import_sessions(&self, max_age: Duration) -> Result<u64, GfError> {
         let sessions = self.resolved_generation.container_root().join(SESSION_DIR);
@@ -608,6 +659,27 @@ impl GraphForge {
                 continue;
             }
             let root = entry.path();
+            let body = fs::read(root.join(MANIFEST)).map_err(storage)?;
+            let recorded = recorded_format(&body)?;
+            if !supported_format(recorded.format_version) {
+                // A retired session is read no further: it is finished if it
+                // says so, stale by its manifest's age, and removed whole.
+                let age = fs::metadata(root.join(MANIFEST))
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+                    .and_then(|modified| modified.elapsed().ok())
+                    .map_or(u64::MAX, |elapsed| {
+                        u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+                    });
+                if matches!(recorded.phase.as_deref(), Some("committed" | "aborted"))
+                    || age < threshold
+                {
+                    continue;
+                }
+                self.remove_retired_import_session(&root, &recorded)?;
+                cleaned = cleaned.saturating_add(1);
+                continue;
+            }
             let manifest = read_manifest(&root)?;
             if matches!(
                 manifest.phase,
@@ -1371,12 +1443,7 @@ impl GraphImportSession {
     }
 
     fn construction_budgets(&self) -> GraphConstructionBudgets {
-        let mut budgets = GraphConstructionBudgets::default();
-        budgets.max_batch_rows = self.manifest.limits.batch_rows;
-        budgets.max_run_records = budgets
-            .max_run_records
-            .max(self.manifest.limits.batch_rows.saturating_mul(4));
-        budgets
+        construction_budgets_for(self.manifest.limits.batch_rows)
     }
 
     fn open_construction<'a>(
@@ -1530,6 +1597,13 @@ impl GraphImportSession {
         self.checkpoint_with_source_cleanup(owned.as_deref())
             .map(|_| ())
     }
+}
+
+fn construction_budgets_for(batch_rows: usize) -> GraphConstructionBudgets {
+    let mut budgets = GraphConstructionBudgets::default();
+    budgets.max_batch_rows = batch_rows;
+    budgets.max_run_records = budgets.max_run_records.max(batch_rows.saturating_mul(4));
+    budgets
 }
 
 fn unix_millis() -> Result<u64, GfError> {
@@ -1774,14 +1848,39 @@ const fn supported_format(version: u32) -> bool {
     version == FORMAT_VERSION
 }
 
+/// The refusal for a session recorded in a format this build no longer reads.
+const RETIRED_FORMAT: &str = "this import session was recorded in a format that is retired and cannot resume; restart the import";
+
+/// What a session manifest says before anything else of it is read: its format,
+/// whether it is finished, and the construction session it names. This is all
+/// that is read of a manifest in a retired format.
+#[derive(Deserialize)]
+struct RecordedFormat {
+    format_version: u32,
+    #[serde(default)]
+    phase: Option<String>,
+    #[serde(default)]
+    construction_session_uuid: Option<Uuid>,
+    /// The batch size its construction was opened with.
+    #[serde(default)]
+    limits: Option<RecordedLimits>,
+}
+
+#[derive(Deserialize)]
+struct RecordedLimits {
+    batch_rows: usize,
+}
+
+fn recorded_format(body: &[u8]) -> Result<RecordedFormat, GfError> {
+    serde_json::from_slice(body).map_err(storage)
+}
+
 fn read_manifest(root: &Path) -> Result<SessionManifest, GfError> {
-    let mut manifest: SessionManifest = serde_json::from_reader(BufReader::new(
-        File::open(root.join(MANIFEST)).map_err(storage)?,
-    ))
-    .map_err(storage)?;
-    if !supported_format(manifest.format_version) {
-        return Err(validation("incompatible import manifest format"));
+    let body = fs::read(root.join(MANIFEST)).map_err(storage)?;
+    if !supported_format(recorded_format(&body)?.format_version) {
+        return Err(validation(RETIRED_FORMAT));
     }
+    let mut manifest: SessionManifest = serde_json::from_slice(&body).map_err(storage)?;
     journal::replay(root, &mut manifest)?;
     if let Some(construction) = manifest.progress.construction.as_mut()
         && construction.publication_work.contract.is_empty()

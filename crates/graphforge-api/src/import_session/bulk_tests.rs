@@ -783,6 +783,50 @@ fn an_import_recorded_by_an_earlier_build_is_refused_and_still_abortable() {
     assert!(!root.exists());
 }
 
+/// A current-format manifest as the earlier build wrote it carries the
+/// import's recorded route (`build_route`, and `staged_reason` when a plan
+/// staged). Deleting those fields did not make such a manifest undecodable: it
+/// resumes, ignores them, and builds on the bulk route, which every initial
+/// import takes.
+#[test]
+fn a_manifest_the_earlier_build_wrote_with_its_recorded_route_resumes_in_bulk() {
+    for recorded in [
+        serde_json::json!({ "build_route": "bulk" }),
+        serde_json::json!({
+            "build_route": "staged",
+            "staged_reason": "node_tables_exceed_budget",
+        }),
+    ] {
+        let (_directory, _project, graph) = fixture();
+        let ids = (1..=3).map(v7).collect::<Vec<_>>();
+        let mut session = graph
+            .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
+            .unwrap();
+        session
+            .append_arrow(BulkInputKind::Node, &[nodes(&ids)])
+            .unwrap();
+        let id = session.session_uuid();
+        let path = session.root.join("manifest.json");
+        drop(session);
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(manifest["format_version"], 3);
+        for (field, value) in recorded.as_object().unwrap() {
+            manifest[field] = value.clone();
+        }
+        fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        let mut resumed = graph.resume_import_session(id).unwrap();
+        let progress = resumed.validate(&graph).unwrap();
+        assert!(
+            progress.construction.unwrap().bulk_build.is_some(),
+            "{recorded}"
+        );
+        resumed.commit(&graph, None).unwrap();
+        assert_eq!(graph.node_count("Person").unwrap(), 3, "{recorded}");
+    }
+}
+
 #[test]
 fn a_second_validate_of_a_built_session_reports_its_rows() {
     let (_directory, _project, graph) = fixture();

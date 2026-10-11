@@ -730,9 +730,8 @@ fn run_import_session_inner(
             write_import_commit(&session, generation, json, output)
         }
         ImportSessionCommand::Abort(args) => {
-            let session = graph.resume_import_session(canonical_uuid(&args.session_uuid)?)?;
-            let session_uuid = session.session_uuid();
-            let progress = session.abort(graph)?;
+            let session_uuid = canonical_uuid(&args.session_uuid)?;
+            let progress = graph.abort_import_session(session_uuid)?;
             write_progress(session_uuid, "aborted", &progress, None, json, output)
         }
         ImportSessionCommand::Cleanup(args) => {

@@ -484,7 +484,7 @@ fn legacy_or_missing_journal_state_is_refused() {
             .err()
             .unwrap()
             .to_string()
-            .contains("incompatible")
+            .contains("restart the import")
     );
 }
 
