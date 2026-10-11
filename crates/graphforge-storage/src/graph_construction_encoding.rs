@@ -36,9 +36,9 @@ use sha2::Digest;
 use uuid::Uuid;
 
 use crate::graph_construction::{
-    ArtifactReceipt, ConstructionChunkKind, ConstructionSemanticAuthority, ConstructionShape,
-    CountingChunkReader, GraphConstructionBudgets, IoCounter, open_authenticated_shape_source,
-    shaped_output_xxh64,
+    ArtifactReceipt, ConstructionAuthority, ConstructionChunkKind, ConstructionShape,
+    CountingChunkReader, GraphConstructionBudgets, IoCounter, SingleDocumentAuthority,
+    open_authenticated_shape_source, shaped_output_xxh64,
 };
 use crate::property_overlay::{
     PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY, PROPERTY_ORDINAL_KEY, PROPERTY_OVERLAY_FORMAT,
@@ -513,7 +513,7 @@ pub(crate) fn encode(
     ontology_mode: OntologyMode,
     parent_nodes: u64,
     parent_generation: Option<&crate::ResolvedProjectGeneration>,
-    semantic_authority: Option<&ConstructionSemanticAuthority>,
+    semantic_authority: Option<&ConstructionAuthority>,
     shape_outputs: &[ArtifactReceipt],
     shape_authority_sha256: &str,
     expected_inventory_sha256: Option<&str>,
@@ -529,7 +529,7 @@ pub(crate) fn encode(
         ));
     }
     let semantic_digest = semantic_authority
-        .map(ConstructionSemanticAuthority::digest)
+        .map(ConstructionAuthority::digest)
         .transpose()?;
     if shape.semantic_authority_sha256 != semantic_digest {
         return Err(storage("shape semantic authority differs from session"));
@@ -636,8 +636,9 @@ pub(crate) fn encode(
         label_ids
     };
     let semantic_context = semantic_authority
-        .map(ConstructionSemanticAuthority::context)
-        .transpose()?;
+        .map(ConstructionAuthority::context)
+        .transpose()?
+        .flatten();
     if shape.parent_topology_generation == 0 {
         // Initial construction owns every node label: encode_nodes uses tagged
         // runtime IDs or the exact semantic storage authority. Publish that
@@ -699,7 +700,8 @@ pub(crate) fn encode(
         &label_ids,
         ontology_mode,
         semantic_context.as_ref(),
-        semantic_authority.map(|authority| &authority.bindings),
+        semantic_authority.and_then(ConstructionAuthority::bindings),
+        semantic_authority.and_then(ConstructionAuthority::single_document),
         budgets,
         generation,
         shape.parent_topology_generation == 0 || parent_ordinal.is_some(),
@@ -772,7 +774,8 @@ pub(crate) fn encode(
         shape_outputs,
         ontology_mode,
         semantic_context.as_ref(),
-        semantic_authority.map(|authority| &authority.bindings),
+        semantic_authority.and_then(ConstructionAuthority::bindings),
+        semantic_authority.and_then(ConstructionAuthority::single_document),
         budgets,
         cancelled,
         &mut artifacts,
@@ -941,11 +944,22 @@ struct ResolvedOwner {
 fn resolve_owner(
     context: Option<&CompositionBindingContext>,
     bindings: Option<&SemanticStorageBindings>,
+    single_document: Option<&SingleDocumentAuthority>,
     symbol_kind: SymbolKind,
     route_kind: SemanticRouteKind,
     input: &str,
     runtime_route: &str,
 ) -> Result<ResolvedOwner, GfError> {
+    if let Some(authority) = single_document {
+        // Routes stay named by label; a declared type is stored under its
+        // ontology identity and a strict mode refuses any other.
+        return Ok(ResolvedOwner {
+            input: input.to_owned(),
+            symbol: None,
+            topology_route: runtime_route.to_owned(),
+            storage_id: authority.declared(symbol_kind, input)?,
+        });
+    }
     let (Some(context), Some(bindings)) = (context, bindings) else {
         return Ok(ResolvedOwner {
             input: input.to_owned(),
@@ -1069,6 +1083,7 @@ fn encode_nodes(
     ontology_mode: OntologyMode,
     semantic_context: Option<&CompositionBindingContext>,
     semantic_bindings: Option<&SemanticStorageBindings>,
+    semantic_single: Option<&SingleDocumentAuthority>,
     budgets: GraphConstructionBudgets,
     generation: u64,
     build_v4: bool,
@@ -1181,6 +1196,7 @@ fn encode_nodes(
                     let owner = resolve_owner(
                         semantic_context,
                         semantic_bindings,
+                        semantic_single,
                         SymbolKind::Entity,
                         SemanticRouteKind::Entity,
                         label,
@@ -1260,6 +1276,7 @@ fn encode_nodes(
         ontology_mode,
         semantic_context,
         semantic_bindings,
+        semantic_single,
         budgets,
         cancelled,
         artifacts,
@@ -1281,6 +1298,7 @@ fn encode_node_properties(
     ontology_mode: OntologyMode,
     semantic_context: Option<&CompositionBindingContext>,
     semantic_bindings: Option<&SemanticStorageBindings>,
+    semantic_single: Option<&SingleDocumentAuthority>,
     budgets: GraphConstructionBudgets,
     cancelled: &mut impl FnMut() -> bool,
     artifacts: &mut Vec<ConstructionEncodedArtifact>,
@@ -1334,6 +1352,7 @@ fn encode_node_properties(
                     ontology_mode,
                     semantic_context,
                     semantic_bindings,
+                    semantic_single,
                     route_table,
                     encoding_lanes,
                     output,
@@ -1387,6 +1406,7 @@ fn encode_edges(
     ontology_mode: OntologyMode,
     semantic_context: Option<&CompositionBindingContext>,
     semantic_bindings: Option<&SemanticStorageBindings>,
+    semantic_single: Option<&SingleDocumentAuthority>,
     budgets: GraphConstructionBudgets,
     cancelled: &mut impl FnMut() -> bool,
     artifacts: &mut Vec<ConstructionEncodedArtifact>,
@@ -1515,6 +1535,7 @@ fn encode_edges(
                 let owner = resolve_owner(
                     semantic_context,
                     semantic_bindings,
+                    semantic_single,
                     SymbolKind::Relation,
                     SemanticRouteKind::Relation,
                     route,
@@ -1622,6 +1643,7 @@ fn encode_edges(
         ontology_mode,
         semantic_context,
         semantic_bindings,
+        semantic_single,
         budgets,
         cancelled,
         artifacts,
@@ -1641,6 +1663,7 @@ fn encode_edge_properties(
     ontology_mode: OntologyMode,
     semantic_context: Option<&CompositionBindingContext>,
     semantic_bindings: Option<&SemanticStorageBindings>,
+    semantic_single: Option<&SingleDocumentAuthority>,
     budgets: GraphConstructionBudgets,
     cancelled: &mut impl FnMut() -> bool,
     artifacts: &mut Vec<ConstructionEncodedArtifact>,
@@ -1694,6 +1717,7 @@ fn encode_edge_properties(
                     ontology_mode,
                     semantic_context,
                     semantic_bindings,
+                    semantic_single,
                     route_table,
                     encoding_lanes,
                     output,

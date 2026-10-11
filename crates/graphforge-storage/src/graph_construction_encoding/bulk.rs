@@ -33,17 +33,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::{
-    Component, CompositionBindingContext, ConstructionChunkKind, ConstructionEncodedArtifact,
-    ConstructionSemanticAuthority, ConstructionShape, Digest, ENCODED_ROOT,
-    ENCODING_FORMAT_VERSION, ENCODING_INTENT, EncodingIntent, EntityTypeId, FixedSizeBinaryArray,
-    GfError, GraphConstructionBudgets, GraphConstructionEncoding,
-    GraphConstructionEncodingEvidence, GraphConstructionEncodingInvocationEvidence, INVENTORY,
-    OntologyMode, OsStr, Path, RecordBatch, SemanticRouteKind, SemanticStorageBindings, Sha256,
-    StableDirectory, StringArray, SymbolKind, UInt64Array, Uuid, Write, adjacency,
-    authenticate_inventory_control, copy_artifact, edge_batch, edge_property_batch,
-    encoded_route_component, hex, index_artifact, install_json, lanes, node_batch,
-    node_property_batch, remove_encoding_intent, required_string, resolve_owner, select_rows,
-    storage, with_route_metadata_batch, write_surrogate_tails,
+    Component, CompositionBindingContext, ConstructionAuthority, ConstructionChunkKind,
+    ConstructionEncodedArtifact, ConstructionShape, Digest, ENCODED_ROOT, ENCODING_FORMAT_VERSION,
+    ENCODING_INTENT, EncodingIntent, EntityTypeId, FixedSizeBinaryArray, GfError,
+    GraphConstructionBudgets, GraphConstructionEncoding, GraphConstructionEncodingEvidence,
+    GraphConstructionEncodingInvocationEvidence, INVENTORY, OntologyMode, OsStr, Path, RecordBatch,
+    SemanticRouteKind, SemanticStorageBindings, Sha256, SingleDocumentAuthority, StableDirectory,
+    StringArray, SymbolKind, UInt64Array, Uuid, Write, adjacency, authenticate_inventory_control,
+    copy_artifact, edge_batch, edge_property_batch, encoded_route_component, hex, index_artifact,
+    install_json, lanes, node_batch, node_property_batch, remove_encoding_intent, required_string,
+    resolve_owner, select_rows, storage, with_route_metadata_batch, write_surrogate_tails,
 };
 
 mod budget;
@@ -326,7 +325,7 @@ pub(crate) fn encode_bulk(
     shape: &ConstructionShape,
     generation: u64,
     ontology_mode: OntologyMode,
-    semantic_authority: Option<&ConstructionSemanticAuthority>,
+    semantic_authority: Option<&ConstructionAuthority>,
     shape_authority_sha256: &str,
     budgets: GraphConstructionBudgets,
     admission: Option<&Arc<crate::graph_construction::cpu_admission::ConstructionCpuAdmission>>,
@@ -345,7 +344,7 @@ pub(crate) fn encode_bulk(
         ));
     }
     let semantic_digest = semantic_authority
-        .map(ConstructionSemanticAuthority::digest)
+        .map(ConstructionAuthority::digest)
         .transpose()?;
     if shape.semantic_authority_sha256 != semantic_digest {
         return Err(storage("shape semantic authority differs from session"));
@@ -715,12 +714,14 @@ pub(crate) fn encode_bulk(
     // The catalog's schema groups, routes and windows.
     let meter = PassMeter::start("catalog");
     let semantic_context = semantic_authority
-        .map(ConstructionSemanticAuthority::context)
-        .transpose()?;
+        .map(ConstructionAuthority::context)
+        .transpose()?
+        .flatten();
     let semantics = Semantics {
         mode: ontology_mode,
         context: semantic_context.as_ref(),
-        bindings: semantic_authority.map(|authority| &authority.bindings),
+        bindings: semantic_authority.and_then(ConstructionAuthority::bindings),
+        single: semantic_authority.and_then(ConstructionAuthority::single_document),
     };
     // The decoded batches are released as soon as their sorted schema groups exist.
     let node_kept = match &mut nodes {
@@ -1109,6 +1110,7 @@ pub(crate) fn encode_bulk(
                                 ontology_mode,
                                 semantics.context,
                                 semantics.bindings,
+                                semantics.single,
                                 &mut routes,
                                 &mut lanes,
                                 &output,
@@ -1126,6 +1128,7 @@ pub(crate) fn encode_bulk(
                                 ontology_mode,
                                 semantics.context,
                                 semantics.bindings,
+                                semantics.single,
                                 &mut routes,
                                 &mut lanes,
                                 &output,

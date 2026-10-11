@@ -3,9 +3,9 @@
 use super::{
     BTreeMap, CompositionBindingContext, ConstructionEncodedArtifact, GfError,
     GraphConstructionEncodingEvidence, OntologyMode, PropertyRouteKind, RecordBatch,
-    SemanticRouteKind, SemanticStorageBindings, StableDirectory, SymbolKind,
-    encoded_route_component, lanes, property_batch, property_projections, required_string,
-    resolve_owner, split_into_fragments, storage, with_route_metadata_batch,
+    SemanticRouteKind, SemanticStorageBindings, SingleDocumentAuthority, StableDirectory,
+    SymbolKind, encoded_route_component, lanes, property_batch, property_projections,
+    required_string, resolve_owner, split_into_fragments, storage, with_route_metadata_batch,
 };
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -16,6 +16,7 @@ pub(super) fn node_property_batch(
     ontology_mode: OntologyMode,
     semantic_context: Option<&CompositionBindingContext>,
     semantic_bindings: Option<&SemanticStorageBindings>,
+    semantic_single: Option<&SingleDocumentAuthority>,
     route_table: &mut crate::route_component::RouteTable,
     encoding_lanes: &mut lanes::ParquetLanes,
     output: &StableDirectory,
@@ -41,6 +42,7 @@ pub(super) fn node_property_batch(
         let owner = resolve_owner(
             semantic_context,
             semantic_bindings,
+            semantic_single,
             SymbolKind::Entity,
             SemanticRouteKind::Entity,
             &label,
@@ -114,6 +116,7 @@ pub(super) fn edge_property_batch(
     ontology_mode: OntologyMode,
     semantic_context: Option<&CompositionBindingContext>,
     semantic_bindings: Option<&SemanticStorageBindings>,
+    semantic_single: Option<&SingleDocumentAuthority>,
     route_table: &mut crate::route_component::RouteTable,
     encoding_lanes: &mut lanes::ParquetLanes,
     output: &StableDirectory,
@@ -139,6 +142,7 @@ pub(super) fn edge_property_batch(
         let owner = resolve_owner(
             semantic_context,
             semantic_bindings,
+            semantic_single,
             SymbolKind::Relation,
             SemanticRouteKind::Relation,
             &route,

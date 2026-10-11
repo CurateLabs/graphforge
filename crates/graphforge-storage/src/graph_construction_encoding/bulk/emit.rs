@@ -12,9 +12,9 @@ use super::tables::{EdgeTable, NodeTable, first_appearance};
 use super::{
     Arc, AtomicBool, CompositionBindingContext, ConstructionChunkKind, EntityTypeId, GfError,
     GraphConstructionBudgets, OntologyMode, RecordBatch, SemanticRouteKind,
-    SemanticStorageBindings, StringArray, SymbolKind, UInt64Array, edge_batch,
-    encoded_route_component, node_batch, required_string, resolve_owner, select_rows, storage,
-    with_route_metadata_batch,
+    SemanticStorageBindings, SingleDocumentAuthority, StringArray, SymbolKind, UInt64Array,
+    edge_batch, encoded_route_component, node_batch, required_string, resolve_owner, select_rows,
+    storage, with_route_metadata_batch,
 };
 
 /// Rows per canonical topology file, matching the staged encoder's window.
@@ -348,6 +348,7 @@ pub(super) struct Semantics<'a> {
     pub(super) mode: OntologyMode,
     pub(super) context: Option<&'a CompositionBindingContext>,
     pub(super) bindings: Option<&'a SemanticStorageBindings>,
+    pub(super) single: Option<&'a SingleDocumentAuthority>,
 }
 
 pub(super) fn node_types(
@@ -366,6 +367,7 @@ pub(super) fn node_types(
             let owner = resolve_owner(
                 semantics.context,
                 semantics.bindings,
+                semantics.single,
                 SymbolKind::Entity,
                 SemanticRouteKind::Entity,
                 label,
@@ -455,6 +457,7 @@ pub(super) fn relation_routes(
             let owner = resolve_owner(
                 semantics.context,
                 semantics.bindings,
+                semantics.single,
                 SymbolKind::Relation,
                 SemanticRouteKind::Relation,
                 route,

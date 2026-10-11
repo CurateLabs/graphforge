@@ -223,6 +223,92 @@ impl Sources {
         }
     }
 
+    /// Property-free sources of `nodes` nodes labelled `label` and `edges`
+    /// edges typed `rel_type`; edge `i` runs from node `i % nodes` to node
+    /// `(i + 1) % nodes`.
+    pub fn write_typed(
+        directory: &Path,
+        nodes: usize,
+        edges: usize,
+        label: &str,
+        rel_type: &str,
+    ) -> Self {
+        Self::write_typed_with(directory, nodes, edges, label, rel_type, None)
+    }
+
+    /// As [`Self::write_typed`], with an `Int64` property on every node and on
+    /// every edge: node `i` holds `i` as `node_property`, edge `i` holds `i` as
+    /// `edge_property`.
+    pub fn write_typed_with_properties(
+        directory: &Path,
+        nodes: usize,
+        edges: usize,
+        label: &str,
+        rel_type: &str,
+        (node_property, edge_property): (&str, &str),
+    ) -> Self {
+        Self::write_typed_with(
+            directory,
+            nodes,
+            edges,
+            label,
+            rel_type,
+            Some((node_property, edge_property)),
+        )
+    }
+
+    fn write_typed_with(
+        directory: &Path,
+        nodes: usize,
+        edges: usize,
+        label: &str,
+        rel_type: &str,
+        properties: Option<(&str, &str)>,
+    ) -> Self {
+        fs::create_dir_all(directory).unwrap();
+        write_parquet(&directory.join("nodes.parquet"), nodes, |range| {
+            let extra = properties
+                .map(|(name, _)| Field::new(name, DataType::Int64, true))
+                .into_iter()
+                .collect::<Vec<_>>();
+            let mut columns = vec![
+                uuid_array(range.clone().map(node_uuid)),
+                Arc::new(StringArray::from(
+                    range.clone().map(|_| label).collect::<Vec<_>>(),
+                )) as ArrayRef,
+            ];
+            if properties.is_some() {
+                columns.push(Arc::new(Int64Array::from_iter_values(
+                    range.map(|row| row as i64),
+                )));
+            }
+            RecordBatch::try_new(bulk_node_input_schema(extra).unwrap(), columns).unwrap()
+        });
+        write_parquet(&directory.join("edges.parquet"), edges, |range| {
+            let extra = properties
+                .map(|(_, name)| Field::new(name, DataType::Int64, true))
+                .into_iter()
+                .collect::<Vec<_>>();
+            let mut columns = vec![
+                uuid_array(range.clone().map(edge_uuid)),
+                Arc::new(StringArray::from(
+                    range.clone().map(|_| rel_type).collect::<Vec<_>>(),
+                )) as ArrayRef,
+                uuid_array(range.clone().map(|row| node_uuid(row % nodes))),
+                uuid_array(range.clone().map(|row| node_uuid((row + 1) % nodes))),
+            ];
+            if properties.is_some() {
+                columns.push(Arc::new(Int64Array::from_iter_values(
+                    range.map(|row| row as i64),
+                )));
+            }
+            RecordBatch::try_new(bulk_edge_input_schema(extra).unwrap(), columns).unwrap()
+        });
+        Self {
+            directory: directory.to_owned(),
+        }
+    }
+
     /// Sources already written to `directory`.
     pub fn at(directory: &Path) -> Self {
         Self {

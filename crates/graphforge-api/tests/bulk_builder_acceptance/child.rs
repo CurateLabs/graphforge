@@ -49,6 +49,9 @@ pub struct ChildSpec {
     /// Exit abruptly as soon as validation has finished, as a process lost
     /// before `commit` does. The exit status is [`KILLED`].
     pub abandon_after_validate: bool,
+    /// Build this many property-free `Host` nodes through the chunk API
+    /// instead of importing `sources`.
+    pub chunk_hosts: Option<usize>,
 }
 
 /// What a child printed, by milestone.
@@ -121,6 +124,10 @@ fn child() {
         return;
     };
     let spec: ChildSpec = serde_json::from_str(&spec).unwrap();
+    if let Some(hosts) = spec.chunk_hosts {
+        build_hosts_through_the_chunk_api(&spec.project, hosts);
+        return;
+    }
     let graph = match spec.lanes {
         Some(lanes) => forge_with_lanes(&spec.project, lanes),
         None => GraphForge::new(spec.project.to_str()).unwrap(),
@@ -397,4 +404,33 @@ pub fn spec_for(project: &Path, sources: &Sources) -> ChildSpec {
         sources: Some(sources.directory.clone()),
         ..ChildSpec::default()
     }
+}
+
+/// Facade B of the stale-handle scenarios: it builds `hosts` nodes through the
+/// chunk API under the project's ontology, printing its session. A failpoint
+/// kills it part-way.
+fn build_hosts_through_the_chunk_api(project: &Path, hosts: usize) {
+    use arrow::array::{ArrayRef, FixedSizeBinaryArray, StringArray};
+    use arrow::record_batch::RecordBatch;
+    use graphforge_api::CONSTRUCTION_NODE_SCHEMA;
+    use std::sync::Arc;
+
+    let graph = GraphForge::new(project.to_str()).unwrap();
+    let mut session = graph.begin_graph_construction(Default::default()).unwrap();
+    emit("SESSION", &session.session_uuid().to_string().into());
+    let ids = (0..hosts).map(node_uuid).collect::<Vec<_>>();
+    let batch = RecordBatch::try_new(
+        CONSTRUCTION_NODE_SCHEMA.clone(),
+        vec![
+            Arc::new(
+                FixedSizeBinaryArray::try_from_iter(ids.iter().map(|id| id.as_bytes().as_slice()))
+                    .unwrap(),
+            ) as ArrayRef,
+            Arc::new(StringArray::from(vec!["Host"; hosts])),
+        ],
+    )
+    .unwrap();
+    session.append_nodes("hosts", &batch).unwrap();
+    session.seal_and_publish().unwrap();
+    emit("COMMITTED", &session.session_uuid().to_string().into());
 }

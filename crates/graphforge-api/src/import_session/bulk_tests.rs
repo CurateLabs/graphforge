@@ -882,9 +882,10 @@ const STRICT_ONTOLOGY: &str = "ontology_id: bulk\nversion: \"1\"\nentity_types:\
 
 /// The bulk reader runs the same owner check as the staged path: under a strict
 /// ontology an undeclared entity or relation type is refused before storage
-/// sees the row, and the refused batch is the one counted as rejected. (A strict
-/// single-ontology project cannot open a construction at all, so the reader is
-/// driven directly.)
+/// sees the row, and the refused batch is the one counted as rejected. This
+/// drives the reader below the facade; the same refusal through the public
+/// `validate` is `a_strict_ontology_refuses_an_import_of_undeclared_types_at_validate`
+/// in `tests/bulk_builder_acceptance/ontology.rs`.
 #[test]
 fn the_bulk_reader_refuses_undeclared_types_under_a_strict_ontology() {
     let directory = tempfile::tempdir().unwrap();
