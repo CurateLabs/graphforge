@@ -1943,6 +1943,7 @@ name = "graphforge-filesystem"
 version = "0.6.0-rc.1"
 dependencies = [
  "fs4 1.1.0",
+ "libc",
  "rustix 1.1.5",
  "windows-sys 0.61.2",
 ]
