@@ -168,3 +168,50 @@ fn observe(file: &File, operation: impl FnOnce() -> io::Result<()>) -> io::Resul
     FSYNC_CALLS.fetch_add(1, Ordering::Relaxed);
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn barrier_on(file: &File) {
+        file.observed_sync_all().unwrap();
+    }
+
+    /// Audits nest and overlap: one ending clears nothing another still needs,
+    /// and the log is only cleared with the last, under the same lock that
+    /// starts them. The test shares the process-wide log with no other test of
+    /// this module.
+    #[test]
+    fn overlapping_audits_keep_their_logs_until_the_last_ends() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = File::create(directory.path().join("file")).unwrap();
+        let identity = crate::file_identity(&file).unwrap();
+        // Other tests of this process may sync their own files meanwhile.
+        let mine = |records: &[BarrierRecord]| {
+            records
+                .iter()
+                .filter(|record| record.identity == identity)
+                .count()
+        };
+        let first = BarrierAudit::start();
+        barrier_on(&file);
+        let second = BarrierAudit::start();
+        barrier_on(&file);
+        // The first audit, ending, leaves the second's records intact.
+        assert_eq!(mine(&first.finish()), 2);
+        barrier_on(&file);
+        let records = second.finish();
+        assert_eq!(mine(&records), 2);
+        assert!(
+            records
+                .iter()
+                .filter(|record| record.identity == identity)
+                .all(|record| !record.directory && record.birth.is_some())
+        );
+        // Nothing is recorded, or kept, once no audit is alive.
+        barrier_on(&file);
+        assert!(audit().log.is_empty());
+        // A later audit starts from an empty log.
+        assert_eq!(mine(&BarrierAudit::start().finish()), 0);
+    }
+}

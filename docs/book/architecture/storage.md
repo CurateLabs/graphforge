@@ -502,8 +502,9 @@ selecting either reason. Publication semantics are unchanged.
 Publication does not copy the encoded files. On unix it links the same inode to
 `graph-objects/sha256/<2>/<62>` and acknowledges the bucket directory, so each
 published byte is written once. Each encoded file was synced once by its producer
-before the checkpoint that lists it, so linking one the encoded ledger lists runs
-no second file barrier (ADR 0013 ordering unchanged). The encoded name
+before the checkpoint that pins the inventory, and the inventory records that
+(`seal_protocol`), so linking its objects runs no second file barrier; an
+inventory without the record is sealed at install (ADR 0013 ordering unchanged). The encoded name
 stays until the session's private tree is retired, so a publication that stopped
 at any point reruns by deduplicating against the existing object. Nothing reads
 the file back at install: exact length and XXH64 are checked on first read

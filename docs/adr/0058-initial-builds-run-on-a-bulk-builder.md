@@ -151,10 +151,12 @@ functions.
    before the checkpoint that pins the inventory and so lists it in the encoded
    ledger (the bulk installer seals each object it writes, in parallel). It is
    then linked into the content-addressed store; it is not copied or read back
-   at install, and linking an object the authenticated ledger lists runs no
-   second file barrier (the install counts a producer-sealed install). Objects
-   the ledger does not list, the copy where the filesystem cannot link, and
-   Windows keep the install barrier. Exact length and XXH64 are checked on
+   at install, and linking an object whose authenticated inventory records the
+   producer-seal protocol (`seal_protocol`, part of the digest that pins the
+   inventory) runs no second file barrier; the install counts a producer-sealed
+   install. An inventory an earlier binary wrote carries no record and is sealed
+   at install, as are objects the ledger does not list, the copy where the
+   filesystem cannot link, and Windows. Exact length and XXH64 are checked on
    first read (ADR 0049). Implemented by #1899 and #1965.
 4. **Initial builds only.** Appends keep the staged path. The builder does not
    read a parent generation, and the CSR is still published only by initial
