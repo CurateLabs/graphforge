@@ -626,9 +626,10 @@ mod a_parent_that_changed {
         );
         assert_eq!(killed.code, Some(KILLED), "{killed:?}");
         let session = killed.session();
-        // B was killed between writing the intent and recording it in the
-        // checkpoint: the intent is durable and the checkpoint still says
-        // sealed, which is the state recovery would move to `publishing`.
+        // B was killed after recording `publishing`. No failpoint sits between
+        // writing the intent and recording it, so the checkpoint is set back to
+        // `sealed` here to recreate that earlier window: a durable intent with a
+        // sealed checkpoint, the state recovery would move to `publishing`.
         let checkpoint = construction_root(&project).join("checkpoint.json");
         let recorded = fs::read_to_string(&checkpoint).unwrap();
         assert!(recorded.contains("\"publication_state\":\"publishing\""));
