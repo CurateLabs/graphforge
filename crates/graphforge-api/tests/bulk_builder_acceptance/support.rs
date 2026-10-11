@@ -240,14 +240,30 @@ pub fn limits() -> ImportSessionLimits {
     }
 }
 
-/// A forge whose construction runs on exactly `lanes` worker lanes.
+/// The most construction lanes this machine's instance budget admits.
+///
+/// An instance bounds Tokio workers plus DataFusion partitions by twice the
+/// machine's parallelism (at least four), and its compute threads, which are
+/// the construction lanes plus the one lane reserved for queries, by its Tokio
+/// workers. Lanes are forced through the public resource policy, so the
+/// largest count is `max(4, 2 * parallelism) - 2`: two on a one- or two-core
+/// runner, eight from five cores. There is no knob to raise the budget.
+pub fn max_lanes() -> usize {
+    let observed = std::thread::available_parallelism().map_or(1, usize::from);
+    (observed * 2).max(4) - 2
+}
+
+/// A forge whose construction runs on exactly `lanes` worker lanes. `lanes`
+/// must not exceed [`max_lanes`].
 pub fn forge_with_lanes(project: &Path, lanes: usize) -> GraphForge {
+    assert!(lanes <= max_lanes(), "{lanes} lanes exceed {}", max_lanes());
     GraphForge::new_with_options(
         project.to_str(),
         GraphForgeOptions {
             resource: ExecutionResourcePolicy {
                 mode: ResourcePolicyMode::Explicit,
                 tokio_worker_threads: Some(lanes + 1),
+                target_partitions: Some(1),
                 compute_threads: Some(lanes + 1),
                 construction_cpu_reserve: Some(1),
                 ..Default::default()

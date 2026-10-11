@@ -24,8 +24,13 @@ fn artifacts_are_byte_identical_across_forced_worker_counts() {
     assert!(spec.nodes / BATCH_ROWS > 16 && spec.edges / BATCH_ROWS > 16);
     let sources = Sources::write(&directory.path().join("input"), spec);
 
+    // One, two and, where the machine admits them, up to eight lanes. Two lanes
+    // already run competing decode tasks on every runner.
+    let mut counts = vec![1, 2, max_lanes().min(8)];
+    counts.dedup();
+    assert!(counts.len() >= 2, "{counts:?}");
     let mut builds = Vec::new();
-    for lanes in [1, 2, 8] {
+    for lanes in counts {
         let project = directory.path().join(format!("project-{lanes}"));
         std::fs::create_dir(&project).unwrap();
         let outcome = run(
