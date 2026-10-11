@@ -453,6 +453,7 @@ pub(crate) fn encode_bulk(
     let retain_nodes = plan.nodes.iter().any(|source| !source.property_free);
     let retain_edges = plan.edges.iter().any(|source| !source.property_free);
     passes.extend([meter.finish()]);
+    crate::graph_construction::construction_failpoint("bulk.after_plan");
 
     let scratch = scratch_plan
         .as_ref()

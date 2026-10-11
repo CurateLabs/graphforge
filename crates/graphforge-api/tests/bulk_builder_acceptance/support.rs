@@ -222,6 +222,14 @@ impl Sources {
         }
     }
 
+    /// Sources already written to `directory`.
+    pub fn at(directory: &Path) -> Self {
+        Self {
+            spec: Spec::graph(0, 0),
+            directory: directory.to_owned(),
+        }
+    }
+
     pub fn nodes(&self) -> PathBuf {
         self.directory.join("nodes.parquet")
     }
@@ -364,4 +372,36 @@ pub fn object_path(project: &Path, sha256: &str) -> PathBuf {
         .join("graph-objects/sha256")
         .join(&sha256[..2])
         .join(&sha256[2..])
+}
+
+/// `(path, bytes, sha256)` of every encoded artifact, except the ordinal
+/// receipt, which carries a random rebuild nonce (ADR 0038, ADR 0058).
+pub fn comparable_inventory(project: &Path) -> BTreeMap<String, (u64, String)> {
+    inventory(project)
+        .into_iter()
+        .filter(|artifact| artifact.path != "topology/uuid-membership/ordinal-v4-receipt.json")
+        .map(|artifact| (artifact.path, (artifact.bytes, artifact.sha256)))
+        .collect()
+}
+
+/// The paths at which two inventories differ, with both entries.
+pub fn inventory_differences(
+    left: &BTreeMap<String, (u64, String)>,
+    right: &BTreeMap<String, (u64, String)>,
+) -> Vec<String> {
+    let mut differences = Vec::new();
+    for path in left
+        .keys()
+        .chain(right.keys())
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        if left.get(path) != right.get(path) {
+            differences.push(format!(
+                "{path}: {:?} vs {:?}",
+                left.get(path),
+                right.get(path)
+            ));
+        }
+    }
+    differences
 }

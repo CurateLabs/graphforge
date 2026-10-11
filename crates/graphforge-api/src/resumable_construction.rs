@@ -357,7 +357,7 @@ impl GraphConstructionSession<'_> {
             .adjacency_visibility
             .write()
             .expect("adjacency visibility lock poisoned");
-        let target = derived_uuid(self.session_uuid, b"generation");
+        let target = target_generation_uuid(self.session_uuid);
         let transaction = derived_uuid(self.session_uuid, b"transaction");
         let outcome = if let Some(replay) =
             self.inner
@@ -710,6 +710,12 @@ pub(crate) fn canonical_property_columns(
         columns,
     )
     .map_err(|error| validation(error.to_string()))
+}
+
+/// The generation a construction session publishes: the one `CURRENT` names
+/// once its publication has swapped, whether or not the session knows it.
+pub(crate) fn target_generation_uuid(session: Uuid) -> Uuid {
+    derived_uuid(session, b"generation")
 }
 
 fn derived_uuid(operation: Uuid, domain: &[u8]) -> Uuid {
