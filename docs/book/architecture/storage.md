@@ -477,9 +477,10 @@ the staged path above, and the builder never reads a parent generation.
   fixed workspace exceeds the budget, node identities, endpoint resolution,
   degrees and CSR key ranges use bounded node-UUID range partitions on scratch
   (#1929).
-- **Route.** The route is chosen once by the first `validate` and recorded in
-  the import manifest (`build_route`). A later change in free memory cannot send
-  a started build to another route.
+- **Route.** The route is a function of the pinned parent: an empty project is an
+  initial build and runs the bulk builder, any other is an append and stages.
+  Nothing is recorded, so a later change in free memory cannot send a started
+  build to another route.
 
 Registered-source decoding has a separate pre-allocation envelope (#1918):
 Parquet and IPC inventory is admitted before native decoding, and source tasks
@@ -491,13 +492,9 @@ Pending, tracked under epic #1881:
 
 - **Scratch passes run one at a time (#1938).** Over-budget builds report
   `scratch_concurrency` 1 until partitions run concurrently.
-- **Retired machinery.** The staged initial-build code awaits deletion after
-  #1929. No new initial-build plan selects it; old staged sessions remain
-  readable until the retirement change lands.
 
-The historical `node_tables_exceed_budget` and `edge_properties_exceed_budget`
-manifest reasons remain readable; new plans use bounded scratch instead of
-selecting either reason. Publication semantics are unchanged.
+The staged pipeline serves appends only; no initial-build plan reaches it.
+Publication semantics are unchanged.
 
 Publication does not copy the encoded files. On unix it syncs each encoded file, links the same inode to
 `graph-objects/sha256/<2>/<62>`, and acknowledges the bucket directory, so each

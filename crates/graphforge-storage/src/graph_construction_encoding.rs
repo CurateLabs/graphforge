@@ -1385,9 +1385,9 @@ fn encode_edges(
     };
     let cache_window =
         graphforge_filesystem::cache_release_window_for_streams(4).map_err(storage)?;
-    if shape.edge_endpoints.is_none() {
+    let Some(endpoints_name) = shape.edge_endpoints.as_deref() else {
         return Err(storage("edge rows lack resolved endpoints"));
-    }
+    };
     let mut identities = FixedReader::<IDENTITY_WIDTH>::open(
         source,
         shape_outputs,
@@ -1401,18 +1401,12 @@ fn encode_edges(
         cache_window,
         Some(detail_codec),
     )?;
-    let mut endpoints = shape
-        .edge_endpoints
-        .as_deref()
-        .map(|endpoints_name| {
-            FixedReader::<RESOLVED_ENDPOINT_WIDTH>::open(
-                source,
-                shape_outputs,
-                endpoints_name,
-                cache_window,
-            )
-        })
-        .transpose()?;
+    let mut endpoints = FixedReader::<RESOLVED_ENDPOINT_WIDTH>::open(
+        source,
+        shape_outputs,
+        endpoints_name,
+        cache_window,
+    )?;
     let rows_per_window = budgets
         .max_batch_rows
         .min((budgets.max_batch_bytes / 192).max(1));
@@ -1438,34 +1432,27 @@ fn encode_edges(
                 if identity[..16] != uuid || detail[..16] != uuid || identity[17] != 0 {
                     return Err(storage("edge row/detail/identity/endpoint streams differ"));
                 }
-                // The node-index path fills both surrogates per window below.
-                let (source_id, target_id) = match endpoints.as_mut() {
-                    Some(endpoints) => {
-                        let (Some(source_endpoint), Some(target_endpoint)) =
-                            (endpoints.next()?, endpoints.next()?)
-                        else {
-                            return Err(storage("edge endpoint stream ended early"));
-                        };
-                        if source_endpoint[..16] != uuid
-                            || target_endpoint[..16] != uuid
-                            || source_endpoint[16] != 0
-                            || target_endpoint[16] != 1
-                        {
-                            return Err(storage(
-                                "edge row/detail/identity/endpoint streams differ",
-                            ));
-                        }
-                        let surrogate = |endpoint: [u8; RESOLVED_ENDPOINT_WIDTH]| {
-                            u64::from_be_bytes(
-                                endpoint[RESOLVED_SURROGATE_OFFSET..RESOLVED_ENDPOINT_WIDTH]
-                                    .try_into()
-                                    .expect("fixed"),
-                            )
-                        };
-                        (surrogate(source_endpoint), surrogate(target_endpoint))
-                    }
-                    None => (0, 0),
+                let (Some(source_endpoint), Some(target_endpoint)) =
+                    (endpoints.next()?, endpoints.next()?)
+                else {
+                    return Err(storage("edge endpoint stream ended early"));
                 };
+                if source_endpoint[..16] != uuid
+                    || target_endpoint[..16] != uuid
+                    || source_endpoint[16] != 0
+                    || target_endpoint[16] != 1
+                {
+                    return Err(storage("edge row/detail/identity/endpoint streams differ"));
+                }
+                let surrogate = |endpoint: [u8; RESOLVED_ENDPOINT_WIDTH]| {
+                    u64::from_be_bytes(
+                        endpoint[RESOLVED_SURROGATE_OFFSET..RESOLVED_ENDPOINT_WIDTH]
+                            .try_into()
+                            .expect("fixed"),
+                    )
+                };
+                let (source_id, target_id) =
+                    (surrogate(source_endpoint), surrogate(target_endpoint));
                 let route_len = usize::from(detail[48]);
                 let route = std::str::from_utf8(&detail[49..49 + route_len]).map_err(storage)?;
                 out_uuid.push(uuid);
@@ -1587,12 +1574,7 @@ fn encode_edges(
             }
         }
         if details.next()?.is_some()
-            || endpoints
-                .as_mut()
-                .map(FixedReader::next)
-                .transpose()?
-                .flatten()
-                .is_some()
+            || endpoints.next()?.is_some()
             || next_kind(&mut identities, 1)?.is_some()
         {
             return Err(storage("edge streams contain unconsumed rows"));
@@ -1610,14 +1592,11 @@ fn encode_edges(
         details.finish_and_account(authenticate, evidence),
         "edge detail",
     );
-    let encoded = match endpoints.as_mut() {
-        Some(endpoints) => combine_reader_cleanup(
-            encoded,
-            endpoints.finish_and_account(authenticate, evidence),
-            "edge endpoint",
-        ),
-        None => encoded,
-    };
+    let encoded = combine_reader_cleanup(
+        encoded,
+        endpoints.finish_and_account(authenticate, evidence),
+        "edge endpoint",
+    );
     encoded?;
     encode_edge_properties(
         source,

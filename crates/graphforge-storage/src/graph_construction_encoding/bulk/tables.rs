@@ -332,7 +332,7 @@ pub(super) fn collect_nodes(
 
 // ----------------------------------------------------------- node index
 
-/// Open-addressing index from node UUID to its dense rank (ADR 0057). The
+/// Open-addressing index from node UUID to its dense rank (ADR 0058). The
 /// table stores ranks; keys are compared against the sorted UUID array.
 pub(super) struct NodeIndex<'a> {
     uuids: &'a [[u8; 16]],

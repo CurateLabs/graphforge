@@ -62,7 +62,6 @@ Roadmap-only ADRs are not retained in this tree.
 | 0054 | [GraphForge component boundaries: Core, XYG, editor, and Hub](0054-product-component-boundaries.md) | `0054-product-component-boundaries.md` |
 | 0055 | [Research Versions are commits](0055-versions-are-commits.md) | `0055-versions-are-commits.md` |
 | 0056 | [Shaping stays serial within stages until one sub-phase dominates](0056-stage-internal-parallelism.md) | `0056-stage-internal-parallelism.md` |
-| 0057 | [Initial builds resolve edge endpoints by a node-surrogate index instead of two endpoint sorts](0057-endpoint-resolution-by-node-index.md) | `0057-endpoint-resolution-by-node-index.md` |
 | 0058 | [Initial builds run on a bulk builder derived from the published generation](0058-initial-builds-run-on-a-bulk-builder.md) | `0058-initial-builds-run-on-a-bulk-builder.md` |
 
 ## Superseded records
@@ -75,6 +74,7 @@ it; nothing here governs.
 | 0017 | [One version across core and adapters](superseded/0017-unified-release-version.md) | ADR 0036 | `superseded/0017-unified-release-version.md` |
 | 0033 | [Prereleases share one version with per-ecosystem spelling](superseded/0033-prerelease-version-identity.md) | ADR 0036 | `superseded/0033-prerelease-version-identity.md` |
 | 0034 | [One canonical release-candidate spelling, `-rc.N`](superseded/0034-canonical-release-candidate-spelling.md) | ADR 0036 | `superseded/0034-canonical-release-candidate-spelling.md` |
+| 0057 | [Initial builds resolve edge endpoints by a node-surrogate index instead of two endpoint sorts](superseded/0057-endpoint-resolution-by-node-index.md) | ADR 0058 | `superseded/0057-endpoint-resolution-by-node-index.md` |
 
 ## Numbering
 
