@@ -170,6 +170,8 @@ pub struct Conditions {
     pub project_failpoint: Option<String>,
     /// `GF_BULK_BUILD_MEMORY_BUDGET_BYTES`.
     pub budget: Option<u64>,
+    /// The session clock, if not [`CLOCK`].
+    pub clock: Option<i64>,
     /// Cap the address space, so a decode that ignores the budget aborts.
     pub address_space_kib: Option<u64>,
 }
@@ -186,7 +188,10 @@ pub fn run(spec: &ChildSpec, conditions: &Conditions) -> Outcome {
     command
         .arg(executable)
         .env(CHILD_ENV, serde_json::to_string(spec).unwrap())
-        .env("GF_TEST_SESSION_NOW_MICROS", CLOCK.to_string());
+        .env(
+            "GF_TEST_SESSION_NOW_MICROS",
+            conditions.clock.unwrap_or(CLOCK).to_string(),
+        );
     if let Some(name) = &conditions.construction_failpoint {
         command
             .env("GF_CONSTRUCTION_FAILPOINT_COOKIE", FAILPOINT_COOKIE)

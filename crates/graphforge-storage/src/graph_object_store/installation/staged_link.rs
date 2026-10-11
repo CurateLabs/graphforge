@@ -450,6 +450,41 @@ pub(in crate::graph_object_store) fn retire_unadmitted_link(
     retire_mismatched(lease, &bucket, digest, identity).map(|_| ())
 }
 
+/// Make the staged inode read-only and durable before it can gain its
+/// content-addressed name, with the one file barrier of this object (ADR 0058
+/// decision 3). A producer that already ran that barrier on this very inode,
+/// unchanged since, has made the object durable: running it again would be a
+/// second barrier for the same bytes. Across a restart the producer's witness
+/// is gone, so the barrier runs here. The bucket barrier after the link makes
+/// the content address durable before it can be referenced (ADR 0013).
+fn seal_staged(
+    cas: &super::super::CasRoot,
+    source: &CapturedEncodedArtifact<'_>,
+    staged_path: &std::path::Path,
+) -> Result<(std::io::Result<crate::durable_commit::SealedArtifact>, u64), GfError> {
+    seal_graph_object(source.source(), staged_path, &cas.diagnostic_root)?;
+    Ok(observe_barriers(|| {
+        let file = source.source().try_clone()?;
+        if crate::durable_commit::producer_seals::take(&file)? {
+            crate::durable_commit::SealedArtifact::adopt_producer_sealed(
+                source.parent().physical(),
+                source.name(),
+                file,
+                source.identity(),
+                cas.allocation.as_ref(),
+            )
+        } else {
+            crate::durable_commit::SealedArtifact::seal_recoverable_existing(
+                source.parent().physical(),
+                source.name(),
+                file,
+                source.identity(),
+                cas.allocation.as_ref(),
+            )
+        }
+    }))
+}
+
 fn link_staged(
     lease: &GraphObjectPublicationLease,
     source: &CapturedEncodedArtifact<'_>,
@@ -471,35 +506,7 @@ fn link_staged(
         ));
     }
     let staged_path = source.parent().path().join(source.name());
-    // Objects are immutable. Make the exact inode read-only before it can gain
-    // the content-addressed name, and make its bytes durable with the one file
-    // barrier of this object (ADR 0058 decision 3). A producer that already
-    // ran that barrier on this very inode, unchanged since, has made the
-    // object durable: running it again would be a second barrier for the same
-    // bytes. Across a restart the producer's witness is gone, so the barrier
-    // runs here. The bucket barrier below makes the content address durable
-    // before it can be referenced (ADR 0013).
-    seal_graph_object(source.source(), &staged_path, &cas.diagnostic_root)?;
-    let (sealed, file_fsyncs) = observe_barriers(|| {
-        let file = source.source().try_clone()?;
-        if crate::durable_commit::producer_seals::take(&file)? {
-            crate::durable_commit::SealedArtifact::adopt_producer_sealed(
-                source.parent().physical(),
-                source.name(),
-                file,
-                source.identity(),
-                cas.allocation.as_ref(),
-            )
-        } else {
-            crate::durable_commit::SealedArtifact::seal_recoverable_existing(
-                source.parent().physical(),
-                source.name(),
-                file,
-                source.identity(),
-                cas.allocation.as_ref(),
-            )
-        }
-    });
+    let (sealed, file_fsyncs) = seal_staged(cas, source, &staged_path)?;
     let staged =
         sealed.map_err(|error| storage("seal staged encoded source", &staged_path, error))?;
     construction_failpoint(&format!("cas.install.after_object_sync.{relative}"));

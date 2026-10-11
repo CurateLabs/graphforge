@@ -1,7 +1,7 @@
 //! Published artifacts are byte-identical across forced worker counts, with
 //! enough batches per kind that decode tasks compete (ADR 0058; #1881).
 
-use super::child::{ChildSpec, Conditions, run, spec_for};
+use super::child::{CLOCK, ChildSpec, Conditions, run, spec_for};
 use super::support::*;
 
 /// More than sixteen batches per kind, in several row groups, so a decode task
@@ -49,6 +49,27 @@ fn artifacts_are_byte_identical_across_forced_worker_counts() {
         );
         builds.push((lanes, outcome.inventory()));
     }
+    // Negative control: the comparison sees a difference when there is one. A
+    // build under another session clock stamps different bytes into the edge
+    // windows and the adjacency manifest.
+    let control = directory.path().join("project-clock");
+    std::fs::create_dir(&control).unwrap();
+    let other_clock = run(
+        &ChildSpec {
+            lanes: Some(2),
+            ..spec_for(&control, &sources)
+        },
+        &Conditions {
+            clock: Some(CLOCK + 1),
+            ..Conditions::default()
+        },
+    );
+    assert!(other_clock.succeeded(), "{other_clock:?}");
+    assert!(
+        !inventory_differences(&builds[0].1, &other_clock.inventory()).is_empty(),
+        "builds under different clocks published the same bytes"
+    );
+
     let (first_lanes, first) = &builds[0];
     assert!(first.len() > 30, "{}", first.len());
     for (lanes, inventory) in &builds[1..] {

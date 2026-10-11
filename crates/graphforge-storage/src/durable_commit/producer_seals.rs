@@ -23,7 +23,10 @@ type Key = (u64, [u8; 16]);
 /// recorded and their installs run their own barrier.
 const CAPACITY: usize = 1 << 20;
 
-static SEALED: Mutex<Option<HashMap<Key, (u64, Option<SystemTime>)>>> = Mutex::new(None);
+/// Length and modification time at the producer's barrier.
+type Sealed = (u64, Option<SystemTime>);
+
+static SEALED: Mutex<Option<HashMap<Key, Sealed>>> = Mutex::new(None);
 
 fn key(file: &File) -> io::Result<Key> {
     let identity = graphforge_filesystem::file_identity(file)?;
