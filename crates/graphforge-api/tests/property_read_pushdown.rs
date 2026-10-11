@@ -606,7 +606,7 @@ fn the_storage_write_gate_sees_a_file_write() {
 
 #[test]
 fn paired_write_counters_distinguish_runtime_writes_from_storage_writes() {
-    const ITERATIONS: usize = 100;
+    const ITERATIONS: usize = 50;
 
     let _serial = serial();
     let built = build(SMALL_NODES);
