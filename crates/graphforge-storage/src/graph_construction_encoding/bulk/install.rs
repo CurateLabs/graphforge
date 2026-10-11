@@ -1,5 +1,6 @@
 //! Parallel artifact installation: every published byte is written once, and
-//! SHA-256 and XXH64 are computed from the bytes about to be written.
+//! SHA-256 and XXH64 are computed from the bytes about to be written. Each
+//! object is made durable here, in parallel, by its producer.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -67,6 +68,12 @@ impl<'a> Installer<'a> {
         directory
             .observe_file(OsStr::new(name), &file)
             .map_err(storage)?;
+        // The producer's barrier is this object's one file barrier (ADR 0058
+        // decision 3). It runs here, before the checkpoint that pins the
+        // inventory and so lists this file in the encoded ledger, so a validated
+        // session is durable in any process that commits it. The install into
+        // the object store links this inode without a second barrier.
+        directory.seal_file(&file).map_err(storage)?;
         self.written
             .fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
         self.artifacts
