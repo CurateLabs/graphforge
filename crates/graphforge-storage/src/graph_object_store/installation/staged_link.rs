@@ -450,39 +450,31 @@ pub(in crate::graph_object_store) fn retire_unadmitted_link(
     retire_mismatched(lease, &bucket, digest, identity).map(|_| ())
 }
 
-fn link_staged(
-    lease: &GraphObjectPublicationLease,
+/// Make the staged inode read-only and durable before it can gain its
+/// content-addressed name, with the one file barrier of this object (ADR 0058
+/// decision 3). The authenticated inventory the source was admitted from may
+/// record, durably and under the digest that pinned it, that every artifact it
+/// lists was synced by its producer before the checkpoint (`seal_protocol`);
+/// `CapturedEncodedInventory::open` has also refused an inode the restored
+/// ledger does not list. Then linking runs no barrier of its own, in any
+/// process. An inventory without that record (written by an earlier binary,
+/// whose objects may be unsynced) is sealed here, as before. The bucket barrier
+/// after the link makes the content address durable before it can be
+/// referenced (ADR 0013). Returns whether the producer's barrier stood in, the
+/// sealed temporary, and the barriers that ran.
+fn seal_staged(
+    cas: &super::super::CasRoot,
     source: &CapturedEncodedArtifact<'_>,
-    bucket: &StableDirectory,
-    authentication: ObjectAuthentication,
-) -> Result<Linked, GfError> {
-    let cas = &lease.cas;
-    let digest = source.content_sha256();
-    let relative = source.relative_path();
-    // Linking needs the staged name and the object store on one filesystem.
-    // ADR 0013 puts the project on one admitted volume, so this is the normal
-    // case; the exception is reported to the caller instead of failing.
-    if source.parent().identity().volume_serial != bucket.identity().volume_serial {
-        return Ok(Linked::CrossDevice { file_fsyncs: 0 });
-    }
-    if staged_links(source)? != 1 {
-        return Err(validation(
-            "staged encoded source has an alias that is not its content address",
-        ));
-    }
-    let staged_path = source.parent().path().join(source.name());
-    // Objects are immutable: make the exact inode read-only before it can gain
-    // the content-addressed name, and make its bytes durable with the one file
-    // barrier of this object (ADR 0058 decision 3). The authenticated
-    // inventory this source was admitted from may record, durably and under
-    // the digest that pinned it, that every artifact it lists was synced by its
-    // producer before the checkpoint (`seal_protocol`); `open` has also
-    // refused an inode the restored ledger does not list. Then linking runs no
-    // barrier of its own, in any process. An inventory without that record
-    // (written by an earlier binary, whose objects may be unsynced) is sealed
-    // here, as before. The bucket barrier after the link makes the content
-    // address durable before it can be referenced (ADR 0013).
-    seal_graph_object(source.source(), &staged_path, &cas.diagnostic_root)?;
+    staged_path: &std::path::Path,
+) -> Result<
+    (
+        bool,
+        std::io::Result<crate::durable_commit::SealedArtifact>,
+        u64,
+    ),
+    GfError,
+> {
+    seal_graph_object(source.source(), staged_path, &cas.diagnostic_root)?;
     let producer_sealed = source.producer_sealed();
     let (sealed, file_fsyncs) = observe_barriers(|| {
         let file = source.source().try_clone()?;
@@ -504,6 +496,31 @@ fn link_staged(
             )
         }
     });
+    Ok((producer_sealed, sealed, file_fsyncs))
+}
+
+fn link_staged(
+    lease: &GraphObjectPublicationLease,
+    source: &CapturedEncodedArtifact<'_>,
+    bucket: &StableDirectory,
+    authentication: ObjectAuthentication,
+) -> Result<Linked, GfError> {
+    let cas = &lease.cas;
+    let digest = source.content_sha256();
+    let relative = source.relative_path();
+    // Linking needs the staged name and the object store on one filesystem.
+    // ADR 0013 puts the project on one admitted volume, so this is the normal
+    // case; the exception is reported to the caller instead of failing.
+    if source.parent().identity().volume_serial != bucket.identity().volume_serial {
+        return Ok(Linked::CrossDevice { file_fsyncs: 0 });
+    }
+    if staged_links(source)? != 1 {
+        return Err(validation(
+            "staged encoded source has an alias that is not its content address",
+        ));
+    }
+    let staged_path = source.parent().path().join(source.name());
+    let (producer_sealed, sealed, file_fsyncs) = seal_staged(cas, source, &staged_path)?;
     let staged =
         sealed.map_err(|error| storage("seal staged encoded source", &staged_path, error))?;
     construction_failpoint(&format!("cas.install.after_object_sync.{relative}"));
