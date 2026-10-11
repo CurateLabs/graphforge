@@ -19,6 +19,10 @@ pub(crate) struct CapturedEncodedInventory<'a> {
     root: &'a StableDirectory,
     artifacts: &'a [crate::graph_construction_encoding::ConstructionEncodedArtifact],
     active_identities: &'a std::collections::BTreeMap<String, u64>,
+    /// The authenticated inventory records that every artifact it lists was
+    /// synced by its producer before the checkpoint that pinned it
+    /// (`seal_protocol`).
+    producer_sealed: bool,
 }
 
 /// One non-forgeable, retained source from the admitted inventory.
@@ -29,6 +33,7 @@ pub(crate) struct CapturedEncodedArtifact<'a> {
     file: std::fs::File,
     identity: graphforge_filesystem::FileIdentity,
     artifact: &'a crate::graph_construction_encoding::ConstructionEncodedArtifact,
+    producer_sealed: bool,
 }
 
 impl CapturedEncodedInventory<'_> {
@@ -74,6 +79,7 @@ impl CapturedEncodedInventory<'_> {
             file,
             identity,
             artifact,
+            producer_sealed: self.producer_sealed,
         };
         source.revalidate()?;
         Ok(source)
@@ -81,6 +87,12 @@ impl CapturedEncodedInventory<'_> {
 }
 
 impl CapturedEncodedArtifact<'_> {
+    /// Whether the authenticated inventory this artifact was admitted from
+    /// records that its producer synced it before the inventory was pinned.
+    #[cfg(unix)]
+    pub(crate) fn producer_sealed(&self) -> bool {
+        self.producer_sealed
+    }
     pub(crate) fn content_sha256(&self) -> &str {
         &self.artifact.sha256
     }
@@ -675,6 +687,8 @@ impl GraphConstructionSession {
                 .checkpoint
                 .evidence
                 .storage_active_identity_allocated_bytes,
+            producer_sealed: encoding.seal_protocol
+                == Some(crate::graph_construction_encoding::PRODUCER_SEAL_PROTOCOL),
         };
         let (ordinal_tombstones, ordinal_io) =
             ordinal_publication_tombstones(&parent, &manifest_state, &encoded_directory, encoding)?;

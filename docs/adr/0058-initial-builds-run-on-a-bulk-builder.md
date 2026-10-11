@@ -145,11 +145,18 @@ functions.
    is provenance: a rewrite that preserves the whole pin is not detected.
    Sessions that copied sources under an earlier version still resume, validate
    and append. Implemented by #1898.
-3. **Each published object is written once.** The encoded file is hashed while
-   it is written, synced, and linked into the content-addressed store; it is
-   not copied or read back at install (a copy remains where the filesystem
-   cannot link, and on Windows). Exact length and XXH64 are checked on first
-   read (ADR 0049). Implemented by #1899.
+3. **Each published object is written once, with one file barrier.** The
+   encoded file is hashed while it is written, and its producer syncs it, once,
+   before the checkpoint that pins the inventory and so lists it in the encoded
+   ledger (the bulk installer seals each object it writes, in parallel). It is
+   then linked into the content-addressed store; it is not copied or read back
+   at install, and linking an object whose authenticated inventory records the
+   producer-seal protocol (`seal_protocol`, part of the digest that pins the
+   inventory) runs no second file barrier; the install counts a producer-sealed
+   install. An inventory an earlier binary wrote carries no record and is sealed
+   at install, as are objects the ledger does not list, the copy where the
+   filesystem cannot link, and Windows. Exact length and XXH64 are checked on
+   first read (ADR 0049). Implemented by #1899 and #1965.
 4. **Initial builds only.** Appends keep the staged path. The builder does not
    read a parent generation, and the CSR is still published only by initial
    builds. Appends can adopt the builder later as a delta build followed by a

@@ -823,6 +823,11 @@ pub struct GraphObjectInstallEvidence {
     pub fsync_calls: u64,
     /// Completed synchronization of the temporary payload file.
     pub file_fsync_calls: u64,
+    /// Linked installs whose payload barrier was its producer's: the encoder
+    /// made the file durable before the checkpoint that lists it, so the link
+    /// runs none of its own. Each attempted install has either this or a file
+    /// barrier of its own.
+    pub producer_sealed_installs: u64,
     /// Completed synchronization of object and temporary namespaces.
     pub directory_fsync_calls: u64,
     /// Digest buckets this installation created. Each is made durable by one
@@ -846,6 +851,10 @@ pub struct GraphObjectIoTotals {
     pub file_fsync_calls: u64,
     /// Completed namespace synchronization operations.
     pub directory_fsync_calls: u64,
+    /// Linked installs whose file barrier was their producer's (see
+    /// [`GraphObjectInstallEvidence::producer_sealed_installs`]).
+    #[serde(default)]
+    pub producer_sealed_installs: u64,
     /// Objects newly installed; shared objects are charged on first install only.
     pub installed_objects: u64,
     /// Completed temporary-object installation attempts, including concurrent losers.
@@ -880,6 +889,7 @@ impl GraphObjectIoTotals {
             write_calls: evidence.write_calls,
             file_fsync_calls: evidence.file_fsync_calls,
             directory_fsync_calls: evidence.directory_fsync_calls,
+            producer_sealed_installs: evidence.producer_sealed_installs,
             installed_objects: u64::from(!evidence.reused_existing),
             install_attempts: u64::from(evidence.attempted_install),
             reused_objects: u64::from(evidence.reused_existing),
@@ -904,6 +914,10 @@ impl GraphObjectIoTotals {
             (&mut self.write_calls, other.write_calls),
             (&mut self.file_fsync_calls, other.file_fsync_calls),
             (&mut self.directory_fsync_calls, other.directory_fsync_calls),
+            (
+                &mut self.producer_sealed_installs,
+                other.producer_sealed_installs,
+            ),
             (&mut self.installed_objects, other.installed_objects),
             (&mut self.install_attempts, other.install_attempts),
             (&mut self.reused_objects, other.reused_objects),

@@ -12,6 +12,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 mod cache_io;
+#[allow(unsafe_code)]
+mod inode_generation;
 mod platform;
 #[cfg(windows)]
 #[allow(unsafe_code)]
@@ -28,6 +30,7 @@ pub use cache_io::FileCacheReleasingReader;
 pub use cache_io::cache_release_window_for_streams;
 pub use cache_io::release_file_cache;
 pub use cache_io::validate_cache_release_operation_windows;
+pub use inode_generation::{admitted_filesystem_class, inode_generation};
 use platform::create_private_directory_platform;
 use platform::file_identity_platform;
 use platform::file_link_count_platform;

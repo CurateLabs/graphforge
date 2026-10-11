@@ -25,6 +25,7 @@ fn captured_encoded_copy_and_known_reuse_do_not_repeat_payload_sha_but_unknown_c
             .checkpoint
             .evidence
             .storage_active_identity_allocated_bytes,
+        producer_sealed: encoded.seal_protocol.is_some(),
     };
     let source = inventory
         .open(Path::new("topology/generation.json"))
@@ -120,6 +121,7 @@ fn captured_encoded_copy_refuses_valid_same_inode_mutate_read_restore_and_preser
             .checkpoint
             .evidence
             .storage_active_identity_allocated_bytes,
+        producer_sealed: encoded.seal_protocol.is_some(),
     };
     let source = inventory
         .open(Path::new("topology/generation.json"))
@@ -169,6 +171,7 @@ fn known_captured_cas_inode_refuses_valid_same_length_corruption() {
             .checkpoint
             .evidence
             .storage_active_identity_allocated_bytes,
+        producer_sealed: encoded.seal_protocol.is_some(),
     };
     let source = inventory
         .open(Path::new("topology/generation.json"))

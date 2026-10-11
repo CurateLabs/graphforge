@@ -82,6 +82,14 @@ mod seam_spike;
 const ENCODED_ROOT: &str = "encoded-v1";
 const INVENTORY: &str = "inventory.json";
 const ENCODING_FORMAT_VERSION: u32 = 2;
+
+/// The durability protocol under which a pinned inventory's artifacts were
+/// made durable: every listed object was synced by its producer, once, before
+/// the checkpoint that pins the inventory (ADR 0058 decision 3). Only this
+/// encoder writes it. An inventory an earlier binary wrote carries none, and
+/// its objects may be unsynced, so the install into the object store seals
+/// them itself.
+pub(crate) const PRODUCER_SEAL_PROTOCOL: u32 = 1;
 const ENCODING_INTENT: &str = "encoding-intent.json";
 use crate::construction_record_layout::{
     BASE_IDENTITY_WIDTH as IDENTITY_WIDTH, IDENTITY_SURROGATE_OFFSET, RESOLVED_ENDPOINT_WIDTH,
@@ -461,6 +469,13 @@ pub struct GraphConstructionEncoding {
     pub artifacts: Vec<ConstructionEncodedArtifact>,
     /// Measured bounded work.
     pub evidence: GraphConstructionEncodingEvidence,
+    /// The durability protocol under which every listed artifact was synced by
+    /// its producer before this inventory was pinned. Part of the digest that
+    /// authenticates the inventory, so it cannot be added after the fact.
+    /// Absent from an inventory an earlier binary wrote, whose artifacts may be
+    /// unsynced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seal_protocol: Option<u32>,
     /// Work performed by the invocation that returned this inventory.
     ///
     /// This delta is not part of durable inventory authority.
@@ -814,6 +829,7 @@ pub(crate) fn encode(
         shape_authority_sha256: shape_authority_sha256.to_owned(),
         artifacts,
         evidence,
+        seal_protocol: Some(PRODUCER_SEAL_PROTOCOL),
         invocation: GraphConstructionEncodingInvocationEvidence::default(),
     };
     install_json(&output, INVENTORY, &completed)?;

@@ -484,7 +484,7 @@ impl SealedArtifact {
         expected: FileIdentity,
         allocation: Option<&StorageAllocationOperation>,
     ) -> io::Result<Self> {
-        Self::seal_existing_inner(parent, temporary, file, expected, allocation, true)
+        Self::seal_existing_inner(parent, temporary, file, expected, allocation, true, true)
     }
 
     /// A durable intent owns this input, including a failed sealing attempt.
@@ -502,6 +502,30 @@ impl SealedArtifact {
             expected,
             allocation,
             false,
+            true,
+        )
+    }
+
+    /// Adopt a privately owned temporary whose producer already ran the file's
+    /// durability barrier, and run none. The temporary's identity and link
+    /// count are checked as for [`Self::seal_recoverable_existing`]. The caller
+    /// owns the proof that the producer sealed this exact descriptor after its
+    /// last write: this establishes no durability itself.
+    pub fn adopt_producer_sealed(
+        parent: &StableDirectory,
+        temporary: &OsStr,
+        file: File,
+        expected: FileIdentity,
+        allocation: Option<&StorageAllocationOperation>,
+    ) -> io::Result<Self> {
+        Self::seal_existing_inner(
+            Arc::new(parent.try_clone()?),
+            temporary,
+            file,
+            expected,
+            allocation,
+            false,
+            false,
         )
     }
 
@@ -512,6 +536,7 @@ impl SealedArtifact {
         expected: FileIdentity,
         allocation: Option<&StorageAllocationOperation>,
         cleanup: bool,
+        barrier: bool,
     ) -> io::Result<Self> {
         let staged = Self {
             parent,
@@ -532,7 +557,11 @@ impl SealedArtifact {
                 "staged temporary identity changed before sealing",
             ));
         }
-        let sealed = seal_file(staged.file());
+        let sealed = if barrier {
+            seal_file(staged.file())
+        } else {
+            Ok(())
+        };
         let observed = allocation.map_or(Ok(()), |a| {
             a.replace_file_at(&staged.parent.path().join(temporary), staged.file())
         });

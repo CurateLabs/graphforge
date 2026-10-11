@@ -53,6 +53,16 @@ impl Staged {
                 .checkpoint
                 .evidence
                 .storage_active_identity_allocated_bytes,
+            producer_sealed: self.encoded.seal_protocol.is_some(),
+        }
+    }
+
+    /// The same inventory as an earlier binary wrote it: without the record
+    /// that its producers synced the objects.
+    fn inventory_without_seal_record(&self) -> CapturedEncodedInventory<'_> {
+        CapturedEncodedInventory {
+            producer_sealed: false,
+            ..self.inventory()
         }
     }
 
@@ -118,6 +128,21 @@ fn sha256_hex(bytes: &[u8]) -> String {
     super::super::super::sha256(bytes)
 }
 
+/// An inventory without the seal record (an earlier binary wrote it, and its
+/// objects may be unsynced) is sealed when installed: one file barrier of its
+/// own, and no producer-sealed install.
+#[test]
+fn an_inventory_without_the_seal_record_is_sealed_when_installed() {
+    let staged = staged(15_006);
+    let inventory = staged.inventory_without_seal_record();
+    let source = inventory.open(Path::new(ARTIFACT)).unwrap();
+    let lease = crate::begin_graph_object_publication(staged.root.path()).unwrap();
+    let evidence = install(&lease, &source).unwrap();
+    assert!(!evidence.reused_existing);
+    assert_eq!(evidence.file_fsync_calls, 1);
+    assert_eq!(evidence.producer_sealed_installs, 0);
+}
+
 #[test]
 fn installed_object_is_the_staged_inode_and_nothing_is_written() {
     let staged = staged(15_001);
@@ -142,10 +167,13 @@ fn installed_object_is_the_staged_inode_and_nothing_is_written() {
     assert_eq!(observed.checksum_bytes, 0);
     assert_eq!(evidence.bytes_installed, source.bytes());
     assert_eq!(evidence.content_xxh64, Some(source.checksum()));
-    // One payload barrier and one namespace barrier for the address (ADR 0013),
-    // plus the `sha256` barrier that makes the bucket this object created
+    // The encoder ran this object's one payload barrier before the ledger that
+    // lists it was pinned (ADR 0058 decision 3), so linking runs none and counts
+    // a producer-sealed install. One namespace barrier for the address (ADR
+    // 0013), plus the `sha256` barrier that makes the bucket this object created
     // durable.
-    assert_eq!(evidence.file_fsync_calls, 1);
+    assert_eq!(evidence.file_fsync_calls, 0);
+    assert_eq!(evidence.producer_sealed_installs, 1);
     assert_eq!(evidence.bucket_creations, 1);
     assert_eq!(
         evidence.directory_fsync_calls,
@@ -328,8 +356,10 @@ fn mis_addressed_existing_object_is_replaced_by_the_correct_install() {
             assert_eq!(observed.checksum_bytes, sha_bytes + checksum_only_bytes);
             assert_eq!(evidence.content_xxh64, Some(source.checksum()));
             // One barrier for the removal of the bad entry, one for the new one.
+            // The encoder ran the payload barrier; linking runs no second.
             assert_eq!(evidence.directory_fsync_calls, 2);
-            assert_eq!(evidence.fsync_calls, 3);
+            assert_eq!(evidence.fsync_calls, 2);
+            assert_eq!(evidence.producer_sealed_installs, 1);
             assert_eq!(std::fs::read(staged.object_path()).unwrap(), bytes);
             object_store(staged.root.path());
             assert_eq!(staged.current(), current);
@@ -631,6 +661,7 @@ fn retry_after_a_crash_retires_the_rewritten_staged_inode() {
             .checkpoint
             .evidence
             .storage_active_identity_allocated_bytes,
+        producer_sealed: encoding.seal_protocol.is_some(),
     };
     let source = inventory.open(Path::new(ARTIFACT)).unwrap();
     let good = std::fs::read(&address).unwrap();

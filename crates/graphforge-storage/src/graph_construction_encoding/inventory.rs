@@ -61,6 +61,9 @@ fn validate_inventory_invariants(inventory: &GraphConstructionEncoding) -> Resul
             .artifacts
             .windows(2)
             .any(|pair| pair[0].path >= pair[1].path)
+        || inventory
+            .seal_protocol
+            .is_some_and(|protocol| protocol != super::PRODUCER_SEAL_PROTOCOL)
         || inventory.evidence.prior_topology_rows_decoded != 0
         || inventory.evidence.retained_topology_bytes_copied != 0
     {

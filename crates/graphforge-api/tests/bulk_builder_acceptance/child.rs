@@ -43,6 +43,12 @@ pub struct ChildSpec {
     /// Report the bytes the process wrote while validating, from the
     /// construction region counters of this process alone.
     pub measure: bool,
+    /// Record every barrier the process makes and report, per published
+    /// object, the file barriers its inode received (`BARRIERS`).
+    pub audit: bool,
+    /// Exit abruptly as soon as validation has finished, as a process lost
+    /// before `commit` does. The exit status is [`KILLED`].
+    pub abandon_after_validate: bool,
 }
 
 /// What a child printed, by milestone.
@@ -72,6 +78,10 @@ impl Outcome {
 
     pub fn inventory(&self) -> BTreeMap<String, (u64, String)> {
         serde_json::from_value(self.validated()["inventory"].clone()).unwrap()
+    }
+
+    pub fn barriers(&self) -> &serde_json::Value {
+        &self.lines["BARRIERS"]
     }
 
     pub fn regions(&self) -> &serde_json::Value {
@@ -124,6 +134,9 @@ fn child() {
     emit("SESSION", &session.session_uuid().to_string().into());
     let (phase, _) = session.status();
     emit("PHASE", &format!("{phase:?}").into());
+    let audit = spec
+        .audit
+        .then(graphforge_filesystem::observation::BarrierAudit::start);
     if phase == ImportPhase::Open {
         let capture = spec
             .measure
@@ -182,6 +195,15 @@ fn child() {
             }),
         );
     }
+    if spec.abandon_after_validate {
+        if let Some(audit) = audit {
+            emit(
+                "BARRIERS",
+                &barrier_report(&spec.project, audit.finish(), false),
+            );
+        }
+        std::process::exit(KILLED);
+    }
     if spec.commit {
         match session.commit(&graph, None) {
             Ok(generation) => emit("COMMITTED", &generation.to_string().into()),
@@ -191,10 +213,109 @@ fn child() {
             }
         }
     }
+    if let Some(audit) = audit {
+        emit(
+            "BARRIERS",
+            &barrier_report(&spec.project, audit.finish(), spec.commit),
+        );
+    }
     emit(
         "DONE",
         &serde_json::json!({"peak_rss_bytes": status_kib("VmHWM:") * 1024}),
     );
+}
+
+/// One file for the whole life of the process: an inode number and the
+/// generation number the filesystem gave that inode. A filesystem reuses the
+/// number of a deleted file but not its generation, so the number alone would
+/// credit a deleted temporary's barriers to a later file, and a creation time,
+/// which repeats within a coarse timer tick, would not separate them either.
+type Inode = (u64, [u8; 16], u32);
+
+/// The inode behind `path`. A filesystem that reports no generation number
+/// cannot be audited, and says so rather than falling back to the bare number.
+fn inode(path: &Path) -> Inode {
+    let file = std::fs::File::open(path).unwrap();
+    let identity = graphforge_filesystem::file_identity(&file).unwrap();
+    let generation = graphforge_filesystem::inode_generation(&file).unwrap_or_else(|error| {
+        panic!(
+            "no inode generation for {}: {error}; barriers cannot be attributed to inodes",
+            path.display()
+        )
+    });
+    (identity.volume_serial, identity.file_id, generation)
+}
+
+/// What the barriers this process made reached. Each published object (one per
+/// distinct digest) is found by inode: in the object store once committed,
+/// else under the session's encoded tree, where it is the same inode.
+fn barrier_report(
+    project: &Path,
+    log: graphforge_filesystem::observation::BarrierLog,
+    committed: bool,
+) -> serde_json::Value {
+    let mut per_inode: BTreeMap<Inode, Vec<(usize, bool)>> = BTreeMap::new();
+    for (sequence, record) in log.records.iter().enumerate() {
+        per_inode
+            .entry((
+                record.identity.volume_serial,
+                record.identity.file_id,
+                record.generation,
+            ))
+            .or_default()
+            .push((sequence, record.directory));
+    }
+    let sequences = |inode: Inode, directory: bool| -> Vec<usize> {
+        per_inode.get(&inode).map_or_else(Vec::new, |reached| {
+            reached
+                .iter()
+                .filter(|(_, is_directory)| *is_directory == directory)
+                .map(|(sequence, _)| *sequence)
+                .collect()
+        })
+    };
+    let mut published = inventory(project);
+    published.sort_by(|a, b| a.sha256.cmp(&b.sha256));
+    published.dedup_by(|a, b| a.sha256 == b.sha256);
+    let tree = construction_root(project).join("encoded-v1/graph");
+    let mut objects = BTreeMap::new();
+    let mut last_object = None::<usize>;
+    let mut buckets_acknowledged = true;
+    for artifact in &published {
+        let object = object_path(project, &artifact.sha256);
+        let path = if committed {
+            object.clone()
+        } else {
+            tree.join(&artifact.path)
+        };
+        let files = sequences(inode(&path), false);
+        objects.insert(artifact.path.clone(), files.len());
+        last_object = last_object.max(files.iter().max().copied());
+        if committed
+            && let Some(last) = files.iter().max()
+            && !sequences(inode(object.parent().unwrap()), true)
+                .iter()
+                .any(|sequence| sequence > last)
+        {
+            buckets_acknowledged = false;
+        }
+    }
+    let current = committed.then(|| sequences(inode(&project.join("CURRENT")), false));
+    serde_json::json!({
+        // Barriers that reached a file the audit could not name; a correct run
+        // has none, and a test asserts so.
+        "unattributed": log.unattributed,
+        "objects": objects,
+        "buckets_acknowledged": buckets_acknowledged,
+        "current_file_barriers": current.as_ref().map(Vec::len),
+        "objects_before_current": current
+            .as_ref()
+            .and_then(|current| current.first())
+            .map(|current| last_object.is_none_or(|last| last < *current)),
+        "root_synced_after_current": current.as_ref().and_then(|current| current.first()).map(|current| {
+            sequences(inode(project), true).iter().any(|sequence| sequence > current)
+        }),
+    })
 }
 
 /// Environment of a child: which failpoints it dies at and what memory it has.
@@ -251,6 +372,7 @@ pub fn run(spec: &ChildSpec, conditions: &Conditions) -> Outcome {
             "SESSION",
             "PHASE",
             "REGIONS",
+            "BARRIERS",
             "VALIDATED",
             "REFUSED",
             "COMMITTED",

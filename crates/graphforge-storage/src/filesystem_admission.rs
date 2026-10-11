@@ -995,12 +995,10 @@ fn classify_supported_local_volume_platform(
 ) -> Result<String, GfError> {
     let stat = rustix::fs::fstatfs(parent.handle())
         .map_err(|_| unsupported("CLASSIFY", "native_volume_query_failed"))?;
-    let class = match u64::try_from(stat.f_type).unwrap_or_default() {
-        0xEF53 => "ext",
-        0x5846_5342 => "xfs",
-        0x9123_683E => "btrfs",
-        _ => return Err(unsupported("CLASSIFY", "filesystem_class_unproven")),
-    };
+    let class = graphforge_filesystem::admitted_filesystem_class(
+        u64::try_from(stat.f_type).unwrap_or_default(),
+    )
+    .ok_or_else(|| unsupported("CLASSIFY", "filesystem_class_unproven"))?;
     let vfs = rustix::fs::fstatvfs(parent.handle())
         .map_err(|_| unsupported("CLASSIFY", "native_volume_query_failed"))?;
     if vfs.f_flag.contains(rustix::fs::StatVfsMountFlags::RDONLY) {
