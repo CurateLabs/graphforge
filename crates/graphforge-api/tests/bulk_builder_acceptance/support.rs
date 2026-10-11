@@ -98,7 +98,7 @@ pub fn edge_uuid(index: usize) -> Uuid {
     v7(1_000_000_000 + index as u128)
 }
 
-fn node_batch(spec: &Spec, range: std::ops::Range<usize>) -> RecordBatch {
+fn node_batch(spec: &Spec, offset: usize, range: std::ops::Range<usize>) -> RecordBatch {
     // Property columns are ordered by name.
     let extra = vec![
         Field::new("blob", DataType::Utf8, true),
@@ -107,7 +107,7 @@ fn node_batch(spec: &Spec, range: std::ops::Range<usize>) -> RecordBatch {
     RecordBatch::try_new(
         bulk_node_input_schema(extra).unwrap(),
         vec![
-            uuid_array(range.clone().map(node_uuid)),
+            uuid_array(range.clone().map(|index| node_uuid(offset + index))),
             Arc::new(StringArray::from(
                 range.clone().map(|_| "Person").collect::<Vec<_>>(),
             )),
@@ -137,7 +137,7 @@ fn edge_position(spec: &Spec, index: usize) -> usize {
     }
 }
 
-fn edge_batch(spec: &Spec, range: std::ops::Range<usize>) -> RecordBatch {
+fn edge_batch(spec: &Spec, offset: usize, range: std::ops::Range<usize>) -> RecordBatch {
     let nodes = spec.nodes;
     let id = |row: usize| edge_position(spec, row);
     let extra = vec![
@@ -147,19 +147,19 @@ fn edge_batch(spec: &Spec, range: std::ops::Range<usize>) -> RecordBatch {
     RecordBatch::try_new(
         bulk_edge_input_schema(extra).unwrap(),
         vec![
-            uuid_array(range.clone().map(|row| edge_uuid(id(row)))),
+            uuid_array(range.clone().map(|row| edge_uuid(offset + id(row)))),
             Arc::new(StringArray::from(
                 range.clone().map(|_| "KNOWS").collect::<Vec<_>>(),
             )),
             uuid_array(
                 range
                     .clone()
-                    .map(|row| node_uuid((id(row) * 7 + 1) % nodes)),
+                    .map(|row| node_uuid(offset + (id(row) * 7 + 1) % nodes)),
             ),
             uuid_array(
                 range
                     .clone()
-                    .map(|row| node_uuid((id(row) * 13 + 5) % nodes)),
+                    .map(|row| node_uuid(offset + (id(row) * 13 + 5) % nodes)),
             ),
             Arc::new(StringArray::from(
                 range
@@ -205,12 +205,18 @@ pub struct Sources {
 
 impl Sources {
     pub fn write(directory: &Path, spec: Spec) -> Self {
+        Self::write_at(directory, spec, 0)
+    }
+
+    /// Sources whose identities are those of `write` shifted by `offset`, so
+    /// they can be imported into a project that holds the unshifted ones.
+    pub fn write_at(directory: &Path, spec: Spec, offset: usize) -> Self {
         fs::create_dir_all(directory).unwrap();
         write_parquet(&directory.join("nodes.parquet"), spec.nodes, |range| {
-            node_batch(&spec, range)
+            node_batch(&spec, offset, range)
         });
         write_parquet(&directory.join("edges.parquet"), spec.edges, |range| {
-            edge_batch(&spec, range)
+            edge_batch(&spec, offset, range)
         });
         Self {
             directory: directory.to_owned(),
@@ -350,12 +356,18 @@ pub struct Artifact {
 /// The session's construction directory: where the bulk builder encodes the
 /// generation's objects before they are installed and published.
 pub fn construction_root(project: &Path) -> PathBuf {
-    let mut sessions = fs::read_dir(project.join(".graphforge-construction"))
+    // A project that was built before has older sessions' trees too: the
+    // session in question is the one touched last.
+    fs::read_dir(project.join(".graphforge-construction"))
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .collect::<Vec<_>>();
-    assert_eq!(sessions.len(), 1, "{sessions:?}");
-    sessions.remove(0)
+        .max_by_key(|path| {
+            fs::metadata(path.join("checkpoint.json"))
+                .unwrap()
+                .modified()
+                .unwrap()
+        })
+        .expect("a construction session")
 }
 
 /// What the build pinned for publication, read from the session's inventory.
