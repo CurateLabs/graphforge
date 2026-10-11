@@ -521,3 +521,163 @@ fn a_strict_import_stores_declared_properties_as_the_writer_path_does() {
     assert_eq!(participants(&imported), participants(&written));
     assert!(published_bindings(&imported).is_none());
 }
+
+/// A second facade changes the project between this one's adoption and its
+/// construction. Storage pins the generation it opens on and publication copies
+/// that parent's ontology participants, so a construction validated against a
+/// document the parent no longer holds is refused when it opens, with nothing
+/// published.
+mod a_parent_that_changed {
+    use super::*;
+    use graphforge_api::{CompositionChangeRequest, CompositionDataDisposition};
+
+    const CHANGED: &str = "the project's ontology changed since this handle was opened";
+
+    fn operation(seed: u128) -> WriteContext {
+        WriteContext {
+            operation_uuid: OperationId(v7(seed)),
+            actor_uuid: None,
+        }
+    }
+
+    #[test]
+    fn replaced_ontology_refuses_a_construction_validated_against_the_old_document() {
+        let directory = tempfile::tempdir().unwrap();
+        let (project, stale) = adopted_document(
+            directory.path(),
+            "strict",
+            OntologyMode::Strict,
+            PROPERTY_ONTOLOGY,
+        );
+        // The same entity and relation ids, without `rank` and `weight`.
+        let mut other = GraphForge::new(project.to_str()).unwrap();
+        let replacement = directory.path().join("replacement.yaml");
+        fs::write(&replacement, ONTOLOGY).unwrap();
+        other
+            .adopt_ontology(AdoptOntologyRequest {
+                context: operation(8),
+                path: replacement,
+                mode: OntologyMode::Strict,
+            })
+            .unwrap();
+        let before = current_generation(&project);
+
+        // The stale facade validates `rank` against the document it holds.
+        let refusal = stale
+            .begin_graph_construction(Default::default())
+            .err()
+            .expect("a construction on a replaced ontology is refused");
+        assert!(refusal.to_string().contains(CHANGED), "{refusal}");
+        let mut session = register(
+            &stale,
+            &Sources::write_typed_with_properties(
+                &directory.path().join("input"),
+                6,
+                5,
+                "Host",
+                "CONNECTS",
+                ("rank", "weight"),
+            ),
+        );
+        let refusal = session.validate(&stale).unwrap_err();
+        assert!(refusal.to_string().contains(CHANGED), "{refusal}");
+        assert_eq!(current_generation(&project), before);
+        assert_eq!(counts(&other), (0, 0));
+    }
+
+    #[test]
+    fn the_same_document_adopted_in_another_mode_refuses_the_construction() {
+        let directory = tempfile::tempdir().unwrap();
+        let (project, stale) = adopted(directory.path(), "strict", OntologyMode::Strict);
+        let mut other = GraphForge::new(project.to_str()).unwrap();
+        other
+            .adopt_ontology(AdoptOntologyRequest {
+                context: operation(8),
+                path: directory.path().join("strict.yaml"),
+                mode: OntologyMode::Advisory,
+            })
+            .unwrap();
+        let refusal = stale
+            .begin_graph_construction(Default::default())
+            .err()
+            .expect("a construction under another mode is refused");
+        assert!(refusal.to_string().contains(CHANGED), "{refusal}");
+    }
+
+    #[test]
+    fn migrating_the_project_to_a_composition_refuses_a_single_document_construction() {
+        let directory = tempfile::tempdir().unwrap();
+        let (project, stale) = adopted(directory.path(), "strict", OntologyMode::Strict);
+        let mut migrated = GraphForge::new(project.to_str()).unwrap();
+        let candidate = migrated.workspace_ontology_composition().unwrap().unwrap();
+        let request = CompositionChangeRequest {
+            context: operation(9),
+            expected_project_generation_uuid: graphforge_storage::resolve_project_generation(
+                &project,
+            )
+            .unwrap()
+            .generation_uuid(),
+            expected_composition_fingerprint: Some(candidate.composition_fingerprint.clone()),
+            candidate,
+            data_disposition: CompositionDataDisposition::RequireConforming,
+        };
+        let preview = migrated
+            .preview_ontology_composition_change(&request, None)
+            .unwrap();
+        migrated
+            .publish_ontology_composition_change(&request, &preview, None)
+            .unwrap();
+        assert!(published_bindings(&project).is_some());
+        let before = current_generation(&project);
+
+        let refusal = stale
+            .begin_graph_construction(Default::default())
+            .err()
+            .expect("a single-document construction on a composition is refused");
+        assert!(refusal.to_string().contains(CHANGED), "{refusal}");
+        assert_eq!(current_generation(&project), before);
+        assert_eq!(counts(&migrated), (0, 0));
+    }
+
+    #[test]
+    fn a_resumed_session_whose_parent_changed_is_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let (project, stale) = adopted_document(
+            directory.path(),
+            "strict",
+            OntologyMode::Strict,
+            PROPERTY_ONTOLOGY,
+        );
+        let mut session = stale.begin_graph_construction(Default::default()).unwrap();
+        session
+            .append_nodes("hosts", &node_chunk("Host", 0..4))
+            .unwrap();
+        let resumable = session.session_uuid();
+        drop(session);
+
+        let mut other = GraphForge::new(project.to_str()).unwrap();
+        let replacement = directory.path().join("replacement.yaml");
+        fs::write(&replacement, ONTOLOGY).unwrap();
+        other
+            .adopt_ontology(AdoptOntologyRequest {
+                context: operation(8),
+                path: replacement,
+                mode: OntologyMode::Strict,
+            })
+            .unwrap();
+        let before = current_generation(&project);
+
+        let refusal = stale
+            .resume_graph_construction(resumable, Default::default())
+            .err()
+            .expect("a session whose parent changed is refused");
+        assert!(
+            refusal
+                .to_string()
+                .contains("construction parent project generation changed"),
+            "{refusal}"
+        );
+        assert_eq!(current_generation(&project), before);
+        assert_eq!(counts(&other), (0, 0));
+    }
+}

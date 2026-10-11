@@ -63,6 +63,60 @@ impl SingleDocumentAuthority {
         self.mode
     }
 
+    /// Authenticate the authority against the exact generation a construction
+    /// pins as its parent: that generation must still be the single-document
+    /// project this authority was taken from. Publication copies the parent's
+    /// ontology participants, so rows validated against any other document
+    /// would be published under one that does not declare them.
+    ///
+    /// # Errors
+    /// A validation error when the parent's ontology record is not this
+    /// document in this mode, carries storage bindings, or holds a
+    /// multi-module composition.
+    pub(crate) fn authenticate_parent(
+        &self,
+        parent: &crate::ResolvedProjectGeneration,
+    ) -> Result<(), GfError> {
+        let changed = || {
+            GfError::Validation(
+                "the project's ontology changed since this handle was opened; reopen".into(),
+            )
+        };
+        let record = parent
+            .participant_snapshot(
+                crate::WORKSPACE_CAPABILITY_ID,
+                crate::WORKSPACE_ONTOLOGY_FAMILY,
+            )?
+            .map(|snapshot| crate::WorkspaceOntology::from_canonical_json(&snapshot.bytes))
+            .transpose()?
+            .ok_or_else(changed)?;
+        if record.mode.execution_mode() != self.mode
+            || record.canonical_ontology_sha256.as_deref() != Some(self.ontology_sha256.as_str())
+        {
+            return Err(changed());
+        }
+        if parent
+            .participant_snapshot(
+                crate::GRAPH_CAPABILITY_ID,
+                crate::GRAPH_SEMANTIC_BINDINGS_FAMILY,
+            )?
+            .is_some()
+        {
+            return Err(changed());
+        }
+        if let Some(snapshot) = parent.participant_snapshot(
+            crate::WORKSPACE_CAPABILITY_ID,
+            crate::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY,
+        )? && crate::WorkspaceOntologyComposition::from_canonical_json(&snapshot.bytes)?
+            .modules
+            .len()
+            != 1
+        {
+            return Err(changed());
+        }
+        Ok(())
+    }
+
     fn digest(&self) -> String {
         let mut digest = Sha256::new();
         digest.update(b"graphforge-construction-single-document-authority/v1\0");
@@ -174,6 +228,19 @@ impl ConstructionAuthority {
         match self {
             Self::Composition(authority) => Some(&authority.bindings),
             Self::SingleDocument(_) => None,
+        }
+    }
+
+    /// Authenticate the authority against the exact parent generation the
+    /// construction pinned. A composition authority is not compared with its
+    /// parent here.
+    pub(crate) fn authenticate_parent(
+        &self,
+        parent: &crate::ResolvedProjectGeneration,
+    ) -> Result<(), GfError> {
+        match self {
+            Self::Composition(_) => Ok(()),
+            Self::SingleDocument(authority) => authority.authenticate_parent(parent),
         }
     }
 

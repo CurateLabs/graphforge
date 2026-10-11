@@ -171,13 +171,11 @@ impl GraphForge {
         );
         let canonical_ontology = serde_json::to_value(&document)
             .map_err(|error| GfError::Ontology(format!("failed to encode ontology: {error}")))?;
-        let canonical_bytes = serde_json::to_vec(&canonical_ontology)
-            .map_err(|error| GfError::Ontology(format!("failed to encode ontology: {error}")))?;
         let record = WorkspaceOntology {
             contract_version: 1,
             mode,
             source_format: Some(source_format),
-            canonical_ontology_sha256: Some(encode_hex(&Sha256::digest(canonical_bytes))),
+            canonical_ontology_sha256: Some(canonical_ontology_sha256(&canonical_ontology)?),
             canonical_ontology: Some(canonical_ontology),
         };
         // The operation identifies the authored request, not regenerated Parquet
@@ -809,6 +807,15 @@ fn source_format(path: &std::path::Path) -> Result<WorkspaceOntologySourceFormat
             "ontology input must use .yaml, .yml, or .json".into(),
         )),
     }
+}
+
+/// The digest the workspace ontology record carries for a canonical document.
+pub(crate) fn canonical_ontology_sha256(
+    canonical_ontology: &serde_json::Value,
+) -> Result<String, GfError> {
+    let canonical_bytes = serde_json::to_vec(canonical_ontology)
+        .map_err(|error| GfError::Ontology(format!("failed to encode ontology: {error}")))?;
+    Ok(encode_hex(&Sha256::digest(canonical_bytes)))
 }
 
 fn encode_hex(bytes: &[u8]) -> String {

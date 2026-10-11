@@ -1554,6 +1554,15 @@ impl GraphConstructionSession {
                 }
                 None => current_parent_generation_authority(project_dir)?,
             };
+        if let Some(authority) = &semantic_authority
+            && matches!(authority, ConstructionAuthority::SingleDocument(_))
+        {
+            // The exact generation this session pinned, however it was pinned.
+            authority.authenticate_parent(&crate::resolve_generation_by_uuid(
+                project_dir,
+                parent_generation_uuid,
+            )?)?;
+        }
         if recovered_checkpoint.as_ref().is_none_or(|checkpoint| {
             !matches!(
                 checkpoint.publication_state,

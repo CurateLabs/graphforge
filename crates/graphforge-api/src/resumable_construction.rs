@@ -193,6 +193,16 @@ impl GraphForge {
             .ontology
             .as_ref()
             .ok_or_else(|| validation("construction ontology document is absent"))?;
+        // The document this handle holds, by the digest the ontology record
+        // carries; storage compares it with the parent it pins.
+        let document = self
+            .ontology_document
+            .as_ref()
+            .ok_or_else(|| validation("construction ontology document is absent"))?;
+        let ontology_sha256 = crate::workspace_ontology::canonical_ontology_sha256(
+            &serde_json::to_value(document)
+                .map_err(|error| validation(format!("failed to encode ontology: {error}")))?,
+        )?;
         let entities = ontology.entity_type_names().into_iter().filter_map(|name| {
             ontology
                 .entity_type_id(name)
@@ -208,7 +218,7 @@ impl GraphForge {
             });
         graphforge_storage::SingleDocumentAuthority::new(
             self.ontology_mode,
-            ontology.checksum().to_owned(),
+            ontology_sha256,
             entities,
             relations,
         )
