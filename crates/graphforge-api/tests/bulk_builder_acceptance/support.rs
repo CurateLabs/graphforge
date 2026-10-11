@@ -405,3 +405,25 @@ pub fn inventory_differences(
     }
     differences
 }
+
+/// Exact node and edge counts of a reopened project.
+pub fn counts(graph: &GraphForge) -> (i64, i64) {
+    let count = |query: &str| -> i64 {
+        let result = graph.execute(query).unwrap();
+        result.batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .expect("count is an integer")
+            .value(0)
+    };
+    (
+        count("MATCH (n) RETURN count(n) AS nodes"),
+        count("MATCH ()-[r]->() RETURN count(r) AS edges"),
+    )
+}
+
+/// The generation `CURRENT` names, as its raw bytes.
+pub fn current_generation(project: &Path) -> Vec<u8> {
+    fs::read(project.join("CURRENT")).unwrap()
+}

@@ -11,6 +11,7 @@ use std::path::Path;
 use graphforge_api::{GraphForge, ImportPhase};
 
 use super::child::{ChildSpec, Conditions, KILLED, run, spec_for};
+use super::routes::{Route, budget_for, floor_of};
 use super::support::*;
 
 /// Competing decode tasks are covered by the forced-worker test; this input is
@@ -65,11 +66,15 @@ fn reopened(project: &Path) -> (u64, String) {
     (graph.node_count("Person").unwrap(), answers(&graph))
 }
 
-#[test]
-fn a_process_killed_in_any_pass_reruns_to_identical_artifacts() {
+/// Kill and rerun a build at each of `kills`, under `budget`, and require every
+/// rerun to publish the bytes an uninterrupted build publishes.
+fn kill_and_rerun(spec: Spec, budget: Option<u64>, kills: Vec<Kill>) {
     let directory = tempfile::tempdir().unwrap();
-    let spec = spec();
     let sources = Sources::write(&directory.path().join("input"), spec);
+    let conditions = |mut kill: Conditions| {
+        kill.budget = budget;
+        kill
+    };
 
     let reference_project = empty_project(directory.path());
     let reference = run(
@@ -77,7 +82,7 @@ fn a_process_killed_in_any_pass_reruns_to_identical_artifacts() {
             commit: true,
             ..spec_for(&reference_project, &sources)
         },
-        &Conditions::default(),
+        &conditions(Conditions::default()),
     );
     assert!(reference.succeeded(), "{reference:?}");
     let expected = reference.inventory();
@@ -85,46 +90,6 @@ fn a_process_killed_in_any_pass_reruns_to_identical_artifacts() {
     let (expected_nodes, expected_answers) = reopened(&reference_project);
     assert_eq!(expected_nodes, spec.nodes as u64);
 
-    let kills = [
-        construction("plan", "bulk.after_plan", false),
-        construction("nodes", "bulk.after_nodes", false),
-        construction("edges", "bulk.after_edges", false),
-        construction("edges+tables", "bulk.after_tables", false),
-        construction("edges+ordinal", "bulk.after_ordinal", false),
-        construction("edges+csr", "bulk.after_adjacency", false),
-        construction("inventory", "bulk.before_inventory", false),
-        construction(
-            "inventory-pending-intent",
-            "bulk.after_inventory_before_intent_removal",
-            false,
-        ),
-        construction("inventory-pinned", "encode.after_inventory_pinned", false),
-        construction(
-            "publish-install",
-            "cas.install.after_object_sync.topology/generation.json",
-            false,
-        ),
-        construction(
-            "publish-link",
-            "cas.install.after_link.topology/generation.json",
-            false,
-        ),
-        project_point(
-            "publish-before-current",
-            "project.before_current_replace",
-            false,
-        ),
-        project_point(
-            "publish-after-current",
-            "project.after_current_replace",
-            true,
-        ),
-        construction(
-            "publish-after-current-before-receipt",
-            "publication.after_current_before_receipt",
-            true,
-        ),
-    ];
     for kill in kills {
         let case = directory.path().join(kill.pass);
         std::fs::create_dir(&case).unwrap();
@@ -138,7 +103,7 @@ fn a_process_killed_in_any_pass_reruns_to_identical_artifacts() {
                 commit: true,
                 ..spec_for(&project, &sources)
             },
-            &kill.conditions,
+            &conditions(kill.conditions.clone()),
         );
         assert_eq!(killed.code, Some(KILLED), "{}: {killed:?}", kill.pass);
         assert!(!killed.succeeded(), "{}", kill.pass);
@@ -161,7 +126,7 @@ fn a_process_killed_in_any_pass_reruns_to_identical_artifacts() {
                 commit: true,
                 ..ChildSpec::default()
             },
-            &Conditions::default(),
+            &conditions(Conditions::default()),
         );
         assert!(rerun.succeeded(), "{}: {rerun:?}", kill.pass);
         assert_eq!(
@@ -182,4 +147,85 @@ fn a_process_killed_in_any_pass_reruns_to_identical_artifacts() {
         assert_eq!(nodes, expected_nodes, "{}", kill.pass);
         assert_eq!(answers, expected_answers, "{}", kill.pass);
     }
+}
+
+#[test]
+fn a_process_killed_in_any_pass_reruns_to_identical_artifacts() {
+    kill_and_rerun(
+        spec(),
+        None,
+        vec![
+            construction("plan", "bulk.after_plan", false),
+            construction("nodes", "bulk.after_nodes", false),
+            construction("edges", "bulk.after_edges", false),
+            construction("edges+tables", "bulk.after_tables", false),
+            construction("edges+ordinal", "bulk.after_ordinal", false),
+            construction("edges+csr", "bulk.after_adjacency", false),
+            construction("inventory", "bulk.before_inventory", false),
+            construction(
+                "inventory-pending-intent",
+                "bulk.after_inventory_before_intent_removal",
+                false,
+            ),
+            construction("inventory-pinned", "encode.after_inventory_pinned", false),
+            construction(
+                "publish-install",
+                "cas.install.after_object_sync.topology/generation.json",
+                false,
+            ),
+            construction(
+                "publish-link",
+                "cas.install.after_link.topology/generation.json",
+                false,
+            ),
+            project_point(
+                "publish-before-current",
+                "project.before_current_replace",
+                false,
+            ),
+            project_point(
+                "publish-after-current",
+                "project.after_current_replace",
+                true,
+            ),
+            construction(
+                "publish-after-current-before-receipt",
+                "publication.after_current_before_receipt",
+                true,
+            ),
+        ],
+    );
+}
+
+/// The same property over scratch files: a build that does not fit its budget
+/// is killed while it scatters nodes, edges and property runs, and reruns from
+/// the sources.
+#[test]
+fn a_scratch_build_killed_in_any_pass_reruns_to_identical_artifacts() {
+    let directory = tempfile::tempdir().unwrap();
+    let probe_sources = Sources::write(&directory.path().join("probe-input"), spec());
+    let floor = floor_of(directory.path(), &probe_sources);
+    kill_and_rerun(
+        spec(),
+        budget_for(Route::Scratch, floor),
+        vec![
+            construction("plan", "bulk.after_plan", false),
+            construction("nodes", "bulk.after_nodes", false),
+            construction("edges-scatter", "bulk.during_edge_scatter", false),
+            construction("edges", "bulk.after_edges", false),
+            construction("property-runs", "bulk.during_property_run", false),
+            construction("edges+csr", "bulk.after_adjacency", false),
+            construction("inventory-pinned", "encode.after_inventory_pinned", false),
+            project_point(
+                "publish-before-current",
+                "project.before_current_replace",
+                false,
+            ),
+            project_point(
+                "publish-after-current",
+                "project.after_current_replace",
+                true,
+            ),
+        ],
+    );
 }
