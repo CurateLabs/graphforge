@@ -202,6 +202,7 @@ pub(super) const STAGES: usize = 9;
 #[derive(Default)]
 pub(super) struct StageTotals {
     bytes: [u64; STAGES],
+    frames: [u64; STAGES],
     pub(super) merged_input: u64,
     pub(super) segment: u64,
 }
@@ -210,10 +211,16 @@ impl StageTotals {
     pub(super) fn of(rows: Option<&PropertyRows<'_>>) -> Self {
         rows.map_or_else(Self::default, |rows| Self {
             bytes: std::array::from_fn(|index| rows.stage_bytes[index].load(Ordering::Relaxed)),
+            frames: std::array::from_fn(|index| rows.stage_frames[index].load(Ordering::Relaxed)),
             merged_input: rows.merged_input_bytes(),
             segment: rows.segment_bytes(),
         })
     }
+}
+
+/// Frames of `stage` over the node and edge rows.
+pub(super) fn property_frames(nodes: &StageTotals, edges: &StageTotals, stage: Stage) -> u64 {
+    nodes.frames[stage as usize] + edges.frames[stage as usize]
 }
 
 /// Bytes of `stage` over the node and edge rows.
@@ -237,6 +244,8 @@ pub(super) struct PropertyRows<'a> {
     read: AtomicU64,
     /// Bytes moved per [`Stage`], written and read counted separately.
     stage_bytes: [AtomicU64; STAGES],
+    /// Frames moved per [`Stage`].
+    stage_frames: [AtomicU64; STAGES],
     /// Bytes of the runs a final merge consumed (groups of two or more runs).
     pub(super) merged_input_bytes: AtomicU64,
     /// Bytes of the final segments: merged outputs and single-run groups.
@@ -798,6 +807,7 @@ impl<'a> PropertyRows<'a> {
             written: AtomicU64::new(0),
             read: AtomicU64::new(0),
             stage_bytes: std::array::from_fn(|_| AtomicU64::new(0)),
+            stage_frames: std::array::from_fn(|_| AtomicU64::new(0)),
             merged_input_bytes: AtomicU64::new(0),
             segment_bytes: AtomicU64::new(0),
             runs_formed: AtomicU64::new(0),
@@ -861,6 +871,7 @@ impl<'a> PropertyRows<'a> {
 
     fn add_stage(&self, stage: Stage, bytes: u64) {
         self.stage_bytes[stage as usize].fetch_add(bytes, Ordering::Relaxed);
+        self.stage_frames[stage as usize].fetch_add(1, Ordering::Relaxed);
     }
 
     /// Bytes of the runs final merges consumed.
@@ -1491,12 +1502,7 @@ impl<'a> PropertyRows<'a> {
     }
 
     /// Append `batch` to the frame file `path` (windows and projections).
-    #[cfg(test)]
-    pub(super) fn write(&self, path: &Path, batch: &RecordBatch) -> Result<(), GfError> {
-        self.write_for(path, batch, Stage::WindowWrite)
-    }
-
-    /// As [`Self::write`], attributing the bytes to `stage`.
+    /// Append `batch` to the frame file `path`, attributing the bytes to `stage`.
     pub(super) fn write_for(
         &self,
         path: &Path,
@@ -1530,11 +1536,6 @@ impl<'a> PropertyRows<'a> {
             .saturating_mul(2)
             .saturating_add(self.schema_bytes.saturating_mul(4))
             .saturating_add(1 << 20)
-    }
-
-    #[cfg(test)]
-    pub(super) fn reader<'r>(&'r self, path: &Path) -> Result<RowsReader<'r, 'a>, GfError> {
-        self.reader_for(path, Stage::MergeRead)
     }
 
     /// A reader whose bytes are attributed to `stage`.

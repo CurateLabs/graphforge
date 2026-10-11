@@ -104,7 +104,7 @@ fn wide_frame_reduction_admits_pairs_and_keeps_every_merge_under_the_shared_pool
         "test must exercise wide-job reduction: {all_cost}"
     );
     for run in &runs {
-        let mut reader = rows.reader(&run.path).unwrap();
+        let mut reader = rows.reader_for(&run.path, Stage::MergeRead).unwrap();
         let decoded = reader.next_expected(&run.frames[0]).unwrap().unwrap();
         assert!(
             decoded.get_array_memory_size() as u64 > run.frames[0].body_bytes,
@@ -168,7 +168,7 @@ fn final_property_ranges_keep_global_uuid_order_above_one_segment() {
 
     let mut reversed = Vec::new();
     for run in groups[0].segments.iter().rev() {
-        let mut reader = rows.reader(&run.path).unwrap();
+        let mut reader = rows.reader_for(&run.path, Stage::MergeRead).unwrap();
         while let Some(batch) = reader.next().unwrap() {
             let uuids = crate::graph_construction::batch_uuid_column(&batch, "node_uuid").unwrap();
             for row in 0..batch.num_rows() {

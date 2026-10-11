@@ -326,6 +326,18 @@ pub struct BulkBuildReport {
     /// Bytes of projections read back.
     #[serde(default)]
     pub property_projection_read_bytes: u64,
+    /// Frames of sorted-run bytes written (each carries its own 16-byte header and IPC schema message).
+    #[serde(default)]
+    pub property_run_write_frames: u64,
+    /// Frames of merged-segment bytes written (each carries its own 16-byte header and IPC schema message).
+    #[serde(default)]
+    pub property_segment_write_frames: u64,
+    /// Frames of window bytes written (each carries its own 16-byte header and IPC schema message).
+    #[serde(default)]
+    pub property_window_write_frames: u64,
+    /// Frames of projection bytes written (each carries its own 16-byte header and IPC schema message).
+    #[serde(default)]
+    pub property_projection_write_frames: u64,
     /// Fixed property workspace reserved before decoding any source.
     #[serde(default)]
     pub property_workspace_reserved_bytes: u64,

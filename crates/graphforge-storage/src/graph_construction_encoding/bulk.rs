@@ -1336,6 +1336,26 @@ pub(crate) fn encode_bulk(
             endpoint_scratch_read_bytes: scratch_report.endpoint_read_bytes,
             property_scratch_write_bytes,
             property_scratch_read_bytes,
+            property_run_write_frames: property_rows::property_frames(
+                &node_stage,
+                &edge_stage,
+                property_rows::Stage::RunWrite,
+            ),
+            property_segment_write_frames: property_rows::property_frames(
+                &node_stage,
+                &edge_stage,
+                property_rows::Stage::SegmentWrite,
+            ),
+            property_window_write_frames: property_rows::property_frames(
+                &node_stage,
+                &edge_stage,
+                property_rows::Stage::WindowWrite,
+            ),
+            property_projection_write_frames: property_rows::property_frames(
+                &node_stage,
+                &edge_stage,
+                property_rows::Stage::ProjectionWrite,
+            ),
             property_run_write_bytes: property_rows::property_stage(
                 &node_stage,
                 &edge_stage,

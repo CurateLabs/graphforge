@@ -12,6 +12,7 @@ use arrow::array::{FixedSizeBinaryArray, RecordBatch, StringArray};
 use graphforge_api::{GraphForge, OperationId, bulk_edge_input_schema, bulk_node_input_schema};
 use uuid::Uuid;
 
+use super::child::{ChildSpec, Conditions, run, spec_for};
 use super::support::*;
 
 fn node_batch(ids: &[Uuid]) -> RecordBatch {
@@ -104,10 +105,17 @@ fn a_bulk_built_project_has_no_membership_index_and_appends_validate_against_par
     let spec = Spec::graph(5_000, 8_000);
     let sources = Sources::write(&directory.path().join("input"), spec);
     let project = empty_project(directory.path());
-    let graph = GraphForge::new(project.to_str()).unwrap();
-    let mut session = register(&graph, &sources);
-    let progress = validate(&graph, &mut session);
-    assert!(progress.construction.unwrap().bulk_build.is_some());
+    // Built in a child process under a pinned memory budget; the appends below
+    // reopen the committed project.
+    let outcome = run(
+        &ChildSpec {
+            commit: true,
+            ..spec_for(&project, &sources)
+        },
+        &Conditions::default(),
+    );
+    assert!(outcome.succeeded(), "{outcome:?}");
+    assert!(!outcome.report().is_null(), "not a bulk build");
 
     // Nothing the build encoded is an index, whether the name is the legacy
     // v5 file or one of its manifests.
@@ -119,7 +127,7 @@ fn a_bulk_built_project_has_no_membership_index_and_appends_validate_against_par
         .map(|artifact| artifact.path.clone())
         .collect::<Vec<_>>();
     assert!(named.is_empty(), "encoded: {named:?}");
-    session.commit(&graph, None).unwrap();
+    let graph = GraphForge::new(project.to_str()).unwrap();
 
     // Nor does the published generation's inventory, nor any file in the tree.
     let published = published_index(&project);

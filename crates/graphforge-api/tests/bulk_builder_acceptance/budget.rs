@@ -32,29 +32,53 @@ fn field(report: &Value, name: &str) -> u64 {
         .unwrap_or_else(|| panic!("{name} in {report}"))
 }
 
-/// Re-framing the same rows adds at most this fraction (IPC schema message and
-/// frame header per frame; measured 0.9% to 2.1%).
-const REFRAMING: f64 = 0.05;
+/// What one frame adds to its payload: a 16-byte header, the IPC schema message
+/// (field names, and the overlay metadata of a projection) and 8-byte buffer
+/// padding. Measured at 1.14 to 1.40 KiB for these schemas, in sizes of 17 to
+/// 254 frames; a frame is never lighter than `FRAME_MINIMUM`.
+const FRAME_OVERHEAD: u64 = 1536;
+const FRAME_MINIMUM: u64 = 1024;
 
-fn within(bytes: u64, base: u64, name: &str) {
-    let (bytes, base) = (bytes as f64, base as f64);
+/// `bytes` is `payload` plus the framing of `frames` frames.
+fn framed(bytes: u64, payload: u64, frames: u64, name: &str) {
     assert!(
-        bytes >= base && bytes <= base * (1.0 + REFRAMING),
-        "{name}: {bytes} against {base}"
+        bytes >= payload + frames * FRAME_MINIMUM && bytes <= payload + frames * FRAME_OVERHEAD,
+        "{name}: {bytes} bytes in {frames} frames against a payload of {payload}"
+    );
+}
+
+/// Two framings of the same rows differ by at most the larger framing.
+fn reframed(bytes: u64, other: u64, frames: u64, name: &str) {
+    assert!(
+        bytes.abs_diff(other) <= frames * FRAME_OVERHEAD,
+        "{name}: {bytes} against {other} within {frames} frames of framing"
     );
 }
 
 /// Arrow bytes the fixture's property rows need, without framing: per node a
-/// 16-byte identity, the `Person` label, a `blob` offset, a `rank` and two
-/// validity bits; per edge (endpoints are not kept) the identity, the `KNOWS`
-/// type, a `note` offset, a `weight` and two validity bits; plus the blobs.
+/// 16-byte identity, the `Person` label, a `blob` offset, a `rank`; per edge
+/// (endpoints are not kept) the identity, the `KNOWS` type, a `note` offset, a
+/// `weight`; one validity bit per row for the nullable string; plus the blobs.
 fn row_bytes(spec: &Spec) -> u64 {
     let node = 16 + (4 + 6) + 4 + 8;
     let edge = 16 + (4 + 5) + 4 + 8;
     (spec.nodes * node
         + spec.edges * edge
-        + (spec.nodes + spec.edges) * 2 / 8
+        + (spec.nodes + spec.edges) / 8
         + (spec.node_blobs + spec.edge_blobs) * spec.blob_bytes) as u64
+}
+
+/// Arrow bytes of the projections: per row the identity, a tombstone bit and
+/// the integer property; the string property only in a window where some row
+/// has a value. The fixture's values are on its first rows, so the first
+/// window of each kind (`window_rows` rows, in identity order) carries the
+/// string column: an offset and a validity bit per row, and the blobs.
+fn projected_bytes(spec: &Spec, window_rows: usize) -> u64 {
+    let kind = |rows: usize, blobs: usize| {
+        let first = rows.min(window_rows);
+        rows * (16 + 8) + rows / 8 + first * 4 + first / 8 + blobs * spec.blob_bytes
+    };
+    (kind(spec.nodes, spec.node_blobs) + kind(spec.edges, spec.edge_blobs)) as u64
 }
 
 fn assert_topology(report: &Value) {
@@ -87,6 +111,7 @@ fn assert_topology(report: &Value) {
 
 fn assert_property_stages(report: &Value, spec: &Spec) {
     let get = |name: &str| field(report, &format!("property_{name}_bytes"));
+    let frames = |name: &str| field(report, &format!("property_{name}_frames"));
     let (run, reduction, segment_write, merge_read) = (
         get("run_write"),
         get("reduction_write"),
@@ -110,9 +135,10 @@ fn assert_property_stages(report: &Value, spec: &Spec) {
         "{report}"
     );
     // Each row is written once as a run, and no run is rewritten.
-    within(
+    framed(
         run,
         row_bytes(spec),
+        frames("run_write"),
         "run bytes against the fixture's row bytes",
     );
     assert_eq!(reduction, 0, "a reduction level rewrote runs: {report}");
@@ -122,9 +148,10 @@ fn assert_property_stages(report: &Value, spec: &Spec) {
     // Merged rows are written once as segments; a group of one run is its own.
     assert_eq!(segments, run - merged + segment_write, "{report}");
     if merged > 0 {
-        within(
+        reframed(
             segment_write,
             merged,
+            frames("run_write").max(frames("segment_write")),
             "segment bytes against the merged runs",
         );
     }
@@ -132,13 +159,28 @@ fn assert_property_stages(report: &Value, spec: &Spec) {
     assert_eq!(segment_read, 2 * segments, "{report}");
     // Each window is the segments' rows copied once, then read back once.
     assert_eq!(window_read, window_write, "{report}");
-    within(window_write, segments, "window bytes against the segments");
-    // Each projection is written once and read back once, and holds no more
-    // than its window (it leaves out the owner column).
+    reframed(
+        window_write,
+        segments,
+        frames("window_write").max(frames("run_write") + frames("segment_write")),
+        "window bytes against the segments",
+    );
+    // Each projection is written once and read back once, and holds exactly
+    // the columns the fixture's windows project.
     assert_eq!(projection_read, projection_write, "{report}");
-    assert!(
-        projection_write > 0 && projection_write <= window_write,
-        "{report}"
+    // A window is one construction batch of the import's `batch_rows`.
+    let window_rows = BATCH_ROWS;
+    framed(
+        projection_write,
+        projected_bytes(spec, window_rows),
+        frames("projection_write"),
+        "projection bytes against the projected columns",
+    );
+    // One owner and one route: each window frame is projected exactly once.
+    assert_eq!(
+        frames("projection_write"),
+        frames("window_write"),
+        "a projection frame was written twice or not at all: {report}"
     );
 }
 

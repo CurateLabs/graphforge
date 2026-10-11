@@ -20,7 +20,7 @@
 
         let run = rows.write_run(&[source], &AtomicBool::new(false)).unwrap();
         assert_eq!(run.frames.len(), 2);
-        let mut reader = rows.reader(&run.path).unwrap();
+        let mut reader = rows.reader_for(&run.path, Stage::MergeRead).unwrap();
         let mut observed_elision = false;
         for frame in &run.frames {
             let decoded = reader.next_expected(frame).unwrap().unwrap();
@@ -62,7 +62,7 @@
         assert_eq!(run.frames[0].max_row_bytes, source_row_bytes);
         run.frames[0].max_row_bytes -= 1;
 
-        let mut reader = rows.reader(&run.path).unwrap();
+        let mut reader = rows.reader_for(&run.path, Stage::MergeRead).unwrap();
         let error = reader.next_expected(&run.frames[0]).unwrap_err();
         assert!(
             error
@@ -263,7 +263,7 @@
                 .iter()
                 .all(|frame| frame.bytes <= rows.frame_limit() as u64 + HEADER as u64)
         );
-        let mut reader = rows.reader(&merged.path).unwrap();
+        let mut reader = rows.reader_for(&merged.path, Stage::MergeRead).unwrap();
         let mut seen = 0_usize;
         while let Some(batch) = reader.next().unwrap() {
             let ids = batch
@@ -445,7 +445,7 @@ fn sliced_struct_rows_keep_the_wide_child_in_its_logical_row() {
     assert!(PropertyRows::row_bytes(&batches[0], 1).unwrap() >= wide.len());
     let run = rows.write_run(&batches, &AtomicBool::new(false)).unwrap();
     assert!(run.frames.len() >= 32);
-    let mut reader = rows.reader(&run.path).unwrap();
+    let mut reader = rows.reader_for(&run.path, Stage::MergeRead).unwrap();
     let mut seen = 0_u128;
     while let Some(batch) = reader.next().unwrap() {
         let ids = batch.column(0).as_any().downcast_ref::<FixedSizeBinaryArray>().unwrap();
