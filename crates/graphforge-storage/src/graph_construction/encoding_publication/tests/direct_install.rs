@@ -118,6 +118,41 @@ fn sha256_hex(bytes: &[u8]) -> String {
     super::super::super::sha256(bytes)
 }
 
+/// The producer's witness lives in its process. An installer that does not find
+/// it, as after a restart, runs the object's file barrier itself.
+#[test]
+fn a_staged_object_without_a_producer_witness_is_sealed_when_installed() {
+    let staged = staged(15_006);
+    let inventory = staged.inventory();
+    let source = inventory.open(Path::new(ARTIFACT)).unwrap();
+    // The encoder recorded its barrier; forget it, as a new process would.
+    assert!(crate::durable_commit::producer_seals::take(source.source()).unwrap());
+    let lease = crate::begin_graph_object_publication(staged.root.path()).unwrap();
+    let evidence = install(&lease, &source).unwrap();
+    assert!(!evidence.reused_existing);
+    assert_eq!(evidence.file_fsync_calls, 1);
+}
+
+/// A producer's barrier covers the file as it was sealed: a staged file that
+/// changed afterwards is sealed again.
+#[test]
+fn a_staged_object_changed_after_its_producer_sealed_it_is_sealed_when_installed() {
+    let staged = staged(15_007);
+    let inventory = staged.inventory();
+    let source = inventory.open(Path::new(ARTIFACT)).unwrap();
+    // Same length, new modification time.
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(staged.staged_path())
+        .unwrap();
+    file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5))
+        .unwrap();
+    drop(file);
+    let lease = crate::begin_graph_object_publication(staged.root.path()).unwrap();
+    let evidence = install(&lease, &source).unwrap();
+    assert_eq!(evidence.file_fsync_calls, 1);
+}
+
 #[test]
 fn installed_object_is_the_staged_inode_and_nothing_is_written() {
     let staged = staged(15_001);
@@ -142,10 +177,11 @@ fn installed_object_is_the_staged_inode_and_nothing_is_written() {
     assert_eq!(observed.checksum_bytes, 0);
     assert_eq!(evidence.bytes_installed, source.bytes());
     assert_eq!(evidence.content_xxh64, Some(source.checksum()));
-    // One payload barrier and one namespace barrier for the address (ADR 0013),
-    // plus the `sha256` barrier that makes the bucket this object created
-    // durable.
-    assert_eq!(evidence.file_fsync_calls, 1);
+    // The encoder already ran this object's one payload barrier on the inode it
+    // named (ADR 0058 decision 3), so installing runs none. One namespace
+    // barrier for the address (ADR 0013), plus the `sha256` barrier that makes
+    // the bucket this object created durable.
+    assert_eq!(evidence.file_fsync_calls, 0);
     assert_eq!(evidence.bucket_creations, 1);
     assert_eq!(
         evidence.directory_fsync_calls,
@@ -328,8 +364,9 @@ fn mis_addressed_existing_object_is_replaced_by_the_correct_install() {
             assert_eq!(observed.checksum_bytes, sha_bytes + checksum_only_bytes);
             assert_eq!(evidence.content_xxh64, Some(source.checksum()));
             // One barrier for the removal of the bad entry, one for the new one.
+            // The encoder ran the payload barrier; installing runs no second.
             assert_eq!(evidence.directory_fsync_calls, 2);
-            assert_eq!(evidence.fsync_calls, 3);
+            assert_eq!(evidence.fsync_calls, 2);
             assert_eq!(std::fs::read(staged.object_path()).unwrap(), bytes);
             object_store(staged.root.path());
             assert_eq!(staged.current(), current);
