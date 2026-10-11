@@ -607,6 +607,60 @@ fn validate_wall_clock_nanos(nanos: i64) -> Result<(), String> {
     }
 }
 
+impl GraphForge {
+    /// Check one chunk of the construction API against the adopted ontology
+    /// document of a strict project: every label or relationship type, and
+    /// every property a row holds a value for, must be declared. Routes the
+    /// import session takes through the same checks row by row.
+    pub(crate) fn validate_chunk_against_ontology(
+        &self,
+        kind: BulkInputKind,
+        batch: &RecordBatch,
+    ) -> Result<(), BulkValidationError> {
+        let (owner_column, first_property) = match kind {
+            BulkInputKind::Node => ("label", 2),
+            BulkInputKind::Edge => ("rel_type", 4),
+        };
+        let owners = batch
+            .column_by_name(owner_column)
+            .and_then(|column| column.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| {
+                contract_error(
+                    kind,
+                    BulkValidationReason::SchemaMismatch,
+                    "chunk owner column is not Utf8",
+                )
+            })?;
+        let schema = batch.schema();
+        let mut checked = HashSet::<(&str, usize)>::new();
+        for row in 0..batch.num_rows() {
+            let ordinal = row as u64;
+            let owner = owners.value(row);
+            if checked.insert((owner, usize::MAX)) {
+                match kind {
+                    BulkInputKind::Node => validate_node_owner(self, ordinal, owner)?,
+                    BulkInputKind::Edge => validate_edge_owner(self, ordinal, owner)?,
+                }
+            }
+            for column in first_property..batch.num_columns() {
+                if batch.column(column).is_null(row) || !checked.insert((owner, column)) {
+                    continue;
+                }
+                let field = schema.field(column);
+                match kind {
+                    BulkInputKind::Node => {
+                        validate_node_property(self, ordinal, owner, field.name(), field)?;
+                    }
+                    BulkInputKind::Edge => {
+                        validate_edge_property(self, ordinal, owner, field.name(), field)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 fn validate_node_owner(
     graph: &GraphForge,
     ordinal: u64,

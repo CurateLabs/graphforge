@@ -421,6 +421,25 @@ impl GraphConstructionSession<'_> {
         cancellation: Option<&crate::CancellationToken>,
     ) -> Result<ConstructionChunkReceipt, GfError> {
         let batch = canonical_property_columns(kind, batch)?;
+        if self.graph.ontology_mode == OntologyMode::Strict
+            && self
+                .graph
+                .default_composition_context
+                .lock()
+                .expect("composition binding lock poisoned")
+                .is_none()
+        {
+            // A strict project under one ontology document has no composition
+            // for storage to resolve a row's owner against, so the chunk is
+            // checked against the document here, before it is accepted.
+            let input = match kind {
+                graphforge_storage::ConstructionChunkKind::Node => crate::BulkInputKind::Node,
+                graphforge_storage::ConstructionChunkKind::Edge => crate::BulkInputKind::Edge,
+            };
+            self.graph
+                .validate_chunk_against_ontology(input, &batch)
+                .map_err(|error| validation(error.to_string()))?;
+        }
         match cancellation {
             Some(token) => self
                 .inner

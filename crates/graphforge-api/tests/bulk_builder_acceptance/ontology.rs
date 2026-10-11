@@ -22,14 +22,25 @@ use uuid::Uuid;
 
 use super::support::*;
 
+const PROPERTY_ONTOLOGY: &str = "ontology_id: bulk\nversion: \"1\"\nentity_types:\n  - name: Host\n    abstract: false\nrelation_types:\n  - name: CONNECTS\n    src: Host\n    dst: Host\nproperties:\n  - name: rank\n    owner: Host\n    type: int64\n  - name: weight\n    owner: CONNECTS\n    type: int64\n";
+
 const ONTOLOGY: &str = "ontology_id: bulk\nversion: \"1\"\nentity_types:\n  - name: Host\n    abstract: false\n  - name: Switch\n    abstract: false\nrelation_types:\n  - name: CONNECTS\n    src: Host\n    dst: Host\nproperties: []\n";
 
 /// An empty durable project that adopted `ONTOLOGY` in `mode`.
 fn adopted(directory: &Path, name: &str, mode: OntologyMode) -> (std::path::PathBuf, GraphForge) {
+    adopted_document(directory, name, mode, ONTOLOGY)
+}
+
+fn adopted_document(
+    directory: &Path,
+    name: &str,
+    mode: OntologyMode,
+    document: &str,
+) -> (std::path::PathBuf, GraphForge) {
     let project = directory.join(name);
     fs::create_dir(&project).unwrap();
     let ontology = directory.join(format!("{name}.yaml"));
-    fs::write(&ontology, ONTOLOGY).unwrap();
+    fs::write(&ontology, document).unwrap();
     let mut graph = GraphForge::new(project.to_str()).unwrap();
     graph
         .adopt_ontology(AdoptOntologyRequest {
@@ -313,43 +324,59 @@ fn the_chunk_api_builds_under_a_strict_ontology_and_refuses_undeclared_types() {
     let (project, graph) = adopted(directory.path(), "strict", OntologyMode::Strict);
     let before = current_generation(&project);
 
-    // An undeclared label is refused when the build seals, and nothing publishes.
     let mut session = graph.begin_graph_construction(Default::default()).unwrap();
-    session
-        .append_nodes("nodes", &node_chunk("Person", 0..4))
-        .unwrap();
-    session
-        .append_edges("edges", &edge_chunk("CONNECTS", 4, 0..3))
-        .unwrap();
-    let refusal = session.seal_and_publish().unwrap_err().to_string();
-    assert!(
-        refusal.contains("unknown strict ontology entity type"),
-        "{refusal}"
-    );
-    drop(session);
+    // Each undeclared owner or property is refused as its chunk arrives, and
+    // the session accepts nothing from it.
+    let undeclared_property = RecordBatch::try_new(
+        Arc::new(arrow::datatypes::Schema::new(
+            CONSTRUCTION_NODE_SCHEMA
+                .fields()
+                .iter()
+                .cloned()
+                .chain([Arc::new(arrow::datatypes::Field::new(
+                    "colour",
+                    arrow::datatypes::DataType::Utf8,
+                    true,
+                ))])
+                .collect::<Vec<_>>(),
+        )),
+        vec![
+            uuids((0..2).map(node_uuid)),
+            Arc::new(StringArray::from(vec!["Host"; 2])),
+            Arc::new(StringArray::from(vec!["red"; 2])),
+        ],
+    )
+    .unwrap();
+    for (refusal, expected) in [
+        (
+            session
+                .append_nodes("people", &node_chunk("Person", 0..4))
+                .unwrap_err(),
+            "unknown strict ontology entity type",
+        ),
+        (
+            session
+                .append_edges("links", &edge_chunk("UNDECLARED", 4, 0..3))
+                .unwrap_err(),
+            "unknown strict ontology relationship type",
+        ),
+        (
+            session
+                .append_nodes("coloured", &undeclared_property)
+                .unwrap_err(),
+            "property is not declared for strict entity type",
+        ),
+    ] {
+        assert!(refusal.to_string().contains(expected), "{refusal}");
+    }
+    assert_eq!(session.progress().accepted_chunks, 0);
     assert_eq!(current_generation(&project), before);
 
-    let mut session = graph.begin_graph_construction(Default::default()).unwrap();
     session
-        .append_nodes("nodes", &node_chunk("Host", 0..4))
+        .append_nodes("hosts", &node_chunk("Host", 0..4))
         .unwrap();
     session
-        .append_edges("edges", &edge_chunk("UNDECLARED", 4, 0..3))
-        .unwrap();
-    let refusal = session.seal_and_publish().unwrap_err().to_string();
-    assert!(
-        refusal.contains("unknown strict ontology relationship type"),
-        "{refusal}"
-    );
-    drop(session);
-    assert_eq!(current_generation(&project), before);
-
-    let mut session = graph.begin_graph_construction(Default::default()).unwrap();
-    session
-        .append_nodes("nodes", &node_chunk("Host", 0..4))
-        .unwrap();
-    session
-        .append_nodes("more-nodes", &node_chunk("Switch", 4..6))
+        .append_nodes("switches", &node_chunk("Switch", 4..6))
         .unwrap();
     session
         .append_edges("edges", &edge_chunk("CONNECTS", 4, 0..3))
@@ -398,4 +425,99 @@ fn an_advisory_import_stores_declared_types_by_ontology_identity_and_admits_othe
     assert_eq!(typed_counts(&reopened), [6, 0, 5, 5]);
     assert_eq!(stored_node_types(&project), vec![0; 6]);
     assert!(published_bindings(&project).is_none());
+}
+
+#[test]
+fn a_strict_import_stores_declared_properties_as_the_writer_path_does() {
+    use graphforge_api::PropValue;
+    use std::collections::HashMap;
+
+    let directory = tempfile::tempdir().unwrap();
+    let (imported, graph) = adopted_document(
+        directory.path(),
+        "imported",
+        OntologyMode::Strict,
+        PROPERTY_ONTOLOGY,
+    );
+    // A column the ontology does not declare is refused at validate, with
+    // nothing accepted.
+    let mut undeclared = register(
+        &graph,
+        &Sources::write_typed_with_properties(
+            &directory.path().join("undeclared"),
+            6,
+            5,
+            "Host",
+            "CONNECTS",
+            ("colour", "weight"),
+        ),
+    );
+    let refusal = undeclared.validate(&graph).unwrap_err().to_string();
+    assert!(
+        refusal.contains("property is not declared for strict entity type"),
+        "{refusal}"
+    );
+    assert_eq!(undeclared.status().1.rows_accepted, 0);
+    drop(undeclared);
+
+    import(
+        &graph,
+        &Sources::write_typed_with_properties(
+            &directory.path().join("input"),
+            6,
+            5,
+            "Host",
+            "CONNECTS",
+            ("rank", "weight"),
+        ),
+    );
+    drop(graph);
+
+    let (written, graph) = adopted_document(
+        directory.path(),
+        "written",
+        OntologyMode::Strict,
+        PROPERTY_ONTOLOGY,
+    );
+    let nodes = (0..6)
+        .map(|rank| {
+            graph
+                .add_node(
+                    "Host",
+                    &HashMap::from([("rank".into(), PropValue::Int(rank))]),
+                )
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    for edge in 0..5 {
+        graph
+            .add_edge(
+                &nodes[edge % 6],
+                "CONNECTS",
+                &nodes[(edge + 1) % 6],
+                &HashMap::from([("weight".into(), PropValue::Int(edge as i64))]),
+            )
+            .unwrap();
+    }
+    drop(graph);
+
+    let imported_graph = GraphForge::new(imported.to_str()).unwrap();
+    let written_graph = GraphForge::new(written.to_str()).unwrap();
+    let answers = |graph: &GraphForge| -> Vec<i64> {
+        [
+            "MATCH (n:Host) RETURN sum(n.rank) AS total",
+            "MATCH (n:Host) WHERE n.rank = 4 RETURN count(n) AS found",
+            "MATCH (:Host)-[r:CONNECTS]->(:Host) RETURN sum(r.weight) AS total",
+            "MATCH ()-[r:CONNECTS]->() WHERE r.weight = 3 RETURN count(r) AS found",
+        ]
+        .iter()
+        .map(|query| count(graph, query))
+        .collect()
+    };
+    assert_eq!(answers(&imported_graph), vec![15, 1, 10, 1]);
+    assert_eq!(answers(&imported_graph), answers(&written_graph));
+    assert_eq!(routes(&imported), routes(&written));
+    assert_eq!(stored_node_types(&imported), stored_node_types(&written));
+    assert_eq!(participants(&imported), participants(&written));
+    assert!(published_bindings(&imported).is_none());
 }

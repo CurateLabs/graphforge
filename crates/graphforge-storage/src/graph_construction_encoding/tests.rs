@@ -379,3 +379,122 @@ fn bounded_control_write_refuses_one_byte_over_and_admits_the_bound() {
         "{error}"
     );
 }
+
+fn single_document(mode: OntologyMode, ontology_sha256: &str) -> SingleDocumentAuthority {
+    SingleDocumentAuthority::new(
+        mode,
+        ontology_sha256.to_owned(),
+        [("Host".to_owned(), graphforge_core::TypeId(0))],
+        [("CONNECTS".to_owned(), graphforge_core::TypeId(0))],
+    )
+    .unwrap()
+}
+
+/// A single-document owner keeps the label as its route and is stored under the
+/// declaration's ontology identity; no composition or binding takes part.
+#[test]
+fn a_single_document_owner_is_routed_by_label_under_its_ontology_identity() {
+    let authority = single_document(OntologyMode::Strict, "digest");
+    let owner = resolve_owner(
+        None,
+        None,
+        Some(&authority),
+        SymbolKind::Entity,
+        SemanticRouteKind::Entity,
+        "Host",
+        "Host",
+    )
+    .unwrap();
+    assert_eq!(owner.topology_route, "Host");
+    assert!(owner.symbol.is_none());
+    assert_eq!(
+        owner.storage_id,
+        Some(TaggedTypeId::ontology(graphforge_core::TypeId(0)).unwrap())
+    );
+    let relation = resolve_owner(
+        None,
+        None,
+        Some(&authority),
+        SymbolKind::Relation,
+        SemanticRouteKind::Relation,
+        "CONNECTS",
+        "CONNECTS",
+    )
+    .unwrap();
+    assert_eq!(relation.topology_route, "CONNECTS");
+}
+
+/// A strict authority refuses a type its document does not declare, with a
+/// typed validation error; an advisory one stores it as a runtime type.
+#[test]
+fn a_single_document_authority_refuses_undeclared_types_only_when_strict() {
+    for (kind, route_kind, name) in [
+        (SymbolKind::Entity, SemanticRouteKind::Entity, "Ghost"),
+        (SymbolKind::Relation, SemanticRouteKind::Relation, "HAUNTS"),
+    ] {
+        let strict = single_document(OntologyMode::Strict, "digest");
+        let refusal = resolve_owner(None, None, Some(&strict), kind, route_kind, name, name)
+            .err()
+            .expect("a strict authority refuses an undeclared type");
+        assert!(
+            matches!(&refusal, GfError::Validation(message)
+                if message.contains("unknown strict ontology")),
+            "{refusal:?}"
+        );
+        let advisory = single_document(OntologyMode::Advisory, "digest");
+        let owner =
+            resolve_owner(None, None, Some(&advisory), kind, route_kind, name, name).unwrap();
+        assert_eq!(
+            (owner.storage_id, owner.topology_route.as_str()),
+            (None, name)
+        );
+    }
+}
+
+/// The authority is part of a session's identity: the document it pins, its
+/// mode and its declarations each change the digest a resume must match.
+#[test]
+fn a_single_document_authority_digest_pins_document_mode_and_declarations() {
+    let strict = ConstructionAuthority::from(single_document(OntologyMode::Strict, "one"));
+    let digest = strict.digest().unwrap();
+    assert_eq!(digest, strict.digest().unwrap());
+    for other in [
+        single_document(OntologyMode::Strict, "two"),
+        single_document(OntologyMode::Advisory, "one"),
+        SingleDocumentAuthority::new(
+            OntologyMode::Strict,
+            "one".to_owned(),
+            [("Host".to_owned(), graphforge_core::TypeId(1))],
+            [("CONNECTS".to_owned(), graphforge_core::TypeId(0))],
+        )
+        .unwrap(),
+    ] {
+        assert_ne!(digest, ConstructionAuthority::from(other).digest().unwrap());
+    }
+}
+
+/// No ontology means no single-document authority, and a construction that is
+/// neither exploratory nor pinned to an authority is still refused.
+#[test]
+fn a_single_document_authority_requires_an_ontology_mode() {
+    assert!(
+        SingleDocumentAuthority::new(OntologyMode::Exploratory, "digest".to_owned(), [], [])
+            .is_err()
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let refusal = crate::GraphConstructionSession::open_with_mode(
+        directory.path(),
+        Uuid::now_v7(),
+        0,
+        OntologyMode::Strict,
+        GraphConstructionBudgets::default(),
+    )
+    .err()
+    .expect("a strict construction without an authority is refused");
+    assert!(
+        refusal
+            .to_string()
+            .contains("requires pinned semantic authority"),
+        "{refusal}"
+    );
+}
