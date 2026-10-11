@@ -1,9 +1,10 @@
 //! Every published object has exactly one file barrier (ADR 0058 decision 3;
 //! #1881 criterion 5), inventoried on the public route.
 //!
-//! `BarrierAudit` records the inode each `fsync` of a process reached, with its
-//! creation time, so a deleted file's inode number reused by a later file is not
-//! mistaken for it. The
+//! `BarrierAudit` records the inode each `fsync` of a process reached, with the
+//! generation number the filesystem gave it, so a deleted file's inode number
+//! reused by a later file is not mistaken for it (the creation time would not
+//! tell them apart: it repeats within a coarse timer tick). The
 //! child process audits a whole validate and commit, then finds each published
 //! object by inode and counts the file barriers it received. The producer's
 //! barrier is the object's only one: installing it into the object store links
@@ -33,6 +34,12 @@ pub fn wide_properties() -> Spec {
 /// Objects by the number of file barriers they received, with the paths of
 /// those that did not receive exactly one.
 pub fn offenders(report: &Value) -> (BTreeMap<u64, u64>, Vec<(String, u64)>) {
+    // Every barrier of the audit was attributed to a file.
+    assert_eq!(
+        report["unattributed"],
+        serde_json::json!([]),
+        "barriers reached files the audit could not name"
+    );
     let mut histogram = BTreeMap::new();
     let mut offenders = Vec::new();
     for (path, count) in report["objects"].as_object().unwrap() {
@@ -131,6 +138,7 @@ fn every_object_an_appended_import_publishes_has_exactly_one_file_barrier() {
         "the append must take the staged path, not the bulk builder"
     );
     let published = published_digests(&project);
+    assert_eq!(appended.barriers()["unattributed"], serde_json::json!([]));
     let mut wrong = Vec::new();
     for (path, count) in appended.barriers()["objects"].as_object().unwrap() {
         let count = count.as_u64().unwrap();
@@ -224,6 +232,7 @@ fn a_session_validated_in_one_process_commits_in_another_without_install_barrier
     );
     assert!(committed.succeeded(), "{committed:?}");
     let report = committed.barriers();
+    assert_eq!(report["unattributed"], serde_json::json!([]));
     // Committing ran none: every object is linked at its address as it was.
     let installed = report["objects"]
         .as_object()

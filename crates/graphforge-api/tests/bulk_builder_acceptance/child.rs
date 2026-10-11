@@ -225,25 +225,25 @@ fn child() {
     );
 }
 
-/// One file for the whole life of the process: an inode number and the time
-/// that inode was created. A filesystem reuses the number of a deleted file, so
-/// the number alone would credit a deleted temporary's barriers to a later file.
-type Inode = (u64, [u8; 16], std::time::SystemTime);
+/// One file for the whole life of the process: an inode number and the
+/// generation number the filesystem gave that inode. A filesystem reuses the
+/// number of a deleted file but not its generation, so the number alone would
+/// credit a deleted temporary's barriers to a later file, and a creation time,
+/// which repeats within a coarse timer tick, would not separate them either.
+type Inode = (u64, [u8; 16], u32);
 
-/// The inode behind `path`. A filesystem that reports no creation time cannot
-/// be audited, and says so rather than falling back to the bare number.
+/// The inode behind `path`. A filesystem that reports no generation number
+/// cannot be audited, and says so rather than falling back to the bare number.
 fn inode(path: &Path) -> Inode {
-    let identity = graphforge_filesystem::path_identity(path).unwrap();
-    let born = std::fs::metadata(path)
-        .unwrap()
-        .created()
-        .unwrap_or_else(|error| {
-            panic!(
-                "no creation time for {}: {error}; barriers cannot be attributed to inodes",
-                path.display()
-            )
-        });
-    (identity.volume_serial, identity.file_id, born)
+    let file = std::fs::File::open(path).unwrap();
+    let identity = graphforge_filesystem::file_identity(&file).unwrap();
+    let generation = graphforge_filesystem::inode_generation(&file).unwrap_or_else(|error| {
+        panic!(
+            "no inode generation for {}: {error}; barriers cannot be attributed to inodes",
+            path.display()
+        )
+    });
+    (identity.volume_serial, identity.file_id, generation)
 }
 
 /// What the barriers this process made reached. Each published object (one per
@@ -251,19 +251,19 @@ fn inode(path: &Path) -> Inode {
 /// else under the session's encoded tree, where it is the same inode.
 fn barrier_report(
     project: &Path,
-    barriers: Vec<graphforge_filesystem::observation::BarrierRecord>,
+    log: graphforge_filesystem::observation::BarrierLog,
     committed: bool,
 ) -> serde_json::Value {
     let mut per_inode: BTreeMap<Inode, Vec<(usize, bool)>> = BTreeMap::new();
-    for (sequence, record) in barriers.iter().enumerate() {
-        // A barrier whose inode reported no creation time reached no file the
-        // report looks up (every lookup has one), so it is attributed to none.
-        if let Some(born) = record.birth {
-            per_inode
-                .entry((record.identity.volume_serial, record.identity.file_id, born))
-                .or_default()
-                .push((sequence, record.directory));
-        }
+    for (sequence, record) in log.records.iter().enumerate() {
+        per_inode
+            .entry((
+                record.identity.volume_serial,
+                record.identity.file_id,
+                record.generation,
+            ))
+            .or_default()
+            .push((sequence, record.directory));
     }
     let sequences = |inode: Inode, directory: bool| -> Vec<usize> {
         per_inode.get(&inode).map_or_else(Vec::new, |reached| {
@@ -302,6 +302,9 @@ fn barrier_report(
     }
     let current = committed.then(|| sequences(inode(&project.join("CURRENT")), false));
     serde_json::json!({
+        // Barriers that reached a file the audit could not name; a correct run
+        // has none, and a test asserts so.
+        "unattributed": log.unattributed,
         "objects": objects,
         "buckets_acknowledged": buckets_acknowledged,
         "current_file_barriers": current.as_ref().map(Vec::len),
