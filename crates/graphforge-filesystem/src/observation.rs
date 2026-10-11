@@ -211,6 +211,17 @@ fn observe(file: &File, operation: impl FnOnce() -> io::Result<()>) -> io::Resul
 mod tests {
     use super::*;
 
+    /// The audit is process-wide, and `cargo test` runs a crate's tests on
+    /// threads of one process: the tests that start audits take turns, as each
+    /// asserts on the state when no other audit is alive.
+    static TURNS: Mutex<()> = Mutex::new(());
+
+    fn take_turn() -> std::sync::MutexGuard<'static, ()> {
+        TURNS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn barrier_on(file: &File) {
         file.observed_sync_all().unwrap();
     }
@@ -252,6 +263,7 @@ mod tests {
     /// starts them. Nothing here depends on attributing a barrier to a file.
     #[test]
     fn overlapping_audits_keep_their_logs_until_the_last_ends() {
+        let _turn = take_turn();
         let directory = tempfile::tempdir().unwrap();
         let file = File::create(directory.path().join("file")).unwrap();
         let identity = crate::file_identity(&file).unwrap();
@@ -292,6 +304,7 @@ mod tests {
     fn audits_started_and_ended_concurrently_keep_their_own_slices() {
         const THREADS: usize = 16;
         const ROUNDS: usize = 60_000;
+        let _turn = take_turn();
         let directory = tempfile::tempdir().unwrap();
         std::thread::scope(|scope| {
             for thread in 0..THREADS {
@@ -323,6 +336,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_barrier_the_audit_cannot_name_is_reported() {
+        let _turn = take_turn();
         let file = File::open("/proc/self/status").unwrap();
         let audit = BarrierAudit::start();
         // The sync itself fails on procfs; the attempt is what is recorded.
