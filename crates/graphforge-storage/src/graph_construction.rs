@@ -1513,6 +1513,19 @@ impl GraphConstructionSession {
         {
             return Err(storage("checkpoint private authority changed"));
         }
+        if let (Some(checkpoint), Some(authority @ ConstructionAuthority::SingleDocument(_))) =
+            (&recovered_checkpoint, &semantic_authority)
+        {
+            // Before anything of a recovered session is touched. Restoring its
+            // ledgers, removing its temporaries and recovering its publication
+            // all write, and a stale or retired authority must never cause
+            // them: the checkpoint names the exact parent it pinned, and that
+            // is what the authority is held to.
+            authority.authenticate_parent(&crate::resolve_generation_by_uuid(
+                project_dir,
+                checkpoint.parent_generation_uuid,
+            )?)?;
+        }
         if let Some(checkpoint) = recovered_checkpoint.as_mut() {
             // Before anything can rewrite the checkpoint: the persisted ledger
             // omits the staged entries the receipt journal names (#900).
@@ -1554,10 +1567,11 @@ impl GraphConstructionSession {
                 }
                 None => current_parent_generation_authority(project_dir)?,
             };
-        if let Some(authority) = &semantic_authority
-            && matches!(authority, ConstructionAuthority::SingleDocument(_))
+        if recovered_checkpoint.is_none()
+            && let Some(authority @ ConstructionAuthority::SingleDocument(_)) = &semantic_authority
         {
-            // The exact generation this session pinned, however it was pinned.
+            // A fresh session's parent is the generation just pinned; nothing
+            // of it exists to recover, so the check can follow the pin.
             authority.authenticate_parent(&crate::resolve_generation_by_uuid(
                 project_dir,
                 parent_generation_uuid,

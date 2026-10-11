@@ -585,6 +585,79 @@ mod a_parent_that_changed {
         assert_eq!(counts(&other), (0, 0));
     }
 
+    /// Facade B replaces the ontology and is killed after it wrote its
+    /// publication intent. The stale facade resuming B's session is refused
+    /// before recovery touches the session: the checkpoint is byte for byte
+    /// what B left.
+    #[test]
+    fn a_stale_facade_resuming_an_interrupted_publication_leaves_its_checkpoint_untouched() {
+        use super::super::child::{Conditions, KILLED, run};
+
+        let directory = tempfile::tempdir().unwrap();
+        let (project, stale) = adopted_document(
+            directory.path(),
+            "strict",
+            OntologyMode::Strict,
+            PROPERTY_ONTOLOGY,
+        );
+        let mut other = GraphForge::new(project.to_str()).unwrap();
+        let replacement = directory.path().join("replacement.yaml");
+        fs::write(&replacement, ONTOLOGY).unwrap();
+        other
+            .adopt_ontology(AdoptOntologyRequest {
+                context: operation(8),
+                path: replacement,
+                mode: OntologyMode::Strict,
+            })
+            .unwrap();
+        drop(other);
+        // Facade B builds under the replacement in its own process and is
+        // killed after it wrote the publication intent, before `CURRENT`.
+        let killed = run(
+            &super::super::child::ChildSpec {
+                project: project.clone(),
+                chunk_hosts: Some(6),
+                ..Default::default()
+            },
+            &Conditions {
+                project_failpoint: Some("project.before_current_replace".to_owned()),
+                ..Conditions::default()
+            },
+        );
+        assert_eq!(killed.code, Some(KILLED), "{killed:?}");
+        let session = killed.session();
+        // B was killed between writing the intent and recording it in the
+        // checkpoint: the intent is durable and the checkpoint still says
+        // sealed, which is the state recovery would move to `publishing`.
+        let checkpoint = construction_root(&project).join("checkpoint.json");
+        let recorded = fs::read_to_string(&checkpoint).unwrap();
+        assert!(recorded.contains("\"publication_state\":\"publishing\""));
+        fs::write(
+            &checkpoint,
+            recorded.replace(
+                "\"publication_state\":\"publishing\"",
+                "\"publication_state\":\"sealed\"",
+            ),
+        )
+        .unwrap();
+        assert!(
+            construction_root(&project)
+                .join("publication-intent.json")
+                .exists()
+        );
+        let before = (fs::read(&checkpoint).unwrap(), current_generation(&project));
+
+        let refusal = stale
+            .resume_graph_construction(session, Default::default())
+            .err()
+            .expect("a stale facade is refused");
+        assert!(refusal.to_string().contains(CHANGED), "{refusal}");
+        assert!(
+            (fs::read(&checkpoint).unwrap(), current_generation(&project)) == before,
+            "the refused resume rewrote the session's checkpoint or moved CURRENT"
+        );
+    }
+
     #[test]
     fn the_same_document_adopted_in_another_mode_refuses_the_construction() {
         let directory = tempfile::tempdir().unwrap();
