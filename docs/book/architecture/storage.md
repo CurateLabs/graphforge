@@ -488,10 +488,13 @@ reserve page, Arrow-array and normalization workspace from a shared pool. That
 reservation is distinct from the normalized-property scratch bound and is not a
 whole-process RSS guarantee; see [resumable import](resumable-import.md).
 
-Pending, tracked under epic #1881:
-
-- **Scratch passes run one at a time (#1938).** Over-budget builds report
-  `scratch_concurrency` 1 until partitions run concurrently.
+Scratch passes run concurrently (#1938). The partitions in flight are the
+threads that run every scratch pass; the planner picks the largest worker count,
+up to the available construction lanes, whose per-worker reservations (and, for
+property-bearing input, an 8 MiB property run each) fit the budget. Partitions
+are claimed in order and admitted by a memory gate, so the reservations in
+flight never exceed the budget. The build reports the count as
+`scratch_concurrency`; it is 1 only when the budget admits no more.
 
 The staged pipeline serves appends only; no initial-build plan reaches it.
 Publication semantics are unchanged.

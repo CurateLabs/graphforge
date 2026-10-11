@@ -15,10 +15,10 @@ revisit_when: "A published artifact stops being a projection of the three ranked
 adjacency scratch), #1916 (property scratch), #1898 (sources read in place),
 #1899 (direct-to-CAS writes), #1901 (chunk-API initial builds), #1902 (no UUID
 membership index) and #1928 (no allocated-block comparison of unsynced encoded
-artifacts), #1929 (out-of-core node tables) and #1964 (the staged initial-build
-machinery deleted). Pending: #1918 (bounded source decoding), #1938 (parallel
-scratch passes), and the integrated acceptance audit and ladder. The epic's
-throughput close gate is #1387.
+artifacts), #1929 (out-of-core node tables), #1918 (bounded source decoding,
+#1956), #1938 (parallel scratch passes, #1960) and #1964 (the staged
+initial-build machinery deleted). Pending: the integrated acceptance audit and
+ladder. The epic's throughput close gate is #1387.
 
 **Related:**
 - ADR 0013 (project generation protocol; the `CURRENT` swap is unchanged)
@@ -93,8 +93,8 @@ functions.
 - An initial build whose estimated peak memory fits the plan-time budget keeps
   everything resident. One that does not runs the same passes through scratch
   files (below), bounding normalized builder workspace within its reservation.
-  The registered-source decoding and normalization boundary is described below;
-  its complete memory bound remains a prerequisite under #1918. The budget is
+  The registered-source decoding and normalization boundary is described below
+  (#1918). The budget is
   three fifths of the process's cgroup-aware memory headroom, or the bytes in
   `GF_BULK_BUILD_MEMORY_BUDGET_BYTES`. Routing is a function of the footers and
   the budget, never of the data, and the bytes are the same on every route.
@@ -163,10 +163,8 @@ functions.
 
 ## Pending work
 
-| Issue | What it changes | Until it lands |
-| --- | --- | --- |
-| #1918 | Registered-source decoding and normalization are bounded before allocation (Parquet dictionary and page expansion, row maps). | The scratch route bounds normalized transport, not every source decoder. A reservation describes builder workspace, not process RSS. |
-| #1938 | Scratch partitions run concurrently, as many as the budget admits. | Over-budget builds run one scratch partition at a time (`scratch_concurrency` 1). |
+No code slice of #1881 is pending. The integrated acceptance audit and the
+ladder remain.
 
 The throughput floor (1,000,000 edges/s at every ladder rung) and the
 multicore criterion are gated by the integrated ladder under #1881 and #1387.
@@ -190,8 +188,9 @@ When the estimate exceeds the budget:
   Consecutive small child ranges coalesce through one streaming output, so
   bookkeeping follows the number of bounded partitions rather than the radix
   fanout. Already-fitting initial ranges keep their original scratch files.
-- Pass 3 currently builds the partitions in order, one at a time. #1938 will
-  admit concurrent partitions from their workspace reservations. Sorting a partition
+- Pass 3 builds the partitions concurrently (#1938): partitions are claimed in
+  order and admitted by a memory gate from their workspace reservations, so as
+  many run at once as the derived worker count and the budget allow. Sorting a partition
   ranks its edges (the first `edge_id` is the number of earlier edges plus
   one). It checks identities, writes its canonical edge files, and scatters
   its adjacency entries once into node-range partitions bounded by exact node degrees. A node larger than a
@@ -292,8 +291,8 @@ transport using the same restart policy as edge and CSR scratch.
 
 Registered-source decoding precedes this transport. Parquet dictionary/page
 expansion and the normalizer's row maps need their own bounded physical batching
-and admission (#1918); this decision does not claim that normalized-row transport
-alone bounds every source decoder. Available IPC footer/body expansion and schema
+and admission (#1918, implemented by #1956); normalized-row transport alone does
+not bound every source decoder. Available IPC footer/body expansion and schema
 metadata reservations are checked before creating eager source readers. Property
 traffic and fixed reservations remain distinct from measured process RSS.
 
