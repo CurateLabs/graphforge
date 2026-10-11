@@ -35,13 +35,45 @@ use crate::durable_commit::{acknowledge_directory, observe_barriers};
 use crate::graph_construction::{CapturedEncodedArtifact, construction_failpoint};
 use graphforge_filesystem::{FileIdentity, StableDirectory};
 
+/// An inode as named at an object's address: its volume and number, and its
+/// generation number where the platform and filesystem have one. A filesystem
+/// reuses the number of a deleted file, so two installers can see the same
+/// number for two different objects; the generation tells them apart. Where
+/// there is no generation (Windows, a filesystem outside the admitted classes)
+/// the number alone is all the evidence there is, and it is what is compared.
+#[derive(Clone, Copy, Debug)]
+struct NamedInode {
+    identity: FileIdentity,
+    generation: Option<u32>,
+}
+
+impl NamedInode {
+    fn of(file: &std::fs::File, identity: FileIdentity) -> Self {
+        Self {
+            identity,
+            // `Unsupported` is the platform saying it has none.
+            generation: graphforge_filesystem::inode_generation(file).ok(),
+        }
+    }
+
+    /// The number, and the generation when both sides have one. A side without
+    /// a generation (an identity captured as a bare number) matches by number.
+    fn is_same_file(&self, other: &Self) -> bool {
+        self.identity == other.identity
+            && match (self.generation, other.generation) {
+                (Some(left), Some(right)) => left == right,
+                _ => true,
+            }
+    }
+}
+
 /// What already sits at the object's content address.
 enum Existing {
     Absent,
     Reused(InstalledObject),
     /// An object that is provably not the bytes its address names.
     Mismatched {
-        identity: FileIdentity,
+        identity: NamedInode,
         io: ReadIoEvidence,
         /// Set when this inode is the encoder's own file, which linking again
         /// cannot repair. The install is refused after the entry is retired.
@@ -204,7 +236,11 @@ fn settle_under_repair_lock<'a>(
     returned_error_boundary("repair:before-lock")?;
     let lock = RepairLock::acquire(bucket, root)?;
     returned_error_boundary("repair:locked")?;
-    if address_identity(bucket, source.content_sha256(), root)? == Some(classified) {
+    // The same file, not merely the same inode number: a rival's replacement
+    // can be given the number of the object it replaced.
+    if address_identity(bucket, source.content_sha256(), root)?
+        .is_some_and(|current| current.is_same_file(&classified))
+    {
         return Ok((first, carried, Some(lock)));
     }
     // Another installer changed the entry while this one waited.
@@ -250,13 +286,14 @@ fn existing_object(
             error,
         )
     })?;
+    let named = NamedInode::of(&file, identity);
     let length = file
         .metadata()
         .map_err(|error| storage("inspect existing graph object", &cas.diagnostic_root, error))?
         .len();
     if length != source.bytes() {
         return Ok(Existing::Mismatched {
-            identity,
+            identity: named,
             io: ReadIoEvidence::default(),
             refusal: None,
         });
@@ -288,7 +325,7 @@ fn existing_object(
         // bad bytes, so nothing here can repair it. The caller retires the
         // entry, so no mis-addressed object stays at the address, and refuses.
         return Ok(Existing::Mismatched {
-            identity,
+            identity: named,
             io,
             refusal: Some(if expected_checksum.is_some() {
                 "staged inventory checksum differs from the object at its address"
@@ -314,7 +351,7 @@ fn existing_object(
     }
     if !matches {
         return Ok(Existing::Mismatched {
-            identity,
+            identity: named,
             io,
             refusal: None,
         });
@@ -391,10 +428,10 @@ fn address_identity(
     bucket: &StableDirectory,
     digest: &str,
     root: &std::path::Path,
-) -> Result<Option<FileIdentity>, GfError> {
+) -> Result<Option<NamedInode>, GfError> {
     match bucket.open_child_file(std::ffi::OsStr::new(&digest[2..])) {
         Ok(file) => graphforge_filesystem::file_identity(&file)
-            .map(Some)
+            .map(|identity| Some(NamedInode::of(&file, identity)))
             .map_err(|error| storage("identify graph object at its address", root, error)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(storage("open graph object at its address", root, error)),
@@ -408,18 +445,20 @@ fn retire_mismatched(
     lease: &GraphObjectPublicationLease,
     bucket: &StableDirectory,
     digest: &str,
-    identity: FileIdentity,
+    identity: NamedInode,
 ) -> Result<u64, GfError> {
     let cas = &lease.cas;
     let object_path = graph_object_path(&cas.diagnostic_root, digest)?;
     returned_error_boundary("repair:retiring")?;
-    if address_identity(bucket, digest, &cas.diagnostic_root)? != Some(identity) {
+    if !address_identity(bucket, digest, &cas.diagnostic_root)?
+        .is_some_and(|current| current.is_same_file(&identity))
+    {
         // Someone else already retired or replaced it; whatever is there now
         // is not this caller's to remove.
         return Ok(0);
     }
     bucket
-        .unlink_child_if_identity(std::ffi::OsStr::new(&digest[2..]), identity)
+        .unlink_child_if_identity(std::ffi::OsStr::new(&digest[2..]), identity.identity)
         .map_err(|error| storage("remove mis-addressed graph object", &object_path, error))?;
     if let Some(allocation) = &cas.allocation {
         allocation.remove_file_at(&object_path)?;
@@ -447,7 +486,12 @@ pub(in crate::graph_object_store) fn retire_unadmitted_link(
     }
     let bucket = lease.cas.digest_bucket(digest, false)?;
     let _repair_lock = RepairLock::acquire(&bucket, &lease.cas.diagnostic_root)?;
-    retire_mismatched(lease, &bucket, digest, identity).map(|_| ())
+    // Only the bare number was captured when the link was made.
+    let linked = NamedInode {
+        identity,
+        generation: None,
+    };
+    retire_mismatched(lease, &bucket, digest, linked).map(|_| ())
 }
 
 /// Make the staged inode read-only and durable before it can gain its
