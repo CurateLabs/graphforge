@@ -27,6 +27,10 @@ const FAILPOINT_COOKIE: &str = "graphforge-construction-test-v1";
 const PROJECT_FAILPOINT_COOKIE: &str = "graphforge-internal-subprocess-v1";
 /// The exit status of a process that hit its failpoint.
 pub const KILLED: i32 = 86;
+/// The memory budget of a build that is meant to stay resident: far above the
+/// resident estimate of any fixture here, and always set, so the route does not
+/// depend on the host's headroom or on a budget in the caller's environment.
+pub const RESIDENT_BUDGET: u64 = 16 << 30;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ChildSpec {
@@ -36,6 +40,9 @@ pub struct ChildSpec {
     pub session: Option<Uuid>,
     pub lanes: Option<usize>,
     pub commit: bool,
+    /// Report the bytes the process wrote while validating, from the
+    /// construction region counters of this process alone.
+    pub measure: bool,
 }
 
 /// What a child printed, by milestone.
@@ -52,7 +59,11 @@ impl Outcome {
     }
 
     pub fn succeeded(&self) -> bool {
-        self.code == Some(0) && self.lines.contains_key("DONE")
+        let succeeded = self.code == Some(0) && self.lines.contains_key("DONE");
+        if !succeeded && !self.stderr.is_empty() {
+            eprintln!("child stderr:\n{}", self.stderr);
+        }
+        succeeded
     }
 
     pub fn validated(&self) -> &serde_json::Value {
@@ -61,6 +72,10 @@ impl Outcome {
 
     pub fn inventory(&self) -> BTreeMap<String, (u64, String)> {
         serde_json::from_value(self.validated()["inventory"].clone()).unwrap()
+    }
+
+    pub fn regions(&self) -> &serde_json::Value {
+        &self.lines["REGIONS"]
     }
 
     pub fn report(&self) -> &serde_json::Value {
@@ -110,7 +125,28 @@ fn child() {
     let (phase, _) = session.status();
     emit("PHASE", &format!("{phase:?}").into());
     if phase == ImportPhase::Open {
-        match session.validate(&graph) {
+        let capture = spec
+            .measure
+            .then(|| graphforge_storage::concurrency_attribution::RegionCapture::start("import"));
+        let validated = session.validate(&graph);
+        if let Some(capture) = capture {
+            let regions = capture.finish();
+            let written = |suffix: &str| {
+                regions
+                    .regions
+                    .iter()
+                    .find(|(path, _)| path.ends_with(suffix))
+                    .and_then(|(_, row)| row.inclusive.written_bytes)
+            };
+            emit(
+                "REGIONS",
+                &serde_json::json!({
+                    "encoding_written": written("/canonical_encoding"),
+                    "validate_written": written("/stage+seal"),
+                }),
+            );
+        }
+        match validated {
             Ok(progress) => {
                 let report = progress.construction.and_then(|c| c.bulk_build);
                 emit(
@@ -168,7 +204,7 @@ pub struct Conditions {
     pub construction_failpoint: Option<String>,
     /// Exit at this project-publication failpoint.
     pub project_failpoint: Option<String>,
-    /// `GF_BULK_BUILD_MEMORY_BUDGET_BYTES`.
+    /// `GF_BULK_BUILD_MEMORY_BUDGET_BYTES`; [`RESIDENT_BUDGET`] when absent.
     pub budget: Option<u64>,
     /// The session clock, if not [`CLOCK`].
     pub clock: Option<i64>,
@@ -202,15 +238,19 @@ pub fn run(spec: &ChildSpec, conditions: &Conditions) -> Outcome {
             .env("GRAPHFORGE_PROJECT_FAILPOINTS", PROJECT_FAILPOINT_COOKIE)
             .env("GRAPHFORGE_PROJECT_FAILPOINT", name);
     }
-    if let Some(budget) = conditions.budget {
-        command.env("GF_BULK_BUILD_MEMORY_BUDGET_BYTES", budget.to_string());
-    }
+    // Always set: an inherited budget or the host's headroom must not pick the
+    // route.
+    command.env(
+        "GF_BULK_BUILD_MEMORY_BUDGET_BYTES",
+        conditions.budget.unwrap_or(RESIDENT_BUDGET).to_string(),
+    );
     let output = command.output().unwrap();
     let mut lines = BTreeMap::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         for name in [
             "SESSION",
             "PHASE",
+            "REGIONS",
             "VALIDATED",
             "REFUSED",
             "COMMITTED",

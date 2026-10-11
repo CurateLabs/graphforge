@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 
 use arrow::array::{ArrayRef, FixedSizeBinaryArray, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field};
@@ -28,16 +28,6 @@ use uuid::Uuid;
 pub const BATCH_ROWS: usize = 1_024;
 pub const TASK_ROWS: usize = 16 * BATCH_ROWS;
 pub const MIB: usize = 1 << 20;
-
-/// Counter-based tests difference process-wide counters, so they do not overlap
-/// when the binary runs its tests on threads (nextest gives each its own process).
-static SERIAL: Mutex<()> = Mutex::new(());
-
-pub fn serial() -> MutexGuard<'static, ()> {
-    SERIAL
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
 
 pub fn v7(value: u128) -> Uuid {
     Uuid::from_u128((value << 80) | (0x7 << 76) | (0x2 << 62) | value)
@@ -203,7 +193,6 @@ fn write_parquet(path: &Path, rows: usize, make: impl Fn(std::ops::Range<usize>)
 }
 
 pub struct Sources {
-    pub spec: Spec,
     pub directory: PathBuf,
 }
 
@@ -217,7 +206,6 @@ impl Sources {
             edge_batch(&spec, range)
         });
         Self {
-            spec,
             directory: directory.to_owned(),
         }
     }
@@ -225,7 +213,6 @@ impl Sources {
     /// Sources already written to `directory`.
     pub fn at(directory: &Path) -> Self {
         Self {
-            spec: Spec::graph(0, 0),
             directory: directory.to_owned(),
         }
     }

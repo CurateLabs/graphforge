@@ -293,6 +293,39 @@ pub struct BulkBuildReport {
     /// Property IPC frames read; repeated catalog/window scans are included.
     #[serde(default)]
     pub property_scratch_read_bytes: u64,
+    /// Bytes of sorted runs written from the input.
+    #[serde(default)]
+    pub property_run_write_bytes: u64,
+    /// Bytes of intermediate runs a reduction level wrote; zero when the runs fit the merge fan-in and workspace.
+    #[serde(default)]
+    pub property_reduction_write_bytes: u64,
+    /// Bytes of final segments the merge wrote.
+    #[serde(default)]
+    pub property_segment_write_bytes: u64,
+    /// Bytes of runs the merges read.
+    #[serde(default)]
+    pub property_merge_read_bytes: u64,
+    /// Bytes of the runs final merges consumed (schema groups of two or more runs).
+    #[serde(default)]
+    pub property_merged_input_bytes: u64,
+    /// Bytes of the final segments, merged or a single run.
+    #[serde(default)]
+    pub property_segment_bytes: u64,
+    /// Bytes of final segments read: the catalog observation and the emission scan.
+    #[serde(default)]
+    pub property_segment_read_bytes: u64,
+    /// Bytes of logical windows copied from the segments for emission.
+    #[serde(default)]
+    pub property_window_write_bytes: u64,
+    /// Bytes of windows read back.
+    #[serde(default)]
+    pub property_window_read_bytes: u64,
+    /// Bytes of owner/route projections written.
+    #[serde(default)]
+    pub property_projection_write_bytes: u64,
+    /// Bytes of projections read back.
+    #[serde(default)]
+    pub property_projection_read_bytes: u64,
     /// Fixed property workspace reserved before decoding any source.
     #[serde(default)]
     pub property_workspace_reserved_bytes: u64,

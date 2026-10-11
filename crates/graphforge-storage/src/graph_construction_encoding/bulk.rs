@@ -1192,6 +1192,8 @@ pub(crate) fn encode_bulk(
     scratch_report.peak_occupied_bytes = scratch
         .as_ref()
         .map_or(0, scratch::Scratch::peak_occupied_bytes);
+    let node_stage = property_rows::StageTotals::of(node_properties.as_ref());
+    let edge_stage = property_rows::StageTotals::of(edge_properties.as_ref());
     drop((node_properties, edge_properties));
     if let Some(scratch) = scratch {
         scratch.remove()?;
@@ -1334,6 +1336,53 @@ pub(crate) fn encode_bulk(
             endpoint_scratch_read_bytes: scratch_report.endpoint_read_bytes,
             property_scratch_write_bytes,
             property_scratch_read_bytes,
+            property_run_write_bytes: property_rows::property_stage(
+                &node_stage,
+                &edge_stage,
+                property_rows::Stage::RunWrite,
+            ),
+            property_reduction_write_bytes: property_rows::property_stage(
+                &node_stage,
+                &edge_stage,
+                property_rows::Stage::ReductionWrite,
+            ),
+            property_segment_write_bytes: property_rows::property_stage(
+                &node_stage,
+                &edge_stage,
+                property_rows::Stage::SegmentWrite,
+            ),
+            property_merge_read_bytes: property_rows::property_stage(
+                &node_stage,
+                &edge_stage,
+                property_rows::Stage::MergeRead,
+            ),
+            property_merged_input_bytes: node_stage.merged_input + edge_stage.merged_input,
+            property_segment_bytes: node_stage.segment + edge_stage.segment,
+            property_segment_read_bytes: property_rows::property_stage(
+                &node_stage,
+                &edge_stage,
+                property_rows::Stage::SegmentRead,
+            ),
+            property_window_write_bytes: property_rows::property_stage(
+                &node_stage,
+                &edge_stage,
+                property_rows::Stage::WindowWrite,
+            ),
+            property_window_read_bytes: property_rows::property_stage(
+                &node_stage,
+                &edge_stage,
+                property_rows::Stage::WindowRead,
+            ),
+            property_projection_write_bytes: property_rows::property_stage(
+                &node_stage,
+                &edge_stage,
+                property_rows::Stage::ProjectionWrite,
+            ),
+            property_projection_read_bytes: property_rows::property_stage(
+                &node_stage,
+                &edge_stage,
+                property_rows::Stage::ProjectionRead,
+            ),
             source_workspace_capacity_bytes: source_pool.capacity(),
             source_workspace_peak_bytes: source_pool.peak_bytes(),
             source_workspace_reservations: source_pool.reservations(),
