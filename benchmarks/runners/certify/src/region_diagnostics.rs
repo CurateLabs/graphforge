@@ -104,7 +104,7 @@ const WORK_UNITS_V2: [&str; 11] = [
     "observed_bytes",
     "reread_bytes",
 ];
-const REGIONS: [&str; 62] = [
+const REGIONS: [&str; 58] = [
     "import_command",
     "begin_import",
     "resume_import",
