@@ -40,7 +40,7 @@
     {
       "id": "finbench-fixture-read-params",
       "role": "parameter",
-      "checksum_sha256": "5b37721a7a6a1f120940e6ebff5e1ef4f724c28c78fc6ecffef4aca74dfecf80",
+      "checksum_sha256": "d53c95cd405a2a65d60eedae024976b3364d1fee43b070a4b1eaa1b4a7a262a5",
       "license": "Apache-2.0",
       "acquisition": "download",
       "source": "https://datasets.ldbcouncil.org/finbench/finbench-fixture-read-params.zip"

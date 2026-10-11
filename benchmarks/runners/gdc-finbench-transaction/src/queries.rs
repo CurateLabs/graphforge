@@ -30,7 +30,8 @@
 //! `graphforge_bench.gdc_finbench_transaction_reference` module, run at SF1
 //! (decision on #952). Where GPStore, an LDBC reference implementation, reads
 //! the specification differently, `reference_reading` records that for
-//! information only; `workarounds` names the GraphForge gap (#1888) or the declared
+//! information only; `workarounds` names the construct GraphForge refuses with a
+//! typed `GF_NOT_IMPLEMENTED` (#1888 is the decision of record) or the declared
 //! variance behind any departure from the most direct Cypher.
 
 use crate::{Operation, SuiteError, ValidationMode};
@@ -255,21 +256,19 @@ const fn truncation(truncated_steps: &'static [&'static str]) -> Option<Truncati
 /// Truncation and path rules compare `[id, id, timestamp]` keys, not edges.
 const W_EDGE_KEYS: &str = "edges are identified by [endpoint id, timestamp] keys because the \
 declared tie-break variance keeps or drops edges sharing both together, which an edge \
-identity would not, and startNode/endNode/id are unsupported for path hops (#1888)";
+identity would not, and startNode()/endNode() and id() over unwound path hops are refused \
+with a typed GF_NOT_IMPLEMENTED (#1888)";
 /// Path hop rules use a list comprehension in a second `WITH`.
-const W_HOP_LIST: &str = "hop rules are a list comprehension over id and timestamp lists in a \
-separate WITH because ALL(i IN range(...)) over path relationships, a path-node comprehension \
-with WHERE in the same WITH, and reduce() fail or are unsupported (#1888)";
-/// Optional truncated steps aggregate admitted rows.
-const W_OPTIONAL_WHERE: &str = "truncated optional steps keep every OPTIONAL MATCH row and \
-aggregate only CASE-admitted ones because OPTIONAL MATCH ... WHERE cannot reference a WITH \
-variable (#1888 D7)";
+const W_HOP_LIST: &str = "hop rules are a list comprehension over id and timestamp lists \
+extracted in a separate WITH because ALL(i IN range(...)) indexing path relationships directly \
+and reduce() over path relationships are refused with a typed GF_NOT_IMPLEMENTED (#1888)";
 /// No shortestPath.
 const W_SHORTEST_PATH: &str = "an unbounded variable-length match with min(size(r)) stands in for \
-shortestPath, which is unsupported (#1888)";
+shortestPath, which is refused with a typed GF_NOT_IMPLEMENTED (#1888)";
 /// No multi-type variable-length relationship.
 const W_MULTI_TYPE: &str = "an untyped variable-length match filtered by type(e) stands in for \
-[:transfer|withdraw*1..3], which fails at execution (#1888)";
+[:transfer|withdraw*1..3], a variable-length relationship type alternation that is refused with \
+a typed GF_NOT_IMPLEMENTED (#1888)";
 
 const EXACT: &str = "exact";
 const NORMALIZED: &str = "normalized";
@@ -396,9 +395,6 @@ const TCR6: &str = concat!(
     "ORDER BY sumEdge2Amount DESC, midId ASC"
 );
 
-// `OPTIONAL MATCH ... WHERE` cannot reference a variable an earlier `WITH`
-// projected (GraphForge plans it as unbound, #1888 D7), so TCR7 and TCR9 keep
-// every optional row of a truncated step and aggregate only the admitted ones.
 const TCR7: &str = concat!(
     "MATCH (mid:Account {id: $id}) ",
     "OPTIONAL MATCH (mid)<-[t:transfer]-(u:Account) ",
@@ -408,18 +404,16 @@ const TCR7: &str = concat!(
     "WITH mid, keptIn, t, d ORDER BY t.timestamp DESC, d.id ASC ",
     "WITH mid, keptIn, collect([d.id, t.timestamp])[0..$truncationLimit] AS keptOut ",
     "OPTIONAL MATCH (mid)<-[edge1:transfer]-(src:Account) ",
-    "WITH mid, keptOut, src, edge1, ([src.id, edge1.timestamp] IN keptIn ",
+    "WHERE [src.id, edge1.timestamp] IN keptIn ",
     "AND $startTime < edge1.timestamp AND edge1.timestamp < $endTime ",
-    "AND edge1.amount > $threshold) AS admitted ",
-    "WITH mid, keptOut, count(DISTINCT CASE WHEN admitted THEN src.id END) AS numSrc, ",
-    "sum(CASE WHEN admitted THEN edge1.amount END) AS sumIn ",
+    "AND edge1.amount > $threshold ",
+    "WITH mid, keptOut, count(DISTINCT src.id) AS numSrc, sum(edge1.amount) AS sumIn ",
     "OPTIONAL MATCH (mid)-[edge2:transfer]->(dst:Account) ",
-    "WITH numSrc, sumIn, dst, edge2, ([dst.id, edge2.timestamp] IN keptOut ",
+    "WHERE [dst.id, edge2.timestamp] IN keptOut ",
     "AND $startTime < edge2.timestamp AND edge2.timestamp < $endTime ",
-    "AND edge2.amount > $threshold) AS admitted ",
-    "WITH numSrc, sumIn, count(DISTINCT CASE WHEN admitted THEN dst.id END) AS numDst, ",
-    "count(CASE WHEN admitted THEN 1 END) AS numEdge2, ",
-    "sum(CASE WHEN admitted THEN edge2.amount END) AS sumOut ",
+    "AND edge2.amount > $threshold ",
+    "WITH numSrc, sumIn, count(DISTINCT dst.id) AS numDst, count(edge2) AS numEdge2, ",
+    "sum(edge2.amount) AS sumOut ",
     "RETURN numSrc, numDst, CASE WHEN numEdge2 = 0 THEN -1.0 ",
     "ELSE round(sumIn / sumOut * 1000) / 1000 END AS inOutRatio"
 );
@@ -476,17 +470,15 @@ const TCR9: &str = concat!(
     "AND $startTime < edge2.timestamp AND edge2.timestamp < $endTime ",
     "WITH mid, keptIn, keptOut, sum1, count(edge2) AS numEdge2, sum(edge2.amount) AS sum2 ",
     "OPTIONAL MATCH (mid)<-[edge3:transfer]-(up:Account) ",
-    "WITH mid, keptOut, sum1, numEdge2, sum2, edge3, ([up.id, edge3.timestamp] IN keptIn ",
+    "WHERE [up.id, edge3.timestamp] IN keptIn ",
     "AND edge3.amount > $threshold ",
-    "AND $startTime < edge3.timestamp AND edge3.timestamp < $endTime) AS admitted ",
-    "WITH mid, keptOut, sum1, numEdge2, sum2, ",
-    "sum(CASE WHEN admitted THEN edge3.amount END) AS sum3 ",
+    "AND $startTime < edge3.timestamp AND edge3.timestamp < $endTime ",
+    "WITH mid, keptOut, sum1, numEdge2, sum2, sum(edge3.amount) AS sum3 ",
     "OPTIONAL MATCH (mid)-[edge4:transfer]->(down:Account) ",
-    "WITH sum1, numEdge2, sum2, sum3, edge4, ([down.id, edge4.timestamp] IN keptOut ",
+    "WHERE [down.id, edge4.timestamp] IN keptOut ",
     "AND edge4.amount > $threshold ",
-    "AND $startTime < edge4.timestamp AND edge4.timestamp < $endTime) AS admitted ",
-    "WITH sum1, numEdge2, sum2, sum3, count(CASE WHEN admitted THEN 1 END) AS numEdge4, ",
-    "sum(CASE WHEN admitted THEN edge4.amount END) AS sum4 ",
+    "AND $startTime < edge4.timestamp AND edge4.timestamp < $endTime ",
+    "WITH sum1, numEdge2, sum2, sum3, count(edge4) AS numEdge4, sum(edge4.amount) AS sum4 ",
     "RETURN CASE WHEN numEdge2 = 0 THEN -1.0 ",
     "ELSE round(sum1 / sum2 * 1000) / 1000 END AS ratioRepay, ",
     "CASE WHEN numEdge4 = 0 THEN -1.0 ",
@@ -751,7 +743,7 @@ pub static QUERIES: &[QueryDefinition] = &[
         semantics: "Distinct senders and receivers of transfers above the threshold in the window, \
                     and the transfer-in over transfer-out amount ratio, -1 without a transfer-out.",
         reference_reading: None,
-        workarounds: &[W_EDGE_KEYS, W_OPTIONAL_WHERE],
+        workarounds: &[W_EDGE_KEYS],
     },
     QueryDefinition {
         operation: Operation::Tcr8,
@@ -817,7 +809,7 @@ pub static QUERIES: &[QueryDefinition] = &[
              this reference follows the spec, which does not name the truncated steps, by \
              truncating only the transfer expansions (edge3, edge4), as Galaxybase does.",
         ),
-        workarounds: &[W_EDGE_KEYS, W_OPTIONAL_WHERE],
+        workarounds: &[W_EDGE_KEYS],
     },
     QueryDefinition {
         operation: Operation::Tcr10,
@@ -1083,7 +1075,15 @@ mod tests {
                     "{}: {workaround}",
                     query.operation
                 );
+                // #1888 is the decision of record for a typed refusal, never a
+                // fixed wrong-answer defect.
+                assert!(
+                    workaround.contains("GF_NOT_IMPLEMENTED"),
+                    "{}: {workaround}",
+                    query.operation
+                );
                 assert!(!workaround.contains("#1887"), "{}", query.operation);
+                assert!(!workaround.contains("#1919"), "{}", query.operation);
             }
             let cites = |text: &str| query.workarounds.iter().any(|w| w.contains(text));
             if query.cypher.contains("] IN ") {
@@ -1099,9 +1099,13 @@ mod tests {
             if query.cypher.contains("type(e) IN") {
                 assert!(cites("[:transfer|withdraw*1..3]"), "{}", query.operation);
             }
-            if query.cypher.contains("CASE WHEN admitted") {
-                assert!(cites("#1888 D7"), "{}", query.operation);
-            }
+            // OPTIONAL MATCH ... WHERE over a WITH-bound list runs (the former
+            // D7 gap is fixed), so no query keeps the CASE-admitted aggregation.
+            assert!(
+                !query.cypher.contains("AS admitted"),
+                "{} aggregates CASE-admitted rows",
+                query.operation
+            );
         }
         let tcr3 = query_definition(Operation::Tcr3).unwrap();
         assert!(tcr3.workarounds.iter().any(|w| w.contains("shortestPath")));

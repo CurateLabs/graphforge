@@ -253,7 +253,8 @@ LIMIT 100",
         ],
         upstream: "neo4j/queries/bi-4.cypher",
         rewrite: Some(
-            "rewrite: LDBC text hits #1888 D5 (CALL subquery). The top-100 forums are \
+            "rewrite: LDBC text uses a CALL { } subquery, which GraphForge refuses with a typed \
+             GF_NOT_IMPLEMENTED (#1888 D5 is the decision of record). The top-100 forums are \
              ordered by their largest per-country member count, then id, which is the order the \
              LDBC ORDER BY + WITH DISTINCT yields and Umbra's maxNumberOfMembers. The UNION ALL \
              of members with their messages and members with 0 becomes every member of a top \
@@ -671,7 +672,8 @@ LIMIT 20",
         columns: &["personId", "messageCountA", "messageCountB"],
         upstream: "neo4j/queries/bi-16.cypher",
         rewrite: Some(
-            "rewrite: LDBC text hits #1888 D5 (CALL subquery). LDBC runs the same per-person \
+            "rewrite: LDBC text uses a CALL { } subquery, which GraphForge refuses with a typed \
+             GF_NOT_IMPLEMENTED (#1888 D5 is the decision of record). LDBC runs the same per-person \
              subquery for (tagA, dateA) and (tagB, dateB) and keeps persons that pass both; here \
              the A pass runs over all persons and the B pass runs for each person that passed A. \
              A person's B counts depend only on that person, so the surviving persons and their \
@@ -710,8 +712,9 @@ LIMIT 10",
         columns: &["person1Id", "messageCount"],
         upstream: "neo4j/queries/bi-17.cypher",
         rewrite: Some(
-            "rewrite: LDBC text hits #1888 D4 (`duration({hours: $delta})` with a non-literal \
-             argument fails). The delta becomes a comparison of epoch milliseconds with \
+            "rewrite: LDBC text uses `duration({hours: $delta})`, a duration map with a non-literal \
+             value, which GraphForge refuses with a typed GF_NOT_IMPLEMENTED (#1888 D4 is the \
+             decision of record). The delta becomes a comparison of epoch milliseconds with \
              `$delta * 3600000` added, which is exact for whole hours on a UTC instant. The \
              final WHERE moves onto a WITH carrying the compared values. The `:Message` supertype label becomes `(m)` with `(m:Post OR m:Comment)` in its \
              WHERE, which selects the same nodes, because import sessions assign one label per \

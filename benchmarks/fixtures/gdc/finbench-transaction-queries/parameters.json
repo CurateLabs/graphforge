@@ -32,7 +32,8 @@
     "TCR7": [
       {"id": 165, "threshold": 60.0, "startTime": 1000, "endTime": 2000, "truncationLimit": 500, "truncationOrder": "TIMESTAMP_DESCENDING"},
       {"id": 165, "threshold": 60.0, "startTime": 1000, "endTime": 2000, "truncationLimit": 3, "truncationOrder": "TIMESTAMP_DESCENDING"},
-      {"id": 171, "threshold": 60.0, "startTime": 1000, "endTime": 2000, "truncationLimit": 500, "truncationOrder": "TIMESTAMP_DESCENDING"}
+      {"id": 171, "threshold": 60.0, "startTime": 1000, "endTime": 2000, "truncationLimit": 500, "truncationOrder": "TIMESTAMP_DESCENDING"},
+      {"id": 165, "threshold": 60.0, "startTime": 1000, "endTime": 2000, "truncationLimit": 1, "truncationOrder": "TIMESTAMP_DESCENDING"}
     ],
     "TCR8": [
       {"id": 210, "threshold": 0.5, "startTime": 1000, "endTime": 2000, "truncationLimit": 500, "truncationOrder": "TIMESTAMP_DESCENDING"},
@@ -41,7 +42,8 @@
     "TCR9": [
       {"id": 185, "threshold": 50.0, "startTime": 1000, "endTime": 2000, "truncationLimit": 500, "truncationOrder": "TIMESTAMP_DESCENDING"},
       {"id": 185, "threshold": 50.0, "startTime": 1000, "endTime": 2000, "truncationLimit": 1, "truncationOrder": "TIMESTAMP_DESCENDING"},
-      {"id": 186, "threshold": 50.0, "startTime": 1000, "endTime": 2000, "truncationLimit": 500, "truncationOrder": "TIMESTAMP_DESCENDING"}
+      {"id": 186, "threshold": 50.0, "startTime": 1000, "endTime": 2000, "truncationLimit": 500, "truncationOrder": "TIMESTAMP_DESCENDING"},
+      {"id": 185, "threshold": 50.0, "startTime": 1000, "endTime": 2000, "truncationLimit": 2, "truncationOrder": "TIMESTAMP_DESCENDING"}
     ],
     "TCR10": [
       {"pid1": 4, "pid2": 5, "startTime": 1000, "endTime": 2000},

@@ -129,7 +129,8 @@ const fn text(name: &'static str) -> QueryParameter {
 
 // Shared rewrite rationale, referenced from per-query notes.
 //
-// * GraphForge does not parse `shortestPath` (#1888); IC1 takes the minimum
+// * GraphForge refuses `shortestPath` with a typed `GF_NOT_IMPLEMENTED` (#1888
+//   is the decision of record); IC1 takes the minimum
 //   length over the bounded variable-length match instead. A shortest path is a
 //   simple path and therefore one of the matched trails, so the minimum is the
 //   same value.
@@ -138,8 +139,11 @@ const fn text(name: &'static str) -> QueryParameter {
 //   IC1 and IS7 record the resulting difference from the prose as a
 //   `spec_variance`.
 // * `:Message` becomes `(m:Post OR m:Comment)`; see the module data model.
-// * Pattern predicates are valid only in `WHERE` (#1888); a pattern used as a
-//   value is written as a pattern comprehension or a counted `OPTIONAL MATCH`.
+// * A pattern predicate in an expression position outside a `WHERE` clause (a
+//   `RETURN` projection, or a list-comprehension filter) is rejected with
+//   `GF_PARSE`, "bind error: pattern predicates are invalid outside WHERE"; a
+//   pattern used as a value is written as a pattern comprehension or a counted
+//   `OPTIONAL MATCH`, an equivalent form.
 
 const IC1: &str = "\
 MATCH path = (p:Person {id: $personId})-[:KNOWS*1..3]-(friend:Person {firstName: $firstName})
@@ -474,11 +478,13 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         ],
         unordered_list_columns: &["friendUniversities", "friendCompanies"],
         limit: Some(20),
-        notes: "shortestPath((p)-[:KNOWS*1..3]-(friend)) is unsupported (#1888) and becomes \
+        notes: "shortestPath((p)-[:KNOWS*1..3]-(friend)) is refused with a typed \
+                GF_NOT_IMPLEMENTED (#1888 is the decision of record) and becomes \
                 min(length(path)) over the bounded match, the same value because a shortest \
                 path is a simple path; the [name, year, place] tuples are maps {name, \
-                classYear|workFrom, city|country} because GraphForge encodes a heterogeneous \
-                list as a tagged union (#1888)",
+                classYear|workFrom, city|country} because the runner refuses GraphForge's \
+                heterogeneous-list encoding (ADR 0011 __het_ structs), which has no exact JSON \
+                mapping",
         spec_variance: Some(
             "reference behaviour, differs from spec prose: CASE uni.name WHEN null (and \
                 company.name) never matches, as in Neo4j, so a friend with no university or \
@@ -584,8 +590,10 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         notes: "head(collect({msg, likeTime})) after ORDER BY likeTime DESC, message.id ASC is \
                 computed as max(likeTime), then min(message.id) among likes at that time, \
                 which selects the same like without relying on aggregation input order; \
-                not((liker)-[:KNOWS]-(person)) as a value is rejected (#1888) and becomes an \
-                empty pattern comprehension; :Message becomes (message:Post OR \
+                not((liker)-[:KNOWS]-(person)) is a pattern predicate in a RETURN \
+                projection, outside WHERE, which is rejected with GF_PARSE (bind error: \
+                pattern predicates are invalid outside WHERE), so it becomes an empty \
+                pattern comprehension; :Message becomes (message:Post OR \
                 message:Comment)",
         spec_variance: None,
     },
@@ -638,7 +646,9 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         ],
         unordered_list_columns: &[],
         limit: Some(10),
-        notes: "the post list comprehension with a pattern predicate is rejected (#1888), so \
+        notes: "the post list comprehension filter is a pattern predicate outside WHERE, \
+                which is rejected with GF_PARSE (bind error: pattern predicates are invalid \
+                outside WHERE), so \
                 posts are counted with OPTIONAL MATCH and the interest pattern is matched \
                 directly and counted with count(DISTINCT post.id)",
         spec_variance: None,
@@ -672,8 +682,9 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         ],
         unordered_list_columns: &["tagNames"],
         limit: Some(20),
-        notes: "[:HAS_TYPE|IS_SUBCLASS_OF*0..] fails at execution (#1888, two-type \
-                variable-length pattern) and becomes [:HAS_TYPE] then [:IS_SUBCLASS_OF*0..], \
+        notes: "[:HAS_TYPE|IS_SUBCLASS_OF*0..] is a variable-length relationship type \
+                alternation, refused with a typed GF_NOT_IMPLEMENTED (#1888 is the decision of \
+                record), and becomes [:HAS_TYPE] then [:IS_SUBCLASS_OF*0..], \
                 the only paths the SNB schema admits from a Tag to a TagClass",
         spec_variance: Some(
             "reference behaviour, differs from spec prose: also selects a Tag whose own \
@@ -693,8 +704,9 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         columns: &["shortestPathLength"],
         unordered_list_columns: &[],
         limit: None,
-        notes: "paths(by=bfs, via=KNOWS, directed=false) instead of Cypher shortestPath \
-                (#1888); -1 when the verb returns no row, 0 for equal endpoints as the \
+        notes: "paths(by=bfs, via=KNOWS, directed=false) instead of Cypher shortestPath, \
+                which is refused with a typed GF_NOT_IMPLEMENTED (#1888 is the decision of \
+                record); -1 when the verb returns no row, 0 for equal endpoints as the \
                 specification states",
         spec_variance: None,
     },

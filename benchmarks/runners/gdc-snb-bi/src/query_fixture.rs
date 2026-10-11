@@ -531,8 +531,9 @@ pub fn load_query_graph(forge: &GraphForge, directory: &Path) -> Result<LoadSumm
             )
         };
         // The endpoints are matched in two clauses separated by WITH: matching
-        // both in one clause after UNWIND fails to plan in GraphForge once node
-        // labels carry different property sets (#1888 D9).
+        // both in one clause after UNWIND is refused with a typed
+        // GF_NOT_IMPLEMENTED once node labels carry different property sets
+        // (#1888 D9 is the decision of record).
         let query = format!(
             "UNWIND $rows AS row \
              MATCH (source:{} {{id: row.source}}) \

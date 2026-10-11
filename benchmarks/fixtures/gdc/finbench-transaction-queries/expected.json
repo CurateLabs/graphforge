@@ -414,6 +414,23 @@
             "-1.000"
           ]
         ]
+      },
+      {
+        "binding": {
+          "id": 165,
+          "threshold": 60.0,
+          "startTime": 1000,
+          "endTime": 2000,
+          "truncationLimit": 1,
+          "truncationOrder": "TIMESTAMP_DESCENDING"
+        },
+        "rows": [
+          [
+            "0",
+            "1",
+            "0.000"
+          ]
+        ]
       }
     ],
     "TCR8": [
@@ -516,6 +533,23 @@
             "-1.000",
             "0.000",
             "0.000"
+          ]
+        ]
+      },
+      {
+        "binding": {
+          "id": 185,
+          "threshold": 50.0,
+          "startTime": 1000,
+          "endTime": 2000,
+          "truncationLimit": 2,
+          "truncationOrder": "TIMESTAMP_DESCENDING"
+        },
+        "rows": [
+          [
+            "2.500",
+            "1.250",
+            "0.250"
           ]
         ]
       }

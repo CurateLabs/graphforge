@@ -20,7 +20,7 @@
       "interface": "cypher",
       "invocation": "MATCH path = (p:Person {id: $personId})-[:KNOWS*1..3]-(friend:Person {firstName: $firstName})\nWHERE NOT p = friend\nWITH friend, min(length(path)) AS distance\nORDER BY distance ASC, friend.lastName ASC, toInteger(friend.id) ASC\nLIMIT 20\nMATCH (friend)-[:IS_LOCATED_IN]->(friendCity:City)\nOPTIONAL MATCH (friend)-[studyAt:STUDY_AT]->(uni:University)-[:IS_LOCATED_IN]->(uniCity:City)\nWITH friend, collect(\n    CASE uni.name WHEN null THEN null\n    ELSE {name: uni.name, classYear: studyAt.classYear, city: uniCity.name} END) AS unis,\n    friendCity, distance\nOPTIONAL MATCH (friend)-[workAt:WORK_AT]->(company:Company)-[:IS_LOCATED_IN]->(companyCountry:Country)\nWITH friend, collect(\n    CASE company.name WHEN null THEN null\n    ELSE {name: company.name, workFrom: workAt.workFrom, country: companyCountry.name} END) AS companies,\n    unis, friendCity, distance\nRETURN\n    friend.id AS friendId,\n    friend.lastName AS friendLastName,\n    distance AS distanceFromPerson,\n    friend.birthday AS friendBirthday,\n    friend.creationDate AS friendCreationDate,\n    friend.gender AS friendGender,\n    friend.browserUsed AS friendBrowserUsed,\n    friend.locationIP AS friendLocationIp,\n    friend.email AS friendEmails,\n    friend.speaks AS friendLanguages,\n    friendCity.name AS friendCityName,\n    unis AS friendUniversities,\n    companies AS friendCompanies\nORDER BY distanceFromPerson ASC, friendLastName ASC, toInteger(friendId) ASC\nLIMIT 20",
       "limit": 20,
-      "notes": "shortestPath((p)-[:KNOWS*1..3]-(friend)) is unsupported (#1888) and becomes min(length(path)) over the bounded match, the same value because a shortest path is a simple path; the [name, year, place] tuples are maps {name, classYear|workFrom, city|country} because GraphForge encodes a heterogeneous list as a tagged union (#1888)",
+      "notes": "shortestPath((p)-[:KNOWS*1..3]-(friend)) is refused with a typed GF_NOT_IMPLEMENTED (#1888 is the decision of record) and becomes min(length(path)) over the bounded match, the same value because a shortest path is a simple path; the [name, year, place] tuples are maps {name, classYear|workFrom, city|country} because the runner refuses GraphForge's heterogeneous-list encoding (ADR 0011 __het_ structs), which has no exact JSON mapping",
       "operation": "IC1",
       "parameters": [
         {
@@ -197,7 +197,7 @@
       "interface": "cypher",
       "invocation": "MATCH (person:Person {id: $personId})<-[:HAS_CREATOR]-(message)<-[like:LIKES]-(liker:Person)\nWHERE message:Post OR message:Comment\nWITH person, liker, max(like.creationDate) AS likeTime\nMATCH (person)<-[:HAS_CREATOR]-(message)<-[like:LIKES]-(liker)\nWHERE (message:Post OR message:Comment) AND like.creationDate = likeTime\nWITH person, liker, likeTime, min(message.id) AS latestMessageId\nMATCH (person)<-[:HAS_CREATOR]-(message)\nWHERE (message:Post OR message:Comment) AND message.id = latestMessageId\nRETURN\n    liker.id AS personId,\n    liker.firstName AS personFirstName,\n    liker.lastName AS personLastName,\n    likeTime AS likeCreationDate,\n    message.id AS commentOrPostId,\n    coalesce(message.content, message.imageFile) AS commentOrPostContent,\n    toInteger(floor(toFloat(likeTime - message.creationDate) / 1000.0) / 60.0) AS minutesLatency,\n    size([(liker)-[:KNOWS]-(person) | 1]) = 0 AS isNew\nORDER BY likeCreationDate DESC, toInteger(personId) ASC\nLIMIT 20",
       "limit": 20,
-      "notes": "head(collect({msg, likeTime})) after ORDER BY likeTime DESC, message.id ASC is computed as max(likeTime), then min(message.id) among likes at that time, which selects the same like without relying on aggregation input order; not((liker)-[:KNOWS]-(person)) as a value is rejected (#1888) and becomes an empty pattern comprehension; :Message becomes (message:Post OR message:Comment)",
+      "notes": "head(collect({msg, likeTime})) after ORDER BY likeTime DESC, message.id ASC is computed as max(likeTime), then min(message.id) among likes at that time, which selects the same like without relying on aggregation input order; not((liker)-[:KNOWS]-(person)) is a pattern predicate in a RETURN projection, outside WHERE, which is rejected with GF_PARSE (bind error: pattern predicates are invalid outside WHERE), so it becomes an empty pattern comprehension; :Message becomes (message:Post OR message:Comment)",
       "operation": "IC7",
       "parameters": [
         {
@@ -273,7 +273,7 @@
       "interface": "cypher",
       "invocation": "MATCH (person:Person {id: $personId})-[:KNOWS*2..2]-(friend),\n      (friend)-[:IS_LOCATED_IN]->(city:City)\nWHERE NOT friend = person AND\n      NOT (friend)-[:KNOWS]-(person)\nWITH DISTINCT person, friend, city\nWITH person, friend, city, datetime({epochMillis: friend.birthday}) AS birthday\nWHERE (birthday.month = $month AND birthday.day >= 21) OR\n      (birthday.month = ($month % 12) + 1 AND birthday.day < 22)\nOPTIONAL MATCH (friend)<-[:HAS_CREATOR]-(post:Post)\nWITH person, friend, city, count(post) AS postCount\nOPTIONAL MATCH (friend)<-[:HAS_CREATOR]-(post:Post)-[:HAS_TAG]->(:Tag)<-[:HAS_INTEREST]-(person)\nWITH friend, city, postCount, count(DISTINCT post.id) AS commonPostCount\nRETURN friend.id AS personId,\n       friend.firstName AS personFirstName,\n       friend.lastName AS personLastName,\n       commonPostCount - (postCount - commonPostCount) AS commonInterestScore,\n       friend.gender AS personGender,\n       city.name AS personCityName\nORDER BY commonInterestScore DESC, personId ASC\nLIMIT 10",
       "limit": 10,
-      "notes": "the post list comprehension with a pattern predicate is rejected (#1888), so posts are counted with OPTIONAL MATCH and the interest pattern is matched directly and counted with count(DISTINCT post.id)",
+      "notes": "the post list comprehension filter is a pattern predicate outside WHERE, which is rejected with GF_PARSE (bind error: pattern predicates are invalid outside WHERE), so posts are counted with OPTIONAL MATCH and the interest pattern is matched directly and counted with count(DISTINCT post.id)",
       "operation": "IC10",
       "parameters": [
         {
@@ -331,7 +331,7 @@
       "interface": "cypher",
       "invocation": "MATCH (tag:Tag)-[:HAS_TYPE]->(:TagClass)-[:IS_SUBCLASS_OF*0..]->(baseTagClass:TagClass)\nWHERE tag.name = $tagClassName OR baseTagClass.name = $tagClassName\nWITH collect(tag.id) AS tags\nMATCH (:Person {id: $personId})-[:KNOWS]-(friend:Person)<-[:HAS_CREATOR]-(comment:Comment)-[:REPLY_OF]->(:Post)-[:HAS_TAG]->(tag:Tag)\nWHERE tag.id IN tags\nRETURN\n    friend.id AS personId,\n    friend.firstName AS personFirstName,\n    friend.lastName AS personLastName,\n    collect(DISTINCT tag.name) AS tagNames,\n    count(DISTINCT comment) AS replyCount\nORDER BY replyCount DESC, toInteger(personId) ASC\nLIMIT 20",
       "limit": 20,
-      "notes": "[:HAS_TYPE|IS_SUBCLASS_OF*0..] fails at execution (#1888, two-type variable-length pattern) and becomes [:HAS_TYPE] then [:IS_SUBCLASS_OF*0..], the only paths the SNB schema admits from a Tag to a TagClass",
+      "notes": "[:HAS_TYPE|IS_SUBCLASS_OF*0..] is a variable-length relationship type alternation, refused with a typed GF_NOT_IMPLEMENTED (#1888 is the decision of record), and becomes [:HAS_TYPE] then [:IS_SUBCLASS_OF*0..], the only paths the SNB schema admits from a Tag to a TagClass",
       "operation": "IC12",
       "parameters": [
         {
@@ -356,7 +356,7 @@
       "interface": "analyst_verb",
       "invocation": "paths(source=Person{id: $person1Id}, target=Person{id: $person2Id}, by=bfs, via=KNOWS, directed=false)",
       "limit": null,
-      "notes": "paths(by=bfs, via=KNOWS, directed=false) instead of Cypher shortestPath (#1888); -1 when the verb returns no row, 0 for equal endpoints as the specification states",
+      "notes": "paths(by=bfs, via=KNOWS, directed=false) instead of Cypher shortestPath, which is refused with a typed GF_NOT_IMPLEMENTED (#1888 is the decision of record); -1 when the verb returns no row, 0 for equal endpoints as the specification states",
       "operation": "IC13",
       "parameters": [
         {
