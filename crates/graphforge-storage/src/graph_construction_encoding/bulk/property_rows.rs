@@ -173,6 +173,54 @@ impl Drop for Run {
     }
 }
 
+/// The scratch stage ADR 0058 permits a property byte to move through. Every
+/// byte of property scratch written or read is attributed to exactly one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Stage {
+    /// Sorted runs formed from the input: each row written once.
+    RunWrite,
+    /// Intermediate runs written by a reduction level (zero when the runs fit
+    /// the merge fan-in and workspace).
+    ReductionWrite,
+    /// Final segments written by the merge.
+    SegmentWrite,
+    /// Run bytes read by a merge.
+    MergeRead,
+    /// Final segments read: the catalog observation and the emission scan.
+    SegmentRead,
+    /// Logical windows copied from the segments for emission.
+    WindowWrite,
+    WindowRead,
+    /// Owner/route projections of a window.
+    ProjectionWrite,
+    ProjectionRead,
+}
+
+pub(super) const STAGES: usize = 9;
+
+/// A snapshot of the stage counters of one kind's rows.
+#[derive(Default)]
+pub(super) struct StageTotals {
+    bytes: [u64; STAGES],
+    pub(super) merged_input: u64,
+    pub(super) segment: u64,
+}
+
+impl StageTotals {
+    pub(super) fn of(rows: Option<&PropertyRows<'_>>) -> Self {
+        rows.map_or_else(Self::default, |rows| Self {
+            bytes: std::array::from_fn(|index| rows.stage_bytes[index].load(Ordering::Relaxed)),
+            merged_input: rows.merged_input_bytes(),
+            segment: rows.segment_bytes(),
+        })
+    }
+}
+
+/// Bytes of `stage` over the node and edge rows.
+pub(super) fn property_stage(nodes: &StageTotals, edges: &StageTotals, stage: Stage) -> u64 {
+    nodes.bytes[stage as usize] + edges.bytes[stage as usize]
+}
+
 pub(super) struct PropertyRows<'a> {
     scratch: &'a Scratch,
     kind: ConstructionChunkKind,
@@ -187,6 +235,12 @@ pub(super) struct PropertyRows<'a> {
     next_file: AtomicU64,
     written: AtomicU64,
     read: AtomicU64,
+    /// Bytes moved per [`Stage`], written and read counted separately.
+    stage_bytes: [AtomicU64; STAGES],
+    /// Bytes of the runs a final merge consumed (groups of two or more runs).
+    pub(super) merged_input_bytes: AtomicU64,
+    /// Bytes of the final segments: merged outputs and single-run groups.
+    pub(super) segment_bytes: AtomicU64,
     runs_formed: AtomicU64,
     merge_inputs_peak: AtomicU64,
 }
@@ -326,6 +380,7 @@ pub(super) struct RunWriter<'p, 'a> {
     frames: Vec<FrameMeta>,
     total: u64,
     index_charge: u64,
+    stage: Stage,
 }
 
 impl Drop for RunWriter<'_, '_> {
@@ -368,6 +423,7 @@ impl RunWriter<'_, '_> {
         self.rows
             .written
             .fetch_add(frame.len() as u64, Ordering::Relaxed);
+        self.rows.add_stage(self.stage, frame.len() as u64);
         let rows = u32::try_from(batch.num_rows()).map_err(storage)?;
         self.frames.push(FrameMeta {
             offset: self.offset,
@@ -741,6 +797,9 @@ impl<'a> PropertyRows<'a> {
             next_file: AtomicU64::new(0),
             written: AtomicU64::new(0),
             read: AtomicU64::new(0),
+            stage_bytes: std::array::from_fn(|_| AtomicU64::new(0)),
+            merged_input_bytes: AtomicU64::new(0),
+            segment_bytes: AtomicU64::new(0),
             runs_formed: AtomicU64::new(0),
             merge_inputs_peak: AtomicU64::new(0),
         }
@@ -798,6 +857,20 @@ impl<'a> PropertyRows<'a> {
         let file = File::create(&path).map_err(storage)?;
         self.scratch.observe_file(&path, &file)?;
         Ok(path)
+    }
+
+    fn add_stage(&self, stage: Stage, bytes: u64) {
+        self.stage_bytes[stage as usize].fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// Bytes of the runs final merges consumed.
+    pub(super) fn merged_input_bytes(&self) -> u64 {
+        self.merged_input_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Bytes of the final segments.
+    pub(super) fn segment_bytes(&self) -> u64 {
+        self.segment_bytes.load(Ordering::Relaxed)
     }
 
     pub(super) fn written_bytes(&self) -> u64 {
@@ -874,6 +947,11 @@ impl<'a> PropertyRows<'a> {
 
     /// A new run file for the merge or the sink to fill.
     pub(super) fn run_writer(&self) -> Result<RunWriter<'_, 'a>, GfError> {
+        self.run_writer_for(Stage::RunWrite)
+    }
+
+    /// A run file whose bytes are attributed to `stage`.
+    pub(super) fn run_writer_for(&self, stage: Stage) -> Result<RunWriter<'_, 'a>, GfError> {
         let path = self.path()?;
         let file = OpenOptions::new()
             .write(true)
@@ -887,6 +965,7 @@ impl<'a> PropertyRows<'a> {
             frames: Vec::new(),
             total: 0,
             index_charge: 0,
+            stage,
         })
     }
 
@@ -1412,7 +1491,18 @@ impl<'a> PropertyRows<'a> {
     }
 
     /// Append `batch` to the frame file `path` (windows and projections).
+    #[cfg(test)]
     pub(super) fn write(&self, path: &Path, batch: &RecordBatch) -> Result<(), GfError> {
+        self.write_for(path, batch, Stage::WindowWrite)
+    }
+
+    /// As [`Self::write`], attributing the bytes to `stage`.
+    pub(super) fn write_for(
+        &self,
+        path: &Path,
+        batch: &RecordBatch,
+        stage: Stage,
+    ) -> Result<(), GfError> {
         let frame = self.encode_frame(batch)?;
         self.scratch.occupy(frame.len() as u64)?;
         let mut file = OpenOptions::new()
@@ -1425,6 +1515,7 @@ impl<'a> PropertyRows<'a> {
         observation?;
         self.written
             .fetch_add(frame.len() as u64, Ordering::Relaxed);
+        self.add_stage(stage, frame.len() as u64);
         Ok(())
     }
 
@@ -1441,10 +1532,21 @@ impl<'a> PropertyRows<'a> {
             .saturating_add(1 << 20)
     }
 
+    #[cfg(test)]
     pub(super) fn reader<'r>(&'r self, path: &Path) -> Result<RowsReader<'r, 'a>, GfError> {
+        self.reader_for(path, Stage::MergeRead)
+    }
+
+    /// A reader whose bytes are attributed to `stage`.
+    pub(super) fn reader_for<'r>(
+        &'r self,
+        path: &Path,
+        stage: Stage,
+    ) -> Result<RowsReader<'r, 'a>, GfError> {
         Ok(RowsReader {
             rows: self,
             file: File::open(path).map_err(storage)?,
+            stage,
         })
     }
 
@@ -1498,7 +1600,7 @@ impl GroupReader<'_, '_> {
             let Some(segment) = self.segments.next() else {
                 return Ok(None);
             };
-            self.current = Some(self.rows.reader(&segment.path)?);
+            self.current = Some(self.rows.reader_for(&segment.path, Stage::SegmentRead)?);
         }
     }
 }
@@ -1506,6 +1608,7 @@ impl GroupReader<'_, '_> {
 pub(super) struct RowsReader<'r, 's> {
     pub(super) rows: &'r PropertyRows<'s>,
     pub(super) file: File,
+    stage: Stage,
 }
 
 impl RowsReader<'_, '_> {
@@ -1595,6 +1698,7 @@ impl RowsReader<'_, '_> {
         self.rows
             .read
             .fetch_add((HEADER + size) as u64, Ordering::Relaxed);
+        self.rows.add_stage(self.stage, (HEADER + size) as u64);
         if crc32c(&payload) != u32::from_le_bytes(header[8..12].try_into().expect("four bytes")) {
             return Err(storage("property scratch CRC32C mismatch"));
         }

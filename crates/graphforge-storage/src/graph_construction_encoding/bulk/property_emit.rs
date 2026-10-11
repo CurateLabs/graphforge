@@ -6,7 +6,7 @@ use arrow::array::Array;
 
 use super::super::{PropertyRouteKind, property_batch, property_projections_for_fields};
 use super::emit::Semantics;
-use super::property_rows::{self, BatchAccumulator, PropertyRows, SortedGroup};
+use super::property_rows::{self, BatchAccumulator, PropertyRows, SortedGroup, Stage};
 use super::{
     ConstructionChunkKind, ConstructionEncodedArtifact, GfError, GraphConstructionBudgets,
     GraphConstructionEncodingEvidence, RecordBatch, SemanticRouteKind, StableDirectory, SymbolKind,
@@ -78,7 +78,7 @@ pub(super) fn emit(
                         }
                     }
                 }
-                rows.write(&window, &part)?;
+                rows.write_for(&window, &part, Stage::WindowWrite)?;
                 window_rows += length;
                 offset += length;
                 if offset == current.num_rows() {
@@ -89,7 +89,7 @@ pub(super) fn emit(
             crate::graph_construction::construction_failpoint("bulk.after_property_window");
             // Bare schema groups participate in catalog ordering and admission
             // but, like the resident route, do not resolve property owners.
-            let mut window_reader = rows.reader(&window)?;
+            let mut window_reader = rows.reader_for(&window, Stage::WindowRead)?;
             let first = window_reader.next()?.expect("nonempty window");
             if first.num_columns() == required {
                 while window_reader.next()?.is_some() {}
@@ -179,7 +179,7 @@ pub(super) fn emit(
                         } else {
                             property
                         };
-                        rows.write(&path, &property)?;
+                        rows.write_for(&path, &property, Stage::ProjectionWrite)?;
                     }
                 }
                 current = window_reader.next()?;
@@ -200,7 +200,7 @@ pub(super) fn emit(
                 for (projection, (route, _)) in projections.into_iter().enumerate() {
                     let path = projected_path(&window, owner.ordinal, projection);
                     let ordinal = ordinals.entry(route.clone()).or_default();
-                    let mut projected = rows.reader(&path)?;
+                    let mut projected = rows.reader_for(&path, Stage::ProjectionRead)?;
                     let mut splitter = FragmentSplitter::default();
                     let mut accumulator = BatchAccumulator::new();
                     while let Some(property) = projected.next()? {

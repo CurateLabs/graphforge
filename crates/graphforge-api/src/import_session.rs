@@ -1398,7 +1398,9 @@ impl GraphImportSession {
         {
             return Err(validation("import must be fully validated before commit"));
         }
-        self.ensure_base(graph)?;
+        if !self.published_its_own_generation(graph) {
+            self.ensure_base(graph)?;
+        }
         let mut construction = self.open_construction(graph)?;
         let started = CallStart::now();
         let region = RegionScope::named("publish");
@@ -1426,6 +1428,22 @@ impl GraphImportSession {
         } else {
             Err(validation("import session is terminal"))
         }
+    }
+
+    /// `CURRENT` already names the generation this session publishes: a commit
+    /// that swapped it and stopped before recording the outcome. Publication
+    /// then replays and authenticates instead of being refused as a foreign
+    /// change to the project.
+    fn published_its_own_generation(&self, graph: &GraphForge) -> bool {
+        let current = *graph
+            .current_generation_uuid
+            .lock()
+            .expect("generation UUID lock poisoned");
+        self.manifest
+            .construction_session_uuid
+            .is_some_and(|session| {
+                current == crate::resumable_construction::target_generation_uuid(session)
+            })
     }
 
     fn ensure_base(&self, graph: &GraphForge) -> Result<(), GfError> {

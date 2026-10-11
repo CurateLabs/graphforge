@@ -1,11 +1,15 @@
 use super::*;
 
 #[test]
-fn bounded_property_outputs_count_completed_hashes_and_private_sealed_writes_separately() {
+fn bounded_property_outputs_are_written_and_hashed_once() {
     let temporary = tempfile::tempdir().unwrap();
     let root = StableDirectory::open(temporary.path()).unwrap();
     let logical_bytes = crate::property_overlay::bounded_object::MAX_PROPERTY_OBJECT_BYTES + 1;
-    let payload = bytes::Bytes::from(vec![0x4f; logical_bytes]);
+    // A logical Parquet stream of any contents, in several write-sized pieces.
+    let chunks = vec![
+        vec![0x4f; logical_bytes / 2],
+        vec![0x4f; logical_bytes - logical_bytes / 2],
+    ];
     let batch = RecordBatch::new_empty(Arc::new(Schema::empty()));
     let mut evidence = GraphConstructionEncodingEvidence::default();
     let capture = crate::concurrency_attribution::RegionCapture::start("import_command");
@@ -16,20 +20,24 @@ fn bounded_property_outputs_count_completed_hashes_and_private_sealed_writes_sep
         std::num::NonZeroU64::new(1 << 20).unwrap(),
         &mut evidence,
         &mut || false,
-        Some(lanes::Encoded::Object(payload)),
+        Some(lanes::Encoded::Chunks(chunks)),
     )
     .unwrap();
     let snapshot = capture.finish();
     assert!(artifacts.len() > 1);
     let physical_bytes: u64 = artifacts.iter().map(|artifact| artifact.bytes).sum();
+    // Only the bounded physical objects are written, each once; no private
+    // copy of the logical stream is, and none is read back.
     assert_eq!(
         snapshot.regions["import_command"].work["hashed_bytes"],
         2 * physical_bytes
     );
     assert_eq!(
         snapshot.regions["import_command"].work["written_bytes"],
-        logical_bytes as u64 + physical_bytes
+        physical_bytes
     );
+    assert_eq!(evidence.output_write_bytes, physical_bytes);
+    assert_eq!(evidence.input_read_bytes, 0);
     for artifact in artifacts {
         let bytes = std::fs::read(temporary.path().join("graph").join(&artifact.path)).unwrap();
         assert_eq!(artifact.sha256, hex(&Sha256::digest(&bytes)));

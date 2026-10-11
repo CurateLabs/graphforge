@@ -6,8 +6,8 @@ use super::{
     write_parquet,
 };
 use super::{
-    CountingInput, CountingWriter, EncodingTempGuard, IoCounter, account_cache_release,
-    add_evidence_counter, directory_for, hex,
+    CountingWriter, EncodingTempGuard, IoCounter, account_cache_release, add_evidence_counter,
+    directory_for, hex,
 };
 use crate::graph_construction::cpu_admission::{ConstructionCpuAdmission, ConstructionCpuLease};
 use arrow::record_batch::RecordBatch;
@@ -289,6 +289,70 @@ pub(super) enum Encoded {
     Object(bytes::Bytes),
 }
 
+fn is_property_object(relative: &str) -> bool {
+    relative.starts_with("properties/") || relative.starts_with("edge_properties/")
+}
+
+/// Streams the chunks of one logical Parquet stream as a single `Read`.
+struct ChunkReader<'a> {
+    chunks: std::slice::Iter<'a, Vec<u8>>,
+    current: &'a [u8],
+}
+impl std::io::Read for ChunkReader<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        while self.current.is_empty() {
+            match self.chunks.next() {
+                Some(next) => self.current = next,
+                None => return Ok(0),
+            }
+        }
+        let count = self.current.len().min(buffer.len());
+        buffer[..count].copy_from_slice(&self.current[..count]);
+        self.current = &self.current[count..];
+        Ok(count)
+    }
+}
+
+/// Publish a property stream longer than one physical object as consecutive
+/// bounded objects, each written once to its own staged name. Every object's
+/// header repeats the stream's length and part count, so the stream is encoded
+/// in memory first; no private logical copy of it reaches the disk.
+#[allow(clippy::too_many_arguments)]
+fn write_bounded_property_objects(
+    root: &StableDirectory,
+    relative: &str,
+    batch: &RecordBatch,
+    cache_window: NonZeroU64,
+    evidence: &mut GraphConstructionEncodingEvidence,
+    cancelled: &mut impl FnMut() -> bool,
+    logical: &[Vec<u8>],
+    length: u64,
+) -> Result<Vec<ConstructionEncodedArtifact>, GfError> {
+    let mut input = ChunkReader {
+        chunks: logical.iter(),
+        current: &[],
+    };
+    let mut artifacts = Vec::new();
+    crate::property_overlay::bounded_object::encode_parts(&mut input, length, |index, bytes| {
+        let path = crate::property_overlay::bounded_object::part_path(Path::new(relative), index);
+        let path = path
+            .to_str()
+            .ok_or_else(|| storage("property object path is not UTF-8"))?
+            .replace('\\', "/");
+        artifacts.extend(write_parquet_chunks(
+            root,
+            &path,
+            batch,
+            cache_window,
+            evidence,
+            cancelled,
+            Some(Encoded::Object(bytes)),
+        )?);
+        Ok(())
+    })?;
+    Ok(artifacts)
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) fn write_parquet_chunks(
     root: &StableDirectory,
@@ -301,6 +365,37 @@ pub(super) fn write_parquet_chunks(
 ) -> Result<Vec<ConstructionEncodedArtifact>, GfError> {
     #[cfg(not(any(test, feature = "test-support")))]
     let _ = cancelled;
+    let chunks = match chunks {
+        // A property stream is bounded into physical objects whose headers
+        // repeat the stream's whole length, so the stream is complete before
+        // its first byte is written (see `write_bounded_property_objects`).
+        None if is_property_object(relative) => {
+            let stop = AtomicBool::new(false);
+            let encoded = compress(batch, &stop)?;
+            if cancelled() {
+                return Err(storage("construction encoding cancelled"));
+            }
+            Some(Encoded::Chunks(encoded))
+        }
+        other => other,
+    };
+    if is_property_object(relative)
+        && let Some(Encoded::Chunks(logical)) = &chunks
+    {
+        let length = logical.iter().map(|chunk| chunk.len() as u64).sum::<u64>();
+        if length > crate::property_overlay::bounded_object::MAX_PROPERTY_OBJECT_BYTES as u64 {
+            return write_bounded_property_objects(
+                root,
+                relative,
+                batch,
+                cache_window,
+                evidence,
+                cancelled,
+                logical,
+                length,
+            );
+        }
+    }
     let (directory, name) = directory_for(root, relative)?;
     let temporary = format!(".{}-{}.tmp", name, Uuid::new_v4().simple());
     let file = directory
@@ -385,75 +480,6 @@ pub(super) fn write_parquet_chunks(
         cache_release.sync_operations,
         "file fsync operations",
     )?;
-    if (relative.starts_with("properties/") || relative.starts_with("edge_properties/"))
-        && written > crate::property_overlay::bounded_object::MAX_PROPERTY_OBJECT_BYTES as u64
-    {
-        // The complete logical Parquet stream remains private. Its bounded
-        // physical objects receive their own hashes and publication receipts.
-        drop(writer);
-        let file = directory
-            .open_child_file(OsStr::new(&temporary))
-            .map_err(storage)?;
-        let reader = graphforge_filesystem::FileCacheReleasingReader::with_window_bytes(
-            file,
-            cache_window,
-            graphforge_filesystem::FileCacheReleaseTracker::default(),
-        )
-        .map_err(storage)?;
-        let reads = IoCounter::default();
-        let mut input = CountingInput {
-            inner: reader,
-            counter: reads.clone(),
-        };
-        let mut artifacts = Vec::new();
-        let encoded = crate::property_overlay::bounded_object::encode_parts(
-            &mut input,
-            written,
-            |index, bytes| {
-                let path =
-                    crate::property_overlay::bounded_object::part_path(Path::new(relative), index);
-                let path = path
-                    .to_str()
-                    .ok_or_else(|| storage("property object path is not UTF-8"))?
-                    .replace('\\', "/");
-                artifacts.extend(write_parquet_chunks(
-                    root,
-                    &path,
-                    batch,
-                    cache_window,
-                    evidence,
-                    cancelled,
-                    Some(Encoded::Object(bytes)),
-                )?);
-                Ok(())
-            },
-        );
-        let released = input.inner.finish().map_err(storage);
-        let (read_bytes, read_operations) = reads.values();
-        add_evidence_counter(
-            &mut evidence.input_read_bytes,
-            read_bytes,
-            "object encoding read bytes",
-        )?;
-        add_evidence_counter(
-            &mut evidence.input_read_operations,
-            read_operations,
-            "object encoding read operations",
-        )?;
-        match (encoded, released) {
-            (Ok(_), Ok(released)) => account_cache_release(released, evidence)?,
-            (Err(primary), Ok(_)) | (Ok(_), Err(primary)) => return Err(primary),
-            (Err(primary), Err(release)) => {
-                return Err(storage(format!(
-                    "{primary}; object source cache release also failed: {release}"
-                )));
-            }
-        }
-        // The private logical stream was sealed, but its digest builders
-        // were abandoned. Only bounded physical objects completed hashes.
-        crate::graph_construction::diagnostics::written_bytes(written);
-        return Ok(artifacts);
-    }
     let artifact = ConstructionEncodedArtifact {
         path: relative.to_owned(),
         bytes: written,
