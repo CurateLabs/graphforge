@@ -24,6 +24,7 @@ fn spec() -> Spec {
         node_blobs: 1,
         edge_blobs: 1,
         blob_bytes: 5 * MIB,
+        scattered_edges: true,
     }
 }
 

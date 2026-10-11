@@ -168,7 +168,7 @@ fn final_property_ranges_keep_global_uuid_order_above_one_segment() {
 
     let mut reversed = Vec::new();
     for run in groups[0].segments.iter().rev() {
-        let mut reader = rows.reader_for(&run.path, Stage::MergeRead).unwrap();
+        let mut reader = rows.reader_for(&run.path, Stage::SegmentRead).unwrap();
         while let Some(batch) = reader.next().unwrap() {
             let uuids = crate::graph_construction::batch_uuid_column(&batch, "node_uuid").unwrap();
             for row in 0..batch.num_rows() {

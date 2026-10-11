@@ -263,7 +263,7 @@
                 .iter()
                 .all(|frame| frame.bytes <= rows.frame_limit() as u64 + HEADER as u64)
         );
-        let mut reader = rows.reader_for(&merged.path, Stage::MergeRead).unwrap();
+        let mut reader = rows.reader_for(&merged.path, Stage::SegmentRead).unwrap();
         let mut seen = 0_usize;
         while let Some(batch) = reader.next().unwrap() {
             let ids = batch

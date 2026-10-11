@@ -13,6 +13,7 @@ pub fn spec() -> Spec {
         node_blobs: 20,
         edge_blobs: 20,
         blob_bytes: 24 << 10,
+        scattered_edges: true,
     }
 }
 

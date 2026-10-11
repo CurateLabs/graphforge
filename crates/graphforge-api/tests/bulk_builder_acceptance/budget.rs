@@ -81,6 +81,47 @@ fn projected_bytes(spec: &Spec, window_rows: usize) -> u64 {
     (kind(spec.nodes, spec.node_blobs) + kind(spec.edges, spec.edge_blobs)) as u64
 }
 
+/// The frames each stage writes, derived from the fixture alone (rows per kind,
+/// the import's batch size and a decode task of 16 batches):
+///
+/// - A run is formed per decode task (`property_runs` is asserted equal to the
+///   tasks), and a frame is cut every `BATCH_ROWS` rows, so a kind of `rows`
+///   rows has `ceil(rows / BATCH_ROWS)` run frames: every task but the last is
+///   a whole number of frames.
+/// - A kind with several tasks is merged. The fixture's edges are in identity
+///   order, so the runs cover disjoint identity ranges and the merge cuts a
+///   frame exactly where an input frame ends: the same frames again. A kind of
+///   one task is its own segment and writes none.
+/// - A window is `BATCH_ROWS` rows and the segment frames are whole windows
+///   but for the last, so each window is one frame: the same frames again.
+/// - One owner and one route per kind: one projection frame per window frame.
+///
+/// This holds while no frame is cut by bytes: a frame's row charge stays under
+/// the 64 KiB floor of the frame target, so the fixture's values are small.
+struct Frames {
+    runs: u64,
+    run: u64,
+    segment: u64,
+    window: u64,
+    projection: u64,
+}
+
+fn expected_frames(spec: &Spec) -> Frames {
+    let kinds = [spec.nodes, spec.edges];
+    let frames = |rows: usize| rows.div_ceil(BATCH_ROWS) as u64;
+    let merged = kinds.iter().filter(|rows| **rows > TASK_ROWS);
+    Frames {
+        runs: kinds
+            .iter()
+            .map(|rows| rows.div_ceil(TASK_ROWS) as u64)
+            .sum(),
+        run: kinds.iter().map(|rows| frames(*rows)).sum(),
+        segment: merged.map(|rows| frames(*rows)).sum(),
+        window: kinds.iter().map(|rows| frames(*rows)).sum(),
+        projection: kinds.iter().map(|rows| frames(*rows)).sum(),
+    }
+}
+
 fn assert_topology(report: &Value) {
     // Nothing else moves through scratch: a balanced single-relation graph needs
     // no refinement and no relation spool, and its node tables are resident.
@@ -123,6 +164,19 @@ fn assert_property_stages(report: &Value, spec: &Spec) {
     let (window_write, window_read) = (get("window_write"), get("window_read"));
     let (projection_write, projection_read) = (get("projection_write"), get("projection_read"));
 
+    // Every stage writes exactly the frames the fixture implies. Counted by the
+    // same counters that count the bytes, so the bytes below are checked
+    // against a count the production code did not produce.
+    let expected = expected_frames(spec);
+    assert_eq!(field(report, "property_runs"), expected.runs, "{report}");
+    for (name, want) in [
+        ("run_write", expected.run),
+        ("segment_write", expected.segment),
+        ("window_write", expected.window),
+        ("projection_write", expected.projection),
+    ] {
+        assert_eq!(frames(name), want, "{name} frames: {report}");
+    }
     // Every byte is attributed to a stage.
     assert_eq!(
         field(report, "property_scratch_write_bytes"),
@@ -195,7 +249,10 @@ fn over_budget_scratch_is_one_topology_pass_and_conserved_property_stages() {
             edges,
             node_blobs: 20,
             edge_blobs: 20,
-            blob_bytes: 24 << 10,
+            // Small values and edges in identity order, so frames are cut by
+            // rows alone and their count is derivable (see `expected_frames`).
+            blob_bytes: 128,
+            scattered_edges: false,
         };
         let sources = Sources::write(&directory.path().join(format!("input-{index}")), spec);
         let budget = *budget.get_or_insert_with(|| {

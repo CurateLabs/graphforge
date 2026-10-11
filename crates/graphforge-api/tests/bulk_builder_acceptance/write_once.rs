@@ -19,6 +19,7 @@ fn wide_properties() -> Spec {
         node_blobs: 3,
         edge_blobs: 2,
         blob_bytes: 6 * MIB,
+        scattered_edges: true,
     }
 }
 

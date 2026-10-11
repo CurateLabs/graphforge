@@ -64,6 +64,8 @@ pub struct Spec {
     /// Leading edges that carry a `note` of `blob_bytes`.
     pub edge_blobs: usize,
     pub blob_bytes: usize,
+    /// Edge UUIDs arrive out of order (the default) rather than in order.
+    pub scattered_edges: bool,
 }
 
 impl Spec {
@@ -74,6 +76,7 @@ impl Spec {
             node_blobs: 0,
             edge_blobs: 0,
             blob_bytes: 0,
+            scattered_edges: true,
         }
     }
 }
@@ -126,13 +129,17 @@ fn node_batch(spec: &Spec, range: std::ops::Range<usize>) -> RecordBatch {
 
 /// Endpoints and the position in the file are decorrelated from the UUID so
 /// the edge UUID column arrives out of order.
-fn edge_position(index: usize, edges: usize) -> usize {
-    (index * 7_919 + 13) % edges
+fn edge_position(spec: &Spec, index: usize) -> usize {
+    if spec.scattered_edges {
+        (index * 7_919 + 13) % spec.edges
+    } else {
+        index
+    }
 }
 
 fn edge_batch(spec: &Spec, range: std::ops::Range<usize>) -> RecordBatch {
     let nodes = spec.nodes;
-    let id = |row: usize| edge_position(row, spec.edges);
+    let id = |row: usize| edge_position(spec, row);
     let extra = vec![
         Field::new("note", DataType::Utf8, true),
         Field::new("weight", DataType::Int64, true),
