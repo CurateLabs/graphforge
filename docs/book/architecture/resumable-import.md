@@ -99,8 +99,8 @@ configured concurrency bound.
 
 ## Initial builds use the bulk builder
 
-When `validate` runs on a session pinned to an empty project and nothing is yet
-staged, it does not stage anything. Sources are read in place, by row group and
+When `validate` runs on a session pinned to an empty project, it does not stage
+anything. Sources are read in place, by row group and
 in parallel; each construction batch passes the same intake normalization an
 append gets, then the builder (ADR 0058) ranks nodes and edges in memory and
 emits the whole encoded generation:
@@ -147,24 +147,28 @@ other session. The builder's receipt (`construction.bulk_build`) reports wall
 time, process CPU, effective cores, logical and physical write bytes and peak
 RSS per pass.
 
-The first `validate` chooses the route once and records it in the manifest, so
-later calls (and reruns after a crash) never re-decide it from live memory. Nothing
-is staged, so there is no durable prefix: a crash, cancellation or error
-discards the attempt and the next `validate` reruns from the sources. Appends,
-and sessions that already staged chunks keep the staged path described below.
-Initial builds made through `GraphConstructionSession::append_*` (the Rust
-facade; the bindings' `add_nodes`/`add_edges` publish atomically and import
-sessions register sources) spool each accepted chunk as one Arrow IPC file,
-synced and renamed into place, which survives a crash and resumes; sealing
-builds from the spool with the same builder, in memory or, when the estimate
-exceeds the budget, on scratch files, the node tables included when they do not
-fit. Every spooled chunk is authenticated
-against the digests acknowledged at acceptance before it is read, so a file
-that changed afterwards, even at the same size and still valid Arrow IPC, fails
-the build. No budget replays the spool through the staged path any more: one
-below the fixed workspace is refused before decoding and keeps the route, and a
-session an earlier binary recorded the replay in keeps it. The route is
-recorded before any work and read back on retry. Node and edge counts are limited to 2^32 - 2.
+The route is a function of the session's pinned parent, never of live memory: a
+session pinned to an empty project is an initial build and always runs the
+builder, in memory or, when the estimate exceeds the budget, on scratch files;
+nothing is recorded. Nothing is staged, so there is no durable prefix: a crash,
+cancellation or error discards the attempt and the next `validate` reruns from
+the sources. Appends keep the staged path described below. A session that
+holds staged chunks of an initial build, made by an earlier 0.6.0-dev build, is
+refused with an instruction to restart the import, and so is a session in the
+earlier copied-source format. Initial builds made through
+`GraphConstructionSession::append_*` (the Rust facade; the bindings'
+`add_nodes`/`add_edges` publish atomically and import sessions register
+sources) spool each accepted chunk as one Arrow IPC file, synced and renamed
+into place, which survives a crash and resumes; sealing builds from the spool
+with the same builder, in memory or, when the estimate exceeds the budget, on
+scratch files, the node tables included when they do not fit. Every spooled
+chunk is authenticated against the digests acknowledged at acceptance before it
+is read, so a file that changed afterwards, even at the same size and still
+valid Arrow IPC, fails the build. A budget below the fixed workspace is refused
+before decoding and keeps the route. The route is recorded before any work and
+read back on retry. `GraphForge::begin_staged_graph_construction` is the append
+lifecycle and refuses an empty project. Node and edge counts are limited to
+2^32 - 2.
 
 Validation processes node sources before edge sources. Each batch is normalized
 through the public bulk contract and flushed into a private graph tree. A

@@ -1,8 +1,9 @@
 // Chunk-API initial builds spool their chunks for the bulk builder.
 //
-// Included at the end of `bulk_builder`, whose helpers it shares. The staged
-// path is again the specification: the same chunks through `append`, `seal`,
-// shaping and the staged encoder must produce the same published artifacts.
+// Included at the end of `bulk_builder`, whose helpers it shares. The same
+// rows handed to the builder as registered sources (`build_checked`, which
+// reads the generation back against the input) are the reference: a spool of
+// those rows must publish the same artifacts.
 
 fn spooled_session(root: &TempDir, budgets: GraphConstructionBudgets) -> GraphConstructionSession {
     let mut session = pinned_with(root, budgets);
@@ -79,26 +80,53 @@ fn spooled(nodes: &[RecordBatch], edges: &[RecordBatch]) -> Inventory {
     spooled_with(GraphConstructionBudgets::default(), nodes, edges).unwrap()
 }
 
+/// A spooled build under `budget` with the generation read back and its counts
+/// checked against the input.
+fn spooled_checked(
+    budgets: GraphConstructionBudgets,
+    budget: u64,
+    nodes: &[RecordBatch],
+    edges: &[RecordBatch],
+) -> (GraphConstructionSession, GraphConstructionEncoding, TempDir) {
+    let root = TempDir::new().unwrap();
+    let mut session = spooled_session(&root, budgets);
+    append_all(&mut session, nodes, edges).unwrap();
+    session.record_seal_route(SealRoute::Bulk).unwrap();
+    let built = session
+        .prepare_spooled_bulk_encoding(1, budget, || false)
+        .unwrap();
+    assert_counts(&session, &built, nodes, edges);
+    assert_reads_back(nodes, edges, &read_back(&session, &built));
+    (session, built, root)
+}
+
 #[test]
-fn spooled_chunks_publish_the_staged_bytes_in_any_arrival_order() {
+fn spooled_chunks_publish_the_registered_source_bytes_in_any_arrival_order() {
     for order in [identity_order, reversed, scattered] {
         let (nodes, edges) = graph(1_021, 3_001, 700, order);
-        let expected = staged(&nodes, &edges);
+        let expected = build_checked(&nodes, &edges, 1, 1);
         assert!(expected.len() > 20);
         assert_same(&expected, &spooled(&nodes, &edges));
+        let (_, built, _) = spooled_checked(
+            GraphConstructionBudgets::default(),
+            u64::MAX,
+            &nodes,
+            &edges,
+        );
+        assert_same(&expected, &inventory(&built));
     }
 }
 
 #[test]
-fn a_spooled_graph_larger_than_one_window_publishes_the_staged_bytes() {
+fn a_spooled_graph_larger_than_one_window_publishes_the_registered_source_bytes() {
     let (nodes, edges) = graph(70_001, 140_003, 20_000, scattered);
-    assert_same(&staged(&nodes, &edges), &spooled(&nodes, &edges));
+    assert_same(&build_checked(&nodes, &edges, 1, 1), &spooled(&nodes, &edges));
 }
 
 #[test]
-fn spooled_nodes_without_edges_publish_the_staged_bytes() {
+fn spooled_nodes_without_edges_publish_the_registered_source_bytes() {
     let (nodes, _) = graph(50, 0, 25, identity_order);
-    assert_same(&staged(&nodes, &[]), &spooled(&nodes, &[]));
+    assert_same(&build_checked(&nodes, &[], 1, 1), &spooled(&nodes, &[]));
 }
 
 /// Property-bearing and mixed-schema chunks of both kinds.
@@ -131,9 +159,9 @@ fn property_bearing_inputs() -> (Vec<RecordBatch>, Vec<RecordBatch>) {
 }
 
 #[test]
-fn spooled_property_bearing_and_mixed_schema_chunks_publish_the_staged_bytes() {
+fn spooled_property_bearing_and_mixed_schema_chunks_publish_the_registered_source_bytes() {
     let (nodes, edges) = property_bearing_inputs();
-    let expected = staged(&nodes, &edges);
+    let expected = build_checked(&nodes, &edges, 1, 1);
     assert!(
         expected
             .iter()
@@ -151,7 +179,7 @@ fn spooled_property_bearing_and_mixed_schema_chunks_publish_the_staged_bytes() {
 #[test]
 fn spooled_output_is_independent_of_chunk_size_and_worker_count() {
     let (nodes, edges) = graph(2_003, 9_001, 9_001, scattered);
-    let expected = staged(&nodes, &edges);
+    let expected = build_checked(&nodes, &edges, 1, 1);
     for (chunk, workers) in [(37, 2), (700, 8), (30_000, 32)] {
         let (nodes, edges) = graph(2_003, 9_001, chunk, scattered);
         let root = TempDir::new().unwrap();
@@ -167,6 +195,8 @@ fn spooled_output_is_independent_of_chunk_size_and_worker_count() {
             .prepare_spooled_bulk_encoding(1, u64::MAX, || false)
             .unwrap();
         assert_same(&expected, &inventory(&built));
+        assert_counts(&session, &built, &nodes, &edges);
+        assert_reads_back(&nodes, &edges, &read_back(&session, &built));
     }
 }
 
@@ -365,7 +395,7 @@ fn resource_windows_are_refused_at_the_same_call_on_both_routes() {
     }
 }
 
-/// Refusals that need global knowledge fire at seal, as on the staged path.
+/// Refusals that need global knowledge fire at seal, as for registered sources.
 #[test]
 fn global_refusals_fire_at_seal() {
     let a = uuid(0x10, 1);
@@ -399,8 +429,8 @@ fn global_refusals_fire_at_seal() {
             .unwrap_err()
             .to_string();
         assert!(message.contains(expected), "{message}");
-        // The staged path refuses the same input, in its own words.
-        assert!(staged_with(GraphConstructionBudgets::default(), &nodes, &edges).is_err());
+        // The registered-source build refuses the same input in the same words.
+        assert_eq!(message, refusal(&nodes, &edges));
     }
 }
 
@@ -454,13 +484,15 @@ fn an_accepted_chunk_replays_idempotently_across_a_reopen() {
     let built = reopened
         .prepare_spooled_bulk_encoding(1, u64::MAX, || false)
         .unwrap();
-    assert_same(&staged(&nodes, &edges), &inventory(&built));
+    assert_same(&build_checked(&nodes, &edges, 1, 1), &inventory(&built));
+    assert_counts(&reopened, &built, &nodes, &edges);
+    assert_reads_back(&nodes, &edges, &read_back(&reopened, &built));
 }
 
 const SPOOL_CRASH_MODE: &str = "GF_SPOOL_CRASH_MODE";
 
 /// The killed process. `append` accepts every chunk; `build` accepts them and
-/// builds; `replay` accepts them and replays them through the staged path.
+/// builds.
 #[test]
 fn spool_crash_child() {
     let Ok(path) = std::env::var(CRASH_ROOT) else {
@@ -486,10 +518,6 @@ fn spool_crash_child() {
             session
                 .prepare_spooled_bulk_encoding(1, u64::MAX, || false)
                 .unwrap();
-        }
-        "replay" => {
-            session.record_seal_route(SealRoute::ReplayStaged).unwrap();
-            session.replay_spool_to_staged(|| false).unwrap();
         }
         _ => {}
     }
@@ -523,7 +551,7 @@ fn spool_chunk_name(sequence: u64, kind: ConstructionChunkKind) -> String {
 #[test]
 fn a_process_killed_while_accepting_chunks_resumes_and_continues() {
     let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
-    let expected = staged(&nodes, &edges);
+    let expected = build_checked(&nodes, &edges, 1, 1);
     let total = (nodes.len() + edges.len()) as u64;
     let kinds = |sequence: u64| {
         if sequence < nodes.len() as u64 {
@@ -562,6 +590,8 @@ fn a_process_killed_while_accepting_chunks_resumes_and_continues() {
                 .prepare_spooled_bulk_encoding(1, u64::MAX, || false)
                 .unwrap();
             assert_same(&expected, &inventory(&built));
+            assert_counts(&session, &built, &nodes, &edges);
+            assert_reads_back(&nodes, &edges, &read_back(&session, &built));
         }
     }
 }
@@ -571,7 +601,7 @@ fn a_process_killed_while_accepting_chunks_resumes_and_continues() {
 #[test]
 fn a_kill_between_rename_and_directory_sync_loses_nothing_acknowledged() {
     let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
-    let expected = staged(&nodes, &edges);
+    let expected = build_checked(&nodes, &edges, 1, 1);
     let name = spool_chunk_name(2, ConstructionChunkKind::Edge);
     let root = TempDir::new().unwrap();
     killed_at(&root, "append", &format!("spool.after_rename.{name}"));
@@ -590,7 +620,7 @@ fn a_kill_between_rename_and_directory_sync_loses_nothing_acknowledged() {
 #[test]
 fn a_process_killed_during_the_spooled_build_reruns_to_identical_artifacts() {
     let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
-    let expected = staged(&nodes, &edges);
+    let expected = build_checked(&nodes, &edges, 1, 1);
     for failpoint in [
         "bulk.after_nodes",
         "bulk.after_edges",
@@ -607,113 +637,58 @@ fn a_process_killed_during_the_spooled_build_reruns_to_identical_artifacts() {
         killed_at(&root, "build", failpoint);
         let mut session = pinned(&root);
         assert_eq!(session.seal_route(), Some(SealRoute::Bulk), "{failpoint}");
-        // The route is read back, not re-decided: asking for another changes nothing.
+        // The route is read back, not recorded again.
         assert_eq!(
-            session.record_seal_route(SealRoute::ReplayStaged).unwrap(),
+            session.record_seal_route(SealRoute::Bulk).unwrap(),
             SealRoute::Bulk
         );
         let rerun = session
             .prepare_spooled_bulk_encoding(1, u64::MAX, || false)
             .unwrap();
         assert_same(&expected, &inventory(&rerun));
+        assert_reads_back(&nodes, &edges, &read_back(&session, &rerun));
         let report = session.bulk_build_report();
         assert_eq!((report.nodes, report.edges), (1_021, 3_001), "{failpoint}");
     }
 }
 
-/// Recorded before any work and read back: a seal that crashed under one
-/// condition completes under the other.
+/// Recorded before any work and read back: the recorded route survives a
+/// reopen, closes the session to further chunks, and the storage-level staged
+/// lifecycle refuses to seal a spooled session whose bulk route is not recorded.
 #[test]
-fn the_seal_route_is_durable_and_a_retry_cannot_flip_it() {
+fn the_seal_route_is_durable_and_the_staged_lifecycle_refuses_a_spooled_session() {
     let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
-    let expected = staged(&nodes, &edges);
+    let expected = build_checked(&nodes, &edges, 1, 1);
 
     let root = TempDir::new().unwrap();
     let mut session = spooled_session(&root, GraphConstructionBudgets::default());
     append_all(&mut session, &nodes, &edges).unwrap();
     assert_eq!(session.seal_route(), None);
+    // The staged lifecycle does not seal a spool.
+    let refused = session.seal().unwrap_err().to_string();
+    assert!(refused.contains("seals through the bulk builder"), "{refused}");
+    assert_eq!(session.seal_route(), None);
+    assert!(session.is_spooled());
     assert_eq!(
-        session.record_seal_route(SealRoute::ReplayStaged).unwrap(),
-        SealRoute::ReplayStaged
+        session.record_seal_route(SealRoute::Bulk).unwrap(),
+        SealRoute::Bulk
     );
+    // Recorded, the session accepts no more chunks.
+    let late = session
+        .append(ConstructionChunkKind::Node, "late", &nodes[0])
+        .unwrap_err()
+        .to_string();
+    assert!(late.contains("not accepting chunks"), "{late}");
     drop(session);
     let mut reopened = pinned(&root);
-    assert_eq!(reopened.seal_route(), Some(SealRoute::ReplayStaged));
-    assert_eq!(
-        reopened.record_seal_route(SealRoute::Bulk).unwrap(),
-        SealRoute::ReplayStaged
-    );
-    // The bulk entry refuses a session that recorded the other route.
-    assert!(
-        reopened
-            .prepare_spooled_bulk_encoding(1, u64::MAX, || false)
-            .unwrap_err()
-            .to_string()
-            .contains("did not record the bulk seal route")
-    );
-    reopened.seal().unwrap();
-    assert!(!reopened.is_spooled());
-    let shape = reopened
-        .shape_canonical_with_cancellation(|| false)
+    assert_eq!(reopened.seal_route(), Some(SealRoute::Bulk));
+    assert!(reopened.is_spooled());
+    let built = reopened
+        .prepare_spooled_bulk_encoding(1, u64::MAX, || false)
         .unwrap();
-    assert_same(
-        &expected,
-        &inventory(&reopened.encode_canonical(&shape, 1).unwrap()),
-    );
-}
-
-/// Kill in the middle of replaying the spool through the staged path: the
-/// reopened session resumes the replay where it stopped and finishes with the
-/// staged bytes.
-#[test]
-fn a_replay_to_staged_killed_midway_resumes_chunk_by_chunk() {
-    let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
-    let expected = staged(&nodes, &edges);
-    let total = (nodes.len() + edges.len()) as u64;
-    for failpoint in [
-        "artifact.after_install.chunk-00000000000000000001-node.parquet",
-        "artifact.after_install.chunk-00000000000000000003-edge.parquet",
-    ] {
-        let root = TempDir::new().unwrap();
-        killed_at(&root, "replay", failpoint);
-        let mut session = pinned(&root);
-        assert_eq!(session.seal_route(), Some(SealRoute::ReplayStaged));
-        assert!(session.is_spooled());
-        assert_eq!(session.accepted_chunks(), total);
-        session.seal().unwrap();
-        assert!(!session.is_spooled());
-        assert_eq!(session.accepted_chunks(), total);
-        let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
-        assert_same(
-            &expected,
-            &inventory(&session.encode_canonical(&shape, 1).unwrap()),
-        );
-        // The deleted spool stays deleted.
-        assert!(
-            !root
-                .path()
-                .join(PRIVATE_ROOT)
-                .join(Uuid::from_u128(OPERATION).simple().to_string())
-                .join("chunk-spool")
-                .exists()
-        );
-    }
-}
-
-/// The storage-level staged lifecycle keeps working over a spooled session.
-#[test]
-fn the_staged_lifecycle_seals_a_spooled_session() {
-    let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
-    let expected = staged(&nodes, &edges);
-    let root = TempDir::new().unwrap();
-    let mut session = spooled_session(&root, GraphConstructionBudgets::default());
-    append_all(&mut session, &nodes, &edges).unwrap();
-    session.seal().unwrap();
-    let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
-    assert_same(
-        &expected,
-        &inventory(&session.encode_canonical(&shape, 1).unwrap()),
-    );
+    assert_same(&expected, &inventory(&built));
+    assert_counts(&reopened, &built, &nodes, &edges);
+    assert_reads_back(&nodes, &edges, &read_back(&reopened, &built));
 }
 
 /// A spool file from another session, or out of sequence, is refused.
@@ -758,7 +733,7 @@ fn a_chunk_admitted_at_its_exact_byte_window_builds() {
         max_batch_bytes: batch.get_array_memory_size(),
         ..GraphConstructionBudgets::default()
     };
-    let expected = staged_with(budgets, std::slice::from_ref(&batch), &[]).unwrap();
+    let expected = build_checked_with(budgets, std::slice::from_ref(&batch), &[], 1, 1);
     let built = spooled_with(budgets, std::slice::from_ref(&batch), &[]).unwrap();
     assert_same(&expected, &built);
     // The node pass of a build with the node tables on scratch admits it too.
@@ -772,6 +747,12 @@ fn a_chunk_admitted_at_its_exact_byte_window_builds() {
         .prepare_spooled_bulk_encoding(1, 512 << 20, || false)
         .unwrap();
     assert_same(&expected, &inventory(&built));
+    assert_counts(&session, &built, std::slice::from_ref(&batch), &[]);
+    assert_reads_back(
+        std::slice::from_ref(&batch),
+        &[],
+        &read_back(&session, &built),
+    );
     assert!(session.bulk_build_report().node_partitions > 0);
 }
 
@@ -787,27 +768,26 @@ const PROPERTY_SCRATCH_BUDGET: u64 = 960 << 20;
 
 /// A spooled build whose estimate exceeds the budget runs the bulk builder's
 /// scratch route over the spool: the scratch is used and removed, nothing is
-/// staged, and the bytes are those of the staged path.
+/// staged, and the bytes are those of the resident build.
 #[test]
-fn an_over_budget_spooled_build_takes_the_scratch_route_and_publishes_the_staged_bytes() {
+fn an_over_budget_spooled_build_takes_the_scratch_route_and_publishes_the_resident_bytes() {
     let plain = graph(1_021, 3_001, 700, scattered);
     let property_bearing = property_bearing_inputs();
     for ((nodes, edges), budget) in [
         (plain, SCRATCH_BUDGET),
         (property_bearing, PROPERTY_SCRATCH_BUDGET),
     ] {
-        let expected = staged(&nodes, &edges);
+        let expected = build_checked(&nodes, &edges, 1, 1);
         let root = TempDir::new().unwrap();
         let mut session = spooled_session(&root, GraphConstructionBudgets::default());
         append_all(&mut session, &nodes, &edges).unwrap();
-        // The route comes from the receipts: scratch fits, in-memory does not.
-        assert_eq!(session.spool_seal_route(budget).unwrap(), SealRoute::Bulk);
-        assert_eq!(session.spool_seal_route(u64::MAX).unwrap(), SealRoute::Bulk);
         session.record_seal_route(SealRoute::Bulk).unwrap();
         let built = session
             .prepare_spooled_bulk_encoding(1, budget, || false)
             .unwrap();
         assert_same(&expected, &inventory(&built));
+        assert_counts(&session, &built, &nodes, &edges);
+        assert_reads_back(&nodes, &edges, &read_back(&session, &built));
         let report = session.bulk_build_report();
         assert!(
             report.scratch_write_bytes > 0 && report.scratch_read_bytes > 0,
@@ -822,19 +802,14 @@ fn an_over_budget_spooled_build_takes_the_scratch_route_and_publishes_the_staged
 /// A budget below the node tables no longer replays the spool through the
 /// staged path (#1929): the node tables go to scratch, and a budget below the
 /// fixed workspace is refused before decoding, as for a registered source. The
-/// spool stays intact, so a retry with room builds the staged path's bytes.
+/// spool stays intact, so a retry with room builds the resident build's bytes.
 #[test]
 fn a_budget_below_the_node_tables_keeps_the_bulk_route_for_a_spooled_build() {
     let (nodes, edges) = graph(300, 700, 200, scattered);
-    let expected = staged(&nodes, &edges);
+    let expected = build_checked(&nodes, &edges, 1, 1);
     let root = TempDir::new().unwrap();
     let mut session = spooled_session(&root, GraphConstructionBudgets::default());
     append_all(&mut session, &nodes, &edges).unwrap();
-    assert_eq!(
-        session.spool_seal_route(SCRATCH_BUDGET).unwrap(),
-        SealRoute::Bulk
-    );
-    assert_eq!(session.spool_seal_route(1).unwrap(), SealRoute::Bulk);
     session.record_seal_route(SealRoute::Bulk).unwrap();
     let error = session
         .prepare_spooled_bulk_encoding(1, 1, || false)
@@ -854,13 +829,15 @@ fn a_budget_below_the_node_tables_keeps_the_bulk_route_for_a_spooled_build() {
         .prepare_spooled_bulk_encoding(1, SCRATCH_BUDGET, || false)
         .unwrap();
     assert_same(&expected, &inventory(&built));
+    assert_counts(&session, &built, &nodes, &edges);
+    assert_reads_back(&nodes, &edges, &read_back(&session, &built));
 }
 
 /// A spooled build whose node tables do not fit runs the node passes over the
 /// spool: nodes, endpoints, degrees and CSR key ranges go through scratch, the
-/// bytes are the staged path's, and nothing is staged.
+/// bytes are the resident build's, and nothing is staged.
 #[test]
-fn a_spooled_build_whose_node_tables_do_not_fit_runs_on_scratch_and_publishes_the_staged_bytes() {
+fn a_spooled_build_whose_node_tables_do_not_fit_runs_on_scratch_and_publishes_the_resident_bytes() {
     let plain = graph(1_021, 3_001, 700, scattered);
     let property_bearing = property_bearing_inputs();
     for (nodes, edges) in [plain, property_bearing] {
@@ -868,13 +845,12 @@ fn a_spooled_build_whose_node_tables_do_not_fit_runs_on_scratch_and_publishes_th
         // The raw source's retained footer/schema bytes remain in this bound;
         // the spool itself drops those schemas after accepting the chunks.
         let budget = probe.scratch_floor_bytes() + 1;
-        let expected = staged(&nodes, &edges);
+        let expected = build_checked(&nodes, &edges, 1, 1);
         let root = TempDir::new().unwrap();
         let mut session = spooled_session(&root, GraphConstructionBudgets::default());
         append_all(&mut session, &nodes, &edges).unwrap();
         let _forced =
             crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(4, 3);
-        assert_eq!(session.spool_seal_route(budget).unwrap(), SealRoute::Bulk);
         session.record_seal_route(SealRoute::Bulk).unwrap();
         let property_bearing =
             nodes[0].num_columns() > 2 || edges.iter().any(|batch| batch.num_columns() > 4);
@@ -893,6 +869,8 @@ fn a_spooled_build_whose_node_tables_do_not_fit_runs_on_scratch_and_publishes_th
                 .unwrap()
         };
         assert_same(&expected, &inventory(&built));
+        assert_counts(&session, &built, &nodes, &edges);
+        assert_reads_back(&nodes, &edges, &read_back(&session, &built));
         let report = session.bulk_build_report();
         assert!(report.node_partitions > 0, "{report:?}");
         assert!(report.node_scratch_write_bytes > 0, "{report:?}");
@@ -1029,8 +1007,8 @@ fn corruptions() -> Vec<Corruption> {
 }
 
 /// A spooled chunk that changed after it was acknowledged is refused, even when
-/// the file is the same size and still valid Arrow IPC, on both seal routes and
-/// whether the session accepted the chunks or reopened them.
+/// the file is the same size and still valid Arrow IPC, whether the session
+/// accepted the chunks or reopened them.
 #[test]
 fn a_same_size_valid_ipc_corruption_of_a_spooled_chunk_is_refused() {
     // Every case runs, so a weakened check names each corruption it misses.
@@ -1038,37 +1016,32 @@ fn a_same_size_valid_ipc_corruption_of_a_spooled_chunk_is_refused() {
     for case in corruptions() {
         let (nodes, edges) = &case.inputs;
         for reopened in [false, true] {
-            for route in [SealRoute::Bulk, SealRoute::ReplayStaged] {
-                let label = format!("{} reopened={reopened} {route:?}", case.name);
-                let root = TempDir::new().unwrap();
-                let mut session = spooled_session(&root, GraphConstructionBudgets::default());
-                append_all(&mut session, nodes, edges).unwrap();
-                corrupt_in_place(&root, case.kind, &case.edits);
-                if reopened {
-                    drop(session);
-                    session = pinned_with(&root, GraphConstructionBudgets::default());
-                    assert!(session.is_spooled(), "{label}");
-                }
-                session.record_seal_route(route).unwrap();
-                let error = match route {
-                    SealRoute::Bulk => session
-                        .prepare_spooled_bulk_encoding(1, u64::MAX, || false)
-                        .err(),
-                    SealRoute::ReplayStaged => session.replay_spool_to_staged(|| false).err(),
-                };
-                match error {
-                    Some(error)
-                        if error
-                            .to_string()
-                            .contains("differs from its acknowledged digest") => {}
-                    other => missed.push(format!("{label}: {other:?}")),
-                }
-                // Nothing was pinned from it.
-                assert!(
-                    session.checkpoint.encoding_inventory_sha256.is_none(),
-                    "{label}"
-                );
+            let label = format!("{} reopened={reopened}", case.name);
+            let root = TempDir::new().unwrap();
+            let mut session = spooled_session(&root, GraphConstructionBudgets::default());
+            append_all(&mut session, nodes, edges).unwrap();
+            corrupt_in_place(&root, case.kind, &case.edits);
+            if reopened {
+                drop(session);
+                session = pinned_with(&root, GraphConstructionBudgets::default());
+                assert!(session.is_spooled(), "{label}");
             }
+            session.record_seal_route(SealRoute::Bulk).unwrap();
+            match session
+                .prepare_spooled_bulk_encoding(1, u64::MAX, || false)
+                .err()
+            {
+                Some(error)
+                    if error
+                        .to_string()
+                        .contains("differs from its acknowledged digest") => {}
+                other => missed.push(format!("{label}: {other:?}")),
+            }
+            // Nothing was pinned from it.
+            assert!(
+                session.checkpoint.encoding_inventory_sha256.is_none(),
+                "{label}"
+            );
         }
     }
     assert!(missed.is_empty(), "corruptions not refused: {missed:#?}");
@@ -1164,35 +1137,9 @@ fn the_chunk_digest_separates_values_that_print_alike() {
     assert_eq!(base, digest(&tagged(&["a, b", "c"], &["d"])));
 }
 
-/// A chunk admitted at its exact byte window also replays through the staged
-/// path: the replay keeps the admission the chunk was accepted under, because
-/// the IPC-decoded copy reports more memory than the arrays that were admitted.
-#[test]
-fn a_chunk_admitted_at_its_exact_byte_window_replays_through_the_staged_path() {
-    let uuids = (0..64_u64).map(|i| uuid(0x10, i)).collect::<Vec<_>>();
-    let batch = wide_nodes(&uuids, 7);
-    let budgets = GraphConstructionBudgets {
-        max_batch_bytes: batch.get_array_memory_size(),
-        ..GraphConstructionBudgets::default()
-    };
-    let nodes = std::slice::from_ref(&batch);
-    let expected = staged_with(budgets, nodes, &[]).unwrap();
-    let root = TempDir::new().unwrap();
-    let mut session = spooled_session(&root, budgets);
-    append_all(&mut session, nodes, &[]).unwrap();
-    session.record_seal_route(SealRoute::ReplayStaged).unwrap();
-    session.replay_spool_to_staged(|| false).unwrap();
-    session.seal().unwrap();
-    let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
-    assert_same(
-        &expected,
-        &inventory(&session.encode_canonical(&shape, 1).unwrap()),
-    );
-}
-
 /// The same chunks as registered sources (what an import session hands the
 /// builder) and as a spool publish the same bytes, so the chunk API and an
-/// import session are equivalent as well as each equal to the staged path.
+/// import session are equivalent.
 #[test]
 fn spooled_chunks_publish_the_bytes_of_registered_sources() {
     for order in [identity_order, scattered] {

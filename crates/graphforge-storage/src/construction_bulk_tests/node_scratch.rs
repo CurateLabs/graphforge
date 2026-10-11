@@ -27,7 +27,7 @@ fn node_scratch_plan(
     plan
 }
 
-fn node_scratch_run(
+pub(super) fn node_scratch_run(
     nodes: &[RecordBatch],
     edges: &[RecordBatch],
     per_task: usize,
@@ -49,6 +49,7 @@ fn node_scratch_run(
         inventory: inventory(&encoding),
         report: session.bulk_build_report(),
         scratch_left: scratch_dir(&session).exists(),
+        back: read_back(&session, &encoding),
     })
 }
 
@@ -199,8 +200,7 @@ fn assert_node_scratch_traffic(report: &crate::BulkBuildReport, nodes: u64, edge
 #[test]
 fn node_tables_on_scratch_publish_the_in_memory_bytes_at_budget_derived_partitions() {
     let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
-    let expected = bulk_with(&nodes, &edges, 2, 4).unwrap();
-    assert_same(&staged(&nodes, &edges), &expected);
+    let expected = build_checked(&nodes, &edges, 2, 4);
     for (per_task, workers, partitions) in [
         (2, 1, (1, 1)),
         (2, 4, (2, 3)),
@@ -215,6 +215,7 @@ fn node_tables_on_scratch_publish_the_in_memory_bytes_at_budget_derived_partitio
             "edge/CSR partitions {partitions:?} workers {workers}"
         );
         assert!(!run.scratch_left, "scratch must be deleted on completion");
+        assert_reads_back(&nodes, &edges, &run.back);
         let report = &run.report;
         assert!(report.node_partitions >= 1, "{report:?}");
         assert!(report.csr_partitions >= partitions.1 as u64);
@@ -348,8 +349,7 @@ fn oversized_node_ranges_refine_and_publish_the_in_memory_bytes() {
     // identities, so both sampled and footer-derived splitters need refine.
     let _limits = ShardLimits::set(31, 100);
     let (nodes, edges, node_ids) = skewed_node_graph(3_001, 500);
-    let expected = bulk_with(&nodes, &edges, 1, 2).unwrap();
-    assert_same(&staged(&nodes, &edges), &expected);
+    let expected = build_checked(&nodes, &edges, 1, 2);
     for bounded in [false, true] {
         for (gate, parts) in [(32 << 10, (4, 2)), (64 << 10, (1, 2))] {
             let _gate =
@@ -700,7 +700,7 @@ fn a_process_killed_in_any_node_scratch_pass_leaves_scratch_and_the_rerun_is_ide
 #[test]
 fn property_bearing_and_typed_input_over_scratch_node_tables_match_the_resident_build() {
     let (nodes, edges) = property_recovery_input();
-    let expected = staged(&nodes, &edges);
+    let expected = build_checked(&nodes, &edges, 1, 1);
     assert!(
         expected
             .iter()
@@ -722,6 +722,8 @@ fn property_bearing_and_typed_input_over_scratch_node_tables_match_the_resident_
         plan.memory_budget = Some(budget);
         let encoding = session.prepare_bulk_encoding(1, &plan, || false).unwrap();
         assert_same(&expected, &inventory(&encoding));
+        assert_counts(&session, &encoding, &nodes, &edges);
+        assert_reads_back(&nodes, &edges, &read_back(&session, &encoding));
         let report = session.bulk_build_report();
         assert!(report.node_partitions > 0, "{report:?}");
         assert!(report.property_scratch_write_bytes > 0, "{report:?}");

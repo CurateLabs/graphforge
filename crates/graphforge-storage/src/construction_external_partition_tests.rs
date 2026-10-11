@@ -95,7 +95,7 @@ fn external_ingest(
         .publish_canonical(&encoding, Uuid::from_u128(0x71), Uuid::from_u128(0x72))
         .map_err(|error| error.to_string())?;
     drop(session);
-    // Reopen as a query process does and count the published adjacency.
+    // Reopen as a query process does and count the published edges.
     let generation = crate::resolve_project_generation(project).map_err(|error| error.to_string())?;
     assert_eq!(generation.generation_uuid(), published.generation_uuid);
     let inventory = generation
@@ -105,15 +105,19 @@ fn external_ingest(
     let workspace = TempDir::new().unwrap();
     crate::materialize_graph_objects(generation.container_root(), &inventory, workspace.path())
         .map_err(|error| error.to_string())?;
-    let union = crate::adjacency::ShardedCsrIndex::open(&crate::adjacency::csr_path(
+    // The wildcard reads every published edge file, whatever its route name.
+    let reopened_edges = crate::read_edges(
         workspace.path(),
-        "_all",
-        crate::adjacency::Direction::Out,
-    ))
-    .map_err(|error| error.to_string())?;
+        "*",
+        graphforge_core::OntologyMode::Strict,
+    )
+    .map_err(|error| error.to_string())?
+    .iter()
+    .map(RecordBatch::num_rows)
+    .sum::<usize>();
     Ok(serde_json::json!({
         "fingerprint": format!("{fingerprint:?}"),
-        "reopened_edge_count": union.edge_count(),
+        "reopened_edge_count": reopened_edges,
         "peak_partition_records": evidence.peak_partition_records,
         "external_partitions": evidence.external_partitions,
         "external_runs": evidence.external_runs,
@@ -131,9 +135,8 @@ fn external_partition_subprocess() {
     let case = std::env::var("GF_EXTERNAL_TEST_CASE").unwrap();
     let project = root.join(std::env::var("GF_EXTERNAL_TEST_PROJECT").unwrap());
     std::fs::create_dir_all(&project).unwrap();
-    // Hub endpoints are what push a partition over budget, and only the
-    // endpoint family routes them (ADR 0057).
-    let mut budgets = family_budgets(EXTERNAL_TEST_PARTITIONS);
+    // Hub endpoints are what push a partition over budget.
+    let mut budgets = budgets(EXTERNAL_TEST_PARTITIONS);
     if let Ok(value) = std::env::var("GF_EXTERNAL_TEST_PARTITION_BYTES") {
         budgets.max_partition_bytes = value.parse().unwrap();
     }

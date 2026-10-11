@@ -1,7 +1,4 @@
-use super::super::tests::{
-    edge_batch, endpoint_family_budgets, fixed, node_batch, nonempty_project_with_nodes, open,
-    open_endpoint_family,
-};
+use super::super::tests::{edge_batch, fixed, node_batch, nonempty_project_with_nodes, open};
 use super::super::*;
 use super::*;
 use arrow::array::StringArray;
@@ -136,7 +133,6 @@ fn shaping_is_bounded_deterministic_and_multipass_at_1x_2x_4x() {
             0,
             GraphConstructionBudgets {
                 merge_fan_in: 2,
-                max_node_index_bytes: 0,
                 ..GraphConstructionBudgets::default()
             },
         )
@@ -536,7 +532,7 @@ fn nonempty_base_rejects_duplicate_cross_kind_and_missing_endpoint_without_copy(
 #[test]
 fn packed_endpoint_wire_preserves_full_width_fields_and_refuses_malformed_roles() {
     let root = TempDir::new().unwrap();
-    let mut session = open_endpoint_family(&root, 127_400);
+    let mut session = open(&root, 127_400);
     let node = u128::MAX - 2;
     let edge = u128::MAX;
     session
@@ -615,7 +611,7 @@ fn packed_endpoint_wire_preserves_full_width_fields_and_refuses_malformed_roles(
 fn fixed_merge_reader_rejects_truncation_and_self_loop_is_valid() {
     assert!(read_fixed::<16>(&mut std::io::Cursor::new(vec![0_u8; 15])).is_err());
     let root = TempDir::new().unwrap();
-    let mut session = open_endpoint_family(&root, 8_004);
+    let mut session = open(&root, 8_004);
     session
         .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 1))
         .unwrap();
@@ -664,7 +660,7 @@ fn fixed_merge_reader_rejects_truncation_and_self_loop_is_valid() {
         root.path(),
         Uuid::from_u128(8_004),
         0,
-        endpoint_family_budgets(),
+        GraphConstructionBudgets::default(),
     )
     .unwrap();
     assert_eq!(
@@ -690,7 +686,7 @@ fn resolved_endpoints_never_cost_one_write_submission_each() {
         root.path(),
         Uuid::from_u128(7_443),
         0,
-        endpoint_family_budgets(),
+        GraphConstructionBudgets::default(),
     )
     .unwrap();
     session

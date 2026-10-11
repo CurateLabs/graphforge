@@ -14,7 +14,7 @@ use uuid::Uuid;
 use super::{PendingDigestBudget, SourceDigest, hex};
 use crate::import_session::test_fixtures::{edges, fixture, nodes, seeded_fixture};
 use crate::import_session::{
-    BuildRoute, GraphImportSession, ImportPhase, ImportSessionLimits, ImportSourceKind,
+    GraphImportSession, ImportPhase, ImportSessionLimits, ImportSourceKind,
 };
 use crate::{BulkInputKind, GraphForge, OperationId};
 
@@ -38,14 +38,16 @@ fn fixture_for(route: Route) -> (tempfile::TempDir, PathBuf, GraphForge) {
     }
 }
 
+/// The session built on the route its fixture implies: only an initial import
+/// runs the bulk builder, which leaves its report in the construction evidence.
 fn assert_route(session: &GraphImportSession, route: Route) {
-    assert_eq!(
-        session.manifest.build_route,
-        Some(match route {
-            Route::Staged => BuildRoute::Staged,
-            Route::Bulk => BuildRoute::Bulk,
-        })
-    );
+    let built_in_bulk = session
+        .manifest
+        .progress
+        .construction
+        .as_ref()
+        .is_some_and(|construction| construction.bulk_build.is_some());
+    assert_eq!(built_in_bulk, matches!(route, Route::Bulk), "{route:?}");
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -922,8 +924,8 @@ fn a_staged_read_hashes_what_it_reads_and_rereads_almost_nothing() {
 }
 
 /// A session an earlier version began copied each Parquet source into the session
-/// and recorded no identity for it. It keeps resuming, validating and appending.
-fn historical_session(graph: &GraphForge, kept: &Path) -> (Uuid, PathBuf) {
+/// and recorded no identity for it. Nothing resumes it: the format is gone.
+fn historical_session(graph: &GraphForge, kept: &Path) -> Uuid {
     let mut session = begin(graph);
     session.register_parquet(BulkInputKind::Node, kept).unwrap();
     // The shape an earlier version wrote: version 2, a copy under `sources/`, and
@@ -935,107 +937,43 @@ fn historical_session(graph: &GraphForge, kept: &Path) -> (Uuid, PathBuf) {
     session.manifest.format_version = 2;
     session.manifest.sources[0].external = None;
     session.checkpoint().unwrap();
-    assert_eq!(session.manifest.sources[0].sha256, None);
-    let id = session.session_uuid();
-    let root = session.root.clone();
-    drop(session);
-    (id, root)
-}
-
-fn a_historical_copied_session_resumes_validates_and_appends_on(route: Route) {
-    let (_directory, _project, graph) = fixture_for(route);
-    let historical = source();
-    let (id, root) = historical_session(&graph, &historical.path);
-    // Only the copy remains: nothing may be read from where the file was.
-    fs::remove_file(&historical.path).unwrap();
-
-    let mut session = graph.resume_import_session(id).unwrap();
-    assert_eq!(session.manifest.format_version, 2);
-    let (phase, _) = graph.import_session_status(id).unwrap();
-    assert_eq!(phase, ImportPhase::Open);
-
-    // Append to it: a new in-place file and an Arrow batch join the copied one.
-    let extra = source();
-    session
-        .register_parquet(BulkInputKind::Node, &extra.path)
-        .unwrap();
-    assert_eq!(
-        session.manifest.format_version, 3,
-        "a session holding an in-place source is no longer readable by the version that copied"
-    );
-    let arrow_ids = (0..BATCH_ROWS).map(|_| Uuid::now_v7()).collect::<Vec<_>>();
-    session
-        .append_arrow(BulkInputKind::Node, &[nodes(&arrow_ids)])
-        .unwrap();
-
-    let progress = session.validate(&graph).unwrap();
-    assert_route(&session, route);
-    assert_eq!(progress.rows_accepted, (2 * NODE_ROWS + BATCH_ROWS) as u64);
-    // Only the in-place source has a digest to attest; the copy and the Arrow
-    // batch are session-owned.
-    let provenance = progress.construction.unwrap().source_provenance;
-    assert_eq!(provenance.len(), 3);
-    assert_eq!(provenance[0].sha256, None);
-    assert_eq!(provenance[0].footer_sha256, None);
-    assert_eq!(
-        provenance[1].sha256.as_deref(),
-        Some(sha256(&fs::read(&extra.path).unwrap()).as_str())
-    );
-    assert_eq!(provenance[2].sha256, None);
-    assert!(
-        root.join("sources")
-            .join(&session.manifest.sources[0].name)
-            .exists()
-    );
-
-    // It survives a fresh process, commits, and the project takes a further append.
-    let session_uuid = session.session_uuid();
-    session.commit(&graph, None).unwrap();
-    drop(session);
-    assert_eq!(
-        graph.node_count("Person").unwrap(),
-        (2 * NODE_ROWS + BATCH_ROWS) as u64
-    );
-    let (phase, _) = graph.import_session_status(session_uuid).unwrap();
-    assert_eq!(phase, ImportPhase::Committed);
-    let mut next = begin(&graph);
-    next.append_arrow(BulkInputKind::Node, &[nodes(&[Uuid::now_v7()])])
-        .unwrap();
-    next.validate(&graph).unwrap();
-    next.commit(&graph, None).unwrap();
-    assert_eq!(
-        graph.node_count("Person").unwrap(),
-        (2 * NODE_ROWS + BATCH_ROWS + 1) as u64
-    );
+    session.session_uuid()
 }
 
 #[test]
-fn a_historical_copied_session_resumes_validates_and_appends() {
-    for route in ROUTES {
-        a_historical_copied_session_resumes_validates_and_appends_on(route);
-    }
-}
-
-/// A copied source is the session's own: nothing outside it can refuse the build,
-/// and an abort removes it with the session.
-#[test]
-fn a_historical_copied_source_ignores_the_original_and_is_removed_by_abort() {
+fn a_session_that_copied_its_sources_is_refused_rather_than_resumed() {
     for route in ROUTES {
         let (_directory, _project, graph) = fixture_for(route);
         let historical = source();
-        let (id, root) = historical_session(&graph, &historical.path);
-        // Changing the original in any way cannot matter to a copied source.
-        for change in CHANGES.iter().rev() {
-            (change.apply)(&historical.path);
-        }
-        assert!(!historical.path.exists());
-        let mut session = graph.resume_import_session(id).unwrap();
+        let id = historical_session(&graph, &historical.path);
+        let resumed = graph
+            .resume_import_session(id)
+            .err()
+            .expect("resumed")
+            .to_string();
+        assert!(
+            resumed.contains("incompatible import manifest format"),
+            "{resumed}"
+        );
+        let status = graph
+            .import_session_status(id)
+            .err()
+            .expect("reported")
+            .to_string();
+        assert!(
+            status.contains("incompatible import manifest format"),
+            "{status}"
+        );
+        // Nothing else reads it either: a fresh session over the same source is fine.
+        let mut session = begin(&graph);
+        session
+            .register_parquet(BulkInputKind::Node, &historical.path)
+            .unwrap();
         assert_eq!(
             session.validate(&graph).unwrap().rows_accepted,
             NODE_ROWS as u64
         );
-        session.abort(&graph).unwrap();
-        assert!(!root.join("sources").exists());
+        assert_route(&session, route);
     }
 }
 
@@ -1049,8 +987,6 @@ fn a_historical_copied_source_ignores_the_original_and_is_removed_by_abort() {
 fn crash_after_inventory_pin(graph: &GraphForge, path: &Path) -> Uuid {
     let mut session = begin(graph);
     session.register_parquet(BulkInputKind::Node, path).unwrap();
-    session.manifest.build_route = Some(BuildRoute::Bulk);
-    session.persist_manifest().unwrap();
     let mut construction = session.open_construction(graph).unwrap();
     let refusals = crate::import_session::bulk_source::Refusals::default();
     let digests = crate::import_session::bulk_source::Digests::default();

@@ -802,9 +802,6 @@ fn import_operation_timings_survive_separate_cli_processes() {
             > 0
     );
     assert!(regions["import_command/stage+seal/seal/shaping"].is_object());
-    assert!(
-        regions["import_command/stage+seal/seal/canonical_encoding/adjacency_encoding"].is_object()
-    );
     let root = regions["import_command"]["inclusive"]["wall_ns"]
         .as_u64()
         .unwrap();

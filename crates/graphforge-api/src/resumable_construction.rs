@@ -49,6 +49,22 @@ pub struct GraphConstructionSession<'a> {
     _parent_workspace: super::GraphWorkspace,
 }
 
+/// How a facade opens a storage construction session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConstructionOpen {
+    /// A new construction, pinned to whatever the project holds.
+    Begin,
+    /// A new construction that stages its chunks: only an append may.
+    BeginAppend,
+    /// An existing construction that continues. A session that staged the
+    /// chunks of an initial build cannot, because an initial build now runs on
+    /// the bulk builder.
+    Resume,
+    /// An existing construction that is about to be discarded, whatever it
+    /// holds.
+    Discard,
+}
+
 impl GraphForge {
     /// Begin a bounded construction pinned to the current committed graph.
     ///
@@ -60,7 +76,8 @@ impl GraphForge {
         &self,
         budgets: GraphConstructionBudgets,
     ) -> Result<GraphConstructionSession<'_>, GfError> {
-        let mut session = self.open_graph_construction(Uuid::now_v7(), budgets, false)?;
+        let mut session =
+            self.open_graph_construction(Uuid::now_v7(), budgets, ConstructionOpen::Begin)?;
         session.inner.spool_chunks();
         Ok(session)
     }
@@ -68,16 +85,28 @@ impl GraphForge {
     /// Begin a construction whose chunks are staged rather than spooled: each
     /// accepted chunk becomes durable, authenticated Parquet and sorted runs,
     /// and sealing shapes and encodes them in a fixed window of memory, however
-    /// large the graph. [`Self::begin_graph_construction`] builds an initial
-    /// graph on the bulk builder, in memory or on bounded scratch files when it
-    /// exceeds the memory budget, and stages only a build whose node tables
-    /// alone exceed that budget. Use this to measure the staged lifecycle
-    /// itself. Appends to a non-empty graph always stage.
+    /// large the graph. This is the append lifecycle, so it requires a
+    /// non-empty graph. An empty project builds on the bulk builder through
+    /// [`Self::begin_graph_construction`] or an import session, in memory or
+    /// on bounded scratch files when the build exceeds the memory budget.
+    ///
+    /// # Errors
+    /// [`GfError::Validation`] when the project holds no graph yet.
     pub fn begin_staged_graph_construction(
         &self,
         budgets: GraphConstructionBudgets,
     ) -> Result<GraphConstructionSession<'_>, GfError> {
-        self.open_graph_construction(Uuid::now_v7(), budgets, false)
+        self.open_graph_construction(Uuid::now_v7(), budgets, ConstructionOpen::BeginAppend)
+    }
+
+    /// Open the construction an import session builds on. The bulk builder
+    /// reads an initial import's registered sources in place and the session
+    /// stages nothing; an append import stages its batches.
+    pub(crate) fn begin_import_construction(
+        &self,
+        budgets: GraphConstructionBudgets,
+    ) -> Result<GraphConstructionSession<'_>, GfError> {
+        self.open_graph_construction(Uuid::now_v7(), budgets, ConstructionOpen::Begin)
     }
 
     /// Resume a construction using the opaque durable identifier returned at begin.
@@ -86,7 +115,19 @@ impl GraphForge {
         session_uuid: Uuid,
         budgets: GraphConstructionBudgets,
     ) -> Result<GraphConstructionSession<'_>, GfError> {
-        self.open_graph_construction(session_uuid, budgets, true)
+        self.open_graph_construction(session_uuid, budgets, ConstructionOpen::Resume)
+    }
+
+    /// Reopen a construction only to discard it. Unlike
+    /// [`Self::resume_graph_construction`] this opens a session that holds the
+    /// staged chunks of an initial build, so that aborting its import can
+    /// reclaim it.
+    pub(crate) fn resume_graph_construction_to_discard(
+        &self,
+        session_uuid: Uuid,
+        budgets: GraphConstructionBudgets,
+    ) -> Result<GraphConstructionSession<'_>, GfError> {
+        self.open_graph_construction(session_uuid, budgets, ConstructionOpen::Discard)
     }
 
     /// Open or resume the storage session for `open_graph_construction`,
@@ -193,8 +234,9 @@ impl GraphForge {
         &self,
         session_uuid: Uuid,
         budgets: GraphConstructionBudgets,
-        resume: bool,
+        open: ConstructionOpen,
     ) -> Result<GraphConstructionSession<'_>, GfError> {
+        let resume = matches!(open, ConstructionOpen::Resume | ConstructionOpen::Discard);
         if self.read_only {
             return Err(validation("historical graph views cannot construct"));
         }
@@ -202,6 +244,12 @@ impl GraphForge {
         let workspace = self.workspace_for_session();
         let dir = workspace.path();
         let parent_topology_generation = graphforge_storage::read_topology_generation(dir)?;
+        if open == ConstructionOpen::BeginAppend && parent_topology_generation == 0 {
+            return Err(validation(
+                "staged construction appends to a non-empty graph; an empty project builds on \
+                 the bulk builder through begin_graph_construction or an import session",
+            ));
+        }
         let mut inner = self.open_storage_construction(
             dir,
             session_uuid,
@@ -209,6 +257,18 @@ impl GraphForge {
             budgets,
             resume,
         )?;
+        if open == ConstructionOpen::Resume
+            && inner.parent_topology_generation() == 0
+            && !inner.is_spooled()
+            && inner.accepted_chunks() > 0
+        {
+            // An initial build no longer stages: the session was recorded by a
+            // build that did, and nothing resumes it.
+            return Err(validation(
+                "this construction session holds staged chunks of an initial build, which now \
+                 runs on the bulk builder and cannot resume them; restart the import",
+            ));
+        }
         // #1586: every import on this instance draws its parallel lanes from
         // one admission, so construction never takes the whole CPU budget.
         inner.set_cpu_admission(Some(std::sync::Arc::clone(
@@ -544,28 +604,16 @@ impl GraphConstructionSession<'_> {
     ) -> Result<graphforge_storage::GraphConstructionEncoding, GfError> {
         let topology_generation = self.inner.parent_topology_generation().saturating_add(1);
         if self.inner.is_spooled() {
-            // The route is recorded before any work and read back on every
-            // retry: a retry never re-decides from live memory.
+            // The route is recorded before any work, which closes the session
+            // to further chunks; a retry reads it back.
             let budget = crate::import_session::bulk_source::bulk_build_memory_budget()?;
-            let route = if let Some(route) = self.inner.seal_route() {
-                route
-            } else {
-                let route = self.inner.spool_seal_route(budget)?;
-                self.inner.record_seal_route(route)?
-            };
-            let cancelled = || cancellation.is_some_and(crate::CancellationToken::is_cancelled);
-            match route {
-                graphforge_storage::SealRoute::Bulk => {
-                    return self.inner.prepare_spooled_bulk_encoding(
-                        topology_generation,
-                        budget,
-                        cancelled,
-                    );
-                }
-                graphforge_storage::SealRoute::ReplayStaged => {
-                    self.inner.replay_spool_to_staged(cancelled)?;
-                }
-            }
+            self.inner
+                .record_seal_route(graphforge_storage::SealRoute::Bulk)?;
+            return self
+                .inner
+                .prepare_spooled_bulk_encoding(topology_generation, budget, || {
+                    cancellation.is_some_and(crate::CancellationToken::is_cancelled)
+                });
         }
         if self.inner.state() == GraphConstructionState::Staging {
             self.inner
@@ -1416,13 +1464,21 @@ mod tests {
         // object so they follow the payload; elsewhere the install links the
         // encoder's file and they are only the small manifest controls (#1899).
         let mut cas_reads = Vec::new();
+        // The append starts from a one-node base whose authentication the seal
+        // already accounts for; it is the same at every scale.
+        let mut seal_reads = Vec::new();
         // Each node retains 16 identity bytes and at least 18 compact detail bytes.
         // 4,096 rows therefore exceed 100,000 payload bytes before Parquet/control
         // overhead; retain the same dominance threshold and every phase ceiling.
         for scale in [4_096_usize, 8_192, 16_384] {
             let graph = GraphForge::new(None).unwrap();
             // The staged lifecycle's phase reads are what this measures; the
-            // staged path still serves appends and over-budget builds.
+            // staged path serves appends, so the project gets a first node
+            // from the bulk builder and the measured construction appends to it.
+            let mut base = graph.begin_graph_construction(Default::default()).unwrap();
+            base.append_nodes("base", &nodes(&[Uuid::now_v7()]))
+                .unwrap();
+            base.seal_and_publish().unwrap();
             let mut session = graph
                 .begin_staged_graph_construction(Default::default())
                 .unwrap();
@@ -1430,7 +1486,7 @@ mod tests {
             session.append_nodes("nodes", &nodes(&ids)).unwrap();
             session.seal_and_publish().unwrap();
             let evidence = &session.progress().evidence;
-            assert_eq!(evidence.seal_application_read_bytes, 0);
+            seal_reads.push(evidence.seal_application_read_bytes);
             assert!(evidence.shape_application_read_bytes > 0);
             assert!(evidence.encode_application_read_bytes > 0);
             assert!(evidence.publication_application_read_bytes > 0);
@@ -1474,11 +1530,15 @@ mod tests {
                 // the source once.
                 assert_eq!(cas.payload.read_bytes, evidence.canonical_output_bytes);
             } else {
-                // Elsewhere the install links the encoder's file (#1899): a fresh
-                // store has no existing object to authenticate, so nothing is read.
-                assert_eq!(cas.payload.read_bytes, 0);
+                // Elsewhere the install links the encoder's file (#1899): the only
+                // payload reads authenticate objects the one-node base already
+                // holds, and what is read plus what is installed is the
+                // canonical output, once each.
                 assert_eq!(cas.payload.write_bytes, 0);
-                assert_eq!(cas.payload.installed_bytes, evidence.canonical_output_bytes);
+                assert_eq!(
+                    cas.payload.installed_bytes + cas.payload.read_bytes,
+                    evidence.canonical_output_bytes
+                );
             }
             assert!(cas.manifest_reads.read_bytes > 0);
             assert!(cas.manifest_reads.read_calls > 0);
@@ -1509,6 +1569,11 @@ mod tests {
             cas_reads.push((payload, evidence.cas_application_read_bytes));
             hydration_reads.push((scale as u64, evidence.hydration_application_read_bytes));
         }
+        assert!(seal_reads[0] > 0, "the base's authentication is accounted");
+        assert!(
+            seal_reads.windows(2).all(|pair| pair[0] == pair[1]),
+            "seal reads followed the payload instead of the one-node base: {seal_reads:?}"
+        );
         if !cfg!(windows) {
             for adjacent in cas_reads.windows(2) {
                 let ((prior_payload, prior), (next_payload, next)) = (adjacent[0], adjacent[1]);
@@ -1581,9 +1646,7 @@ mod tests {
     }
 
     /// An initial build through the chunk API runs on the bulk builder: the
-    /// builder reports the rows it built and no chunk was staged. The same
-    /// chunks pinned to the staged path stage them and the builder builds
-    /// nothing, and both publish the same graph.
+    /// builder reports the rows it built and no chunk was staged.
     #[test]
     fn chunk_api_initial_builds_take_the_bulk_path() {
         let spooled = GraphForge::new(None).unwrap();
@@ -1599,17 +1662,93 @@ mod tests {
         assert_eq!(session.progress().evidence.input_batches, 3);
         assert_eq!(session.progress().evidence.parquet_shards, 0);
         assert_construction_relationships(&spooled, &chain_relationships(&node_ids, &edge_ids));
+    }
 
-        let staged = GraphForge::new(None).unwrap();
-        let mut session = staged
+    /// An empty project builds on the bulk builder, so staging its chunks is
+    /// refused with a typed validation error that names the way in; once the
+    /// project holds a graph, staging is the append lifecycle and is accepted.
+    #[test]
+    fn staged_construction_is_refused_on_an_empty_project_and_serves_appends() {
+        let graph = GraphForge::new(None).unwrap();
+        let refused = graph
+            .begin_staged_graph_construction(Default::default())
+            .err()
+            .expect("an empty project cannot stage an initial build");
+        assert!(matches!(refused, GfError::Validation(_)), "{refused:?}");
+        assert_eq!(refused.code(), "GF_VALIDATION");
+        let message = refused.to_string();
+        assert!(
+            message.contains("appends to a non-empty graph")
+                && message.contains("begin_graph_construction"),
+            "{message}"
+        );
+        // Nothing was opened: a refusal leaves no construction session behind.
+        let root = graph
+            .resolved_generation
+            .container_root()
+            .join(".graphforge-construction");
+        assert!(!root.exists() || std::fs::read_dir(&root).unwrap().next().is_none());
+
+        let mut first = graph.begin_graph_construction(Default::default()).unwrap();
+        accept_chain(&mut first);
+        first.seal_and_publish().unwrap();
+        let mut append = graph
             .begin_staged_graph_construction(Default::default())
             .unwrap();
-        let (node_ids, edge_ids) = accept_chain(&mut session);
-        session.seal_and_publish().unwrap();
-        let report = session.inner.bulk_build_report();
-        assert_eq!((report.nodes, report.edges), (0, 0));
-        assert_eq!(session.progress().evidence.input_batches, 3);
-        assert_construction_relationships(&staged, &chain_relationships(&node_ids, &edge_ids));
+        append
+            .append_nodes("more", &nodes(&[Uuid::now_v7()]))
+            .unwrap();
+        assert_eq!(append.progress().accepted_chunks, 1);
+        append.seal_and_publish().unwrap();
+        assert_eq!(append.progress().evidence.input_batches, 1);
+    }
+
+    /// A construction session of an earlier build that staged an initial
+    /// graph holds staged chunks the bulk builder cannot resume: reopening it
+    /// is refused with an instruction to restart the import.
+    #[test]
+    fn a_staged_initial_session_is_refused_on_resume_and_asks_for_a_restart() {
+        let graph = GraphForge::new(None).unwrap();
+        // The only way to stage on an empty project is below the facade's
+        // public entry point, as an earlier build did.
+        let mut session = graph
+            .open_graph_construction(Uuid::now_v7(), Default::default(), ConstructionOpen::Begin)
+            .unwrap();
+        accept_chain(&mut session);
+        assert_eq!(session.progress().accepted_chunks, 3);
+        let uuid = session.session_uuid();
+        drop(session);
+        let refused = graph
+            .resume_graph_construction(uuid, Default::default())
+            .err()
+            .expect("staged initial chunks cannot resume");
+        assert!(matches!(refused, GfError::Validation(_)), "{refused:?}");
+        assert!(
+            refused.to_string().contains("restart the import"),
+            "{refused}"
+        );
+        // Restarting reclaims it: a session being discarded reopens.
+        graph
+            .resume_graph_construction_to_discard(uuid, Default::default())
+            .unwrap()
+            .discard()
+            .unwrap();
+        let root = graph
+            .resolved_generation
+            .container_root()
+            .join(".graphforge-construction")
+            .join(uuid.simple().to_string());
+        assert!(!root.exists());
+
+        // A spooled initial session resumes: its chunks are the bulk builder's input.
+        let mut spooled = graph.begin_graph_construction(Default::default()).unwrap();
+        accept_chain(&mut spooled);
+        let uuid = spooled.session_uuid();
+        drop(spooled);
+        let resumed = graph
+            .resume_graph_construction(uuid, Default::default())
+            .unwrap();
+        assert_eq!(resumed.progress().accepted_chunks, 3);
     }
 
     /// A construction pinned to a non-empty graph is an append: it stages.
@@ -1636,56 +1775,37 @@ mod tests {
     /// graph exceeds it, large enough for its node tables: the scratch route.
     const SCRATCH_BUDGET: u64 = 800 << 20;
 
-    /// The seal route is decided once and stored with the session. A seal that
-    /// is interrupted under one memory condition is completed under another
-    /// without re-deciding: a build that recorded the bulk route keeps it and
-    /// runs on scratch when memory shrank; one that recorded the staged replay
-    /// (as a binary did before node tables could go to scratch, #1929) keeps it
-    /// when memory grew.
+    /// The seal route is recorded once and stored with the session. A seal that
+    /// is interrupted under one memory condition is completed under another:
+    /// the recorded bulk route is kept and runs on scratch when memory shrank.
     #[test]
     fn a_retried_seal_keeps_the_route_it_recorded_whatever_the_budget_now_says() {
-        for (first_budget, second_budget, expected) in [
-            (0, u64::MAX, graphforge_storage::SealRoute::ReplayStaged),
-            (
-                u64::MAX,
-                SCRATCH_BUDGET,
-                graphforge_storage::SealRoute::Bulk,
-            ),
-        ] {
-            let graph = GraphForge::new(None).unwrap();
-            let mut session = graph.begin_graph_construction(Default::default()).unwrap();
-            let (node_ids, edge_ids) = accept_chain(&mut session);
-            if expected == graphforge_storage::SealRoute::ReplayStaged {
-                // No plan chooses this route for want of memory any more; an
-                // earlier binary recorded it.
-                session.inner.record_seal_route(expected).unwrap();
-            }
-            let cancelled = crate::CancellationToken::new();
-            cancelled.cancel();
-            force_budget(Some(first_budget));
-            let interrupted = session.validate_and_seal(Some(&cancelled)).unwrap_err();
-            assert!(
-                interrupted.to_string().contains("cancelled"),
-                "{interrupted}"
-            );
-            assert_eq!(session.inner.seal_route(), Some(expected));
-            force_budget(Some(second_budget));
-            session.seal_and_publish().unwrap();
-            force_budget(None);
-            assert_eq!(session.inner.seal_route(), Some(expected));
-            let built = session.inner.bulk_build_report();
-            match expected {
-                graphforge_storage::SealRoute::Bulk => {
-                    assert_eq!((built.nodes, built.edges), (4, 3));
-                    assert!(built.scratch_write_bytes > 0, "{built:?}");
-                }
-                graphforge_storage::SealRoute::ReplayStaged => {
-                    assert_eq!((built.nodes, built.edges), (0, 0));
-                    assert_eq!(session.progress().evidence.input_batches, 3);
-                }
-            }
-            assert_construction_relationships(&graph, &chain_relationships(&node_ids, &edge_ids));
-        }
+        let graph = GraphForge::new(None).unwrap();
+        let mut session = graph.begin_graph_construction(Default::default()).unwrap();
+        let (node_ids, edge_ids) = accept_chain(&mut session);
+        let cancelled = crate::CancellationToken::new();
+        cancelled.cancel();
+        force_budget(Some(u64::MAX));
+        let interrupted = session.validate_and_seal(Some(&cancelled)).unwrap_err();
+        assert!(
+            interrupted.to_string().contains("cancelled"),
+            "{interrupted}"
+        );
+        assert_eq!(
+            session.inner.seal_route(),
+            Some(graphforge_storage::SealRoute::Bulk)
+        );
+        force_budget(Some(SCRATCH_BUDGET));
+        session.seal_and_publish().unwrap();
+        force_budget(None);
+        assert_eq!(
+            session.inner.seal_route(),
+            Some(graphforge_storage::SealRoute::Bulk)
+        );
+        let built = session.inner.bulk_build_report();
+        assert_eq!((built.nodes, built.edges), (4, 3));
+        assert!(built.scratch_write_bytes > 0, "{built:?}");
+        assert_construction_relationships(&graph, &chain_relationships(&node_ids, &edge_ids));
     }
 
     /// Above the fixed workspace and below the node tables of the test chain:

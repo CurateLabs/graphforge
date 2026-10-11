@@ -2,15 +2,13 @@
 //!
 //! The footers fix the answer to two questions before a byte is read:
 //!
-//! - which route builds the generation: in memory, on scratch files, or on the
-//!   staged path (a typed reason says why not);
+//! - which route builds the generation: in memory, on scratch files for the
+//!   edges, or on scratch files for the node tables too;
 //! - for the scratch route, how many partitions and how many partitions in
 //!   flight fit the normalized builder workspace inside the budget. Registered
 //!   source decoding and normalization require the separate bound in #1918.
 //!
 //! The constants are fitted to measured runs (see ADR 0058) and rounded up.
-
-use serde::{Deserialize, Serialize};
 
 use super::GraphConstructionBudgets;
 use super::plan::BulkBuildPlan;
@@ -64,21 +62,6 @@ const MAX_STAGING_BYTES: u64 = 256 << 10;
 /// Partitions per set. Files open per block, so this bounds only bookkeeping.
 const MAX_PARTITIONS: u64 = 4096;
 
-/// Why an initial build cannot run on the bulk builder and stages instead.
-///
-/// Chosen once, at plan time, from the footers and the memory budget.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BulkStagedReason {
-    /// The node tables (sorted UUIDs, labels, endpoint index, and any retained
-    /// cached source metadata) do not fit the budget. External node handling is not
-    /// implemented (#1881).
-    NodeTablesExceedBudget,
-    /// Historical reason retained for manifest decoding. New property-bearing
-    /// plans use bounded property scratch instead of selecting this reason.
-    EdgePropertiesExceedBudget,
-}
-
 /// How the bulk builder will build a plan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BulkRoute {
@@ -88,8 +71,6 @@ pub enum BulkRoute {
     Scratch,
     /// Node tables, edge records and adjacency entries use scratch files.
     ScratchNodes,
-    /// The staged path builds it.
-    Staged(BulkStagedReason),
 }
 
 impl BulkBuildPlan<'_> {

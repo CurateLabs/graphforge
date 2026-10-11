@@ -101,8 +101,7 @@ fn identical_input_shaped_outputs_match_across_processes() {
             let map: std::collections::BTreeMap<String, String> =
                 serde_json::from_value(evidence["digests"].clone()).unwrap();
             assert!(map.contains_key(SHAPED_RUNTIME_CATALOG));
-            // Both endpoint-resolution paths shape these; only the endpoint
-            // family adds `shaped-edge-endpoints.run` (ADR 0057).
+            // Every shape publishes these runs.
             for shaped in [
                 "shaped-identities.run",
                 "shaped-node-details.run",

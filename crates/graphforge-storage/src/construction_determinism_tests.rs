@@ -434,96 +434,6 @@ mod determinism {
         );
     }
 
-    /// Initial construction publishes the derived adjacency CSR as ordinary
-    /// SHA-256-declared artifacts of the generation (#1388): a query process
-    /// hydrates and opens it instead of rebuilding it into a temporary
-    /// directory. Byte reproducibility of those artifacts is covered by
-    /// `same_input_twice_produces_identical_digests`, which compares every
-    /// encoded artifact; this test pins presence, generation stamp, and that
-    /// the published index validates against the published topology.
-    #[test]
-    fn initial_construction_publishes_a_current_adjacency_index() {
-        use crate::adjacency::{Direction, ShardedCsrIndex, csr_path};
-
-        let nodes = node_ids(256);
-        let edges = edge_ids(1_024);
-        let root = TempDir::new().unwrap();
-        let mut session = pinned_session(&root, 4);
-        append_all(&mut session, &nodes, &edges, 128);
-        session.seal().unwrap();
-        let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
-        let encoding = session.encode_canonical(&shape, 1).unwrap();
-
-        let published_index = encoding
-            .artifacts
-            .iter()
-            .map(|artifact| artifact.path.as_str())
-            .filter(|path| path.starts_with("indexes/adjacency/"))
-            .collect::<Vec<_>>();
-        let shard_manifest = |stem: &str, direction: Direction| {
-            csr_path(std::path::Path::new(""), stem, direction)
-                .with_extension("csr.json")
-                .to_string_lossy()
-                .into_owned()
-        };
-        let expected_manifests = [
-            shard_manifest(crate::adjacency::ALL_RELATIONS_STEM, Direction::Out),
-            shard_manifest(crate::adjacency::ALL_RELATIONS_STEM, Direction::In),
-            shard_manifest("R", Direction::Out),
-            shard_manifest("R", Direction::In),
-        ];
-        for expected in std::iter::once("indexes/adjacency/index_manifest.parquet")
-            .chain(expected_manifests.iter().map(String::as_str))
-        {
-            assert!(
-                published_index.contains(&expected),
-                "{expected} is not among {published_index:?}"
-            );
-        }
-        assert!(encoding.evidence.adjacency.write_bytes > 0);
-        assert_eq!(encoding.evidence.adjacency.source_rows, edges.len() as u64);
-        assert!(encoding.evidence.adjacency.csr_shards >= 4);
-
-        let published = session
-            .publish_canonical(&encoding, Uuid::from_u128(0x71), Uuid::from_u128(0x72))
-            .unwrap();
-        let generation = crate::resolve_project_generation(root.path()).unwrap();
-        assert_eq!(generation.generation_uuid(), published.generation_uuid);
-        let inventory = generation.graph_files_inventory().unwrap().unwrap();
-        assert_eq!(
-            inventory
-                .files
-                .iter()
-                .filter(|entry| entry.role == crate::GraphFileRole::Index)
-                .count(),
-            published_index.len()
-        );
-
-        // Hydrate exactly as a query process does, then open presence-only.
-        let workspace = TempDir::new().unwrap();
-        crate::materialize_graph_objects(
-            generation.container_root(),
-            &inventory,
-            workspace.path(),
-        )
-        .unwrap();
-        let rows = crate::adjacency::read_manifest(workspace.path()).unwrap();
-        assert!(!rows.is_empty());
-        assert!(rows.iter().all(|row| row.topology_generation == 1));
-        assert_eq!(
-            crate::read_topology_generation(workspace.path()).unwrap(),
-            1
-        );
-        let union = ShardedCsrIndex::open(&csr_path(workspace.path(), "_all", Direction::Out))
-            .unwrap();
-        assert_eq!(union.edge_count(), edges.len() as u64);
-        assert!(
-            crate::adjacency::validate_adjacency_index(workspace.path())
-                .unwrap()
-                .is_empty()
-        );
-    }
-
     /// A graph too small to fill one partition shapes into exactly one, and
     /// that is intended rather than a degenerate case to refuse.
     ///
@@ -987,22 +897,6 @@ mod determinism {
         assert_eq!(admission.in_use(), 0);
     }
 
-    /// Budgets that keep the endpoint family: the node index is disabled.
-    fn family_budgets(partition_count: u32) -> GraphConstructionBudgets {
-        GraphConstructionBudgets {
-            max_node_index_bytes: 0,
-            ..budgets(partition_count)
-        }
-    }
-
-    fn shaped_names(fingerprint: &Fingerprint) -> Vec<&str> {
-        fingerprint
-            .shaped
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect()
-    }
-
     fn installed_intent(session: &GraphConstructionSession) -> Option<ShapeIntent> {
         let mut file = session
             .root
@@ -1011,88 +905,16 @@ mod determinism {
         Some(decode_shape_intent(&mut file).unwrap())
     }
 
-    /// ADR 0057: resolving endpoints by the node index publishes exactly the
-    /// bytes the endpoint family publishes, without shaping that family.
+    /// An edge naming a node that does not exist is refused while shaping, so
+    /// no shape that cannot encode is recorded complete.
     #[test]
-    fn node_index_resolution_publishes_the_endpoint_familys_bytes() {
-        let nodes = node_ids(1_024);
-        let edges = edge_ids(4_096);
-        let index_root = TempDir::new().unwrap();
-        let (index, _) = ingest(&index_root, 64, &nodes, &edges, 128);
-        let family_root = TempDir::new().unwrap();
-        let (family, _) = ingest_with(
-            &family_root,
-            family_budgets(64),
-            &nodes,
-            &edges,
-            128,
-        );
-        assert_eq!(index.encoded, family.encoded);
-        assert_eq!(
-            (index.node_count, index.edge_count),
-            (family.node_count, family.edge_count)
-        );
-        assert_eq!(
-            (index.max_node_surrogate, index.max_edge_surrogate),
-            (family.max_node_surrogate, family.max_edge_surrogate)
-        );
-        assert!(!shaped_names(&index).contains(&"shaped-edge-endpoints.run"));
-        assert!(shaped_names(&family).contains(&"shaped-edge-endpoints.run"));
-    }
-
-    /// A node index larger than its budget keeps the endpoint family, and a
-    /// budget that holds it exactly takes the index. Lanes leased from the
-    /// admission resolve the same surrogates as the calling thread alone.
-    #[test]
-    fn node_index_budget_selects_the_path_and_lanes_do_not_change_bytes() {
-        let nodes = node_ids(2_048);
-        let edges = edge_ids(16_384);
-        let index_bytes = nodes.len() as u64 * 16;
-        let mut published = Vec::new();
-        for (budget, lanes, indexed) in [
-            (index_bytes - 16, 1, false),
-            (index_bytes, 1, true),
-            (index_bytes, 8, true),
-        ] {
-            let root = TempDir::new().unwrap();
-            let mut session = pinned_session_with(
-                &root,
-                GraphConstructionBudgets {
-                    // Windows wide enough that a probe batch spans lanes.
-                    max_batch_rows: 8_192,
-                    max_run_records: 4 * 8_192,
-                    partition_count: 64,
-                    max_node_index_bytes: budget,
-                    ..GraphConstructionBudgets::default()
-                },
-            );
-            let admission = Arc::new(cpu_admission::ConstructionCpuAdmission::new(
-                std::num::NonZeroUsize::new(lanes).unwrap(),
-            ));
-            session.set_cpu_admission(Some(admission.clone()));
-            append_all(&mut session, &nodes, &edges, 1_024);
-            session.seal().unwrap();
-            let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
-            assert_eq!(installed_intent(&session).unwrap().endpoint_index, indexed);
-            assert_eq!(shape.edge_endpoints.is_none(), indexed);
-            let fingerprint = fingerprint(&mut session, &shape);
-            assert_eq!(admission.in_use(), 0);
-            published.push(fingerprint.encoded);
-        }
-        assert!(published.windows(2).all(|pair| pair[0] == pair[1]));
-    }
-
-    /// An edge naming a node that does not exist is refused while shaping, on
-    /// both resolution paths, so no shape that cannot encode is recorded
-    /// complete.
-    #[test]
-    fn a_dangling_endpoint_is_refused_while_shaping_on_both_paths() {
+    fn a_dangling_endpoint_is_refused_while_shaping() {
         let nodes = node_ids(512);
         let edges = edge_ids(256);
         let absent = ids(1_800_001_200_000, 0x0bad_cafe, 1)[0];
-        for budgets in [budgets(16), family_budgets(16)] {
+        {
             let root = TempDir::new().unwrap();
-            let mut session = pinned_session_with(&root, budgets);
+            let mut session = pinned_session_with(&root, budgets(16));
             for (index, window) in nodes.chunks(128).enumerate() {
                 session
                     .append(
@@ -1128,54 +950,6 @@ mod determinism {
             );
             assert!(installed_intent(&session).is_none_or(|intent| !intent.complete));
         }
-    }
-
-    /// A session recorded before the node index existed has no
-    /// `max_node_index_bytes`, reads it as zero, and resumes under today's
-    /// default budgets on the endpoint family it started with (ADR 0057).
-    #[test]
-    fn a_session_recorded_before_the_node_index_resumes_on_the_endpoint_family() {
-        let mut recorded = serde_json::to_value(GraphConstructionBudgets::default()).unwrap();
-        recorded
-            .as_object_mut()
-            .unwrap()
-            .remove("max_node_index_bytes")
-            .unwrap();
-        let legacy: GraphConstructionBudgets = serde_json::from_value(recorded.clone()).unwrap();
-        assert_eq!(legacy.max_node_index_bytes, 0);
-        // Finish-stage controls embed the budgets and chain by re-serializing
-        // them, so a legacy record must re-serialize byte for byte.
-        assert_eq!(serde_json::to_value(legacy).unwrap(), recorded);
-        assert!(
-            serde_json::to_value(GraphConstructionBudgets::default())
-                .unwrap()
-                .get("max_node_index_bytes")
-                .is_some()
-        );
-
-        let nodes = node_ids(512);
-        let edges = edge_ids(512);
-        let root = TempDir::new().unwrap();
-        let mut session = GraphConstructionSession::open(
-            root.path(),
-            Uuid::from_u128(OPERATION),
-            0,
-            legacy,
-        )
-        .unwrap();
-        append_all(&mut session, &nodes, &edges, 128);
-        session.seal().unwrap();
-        drop(session);
-        let mut resumed = GraphConstructionSession::open(
-            root.path(),
-            Uuid::from_u128(OPERATION),
-            0,
-            GraphConstructionBudgets::default(),
-        )
-        .unwrap();
-        let shape = resumed.shape_canonical_with_cancellation(|| false).unwrap();
-        assert!(shape.edge_endpoints.is_some());
-        assert!(!installed_intent(&resumed).unwrap().endpoint_index);
     }
 
     include!("construction_external_partition_tests.rs");

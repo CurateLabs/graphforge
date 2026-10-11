@@ -11,7 +11,6 @@ use super::{
     account_cache_release, add_evidence_counter, authenticate_file_cancellable, directory_for,
     storage,
 };
-use crate::graph_construction::ConstructionShape;
 
 /// Measured work of the adjacency build inside canonical encoding.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -35,111 +34,6 @@ pub struct AdjacencyEncodingEvidence {
     /// CSR shards published across every relation/direction pair.
     #[serde(default)]
     pub csr_shards: u64,
-}
-
-/// Private spill root for the adjacency build, beside (never inside) the
-/// encoded graph tree so a crash cannot leave spill runs among artifacts.
-const ADJACENCY_SPILL_ROOT: &str = ".adjacency-spill";
-
-/// Publish the derived adjacency CSR with the canonical inventory (#1388).
-///
-/// Every query process used to rebuild the whole CSR into a private temporary
-/// directory and delete it at exit. Building it once here, from the exact edge
-/// tables just encoded, makes it an ordinary SHA-256-declared artifact under
-/// `indexes/adjacency/` that the publisher installs into the CAS like every
-/// other file: hydration verifies its digest at open, and the persistent
-/// adjacency provider then opens it presence-only instead of rebuilding.
-///
-/// Only an initial construction (`parent_topology_generation == 0`) is
-/// covered: the encoder holds every edge table of that generation. An append
-/// carries the parent's files forward structurally without re-reading them,
-/// so its index would need the parent's edge tables too; until that lands an
-/// append keeps today's lazy rebuild (the provider reads the carried-forward
-/// manifest as stale and never serves it).
-///
-/// Deterministic by construction: CSR bytes derive from `topology/` alone
-/// (R-ADJ-2), the shard directory takes its content digest as its name, and
-/// the manifest's build time is the session's recorded clock, so the encoded
-/// inventory authority stays reproducible across sessions and resume.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn encode_adjacency(
-    output: &StableDirectory,
-    shape: &ConstructionShape,
-    generation: u64,
-    routes: &crate::route_component::RouteTable,
-    admission: Option<
-        &std::sync::Arc<crate::graph_construction::cpu_admission::ConstructionCpuAdmission>,
-    >,
-    cancelled: &mut impl FnMut() -> bool,
-    artifacts: &mut Vec<ConstructionEncodedArtifact>,
-    evidence: &mut GraphConstructionEncodingEvidence,
-) -> Result<(), GfError> {
-    if shape.parent_topology_generation != 0 {
-        return Ok(());
-    }
-    let graph_root = output.path().join("graph");
-    let mut edge_files = Vec::new();
-    for artifact in artifacts.iter() {
-        if !artifact.path.starts_with("topology/edges/") {
-            continue;
-        }
-        let semantic = routes.semantic_relative_path(&artifact.path)?;
-        let relation = crate::route_component::route_position(&semantic)?
-            .ok_or_else(|| storage("encoded edge table lacks a relation route"))?;
-        edge_files.push((relation.to_owned(), graph_root.join(&artifact.path)));
-    }
-    edge_files.sort();
-
-    // A crashed earlier attempt may have left a torn index or spill behind;
-    // the artifact set must be exactly this build's.
-    let adjacency = crate::adjacency::adjacency_dir(&graph_root);
-    if adjacency.exists() {
-        std::fs::remove_dir_all(&adjacency).map_err(storage)?;
-    }
-    let spill_root = output.path().join(ADJACENCY_SPILL_ROOT);
-    if spill_root.exists() {
-        std::fs::remove_dir_all(&spill_root).map_err(storage)?;
-    }
-    let options = crate::adjacency::AdjacencyBuildOptions {
-        spill_dir: Some(spill_root.clone()),
-        ..crate::adjacency::AdjacencyBuildOptions::default()
-    };
-    // The builder's own I/O is recorded in the lifecycle ledger (#1449), whose
-    // `read_path_scan` row is reserved for committed read-path work. Scope the
-    // publish-side build to the encoding row so construction never reports a
-    // read-path scan; the evidence contract above is untouched.
-    let phase_scope = crate::lifecycle_io::PhaseScope::enter(
-        crate::StorageIoPhase::EncodeWritePostwriteAuthentication,
-    );
-    let (rows, metrics) = crate::adjacency::build_adjacency_index_for_edge_files_on_lanes(
-        &graph_root,
-        &edge_files,
-        generation,
-        shape.runtime_catalog_now_micros,
-        &options,
-        admission,
-        || crate::graph_construction::reject_cancelled(cancelled),
-    )?;
-    drop(phase_scope);
-    let _ = std::fs::remove_dir_all(&spill_root);
-    if rows.is_empty() {
-        return Err(storage("adjacency build published no manifest rows"));
-    }
-
-    register_adjacency_artifacts(
-        output,
-        &graph_root,
-        &adjacency,
-        metrics.captured_artifacts,
-        cancelled,
-        artifacts,
-        evidence,
-    )?;
-    evidence.adjacency.source_rows = metrics.source_rows;
-    evidence.adjacency.spill_runs = metrics.spill_runs;
-    evidence.adjacency.spill_peak_bytes = metrics.spill_bytes;
-    evidence.adjacency.csr_shards = metrics.csr_shards;
-    Ok(())
 }
 
 pub(super) fn register_adjacency_artifacts(

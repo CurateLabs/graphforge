@@ -15,10 +15,10 @@ revisit_when: "A published artifact stops being a projection of the three ranked
 adjacency scratch), #1916 (property scratch), #1898 (sources read in place),
 #1899 (direct-to-CAS writes), #1901 (chunk-API initial builds), #1902 (no UUID
 membership index) and #1928 (no allocated-block comparison of unsynced encoded
-artifacts) and #1929 (out-of-core node tables). Pending: #1918 (bounded source
-decoding), #1938 (parallel scratch passes), the retirement of the old
-initial-build machinery, and the integrated acceptance audit and ladder. The
-epic's throughput close gate is #1387.
+artifacts), #1929 (out-of-core node tables), #1918 (bounded source decoding,
+#1956), #1938 (parallel scratch passes, #1960) and #1964 (the staged
+initial-build machinery deleted). Pending: the integrated acceptance audit and
+ladder. The epic's throughput close gate is #1387.
 
 **Related:**
 - ADR 0013 (project generation protocol; the `CURRENT` swap is unchanged)
@@ -26,7 +26,7 @@ epic's throughput close gate is #1387.
 - ADR 0046 (construction keeps its own sorting and partitioning)
 - ADR 0047 (one construction CPU budget)
 - ADR 0056 (shaping stays serial within stages; this record removes shaping for initial builds instead, and appends keep it)
-- ADR 0057 (node-index endpoint resolution; the builder uses its own index, and the staged index is retired with the staged initial-build path)
+- ADR 0057 (superseded: the staged node-index endpoint resolution was deleted with the staged initial-build path; the builder uses its own index)
 - #1387 (ingest floor), #1881 (epic)
 
 ## Context
@@ -93,41 +93,40 @@ functions.
 - An initial build whose estimated peak memory fits the plan-time budget keeps
   everything resident. One that does not runs the same passes through scratch
   files (below), bounding normalized builder workspace within its reservation.
-  The registered-source decoding and normalization boundary is described below;
-  its complete memory bound remains a prerequisite under #1918. The budget is
+  The registered-source decoding and normalization boundary is described below
+  (#1918). The budget is
   three fifths of the process's cgroup-aware memory headroom, or the bytes in
   `GF_BULK_BUILD_MEMORY_BUDGET_BYTES`. Routing is a function of the footers and
   the budget, never of the data, and the bytes are the same on every route.
-- The staged path remains for appends and for sessions an earlier binary began
-  staging. When the identity tables, labels, endpoint index and degree arrays
-  (a conservative 56 bytes per node alongside the fixed workspace) do not fit,
-  node identities, endpoint resolution, degrees and CSR key ranges use bounded
-  node-UUID range partitions on scratch. The historical
-  `node_tables_exceed_budget` and `edge_properties_exceed_budget` manifest
-  reasons remain readable, but new builds do not select either.
-- No plan sends an initial build to the staged path. Deleting
-  the machinery that only that path used is the last code slice of #1881. It
-  keeps the append engine. The maintainer's 2026-10-09 retirement decision
-  removes compatibility for staged initial-build sessions from unreleased
-  0.6.0-dev builds: a session with parent generation zero and staged chunks
-  must restart its import. Endpoint-index resume, staged route reasons,
-  chunk-spool replay, format-2 copied-source sessions and the persisted
-  `build_route` are pending removal. The facade will refuse staged construction
-  on an empty project; storage tests may still use the staged engine.
-  The staged-versus-bulk test oracle is also retired. Bulk correctness is
-  established by byte identity across resident, scratch and node-scratch
-  routes, forced worker counts, kill and rerun, and equality of recorded
-  queries and exact node and edge counts.
-- The route is chosen once, by the first `validate`, and written to the import
-  manifest (`build_route`); every later `validate`, in any process, reads it
-  back. A refused, cancelled or killed bulk attempt therefore cannot be
-  re-routed to the staged path by a change in free memory. It is never a
-  retry. Whether the bulk route then runs in memory or on scratch is decided
-  again on each attempt from the live budget; either produces the same bytes.
-  Since #1929 the node tables belong to that scratch workspace instead of being
-  a residency requirement: a budget that can no longer hold the bulk route's
-  minimum scratch workspace returns a resource-limit refusal before loading
-  data. It keeps the bulk route and can retry when the budget is sufficient.
+- The staged path remains for appends only. When the identity tables, labels,
+  endpoint index and degree arrays (a conservative 56 bytes per node alongside
+  the fixed workspace) do not fit, node identities, endpoint resolution,
+  degrees and CSR key ranges use bounded node-UUID range partitions on scratch.
+- No plan sends an initial build to the staged path, and the code that only
+  that path used is deleted (#1964): the staged route reasons, the chunk-spool
+  replay, the staged node index (ADR 0057) and its budget, the staged adjacency
+  publication, the format-2 copied-source import sessions and the persisted
+  build route. The maintainer's 2026-10-09 decision removed compatibility for
+  staged initial-build sessions from unreleased 0.6.0-dev builds: a session
+  with parent generation zero that holds staged chunks is refused with an
+  instruction to restart its import. The facade refuses
+  `begin_staged_graph_construction` on an empty project with a validation
+  error; the storage-level engine still stages on an empty project, which its
+  tests use. The staged-versus-bulk test oracle is retired. Bulk correctness is
+  established by reading each generation back against its input, byte identity
+  across resident, scratch and node-scratch routes, forced worker counts, kill
+  and rerun, and exact node and edge counts.
+- The route is a function of durable state, never of free memory: a session
+  whose parent generation has no topology is an initial build and runs the
+  bulk builder; any other session is an append and stages. No route is stored.
+  A refused, cancelled or killed bulk attempt therefore cannot be re-routed by
+  a change in free memory, and a retry is the same build. Whether the bulk
+  route then runs in memory or on scratch is decided again on each attempt from
+  the live budget; either produces the same bytes. Since #1929 the node tables
+  belong to that scratch workspace instead of being a residency requirement: a
+  budget that can no longer hold the bulk route's minimum scratch workspace
+  returns a resource-limit refusal before loading data, and the build can retry
+  when the budget is sufficient.
 
 ## Maintainer decisions (2026-10-07, epic #1881)
 
@@ -164,11 +163,8 @@ functions.
 
 ## Pending work
 
-| Issue | What it changes | Until it lands |
-| --- | --- | --- |
-| #1918 | Registered-source decoding and normalization are bounded before allocation (Parquet dictionary and page expansion, row maps). | The scratch route bounds normalized transport, not every source decoder. A reservation describes builder workspace, not process RSS. |
-| #1938 | Scratch partitions run concurrently, as many as the budget admits. | Over-budget builds run one scratch partition at a time (`scratch_concurrency` 1). |
-| Retirement | Delete the initial-build staged machinery that no new plan reaches now that every initial build runs on the bulk builder. | The staged initial-build code still exists and stays reachable through the explicitly retained staged paths: append sessions, import-session staging, and the historical replay route. |
+No code slice of #1881 is pending. The integrated acceptance audit and the
+ladder remain.
 
 The throughput floor (1,000,000 edges/s at every ladder rung) and the
 multicore criterion are gated by the integrated ladder under #1881 and #1387.
@@ -192,8 +188,9 @@ When the estimate exceeds the budget:
   Consecutive small child ranges coalesce through one streaming output, so
   bookkeeping follows the number of bounded partitions rather than the radix
   fanout. Already-fitting initial ranges keep their original scratch files.
-- Pass 3 currently builds the partitions in order, one at a time. #1938 will
-  admit concurrent partitions from their workspace reservations. Sorting a partition
+- Pass 3 builds the partitions concurrently (#1938): partitions are claimed in
+  order and admitted by a memory gate from their workspace reservations, so as
+  many run at once as the derived worker count and the budget allow. Sorting a partition
   ranks its edges (the first `edge_id` is the number of earlier edges plus
   one). It checks identities, writes its canonical edge files, and scatters
   its adjacency entries once into node-range partitions bounded by exact node degrees. A node larger than a
@@ -294,8 +291,8 @@ transport using the same restart policy as edge and CSR scratch.
 
 Registered-source decoding precedes this transport. Parquet dictionary/page
 expansion and the normalizer's row maps need their own bounded physical batching
-and admission (#1918); this decision does not claim that normalized-row transport
-alone bounds every source decoder. Available IPC footer/body expansion and schema
+and admission (#1918, implemented by #1956); normalized-row transport alone does
+not bound every source decoder. Available IPC footer/body expansion and schema
 metadata reservations are checked before creating eager source readers. Property
 traffic and fixed reservations remain distinct from measured process RSS.
 
@@ -341,11 +338,11 @@ spill file lifecycle is removed from initial builds.
   whose UUIDs arrive unsorted also needs an order array and one gathered
   column at a time (about 20 B/edge more) while it sorts.
 - The session checkpoint records an empty shape for a builder session. The
-  inventory's `shape_*` digests therefore differ from a staged build of the
-  same input; they are session authority, not published bytes.
-- Published artifacts are byte-identical to the staged build's for the same
-  input and session clock, with one exception: `ordinal-v4-receipt.json`
-  carries a random rebuild nonce (named by ADR 0038), in both builds.
+  inventory's `shape_*` digests therefore differ from those of a staged
+  session; they are session authority, not published bytes.
+- Published artifacts are byte-identical on every route (resident, scratch and
+  node-table scratch) for the same input and session clock, with one exception:
+  `ordinal-v4-receipt.json` carries a random rebuild nonce (named by ADR 0038).
 
 ### Chunk-API initial builds (#1901)
 
@@ -365,8 +362,8 @@ staging:
   a temporary file was never acknowledged and is removed.
 - Every chunk-time refusal (identifier, schema, window, ordering, in-chunk
   duplicate, conflicting replay) fires at the same `append` call, with the same
-  message, as on the staged path. Refusals that need global knowledge fire at
-  seal.
+  message, as on the staged append path. Refusals that need global knowledge
+  fire at seal.
 - At seal the spooled chunks are the builder's sources: row counts come from
   the receipts, and passes 1 and 2 decode the files in place and in parallel.
   They were validated and admitted when accepted, so the builder does not repeat
@@ -377,25 +374,25 @@ staging:
   endpoints and routes, and every property value) must equal those
   acknowledged at acceptance. A file that changed after acceptance, including
   one of the same size that is still valid Arrow IPC, fails the build with
-  `spooled chunk differs from its acknowledged digest`, on the bulk route (in
-  memory or scratch) and on the staged replay alike.
+  `spooled chunk differs from its acknowledged digest`, in memory or on
+  scratch.
 - The chunk-API build takes the same route as a registered-source build: the
   plan is built from the receipts and the memory budget (`BulkBuildPlan::route`),
   so an over-budget estimate runs the scratch passes of #1912, #1920 and #1929
   over the spool and never stages or refuses: node tables that exceed the
-  budget go through bounded scratch too. The seal route (`bulk`; a
-  `replay_staged` value can only come from a checkpoint an earlier binary
-  recorded, since no new plan stages) is recorded in the checkpoint before any
-  build or replay work and read back on every retry; a retry never re-decides
-  from live memory, and whether a `bulk` attempt runs in memory or on scratch
-  is decided again from the live budget (a budget below the minimum scratch
-  workspace refuses the attempt before decoding, as for a registered source).
-  `replay_staged` re-appends the authenticated spool through the staged path,
-  chunk by chunk under the same chunk ids, so an interrupted replay resumes.
+  budget go through bounded scratch too. The seal route (`bulk`) is recorded
+  in the checkpoint before any build work, which closes the session to further
+  chunks, and is read back on every retry. Whether the attempt runs in memory
+  or on scratch is decided again from the live budget (a budget below the
+  minimum scratch workspace refuses the attempt before decoding, as for a
+  registered source). The storage-level staged `seal` refuses a spooled
+  session.
 - A crash during the build leaves the spool intact; the rerun is identical.
   The spool is deleted once the build's inventory is pinned.
-- Import sessions stage through `begin_staged_graph_construction`: they route
-  their own builds and never spool.
+- Import sessions open their construction through an import-only opener, not
+  the public staged entry point: an initial import runs the bulk builder over
+  its registered sources and never spools or stages, and an append import
+  stages.
 
 **Does not change.** Intake refusals, the publication protocol, the format of
 any published artifact, and appends.
