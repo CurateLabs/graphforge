@@ -499,9 +499,11 @@ The historical `node_tables_exceed_budget` and `edge_properties_exceed_budget`
 manifest reasons remain readable; new plans use bounded scratch instead of
 selecting either reason. Publication semantics are unchanged.
 
-Publication does not copy the encoded files. On unix it syncs each encoded file, links the same inode to
-`graph-objects/sha256/<2>/<62>`, and acknowledges the bucket directory, so each
-published byte is written once (ADR 0013 barriers unchanged). The encoded name
+Publication does not copy the encoded files. On unix it links the same inode to
+`graph-objects/sha256/<2>/<62>` and acknowledges the bucket directory, so each
+published byte is written once. Each encoded file was synced once by its producer
+before the checkpoint that lists it, so linking one the encoded ledger lists runs
+no second file barrier (ADR 0013 ordering unchanged). The encoded name
 stays until the session's private tree is retired, so a publication that stopped
 at any point reruns by deduplicating against the existing object. Nothing reads
 the file back at install: exact length and XXH64 are checked on first read

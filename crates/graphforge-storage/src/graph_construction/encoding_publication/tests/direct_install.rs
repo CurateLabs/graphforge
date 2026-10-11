@@ -142,10 +142,13 @@ fn installed_object_is_the_staged_inode_and_nothing_is_written() {
     assert_eq!(observed.checksum_bytes, 0);
     assert_eq!(evidence.bytes_installed, source.bytes());
     assert_eq!(evidence.content_xxh64, Some(source.checksum()));
-    // One payload barrier and one namespace barrier for the address (ADR 0013),
-    // plus the `sha256` barrier that makes the bucket this object created
+    // The encoder ran this object's one payload barrier before the ledger that
+    // lists it was pinned (ADR 0058 decision 3), so linking runs none and counts
+    // a producer-sealed install. One namespace barrier for the address (ADR
+    // 0013), plus the `sha256` barrier that makes the bucket this object created
     // durable.
-    assert_eq!(evidence.file_fsync_calls, 1);
+    assert_eq!(evidence.file_fsync_calls, 0);
+    assert_eq!(evidence.producer_sealed_installs, 1);
     assert_eq!(evidence.bucket_creations, 1);
     assert_eq!(
         evidence.directory_fsync_calls,
@@ -328,8 +331,10 @@ fn mis_addressed_existing_object_is_replaced_by_the_correct_install() {
             assert_eq!(observed.checksum_bytes, sha_bytes + checksum_only_bytes);
             assert_eq!(evidence.content_xxh64, Some(source.checksum()));
             // One barrier for the removal of the bad entry, one for the new one.
+            // The encoder ran the payload barrier; linking runs no second.
             assert_eq!(evidence.directory_fsync_calls, 2);
-            assert_eq!(evidence.fsync_calls, 3);
+            assert_eq!(evidence.fsync_calls, 2);
+            assert_eq!(evidence.producer_sealed_installs, 1);
             assert_eq!(std::fs::read(staged.object_path()).unwrap(), bytes);
             object_store(staged.root.path());
             assert_eq!(staged.current(), current);

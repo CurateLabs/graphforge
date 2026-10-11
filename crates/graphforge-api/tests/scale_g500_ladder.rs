@@ -6720,12 +6720,20 @@ fn validate_lifecycle_metric_policies_for_axis(
                                     "{name} {kind} created more buckets than it had requests at rung {rung}"
                                 ));
                             }
+                            // A linked payload's file barrier is its producer's
+                            // when the encoded ledger lists it; a copy is a new
+                            // file and takes its own.
+                            let barriers = component
+                                .file_fsync_calls
+                                .checked_add(component.producer_sealed_installs);
                             if component.install_attempts < component.installed_objects
                                 || component.install_attempts > requests
                                 || directory_barriers != Some(component.directory_fsync_calls)
-                                || component.file_fsync_calls < component.install_attempts
+                                || barriers
+                                    .is_none_or(|barriers| barriers < component.install_attempts)
                                 || ((kind == "manifest" || linked)
-                                    && component.file_fsync_calls != component.install_attempts)
+                                    && barriers != Some(component.install_attempts))
+                                || (!linked && component.producer_sealed_installs != 0)
                             {
                                 return Err(format!(
                                     "{name} {kind} durability components differ at rung {rung}"
@@ -8025,6 +8033,44 @@ fn linked_payload_policies_reject_a_reintroduced_copy_or_read_back() {
         }
         validate_lifecycle_metric_policies_for_axis(axis, &accounted)
             .expect("a counted bucket creation barrier is accepted");
+        // A linked install whose file barrier was its producer's: none of its
+        // own, one producer-sealed install per attempt. Known positive.
+        let mut sealed = baseline.clone();
+        for observation in &mut sealed {
+            let payload = &mut observation.cas_publication_io.payload;
+            payload.producer_sealed_installs = payload.install_attempts;
+            payload.file_fsync_calls = 0;
+            reconcile_cas_phase_aggregate(observation);
+        }
+        validate_lifecycle_metric_policies_for_axis(axis, &sealed)
+            .expect("producer-sealed installs replace the install barriers");
+        // Known negatives: both an install barrier and a producer seal for one
+        // attempt is a second barrier; and a copy cannot be producer-sealed.
+        let mut doubled = baseline.clone();
+        for observation in &mut doubled {
+            let payload = &mut observation.cas_publication_io.payload;
+            payload.producer_sealed_installs = payload.install_attempts;
+            reconcile_cas_phase_aggregate(observation);
+        }
+        let error = validate_lifecycle_metric_policies_for_axis(axis, &doubled)
+            .expect_err("a barrier plus a producer seal for one attempt must fail");
+        assert!(
+            error.contains("durability components differ"),
+            "{axis:?}: {error}"
+        );
+        let mut sealed_copy = baseline.clone();
+        for observation in &mut sealed_copy {
+            let manifest = &mut observation.cas_publication_io.manifest;
+            manifest.producer_sealed_installs = manifest.install_attempts;
+            manifest.file_fsync_calls = 0;
+            reconcile_cas_phase_aggregate(observation);
+        }
+        let error = validate_lifecycle_metric_policies_for_axis(axis, &sealed_copy)
+            .expect_err("a copied object cannot be producer-sealed");
+        assert!(
+            error.contains("durability components differ"),
+            "{axis:?}: {error}"
+        );
         let mut read_back = baseline.clone();
         for observation in &mut read_back {
             let payload = &mut observation.cas_publication_io.payload;
