@@ -175,7 +175,7 @@ fn assert_property_stages(report: &Value, spec: &Spec) {
         ("window_write", expected.window),
         ("projection_write", expected.projection),
     ] {
-        assert_eq!(frames(name), want, "{name} frames: {report}");
+        assert_eq!(frames(name), want, "{name} frames");
     }
     // Every byte is attributed to a stage.
     assert_eq!(
