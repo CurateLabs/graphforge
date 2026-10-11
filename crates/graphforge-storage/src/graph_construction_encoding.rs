@@ -59,7 +59,7 @@ mod lanes;
 mod properties;
 pub use bulk::{
     BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkRoute, BulkSource,
-    BulkStagedReason, SourceReservation, SourceWorkspace,
+    SourceReservation, SourceWorkspace,
 };
 #[cfg(test)]
 #[path = "graph_construction_encoding/bulk_test_support.rs"]
@@ -759,7 +759,6 @@ pub(crate) fn encode(
         semantic_context.as_ref(),
         semantic_authority.map(|authority| &authority.bindings),
         budgets,
-        admission,
         cancelled,
         &mut artifacts,
         &mut evidence,
@@ -796,18 +795,6 @@ pub(crate) fn encode(
             &mut evidence,
         )?;
     }
-    let adjacency_region = crate::concurrency_attribution::RegionScope::named("adjacency_encoding");
-    adjacency::encode_adjacency(
-        &output,
-        shape,
-        generation,
-        &routes,
-        admission,
-        cancelled,
-        &mut artifacts,
-        &mut evidence,
-    )?;
-    drop(adjacency_region);
 
     evidence.edge_records = shape.edge_count;
     artifacts.sort_unstable_by(|left, right| left.path.cmp(&right.path));
@@ -1385,7 +1372,6 @@ fn encode_edges(
     semantic_context: Option<&CompositionBindingContext>,
     semantic_bindings: Option<&SemanticStorageBindings>,
     budgets: GraphConstructionBudgets,
-    admission: Option<&Arc<crate::graph_construction::cpu_admission::ConstructionCpuAdmission>>,
     cancelled: &mut impl FnMut() -> bool,
     artifacts: &mut Vec<ConstructionEncodedArtifact>,
     evidence: &mut GraphConstructionEncodingEvidence,
@@ -1399,23 +1385,9 @@ fn encode_edges(
     };
     let cache_window =
         graphforge_filesystem::cache_release_window_for_streams(4).map_err(storage)?;
-    // A shape without an endpoint family resolved by the node index (ADR
-    // 0057): only an initial build may, and shaping already proved every
-    // endpoint names a new node.
-    let node_index = match shape.edge_endpoints {
-        Some(_) => None,
-        None if shape.parent_topology_generation == 0 => {
-            let _build = crate::concurrency_attribution::RegionScope::named("endpoint_index_build");
-            Some(encoding_node_index(
-                source,
-                shape_outputs,
-                &shape.identities,
-                cache_window,
-                evidence,
-            )?)
-        }
-        None => return Err(storage("edge rows lack resolved endpoints")),
-    };
+    if shape.edge_endpoints.is_none() {
+        return Err(storage("edge rows lack resolved endpoints"));
+    }
     let mut identities = FixedReader::<IDENTITY_WIDTH>::open(
         source,
         shape_outputs,
@@ -1516,12 +1488,6 @@ fn encode_edges(
             }
             if out_id.is_empty() {
                 break;
-            }
-            if let Some(index) = &node_index {
-                let _probe =
-                    crate::concurrency_attribution::RegionScope::named("endpoint_index_probe");
-                index.resolve(&out_src, &mut out_src_id, admission)?;
-                index.resolve(&out_dst, &mut out_dst_id, admission)?;
             }
             let canonical = edge_batch(
                 &out_uuid,
@@ -1774,39 +1740,6 @@ fn encode_edge_properties(
         )?;
     }
     Ok(())
-}
-
-/// The node index (ADR 0057) over the node records of the shaped identities.
-fn encoding_node_index(
-    source: &StableDirectory,
-    shape_outputs: &[ArtifactReceipt],
-    identities_name: &str,
-    cache_window: std::num::NonZeroU64,
-    evidence: &mut GraphConstructionEncodingEvidence,
-) -> Result<crate::graph_construction::node_index::NodeIndex, GfError> {
-    let mut identities =
-        FixedReader::<IDENTITY_WIDTH>::open(source, shape_outputs, identities_name, cache_window)?;
-    let mut builder = crate::graph_construction::node_index::NodeIndexBuilder::default();
-    let built = (|| {
-        while let Some(record) = next_kind(&mut identities, 0)? {
-            builder.push(
-                record[..16].try_into().expect("fixed UUID"),
-                u64::from_be_bytes(
-                    record[IDENTITY_SURROGATE_OFFSET..IDENTITY_WIDTH]
-                        .try_into()
-                        .expect("fixed surrogate"),
-                ),
-            )?;
-        }
-        Ok(())
-    })();
-    let authenticate = built.is_ok();
-    combine_reader_cleanup(
-        built,
-        identities.finish_and_account(authenticate, evidence),
-        "node index identity",
-    )?;
-    Ok(builder.finish())
 }
 
 fn next_kind(

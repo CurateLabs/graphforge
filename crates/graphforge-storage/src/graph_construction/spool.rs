@@ -24,9 +24,8 @@
 //! Opening a spooled session scans the directory and rebuilds the accepted
 //! chunks from those footers. A temporary file was never acknowledged and is
 //! removed. At seal the bulk builder reads the files in place (see
-//! [`SpoolReader`]), in memory or on scratch files, or, when even the node
-//! tables exceed the memory budget, the chunks are replayed through the staged
-//! path, which resumes chunk by chunk because a replayed chunk keeps its id.
+//! [`SpoolReader`]), in memory or on scratch files, with the node tables on
+//! scratch too when they exceed the memory budget.
 
 use std::collections::{BTreeSet, HashMap};
 use std::io::{BufWriter, Write};
@@ -44,7 +43,7 @@ use super::{
     artifact_temp, construction_failpoint, file_identity, normalized_schema_digest,
     reject_cancelled, replace_checkpoint_control, storage, unlink_named,
 };
-use crate::graph_construction_encoding::{BulkBatchReader, BulkBuildPlan, BulkRoute, BulkSource};
+use crate::graph_construction_encoding::{BulkBatchReader, BulkBuildPlan, BulkSource};
 
 /// Directory of the spool inside the session root. Not a shape-scoped name.
 const SPOOL_DIR: &str = "chunk-spool";
@@ -58,11 +57,10 @@ const TASK_ROWS: u64 = 65_536;
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum ChunkRoute {
-    /// Nothing accepted yet, or a session an earlier binary began staging.
+    /// Nothing spooled: either no chunk is accepted yet, or chunks are staged
+    /// as Parquet and runs (appends).
     #[default]
     Undecided,
-    /// Chunks are staged as Parquet and runs (appends, replayed spools).
-    Staged,
     /// Chunks are spooled for the bulk builder.
     Spool,
 }
@@ -86,16 +84,13 @@ pub(super) enum ChunkPreference {
 }
 
 /// How a spooled session builds. Recorded in the checkpoint before any build
-/// or replay work starts, so a retry never re-decides from live conditions.
+/// work starts: it closes the session to further chunks, and a retry reads it
+/// back instead of deciding again.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SealRoute {
     /// Read the spooled chunks in place with the bulk builder.
     Bulk,
-    /// Replay the chunks through the staged path: the storage-level seal, and
-    /// a session that recorded this route before node tables could go to
-    /// scratch (#1929). No plan chooses it for want of memory any more.
-    ReplayStaged,
 }
 
 /// The one file a spooled chunk occupies.
@@ -453,10 +448,7 @@ impl GraphConstructionSession {
         if let Some(totals) = totals {
             evidence.input_rows = totals.rows;
             evidence.input_batches = totals.chunks;
-            // A replayed spool is counted by the staged shards it became.
-            if self.checkpoint.seal_route != Some(SealRoute::ReplayStaged) {
-                evidence.spooled_chunks = totals.chunks;
-            }
+            evidence.spooled_chunks = totals.chunks;
             evidence.peak_batch_rows = totals.peak_batch_rows;
             evidence.peak_batch_bytes = totals.peak_batch_bytes;
             evidence.peak_run_records = totals.peak_run_records;
@@ -691,11 +683,6 @@ impl GraphConstructionSession {
     /// A temporary file was never acknowledged, so it is removed. Chunks must
     /// be contiguous from zero and every footer must name this session.
     pub(super) fn restore_spool(&mut self) -> Result<(), GfError> {
-        if self.checkpoint.chunk_route == ChunkRoute::Staged {
-            // A replay that flipped the route may have been interrupted while
-            // deleting the spool.
-            return self.retire_spool();
-        }
         if self.checkpoint.chunk_route != ChunkRoute::Spool
             || self.checkpoint.state == GraphConstructionState::Aborted
         {
@@ -849,27 +836,11 @@ impl GraphConstructionSession {
         })
     }
 
-    /// How the spooled chunks build under `memory_budget` resident bytes, from
-    /// the chunk receipts alone. The bulk builder takes every build, in memory
-    /// or on bounded scratch files with the node tables on scratch too when
-    /// they do not fit, exactly as it does for registered sources. A budget
-    /// below the fixed workspace refuses the attempt before decoding instead.
-    ///
-    /// # Errors
-    /// Refuses a session without an open spool.
-    pub fn spool_seal_route(&self, memory_budget: u64) -> Result<SealRoute, GfError> {
-        Ok(match self.spool_bulk_plan(Some(memory_budget))?.route() {
-            BulkRoute::Memory | BulkRoute::Scratch | BulkRoute::ScratchNodes => SealRoute::Bulk,
-            // No plan stages; a historical route would replay.
-            BulkRoute::Staged(_) => SealRoute::ReplayStaged,
-        })
-    }
-
     /// Build the generation from the spooled chunks with the bulk builder and
     /// seal it, then delete the spool. A build whose estimate exceeds
-    /// `memory_budget` runs on bounded scratch files (ADR 0058). Equivalent to staging every chunk and
-    /// sealing, shaping and encoding it. Restartable: a retry before the
-    /// inventory is pinned rebuilds from the spool, after it only reports.
+    /// `memory_budget` runs on bounded scratch files (ADR 0058). Restartable:
+    /// a retry before the inventory is pinned rebuilds from the spool, after it
+    /// only reports.
     ///
     /// # Errors
     /// Refuses a session that did not record the bulk route, and returns the
@@ -893,57 +864,5 @@ impl GraphConstructionSession {
         let encoding = self.prepare_bulk_encoding(generation, &plan, cancelled)?;
         self.retire_spool()?;
         Ok(encoding)
-    }
-
-    /// Replay the spooled chunks through the staged path, then continue as a
-    /// staged session. For a build that does not fit in memory, and for the
-    /// storage-level seal. Restartable chunk by chunk: a replayed chunk keeps
-    /// its id, so a chunk already staged is recognized.
-    ///
-    /// # Errors
-    /// Refuses a session that recorded the bulk route.
-    pub fn replay_spool_to_staged(
-        &mut self,
-        mut cancelled: impl FnMut() -> bool,
-    ) -> Result<(), GfError> {
-        if self.checkpoint.chunk_route != ChunkRoute::Spool {
-            return Ok(());
-        }
-        self.revalidate_authority()?;
-        self.recover_intent()?;
-        if self.record_seal_route(SealRoute::ReplayStaged)? != SealRoute::ReplayStaged {
-            return Err(storage("the session recorded the bulk seal route"));
-        }
-        let spool = self
-            .spool
-            .as_ref()
-            .ok_or_else(|| storage("chunk spool is not open"))?;
-        let todo = spool
-            .chunks
-            .iter()
-            .skip(usize::try_from(self.checkpoint.next_sequence).map_err(storage)?)
-            .map(|chunk| chunk.descriptor.clone())
-            .collect::<Vec<_>>();
-        let directory = spool.directory.try_clone().map_err(storage)?;
-        for descriptor in todo {
-            let (sequence, kind) = (descriptor.sequence, descriptor.kind);
-            reject_cancelled(&mut cancelled)?;
-            if self.checkpoint.next_sequence != sequence {
-                return Err(storage("staged replay diverged from the spool"));
-            }
-            let batch = read_authenticated_chunk(&directory, &descriptor)?;
-            self.append_staged(
-                kind,
-                &descriptor.chunk_id,
-                &batch,
-                Some(usize::try_from(descriptor.input_bytes).map_err(storage)?),
-                &mut cancelled,
-            )?;
-        }
-        // The route flips only once every chunk is staged, and before the
-        // spool is deleted, so an interrupted deletion is finished on open.
-        self.checkpoint.chunk_route = ChunkRoute::Staged;
-        replace_checkpoint_control(&self.root, &mut self.checkpoint)?;
-        self.retire_spool()
     }
 }

@@ -353,8 +353,6 @@ pub(super) struct ShapeResume {
     /// Finish stages completed before the interruption (#1562), whose
     /// successors were authenticated at the resume boundary.
     pub(super) stages: super::finish_stages::ShapeStages,
-    /// The installed intent's endpoint-resolution path (ADR 0057).
-    pub(super) endpoint_index: bool,
 }
 
 /// Sweep the construction root's partition-spill segments.

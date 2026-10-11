@@ -1,9 +1,12 @@
-// The bulk builder builds exactly the generation the staged path builds (#1883).
+// The bulk builder builds every initial generation (#1883, ADR 0058).
 //
-// The staged path is the specification: every case ingests one logical input
-// through staging, shaping and the staged encoder, then through the bulk
-// builder, and compares the encoded inventory artifact by artifact. The only
-// control excluded is the v4 ordinal receipt's random rebuild nonce.
+// It has no second implementation to compare with, so its correctness rests
+// on what holds for the builder alone: the generation reads back through the
+// ordinary readers as exactly the input (`assert_reads_back`), every route
+// (resident, scratch, node-table scratch) publishes the same bytes at any
+// worker count and task shape, a cancelled or killed build reruns to the same
+// bytes, and the counts are exact. The only control excluded from a byte
+// comparison is the v4 ordinal receipt's random rebuild nonce.
 mod bulk_builder {
     use super::*;
     use crate::graph_construction_encoding::{BulkBatchReader, BulkBuildPlan, BulkSource};
@@ -132,29 +135,6 @@ mod bulk_builder {
             .collect()
     }
 
-    fn staged(nodes: &[RecordBatch], edges: &[RecordBatch]) -> Inventory {
-        staged_with(GraphConstructionBudgets::default(), nodes, edges).unwrap()
-    }
-
-    /// The staged path's result or its first refusal.
-    fn staged_with(
-        budgets: GraphConstructionBudgets,
-        nodes: &[RecordBatch],
-        edges: &[RecordBatch],
-    ) -> Result<Inventory, GfError> {
-        let root = TempDir::new().unwrap();
-        let mut session = pinned_with(&root, budgets);
-        for (index, batch) in nodes.iter().enumerate() {
-            session.append(ConstructionChunkKind::Node, &format!("n{index}"), batch)?;
-        }
-        for (index, batch) in edges.iter().enumerate() {
-            session.append(ConstructionChunkKind::Edge, &format!("e{index}"), batch)?;
-        }
-        session.seal()?;
-        let shape = session.shape_canonical_with_cancellation(|| false)?;
-        Ok(inventory(&session.encode_canonical(&shape, 1)?))
-    }
-
     fn bulk_budgeted(
         budgets: GraphConstructionBudgets,
         nodes: &[RecordBatch],
@@ -281,40 +261,366 @@ mod bulk_builder {
             .collect::<Vec<_>>();
         assert!(
             missing.is_empty() && extra.is_empty(),
-            "missing from bulk: {missing:?}\nextra in bulk: {extra:?}"
+            "missing from the other build: {missing:?}\nextra in the other build: {extra:?}"
         );
     }
 
-    #[test]
-    fn property_free_inputs_match_the_staged_encoder_in_any_arrival_order() {
-        for order in [identity_order, reversed, scattered] {
-            let (nodes, edges) = graph(1_021, 3_001, 700, order);
-            let expected = staged(&nodes, &edges);
-            assert!(expected.len() > 20);
-            assert_same(&expected, &bulk(&nodes, &edges));
+    /// What an encoded generation answers when it is read back through the
+    /// ordinary readers: node and edge rows with their surrogates, the
+    /// adjacency manifest, and every non-null property cell.
+    #[derive(Default)]
+    struct ReadBack {
+        /// UUID to (surrogate, runtime type id).
+        nodes: std::collections::BTreeMap<[u8; 16], (u64, u32)>,
+        edges: std::collections::BTreeMap<[u8; 16], BackEdge>,
+        adjacency: Vec<crate::adjacency::AdjacencyManifestRow>,
+        /// (is edge, owner UUID, property) to the cell as text.
+        cells: std::collections::BTreeMap<(bool, [u8; 16], String), String>,
+    }
+
+    struct BackEdge {
+        relation: String,
+        source: [u8; 16],
+        target: [u8; 16],
+        id: u64,
+        source_id: u64,
+        target_id: u64,
+    }
+
+    fn uuid_column(batch: &RecordBatch, name: &str) -> FixedSizeBinaryArray {
+        batch
+            .column_by_name(name)
+            .and_then(|array| array.as_any().downcast_ref::<FixedSizeBinaryArray>())
+            .unwrap_or_else(|| panic!("{name} is not a UUID column"))
+            .clone()
+    }
+
+    fn uuid_at(column: &FixedSizeBinaryArray, row: usize) -> [u8; 16] {
+        column.value(row).try_into().unwrap()
+    }
+
+    fn surrogates(batch: &RecordBatch, name: &str) -> arrow::array::UInt64Array {
+        batch
+            .column_by_name(name)
+            .and_then(|array| array.as_any().downcast_ref::<arrow::array::UInt64Array>())
+            .unwrap_or_else(|| panic!("{name} is not a surrogate column"))
+            .clone()
+    }
+
+    /// Every non-null property cell of `batch` past its `required` topology
+    /// columns, keyed by owner and column and rendered as text.
+    fn property_cells(
+        batch: &RecordBatch,
+        required: usize,
+        is_edge: bool,
+        cells: &mut std::collections::BTreeMap<(bool, [u8; 16], String), String>,
+    ) {
+        let owners = uuid_column(batch, if is_edge { "edge_uuid" } else { "node_uuid" });
+        for (field, column) in batch
+            .schema()
+            .fields()
+            .iter()
+            .zip(batch.columns())
+            .skip(required)
+        {
+            if matches!(
+                field.name().as_str(),
+                "node_uuid" | "edge_uuid" | "__gf_property_tombstone"
+            ) {
+                continue;
+            }
+            for row in (0..batch.num_rows()).filter(|row| column.is_valid(*row)) {
+                let mut text = arrow::util::display::array_value_to_string(column, row).unwrap();
+                if text.len() > 256 {
+                    // Wide values compare by length and digest.
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    text.hash(&mut hasher);
+                    text = format!("{} bytes, hash {:x}", text.len(), hasher.finish());
+                }
+                cells.insert((is_edge, uuid_at(&owners, row), field.name().clone()), text);
+            }
         }
     }
 
-    #[test]
-    fn a_graph_larger_than_one_window_matches_the_staged_encoder() {
-        let (nodes, edges) = graph(70_001, 140_003, 20_000, scattered);
-        assert_same(&staged(&nodes, &edges), &bulk(&nodes, &edges));
+    /// The encoded generation of `encoding`, read through the ordinary readers.
+    fn read_back(
+        session: &GraphConstructionSession,
+        encoding: &GraphConstructionEncoding,
+    ) -> ReadBack {
+        let graph = session.root.path().join(&encoding.root).join("graph");
+        let mut back = ReadBack::default();
+        for batch in crate::read_nodes(&graph).unwrap() {
+            let uuids = uuid_column(&batch, "node_uuid");
+            let ids = surrogates(&batch, "node_id");
+            let types = batch
+                .column_by_name("type_id")
+                .and_then(|array| array.as_any().downcast_ref::<arrow::array::UInt32Array>())
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                back.nodes
+                    .insert(uuid_at(&uuids, row), (ids.value(row), types.value(row)));
+            }
+        }
+        // Edge and property fragments are read as published, one file at a time.
+        let fragments = |prefix: &str| {
+            encoding
+                .artifacts
+                .iter()
+                .filter(|artifact| {
+                    artifact.path.starts_with(prefix) && artifact.path.ends_with(".parquet")
+                })
+                .flat_map(|artifact| {
+                    parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+                        std::fs::File::open(graph.join(&artifact.path)).unwrap(),
+                    )
+                    .unwrap()
+                    .build()
+                    .unwrap()
+                    .map(|batch| batch.unwrap())
+                })
+                .collect::<Vec<_>>()
+        };
+        for batch in fragments("topology/edges/") {
+            let (uuids, sources, targets) = (
+                uuid_column(&batch, "edge_uuid"),
+                uuid_column(&batch, "src_uuid"),
+                uuid_column(&batch, "dst_uuid"),
+            );
+            let (ids, source_ids, target_ids) = (
+                surrogates(&batch, "edge_id"),
+                surrogates(&batch, "src_id"),
+                surrogates(&batch, "dst_id"),
+            );
+            let relations = batch
+                .column_by_name("rel_type_name")
+                .and_then(|array| array.as_any().downcast_ref::<StringArray>())
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                let edge = BackEdge {
+                    relation: relations.value(row).to_owned(),
+                    source: uuid_at(&sources, row),
+                    target: uuid_at(&targets, row),
+                    id: ids.value(row),
+                    source_id: source_ids.value(row),
+                    target_id: target_ids.value(row),
+                };
+                assert!(back.edges.insert(uuid_at(&uuids, row), edge).is_none());
+            }
+        }
+        back.adjacency = crate::adjacency::read_manifest(&graph).unwrap_or_default();
+        for batch in fragments("properties/") {
+            property_cells(&batch, 0, false, &mut back.cells);
+        }
+        for batch in fragments("edge_properties/") {
+            property_cells(&batch, 0, true, &mut back.cells);
+        }
+        back
+    }
+
+    /// The generation reads back as exactly the input: the same nodes, with one
+    /// type id per label and distinct ids for distinct labels; the same edges
+    /// with their relation, endpoints and the endpoints' surrogates; the
+    /// adjacency manifest counts every edge once per direction and relation and
+    /// once in the union; and every non-null property cell is present.
+    fn assert_reads_back(nodes: &[RecordBatch], edges: &[RecordBatch], back: &ReadBack) {
+        let mut labels = std::collections::BTreeMap::new();
+        let mut expected_cells = std::collections::BTreeMap::new();
+        for batch in nodes {
+            let uuids = uuid_column(batch, "node_uuid");
+            let names = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                assert!(
+                    labels
+                        .insert(uuid_at(&uuids, row), names.value(row).to_owned())
+                        .is_none()
+                );
+            }
+            property_cells(batch, 2, false, &mut expected_cells);
+        }
+        assert_eq!(back.nodes.len(), labels.len(), "node count");
+        let mut types = std::collections::BTreeMap::new();
+        for (uuid, label) in &labels {
+            let (_, type_id) = back.nodes.get(uuid).expect("an input node is missing");
+            assert_eq!(
+                *types.entry(label.clone()).or_insert(*type_id),
+                *type_id,
+                "label {label} has two type ids"
+            );
+        }
+        assert_eq!(
+            types.values().collect::<std::collections::BTreeSet<_>>().len(),
+            types.len(),
+            "two labels share a type id"
+        );
+        let node_ids = back
+            .nodes
+            .values()
+            .map(|(id, _)| *id)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(node_ids.len(), back.nodes.len(), "node surrogates repeat");
+
+        let mut per_relation = std::collections::BTreeMap::<String, u64>::new();
+        let mut total = 0_u64;
+        for batch in edges {
+            let uuids = uuid_column(batch, "edge_uuid");
+            let relations = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let (sources, targets) = (uuid_column(batch, "source_uuid"), uuid_column(batch, "target_uuid"));
+            for row in 0..batch.num_rows() {
+                let edge = back
+                    .edges
+                    .get(&uuid_at(&uuids, row))
+                    .expect("an input edge is missing");
+                assert_eq!(edge.relation, relations.value(row));
+                assert_eq!(edge.source, uuid_at(&sources, row));
+                assert_eq!(edge.target, uuid_at(&targets, row));
+                assert_eq!(edge.source_id, back.nodes[&edge.source].0, "source surrogate");
+                assert_eq!(edge.target_id, back.nodes[&edge.target].0, "target surrogate");
+                *per_relation.entry(relations.value(row).to_owned()).or_default() += 1;
+                total += 1;
+            }
+            property_cells(batch, 4, true, &mut expected_cells);
+        }
+        assert_eq!(back.edges.len() as u64, total, "edge count");
+        let edge_ids = back
+            .edges
+            .values()
+            .map(|edge| edge.id)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(edge_ids.len(), back.edges.len(), "edge surrogates repeat");
+
+        if total > 0 {
+            for direction in [crate::adjacency::Direction::Out, crate::adjacency::Direction::In] {
+                let counted = |relation: &str| {
+                    back.adjacency
+                        .iter()
+                        .filter(|row| row.relation_type == relation && row.direction == direction)
+                        .map(|row| row.edge_count)
+                        .sum::<u64>()
+                };
+                for (relation, count) in &per_relation {
+                    assert_eq!(counted(relation), *count, "{relation} {direction:?}");
+                }
+                assert_eq!(
+                    counted(crate::adjacency::ALL_RELATIONS_STEM),
+                    total,
+                    "union {direction:?}"
+                );
+            }
+        }
+        assert_eq!(back.cells, expected_cells, "property cells");
+    }
+
+    /// Build resident on `workers`, read the generation back and check it
+    /// against the input and its counts; returns the inventory.
+    fn build_checked(
+        nodes: &[RecordBatch],
+        edges: &[RecordBatch],
+        per_task: usize,
+        workers: usize,
+    ) -> Inventory {
+        build_checked_with(GraphConstructionBudgets::default(), nodes, edges, per_task, workers)
+    }
+
+    fn build_checked_with(
+        budgets: GraphConstructionBudgets,
+        nodes: &[RecordBatch],
+        edges: &[RecordBatch],
+        per_task: usize,
+        workers: usize,
+    ) -> Inventory {
+        let root = TempDir::new().unwrap();
+        let mut session = pinned_with(&root, budgets);
+        session.set_cpu_admission(Some(Arc::new(
+            cpu_admission::ConstructionCpuAdmission::new(
+                std::num::NonZeroUsize::new(workers).unwrap(),
+            ),
+        )));
+        let encoding = session
+            .prepare_bulk_encoding(1, &plan(nodes, edges, per_task), || false)
+            .unwrap();
+        assert_counts(&session, &encoding, nodes, edges);
+        assert_reads_back(nodes, edges, &read_back(&session, &encoding));
+        inventory(&encoding)
+    }
+
+    /// The report, the encoding's evidence and the input agree on the counts.
+    fn assert_counts(
+        session: &GraphConstructionSession,
+        encoding: &GraphConstructionEncoding,
+        nodes: &[RecordBatch],
+        edges: &[RecordBatch],
+    ) {
+        let rows = |batches: &[RecordBatch]| {
+            batches.iter().map(RecordBatch::num_rows).sum::<usize>() as u64
+        };
+        let report = session.bulk_build_report();
+        assert_eq!((report.nodes, report.edges), (rows(nodes), rows(edges)));
+        assert_eq!(encoding.evidence.edge_records, rows(edges));
+        assert_eq!(encoding.evidence.ordinal_records, rows(nodes));
     }
 
     #[test]
-    fn nodes_without_edges_match_the_staged_encoder() {
+    fn property_free_inputs_read_back_exactly_in_any_arrival_order() {
+        let mut published = Vec::new();
+        for order in [identity_order, reversed, scattered] {
+            let (nodes, edges) = graph(1_021, 3_001, 700, order);
+            let reference = build_checked(&nodes, &edges, 1, 1);
+            assert!(reference.len() > 20);
+            assert_same(&reference, &build_checked(&nodes, &edges, 2, 4));
+            assert_same(&reference, &scratch_run(&nodes, &edges, 2, 4, (7, 5)).unwrap().inventory);
+            assert_same(
+                &reference,
+                &node_scratch::node_scratch_run(&nodes, &edges, 2, 4, (7, 5))
+                    .unwrap()
+                    .inventory,
+            );
+            published.push(reference);
+        }
+        // Arrival order changes only which chunk a row came from: the same
+        // rows publish the same files, whatever their order.
+        assert_same(&published[0], &published[1]);
+        assert_same(&published[0], &published[2]);
+    }
+
+    #[test]
+    fn a_graph_larger_than_one_window_reads_back_exactly_on_every_route() {
+        let (nodes, edges) = graph(70_001, 140_003, 20_000, scattered);
+        let reference = build_checked(&nodes, &edges, 1, 1);
+        assert_same(&reference, &build_checked(&nodes, &edges, 2, 4));
+        assert_same(&reference, &scratch_run(&nodes, &edges, 2, 4, (5, 3)).unwrap().inventory);
+    }
+
+    #[test]
+    fn nodes_without_edges_read_back_exactly_on_every_route() {
         let (nodes, _) = graph(50, 0, 25, identity_order);
-        assert_same(&staged(&nodes, &[]), &bulk(&nodes, &[]));
+        let reference = build_checked(&nodes, &[], 1, 1);
+        assert_same(&reference, &build_checked(&nodes, &[], 2, 4));
+        assert_same(&reference, &scratch_run(&nodes, &[], 2, 4, (2, 2)).unwrap().inventory);
+        assert_same(
+            &reference,
+            &node_scratch::node_scratch_run(&nodes, &[], 2, 4, (2, 2))
+                .unwrap()
+                .inventory,
+        );
     }
 
     #[test]
     fn output_is_independent_of_worker_count_and_task_shape() {
         let (nodes, edges) = graph(2_003, 9_001, 300, scattered);
-        let expected = bulk_with(&nodes, &edges, 1, 1).unwrap();
+        let expected = build_checked(&nodes, &edges, 1, 1);
         for (per_task, workers) in [(3, 2), (16, 8), (64, 32)] {
             assert_eq!(
                 expected,
-                bulk_with(&nodes, &edges, per_task, workers).unwrap(),
+                build_checked(&nodes, &edges, per_task, workers),
                 "per_task={per_task} workers={workers}"
             );
         }
@@ -368,7 +674,7 @@ mod bulk_builder {
     }
 
     #[test]
-    fn property_bearing_and_mixed_schema_inputs_match_the_staged_encoder() {
+    fn property_bearing_and_mixed_schema_inputs_read_back_exactly_on_every_route() {
         let node_uuids = (0..600_u64).map(|i| uuid(0x10, i)).collect::<Vec<_>>();
         let edge_uuids = (0..900_u64).map(|i| uuid(0x20, i)).collect::<Vec<_>>();
         // Three node schemas (bare, one property, two properties) and two edge
@@ -395,7 +701,7 @@ mod bulk_builder {
                 &dst(400..900),
             ),
         ];
-        let expected = staged(&nodes, &edges);
+        let expected = build_checked(&nodes, &edges, 1, 1);
         assert!(
             expected
                 .iter()
@@ -406,7 +712,7 @@ mod bulk_builder {
                 .iter()
                 .any(|entry| entry.0.starts_with("edge_properties/"))
         );
-        assert_same(&expected, &bulk(&nodes, &edges));
+        assert_same(&expected, &build_checked(&nodes, &edges, 2, 4));
         for (budget, partitions) in [(920 << 20, (3, 4)), (944 << 20, (7, 5))] {
             let root = TempDir::new().unwrap();
             let mut session = pinned(&root);
@@ -420,6 +726,8 @@ mod bulk_builder {
             assert_eq!(plan.route(), crate::BulkRoute::Scratch);
             let encoding = session.prepare_bulk_encoding(1, &plan, || false).unwrap();
             assert_same(&expected, &inventory(&encoding));
+            assert_counts(&session, &encoding, &nodes, &edges);
+            assert_reads_back(&nodes, &edges, &read_back(&session, &encoding));
             let report = session.bulk_build_report();
             assert!(report.property_scratch_write_bytes > 0, "{report:?}");
             assert!(
@@ -511,8 +819,10 @@ mod bulk_builder {
                 .unwrap(),
             );
         }
-        let expected = staged_with(budgets, &nodes, &[]).unwrap();
-        assert_same(&expected, &bulk_budgeted(budgets, &nodes, &[]).unwrap());
+        // The resident build reads back as the input, nested values, nulls and
+        // wide text included; the scratch builds publish the same bytes.
+        let expected = build_checked_with(budgets, &nodes, &[], 2, 4);
+        assert_same(&expected, &build_checked_with(budgets, &nodes, &[], 1, 1));
         for budget in [880 << 20, 944 << 20] {
             let root = TempDir::new().unwrap();
             let mut session = pinned_with(&root, budgets);
@@ -521,12 +831,14 @@ mod bulk_builder {
             assert_eq!(plan.route(), crate::BulkRoute::Scratch);
             let encoded = session.prepare_bulk_encoding(1, &plan, || false).unwrap();
             assert_same(&expected, &inventory(&encoded));
+            assert_counts(&session, &encoded, &nodes, &[]);
+            assert_reads_back(&nodes, &[], &read_back(&session, &encoded));
             assert!(!scratch_dir(&session).exists());
         }
     }
 
     #[test]
-    fn skewed_property_scratch_matches_staged_artifacts_at_natural_minimum() {
+    fn skewed_property_scratch_reads_back_and_matches_the_resident_bytes_at_natural_minimum() {
         let budgets = GraphConstructionBudgets {
             max_batch_rows: 1024,
             max_batch_bytes: 256 << 10,
@@ -561,7 +873,7 @@ mod bulk_builder {
             nodes.push(batch);
         }
 
-        let expected = staged_with(budgets, &nodes, &[]).unwrap();
+        let expected = build_checked_with(budgets, &nodes, &[], 1, 1);
         let mut plan = plan(&nodes, &[], 1);
         let budget = crate::graph_construction_encoding::bulk_test_support::scratch_minimum_bytes(
             &plan, budgets,
@@ -577,6 +889,8 @@ mod bulk_builder {
         // merged within the derived pool.
         let encoding = session.prepare_bulk_encoding(1, &plan, || false).unwrap();
         assert_same(&expected, &inventory(&encoding));
+        assert_counts(&session, &encoding, &nodes, &[]);
+        assert_reads_back(&nodes, &[], &read_back(&session, &encoding));
         let report = session.bulk_build_report();
         assert_eq!(report.scratch_concurrency, 1, "{report:?}");
         assert_eq!(
@@ -621,7 +935,7 @@ mod bulk_builder {
             max_run_records: 1028,
             ..GraphConstructionBudgets::default()
         };
-        let expected = staged_with(budgets, &nodes, &[]).unwrap();
+        let expected = build_checked_with(budgets, &nodes, &[], 1, 1);
         let root = TempDir::new().unwrap();
         let mut session = pinned_with(&root, budgets);
         let _frames =
@@ -630,6 +944,10 @@ mod bulk_builder {
         plan.memory_budget = Some(920 << 20);
         let encoded = session.prepare_bulk_encoding(1, &plan, || false).unwrap();
         assert_same(&expected, &inventory(&encoded));
+        // A field first active in a later frame still applies to the owners of
+        // the earlier frames: every non-null cell reads back.
+        assert_counts(&session, &encoded, &nodes, &[]);
+        assert_reads_back(&nodes, &[], &read_back(&session, &encoded));
     }
 
     #[test]
@@ -672,21 +990,6 @@ mod bulk_builder {
             }
         ));
         assert!(!scratch_dir(&session).exists());
-        let historical: crate::BulkStagedReason =
-            serde_json::from_str("\"edge_properties_exceed_budget\"").unwrap();
-        assert_eq!(
-            historical,
-            crate::BulkStagedReason::EdgePropertiesExceedBudget
-        );
-        // Receipts an earlier binary wrote name the other reason; they stay
-        // readable although no plan produces it any more (#1929).
-        let historical: crate::BulkStagedReason =
-            serde_json::from_str("\"node_tables_exceed_budget\"").unwrap();
-        assert_eq!(historical, crate::BulkStagedReason::NodeTablesExceedBudget);
-        assert_eq!(
-            serde_json::to_string(&historical).unwrap(),
-            "\"node_tables_exceed_budget\""
-        );
     }
 
     fn property_recovery_input() -> (Vec<RecordBatch>, Vec<RecordBatch>) {
@@ -718,7 +1021,7 @@ mod bulk_builder {
     #[test]
     fn cancelled_property_spools_are_discarded_and_rerun_bytes_match() {
         let (nodes, edges) = property_recovery_input();
-        let expected = staged(&nodes, &edges);
+        let expected = build_checked(&nodes, &edges, 1, 1);
         let root = TempDir::new().unwrap();
         let mut session = pinned(&root);
         let scratch_path = scratch_dir(&session);
@@ -737,6 +1040,8 @@ mod bulk_builder {
         assert!(!scratch_dir(&session).exists());
         let rerun = session.prepare_bulk_encoding(1, &plan, || false).unwrap();
         assert_same(&expected, &inventory(&rerun));
+        assert_counts(&session, &rerun, &nodes, &edges);
+        assert_reads_back(&nodes, &edges, &read_back(&session, &rerun));
     }
 
     #[test]
@@ -761,7 +1066,7 @@ mod bulk_builder {
     #[test]
     fn killed_property_windows_are_discarded_on_recovery_and_rerun_is_identical() {
         let (nodes, edges) = property_recovery_input();
-        let expected = staged(&nodes, &edges);
+        let expected = build_checked(&nodes, &edges, 1, 1);
         let root = TempDir::new().unwrap();
         let initial = pinned(&root);
         let scratch_path = scratch_dir(&initial);
@@ -786,6 +1091,8 @@ mod bulk_builder {
         plan.memory_budget = Some(920 << 20);
         let rerun = session.prepare_bulk_encoding(1, &plan, || false).unwrap();
         assert_same(&expected, &inventory(&rerun));
+        assert_counts(&session, &rerun, &nodes, &edges);
+        assert_reads_back(&nodes, &edges, &read_back(&session, &rerun));
         assert!(!scratch_dir(&session).exists());
     }
 
@@ -1025,7 +1332,7 @@ mod bulk_builder {
     fn property_scratch_bytes_do_not_grow_with_the_number_of_runs() {
         let budgets = small_property_budgets();
         let (nodes, edges) = concurrent_property_graph(4_800, 9_600, 150);
-        let expected = staged_with(budgets, &nodes, &edges).unwrap();
+        let expected = build_checked_with(budgets, &nodes, &edges, 2, 1);
         let (budget, derived) = budget_admitting(&nodes, &edges, budgets, 1, 1);
         assert_eq!(derived, 1);
         let mut written = Vec::new();
@@ -1038,6 +1345,8 @@ mod bulk_builder {
             lanes(&mut session, 1);
             let encoding = session.prepare_bulk_encoding(1, &plan, || false).unwrap();
             assert_same(&expected, &inventory(&encoding));
+            assert_counts(&session, &encoding, &nodes, &edges);
+            assert_reads_back(&nodes, &edges, &read_back(&session, &encoding));
             let report = session.bulk_build_report();
             assert_eq!(report.scratch_concurrency, 1, "{report:?}");
             assert!(!scratch_dir(&session).exists());
@@ -1345,7 +1654,7 @@ mod bulk_builder {
         let budgets = rss_property_budgets();
         let (nodes, edges) = wide_property_graph();
         assert_wide_batches_fit(budgets);
-        let expected_inventory = staged_with(budgets, &nodes, &edges).unwrap();
+        let expected_inventory = build_checked_with(budgets, &nodes, &edges, 2, 1);
         assert!(
             expected_inventory
                 .iter()
@@ -1522,7 +1831,7 @@ mod bulk_builder {
     fn a_kill_during_a_concurrent_scratch_pass_reruns_to_identical_bytes() {
         let budgets = small_property_budgets();
         let (nodes, edges) = padded_concurrent_property_graph(4_800, 9_600, 150, 2 << 10);
-        let expected = staged_with(budgets, &nodes, &edges).unwrap();
+        let expected = build_checked_with(budgets, &nodes, &edges, 2, 1);
         let budget = concurrent_crash_budget(&nodes, &edges);
         let mut left_scratch = 0;
         for point in [
@@ -1555,6 +1864,8 @@ mod bulk_builder {
             assert_eq!(plan.route(), crate::BulkRoute::Scratch);
             let rerun = session.prepare_bulk_encoding(1, &plan, || false).unwrap();
             assert_eq!(expected, inventory(&rerun), "killed at {point}");
+            assert_counts(&session, &rerun, &nodes, &edges);
+            assert_reads_back(&nodes, &edges, &read_back(&session, &rerun));
             assert_eq!(session.bulk_build_report().scratch_concurrency, 4);
             assert!(!scratch_dir(&session).exists());
         }
@@ -1569,7 +1880,7 @@ mod bulk_builder {
     }
 
     #[test]
-    fn every_global_refusal_of_the_staged_path_still_fires() {
+    fn every_global_refusal_fires_on_the_resident_route() {
         let a = uuid(0x10, 1);
         let b = uuid(0x10, 2);
         let e = uuid(0x20, 1);
@@ -1701,9 +2012,10 @@ mod bulk_builder {
         }
     }
 
-    /// The same typed (strict, qualified-route) input through both builds.
+    /// A typed (strict, qualified-route) input reads back through the typed
+    /// readers, and every route and worker count publishes the same bytes.
     #[test]
-    fn a_typed_ontology_build_matches_the_staged_encoder() {
+    fn a_typed_ontology_build_reads_back_and_matches_on_every_route() {
         let authority = super::encoding_publication::tests::semantic_authority(
             graphforge_core::OntologyMode::Strict,
         );
@@ -1721,24 +2033,79 @@ mod bulk_builder {
             session.checkpoint.session_now_micros = CLOCK;
             session
         };
+        let route = |kind, local: &str| {
+            authority
+                .bindings
+                .bindings
+                .iter()
+                .find(|binding| binding.route_kind == kind && binding.symbol.local_id == local)
+                .unwrap()
+                .route
+                .clone()
+        };
+        let (relation, node_property, edge_property) = (
+            route(crate::SemanticRouteKind::Relation, "R"),
+            route(crate::SemanticRouteKind::NodeProperty, "Person:score"),
+            route(crate::SemanticRouteKind::EdgeProperty, "R:weight"),
+        );
+        let person = authority
+            .bindings
+            .bindings
+            .iter()
+            .find(|binding| {
+                binding.route_kind == crate::SemanticRouteKind::Entity
+                    && binding.symbol.local_id == "Person"
+            })
+            .unwrap()
+            .storage_id;
+        let rows = |batches: Vec<RecordBatch>| batches.iter().map(RecordBatch::num_rows).sum::<usize>();
+        // The typed generation answers with the input's counts and routes.
+        let read_typed = |session: &GraphConstructionSession, encoding: &GraphConstructionEncoding| {
+            assert_counts(session, encoding, &nodes, &edges);
+            let graph = session.root.path().join(&encoding.root).join("graph");
+            let stored = crate::read_nodes(&graph).unwrap();
+            assert_eq!(stored.iter().map(RecordBatch::num_rows).sum::<usize>(), 3);
+            for batch in &stored {
+                let ids = batch
+                    .column_by_name("type_id")
+                    .and_then(|array| array.as_any().downcast_ref::<arrow::array::UInt32Array>())
+                    .unwrap();
+                assert!(ids.values().iter().all(|id| *id == person));
+            }
+            let (files, _) = crate::capture_graph_files(&graph).unwrap();
+            let admitted =
+                crate::AuthenticatedPropertyInventory::from_inventory_at_root(&graph, files, None)
+                    .unwrap();
+            assert_eq!(
+                rows(
+                    crate::read_edges_from_inventory(
+                        &admitted,
+                        &relation,
+                        graphforge_core::OntologyMode::Strict
+                    )
+                    .unwrap()
+                ),
+                2
+            );
+            assert_eq!(rows(crate::read_properties(&graph, &node_property).unwrap()), 3);
+            assert_eq!(
+                rows(crate::read_edge_properties(&graph, &edge_property).unwrap()),
+                2
+            );
+            let index = crate::TopologyIdentityProbe::open_dir(&graph).unwrap();
+            assert_eq!(index.count(crate::UuidIndexKind::Node), 3);
+            assert_eq!(index.count(crate::UuidIndexKind::Edge), 2);
+            let manifest = crate::adjacency::read_manifest(&graph).unwrap();
+            assert!(manifest.iter().all(|row| row.edge_count == 2), "{manifest:?}");
+            assert!(!manifest.is_empty());
+        };
 
-        let staged_root = TempDir::new().unwrap();
-        let mut staged_session = open(&staged_root);
-        for (index, batch) in nodes.iter().enumerate() {
-            staged_session
-                .append(ConstructionChunkKind::Node, &format!("n{index}"), batch)
-                .unwrap();
-        }
-        for (index, batch) in edges.iter().enumerate() {
-            staged_session
-                .append(ConstructionChunkKind::Edge, &format!("e{index}"), batch)
-                .unwrap();
-        }
-        staged_session.seal().unwrap();
-        let shape = staged_session
-            .shape_canonical_with_cancellation(|| false)
+        let resident_root = TempDir::new().unwrap();
+        let mut resident_session = open(&resident_root);
+        let built = resident_session
+            .prepare_bulk_encoding(1, &plan(&nodes, &edges, 1), || false)
             .unwrap();
-        let expected = inventory(&staged_session.encode_canonical(&shape, 1).unwrap());
+        let expected = inventory(&built);
         assert!(
             expected
                 .iter()
@@ -1749,13 +2116,17 @@ mod bulk_builder {
                 .iter()
                 .any(|entry| entry.0.starts_with("edge_properties/"))
         );
-
-        let bulk_root = TempDir::new().unwrap();
-        let mut bulk_session = open(&bulk_root);
-        let built = bulk_session
-            .prepare_bulk_encoding(1, &plan(&nodes, &edges, 1), || false)
+        read_typed(&resident_session, &built);
+        // A different task shape and worker count publishes the same bytes.
+        let root = TempDir::new().unwrap();
+        let mut session = open(&root);
+        session.set_cpu_admission(Some(Arc::new(
+            cpu_admission::ConstructionCpuAdmission::new(std::num::NonZeroUsize::new(4).unwrap()),
+        )));
+        let wide = session
+            .prepare_bulk_encoding(1, &plan(&nodes, &edges, 2), || false)
             .unwrap();
-        assert_same(&expected, &inventory(&built));
+        assert_same(&expected, &inventory(&wide));
         for budget in [920 << 20, 944 << 20] {
             let root = TempDir::new().unwrap();
             let mut session = open(&root);
@@ -1765,6 +2136,7 @@ mod bulk_builder {
             plan.memory_budget = Some(budget);
             let scratch = session.prepare_bulk_encoding(1, &plan, || false).unwrap();
             assert_same(&expected, &inventory(&scratch));
+            read_typed(&session, &scratch);
             assert!(session.bulk_build_report().property_scratch_write_bytes > 0);
         }
     }
@@ -1827,7 +2199,7 @@ mod bulk_builder {
     /// (4 MiB), so every overlay is split into fragments and the ordinals run on
     /// across windows and across batches.
     #[test]
-    fn property_overlays_spanning_windows_and_fragments_match_the_staged_encoder() {
+    fn property_overlays_spanning_windows_and_fragments_read_back_exactly() {
         let budgets = GraphConstructionBudgets {
             max_batch_rows: 1_024,
             max_run_records: 4 * 1_024,
@@ -1851,7 +2223,7 @@ mod bulk_builder {
                 wide_edges(window, &src, &dst, 50_000 + index as u64 * 1_000)
             })
             .collect::<Vec<_>>();
-        let expected = staged_with(budgets, &nodes, &edges).unwrap();
+        let expected = build_checked_with(budgets, &nodes, &edges, 1, 1);
         let fragments = |prefix: &str| {
             expected
                 .iter()
@@ -1860,7 +2232,7 @@ mod bulk_builder {
         };
         assert!(fragments("properties/") > 4, "{expected:?}");
         assert!(fragments("edge_properties/") > 4, "{expected:?}");
-        assert_same(&expected, &bulk_budgeted(budgets, &nodes, &edges).unwrap());
+        assert_same(&expected, &build_checked_with(budgets, &nodes, &edges, 2, 4));
     }
 
     /// Resets the thread's CSR shard limits when dropped.
@@ -1882,10 +2254,10 @@ mod bulk_builder {
     /// A small graph on small shard limits: every CSR splits into shards by
     /// entries and by node span, and a high-degree node spans consecutive shards.
     #[test]
-    fn a_graph_with_several_csr_shards_matches_the_staged_encoder() {
+    fn a_graph_with_several_csr_shards_reads_back_exactly_on_every_route() {
         let _limits = ShardLimits::set(300, 64);
         let (nodes, edges) = graph(257, 2_000, 700, scattered);
-        let expected = staged(&nodes, &edges);
+        let expected = build_checked(&nodes, &edges, 1, 1);
         let shards = expected
             .iter()
             .filter(|entry| entry.0.ends_with(".csr"))
@@ -1893,12 +2265,13 @@ mod bulk_builder {
         // Eight CSRs (three relation groups and the union, each in both
         // directions), most of them in several shards.
         assert!(shards >= 40, "{shards} shards");
-        assert_same(&expected, &bulk(&nodes, &edges));
+        assert_same(&expected, &build_checked(&nodes, &edges, 2, 4));
+        assert_same(&expected, &scratch_run(&nodes, &edges, 2, 4, (3, 4)).unwrap().inventory);
     }
 
-    /// The staged path's per-chunk and per-session admission, on the same input.
+    /// The per-chunk and per-session admission budgets refuse on the bulk path.
     #[test]
-    fn the_staged_admission_budgets_refuse_on_the_bulk_path_too() {
+    fn the_admission_budgets_refuse_on_the_bulk_path() {
         let (nodes, edges) = graph(100, 200, 100, identity_order);
         let two_properties = [property_nodes(
             &(0..10).map(|i| uuid(0x10, i)).collect::<Vec<_>>(),
@@ -1950,10 +2323,6 @@ mod bulk_builder {
             ),
         ];
         for (message, budgets, node_batches, edge_batches) in cases {
-            let staged = staged_with(budgets, node_batches, edge_batches)
-                .unwrap_err()
-                .to_string();
-            assert!(staged.contains(message), "staged: {staged}");
             let bulk = bulk_budgeted(budgets, node_batches, edge_batches)
                 .unwrap_err()
                 .to_string();
@@ -2018,6 +2387,7 @@ mod bulk_builder {
         inventory: Inventory,
         report: crate::BulkBuildReport,
         scratch_left: bool,
+        back: ReadBack,
     }
 
     fn scratch_run(
@@ -2044,6 +2414,7 @@ mod bulk_builder {
             inventory: inventory(&encoding),
             report: session.bulk_build_report(),
             scratch_left: scratch_dir(&session).exists(),
+            back: read_back(&session, &encoding),
         })
     }
 
@@ -2084,8 +2455,7 @@ mod bulk_builder {
     #[test]
     fn the_over_budget_route_publishes_the_in_memory_bytes_at_any_partition_count() {
         let (nodes, edges) = graph(1_021, 3_001, 700, scattered);
-        let expected = bulk_with(&nodes, &edges, 2, 4).unwrap();
-        assert_same(&staged(&nodes, &edges), &expected);
+        let expected = build_checked(&nodes, &edges, 2, 4);
         for (partitions, per_task, workers) in [
             ((1, 1), 2, 1),
             ((2, 3), 2, 4),
@@ -2099,6 +2469,7 @@ mod bulk_builder {
                 "partitions {partitions:?} workers {workers}"
             );
             assert!(!run.scratch_left, "scratch must be deleted on completion");
+            assert_reads_back(&nodes, &edges, &run.back);
             assert!(run.report.csr_partitions >= partitions.1 as u64);
             assert!(run.report.scratch_concurrency >= 1);
             if partitions.0 > 1 {
@@ -2146,6 +2517,101 @@ mod bulk_builder {
         }
     }
 
+    /// The bulk builder publishes the derived adjacency CSR as ordinary
+    /// SHA-256-declared artifacts of the generation (#1388): a query process
+    /// hydrates and opens it instead of rebuilding it into a temporary
+    /// directory. Pins presence, generation stamp, and that the published index
+    /// validates against the published topology, on the resident route and on
+    /// scratch.
+    #[test]
+    fn a_bulk_build_publishes_a_current_adjacency_index_that_hydrates_and_validates() {
+        use crate::adjacency::{Direction, ShardedCsrIndex, csr_path};
+
+        let (nodes, edges) = graph(256, 1_024, 128, scattered);
+        let shard_manifest = |stem: &str, direction: Direction| {
+            csr_path(std::path::Path::new(""), stem, direction)
+                .with_extension("csr.json")
+                .to_string_lossy()
+                .into_owned()
+        };
+        for scratch in [false, true] {
+            let root = TempDir::new().unwrap();
+            let mut session = pinned(&root);
+            let mut plan = plan(&nodes, &edges, 2);
+            if scratch {
+                plan.memory_budget = Some(SCRATCH_BUDGET);
+            }
+            let encoding = session.prepare_bulk_encoding(1, &plan, || false).unwrap();
+            let published_index = encoding
+                .artifacts
+                .iter()
+                .map(|artifact| artifact.path.as_str())
+                .filter(|path| path.starts_with("indexes/adjacency/"))
+                .collect::<Vec<_>>();
+            let mut expected_manifests = vec![
+                shard_manifest(crate::adjacency::ALL_RELATIONS_STEM, Direction::Out),
+                shard_manifest(crate::adjacency::ALL_RELATIONS_STEM, Direction::In),
+            ];
+            for relation in ["KNOWS", "LIVES_IN", "OWNS"] {
+                expected_manifests.push(shard_manifest(relation, Direction::Out));
+                expected_manifests.push(shard_manifest(relation, Direction::In));
+            }
+            for expected in std::iter::once("indexes/adjacency/index_manifest.parquet")
+                .chain(expected_manifests.iter().map(String::as_str))
+            {
+                assert!(
+                    published_index.contains(&expected),
+                    "scratch={scratch}: {expected} is not among {published_index:?}"
+                );
+            }
+            assert!(encoding.evidence.adjacency.write_bytes > 0);
+
+            let published = session
+                .publish_canonical(&encoding, Uuid::from_u128(0x71), Uuid::from_u128(0x72))
+                .unwrap();
+            let generation = crate::resolve_project_generation(root.path()).unwrap();
+            assert_eq!(generation.generation_uuid(), published.generation_uuid);
+            let inventory = generation.graph_files_inventory().unwrap().unwrap();
+            assert_eq!(
+                inventory
+                    .files
+                    .iter()
+                    .filter(|entry| entry.role == crate::GraphFileRole::Index)
+                    .count(),
+                published_index.len()
+            );
+
+            // Hydrate exactly as a query process does, then open presence-only.
+            let workspace = TempDir::new().unwrap();
+            crate::materialize_graph_objects(
+                generation.container_root(),
+                &inventory,
+                workspace.path(),
+            )
+            .unwrap();
+            let rows = crate::adjacency::read_manifest(workspace.path()).unwrap();
+            assert!(!rows.is_empty());
+            assert!(rows.iter().all(|row| row.topology_generation == 1));
+            assert_eq!(
+                crate::read_topology_generation(workspace.path()).unwrap(),
+                1
+            );
+            let union = ShardedCsrIndex::open(&csr_path(
+                workspace.path(),
+                crate::adjacency::ALL_RELATIONS_STEM,
+                Direction::Out,
+            ))
+            .unwrap();
+            assert_eq!(union.edge_count(), 1_024);
+            assert!(
+                crate::adjacency::validate_adjacency_index(workspace.path())
+                    .unwrap()
+                    .is_empty(),
+                "scratch={scratch}"
+            );
+        }
+    }
+
     #[test]
     fn edge_windows_that_straddle_partitions_publish_the_in_memory_files() {
         // Several canonical edge files, and partition boundaries that fall
@@ -2169,7 +2635,7 @@ mod bulk_builder {
         // partition boundaries, in every relation group and both directions.
         let _limits = ShardLimits::set(7, 3);
         let (nodes, edges) = graph(257, 2_000, 700, scattered);
-        let expected = bulk_with(&nodes, &edges, 2, 4).unwrap();
+        let expected = build_checked(&nodes, &edges, 2, 4);
         let shards = expected
             .iter()
             .filter(|entry| entry.0.ends_with(".csr"))
@@ -2179,7 +2645,6 @@ mod bulk_builder {
             let run = scratch_run(&nodes, &edges, 2, 4, partitions).unwrap();
             assert_same(&expected, &run.inventory);
         }
-        assert_same(&staged(&nodes, &edges), &expected);
     }
 
     #[test]
@@ -2460,12 +2925,18 @@ mod bulk_builder {
         // One byte short, with room for the node tables: scratch.
         plan.memory_budget = Some(plan.estimated_resident_bytes() - 1);
         assert_eq!(plan.route(), crate::BulkRoute::Scratch);
-        // The node tables do not fit: they go to scratch too (#1929). The
-        // route that used to stage here has no producer.
+        // The node tables do not fit: they go to scratch too (#1929).
         plan.memory_budget = Some(plan.node_tables_resident_bytes() - 1);
         assert_eq!(plan.route(), crate::BulkRoute::ScratchNodes);
         plan.memory_budget = Some(1);
         assert_eq!(plan.route(), crate::BulkRoute::ScratchNodes);
+        // A larger budget never moves more of the build to scratch.
+        let rank = |route| match route {
+            crate::BulkRoute::Memory => 0,
+            crate::BulkRoute::Scratch => 1,
+            crate::BulkRoute::ScratchNodes => 2,
+        };
+        let mut previous = u8::MAX;
         for budget in [
             0,
             1,
@@ -2479,10 +2950,9 @@ mod bulk_builder {
             u64::MAX,
         ] {
             plan.memory_budget = Some(budget);
-            assert!(
-                !matches!(plan.route(), crate::BulkRoute::Staged(_)),
-                "budget {budget} staged"
-            );
+            let current = rank(plan.route());
+            assert!(current <= previous, "budget {budget} moved work to scratch");
+            previous = current;
         }
         // Property payloads do not change the resident node identity footprint.
         let node_uuids = (0..600_u64).map(|i| uuid(0x10, i)).collect::<Vec<_>>();
@@ -2507,10 +2977,9 @@ mod bulk_builder {
     }
 
     #[test]
-    fn node_counts_that_used_to_stage_route_to_scratch_nodes_at_every_realistic_budget() {
+    fn large_node_counts_route_to_scratch_nodes_at_every_realistic_budget() {
         // Millions of nodes against the budgets the host derives (3/5 of a
-        // 4 GiB cgroup, 1 GiB, 8 GiB): the planner chooses a bulk route and
-        // never the staged one, and the node tables dominate the decision.
+        // 4 GiB cgroup, 1 GiB, 8 GiB): the node tables dominate the decision.
         let sources = |rows: u64| {
             let source = |rows| BulkSource {
                 reader: Arc::new(Memory {
@@ -2659,8 +3128,7 @@ mod bulk_builder {
             &vec![ids[0]; 3001],
             &vec![ids[1]; 3001],
         )];
-        let expected = bulk_with(&nodes, &edges, 1, 2).unwrap();
-        assert_same(&staged(&nodes, &edges), &expected);
+        let expected = build_checked(&nodes, &edges, 1, 2);
         for bounded in [false, true] {
             for (gate, parts) in [(32 << 10, 4), (64 << 10, 1)] {
                 let _gate = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(gate);
@@ -2750,8 +3218,7 @@ mod bulk_builder {
             &vec![ids[0]; 6400],
             &vec![ids[1]; 6400],
         )];
-        let expected = bulk_with(&nodes, &edges, 1, 4).unwrap();
-        assert_same(&staged(&nodes, &edges), &expected);
+        let expected = build_checked(&nodes, &edges, 1, 4);
         for (gate, parts, workers) in [(32 << 10, (16, 2), 1), (64 << 10, (7, 5), 4)] {
             // Previously each relation retained its 200-record tail while
             // partitions advanced: 102,400 bytes outside either sort gate.

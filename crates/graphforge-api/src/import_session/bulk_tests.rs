@@ -1,7 +1,8 @@
-//! Initial imports run on the bulk builder (#1883): every intake refusal of the
-//! staged path still fires, routing is decided at plan time, and row groups that
-//! straddle task boundaries publish the staged path's bytes. Typed-ontology
-//! equivalence is proven in storage (`construction_bulk_tests`).
+//! Initial imports run on the bulk builder (#1883): every intake refusal still
+//! fires, routing is decided at plan time from the footers and the budget, and
+//! row groups that straddle task boundaries publish the same bytes on every
+//! route. Typed-ontology equivalence is proven in storage
+//! (`construction_bulk_tests`).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -73,8 +74,6 @@ fn refusal(node_batches: &[RecordBatch], edge_batches: &[RecordBatch]) -> String
         // Admit the exact fixed source metadata before testing the data's
         // semantic refusal on the natural node-scratch route.
         let required = required_scratch_bytes(&error);
-        assert_eq!(session.manifest.build_route, Some(BuildRoute::Bulk));
-        assert_eq!(session.manifest.staged_reason, None);
         pin_budget(Budget::Bytes(required));
         let error = session.validate(&graph).unwrap_err();
         pin_budget(Budget::Bytes(NODE_SCRATCH_BUDGET));
@@ -95,7 +94,7 @@ fn refusal(node_batches: &[RecordBatch], edge_batches: &[RecordBatch]) -> String
     error
 }
 
-/// Every refusal of the staged path fires on every route a bulk build takes:
+/// Every intake refusal fires on every route a bulk build takes:
 /// resident, edges on scratch, and node tables on scratch too (#1929).
 #[test]
 fn every_intake_refusal_fires_on_an_initial_import() {
@@ -186,7 +185,7 @@ fn every_intake_refusal_fires() {
 const CLOCK: i64 = 1_789_000_000_000_000;
 
 /// Pin the recorded session clock of a construction before it stages anything,
-/// so two builds of one input are comparable (the staged path stamps it into
+/// so two builds of one input are comparable (the bulk builder stamps it into
 /// the encoded topology).
 fn pin_clock(root: &Path) {
     let path = root.join("checkpoint.json");
@@ -283,7 +282,7 @@ fn stable_required_scratch_bytes(error: &GfError, initial_budget: u64) -> u64 {
 }
 
 #[test]
-fn routing_is_memory_then_scratch_then_scratch_nodes_and_never_staged() {
+fn routing_is_memory_then_scratch_then_scratch_nodes() {
     let ids = (1..=30).map(v7).collect::<Vec<_>>();
     let edge_ids = (100..=160).map(v7).collect::<Vec<_>>();
     let from = (0..61).map(|i| ids[i % 30]).collect::<Vec<_>>();
@@ -310,8 +309,6 @@ fn routing_is_memory_then_scratch_then_scratch_nodes_and_never_staged() {
         let construction = if node_scratch {
             let error = session.validate(&graph).unwrap_err();
             let required = stable_required_scratch_bytes(&error, NODE_SCRATCH_BUDGET);
-            assert_eq!(session.manifest.build_route, Some(BuildRoute::Bulk));
-            assert_eq!(session.manifest.staged_reason, None);
             assert_eq!(graph.node_count("Person").unwrap(), 0);
             pin_budget(Budget::Bytes(required));
             let progress = session.validate(&graph);
@@ -339,15 +336,13 @@ fn routing_is_memory_then_scratch_then_scratch_nodes_and_never_staged() {
             report.endpoint_scratch_write_bytes
         );
         assert_eq!(report.endpoint_scratch_write_bytes > 0, node_scratch);
-        assert_eq!(session.manifest.build_route, Some(BuildRoute::Bulk));
-        assert_eq!(session.manifest.staged_reason, None);
         session.commit(&graph, None).unwrap();
         assert_eq!(graph.node_count("Person").unwrap(), 30);
     }
 }
 
 #[test]
-fn a_budget_below_the_fixed_workspace_refuses_on_the_bulk_route_instead_of_staging() {
+fn a_budget_below_the_fixed_workspace_refuses_on_the_bulk_route() {
     let ids = (1..=30).map(v7).collect::<Vec<_>>();
     let (_directory, _project, graph) = fixture();
     let mut session = graph
@@ -368,8 +363,6 @@ fn a_budget_below_the_fixed_workspace_refuses_on_the_bulk_route_instead_of_stagi
     ));
     // No node count stages for want of memory: the session keeps the bulk
     // route, and a retry with room builds the same graph.
-    assert_eq!(session.manifest.build_route, Some(BuildRoute::Bulk));
-    assert_eq!(session.manifest.staged_reason, None);
     session.validate(&graph).unwrap();
     session.commit(&graph, None).unwrap();
     assert_eq!(graph.node_count("Person").unwrap(), 30);
@@ -417,7 +410,6 @@ fn edge_properties_use_scratch_and_reopen_with_their_values() {
             budget.is_some(),
             "{report:?}"
         );
-        assert!(session.manifest.staged_reason.is_none());
         session.commit(&graph, None).unwrap();
         assert_eq!(graph.node_count("Person").unwrap(), 30);
         drop(session);
@@ -446,7 +438,7 @@ fn edge_properties_use_scratch_and_reopen_with_their_values() {
 }
 
 #[test]
-fn an_unallocatable_ipc_footer_refuses_before_route_selection() {
+fn an_unallocatable_ipc_footer_refuses_before_any_build() {
     let (_directory, _project, graph) = fixture();
     let before = *graph.current_generation_uuid.lock().unwrap();
     let mut session = graph
@@ -466,7 +458,6 @@ fn an_unallocatable_ipc_footer_refuses_before_route_selection() {
         }
     ));
     assert!(error.to_string().contains("footer"));
-    assert_eq!(session.manifest.build_route, None);
     assert_eq!(*graph.current_generation_uuid.lock().unwrap(), before);
     session.validate(&graph).unwrap();
     session.commit(&graph, None).unwrap();
@@ -498,7 +489,7 @@ fn null_uuid_nodes(count: usize) -> RecordBatch {
 }
 
 #[test]
-fn row_groups_that_straddle_task_boundaries_publish_the_staged_bytes() {
+fn row_groups_that_straddle_task_boundaries_publish_identical_bytes_on_every_route() {
     // 4-row batches, 16 batches per task (64 rows), 7-row row groups: every
     // task boundary falls inside a row group.
     let batch = null_uuid_nodes(300);
@@ -545,8 +536,6 @@ fn row_groups_that_straddle_task_boundaries_publish_the_staged_bytes() {
         let construction = if matches!(budget, Budget::Bytes(NODE_SCRATCH_BUDGET)) {
             let error = session.validate(&graph).unwrap_err();
             let required = stable_required_scratch_bytes(&error, NODE_SCRATCH_BUDGET);
-            assert_eq!(session.manifest.build_route, Some(BuildRoute::Bulk));
-            assert_eq!(session.manifest.staged_reason, None);
             assert_eq!(graph.node_count("Person").unwrap(), 0);
             assert!(!root.join("encoded-v1/inventory.json").exists());
             // A failed initial build is restarted by the next validation. Pin
@@ -613,13 +602,12 @@ fn two_batch_import_with_a_cross_batch_duplicate(graph: &GraphForge) -> (GraphIm
 }
 
 #[test]
-fn a_refused_bulk_attempt_stays_on_the_bulk_route_when_memory_drops() {
+fn a_refused_bulk_attempt_retries_the_same_build_when_memory_drops() {
     let (_directory, _project, graph) = fixture();
     let (mut session, id) = two_batch_import_with_a_cross_batch_duplicate(&graph);
     // The first attempt fits in memory, seals the storage session and is refused.
     let first = session.validate(&graph).unwrap_err().to_string();
     assert!(first.contains("duplicate"), "{first}");
-    assert_eq!(session.manifest.build_route, Some(BuildRoute::Bulk));
     // The route is durable: the same session, reopened or not, on a host whose
     // memory has since shrunk, refuses the resource shortage before loading
     // data instead of staging a sealed session or ignoring the smaller budget.
@@ -656,12 +644,10 @@ fn a_refused_bulk_attempt_stays_on_the_bulk_route_when_memory_drops() {
             .to_string();
         assert_eq!(first, restored);
     }
-    let manifest = read_manifest(&session.root).unwrap();
-    assert_eq!(manifest.build_route, Some(BuildRoute::Bulk));
 }
 
 #[test]
-fn a_staged_route_is_durable_too() {
+fn an_append_import_stages_every_attempt() {
     let (_directory, _project, graph) = fixture();
     // An append stages: only an initial build runs on the bulk builder. The
     // first import gives the project its generation.
@@ -677,13 +663,9 @@ fn a_staged_route_is_durable_too() {
     let (mut session, _) = two_batch_import_with_a_cross_batch_duplicate(&graph);
     let first = session.validate(&graph);
     assert!(first.is_err());
-    assert_eq!(session.manifest.build_route, Some(BuildRoute::Staged));
-    // The session already chose to stage, and no reason is recorded: the
-    // typed reasons are historical.
-    assert_eq!(session.manifest.staged_reason, None);
+    // A retry stages again and refuses the same duplicate.
     let again = session.validate(&graph).unwrap_err().to_string();
     assert!(again.contains("duplicate"), "{again}");
-    assert_eq!(session.manifest.build_route, Some(BuildRoute::Staged));
     assert!(
         session
             .manifest
@@ -693,6 +675,59 @@ fn a_staged_route_is_durable_too() {
             .is_some_and(|construction| construction.bulk_build.is_none()
                 && construction.accepted_chunks > 0)
     );
+}
+
+/// An import whose construction session already holds staged chunks of an
+/// initial build (from a build that staged them) cannot resume on the bulk
+/// builder: it is refused with an instruction to restart, and a fresh import of
+/// the same sources builds.
+#[test]
+fn an_import_holding_staged_initial_chunks_is_refused_and_asks_for_a_restart() {
+    let (_directory, _project, graph) = fixture();
+    let ids = (1..=3).map(v7).collect::<Vec<_>>();
+    let mut session = graph
+        .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
+        .unwrap();
+    session
+        .append_arrow(BulkInputKind::Node, &[nodes(&ids)])
+        .unwrap();
+    // The construction session is opened on first use; an earlier build staged
+    // the registered rows into it as chunks.
+    let mut construction = session.open_construction(&graph).unwrap();
+    construction
+        .append_nodes(
+            "staged-by-an-earlier-build",
+            &RecordBatch::try_new(
+                graphforge_storage::CONSTRUCTION_NODE_SCHEMA.clone(),
+                vec![uuids(&ids), Arc::new(StringArray::from(vec!["Person"; 3]))],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(construction.progress().accepted_chunks, 1);
+    drop(construction);
+
+    for _ in 0..2 {
+        let refused = session.validate(&graph).unwrap_err();
+        assert!(matches!(refused, GfError::Validation(_)), "{refused:?}");
+        assert!(
+            refused.to_string().contains("restart the import"),
+            "{refused}"
+        );
+    }
+    assert_eq!(graph.node_count("Person").unwrap(), 0);
+    session.abort(&graph).unwrap();
+
+    let mut restarted = graph
+        .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
+        .unwrap();
+    restarted
+        .append_arrow(BulkInputKind::Node, &[nodes(&ids)])
+        .unwrap();
+    let built = restarted.validate(&graph).unwrap();
+    assert!(built.construction.unwrap().bulk_build.is_some());
+    restarted.commit(&graph, None).unwrap();
+    assert_eq!(graph.node_count("Person").unwrap(), 3);
 }
 
 #[test]
@@ -722,7 +757,7 @@ fn a_second_validate_of_a_built_session_reports_its_rows() {
 }
 
 #[test]
-fn a_refused_batch_counts_as_rejected_rows_as_in_the_staged_path() {
+fn a_refused_batch_counts_as_rejected_rows() {
     // Three rows that are not UUIDv7: the batch is refused by name.
     let (_directory, _project, graph) = fixture();
     let mut session = graph

@@ -40,15 +40,13 @@ mod builder;
 pub(crate) use builder::TEST_SHARD_LIMITS;
 mod codec;
 mod installation;
+pub(crate) use builder::build_adjacency_index_for_edge_files_observed;
 pub use builder::{
     ADJACENCY_SPILL_DIR_NAME, AdjacencyBuildMetrics, AdjacencyBuildOptions,
     DEFAULT_ADJACENCY_CHUNK_ROWS, DEFAULT_ADJACENCY_MERGE_FAN_IN, build_adjacency_index,
     build_adjacency_index_from_inventory, build_adjacency_index_into,
     build_adjacency_index_into_with_metrics, build_adjacency_index_into_with_options,
     build_adjacency_index_with_checkpoint,
-};
-pub(crate) use builder::{
-    build_adjacency_index_for_edge_files_observed, build_adjacency_index_for_edge_files_on_lanes,
 };
 use codec::{corrupt_index, corrupt_index_from, corrupt_structure, shard_io_error};
 use installation::{
