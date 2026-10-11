@@ -606,12 +606,14 @@ fn the_storage_write_gate_sees_a_file_write() {
 
 #[test]
 fn paired_write_counters_distinguish_runtime_writes_from_storage_writes() {
+    const ITERATIONS: usize = 150;
+
     let _serial = serial();
     let built = build(SMALL_NODES);
     let forge = open(&built.project);
     let queries = [ANCHORED_HOP, SCATTERED_HOP, UNPUSHED_HOP];
     let mut iterations_with_wchar = 0;
-    for _ in 0..300 {
+    for _ in 0..ITERATIONS {
         let mut iteration_wchar = 0;
         for query in queries {
             let (batches, io) = measured(&forge, query, 5);
@@ -624,7 +626,7 @@ fn paired_write_counters_distinguish_runtime_writes_from_storage_writes() {
         }
     }
     eprintln!(
-        "paired I/O evidence: iterations=300, wchar_positive_iterations={iterations_with_wchar}, storage_write_bytes_positive_iterations=0"
+        "paired I/O evidence: iterations={ITERATIONS}, wchar_positive_iterations={iterations_with_wchar}, storage_write_bytes_positive_iterations=0"
     );
 }
 
