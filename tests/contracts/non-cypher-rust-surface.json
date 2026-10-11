@@ -386,6 +386,10 @@
         },
         {
           "path": "crates/graphforge-api/src/resumable_construction.rs",
+          "symbol": "staged_construction_is_refused_on_an_empty_project_and_serves_appends"
+        },
+        {
+          "path": "crates/graphforge-api/src/resumable_construction.rs",
           "symbol": "cancelled_public_construction_preserves_current"
         },
         {
