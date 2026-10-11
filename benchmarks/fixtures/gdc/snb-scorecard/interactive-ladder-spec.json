@@ -27,7 +27,7 @@
     {
       "kind": "rewrite",
       "subject": "IC1",
-      "text": "shortestPath((p)-[:KNOWS*1..3]-(friend)) is unsupported (#1888) and becomes min(length(path)) over the bounded match, the same value because a shortest path is a simple path; the [name, year, place] tuples are maps {name, classYear|workFrom, city|country} because GraphForge encodes a heterogeneous list as a tagged union (#1888)"
+      "text": "shortestPath((p)-[:KNOWS*1..3]-(friend)) is refused with a typed GF_NOT_IMPLEMENTED (#1888 is the decision of record) and becomes min(length(path)) over the bounded match, the same value because a shortest path is a simple path; the [name, year, place] tuples are maps {name, classYear|workFrom, city|country} because the runner refuses GraphForge's heterogeneous-list encoding (ADR 0011 __het_ structs), which has no exact JSON mapping"
     },
     {
       "kind": "spec_variance",
@@ -57,7 +57,7 @@
     {
       "kind": "rewrite",
       "subject": "IC7",
-      "text": "head(collect({msg, likeTime})) after ORDER BY likeTime DESC, message.id ASC is computed as max(likeTime), then min(message.id) among likes at that time, which selects the same like without relying on aggregation input order; not((liker)-[:KNOWS]-(person)) as a value is rejected (#1888) and becomes an empty pattern comprehension; :Message becomes (message:Post OR message:Comment)"
+      "text": "head(collect({msg, likeTime})) after ORDER BY likeTime DESC, message.id ASC is computed as max(likeTime), then min(message.id) among likes at that time, which selects the same like without relying on aggregation input order; not((liker)-[:KNOWS]-(person)) is a pattern predicate in a RETURN projection, outside WHERE, which is rejected with GF_PARSE (bind error: pattern predicates are invalid outside WHERE), so it becomes an empty pattern comprehension; :Message becomes (message:Post OR message:Comment)"
     },
     {
       "kind": "rewrite",
@@ -72,12 +72,12 @@
     {
       "kind": "rewrite",
       "subject": "IC10",
-      "text": "the post list comprehension with a pattern predicate is rejected (#1888), so posts are counted with OPTIONAL MATCH and the interest pattern is matched directly and counted with count(DISTINCT post.id)"
+      "text": "the post list comprehension filter is a pattern predicate outside WHERE, which is rejected with GF_PARSE (bind error: pattern predicates are invalid outside WHERE), so posts are counted with OPTIONAL MATCH and the interest pattern is matched directly and counted with count(DISTINCT post.id)"
     },
     {
       "kind": "rewrite",
       "subject": "IC12",
-      "text": "[:HAS_TYPE|IS_SUBCLASS_OF*0..] fails at execution (#1888, two-type variable-length pattern) and becomes [:HAS_TYPE] then [:IS_SUBCLASS_OF*0..], the only paths the SNB schema admits from a Tag to a TagClass"
+      "text": "[:HAS_TYPE|IS_SUBCLASS_OF*0..] is a variable-length relationship type alternation, refused with a typed GF_NOT_IMPLEMENTED (#1888 is the decision of record), and becomes [:HAS_TYPE] then [:IS_SUBCLASS_OF*0..], the only paths the SNB schema admits from a Tag to a TagClass"
     },
     {
       "kind": "spec_variance",
@@ -87,7 +87,7 @@
     {
       "kind": "rewrite",
       "subject": "IC13",
-      "text": "paths(by=bfs, via=KNOWS, directed=false) instead of Cypher shortestPath (#1888); -1 when the verb returns no row, 0 for equal endpoints as the specification states"
+      "text": "paths(by=bfs, via=KNOWS, directed=false) instead of Cypher shortestPath, which is refused with a typed GF_NOT_IMPLEMENTED (#1888 is the decision of record); -1 when the verb returns no row, 0 for equal endpoints as the specification states"
     },
     {
       "kind": "spec_variance",

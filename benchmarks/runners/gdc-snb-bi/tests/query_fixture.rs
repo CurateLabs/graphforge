@@ -112,8 +112,9 @@ fn every_analytical_read_is_runnable_or_refused_exactly_once() {
 }
 
 /// Every departure from the LDBC text is labelled as a variance, and one caused
-/// by an open GraphForge gap cites its tracking issue (#1888). #1887 and #1919
-/// are fixed, so no rewrite cites them.
+/// by a construct GraphForge refuses cites #1888, the decision of record, and
+/// names the typed `GF_NOT_IMPLEMENTED` refusal. #1887 and #1919 are fixed, so
+/// no rewrite cites them.
 #[test]
 fn rewrites_are_labelled_variances_that_cite_their_cause() {
     let rewritten: Vec<Operation> = BI_QUERIES
@@ -153,6 +154,13 @@ fn rewrites_are_labelled_variances_that_cite_their_cause() {
         assert!(!rewrite.contains("#1887"), "{}", query.operation);
         assert!(!rewrite.contains("#1919"), "{}", query.operation);
         let cites_defect = rewrite.contains("#1888 D");
+        if cites_defect {
+            assert!(
+                rewrite.contains("GF_NOT_IMPLEMENTED"),
+                "{}",
+                query.operation
+            );
+        }
         // The `:Message` label rewrite is a data-model variance, not a defect.
         let not_a_defect = matches!(
             query.operation,
