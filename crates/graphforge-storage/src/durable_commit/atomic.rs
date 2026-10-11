@@ -484,10 +484,7 @@ impl SealedArtifact {
         expected: FileIdentity,
         allocation: Option<&StorageAllocationOperation>,
     ) -> io::Result<Self> {
-        let sealed =
-            Self::seal_existing_inner(parent, temporary, file, expected, allocation, true, true)?;
-        super::producer_seals::record(sealed.file())?;
-        Ok(sealed)
+        Self::seal_existing_inner(parent, temporary, file, expected, allocation, true)
     }
 
     /// A durable intent owns this input, including a failed sealing attempt.
@@ -505,31 +502,6 @@ impl SealedArtifact {
             expected,
             allocation,
             false,
-            true,
-        )
-    }
-
-    /// Adopt a privately owned temporary whose producer has already run the
-    /// file's durability barrier, without running a second one. The check of
-    /// the temporary's identity and link count is the same as for
-    /// [`Self::seal_recoverable_existing`]; only the barrier is skipped. The
-    /// caller owns the proof that the producer sealed this exact descriptor
-    /// after its last write: this establishes no durability itself.
-    pub fn adopt_producer_sealed(
-        parent: &StableDirectory,
-        temporary: &OsStr,
-        file: File,
-        expected: FileIdentity,
-        allocation: Option<&StorageAllocationOperation>,
-    ) -> io::Result<Self> {
-        Self::seal_existing_inner(
-            Arc::new(parent.try_clone()?),
-            temporary,
-            file,
-            expected,
-            allocation,
-            false,
-            false,
         )
     }
 
@@ -540,7 +512,6 @@ impl SealedArtifact {
         expected: FileIdentity,
         allocation: Option<&StorageAllocationOperation>,
         cleanup: bool,
-        barrier: bool,
     ) -> io::Result<Self> {
         let staged = Self {
             parent,
@@ -561,11 +532,7 @@ impl SealedArtifact {
                 "staged temporary identity changed before sealing",
             ));
         }
-        let sealed = if barrier {
-            seal_file(staged.file())
-        } else {
-            Ok(())
-        };
+        let sealed = seal_file(staged.file());
         let observed = allocation.map_or(Ok(()), |a| {
             a.replace_file_at(&staged.parent.path().join(temporary), staged.file())
         });

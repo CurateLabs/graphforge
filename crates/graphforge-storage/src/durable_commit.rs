@@ -13,7 +13,6 @@ pub use barrier_observation::observe_barriers;
 #[cfg(test)]
 pub(crate) mod fault;
 mod namespace;
-pub mod producer_seals;
 #[cfg(all(test, windows))]
 mod windows_allocation_tests;
 pub use atomic::{
@@ -148,14 +147,12 @@ impl FileSeal {
 /// Seal once and return opaque exact-descriptor durability evidence.
 pub fn seal_file_witness(file: &File) -> io::Result<FileSeal> {
     seal_file(file)?;
-    producer_seals::record(file)?;
     FileSeal::capture(file)
 }
 
 /// Finish the final cache fence once and capture its exact producer descriptor.
 pub fn seal_cache_writer_witness(writer: &mut DurableFileCacheWriter) -> io::Result<FileSeal> {
     seal_cache_writer(writer)?;
-    producer_seals::record(writer.file())?;
     FileSeal::capture(writer.file())
 }
 

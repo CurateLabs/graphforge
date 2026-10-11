@@ -366,14 +366,6 @@ pub fn inventory(project: &Path) -> Vec<Artifact> {
         .collect()
 }
 
-/// Where the object store keeps the object with this SHA-256.
-pub fn object_path(project: &Path, sha256: &str) -> PathBuf {
-    project
-        .join("graph-objects/sha256")
-        .join(&sha256[..2])
-        .join(&sha256[2..])
-}
-
 /// `(path, bytes, sha256)` of every encoded artifact, except the ordinal
 /// receipt, which carries a random rebuild nonce (ADR 0038, ADR 0058).
 pub fn comparable_inventory(project: &Path) -> BTreeMap<String, (u64, String)> {
