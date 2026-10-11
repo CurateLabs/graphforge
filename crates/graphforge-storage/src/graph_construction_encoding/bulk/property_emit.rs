@@ -303,6 +303,7 @@ fn resolve(
     resolve_owner(
         semantics.context,
         semantics.bindings,
+        semantics.single,
         symbol,
         topology,
         name,

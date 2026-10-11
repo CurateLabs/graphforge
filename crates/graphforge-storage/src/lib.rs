@@ -84,11 +84,12 @@ pub mod payload_digest;
 pub use graph_construction::cpu_admission::{ConstructionCpuAdmission, ConstructionCpuLease};
 pub use graph_construction::{
     BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkRoute, BulkSource,
-    CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, ConstructionChunkKind,
-    ConstructionChunkReceipt, ConstructionSemanticAuthority, ConstructionShape,
-    GRAPH_CONSTRUCTION_ENCODING_BUFFER_BYTES, GraphConstructionBudgets, GraphConstructionEncoding,
-    GraphConstructionEncodingEvidence, GraphConstructionEncodingInvocationEvidence,
-    GraphConstructionEvidence, GraphConstructionSession, GraphConstructionState, SealRoute,
+    CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, ConstructionAuthority,
+    ConstructionChunkKind, ConstructionChunkReceipt, ConstructionSemanticAuthority,
+    ConstructionShape, GRAPH_CONSTRUCTION_ENCODING_BUFFER_BYTES, GraphConstructionBudgets,
+    GraphConstructionEncoding, GraphConstructionEncodingEvidence,
+    GraphConstructionEncodingInvocationEvidence, GraphConstructionEvidence,
+    GraphConstructionSession, GraphConstructionState, SealRoute, SingleDocumentAuthority,
     SourceReservation, SourceWorkspace,
 };
 pub use graph_construction::{

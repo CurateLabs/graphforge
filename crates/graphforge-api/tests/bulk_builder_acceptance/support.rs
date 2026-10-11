@@ -223,6 +223,46 @@ impl Sources {
         }
     }
 
+    /// Property-free sources of `nodes` nodes labelled `label` and `edges`
+    /// edges typed `rel_type`; edge `i` runs from node `i % nodes` to node
+    /// `(i + 1) % nodes`.
+    pub fn write_typed(
+        directory: &Path,
+        nodes: usize,
+        edges: usize,
+        label: &str,
+        rel_type: &str,
+    ) -> Self {
+        fs::create_dir_all(directory).unwrap();
+        write_parquet(&directory.join("nodes.parquet"), nodes, |range| {
+            RecordBatch::try_new(
+                bulk_node_input_schema(vec![]).unwrap(),
+                vec![
+                    uuid_array(range.clone().map(node_uuid)),
+                    Arc::new(StringArray::from(range.map(|_| label).collect::<Vec<_>>())),
+                ],
+            )
+            .unwrap()
+        });
+        write_parquet(&directory.join("edges.parquet"), edges, |range| {
+            RecordBatch::try_new(
+                bulk_edge_input_schema(vec![]).unwrap(),
+                vec![
+                    uuid_array(range.clone().map(edge_uuid)),
+                    Arc::new(StringArray::from(
+                        range.clone().map(|_| rel_type).collect::<Vec<_>>(),
+                    )),
+                    uuid_array(range.clone().map(|row| node_uuid(row % nodes))),
+                    uuid_array(range.map(|row| node_uuid((row + 1) % nodes))),
+                ],
+            )
+            .unwrap()
+        });
+        Self {
+            directory: directory.to_owned(),
+        }
+    }
+
     /// Sources already written to `directory`.
     pub fn at(directory: &Path) -> Self {
         Self {

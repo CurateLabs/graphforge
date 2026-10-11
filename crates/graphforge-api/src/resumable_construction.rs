@@ -143,6 +143,78 @@ impl GraphForge {
             .discard()
     }
 
+    /// The semantic authority a construction on this facade is pinned to.
+    ///
+    /// A project with storage bindings builds under its composition and those
+    /// bindings. A project that adopted one ontology document and never
+    /// migrated to a composition (ADR 0023) has neither, and builds under the
+    /// document's declarations, the authority `add_node` and the Cypher writer
+    /// already honour for it. Any other project is refused.
+    fn construction_authority(
+        &self,
+        parent_topology_generation: u64,
+        resume: bool,
+    ) -> Result<Option<graphforge_storage::ConstructionAuthority>, GfError> {
+        if self.ontology_mode == OntologyMode::Exploratory {
+            return Ok(None);
+        }
+        let bindings = self
+            .semantic_storage_bindings
+            .lock()
+            .expect("semantic storage binding lock poisoned")
+            .clone();
+        if let Some(bindings) = bindings {
+            let composition = self
+                .workspace_ontology_composition()?
+                .ok_or_else(|| validation("construction semantic composition is absent"))?;
+            return Ok(Some(
+                graphforge_storage::ConstructionSemanticAuthority {
+                    composition,
+                    bindings,
+                }
+                .into(),
+            ));
+        }
+        if self
+            .default_composition_context
+            .lock()
+            .expect("composition binding lock poisoned")
+            .is_some()
+        {
+            return Err(validation("construction semantic bindings are absent"));
+        }
+        if parent_topology_generation != 0 && !resume {
+            return Err(validation(
+                "appending to a populated project under a single ontology document is not \
+                 supported; its construction semantic bindings are absent",
+            ));
+        }
+        let ontology = self
+            .ontology
+            .as_ref()
+            .ok_or_else(|| validation("construction ontology document is absent"))?;
+        let entities = ontology.entity_type_names().into_iter().filter_map(|name| {
+            ontology
+                .entity_type_id(name)
+                .map(|id| (name.to_owned(), id))
+        });
+        let relations = ontology
+            .relation_type_names()
+            .into_iter()
+            .filter_map(|name| {
+                ontology
+                    .relation_type_id(name)
+                    .map(|id| (name.to_owned(), id))
+            });
+        graphforge_storage::SingleDocumentAuthority::new(
+            self.ontology_mode,
+            ontology.checksum().to_owned(),
+            entities,
+            relations,
+        )
+        .map(|authority| Some(authority.into()))
+    }
+
     /// Open or resume the storage session for `open_graph_construction`,
     /// selecting the semantic authority and lifecycle this facade carries.
     fn open_storage_construction(
@@ -154,22 +226,8 @@ impl GraphForge {
         resume: bool,
     ) -> Result<graphforge_storage::GraphConstructionSession, GfError> {
         let project = self.resolved_generation.container_root();
+        let authority = self.construction_authority(parent_topology_generation, resume)?;
         let inner = if let Some(allocation) = &self.allocation_operation {
-            let authority = if self.ontology_mode == OntologyMode::Exploratory {
-                None
-            } else {
-                Some(graphforge_storage::ConstructionSemanticAuthority {
-                    composition: self
-                        .workspace_ontology_composition()?
-                        .ok_or_else(|| validation("construction semantic composition is absent"))?,
-                    bindings: self
-                        .semantic_storage_bindings
-                        .lock()
-                        .expect("semantic storage binding lock poisoned")
-                        .clone()
-                        .ok_or_else(|| validation("construction semantic bindings are absent"))?,
-                })
-            };
             graphforge_storage::GraphConstructionSession::open_with_allocation(
                 project,
                 dir,
@@ -182,41 +240,7 @@ impl GraphForge {
                 resume,
                 allocation,
             )?
-        } else if self.ontology_mode == OntologyMode::Exploratory {
-            if resume {
-                graphforge_storage::GraphConstructionSession::resume_with_mode_and_lifecycle_from_graph(
-                    project,
-                    dir,
-                    session_uuid,
-                    self.ontology_mode,
-                    budgets,
-                    self.lifecycle_mode,
-                )?
-            } else {
-                graphforge_storage::GraphConstructionSession::open_with_mode_and_lifecycle_from_graph(
-                    project,
-                    dir,
-                    session_uuid,
-                    parent_topology_generation,
-                    self.ontology_mode,
-                    budgets,
-                    self.lifecycle_mode,
-                )?
-            }
-        } else {
-            let composition = self
-                .workspace_ontology_composition()?
-                .ok_or_else(|| validation("construction semantic composition is absent"))?;
-            let bindings = self
-                .semantic_storage_bindings
-                .lock()
-                .expect("semantic storage binding lock poisoned")
-                .clone()
-                .ok_or_else(|| validation("construction semantic bindings are absent"))?;
-            let authority = graphforge_storage::ConstructionSemanticAuthority {
-                composition,
-                bindings,
-            };
+        } else if let Some(authority) = authority {
             if resume {
                 graphforge_storage::GraphConstructionSession::resume_with_semantic_authority_and_lifecycle_from_graph(
                     project,
@@ -239,6 +263,25 @@ impl GraphForge {
                     self.lifecycle_mode,
                 )?
             }
+        } else if resume {
+            graphforge_storage::GraphConstructionSession::resume_with_mode_and_lifecycle_from_graph(
+                project,
+                dir,
+                session_uuid,
+                self.ontology_mode,
+                budgets,
+                self.lifecycle_mode,
+            )?
+        } else {
+            graphforge_storage::GraphConstructionSession::open_with_mode_and_lifecycle_from_graph(
+                project,
+                dir,
+                session_uuid,
+                parent_topology_generation,
+                self.ontology_mode,
+                budgets,
+                self.lifecycle_mode,
+            )?
         };
         Ok(inner)
     }

@@ -64,6 +64,8 @@ use recovery::{
     retained_shape_segments, shape_publication_failure, shape_publication_io_failure, unlink_named,
     unlink_reconciled_shape_segments, unlink_shape_artifact, unlink_writer_capability,
 };
+mod authority;
+pub use authority::{ConstructionAuthority, SingleDocumentAuthority};
 mod controls;
 pub mod cpu_admission;
 mod external_partition;
@@ -1030,7 +1032,7 @@ pub struct GraphConstructionSession {
     base_snapshot: Option<TopologyIdentityProbe>,
     parent_catalog: RuntimeCatalog,
     compact_parent: Option<crate::GraphFilesInventory>,
-    semantic_authority: Option<ConstructionSemanticAuthority>,
+    semantic_authority: Option<ConstructionAuthority>,
     /// Whether this process has already streamed and checksummed the retained
     /// shape output payloads since it opened the session (#1392). The refusal
     /// is once per process-open: nothing inside this process mutates those
@@ -1221,9 +1223,10 @@ impl GraphConstructionSession {
         project_dir: &Path,
         operation_uuid: Uuid,
         parent_topology_generation: u64,
-        authority: ConstructionSemanticAuthority,
+        authority: impl Into<ConstructionAuthority>,
         budgets: GraphConstructionBudgets,
     ) -> Result<Self, GfError> {
+        let authority = authority.into();
         authority.validate()?;
         Self::open_with_semantic_authority_and_lifecycle(
             project_dir,
@@ -1243,9 +1246,10 @@ impl GraphConstructionSession {
         parent_topology_generation: u64,
         ontology_mode: graphforge_core::OntologyMode,
         budgets: GraphConstructionBudgets,
-        authority: ConstructionSemanticAuthority,
+        authority: impl Into<ConstructionAuthority>,
         lifecycle_mode: crate::filesystem_admission::ProjectLifecycleMode,
     ) -> Result<Self, GfError> {
+        let authority = authority.into();
         authority.validate()?;
         if authority.mode() != ontology_mode {
             return Err(storage("construction semantic authority mode changed"));
@@ -1271,9 +1275,10 @@ impl GraphConstructionSession {
         parent_topology_generation: u64,
         ontology_mode: graphforge_core::OntologyMode,
         budgets: GraphConstructionBudgets,
-        authority: ConstructionSemanticAuthority,
+        authority: impl Into<ConstructionAuthority>,
         lifecycle_mode: crate::filesystem_admission::ProjectLifecycleMode,
     ) -> Result<Self, GfError> {
+        let authority = authority.into();
         authority.validate()?;
         if authority.mode() != ontology_mode {
             return Err(storage("construction semantic authority mode changed"));
@@ -1296,7 +1301,7 @@ impl GraphConstructionSession {
         operation_uuid: Uuid,
         ontology_mode: graphforge_core::OntologyMode,
         budgets: GraphConstructionBudgets,
-        authority: ConstructionSemanticAuthority,
+        authority: impl Into<ConstructionAuthority>,
         lifecycle_mode: crate::filesystem_admission::ProjectLifecycleMode,
     ) -> Result<Self, GfError> {
         Self::resume_with_semantic_authority_and_lifecycle_from_graph(
@@ -1318,7 +1323,7 @@ impl GraphConstructionSession {
         operation_uuid: Uuid,
         ontology_mode: graphforge_core::OntologyMode,
         budgets: GraphConstructionBudgets,
-        authority: ConstructionSemanticAuthority,
+        authority: impl Into<ConstructionAuthority>,
         lifecycle_mode: crate::filesystem_admission::ProjectLifecycleMode,
     ) -> Result<Self, GfError> {
         let parent_topology_generation =
@@ -1342,7 +1347,7 @@ impl GraphConstructionSession {
         operation_uuid: Uuid,
         parent_topology_generation: u64,
         ontology_mode: graphforge_core::OntologyMode,
-        semantic_authority: Option<ConstructionSemanticAuthority>,
+        semantic_authority: Option<ConstructionAuthority>,
         budgets: GraphConstructionBudgets,
         lifecycle_mode: crate::filesystem_admission::ProjectLifecycleMode,
     ) -> Result<Self, GfError> {
@@ -1368,7 +1373,7 @@ impl GraphConstructionSession {
         operation_uuid: Uuid,
         parent_topology_generation: u64,
         ontology_mode: graphforge_core::OntologyMode,
-        semantic_authority: Option<ConstructionSemanticAuthority>,
+        semantic_authority: Option<ConstructionAuthority>,
         budgets: GraphConstructionBudgets,
         lifecycle_mode: crate::filesystem_admission::ProjectLifecycleMode,
         resume: bool,
@@ -1406,7 +1411,7 @@ impl GraphConstructionSession {
         operation_uuid: Uuid,
         parent_topology_generation: u64,
         ontology_mode: graphforge_core::OntologyMode,
-        semantic_authority: Option<ConstructionSemanticAuthority>,
+        semantic_authority: Option<ConstructionAuthority>,
         budgets: GraphConstructionBudgets,
         lifecycle_mode: crate::filesystem_admission::ProjectLifecycleMode,
         allocation: Option<&crate::StorageAllocationOperation>,
@@ -1414,7 +1419,7 @@ impl GraphConstructionSession {
         let budgets = budgets.validate()?;
         let semantic_authority_sha256 = semantic_authority
             .as_ref()
-            .map(ConstructionSemanticAuthority::digest)
+            .map(ConstructionAuthority::digest)
             .transpose()?;
         let project = StableDirectory::open(project_dir)
             .map_err(storage)?
