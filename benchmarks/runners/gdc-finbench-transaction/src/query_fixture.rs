@@ -772,6 +772,59 @@ mod tests {
         assert!(statuses.contains(&OperationStatus::CorrectnessFailed));
     }
 
+    /// TCR7, account 165, threshold 60, window (1000, 2000), limit 1, derived
+    /// by hand from `graph.json`. Out-edges of 165: ->169 @1400 (150), ->170
+    /// @1500 (120), ->170 @1450 (30). Newest first, the limit-1 slice keeps
+    /// only [170, 1500], so the admitted out-edges are that one (120 > 60):
+    /// numDst = 1. Without the membership test ->169 @1400 (150 > 60) is
+    /// admitted too, so numDst = 2. The limit-3 binding keeps all three
+    /// out-edges and cannot tell the two apart.
+    #[test]
+    fn dropping_the_tcr7_outgoing_membership_is_detected() {
+        let statuses = statuses_after_mutation(
+            Operation::Tcr7,
+            "[dst.id, edge2.timestamp] IN keptOut AND ",
+            "",
+        );
+        assert_eq!(
+            statuses,
+            [
+                OperationStatus::Passed,
+                OperationStatus::Passed,
+                OperationStatus::Passed,
+                OperationStatus::CorrectnessFailed
+            ]
+        );
+    }
+
+    /// TCR9, account 185, threshold 50, window (1000, 2000), limit 2, derived
+    /// by hand from `graph.json`. In-edges of 185, newest first: 188 @2500
+    /// (500), 187 @1410 (200), 186 @1400 (300). The limit-2 slice keeps
+    /// [188, 2500] and [187, 1410]; the first is outside the window, so
+    /// sum3 = 200 (186 @1400 is excluded by membership). Out-edges: ->188
+    /// @1500 (800) and ->189 @1510 (30), both kept; only 800 > 50, so
+    /// sum4 = 800 and ratioTransfer = 200 / 800 = 0.250. Without the
+    /// membership test sum3 = 500 and ratioTransfer = 0.625. The limit-1
+    /// binding has no admitted out-edge (ratioTransfer = -1 either way), so
+    /// it cannot tell the two apart.
+    #[test]
+    fn dropping_the_tcr9_incoming_membership_is_detected() {
+        let statuses = statuses_after_mutation(
+            Operation::Tcr9,
+            "[up.id, edge3.timestamp] IN keptIn AND ",
+            "",
+        );
+        assert_eq!(
+            statuses,
+            [
+                OperationStatus::Passed,
+                OperationStatus::Passed,
+                OperationStatus::Passed,
+                OperationStatus::CorrectnessFailed
+            ]
+        );
+    }
+
     #[test]
     fn windowing_the_tsr3_denominator_is_detected() {
         let statuses = statuses_after_mutation(
