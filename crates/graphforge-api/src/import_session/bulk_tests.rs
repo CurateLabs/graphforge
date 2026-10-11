@@ -746,6 +746,43 @@ fn an_import_holding_staged_initial_chunks_is_refused_and_asks_for_a_restart() {
     assert_eq!(graph.node_count("Person").unwrap(), 3);
 }
 
+/// An import whose construction session an earlier build recorded (its
+/// budgets name the retired node-index bound) is refused with a typed error,
+/// whatever the build staged, and aborting the import still reclaims it.
+#[test]
+fn an_import_recorded_by_an_earlier_build_is_refused_and_still_abortable() {
+    let (_directory, _project, graph) = fixture();
+    let ids = (1..=3).map(v7).collect::<Vec<_>>();
+    let mut session = graph
+        .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
+        .unwrap();
+    session
+        .append_arrow(BulkInputKind::Node, &[nodes(&ids)])
+        .unwrap();
+    let construction = session.open_construction(&graph).unwrap();
+    let root = graph
+        .resolved_generation
+        .container_root()
+        .join(".graphforge-construction")
+        .join(construction.session_uuid().simple().to_string());
+    drop(construction);
+    let checkpoint = root.join("checkpoint.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&checkpoint).unwrap()).unwrap();
+    value["budgets"]["max_node_index_bytes"] = serde_json::json!(1_073_741_824_u64);
+    fs::write(&checkpoint, serde_json::to_vec(&value).unwrap()).unwrap();
+
+    let refused = session.validate(&graph).unwrap_err();
+    assert!(matches!(refused, GfError::Validation(_)), "{refused:?}");
+    assert!(
+        refused.to_string().contains("restart the import"),
+        "{refused}"
+    );
+    assert_eq!(graph.node_count("Person").unwrap(), 0);
+    session.abort(&graph).unwrap();
+    assert!(!root.exists());
+}
+
 #[test]
 fn a_second_validate_of_a_built_session_reports_its_rows() {
     let (_directory, _project, graph) = fixture();

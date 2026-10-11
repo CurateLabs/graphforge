@@ -1292,12 +1292,7 @@ impl GraphImportSession {
         }
         let cleanup = (|| {
             if let Some(session_uuid) = self.manifest.construction_session_uuid {
-                graph
-                    .resume_graph_construction_to_discard(
-                        session_uuid,
-                        self.construction_budgets(),
-                    )?
-                    .discard()?;
+                graph.discard_construction(session_uuid, self.construction_budgets())?;
                 self.manifest.construction_session_uuid = None;
             }
             let sources = self.root.join("sources");

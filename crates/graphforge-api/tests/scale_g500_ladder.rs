@@ -4423,6 +4423,55 @@ const LINEARITY_RETAINED_FIELDS: [(&str, &str, RetainedMetricPolicy); 33] = [
     ),
 ];
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ShapeComponents {
+    /// Input validation, merge, Parquet, shaped-output authentication, parent
+    /// catalog and retained-probe bytes read.
+    read_bytes: [u64; 6],
+    /// The same six components, in read calls.
+    read_calls: [u64; 6],
+    /// Merge and Parquet bytes written.
+    write_bytes: [u64; 2],
+    /// Merge and Parquet write calls.
+    write_calls: [u64; 2],
+    /// Merge blocks read and written.
+    blocks: [u64; 2],
+}
+
+impl ShapeComponents {
+    fn from_evidence(construction: &Value) -> Self {
+        let field = |name: &str| {
+            construction[name]
+                .as_u64()
+                .unwrap_or_else(|| panic!("shape component {name} is an integer"))
+        };
+        Self {
+            read_bytes: [
+                field("shape_input_validation_read_bytes"),
+                field("merge_read_bytes"),
+                field("parquet_read_bytes"),
+                field("shaped_output_authentication_bytes"),
+                field("parent_catalog_read_bytes"),
+                field("retained_probe_read_bytes"),
+            ],
+            read_calls: [
+                field("shape_input_validation_read_operations"),
+                field("merge_read_operations"),
+                field("parquet_read_operations"),
+                field("shaped_output_authentication_operations"),
+                field("parent_catalog_read_operations"),
+                field("retained_probe_block_loads"),
+            ],
+            write_bytes: [field("merge_written_bytes"), field("parquet_write_bytes")],
+            write_calls: [
+                field("merge_write_operations"),
+                field("parquet_write_operations"),
+            ],
+            blocks: [field("merge_read_blocks"), field("merge_write_blocks")],
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LifecycleLinearityObservation {
     phases: BTreeMap<String, [u64; LINEARITY_PHASE_FIELDS.len()]>,
@@ -4431,6 +4480,9 @@ struct LifecycleLinearityObservation {
     input_rows: u64,
     live_nodes: u64,
     live_edges: u64,
+    /// The native counters the shape phase's totals are the sums of: read
+    /// bytes, read calls, written bytes, write calls and blocks.
+    shape_components: ShapeComponents,
     canonical_artifact_objects: u64,
     /// Bytes of every canonical artifact the publication installed or reused.
     canonical_output_bytes: u64,
@@ -4708,6 +4760,7 @@ fn lifecycle_linearity_observation(evidence: &Value) -> LifecycleLinearityObserv
         input_rows,
         live_nodes,
         live_edges,
+        shape_components: ShapeComponents::from_evidence(construction),
         canonical_artifact_objects,
         canonical_output_bytes,
         cas_publication_io: serde_json::from_value(construction["cas_publication_io"].clone())
@@ -5338,6 +5391,30 @@ enum MetricRegime {
     Reconciled,
 }
 
+/// The shape total a [`PhaseMetricPolicy::ShapeControl`] polices.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShapeControlField {
+    ReadBytes,
+    ReadCalls,
+    WriteBytes,
+    WriteCalls,
+    Blocks,
+}
+
+/// Components of the empty shape's own record: the shaped-output
+/// authentication reads, the Parquet write of the shaped runtime catalog, and
+/// the merge-writer block that carries it.
+const SHAPE_AUTHENTICATION_COMPONENT: usize = 3;
+const SHAPE_PARQUET_WRITE_COMPONENT: usize = 1;
+const SHAPE_WRITE_BLOCK_COMPONENT: usize = 1;
+/// One small control record: a filesystem block.
+const CONTROL_RECORD_MAX_BYTES: u64 = 4096;
+/// The smallest authenticated record: a Parquet file's two magics and footer
+/// length.
+const CONTROL_RECORD_MIN_BYTES: u64 = 12;
+/// A control record is read or written in a handful of calls.
+const CONTROL_RECORD_MAX_CALLS: u64 = 16;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PhaseMetricPolicy {
     ScaleBearing,
@@ -5386,12 +5463,21 @@ enum PhaseMetricPolicy {
     },
     EncodeWriteComponentCalls,
     AppendObjectInventory,
-    /// The bulk builder runs no shaping stage and its session records an empty
-    /// shape, so the phase carries only the fixed control reads and writes of
-    /// that record. The value is the same on every rung and never zero: a
-    /// value that follows the data means a shape stage came back, and a value
-    /// that vanishes means the control stopped being authenticated.
-    ConstantControl,
+    /// A fixed control read or write: the same on every rung, within
+    /// `minimum..=maximum`. The ceiling is the size of one small control
+    /// record, so a payload-sized read added to the phase fails it, and the
+    /// floor is the smallest record that can be authenticated at all, so a
+    /// read that stops or shrinks to nothing fails it.
+    ConstantControl {
+        minimum: u64,
+        maximum: u64,
+    },
+    /// The bulk builder runs no shaping stage; its session records an empty
+    /// shape, which writes the shaped runtime catalog of an empty parent once
+    /// and authenticates it. Each shape total is the sum of its native
+    /// components, of which only that record's component is nonzero, and it is
+    /// the same on every rung and within one control record.
+    ShapeControl(ShapeControlField),
     /// Unix links the encoder's file into the object store instead of copying
     /// it. Payload read bytes are then only the authentication of objects that
     /// already existed, and together with the bytes installed they account for
@@ -5427,9 +5513,10 @@ impl PhaseMetricPolicy {
             Self::BoundedObjectCalls { .. } | Self::InventoryControlBytes { .. } => {
                 MetricRegime::StructureBounded
             }
-            Self::StructurallyZero | Self::ConstantControl => MetricRegime::FixedProtocol,
+            Self::StructurallyZero | Self::ConstantControl { .. } => MetricRegime::FixedProtocol,
             Self::HydrationReadReconciliation { .. }
             | Self::EncodeWriteComponentCalls
+            | Self::ShapeControl(_)
             | Self::LinkedPayloadReadBytes
             | Self::LinkedPayloadWriteBytes
             | Self::CasFsyncInventory
@@ -5449,7 +5536,10 @@ struct PhasePolicyRow {
 
 const ZERO: PhaseMetricPolicy = PhaseMetricPolicy::StructurallyZero;
 const SCALE: PhaseMetricPolicy = PhaseMetricPolicy::ScaleBearing;
-const CONTROL: PhaseMetricPolicy = PhaseMetricPolicy::ConstantControl;
+const CONTROL: PhaseMetricPolicy = PhaseMetricPolicy::ConstantControl {
+    minimum: CONTROL_RECORD_MIN_BYTES,
+    maximum: CONTROL_RECORD_MAX_BYTES,
+};
 /// Windows copies each encoded file into the object store, so its bytes follow
 /// the data. Everywhere else the install links the encoder's file (#1899) and
 /// the invariant is that the object store writes no payload byte at all.
@@ -5521,9 +5611,11 @@ const HYDRATION_ROUTE_TABLE_CONTROL_BYTES: u64 = 2 * 1024;
 // seal_authentication: fixed-protocol zero on every field; no I/O is
 //   attributed to the seal itself (#1623 split it from append).
 // shape_consume_reauthentication: the bulk builder shapes nothing, so the phase
-//   is the fixed control I/O of the empty shape its session records: bytes,
-//   calls and blocks are the same on every rung and nonzero; object count and
-//   fsyncs are zero.
+//   is the fixed control I/O of the empty shape its session records: the
+//   shaped runtime catalog of an empty parent, written once and authenticated.
+//   Each total equals the sum of its native components, only that record's
+//   component is nonzero, and it is the same on every rung and within one
+//   control record; object count and fsyncs are zero.
 // encode_write_postwrite_authentication: write bytes are data-proportional.
 //   The bulk builder emits each artifact once and authenticates nothing it
 //   wrote, so read bytes are the fixed control read, the same on every rung;
@@ -5577,7 +5669,15 @@ const PHASE_METRIC_POLICIES: [PhasePolicyRow; 9] = [
     },
     PhasePolicyRow {
         phase: "shape_consume_reauthentication",
-        fields: [CONTROL, CONTROL, CONTROL, CONTROL, ZERO, CONTROL, ZERO],
+        fields: [
+            PhaseMetricPolicy::ShapeControl(ShapeControlField::ReadBytes),
+            PhaseMetricPolicy::ShapeControl(ShapeControlField::WriteBytes),
+            PhaseMetricPolicy::ShapeControl(ShapeControlField::ReadCalls),
+            PhaseMetricPolicy::ShapeControl(ShapeControlField::WriteCalls),
+            ZERO,
+            PhaseMetricPolicy::ShapeControl(ShapeControlField::Blocks),
+            ZERO,
+        ],
     },
     PhasePolicyRow {
         phase: "encode_write_postwrite_authentication",
@@ -5703,6 +5803,75 @@ fn validate_phase_policy_table(
     if policy_names.len() != PHASE_METRIC_POLICIES.len() || policy_names != observed_names {
         return Err(format!(
             "phase policy inventory differs from evidence: policy={policy_names:?} observed={observed_names:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// A shape total of the bulk route: the sum of its native components, all of
+/// which are zero but the empty shape's own record, and within one control
+/// record (see [`PhaseMetricPolicy::ShapeControl`]).
+fn validate_shape_control(
+    name: &str,
+    field: ShapeControlField,
+    observed: u64,
+    observation: &LifecycleLinearityObservation,
+    rung: usize,
+) -> Result<(), String> {
+    let components = &observation.shape_components;
+    let (parts, record, minimum, maximum): (&[u64], usize, u64, u64) = match field {
+        ShapeControlField::ReadBytes => (
+            &components.read_bytes,
+            SHAPE_AUTHENTICATION_COMPONENT,
+            CONTROL_RECORD_MIN_BYTES,
+            CONTROL_RECORD_MAX_BYTES,
+        ),
+        ShapeControlField::WriteBytes => (
+            &components.write_bytes,
+            SHAPE_PARQUET_WRITE_COMPONENT,
+            CONTROL_RECORD_MIN_BYTES,
+            CONTROL_RECORD_MAX_BYTES,
+        ),
+        ShapeControlField::ReadCalls => (
+            &components.read_calls,
+            SHAPE_AUTHENTICATION_COMPONENT,
+            1,
+            CONTROL_RECORD_MAX_CALLS,
+        ),
+        ShapeControlField::WriteCalls => (
+            &components.write_calls,
+            SHAPE_PARQUET_WRITE_COMPONENT,
+            1,
+            CONTROL_RECORD_MAX_CALLS,
+        ),
+        ShapeControlField::Blocks => (
+            &components.blocks,
+            SHAPE_WRITE_BLOCK_COMPONENT,
+            1,
+            CONTROL_RECORD_MAX_CALLS,
+        ),
+    };
+    let sum = parts
+        .iter()
+        .try_fold(0_u64, |total, part| total.checked_add(*part))
+        .ok_or_else(|| format!("{name} native component sum overflows at rung {rung}"))?;
+    if observed != sum {
+        return Err(format!(
+            "{name} does not reconcile to its native components at rung {rung}: observed={observed} components={parts:?}"
+        ));
+    }
+    if parts
+        .iter()
+        .enumerate()
+        .any(|(index, part)| index != record && *part != 0)
+    {
+        return Err(format!(
+            "{name} has work outside the empty shape's own record at rung {rung}: {parts:?}"
+        ));
+    }
+    if !(minimum..=maximum).contains(&observed) {
+        return Err(format!(
+            "{name} is outside the control record bounds {minimum}..={maximum} at rung {rung}: {observed}"
         ));
     }
     Ok(())
@@ -6423,7 +6592,18 @@ fn validate_lifecycle_metric_policies_for_axis(
                         ));
                     }
                 }
-                PhaseMetricPolicy::ConstantControl => {
+                PhaseMetricPolicy::ConstantControl { minimum, maximum } => {
+                    if !(minimum..=maximum).contains(&values[0]) {
+                        return Err(format!(
+                            "{name} is outside the control record bounds {minimum}..={maximum}: {values:?}"
+                        ));
+                    }
+                    validate_fixed_protocol_metric(&name, values, values[0], values[0])?;
+                }
+                PhaseMetricPolicy::ShapeControl(field) => {
+                    for (rung, observation) in observations.iter().enumerate() {
+                        validate_shape_control(&name, field, values[rung], observation, rung)?;
+                    }
                     validate_fixed_protocol_metric(&name, values, values[0], values[0])?;
                 }
                 PhaseMetricPolicy::EncodeWriteComponentCalls => {
@@ -6956,6 +7136,13 @@ fn synthetic_linearity_observations_for_axis(
             input_rows: live_nodes + live_edges,
             live_nodes,
             live_edges,
+            shape_components: ShapeComponents {
+                read_bytes: [0, 0, 0, 434, 0, 0],
+                read_calls: [0, 0, 0, 2, 0, 0],
+                write_bytes: [0, 963],
+                write_calls: [0, 1],
+                blocks: [0, 1],
+            },
             canonical_artifact_objects: 19,
             canonical_output_bytes: if cfg!(windows) {
                 900 * factor
@@ -7682,7 +7869,8 @@ fn phase_metric_regimes_are_declared_and_structure_bounds_carry_a_floor() {
                 (MetricRegime::FixedProtocol, other)
                     if !matches!(
                         other,
-                        PhaseMetricPolicy::StructurallyZero | PhaseMetricPolicy::ConstantControl
+                        PhaseMetricPolicy::StructurallyZero
+                            | PhaseMetricPolicy::ConstantControl { .. }
                     ) =>
                 {
                     panic!("{}.{field}: {other:?} is not a fixed protocol", row.phase)
@@ -7907,39 +8095,65 @@ fn linked_payload_policies_reject_a_reintroduced_copy_or_read_back() {
 }
 
 #[test]
-fn the_shape_phase_is_a_constant_control_protocol_that_neither_grows_nor_vanishes() {
+fn the_shape_phase_is_the_empty_shapes_own_control_record() {
     // The bulk builder shapes nothing: its session records an empty shape, and
-    // the phase is the fixed control I/O of that record.
+    // the phase is the one record that shape writes and authenticates.
+    let phase = "shape_consume_reauthentication";
     for axis in [LinearityAxis::Nodes, LinearityAxis::Edges] {
-        let observations = synthetic_linearity_observations_for_axis(axis);
-        validate_lifecycle_metric_policies_for_axis(axis, &observations)
-            .expect("a constant shape control passes");
-        for (index, field) in LINEARITY_PHASE_FIELDS.iter().enumerate() {
-            if matches!(*field, "object_count" | "fsync_calls") {
-                continue;
-            }
+        let base = synthetic_linearity_observations_for_axis(axis);
+        validate_lifecycle_metric_policies_for_axis(axis, &base)
+            .expect("the empty shape's record passes");
+        // (field, mutation of the aggregate and of its components)
+        type Mutation = fn(&mut LifecycleLinearityObservation, usize);
+        let cases: Vec<(&str, &str, Mutation)> = vec![
             // A shape stage that came back and follows the data.
-            let mut growing = observations.clone();
-            for (rung, observation) in growing.iter_mut().enumerate() {
-                observation
-                    .phases
-                    .get_mut("shape_consume_reauthentication")
-                    .unwrap()[index] += rung as u64;
+            ("read_bytes", "grows", |o, rung| {
+                o.phases.get_mut("shape_consume_reauthentication").unwrap()[0] += rung as u64;
+                o.shape_components.read_bytes[3] += rung as u64;
+            }),
+            ("write_calls", "grows", |o, rung| {
+                o.phases.get_mut("shape_consume_reauthentication").unwrap()[3] += rung as u64;
+                o.shape_components.write_calls[1] += rung as u64;
+            }),
+            // The record stops being authenticated, or is read as one byte.
+            ("read_bytes", "vanishes", |o, _| {
+                o.phases.get_mut("shape_consume_reauthentication").unwrap()[0] = 0;
+                o.shape_components.read_bytes[3] = 0;
+            }),
+            ("read_bytes", "shrinks to one byte", |o, _| {
+                o.phases.get_mut("shape_consume_reauthentication").unwrap()[0] = 1;
+                o.shape_components.read_bytes[3] = 1;
+            }),
+            // A payload-sized fixed read is added.
+            ("read_bytes", "gains a large fixed read", |o, _| {
+                o.phases.get_mut("shape_consume_reauthentication").unwrap()[0] = 1 << 20;
+                o.shape_components.read_bytes[3] = 1 << 20;
+            }),
+            // Shaping work that the bulk builder does not do.
+            ("read_bytes", "reads merge runs", |o, _| {
+                o.phases.get_mut("shape_consume_reauthentication").unwrap()[0] += 100;
+                o.shape_components.read_bytes[1] = 100;
+            }),
+            ("write_bytes", "writes merge runs", |o, _| {
+                o.phases.get_mut("shape_consume_reauthentication").unwrap()[1] += 100;
+                o.shape_components.write_bytes[0] = 100;
+            }),
+            // An aggregate that does not reconcile to its components.
+            ("read_calls", "overreports", |o, _| {
+                o.phases.get_mut("shape_consume_reauthentication").unwrap()[2] += 1;
+            }),
+            ("blocks", "lose their component", |o, _| {
+                o.shape_components.blocks[1] = 0;
+            }),
+        ];
+        for (name, what, mutate) in cases {
+            let mut mutated = base.clone();
+            for (rung, observation) in mutated.iter_mut().enumerate() {
+                mutate(observation, rung);
             }
-            let error = validate_lifecycle_metric_policies_for_axis(axis, &growing)
-                .expect_err("a shape phase that grows with the rung must fail");
-            assert!(error.contains("shape_consume_reauthentication"), "{error}");
-            // A control that stopped being authenticated on every rung alike.
-            let mut vanished = observations.clone();
-            for observation in &mut vanished {
-                observation
-                    .phases
-                    .get_mut("shape_consume_reauthentication")
-                    .unwrap()[index] = 0;
-            }
-            let error = validate_lifecycle_metric_policies_for_axis(axis, &vanished)
-                .expect_err("a shape phase that vanishes must fail");
-            assert!(error.contains("shape_consume_reauthentication"), "{error}");
+            let error = validate_lifecycle_metric_policies_for_axis(axis, &mutated)
+                .expect_err(&format!("{axis:?}: shape {name} that {what} must fail"));
+            assert!(error.contains(phase), "{axis:?} {name} {what}: {error}");
         }
     }
 }

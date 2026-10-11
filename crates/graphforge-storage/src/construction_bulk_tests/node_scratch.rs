@@ -50,6 +50,7 @@ pub(super) fn node_scratch_run(
         report: session.bulk_build_report(),
         scratch_left: scratch_dir(&session).exists(),
         back: read_back(&session, &encoding),
+        _root: root,
     })
 }
 

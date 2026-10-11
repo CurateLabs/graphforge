@@ -6,18 +6,28 @@
 // were submitted.
 
 /// What an encoded generation answers when it is read back through the
-/// ordinary readers: node and edge rows with their surrogates, the
-/// adjacency manifest, and every non-null property cell.
-#[derive(Default)]
+/// ordinary readers: node and edge rows with their surrogates, the adjacency
+/// manifest and CSR, and every non-null property cell.
+#[derive(Clone, Default)]
 struct ReadBack {
+    /// The published graph tree the generation was read from.
+    graph: PathBuf,
     /// UUID to (surrogate, runtime type id).
     nodes: std::collections::BTreeMap<[u8; 16], (u64, u32)>,
     edges: std::collections::BTreeMap<[u8; 16], BackEdge>,
     adjacency: Vec<crate::adjacency::AdjacencyManifestRow>,
-    /// (is edge, owner UUID, property) to the cell as text.
-    cells: std::collections::BTreeMap<(bool, [u8; 16], String), String>,
+    /// Every non-null cell of each node property, by column.
+    node_columns: PropertyColumns,
+    /// Every non-null cell of each edge property, by column.
+    edge_columns: PropertyColumns,
 }
 
+/// The non-null cells of each property column as (owner UUIDs, values), both
+/// in owner order, so a column compares with its typed Arrow values.
+type PropertyColumns =
+    std::collections::BTreeMap<String, (arrow::array::ArrayRef, arrow::array::ArrayRef)>;
+
+#[derive(Clone)]
 struct BackEdge {
     relation: String,
     source: [u8; 16],
@@ -47,39 +57,77 @@ fn surrogates(batch: &RecordBatch, name: &str) -> arrow::array::UInt64Array {
         .clone()
 }
 
-/// Every non-null property cell of `batch` past its `required` topology
-/// columns, keyed by owner and column and rendered as text.
-fn property_cells(
-    batch: &RecordBatch,
-    required: usize,
-    is_edge: bool,
-    cells: &mut std::collections::BTreeMap<(bool, [u8; 16], String), String>,
-) {
-    let owners = uuid_column(batch, if is_edge { "edge_uuid" } else { "node_uuid" });
-    for (field, column) in batch
-        .schema()
-        .fields()
-        .iter()
-        .zip(batch.columns())
-        .skip(required)
-    {
-        if matches!(
-            field.name().as_str(),
-            "node_uuid" | "edge_uuid" | "__gf_property_tombstone"
-        ) {
-            continue;
-        }
-        for row in (0..batch.num_rows()).filter(|row| column.is_valid(*row)) {
-            let mut text = arrow::util::display::array_value_to_string(column, row).unwrap();
-            if text.len() > 256 {
-                // Wide values compare by length and digest.
-                use std::hash::{Hash, Hasher};
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                text.hash(&mut hasher);
-                text = format!("{} bytes, hash {:x}", text.len(), hasher.finish());
+/// The non-null cells of every property column of `batches` past their
+/// `required` topology columns, keyed by owner in the `owner` column. Values
+/// keep their Arrow type, so integer 10 never equals the string "10".
+fn property_columns(batches: &[RecordBatch], owner: &str, required: usize) -> PropertyColumns {
+    use arrow::compute::{concat, filter, sort_to_indices, take};
+    let mut parts = std::collections::BTreeMap::<
+        String,
+        Vec<(arrow::array::ArrayRef, arrow::array::ArrayRef)>,
+    >::new();
+    for batch in batches {
+        let owners = batch.column_by_name(owner).unwrap();
+        for (field, column) in batch
+            .schema()
+            .fields()
+            .iter()
+            .zip(batch.columns())
+            .skip(required)
+        {
+            if matches!(
+                field.name().as_str(),
+                "node_uuid" | "edge_uuid" | "__gf_property_tombstone"
+            ) {
+                continue;
             }
-            cells.insert((is_edge, uuid_at(&owners, row), field.name().clone()), text);
+            let valid = arrow::array::BooleanArray::from(
+                (0..column.len())
+                    .map(|row| column.is_valid(row))
+                    .collect::<Vec<_>>(),
+            );
+            parts.entry(field.name().clone()).or_default().push((
+                filter(owners, &valid).unwrap(),
+                filter(column, &valid).unwrap(),
+            ));
         }
+    }
+    parts
+        .into_iter()
+        .filter_map(|(name, parts)| {
+            let owners = concat(&parts.iter().map(|part| part.0.as_ref()).collect::<Vec<_>>())
+                .unwrap();
+            if owners.is_empty() {
+                // A column with no cell publishes nothing.
+                return None;
+            }
+            let values = concat(&parts.iter().map(|part| part.1.as_ref()).collect::<Vec<_>>())
+                .unwrap();
+            let order = sort_to_indices(&owners, None, None).unwrap();
+            Some((
+                name,
+                (
+                    take(&owners, &order, None).unwrap(),
+                    take(&values, &order, None).unwrap(),
+                ),
+            ))
+        })
+        .collect()
+}
+
+/// Two property column sets hold the same cells, owner for owner and type for
+/// type.
+fn assert_columns_equal(label: &str, expected: &PropertyColumns, actual: &PropertyColumns) {
+    assert_eq!(
+        expected.keys().collect::<Vec<_>>(),
+        actual.keys().collect::<Vec<_>>(),
+        "{label} columns"
+    );
+    for (name, (expected_owners, expected_values)) in expected {
+        let (owners, values) = &actual[name];
+        assert_eq!(expected_values.data_type(), values.data_type(), "{label} {name} type");
+        assert!(expected_owners.to_data() == owners.to_data(), "{label} {name} owners");
+        assert!(expected_values.to_data() == values.to_data(), "{label} {name} values");
     }
 }
 
@@ -89,7 +137,10 @@ fn read_back(
     encoding: &GraphConstructionEncoding,
 ) -> ReadBack {
     let graph = session.root.path().join(&encoding.root).join("graph");
-    let mut back = ReadBack::default();
+    let mut back = ReadBack {
+        graph: graph.clone(),
+        ..ReadBack::default()
+    };
     for batch in crate::read_nodes(&graph).unwrap() {
         let uuids = uuid_column(&batch, "node_uuid");
         let ids = surrogates(&batch, "node_id");
@@ -149,12 +200,8 @@ fn read_back(
         }
     }
     back.adjacency = crate::adjacency::read_manifest(&graph).unwrap_or_default();
-    for batch in fragments("properties/") {
-        property_cells(&batch, 0, false, &mut back.cells);
-    }
-    for batch in fragments("edge_properties/") {
-        property_cells(&batch, 0, true, &mut back.cells);
-    }
+    back.node_columns = property_columns(&fragments("properties/"), "node_uuid", 0);
+    back.edge_columns = property_columns(&fragments("edge_properties/"), "edge_uuid", 0);
     back
 }
 
@@ -165,7 +212,6 @@ fn read_back(
 /// once in the union; and every non-null property cell is present.
 fn assert_reads_back(nodes: &[RecordBatch], edges: &[RecordBatch], back: &ReadBack) {
     let mut labels = std::collections::BTreeMap::new();
-    let mut expected_cells = std::collections::BTreeMap::new();
     for batch in nodes {
         let uuids = uuid_column(batch, "node_uuid");
         let names = batch
@@ -180,7 +226,6 @@ fn assert_reads_back(nodes: &[RecordBatch], edges: &[RecordBatch], back: &ReadBa
                     .is_none()
             );
         }
-        property_cells(batch, 2, false, &mut expected_cells);
     }
     assert_eq!(back.nodes.len(), labels.len(), "node count");
     let mut types = std::collections::BTreeMap::new();
@@ -203,6 +248,14 @@ fn assert_reads_back(nodes: &[RecordBatch], edges: &[RecordBatch], back: &ReadBa
         .map(|(id, _)| *id)
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(node_ids.len(), back.nodes.len(), "node surrogates repeat");
+    // A surrogate is the rank of its UUID: ids rise with the UUID order.
+    assert!(
+        back.nodes
+            .values()
+            .zip(back.nodes.values().skip(1))
+            .all(|(low, high)| low.0 < high.0),
+        "node surrogates do not follow the UUID order"
+    );
 
     let mut per_relation = std::collections::BTreeMap::<String, u64>::new();
     let mut total = 0_u64;
@@ -227,7 +280,6 @@ fn assert_reads_back(nodes: &[RecordBatch], edges: &[RecordBatch], back: &ReadBa
             *per_relation.entry(relations.value(row).to_owned()).or_default() += 1;
             total += 1;
         }
-        property_cells(batch, 4, true, &mut expected_cells);
     }
     assert_eq!(back.edges.len() as u64, total, "edge count");
     let edge_ids = back
@@ -236,6 +288,13 @@ fn assert_reads_back(nodes: &[RecordBatch], edges: &[RecordBatch], back: &ReadBa
         .map(|edge| edge.id)
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(edge_ids.len(), back.edges.len(), "edge surrogates repeat");
+    assert!(
+        back.edges
+            .values()
+            .zip(back.edges.values().skip(1))
+            .all(|(low, high)| low.id < high.id),
+        "edge surrogates do not follow the UUID order"
+    );
 
     if total > 0 {
         for direction in [crate::adjacency::Direction::Out, crate::adjacency::Direction::In] {
@@ -256,7 +315,60 @@ fn assert_reads_back(nodes: &[RecordBatch], edges: &[RecordBatch], back: &ReadBa
             );
         }
     }
-    assert_eq!(back.cells, expected_cells, "property cells");
+    assert_columns_equal(
+        "node property",
+        &property_columns(nodes, "node_uuid", 2),
+        &back.node_columns,
+    );
+    assert_columns_equal(
+        "edge property",
+        &property_columns(edges, "edge_uuid", 4),
+        &back.edge_columns,
+    );
+    assert_csr_matches(back);
+}
+
+/// Every published CSR (each relation and the union, both directions) holds,
+/// for every node, exactly the (edge, neighbour) entries an adjacency computed
+/// from the edges' endpoints holds, in edge order.
+fn assert_csr_matches(back: &ReadBack) {
+    use crate::adjacency::{ALL_RELATIONS_STEM, Direction, ShardedCsrIndex, csr_path};
+    let mut by_relation = std::collections::BTreeMap::<String, Vec<(u64, u64, u64)>>::new();
+    for edge in back.edges.values() {
+        let entry = (edge.source_id, edge.target_id, edge.id);
+        by_relation
+            .entry(edge.relation.clone())
+            .or_default()
+            .push(entry);
+        by_relation
+            .entry(ALL_RELATIONS_STEM.to_owned())
+            .or_default()
+            .push(entry);
+    }
+    for (stem, entries) in &by_relation {
+        for direction in [Direction::Out, Direction::In] {
+            let mut expected = std::collections::BTreeMap::<u64, Vec<(u64, u64)>>::new();
+            for &(source, target, edge) in entries {
+                let (key, neighbour) = match direction {
+                    Direction::Out => (source, target),
+                    Direction::In => (target, source),
+                };
+                expected.entry(key).or_default().push((edge, neighbour));
+            }
+            for row in expected.values_mut() {
+                row.sort_unstable();
+            }
+            let index = ShardedCsrIndex::open(&csr_path(&back.graph, stem, direction)).unwrap();
+            assert_eq!(index.edge_count(), entries.len() as u64, "{stem} {direction:?}");
+            for (node, _) in back.nodes.values() {
+                assert_eq!(
+                    index.row(*node).unwrap(),
+                    expected.get(node).cloned().unwrap_or_default(),
+                    "{stem} {direction:?} node {node}"
+                );
+            }
+        }
+    }
 }
 
 /// Build resident on `workers`, read the generation back and check it
@@ -403,3 +515,55 @@ fn a_bulk_build_publishes_a_current_adjacency_index_that_hydrates_and_validates(
     }
 }
 
+
+/// The oracle rejects what it exists to catch: a CSR whose entries disagree
+/// with the edges' endpoints, surrogates that do not follow the UUID order, and
+/// a value whose type differs although its text is the same.
+#[test]
+fn the_read_back_oracle_rejects_a_wrong_csr_wrong_surrogates_and_a_wrong_type() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let (nodes, edges) = graph(64, 200, 64, scattered);
+    let root = TempDir::new().unwrap();
+    let mut session = pinned(&root);
+    let encoding = session
+        .prepare_bulk_encoding(1, &plan(&nodes, &edges, 2), || false)
+        .unwrap();
+    let back = read_back(&session, &encoding);
+    assert_reads_back(&nodes, &edges, &back);
+
+    // An edge whose recorded target is another node than the CSR holds.
+    let mut wrong_csr = back.clone();
+    wrong_csr.edges.values_mut().next().unwrap().target_id += 1;
+    assert!(catch_unwind(AssertUnwindSafe(|| assert_csr_matches(&wrong_csr))).is_err());
+
+    // Two nodes whose surrogates swap against their UUID order.
+    let mut wrong_order = back.clone();
+    let mut ids = wrong_order.nodes.values_mut().take(2);
+    let (first, second) = (ids.next().unwrap(), ids.next().unwrap());
+    std::mem::swap(&mut first.0, &mut second.0);
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| assert_reads_back(
+            &nodes,
+            &edges,
+            &wrong_order
+        )))
+        .is_err()
+    );
+
+    // Integer 10 against the string "10".
+    let owner: arrow::array::ArrayRef = Arc::new(fixed(&[uuid(0x10, 0)]));
+    let column = |values: arrow::array::ArrayRef| {
+        PropertyColumns::from([("x".to_owned(), (owner.clone(), values))])
+    };
+    let integer = column(Arc::new(Int64Array::from(vec![10])));
+    let text = column(Arc::new(StringArray::from(vec!["10"])));
+    assert_columns_equal("same", &integer, &integer);
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| assert_columns_equal(
+            "different",
+            &integer,
+            &text
+        )))
+        .is_err()
+    );
+}

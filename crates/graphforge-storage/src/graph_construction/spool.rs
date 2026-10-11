@@ -61,6 +61,10 @@ pub(super) enum ChunkRoute {
     /// as Parquet and runs (appends).
     #[default]
     Undecided,
+    /// Chunks are staged as Parquet and runs, then replayed from a spool. An
+    /// earlier build recorded this route; it is decoded only so that the
+    /// session is refused and discarded, and never executed.
+    Staged,
     /// Chunks are spooled for the bulk builder.
     Spool,
 }
@@ -91,6 +95,10 @@ pub(super) enum ChunkPreference {
 pub enum SealRoute {
     /// Read the spooled chunks in place with the bulk builder.
     Bulk,
+    /// Replay the spool through the staged path. An earlier build recorded
+    /// this route; it is decoded only so that the session is refused and
+    /// discarded, and never executed.
+    ReplayStaged,
 }
 
 /// The one file a spooled chunk occupies.

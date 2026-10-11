@@ -83,6 +83,8 @@ use catalog::{
     load_parent_runtime_catalog_from_compact,
 };
 mod finish_stages;
+mod retired;
+pub use retired::discard_retired_construction;
 mod partition_load;
 mod partition_memory;
 mod partition_records;
@@ -1450,7 +1452,14 @@ impl GraphConstructionSession {
         // exact immutable parent and therefore remains recoverable after
         // `CURRENT` has advanced.
         let mut recovered_checkpoint = match root.open_child_file(OsStr::new(CHECKPOINT)) {
-            Ok(mut file) => Some(decode_bounded::<Checkpoint>(&mut file)?),
+            Ok(mut file) => {
+                let body = controls::read_bounded_limit(&mut file, MAX_CONTROL_BYTES)?;
+                let checkpoint: Checkpoint = serde_json::from_slice(&body).map_err(storage)?;
+                if retired::is_retired(&body, &checkpoint) {
+                    return Err(retired::refusal());
+                }
+                Some(checkpoint)
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(storage(error)),
         };

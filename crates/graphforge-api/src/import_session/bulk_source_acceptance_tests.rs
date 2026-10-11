@@ -258,47 +258,137 @@ fn query_snapshot(graph: &GraphForge, property: &str) -> String {
     )
 }
 
-/// The published graph answers with the input's values: for every seventh row
-/// that has an identity, the property read through a query equals the source's.
-fn assert_values_match_input(graph: &GraphForge, batch: &RecordBatch, property: &str) {
-    let ids = batch
-        .column(0)
-        .as_any()
-        .downcast_ref::<FixedSizeBinaryArray>()
-        .unwrap();
-    let values = batch.column_by_name(property).unwrap();
-    let mut checked = 0;
-    for row in (0..batch.num_rows())
-        .filter(|row| ids.is_valid(*row))
-        .step_by(7)
-    {
-        let id: [u8; 16] = ids.value(row).try_into().unwrap();
-        let params =
-            std::collections::HashMap::from([("id".to_owned(), crate::IrLiteral::Uuid(id))]);
-        let result = graph
-            .execute_with_params(
-                &format!("MATCH (n:Person) WHERE n.node_uuid = $id RETURN n.{property} AS value"),
-                &params,
-            )
-            .unwrap();
-        assert_eq!(
-            result
-                .batches
-                .iter()
-                .map(RecordBatch::num_rows)
-                .sum::<usize>(),
-            1
-        );
-        let answered = &result.batches[0].column(0);
-        let render = |array: &ArrayRef, row: usize| {
-            array
-                .is_valid(row)
-                .then(|| arrow::util::display::array_value_to_string(array, row).unwrap())
-        };
-        assert_eq!(render(answered, 0), render(values, row), "row {row}");
-        checked += 1;
+/// The non-null cells of every property column of `batches` past their first
+/// `required` columns, keyed by the UUIDs in column 0 and typed as Arrow.
+type Columns = BTreeMap<String, (ArrayRef, ArrayRef)>;
+
+fn property_columns(batches: &[RecordBatch], required: usize) -> Columns {
+    use arrow::compute::{concat, filter, sort_to_indices, take};
+    let mut parts = BTreeMap::<String, Vec<(ArrayRef, ArrayRef)>>::new();
+    for batch in batches {
+        let owners = batch.column(0);
+        for (field, column) in batch
+            .schema()
+            .fields()
+            .iter()
+            .zip(batch.columns())
+            .skip(required)
+        {
+            if matches!(field.name().as_str(), "__gf_property_tombstone") {
+                continue;
+            }
+            let valid = arrow::array::BooleanArray::from(
+                (0..column.len())
+                    .map(|row| column.is_valid(row))
+                    .collect::<Vec<_>>(),
+            );
+            parts.entry(field.name().clone()).or_default().push((
+                filter(owners, &valid).unwrap(),
+                filter(column, &valid).unwrap(),
+            ));
+        }
     }
-    assert!(checked > 0, "no row was compared");
+    parts
+        .into_iter()
+        .filter_map(|(name, parts)| {
+            let owners =
+                concat(&parts.iter().map(|part| part.0.as_ref()).collect::<Vec<_>>()).unwrap();
+            if owners.is_empty() {
+                return None;
+            }
+            let values =
+                concat(&parts.iter().map(|part| part.1.as_ref()).collect::<Vec<_>>()).unwrap();
+            let order = sort_to_indices(&owners, None, None).unwrap();
+            Some((
+                name,
+                (
+                    take(&owners, &order, None).unwrap(),
+                    take(&values, &order, None).unwrap(),
+                ),
+            ))
+        })
+        .collect()
+}
+
+fn parquet_files(directory: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            parquet_files(&path, files);
+        } else if path
+            .extension()
+            .is_some_and(|extension| extension == "parquet")
+        {
+            files.push(path);
+        }
+    }
+}
+
+/// Every non-null cell of every property column the source holds is published,
+/// owner for owner, with its Arrow type. The expectation is the source after the
+/// intake normalization an append also runs, so a row without an identity has
+/// the one the operation derives for it.
+fn assert_every_cell_published(
+    graph: &GraphForge,
+    root: &Path,
+    batch: &RecordBatch,
+    batch_rows: usize,
+) {
+    let mut normalized = Vec::new();
+    for (index, first) in (0..batch.num_rows()).step_by(batch_rows).enumerate() {
+        let slice = batch.slice(first, batch_rows.min(batch.num_rows() - first));
+        let canonical = super::canonicalize_parquet_batch(BulkInputKind::Node, &slice).unwrap();
+        normalized.push(
+            graph
+                .normalize_import_node_chunk_at(
+                    super::import_batch_operation(v7(1918), 0, index as u64),
+                    &canonical,
+                    0,
+                )
+                .unwrap(),
+        );
+    }
+    let mut files = Vec::new();
+    parquet_files(&root.join("encoded-v1/graph/properties"), &mut files);
+    assert!(!files.is_empty(), "no property fragment was published");
+    let fragments = files
+        .iter()
+        .flat_map(|path| {
+            parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+                File::open(path).unwrap(),
+            )
+            .unwrap()
+            .build()
+            .unwrap()
+            .map(|batch| batch.unwrap())
+        })
+        .collect::<Vec<_>>();
+    let expected = property_columns(&normalized, 2);
+    let published = property_columns(&fragments, 1);
+    assert_eq!(
+        expected.keys().collect::<Vec<_>>(),
+        published.keys().collect::<Vec<_>>(),
+        "published property columns"
+    );
+    for (name, (owners, values)) in &expected {
+        let (published_owners, published_values) = &published[name];
+        assert_eq!(
+            values.data_type(),
+            published_values.data_type(),
+            "{name} type"
+        );
+        assert!(
+            owners.to_data() == published_owners.to_data(),
+            "{name} owners"
+        );
+        assert!(
+            values.to_data() == published_values.to_data(),
+            "{name} values"
+        );
+    }
 }
 
 fn publish(
@@ -306,8 +396,12 @@ fn publish(
     format: SourceFormat,
     batch_rows: usize,
     property: &str,
+    lanes: usize,
 ) -> Published {
-    let (_directory, project, graph) = fixture();
+    let (_directory, project, mut graph) = fixture();
+    graph.construction_cpu_admission = Arc::new(graphforge_storage::ConstructionCpuAdmission::new(
+        std::num::NonZeroUsize::new(lanes).unwrap(),
+    ));
     let source_directory = tempfile::tempdir().unwrap();
     let source = source_directory.path().join(match format {
         SourceFormat::Parquet { .. } => "registered.parquet",
@@ -348,6 +442,7 @@ fn publish(
     assert_eq!(graph.node_count("Person").unwrap(), batch.num_rows() as u64);
     let current_query = query_snapshot(&graph, property);
     let current_catalog = catalog_ids(&graph);
+    assert_every_cell_published(&graph, &root, batch, batch_rows);
     drop(session);
     drop(graph);
 
@@ -358,7 +453,6 @@ fn publish(
     );
     let reopened_query = query_snapshot(&reopened, property);
     assert_eq!(current_query, reopened_query);
-    assert_values_match_input(&reopened, batch, property);
     let reopened_catalog = catalog_ids(&reopened);
     assert_eq!(current_catalog, reopened_catalog);
     assert!(
@@ -379,7 +473,8 @@ fn publish(
     }
 }
 
-/// Publish the source twice into fresh projects: each reads back as the input
+/// Publish the source into fresh projects on one construction lane and on four:
+/// each publishes every cell of every column as the input holds it
 /// (`publish`), and the two publish the same artifacts, answers and catalog ids.
 fn publish_and_read_back(
     batch: &RecordBatch,
@@ -387,8 +482,8 @@ fn publish_and_read_back(
     batch_rows: usize,
     property: &str,
 ) {
-    let first = publish(batch, format, batch_rows, property);
-    let second = publish(batch, format, batch_rows, property);
+    let first = publish(batch, format, batch_rows, property, 4);
+    let second = publish(batch, format, batch_rows, property, 1);
     assert_eq!(first.rows, second.rows);
     assert_eq!(first.inventory, second.inventory);
     assert_eq!(first.query, second.query);

@@ -1762,6 +1762,18 @@ mod bulk_builder {
             let graph = session.root.path().join(&encoding.root).join("graph");
             let stored = crate::read_nodes(&graph).unwrap();
             assert_eq!(stored.iter().map(RecordBatch::num_rows).sum::<usize>(), 3);
+            let uuids = |batches: &[RecordBatch], column: &str| {
+                batches
+                    .iter()
+                    .flat_map(|batch| {
+                        let uuids = uuid_column(batch, column);
+                        (0..batch.num_rows())
+                            .map(|row| uuid_at(&uuids, row))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<std::collections::BTreeSet<_>>()
+            };
+            assert_eq!(uuids(&stored, "node_uuid"), uuids(&nodes, "node_uuid"));
             for batch in &stored {
                 let ids = batch
                     .column_by_name("type_id")
@@ -1773,21 +1785,43 @@ mod bulk_builder {
             let admitted =
                 crate::AuthenticatedPropertyInventory::from_inventory_at_root(&graph, files, None)
                     .unwrap();
+            let stored_edges = crate::read_edges_from_inventory(
+                &admitted,
+                &relation,
+                graphforge_core::OntologyMode::Strict,
+            )
+            .unwrap();
+            assert_eq!(rows(stored_edges.clone()), 2);
+            // The same edges, endpoint for endpoint.
+            let endpoints = |batches: &[RecordBatch], columns: [&str; 3]| {
+                batches
+                    .iter()
+                    .flat_map(|batch| {
+                        let [edge, source, target] = columns.map(|name| uuid_column(batch, name));
+                        (0..batch.num_rows())
+                            .map(|row| (uuid_at(&edge, row), uuid_at(&source, row), uuid_at(&target, row)))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<std::collections::BTreeSet<_>>()
+            };
             assert_eq!(
-                rows(
-                    crate::read_edges_from_inventory(
-                        &admitted,
-                        &relation,
-                        graphforge_core::OntologyMode::Strict
-                    )
-                    .unwrap()
-                ),
-                2
+                endpoints(&stored_edges, ["edge_uuid", "src_uuid", "dst_uuid"]),
+                endpoints(&edges, ["edge_uuid", "source_uuid", "target_uuid"])
             );
-            assert_eq!(rows(crate::read_properties(&graph, &node_property).unwrap()), 3);
-            assert_eq!(
-                rows(crate::read_edge_properties(&graph, &edge_property).unwrap()),
-                2
+            // The typed properties, owner for owner and value for value.
+            let node_cells = crate::read_properties(&graph, &node_property).unwrap();
+            assert_eq!(rows(node_cells.clone()), 3);
+            assert_columns_equal(
+                "typed node property",
+                &property_columns(&nodes, "node_uuid", 2),
+                &property_columns(&node_cells, "node_uuid", 0),
+            );
+            let edge_cells = crate::read_edge_properties(&graph, &edge_property).unwrap();
+            assert_eq!(rows(edge_cells.clone()), 2);
+            assert_columns_equal(
+                "typed edge property",
+                &property_columns(&edges, "edge_uuid", 4),
+                &property_columns(&edge_cells, "edge_uuid", 0),
             );
             let index = crate::TopologyIdentityProbe::open_dir(&graph).unwrap();
             assert_eq!(index.count(crate::UuidIndexKind::Node), 3);
@@ -2085,6 +2119,8 @@ mod bulk_builder {
         report: crate::BulkBuildReport,
         scratch_left: bool,
         back: ReadBack,
+        /// Keeps the published tree `back` was read from.
+        _root: TempDir,
     }
 
     fn scratch_run(
@@ -2112,6 +2148,7 @@ mod bulk_builder {
             report: session.bulk_build_report(),
             scratch_left: scratch_dir(&session).exists(),
             back: read_back(&session, &encoding),
+            _root: root,
         })
     }
 

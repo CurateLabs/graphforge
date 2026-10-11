@@ -7,6 +7,7 @@ include!("../construction_detail_tests.rs");
 include!("../construction_lifecycle_tests.rs");
 include!("../construction_determinism_tests.rs");
 include!("../construction_bulk_tests.rs");
+include!("../construction_retired_tests.rs");
 include!("../transient_composition_tests.rs");
 use std::sync::Arc;
 

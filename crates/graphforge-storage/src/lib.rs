@@ -82,6 +82,7 @@ mod payload_digest;
 #[cfg(any(test, feature = "test-support"))]
 pub mod payload_digest;
 pub use graph_construction::cpu_admission::{ConstructionCpuAdmission, ConstructionCpuLease};
+pub use graph_construction::discard_retired_construction;
 pub use graph_construction::{
     BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkRoute, BulkSource,
     CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, ConstructionChunkKind,

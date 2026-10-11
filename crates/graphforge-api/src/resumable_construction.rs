@@ -118,16 +118,29 @@ impl GraphForge {
         self.open_graph_construction(session_uuid, budgets, ConstructionOpen::Resume)
     }
 
-    /// Reopen a construction only to discard it. Unlike
-    /// [`Self::resume_graph_construction`] this opens a session that holds the
-    /// staged chunks of an initial build, so that aborting its import can
-    /// reclaim it.
-    pub(crate) fn resume_graph_construction_to_discard(
+    /// Discard a construction that will not continue, whatever it holds.
+    ///
+    /// A session an earlier build recorded in a retired format is removed
+    /// without being opened; any other is reopened to be discarded, so that
+    /// aborting its import can reclaim the staged chunks of an initial build
+    /// that [`Self::resume_graph_construction`] refuses.
+    pub(crate) fn discard_construction(
         &self,
         session_uuid: Uuid,
         budgets: GraphConstructionBudgets,
-    ) -> Result<GraphConstructionSession<'_>, GfError> {
-        self.open_graph_construction(session_uuid, budgets, ConstructionOpen::Discard)
+    ) -> Result<(), GfError> {
+        if self.read_only {
+            return Err(validation("historical graph views cannot construct"));
+        }
+        let retired = graphforge_storage::discard_retired_construction(
+            self.resolved_generation.container_root(),
+            session_uuid,
+        )?;
+        if retired {
+            return Ok(());
+        }
+        self.open_graph_construction(session_uuid, budgets, ConstructionOpen::Discard)?
+            .discard()
     }
 
     /// Open or resume the storage session for `open_graph_construction`,
@@ -257,6 +270,12 @@ impl GraphForge {
             budgets,
             resume,
         )?;
+        if open == ConstructionOpen::Resume && inner.parent_topology_generation() == 0 {
+            // An initial build spools whatever it is asked to accept next: a
+            // construction begun and dropped before its first chunk reopens
+            // with the route its begin asked for.
+            inner.spool_chunks();
+        }
         if open == ConstructionOpen::Resume
             && inner.parent_topology_generation() == 0
             && !inner.is_spooled()
@@ -1703,6 +1722,65 @@ mod tests {
         assert_eq!(append.progress().evidence.input_batches, 1);
     }
 
+    /// The directories (two path components) a construction encoded artifacts in.
+    fn encoded_artifacts(graph: &GraphForge, session_uuid: Uuid) -> Vec<String> {
+        let path = graph
+            .resolved_generation
+            .container_root()
+            .join(".graphforge-construction")
+            .join(session_uuid.simple().to_string())
+            .join("encoded-v1/inventory.json");
+        let inventory: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        inventory["artifacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|artifact| {
+                // Names below the second component hash the content.
+                let path = artifact["path"].as_str().unwrap();
+                path.split('/').take(2).collect::<Vec<_>>().join("/")
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    /// An initial chunk-API build whose first handle is dropped before it
+    /// accepts a chunk reopens with the spool its begin asked for: the chunks
+    /// are spooled, the bulk builder builds them, and the generation has the
+    /// artifacts of an uninterrupted build rather than the staged encoder's.
+    #[test]
+    fn a_construction_begun_and_reopened_before_its_first_chunk_still_builds_in_bulk() {
+        let straight = GraphForge::new(None).unwrap();
+        let mut session = straight
+            .begin_graph_construction(Default::default())
+            .unwrap();
+        let (node_ids, edge_ids) = accept_chain(&mut session);
+        session.seal_and_publish().unwrap();
+        let expected = encoded_artifacts(&straight, session.session_uuid());
+        assert_construction_relationships(&straight, &chain_relationships(&node_ids, &edge_ids));
+
+        let graph = GraphForge::new(None).unwrap();
+        let begun = graph.begin_graph_construction(Default::default()).unwrap();
+        let uuid = begun.session_uuid();
+        drop(begun);
+        let mut session = graph
+            .resume_graph_construction(uuid, Default::default())
+            .unwrap();
+        let (node_ids, edge_ids) = accept_chain(&mut session);
+        assert!(session.inner.is_spooled());
+        assert_eq!(session.progress().evidence.spooled_chunks, 3);
+        assert_eq!(session.progress().evidence.parquet_shards, 0);
+        session.seal_and_publish().unwrap();
+        let report = session.inner.bulk_build_report();
+        assert_eq!((report.nodes, report.edges), (4, 3));
+        assert_eq!(session.progress().evidence.parquet_shards, 0);
+        assert!(expected.contains(&"indexes/adjacency".to_owned()));
+        assert_eq!(encoded_artifacts(&graph, uuid), expected);
+        assert_construction_relationships(&graph, &chain_relationships(&node_ids, &edge_ids));
+    }
+
     /// A construction session of an earlier build that staged an initial
     /// graph holds staged chunks the bulk builder cannot resume: reopening it
     /// is refused with an instruction to restart the import.
@@ -1729,9 +1807,7 @@ mod tests {
         );
         // Restarting reclaims it: a session being discarded reopens.
         graph
-            .resume_graph_construction_to_discard(uuid, Default::default())
-            .unwrap()
-            .discard()
+            .discard_construction(uuid, Default::default())
             .unwrap();
         let root = graph
             .resolved_generation
