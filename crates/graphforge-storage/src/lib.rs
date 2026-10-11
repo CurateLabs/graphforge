@@ -91,7 +91,9 @@ pub use graph_construction::{
     GraphConstructionEvidence, GraphConstructionSession, GraphConstructionState, SealRoute,
     SourceReservation, SourceWorkspace,
 };
-pub use graph_construction::{discard_retired_construction, remove_owned_directory};
+pub use graph_construction::{
+    discard_retired_construction, refuse_retired_construction, remove_owned_directory,
+};
 
 pub mod graph_admission;
 pub mod graph_files;

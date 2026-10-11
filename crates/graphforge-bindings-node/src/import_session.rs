@@ -356,6 +356,17 @@ pub(crate) fn resume_import_session(
     })
 }
 
+pub(crate) fn abort_import_session(
+    graph: &graphforge_api::GraphForge,
+    session_uuid: String,
+) -> Result<ImportProgressOutput> {
+    let uuid = crate::canonical_operation_id(&session_uuid)?.0;
+    let progress = graph
+        .abort_import_session(uuid)
+        .map_err(|error| to_napi_err(&error))?;
+    Ok(progress_output(progress))
+}
+
 pub(crate) fn cleanup_stale_import_sessions(
     graph: &graphforge_api::GraphForge,
     max_age_secs: BigInt,

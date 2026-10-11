@@ -331,6 +331,26 @@ pub(crate) fn resume_import_session(
     .map(Bound::unbind)
 }
 
+/// Abort the import session `session_uuid`, including one recorded in a format
+/// this build no longer reads, which cannot be resumed.
+pub(crate) fn abort_import_session(
+    forge: &GraphForge,
+    py: Python<'_>,
+    session_uuid: &str,
+) -> PyResult<Py<PyAny>> {
+    let uuid = Uuid::parse_str(session_uuid).map_err(|_| {
+        to_pyerr(
+            py,
+            &GfError::Validation("session_uuid must be a canonical UUID string".into()),
+        )
+    })?;
+    let native = forge.ensure_open()?;
+    let progress = py
+        .detach(|| native.abort_import_session(uuid))
+        .map_err(|error| to_pyerr(py, &error))?;
+    progress_dict(py, &progress)
+}
+
 /// Abort and remove durable staging for non-terminal sessions older than `max_age_secs`.
 pub(crate) fn cleanup_stale_import_sessions(
     forge: &GraphForge,

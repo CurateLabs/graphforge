@@ -263,6 +263,17 @@ impl GraphForge {
                  the bulk builder through begin_graph_construction or an import session",
             ));
         }
+        if open == ConstructionOpen::Resume {
+            // Before anything of the session is opened: opening recovers its
+            // shaping state, authenticating and unlinking intermediates, which
+            // a session in a retired format must never run. The preflight
+            // reads the checkpoint alone and refuses a session recorded by a
+            // build whose staged initial builds are gone.
+            graphforge_storage::refuse_retired_construction(
+                self.resolved_generation.container_root(),
+                session_uuid,
+            )?;
+        }
         let mut inner = self.open_storage_construction(
             dir,
             session_uuid,
@@ -275,18 +286,6 @@ impl GraphForge {
             // construction begun and dropped before its first chunk reopens
             // with the route its begin asked for.
             inner.spool_chunks();
-        }
-        if open == ConstructionOpen::Resume
-            && inner.parent_topology_generation() == 0
-            && !inner.is_spooled()
-            && inner.accepted_chunks() > 0
-        {
-            // An initial build no longer stages: the session was recorded by a
-            // build that did, and nothing resumes it.
-            return Err(validation(
-                "this construction session holds staged chunks of an initial build, which now \
-                 runs on the bulk builder and cannot resume them; restart the import",
-            ));
         }
         // #1586: every import on this instance draws its parallel lanes from
         // one admission, so construction never takes the whole CPU budget.
@@ -1785,6 +1784,55 @@ mod tests {
         assert!(expected.contains(&"indexes/adjacency".to_owned()));
         assert_eq!(encoded_artifacts(&graph, uuid), expected);
         assert_construction_relationships(&graph, &chain_relationships(&node_ids, &edge_ids));
+    }
+
+    /// A staged initial construction that records none of the retired markers
+    /// (its budgets omit the node-index bound, its route is undecided) and
+    /// holds the intermediates of an interrupted shape is refused before
+    /// anything of it is opened: opening recovers shaping, which authenticates
+    /// and unlinks intermediates. Its files are untouched, and aborting it
+    /// removes it.
+    #[test]
+    fn a_staged_initial_session_without_markers_is_refused_before_recovery_runs() {
+        let graph = GraphForge::new(None).unwrap();
+        let mut session = graph
+            .open_graph_construction(Uuid::now_v7(), Default::default(), ConstructionOpen::Begin)
+            .unwrap();
+        accept_chain(&mut session);
+        let uuid = session.session_uuid();
+        drop(session);
+        let root = graph
+            .resolved_generation
+            .container_root()
+            .join(".graphforge-construction")
+            .join(uuid.simple().to_string());
+        let intermediates = [
+            (root.join("shape-intent.json"), b"{}".to_vec()),
+            (
+                root.join("part-identities-g0-p0.run"),
+                b"intermediate".to_vec(),
+            ),
+        ];
+        for (path, bytes) in &intermediates {
+            std::fs::write(path, bytes).unwrap();
+        }
+
+        let refused = graph
+            .resume_graph_construction(uuid, Default::default())
+            .err()
+            .expect("a staged initial session cannot resume");
+        assert!(matches!(refused, GfError::Validation(_)), "{refused:?}");
+        assert!(
+            refused.to_string().contains("restart the import"),
+            "{refused}"
+        );
+        for (path, bytes) in &intermediates {
+            assert_eq!(&std::fs::read(path).unwrap(), bytes, "{path:?} was touched");
+        }
+        graph
+            .discard_construction(uuid, Default::default())
+            .unwrap();
+        assert!(!root.exists());
     }
 
     /// A construction session of an earlier build that staged an initial

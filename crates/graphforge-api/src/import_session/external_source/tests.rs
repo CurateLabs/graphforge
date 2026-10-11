@@ -1018,6 +1018,45 @@ fn a_session_that_copied_its_sources_is_refused_rather_than_resumed() {
     }
 }
 
+/// A removal of a retired session that cannot finish leaves its manifest, the
+/// record abort and cleanup read, for last; both then complete it.
+#[cfg(unix)]
+#[test]
+fn an_interrupted_retired_removal_stays_readable_and_completes() {
+    use std::os::unix::fs::PermissionsExt;
+    for cleanup in [false, true] {
+        let (_directory, _project, graph) = fixture();
+        let historical = source();
+        let id = historical_session(&graph, &historical.path);
+        let session = session_directory(&graph, id);
+        let stuck = session.join("stuck");
+        fs::create_dir(&stuck).unwrap();
+        fs::write(stuck.join("entry"), b"x").unwrap();
+        fs::set_permissions(&stuck, fs::Permissions::from_mode(0o555)).unwrap();
+        // Root is not stopped by permissions; there the interruption cannot be made.
+        let enforced = fs::remove_file(stuck.join("entry")).is_err();
+        if enforced {
+            assert!(graph.abort_import_session(id).is_err());
+            assert!(
+                session.join("manifest.json").exists(),
+                "the manifest goes last"
+            );
+        }
+        fs::set_permissions(&stuck, fs::Permissions::from_mode(0o755)).unwrap();
+        if cleanup {
+            assert_eq!(
+                graph
+                    .cleanup_stale_import_sessions(std::time::Duration::ZERO)
+                    .unwrap(),
+                1
+            );
+        } else {
+            graph.abort_import_session(id).unwrap();
+        }
+        assert!(!session.exists());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Resume, coverage and classification (review of #1923)
 // ---------------------------------------------------------------------------

@@ -637,6 +637,7 @@ impl GraphForge {
             root.parent()
                 .ok_or_else(|| validation("import session directory has no parent"))?,
             name,
+            MANIFEST,
         )
     }
 
