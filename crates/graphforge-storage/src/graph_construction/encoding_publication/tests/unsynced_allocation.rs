@@ -53,6 +53,7 @@ fn captured_encoded_source_survives_allocation_change_with_unchanged_content() {
             .checkpoint
             .evidence
             .storage_active_identity_allocated_bytes,
+        producer_sealed: encoded.seal_protocol.is_some(),
     };
     let first = inventory
         .open(Path::new("topology/generation.json"))
@@ -130,6 +131,7 @@ fn captured_encoded_source_still_refuses_content_change_after_capture() {
                 .checkpoint
                 .evidence
                 .storage_active_identity_allocated_bytes,
+            producer_sealed: encoded.seal_protocol.is_some(),
         };
         let source = inventory
             .open(Path::new("topology/generation.json"))

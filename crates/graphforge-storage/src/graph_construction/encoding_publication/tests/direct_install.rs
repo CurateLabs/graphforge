@@ -53,6 +53,16 @@ impl Staged {
                 .checkpoint
                 .evidence
                 .storage_active_identity_allocated_bytes,
+            producer_sealed: self.encoded.seal_protocol.is_some(),
+        }
+    }
+
+    /// The same inventory as an earlier binary wrote it: without the record
+    /// that its producers synced the objects.
+    fn inventory_without_seal_record(&self) -> CapturedEncodedInventory<'_> {
+        CapturedEncodedInventory {
+            producer_sealed: false,
+            ..self.inventory()
         }
     }
 
@@ -116,6 +126,21 @@ fn object_store(root: &Path) -> BTreeMap<String, u64> {
 
 fn sha256_hex(bytes: &[u8]) -> String {
     super::super::super::sha256(bytes)
+}
+
+/// An inventory without the seal record (an earlier binary wrote it, and its
+/// objects may be unsynced) is sealed when installed: one file barrier of its
+/// own, and no producer-sealed install.
+#[test]
+fn an_inventory_without_the_seal_record_is_sealed_when_installed() {
+    let staged = staged(15_006);
+    let inventory = staged.inventory_without_seal_record();
+    let source = inventory.open(Path::new(ARTIFACT)).unwrap();
+    let lease = crate::begin_graph_object_publication(staged.root.path()).unwrap();
+    let evidence = install(&lease, &source).unwrap();
+    assert!(!evidence.reused_existing);
+    assert_eq!(evidence.file_fsync_calls, 1);
+    assert_eq!(evidence.producer_sealed_installs, 0);
 }
 
 #[test]
@@ -636,6 +661,7 @@ fn retry_after_a_crash_retires_the_rewritten_staged_inode() {
             .checkpoint
             .evidence
             .storage_active_identity_allocated_bytes,
+        producer_sealed: encoding.seal_protocol.is_some(),
     };
     let source = inventory.open(Path::new(ARTIFACT)).unwrap();
     let good = std::fs::read(&address).unwrap();

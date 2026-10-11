@@ -28,8 +28,39 @@ impl Drop for Observation {
         CAPTURES.fetch_sub(1, Ordering::Relaxed);
     }
 }
+/// Mirrors `AuditState::holders` so the barrier path can skip the lock when no
+/// audit runs. Only ever written under the lock.
 static AUDITS: AtomicUsize = AtomicUsize::new(0);
-static AUDIT_LOG: Mutex<Vec<(FileIdentity, bool)>> = Mutex::new(Vec::new());
+static AUDIT: Mutex<AuditState> = Mutex::new(AuditState {
+    holders: 0,
+    log: Vec::new(),
+});
+
+struct AuditState {
+    /// Audits alive. The log is kept, and grows, only while there are some.
+    holders: usize,
+    log: Vec<BarrierRecord>,
+}
+
+fn audit() -> std::sync::MutexGuard<'static, AuditState> {
+    AUDIT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// One barrier attempt: the inode it reached, whether that is a directory, and
+/// when that inode was created. A filesystem reuses the inode number of a file
+/// that was deleted, so the number alone does not say which file a barrier
+/// reached; the creation time, with the number, does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BarrierRecord {
+    /// The inode the barrier reached.
+    pub identity: FileIdentity,
+    /// Whether it is a directory.
+    pub directory: bool,
+    /// The inode's creation (birth) time, when the filesystem reports one.
+    pub birth: Option<std::time::SystemTime>,
+}
 
 /// Records which file or directory each barrier attempt reached, for as long
 /// as it lives: an exact inventory of barriers per inode. The counters above say
@@ -44,32 +75,29 @@ impl BarrierAudit {
     /// Begin recording barrier attempts.
     #[must_use]
     pub fn start() -> Self {
-        AUDITS.fetch_add(1, Ordering::SeqCst);
-        let start = AUDIT_LOG
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len();
-        Self { start }
+        let mut state = audit();
+        state.holders += 1;
+        AUDITS.store(state.holders, Ordering::SeqCst);
+        Self {
+            start: state.log.len(),
+        }
     }
 
-    /// The barriers attempted since [`BarrierAudit::start`], in order: the
-    /// identity reached and whether it is a directory. Identities of objects
-    /// that were later unlinked may be reused by the filesystem.
+    /// The barriers attempted since [`BarrierAudit::start`], in order.
     #[must_use]
-    pub fn finish(self) -> Vec<(FileIdentity, bool)> {
-        AUDIT_LOG
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)[self.start..]
-            .to_vec()
+    pub fn finish(self) -> Vec<BarrierRecord> {
+        let state = audit();
+        // The log only shrinks when no audit is alive, so `start` is in range.
+        state.log[self.start.min(state.log.len())..].to_vec()
     }
 }
 impl Drop for BarrierAudit {
     fn drop(&mut self) {
-        if AUDITS.fetch_sub(1, Ordering::SeqCst) == 1 {
-            AUDIT_LOG
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clear();
+        let mut state = audit();
+        state.holders -= 1;
+        AUDITS.store(state.holders, Ordering::SeqCst);
+        if state.holders == 0 {
+            state.log.clear();
         }
     }
 }
@@ -114,17 +142,22 @@ fn observe(file: &File, operation: impl FnOnce() -> io::Result<()>) -> io::Resul
     if !active() {
         return operation();
     }
-    let directory = file.metadata().is_ok_and(|metadata| metadata.is_dir());
+    let metadata = file.metadata().ok();
+    let directory = metadata.as_ref().is_some_and(std::fs::Metadata::is_dir);
     if directory {
         FSYNC_DIRECTORY_CALLS.fetch_add(1, Ordering::Relaxed);
     }
     if AUDITS.load(Ordering::SeqCst) != 0
         && let Ok(identity) = crate::file_identity(file)
     {
-        AUDIT_LOG
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push((identity, directory));
+        let mut state = audit();
+        if state.holders != 0 {
+            state.log.push(BarrierRecord {
+                identity,
+                directory,
+                birth: metadata.and_then(|metadata| metadata.created().ok()),
+            });
+        }
     }
     let started = Instant::now();
     let result = operation();

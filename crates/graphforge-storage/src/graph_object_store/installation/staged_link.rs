@@ -472,24 +472,37 @@ fn link_staged(
     }
     let staged_path = source.parent().path().join(source.name());
     // Objects are immutable: make the exact inode read-only before it can gain
-    // the content-addressed name. Its bytes are already durable. Every source
-    // here was admitted from the encoded ledger (`CapturedEncodedInventory::open`
-    // refuses an inode the ledger does not list), and each artifact the ledger
-    // lists was sealed by its producer, with the one file barrier of this
-    // object (ADR 0058 decision 3), before the checkpoint that pinned the
-    // inventory. That holds across processes: the restored ledger is
-    // authenticated against the pinned inventory. Linking therefore runs no
-    // barrier of its own. The bucket barrier after the link makes the content
+    // the content-addressed name, and make its bytes durable with the one file
+    // barrier of this object (ADR 0058 decision 3). The authenticated
+    // inventory this source was admitted from may record, durably and under
+    // the digest that pinned it, that every artifact it lists was synced by its
+    // producer before the checkpoint (`seal_protocol`); `open` has also
+    // refused an inode the restored ledger does not list. Then linking runs no
+    // barrier of its own, in any process. An inventory without that record
+    // (written by an earlier binary, whose objects may be unsynced) is sealed
+    // here, as before. The bucket barrier after the link makes the content
     // address durable before it can be referenced (ADR 0013).
     seal_graph_object(source.source(), &staged_path, &cas.diagnostic_root)?;
+    let producer_sealed = source.producer_sealed();
     let (sealed, file_fsyncs) = observe_barriers(|| {
-        crate::durable_commit::SealedArtifact::adopt_producer_sealed(
-            source.parent().physical(),
-            source.name(),
-            source.source().try_clone()?,
-            source.identity(),
-            cas.allocation.as_ref(),
-        )
+        let file = source.source().try_clone()?;
+        if producer_sealed {
+            crate::durable_commit::SealedArtifact::adopt_producer_sealed(
+                source.parent().physical(),
+                source.name(),
+                file,
+                source.identity(),
+                cas.allocation.as_ref(),
+            )
+        } else {
+            crate::durable_commit::SealedArtifact::seal_recoverable_existing(
+                source.parent().physical(),
+                source.name(),
+                file,
+                source.identity(),
+                cas.allocation.as_ref(),
+            )
+        }
     });
     let staged =
         sealed.map_err(|error| storage("seal staged encoded source", &staged_path, error))?;
@@ -564,10 +577,10 @@ fn link_staged(
             // The staged file is the object: nothing is copied.
             write_calls: 0,
             write_bytes: 0,
-            // Counted from the barriers that actually ran: none, the producer's
-            // having made this object durable.
+            // Counted from the barriers that actually ran: none when the
+            // producer's made this object durable.
             file_fsync_calls: file_fsyncs,
-            producer_sealed_installs: 1,
+            producer_sealed_installs: u64::from(producer_sealed),
             directory_fsync_calls: directory_fsyncs,
             fsync_calls: file_fsyncs + directory_fsyncs,
             bucket_creations: 0,

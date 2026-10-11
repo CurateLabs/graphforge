@@ -228,6 +228,7 @@ fn encoded_inventory_version_precedes_required_checksums_and_current_wire_is_str
         artifacts: vec![artifact],
         evidence: GraphConstructionEncodingEvidence::default(),
         invocation: GraphConstructionEncodingInvocationEvidence::default(),
+        seal_protocol: Some(PRODUCER_SEAL_PROTOCOL),
     };
     let original = serde_json::to_value(&inventory).unwrap();
     for version in [None, Some(1), Some(3)] {

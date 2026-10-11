@@ -1290,6 +1290,7 @@ pub(crate) fn encode_bulk(
         shape_authority_sha256: shape_authority_sha256.to_owned(),
         artifacts,
         evidence,
+        seal_protocol: Some(super::PRODUCER_SEAL_PROTOCOL),
         invocation: GraphConstructionEncodingInvocationEvidence::default(),
     };
     crate::graph_construction::construction_failpoint("bulk.before_inventory");

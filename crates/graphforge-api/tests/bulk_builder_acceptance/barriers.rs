@@ -1,7 +1,9 @@
 //! Every published object has exactly one file barrier (ADR 0058 decision 3;
 //! #1881 criterion 5), inventoried on the public route.
 //!
-//! `BarrierAudit` records the inode each `fsync` of a process reached. The
+//! `BarrierAudit` records the inode each `fsync` of a process reached, with its
+//! creation time, so a deleted file's inode number reused by a later file is not
+//! mistaken for it. The
 //! child process audits a whole validate and commit, then finds each published
 //! object by inode and counts the file barriers it received. The producer's
 //! barrier is the object's only one: installing it into the object store links
@@ -91,14 +93,11 @@ fn every_published_object_has_exactly_one_file_barrier_on_every_route() {
 
 /// An import into a project that already has a generation encodes through the
 /// staged path (appends keep it), whose encoders are the same sealing writers.
-/// Linking its objects into the object store runs no barrier of its own, so each
-/// object it newly publishes must have had a producer barrier. (The staged path
-/// may seal an object more than once; only the bulk builder is held to exactly
-/// one. An inode number the filesystem reuses can only add barriers to a count,
-/// so this is a lower bound.) An object already in the store is linked, not
-/// installed, and may have none in this process.
+/// Each object it newly publishes has exactly one file barrier too. An object
+/// already in the store (identical content) is linked, not installed, and
+/// received none in this process.
 #[test]
-fn every_object_an_appended_import_installs_was_sealed_by_its_producer() {
+fn every_object_an_appended_import_publishes_has_exactly_one_file_barrier() {
     let directory = tempfile::tempdir().unwrap();
     let project = empty_project(directory.path());
     let first = Sources::write(&directory.path().join("first"), wide_properties());
@@ -132,17 +131,18 @@ fn every_object_an_appended_import_installs_was_sealed_by_its_producer() {
         "the append must take the staged path, not the bulk builder"
     );
     let published = published_digests(&project);
-    let mut unsealed = Vec::new();
+    let mut wrong = Vec::new();
     for (path, count) in appended.barriers()["objects"].as_object().unwrap() {
         let count = count.as_u64().unwrap();
-        if count == 0 && !before.contains(&published[path]) {
-            unsealed.push(path.clone());
+        let expected = u64::from(!before.contains(&published[path]));
+        if count != expected {
+            wrong.push((path.clone(), count, expected));
         }
     }
     assert!(published.len() > 20, "{}", published.len());
     assert!(
-        unsealed.is_empty(),
-        "objects installed by an append without a producer barrier: {unsealed:#?}"
+        wrong.is_empty(),
+        "objects (path, file barriers, expected) of an append: {wrong:#?}"
     );
 }
 
@@ -241,6 +241,99 @@ fn a_session_validated_in_one_process_commits_in_another_without_install_barrier
     assert_eq!(report["root_synced_after_current"], true);
 
     // And the bytes are those of a build that was never interrupted.
+    assert_eq!(
+        inventory_differences(&reference.inventory(), &committed.inventory()),
+        Vec::<String>::new()
+    );
+}
+
+/// The durable record that the producers synced the objects is part of the
+/// digest that pins the inventory. An inventory an earlier binary wrote has no
+/// such record, and its objects may be unsynced: committing it seals each at
+/// install, with one file barrier of its own, and the bytes are the same.
+///
+/// The record is removed from a validated session's inventory, and the digest
+/// that pins it re-derived in the checkpoint, exactly as the encoder derives it
+/// (`inventory_authority_sha256`): the session is then authentic, with an
+/// inventory that carries no record.
+#[test]
+fn a_session_pinned_without_the_seal_record_is_sealed_when_committed() {
+    use sha2::{Digest, Sha256};
+
+    let directory = tempfile::tempdir().unwrap();
+    let sources = Sources::write(&directory.path().join("input"), wide_properties());
+    let reference_project = empty_project(directory.path());
+    let reference = run(
+        &ChildSpec {
+            commit: true,
+            ..spec_for(&reference_project, &sources)
+        },
+        &Conditions::default(),
+    );
+    assert!(reference.succeeded(), "{reference:?}");
+
+    let case = directory.path().join("case");
+    std::fs::create_dir(&case).unwrap();
+    let project = empty_project(&case);
+    let validated = run(
+        &ChildSpec {
+            abandon_after_validate: true,
+            ..spec_for(&project, &sources)
+        },
+        &Conditions::default(),
+    );
+    assert_eq!(validated.code, Some(KILLED), "{validated:?}");
+
+    let root = construction_root(&project);
+    let digest = |bytes: &[u8]| {
+        let mut digest = Sha256::new();
+        digest.update(b"graphforge-construction-encoding-inventory/v2\0");
+        digest.update(bytes);
+        digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let inventory_path = root.join("encoded-v1/inventory.json");
+    let checkpoint_path = root.join("checkpoint.json");
+    let inventory = std::fs::read_to_string(&inventory_path).unwrap();
+    let checkpoint = std::fs::read_to_string(&checkpoint_path).unwrap();
+    // The checkpoint pins exactly this serialization.
+    let pinned = digest(inventory.as_bytes());
+    assert!(checkpoint.contains(&pinned), "the pin is not this digest");
+    let record = ",\"seal_protocol\":1";
+    assert!(
+        inventory.contains(record),
+        "the inventory carries no record"
+    );
+    let stripped = inventory.replacen(record, "", 1);
+    assert!(!stripped.contains("seal_protocol"));
+    std::fs::write(&inventory_path, &stripped).unwrap();
+    std::fs::write(
+        &checkpoint_path,
+        checkpoint.replacen(&pinned, &digest(stripped.as_bytes()), 1),
+    )
+    .unwrap();
+
+    let committed = run(
+        &ChildSpec {
+            project: project.clone(),
+            session: Some(validated.session()),
+            commit: true,
+            audit: true,
+            ..ChildSpec::default()
+        },
+        &Conditions::default(),
+    );
+    assert!(committed.succeeded(), "{committed:?}");
+    // Each object got exactly one file barrier, made when it was installed.
+    let (histogram, offenders) = offenders(committed.barriers());
+    assert!(
+        offenders.is_empty(),
+        "commit: objects by file barriers {histogram:?}; not exactly one: {offenders:#?}"
+    );
+    assert!(histogram.values().sum::<u64>() > 40, "{histogram:?}");
     assert_eq!(
         inventory_differences(&reference.inventory(), &committed.inventory()),
         Vec::<String>::new()

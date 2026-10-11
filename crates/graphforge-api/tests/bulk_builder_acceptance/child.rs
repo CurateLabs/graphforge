@@ -225,11 +225,25 @@ fn child() {
     );
 }
 
-type Inode = (u64, [u8; 16]);
+/// One file for the whole life of the process: an inode number and the time
+/// that inode was created. A filesystem reuses the number of a deleted file, so
+/// the number alone would credit a deleted temporary's barriers to a later file.
+type Inode = (u64, [u8; 16], std::time::SystemTime);
 
+/// The inode behind `path`. A filesystem that reports no creation time cannot
+/// be audited, and says so rather than falling back to the bare number.
 fn inode(path: &Path) -> Inode {
     let identity = graphforge_filesystem::path_identity(path).unwrap();
-    (identity.volume_serial, identity.file_id)
+    let born = std::fs::metadata(path)
+        .unwrap()
+        .created()
+        .unwrap_or_else(|error| {
+            panic!(
+                "no creation time for {}: {error}; barriers cannot be attributed to inodes",
+                path.display()
+            )
+        });
+    (identity.volume_serial, identity.file_id, born)
 }
 
 /// What the barriers this process made reached. Each published object (one per
@@ -237,15 +251,19 @@ fn inode(path: &Path) -> Inode {
 /// else under the session's encoded tree, where it is the same inode.
 fn barrier_report(
     project: &Path,
-    barriers: Vec<(graphforge_filesystem::FileIdentity, bool)>,
+    barriers: Vec<graphforge_filesystem::observation::BarrierRecord>,
     committed: bool,
 ) -> serde_json::Value {
     let mut per_inode: BTreeMap<Inode, Vec<(usize, bool)>> = BTreeMap::new();
-    for (sequence, (identity, directory)) in barriers.iter().enumerate() {
-        per_inode
-            .entry((identity.volume_serial, identity.file_id))
-            .or_default()
-            .push((sequence, *directory));
+    for (sequence, record) in barriers.iter().enumerate() {
+        // A barrier whose inode reported no creation time reached no file the
+        // report looks up (every lookup has one), so it is attributed to none.
+        if let Some(born) = record.birth {
+            per_inode
+                .entry((record.identity.volume_serial, record.identity.file_id, born))
+                .or_default()
+                .push((sequence, record.directory));
+        }
     }
     let sequences = |inode: Inode, directory: bool| -> Vec<usize> {
         per_inode.get(&inode).map_or_else(Vec::new, |reached| {
