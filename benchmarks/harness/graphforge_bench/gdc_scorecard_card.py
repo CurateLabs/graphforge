@@ -195,7 +195,12 @@ def _next_rung(
     result = results[following]
     if result["status"] == "not_admitted":
         return {"label": label, "outcome": "not_admitted", "cause": result["failure"]["cause"]}
-    return {"label": label, "outcome": "typed_failure", "cause": result["failure"]["cause"]}
+    return {
+        "label": label,
+        "outcome": "typed_failure",
+        "cause": result["failure"]["cause"],
+        "in_flight": result["failure"].get("in_flight"),
+    }
 
 
 def build_card(spec: LadderSpec, output_dir: Path) -> dict[str, Any]:
@@ -363,7 +368,14 @@ def _next_line(next_rung: Mapping[str, Any]) -> str:
         return f"{label} — not attempted"
     if outcome == "not_admitted":
         return f"{label} — not admitted ({next_rung['cause']})"
-    return f"{label} — typed failure ({next_rung['cause']})"
+    rendered = f"{label} — typed failure ({next_rung['cause']})"
+    in_flight = next_rung.get("in_flight")
+    if in_flight is not None:
+        rendered += (
+            f"; in flight: {in_flight['query_id']}/{in_flight['binding_id']} "
+            f"({in_flight['phase']})"
+        )
+    return rendered
 
 
 def render_card(card: Mapping[str, Any]) -> str:

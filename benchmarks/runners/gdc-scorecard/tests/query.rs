@@ -2,6 +2,7 @@
 //! reopen, typed count mismatches, the measured pass and the result digest.
 
 use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
 
 use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray};
@@ -169,6 +170,67 @@ fn durable_project_reconciles_after_reopen_and_every_binding_is_measured() {
         .map(|s| measured(s).result_sha256.clone())
         .collect();
     assert_eq!(digests, repeated);
+}
+
+#[test]
+fn query_progress_is_flushed_in_binding_order() {
+    let root = tempfile::tempdir().unwrap();
+    let project = durable_project(root.path());
+    let workload_path = root.path().join("workload.json");
+    let counts_path = root.path().join("expected-counts.json");
+    let output_path = root.path().join("evidence.json");
+    std::fs::write(
+        &workload_path,
+        serde_json::to_vec(&workload(json!([people_by_min_id()]))).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        &counts_path,
+        serde_json::to_vec(&expected(4, 3)).unwrap(),
+    )
+    .unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_graphforge-benchmark-gdc-scorecard"))
+        .args([
+            "query",
+            "--project",
+            project.to_str().unwrap(),
+            "--workload",
+            workload_path.to_str().unwrap(),
+            "--expected-counts",
+            counts_path.to_str().unwrap(),
+            "--output",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    let progress: Vec<_> = String::from_utf8(result.stderr)
+        .unwrap()
+        .lines()
+        .filter(|line| line.starts_with("gdc-query "))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        progress.len(),
+        8,
+        "one start and completion for warmup and each binding: {progress:?}"
+    );
+    for (line, (action, binding, phase)) in progress.iter().zip([
+        ("start", "min-1", "warmup"),
+        ("complete", "min-1", "warmup"),
+        ("start", "min-1", "run-1"),
+        ("complete", "min-1", "run-1"),
+        ("start", "min-2", "run-2"),
+        ("complete", "min-2", "run-2"),
+        ("start", "min-4", "run-3"),
+        ("complete", "min-4", "run-3"),
+    ]) {
+        assert!(line.starts_with(&format!("gdc-query {action} people-by-min-id {binding} {phase}")), "{line}");
+        if action == "complete" {
+            assert!(line.contains("latency_ns="), "{line}");
+            assert!(line.contains("rows="), "{line}");
+        }
+    }
 }
 
 #[test]

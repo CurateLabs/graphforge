@@ -120,7 +120,13 @@ class FakeBenchExec:
         logs = raw / f"benchmark.{gdc_rung.DEFINITION}.logfiles"
         logs.mkdir()
         (logs / "phase.json.log").write_text(
-            " ".join(argv) + "\n\n" + "-" * 80 + "\n\n" + completed.stdout, encoding="utf-8"
+            " ".join(argv)
+            + "\n\n"
+            + "-" * 80
+            + "\n\n"
+            + completed.stdout
+            + completed.stderr,
+            encoding="utf-8",
         )
         status = "DONE" if completed.returncode == 0 else "ERROR"
         columns = {
@@ -292,6 +298,13 @@ class TinyLadderEndToEndTests(Scratch):
         )
         self.assertEqual((failed_correctness["checked"], failed_correctness["matched"]), (3, 2))
         self.assertTrue((self.output / "snb-interactive-sf1-query-benchexec-raw").is_dir())
+        query_logs = list(
+            (self.output / "snb-interactive-sf1-query-benchexec-raw").rglob("*.log")
+        )
+        self.assertTrue(query_logs)
+        query_log_text = "\n".join(path.read_text(encoding="utf-8") for path in query_logs)
+        self.assertIn("gdc-query start", query_log_text)
+        self.assertIn("gdc-query complete", query_log_text)
 
         # The card headlines sf0 and names what stopped sf1.
         paths = write_card(ROOT, ladder.spec, self.output)
@@ -498,8 +511,8 @@ class LadderControlTests(Scratch):
             return contextlib.closing(io.BytesIO(b"not the pinned archive"))
 
         ladder = self.ladder(self.executables, FakeBenchExec(), opener=wrong_bytes)
-        (self.work / "tmp").mkdir()
-        (self.work / "tmp" / "leftover").write_bytes(b"x")
+        (self.work / "workspace").mkdir()
+        (self.work / "workspace" / "leftover").write_bytes(b"x")
         results = gdc_rung.climb(
             ladder,
             reserved_headroom_bytes=0,
@@ -510,7 +523,49 @@ class LadderControlTests(Scratch):
             [(f["phase"], f["cause"]) for f in results[0]["failures"]],
             [("acquisition", "checksum_mismatch"), ("teardown", "teardown_incomplete")],
         )
-        self.assertEqual(results[0]["inventory"], {"empty": False, "entries": ["tmp/leftover"]})
+        self.assertEqual(
+            results[0]["inventory"],
+            {"empty": False, "entries": ["workspace/leftover"]},
+        )
+
+    def test_teardown_clears_phase_tmp_files_and_adjacency_cache_directories(self) -> None:
+        tmp = self.work / "tmp"
+        cache = tmp / "graphforge-adjacency-cache-leftover"
+        cache.mkdir(parents=True)
+        (cache / "buffer").write_bytes(b"partial query cache")
+        (tmp / "phase-leftover").write_bytes(b"temporary")
+        ladder = self.ladder(self.executables, FakeBenchExec())
+        results = gdc_rung.climb(
+            ladder,
+            reserved_headroom_bytes=0,
+            quiet_host_wait_seconds=0,
+            quiet_host=lambda _wait: QUIET,
+        )
+        self.assertEqual(results[0]["inventory"], {"empty": True, "entries": []})
+        self.assertEqual(list(tmp.iterdir()), [])
+        document = json.loads(
+            (self.output / "snb-interactive-sf0-inventory.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(document["entries"], [])
+
+    def test_truncated_query_log_reports_last_unmatched_start_and_no_lines_is_null(self) -> None:
+        raw = self.scratch / "phase-raw"
+        raw.mkdir()
+        log = raw / "phase.json.log"
+        log.write_text(
+            "gdc-query start BI1 line-1 warmup\n"
+            "gdc-query complete BI1 line-1 warmup latency_ns=10 rows=1\n"
+            "gdc-query start BI1 line-1 run-1\n"
+            "gdc-query complete BI1 line-1 run-1 latency_ns=20 rows=1\n"
+            "gdc-query start BI2 line-7 run-3\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            gdc_rung._in_flight_query(raw),
+            {"query_id": "BI2", "binding_id": "line-7", "phase": "run-3"},
+        )
+        log.write_text("only the phase launch line\n", encoding="utf-8")
+        self.assertIsNone(gdc_rung._in_flight_query(raw))
 
     def test_an_interrupted_attempt_is_not_overwritten(self) -> None:
         ladder = self.ladder(self.executables, FakeBenchExec())
@@ -1033,6 +1088,26 @@ class CardRenderingTests(unittest.TestCase):
         self.assertEqual(error.exception.cause, "misattributed_authority")
         with self.assertRaises(CardError):
             render_card(self.card(fair_use_label="LDBC results"))
+
+    def test_card_shows_the_unfinished_query_on_the_failed_rung_line(self) -> None:
+        in_flight = {"query_id": "BI9", "binding_id": "line-18", "phase": "run-2"}
+        card = self.card(
+            next_rung={
+                "label": "datagen-7_5-fb",
+                "outcome": "typed_failure",
+                "cause": "rung_wall_exceeded",
+                "in_flight": in_flight,
+            }
+        )
+        validator = Draft202012Validator(
+            json.loads((ROOT / "schemas/gdc-scorecard-card.json").read_text())
+        )
+        self.assertEqual(list(validator.iter_errors(card)), [])
+        self.assertIn(
+            "Next rung:    datagen-7_5-fb — typed failure (rung_wall_exceeded); "
+            "in flight: BI9/line-18 (run-2)\n",
+            render_card(card),
+        )
 
 
 if __name__ == "__main__":
