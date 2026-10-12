@@ -21,6 +21,10 @@ pub(crate) struct HydrationResource {
     peak_gathered: AtomicU64,
     pub(crate) metrics: ExecutionPlanMetricsSet,
     counters: HashMap<&'static str, Count>,
+    /// The requested read-path observer of the statement this resource was
+    /// planned in. Evaluation runs on whichever worker polls the plan, so the
+    /// observer is carried to it rather than found on the calling thread.
+    lifecycle: graphforge_storage::lifecycle_io::CaptureContext,
 }
 impl std::fmt::Debug for HydrationResource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -61,6 +65,7 @@ impl HydrationResource {
             peak_gathered: AtomicU64::new(0),
             metrics,
             counters,
+            lifecycle: graphforge_storage::lifecycle_io::CaptureContext::current(),
         })
     }
     fn check(&self) -> Result<()> {
@@ -192,6 +197,7 @@ impl ScalarUDFImpl for HydratedPathNodes {
     }
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
         self.resource.check()?;
+        let _lifecycle = self.resource.lifecycle.attach();
         let invocation = Invocation {
             descriptor: &self.descriptor,
             tables: &self.tables,
@@ -249,6 +255,9 @@ fn hydrate_path_node_children(
     )>(flat.len())?)?;
     h.reserve(hash_table_bytes::<([u8; 16], Vec<PropRowLoc>)>(flat.len())?)?;
     h.reserve(hash_table_bytes::<[u8; 16]>(flat.len())?)?;
+    // The stable-first unique run, and the sorted copy the property reader
+    // resolves its targets against.
+    h.reserve(allocation_bytes::<[u8; 16]>(flat.len())?)?;
     h.reserve(allocation_bytes::<[u8; 16]>(flat.len())?)?;
     let unique = unique_path_uuids(flat);
     h.resource.record("requested", unique.len() as u64);
@@ -452,9 +461,32 @@ type GatheredPathProps = (
     std::collections::HashMap<[u8; 16], Vec<PropRowLoc>>,
 );
 
-/// Gather property rows for the requested UUID set only — batchwise, no
-/// complete-stem `concat_batches` (#706). Each stem is scanned independently
-/// so a UUID found in an earlier stem is still sought in later stems (#807).
+/// The targeted reader's inputs: the requested UUIDs in strictly ascending
+/// order (`unique` holds no repeat, so sorting suffices; the sorted copy is
+/// reserved with the other scratch before any read) and the property columns
+/// the hydrated elements carry.
+fn targeted_read_inputs(
+    h: &Invocation<'_>,
+    unique: &[[u8; 16]],
+) -> (Vec<[u8; 16]>, std::collections::BTreeSet<String>) {
+    let mut targets = unique.to_vec();
+    targets.sort_unstable();
+    let selected = h
+        .fields
+        .iter()
+        .skip(2)
+        .map(|field| field.name().clone())
+        .collect();
+    (targets, selected)
+}
+
+/// Gather property rows for the requested UUID set only, through the targeted
+/// authenticated reader: fragments and row groups are pruned by UUID
+/// statistics, only the descriptor's property columns are decoded, and the
+/// batches that arrive hold the newest live row of requested UUIDs alone, so
+/// the cost follows the path nodes and not the route (#706, #1984). Each stem
+/// is read independently so a UUID found in an earlier stem is still sought in
+/// later stems (#807).
 fn gather_path_node_props(
     h: &Invocation<'_>,
     unique: &[[u8; 16]],
@@ -476,12 +508,14 @@ fn gather_path_node_props(
         return Ok((kept_by_stem, uuid_to_loc));
     }
 
+    let (targets, selected) = targeted_read_inputs(h, unique);
+
     for si in 0..h.prop_stems.len() {
         h.resource.check()?;
         h.resource.record("stems", 1);
         let mut remaining: HashSet<[u8; 16]> = unique.iter().copied().collect();
         let mut kept: Vec<datafusion::arrow::array::RecordBatch> = Vec::new();
-        h.tables[si].visit_authenticated_batches(batch_size, |b| {
+        h.tables[si].visit_authenticated_targets(&targets, &selected, batch_size, |b| {
             h.resource.check()?;
             h.resource.record("property_batches", 1);
             h.resource.record("property_rows", b.num_rows() as u64);
@@ -515,6 +549,8 @@ fn gather_path_node_props(
             )?)?;
             let upper = b.get_array_memory_size();
             h.reserve(upper)?;
+            // A compact copy: the decoder's builders leave slack in the batch
+            // that the retained reservation must not carry.
             let filtered = take_record_batch_rows(b, &indices)?;
             let retained = filtered.get_array_memory_size();
             if retained < upper {
