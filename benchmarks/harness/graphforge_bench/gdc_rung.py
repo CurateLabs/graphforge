@@ -370,7 +370,7 @@ def _stage_phase(
         f"export TMPDIR={shlex.quote(str(tmp_dir))}\n"
         f"export GF_GDC_PROGRESS_PATH={shlex.quote(str(stage / 'query-progress.jsonl'))}\n"
         f"export PYTHONPATH={shlex.quote(str(harness))}\n"
-        f"exec {shlex.quote(sys.executable)} -m graphforge_bench.gdc_phase \"$@\"\n",
+        f'exec {shlex.quote(sys.executable)} -m graphforge_bench.gdc_phase "$@"\n',
         encoding="utf-8",
     )
     launcher.chmod(0o755)
@@ -386,9 +386,7 @@ def _stage_phase(
     return stage, task
 
 
-def _phase_tmp_dir(
-    work_root: Path, *, suite_id: str, rung_id: str, create: bool
-) -> Path:
+def _phase_tmp_dir(work_root: Path, *, suite_id: str, rung_id: str, create: bool) -> Path:
     """Create or validate one exclusive harness-owned phase TMPDIR."""
     root = work_root.resolve(strict=True)
     if not create:
@@ -399,9 +397,7 @@ def _phase_tmp_dir(
             os.mkdir("tmp", dir_fd=root_fd)
         except FileExistsError:
             pass
-        parent_fd = os.open(
-            "tmp", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd
-        )
+        parent_fd = os.open("tmp", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
         try:
             name = f"gdc-{suite_id}-{rung_id}-{secrets.token_hex(8)}"
             os.mkdir(name, dir_fd=parent_fd)
@@ -478,12 +474,14 @@ def _in_flight_query(progress_file: Path) -> dict[str, str] | None:
         if not isinstance(value, Mapping):
             continue
         action, query_id, binding_id, phase = (
-            value.get("gdc_query"), value.get("query_id"), value.get("binding_id"), value.get("phase")
+            value.get("gdc_query"),
+            value.get("query_id"),
+            value.get("binding_id"),
+            value.get("phase"),
         )
-    if (
-        not all(isinstance(item, str) and item for item in (query_id, binding_id, phase))
-        or phase != "warmup" and not re.fullmatch(r"run-[1-9][0-9]*", phase)
-    ):
+        if not all(isinstance(item, str) and item for item in (query_id, binding_id, phase)) or (
+            phase != "warmup" and not re.fullmatch(r"run-[1-9][0-9]*", phase)
+        ):
             continue
         key = (query_id, binding_id, phase)
         if action == "start" and set(value) == {"gdc_query", "query_id", "binding_id", "phase"}:
@@ -628,7 +626,8 @@ def run_phase(rung: Rung, name: str, task: dict[str, Any], wall_seconds: int) ->
             rung.phase_cgroups.extend(
                 Path(str(run["cgroup_path"]))
                 for run in swap["runs"].values()
-                if isinstance(run, Mapping) and isinstance(run.get("cgroup_path"), str)
+                if isinstance(run, Mapping)
+                and isinstance(run.get("cgroup_path"), str)
                 and run["cgroup_path"]
             )
         swapped = phase_cgroup.verdict(swap)
@@ -678,7 +677,7 @@ def run_phase(rung: Rung, name: str, task: dict[str, Any], wall_seconds: int) ->
             cause = (
                 cause[0],
                 f"{cause[1][: max(0, 2048 - len(suffix))]}{suffix}",
-        )
+            )
         if cause is not None and raw.is_dir():
             progress_file = stage / "query-progress.jsonl"
             if name == "query" and progress_file.is_file():
