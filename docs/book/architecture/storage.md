@@ -1170,6 +1170,23 @@ selection; any mismatch is discarded and retried conservatively. This
 accelerator fallback applies only to a valid v0.5 participant; it is not a
 project-format compatibility path.
 
+#### Filtered edge lookup
+
+The bulk builder ranks edges by UUID and gives each canonical edge file a
+contiguous window of `edge_id`s, so a file that holds one route's edges has
+physical row ordinal `n - first_id` for `edge_id = n`. The traversal's edge read
+(`ExpandExec`, `VarLenExpandExec`) proves that layout per file from the same
+footer statistics and page indexes as the node read, and selects the requested
+rows by ordinal. The decision is made file by file: a file that holds none of the
+requested ids selects no row group and costs its footer, and a request is never
+compared with the size of the whole route. A file that is not dense (it shares
+its id window with another route, has no page index, or is a legacy single-file
+relation with gaps) keeps the row-group plus membership-predicate reader, as does
+a dense file when more than half of its rows are requested. The selected rows are
+validated against the ids requested of that file; any mismatch is discarded and
+the file is read conservatively. A read of a fixed frontier therefore decodes the
+pages that hold the frontier, so its bytes do not grow with the relation.
+
 **`topology/edges/TYPENAME.parquet`** (one file per relation type)
 
 | Column       | Arrow type                     | Notes                                 |

@@ -23,6 +23,7 @@
 //! consume the same canonical shard union; they are outside the query-provider
 //! scan path.
 
+use self::filtered_parquet::EdgeIdRequest;
 use self::filtered_parquet::FilteredReadKind;
 use self::filtered_parquet::read_parquet_filtered_u64;
 use self::filtered_parquet::read_required_edge_filtered;
@@ -517,16 +518,18 @@ fn read_edges_union_paths(
         )]);
     }
     let mut out = Vec::new();
+    let request = edge_ids.map(EdgeIdRequest::new);
     for (stem, path) in paths {
         let schema = if required {
             admitted_parquet(&path)?.schema().clone()
         } else {
             discover_parquet_schema(&path).unwrap_or_else(|| TYPED_EDGE_SCHEMA.clone())
         };
-        let batches = if let Some(ids) = edge_ids {
+        let batches = if let Some(request) = &request {
             if required {
-                read_required_edge_filtered(&path, schema, ids, observer, None)?
+                read_required_edge_filtered(&path, schema, request, observer, None)?
             } else {
+                let ids = request.ids();
                 read_parquet_filtered_u64(
                     &path,
                     schema,
