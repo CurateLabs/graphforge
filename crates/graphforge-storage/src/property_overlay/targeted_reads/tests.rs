@@ -445,6 +445,7 @@ fn targeted_reader_n_2n_4n_has_bounded_retention_and_exact_work() {
                 &targets,
                 None,
                 false,
+                false,
             )
             .unwrap();
             let unobserved_charges =

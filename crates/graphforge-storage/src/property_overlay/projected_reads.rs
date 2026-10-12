@@ -285,8 +285,34 @@ fn open_projected_fragment(
     let selected_groups = context
         .row_groups
         .select(builder.metadata(), context.kind.uuid_field());
+    // A nominated read decodes only the rows it names. The UUID column of the
+    // selected row groups is read first (one narrow column), and the full
+    // projection is then decoded for the matching rows alone, instead of
+    // decoding every row of each surviving row group.
+    let row_selection = match (&context.row_groups, selected_groups.as_deref()) {
+        (RowGroupSelection::Uuids(wanted), Some(groups)) if !groups.is_empty() => Some(
+            wanted_row_selection(
+                ParquetRecordBatchReaderBuilder::try_new(CountingChunkReader {
+                    length: opened.logical_length,
+                    file: Arc::clone(&opened.file),
+                    counts: context.counts.clone(),
+                })
+                .map_err(parquet_error)?,
+                context.kind.uuid_field(),
+                groups,
+                *wanted,
+                admitted_batch_rows(context.limits),
+            )?
+            .0,
+        ),
+        _ => None,
+    };
     let builder = match selected_groups {
         Some(groups) => builder.with_row_groups(groups),
+        None => builder,
+    };
+    let builder = match row_selection {
+        Some(selection) => builder.with_row_selection(selection),
         None => builder,
     };
     let reader = builder
@@ -294,6 +320,66 @@ fn open_projected_fragment(
         .build()
         .map_err(parquet_error)?;
     Ok((reader, page_reservation_bytes, opened.file, opened.handle))
+}
+
+/// The rows of `groups` whose UUID is wanted, as a selection relative to the
+/// concatenation of those row groups. Only the UUID column is decoded. Order
+/// is validated here exactly as the row cursor validates it for decoded rows.
+pub(super) fn wanted_row_selection(
+    builder: ParquetRecordBatchReaderBuilder<CountingChunkReader>,
+    uuid_field: &str,
+    groups: &[usize],
+    wanted: &dyn crate::uuid_set::UuidMembership,
+    batch_rows: usize,
+) -> Result<(parquet::arrow::arrow_reader::RowSelection, u64), GfError> {
+    use parquet::arrow::arrow_reader::{RowSelection, RowSelector};
+
+    let root = builder
+        .schema()
+        .index_of(uuid_field)
+        .map_err(|_| corrupt("property fragment lacks its UUID column"))?;
+    let mask = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), [root]);
+    let reader = builder
+        .with_projection(mask)
+        .with_row_groups(groups.to_vec())
+        .with_batch_size(batch_rows)
+        .build()
+        .map_err(parquet_error)?;
+    let mut selectors: Vec<RowSelector> = Vec::new();
+    let mut push = |select: bool, count: usize| match selectors.last_mut() {
+        Some(last) if last.skip != select => last.row_count += count,
+        _ => selectors.push(if select {
+            RowSelector::select(count)
+        } else {
+            RowSelector::skip(count)
+        }),
+    };
+    let mut prior: Option<[u8; 16]> = None;
+    let mut rows_read = 0_u64;
+    for batch in reader {
+        let batch = batch.map_err(super::authenticated_arrow_error)?;
+        let column = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+            .filter(|column| column.value_length() == 16)
+            .ok_or_else(|| corrupt("property UUID column is not FixedSizeBinary(16)"))?;
+        if column.null_count() != 0 {
+            return Err(corrupt("property UUID column contains null slots"));
+        }
+        for index in 0..column.len() {
+            let mut uuid = [0_u8; 16];
+            uuid.copy_from_slice(column.value(index));
+            // Rows of different row groups of one fragment stay ordered.
+            if prior.is_some_and(|before| before >= uuid) {
+                return Err(corrupt("property fragment UUIDs are duplicate or unsorted"));
+            }
+            prior = Some(uuid);
+            rows_read += 1;
+            push(wanted.contains_uuid(&uuid), 1);
+        }
+    }
+    Ok((RowSelection::from(selectors), rows_read))
 }
 
 pub(super) struct ProjectedMetricSources<'a> {
@@ -631,7 +717,7 @@ pub fn read_authenticated_property_snapshots_for_inventory(
     ),
     GfError,
 > {
-    let result = read_property_targets(inventory, kind, route, targets, None, true)?;
+    let result = read_property_targets(inventory, kind, route, targets, None, true, false)?;
     Ok((result.rows, result.metrics))
 }
 

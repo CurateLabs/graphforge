@@ -307,6 +307,12 @@ struct AuthenticatedPropertyFragment {
     object: OnceLock<Result<FragmentObject, GfError>>,
     footer: OnceLock<Result<FragmentFooter, GfError>>,
     readonly_index: OnceLock<Result<Arc<readonly_snapshot::ReadonlyIndex>, GfError>>,
+    /// Set once a targeted read has walked every key of this fragment and found
+    /// it strictly sorted with no tombstone carrying values. The fragment's
+    /// bytes are still authenticated on every open; this only records that the
+    /// logical key walk of those same bytes already passed, so later targeted
+    /// reads need not repeat it (#1984).
+    keys_validated: std::sync::atomic::AtomicBool,
     authentication_bytes: u64,
     authentication_block_equivalents: u64,
     authentication_read_calls: u64,

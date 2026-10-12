@@ -156,6 +156,27 @@ pub(crate) fn read_parquet_required(path: &Path) -> Result<Vec<RecordBatch>, Dat
     Ok(vec![merged])
 }
 
+/// [`read_parquet_required`] decoding only the root columns `indices` (file
+/// schema order). The batches carry exactly those columns.
+pub(crate) fn read_parquet_required_projected(
+    path: &Path,
+    indices: &[usize],
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    let builder = admitted_parquet(path)?;
+    let mask =
+        parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), indices.iter().copied());
+    let reader = builder.with_projection(mask).build().map_err(parquet_err)?;
+    // The builder's schema is the file's; the reader's is the projection.
+    let projected_schema = arrow::record_batch::RecordBatchReader::schema(&reader);
+    let batches: Vec<RecordBatch> = reader.collect::<Result<Vec<_>, _>>().map_err(parquet_err)?;
+    if batches.is_empty() {
+        return Ok(vec![RecordBatch::new_empty(projected_schema)]);
+    }
+    let merged = concat_batches(&projected_schema, &batches)
+        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+    Ok(vec![merged])
+}
+
 /// Normalize legacy scalar-label topology batches to the current multi-label
 /// schema. Existing `type_id` values become singleton `type_ids` lists.
 pub(crate) fn normalize_topology_nodes(
