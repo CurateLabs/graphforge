@@ -737,7 +737,8 @@ fn a_stale_index_is_not_used_until_rebuilt() {
     assert!(reopened <= 2 * indexed, "{reopened} vs {indexed} bytes");
 }
 
-/// The same bytes for the same content, from construction and from a rebuild.
+/// The same bytes for the same content: two constructions of one input agree,
+/// and two successive rebuilds of one project agree.
 #[test]
 fn the_index_bytes_are_a_function_of_the_content() {
     let _serial = serial();
