@@ -1065,7 +1065,9 @@ fn assess(f: Fixture) {
         // that tree's shape, not an invariant, so it moves when the file set does.
         // 373 while the fixture still published the membership index files
         // (manifest, topology receipt, identity and surrogate runs; #1902).
-        assert_eq!(manifest_experiment["authenticated_lookups_checked"], 368);
+        // 368 before the derived edge-property index (#1984, ADR 0059): its
+        // manifest and pack are graph files published with the generation.
+        assert_eq!(manifest_experiment["authenticated_lookups_checked"], 370);
         assert!(
             manifest_experiment["source_manifest_allocated_bytes"]
                 .as_u64()
