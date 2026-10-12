@@ -236,7 +236,7 @@ impl<'a> NeighborView<'a> {
 
     /// Materialize the entries.
     #[must_use]
-    pub(crate) fn to_vec(&self) -> Vec<AlgorithmEdge> {
+    pub(crate) fn to_vec(self) -> Vec<AlgorithmEdge> {
         self.iter().collect()
     }
 }
@@ -1165,7 +1165,7 @@ pub(crate) fn load_node_vectors(
     let mut values = HashMap::new();
     for stem in property_stems {
         for (uuid, row) in graph.node_property_rows(dir, stem).map_err(storage_error)? {
-            if !graph.node_id(&uuid).is_some() {
+            if graph.node_id(&uuid).is_none() {
                 continue;
             }
             if let Some(value) = row.get(property)
@@ -1355,7 +1355,7 @@ pub(crate) fn load_node_feature_properties(
                 .node_property_rows(dir, &stem)
                 .map_err(storage_error)?
             {
-                if !graph.node_id(&uuid).is_some() {
+                if graph.node_id(&uuid).is_none() {
                     continue;
                 }
                 if let Some(value) = row.get(property)
