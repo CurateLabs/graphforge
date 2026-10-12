@@ -65,7 +65,9 @@ pub struct ExecutionResourcePolicy {
     pub target_partitions: Option<usize>,
     /// DataFusion batch size. `None` → DataFusion/GraphForge default (8192).
     pub batch_size: Option<usize>,
-    /// Soft memory budget for the DataFusion memory pool. `None` → 512 MiB.
+    /// Memory budget for the DataFusion query pool. `None` derives it from the
+    /// process's memory limit ([`derive_query_memory_budget`]); a value is used
+    /// as given.
     pub memory_budget_bytes: Option<u64>,
     /// Spill configuration.
     pub spill: SpillPolicy,
@@ -102,7 +104,7 @@ impl Default for ExecutionResourcePolicy {
             tokio_worker_threads: None,
             target_partitions: None,
             batch_size: Some(DEFAULT_BATCH_SIZE),
-            memory_budget_bytes: Some(DEFAULT_MEMORY_BUDGET_BYTES),
+            memory_budget_bytes: None,
             spill: SpillPolicy::default(),
             io_concurrency: None,
             max_concurrent_heavy_queries: Some(DEFAULT_MAX_CONCURRENT_HEAVY_QUERIES),
@@ -110,6 +112,22 @@ impl Default for ExecutionResourcePolicy {
             construction_cpu_reserve: None,
         }
     }
+}
+
+/// Where the query memory budget came from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum MemoryBudgetSource {
+    /// The caller stated `memory_budget_bytes`.
+    Explicit,
+    /// Derived from the process's hard memory limit (cgroup `memory.max`,
+    /// else `MemTotal`), in bytes.
+    DerivedFromHostLimit {
+        /// The limit the budget was derived from.
+        host_limit_bytes: u64,
+    },
+    /// No limit was readable: the floor applies.
+    DerivedWithoutHostLimit,
 }
 
 /// Immutable normalized policy applied to runtime + DataFusion adapters.
@@ -125,6 +143,8 @@ pub struct NormalizedResourcePolicy {
     pub batch_size: usize,
     /// Memory budget bytes for the session memory pool.
     pub memory_budget_bytes: u64,
+    /// Where `memory_budget_bytes` came from.
+    pub memory_budget_source: MemoryBudgetSource,
     /// Whether spill is enabled.
     pub spill_enabled: bool,
     /// Caller-configured absolute spill directory. `None` with spill enabled
@@ -159,6 +179,8 @@ pub struct ResourcePolicyDiagnostics {
     pub batch_size: usize,
     /// Memory budget bytes.
     pub memory_budget_bytes: u64,
+    /// Where the memory budget came from.
+    pub memory_budget_source: MemoryBudgetSource,
     /// Whether spill is enabled.
     pub spill_enabled: bool,
     /// I/O concurrency budget.
@@ -185,13 +207,46 @@ pub struct ResourcePolicyDiagnostics {
 /// (pre-#337 had no admission semaphore).
 pub(crate) const DEFAULT_MAX_CONCURRENT_HEAVY_QUERIES: usize = 64;
 const DEFAULT_BATCH_SIZE: usize = 8_192;
+/// Floor of the derived query budget: what every instance had before the
+/// budget followed the host, so deriving never shrinks the pool.
 pub(crate) const DEFAULT_MEMORY_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
+/// Share of the process memory limit the query pool may account. The rest
+/// covers what the pool does not see: Arrow buffers held by operators that do
+/// not reserve, the page cache of the scans, sort and spill buffers, and the
+/// bulk builder and other tenants of the process (#1985).
+const QUERY_BUDGET_NUMERATOR: u64 = 1;
+const QUERY_BUDGET_DENOMINATOR: u64 = 2;
+/// Ceiling of the derived query budget. A query past 32 GiB of accounted
+/// state is a spill or a re-plan, not a bigger pool; the ceiling also keeps
+/// the partition count (`budget / 32 MiB`) from growing without bound on a
+/// large host.
+const MAX_DERIVED_QUERY_BUDGET_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 pub(crate) const MIN_THREADS: usize = 1;
 pub(crate) const MAX_THREADS: usize = 256;
 pub(crate) const MIN_BATCH_SIZE: usize = 1;
 pub(crate) const MAX_BATCH_SIZE: usize = 1_048_576;
 pub(crate) const MIN_MEMORY_BUDGET_BYTES: u64 = 16 * 1024 * 1024;
 pub(crate) const MAX_MEMORY_BUDGET_BYTES: u64 = 1024 * 1024 * 1024 * 1024; // 1 TiB
+
+/// The query memory budget for a process limited to `host_limit_bytes`:
+/// [`QUERY_BUDGET_NUMERATOR`] / [`QUERY_BUDGET_DENOMINATOR`] of the limit,
+/// within [`DEFAULT_MEMORY_BUDGET_BYTES`] and [`MAX_DERIVED_QUERY_BUDGET_BYTES`].
+#[must_use]
+pub fn derive_query_memory_budget(host_limit_bytes: Option<u64>) -> (u64, MemoryBudgetSource) {
+    match host_limit_bytes {
+        Some(limit) => (
+            (limit / QUERY_BUDGET_DENOMINATOR * QUERY_BUDGET_NUMERATOR)
+                .clamp(DEFAULT_MEMORY_BUDGET_BYTES, MAX_DERIVED_QUERY_BUDGET_BYTES),
+            MemoryBudgetSource::DerivedFromHostLimit {
+                host_limit_bytes: limit,
+            },
+        ),
+        None => (
+            DEFAULT_MEMORY_BUDGET_BYTES,
+            MemoryBudgetSource::DerivedWithoutHostLimit,
+        ),
+    }
+}
 
 fn validation(message: impl Into<String>) -> GfError {
     GfError::Validation(message.into())
@@ -292,9 +347,24 @@ impl ExecutionResourcePolicy {
     ///
     /// # Errors
     /// Returns [`GfError::Validation`] for unsafe/unsupported settings.
-    #[allow(clippy::too_many_lines)]
     pub fn normalize(self) -> Result<NormalizedResourcePolicy, GfError> {
+        self.normalize_with_host_memory_limit(
+            crate::import_session::memory_budget::host_process_memory_limit_bytes,
+        )
+    }
+
+    /// [`normalize`](Self::normalize) with the process memory limit supplied by
+    /// `host_memory_limit`, read only when the budget is not stated.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn normalize_with_host_memory_limit(
+        self,
+        host_memory_limit: impl FnOnce() -> Option<u64>,
+    ) -> Result<NormalizedResourcePolicy, GfError> {
         let observed = logical_cpus();
+        let (memory_budget_bytes, memory_budget_source) = match self.memory_budget_bytes {
+            Some(bytes) => (bytes, MemoryBudgetSource::Explicit),
+            None => derive_query_memory_budget(host_memory_limit()),
+        };
         let (tokio_workers, partitions, io_conc, compute) = match self.mode {
             ResourcePolicyMode::Explicit => {
                 let workers = validate_thread_count(
@@ -316,11 +386,7 @@ impl ExecutionResourcePolicy {
                 (workers, partitions, io, compute)
             }
             ResourcePolicyMode::Automatic => {
-                let defaults = automatic_defaults(
-                    observed,
-                    self.memory_budget_bytes
-                        .unwrap_or(DEFAULT_MEMORY_BUDGET_BYTES),
-                );
+                let defaults = automatic_defaults(observed, memory_budget_bytes);
                 let (half, all) = (defaults.half, defaults.all);
                 let workers = validate_thread_count(
                     "tokio_worker_threads",
@@ -375,9 +441,6 @@ impl ExecutionResourcePolicy {
             )));
         }
 
-        let memory_budget_bytes = self
-            .memory_budget_bytes
-            .unwrap_or(DEFAULT_MEMORY_BUDGET_BYTES);
         if !(MIN_MEMORY_BUDGET_BYTES..=MAX_MEMORY_BUDGET_BYTES).contains(&memory_budget_bytes) {
             return Err(validation(format!(
                 "memory_budget_bytes must be between {MIN_MEMORY_BUDGET_BYTES} and {MAX_MEMORY_BUDGET_BYTES}"
@@ -423,6 +486,7 @@ impl ExecutionResourcePolicy {
             target_partitions: partitions,
             batch_size,
             memory_budget_bytes,
+            memory_budget_source,
             spill_enabled,
             spill_directory,
             spill_max_bytes,
@@ -597,7 +661,7 @@ mod tests {
         assert_eq!(normalized.tokio_worker_threads, half);
         assert_eq!(
             normalized.target_partitions,
-            automatic_defaults(observed, DEFAULT_MEMORY_BUDGET_BYTES).partitions
+            automatic_defaults(observed, normalized.memory_budget_bytes).partitions
         );
         assert_eq!(normalized.io_concurrency, half);
         // #1863: no fixed ceiling; compute and the construction admission
@@ -609,7 +673,13 @@ mod tests {
         assert_eq!(normalized.spill_directory, None);
         assert_eq!(normalized.spill_max_bytes, None);
         assert_eq!(normalized.batch_size, DEFAULT_BATCH_SIZE);
-        assert_eq!(normalized.memory_budget_bytes, DEFAULT_MEMORY_BUDGET_BYTES);
+        assert_eq!(
+            normalized.memory_budget_bytes,
+            derive_query_memory_budget(
+                crate::import_session::memory_budget::host_process_memory_limit_bytes()
+            )
+            .0
+        );
         assert_eq!(
             normalized.max_concurrent_heavy_queries,
             DEFAULT_MAX_CONCURRENT_HEAVY_QUERIES
@@ -717,6 +787,60 @@ mod tests {
         .normalize()
         .expect_err("relative spill");
         assert!(matches!(err, GfError::Validation(_)));
+    }
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    #[test]
+    fn the_default_budget_is_half_the_process_limit_within_a_floor_and_a_cap() {
+        for (limit, budget) in [
+            (Some(4 * GIB), 2 * GIB),
+            (Some(120 * GIB), 32 * GIB),
+            (Some(GIB), DEFAULT_MEMORY_BUDGET_BYTES),
+            (Some(GIB / 4), DEFAULT_MEMORY_BUDGET_BYTES),
+            (None, DEFAULT_MEMORY_BUDGET_BYTES),
+        ] {
+            assert_eq!(derive_query_memory_budget(limit).0, budget, "{limit:?}");
+        }
+        let normalized = ExecutionResourcePolicy::default()
+            .normalize_with_host_memory_limit(|| Some(4 * GIB))
+            .expect("derived");
+        assert_eq!(normalized.memory_budget_bytes, 2 * GIB);
+        assert_eq!(
+            normalized.memory_budget_source,
+            MemoryBudgetSource::DerivedFromHostLimit {
+                host_limit_bytes: 4 * GIB
+            }
+        );
+        // The unreadable-host case is recorded, not passed off as a limit.
+        let unreadable = ExecutionResourcePolicy::default()
+            .normalize_with_host_memory_limit(|| None)
+            .expect("floor");
+        assert_eq!(
+            (
+                unreadable.memory_budget_bytes,
+                unreadable.memory_budget_source
+            ),
+            (
+                DEFAULT_MEMORY_BUDGET_BYTES,
+                MemoryBudgetSource::DerivedWithoutHostLimit
+            )
+        );
+    }
+
+    #[test]
+    fn a_stated_budget_overrides_the_host_and_never_reads_it() {
+        let normalized = ExecutionResourcePolicy {
+            memory_budget_bytes: Some(64 * 1024 * 1024),
+            ..ExecutionResourcePolicy::default()
+        }
+        .normalize_with_host_memory_limit(|| panic!("the host limit is not consulted"))
+        .expect("explicit");
+        assert_eq!(normalized.memory_budget_bytes, 64 * 1024 * 1024);
+        assert_eq!(
+            normalized.memory_budget_source,
+            MemoryBudgetSource::Explicit
+        );
     }
 
     #[test]

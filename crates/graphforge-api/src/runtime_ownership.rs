@@ -19,6 +19,7 @@ impl GraphForge {
             target_partitions: self.resource_policy.target_partitions,
             batch_size: self.resource_policy.batch_size,
             memory_budget_bytes: self.resource_policy.memory_budget_bytes,
+            memory_budget_source: self.resource_policy.memory_budget_source,
             spill_enabled: self.resource_policy.spill_enabled,
             io_concurrency: self.resource_policy.io_concurrency,
             compute_threads: self.resource_policy.compute_threads,

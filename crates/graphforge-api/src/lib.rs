@@ -574,8 +574,8 @@ pub use paging::{CancellationToken, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, PageRequ
 #[cfg(feature = "provenance")]
 pub use provenance::ProvenanceHistoryRequest;
 pub use resource_policy::{
-    ExecutionResourcePolicy, NormalizedResourcePolicy, ResourcePolicyDiagnostics,
-    ResourcePolicyMode, SpillPolicy,
+    ExecutionResourcePolicy, MemoryBudgetSource, NormalizedResourcePolicy,
+    ResourcePolicyDiagnostics, ResourcePolicyMode, SpillPolicy, derive_query_memory_budget,
 };
 pub use search_index::AdjacencyInspection;
 #[cfg(feature = "search")]

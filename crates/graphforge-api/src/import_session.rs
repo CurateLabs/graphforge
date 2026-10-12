@@ -28,7 +28,7 @@ mod external_source;
 mod inventory_budget;
 mod ipc_schema_admission;
 mod journal;
-mod memory_budget;
+pub(crate) mod memory_budget;
 mod normalization;
 mod parquet_admission;
 mod parquet_alloc;

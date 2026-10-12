@@ -63,6 +63,74 @@ pub(super) fn claimable_bytes(
     claimable
 }
 
+/// Paths from `path` up to and including the root: `/a/b` gives `/a/b`, `/a`, ``.
+fn cgroup_ancestors(path: &str) -> impl Iterator<Item = &str> {
+    let mut level = Some(path.trim_end_matches('/'));
+    std::iter::from_fn(move || {
+        let current = level?;
+        level = current.rfind('/').map(|cut| &current[..cut]);
+        Some(current)
+    })
+}
+
+/// The hard memory limit of this process, in bytes: the smallest of `MemTotal`
+/// and every numeric cgroup limit from the process's cgroup to the root, v2
+/// (`memory.max`) and v1 (`memory.limit_in_bytes`, whose "no limit" is a value
+/// near `i64::MAX` that `MemTotal` undercuts). Unlike [`claimable_bytes`] this
+/// ignores current usage: it sizes a pool that lives for the instance, not a
+/// one-shot plan. `None` when nothing is readable.
+pub(crate) fn process_memory_limit_bytes(
+    meminfo: Option<&str>,
+    self_cgroup: Option<&str>,
+    read: &dyn Fn(&str) -> Option<String>,
+) -> Option<u64> {
+    let mut limit = meminfo.and_then(|text| {
+        text.lines()
+            .find_map(|line| line.strip_prefix("MemTotal:"))
+            .and_then(|rest| rest.split_ascii_whitespace().next()?.parse::<u64>().ok())
+            .map(|kib| kib.saturating_mul(1024))
+    });
+    let mut tighten = |bytes: u64| limit = Some(limit.map_or(bytes, |current| current.min(bytes)));
+    let strip = |path: &str| {
+        path.split(" (deleted)")
+            .next()
+            .unwrap_or(path)
+            .trim_end()
+            .to_owned()
+    };
+    let number = |file: String| read(&file).and_then(|text| text.trim().parse::<u64>().ok());
+    for line in self_cgroup.unwrap_or_default().lines() {
+        if let Some(path) = line.strip_prefix("0::") {
+            for level in cgroup_ancestors(&strip(path)) {
+                if let Some(bytes) = number(format!("/sys/fs/cgroup{level}/memory.max")) {
+                    tighten(bytes);
+                }
+            }
+        } else if let Some((_, rest)) = line.split_once(':')
+            && let Some((controllers, path)) = rest.split_once(':')
+            && controllers.split(',').any(|name| name == "memory")
+        {
+            for level in cgroup_ancestors(&strip(path)) {
+                if let Some(bytes) = number(format!(
+                    "/sys/fs/cgroup/memory{level}/memory.limit_in_bytes"
+                )) {
+                    tighten(bytes);
+                }
+            }
+        }
+    }
+    limit
+}
+
+/// The hard memory limit on this host, for this process.
+pub(crate) fn host_process_memory_limit_bytes() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok();
+    let cgroup = std::fs::read_to_string("/proc/self/cgroup").ok();
+    process_memory_limit_bytes(meminfo.as_deref(), cgroup.as_deref(), &|path| {
+        std::fs::read_to_string(path).ok()
+    })
+}
+
 /// The budget for `claimable` bytes of memory.
 pub(super) fn budget_for(claimable: Option<u64>) -> u64 {
     claimable.map_or(FALLBACK_BYTES, |claimable| {
@@ -185,6 +253,49 @@ mod tests {
         assert_eq!(
             claimable_bytes(Some(&meminfo(10)), Some("4:memory:/x\n"), &read),
             Some(10 * GIB)
+        );
+    }
+
+    #[test]
+    fn the_process_limit_is_the_tightest_level_ignoring_current_usage() {
+        let meminfo = "MemTotal: 125829120 kB\nMemAvailable: 1 kB\n";
+        let read = files(&[
+            ("/sys/fs/cgroup/a/b/memory.max", "4294967296"),
+            ("/sys/fs/cgroup/a/b/memory.current", "4000000000"),
+            ("/sys/fs/cgroup/a/memory.max", "max"),
+            ("/sys/fs/cgroup/memory.max", "68719476736"),
+        ]);
+        assert_eq!(
+            process_memory_limit_bytes(Some(meminfo), Some("0::/a/b\n"), &read),
+            Some(4 * GIB)
+        );
+        // No cgroup limit: the machine's memory.
+        assert_eq!(
+            process_memory_limit_bytes(Some(meminfo), Some("0::/a/b\n"), &files(&[])),
+            Some(120 * GIB)
+        );
+        assert_eq!(process_memory_limit_bytes(None, None, &files(&[])), None);
+    }
+
+    #[test]
+    fn a_v1_hierarchy_limit_applies_and_its_unlimited_value_does_not() {
+        let meminfo = "MemTotal: 33554432 kB\n";
+        let cgroup = "12:cpu,cpuacct:/x\n4:memory:/x/y\n";
+        let limited = files(&[(
+            "/sys/fs/cgroup/memory/x/y/memory.limit_in_bytes",
+            "2147483648\n",
+        )]);
+        assert_eq!(
+            process_memory_limit_bytes(Some(meminfo), Some(cgroup), &limited),
+            Some(2 * GIB)
+        );
+        let unlimited = files(&[(
+            "/sys/fs/cgroup/memory/x/y/memory.limit_in_bytes",
+            "9223372036854771712\n",
+        )]);
+        assert_eq!(
+            process_memory_limit_bytes(Some(meminfo), Some(cgroup), &unlimited),
+            Some(32 * GIB)
         );
     }
 
