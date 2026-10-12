@@ -298,9 +298,11 @@ class TinyLadderEndToEndTests(Scratch):
             (self.output / "snb-interactive-sf1-query-benchexec-raw").rglob("query-progress.jsonl")
         )
         self.assertEqual(len(query_progress), 1)
-        progress_text = query_progress[0].read_text(encoding="utf-8")
-        self.assertIn('"gdc_query": "start"', progress_text)
-        self.assertIn('"gdc_query": "end"', progress_text)
+        progress_records = [
+            json.loads(line) for line in query_progress[0].read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertIn("start", {record["gdc_query"] for record in progress_records})
+        self.assertIn("end", {record["gdc_query"] for record in progress_records})
 
         # The card headlines sf0 and names what stopped sf1.
         paths = write_card(ROOT, ladder.spec, self.output)
@@ -557,11 +559,34 @@ class LadderControlTests(Scratch):
     def test_json_progress_ignores_torn_final_line_and_preserves_escaped_ids(self) -> None:
         progress = self.scratch / "progress.jsonl"
         progress.write_text(
-            json.dumps({"gdc_query": "start", "query_id": 'BI "two"', "binding_id": "line one", "phase": "run-10"})
+            json.dumps(
+                {
+                    "gdc_query": "start",
+                    "query_id": 'BI "two"',
+                    "binding_id": "line one",
+                    "phase": "run-10",
+                }
+            )
             + "\n"
-            + json.dumps({"gdc_query": "end", "query_id": 'BI "two"', "binding_id": "line one", "phase": "run-10", "latency_ns": 10, "rows": 2})
+            + json.dumps(
+                {
+                    "gdc_query": "end",
+                    "query_id": 'BI "two"',
+                    "binding_id": "line one",
+                    "phase": "run-10",
+                    "latency_ns": 10,
+                    "rows": 2,
+                }
+            )
             + "\n"
-            + json.dumps({"gdc_query": "start", "query_id": "run-10", "binding_id": "a " + "x" * 8000, "phase": "run-3"})
+            + json.dumps(
+                {
+                    "gdc_query": "start",
+                    "query_id": "run-10",
+                    "binding_id": "a " + "x" * 8000,
+                    "phase": "run-3",
+                }
+            )
             + "\n"
             + '{"gdc_query":"start","query_id":"run-1',
             encoding="utf-8",
@@ -581,7 +606,9 @@ class LadderControlTests(Scratch):
             "os.write(fd, json.dumps({'gdc_query':'start','query_id':'BI9','binding_id':'line 7','phase':'run-2'}).encode()+b'\\n'); "
             "time.sleep(30)"
         )
-        child = subprocess.Popen([sys.executable, "-c", code], env={**os.environ, "GF_GDC_PROGRESS_PATH": str(progress)})
+        child = subprocess.Popen(
+            [sys.executable, "-c", code], env={**os.environ, "GF_GDC_PROGRESS_PATH": str(progress)}
+        )
         self.addCleanup(lambda: child.poll() is None and child.kill())
         deadline = time.monotonic() + 5
         while not progress.exists() and time.monotonic() < deadline:
