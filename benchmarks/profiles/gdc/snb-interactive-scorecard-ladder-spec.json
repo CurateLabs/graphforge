@@ -6,6 +6,7 @@
   "identity_profile": "scorecard",
   "counts_ladder": "profiles/gdc/snb-interactive-scorecard-ladder.json",
   "metric_shape": "queries",
+  "query_timeout_seconds": 300,
   "variance_line": "Read-only Interactive v1 reads on the bulk-load snapshot; the update stream is refused.",
   "attribution": "Data and parameters from the LDBC Social Network Benchmark Interactive v1 workload (https://ldbcouncil.org/benchmarks/snb/), used under CC-BY 4.0.",
   "variances": [

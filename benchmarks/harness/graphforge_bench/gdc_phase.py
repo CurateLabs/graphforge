@@ -219,6 +219,8 @@ def _query(task: Mapping[str, Any], phase: Phase) -> dict[str, Any]:
         task["expected_counts"],
         "--output",
         task["evidence"],
+        "--query-timeout-seconds",
+        str(task["query_timeout_seconds"]),
     ]
     if task.get("results_dir") is not None:
         argv += ["--results-dir", task["results_dir"]]

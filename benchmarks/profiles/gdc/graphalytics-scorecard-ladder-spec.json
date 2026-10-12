@@ -6,6 +6,7 @@
   "identity_profile": "scorecard",
   "counts_ladder": "profiles/gdc/graphalytics-scorecard-ladder.json",
   "metric_shape": "graphalytics",
+  "query_timeout_seconds": 900,
   "variance_line": "Graphalytics algorithms run through GraphForge analyst verbs with explicit compatibility modes; makespan is not measured.",
   "attribution": "Datasets, reference outputs and specification from LDBC Graphalytics (https://ldbcouncil.org/benchmarks/graphalytics/); LDBC materials are used under CC-BY 4.0.",
   "variances": [
@@ -27,7 +28,7 @@
     {
       "kind": "spec_variance",
       "subject": "timeouts",
-      "text": "Graphalytics' per-class job time-outs are not applied; each rung runs under the four-hour rung wall."
+      "text": "Graphalytics' per-class job time-out (15 minutes for an S-class job) is applied per algorithm run: a query call still in flight after query_timeout_seconds is killed and recorded as a failed sample. The four-hour rung wall remains as a backstop."
     }
   ],
   "rungs": [

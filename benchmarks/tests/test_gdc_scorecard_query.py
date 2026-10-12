@@ -70,6 +70,8 @@ class ScorecardQueryTests(unittest.TestCase):
                 str(expected),
                 "--output",
                 str(output),
+                "--query-timeout-seconds",
+                "60",
             ],
             check=False,
             capture_output=True,
@@ -158,7 +160,9 @@ class ScorecardQueryTests(unittest.TestCase):
         completed = self.query(QUERY_FIXTURE / "expected-counts.json", output, path)
 
         self.assertEqual(completed.returncode, 3, completed.stderr)
-        self.assertEqual(json.loads(completed.stderr)["error"]["cause"], "query_failed")
+        # The driver names each variant's child pid on stderr before the error line.
+        error = json.loads(completed.stderr.strip().splitlines()[-1])
+        self.assertEqual(error["error"]["cause"], "query_failed")
         evidence = json.loads(output.read_text(encoding="utf-8"))
         assert_query_latency_authority(evidence)
         self.assertEqual(evidence["status"], "failed")

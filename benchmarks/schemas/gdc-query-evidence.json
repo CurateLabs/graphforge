@@ -9,6 +9,7 @@
     "certification",
     "suite",
     "status",
+    "query_timeout_seconds",
     "failures",
     "driver",
     "inputs",
@@ -35,6 +36,14 @@
         "failed"
       ],
       "description": "failed when any sample failed; every failed sample is listed in `failures`."
+    },
+    "query_timeout_seconds": {
+      "description": "The longest one call could be in flight before the driver killed the variant's process; null when the run measured in-process with no bound. A bound, never a measurement.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1
     },
     "failures": {
       "type": "array",
@@ -326,7 +335,10 @@
     "failureCause": {
       "enum": [
         "query_failed",
-        "result_unrenderable"
+        "result_unrenderable",
+        "query_timeout",
+        "not_run",
+        "query_crashed"
       ]
     },
     "errorCode": {
