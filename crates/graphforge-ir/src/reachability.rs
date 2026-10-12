@@ -29,14 +29,15 @@
 //!    selected.
 //! 2. **The relationship list is never read.** The edge variable (and any named
 //!    path, which binds to it) appears only as the argument of `length()` or
-//!    `size()` that is itself the argument of `min()`. Every other mention —
-//!    `RETURN r`, `[e IN r | …]`, `ALL(e IN r WHERE …)`, `nodes(p)`, `r[0]`,
-//!    `length(r) > 2` in a filter, `max(length(r))` — reads something reachability
-//!    does not produce, so the expansion stays on trails. A relationship-
-//!    uniqueness constraint against another relationship (`RelationshipUnique`)
-//!    reads the list too; it is vacuous, and dropped, only when both
-//!    relationships have known, different relation types, because then they
-//!    cannot share a relationship.
+//!    `size()` that is itself the argument of `min()`, or as the list of a
+//!    per-hop predicate that is pushed into the search (see below). Every other
+//!    mention — `RETURN r`, `[e IN r | …]`, `ANY(e IN r WHERE …)`, `nodes(p)`,
+//!    `r[0]`, `length(r) > 2` in a filter, `max(length(r))` — reads something
+//!    reachability does not produce, so the expansion stays on trails. A
+//!    relationship-uniqueness constraint against another relationship
+//!    (`RelationshipUnique`) reads the list too; it is vacuous, and dropped, only
+//!    when both relationships have known, different relation types, because then
+//!    they cannot share a relationship.
 //! 3. **Row multiplicity is erased before it is observed.** Between the
 //!    expansion and the first operator that ignores how many times a row occurs,
 //!    every operator is a function of one row at a time (filters, projections,
@@ -61,17 +62,49 @@
 //! input column and stops its search at the level that reaches it. A bounded
 //! expansion keeps the join after it: its search is bounded by the hop limit.
 //!
-//! # Per-hop predicates (not yet pushed)
+//! # Per-hop predicates
 //!
-//! `ALL(e IN r WHERE …)` over edge properties (`TCR3`) is a read of `r`, so the
-//! expansion stays on trails. Pushing it into the search needs the edge
-//! properties of a frontier edge by CSR position (S4b); the place to lift such a
-//! conjunct out of the `Filter` and hand it to the expansion is the `Filter` arm
-//! of [`analyse`].
+//! A top-level conjunct `ALL(e IN r WHERE p)` of a filter after the expansion
+//! (`TCR3`, or the inline `-[r*1..3 {since: 2020}]->`, which the binder emits as
+//! one such conjunct per key) is *pushed into the search* when `p` reads only
+//! the properties of `e` itself, parameters and literals. It must not read `r`,
+//! a position or index, another element of the list, `e` as a whole (`type(e)`,
+//! `properties(e)`, `e = other`), any other variable, or a function that is not
+//! deterministic and clock-free; `p` must read at least one property of `e`.
+//! Only top-level `AND` conjuncts are lifted, and every other conjunct stays in
+//! the filter. A conjunct that is not liftable but mentions `r` — `ANY`, `NONE`,
+//! `SINGLE`, `ALL` over `nodes(p)`, `ALL` OR-mixed with another condition, a
+//! predicate that mentions another variable — keeps the expansion on trails.
+//!
+//! **Exactness.** `ALL(e IN r WHERE p)` is true exactly when `p` is true for
+//! every relationship of the trail `r`: one false makes it false, and one `NULL`
+//! with no false makes it `NULL`, and a filter drops both. So a trail passes the
+//! filter exactly when every one of its relationships is in
+//! `S = { e | p(e) is true }`. The trails from `a` whose every relationship is in
+//! `S` are precisely the trails of the subgraph that has only the relationships
+//! of `S`, because a trail is a walk that uses no relationship twice and
+//! whether it uses relationship `e` is decided by `e` alone. Conditions 1, 3 and
+//! 4 of the proof above hold for every graph, so they hold for that subgraph:
+//! the nodes reached, and the shortest trail to each (hence `min(size(r))`), are
+//! exactly what a breadth-first search over `S` finds. A relationship whose `p`
+//! is false or `NULL` is outside `S`, as `ALL` over a list containing it is
+//! false or `NULL`. For `min_hops = 0` the zero-hop trail has the empty list,
+//! `ALL` over `[]` is true, and the seed keeps its zero-hop row without
+//! consulting `p`. The relationships of `S` are decided one frontier at a time
+//! by the executor; a relationship is tested at most once per search level.
+//!
+//! The filter that held the conjunct is lowered without it. With a pinned
+//! destination and an unbounded expansion the destination is still hoisted
+//! (below) when the `ALL` filter follows the destination's own filters, as it
+//! does in `TCR3`; an inline `{…}` map sits between the `Expand` and the
+//! destination scan and keeps the plan order.
 
 use std::collections::{BTreeMap, HashMap};
 
-use crate::{AggFunc, BinaryOpKind, ExprArena, ExprId, GraphOp, IrExpr, RelationTypeId, VarId};
+use crate::{
+    AggFunc, BinaryOpKind, ExprArena, ExprId, GraphOp, IrExpr, PropertyId, QuantifierKind,
+    RelationTypeId, VarId,
+};
 
 /// How the lowerer is to treat one provably reachability-only `Expand`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +119,26 @@ pub struct ReachabilityExpansion {
     /// relationship they constrain has a relation type no other relationship in
     /// the constraint has.
     pub vacuous_uniqueness: Vec<usize>,
+    /// The per-relationship predicates the search applies itself, one per lifted
+    /// `ALL(e IN r WHERE …)` conjunct, in plan order. A `Filter` that held one is
+    /// lowered without it (see [`ReachabilityPlan::residual_conjuncts`]).
+    pub edge_predicates: Vec<EdgePredicate>,
+}
+
+/// One `ALL(e IN r WHERE predicate)` conjunct that the search evaluates per
+/// relationship (see the module docs for the conditions and the proof).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EdgePredicate {
+    /// The index of the `Filter` operator that held the conjunct.
+    pub filter_op: usize,
+    /// The conjunct, the whole `ALL(…)` expression.
+    pub conjunct: ExprId,
+    /// The variable that stands for one relationship inside `predicate`.
+    pub loop_var: VarId,
+    /// The predicate, over `loop_var`'s properties, parameters and literals.
+    pub predicate: ExprId,
+    /// The distinct properties of `loop_var` that `predicate` reads. Never empty.
+    pub properties: Vec<PropertyId>,
 }
 
 /// The expansions of one operator pipeline that can run as reachability
@@ -132,6 +185,58 @@ impl ReachabilityPlan {
     pub fn is_empty(&self) -> bool {
         self.expansions.is_empty()
     }
+
+    /// The conjuncts of the `Filter` at `op_index` (whose predicate is
+    /// `predicate`) that remain after the per-relationship predicates the search
+    /// applies itself are removed, in plan order. `None` when no conjunct of this
+    /// filter was lifted, so it lowers unchanged; an empty list means that the
+    /// whole filter was lifted and is skipped.
+    #[must_use]
+    pub fn residual_conjuncts(
+        &self,
+        exprs: &ExprArena,
+        op_index: usize,
+        predicate: ExprId,
+    ) -> Option<Vec<ExprId>> {
+        let lifted = |conjunct: ExprId| {
+            self.expansions
+                .values()
+                .flat_map(|expansion| &expansion.edge_predicates)
+                .any(|edge| edge.filter_op == op_index && edge.conjunct == conjunct)
+        };
+        let conjuncts = conjuncts(exprs, predicate);
+        if !conjuncts.iter().any(|conjunct| lifted(*conjunct)) {
+            return None;
+        }
+        Some(
+            conjuncts
+                .into_iter()
+                .filter(|conjunct| !lifted(*conjunct))
+                .collect(),
+        )
+    }
+}
+
+/// The top-level `AND` conjuncts of `id`, left to right. An expression that is
+/// not an `AND` is its own single conjunct.
+#[must_use]
+pub fn conjuncts(exprs: &ExprArena, id: ExprId) -> Vec<ExprId> {
+    let mut out = Vec::new();
+    let mut stack = vec![id];
+    while let Some(next) = stack.pop() {
+        match exprs.get(next) {
+            IrExpr::BinaryOp {
+                op: BinaryOpKind::And,
+                left,
+                right,
+            } => {
+                stack.push(*right);
+                stack.push(*left);
+            }
+            _ => out.push(next),
+        }
+    }
+    out
 }
 
 /// Find the expansions of `ops` that can run as reachability searches.
@@ -215,6 +320,7 @@ fn analyse(
 
     let mentions = |id: ExprId| mentions_var(exprs, id, edge);
     let mut vacuous_uniqueness = Vec::new();
+    let mut edge_predicates = Vec::new();
     for (offset, op) in ops[index + 1..].iter().enumerate() {
         let position = index + 1 + offset;
         match op {
@@ -251,10 +357,15 @@ fn analyse(
                 vacuous_uniqueness.push(position);
             }
             GraphOp::Filter { predicate } => {
-                // Per-hop predicates `ALL(e IN r WHERE …)` are a mention of the
-                // list here; see the module docs for where they would be pushed.
-                if mentions(*predicate) {
-                    return None;
+                // A conjunct that mentions the list is either a per-hop predicate
+                // the search can apply itself, or a read of something
+                // reachability does not produce.
+                for conjunct in conjuncts(exprs, *predicate) {
+                    if !mentions(conjunct) {
+                        continue;
+                    }
+                    let lifted = edge_predicate(exprs, conjunct, edge, position)?;
+                    edge_predicates.push(lifted);
                 }
             }
             GraphOp::Unwind { list_expr, .. } => {
@@ -272,7 +383,13 @@ fn analyse(
                     return None;
                 }
                 if *distinct {
-                    return Some(expansion(ops, exprs, index, vacuous_uniqueness));
+                    return Some(expansion(
+                        ops,
+                        exprs,
+                        index,
+                        vacuous_uniqueness,
+                        edge_predicates,
+                    ));
                 }
             }
             GraphOp::With {
@@ -286,7 +403,13 @@ fn analyse(
                     return None;
                 }
                 if *distinct {
-                    return Some(expansion(ops, exprs, index, vacuous_uniqueness));
+                    return Some(expansion(
+                        ops,
+                        exprs,
+                        index,
+                        vacuous_uniqueness,
+                        edge_predicates,
+                    ));
                 }
             }
             GraphOp::Aggregate { group_by, aggs, .. } => {
@@ -319,7 +442,13 @@ fn analyse(
                 if !ignores_multiplicity {
                     return None;
                 }
-                return Some(expansion(ops, exprs, index, vacuous_uniqueness));
+                return Some(expansion(
+                    ops,
+                    exprs,
+                    index,
+                    vacuous_uniqueness,
+                    edge_predicates,
+                ));
             }
             // LIMIT/SKIP select rows by position; subqueries, unions, procedure
             // calls and writes are not modelled.
@@ -337,12 +466,136 @@ fn expansion(
     exprs: &ExprArena,
     index: usize,
     vacuous_uniqueness: Vec<usize>,
+    edge_predicates: Vec<EdgePredicate>,
 ) -> ReachabilityExpansion {
     ReachabilityExpansion {
         hoisted_destination_ops: hoistable_destination_ops(ops, exprs, index),
         vacuous_uniqueness,
+        edge_predicates,
     }
 }
+
+/// The per-relationship predicate that `conjunct` is, if it is
+/// `ALL(e IN edge WHERE p)` with `p` pushable (see the module docs).
+fn edge_predicate(
+    exprs: &ExprArena,
+    conjunct: ExprId,
+    edge: VarId,
+    filter_op: usize,
+) -> Option<EdgePredicate> {
+    let IrExpr::Quantifier {
+        kind: QuantifierKind::All,
+        loop_var,
+        list,
+        predicate,
+    } = exprs.get(conjunct)
+    else {
+        return None;
+    };
+    if !matches!(exprs.get(*list), IrExpr::VarRef(v) if *v == edge) {
+        return None;
+    }
+    let mut properties = Vec::new();
+    if !pushable(exprs, *predicate, *loop_var, &mut properties) || properties.is_empty() {
+        return None;
+    }
+    Some(EdgePredicate {
+        filter_op,
+        conjunct,
+        loop_var: *loop_var,
+        predicate: *predicate,
+        properties,
+    })
+}
+
+/// Whether `id` is a function of the properties of `loop_var` alone, parameters
+/// and literals, built from deterministic operators. Records the properties of
+/// `loop_var` it reads in `properties`.
+///
+/// This is an allow-list: a bare `loop_var` (which would let `type(e)`,
+/// `properties(e)` or an equality with another relationship in), any other
+/// variable, a nested quantifier or comprehension, a map, and any function not
+/// listed are rejected.
+fn pushable(
+    exprs: &ExprArena,
+    id: ExprId,
+    loop_var: VarId,
+    properties: &mut Vec<PropertyId>,
+) -> bool {
+    match exprs.get(id) {
+        IrExpr::Literal(_) | IrExpr::Parameter(_) => true,
+        IrExpr::PropertyAccess { base, prop } => {
+            if !matches!(exprs.get(*base), IrExpr::VarRef(v) if *v == loop_var) {
+                return false;
+            }
+            if !properties.contains(prop) {
+                properties.push(*prop);
+            }
+            true
+        }
+        IrExpr::BinaryOp { left, right, .. } => {
+            pushable(exprs, *left, loop_var, properties)
+                && pushable(exprs, *right, loop_var, properties)
+        }
+        IrExpr::UnaryOp { expr, .. } => pushable(exprs, *expr, loop_var, properties),
+        IrExpr::FunctionCall { name, args } => {
+            DETERMINISTIC_FUNCTIONS
+                .iter()
+                .any(|allowed| name.eq_ignore_ascii_case(allowed))
+                && args
+                    .iter()
+                    .all(|arg| pushable(exprs, *arg, loop_var, properties))
+        }
+        IrExpr::Case {
+            operand,
+            arms,
+            else_expr,
+        } => {
+            operand
+                .iter()
+                .chain(else_expr)
+                .all(|child| pushable(exprs, *child, loop_var, properties))
+                && arms.iter().all(|arm| {
+                    pushable(exprs, arm.when, loop_var, properties)
+                        && pushable(exprs, arm.then, loop_var, properties)
+                })
+        }
+        IrExpr::ListLiteral(items) => items
+            .iter()
+            .all(|item| pushable(exprs, *item, loop_var, properties)),
+        IrExpr::VarRef(_)
+        | IrExpr::MapLiteral(_)
+        | IrExpr::Quantifier { .. }
+        | IrExpr::ListComprehension { .. } => false,
+    }
+}
+
+/// Functions a pushed predicate may call: pure functions of their arguments, with
+/// no clock, randomness or access to a whole entity.
+const DETERMINISTIC_FUNCTIONS: &[&str] = &[
+    "abs",
+    "ceil",
+    "floor",
+    "round",
+    "sqrt",
+    "sign",
+    "exp",
+    "log",
+    "power",
+    "coalesce",
+    "size",
+    "tolower",
+    "lower",
+    "toupper",
+    "upper",
+    "trim",
+    "ltrim",
+    "rtrim",
+    "tostring",
+    "tointeger",
+    "tofloat",
+    "toboolean",
+];
 
 /// The number of operators after the `Expand` at `index` to move before it
 /// (see [`ReachabilityExpansion::hoisted_destination_ops`]), or `0`.

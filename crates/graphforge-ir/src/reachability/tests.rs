@@ -123,18 +123,204 @@ fn the_relationship_list_is_never_reachability() {
     ));
 }
 
+const TCR3_SHAPE: &str = "MATCH (a:N {id: $a})-[r:T*1..]->(b:N {id: $b}) \
+     WHERE ALL(e IN r WHERE $from < e.timestamp AND e.timestamp < $to) \
+     RETURN coalesce(min(size(r)), -1) AS d";
+
+/// The per-relationship predicates of the first variable-length `Expand`.
+fn lifted(query: &str) -> Vec<EdgePredicate> {
+    analysis(query)
+        .unwrap_or_else(|| panic!("{query} is reachability"))
+        .edge_predicates
+}
+
 #[test]
-fn per_hop_predicates_stay_on_trails() {
-    // TCR3: `ALL(e IN r WHERE …)` reads the relationship list. Pushing it into
-    // the search needs the edge properties of a frontier edge by CSR position.
-    assert!(!eligible(
-        "MATCH (a:N {id: $a})-[r:T*1..]->(b:N {id: $b}) \
-         WHERE ALL(e IN r WHERE $from < e.timestamp AND e.timestamp < $to) \
-         RETURN coalesce(min(size(r)), -1) AS d"
-    ));
-    assert!(!eligible(
-        "MATCH (a:N)-[r:T*1..2 {since: 2020}]->(b:N) RETURN DISTINCT b.id AS id"
-    ));
+fn per_hop_predicates_over_the_relationship_alone_are_pushed() {
+    // TCR3: the window reads only the timestamp of each relationship.
+    let predicates = lifted(TCR3_SHAPE);
+    assert_eq!(predicates.len(), 1);
+    assert_eq!(predicates[0].properties.len(), 1);
+
+    // An inline property map on the hop binds one `ALL` per key.
+    let predicates =
+        lifted("MATCH (a:N)-[r:T*1..2 {since: 2020, w: 3}]->(b:N) RETURN DISTINCT b.id AS id");
+    assert_eq!(predicates.len(), 2);
+
+    // Parameters, literals, and deterministic functions are allowed.
+    assert_eq!(
+        lifted(
+            "MATCH (a:N)-[r:T*1..3]->(b:N) \
+             WHERE ALL(x IN r WHERE abs(x.w) > $m AND coalesce(x.v, 0) IN [1, 2, $k]) \
+             RETURN DISTINCT b.id AS id"
+        )
+        .len(),
+        1
+    );
+    // A property read twice is one property; two properties are two.
+    let predicates = lifted(
+        "MATCH (a:N)-[r:T*1..3]->(b:N) \
+         WHERE ALL(x IN r WHERE x.w > 1 AND x.w < 9 AND x.v = 2) \
+         RETURN DISTINCT b.id AS id",
+    );
+    assert_eq!(predicates.len(), 1);
+    assert_eq!(predicates[0].properties.len(), 2);
+}
+
+#[test]
+fn every_top_level_conjunct_is_lifted_on_its_own_and_the_other_filters_stay() {
+    // The binder emits one filter per top-level conjunct of a `WHERE`.
+    let query = "MATCH (a:N)-[r:T*1..3]->(b:N) \
+                 WHERE b.id > 1 AND ALL(x IN r WHERE x.w > $m) AND ALL(y IN r WHERE y.v < $n) \
+                 RETURN DISTINCT b.id AS id";
+    let plan = bind(query);
+    let reachability = reachability_expansions(&plan.ops, &plan.exprs);
+    let expand = plan
+        .ops
+        .iter()
+        .position(|op| matches!(op, GraphOp::Expand { .. }))
+        .unwrap();
+    let expansion = reachability.expansion_at(expand).expect("reachability");
+    assert_eq!(expansion.edge_predicates.len(), 2);
+    let mut lifted_filters = 0;
+    let mut kept_filters = 0;
+    for (index, op) in plan.ops.iter().enumerate() {
+        let GraphOp::Filter { predicate } = op else {
+            continue;
+        };
+        match reachability.residual_conjuncts(&plan.exprs, index, *predicate) {
+            Some(residual) => {
+                assert!(residual.is_empty(), "a lifted filter keeps nothing");
+                lifted_filters += 1;
+            }
+            None => kept_filters += 1,
+        }
+    }
+    assert_eq!((lifted_filters, kept_filters), (2, 1));
+}
+
+#[test]
+fn a_filter_that_mixes_lifted_and_other_conjuncts_keeps_the_others_in_order() {
+    let mut exprs = ExprArena::new();
+    let lit = |exprs: &mut ExprArena, value: i64| {
+        exprs.push(IrExpr::Literal(crate::IrLiteral::Int(value)))
+    };
+    let first = lit(&mut exprs, 1);
+    let lifted = lit(&mut exprs, 2);
+    let last = lit(&mut exprs, 3);
+    let and = |exprs: &mut ExprArena, left, right| {
+        exprs.push(IrExpr::BinaryOp {
+            op: BinaryOpKind::And,
+            left,
+            right,
+        })
+    };
+    let head = and(&mut exprs, first, lifted);
+    let whole = and(&mut exprs, head, last);
+    let reachability = ReachabilityPlan {
+        expansions: BTreeMap::from([(
+            0,
+            ReachabilityExpansion {
+                hoisted_destination_ops: 0,
+                vacuous_uniqueness: Vec::new(),
+                edge_predicates: vec![EdgePredicate {
+                    filter_op: 5,
+                    conjunct: lifted,
+                    loop_var: VarId(9),
+                    predicate: lifted,
+                    properties: Vec::new(),
+                }],
+            },
+        )]),
+    };
+    assert_eq!(conjuncts(&exprs, whole), vec![first, lifted, last]);
+    assert_eq!(
+        reachability.residual_conjuncts(&exprs, 5, whole),
+        Some(vec![first, last])
+    );
+    // The same conjunct in another filter is not the lifted one.
+    assert_eq!(reachability.residual_conjuncts(&exprs, 6, whole), None);
+}
+
+#[test]
+fn a_filter_of_only_lifted_conjuncts_has_no_residual() {
+    let plan = bind(TCR3_SHAPE);
+    let reachability = reachability_expansions(&plan.ops, &plan.exprs);
+    let (index, predicate) = plan
+        .ops
+        .iter()
+        .enumerate()
+        .filter_map(|(index, op)| match op {
+            GraphOp::Filter { predicate } => Some((index, *predicate)),
+            _ => None,
+        })
+        .find(|(index, predicate)| {
+            reachability
+                .residual_conjuncts(&plan.exprs, *index, *predicate)
+                .is_some()
+        })
+        .expect("the window filter holds the lifted conjunct");
+    assert_eq!(
+        reachability.residual_conjuncts(&plan.exprs, index, predicate),
+        Some(Vec::new())
+    );
+    // The filters that held no lifted conjunct lower unchanged.
+    for (other, op) in plan.ops.iter().enumerate() {
+        if let GraphOp::Filter { predicate } = op
+            && other != index
+        {
+            assert_eq!(
+                reachability.residual_conjuncts(&plan.exprs, other, *predicate),
+                None
+            );
+        }
+    }
+}
+
+#[test]
+fn a_pinned_destination_is_still_hoisted_when_the_window_filter_follows_it() {
+    let plan = bind(TCR3_SHAPE);
+    let reachability = reachability_expansions(&plan.ops, &plan.exprs);
+    let expand = plan
+        .ops
+        .iter()
+        .position(|op| matches!(op, GraphOp::Expand { .. }))
+        .unwrap();
+    let expansion = reachability.expansion_at(expand).expect("reachability");
+    assert_eq!(expansion.hoisted_destination_ops, 2);
+}
+
+#[test]
+fn per_hop_predicates_that_read_more_than_one_relationship_stay_on_trails() {
+    for query in [
+        // ANY / NONE / SINGLE are not "every relationship satisfies".
+        "MATCH (a:N)-[r:T*1..3]->(b:N) WHERE ANY(e IN r WHERE e.w > 1) RETURN DISTINCT b.id AS id",
+        "MATCH (a:N)-[r:T*1..3]->(b:N) WHERE NONE(e IN r WHERE e.w > 1) RETURN DISTINCT b.id AS id",
+        "MATCH (a:N)-[r:T*1..3]->(b:N) WHERE SINGLE(e IN r WHERE e.w > 1) RETURN DISTINCT b.id AS id",
+        // A predicate on another variable.
+        "MATCH (a:N)-[r:T*1..3]->(b:N) WHERE ALL(e IN r WHERE e.w > b.id) RETURN DISTINCT b.id AS id",
+        "MATCH (a:N)-[r:T*1..3]->(b:N) WHERE ALL(e IN r WHERE e.w > a.id) RETURN DISTINCT b.id AS id",
+        // ALL mixed with OR is not a top-level conjunct.
+        "MATCH (a:N)-[r:T*1..3]->(b:N) WHERE ALL(e IN r WHERE e.w > 1) OR b.id = 2 RETURN DISTINCT b.id AS id",
+        "MATCH (a:N)-[r:T*1..3]->(b:N) WHERE NOT ALL(e IN r WHERE e.w > 1) RETURN DISTINCT b.id AS id",
+        // ALL over the nodes of the path.
+        "MATCH p = (a:N)-[:T*1..3]->(b:N) WHERE ALL(n IN nodes(p) WHERE n.id > 1) RETURN DISTINCT b.id AS id",
+        // Position-dependent predicates.
+        "MATCH (a:N)-[r:T*1..3]->(b:N) WHERE ALL(e IN r WHERE e.w > size(r)) RETURN DISTINCT b.id AS id",
+        "MATCH (a:N)-[r:T*1..3]->(b:N) WHERE ALL(e IN r WHERE e.w > length(r)) RETURN DISTINCT b.id AS id",
+        // The relationship as a whole, a whole-entity function, or a clock.
+        "MATCH (a:N)-[r:T*1..3]->(b:N) WHERE ALL(e IN r WHERE type(e) = 'T') RETURN DISTINCT b.id AS id",
+        "MATCH (a:N)-[r:T*1..3]->(b:N) WHERE ALL(e IN r WHERE e.w > rand()) RETURN DISTINCT b.id AS id",
+        "MATCH (a:N)-[r:T*1..3]->(b:N) WHERE ALL(e IN r WHERE e.w < timestamp()) RETURN DISTINCT b.id AS id",
+        // No property of the relationship at all.
+        "MATCH (a:N)-[r:T*1..3]->(b:N) WHERE ALL(e IN r WHERE $k > 1) RETURN DISTINCT b.id AS id",
+        // Nested iteration.
+        "MATCH (a:N)-[r:T*1..3]->(b:N) WHERE ALL(e IN r WHERE ALL(k IN [1] WHERE e.w > k)) RETURN DISTINCT b.id AS id",
+        // A lifted conjunct does not excuse another mention of the list.
+        "MATCH (a:N)-[r:T*1..3]->(b:N) WHERE ALL(e IN r WHERE e.w > 1) AND size(r) > 1 RETURN DISTINCT b.id AS id",
+        "MATCH (a:N)-[r:T*1..3]->(b:N) WHERE ALL(e IN r WHERE e.w > 1) RETURN DISTINCT r",
+    ] {
+        assert!(!eligible(query), "{query} must stay on trails");
+    }
 }
 
 #[test]
