@@ -82,6 +82,9 @@ pub struct FilteredReadPruning {
     pub pages_considered: u64,
     /// Key-column pages containing at least one selected row.
     pub pages_selected: u64,
+    /// Rows held by those pages: the rows a decoder decompresses to return the
+    /// selected ones, which falls with the writer's page size.
+    pub page_rows_selected: u64,
     /// Exact row ordinals selected before the membership guard.
     pub exact_rows_selected: u64,
     /// Dense selection was unavailable because its metadata contract failed.
@@ -135,6 +138,7 @@ pub(crate) struct Counters {
     node_row_groups_selected: AtomicU64,
     node_pages_considered: AtomicU64,
     node_pages_selected: AtomicU64,
+    node_page_rows_selected: AtomicU64,
     node_exact_rows_selected: AtomicU64,
     node_metadata_fallbacks: AtomicU64,
     node_validation_fallbacks: AtomicU64,
@@ -145,6 +149,7 @@ pub(crate) struct Counters {
     edge_row_groups_selected: AtomicU64,
     edge_pages_considered: AtomicU64,
     edge_pages_selected: AtomicU64,
+    edge_page_rows_selected: AtomicU64,
     edge_exact_rows_selected: AtomicU64,
     edge_validation_fallbacks: AtomicU64,
     property_uuid_selections: AtomicU64,
@@ -209,6 +214,8 @@ pub struct IoSnapshot {
     pub node_pages_considered: u64,
     /// Node-id pages containing selected rows.
     pub node_pages_selected: u64,
+    /// Rows held by those node-id pages: what the decoder decompressed.
+    pub node_page_rows_selected: u64,
     /// Exact node row ordinals selected before the membership guard.
     pub node_exact_rows_selected: u64,
     /// Dense selection attempts rejected by the metadata contract.
@@ -231,6 +238,8 @@ pub struct IoSnapshot {
     pub edge_pages_considered: u64,
     /// Edge-id pages containing selected rows.
     pub edge_pages_selected: u64,
+    /// Rows held by those edge-id pages: what the decoder decompressed.
+    pub edge_page_rows_selected: u64,
     /// Exact edge row ordinals selected before the membership guard.
     pub edge_exact_rows_selected: u64,
     /// Dense edge selections rejected by post-read validation.
@@ -306,6 +315,7 @@ pub fn snapshot() -> Option<IoSnapshot> {
         node_row_groups_selected: counters.node_row_groups_selected.load(Ordering::Relaxed),
         node_pages_considered: counters.node_pages_considered.load(Ordering::Relaxed),
         node_pages_selected: counters.node_pages_selected.load(Ordering::Relaxed),
+        node_page_rows_selected: counters.node_page_rows_selected.load(Ordering::Relaxed),
         node_exact_rows_selected: counters.node_exact_rows_selected.load(Ordering::Relaxed),
         node_metadata_fallbacks: counters.node_metadata_fallbacks.load(Ordering::Relaxed),
         node_validation_fallbacks: counters.node_validation_fallbacks.load(Ordering::Relaxed),
@@ -320,6 +330,7 @@ pub fn snapshot() -> Option<IoSnapshot> {
         edge_row_groups_selected: counters.edge_row_groups_selected.load(Ordering::Relaxed),
         edge_pages_considered: counters.edge_pages_considered.load(Ordering::Relaxed),
         edge_pages_selected: counters.edge_pages_selected.load(Ordering::Relaxed),
+        edge_page_rows_selected: counters.edge_page_rows_selected.load(Ordering::Relaxed),
         edge_exact_rows_selected: counters.edge_exact_rows_selected.load(Ordering::Relaxed),
         edge_validation_fallbacks: counters.edge_validation_fallbacks.load(Ordering::Relaxed),
         property_uuid_selections: counters.property_uuid_selections.load(Ordering::Relaxed),
@@ -394,6 +405,7 @@ pub fn reset() {
             .store(0, Ordering::Relaxed);
         counters.node_pages_considered.store(0, Ordering::Relaxed);
         counters.node_pages_selected.store(0, Ordering::Relaxed);
+        counters.node_page_rows_selected.store(0, Ordering::Relaxed);
         counters
             .node_exact_rows_selected
             .store(0, Ordering::Relaxed);
@@ -418,6 +430,7 @@ pub fn reset() {
             .store(0, Ordering::Relaxed);
         counters.edge_pages_considered.store(0, Ordering::Relaxed);
         counters.edge_pages_selected.store(0, Ordering::Relaxed);
+        counters.edge_page_rows_selected.store(0, Ordering::Relaxed);
         counters
             .edge_exact_rows_selected
             .store(0, Ordering::Relaxed);
@@ -617,6 +630,9 @@ pub(crate) fn record_node_pruning(pruning: FilteredReadPruning) {
             .node_pages_selected
             .fetch_add(pruning.pages_selected, Ordering::Relaxed);
         counters
+            .node_page_rows_selected
+            .fetch_add(pruning.page_rows_selected, Ordering::Relaxed);
+        counters
             .node_exact_rows_selected
             .fetch_add(pruning.exact_rows_selected, Ordering::Relaxed);
         counters
@@ -646,6 +662,9 @@ pub(crate) fn record_edge_dense_pruning(pruning: FilteredReadPruning) {
         counters
             .edge_pages_selected
             .fetch_add(pruning.pages_selected, Ordering::Relaxed);
+        counters
+            .edge_page_rows_selected
+            .fetch_add(pruning.page_rows_selected, Ordering::Relaxed);
         counters
             .edge_exact_rows_selected
             .fetch_add(pruning.exact_rows_selected, Ordering::Relaxed);

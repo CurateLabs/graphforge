@@ -190,6 +190,7 @@ fn wave12_filtered_observation_reports_completion_or_failure_once() {
             row_groups_selected: 1,
             pages_considered: 1,
             pages_selected: 1,
+            page_rows_selected: 1,
             exact_rows_selected: 1,
             metadata_fallbacks: 0,
             validation_fallbacks: 0,
