@@ -72,6 +72,16 @@ use value_semantics::{
 };
 pub(crate) use value_semantics::{CYPHER_ORDER_KEY, needs_cypher_order_key_type};
 
+pub(crate) fn cypher_or(left: DfExpr, right: DfExpr) -> DfExpr {
+    CYPHER_OR.call(vec![left, right])
+}
+
+pub(crate) fn cypher_or_operands(
+    function: &datafusion::logical_expr::expr::ScalarFunction,
+) -> Option<(&DfExpr, &DfExpr)> {
+    value_semantics::cypher_or_operands(function)
+}
+
 pub(crate) fn is_comparison_predicate(
     function: &datafusion::logical_expr::expr::ScalarFunction,
 ) -> bool {
@@ -1742,7 +1752,7 @@ impl<'a> ExprLowerer<'a> {
                 }
                 match op {
                     BinaryOpKind::And => CYPHER_AND.call(vec![l, r]),
-                    BinaryOpKind::Or => CYPHER_OR.call(vec![l, r]),
+                    BinaryOpKind::Or => cypher_or(l, r),
                     BinaryOpKind::Xor => CYPHER_XOR.call(vec![l, r]),
                     _ => unreachable!("matched boolean operator"),
                 }

@@ -109,6 +109,17 @@ fn scalar_as_bool(s: &ScalarValue) -> datafusion::error::Result<Option<bool>> {
     }
 }
 
+/// The two operands of a Cypher `OR`, when `function` is exactly that UDF.
+pub(super) fn cypher_or_operands(
+    function: &datafusion::logical_expr::expr::ScalarFunction,
+) -> Option<(&DfExpr, &DfExpr)> {
+    let op = function.func.inner().downcast_ref::<CypherBoolOp>()?;
+    match (op.kind, function.args.as_slice()) {
+        (CypherBoolOpKind::Or, [left, right]) => Some((left, right)),
+        _ => None,
+    }
+}
+
 pub(super) static CYPHER_CMP_PRED: LazyLock<ScalarUDF> =
     LazyLock::new(|| ScalarUDF::new_from_impl(CypherCmpPred::new()));
 

@@ -96,8 +96,44 @@ fn total_predicate(expr: &Expr, schema: &DFSchema) -> bool {
                     .is_some_and(primitive)
                 && atom_type(&function.args[0], schema) == atom_type(&function.args[1], schema)
         }
-        _ => crate::expr::is_fixed_relationship_disjoint(expr, schema),
+        // A label test is `array_has(<node>.type_ids, <type id>)`: it yields
+        // true, false or NULL for every row and cannot fail, so a disjunction
+        // of such tests is as total as its operands. `OR` evaluates both
+        // operands and fails only through them.
+        Expr::ScalarFunction(function) if label_membership(function, schema) => true,
+        _ => {
+            crate::expr::is_fixed_relationship_disjoint(expr, schema)
+                || matches!(
+                    expr,
+                    Expr::ScalarFunction(function)
+                        if crate::expr::cypher_or_operands(function).is_some_and(
+                            |(left, right)| {
+                                total_predicate(left, schema) && total_predicate(right, schema)
+                            }
+                        )
+                )
+        }
     }
+}
+
+/// `array_has(column, literal)` where the column is a list of the literal's
+/// primitive type, so that the call cannot fail on any row.
+fn label_membership(
+    function: &datafusion::logical_expr::expr::ScalarFunction,
+    schema: &DFSchema,
+) -> bool {
+    use datafusion::functions_nested::array_has::ArrayHas;
+    let [list, needle] = function.args.as_slice() else {
+        return false;
+    };
+    function.func.inner().downcast_ref::<ArrayHas>().is_some()
+        && matches!(list, Expr::Column(column) if column.relation.is_some())
+        && match (list.get_type(schema), atom_type(needle, schema)) {
+            (Ok(DataType::List(element)), Some(needle)) => {
+                needle.is_integer() && element.data_type() == &needle
+            }
+            _ => false,
+        }
 }
 
 impl OptimizerRule for FixedExpandInputPredicates {
@@ -286,5 +322,71 @@ mod tests {
             )
             .transformed
         );
+    }
+
+    fn labelled() -> DFSchema {
+        DFSchema::new_with_metadata(
+            vec![
+                (
+                    Some(TableReference::bare("var_0")),
+                    Arc::new(Field::new(
+                        "type_ids",
+                        DataType::List(Arc::new(Field::new("item", DataType::UInt32, true))),
+                        true,
+                    )),
+                ),
+                (
+                    Some(TableReference::bare("var_0")),
+                    Arc::new(Field::new("score", DataType::Int64, true)),
+                ),
+            ],
+            Default::default(),
+        )
+        .unwrap()
+    }
+
+    fn has_label(id: u32) -> Expr {
+        datafusion::functions_nested::expr_fn::array_has(
+            Expr::Column(Column::new(Some(TableReference::bare("var_0")), "type_ids")),
+            lit(id),
+        )
+    }
+
+    #[test]
+    fn label_disjunction_is_total_only_through_total_operands() {
+        let schema = labelled();
+        let or = |left, right| crate::expr::cypher_or(left, right);
+        assert!(total_predicate(&has_label(1), &schema));
+        assert!(total_predicate(&or(has_label(1), has_label(2)), &schema));
+        assert!(total_predicate(
+            &or(has_label(1), or(has_label(2), has_label(3))),
+            &schema
+        ));
+        let failing = (column("var_0") / lit(0_i64)).gt(lit(0_i64));
+        assert!(!total_predicate(&or(has_label(1), failing), &schema));
+        // A needle of another type than the list's elements is not admitted.
+        let wrong = datafusion::functions_nested::expr_fn::array_has(
+            Expr::Column(Column::new(Some(TableReference::bare("var_0")), "type_ids")),
+            lit(1_i64),
+        );
+        assert!(!total_predicate(&wrong, &schema));
+    }
+
+    #[test]
+    fn fixed_relationship_disjointness_stays_total() {
+        let edge = |var: &str| {
+            (
+                Some(TableReference::bare(var)),
+                Arc::new(Field::new("edge_id", DataType::UInt64, false)),
+            )
+        };
+        let schema =
+            DFSchema::new_with_metadata(vec![edge("var_1"), edge("var_3")], Default::default())
+                .unwrap();
+        let disjoint = crate::expr::relationship_disjoint(
+            Expr::Column(Column::new(Some(TableReference::bare("var_1")), "edge_id")),
+            Expr::Column(Column::new(Some(TableReference::bare("var_3")), "edge_id")),
+        );
+        assert!(total_predicate(&disjoint, &schema));
     }
 }
