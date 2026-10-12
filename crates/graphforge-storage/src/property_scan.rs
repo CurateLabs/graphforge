@@ -53,6 +53,8 @@ pub(crate) struct PropertyOverlayExec {
     batch_size: usize,
     planned_rows: Option<usize>,
     equality: Option<crate::property_overlay::PropertyEquality>,
+    /// Whether a current persisted equality index answers `equality`.
+    equality_index: bool,
     uuid_filters: Vec<Arc<dyn PhysicalExpr>>,
     uuid_nominations: Vec<Arc<crate::property_join_nomination::UuidBuildKeyNomination>>,
     props: Arc<PlanProperties>,
@@ -148,6 +150,13 @@ impl PropertyOverlayExec {
         } else {
             (None, None)
         };
+        let equality_index = match (&options.equality, inventory.as_deref(), is_edge) {
+            (Some(equality), Some(inventory), false) => {
+                crate::property_equality_index::is_current(&project, inventory, &route, equality)
+                    .map_err(|error| DataFusionError::External(Box::new(error)))?
+            }
+            _ => false,
+        };
         Ok(Self {
             project,
             inventory,
@@ -159,6 +168,7 @@ impl PropertyOverlayExec {
             batch_size: options.batch_size.max(1),
             planned_rows,
             equality: options.equality,
+            equality_index,
             uuid_filters: Vec::new(),
             uuid_nominations: Vec::new(),
             props,
@@ -397,6 +407,9 @@ impl DisplayAs for PropertyOverlayExec {
         write!(f, "PropertyOverlayExec: route={}", self.route)?;
         if let Some(equality) = &self.equality {
             write!(f, ", equality={}={:?}", equality.column, equality.value)?;
+            if self.equality_index {
+                write!(f, ", index=property_equality({})", equality.column)?;
+            }
         }
         Ok(())
     }

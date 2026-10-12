@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "e404f548d91b2b5149f56e803e8c5b637d30dc15b4bfcb189c12434c20fe74cd",
+  "public_method_digest": "bd3f2e87aec27614d54dd9355394aae2915109af816e75e5a5c82ae08f6bd84c",
   "method_policy": {
     "receiver_defaults": {
       "PortableV2ImportResult": "release-tested",
@@ -638,6 +638,7 @@
         "GraphForge.refresh_provider_embeddings",
         "GraphForge.remove_embedding_space_alias",
         "GraphForge.rebuild_adjacency",
+        "GraphForge.rebuild_property_indexes",
         "GraphForge.rerank_find_results",
         "GraphForge.set_default_embedding_space",
         "GraphForge.set_embedding_refresh_project_policy",
@@ -679,6 +680,10 @@
         {
           "path": "crates/graphforge-api/src/search_index.rs",
           "symbol": "adjacency_rebuild_cancellation_preserves_prior_authoritative_artifact"
+        },
+        {
+          "path": "crates/graphforge-api/tests/property_equality_index.rs",
+          "symbol": "a_project_without_the_index_scans_until_rebuilt_and_after_a_write"
         },
         {
           "path": "crates/graphforge-api/tests/provider_session.rs",

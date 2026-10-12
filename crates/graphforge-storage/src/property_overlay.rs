@@ -29,6 +29,7 @@ pub use projected_reads::{
     read_authenticated_property_snapshots_for, read_authenticated_property_snapshots_for_inventory,
     visit_authenticated_property_snapshots,
 };
+mod route_digest;
 mod selective_reads;
 pub(crate) use selective_reads::{EqualityValue, PropertyEquality};
 mod streaming_merge;

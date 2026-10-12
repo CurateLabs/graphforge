@@ -57,6 +57,7 @@ mod inventory;
 mod inventory_bound;
 mod lanes;
 mod properties;
+mod property_index;
 pub use bulk::{
     BulkBatchReader, BulkBuildPlan, BulkBuildReport, BulkPassReport, BulkRoute, BulkSource,
     SourceReservation, SourceWorkspace,

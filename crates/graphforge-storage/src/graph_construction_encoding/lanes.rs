@@ -123,6 +123,7 @@ pub(super) struct ParquetLanes {
     bytes: usize,
     budget: usize,
     reversed: bool,
+    index_tap: Option<super::property_index::PropertyIndexTap>,
 }
 impl ParquetLanes {
     pub(super) fn new(admission: Option<&Arc<ConstructionCpuAdmission>>, budget: usize) -> Self {
@@ -144,7 +145,20 @@ impl ParquetLanes {
             bytes: 0,
             budget,
             reversed: crate::graph_construction::lane_jobs_reversed(),
+            index_tap: None,
         }
+    }
+
+    /// Collect the node property rows the property-equality index covers from
+    /// every fragment pushed from now on.
+    pub(super) fn with_index_tap(mut self) -> Self {
+        self.index_tap = Some(super::property_index::PropertyIndexTap::default());
+        self
+    }
+
+    /// The rows collected so far.
+    pub(super) fn take_index_tap(&mut self) -> Option<super::property_index::PropertyIndexTap> {
+        self.index_tap.take()
     }
     #[allow(clippy::too_many_arguments)]
     pub(super) fn push(
@@ -157,6 +171,9 @@ impl ParquetLanes {
         cancelled: &mut impl FnMut() -> bool,
         artifacts: &mut Vec<ConstructionEncodedArtifact>,
     ) -> Result<(), GfError> {
+        if let Some(tap) = &mut self.index_tap {
+            tap.observe(path, batch)?;
+        }
         let Some(pool) = &self.pool else {
             artifacts.extend(write_parquet(
                 root,

@@ -195,6 +195,7 @@ mod discovery_research_lineage;
 #[cfg(all(feature = "discovery", feature = "portable"))]
 mod discovery_research_version;
 mod paging;
+mod property_index;
 #[cfg(all(feature = "discovery", feature = "portable"))]
 pub use discovery_ontology_module::{
     DiscoveryOntologyModuleRequest, ResolvedOntologyModule, resolve_discovered_ontology_module,
@@ -571,6 +572,7 @@ pub use ontology_lifecycle::{
     RuntimeCatalogSnapshot,
 };
 pub use paging::{CancellationToken, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, PageRequest, PageToken};
+pub use property_index::PropertyEqualityIndexBuild;
 #[cfg(feature = "provenance")]
 pub use provenance::ProvenanceHistoryRequest;
 pub use resource_policy::{
