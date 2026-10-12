@@ -101,12 +101,18 @@ fn total_predicate(expr: &Expr, schema: &DFSchema) -> bool {
         // of such tests is as total as its operands. `OR` evaluates both
         // operands and fails only through them.
         Expr::ScalarFunction(function) if label_membership(function, schema) => true,
-        Expr::ScalarFunction(function) => {
-            crate::expr::cypher_or_operands(function).is_some_and(|(left, right)| {
-                total_predicate(left, schema) && total_predicate(right, schema)
-            })
+        _ => {
+            crate::expr::is_fixed_relationship_disjoint(expr, schema)
+                || matches!(
+                    expr,
+                    Expr::ScalarFunction(function)
+                        if crate::expr::cypher_or_operands(function).is_some_and(
+                            |(left, right)| {
+                                total_predicate(left, schema) && total_predicate(right, schema)
+                            }
+                        )
+                )
         }
-        _ => crate::expr::is_fixed_relationship_disjoint(expr, schema),
     }
 }
 
@@ -364,5 +370,23 @@ mod tests {
             lit(1_i64),
         );
         assert!(!total_predicate(&wrong, &schema));
+    }
+
+    #[test]
+    fn fixed_relationship_disjointness_stays_total() {
+        let edge = |var: &str| {
+            (
+                Some(TableReference::bare(var)),
+                Arc::new(Field::new("edge_id", DataType::UInt64, false)),
+            )
+        };
+        let schema =
+            DFSchema::new_with_metadata(vec![edge("var_1"), edge("var_3")], Default::default())
+                .unwrap();
+        let disjoint = crate::expr::relationship_disjoint(
+            Expr::Column(Column::new(Some(TableReference::bare("var_1")), "edge_id")),
+            Expr::Column(Column::new(Some(TableReference::bare("var_3")), "edge_id")),
+        );
+        assert!(total_predicate(&disjoint, &schema));
     }
 }
