@@ -526,7 +526,7 @@ impl AdjacencyGraph {
             .iter()
             .map_while(|node_id| node_uuid_by_id.get(node_id).copied())
             .collect();
-        let entries = neighbors
+        let entries: Vec<(u64, AlgorithmEdge)> = neighbors
             .into_iter()
             .flat_map(|(node, edges)| edges.into_iter().map(move |edge| (node, edge)))
             .collect();
