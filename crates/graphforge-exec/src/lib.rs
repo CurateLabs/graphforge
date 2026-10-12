@@ -101,8 +101,8 @@ mod algorithm_embedding_invocation;
 pub(crate) mod algorithm_embedding_options;
 pub mod mutation;
 mod path_hydration;
-mod task_panic;
 pub mod read_resource;
+mod task_panic;
 pub mod write_resource;
 #[cfg(feature = "algorithms-extended")]
 pub use algorithm_embedding_options::validate_embedding_options;
