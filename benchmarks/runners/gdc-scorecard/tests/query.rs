@@ -205,11 +205,12 @@ fn query_progress_is_flushed_in_binding_order() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    let progress: Vec<serde_json::Value> = String::from_utf8(progress_path.read_bytes().unwrap())
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
+    let progress: Vec<serde_json::Value> =
+        String::from_utf8(std::fs::read(&progress_path).unwrap())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
     assert_eq!(
         progress.len(),
         8,
