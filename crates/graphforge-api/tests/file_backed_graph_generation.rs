@@ -414,7 +414,7 @@ fn public_delete_keeps_multishard_index_readers_and_portability_consistent() {
             .execute("MATCH (p:Person {name:'Cy'}) RETURN p.node_uuid")
             .unwrap(),
     );
-    let (_workspace, mut index) = membership_index(&source);
+    let (_workspace, index) = membership_index(&source);
     let deleted_surrogate = index.lookup_node_surrogates(&[deleted_uuid]).unwrap().0[0]
         .expect("Cy is indexed before deletion");
 
@@ -429,7 +429,7 @@ fn public_delete_keeps_multishard_index_readers_and_portability_consistent() {
             "deleting a later-shard entity must not rewrite earlier shard {path}"
         );
     }
-    let (_workspace, mut index) = membership_index(&source);
+    let (_workspace, index) = membership_index(&source);
     assert_eq!(
         index.lookup_node_surrogates(&[deleted_uuid]).unwrap().0,
         [None]
@@ -447,7 +447,7 @@ fn public_delete_keeps_multishard_index_readers_and_portability_consistent() {
         replacement_uuid, deleted_uuid,
         "deleted identity is not reused"
     );
-    let (_workspace, mut index) = membership_index(&source);
+    let (_workspace, index) = membership_index(&source);
     let replacement_surrogate = index.lookup_node_surrogates(&[replacement_uuid]).unwrap().0[0]
         .expect("replacement node is indexed");
     assert_ne!(

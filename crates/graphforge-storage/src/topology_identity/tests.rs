@@ -118,7 +118,7 @@ fn the_fixture_carries_the_page_layout_the_pruning_tests_depend_on() {
 #[test]
 fn a_candidate_set_inside_one_page_decodes_exactly_that_page() {
     let dir = TempDir::new().unwrap();
-    let mut probe = node_probe(dir.path());
+    let probe = node_probe(dir.path());
     let candidates = [identity(1_205), identity(1_250), identity(1_299)];
     let (surrogates, metrics) = probe.lookup_node_surrogates(&candidates).unwrap();
     assert_eq!(surrogates, [Some(1_206), Some(1_251), Some(1_300)]);
@@ -141,7 +141,7 @@ fn a_candidate_set_inside_one_page_decodes_exactly_that_page() {
 #[test]
 fn candidates_in_two_row_groups_decode_one_page_in_each() {
     let dir = TempDir::new().unwrap();
-    let mut probe = node_probe(dir.path());
+    let probe = node_probe(dir.path());
     let (present, metrics) = probe
         .probe(UuidIndexKind::Node, &[identity(5), identity(3_999)])
         .unwrap();
@@ -153,7 +153,7 @@ fn candidates_in_two_row_groups_decode_one_page_in_each() {
 #[test]
 fn a_candidate_in_a_gap_between_pages_decodes_nothing() {
     let dir = TempDir::new().unwrap();
-    let mut probe = node_probe(dir.path());
+    let probe = node_probe(dir.path());
     // Inside the row group's bounds, below the next page's minimum and above
     // the previous page's maximum: only the page index can rule it out.
     let (present, metrics) = probe
@@ -169,7 +169,7 @@ fn a_candidate_in_a_gap_between_pages_decodes_nothing() {
 #[test]
 fn an_absent_candidate_inside_a_page_is_decoded_and_refused() {
     let dir = TempDir::new().unwrap();
-    let mut probe = node_probe(dir.path());
+    let probe = node_probe(dir.path());
     let (present, metrics) = probe
         .probe(UuidIndexKind::Node, &[absent_after(250)])
         .unwrap();
@@ -180,7 +180,7 @@ fn an_absent_candidate_inside_a_page_is_decoded_and_refused() {
 #[test]
 fn a_candidate_beyond_every_row_group_decodes_nothing() {
     let dir = TempDir::new().unwrap();
-    let mut probe = node_probe(dir.path());
+    let probe = node_probe(dir.path());
     let (present, metrics) = probe
         .probe(UuidIndexKind::Node, &[identity(ROWS + 7)])
         .unwrap();
@@ -191,7 +191,7 @@ fn a_candidate_beyond_every_row_group_decodes_nothing() {
 #[test]
 fn candidates_across_every_page_decode_every_page() {
     let dir = TempDir::new().unwrap();
-    let mut probe = node_probe(dir.path());
+    let probe = node_probe(dir.path());
     let candidates = (0..ROWS)
         .step_by(PAGE_ROWS)
         .map(identity)
@@ -206,7 +206,7 @@ fn candidates_across_every_page_decode_every_page() {
 fn edge_probes_prune_pages_without_a_surrogate_column() {
     let dir = TempDir::new().unwrap();
     let path = write_fragment(dir.path(), "edge_uuid", None, EnabledStatistics::Page);
-    let mut probe = probe_over(
+    let probe = probe_over(
         Vec::new(),
         vec![load_fragment(&path, "edge_uuid", None).unwrap()],
     );
@@ -229,7 +229,7 @@ fn a_file_without_a_page_index_is_pruned_by_row_group_alone() {
     );
     let fragment = load_fragment(&path, "node_uuid", Some("node_id")).unwrap();
     assert!(fragment.groups.iter().all(|group| group.pages.is_empty()));
-    let mut probe = probe_over(vec![fragment], Vec::new());
+    let probe = probe_over(vec![fragment], Vec::new());
     let (surrogates, metrics) = probe.lookup_node_surrogates(&[identity(2_500)]).unwrap();
     assert_eq!(surrogates, [Some(2_501)]);
     assert_eq!(metrics.pages_considered, GROUPS, "a group is one page");
@@ -240,11 +240,11 @@ fn a_file_without_a_page_index_is_pruned_by_row_group_alone() {
 #[test]
 fn page_pruning_reduces_the_bytes_the_file_system_serves() {
     let dir = TempDir::new().unwrap();
-    let mut probe = node_probe(dir.path());
+    let probe = node_probe(dir.path());
     let file_len = std::fs::metadata(dir.path().join("node_uuid.parquet"))
         .unwrap()
         .len();
-    let read_bytes = |probe: &mut TopologyIdentityProbe, candidates: &[Uuid]| {
+    let read_bytes = |probe: &TopologyIdentityProbe, candidates: &[Uuid]| {
         let _capture = crate::lifecycle_io::CaptureScope::install();
         let before = crate::lifecycle_io::snapshot().expect("requested measurement");
         probe.lookup_node_surrogates(candidates).unwrap();
@@ -255,12 +255,12 @@ fn page_pruning_reduces_the_bytes_the_file_system_serves() {
             .phases[&crate::StorageIoPhase::ReadPathScan]
             .read_bytes
     };
-    let narrow = read_bytes(&mut probe, &[identity(1_250)]);
+    let narrow = read_bytes(&probe, &[identity(1_250)]);
     let every_page = (0..ROWS)
         .step_by(PAGE_ROWS)
         .map(identity)
         .collect::<Vec<_>>();
-    let wide = read_bytes(&mut probe, &every_page);
+    let wide = read_bytes(&probe, &every_page);
     assert!(narrow > 0, "the probe's reads reach the lifecycle counters");
     assert!(
         narrow * 5 < wide,
@@ -289,7 +289,7 @@ fn a_cached_footer_never_sends_a_probe_to_the_path_it_was_first_read_from() {
     drop(first);
     assert!(!path.exists());
 
-    let mut probe = probe_over(
+    let probe = probe_over(
         vec![load_fragment(&linked, "node_uuid", Some("node_id")).unwrap()],
         Vec::new(),
     );
@@ -312,7 +312,7 @@ fn absent_statistics_make_every_group_and_page_possible_and_the_answer_still_exa
     let fragment = load_fragment(&path, "node_uuid", Some("node_id")).unwrap();
     assert!(fragment.groups.iter().all(|group| group.bounds.is_none()));
     assert!(fragment.groups.iter().all(|group| group.pages.is_empty()));
-    let mut probe = probe_over(vec![fragment], Vec::new());
+    let probe = probe_over(vec![fragment], Vec::new());
     let (surrogates, metrics) = probe
         .lookup_node_surrogates(&[identity(3_500), absent_after(10)])
         .unwrap();
@@ -336,7 +336,7 @@ fn truncated_statistics_are_not_trusted_for_pruning() {
     );
     let fragment = load_fragment(&path, "node_uuid", Some("node_id")).unwrap();
     assert!(fragment.groups.iter().all(|group| group.bounds.is_none()));
-    let mut probe = probe_over(vec![fragment], Vec::new());
+    let probe = probe_over(vec![fragment], Vec::new());
     let (surrogates, metrics) = probe.lookup_node_surrogates(&[identity(1_234)]).unwrap();
     assert_eq!(surrogates, [Some(1_235)]);
     assert_eq!(metrics.identity_blocks_read, GROUPS);
@@ -345,7 +345,7 @@ fn truncated_statistics_are_not_trusted_for_pruning() {
 #[test]
 fn a_fragment_replaced_after_its_footer_was_read_is_refused() {
     let dir = TempDir::new().unwrap();
-    let mut probe = node_probe(dir.path());
+    let probe = node_probe(dir.path());
     let path = dir.path().join("node_uuid.parquet");
     // Another file at the same path, as a rewrite that renames over it leaves.
     let other = TempDir::new().unwrap();
@@ -379,7 +379,7 @@ fn a_uuid_held_by_two_fragments_is_corrupt_topology() {
     );
     let copy = dir.path().join("second.parquet");
     std::fs::copy(&first, &copy).unwrap();
-    let mut probe = probe_over(
+    let probe = probe_over(
         vec![
             load_fragment(&first, "node_uuid", Some("node_id")).unwrap(),
             load_fragment(&copy, "node_uuid", Some("node_id")).unwrap(),

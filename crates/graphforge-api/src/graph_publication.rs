@@ -432,10 +432,7 @@ impl GraphForge {
         self.adjacency_provider_for_session().invalidate();
         // The topology generation counter restarts at clear(), so a cached
         // identity probe from before it can match a later generation.
-        *self
-            .identity_probe
-            .lock()
-            .expect("identity probe lock poisoned") = None;
+        self.identity_probe.invalidate();
         // The session's read authority still declares the generation's node and
         // edge files, content-store objects the workspace wipe does not touch,
         // and every later catalog lists node files from it (#1388). Re-establish

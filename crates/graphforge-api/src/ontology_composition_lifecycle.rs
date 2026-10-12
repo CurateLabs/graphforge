@@ -550,10 +550,7 @@ impl GraphForge {
                 )?;
                 self.replace_workspace_owner(crate::GraphWorkspace::new(dir, owner, &inventory)?);
                 self.graph_open_evidence = evidence;
-                *self
-                    .identity_probe
-                    .lock()
-                    .expect("UUID membership index lock poisoned") = None;
+                self.identity_probe.invalidate();
             }
             *self
                 .semantic_storage_bindings

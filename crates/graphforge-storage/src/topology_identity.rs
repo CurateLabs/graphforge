@@ -838,7 +838,7 @@ impl TopologyIdentityProbe {
     /// # Errors
     /// Returns an error when a fragment cannot be decoded.
     pub fn probe(
-        &mut self,
+        &self,
         kind: UuidIndexKind,
         uuids: &[Uuid],
     ) -> Result<(Vec<bool>, UuidProbeMetrics), GfError> {
@@ -858,7 +858,7 @@ impl TopologyIdentityProbe {
     /// # Errors
     /// Returns an error when a fragment cannot be decoded.
     pub fn lookup_node_surrogates(
-        &mut self,
+        &self,
         uuids: &[Uuid],
     ) -> Result<(Vec<Option<u64>>, UuidProbeMetrics), GfError> {
         Self::scan(&self.nodes, uuids)
@@ -879,7 +879,7 @@ impl TopologyIdentityProbe {
     ///
     /// # Errors
     /// Returns an error when a fragment cannot be decoded.
-    pub fn taken(&mut self, uuids: &[Uuid]) -> Result<(Vec<bool>, UuidProbeMetrics), GfError> {
+    pub fn taken(&self, uuids: &[Uuid]) -> Result<(Vec<bool>, UuidProbeMetrics), GfError> {
         let (nodes, node_metrics) = Self::scan(&self.nodes, uuids)?;
         let (edges, edge_metrics) = Self::scan(&self.edges, uuids)?;
         let deleted = self.deleted(uuids);

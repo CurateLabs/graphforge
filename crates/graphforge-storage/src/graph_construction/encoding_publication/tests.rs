@@ -1786,7 +1786,7 @@ fn construction_append_publishes_current_complete_ordinal_authority() {
                 .map(|id| Some(Uuid::from_u128(u128::from(*id))))
                 .collect::<Vec<_>>()
         );
-        let mut membership = crate::TopologyIdentityProbe::open_dir(&graph).unwrap();
+        let membership = crate::TopologyIdentityProbe::open_dir(&graph).unwrap();
         let uuids = ids
             .iter()
             .map(|id| Uuid::from_u128(u128::from(*id)))

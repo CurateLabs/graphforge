@@ -208,11 +208,7 @@ impl FacadeMutationLifecycle<'_> {
                 .lock()
                 .expect("runtime catalog poisoned") = catalog;
         }
-        *self
-            .graph
-            .identity_probe
-            .lock()
-            .expect("UUID membership index lock poisoned") = None;
+        self.graph.identity_probe.invalidate();
         self.graph.adjacency_provider_for_session().invalidate();
         Ok(())
     }

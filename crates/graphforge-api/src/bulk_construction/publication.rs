@@ -221,8 +221,8 @@ impl GraphForge {
         let mut candidates = normalized.identities().collect::<Vec<_>>();
         candidates.sort_unstable();
         candidates.dedup();
-        let mut probe = open_identity_probe(self, BulkInputKind::Node)?;
-        let existing = taken_identities(probe.as_mut(), &candidates, BulkInputKind::Node)?;
+        let probe = open_identity_probe(self, BulkInputKind::Node)?;
+        let existing = taken_identities(&probe, &candidates, BulkInputKind::Node)?;
         if normalized
             .rows
             .iter()
@@ -397,8 +397,8 @@ impl GraphForge {
             .collect::<Vec<_>>();
         candidates.sort_unstable();
         candidates.dedup();
-        let mut probe = open_identity_probe(self, BulkInputKind::Edge)?;
-        let existing = taken_identities(probe.as_mut(), &candidates, BulkInputKind::Edge)?;
+        let probe = open_identity_probe(self, BulkInputKind::Edge)?;
+        let existing = taken_identities(&probe, &candidates, BulkInputKind::Edge)?;
         if let Some(row) = normalized
             .rows
             .iter()

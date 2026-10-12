@@ -130,6 +130,7 @@ mod graph_inspection;
 mod graph_publication;
 #[cfg(test)]
 mod graph_snapshot;
+mod identity_probe_cache;
 #[cfg(test)]
 use graph_publication::participant_encoding;
 use graph_publication::{persist_runtime_catalog, system_time_micros};
@@ -666,7 +667,7 @@ pub struct GraphForge {
     /// Generation UUID whose graph snapshot was hydrated into `dir`.
     current_generation_uuid: Arc<Mutex<uuid::Uuid>>,
     /// Authenticated UUID index handle cached for one topology generation.
-    identity_probe: Mutex<Option<graphforge_storage::TopologyIdentityProbe>>,
+    identity_probe: identity_probe_cache::IdentityProbeCache,
     /// Decoded epistemic ledgers cached for one immutable read generation.
     /// See `epistemic_snapshot::EpistemicLedgerCache` for the invalidation
     /// contract: keyed by `(generation_uuid, manifest_sha256)`, so a publish
@@ -904,7 +905,7 @@ impl GraphForge {
             })),
             read_only: false,
             current_generation_uuid: Arc::new(Mutex::new(generation_uuid)),
-            identity_probe: Mutex::new(None),
+            identity_probe: identity_probe_cache::IdentityProbeCache::default(),
             #[cfg(feature = "knowledge")]
             epistemic_ledger_cache: Mutex::new(None),
             ordinal_identities,
@@ -1185,7 +1186,7 @@ impl GraphForge {
             })),
             read_only,
             current_generation_uuid: Arc::new(Mutex::new(generation_uuid)),
-            identity_probe: Mutex::new(None),
+            identity_probe: identity_probe_cache::IdentityProbeCache::default(),
             #[cfg(feature = "knowledge")]
             epistemic_ledger_cache: Mutex::new(None),
             ordinal_identities,

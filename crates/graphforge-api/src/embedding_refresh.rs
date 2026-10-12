@@ -261,7 +261,7 @@ impl GraphForge {
             ordinal_identities: Arc::clone(&self.ordinal_identities),
             read_only: self.read_only,
             current_generation_uuid: Arc::clone(&self.current_generation_uuid),
-            identity_probe: std::sync::Mutex::new(None),
+            identity_probe: crate::identity_probe_cache::IdentityProbeCache::default(),
             #[cfg(feature = "knowledge")]
             epistemic_ledger_cache: std::sync::Mutex::new(None),
             clock: std::sync::Mutex::new(Arc::clone(

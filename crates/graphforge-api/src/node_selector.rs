@@ -39,10 +39,8 @@ impl GraphForge {
     /// identity lookup in the published node Parquet (row-group and page pruning,
     /// ADR 0057), so it is not bounded by the graph's node count.
     fn require_node(&self, uuid: Uuid) -> Result<Uuid, GfError> {
-        let mut cached = self.cached_identity_probe()?;
-        let (found, _) = cached
-            .as_mut()
-            .expect("identity probe was just opened")
+        let (found, _) = self
+            .cached_identity_probe()?
             .probe(graphforge_storage::UuidIndexKind::Node, &[uuid])?;
         if found.first().copied().unwrap_or(false) {
             Ok(uuid)
@@ -278,7 +276,7 @@ mod tests {
         let graph = GraphForge::new(None).unwrap();
         graph.execute("CREATE (:Person {name: 'Alice'})").unwrap();
         let uuid = first_uuid(&graph);
-        assert!(graph.identity_probe.lock().unwrap().is_none());
+        assert!(graph.identity_probe.state.lock().unwrap().current.is_none());
         assert_eq!(
             graph
                 .resolve_node_selector(&NodeSelector::Uuid(uuid))
@@ -286,7 +284,7 @@ mod tests {
             uuid
         );
         // The lookup opened the Parquet probe; no topology scan was needed.
-        assert!(graph.identity_probe.lock().unwrap().is_some());
+        assert!(graph.identity_probe.state.lock().unwrap().current.is_some());
         assert_validation(graph.resolve_node_selector(&NodeSelector::Uuid(Uuid::now_v7())));
 
         // A new generation replaces the cached probe, and the new node resolves.
@@ -323,7 +321,7 @@ mod tests {
                 .unwrap(),
             old
         );
-        assert!(graph.identity_probe.lock().unwrap().is_some());
+        assert!(graph.identity_probe.state.lock().unwrap().current.is_some());
 
         graph.clear().unwrap();
         graph.execute("CREATE (:Person {name: 'new'})").unwrap();

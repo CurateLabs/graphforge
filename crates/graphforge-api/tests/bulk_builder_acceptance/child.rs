@@ -8,8 +8,12 @@
 //! child therefore knows which session to resume.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::sync::mpsc::{Receiver, channel};
+use std::time::{Duration, Instant};
 
 use graphforge_api::{GraphForge, ImportPhase};
 use graphforge_core::{GfError, ProjectErrorCode};
@@ -372,7 +376,7 @@ pub fn run(spec: &ChildSpec, conditions: &Conditions) -> Outcome {
         "GF_BULK_BUILD_MEMORY_BUDGET_BYTES",
         conditions.budget.unwrap_or(RESIDENT_BUDGET).to_string(),
     );
-    let output = command.output().unwrap();
+    let output = output_within_deadline(&mut command);
     let mut lines = BTreeMap::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         for name in [
@@ -396,6 +400,169 @@ pub fn run(spec: &ChildSpec, conditions: &Conditions) -> Outcome {
         lines,
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     }
+}
+
+/// How long a child may run. The slowest builds here take about a minute on a
+/// loaded host; a child still running after this is hung.
+const CHILD_DEADLINE: Duration = Duration::from_mins(10);
+/// How long diagnosing a hung child may take in all.
+const DIAGNOSIS_BUDGET: Duration = Duration::from_mins(1);
+/// How long to wait for a child's pipes to close once it is gone. A descendant
+/// that inherited them can hold them open.
+const PIPE_DRAIN: Duration = Duration::from_secs(30);
+
+/// A pipe of a child, read to its end on a thread of its own so the child
+/// never blocks on a full pipe, and so waiting for the end has a deadline.
+/// The thread ends at the end of the pipe; if a descendant holds it open it
+/// is left behind, and the reader of the receiver has its own deadline.
+fn drain(pipe: impl Read + Send + 'static) -> Receiver<Vec<u8>> {
+    let (sender, receiver) = channel();
+    std::thread::spawn(move || {
+        let mut pipe = pipe;
+        let mut bytes = Vec::new();
+        let _ = pipe.read_to_end(&mut bytes);
+        let _ = sender.send(bytes);
+    });
+    receiver
+}
+
+/// What a drained pipe holds, or a note that it never closed.
+fn drained(pipe: &Receiver<Vec<u8>>, timeout: Duration) -> Result<Vec<u8>, String> {
+    pipe.recv_timeout(timeout).map_err(|_| {
+        format!("(the pipe was still open {timeout:?} after the child went: a descendant holds it)")
+    })
+}
+
+/// Run `command` to completion like `Command::output`, but give up on a child
+/// that outlives [`CHILD_DEADLINE`]: record where its threads are blocked, kill
+/// it, and fail the test with that and what it printed, instead of waiting on
+/// it for the rest of the CI job (#1881). The stacks are the diagnosis; the
+/// kill and the failure do not depend on getting them.
+fn output_within_deadline(command: &mut Command) -> Output {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = drain(child.stdout.take().unwrap());
+    let stderr = drain(child.stderr.take().unwrap());
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > CHILD_DEADLINE {
+            let threads = blocked_threads(child.id());
+            // SIGKILL ends the process, so the wait that follows is bounded.
+            let _ = child.kill();
+            let _ = child.wait();
+            let text = |pipe: &Receiver<Vec<u8>>| {
+                drained(pipe, PIPE_DRAIN).map_or_else(
+                    |note| note,
+                    |bytes| String::from_utf8_lossy(&bytes).into_owned(),
+                )
+            };
+            panic!(
+                "the child ran for more than {CHILD_DEADLINE:?} and was killed\n\
+                 threads at the deadline:\n{threads}\nstdout:\n{}\nstderr:\n{}",
+                text(&stdout),
+                text(&stderr),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    Output {
+        status,
+        stdout: drained(&stdout, PIPE_DRAIN).unwrap_or_else(|note| panic!("{note}")),
+        stderr: drained(&stderr, PIPE_DRAIN).unwrap_or_else(|note| panic!("{note}")),
+    }
+}
+
+/// Run a diagnostic to completion within `limit`, or kill it and give up.
+/// `timeout` also ends a debugger run through `sudo`, which a kill of `sudo`
+/// alone would leave running.
+fn stdout_within(arguments: &[&str], limit: Duration) -> Option<String> {
+    let seconds = limit.as_secs().max(1).to_string();
+    let mut command = Command::new("timeout");
+    command
+        .args(["--kill-after=5", &seconds])
+        .args(arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().ok()?;
+    let stdout = drain(child.stdout.take()?);
+    let deadline = Instant::now() + limit + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().ok()? {
+            break status;
+        }
+        if Instant::now() > deadline {
+            // SIGKILL ends the process, so the wait that follows is bounded.
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let stdout = stdout.recv_timeout(Duration::from_secs(5)).ok()?;
+    status
+        .success()
+        .then(|| String::from_utf8_lossy(&stdout).into_owned())
+}
+
+/// Where each thread of process `pid` is blocked: the stacks from a debugger
+/// when the host has one, else what `/proc` says about every thread. A
+/// debugger cannot attach to a process that is not its descendant where
+/// `ptrace_scope` is 1, so it is also tried through `sudo`. Every attempt
+/// shares [`DIAGNOSIS_BUDGET`].
+fn blocked_threads(pid: u32) -> String {
+    let pid = pid.to_string();
+    let end = Instant::now() + DIAGNOSIS_BUDGET;
+    let debuggers: [&[&str]; 2] = [
+        &["gdb", "-batch", "-ex", "thread apply all bt", "-p"],
+        &["eu-stack", "-p"],
+    ];
+    for through_sudo in [false, true] {
+        for debugger in debuggers {
+            let Some(left) = end.checked_duration_since(Instant::now()) else {
+                break;
+            };
+            let mut arguments = if through_sudo {
+                vec!["sudo", "-n"]
+            } else {
+                Vec::new()
+            };
+            arguments.extend(debugger);
+            arguments.push(&pid);
+            // gdb exits successfully when it cannot attach, so look for a frame.
+            if let Some(stacks) = stdout_within(&arguments, left.min(Duration::from_secs(40)))
+                && stacks.contains("#0")
+            {
+                return stacks;
+            }
+        }
+    }
+    let mut report = String::from("(no debugger stacks; /proc only)\n");
+    // Plain reads of /proc files that never block, so no deadline is needed.
+    if let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) {
+        for task in tasks.flatten() {
+            let read = |name: &str| {
+                std::fs::read_to_string(task.path().join(name))
+                    .map_or_else(|error| format!("<{error}>"), |text| text.trim().to_owned())
+            };
+            let _ = writeln!(
+                report,
+                "{} {} wchan={} syscall={}",
+                task.file_name().to_string_lossy(),
+                read("comm"),
+                read("wchan"),
+                read("syscall"),
+            );
+        }
+    }
+    report
 }
 
 pub fn spec_for(project: &Path, sources: &Sources) -> ChildSpec {
