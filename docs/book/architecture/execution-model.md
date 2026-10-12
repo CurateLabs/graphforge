@@ -262,6 +262,22 @@ adjacency-backed physical node when the provider covers the relation type + dire
 back to the DataFusion hash-join path otherwise. Both paths produce identical results; only
 speed differs.
 
+**Reachability mode for variable-length expansion.** `*min..max` binds every
+relationship-distinct path (trail), and a dense graph has exponentially more trails
+than reached nodes. `graphforge_ir::reachability` proves, from the operators after an
+`Expand`, when the query can observe only which nodes are reached and how soon: the
+relationship list is read only through `min(length(r))` or not at all, a `DISTINCT` or a
+multiplicity-blind aggregate (`min`, `max`, `count(DISTINCT)`, ...) follows, and
+`min_hops <= 1`. The lowerer then marks `VarLenExpandExec` `mode=reachability` (visible
+in `EXPLAIN`), and the operator runs a level-synchronous breadth-first search with one
+visited set per seed, emitting one row per reached node with its hop count. When the
+destination is separately pinned (`(b {id: $y})`) and the expansion is unbounded, the
+lowerer scans `b` first and the search stops at the level that reaches it. The mode
+changes cost, never the result; a query that returns the path, the relationship list, or
+a multiplicity-sensitive aggregate stays on trail enumeration. Per-hop
+`ALL(e IN r WHERE ...)` predicates over edge properties are not yet pushed into the
+search and keep the expansion on trails.
+
 The index is **optional and never authoritative**: a stale or missing index
 falls back to scan-and-build with identical output. The pinned v0.5
 project-generation UUID and graph source fingerprint detect staleness; the
