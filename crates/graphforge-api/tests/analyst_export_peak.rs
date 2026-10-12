@@ -427,10 +427,12 @@ fn degree_rank(directed: bool) -> RankOptions {
     }
 }
 
-/// Run one `rank` call twice (the first warms the provider), measure the
-/// second, check what it computed against the generator, and return the peak.
+/// Run one `rank` call, check what it computed against the generator, and
+/// return its peak. The call is the first on the project, so what it opens is
+/// part of what it holds, and what it leaves behind once its result is dropped
+/// (a decoded-shard cache, say) must be nothing that grows with the graph.
 fn measured_rank(forge: &GraphForge, label: &str, directed: bool, expect: &Shape) -> usize {
-    forge.rank(label, degree_rank(directed)).unwrap();
+    let before = CURRENT.load(Ordering::Relaxed);
     let (batch, peak) = peak_live_bytes(|| forge.rank(label, degree_rank(directed)).unwrap());
     assert_eq!(batch.num_rows(), expect.selected, "{label} nodes");
     // Scores are entries / max(nodes - 1, 1): their sum recovers the entry count.
@@ -442,6 +444,9 @@ fn measured_rank(forge: &GraphForge, label: &str, directed: bool, expect: &Shape
         .unwrap();
     let total: f64 = scores.iter().flatten().sum();
     let recovered = total * (expect.selected.saturating_sub(1).max(1)) as f64;
+    drop(batch);
+    let kept = CURRENT.load(Ordering::Relaxed).saturating_sub(before);
+    assert!(kept <= SLACK, "{label}: the call left {kept} bytes behind");
     assert!(
         (recovered - expect.entries as f64).abs() < 1e-3,
         "{label}: export kept {recovered} entries, the generator says {}",
@@ -556,7 +561,7 @@ fn rank_over_a_tiny_subset_of_a_large_view_pays_for_the_subset() {
 /// Peak of a shortest-path call from node 0 to its cheapest neighbor, node 1:
 /// the search ends at the first pop, so the call is an export, a node-id slice
 /// and a one-row result.
-fn measured_dijkstra(spec: Spec) -> (usize, usize, usize) {
+fn measured_dijkstra(spec: Spec) -> (usize, usize, usize, usize) {
     let (_directory, project) = build_project(spec);
     let forge = open_indexed(&project);
     let source = NodeSelector::Uuid(node_uuid(0));
@@ -570,18 +575,18 @@ fn measured_dijkstra(spec: Spec) -> (usize, usize, usize) {
         weight: Some("cost".to_owned()),
         ..PathsOptions::default()
     };
-    forge
-        .paths(&source, Some(&target), options.clone())
-        .unwrap();
+    let before = CURRENT.load(Ordering::Relaxed);
     let (batch, peak) = peak_live_bytes(|| {
         forge
             .paths(&source, Some(&target), options.clone())
             .unwrap()
     });
     assert_eq!(batch.num_rows(), 1);
+    drop(batch);
+    let kept = CURRENT.load(Ordering::Relaxed).saturating_sub(before);
     let windows = stream_window(&project, "nodes", &["node_id", "node_uuid", "type_ids"], 32)
         + stream_window(&project, "edges", &["edge_id", "edge_uuid"], 24);
-    (peak, spec.edges().len(), windows)
+    (peak, spec.edges().len(), windows, kept)
 }
 
 #[test]
@@ -598,8 +603,15 @@ fn weighted_paths_peak_grows_with_the_entries_by_no_more_than_the_export_costs()
         nodes: 16_000,
         ..small
     };
-    let (small_peak, small_edges, small_windows) = measured_dijkstra(small);
-    let (large_peak, large_edges, large_windows) = measured_dijkstra(large);
+    let (small_peak, small_edges, small_windows, small_kept) = measured_dijkstra(small);
+    let (large_peak, large_edges, large_windows, large_kept) = measured_dijkstra(large);
+    // What the first call leaves behind (opened indexes, resolved selectors) may
+    // grow with the nodes, by a few words each, and not with the entries: a
+    // decoded-shard cache would add megabytes.
+    assert!(
+        large_kept <= small_kept + 32 * (large.nodes - small.nodes),
+        "the call left {small_kept} bytes behind on the small graph and {large_kept} on the large"
+    );
     assert_eq!(large_edges, 4 * small_edges);
 
     // Per entry, at the widest point of the export, while weights are matched:
