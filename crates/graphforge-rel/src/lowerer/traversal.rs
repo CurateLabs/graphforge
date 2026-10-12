@@ -32,6 +32,7 @@ fn lower_var_len_expand(
     type_id_to_rel_name: &HashMap<RelationTypeId, String>,
     inference_rules: &HashMap<RelationTypeId, Vec<(String, String)>>,
     target: Option<(&LoweringSnapshot, OntologyMode)>,
+    reachability: bool,
 ) -> Result<LogicalPlan, LoweringError> {
     use datafusion::logical_expr::col;
 
@@ -58,6 +59,11 @@ fn lower_var_len_expand(
         .and_then(|rt| inference_rules.get(&rt))
         .cloned()
         .unwrap_or_default();
+    // The reachability proof (`graphforge_ir::reachability_expansions`) covers
+    // only an expansion that produces its own, unconstrained relationship list;
+    // an inference rule wraps the node in auditable closure events, so it keeps
+    // the trail enumeration it was specified against.
+    let reachability = reachability && bound_edge_list.is_none() && infer_rules.is_empty();
     let rel_for_infer = rel_name.clone();
     // Lowering discovers the logical output schema here; execution resolves
     // the graph resource from its own session context.
@@ -78,7 +84,10 @@ fn lower_var_len_expand(
     // forced nullable since an edge from a relation without the column is NULL
     // (the exec coalesces each edge's values from its own relation's file).
     let topology_names = ["edge_uuid", "src_uuid", "dst_uuid", "rel_type"];
-    let prop_fields: Vec<datafusion::arrow::datatypes::Field> = {
+    let prop_fields: Vec<datafusion::arrow::datatypes::Field> = if reachability {
+        // No relationship list is produced, so its properties are not needed.
+        Vec::new()
+    } else {
         let mut positions = std::collections::HashMap::<String, usize>::new();
         let mut fields: Vec<datafusion::arrow::datatypes::Field> = Vec::new();
         for stem in edge_property_candidate_stems(dir_path, &rel_name) {
@@ -121,6 +130,11 @@ fn lower_var_len_expand(
         graphforge_plan::var_len_edge_list_field(&prop_fields),
     )
     .with_bound_destination(bound_dst.clone());
+    let node = if reachability {
+        node.into_reachability()
+    } else {
+        node
+    };
     // Register the destination var so the binder's trailing NodeScan(dst)
     // recognises it as already bound (and stays a no-op, preserving this
     // Extension node as the plan root).
@@ -132,12 +146,18 @@ fn lower_var_len_expand(
     // resolves only via `n.<field>`), the edge var maps to one concrete column,
     // so it is registered fully-qualified: `RETURN r` lowers to
     // `col("var_<edge>.rels")` and `length(r)` to `array_length` over it.
+    // In reachability mode the column holds the hop count instead; the
+    // expression lowerer accepts it only as the argument of `length()`/`size()`.
     var_map.insert(
         edge,
         format!(
             "var_{}.{}",
             edge.0,
-            graphforge_plan::VAR_LEN_EDGE_LIST_FIELD
+            if reachability {
+                graphforge_plan::VAR_LEN_HOPS_FIELD
+            } else {
+                graphforge_plan::VAR_LEN_EDGE_LIST_FIELD
+            }
         ),
     );
     let mut base = LogicalPlan::Extension(Extension {
@@ -218,6 +238,7 @@ pub(super) fn lower_expand(
     type_id_to_rel_name: &HashMap<RelationTypeId, String>,
     inference_rules: &HashMap<RelationTypeId, Vec<(String, String)>>,
     target: Option<(&LoweringSnapshot, OntologyMode)>,
+    reachability: bool,
     #[cfg(feature = "differential-testing")] relational_reference: bool,
 ) -> Result<LogicalPlan, LoweringError> {
     // Variable-length expand cannot be expressed in relational algebra; emit
@@ -237,6 +258,7 @@ pub(super) fn lower_expand(
             type_id_to_rel_name,
             inference_rules,
             target,
+            reachability,
         );
     }
 

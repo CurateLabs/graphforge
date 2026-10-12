@@ -120,6 +120,38 @@ pub fn var_len_edge_list_field(prop_fields: &[Field]) -> Arc<Field> {
     ))
 }
 
+/// Arrow field name of the hop-count column a [`VarLenMode::Reachability`]
+/// expansion produces in place of the edge list (qualified `var_<edge_var>`).
+pub const VAR_LEN_HOPS_FIELD: &str = "hops";
+
+/// The Arrow [`Field`] for the hop-count column: the number of relationships on
+/// the shortest qualifying trail to the reached node. Non-null `UInt64`, the
+/// type `length(r)` has over the edge list.
+#[must_use]
+pub fn var_len_hops_field() -> Arc<Field> {
+    Arc::new(Field::new(VAR_LEN_HOPS_FIELD, DataType::UInt64, false))
+}
+
+/// How a variable-length expansion produces its rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VarLenMode {
+    /// One row per edge-distinct trail (openCypher relationship isomorphism),
+    /// carrying the trail's relationship list in the trailing `rels` column.
+    Trails,
+    /// One row per reached node, carrying the length of the shortest trail to
+    /// it in the trailing `hops` column.
+    ///
+    /// Selected by the lowerer only when the query's result is provably the same
+    /// as under [`Trails`](Self::Trails): the edge variable is used only as the
+    /// argument of `length()`/`size()` inside `min()`, and every row of the
+    /// expansion reaches an operator that ignores row multiplicity (see
+    /// `graphforge_ir::reachability_expansions`). Execution is then a
+    /// level-synchronous breadth-first search with a visited set, so its work is
+    /// bounded by the reached nodes and their adjacency, not by the number of
+    /// trails.
+    Reachability,
+}
+
 // ---------------------------------------------------------------------------
 // VarLenExpandNode
 // ---------------------------------------------------------------------------
@@ -170,6 +202,8 @@ pub struct VarLenExpandNode {
     /// paths before they are materialised (#1986). `None` when the destination
     /// is not already bound.
     pub bound_destination: Option<String>,
+    /// How rows are produced; fixes the trailing column of the schema.
+    pub mode: VarLenMode,
     schema: DFSchemaRef,
 }
 
@@ -186,6 +220,36 @@ impl VarLenExpandNode {
     pub fn with_read_contract(mut self, contract: Option<GraphReadContract>) -> Self {
         self.read_contract = contract;
         self
+    }
+
+    /// Produce one row per reached node with its shortest hop count instead of
+    /// one row per trail: the trailing column becomes `var_<edge_var>.hops`
+    /// ([`var_len_hops_field`]) in place of the edge list.
+    ///
+    /// The caller owns the proof that this does not change the query's result
+    /// (see [`VarLenMode::Reachability`]).
+    #[must_use]
+    pub fn into_reachability(mut self) -> Self {
+        let dst_fields = self.destination_fields();
+        self.schema = Self::build_schema(
+            &self.input,
+            self.dst_var,
+            self.edge_var,
+            dst_fields,
+            var_len_hops_field(),
+        );
+        self.mode = VarLenMode::Reachability;
+        self
+    }
+
+    /// The destination node's fields, without their `var_<dst_var>` qualifier.
+    fn destination_fields(&self) -> Vec<Arc<Field>> {
+        let dst_qual = format!("var_{}", self.dst_var);
+        self.schema
+            .iter()
+            .filter(|(q, _)| q.map(TableReference::table) == Some(dst_qual.as_str()))
+            .map(|(_, f)| Arc::clone(f))
+            .collect()
     }
 
     /// Create a variable-length expand node.
@@ -223,6 +287,7 @@ impl VarLenExpandNode {
             rel_ty,
             read_contract: None,
             bound_destination: None,
+            mode: VarLenMode::Trails,
             schema,
         }
     }
@@ -294,7 +359,11 @@ impl UserDefinedLogicalNodeCore for VarLenExpandNode {
             f,
             "VarLenExpand: rel={}, hops={}..{}, dir={arrow}, edge=var_{}",
             self.rel_type_name, self.min_hops, max, self.edge_var
-        )
+        )?;
+        if self.mode == VarLenMode::Reachability {
+            f.write_str(", mode=reachability")?;
+        }
+        Ok(())
     }
 
     fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, inputs: Vec<LogicalPlan>) -> DfResult<Self> {
@@ -306,21 +375,16 @@ impl UserDefinedLogicalNodeCore for VarLenExpandNode {
         );
         // Reuse the already-computed destination fields (strip the qualifier);
         // the input schema is the only piece that can change here.
-        let dst_qual = format!("var_{}", self.dst_var);
-        let dst_fields: Vec<Arc<Field>> = self
-            .schema
-            .iter()
-            .filter(|(q, _)| q.map(TableReference::table) == Some(dst_qual.as_str()))
-            .map(|(_, f)| Arc::clone(f))
-            .collect();
-        // The trailing edge-list column (exactly one field qualified `var_<edge>`).
+        let dst_fields = self.destination_fields();
+        // The trailing edge-list (or, in reachability mode, hop-count) column:
+        // exactly one field qualified `var_<edge>`.
         let edge_qual = format!("var_{}", self.edge_var);
         let edge_field = self
             .schema
             .iter()
             .find(|(q, _)| q.map(TableReference::table) == Some(edge_qual.as_str()))
             .map_or_else(|| var_len_edge_list_field(&[]), |(_, f)| Arc::clone(f));
-        Ok(Self::new(
+        let mut node = Self::new(
             input,
             self.rel_type_name.clone(),
             self.min_hops,
@@ -334,7 +398,9 @@ impl UserDefinedLogicalNodeCore for VarLenExpandNode {
             edge_field,
         )
         .with_read_contract(self.read_contract.clone())
-        .with_bound_destination(self.bound_destination.clone()))
+        .with_bound_destination(self.bound_destination.clone());
+        node.mode = self.mode;
+        Ok(node)
     }
 }
 

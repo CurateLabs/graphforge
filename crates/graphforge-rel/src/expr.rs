@@ -373,6 +373,15 @@ impl<'a> ExprLowerer<'a> {
                     .var_map
                     .get(*var_id)
                     .ok_or(LoweringError::UnboundVar(var_id.0))?;
+                if is_hop_count_column(col_name) {
+                    // A reachability expansion keeps no relationship list; the
+                    // analysis that selected it admits only `length()`/`size()`.
+                    return Err(LoweringError::UnsupportedExpr(
+                        "a relationship list reduced to its hop count by a reachability \
+                         expansion can only be read through length() or size()"
+                            .into(),
+                    ));
+                }
                 if let Some(schema) = self.input_schema.as_ref()
                     && schema.field_with_unqualified_name(col_name).is_err()
                 {
@@ -511,6 +520,12 @@ impl<'a> ExprLowerer<'a> {
             IrExpr::BinaryOp { op, left, right } => self.lower_binary(*op, *left, *right),
 
             IrExpr::UnaryOp { op, expr } => self.lower_unary(*op, *expr),
+
+            // `length(r)` / `size(r)` over a relationship list that a reachability
+            // expansion reduced to its hop count.
+            IrExpr::FunctionCall { name, args } if self.hop_count_column(name, args).is_some() => {
+                self.lower_hop_count(name, args)
+            }
 
             IrExpr::FunctionCall { name, args } if name == "_node_struct" => {
                 self.lower_node_struct(args)
@@ -1323,6 +1338,38 @@ impl<'a> ExprLowerer<'a> {
     // Helpers
     // -----------------------------------------------------------------------
 
+    /// The hop-count column of a reachability expansion, when `name(args)` is
+    /// `length(r)` or `size(r)` over its relationship variable.
+    fn hop_count_column(&self, name: &str, args: &[ExprId]) -> Option<&str> {
+        if !(name.eq_ignore_ascii_case("length") || name.eq_ignore_ascii_case("size")) {
+            return None;
+        }
+        let [arg] = args else {
+            return None;
+        };
+        let IrExpr::VarRef(var) = self.arena.get(*arg) else {
+            return None;
+        };
+        self.var_map
+            .get(*var)
+            .filter(|column| is_hop_count_column(column))
+    }
+
+    /// `length(r)` / `size(r)` over a hop-count column. Over the relationship list
+    /// `length` is `array_length` (`UInt64`) and `size` is `cypher_size` (`Int64`);
+    /// the column is cast to the same type so the result is indistinguishable.
+    fn lower_hop_count(&self, name: &str, args: &[ExprId]) -> Result<DfExpr, LoweringError> {
+        let column = self.hop_count_column(name, args).ok_or_else(|| {
+            LoweringError::UnsupportedExpr(format!("{name}() is not over a hop-count column"))
+        })?;
+        let hops = col_literal(column);
+        Ok(if name.eq_ignore_ascii_case("size") {
+            cast(hops, DataType::Int64)
+        } else {
+            hops
+        })
+    }
+
     /// `keys(map|node|relationship)` — map keys include null-valued entries;
     /// entity keys include only non-null stored property columns for each row.
     fn lower_keys(&self, args: &[ExprId]) -> Result<DfExpr, LoweringError> {
@@ -2060,6 +2107,17 @@ impl<'a> ExprLowerer<'a> {
 // ---------------------------------------------------------------------------
 // Free functions
 // ---------------------------------------------------------------------------
+
+/// Whether `column` is the hop-count column `var_<n>.hops` of a reachability
+/// expansion (see `graphforge_plan::VarLenMode::Reachability`).
+fn is_hop_count_column(column: &str) -> bool {
+    column
+        .strip_prefix("var_")
+        .and_then(|rest| rest.split_once('.'))
+        .is_some_and(|(id, field)| {
+            field == graphforge_plan::VAR_LEN_HOPS_FIELD && id.bytes().all(|b| b.is_ascii_digit())
+        })
+}
 
 /// Reference a column by its LITERAL name, preserving case (#957).
 ///

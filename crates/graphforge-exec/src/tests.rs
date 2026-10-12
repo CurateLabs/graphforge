@@ -226,6 +226,8 @@ fn wave11_low_level_expand_and_optional_schema_guards_fail_closed() {
         mode: OntologyMode::Exploratory,
         src_col_idx: 0,
         bound_dst_col_idx: None,
+        expansion: graphforge_plan::VarLenMode::Trails,
+        edge_var: 0,
         out_schema: Arc::new(Schema::empty()),
         provider: Arc::new(PersistentAdjacencyProvider::new(
             dir.path().to_path_buf(),

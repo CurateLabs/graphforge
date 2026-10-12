@@ -45,6 +45,8 @@ use graphforge_core::GfError;
 use graphforge_core::OntologyMode;
 use graphforge_ir::Direction;
 use graphforge_plan::VarLenExpandNode;
+use graphforge_plan::VarLenMode;
+use reachability::reach_bfs;
 use std::fmt;
 use std::path::Path;
 use std::path::PathBuf;
@@ -89,6 +91,10 @@ pub struct VarLenExpandExec {
     /// Column index of an already-bound destination node's `node_id` within the
     /// input: only paths reaching that node are materialised (#1986).
     bound_dst_col_idx: Option<usize>,
+    /// Whether rows are trails or reached nodes; see [`VarLenMode`].
+    expansion: VarLenMode,
+    /// The edge variable, the key of this hop's demand counters.
+    edge_var: u32,
     schema: SchemaRef,
     props: Arc<PlanProperties>,
     /// Adjacency source for the BFS — the session-scoped provider injected
@@ -141,6 +147,8 @@ impl VarLenExpandExec {
             mode,
             src_col_idx,
             bound_dst_col_idx,
+            expansion: node.mode,
+            edge_var: node.edge_var,
             schema,
             props,
             provider,
@@ -173,7 +181,11 @@ impl DisplayAs for VarLenExpandExec {
             max,
             self.provider
                 .explain_status(&self.rel_type_name, self.direction)
-        )
+        )?;
+        if self.expansion == VarLenMode::Reachability {
+            f.write_str(", mode=reachability")?;
+        }
+        Ok(())
     }
 }
 
@@ -208,6 +220,8 @@ impl ExecutionPlan for VarLenExpandExec {
             mode: self.mode,
             src_col_idx: self.src_col_idx,
             bound_dst_col_idx: self.bound_dst_col_idx,
+            expansion: self.expansion,
+            edge_var: self.edge_var,
             schema: self.schema.clone(),
             props: self.props.clone(),
             provider: self.provider.clone(),
@@ -238,6 +252,8 @@ impl ExecutionPlan for VarLenExpandExec {
             mode: self.mode,
             src_col_idx: self.src_col_idx,
             bound_dst_col_idx: self.bound_dst_col_idx,
+            expansion: self.expansion,
+            edge_var: self.edge_var,
             out_schema: self.schema.clone(),
             provider: self.provider.clone(),
             capture_epoch: self.capture_epoch,
@@ -364,6 +380,10 @@ pub(super) struct ExpandConfig {
     /// Input column of an already-bound destination's `node_id`; paths that do
     /// not end there are dropped before they are materialised (#1986).
     pub(super) bound_dst_col_idx: Option<usize>,
+    /// Whether rows are trails or reached nodes; see [`VarLenMode`].
+    pub(super) expansion: VarLenMode,
+    /// The edge variable, the key of this hop's demand counters.
+    pub(super) edge_var: u32,
     pub(super) out_schema: SchemaRef,
     /// Adjacency source (#762) — moved into the `'static` execute future.
     pub(super) provider: Arc<dyn AdjacencyProvider>,
@@ -459,14 +479,42 @@ fn grow_reservation(reservation: &mut MemoryReservation, bytes: usize) -> Result
 /// Send one built batch and release its charge: the consumer owns it now.
 /// `false` once the consumer is gone.
 async fn send_chunk(
+    cfg: &ExpandConfig,
     tx: &tokio::sync::mpsc::Sender<Result<RecordBatch, DataFusionError>>,
     out: RecordBatch,
     reservation: &mut MemoryReservation,
 ) -> bool {
     let bytes = out.get_array_memory_size();
+    if cfg.capture_epoch != 0 {
+        demand::record_emitted(cfg.capture_epoch, cfg.edge_var, out.num_rows());
+    }
     let sent = tx.send(Ok(out)).await.is_ok();
     reservation.shrink(bytes);
     sent
+}
+
+/// Rows of an output batch that copies one row of `input` per emitted row. Every
+/// emitted row copies one input row, so the rows per batch follow the input's
+/// average row width. Width is the bytes the rows occupy, not the capacity of the
+/// buffers they were sliced from: one row cut from an 8,192-row scan batch
+/// reports the whole batch's buffers and would cap every output batch at a
+/// handful of rows.
+fn output_batch_rows(input: &RecordBatch) -> usize {
+    let input_slice_bytes = input
+        .columns()
+        .iter()
+        .map(|column| {
+            column
+                .to_data()
+                .get_slice_memory_size()
+                .unwrap_or_else(|_| column.get_array_memory_size())
+        })
+        .sum::<usize>();
+    let row_bytes = input_slice_bytes
+        .checked_div(input.num_rows())
+        .unwrap_or(0)
+        .max(1);
+    (EXPAND_BATCH_INPUT_BYTES / row_bytes).clamp(1, EXPAND_BATCH_MAX_ROWS)
 }
 
 /// Run the variable-length BFS and send the output as bounded batches.
@@ -492,6 +540,9 @@ async fn expand_bfs(
     tx: &tokio::sync::mpsc::Sender<Result<RecordBatch, DataFusionError>>,
     reservation: &mut MemoryReservation,
 ) -> Result<(), GfError> {
+    if cfg.expansion == VarLenMode::Reachability {
+        return reach_bfs(cfg, input, tx, reservation).await;
+    }
     let exec_err = |m: String| GfError::Execution(m);
 
     // --- Obtain the directed adjacency the traversal needs (#762). ---
@@ -510,6 +561,9 @@ async fn expand_bfs(
         let input = batch.map_err(GfError::from_execution_error)?;
         let input_bytes = input.get_array_memory_size();
         grow_reservation(reservation, input_bytes)?;
+        if cfg.capture_epoch != 0 {
+            demand::record_input(cfg.capture_epoch, cfg.edge_var, input.num_rows());
+        }
         // Seed column is resolved by qualifier at construction (`var_<src>.node_id`),
         // so chained expansions — whose input carries several `node_id` columns —
         // start from the correct source rather than the first `node_id`.
@@ -526,26 +580,7 @@ async fn expand_bfs(
             .map(|index| u64_column(&input, index))
             .transpose()?;
 
-        // Every emitted path copies one input row, so the rows per batch follow
-        // the input's average row width. Width is the bytes the rows occupy, not
-        // the capacity of the buffers they were sliced from: one row cut from an
-        // 8,192-row scan batch reports the whole batch's buffers and would cap
-        // every output batch at a handful of paths.
-        let input_slice_bytes = input
-            .columns()
-            .iter()
-            .map(|column| {
-                column
-                    .to_data()
-                    .get_slice_memory_size()
-                    .unwrap_or_else(|_| column.get_array_memory_size())
-            })
-            .sum::<usize>();
-        let row_bytes = input_slice_bytes
-            .checked_div(input.num_rows())
-            .unwrap_or(0)
-            .max(1);
-        let max_rows = (EXPAND_BATCH_INPUT_BYTES / row_bytes).clamp(1, EXPAND_BATCH_MAX_ROWS);
+        let max_rows = output_batch_rows(&input);
 
         let mut pending: Vec<Emission> = Vec::new();
         let mut pending_hops = 0usize;
@@ -576,7 +611,7 @@ async fn expand_bfs(
                     reservation.shrink(pending_bytes);
                     pending_hops = 0;
                     pending_bytes = 0;
-                    if !send_chunk(tx, out, reservation).await {
+                    if !send_chunk(cfg, tx, out, reservation).await {
                         return Ok(());
                     }
                 }
@@ -606,7 +641,7 @@ async fn expand_bfs(
                     pending_hops = 0;
                     pending_bytes = 0;
                     sent_any = true;
-                    if !send_chunk(tx, out, reservation).await {
+                    if !send_chunk(cfg, tx, out, reservation).await {
                         return Ok(());
                     }
                 }
@@ -616,7 +651,7 @@ async fn expand_bfs(
             sent_any = true;
             let out = expand_chunk(cfg, &input, &pending, reservation)?;
             reservation.shrink(pending_bytes);
-            if !send_chunk(tx, out, reservation).await {
+            if !send_chunk(cfg, tx, out, reservation).await {
                 return Ok(());
             }
         }
@@ -668,7 +703,7 @@ async fn emit_large_seed(
                 reservation,
             )?;
             *sent_any = true;
-            if !send_chunk(tx, out, reservation).await {
+            if !send_chunk(cfg, tx, out, reservation).await {
                 return Ok(false);
             }
             start = end;
@@ -1009,6 +1044,8 @@ fn bfs_emit_seed(
     };
     grow_reservation(reservation, path_state_bytes(&seed_state))?;
     queue.push_back(seed_state);
+    // Adjacency entries examined for this seed, recorded once at the end.
+    let mut examined = 0_usize;
     while let Some(p) = queue.pop_front() {
         let in_range = p.hops >= cfg.min_hops && cfg.max_hops.is_none_or(|m| p.hops <= m);
         if in_range && required_dst.is_none_or(|dst| dst == p.node) {
@@ -1020,6 +1057,7 @@ fn bfs_emit_seed(
             continue;
         }
         adjacency.with_neighbors(p.node, |neighbors| {
+            examined = examined.saturating_add(neighbors.len());
             for (edge_id, next) in neighbors.iter() {
                 if p.edge_path.contains(&edge_id) {
                     continue; // relationship isomorphism: no edge twice per path
@@ -1039,6 +1077,9 @@ fn bfs_emit_seed(
             Ok::<(), GfError>(())
         })??;
         reservation.shrink(path_state_bytes(&p));
+    }
+    if cfg.capture_epoch != 0 {
+        demand::record_candidates(cfg.capture_epoch, cfg.edge_var, examined);
     }
     Ok(emissions)
 }
@@ -2757,6 +2798,7 @@ fn expand_single_hop_chunk(
     Ok(output)
 }
 
+mod reachability;
 #[cfg(test)]
 mod tests;
 
