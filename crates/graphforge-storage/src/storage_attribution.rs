@@ -1924,7 +1924,7 @@ mod tests {
             ArtifactCategory::Properties
         );
         assert_eq!(
-            classify_graph_artifact("indexes/edge-properties/0123.shards/00000000.c0.epc"),
+            classify_graph_artifact("indexes/edge-properties/0123.packs/00000000.epk"),
             ArtifactCategory::Properties
         );
         assert_eq!(

@@ -4,10 +4,10 @@
 //!
 //! The node equality index is collected from the property fragments as they
 //! are encoded and its files are written at the end. The edge property index is
-//! cut into shards as each fragment is pushed, because it carries the property
-//! values and must not hold the route. Every file is written once, as an
-//! artifact of the same generation; nothing is read back from the encoded
-//! fragments.
+//! cut into shards and packed as each fragment is pushed, because it carries the
+//! property values and must not hold the route; a pack is written as soon as it
+//! fills. Every file is written once, as an artifact of the same generation;
+//! nothing is read back from the encoded fragments.
 
 use std::collections::BTreeMap;
 use std::io::Cursor;
@@ -33,7 +33,7 @@ pub(super) struct PropertyIndexTap {
 impl PropertyIndexTap {
     /// Observe a fragment about to be written at `path`. Node property
     /// fragments feed the equality index; edge property fragments are cut into
-    /// shards, written to `output` at once.
+    /// shards and packed, and each pack that fills is written to `output` at once.
     pub(super) fn observe(
         &mut self,
         path: &str,
@@ -53,7 +53,7 @@ impl PropertyIndexTap {
             return self
                 .edge_routes
                 .entry(component.to_owned())
-                .or_insert_with(|| EdgeRouteIndexBuilder::new(format!("{component}.shards")))
+                .or_insert_with(|| EdgeRouteIndexBuilder::new(format!("{component}.packs")))
                 .observe(fragment, &mut |relative, bytes| {
                     copy_artifact(Cursor::new(bytes), output, &relative, artifacts, evidence)
                 });
@@ -109,9 +109,12 @@ pub(super) fn write_property_equality_indexes(
     for (component, builder) in tap.edge_routes {
         let route = routes.route(&component)?;
         let parts = route_parts(artifacts, "edge_properties/", &component);
-        if let Some(manifest) = builder.finish(route, &source_digest(parts))? {
-            files.push((manifest.relative_path, manifest.bytes));
-        }
+        files.extend(
+            builder
+                .finish(route, &source_digest(parts))?
+                .into_iter()
+                .map(|file| (file.relative_path, file.bytes)),
+        );
     }
     for (relative_path, bytes) in files {
         copy_artifact(

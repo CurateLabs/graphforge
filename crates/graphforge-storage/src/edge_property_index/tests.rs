@@ -1,6 +1,7 @@
-//! The edge property index builder: shard cutting, sealing, poisoning and
-//! determinism. Lookups need a published generation and are covered through the
-//! facade in `graphforge-api/tests/edge_property_index.rs`.
+//! The edge property index builder: shard cutting, packing, sealing, poisoning
+//! and determinism, and reading a sealed blob back. Lookups need a published
+//! generation and are covered through the facade in
+//! `graphforge-api/tests/edge_property_index.rs`.
 
 use super::*;
 use arrow::array::{BooleanArray, FixedSizeBinaryBuilder, Float64Array, Int64Array, StringArray};
@@ -9,13 +10,13 @@ fn uuid(index: u128) -> [u8; 16] {
     (0x2000_0000_0000_0000_0000_0000_0000_0000_u128 | (index + 1)).to_be_bytes()
 }
 
-/// A fragment of `rows` edges starting at index `first`, ascending by UUID.
-fn fragment(first: u128, rows: usize, memo_bytes: usize) -> RecordBatch {
+/// A fragment of one edge per memo, starting at index `first`, ascending by UUID.
+fn fragment_of(first: u128, memos: &[String]) -> RecordBatch {
+    let rows = memos.len();
     let mut uuids = FixedSizeBinaryBuilder::with_capacity(rows, 16);
     for row in 0..rows {
         uuids.append_value(uuid(first + row as u128)).unwrap();
     }
-    let memo = "m".repeat(memo_bytes);
     RecordBatch::try_new(
         Arc::new(Schema::new(vec![
             Field::new(UUID_COLUMN, DataType::FixedSizeBinary(16), false),
@@ -29,66 +30,117 @@ fn fragment(first: u128, rows: usize, memo_bytes: usize) -> RecordBatch {
             Arc::new(Int64Array::from_iter_values(
                 (0..rows).map(|row| (first as i64 + row as i64) * 3),
             )),
-            Arc::new(StringArray::from(vec![memo.as_str(); rows])),
+            Arc::new(StringArray::from_iter_values(memos)),
         ],
     )
     .unwrap()
 }
 
+/// A fragment of `rows` edges starting at index `first`, ascending by UUID.
+fn fragment(first: u128, rows: usize, memo_bytes: usize) -> RecordBatch {
+    fragment_of(first, &vec!["m".repeat(memo_bytes); rows])
+}
+
+/// `bytes` of pseudo-random hex text, which Zstd cannot shrink below half.
+fn noise(seed: u64, bytes: usize) -> String {
+    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut text = String::with_capacity(bytes + 16);
+    while text.len() < bytes {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        text.push_str(&format!("{state:016x}"));
+    }
+    text.truncate(bytes);
+    text
+}
+
 type Files = Vec<(String, Vec<u8>)>;
 
-fn build(fragments: &[RecordBatch]) -> Option<(Files, EdgePropertyIndexFile)> {
-    let mut builder = EdgeRouteIndexBuilder::new("route.shards".to_owned());
-    let mut files = Vec::new();
+/// A finished index: every pack the builder wrote, in order, and the manifest.
+struct Built {
+    packs: Files,
+    manifest_file: EdgePropertyIndexFile,
+    manifest: Manifest,
+}
+
+fn build(fragments: &[RecordBatch]) -> Option<Built> {
+    let mut builder = EdgeRouteIndexBuilder::new("route.packs".to_owned());
+    let mut packs = Vec::new();
     for fragment in fragments {
         builder
             .observe(fragment, &mut |path, bytes| {
-                files.push((path, bytes));
+                packs.push((path, bytes));
                 Ok(())
             })
             .unwrap();
     }
-    builder
-        .finish("_exploratory", "digest")
-        .unwrap()
-        .map(|manifest| (files, manifest))
+    let mut files = builder.finish("_exploratory", "digest").unwrap();
+    let manifest_file = files.pop()?;
+    packs.extend(files.into_iter().map(|file| (file.relative_path, file.bytes)));
+    let manifest = decode_manifest(&manifest_file.bytes, Path::new(&manifest_file.relative_path))
+        .unwrap();
+    Some(Built {
+        packs,
+        manifest_file,
+        manifest,
+    })
 }
 
-fn manifest_of(file: &EdgePropertyIndexFile) -> Manifest {
-    decode_manifest(&file.bytes, Path::new(&file.relative_path)).unwrap()
+/// The bytes the seal names inside the packs of a built index.
+fn blob(packs: &Files, seal: BlobSeal) -> &[u8] {
+    let (path, bytes) = &packs[seal.pack as usize];
+    assert_eq!(
+        path,
+        &format!("indexes/edge-properties/route.packs/{:08}.epk", seal.pack)
+    );
+    let start = usize::try_from(seal.offset).unwrap();
+    &bytes[start..start + usize::try_from(seal.byte_length).unwrap()]
+}
+
+/// Every blob a manifest names, in the order the builder appended them.
+fn seals(manifest: &Manifest) -> Vec<BlobSeal> {
+    manifest
+        .shards
+        .iter()
+        .flat_map(|shard| {
+            std::iter::once(shard.uuids).chain(shard.columns.iter().map(|column| column.blob))
+        })
+        .collect()
+}
+
+/// Lay the packs of a built index out as a lookup finds them, below `root`.
+fn write_packs(root: &Path, packs: &Files) -> PathBuf {
+    let directory = root.join("route.packs");
+    std::fs::create_dir_all(&directory).unwrap();
+    for (path, bytes) in packs {
+        std::fs::write(directory.join(path.rsplit('/').next().unwrap()), bytes).unwrap();
+    }
+    directory
 }
 
 #[test]
-fn fragments_are_cut_into_row_bounded_shards_each_sealed_in_the_manifest() {
-    let (files, manifest_file) = build(&[fragment(0, 10_000, 4)]).expect("indexed");
-    let manifest = manifest_of(&manifest_file);
+fn fragments_are_cut_into_row_bounded_shards_each_blob_sealed_in_the_manifest() {
+    let built = build(&[fragment(0, 10_000, 4)]).expect("indexed");
+    let manifest = &built.manifest;
     assert_eq!(manifest.rows, 10_000);
     assert_eq!(manifest.columns, ["timestamp", "memo"]);
-    assert_eq!(manifest.shard_dir, "route.shards");
+    assert_eq!(manifest.pack_dir, "route.packs");
     let rows = manifest
         .shards
         .iter()
         .map(|shard| shard.rows)
         .collect::<Vec<_>>();
     assert_eq!(rows, [4096, 4096, 1808]);
-    // One UUID file and one file per stored column, per shard.
-    assert_eq!(files.len(), 3 * 3);
-    for shard in &manifest.shards {
-        let uuid_file = files
-            .iter()
-            .find(|(path, _)| path.ends_with(&format!("{}.{UUID_EXTENSION}", shard.stem)))
-            .expect("uuid file");
-        assert_eq!(FileSeal::of(&uuid_file.1).xxh64, shard.uuids.xxh64);
-        assert_eq!(uuid_file.1.len() as u64, shard.uuids.byte_length);
-        for column in &shard.columns {
-            let name = format!("{}.c{}.{COLUMN_EXTENSION}", shard.stem, column.column);
-            let bytes = &files
-                .iter()
-                .find(|(path, _)| path.ends_with(&name))
-                .expect("column file")
-                .1;
-            assert_eq!(FileSeal::of(bytes).xxh64, column.seal.xxh64);
-        }
+    // Small values: the whole route is one pack, holding a UUID blob and a blob
+    // per stored column, per shard.
+    assert_eq!(built.packs.len(), 1);
+    assert_eq!(seals(manifest).len(), 3 * 3);
+    for seal in seals(manifest) {
+        assert_eq!(
+            crate::corruption_checksum::checksum(blob(&built.packs, seal)),
+            seal.xxh64
+        );
     }
     // Ranges are the shard's first and last UUID.
     assert_eq!(manifest.shards[0].first, hex(&uuid(0)));
@@ -97,63 +149,141 @@ fn fragments_are_cut_into_row_bounded_shards_each_sealed_in_the_manifest() {
 }
 
 #[test]
-fn a_shard_file_is_read_back_exactly() {
-    let (files, manifest_file) = build(&[fragment(7, 100, 4)]).expect("indexed");
-    let manifest = manifest_of(&manifest_file);
-    let dir = tempfile::tempdir().unwrap();
-    for (path, bytes) in &files {
-        let name = path.rsplit('/').next().unwrap();
-        std::fs::write(dir.path().join(name), bytes).unwrap();
+fn a_route_larger_than_a_pack_fills_consecutive_packs_with_contiguous_blobs() {
+    // 500 KiB of incompressible text per edge: two edges per shard, about 6 MiB
+    // of compressed blobs, which is more than one 4 MiB pack.
+    let memos = (0..24)
+        .map(|row| noise(row + 1, 500 << 10))
+        .collect::<Vec<_>>();
+    let built = build(&[fragment_of(0, &memos)]).expect("indexed");
+    assert!(
+        built.packs.len() >= 2,
+        "expected more than one pack, got {}",
+        built.packs.len()
+    );
+    for (index, (path, bytes)) in built.packs.iter().enumerate() {
+        assert_eq!(
+            path,
+            &format!("indexes/edge-properties/route.packs/{index:08}.epk")
+        );
+        assert!(!bytes.is_empty());
+        assert!(bytes.len() <= PACK_BYTES, "pack {index} is {}", bytes.len());
     }
-    let shard = &manifest.shards[0];
-    let uuids = read_column(
-        dir.path(),
-        &format!("{}.{UUID_EXTENSION}", shard.stem),
-        shard.uuids,
-        shard.rows,
-    )
-    .unwrap();
+    // Blobs are laid end to end, a blob never straddles two packs, and the
+    // packs fill in order.
+    let mut expected_pack = 0_u32;
+    let mut expected_offset = 0_u64;
+    for seal in seals(&built.manifest) {
+        if seal.pack != expected_pack {
+            assert_eq!(seal.pack, expected_pack + 1, "packs fill in order");
+            assert_eq!(
+                expected_offset,
+                built.packs[expected_pack as usize].1.len() as u64,
+                "a pack holds exactly its blobs"
+            );
+            expected_pack = seal.pack;
+            expected_offset = 0;
+        }
+        assert_eq!(seal.offset, expected_offset);
+        assert_eq!(
+            crate::corruption_checksum::checksum(blob(&built.packs, seal)),
+            seal.xxh64
+        );
+        expected_offset += seal.byte_length;
+    }
+    assert_eq!(expected_pack as usize, built.packs.len() - 1);
+    assert_eq!(
+        expected_offset,
+        built.packs.last().unwrap().1.len() as u64,
+        "the last pack holds exactly its blobs"
+    );
+}
+
+#[test]
+fn a_blob_is_read_back_exactly_and_each_blob_is_sealed_alone() {
+    let built = build(&[fragment(7, 100, 4)]).expect("indexed");
+    let shard = &built.manifest.shards[0];
+    let timestamps = shard
+        .columns
+        .iter()
+        .find(|column| built.manifest.columns[column.column] == "timestamp")
+        .unwrap()
+        .blob;
+    let memos = shard
+        .columns
+        .iter()
+        .find(|column| built.manifest.columns[column.column] == "memo")
+        .unwrap()
+        .blob;
+    let dir = tempfile::tempdir().unwrap();
+    let directory = write_packs(dir.path(), &built.packs);
+
+    let mut packs = PackHandles::new(directory.clone());
+    let uuids = packs.read_column(shard.uuids, shard.rows).unwrap();
     let uuids = uuids
         .as_any()
         .downcast_ref::<FixedSizeBinaryArray>()
         .unwrap();
     assert_eq!(uuids.value(0), uuid(7));
     assert_eq!(uuids.value(99), uuid(106));
-    let timestamps = shard
-        .columns
-        .iter()
-        .find(|column| manifest.columns[column.column] == "timestamp")
-        .unwrap();
-    let column = read_column(
-        dir.path(),
-        &format!("{}.c{}.{COLUMN_EXTENSION}", shard.stem, timestamps.column),
-        timestamps.seal,
-        shard.rows,
-    )
-    .unwrap();
+    let column = packs.read_column(timestamps, shard.rows).unwrap();
     let column = column.as_any().downcast_ref::<Int64Array>().unwrap();
     assert_eq!(column.value(0), 21);
     assert_eq!(column.value(99), 106 * 3);
+    // A blob read with the wrong row count is refused.
+    assert!(packs.read_column(timestamps, shard.rows + 1).is_err());
 
-    // A flipped byte fails the seal; a changed length does too.
-    let name = format!("{}.{UUID_EXTENSION}", shard.stem);
-    let path = dir.path().join(&name);
-    let mut bytes = std::fs::read(&path).unwrap();
-    let last = bytes.len() - 1;
-    bytes[last] ^= 1;
-    std::fs::write(&path, &bytes).unwrap();
-    let error = read_column(dir.path(), &name, shard.uuids, shard.rows).unwrap_err();
+    // A flipped byte in one blob fails that blob and no other.
+    let pack_path = directory.join("00000000.epk");
+    let original = std::fs::read(&pack_path).unwrap();
+    let mut flipped = original.clone();
+    let last = usize::try_from(memos.offset + memos.byte_length).unwrap() - 1;
+    flipped[last] ^= 1;
+    std::fs::write(&pack_path, &flipped).unwrap();
+    let mut packs = PackHandles::new(directory.clone());
+    let error = packs.read_column(memos, shard.rows).unwrap_err();
     assert_eq!(error.code(), "GF_VALIDATION", "{error}");
-    bytes.push(0);
-    std::fs::write(&path, &bytes).unwrap();
-    assert!(read_column(dir.path(), &name, shard.uuids, shard.rows).is_err());
+    packs.read_column(timestamps, shard.rows).unwrap();
+    packs.read_column(shard.uuids, shard.rows).unwrap();
+
+    // A pack cut short inside a blob fails that blob; the blobs before it
+    // still read.
+    let cut = usize::try_from(memos.offset).unwrap() + 1;
+    std::fs::write(&pack_path, &original[..cut]).unwrap();
+    let mut packs = PackHandles::new(directory.clone());
+    let error = packs.read_column(memos, shard.rows).unwrap_err();
+    assert_eq!(error.code(), "GF_VALIDATION", "{error}");
+    packs.read_column(timestamps, shard.rows).unwrap();
+
+    // A seal that names bytes past the end of the pack, or past the pack bound,
+    // is refused rather than read.
+    let past_end = BlobSeal {
+        offset: original.len() as u64,
+        ..memos
+    };
+    std::fs::write(&pack_path, &original).unwrap();
+    let mut packs = PackHandles::new(directory.clone());
+    let error = packs.read_column(past_end, shard.rows).unwrap_err();
+    assert_eq!(error.code(), "GF_VALIDATION", "{error}");
+    let oversize = BlobSeal {
+        byte_length: PACK_BYTES as u64 + 1,
+        ..memos
+    };
+    let error = packs.read_column(oversize, shard.rows).unwrap_err();
+    assert_eq!(error.code(), "GF_VALIDATION", "{error}");
+
+    // A pack that is gone is an error, not an empty answer.
+    std::fs::remove_file(&pack_path).unwrap();
+    let mut packs = PackHandles::new(directory);
+    assert!(packs.read_column(timestamps, shard.rows).is_err());
 }
 
 #[test]
 fn wide_values_shrink_the_shard_until_a_single_value_passes_the_bound() {
     // 600 KiB per memo: two rows pass the 1 MiB column bound, so one per shard.
-    let (_, manifest_file) = build(&[fragment(0, 4, 600 << 10)]).expect("indexed");
-    let rows = manifest_of(&manifest_file)
+    let built = build(&[fragment(0, 4, 600 << 10)]).expect("indexed");
+    let rows = built
+        .manifest
         .shards
         .iter()
         .map(|shard| shard.rows)
@@ -162,6 +292,51 @@ fn wide_values_shrink_the_shard_until_a_single_value_passes_the_bound() {
     // A single value over the bound cannot be sharded: the route is left to
     // the property overlay.
     assert!(build(&[fragment(0, 2, 2 << 20)]).is_none());
+}
+
+#[test]
+fn a_blob_that_cannot_fit_a_pack_leaves_the_route_to_the_property_overlay() {
+    let mut builder = EdgeRouteIndexBuilder::new("route.packs".to_owned());
+    let mut written = 0_usize;
+    let mut write = |_: String, _: Vec<u8>| {
+        written += 1;
+        Ok(())
+    };
+    let sealed = builder
+        .append(&vec![0_u8; PACK_BYTES + 1], &mut write)
+        .unwrap();
+    assert!(sealed.is_none());
+    // A poisoned builder indexes nothing, and writes no manifest.
+    builder.observe(&fragment(0, 8, 4), &mut write).unwrap();
+    assert!(builder.finish("_exploratory", "digest").unwrap().is_empty());
+    assert_eq!(written, 0);
+}
+
+#[test]
+fn a_blob_that_would_overflow_a_pack_starts_the_next_one() {
+    let mut builder = EdgeRouteIndexBuilder::new("route.packs".to_owned());
+    let mut flushed: Files = Vec::new();
+    let mut write = |path: String, bytes: Vec<u8>| {
+        flushed.push((path, bytes));
+        Ok(())
+    };
+    let first = builder
+        .append(&vec![1_u8; PACK_BYTES - 10], &mut write)
+        .unwrap()
+        .unwrap();
+    // Exactly the room left: it still fits.
+    let second = builder.append(&[2_u8; 10], &mut write).unwrap().unwrap();
+    // One byte more than the room left: the pack is flushed first.
+    let third = builder.append(&[3_u8; 1], &mut write).unwrap().unwrap();
+    assert_eq!((first.pack, first.offset), (0, 0));
+    assert_eq!((second.pack, second.offset), (0, PACK_BYTES as u64 - 10));
+    assert_eq!((third.pack, third.offset), (1, 0));
+    assert_eq!(flushed.len(), 1);
+    assert_eq!(
+        flushed[0].0,
+        "indexes/edge-properties/route.packs/00000000.epk"
+    );
+    assert_eq!(flushed[0].1.len(), PACK_BYTES);
 }
 
 #[test]
@@ -226,8 +401,9 @@ fn fragments_with_different_columns_share_a_route() {
         ],
     )
     .unwrap();
-    let (_, manifest_file) = build(&[fragment(0, 8, 4), second]).expect("indexed");
-    let manifest = manifest_of(&manifest_file);
+    let manifest = build(&[fragment(0, 8, 4), second])
+        .expect("indexed")
+        .manifest;
     assert_eq!(manifest.columns, ["timestamp", "memo", "amount"]);
     let stored = manifest
         .shards
@@ -240,21 +416,21 @@ fn fragments_with_different_columns_share_a_route() {
 #[test]
 fn the_bytes_are_a_function_of_the_content() {
     let fragments = [fragment(0, 5_000, 16), fragment(5_000, 100, 16)];
-    let (first_files, first) = build(&fragments).expect("indexed");
-    let (second_files, second) = build(&fragments).expect("indexed");
-    assert_eq!(first, second);
-    assert_eq!(first_files, second_files);
+    let first = build(&fragments).expect("indexed");
+    let second = build(&fragments).expect("indexed");
+    assert_eq!(first.manifest_file, second.manifest_file);
+    assert_eq!(first.packs, second.packs);
 }
 
 #[test]
 fn a_manifest_that_fails_its_checksum_is_refused() {
-    let (_, manifest_file) = build(&[fragment(0, 8, 4)]).expect("indexed");
+    let built = build(&[fragment(0, 8, 4)]).expect("indexed");
     let path = Path::new("indexes/edge-properties/x.epx");
-    assert!(decode_manifest(&manifest_file.bytes, path).is_ok());
-    let mut corrupt = manifest_file.bytes.clone();
+    assert!(decode_manifest(&built.manifest_file.bytes, path).is_ok());
+    let mut corrupt = built.manifest_file.bytes.clone();
     let last = corrupt.len() - 2;
     corrupt[last] ^= 1;
     let error = decode_manifest(&corrupt, path).unwrap_err();
     assert_eq!(error.code(), "GF_VALIDATION", "{error}");
-    assert!(decode_manifest(&manifest_file.bytes[..10], path).is_err());
+    assert!(decode_manifest(&built.manifest_file.bytes[..10], path).is_err());
 }

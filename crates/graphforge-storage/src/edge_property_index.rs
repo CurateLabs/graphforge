@@ -5,36 +5,42 @@
 //! fragments, each authenticated as a whole object, so before this index every
 //! statement opened and checksummed every fragment of the route and decoded its
 //! UUID column to find the handful of rows it wanted. The index is the same
-//! data cut into small column shards that are authenticated one at a time.
+//! data cut into small column blobs that are authenticated one at a time.
 //!
 //! Layout, below `indexes/edge-properties/`, one set per edge property route:
 //!
 //! - `<stem>.epx`: a manifest. An XXH64 line over the JSON body, then the JSON:
 //!   format, route, the digest of the route's source objects, the route's
-//!   property columns, the directory of the shards, and every shard's first and
-//!   last edge UUID, row count, and the length and XXH64 of each of its files.
-//! - `<shard directory>/<n>.epu`: the sorted `edge_uuid` column of shard `n`,
-//!   at most 4096 rows, as a Zstd-compressed Arrow IPC stream.
-//! - `<shard directory>/<n>.c<k>.epc`: property column `k` of shard `n`, one
-//!   value per UUID row, exactly as the route stores it. A shard holds only the
-//!   columns its source fragment stored.
+//!   property columns, the directory of the packs, and for every shard its first
+//!   and last edge UUID, its row count, and where each of its blobs is: the
+//!   pack, the byte range, and the XXH64 of those bytes.
+//! - `<pack directory>/<n>.epk`: a pack, consecutive blobs of at most 4 MiB. A
+//!   blob is one column of one shard of at most 4096 rows: the sorted
+//!   `edge_uuid` column, or property column `k` exactly as the route stores it,
+//!   one value per UUID row, as a Zstd-compressed Arrow IPC stream. A shard
+//!   holds only the columns its source fragment stored.
+//!
+//! The blobs are small so a lookup reads a few kilobytes per hit. They are
+//! packed because every durable open links each artifact of the generation into
+//! a private workspace: a file per blob would cost an open as many link and stat
+//! calls as the index has blobs.
 //!
 //! A lookup compares each shard's UUID range with the sorted request, reads the
-//! UUID file of the shards whose range holds a requested UUID, and reads the
-//! column files of the demanded properties for the shards that hold a match,
-//! each checked against the manifest. Columns the statement does not demand are
+//! UUID blob of the shards whose range holds a requested UUID, and reads the
+//! blobs of the demanded properties for the shards that hold a match, each byte
+//! range checked against the manifest. Columns the statement does not demand are
 //! never read. The bytes of a built index are a pure function of the route's
 //! content: they hold no clock, UUID or process identity.
 //!
 //! An index is current only while its source digest equals the route's. A
 //! missing or stale index is not used and is never rebuilt by a read; the
-//! property overlay answers instead. A manifest or shard that fails its
+//! property overlay answers instead. A manifest or blob that fails its
 //! checksum is refused. Routes that hold a tombstone, or whose fragments
 //! disagree on the type of a column, are not indexed.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -49,22 +55,23 @@ use sha2::{Digest, Sha256};
 
 use crate::property_equality_index::hex;
 use crate::property_overlay::{
-    AuthenticatedPropertyInventory, PROPERTY_TOMBSTONE_FIELD, PropertyOverlayLimits,
-    PropertyRouteKind, RouteRead,
+    AuthenticatedPropertyInventory, MAX_PROPERTY_OBJECT_BYTES, PROPERTY_TOMBSTONE_FIELD,
+    PropertyOverlayLimits, PropertyRouteKind, RouteRead,
 };
 
 /// Manifest format identifier.
 pub const FORMAT: &str = "graphforge-edge-property-index/1";
 /// Rows per shard. Fixed, so a lookup's reads do not depend on the route size.
 const SHARD_ROWS: usize = 4096;
-/// Bytes of one column of a shard, so a shard file stays well inside the
-/// property object bound whatever the values are.
+/// Bytes of one column of a shard, so a blob stays well inside the pack bound
+/// whatever the values are.
 const SHARD_BYTES: usize = 1 << 20;
+/// Bytes of one pack: the bound on a property object, which a pack is.
+const PACK_BYTES: usize = MAX_PROPERTY_OBJECT_BYTES;
 /// The edge identity column of every edge property fragment and shard.
 const UUID_COLUMN: &str = "edge_uuid";
 const MANIFEST_EXTENSION: &str = "epx";
-const UUID_EXTENSION: &str = "epu";
-const COLUMN_EXTENSION: &str = "epc";
+const PACK_EXTENSION: &str = "epk";
 
 /// `<project>/indexes/edge-properties`.
 #[must_use]
@@ -85,20 +92,14 @@ fn manifest_relative_path(route: &str) -> String {
     )
 }
 
-/// Length and XXH64 of one shard file.
+/// Where one blob is inside the packs of its route, and the XXH64 of its bytes.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-struct FileSeal {
+struct BlobSeal {
+    /// Ordinal of the pack, which names `<ordinal>.epk` below the pack directory.
+    pack: u32,
+    offset: u64,
     byte_length: u64,
     xxh64: u64,
-}
-
-impl FileSeal {
-    fn of(bytes: &[u8]) -> Self {
-        Self {
-            byte_length: bytes.len() as u64,
-            xxh64: crate::corruption_checksum::checksum(bytes),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,17 +107,15 @@ struct ColumnEntry {
     /// Index into the manifest's `columns`.
     column: usize,
     #[serde(flatten)]
-    seal: FileSeal,
+    blob: BlobSeal,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ShardEntry {
-    /// File stem: `<stem>.epu` and `<stem>.c<k>.epc`.
-    stem: String,
     rows: u64,
     first: String,
     last: String,
-    uuids: FileSeal,
+    uuids: BlobSeal,
     columns: Vec<ColumnEntry>,
 }
 
@@ -126,7 +125,7 @@ struct Manifest {
     route: String,
     source_digest: String,
     rows: u64,
-    shard_dir: String,
+    pack_dir: String,
     columns: Vec<String>,
     shards: Vec<ShardEntry>,
 }
@@ -230,31 +229,81 @@ pub struct EdgePropertyIndexFile {
 }
 
 /// Accumulates the manifest of one edge property route while its shards are
-/// written, so a bulk construction indexes the fragments as it encodes them
-/// without holding the route.
+/// packed, so a bulk construction indexes the fragments as it encodes them
+/// without holding the route: at most one pack is held.
 ///
 /// An initial build writes each edge once, with no tombstone, and every
 /// fragment is sorted by edge UUID. A route that breaks any of those
 /// assumptions, or whose fragments disagree on the type of a column, is not
 /// indexed and the property overlay answers it.
 pub(crate) struct EdgeRouteIndexBuilder {
-    shard_dir: String,
+    pack_dir: String,
     shards: Vec<ShardEntry>,
     columns: Vec<(String, DataType)>,
     rows: u64,
+    /// The pack being filled, which becomes pack number `packs_written`.
+    pack: Vec<u8>,
+    packs_written: u32,
     poisoned: bool,
 }
 
 impl EdgeRouteIndexBuilder {
-    /// A builder whose shards are written below `indexes/edge-properties/<shard_dir>/`.
-    pub(crate) fn new(shard_dir: String) -> Self {
+    /// A builder whose packs are written below `indexes/edge-properties/<pack_dir>/`.
+    pub(crate) fn new(pack_dir: String) -> Self {
         Self {
-            shard_dir,
+            pack_dir,
             shards: Vec::new(),
             columns: Vec::new(),
             rows: 0,
+            pack: Vec::new(),
+            packs_written: 0,
             poisoned: false,
         }
+    }
+
+    fn pack_relative_path(&self) -> String {
+        format!(
+            "indexes/edge-properties/{}/{:08}.{PACK_EXTENSION}",
+            self.pack_dir, self.packs_written
+        )
+    }
+
+    /// Hand the pack being filled to `write`, if it holds anything.
+    fn flush_pack(
+        &mut self,
+        write: &mut dyn FnMut(String, Vec<u8>) -> Result<(), GfError>,
+    ) -> Result<(), GfError> {
+        if self.pack.is_empty() {
+            return Ok(());
+        }
+        write(self.pack_relative_path(), std::mem::take(&mut self.pack))?;
+        self.packs_written += 1;
+        Ok(())
+    }
+
+    /// Append one blob to the pack being filled, starting a new pack when it
+    /// would pass `PACK_BYTES`. `None` when the blob cannot fit any pack, which
+    /// leaves the route to the property overlay.
+    fn append(
+        &mut self,
+        blob: &[u8],
+        write: &mut dyn FnMut(String, Vec<u8>) -> Result<(), GfError>,
+    ) -> Result<Option<BlobSeal>, GfError> {
+        if blob.len() > PACK_BYTES {
+            self.poisoned = true;
+            return Ok(None);
+        }
+        if self.pack.len() + blob.len() > PACK_BYTES {
+            self.flush_pack(write)?;
+        }
+        let seal = BlobSeal {
+            pack: self.packs_written,
+            offset: self.pack.len() as u64,
+            byte_length: blob.len() as u64,
+            xxh64: crate::corruption_checksum::checksum(blob),
+        };
+        self.pack.extend_from_slice(blob);
+        Ok(Some(seal))
     }
 
     /// Stop indexing this route.
@@ -272,8 +321,9 @@ impl EdgeRouteIndexBuilder {
         Some(self.columns.len() - 1)
     }
 
-    /// Cut one encoded fragment, or one batch of merged rows, into shards and
-    /// hand each shard file's path and bytes to `write`.
+    /// Cut one encoded fragment, or one batch of merged rows, into shards,
+    /// append their blobs to the pack being filled, and hand each pack that
+    /// fills to `write` with its path.
     ///
     /// The batch is `edge_uuid`, optionally the tombstone flag, then the
     /// property columns. Rows must be strictly ascending by UUID.
@@ -345,21 +395,24 @@ impl EdgeRouteIndexBuilder {
                 }
                 length = (length / 2).max(1);
             }
-            let shard_stem = format!("{:08}", self.shards.len());
             let uuid_bytes = encode_column(
                 UUID_COLUMN,
                 &DataType::FixedSizeBinary(16),
                 uuid_column.slice(start, length),
             )?;
+            let Some(uuid_seal) = self.append(&uuid_bytes, write)? else {
+                return Ok(());
+            };
             let mut columns = Vec::with_capacity(stored.len());
-            let mut files = Vec::with_capacity(stored.len() + 1);
             for (index, name, column) in &stored {
                 let bytes = encode_column(name, column.data_type(), column.slice(start, length))?;
+                let Some(blob) = self.append(&bytes, write)? else {
+                    return Ok(());
+                };
                 columns.push(ColumnEntry {
                     column: *index,
-                    seal: FileSeal::of(&bytes),
+                    blob,
                 });
-                files.push((format!("{shard_stem}.c{index}.{COLUMN_EXTENSION}"), bytes));
             }
             let first: [u8; 16] = uuids.value(start).try_into().expect("16-byte UUID");
             let last: [u8; 16] = uuids
@@ -367,51 +420,52 @@ impl EdgeRouteIndexBuilder {
                 .try_into()
                 .expect("16-byte UUID");
             self.shards.push(ShardEntry {
-                stem: shard_stem.clone(),
                 rows: length as u64,
                 first: hex(&first),
                 last: hex(&last),
-                uuids: FileSeal::of(&uuid_bytes),
+                uuids: uuid_seal,
                 columns,
             });
             self.rows += length as u64;
-            files.push((format!("{shard_stem}.{UUID_EXTENSION}"), uuid_bytes));
-            for (file, bytes) in files {
-                write(
-                    format!("indexes/edge-properties/{}/{file}", self.shard_dir),
-                    bytes,
-                )?;
-            }
             start += length;
         }
         Ok(())
     }
 
-    /// The manifest of the route, none when it cannot be indexed.
+    /// The files that complete the index of the route: the last pack and the
+    /// manifest. None when the route cannot be indexed.
     ///
     /// # Errors
     /// Propagates an encoding failure.
     pub(crate) fn finish(
-        self,
+        mut self,
         route: &str,
         source_digest: &str,
-    ) -> Result<Option<EdgePropertyIndexFile>, GfError> {
+    ) -> Result<Vec<EdgePropertyIndexFile>, GfError> {
         if self.poisoned || self.shards.is_empty() || self.columns.is_empty() {
-            return Ok(None);
+            return Ok(Vec::new());
+        }
+        let mut files = Vec::with_capacity(2);
+        if !self.pack.is_empty() {
+            files.push(EdgePropertyIndexFile {
+                relative_path: self.pack_relative_path(),
+                bytes: std::mem::take(&mut self.pack),
+            });
         }
         let manifest = Manifest {
             format: FORMAT.to_owned(),
             route: route.to_owned(),
             source_digest: source_digest.to_owned(),
             rows: self.rows,
-            shard_dir: self.shard_dir,
+            pack_dir: self.pack_dir,
             columns: self.columns.into_iter().map(|(name, _)| name).collect(),
             shards: self.shards,
         };
-        Ok(Some(EdgePropertyIndexFile {
+        files.push(EdgePropertyIndexFile {
             relative_path: manifest_relative_path(route),
             bytes: encode_manifest(&manifest)?,
-        }))
+        });
+        Ok(files)
     }
 }
 
@@ -420,7 +474,7 @@ impl EdgeRouteIndexBuilder {
 pub struct EdgePropertyIndexBuild {
     /// Indexes written: one per edge property route.
     pub indexes: u64,
-    /// Files written, manifests and shards.
+    /// Files written, manifests and packs.
     pub files: u64,
     /// Bytes written.
     pub bytes: u64,
@@ -472,16 +526,16 @@ pub fn write_edge_property_indexes(
             continue;
         }
         let projected = Schema::new(fields);
-        let mut builder = EdgeRouteIndexBuilder::new(format!("{}.shards", stem(&route)));
+        let mut builder = EdgeRouteIndexBuilder::new(format!("{}.packs", stem(&route)));
         let mut rows: BTreeMap<[u8; 16], crate::PropertySnapshotRow> = BTreeMap::new();
         let mut files = 0_u64;
         let mut bytes = 0_u64;
         let mut previous: Option<[u8; 16]> = None;
         let mut stopped = None;
-        let mut write = |relative: String, shard: Vec<u8>| -> Result<(), GfError> {
-            write_stage_file(stage_root, &relative, &shard)?;
+        let mut write = |relative: String, content: Vec<u8>| -> Result<(), GfError> {
+            write_stage_file(stage_root, &relative, &content)?;
             files += 1;
-            bytes += shard.len() as u64;
+            bytes += content.len() as u64;
             Ok(())
         };
         let read = RouteRead {
@@ -517,8 +571,11 @@ pub fn write_edge_property_indexes(
             let batch = crate::writer::edge_property_snapshots_batch(&projected, &rows)?;
             builder.observe(&batch, &mut write)?;
         }
-        if let Some(manifest) = builder.finish(&route, &digest)? {
-            write(manifest.relative_path, manifest.bytes)?;
+        let completed = builder.finish(&route, &digest)?;
+        if !completed.is_empty() {
+            for file in completed {
+                write(file.relative_path, file.bytes)?;
+            }
             report.indexes += 1;
         }
         report.files += files;
@@ -566,10 +623,8 @@ fn current_manifest(
     if current.as_deref() != Some(manifest.source_digest.as_str()) {
         return Ok(None);
     }
-    if manifest.shard_dir.contains(['/', '\\']) || manifest.shard_dir.starts_with('.') {
-        return Err(validation(
-            "manifest names a shard directory outside its own",
-        ));
+    if manifest.pack_dir.contains(['/', '\\']) || manifest.pack_dir.starts_with('.') {
+        return Err(validation("manifest names a pack directory outside its own"));
     }
     let ranges = manifest
         .shards
@@ -626,13 +681,13 @@ struct HitShard {
 }
 
 /// Look the properties of `targets` up in the index of `route`. Reads the
-/// manifest, the UUID file of the shards whose UUID range holds a target, and
-/// the demanded column files of the shards that hold a match, each checked
-/// against the manifest.
+/// manifest, the UUID blob of the shards whose UUID range holds a target, and
+/// the demanded column blobs of the shards that hold a match, each byte range
+/// checked against the manifest.
 ///
 /// # Errors
-/// A manifest or shard file that fails its checksum or is malformed, or an
-/// edge that two shards both hold.
+/// A manifest or blob that fails its checksum or is malformed, or an edge that
+/// two shards both hold.
 pub fn lookup_edge_properties(
     project_dir: &Path,
     inventory: &AuthenticatedPropertyInventory,
@@ -658,7 +713,7 @@ pub fn lookup_edge_properties(
         })
         .collect();
     let sorted: Vec<[u8; 16]> = targets.iter().copied().collect();
-    let directory = index_dir(project_dir).join(&current.manifest.shard_dir);
+    let mut packs = PackHandles::new(index_dir(project_dir).join(&current.manifest.pack_dir));
     let mut hits: Vec<HitShard> = Vec::new();
     let mut located: Vec<([u8; 16], usize, usize)> = Vec::new();
     for (shard, (first, last)) in current.manifest.shards.iter().zip(&current.ranges) {
@@ -667,7 +722,7 @@ pub fn lookup_edge_properties(
         if begin == end {
             continue;
         }
-        if let Some(hit) = read_hit_shard(&directory, shard, &sorted[begin..end], &demanded)? {
+        if let Some(hit) = read_hit_shard(&mut packs, shard, &sorted[begin..end], &demanded)? {
             located.extend(
                 hit.uuids
                     .iter()
@@ -694,21 +749,16 @@ pub fn lookup_edge_properties(
     }))
 }
 
-/// Read the UUID file of one shard whose range holds a requested edge, and, if
-/// the shard holds any of `targets`, the demanded column files. `None` when the
+/// Read the UUID blob of one shard whose range holds a requested edge, and, if
+/// the shard holds any of `targets`, the demanded column blobs. `None` when the
 /// shard holds none of them.
 fn read_hit_shard(
-    directory: &Path,
+    packs: &mut PackHandles,
     shard: &ShardEntry,
     targets: &[[u8; 16]],
     demanded: &BTreeMap<usize, &String>,
 ) -> Result<Option<HitShard>, GfError> {
-    let uuids = read_column(
-        directory,
-        &format!("{}.{UUID_EXTENSION}", shard.stem),
-        shard.uuids,
-        shard.rows,
-    )?;
+    let uuids = packs.read_column(shard.uuids, shard.rows)?;
     let wrong_type = || validation("shard UUID column has the wrong type");
     if uuids.data_type() != &DataType::FixedSizeBinary(16) || uuids.null_count() != 0 {
         return Err(wrong_type());
@@ -742,12 +792,7 @@ fn read_hit_shard(
         if !demanded.contains_key(&entry.column) {
             continue;
         }
-        let array = read_column(
-            directory,
-            &format!("{}.c{}.{COLUMN_EXTENSION}", shard.stem, entry.column),
-            entry.seal,
-            shard.rows,
-        )?;
+        let array = packs.read_column(entry.blob, shard.rows)?;
         let taken = arrow::compute::take(array.as_ref(), &indices, None)
             .map_err(|e| validation(e.to_string()))?;
         columns.insert(entry.column, taken);
@@ -804,33 +849,67 @@ fn find_uuid(uuids: &FixedSizeBinaryArray, target: &[u8; 16]) -> Option<usize> {
     None
 }
 
-/// Read one shard file, check it against its seal and decode its single column.
-fn read_column(dir: &Path, file: &str, seal: FileSeal, rows: u64) -> Result<ArrayRef, GfError> {
-    let path = dir.join(file);
-    let mut handle = File::open(&path).map_err(|e| storage("open shard file", &e))?;
-    let mut bytes = Vec::new();
-    // One byte past the declared length detects a longer file without reading it all.
-    (&mut handle)
-        .take(seal.byte_length.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|e| storage("read shard file", &e))?;
-    crate::lifecycle_io::record_read(crate::StorageIoPhase::ReadPathScan, bytes.len() as u64, 1);
-    if bytes.len() as u64 != seal.byte_length
-        || crate::corruption_checksum::checksum(&bytes) != seal.xxh64
-    {
-        return Err(validation(format!(
-            "shard file {} failed its checksum",
-            path.display()
-        )));
+/// The packs of one route, opened when a lookup first reads from them and kept
+/// open for the rest of the lookup.
+struct PackHandles {
+    directory: PathBuf,
+    open: BTreeMap<u32, (PathBuf, File)>,
+}
+
+impl PackHandles {
+    fn new(directory: PathBuf) -> Self {
+        Self {
+            directory,
+            open: BTreeMap::new(),
+        }
     }
-    let mut reader = arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(&bytes), None)
-        .map_err(|e| validation(e.to_string()))?;
-    let batch = reader
-        .next()
-        .ok_or_else(|| validation("shard file holds no batch"))?
-        .map_err(|e| validation(e.to_string()))?;
-    if reader.next().is_some() || batch.num_columns() != 1 || batch.num_rows() as u64 != rows {
-        return Err(validation("shard file shape does not match its manifest"));
+
+    /// The bytes `seal` names, checked against its checksum.
+    fn read_blob(&mut self, seal: BlobSeal) -> Result<Vec<u8>, GfError> {
+        if let std::collections::btree_map::Entry::Vacant(slot) = self.open.entry(seal.pack) {
+            let path = self
+                .directory
+                .join(format!("{:08}.{PACK_EXTENSION}", seal.pack));
+            let file = File::open(&path).map_err(|e| storage("open pack", &e))?;
+            slot.insert((path, file));
+        }
+        let (path, file) = self.open.get_mut(&seal.pack).expect("pack was just opened");
+        let corrupt = || validation(format!("pack {} failed its checksum", path.display()));
+        if seal.byte_length > PACK_BYTES as u64 {
+            return Err(corrupt());
+        }
+        file.seek(SeekFrom::Start(seal.offset))
+            .map_err(|e| storage("seek pack", &e))?;
+        let mut bytes = Vec::new();
+        file.take(seal.byte_length)
+            .read_to_end(&mut bytes)
+            .map_err(|e| storage("read pack", &e))?;
+        crate::lifecycle_io::record_read(
+            crate::StorageIoPhase::ReadPathScan,
+            bytes.len() as u64,
+            1,
+        );
+        if bytes.len() as u64 != seal.byte_length
+            || crate::corruption_checksum::checksum(&bytes) != seal.xxh64
+        {
+            return Err(corrupt());
+        }
+        Ok(bytes)
     }
-    Ok(Arc::clone(batch.column(0)))
+
+    /// Read one blob, check it against its seal and decode its single column.
+    fn read_column(&mut self, seal: BlobSeal, rows: u64) -> Result<ArrayRef, GfError> {
+        let bytes = self.read_blob(seal)?;
+        let mut reader =
+            arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(&bytes), None)
+                .map_err(|e| validation(e.to_string()))?;
+        let batch = reader
+            .next()
+            .ok_or_else(|| validation("blob holds no batch"))?
+            .map_err(|e| validation(e.to_string()))?;
+        if reader.next().is_some() || batch.num_columns() != 1 || batch.num_rows() as u64 != rows {
+            return Err(validation("blob shape does not match its manifest"));
+        }
+        Ok(Arc::clone(batch.column(0)))
+    }
 }

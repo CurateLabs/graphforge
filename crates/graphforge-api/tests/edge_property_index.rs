@@ -312,9 +312,26 @@ fn the_index_is_published_with_the_generation() {
     let files = index_files(&built.project);
     assert!(
         files.iter().any(|f| f.relative_path.ends_with(".epx"))
-            && files.iter().any(|f| f.relative_path.ends_with(".epu"))
-            && files.iter().any(|f| f.relative_path.ends_with(".epc")),
+            && files.iter().any(|f| f.relative_path.ends_with(".epk")),
         "the constructed generation declares the index: {files:?}"
+    );
+    // The index is a manifest and the packs that hold its blobs, never a file
+    // per blob: every durable open links every declared artifact.
+    assert!(
+        files
+            .iter()
+            .all(|f| f.relative_path.ends_with(".epx") || f.relative_path.ends_with(".epk")),
+        "the index is a manifest and packs: {files:?}"
+    );
+    let manifest = manifest(&built.project);
+    let shards = manifest["shards"].as_array().unwrap().len();
+    let packs = files
+        .iter()
+        .filter(|f| f.relative_path.ends_with(".epk"))
+        .count();
+    assert!(
+        shards > packs,
+        "{shards} shards of several blobs each share {packs} packs"
     );
     let (fragments, _) = property_fragments(&built.project);
     assert!(fragments >= 3, "the route spans fragments: {fragments}");
@@ -430,23 +447,75 @@ fn every_stored_type_reads_back_exactly_with_and_without_the_index() {
     check(&forge);
 }
 
-/// An `Int64` column of one shard: 4,096 values and the IPC framing.
-const INT64_COLUMN_FILE: u64 = 36 << 10;
+/// The path of the stored object that holds an inventory entry's bytes.
+fn object_of(project: &Path, entry: &graphforge_storage::GraphFileEntry) -> std::path::PathBuf {
+    let generation = graphforge_storage::resolve_project_generation(project).unwrap();
+    graphforge_storage::graph_object_path(generation.container_root(), &entry.content_sha256)
+        .unwrap()
+}
 
-/// The largest file of the given kind the project's index declares.
-fn largest_index_file(project: &Path, extension: &str) -> u64 {
-    index_files(project)
+/// The decoded manifest of the project's one edge property route.
+fn manifest(project: &Path) -> serde_json::Value {
+    let entry = index_files(project)
         .into_iter()
-        .filter(|file| file.relative_path.ends_with(extension))
-        .map(|file| file.byte_length)
+        .find(|file| file.relative_path.ends_with(".epx"))
+        .expect("the generation declares a manifest");
+    let bytes = std::fs::read(object_of(project, &entry)).unwrap();
+    assert_eq!(bytes[16], b'\n');
+    serde_json::from_slice(&bytes[17..]).expect("manifest body is JSON")
+}
+
+/// Where a manifest names a blob: its pack file, and the bytes inside it.
+#[derive(Clone, Copy, Debug)]
+struct Blob {
+    pack: u64,
+    offset: u64,
+    byte_length: u64,
+}
+
+fn blob_of(seal: &serde_json::Value) -> Blob {
+    let field = |name: &str| seal[name].as_u64().expect(name);
+    Blob {
+        pack: field("pack"),
+        offset: field("offset"),
+        byte_length: field("byte_length"),
+    }
+}
+
+/// The blob of `column` in shard `shard`, or the shard's UUID blob.
+fn column_blob(manifest: &serde_json::Value, shard: usize, column: Option<&str>) -> Blob {
+    let shard = &manifest["shards"][shard];
+    let Some(column) = column else {
+        return blob_of(&shard["uuids"]);
+    };
+    let index = manifest["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|name| name == column)
+        .expect("the route stores the column");
+    let entry = shard["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["column"] == index)
+        .expect("the shard stores the column");
+    blob_of(entry)
+}
+
+/// The largest blob of the column (or of the UUIDs) over all shards.
+fn largest_blob(project: &Path, column: Option<&str>) -> u64 {
+    let manifest = manifest(project);
+    (0..manifest["shards"].as_array().unwrap().len())
+        .map(|shard| column_blob(&manifest, shard, column).byte_length)
         .max()
-        .unwrap_or(0)
+        .unwrap()
 }
 
 /// A one-hop read of a fixed frontier's edge property is bounded by the
-/// frontier: at most the UUID file and the demanded column of the one shard
-/// that holds each frontier edge, whatever the size of the route. The route
-/// doubles, and every edge of the frontier is still found in one shard.
+/// frontier: at most the UUID blob and the demanded column blob of the one
+/// shard that holds each frontier edge, whatever the size of the route. The
+/// route doubles, and every edge of the frontier is still found in one shard.
 #[test]
 fn a_one_hop_edge_property_read_is_bounded_by_the_frontier_not_the_relation() {
     let _serial = serial();
@@ -481,7 +550,7 @@ fn a_one_hop_edge_property_read_is_bounded_by_the_frontier_not_the_relation() {
         // statement runs on the capturing thread; with more, the capture sees
         // less, never more.
         let bound = FRONTIER as u64
-            * (largest_index_file(&large.project, ".epu") + INT64_COLUMN_FILE)
+            * (largest_blob(&large.project, None) + largest_blob(&large.project, Some("timestamp")))
             + (512 << 10);
         for (size, bytes) in ["small", "large"].into_iter().zip(&reads) {
             assert!(
@@ -494,12 +563,13 @@ fn a_one_hop_edge_property_read_is_bounded_by_the_frontier_not_the_relation() {
     }
 }
 
-fn corrupt_object(project: &Path, entry: &graphforge_storage::GraphFileEntry) {
-    let generation = graphforge_storage::resolve_project_generation(project).unwrap();
-    let object =
-        graphforge_storage::graph_object_path(generation.container_root(), &entry.content_sha256)
-            .unwrap();
-    drop(generation);
+/// Flip one bit of the byte at `position` of the stored object of `entry`.
+fn corrupt_object(
+    project: &Path,
+    entry: &graphforge_storage::GraphFileEntry,
+    position: impl FnOnce(usize) -> usize,
+) {
+    let object = object_of(project, entry);
     let mut permissions = std::fs::metadata(&object).unwrap().permissions();
     #[cfg(unix)]
     {
@@ -510,9 +580,33 @@ fn corrupt_object(project: &Path, entry: &graphforge_storage::GraphFileEntry) {
     permissions.set_readonly(false);
     std::fs::set_permissions(&object, permissions).unwrap();
     let mut bytes = std::fs::read(&object).unwrap();
-    let last = bytes.len() - 1;
-    bytes[last] ^= 1;
+    let at = position(bytes.len());
+    bytes[at] ^= 1;
     std::fs::write(&object, bytes).unwrap();
+}
+
+/// Corrupt the manifest of the route.
+fn corrupt_manifest(project: &Path) {
+    let entry = index_files(project)
+        .into_iter()
+        .find(|file| file.relative_path.ends_with(".epx"))
+        .expect("the generation declares a manifest");
+    corrupt_object(project, &entry, |length| length - 1);
+}
+
+/// Corrupt the middle of one blob, inside the pack that holds it. The pack's
+/// other blobs, which have their own seals, are left intact.
+fn corrupt_blob(project: &Path, blob: Blob) {
+    let suffix = format!("/{:08}.epk", blob.pack);
+    let entry = index_files(project)
+        .into_iter()
+        .find(|file| file.relative_path.ends_with(&suffix))
+        .expect("the generation declares the pack");
+    let at = (blob.offset + blob.byte_length / 2) as usize;
+    corrupt_object(project, &entry, |length| {
+        assert!(at < length, "the blob lies inside its pack");
+        at
+    });
 }
 
 fn digests(project: &Path) -> Vec<(String, String)> {
@@ -524,50 +618,80 @@ fn digests(project: &Path) -> Vec<(String, String)> {
     files
 }
 
-/// A manifest, UUID file or column file that fails its checksum is refused with
-/// `GF_VALIDATION` by the lookup that reads it. It is not served, the property
-/// overlay is not substituted for it, and nothing is rebuilt by the read.
+const NO_PROPERTY: &str = "MATCH (a:Entity {ident: $ident})-[e:LINK]->(b) RETURN count(b) AS n";
+const MEMOS: &str = "MATCH (a:Entity {ident: $ident})-[e:LINK]->(b) RETURN e.memo AS memo";
+
+/// Execute `query` for the node `ident` and return the error it fails with.
+fn refusal(forge: &GraphForge, query: &str, ident: i64) -> graphforge_core::GfError {
+    forge
+        .execute_with_params(
+            query,
+            &HashMap::from([("ident".to_owned(), IrLiteral::Int(ident))]),
+        )
+        .expect_err("a corrupted index must be refused")
+}
+
+/// A manifest, or a blob of the UUIDs or of a demanded column, that fails its
+/// checksum is refused with `GF_VALIDATION` by the lookup that reads it. It is
+/// not served, the property overlay is not substituted for it, and nothing is
+/// rebuilt by the read.
 #[test]
 fn a_corrupted_index_is_refused_not_rebuilt_or_bypassed() {
     let _serial = serial();
-    for suffix in [".epx", ".epu", ".epc"] {
+    for label in ["manifest", "uuid blob", "timestamp blob"] {
         let built = build(SMALL_EDGES);
         let before = digests(&built.project);
         // The frontier's edges hold the smallest UUIDs, so shard 0 serves it.
-        let targets = index_files(&built.project)
-            .into_iter()
-            .filter(|file| {
-                file.relative_path.ends_with(suffix)
-                    && (suffix == ".epx" || file.relative_path.contains("/00000000."))
-            })
-            .collect::<Vec<_>>();
-        assert!(!targets.is_empty(), "{suffix}: no index file to corrupt");
-        for entry in &targets {
-            corrupt_object(&built.project, entry);
+        match label {
+            "manifest" => corrupt_manifest(&built.project),
+            "uuid blob" => {
+                let manifest = manifest(&built.project);
+                corrupt_blob(&built.project, column_blob(&manifest, 0, None));
+            }
+            _ => {
+                let manifest = manifest(&built.project);
+                corrupt_blob(&built.project, column_blob(&manifest, 0, Some("timestamp")));
+            }
         }
         // Opening reads no index payload.
         let forge = open(&built.project, 1);
-        let error = forge
-            .execute_with_params(
-                SUM_TIMESTAMPS,
-                &HashMap::from([("ident".to_owned(), IrLiteral::Int(0))]),
-            )
-            .expect_err("a corrupted index must be refused");
-        assert_eq!(error.code(), "GF_VALIDATION", "{suffix}: {error}");
+        let error = refusal(&forge, SUM_TIMESTAMPS, 0);
+        assert_eq!(error.code(), "GF_VALIDATION", "{label}: {error}");
         // A statement that reads no edge property is unaffected.
-        let count = scalar_i64(&run(
-            &forge,
-            "MATCH (a:Entity {ident: $ident})-[e:LINK]->(b) RETURN count(b) AS n",
-            0,
-        ));
-        assert_eq!(count, FRONTIER as i64, "{suffix}");
+        let count = scalar_i64(&run(&forge, NO_PROPERTY, 0));
+        assert_eq!(count, FRONTIER as i64, "{label}");
         drop(forge);
         assert_eq!(
             digests(&built.project),
             before,
-            "{suffix}: the read rebuilt"
+            "{label}: the read rebuilt"
         );
     }
+}
+
+/// Every blob carries its own seal, so damage to the blob of one column
+/// refuses the statements that demand that column and no others, though the
+/// blob shares its pack with the blobs of the other columns.
+#[test]
+fn a_corrupted_blob_refuses_only_the_statements_that_demand_its_column() {
+    let _serial = serial();
+    let built = build(SMALL_EDGES);
+    let before = digests(&built.project);
+    let manifest = manifest(&built.project);
+    let damaged = column_blob(&manifest, 0, Some("memo"));
+    let intact = column_blob(&manifest, 0, Some("timestamp"));
+    assert_eq!(damaged.pack, intact.pack, "both blobs are in one pack");
+    corrupt_blob(&built.project, damaged);
+
+    let forge = open(&built.project, 1);
+    let error = refusal(&forge, MEMOS, 0);
+    assert_eq!(error.code(), "GF_VALIDATION", "{error}");
+    // The timestamp blob lies in the damaged blob's pack and is verified on
+    // its own seal.
+    let sum = scalar_i64(&run(&forge, SUM_TIMESTAMPS, 0));
+    assert_eq!(sum, frontier_timestamps());
+    drop(forge);
+    assert_eq!(digests(&built.project), before, "the read rebuilt");
 }
 
 /// A write changes the route, so the index no longer describes it and is not

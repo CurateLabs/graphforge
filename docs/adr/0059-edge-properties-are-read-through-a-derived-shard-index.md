@@ -51,30 +51,46 @@ same family as the adjacency CSR and the property-equality index.
 
 ### Layout
 
-One manifest and a directory of shards per edge property route:
+One manifest and a directory of packs per edge property route:
 
 - `<stem>.epx`, the manifest: an XXH64 line over the JSON body, then the JSON.
   It records the format, the route, a digest of the route's source objects
   (path, length and XXH64 of every object the generation inventory names), the
   route's property columns, and for every shard its first and last edge UUID,
-  row count, and the length and XXH64 of each of its files.
-- `<shard directory>/<n>.epu`, the sorted `edge_uuid` column of shard `n`, and
-  `<n>.c<k>.epc`, property column `k` of shard `n`, both Zstd-compressed Arrow IPC streams of
-  one batch. A shard holds at most 4,096 rows and at most 1 MiB per column.
+  row count, and a seal (pack number, offset, length and XXH64) for its UUID
+  blob and for each of its column blobs.
+- `<stem>.packs/<n>.epk`, a pack: consecutive blobs, up to 4 MiB, one write.
+  A blob is the sorted `edge_uuid` column of a shard, or one property column of
+  it, as a Zstd-compressed Arrow IPC stream of one batch with no field
+  metadata. A shard holds at most 4,096 rows and at most 1 MiB per column.
 
-The columns are separate files so a statement reads only the properties it
+The columns are separate blobs so a statement reads only the properties it
 demands: a route that also stores a wide `memo` costs a `timestamp` lookup
-nothing. The values are the route's own Arrow values, so every type the overlay
+nothing, and a damaged `memo` blob refuses only the statements that demand
+`memo`. The values are the route's own Arrow values, so every type the overlay
 stores is stored; nothing is re-encoded.
+
+#### Why packs and not a file per blob
+
+Every durable open hard-links every artifact the generation inventories into a
+private workspace (#1992), at about 200 microseconds and a hundred `statx` calls
+per artifact. A file per UUID list and per column was 8,339 files for the
+SF1 FinBench `transaction` route and 4,901 for the IC `Message` route, and added
+1.5 to 3 s to every open of an indexed project, more than the lookup saved on a
+statement that reads few properties. A pack holds about a hundred blobs, so the
+route is a few dozen files. The seal of a blob, not the name of a file,
+authenticates what a lookup reads, so the guarantee of the per-file layout is
+kept: a lookup reads the byte range of one blob and checks its length and XXH64.
 
 ### Authority, authentication, currency
 
 - The index is derived and rebuildable. The fragments remain the authority.
 - The manifest is first-touch (checked once per hydration, like the adjacency
-  manifest); shard files are self-authenticating (hydration neither reads nor
-  registers them) and every lookup checks the length and XXH64 of each file it
-  reads against the manifest. A failure is `GF_VALIDATION`. The overlay is not
-  substituted for a corrupted index, and a read never rebuilds one.
+  manifest); packs are self-authenticating (hydration neither reads nor
+  registers their bytes, only links them) and every lookup checks the length and
+  XXH64 of each blob it reads against the manifest, whichever pack holds it. A
+  failure is `GF_VALIDATION`. The overlay is not substituted for a corrupted
+  index, and a read never rebuilds one.
 - An index is current only while its source digest equals the route's. A
   mutation appends a fragment and changes the digest, so the index goes stale
   and the overlay answers, exactly as before the index existed, until an
@@ -84,10 +100,11 @@ stores is stored; nothing is re-encoded.
 ### Build
 
 - Initial bulk construction cuts the index from the fragments as they are
-  encoded, writing each shard once as an artifact of the same generation
-  (never reading the published fragments back, which would copy multi-object
-  fragments to scratch and break write-once accounting). The manifest is
-  written last.
+  encoded, writing each pack once, as it fills, as an artifact of the same
+  generation (never reading the published fragments back, which would copy
+  multi-object fragments to scratch and break write-once accounting). The
+  manifest is written last. A pack never passes the 4 MiB property object
+  bound, so the write-once accounting of the generation holds.
 - `GraphForge::rebuild_property_indexes` rebuilds both the node equality index
   and this one from the current generation's newest-wins state in UUID order
   and publishes a new generation. Both directories are replaced under the
@@ -143,8 +160,9 @@ relation, now read from the index.
   route changed since the build answer through the overlay until
   `rebuild_property_indexes`. Nothing breaks and nothing is rebuilt silently.
 - A route poisoned mid-build (a tombstone, an unsorted fragment, a conflicting
-  column type, a single value over 1 MiB) is not indexed; shards written before
+  column type, a single value over 1 MiB) is not indexed; packs written before
   the decision stay in the generation as unreferenced files.
 - The index adds about the size of the indexed columns plus 16 bytes per row.
-- The manifest is read whole by every lookup that touches its route: about
-  200 bytes per shard, 3 KiB per 100,000 edges.
+- The manifest is read whole by every lookup that touches its route: a seal of
+  about 70 bytes per blob, so a few hundred bytes per shard.
+- A lookup reads the byte range of a blob out of its pack, not the pack.
