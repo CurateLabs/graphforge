@@ -184,11 +184,7 @@ fn query_progress_is_flushed_in_binding_order() {
         serde_json::to_vec(&workload(json!([people_by_min_id()]))).unwrap(),
     )
     .unwrap();
-    std::fs::write(
-        &counts_path,
-        serde_json::to_vec(&expected(4, 3)).unwrap(),
-    )
-    .unwrap();
+    std::fs::write(&counts_path, serde_json::to_vec(&expected(4, 3)).unwrap()).unwrap();
     let result = Command::new(env!("CARGO_BIN_EXE_graphforge-benchmark-gdc-scorecard"))
         .args([
             "query",
@@ -203,7 +199,11 @@ fn query_progress_is_flushed_in_binding_order() {
         ])
         .output()
         .unwrap();
-    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
     let progress: Vec<_> = String::from_utf8(result.stderr)
         .unwrap()
         .lines()
@@ -225,7 +225,12 @@ fn query_progress_is_flushed_in_binding_order() {
         ("start", "min-4", "run-3"),
         ("complete", "min-4", "run-3"),
     ]) {
-        assert!(line.starts_with(&format!("gdc-query {action} people-by-min-id {binding} {phase}")), "{line}");
+        assert!(
+            line.starts_with(&format!(
+                "gdc-query {action} people-by-min-id {binding} {phase}"
+            )),
+            "{line}"
+        );
         if action == "complete" {
             assert!(line.contains("latency_ns="), "{line}");
             assert!(line.contains("rows="), "{line}");
