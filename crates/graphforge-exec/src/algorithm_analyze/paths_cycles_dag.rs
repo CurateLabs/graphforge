@@ -93,23 +93,12 @@ fn project_euler_graph(
         .map_err(|_| AlgorithmError::Execution {
             message: "Euler stored-edge projection allocation failed".into(),
         })?;
-    let mut projected = 0_usize;
     for &source_id in graph.node_ids() {
-        if projected.is_multiple_of(4_096) {
-            control.checkpoint()?;
-        } else {
-            control.check_cancelled()?;
-        }
-        projected = projected.saturating_add(1);
+        control.check_cancelled()?;
         let source = euler_node_uuid(graph, source_id)?;
         nodes.push(source);
         for edge in graph.neighbors(source_id) {
-            if projected.is_multiple_of(4_096) {
-                control.checkpoint()?;
-            } else {
-                control.check_cancelled()?;
-            }
-            projected = projected.saturating_add(1);
+            control.check_cancelled()?;
             edges.push(EulerEdge {
                 edge: edge.edge_uuid,
                 source,
@@ -150,14 +139,14 @@ impl RustAlgorithm for HasEulerPath {
         let mut projected = 0_usize;
         for &source in graph.node_ids() {
             if projected.is_multiple_of(4_096) {
-                control.checkpoint()?;
+                control.check_cancelled()?;
             }
             projected = projected.saturating_add(1);
             let source_uuid = euler_path_node_uuid(graph, source)?;
             nodes.push(source_uuid);
             for edge in graph.neighbors(source) {
                 if projected.is_multiple_of(4_096) {
-                    control.checkpoint()?;
+                    control.check_cancelled()?;
                 }
                 projected = projected.saturating_add(1);
                 edges.push(EulerPathEdge {
@@ -195,14 +184,14 @@ impl RustAlgorithm for HasEulerCircuit {
         let mut projected = 0_usize;
         for &source in graph.node_ids() {
             if projected.is_multiple_of(4_096) {
-                control.checkpoint()?;
+                control.check_cancelled()?;
             }
             projected = projected.saturating_add(1);
             let source_uuid = euler_circuit_node_uuid(graph, source)?;
             nodes.push(source_uuid);
             for edge in graph.neighbors(source) {
                 if projected.is_multiple_of(4_096) {
-                    control.checkpoint()?;
+                    control.check_cancelled()?;
                 }
                 projected = projected.saturating_add(1);
                 edges.push(EulerCircuitEdge {
@@ -240,14 +229,14 @@ impl RustAlgorithm for FindCycles {
         let mut projected = 0_usize;
         for &source in graph.node_ids() {
             if projected.is_multiple_of(4_096) {
-                control.checkpoint()?;
+                control.check_cancelled()?;
             }
             projected = projected.saturating_add(1);
             let source_uuid = find_cycles_node_uuid(graph, source)?;
             nodes.push(source_uuid);
             for edge in graph.neighbors(source) {
                 if projected.is_multiple_of(4_096) {
-                    control.checkpoint()?;
+                    control.check_cancelled()?;
                 }
                 projected = projected.saturating_add(1);
                 edges.push(CycleEdge {
@@ -288,14 +277,14 @@ impl RustAlgorithm for DagLongestPath {
         let mut projected = 0_usize;
         for &source in graph.node_ids() {
             if projected.is_multiple_of(4_096) {
-                control.checkpoint()?;
+                control.check_cancelled()?;
             }
             projected = projected.saturating_add(1);
             let source_uuid = dag_longest_path_node_uuid(graph, source)?;
             nodes.push(source_uuid);
             for edge in graph.neighbors(source) {
                 if projected.is_multiple_of(4_096) {
-                    control.checkpoint()?;
+                    control.check_cancelled()?;
                 }
                 projected = projected.saturating_add(1);
                 edges.push(DagLongestPathEdge {
@@ -336,14 +325,14 @@ impl RustAlgorithm for WeightedDagLongestPath {
         let mut projected = 0_usize;
         for &source in graph.node_ids() {
             if projected.is_multiple_of(4_096) {
-                control.checkpoint()?;
+                control.check_cancelled()?;
             }
             projected = projected.saturating_add(1);
             let source_uuid = weighted_dag_longest_path_node_uuid(graph, source)?;
             nodes.push(source_uuid);
             for edge in graph.neighbors(source) {
                 if projected.is_multiple_of(4_096) {
-                    control.checkpoint()?;
+                    control.check_cancelled()?;
                 }
                 projected = projected.saturating_add(1);
                 edges.push(WeightedDagEdge {
@@ -387,7 +376,7 @@ impl RustAlgorithm for SpanningTree {
             let source_uuid = spanning_node_uuid(graph, source, self.algorithm)?;
             for edge in graph.neighbors(source) {
                 if projected.is_multiple_of(4_096) {
-                    control.checkpoint()?;
+                    control.check_cancelled()?;
                 }
                 projected = projected.saturating_add(1);
                 edges.push(SpanningEdge {
@@ -402,7 +391,7 @@ impl RustAlgorithm for SpanningTree {
         let mut rows = Vec::with_capacity(forest.len());
         for (index, edge) in forest.into_iter().enumerate() {
             if index.is_multiple_of(4_096) {
-                control.checkpoint()?;
+                control.check_cancelled()?;
             }
             rows.push(vec![
                 AlgorithmValue::Uuid(edge.edge_uuid),
@@ -432,16 +421,10 @@ impl RustAlgorithm for MinimumKSpanningTree {
         let algorithm = AnalyzeAlgorithm::MinimumKSpanningTree;
         let nodes = graph.node_uuids().collect::<Vec<_>>();
         let mut edges = Vec::new();
-        let mut projected = 0_usize;
         for &source in graph.node_ids() {
             let source_uuid = spanning_node_uuid(graph, source, algorithm)?;
             for edge in graph.neighbors(source) {
-                if projected.is_multiple_of(4_096) {
-                    control.checkpoint()?;
-                } else {
-                    control.check_cancelled()?;
-                }
-                projected = projected.saturating_add(1);
+                control.check_cancelled()?;
                 edges.push(WeightedEdge {
                     edge_uuid: edge.edge_uuid,
                     source_uuid,
@@ -459,18 +442,12 @@ impl RustAlgorithm for MinimumKSpanningTree {
                 message: "minimum-k spanning-tree row count exceeds platform range".into(),
             })?;
         let mut rows = Vec::with_capacity(row_count);
-        let mut shaped = 0_usize;
         for (tree_id, tree) in trees.into_iter().enumerate() {
             let tree_id = u64::try_from(tree_id).map_err(|_| AlgorithmError::Execution {
                 message: "minimum-k spanning-tree ordinal exceeds UInt64".into(),
             })?;
             for edge in tree.edges {
-                if shaped.is_multiple_of(4_096) {
-                    control.checkpoint()?;
-                } else {
-                    control.check_cancelled()?;
-                }
-                shaped = shaped.saturating_add(1);
+                control.check_cancelled()?;
                 rows.push(vec![
                     AlgorithmValue::UInt64(tree_id),
                     AlgorithmValue::Uuid(edge.edge_uuid),
@@ -560,7 +537,7 @@ pub(super) fn directed_is_dag(
     for &node in graph.node_ids() {
         for edge in graph.neighbors(node) {
             if visited_edges.is_multiple_of(16_384) {
-                control.checkpoint()?;
+                control.check_cancelled()?;
             }
             visited_edges += 1;
             let degree =
@@ -586,7 +563,7 @@ pub(super) fn directed_is_dag(
     let mut visited_nodes = 0_usize;
     while let Some(node) = ready.pop_front() {
         if visited_nodes.is_multiple_of(16_384) {
-            control.checkpoint()?;
+            control.check_cancelled()?;
         }
         visited_nodes += 1;
         for edge in graph.neighbors(node) {

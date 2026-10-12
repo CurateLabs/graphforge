@@ -389,10 +389,13 @@ fn transition_distributions(
     Ok(rows)
 }
 
+/// Counts work and polls cancellation every 1,024 units. Work is bounded by this kernel's
+/// node or vector cap, so it never consumes the `iterations` limit, which counts rounds
+/// (#1974).
 fn checkpoint_chunk(control: &AlgorithmControl, work: &mut usize) -> Result<(), AlgorithmError> {
     *work += 1;
     if *work == 1_024 {
-        control.checkpoint()?;
+        control.check_cancelled()?;
         *work = 0;
     }
     Ok(())

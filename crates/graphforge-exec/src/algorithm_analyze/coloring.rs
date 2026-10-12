@@ -32,14 +32,14 @@ impl RustAlgorithm for ChromaticNumber {
         let mut projected = 0_usize;
         for &source in graph.node_ids() {
             if projected.is_multiple_of(4_096) {
-                control.checkpoint()?;
+                control.check_cancelled()?;
             }
             projected = projected.saturating_add(1);
             let source_uuid = chromatic_number_node_uuid(graph, source)?;
             nodes.push(source_uuid);
             for edge in graph.neighbors(source) {
                 if projected.is_multiple_of(4_096) {
-                    control.checkpoint()?;
+                    control.check_cancelled()?;
                 }
                 projected = projected.saturating_add(1);
                 edges.push(ChromaticEdge {
@@ -77,14 +77,14 @@ impl RustAlgorithm for NodeColoring {
         let mut projected = 0_usize;
         for &source in graph.node_ids() {
             if projected.is_multiple_of(4_096) {
-                control.checkpoint()?;
+                control.check_cancelled()?;
             }
             projected = projected.saturating_add(1);
             let source_uuid = node_coloring_node_uuid(graph, source)?;
             nodes.push(source_uuid);
             for edge in graph.neighbors(source) {
                 if projected.is_multiple_of(4_096) {
-                    control.checkpoint()?;
+                    control.check_cancelled()?;
                 }
                 projected = projected.saturating_add(1);
                 edges.push(NodeColoringEdge {
@@ -130,14 +130,14 @@ impl RustAlgorithm for K1Coloring {
         let mut projected = 0_usize;
         for &source in graph.node_ids() {
             if projected.is_multiple_of(4_096) {
-                control.checkpoint()?;
+                control.check_cancelled()?;
             }
             projected = projected.saturating_add(1);
             let source_uuid = k1_coloring_node_uuid(graph, source)?;
             nodes.push(source_uuid);
             for edge in graph.neighbors(source) {
                 if projected.is_multiple_of(4_096) {
-                    control.checkpoint()?;
+                    control.check_cancelled()?;
                 }
                 projected = projected.saturating_add(1);
                 edges.push(NodeColoringEdge {
@@ -183,14 +183,14 @@ impl RustAlgorithm for EdgeColoring {
         let mut projected = 0_usize;
         for &source in graph.node_ids() {
             if projected.is_multiple_of(4_096) {
-                control.checkpoint()?;
+                control.check_cancelled()?;
             }
             projected = projected.saturating_add(1);
             let source_uuid = edge_coloring_node_uuid(graph, source)?;
             nodes.push(source_uuid);
             for edge in graph.neighbors(source) {
                 if projected.is_multiple_of(4_096) {
-                    control.checkpoint()?;
+                    control.check_cancelled()?;
                 }
                 projected = projected.saturating_add(1);
                 edges.push(EdgeColoringEdge {

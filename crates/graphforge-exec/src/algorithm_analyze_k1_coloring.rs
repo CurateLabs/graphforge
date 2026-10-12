@@ -3,8 +3,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::algorithm_analyze_node_coloring::{NodeColor, NodeColoringEdge};
 use crate::algorithm_dispatch::{AlgorithmControl, AlgorithmError};
 
-const CHECKPOINT_INTERVAL: usize = 4_096;
-
 /// Color a simple undirected graph in descending-degree, ascending-UUID order.
 pub(crate) fn k1_coloring(
     nodes: &[[u8; 16]],
@@ -129,15 +127,13 @@ fn simple_neighbors(
     Ok(neighbors)
 }
 
+/// Counts work and polls cancellation. Work is bounded by the node and edge limits,
+/// so it never consumes the `iterations` limit, which counts rounds (#1974).
 fn checkpoint(control: &AlgorithmControl, work: &mut usize) -> Result<(), AlgorithmError> {
     *work = work
         .checked_add(1)
         .ok_or_else(|| execution("k1_coloring work counter overflow"))?;
-    if work.is_multiple_of(CHECKPOINT_INTERVAL) {
-        control.checkpoint()?;
-    } else {
-        control.check_cancelled()?;
-    }
+    control.check_cancelled()?;
     Ok(())
 }
 

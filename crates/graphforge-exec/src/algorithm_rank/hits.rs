@@ -137,7 +137,7 @@ fn prepare_hits(
     for &node in node_ids {
         for edge in graph.neighbors(node) {
             if edge_count > 0 && edge_count.is_multiple_of(1024) {
-                control.checkpoint()?;
+                control.check_cancelled()?;
             }
             let target = indices
                 .get(&edge.neighbor_id)
@@ -239,7 +239,7 @@ fn hits_pull_serial(
             .map_err(|_| execution("HITS CSR offset exceeds supported range"))?;
         for &neighbor in &csr.neighbors[start..end] {
             if traversed_edges > 0 && traversed_edges.is_multiple_of(1024) {
-                control.checkpoint()?;
+                control.check_cancelled()?;
             }
             traversed_edges += 1;
             let neighbor = usize::try_from(neighbor)

@@ -961,9 +961,14 @@ fn execution(message: &str) -> AlgorithmError {
     }
 }
 
+/// Count one unit of work and poll cancellation every 16,384 units.
+///
+/// Work is bounded by the node and edge limits, so it never consumes the
+/// `iterations` limit, which counts rounds: an iterative algorithm charges that
+/// limit once per round with [`AlgorithmControl::checkpoint`] (#1974).
 fn checkpoint_chunk(control: &AlgorithmControl, work: &mut usize) -> Result<(), AlgorithmError> {
     if work.is_multiple_of(16_384) {
-        control.checkpoint()?;
+        control.check_cancelled()?;
     }
     *work += 1;
     Ok(())
@@ -1314,19 +1319,20 @@ mod tests {
                     limit: 5,
                 },
             ),
-            (
-                AlgorithmLimits {
-                    iterations: 0,
-                    ..AlgorithmLimits::default()
-                },
-                AlgorithmError::IterationLimit {
-                    observed: 1,
-                    limit: 0,
-                },
-            ),
         ] {
             assert_eq!(execute_strongly_connected(&graph, limits), Err(expected));
         }
+        // One pass consumes no iterations: the limit counts rounds (#1974).
+        assert!(
+            execute_strongly_connected(
+                &graph,
+                AlgorithmLimits {
+                    iterations: 0,
+                    ..AlgorithmLimits::default()
+                }
+            )
+            .is_ok()
+        );
 
         let cancellation = AlgorithmCancellation::default();
         cancellation.cancel();
@@ -1395,19 +1401,20 @@ mod tests {
                     limit: 6,
                 },
             ),
-            (
-                AlgorithmLimits {
-                    iterations: 0,
-                    ..AlgorithmLimits::default()
-                },
-                AlgorithmError::IterationLimit {
-                    observed: 1,
-                    limit: 0,
-                },
-            ),
         ] {
             assert_eq!(execute_biconnected(&graph, limits), Err(expected));
         }
+        // One pass consumes no iterations: the limit counts rounds (#1974).
+        assert!(
+            execute_biconnected(
+                &graph,
+                AlgorithmLimits {
+                    iterations: 0,
+                    ..AlgorithmLimits::default()
+                }
+            )
+            .is_ok()
+        );
         let cancellation = AlgorithmCancellation::default();
         cancellation.cancel();
         assert_eq!(
@@ -1489,19 +1496,20 @@ mod tests {
                     limit: 9,
                 },
             ),
-            (
-                AlgorithmLimits {
-                    iterations: 0,
-                    ..AlgorithmLimits::default()
-                },
-                AlgorithmError::IterationLimit {
-                    observed: 1,
-                    limit: 0,
-                },
-            ),
         ] {
             assert_eq!(execute_k_core_decomposition(&graph, limits), Err(expected));
         }
+        // One pass consumes no iterations: the limit counts rounds (#1974).
+        assert!(
+            execute_k_core_decomposition(
+                &graph,
+                AlgorithmLimits {
+                    iterations: 0,
+                    ..AlgorithmLimits::default()
+                }
+            )
+            .is_ok()
+        );
         let cancellation = AlgorithmCancellation::default();
         cancellation.cancel();
         assert_eq!(

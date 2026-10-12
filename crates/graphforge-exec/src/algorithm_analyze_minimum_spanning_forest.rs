@@ -92,10 +92,12 @@ fn checkpointed_sort(
     Ok(())
 }
 
+/// Counts work and polls cancellation every 4,096 units. Work is bounded by the node and
+/// edge limits, so it never consumes the `iterations` limit, which counts rounds (#1974).
 fn checkpoint(control: &AlgorithmControl, work: &mut usize) -> Result<(), AlgorithmError> {
     *work = work.saturating_add(1);
     if work.is_multiple_of(CHECKPOINT_INTERVAL) {
-        control.checkpoint()?;
+        control.check_cancelled()?;
     }
     Ok(())
 }
@@ -419,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn sorting_consumes_the_shared_iteration_budget() {
+    fn sorting_polls_cancellation_and_consumes_no_iterations() {
         let nodes = [uuid(1), uuid(2)];
         let edges = (0_u32..4_096)
             .map(|id| SpanningEdge {
@@ -436,12 +438,10 @@ mod tests {
             },
             AlgorithmCancellation::default(),
         );
-        assert!(matches!(
-            spanning_forest(&nodes, &edges, true, &sorting_limited),
-            Err(AlgorithmError::IterationLimit {
-                observed: 3,
-                limit: 2
-            })
-        ));
+        // Sorting 4,096 edges is far more than 2 chunks of work; only the entry
+        // charge counts against the iteration limit (#1974).
+        let forest = spanning_forest(&nodes, &edges, true, &sorting_limited).unwrap();
+        assert_eq!(forest.len(), 1);
+        assert_eq!(forest[0].weight, 4_095.0);
     }
 }

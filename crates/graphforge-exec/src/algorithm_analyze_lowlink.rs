@@ -237,9 +237,11 @@ fn discover(
     Ok(())
 }
 
+/// Counts work and polls cancellation every 16,384 units. Work is bounded by the node and
+/// edge limits, so it never consumes the `iterations` limit, which counts rounds (#1974).
 fn checkpoint(control: &AlgorithmControl, work: &mut usize) -> Result<(), AlgorithmError> {
     if work.is_multiple_of(CHECKPOINT_INTERVAL) {
-        control.checkpoint()?;
+        control.check_cancelled()?;
     }
     *work = work.saturating_add(1);
     Ok(())
@@ -304,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_and_iteration_limits_abort_without_output() {
+    fn cancellation_aborts_without_output_and_one_pass_consumes_no_iterations() {
         let graph = AdjacencyGraph::with_test_undirected_multigraph(2, &[(0, 0, 1)]);
         let cancellation = AlgorithmCancellation::default();
         cancellation.cancel();
@@ -320,15 +322,12 @@ mod tests {
             iterations: 0,
             ..AlgorithmLimits::default()
         };
-        assert!(matches!(
+        assert!(
             low_link(
                 &graph,
                 &AlgorithmControl::new(limits, AlgorithmCancellation::default())
-            ),
-            Err(AlgorithmError::IterationLimit {
-                observed: 1,
-                limit: 0
-            })
-        ));
+            )
+            .is_ok()
+        );
     }
 }

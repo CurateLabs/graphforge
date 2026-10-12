@@ -31,7 +31,10 @@ pub struct AlgorithmLimits {
     pub edges: u64,
     /// Maximum public output rows.
     pub output_rows: u64,
-    /// Maximum cooperative iteration checkpoints.
+    /// Maximum iterations: rounds of an iterative algorithm, one per round or
+    /// sweep. Work within a round, and a single-pass algorithm's work, polls
+    /// cancellation and is bounded by the node and edge limits; neither consumes
+    /// this limit (#1974).
     pub iterations: u64,
     /// Maximum aggregate exact-solver states retained or generated.
     pub states: u64,

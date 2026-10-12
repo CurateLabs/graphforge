@@ -1,7 +1,5 @@
 use crate::algorithm_dispatch::{AlgorithmControl, AlgorithmError};
 
-const CHECKPOINT_INTERVAL: usize = 4_096;
-
 /// One stored edge in the selected public-identity projection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct EulerEdge {
@@ -571,15 +569,13 @@ fn increment_usize(value: &mut usize, message: &'static str) -> Result<(), Algor
     Ok(())
 }
 
+/// Counts work and polls cancellation. Work is bounded by the node and edge limits,
+/// so it never consumes the `iterations` limit, which counts rounds (#1974).
 fn checkpoint(control: &AlgorithmControl, work: &mut usize) -> Result<(), AlgorithmError> {
     *work = work
         .checked_add(1)
         .ok_or_else(|| execution("Euler cooperative work count exceeds platform range"))?;
-    if work.is_multiple_of(CHECKPOINT_INTERVAL) {
-        control.checkpoint()?;
-    } else {
-        control.check_cancelled()?;
-    }
+    control.check_cancelled()?;
     Ok(())
 }
 

@@ -420,10 +420,13 @@ fn validate(vectors: &[&[f64]]) -> Result<Vec<f64>, AlgorithmError> {
         .collect()
 }
 
+/// Counts work and polls cancellation every 16,384 units. Work is bounded by this kernel's
+/// node or vector cap, so it never consumes the `iterations` limit, which counts rounds
+/// (#1974).
 fn checkpoint(control: &AlgorithmControl, work: &mut usize) -> Result<(), AlgorithmError> {
     *work = work.saturating_add(1);
     if (*work).is_multiple_of(CHECKPOINT_INTERVAL) {
-        control.checkpoint()?;
+        control.check_cancelled()?;
     }
     Ok(())
 }
