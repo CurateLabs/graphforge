@@ -528,6 +528,7 @@ pub use row_exec::{CorrelatedSeedExec, OptionalMatchExec, UnwindExec};
 mod join_memory;
 mod session;
 mod sort_runs;
+mod traversal_destination;
 pub use session::{
     AdjacencyProviderExt, ExecutionSession, GraphForgeQueryPlanner, SessionResourceConfig,
 };

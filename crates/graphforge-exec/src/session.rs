@@ -742,12 +742,13 @@ impl ExecutionSession {
             // Property scans wait only on completed filters whose producer is
             // still authoritative in this final physical plan.
             .with_physical_optimizer_rule(Arc::new(graphforge_storage::PropertyFilterApprovalRule))
-            // Selected expansion endpoints may carry a UUID that the final
-            // LEFT join projection hides. The storage rule only receives this
-            // opt-in authority after exec proves the exact output lineage.
+            // A key-only property scan joined to a traversal's destination
+            // reads that traversal's frontier. The storage rule only receives
+            // this opt-in authority after exec proves the exact output
+            // lineage, so a whole-graph `count(*)` still reads its whole route.
             .with_physical_optimizer_rule(Arc::new(
                 graphforge_storage::SelectedEndpointPropertyFilterApprovalRule::new(
-                    crate::expand_exec::is_selected_endpoint_uuid,
+                    crate::traversal_destination::is_frontier_endpoint_uuid,
                 ),
             ))
             .build();
