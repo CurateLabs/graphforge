@@ -91,9 +91,18 @@ inserted filters through those joins.
 An unrecognized, volatile, potentially failing, or mixed-OR expression blocks
 movement of the entire filter. Fixed-hop relationship-disjoint checks are
 recognized by implementation type and exact UInt64 operands and remain residual.
-Destination/edge references cannot cross their producing expansion. Optional,
-variable-length and path operators have no new pushdown permission. This rule
-changes neither persisted representations nor authentication and recovery paths.
+Destination/edge references cannot cross their producing expansion. Optional
+and path operators have no new pushdown permission. This rule changes neither
+persisted representations nor authentication and recovery paths.
+
+`VarLenExpandInputPredicates` applies the same movement across a variable-length
+`VarLenExpandNode`. The expansion runs once per input row and its output extends
+that row, so a total predicate over the input's own columns selects the same seed
+rows before the expansion as after it. A conjunct over the destination or the
+path stays above. Moving the seed predicate lets a stored-property equality on
+the seed (`MATCH (m {id: $x})-[:R*0..]->(p)`, with or without a label
+disjunction in `WHERE`) reach the node scan that supplies the seed, instead of
+the expansion starting from every node of the graph.
 
 The public eight-route fixture asserts 16 first-hop and 256 second-hop candidates
 for its selective equality and range queries, with an independent exact UUID
