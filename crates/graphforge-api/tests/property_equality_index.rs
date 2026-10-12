@@ -424,7 +424,10 @@ fn a_project_without_the_index_scans_until_rebuilt_and_after_a_write() {
     assert!(index_files(&project).is_empty());
 
     let built = forge.rebuild_property_indexes(None).unwrap();
-    assert!(built.indexes >= 1 && built.files >= 2, "{built:?}");
+    assert!(
+        built.equality.indexes >= 1 && built.equality.files >= 2,
+        "{built:?}"
+    );
     assert!(plan(&forge, query).contains(INDEX_IN_PLAN));
     assert_eq!(ids(&run(&forge, query, &[])), [17]);
     drop(forge);
@@ -497,7 +500,7 @@ fn the_construction_index_is_the_one_a_rebuild_reads_back() {
     assert!(!at_construction.is_empty());
     let forge = open(&built.project, 1);
     let rebuilt = forge.rebuild_property_indexes(None).unwrap();
-    assert_eq!(rebuilt.files as usize, at_construction.len());
+    assert_eq!(rebuilt.equality.files as usize, at_construction.len());
     drop(forge);
     assert_eq!(digests(&built.project), at_construction);
 }

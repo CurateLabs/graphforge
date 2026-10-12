@@ -91,6 +91,16 @@ pub(crate) fn classify(relative_path: &str) -> PayloadClass {
         && Path::new(relative_path)
             .extension()
             .is_some_and(|extension| extension == "eqs");
+    // The edge property index's manifest authenticates the shard files it
+    // names, and each is checked by the lookup that reads it.
+    let edge_property_index_manifest = relative_path.starts_with("indexes/edge-properties/")
+        && Path::new(relative_path)
+            .extension()
+            .is_some_and(|extension| extension == "epx");
+    let edge_property_index_shard = relative_path.starts_with("indexes/edge-properties/")
+        && Path::new(relative_path)
+            .extension()
+            .is_some_and(|extension| extension == "epu" || extension == "epc");
     let first_touch = relative_path == "topology/nodes.parquet"
         || relative_path.starts_with("topology/nodes/")
         || relative_path.starts_with("topology/edges/")
@@ -98,9 +108,11 @@ pub(crate) fn classify(relative_path: &str) -> PayloadClass {
         || relative_path.starts_with("edge_properties/")
         || relative_path.starts_with("indexes/search/")
         || property_index_manifest
+        || edge_property_index_manifest
         || is_hard_linked_identity_artifact(relative_path)
         || adjacency_manifest;
     let self_authenticating = property_index_shard
+        || edge_property_index_shard
         || relative_path.starts_with("topology/uuid-membership/")
         || relative_path.starts_with("deltas/")
         || (relative_path.starts_with("indexes/adjacency/")
@@ -931,5 +943,23 @@ mod tests {
         // A directory that is there is still walked: the registered link refuses.
         fixture.flip_first_byte();
         assert!(admit_tree(&fixture.directory.path().join("workspace")).is_err());
+    }
+
+    /// The edge property index's manifest is checked on first touch; its shard
+    /// files are read only by the lookup that checks them, so hydration must
+    /// neither read nor register them (an unclassified file would be read in
+    /// full when it is linked).
+    #[test]
+    fn edge_property_index_files_are_classified_by_who_authenticates_them() {
+        assert_eq!(
+            classify("indexes/edge-properties/0123.epx"),
+            PayloadClass::FirstTouch
+        );
+        for shard in [
+            "indexes/edge-properties/r-abc.shards/00000000.epu",
+            "indexes/edge-properties/r-abc.shards/00000000.c0.epc",
+        ] {
+            assert_eq!(classify(shard), PayloadClass::SelfAuthenticating, "{shard}");
+        }
     }
 }

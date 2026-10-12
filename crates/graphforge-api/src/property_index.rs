@@ -1,25 +1,108 @@
-//! Explicit rebuild of the persisted property-equality index (#1983).
+//! Explicit rebuild of the persisted property indexes (#1983, #1984).
 //!
-//! A bulk construction publishes the index inside its own generation. A project
-//! written some other way (published before the index existed, or changed by a
-//! mutation since) answers `{id: $x}` through the scan until this runs: a read
-//! never builds or repairs an index.
+//! A bulk construction publishes the property-equality index and the edge
+//! property index inside its own generation. A project written some other way
+//! (published before the indexes existed, or changed by a mutation since)
+//! answers `{id: $x}` through the scan and edge properties through the property
+//! overlay until this runs: a read never builds or repairs an index.
+
+use std::path::{Path, PathBuf};
 
 use super::{CancellationToken, GfError, GraphForge};
 
+pub use graphforge_storage::edge_property_index::EdgePropertyIndexBuild;
 pub use graphforge_storage::property_equality_index::PropertyEqualityIndexBuild;
 
+/// What one rebuild of the persisted property indexes wrote.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PropertyIndexBuild {
+    /// The node property-equality index.
+    pub equality: PropertyEqualityIndexBuild,
+    /// The edge property index.
+    pub edge_properties: EdgePropertyIndexBuild,
+}
+
+/// One index directory being replaced: the prior tree is kept beside the
+/// project until the publication that makes the replacement authoritative.
+struct DirectorySwap {
+    live: PathBuf,
+    backup: PathBuf,
+    had_prior: bool,
+    installed: bool,
+}
+
+impl DirectorySwap {
+    /// Move the prior tree, if any, out of the way.
+    fn begin(project: &Path, live: PathBuf) -> Result<Self, GfError> {
+        let backup = project.with_file_name(format!(
+            ".graphforge-property-index-backup.{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let had_prior = live.exists();
+        if had_prior {
+            std::fs::rename(&live, &backup).map_err(|error| {
+                GfError::Storage(format!("cannot preserve prior property index: {error}"))
+            })?;
+        }
+        Ok(Self {
+            live,
+            backup,
+            had_prior,
+            installed: false,
+        })
+    }
+
+    /// Move the staged tree into place.
+    fn install(&mut self, staged: &Path) -> Result<(), GfError> {
+        if let Some(parent) = self.live.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                GfError::Storage(format!(
+                    "cannot prepare property index destination: {error}"
+                ))
+            })?;
+        }
+        std::fs::rename(staged, &self.live)
+            .map_err(|error| GfError::Storage(format!("cannot install property index: {error}")))?;
+        self.installed = true;
+        Ok(())
+    }
+
+    /// Put the prior tree back.
+    fn restore(&self) -> Result<(), GfError> {
+        if self.installed {
+            std::fs::remove_dir_all(&self.live).map_err(|error| {
+                GfError::Storage(format!("cannot remove failed property index: {error}"))
+            })?;
+        }
+        if self.had_prior {
+            std::fs::rename(&self.backup, &self.live).map_err(|error| {
+                GfError::Storage(format!("cannot restore prior property index: {error}"))
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Publication is authoritative; a failed cleanup must not turn a committed
+    /// rebuild into a false failure.
+    fn commit(&self) {
+        if self.had_prior {
+            let _ = std::fs::remove_dir_all(&self.backup);
+        }
+    }
+}
+
 impl GraphForge {
-    /// Rebuild the persisted equality index of every node property route from
-    /// the current generation, and publish it as a new generation.
+    /// Rebuild the persisted property indexes from the current generation, and
+    /// publish them as a new generation: the equality index of every node
+    /// property route and the edge property index of every edge property route.
     ///
     /// # Errors
     /// Returns the route read, cancellation, write or publication failure. A
-    /// failed publication restores the prior index.
+    /// failed publication restores the prior indexes.
     pub fn rebuild_property_indexes(
         &self,
         cancellation: Option<CancellationToken>,
-    ) -> Result<PropertyEqualityIndexBuild, GfError> {
+    ) -> Result<PropertyIndexBuild, GfError> {
         let _phase = graphforge_storage::lifecycle_io::PhaseScope::enter(
             graphforge_storage::StorageIoPhase::EncodeWritePostwriteAuthentication,
         );
@@ -34,64 +117,67 @@ impl GraphForge {
             .prefix(".graphforge-property-index-stage.")
             .tempdir_in(workspace_parent)
             .map_err(|error| GfError::Storage(format!("cannot stage property index: {error}")))?;
-        let report = graphforge_storage::property_equality_index::write_property_equality_indexes(
+        let inventory = self.property_inventory_for_session();
+        let equality =
+            graphforge_storage::property_equality_index::write_property_equality_indexes(
+                staged.path(),
+                &inventory,
+                &mut || token.checkpoint(),
+            )?;
+        let edge_properties = graphforge_storage::edge_property_index::write_edge_property_indexes(
             staged.path(),
-            &self.property_inventory_for_session(),
+            &inventory,
             &mut || token.checkpoint(),
         )?;
         token.checkpoint()?;
 
-        let live = graphforge_storage::property_equality_index::index_dir(&self.dir());
-        let staged_index = graphforge_storage::property_equality_index::index_dir(staged.path());
-        let backup = self.dir().with_file_name(format!(
-            ".graphforge-property-index-backup.{}",
-            uuid::Uuid::new_v4().simple()
-        ));
-        let had_prior = live.exists();
-        if had_prior {
-            std::fs::rename(&live, &backup).map_err(|error| {
-                GfError::Storage(format!("cannot preserve prior property index: {error}"))
-            })?;
-        }
-        let restore = |installed: bool| -> Result<(), GfError> {
-            if installed {
-                std::fs::remove_dir_all(&live).map_err(|error| {
-                    GfError::Storage(format!("cannot remove failed property index: {error}"))
-                })?;
+        let project = self.dir();
+        let plan = [
+            (
+                graphforge_storage::property_equality_index::index_dir(&project),
+                graphforge_storage::property_equality_index::index_dir(staged.path()),
+                equality.files > 0,
+            ),
+            (
+                graphforge_storage::edge_property_index::index_dir(&project),
+                graphforge_storage::edge_property_index::index_dir(staged.path()),
+                edge_properties.files > 0,
+            ),
+        ];
+        let mut swaps: Vec<DirectorySwap> = Vec::new();
+        let mut outcome = Ok(());
+        for (live, staged_dir, install) in plan {
+            match DirectorySwap::begin(&project, live) {
+                Ok(swap) => swaps.push(swap),
+                Err(error) => {
+                    outcome = Err(error);
+                    break;
+                }
             }
-            if had_prior {
-                std::fs::rename(&backup, &live).map_err(|error| {
-                    GfError::Storage(format!("cannot restore prior property index: {error}"))
-                })?;
-            }
-            Ok(())
-        };
-        let installed = report.files > 0;
-        if installed {
-            if let Some(parent) = live.parent() {
-                std::fs::create_dir_all(parent).map_err(|error| {
-                    GfError::Storage(format!(
-                        "cannot prepare property index destination: {error}"
-                    ))
-                })?;
-            }
-            if let Err(error) = std::fs::rename(&staged_index, &live) {
-                restore(false)?;
-                return Err(GfError::Storage(format!(
-                    "cannot install property index: {error}"
-                )));
+            if install {
+                let swap = swaps.last_mut().expect("swap just pushed");
+                if let Err(error) = swap.install(&staged_dir) {
+                    outcome = Err(error);
+                    break;
+                }
             }
         }
-        if let Err(error) = self.publish_workspace_update() {
-            restore(installed)?;
+        if outcome.is_ok() {
+            outcome = self.publish_workspace_update();
+        }
+        if let Err(error) = outcome {
+            for swap in swaps.iter().rev() {
+                swap.restore()?;
+            }
             return Err(error);
         }
-        if had_prior {
-            // Publication is authoritative; a failed cleanup must not turn a
-            // committed rebuild into a false failure.
-            let _ = std::fs::remove_dir_all(&backup);
+        for swap in &swaps {
+            swap.commit();
         }
         drop(visibility);
-        Ok(report)
+        Ok(PropertyIndexBuild {
+            equality,
+            edge_properties,
+        })
     }
 }

@@ -1283,11 +1283,24 @@ pub(super) fn build_edge_list_column(
 
 fn read_target_edge_properties(
     inventory: &graphforge_storage::AuthenticatedPropertyInventory,
+    dir: &Path,
     stem: &str,
     targets: &std::collections::BTreeSet<[u8; 16]>,
     property_names: &[String],
     owners: &mut std::collections::BTreeSet<[u8; 16]>,
 ) -> Result<Vec<arrow::record_batch::RecordBatch>, GfError> {
+    // A route with a current persisted index is read through its small
+    // authenticated shards; any other route, as before, from its fragments.
+    if let Some(batches) = crate::edge_property_index::indexed_edge_property_batches(
+        inventory,
+        dir,
+        stem,
+        targets,
+        property_names,
+        owners,
+    )? {
+        return Ok(batches);
+    }
     let selected = graphforge_storage::read_authenticated_property_target_data_for_inventory(
         inventory,
         graphforge_storage::PropertyRouteKind::Edge,
@@ -1433,9 +1446,14 @@ fn load_edge_prop_source(
         .collect::<Vec<_>>();
     for stem in &stems {
         let batches = match inventory {
-            Some(inventory) => {
-                read_target_edge_properties(inventory, stem, targets, &property_names, &mut owners)
-            }
+            Some(inventory) => read_target_edge_properties(
+                inventory,
+                dir,
+                stem,
+                targets,
+                &property_names,
+                &mut owners,
+            ),
             None => graphforge_storage::read_edge_properties_projected(dir, stem, &property_names)
                 .map_err(|e| exec_err(e.to_string())),
         }?;

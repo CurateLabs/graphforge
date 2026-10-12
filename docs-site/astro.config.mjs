@@ -540,6 +540,10 @@ export default defineConfig({
                   label: '0058 — Initial builds run on a bulk builder derived from the published generation',
                   slug: 'adr/0058-initial-builds-run-on-a-bulk-builder',
                 },
+                {
+                  label: '0059 — Edge properties are read through a derived, authenticated shard index',
+                  slug: 'adr/0059-edge-properties-are-read-through-a-derived-shard-index',
+                },
                 // END generated ADR records
               ],
             },

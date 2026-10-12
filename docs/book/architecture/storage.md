@@ -1030,6 +1030,48 @@ one answers it. Bytes are a pure function of the route's content.
   node, and a node with several labels behave as they do without the anchor. A stale or
   absent index leaves the scan whole. Its reads grow with the matches, not the graph.
 
+### `indexes/edge-properties/` — edge property index
+
+A traversal that returns or filters an edge property reads the properties of the
+edges it crossed from a persisted index instead of opening and checksumming every
+fragment of the edge property route (#1984, [ADR 0059](../../adr/0059-edge-properties-are-read-through-a-derived-shard-index.md)).
+One manifest and one shard directory exist per edge property route:
+
+```
+indexes/edge-properties/
+├── <stem>.epx                      # manifest: XXH64 line, then JSON
+└── <shard dir>/
+    ├── 00000000.epu                # Zstd Arrow IPC: the shard's sorted edge_uuid column
+    └── 00000000.c0.epc             # Zstd Arrow IPC: property column 0 of the shard
+```
+
+A shard holds at most 4,096 rows and at most 1 MiB per column. Its columns are
+separate files so a statement reads only the properties it demands. The values
+are the route's own Arrow values, exactly as the fragments store them. The
+manifest records the route, a digest of the route's property objects (path,
+length, XXH64), the route's property columns, and for every shard its first and
+last edge UUID, row count, and the length and XXH64 of each file. A lookup reads
+the UUID file of the shards whose range holds a requested edge and the demanded
+column files of the shards that hold a match, each checked against the manifest,
+so its reads are bounded by the frontier and not by the route. `ExpandExec` and
+`VarLenExpandExec` both resolve their edge properties through it.
+
+- **Built at publish.** An initial bulk construction cuts each fragment into shards
+  as it encodes it and writes every shard once, inside its own generation, with
+  the manifest last (never reading the published fragments back).
+  `GraphForge::rebuild_property_indexes` rebuilds it, with the node equality
+  index, from the route's newest-wins state in UUID order and publishes a new generation.
+- **Current or not used.** The index answers only while its source digest equals the
+  route's. A project published before the index, one built by a staged append, and a
+  route changed by a mutation since are answered by the property overlay until the next
+  rebuild. A read never builds or repairs an index.
+- **Authenticated.** The manifest is checked on first touch; every shard file is checked
+  by the lookup that reads it. A failure is `GF_VALIDATION`; the overlay is not
+  substituted for a corrupted index.
+- **Not indexed.** A route with a tombstone, unsorted fragment rows, a column stored
+  under two types, or a single value over 1 MiB. Bytes are a pure function of the
+  route's content: no clock, UUID or process identity, and no Arrow field metadata.
+
 ### Bounded CSR compression
 
 Every production shard publisher uses Arrow IPC Zstd (the pinned Arrow default

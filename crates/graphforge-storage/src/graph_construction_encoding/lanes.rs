@@ -149,8 +149,8 @@ impl ParquetLanes {
         }
     }
 
-    /// Collect the node property rows the property-equality index covers from
-    /// every fragment pushed from now on.
+    /// Collect the rows the persisted property indexes cover (node equality
+    /// rows, edge property shards) from every fragment pushed from now on.
     pub(super) fn with_index_tap(mut self) -> Self {
         self.index_tap = Some(super::property_index::PropertyIndexTap::default());
         self
@@ -172,7 +172,7 @@ impl ParquetLanes {
         artifacts: &mut Vec<ConstructionEncodedArtifact>,
     ) -> Result<(), GfError> {
         if let Some(tap) = &mut self.index_tap {
-            tap.observe(path, batch)?;
+            tap.observe(path, batch, root, artifacts, evidence)?;
         }
         let Some(pool) = &self.pool else {
             artifacts.extend(write_parquet(
