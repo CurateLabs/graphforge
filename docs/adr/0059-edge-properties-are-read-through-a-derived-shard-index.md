@@ -74,13 +74,15 @@ stores is stored; nothing is re-encoded.
 
 Every durable open hard-links every artifact the generation inventories into a
 private workspace (#1992), at about 200 microseconds and a hundred `statx` calls
-per artifact. A file per UUID list and per column was 8,339 files for the
-SF1 FinBench `transaction` route and 4,901 for the IC `Message` route, and added
-1.5 to 3 s to every open of an indexed project, more than the lookup saved on a
-statement that reads few properties. A pack holds about a hundred blobs, so the
-route is a few dozen files. The seal of a blob, not the name of a file,
-authenticates what a lookup reads, so the guarantee of the per-file layout is
-kept: a lookup reads the byte range of one blob and checks its length and XXH64.
+per artifact. A file per UUID list and per column was 8,339 files for the SF1
+FinBench project's edge route (3.1 million rows) and 4,901 for the SF1 IC
+project's (4.0 million rows), and added 1.5 to 3 s to every open of an indexed
+project, more than the lookup saved on a statement that reads few properties. A
+pack holds about two hundred blobs (SF1 FinBench: 8,338 blobs in 37 packs; SF1
+IC: 4,900 in 23), so the route is a few dozen files. The seal of a blob, not the
+name of a file, authenticates what a lookup reads, so the guarantee of the
+per-file layout is kept: a lookup reads the byte range of one blob and checks
+its length and XXH64.
 
 ### Authority, authentication, currency
 
@@ -163,6 +165,8 @@ relation, now read from the index.
   column type, a single value over 1 MiB) is not indexed; packs written before
   the decision stay in the generation as unreferenced files.
 - The index adds about the size of the indexed columns plus 16 bytes per row.
-- The manifest is read whole by every lookup that touches its route: a seal of
-  about 70 bytes per blob, so a few hundred bytes per shard.
+- The manifest is read whole by every lookup that touches its route: about 100
+  bytes per blob (a seal and its share of the shard's bounds), so about 1 KB per
+  shard: 0.8 MB for the 3.1 million rows of the SF1 FinBench edge route and 0.5 MB
+  for the 4.0 million rows of the SF1 IC route.
 - A lookup reads the byte range of a blob out of its pack, not the pack.
