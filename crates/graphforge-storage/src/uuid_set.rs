@@ -54,6 +54,54 @@ impl UuidMembership for BTreeSet<[u8; 16]> {
     }
 }
 
+/// A strictly ascending run of UUIDs, borrowed from the caller. It is exact and
+/// allocation-free: membership is a binary search and a range probe is a
+/// partition point, so a caller that already owns its sorted targets charges
+/// them once, as the slice.
+pub(crate) struct SortedUuids<'a>(pub(crate) &'a [[u8; 16]]);
+
+impl SortedUuids<'_> {
+    /// Whether the slice is strictly ascending, which membership relies on.
+    pub(crate) fn is_strictly_ascending(&self) -> bool {
+        self.0.windows(2).all(|pair| pair[0] < pair[1])
+    }
+}
+
+impl UuidMembership for SortedUuids<'_> {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn contains_uuid(&self, uuid: &[u8; 16]) -> bool {
+        self.0.binary_search(uuid).is_ok()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn min_uuid(&self) -> Option<[u8; 16]> {
+        self.0.first().copied()
+    }
+
+    fn max_uuid(&self) -> Option<[u8; 16]> {
+        self.0.last().copied()
+    }
+
+    fn any_match_in_range(
+        &self,
+        min: &[u8; 16],
+        max: &[u8; 16],
+        matches: &dyn Fn(&[u8; 16]) -> bool,
+    ) -> bool {
+        let start = self.0.partition_point(|uuid| uuid < min);
+        self.0[start..]
+            .iter()
+            .take_while(|uuid| *uuid <= max)
+            .any(matches)
+    }
+}
+
 /// A read-time intersection of nomination sets and an optional equality
 /// candidate set. It avoids materializing a second UUID-sized collection.
 pub(crate) struct UuidFilter<'a> {

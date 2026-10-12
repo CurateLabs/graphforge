@@ -249,6 +249,9 @@ fn hydrate_path_node_children(
     )>(flat.len())?)?;
     h.reserve(hash_table_bytes::<([u8; 16], Vec<PropRowLoc>)>(flat.len())?)?;
     h.reserve(hash_table_bytes::<[u8; 16]>(flat.len())?)?;
+    // The stable-first unique run, and the sorted copy the property reader
+    // resolves its targets against.
+    h.reserve(allocation_bytes::<[u8; 16]>(flat.len())?)?;
     h.reserve(allocation_bytes::<[u8; 16]>(flat.len())?)?;
     let unique = unique_path_uuids(flat);
     h.resource.record("requested", unique.len() as u64);
@@ -452,9 +455,13 @@ type GatheredPathProps = (
     std::collections::HashMap<[u8; 16], Vec<PropRowLoc>>,
 );
 
-/// Gather property rows for the requested UUID set only — batchwise, no
-/// complete-stem `concat_batches` (#706). Each stem is scanned independently
-/// so a UUID found in an earlier stem is still sought in later stems (#807).
+/// Gather property rows for the requested UUID set only, through the targeted
+/// authenticated reader: fragments and row groups are pruned by UUID
+/// statistics, only the descriptor's property columns are decoded, and the
+/// batches that arrive hold the newest live row of requested UUIDs alone, so
+/// the cost follows the path nodes and not the route (#706, #1984). Each stem
+/// is read independently so a UUID found in an earlier stem is still sought in
+/// later stems (#807).
 fn gather_path_node_props(
     h: &Invocation<'_>,
     unique: &[[u8; 16]],
@@ -476,12 +483,24 @@ fn gather_path_node_props(
         return Ok((kept_by_stem, uuid_to_loc));
     }
 
+    // `unique` holds no repeat, so its sorted copy is strictly ascending, as
+    // the targeted reader requires. Reserved with the other scratch before any
+    // read.
+    let mut targets = unique.to_vec();
+    targets.sort_unstable();
+    let selected: std::collections::BTreeSet<String> = h
+        .fields
+        .iter()
+        .skip(2)
+        .map(|field| field.name().clone())
+        .collect();
+
     for si in 0..h.prop_stems.len() {
         h.resource.check()?;
         h.resource.record("stems", 1);
         let mut remaining: HashSet<[u8; 16]> = unique.iter().copied().collect();
         let mut kept: Vec<datafusion::arrow::array::RecordBatch> = Vec::new();
-        h.tables[si].visit_authenticated_batches(batch_size, |b| {
+        h.tables[si].visit_authenticated_targets(&targets, &selected, batch_size, |b| {
             h.resource.check()?;
             h.resource.record("property_batches", 1);
             h.resource.record("property_rows", b.num_rows() as u64);
@@ -515,7 +534,13 @@ fn gather_path_node_props(
             )?)?;
             let upper = b.get_array_memory_size();
             h.reserve(upper)?;
-            let filtered = take_record_batch_rows(b, &indices)?;
+            // The targeted reader yields requested rows only, so the batch is
+            // normally kept whole rather than copied.
+            let filtered = if indices.len() == b.num_rows() {
+                b.clone()
+            } else {
+                take_record_batch_rows(b, &indices)?
+            };
             let retained = filtered.get_array_memory_size();
             if retained < upper {
                 h.reservation

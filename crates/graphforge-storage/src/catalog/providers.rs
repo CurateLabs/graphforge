@@ -433,6 +433,54 @@ impl PropertyTable {
         )
     }
 
+    /// Visit the newest live rows of exactly the `targets` nodes, decoding only
+    /// the `selected` property columns, using this provider's retained
+    /// admission.
+    ///
+    /// The read prunes fragments and row groups by their UUID statistics and
+    /// resolves each target against every fragment that can hold it, so a
+    /// tombstoned target yields no row and a replaced one yields its newest
+    /// snapshot, exactly as a read of the whole route would for the same UUID.
+    /// Its cost follows the targets, not the route. It writes nothing.
+    ///
+    /// `targets` must be strictly ascending.
+    ///
+    /// # Errors
+    /// Rejects unadmitted providers and unordered targets, and propagates
+    /// storage or visitor errors.
+    pub fn visit_authenticated_targets<F>(
+        &self,
+        targets: &[[u8; 16]],
+        selected: &std::collections::BTreeSet<String>,
+        batch_size: usize,
+        visit: F,
+    ) -> Result<(), DataFusionError>
+    where
+        F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
+    {
+        let inventory = self.inventory.as_deref().ok_or_else(|| {
+            DataFusionError::Execution("property provider has no retained inventory".into())
+        })?;
+        let targets = crate::uuid_set::SortedUuids(targets);
+        if !targets.is_strictly_ascending() {
+            return Err(DataFusionError::Execution(
+                "property targets are not strictly ascending".into(),
+            ));
+        }
+        super::visit_property_overlay_batched_selected(
+            &self.project,
+            Some(inventory),
+            &self.route,
+            false,
+            batch_size,
+            Some(selected),
+            None,
+            &[&targets],
+            visit,
+        )
+        .map(|_| ())
+    }
+
     /// The property column schema (including the `node_uuid` join key).
     #[must_use]
     pub fn schema_ref(&self) -> SchemaRef {
