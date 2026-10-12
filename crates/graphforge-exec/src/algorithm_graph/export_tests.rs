@@ -94,6 +94,24 @@ fn persistent(dir: &Path) -> PersistentAdjacencyProvider {
         .with_inventory(inventory)
 }
 
+#[test]
+fn undirected_export_counts_each_relationship_once_including_self_loops() {
+    let graph = generate(5, 0, false);
+    index_with_shards(graph.dir.path(), 16);
+    let provider = persistent(graph.dir.path());
+    let exported = export_adjacency(
+        &provider,
+        graph.dir.path(),
+        OntologyMode::Strict,
+        selection(Direction::Undirected, None),
+    )
+    .unwrap();
+
+    assert_eq!(graph.edges, 3);
+    assert_eq!(exported.edge_entry_count(), 6);
+    assert_eq!(exported.logical_edge_count(), 3);
+}
+
 fn selection(direction: Direction, weight: Option<&'static str>) -> AdjacencySelection<'static> {
     AdjacencySelection {
         label: EntityTypeSelection::All,

@@ -27,7 +27,7 @@ pub(crate) use graphforge_core::AlgorithmError;
 pub struct AlgorithmLimits {
     /// Maximum selected nodes.
     pub nodes: u64,
-    /// Maximum adjacency entries after direction and filtering.
+    /// Maximum selected logical relationships after filtering.
     pub edges: u64,
     /// Maximum public output rows.
     pub output_rows: u64,
@@ -442,7 +442,7 @@ impl AlgorithmRegistry {
                 limit: control.limits.nodes,
             });
         }
-        let edge_count = graph.edge_entry_count();
+        let edge_count = graph.logical_edge_count();
         if edge_count > control.limits.edges {
             return Err(AlgorithmError::EdgeLimit {
                 observed: edge_count,
@@ -706,6 +706,38 @@ mod tests {
             AlgorithmError::OutputLimit {
                 observed: 2,
                 limit: 1
+            }
+        );
+    }
+
+    #[test]
+    fn edge_limit_counts_undirected_relationships_not_entries() {
+        let graph = AdjacencyGraph::with_test_undirected_multigraph(3, &[(0, 0, 1), (1, 1, 2)]);
+        assert_eq!(graph.edge_entry_count(), 4);
+        assert_eq!(graph.logical_edge_count(), 2);
+
+        let mut registry = AlgorithmRegistry::default();
+        registry
+            .register(handler(degree(), Behavior::Rows(0)))
+            .unwrap();
+        let limits = AlgorithmLimits {
+            edges: 2,
+            ..AlgorithmLimits::default()
+        };
+        assert!(registry.execute(degree(), &graph, &control(limits)).is_ok());
+
+        let error = registry
+            .execute(
+                degree(),
+                &graph,
+                &control(AlgorithmLimits { edges: 1, ..limits }),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error,
+            AlgorithmError::EdgeLimit {
+                observed: 2,
+                limit: 1,
             }
         );
     }

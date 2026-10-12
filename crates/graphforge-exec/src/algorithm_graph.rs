@@ -122,6 +122,7 @@ struct LogicalProjectionEdge {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AdjacencyGraph {
     topology: TopologyGraph,
+    logical_edge_count: u64,
     /// `node_ids()` of a dense graph, materialized on first use.
     dense_node_ids: OnceLock<Vec<u64>>,
     uuid_lookup: UuidLookup,
@@ -316,11 +317,13 @@ impl AdjacencyGraph {
     /// Wrap an exported topology with the authority it was read under.
     fn from_topology(
         topology: TopologyGraph,
+        logical_edge_count: u64,
         inventory: Option<std::sync::Arc<graphforge_storage::AuthenticatedPropertyInventory>>,
         evidence: AlgorithmExportEvidence,
     ) -> Self {
         Self {
             topology,
+            logical_edge_count,
             dense_node_ids: OnceLock::new(),
             uuid_lookup: UuidLookup::default(),
             node_vectors: HashMap::new(),
@@ -338,6 +341,7 @@ impl AdjacencyGraph {
     /// ordinal so malformed fixtures stay malformed.
     fn from_entries(
         directed: bool,
+        logical_edge_count: u64,
         node_ids: Vec<u64>,
         uuids: Vec<[u8; 16]>,
         mut entries: Vec<(u64, AlgorithmEdge)>,
@@ -383,6 +387,7 @@ impl AdjacencyGraph {
                 nodes,
                 identity: Some(identity),
             },
+            logical_edge_count,
             None,
             AlgorithmExportEvidence::default(),
         )
@@ -525,7 +530,8 @@ impl AdjacencyGraph {
             .into_iter()
             .flat_map(|(node, edges)| edges.into_iter().map(move |edge| (node, edge)))
             .collect();
-        Self::from_entries(directed, node_ids, uuids, entries)
+        let logical_edge_count = u64::try_from(entries.len()).unwrap_or(u64::MAX);
+        Self::from_entries(directed, logical_edge_count, node_ids, uuids, entries)
     }
 
     /// Fingerprint public UUID topology without execution surrogates.
@@ -761,6 +767,7 @@ impl AdjacencyGraph {
         }
         Ok(Self::from_entries(
             projection.directed,
+            u64::try_from(projection.edges.len()).unwrap_or(u64::MAX),
             node_ids,
             projection.nodes.clone(),
             entries,
@@ -883,6 +890,11 @@ impl AdjacencyGraph {
         u64::try_from(self.topology.neighbors.len()).unwrap_or(u64::MAX)
     }
 
+    /// Number of selected logical relationships, independent of adjacency direction.
+    pub(crate) fn logical_edge_count(&self) -> u64 {
+        self.logical_edge_count
+    }
+
     #[cfg(test)]
     pub(crate) fn with_test_counts(nodes: u64, edges: u64) -> Self {
         let node_ids: Vec<u64> = (0..nodes).collect();
@@ -907,7 +919,7 @@ impl AdjacencyGraph {
                 })
                 .collect()
         };
-        Self::from_entries(false, node_ids, uuids, entries)
+        Self::from_entries(false, edges, node_ids, uuids, entries)
     }
 
     #[cfg(test)]
@@ -933,7 +945,13 @@ impl AdjacencyGraph {
                 )
             })
             .collect();
-        Self::from_entries(false, node_ids, uuids, entries)
+        Self::from_entries(
+            false,
+            u64::try_from(edges.len()).unwrap_or(u64::MAX),
+            node_ids,
+            uuids,
+            entries,
+        )
     }
 
     #[cfg(test)]
@@ -975,7 +993,13 @@ impl AdjacencyGraph {
                 entries.push((target, edge(source)));
             }
         }
-        Self::from_entries(false, node_ids, uuids, entries)
+        Self::from_entries(
+            false,
+            u64::try_from(edges.len()).unwrap_or(u64::MAX),
+            node_ids,
+            uuids,
+            entries,
+        )
     }
 
     #[cfg(test)]
@@ -1021,6 +1045,7 @@ pub(crate) fn export_node_selection_from_files(
             nodes: selected.nodes,
             identity: None,
         },
+        0,
         None,
         AlgorithmExportEvidence::default(),
     ))
@@ -1103,6 +1128,14 @@ pub(crate) fn export_topology(
         })?;
     }
     let (offsets, neighbors, edge_ids) = builder.finish(node_count);
+    let retained_entry_count = u64::try_from(neighbors.len()).unwrap_or(u64::MAX);
+    let logical_edge_count = if matches!(selection.direction, Direction::Undirected) {
+        // Every selected relationship contributes one out and one in entry,
+        // including self-loops. Undirected export merges both rows.
+        retained_entry_count / 2
+    } else {
+        retained_entry_count
+    };
 
     let mut evidence = AlgorithmExportEvidence {
         edge_scale_hash_entries: adjacency.hash_entries(),
@@ -1139,6 +1172,7 @@ pub(crate) fn export_topology(
             nodes: selected.nodes,
             identity: retained,
         },
+        logical_edge_count,
         inventory,
         evidence,
     ))
@@ -2685,6 +2719,7 @@ mod tests {
         let base = || {
             AdjacencyGraph::from_entries(
                 true,
+                1,
                 vec![0, 1],
                 vec![uuid0, uuid1],
                 vec![(
