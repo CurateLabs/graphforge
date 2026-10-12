@@ -146,6 +146,9 @@ class FakeBenchExec:
         ET.ElementTree(result).write(raw / f"benchmark.results.{gdc_rung.DEFINITION}.xml")
         if self.swap is not None:
             pages = 7 if self.swap == "swapped" else 0
+            fake_cgroup = stage / "fake-cgroup"
+            fake_cgroup.mkdir()
+            (fake_cgroup / "cgroup.procs").write_text("", encoding="ascii")
             (stage / phase_cgroup.EVIDENCE_NAME).write_text(
                 json.dumps(
                     {
@@ -156,6 +159,7 @@ class FakeBenchExec:
                                 "pswpout_pages": pages,
                                 "swap_peak_bytes": pages * 4096,
                                 "swap_max": "0",
+                                "cgroup_path": str(fake_cgroup),
                             }
                         },
                     }
@@ -537,6 +541,17 @@ class LadderControlTests(Scratch):
         gdc_rung._clear_phase_tmp(owned)
         self.assertFalse(owned.exists())
         self.assertEqual(unrelated.read_text(encoding="utf-8"), "preserve")
+
+    def test_tmp_parent_symlink_cannot_redirect_cleanup(self) -> None:
+        outside = self.scratch / "outside"
+        outside.mkdir()
+        data = outside / "preserve"
+        data.write_text("unrelated", encoding="utf-8")
+        tmp = self.work / "tmp"
+        tmp.symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(OSError):
+            gdc_rung._clear_phase_tmp(tmp / "gdc-snb-interactive-sf0-owned")
+        self.assertEqual(data.read_text(encoding="utf-8"), "unrelated")
 
     def test_live_phase_tree_blocks_all_teardown_cleanup(self) -> None:
         ladder = self.ladder(self.executables, FakeBenchExec())

@@ -309,6 +309,7 @@ class Rung:
     built: dict[str, Path] = field(default_factory=dict)
     phase_tmp_dirs: list[Path] = field(default_factory=list)
     phase_cgroups: list[Path] = field(default_factory=list)
+    phase_tree_alive: bool = False
 
     @property
     def prefix(self) -> str:
@@ -386,6 +387,13 @@ def _stage_phase(
         if path.is_dir():
             path.chmod(0o777)
     return stage, task
+
+
+class _RetainableTemporaryDirectory(tempfile.TemporaryDirectory):
+    """Temporary stage directory that can be kept while a phase tree is alive."""
+
+    def preserve(self) -> None:
+        self._finalizer.detach()
 
 
 def _phase_tmp_dir(work_root: Path, *, suite_id: str, rung_id: str, create: bool) -> Path:
@@ -613,7 +621,8 @@ def _hung_detail(raw: Path) -> str:
 
 def run_phase(rung: Rung, name: str, task: dict[str, Any], wall_seconds: int) -> PhaseRun:
     ladder = rung.ladder
-    with tempfile.TemporaryDirectory(prefix=".gf-gdc-authority-", dir=ladder.work_root) as parent:
+    temporary = _RetainableTemporaryDirectory(prefix=".gf-gdc-authority-", dir=ladder.work_root)
+    with temporary as parent:
         stage, task = _stage_phase(
             rung, Path(parent), {"schema": TASK_SCHEMA, **task}, wall_seconds
         )
@@ -630,6 +639,10 @@ def run_phase(rung: Rung, name: str, task: dict[str, Any], wall_seconds: int) ->
                 and isinstance(run.get("cgroup_path"), str)
                 and run["cgroup_path"]
             )
+        if rung.phase_cgroups and not wait_for_phase_trees_empty(rung.phase_cgroups):
+            rung.phase_tree_alive = True
+            temporary.preserve()
+            rung.fail("teardown", "phase_tree_alive", "phase cgroup still contains processes")
         swapped = phase_cgroup.verdict(swap)
         if swap is not None and raw.is_dir():
             # Retain the counters beside the raw output (#1727), even when a known
@@ -1016,9 +1029,10 @@ def _check(rung: Rung, evidence: Mapping[str, Any], results_dir: Path, input_roo
 
 def _teardown(rung: Rung) -> dict[str, Any]:
     ladder = rung.ladder
-    alive = not wait_for_phase_trees_empty(rung.phase_cgroups)
+    alive = rung.phase_tree_alive or not wait_for_phase_trees_empty(rung.phase_cgroups)
     if alive:
-        rung.fail("teardown", "phase_tree_alive", "phase cgroup still contains processes")
+        if not rung.phase_tree_alive:
+            rung.fail("teardown", "phase_tree_alive", "phase cgroup still contains processes")
     else:
         reclaim_workspace(ladder.work_root, rung.workspace_name)
         for path in rung.phase_tmp_dirs:
