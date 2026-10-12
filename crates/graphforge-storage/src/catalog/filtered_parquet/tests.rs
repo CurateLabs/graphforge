@@ -256,10 +256,7 @@ impl crate::io_stats::FilteredReadObserver for PruningCapture {
 /// A canonical dense node file holding ids `1..=rows`, written with
 /// `properties`, so its page size is the caller's.
 fn write_dense_nodes(dir: &std::path::Path, rows: u64, properties: WriterProperties) {
-    let path = dir.join(format!(
-        "topology/nodes/{:020}-{:020}.parquet",
-        1_u64, rows
-    ));
+    let path = dir.join(format!("topology/nodes/{:020}-{:020}.parquet", 1_u64, rows));
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let ids: Vec<u64> = (1..=rows).collect();
     let count = ids.len();
