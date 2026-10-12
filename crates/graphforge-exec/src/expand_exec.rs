@@ -37,6 +37,7 @@ use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::physical_plan::collect;
 use datafusion::physical_plan::execution_plan::Boundedness;
 use datafusion::physical_plan::execution_plan::EmissionType;
+use datafusion::physical_plan::stream::RecordBatchReceiverStream;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use futures::StreamExt;
 use graphforge_core::GfError;
@@ -212,9 +213,9 @@ impl ExecutionPlan for VarLenExpandExec {
                 "VarLenExpandExec only has partition 0, got {partition}"
             )));
         }
-        // The BFS must consume the whole input frontier before emitting, so it
-        // runs in a future that collects the child stream, then yields a single
-        // output batch.
+        // The input frontier is collected first; the traversal then runs as a
+        // task that sends bounded batches through a small channel, so the paths
+        // of every seed never exist at once (#1986).
         let input = self.input.clone();
         let cfg = ExpandConfig {
             rel_type_name: self.rel_type_name.clone(),
@@ -228,15 +229,15 @@ impl ExecutionPlan for VarLenExpandExec {
             provider: self.provider.clone(),
             capture_epoch: self.capture_epoch,
         };
-        let schema = self.schema.clone();
-        let fut = async move {
+        let mut builder = RecordBatchReceiverStream::builder(self.schema.clone(), 2);
+        let tx = builder.tx();
+        builder.spawn(async move {
             let input_batches = collect(input, context).await?;
-            expand_bfs(&cfg, &input_batches).map_err(to_df_err)
-        };
-        Ok(Box::pin(RecordBatchStreamAdapter::new(
-            schema,
-            futures::stream::once(fut),
-        )))
+            expand_bfs(&cfg, &input_batches, &tx)
+                .await
+                .map_err(to_df_err)
+        });
+        Ok(builder.build())
     }
 }
 
@@ -353,11 +354,9 @@ pub(super) struct ExpandConfig {
 struct PathState {
     /// Current node (the path's frontier).
     node: u64,
-    /// Edges already used on this path (relationship-isomorphism dedup). A
-    /// `HashSet` for O(1) membership; `edge_path` keeps the ordered sequence.
-    visited_edges: std::collections::HashSet<u64>,
     /// Edge ids in traversal order — the relationship list bound to the edge
-    /// var (#709). `edge_path.len() == hops` by construction.
+    /// var (#709). `edge_path.len() == hops` by construction; it doubles as the
+    /// relationship-isomorphism set (a path is at most `max_hops` long).
     edge_path: Vec<u64>,
     /// Hops taken so far.
     hops: u16,
@@ -365,16 +364,33 @@ struct PathState {
     input_row: usize,
 }
 
-/// Run the variable-length BFS and build the output batch.
+/// Output-batch bounds for the variable-length traversal (#1986). A batch holds
+/// at most [`EXPAND_BATCH_MAX_ROWS`] paths and [`EXPAND_BATCH_MAX_HOPS`]
+/// relationship entries, and its copied input columns stay near
+/// [`EXPAND_BATCH_INPUT_BYTES`], so no Arrow offset buffer in one batch can reach
+/// 2 GiB however many paths the query admits.
+const EXPAND_BATCH_MAX_ROWS: usize = 65_536;
+const EXPAND_BATCH_MAX_HOPS: usize = 1 << 22;
+const EXPAND_BATCH_INPUT_BYTES: usize = 64 << 20;
+
+/// One emitted path: `(input_row, reached_node_id, edge_ids_in_order)`.
+type Emission = (usize, u64, Vec<u64>);
+
+/// Run the variable-length BFS and send the output as bounded batches.
 ///
 /// Output columns = the input (source) columns, then the destination node's
 /// `TOPOLOGY_NODES_SCHEMA` columns, then a trailing `List<Struct>` edge-list
 /// column (the relationship list bound to the edge var, #709) — for every path
-/// whose hop count lands in `[min_hops, max_hops]`.
-fn expand_bfs(cfg: &ExpandConfig, input_batches: &[RecordBatch]) -> Result<RecordBatch, GfError> {
-    use std::collections::HashMap;
-
-    use arrow::compute::{concat_batches, take};
+/// whose hop count lands in `[min_hops, max_hops]`. Seeds are expanded in input
+/// order and each batch is built and sent before the next seed is expanded, so
+/// memory is bounded by one batch plus one seed's paths. Stops quietly once the
+/// consumer is gone.
+async fn expand_bfs(
+    cfg: &ExpandConfig,
+    input_batches: &[RecordBatch],
+    tx: &tokio::sync::mpsc::Sender<Result<RecordBatch, DataFusionError>>,
+) -> Result<(), GfError> {
+    use arrow::compute::concat_batches;
 
     let exec_err = |m: String| GfError::Execution(m);
 
@@ -396,6 +412,15 @@ fn expand_bfs(cfg: &ExpandConfig, input_batches: &[RecordBatch]) -> Result<Recor
     }
     let src_ids = u64_column(&input, cfg.src_col_idx)?;
 
+    // Every emitted path copies one input row, so the rows per batch follow the
+    // input's average row width.
+    let row_bytes = input
+        .get_array_memory_size()
+        .checked_div(input.num_rows())
+        .unwrap_or(0)
+        .max(1);
+    let max_rows = (EXPAND_BATCH_INPUT_BYTES / row_bytes).clamp(1, EXPAND_BATCH_MAX_ROWS);
+
     // --- Obtain the directed adjacency the traversal needs (#762). ---
     let mut adjacency = adjacency::AdjacencyReader::for_capture(
         cfg.provider.as_ref(),
@@ -404,19 +429,52 @@ fn expand_bfs(cfg: &ExpandConfig, input_batches: &[RecordBatch]) -> Result<Recor
         cfg.capture_epoch,
     )?;
 
-    // --- BFS per source row, with per-path edge deduplication. ---
-    // Run the traversal BEFORE any edge-file read: the BFS needs only the
-    // adjacency view, and knowing the traversed edge ids lets the
-    // relationship-list read below fetch exactly those rows (#830) instead of
-    // scanning the whole file.
-    let emissions = bfs_emit(cfg, &mut adjacency, src_ids)?;
-    // No matched paths → empty output under the planned schema. Avoid assembling
-    // take-columns from empty input/node batches: under DataFusion 54 an empty
-    // seed can still produce wide intermediate schemas that disagree with
-    // `out_schema` (columns vs fields mismatch).
-    if emissions.is_empty() {
-        return Ok(RecordBatch::new_empty(cfg.out_schema.clone()));
+    let mut pending: Vec<Emission> = Vec::new();
+    let mut pending_hops = 0usize;
+    let mut sent_any = false;
+    for (row, seed) in src_ids.iter().enumerate() {
+        let Some(node) = seed else { continue };
+        for emission in bfs_emit_seed(cfg, &mut adjacency, row, node)? {
+            pending_hops = pending_hops.saturating_add(emission.2.len());
+            pending.push(emission);
+            if pending.len() >= max_rows || pending_hops >= EXPAND_BATCH_MAX_HOPS {
+                let batch = expand_chunk(cfg, &input, &pending)?;
+                pending.clear();
+                pending_hops = 0;
+                sent_any = true;
+                if tx.send(Ok(batch)).await.is_err() {
+                    return Ok(());
+                }
+            }
+        }
     }
+    if !pending.is_empty() {
+        sent_any = true;
+        let batch = expand_chunk(cfg, &input, &pending)?;
+        if tx.send(Ok(batch)).await.is_err() {
+            return Ok(());
+        }
+    }
+    // No matched paths → one empty output under the planned schema.
+    if !sent_any {
+        // A closed receiver only means the consumer is gone.
+        let _ = tx.send(Ok(RecordBatch::new_empty(cfg.out_schema.clone()))).await;
+    }
+    Ok(())
+}
+
+/// Build one output batch for `emissions` (a bounded slice of the traversal).
+fn expand_chunk(
+    cfg: &ExpandConfig,
+    input: &RecordBatch,
+    emissions: &[Emission],
+) -> Result<RecordBatch, GfError> {
+    use std::collections::HashMap;
+
+    use arrow::compute::{concat_batches, take};
+
+    let exec_err = |m: String| GfError::Execution(m);
+
     let traversed: std::collections::HashSet<u64> = emissions
         .iter()
         .flat_map(|(_, _, path)| path.iter().copied())
@@ -503,36 +561,32 @@ fn expand_bfs(cfg: &ExpandConfig, input_batches: &[RecordBatch]) -> Result<Recor
     // Trailing edge-list column (#709): one `List<Struct>` value per emitted
     // path, in schema order (last). Built from each path's ordered edge ids,
     // plus the relation's edge properties (#755).
-    columns.push(build_edge_list_column(cfg, &emissions, &edge_records)?);
+    columns.push(build_edge_list_column(cfg, emissions, &edge_records)?);
     RecordBatch::try_new(cfg.out_schema.clone(), columns).map_err(|e| exec_err(e.to_string()))
 }
 
-/// BFS every source seed over `adjacency`, with per-path relationship
+/// BFS one source seed over `adjacency`, with per-path relationship
 /// isomorphism (no edge reused on a path). Returns one emission per matched
-/// path: `(input_row, reached_node_id, edge_ids_in_order)`.
+/// path: `(input_row, reached_node_id, edge_ids_in_order)`, breadth-first.
 ///
 /// `min_hops == 0` (Cypher `*0..`) emits the 0-hop source-to-self path (empty
 /// edge list); extension stops once `max_hops` is reached.
-fn bfs_emit(
+fn bfs_emit_seed(
     cfg: &ExpandConfig,
     adjacency: &mut adjacency::AdjacencyReader<'_>,
-    src_ids: &arrow::array::UInt64Array,
-) -> Result<Vec<(usize, u64, Vec<u64>)>, GfError> {
-    use std::collections::{HashSet, VecDeque};
+    input_row: usize,
+    seed: u64,
+) -> Result<Vec<Emission>, GfError> {
+    use std::collections::VecDeque;
 
-    let mut emissions: Vec<(usize, u64, Vec<u64>)> = Vec::new();
+    let mut emissions: Vec<Emission> = Vec::new();
     let mut queue: VecDeque<PathState> = VecDeque::new();
-    for (row, seed) in src_ids.iter().enumerate() {
-        if let Some(node) = seed {
-            queue.push_back(PathState {
-                node,
-                visited_edges: HashSet::new(),
-                edge_path: Vec::new(),
-                hops: 0,
-                input_row: row,
-            });
-        }
-    }
+    queue.push_back(PathState {
+        node: seed,
+        edge_path: Vec::new(),
+        hops: 0,
+        input_row,
+    });
     while let Some(p) = queue.pop_front() {
         let in_range = p.hops >= cfg.min_hops && cfg.max_hops.is_none_or(|m| p.hops <= m);
         if in_range {
@@ -543,16 +597,14 @@ fn bfs_emit(
         }
         adjacency.with_neighbors(p.node, |neighbors| {
             for (edge_id, next) in neighbors.iter() {
-                if p.visited_edges.contains(&edge_id) {
+                if p.edge_path.contains(&edge_id) {
                     continue; // relationship isomorphism: no edge twice per path
                 }
-                let mut visited = p.visited_edges.clone();
-                visited.insert(edge_id);
-                let mut edge_path = p.edge_path.clone();
+                let mut edge_path = Vec::with_capacity(p.edge_path.len() + 1);
+                edge_path.extend_from_slice(&p.edge_path);
                 edge_path.push(edge_id);
                 queue.push_back(PathState {
                     node: next,
-                    visited_edges: visited,
                     edge_path,
                     hops: p.hops + 1,
                     input_row: p.input_row,

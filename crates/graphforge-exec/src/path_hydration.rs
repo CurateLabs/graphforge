@@ -727,5 +727,13 @@ pub(crate) async fn collect_guarded(
     let _guard = QueryGuard(Arc::clone(&physical));
     #[cfg(test)]
     tests::pause_collect(&physical).await;
-    datafusion::physical_plan::collect(physical, context).await
+    let plan = Arc::clone(&physical);
+    let collected = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+        datafusion::physical_plan::collect(physical, context),
+    ))
+    .await;
+    match collected {
+        Ok(result) => result.map_err(|error| crate::task_panic::from_task_error(error, &plan)),
+        Err(payload) => Err(crate::task_panic::from_unwind(payload.as_ref(), &plan)),
+    }
 }
