@@ -120,12 +120,7 @@ class FakeBenchExec:
         logs = raw / f"benchmark.{gdc_rung.DEFINITION}.logfiles"
         logs.mkdir()
         (logs / "phase.json.log").write_text(
-            " ".join(argv)
-            + "\n\n"
-            + "-" * 80
-            + "\n\n"
-            + completed.stdout
-            + completed.stderr,
+            " ".join(argv) + "\n\n" + "-" * 80 + "\n\n" + completed.stdout + completed.stderr,
             encoding="utf-8",
         )
         status = "DONE" if completed.returncode == 0 else "ERROR"
@@ -298,9 +293,7 @@ class TinyLadderEndToEndTests(Scratch):
         )
         self.assertEqual((failed_correctness["checked"], failed_correctness["matched"]), (3, 2))
         self.assertTrue((self.output / "snb-interactive-sf1-query-benchexec-raw").is_dir())
-        query_logs = list(
-            (self.output / "snb-interactive-sf1-query-benchexec-raw").rglob("*.log")
-        )
+        query_logs = list((self.output / "snb-interactive-sf1-query-benchexec-raw").rglob("*.log"))
         self.assertTrue(query_logs)
         query_log_text = "\n".join(path.read_text(encoding="utf-8") for path in query_logs)
         self.assertIn("gdc-query start", query_log_text)

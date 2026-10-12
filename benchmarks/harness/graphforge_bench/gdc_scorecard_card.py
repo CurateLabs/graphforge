@@ -372,8 +372,7 @@ def _next_line(next_rung: Mapping[str, Any]) -> str:
     in_flight = next_rung.get("in_flight")
     if in_flight is not None:
         rendered += (
-            f"; in flight: {in_flight['query_id']}/{in_flight['binding_id']} "
-            f"({in_flight['phase']})"
+            f"; in flight: {in_flight['query_id']}/{in_flight['binding_id']} ({in_flight['phase']})"
         )
     return rendered
 
