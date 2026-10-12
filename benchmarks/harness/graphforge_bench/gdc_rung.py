@@ -576,7 +576,9 @@ def run_phase(rung: Rung, name: str, task: dict[str, Any], wall_seconds: int) ->
         )
         rung.phase_tree_unverified = True
         record = rung.workspace / PHASE_CGROUP_RECORD
-        record.write_text(json.dumps({"cgroup_paths": []}) + "\n", encoding="utf-8")
+        record.write_text(
+            json.dumps({"cgroup_paths": [], "verified": False}) + "\n", encoding="utf-8"
+        )
         status = ladder.benchexec(stage, ladder.executables, ladder.identities, ladder.work_root)
         raw = stage / "raw"
         # The phase's own cgroup counters (#1914), not the host's: another process's
@@ -599,7 +601,10 @@ def run_phase(rung: Rung, name: str, task: dict[str, Any], wall_seconds: int) ->
         rung.phase_cgroups.extend(phase_cgroups)
         rung.phase_cgroups = list(dict.fromkeys(rung.phase_cgroups))
         record.write_text(
-            json.dumps({"cgroup_paths": [str(path) for path in rung.phase_cgroups]}) + "\n",
+            json.dumps(
+                {"cgroup_paths": [str(path) for path in rung.phase_cgroups], "verified": False}
+            )
+            + "\n",
             encoding="utf-8",
         )
         if not phase_cgroups:
@@ -610,7 +615,16 @@ def run_phase(rung: Rung, name: str, task: dict[str, Any], wall_seconds: int) ->
             tree_state = wait_for_phase_trees_state(rung.phase_cgroups)
             if tree_state == "empty":
                 rung.phase_tree_unverified = False
-                record.unlink(missing_ok=True)
+                record.write_text(
+                    json.dumps(
+                        {
+                            "cgroup_paths": [str(path) for path in rung.phase_cgroups],
+                            "verified": True,
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
                 safe_to_remove = True
             elif tree_state == "alive":
                 rung.phase_tree_alive = True
