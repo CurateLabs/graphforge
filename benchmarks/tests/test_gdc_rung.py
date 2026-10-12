@@ -625,6 +625,27 @@ class LadderControlTests(Scratch):
         self.assertEqual(rung.failures[0]["cause"], "phase_tree_alive")
         self.assertFalse(inventory["empty"])
 
+    def test_nested_populated_cgroup_blocks_workspace_reclaim(self) -> None:
+        ladder = self.ladder(self.executables, FakeBenchExec())
+        rung = gdc_rung.Rung(ladder, {"id": "sf0", "label": "SF0"})
+        rung.workspace.mkdir(parents=True)
+        cgroup = self.scratch / "benchmark_nested"
+        child = cgroup / "delegate_child"
+        child.mkdir(parents=True)
+        (cgroup / "cgroup.procs").write_text("", encoding="ascii")
+        (child / "cgroup.procs").write_text("123\n", encoding="ascii")
+        (cgroup / "cgroup.events").write_text("populated 1\n", encoding="ascii")
+        rung.phase_cgroups.append(cgroup)
+        real_state = gdc_rung.wait_for_phase_trees_state
+        with patch(
+            "graphforge_bench.gdc_rung.wait_for_phase_trees_state",
+            side_effect=lambda paths: real_state(paths, timeout_seconds=0),
+        ):
+            inventory = gdc_rung._teardown(rung)
+        self.assertTrue(rung.workspace.exists())
+        self.assertEqual(rung.failures[0]["cause"], "phase_tree_alive")
+        self.assertFalse(inventory["empty"])
+
     def test_exception_during_benchexec_publishes_unverified_result_and_keeps_workspace(
         self,
     ) -> None:
