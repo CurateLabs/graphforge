@@ -149,6 +149,7 @@ class ResultsFinalTests(ScratchTest):
     def test_unreadable_cgroup_events_fails_closed(self) -> None:
         cgroup = self.scratch / "benchmark_unreadable"
         cgroup.mkdir()
+        (cgroup / "cgroup.procs").write_text("", encoding="ascii")
         self.assertEqual(benchexec_process.wait_for_phase_trees_state([cgroup]), "unverified")
 
 
