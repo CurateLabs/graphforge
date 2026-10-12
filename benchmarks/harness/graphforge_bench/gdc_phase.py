@@ -215,10 +215,10 @@ def _query(task: Mapping[str, Any], phase: Phase) -> dict[str, Any]:
         task["project"],
         "--workload",
         task["workload"],
-        "--expected-counts",
-        task["expected_counts"],
-        "--output",
-        task["evidence"],
+            "--expected-counts",
+            task["expected_counts"],
+            "--output",
+            task["evidence"],
     ]
     if task.get("results_dir") is not None:
         argv += ["--results-dir", task["results_dir"]]

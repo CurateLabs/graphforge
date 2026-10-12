@@ -17,6 +17,7 @@ import json
 import os
 from pathlib import Path
 import resource
+import signal
 import subprocess
 import sys
 import tempfile
@@ -293,11 +294,13 @@ class TinyLadderEndToEndTests(Scratch):
         )
         self.assertEqual((failed_correctness["checked"], failed_correctness["matched"]), (3, 2))
         self.assertTrue((self.output / "snb-interactive-sf1-query-benchexec-raw").is_dir())
-        query_logs = list((self.output / "snb-interactive-sf1-query-benchexec-raw").rglob("*.log"))
-        self.assertTrue(query_logs)
-        query_log_text = "\n".join(path.read_text(encoding="utf-8") for path in query_logs)
-        self.assertIn("gdc-query start", query_log_text)
-        self.assertIn("gdc-query complete", query_log_text)
+        query_progress = list(
+            (self.output / "snb-interactive-sf1-query-benchexec-raw").rglob("query-progress.jsonl")
+        )
+        self.assertEqual(len(query_progress), 1)
+        progress_text = query_progress[0].read_text(encoding="utf-8")
+        self.assertIn('"gdc_query": "start"', progress_text)
+        self.assertIn('"gdc_query": "end"', progress_text)
 
         # The card headlines sf0 and names what stopped sf1.
         paths = write_card(ROOT, ladder.spec, self.output)
@@ -521,44 +524,77 @@ class LadderControlTests(Scratch):
             {"empty": False, "entries": ["workspace/leftover"]},
         )
 
-    def test_teardown_clears_phase_tmp_files_and_adjacency_cache_directories(self) -> None:
+    def test_teardown_removes_only_its_phase_tmp_directory(self) -> None:
         tmp = self.work / "tmp"
-        cache = tmp / "graphforge-adjacency-cache-leftover"
+        owned = tmp / "gdc-snb-interactive-sf0-owned"
+        cache = owned / "graphforge-adjacency-cache-leftover"
         cache.mkdir(parents=True)
         (cache / "buffer").write_bytes(b"partial query cache")
-        (tmp / "phase-leftover").write_bytes(b"temporary")
-        ladder = self.ladder(self.executables, FakeBenchExec())
-        results = gdc_rung.climb(
-            ladder,
-            reserved_headroom_bytes=0,
-            quiet_host_wait_seconds=0,
-            quiet_host=lambda _wait: QUIET,
-        )
-        self.assertEqual(results[0]["inventory"], {"empty": True, "entries": []})
-        self.assertEqual(list(tmp.iterdir()), [])
-        document = json.loads(
-            (self.output / "snb-interactive-sf0-inventory.json").read_text(encoding="utf-8")
-        )
-        self.assertEqual(document["entries"], [])
+        unrelated = tmp / "unrelated"
+        unrelated.write_text("preserve", encoding="utf-8")
+        gdc_rung._clear_phase_tmp(owned)
+        self.assertFalse(owned.exists())
+        self.assertEqual(unrelated.read_text(encoding="utf-8"), "preserve")
 
-    def test_truncated_query_log_reports_last_unmatched_start_and_no_lines_is_null(self) -> None:
-        raw = self.scratch / "phase-raw"
-        raw.mkdir()
-        log = raw / "phase.json.log"
-        log.write_text(
-            "gdc-query start BI1 line-1 warmup\n"
-            "gdc-query complete BI1 line-1 warmup latency_ns=10 rows=1\n"
-            "gdc-query start BI1 line-1 run-1\n"
-            "gdc-query complete BI1 line-1 run-1 latency_ns=20 rows=1\n"
-            "gdc-query start BI2 line-7 run-3\n",
+    def test_live_phase_tree_blocks_all_teardown_cleanup(self) -> None:
+        ladder = self.ladder(self.executables, FakeBenchExec())
+        rung = gdc_rung.Rung(ladder, {"id": "sf0", "label": "SF0"})
+        rung.workspace.mkdir(parents=True)
+        owned = self.work / "tmp" / "gdc-snb-interactive-sf0-owned"
+        owned.mkdir(parents=True)
+        rung.phase_tmp_dirs.append(owned)
+        cgroup = self.scratch / "benchmark_fake"
+        cgroup.mkdir()
+        (cgroup / "cgroup.procs").write_text("123\n", encoding="ascii")
+        rung.phase_cgroups.append(cgroup)
+        with patch("graphforge_bench.gdc_rung.wait_for_phase_trees_empty", return_value=False):
+            inventory = gdc_rung._teardown(rung)
+        self.assertTrue(rung.workspace.exists())
+        self.assertTrue(owned.exists())
+        self.assertEqual(rung.failures[0]["cause"], "phase_tree_alive")
+        self.assertFalse(inventory["empty"])
+
+    def test_json_progress_ignores_torn_final_line_and_preserves_escaped_ids(self) -> None:
+        progress = self.scratch / "progress.jsonl"
+        progress.write_text(
+            json.dumps({"gdc_query": "start", "query_id": 'BI "two"', "binding_id": "line one", "phase": "run-10"})
+            + "\n"
+            + json.dumps({"gdc_query": "end", "query_id": 'BI "two"', "binding_id": "line one", "phase": "run-10", "latency_ns": 10, "rows": 2})
+            + "\n"
+            + json.dumps({"gdc_query": "start", "query_id": "run-10", "binding_id": "a " + "x" * 8000, "phase": "run-3"})
+            + "\n"
+            + '{"gdc_query":"start","query_id":"run-1',
             encoding="utf-8",
         )
         self.assertEqual(
-            gdc_rung._in_flight_query(raw),
-            {"query_id": "BI2", "binding_id": "line-7", "phase": "run-3"},
+            gdc_rung._in_flight_query(progress),
+            {"query_id": "run-10", "binding_id": "a " + "x" * 8000, "phase": "run-3"},
         )
-        log.write_text("only the phase launch line\n", encoding="utf-8")
-        self.assertIsNone(gdc_rung._in_flight_query(raw))
+        progress.write_text('{"gdc_query":"start","query_id":"run-10', encoding="utf-8")
+        self.assertIsNone(gdc_rung._in_flight_query(progress))
+
+    def test_child_progress_write_survives_sigkill_mid_query(self) -> None:
+        progress = self.scratch / "progress.jsonl"
+        code = (
+            "import json, os, time; "
+            "fd=os.open(os.environ['GF_GDC_PROGRESS_PATH'], os.O_CREAT|os.O_APPEND|os.O_WRONLY, 0o600); "
+            "os.write(fd, json.dumps({'gdc_query':'start','query_id':'BI9','binding_id':'line 7','phase':'run-2'}).encode()+b'\\n'); "
+            "time.sleep(30)"
+        )
+        child = subprocess.Popen([sys.executable, "-c", code], env={**os.environ, "GF_GDC_PROGRESS_PATH": str(progress)})
+        self.addCleanup(lambda: child.poll() is None and child.kill())
+        deadline = time.monotonic() + 5
+        while not progress.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        os.kill(child.pid, signal.SIGKILL)
+        child.wait(timeout=5)
+        self.assertEqual(
+            gdc_rung._in_flight_query(progress),
+            {"query_id": "BI9", "binding_id": "line 7", "phase": "run-2"},
+        )
+
+    def test_no_query_progress_is_null(self) -> None:
+        self.assertIsNone(gdc_rung._in_flight_query(self.scratch / "absent.jsonl"))
 
     def test_an_interrupted_attempt_is_not_overwritten(self) -> None:
         ladder = self.ladder(self.executables, FakeBenchExec())

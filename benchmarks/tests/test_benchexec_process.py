@@ -130,6 +130,19 @@ class ResultsFinalTests(ScratchTest):
         document.write_text(FINAL_RESULTS)
         self.assertTrue(benchexec_process.results_final(self.raw))
 
+    def test_phase_tree_wait_reads_a_fake_cgroup_until_empty(self) -> None:
+        cgroup = self.scratch / "benchmark_fake"
+        cgroup.mkdir()
+        processes = cgroup / "cgroup.procs"
+        processes.write_text("123\n", encoding="ascii")
+        self.assertFalse(
+            benchexec_process.wait_for_phase_trees_empty(
+                [cgroup], timeout_seconds=0.01, poll_seconds=0.001
+            )
+        )
+        processes.write_text("", encoding="ascii")
+        self.assertTrue(benchexec_process.wait_for_phase_trees_empty([cgroup]))
+
 
 class RunBoundedTests(ScratchTest):
     def test_a_run_that_exits_returns_its_own_status(self) -> None:

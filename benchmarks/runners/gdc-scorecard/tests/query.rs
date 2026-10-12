@@ -179,12 +179,12 @@ fn query_progress_is_flushed_in_binding_order() {
     let workload_path = root.path().join("workload.json");
     let counts_path = root.path().join("expected-counts.json");
     let output_path = root.path().join("evidence.json");
-    std::fs::write(
-        &workload_path,
-        serde_json::to_vec(&workload(json!([people_by_min_id()]))).unwrap(),
-    )
-    .unwrap();
+    let mut input = workload(json!([people_by_min_id()]));
+    input["variants"][0]["id"] = json!("people \"by\" min");
+    input["variants"][0]["bindings"][0]["id"] = json!("line one \"quoted\"");
+    std::fs::write(&workload_path, serde_json::to_vec(&input).unwrap()).unwrap();
     std::fs::write(&counts_path, serde_json::to_vec(&expected(4, 3)).unwrap()).unwrap();
+    let progress_path = root.path().join("progress.jsonl");
     let result = Command::new(env!("CARGO_BIN_EXE_graphforge-benchmark-gdc-scorecard"))
         .args([
             "query",
@@ -197,6 +197,7 @@ fn query_progress_is_flushed_in_binding_order() {
             "--output",
             output_path.to_str().unwrap(),
         ])
+        .env("GF_GDC_PROGRESS_PATH", &progress_path)
         .output()
         .unwrap();
     assert!(
@@ -204,36 +205,33 @@ fn query_progress_is_flushed_in_binding_order() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    let progress: Vec<_> = String::from_utf8(result.stderr)
+    let progress: Vec<serde_json::Value> = String::from_utf8(progress_path.read_bytes().unwrap())
         .unwrap()
         .lines()
-        .filter(|line| line.starts_with("gdc-query "))
-        .map(str::to_owned)
+        .map(|line| serde_json::from_str(line).unwrap())
         .collect();
     assert_eq!(
         progress.len(),
         8,
         "one start and completion for warmup and each binding: {progress:?}"
     );
-    for (line, (action, binding, phase)) in progress.iter().zip([
-        ("start", "min-1", "warmup"),
-        ("complete", "min-1", "warmup"),
-        ("start", "min-1", "run-1"),
-        ("complete", "min-1", "run-1"),
+    for (record, (action, binding, phase)) in progress.iter().zip([
+        ("start", "line one \"quoted\"", "warmup"),
+        ("end", "line one \"quoted\"", "warmup"),
+        ("start", "line one \"quoted\"", "run-1"),
+        ("end", "line one \"quoted\"", "run-1"),
         ("start", "min-2", "run-2"),
-        ("complete", "min-2", "run-2"),
+        ("end", "min-2", "run-2"),
         ("start", "min-4", "run-3"),
-        ("complete", "min-4", "run-3"),
+        ("end", "min-4", "run-3"),
     ]) {
-        assert!(
-            line.starts_with(&format!(
-                "gdc-query {action} people-by-min-id {binding} {phase}"
-            )),
-            "{line}"
-        );
-        if action == "complete" {
-            assert!(line.contains("latency_ns="), "{line}");
-            assert!(line.contains("rows="), "{line}");
+        assert_eq!(record["gdc_query"], action);
+        assert_eq!(record["query_id"], "people \"by\" min");
+        assert_eq!(record["binding_id"], binding);
+        assert_eq!(record["phase"], phase);
+        if action == "end" {
+            assert!(record["latency_ns"].is_number());
+            assert!(record["rows"].is_number());
         }
     }
 }

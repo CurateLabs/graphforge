@@ -38,7 +38,9 @@ from importlib.metadata import version
 import json
 import os
 from pathlib import Path
+import re
 import secrets
+import shlex
 import shutil
 import stat
 import subprocess
@@ -48,11 +50,16 @@ import time
 from typing import Any
 import uuid
 import xml.etree.ElementTree as ET
+from jsonschema import Draft202012Validator
 
 from graphforge_bench import gdc_dataset_cache, phase_cgroup
 from graphforge_bench import gdc_graphalytics_scorecard as graphalytics
 from graphforge_bench.benchexec_authority import EvidenceError, Limits, normalize_run
-from graphforge_bench.benchexec_process import HUNG_EVIDENCE, HUNG_STATUS
+from graphforge_bench.benchexec_process import (
+    HUNG_EVIDENCE,
+    HUNG_STATUS,
+    wait_for_phase_trees_empty,
+)
 from graphforge_bench.gdc_contracts import GdcContractError
 from graphforge_bench.gdc_measurement_policy import (
     GdcMeasurementBoundaryError,
@@ -298,6 +305,8 @@ class Rung:
     counts: dict[str, Any] | None = None
     references: dict[str, Path] = field(default_factory=dict)
     built: dict[str, Path] = field(default_factory=dict)
+    phase_tmp_dirs: list[Path] = field(default_factory=list)
+    phase_cgroups: list[Path] = field(default_factory=list)
 
     @property
     def prefix(self) -> str:
@@ -323,14 +332,21 @@ class Rung:
 
 
 def _stage_phase(
-    ladder: Ladder, parent: Path, task: dict[str, Any], wall_seconds: int
+    rung: Rung, parent: Path, task: dict[str, Any], wall_seconds: int
 ) -> tuple[Path, dict[str, Any]]:
     """Stage the definition, identity-checked executables and the phase task."""
+    ladder = rung.ladder
     stage = Path(tempfile.mkdtemp(prefix="gf-gdc-phase-", dir=parent))
     _stage_benchmark_xml(ladder.root, stage, wall_seconds=wall_seconds, definition=DEFINITION)
     bin_dir = stage / "bin"
     bin_dir.mkdir()
-    tmp_dir = _phase_tmp_dir(ladder.work_root, create=True)
+    tmp_dir = _phase_tmp_dir(
+        ladder.work_root,
+        suite_id=ladder.spec.suite_id,
+        rung_id=str(rung.spec["id"]),
+        create=True,
+    )
+    rung.phase_tmp_dirs.append(tmp_dir)
     staged: dict[str, str] = {}
     for name, source, key in (
         ("gf", ladder.executables.gf, "gf_sha256"),
@@ -351,9 +367,10 @@ def _stage_phase(
     launcher = bin_dir / LAUNCHER_NAME
     launcher.write_text(
         "#!/bin/sh\n"
-        f'export TMPDIR="{tmp_dir}"\n'
-        f'export PYTHONPATH="{harness}"\n'
-        f'exec "{sys.executable}" -m graphforge_bench.gdc_phase "$@"\n',
+        f"export TMPDIR={shlex.quote(str(tmp_dir))}\n"
+        f"export GF_GDC_PROGRESS_PATH={shlex.quote(str(stage / 'query-progress.jsonl'))}\n"
+        f"export PYTHONPATH={shlex.quote(str(harness))}\n"
+        f"exec {shlex.quote(sys.executable)} -m graphforge_bench.gdc_phase \"$@\"\n",
         encoding="utf-8",
     )
     launcher.chmod(0o755)
@@ -369,44 +386,66 @@ def _stage_phase(
     return stage, task
 
 
-def _phase_tmp_dir(work_root: Path, *, create: bool) -> Path:
-    """Return the harness-owned TMPDIR without accepting a linked directory."""
+def _phase_tmp_dir(
+    work_root: Path, *, suite_id: str, rung_id: str, create: bool
+) -> Path:
+    """Create or validate one exclusive harness-owned phase TMPDIR."""
     root = work_root.resolve(strict=True)
-    path = root / "tmp"
-    if path.is_symlink():
-        raise ControllerError("phase TMPDIR is a symlink")
-    if create:
-        path.mkdir(exist_ok=True)
-    if path.exists() and (not path.is_dir() or path.resolve(strict=True).parent != root):
-        raise ControllerError("phase TMPDIR is not a direct work-root directory")
-    return path
+    if not create:
+        raise ControllerError("phase TMPDIR must be created exclusively")
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        try:
+            os.mkdir("tmp", dir_fd=root_fd)
+        except FileExistsError:
+            pass
+        parent_fd = os.open(
+            "tmp", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd
+        )
+        try:
+            name = f"gdc-{suite_id}-{rung_id}-{secrets.token_hex(8)}"
+            os.mkdir(name, dir_fd=parent_fd)
+        finally:
+            os.close(parent_fd)
+    finally:
+        os.close(root_fd)
+    return root / "tmp" / name
 
 
-def _clear_phase_tmp(work_root: Path) -> None:
-    """Remove only direct children of the real, harness-owned phase TMPDIR."""
-    root = work_root.resolve(strict=True)
-    path = root / "tmp"
-    if path.is_symlink() or not path.exists():
+def _clear_phase_tmp(path: Path) -> None:
+    """Remove exactly one owned TMPDIR using its opened directory as authority."""
+    root = path.parent.parent
+    name = path.name
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        parent_fd = os.open("tmp", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+    except FileNotFoundError:
+        os.close(root_fd)
         return
-    if not path.is_dir() or path.resolve(strict=True).parent != root:
-        return
-    identity = path.stat(follow_symlinks=False)
-    for child in sorted(path.iterdir()):
-        current = path.stat(follow_symlinks=False)
-        if (current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino):
+    try:
+        try:
+            descriptor = os.open(
+                name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd
+            )
+        except FileNotFoundError:
             return
         try:
-            if child.is_symlink() or not child.is_dir():
-                child.unlink()
-            else:
-                # shutil.rmtree uses a symlink-attack-resistant fd implementation
-                # where the platform supports it, and never follows a directory link.
-                shutil.rmtree(child)
-        except OSError:
-            return
-    current = path.stat(follow_symlinks=False)
-    if (current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino):
-        raise ControllerError("phase TMPDIR identity changed during teardown")
+            identity = os.fstat(descriptor)
+            for entry in os.scandir(descriptor):
+                child = entry.name
+                if entry.is_dir(follow_symlinks=False):
+                    shutil.rmtree(child, dir_fd=descriptor)
+                else:
+                    os.unlink(child, dir_fd=descriptor)
+        finally:
+            os.close(descriptor)
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino):
+            raise ControllerError("phase TMPDIR identity changed during teardown")
+        os.rmdir(name, dir_fd=parent_fd)
+    finally:
+        os.close(parent_fd)
+        os.close(root_fd)
 
 
 def _phase_telemetry(raw: Path) -> Mapping[str, Any] | None:
@@ -422,28 +461,43 @@ def _phase_telemetry(raw: Path) -> Mapping[str, Any] | None:
     return found[0] if len(found) == 1 else None
 
 
-def _in_flight_query(raw: Path) -> dict[str, str] | None:
-    """The last query progress start without its completion in BenchExec's logs."""
+def _in_flight_query(progress_file: Path) -> dict[str, str] | None:
+    """Parse complete JSONL records and return the last unmatched start."""
+    try:
+        data = progress_file.read_bytes()
+    except OSError:
+        return None
     pending: dict[tuple[str, str, str], dict[str, str]] = {}
-    for path in sorted(raw.rglob("*.log")):
-        try:
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
+    for raw_line in data.splitlines(keepends=True):
+        if not raw_line.endswith(b"\n"):
             continue
-        for line in lines:
-            fields = line.strip().split()
-            if len(fields) == 5 and fields[:2] == ["gdc-query", "start"]:
-                query_id, binding_id, phase = fields[2:]
-                key = (query_id, binding_id, phase)
-                pending[key] = {
-                    "query_id": query_id,
-                    "binding_id": binding_id,
-                    "phase": phase,
-                }
-            elif len(fields) >= 6 and fields[:2] == ["gdc-query", "complete"]:
-                key = tuple(fields[2:5])
-                pending.pop(key, None)  # type: ignore[arg-type]
-    return list(pending.values())[-1] if pending else None
+        try:
+            value = json.loads(raw_line)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(value, Mapping):
+            continue
+        action, query_id, binding_id, phase = (
+            value.get("gdc_query"), value.get("query_id"), value.get("binding_id"), value.get("phase")
+        )
+    if (
+        not all(isinstance(item, str) and item for item in (query_id, binding_id, phase))
+        or phase != "warmup" and not re.fullmatch(r"run-[1-9][0-9]*", phase)
+    ):
+            continue
+        key = (query_id, binding_id, phase)
+        if action == "start" and set(value) == {"gdc_query", "query_id", "binding_id", "phase"}:
+            pending[key] = {"query_id": query_id, "binding_id": binding_id, "phase": phase}
+        elif (
+            action == "end"
+            and set(value) == {"gdc_query", "query_id", "binding_id", "phase", "latency_ns", "rows"}
+            and isinstance(value.get("latency_ns"), int)
+            and not isinstance(value.get("latency_ns"), bool)
+            and isinstance(value.get("rows"), int)
+            and not isinstance(value.get("rows"), bool)
+        ):
+            pending.pop(key, None)
+    return next(reversed(pending.values()), None) if pending else None
 
 
 def _run_columns(raw: Path) -> dict[str, str]:
@@ -563,13 +617,20 @@ def run_phase(rung: Rung, name: str, task: dict[str, Any], wall_seconds: int) ->
     ladder = rung.ladder
     with tempfile.TemporaryDirectory(prefix=".gf-gdc-authority-", dir=ladder.work_root) as parent:
         stage, task = _stage_phase(
-            ladder, Path(parent), {"schema": TASK_SCHEMA, **task}, wall_seconds
+            rung, Path(parent), {"schema": TASK_SCHEMA, **task}, wall_seconds
         )
         status = ladder.benchexec(stage, ladder.executables, ladder.identities, ladder.work_root)
         raw = stage / "raw"
         # The phase's own cgroup counters (#1914), not the host's: another process's
         # page-out on a shared host is not this phase's memory.
         swap = phase_cgroup.load_evidence(stage / phase_cgroup.EVIDENCE_NAME)
+        if swap is not None:
+            rung.phase_cgroups.extend(
+                Path(str(run["cgroup_path"]))
+                for run in swap["runs"].values()
+                if isinstance(run, Mapping) and isinstance(run.get("cgroup_path"), str)
+                and run["cgroup_path"]
+            )
         swapped = phase_cgroup.verdict(swap)
         if swap is not None and raw.is_dir():
             # Retain the counters beside the raw output (#1727), even when a known
@@ -602,14 +663,26 @@ def run_phase(rung: Rung, name: str, task: dict[str, Any], wall_seconds: int) ->
             cause = ("benchexec_hung", _hung_detail(raw))
         elif cause is None and status != 0:
             cause = ("benchexec_failed", f"BenchExec exited {status}")
-        in_flight = _in_flight_query(raw) if name == "query" and cause is not None else None
+        in_flight = (
+            _in_flight_query(stage / "query-progress.jsonl")
+            if name == "query" and cause is not None
+            else None
+        )
         if in_flight is not None:
+            result_schema = read_json(ladder.root / "schemas" / "gdc-rung-result.json")
+            Draft202012Validator(result_schema["$defs"]["in_flight"]).validate(in_flight)
+            suffix = (
+                f"; in-flight {in_flight['query_id'][:500]}/"
+                f"{in_flight['binding_id'][:500]} ({in_flight['phase'][:128]})"
+            )
             cause = (
                 cause[0],
-                f"{cause[1][:1500]}; in-flight {in_flight['query_id']}/"
-                f"{in_flight['binding_id']} ({in_flight['phase']})",
-            )
+                f"{cause[1][: max(0, 2048 - len(suffix))]}{suffix}",
+        )
         if cause is not None and raw.is_dir():
+            progress_file = stage / "query-progress.jsonl"
+            if name == "query" and progress_file.is_file():
+                shutil.copyfile(progress_file, raw / progress_file.name)
             shutil.copytree(raw, ladder.output_dir / f"{rung.prefix}-{name}-benchexec-raw")
     run = PhaseRun(
         name,
@@ -944,8 +1017,13 @@ def _check(rung: Rung, evidence: Mapping[str, Any], results_dir: Path, input_roo
 
 def _teardown(rung: Rung) -> dict[str, Any]:
     ladder = rung.ladder
-    reclaim_workspace(ladder.work_root, rung.workspace_name)
-    _clear_phase_tmp(ladder.work_root)
+    alive = not wait_for_phase_trees_empty(rung.phase_cgroups)
+    if alive:
+        rung.fail("teardown", "phase_tree_alive", "phase cgroup still contains processes")
+    else:
+        reclaim_workspace(ladder.work_root, rung.workspace_name)
+        for path in rung.phase_tmp_dirs:
+            _clear_phase_tmp(path)
     inventory = collect_inventory(ladder.work_root, None)
     rung.publish("inventory", inventory)
     if not inventory["empty"]:

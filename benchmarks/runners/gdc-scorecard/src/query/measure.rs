@@ -385,19 +385,46 @@ fn project(
     Ok((projected, batches))
 }
 
+fn write_progress(record: serde_json::Value) {
+    use std::io::Write as _;
+
+    let Some(path) = std::env::var_os("GF_GDC_PROGRESS_PATH") else {
+        return;
+    };
+    let mut bytes = match serde_json::to_vec(&record) {
+        Ok(bytes) => bytes,
+        Err(_) => return,
+    };
+    bytes.push(b'\n');
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
+        return;
+    };
+    // Each JSONL record is one append write with no user-space buffering.
+    let _ = file.write(&bytes);
+}
+
 fn progress_start(query_id: &str, binding_id: &str, phase: &str) {
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "gdc-query start {query_id} {binding_id} {phase}");
-    let _ = stderr.flush();
+    write_progress(serde_json::json!({
+        "gdc_query": "start",
+        "query_id": query_id,
+        "binding_id": binding_id,
+        "phase": phase,
+    }));
 }
 
 fn progress_complete(query_id: &str, binding_id: &str, phase: &str, latency_ns: u128, rows: u64) {
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(
-        stderr,
-        "gdc-query complete {query_id} {binding_id} {phase} latency_ns={latency_ns} rows={rows}"
-    );
-    let _ = stderr.flush();
+    write_progress(serde_json::json!({
+        "gdc_query": "end",
+        "query_id": query_id,
+        "binding_id": binding_id,
+        "phase": phase,
+        "latency_ns": latency_ns,
+        "rows": rows,
+    }));
 }
 
 /// Nearest-rank percentile: the smallest sample with at least `percent`% of
