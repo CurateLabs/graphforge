@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable, Mapping, Sequence
+import contextlib
 from dataclasses import dataclass, field
 import hashlib
 from importlib.metadata import version
@@ -50,6 +51,7 @@ import time
 from typing import Any
 import uuid
 import xml.etree.ElementTree as ET
+
 from jsonschema import Draft202012Validator
 
 from graphforge_bench import gdc_dataset_cache, phase_cgroup
@@ -393,10 +395,8 @@ def _phase_tmp_dir(work_root: Path, *, suite_id: str, rung_id: str, create: bool
         raise ControllerError("phase TMPDIR must be created exclusively")
     root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        try:
+        with contextlib.suppress(FileExistsError):
             os.mkdir("tmp", dir_fd=root_fd)
-        except FileExistsError:
-            pass
         parent_fd = os.open("tmp", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
         try:
             name = f"gdc-{suite_id}-{rung_id}-{secrets.token_hex(8)}"

@@ -602,8 +602,10 @@ class LadderControlTests(Scratch):
         progress = self.scratch / "progress.jsonl"
         code = (
             "import json, os, time; "
-            "fd=os.open(os.environ['GF_GDC_PROGRESS_PATH'], os.O_CREAT|os.O_APPEND|os.O_WRONLY, 0o600); "
-            "os.write(fd, json.dumps({'gdc_query':'start','query_id':'BI9','binding_id':'line 7','phase':'run-2'}).encode()+b'\\n'); "
+            "fd=os.open(os.environ['GF_GDC_PROGRESS_PATH'], "
+            "os.O_CREAT|os.O_APPEND|os.O_WRONLY, 0o600); "
+            "record={'gdc_query':'start','query_id':'BI9','binding_id':'line 7','phase':'run-2'}; "
+            "os.write(fd, json.dumps(record).encode()+b'\\n'); "
             "time.sleep(30)"
         )
         child = subprocess.Popen(
