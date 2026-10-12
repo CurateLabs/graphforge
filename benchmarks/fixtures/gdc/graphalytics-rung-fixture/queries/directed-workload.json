@@ -40,7 +40,7 @@
       ],
       "operation": {
         "kind": "paths",
-        "by": "bfs",
+        "by": "bfs_depth",
         "directed": true,
         "source": {
           "uuid_param": "source"

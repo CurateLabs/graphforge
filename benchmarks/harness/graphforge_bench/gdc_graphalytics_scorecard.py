@@ -213,12 +213,12 @@ class Expectation:
 def expectation(algorithm: str, graph: GraphProperties, label: str) -> Expectation:
     """The analyst-verb dispatch and answer columns of one supported algorithm."""
     if algorithm == "bfs":
-        operation = {"kind": "paths", "by": "bfs", "directed": graph.directed}
+        operation = {"kind": "paths", "by": "bfs_depth", "directed": graph.directed}
         return Expectation(operation, graph.bfs_source, ["target_uuid", "cost"])
     if algorithm == "sssp":
         operation = {
             "kind": "paths",
-            "by": "dijkstra",
+            "by": "dijkstra_cost",
             "directed": graph.directed,
             "weight": "weight",
         }

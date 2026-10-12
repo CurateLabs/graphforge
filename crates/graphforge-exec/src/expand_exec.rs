@@ -26,6 +26,8 @@ use arrow::datatypes::SchemaRef;
 use arrow::datatypes::TimeUnit;
 use datafusion::common::DataFusionError;
 use datafusion::execution::TaskContext;
+use datafusion::execution::memory_pool::MemoryConsumer;
+use datafusion::execution::memory_pool::MemoryReservation;
 use datafusion::logical_expr::UserDefinedLogicalNode;
 use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::DisplayAs;
@@ -240,11 +242,16 @@ impl ExecutionPlan for VarLenExpandExec {
             provider: self.provider.clone(),
             capture_epoch: self.capture_epoch,
         };
+        let mut reservation = MemoryConsumer::new(VAR_LEN_CONSUMER)
+            .with_can_spill(false)
+            .register(context.memory_pool());
         let mut builder = RecordBatchReceiverStream::builder(self.schema.clone(), 2);
         let tx = builder.tx();
         builder.spawn(async move {
             let input = datafusion::physical_plan::execute_stream(input, context)?;
-            expand_bfs(&cfg, input, &tx).await.map_err(to_df_err)
+            expand_bfs(&cfg, input, &tx, &mut reservation)
+                .await
+                .map_err(to_df_err)
         });
         Ok(builder.build())
     }
@@ -388,6 +395,76 @@ const EXPAND_BATCH_INPUT_BYTES: usize = 64 << 20;
 /// One emitted path: `(input_row, reached_node_id, edge_ids_in_order)`.
 type Emission = (usize, u64, Vec<u64>);
 
+/// The memory-pool consumer a variable-length expansion charges the state it
+/// holds between batches to. The reservation cannot spill: when the pool refuses
+/// a charge the query fails naming this consumer.
+///
+/// Charged while held, released as soon as it is handed on or dropped:
+/// - the input batch being expanded: `get_array_memory_size()`;
+/// - a queued path: [`path_state_bytes`], released when it is expanded;
+/// - an emitted path: [`emission_bytes`], released when the batch carrying it is
+///   sent;
+/// - while a batch is built: the traversed-edge and reached-node sets
+///   ([`hash_table_bytes`]), the edge batches and records
+///   ([`edge_record_table_bytes`]), the destination node batch and its row map,
+///   all released when the batch is built;
+/// - the output batch: `get_array_memory_size()`, released when it is sent.
+///
+/// So the reservation tracks live state: one input batch, one seed's queue and
+/// paths, and one output batch, never the whole result.
+const VAR_LEN_CONSUMER: &str = "VarLenExpand path state";
+
+/// Heap bytes of a hash table with `capacity` usable slots of `entry_bytes`
+/// each: one control byte per bucket and `8/7` buckets per usable slot
+/// (hashbrown's maximum load factor), plus `16` bytes of control-group padding.
+fn hash_table_bytes(capacity: usize, entry_bytes: usize) -> usize {
+    capacity
+        .saturating_mul(entry_bytes + 1)
+        .saturating_mul(8)
+        .div_ceil(7)
+        .saturating_add(16)
+}
+
+/// Charged bytes of one queued path: `2 * size_of::<PathState>()` (its
+/// `VecDeque` slot plus up to one slot of doubling slack) `+ 8 * edge_path.capacity()`.
+fn path_state_bytes(state: &PathState) -> usize {
+    (2 * std::mem::size_of::<PathState>()).saturating_add(8 * state.edge_path.capacity())
+}
+
+/// Charged bytes of one emitted path: `2 * size_of::<Emission>()` (its `Vec`
+/// slot plus doubling slack) `+ 8 * hops` for its edge ids.
+fn emission_bytes(hops: usize) -> usize {
+    (2 * std::mem::size_of::<Emission>()).saturating_add(8 * hops)
+}
+
+/// Charged bytes of the edge-record table: the table at its capacity plus each
+/// record's relation-type string.
+fn edge_record_table_bytes(records: &std::collections::HashMap<u64, EdgeRecord>) -> usize {
+    records.values().fold(
+        hash_table_bytes(records.capacity(), std::mem::size_of::<(u64, EdgeRecord)>()),
+        |bytes, record| bytes.saturating_add(record.rel_type.as_ref().map_or(0, String::capacity)),
+    )
+}
+
+fn grow_reservation(reservation: &mut MemoryReservation, bytes: usize) -> Result<(), GfError> {
+    reservation
+        .try_grow(bytes)
+        .map_err(GfError::from_execution_error)
+}
+
+/// Send one built batch and release its charge: the consumer owns it now.
+/// `false` once the consumer is gone.
+async fn send_chunk(
+    tx: &tokio::sync::mpsc::Sender<Result<RecordBatch, DataFusionError>>,
+    out: RecordBatch,
+    reservation: &mut MemoryReservation,
+) -> bool {
+    let bytes = out.get_array_memory_size();
+    let sent = tx.send(Ok(out)).await.is_ok();
+    reservation.shrink(bytes);
+    sent
+}
+
 /// Run the variable-length BFS and send the output as bounded batches.
 ///
 /// Output columns = the input (source) columns, then the destination node's
@@ -398,10 +475,14 @@ type Emission = (usize, u64, Vec<u64>);
 /// built and sent before the next seed is expanded, so memory is bounded by one
 /// input batch, one output batch and one seed's paths. Stops quietly once the
 /// consumer is gone.
+///
+/// What is held between batches is charged to `reservation` (see
+/// [`VAR_LEN_CONSUMER`]); the pool refusing a charge fails the query.
 async fn expand_bfs(
     cfg: &ExpandConfig,
     mut input: SendableRecordBatchStream,
     tx: &tokio::sync::mpsc::Sender<Result<RecordBatch, DataFusionError>>,
+    reservation: &mut MemoryReservation,
 ) -> Result<(), GfError> {
     let exec_err = |m: String| GfError::Execution(m);
 
@@ -416,6 +497,8 @@ async fn expand_bfs(
     let mut sent_any = false;
     while let Some(batch) = input.next().await {
         let input = batch.map_err(GfError::from_execution_error)?;
+        let input_bytes = input.get_array_memory_size();
+        grow_reservation(reservation, input_bytes)?;
         // Seed column is resolved by qualifier at construction (`var_<src>.node_id`),
         // so chained expansions — whose input carries several `node_id` columns —
         // start from the correct source rather than the first `node_id`.
@@ -443,6 +526,7 @@ async fn expand_bfs(
 
         let mut pending: Vec<Emission> = Vec::new();
         let mut pending_hops = 0usize;
+        let mut pending_bytes = 0usize;
         for (row, seed) in src_ids.iter().enumerate() {
             let Some(node) = seed else { continue };
             // The query equates the destination with an input node: a NULL
@@ -452,15 +536,20 @@ async fn expand_bfs(
                 Some(ids) if ids.is_null(row) => continue,
                 Some(ids) => Some(ids.value(row)),
             };
-            for emission in bfs_emit_seed(cfg, &mut adjacency, row, node, required_dst)? {
+            let seed_paths =
+                bfs_emit_seed(cfg, &mut adjacency, row, node, required_dst, reservation)?;
+            for emission in seed_paths {
                 pending_hops = pending_hops.saturating_add(emission.2.len());
+                pending_bytes = pending_bytes.saturating_add(emission_bytes(emission.2.len()));
                 pending.push(emission);
                 if pending.len() >= max_rows || pending_hops >= EXPAND_BATCH_MAX_HOPS {
-                    let out = expand_chunk(cfg, &input, &pending)?;
+                    let out = expand_chunk(cfg, &input, &pending, reservation)?;
                     pending.clear();
+                    reservation.shrink(pending_bytes);
                     pending_hops = 0;
+                    pending_bytes = 0;
                     sent_any = true;
-                    if tx.send(Ok(out)).await.is_err() {
+                    if !send_chunk(tx, out, reservation).await {
                         return Ok(());
                     }
                 }
@@ -468,11 +557,13 @@ async fn expand_bfs(
         }
         if !pending.is_empty() {
             sent_any = true;
-            let out = expand_chunk(cfg, &input, &pending)?;
-            if tx.send(Ok(out)).await.is_err() {
+            let out = expand_chunk(cfg, &input, &pending, reservation)?;
+            reservation.shrink(pending_bytes);
+            if !send_chunk(tx, out, reservation).await {
                 return Ok(());
             }
         }
+        reservation.shrink(input_bytes);
     }
     // No matched paths → one empty output under the planned schema. A closed
     // receiver only means the consumer is gone.
@@ -485,10 +576,32 @@ async fn expand_bfs(
 }
 
 /// Build one output batch for `emissions` (a bounded slice of the traversal).
+///
+/// The sets, edge records and node batch it builds are charged while it runs and
+/// released before it returns; the returned batch stays charged until
+/// [`send_chunk`] hands it on.
 fn expand_chunk(
     cfg: &ExpandConfig,
     input: &RecordBatch,
     emissions: &[Emission],
+    reservation: &mut MemoryReservation,
+) -> Result<RecordBatch, GfError> {
+    let baseline = reservation.size();
+    let out = build_chunk(cfg, input, emissions, reservation)?;
+    let held = reservation.size().saturating_sub(baseline);
+    reservation.shrink(held.saturating_sub(out.get_array_memory_size()));
+    Ok(out)
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one function owns the batch assembly and every charge made for what it holds"
+)]
+fn build_chunk(
+    cfg: &ExpandConfig,
+    input: &RecordBatch,
+    emissions: &[Emission],
+    reservation: &mut MemoryReservation,
 ) -> Result<RecordBatch, GfError> {
     use std::collections::HashMap;
 
@@ -500,6 +613,7 @@ fn expand_chunk(
         .iter()
         .flat_map(|(_, _, path)| path.iter().copied())
         .collect();
+    grow_reservation(reservation, hash_table_bytes(traversed.capacity(), 8))?;
 
     // Edge records (public identity + rel type) keyed by edge_id, for assembling
     // the per-path relationship list (#709) — read lazily for the traversed
@@ -520,7 +634,15 @@ fn expand_chunk(
         ),
     }
     .map_err(|e| exec_err(e.to_string()))?;
+    grow_reservation(
+        reservation,
+        edge_batches
+            .iter()
+            .map(RecordBatch::get_array_memory_size)
+            .sum(),
+    )?;
     let edge_records = build_edge_records(cfg, &edge_batches)?;
+    grow_reservation(reservation, edge_record_table_bytes(&edge_records))?;
 
     // --- Read nodes; map node_id -> row index for destination columns. ---
     // Lazily read only the reached destination node records (#838): the dst
@@ -528,6 +650,7 @@ fn expand_chunk(
     // row's seed, which is in `emissions`), so an index Hit no longer scans the
     // whole node table. Source columns come from the input batch, not here.
     let reached: std::collections::HashSet<u64> = emissions.iter().map(|(_, id, _)| *id).collect();
+    grow_reservation(reservation, hash_table_bytes(reached.capacity(), 8))?;
     let node_batches = graphforge_storage::read_nodes_filtered_from_files(
         &topology_for_provider(cfg.provider.as_ref(), &cfg.dir)?,
         &reached,
@@ -537,16 +660,23 @@ fn expand_chunk(
     // but guard defensively: with no node batch there is nothing to reach, so
     // emit zero rows rather than indexing into an empty Vec.
     let Some(first) = node_batches.first() else {
-        return Ok(RecordBatch::new_empty(cfg.out_schema.clone()));
+        let empty = RecordBatch::new_empty(cfg.out_schema.clone());
+        grow_reservation(reservation, empty.get_array_memory_size())?;
+        return Ok(empty);
     };
     let node_batch =
         concat_batches(&first.schema(), &node_batches).map_err(|e| exec_err(e.to_string()))?;
+    grow_reservation(reservation, node_batch.get_array_memory_size())?;
     let node_ids = u64_column(&node_batch, 1)?; // node_id is column 1
     let node_row: HashMap<u64, usize> = node_ids
         .iter()
         .enumerate()
         .filter_map(|(i, id)| id.map(|v| (v, i)))
         .collect();
+    grow_reservation(
+        reservation,
+        hash_table_bytes(node_row.capacity(), std::mem::size_of::<(u64, usize)>()),
+    )?;
 
     // --- Materialise the output batch via `take` on input + node columns. ---
     let to_u32 = |v: usize| -> Result<u32, GfError> {
@@ -583,7 +713,10 @@ fn expand_chunk(
     // path, in schema order (last). Built from each path's ordered edge ids,
     // plus the relation's edge properties (#755).
     columns.push(build_edge_list_column(cfg, emissions, &edge_records)?);
-    RecordBatch::try_new(cfg.out_schema.clone(), columns).map_err(|e| exec_err(e.to_string()))
+    let out = RecordBatch::try_new(cfg.out_schema.clone(), columns)
+        .map_err(|e| exec_err(e.to_string()))?;
+    grow_reservation(reservation, out.get_array_memory_size())?;
+    Ok(out)
 }
 
 /// BFS one source seed over `adjacency`, with per-path relationship
@@ -592,29 +725,39 @@ fn expand_chunk(
 ///
 /// `min_hops == 0` (Cypher `*0..`) emits the 0-hop source-to-self path (empty
 /// edge list); extension stops once `max_hops` is reached.
+///
+/// Every queued path ([`path_state_bytes`]) and emitted path ([`emission_bytes`])
+/// is charged to `reservation` when created; a queued path is released once
+/// expanded. The returned emissions stay charged: the caller releases them when
+/// the batch carrying them is sent.
 fn bfs_emit_seed(
     cfg: &ExpandConfig,
     adjacency: &mut adjacency::AdjacencyReader<'_>,
     input_row: usize,
     seed: u64,
     required_dst: Option<u64>,
+    reservation: &mut MemoryReservation,
 ) -> Result<Vec<Emission>, GfError> {
     use std::collections::VecDeque;
 
     let mut emissions: Vec<Emission> = Vec::new();
     let mut queue: VecDeque<PathState> = VecDeque::new();
-    queue.push_back(PathState {
+    let seed_state = PathState {
         node: seed,
         edge_path: Vec::new(),
         hops: 0,
         input_row,
-    });
+    };
+    grow_reservation(reservation, path_state_bytes(&seed_state))?;
+    queue.push_back(seed_state);
     while let Some(p) = queue.pop_front() {
         let in_range = p.hops >= cfg.min_hops && cfg.max_hops.is_none_or(|m| p.hops <= m);
         if in_range && required_dst.is_none_or(|dst| dst == p.node) {
+            grow_reservation(reservation, emission_bytes(p.edge_path.len()))?;
             emissions.push((p.input_row, p.node, p.edge_path.clone()));
         }
         if cfg.max_hops.is_some_and(|m| p.hops >= m) {
+            reservation.shrink(path_state_bytes(&p));
             continue;
         }
         adjacency.with_neighbors(p.node, |neighbors| {
@@ -625,14 +768,18 @@ fn bfs_emit_seed(
                 let mut edge_path = Vec::with_capacity(p.edge_path.len() + 1);
                 edge_path.extend_from_slice(&p.edge_path);
                 edge_path.push(edge_id);
-                queue.push_back(PathState {
+                let state = PathState {
                     node: next,
                     edge_path,
                     hops: p.hops + 1,
                     input_row: p.input_row,
-                });
+                };
+                grow_reservation(reservation, path_state_bytes(&state))?;
+                queue.push_back(state);
             }
-        })?;
+            Ok::<(), GfError>(())
+        })??;
+        reservation.shrink(path_state_bytes(&p));
     }
     Ok(emissions)
 }

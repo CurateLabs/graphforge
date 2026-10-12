@@ -689,3 +689,251 @@ async fn explain_display_shows_adjacency_status() {
     assert!(line.contains("adjacency=building"), "got: {line}");
     assert!(line.contains("rel=KNOWS"), "got: {line}");
 }
+
+// ---------------------------------------------------------------------------
+// Memory accounting (#1987)
+// ---------------------------------------------------------------------------
+
+mod memory {
+    use super::*;
+    use std::fmt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use datafusion::execution::memory_pool::{
+        GreedyMemoryPool, MemoryLimit, MemoryPool, MemoryReservation,
+    };
+    use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+    use datafusion::prelude::SessionConfig;
+
+    /// A greedy pool that remembers the highest total it ever held.
+    #[derive(Debug)]
+    struct PeakPool {
+        inner: GreedyMemoryPool,
+        peak: AtomicUsize,
+    }
+
+    impl PeakPool {
+        fn new(limit: usize) -> Arc<Self> {
+            Arc::new(Self {
+                inner: GreedyMemoryPool::new(limit),
+                peak: AtomicUsize::new(0),
+            })
+        }
+
+        fn peak(&self) -> usize {
+            self.peak.load(Ordering::SeqCst)
+        }
+
+        fn observe(&self) {
+            self.peak.fetch_max(self.inner.reserved(), Ordering::SeqCst);
+        }
+    }
+
+    impl fmt::Display for PeakPool {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "PeakPool({})", self.inner)
+        }
+    }
+
+    impl MemoryPool for PeakPool {
+        fn name(&self) -> &str {
+            "PeakPool"
+        }
+
+        fn grow(&self, reservation: &MemoryReservation, additional: usize) {
+            self.inner.grow(reservation, additional);
+            self.observe();
+        }
+
+        fn shrink(&self, reservation: &MemoryReservation, shrink: usize) {
+            self.inner.shrink(reservation, shrink);
+        }
+
+        fn try_grow(
+            &self,
+            reservation: &MemoryReservation,
+            additional: usize,
+        ) -> datafusion::error::Result<()> {
+            self.inner.try_grow(reservation, additional)?;
+            self.observe();
+            Ok(())
+        }
+
+        fn reserved(&self) -> usize {
+            self.inner.reserved()
+        }
+
+        fn memory_limit(&self) -> MemoryLimit {
+            self.inner.memory_limit()
+        }
+    }
+
+    /// A root with `leaves` outgoing `KNOWS` edges. Returns `[root, leaf, ...]`.
+    fn write_star(dir: &Path, leaves: usize) -> Vec<u64> {
+        let mut w = GraphWriter::open_at(dir, OntologyMode::Strict, TS).unwrap();
+        let uuids: Vec<Uuid> = (0..=leaves).map(|_| new_v7()).collect();
+        let ids: Vec<u64> = uuids
+            .iter()
+            .map(|u| w.create_node(*u, PERSON).unwrap())
+            .collect();
+        for leaf in &uuids[1..] {
+            w.create_edge(new_v7(), "KNOWS", &uuids[0], leaf).unwrap();
+        }
+        w.flush().unwrap();
+        ids
+    }
+
+    /// The complete directed graph on `nodes` nodes (every ordered pair is a
+    /// `KNOWS` edge): `nodes * (nodes - 1)` edges, and from any node
+    /// `(nodes - 1) + (nodes - 1)^2` paths of one or two hops. Returns the ids.
+    fn write_complete(dir: &Path, nodes: usize) -> Vec<u64> {
+        let mut w = GraphWriter::open_at(dir, OntologyMode::Strict, TS).unwrap();
+        let uuids: Vec<Uuid> = (0..nodes).map(|_| new_v7()).collect();
+        let ids: Vec<u64> = uuids
+            .iter()
+            .map(|u| w.create_node(*u, PERSON).unwrap())
+            .collect();
+        for (from, a) in uuids.iter().enumerate() {
+            for (to, b) in uuids.iter().enumerate() {
+                if from != to {
+                    w.create_edge(new_v7(), "KNOWS", a, b).unwrap();
+                }
+            }
+        }
+        w.flush().unwrap();
+        ids
+    }
+
+    /// Run `KNOWS*min..max` from `seeds` over the graph in `dir`.
+    async fn run_expand_in(
+        pool: Arc<dyn MemoryPool>,
+        dir: &Path,
+        hops: (u16, u16),
+        seeds: Vec<u64>,
+    ) -> datafusion::error::Result<Vec<RecordBatch>> {
+        let node = make_node(dir, Direction::Out, hops.0, Some(hops.1), 0, 1);
+        let runtime = RuntimeEnvBuilder::new()
+            .with_memory_pool(pool)
+            .build_arc()
+            .unwrap();
+        let ctx = SessionContext::new_with_config_rt(SessionConfig::new(), runtime);
+        let batch =
+            RecordBatch::try_new(frontier_schema(), vec![Arc::new(UInt64Array::from(seeds))])
+                .unwrap();
+        let input: Arc<dyn ExecutionPlan> = ctx
+            .read_batch(batch)
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        let exec = make_exec(dir, OntologyMode::Strict, &node, input);
+        collect(exec, ctx.task_ctx()).await
+    }
+
+    /// `KNOWS*1..1` from the root of a `leaves`-leaf star.
+    async fn run_star(
+        pool: Arc<dyn MemoryPool>,
+        leaves: usize,
+    ) -> (datafusion::error::Result<Vec<RecordBatch>>, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let ids = write_star(dir.path(), leaves);
+        let result = run_expand_in(pool, dir.path(), (1, 1), vec![ids[0]]).await;
+        (result, dir)
+    }
+
+    fn rows(batches: &[RecordBatch]) -> usize {
+        batches.iter().map(RecordBatch::num_rows).sum()
+    }
+
+    /// The peak reservation of `KNOWS*1..1` from one root over `LEAVES`
+    /// leaves is bounded by the per-path formulas, and every byte is returned
+    /// once the stream ends.
+    ///
+    /// Lower bound: every leaf path is queued at once and each queued path is
+    /// charged at least `2 * size_of::<PathState>()` = 96 bytes. Upper bound,
+    /// labelled generous: 2 KiB per leaf path covers the charged queued path
+    /// (104 bytes), emission (88 bytes), edge record (about 100 bytes), node
+    /// batch, node-id map and the output batch.
+    #[tokio::test]
+    async fn peak_reservation_follows_the_per_path_formula_and_is_released() {
+        const LEAVES: usize = 2_000;
+        let pool = PeakPool::new(usize::MAX / 2);
+        let (result, _dir) = run_star(pool.clone(), LEAVES).await;
+        let batches = result.unwrap();
+        assert_eq!(rows(&batches), LEAVES);
+        drop(batches);
+        assert!(
+            pool.peak() >= LEAVES * 96,
+            "peak {} is below the queued-path lower bound {}",
+            pool.peak(),
+            LEAVES * 96
+        );
+        assert!(
+            pool.peak() <= LEAVES * 2_048,
+            "peak {} exceeds the 2 KiB per path bound {}",
+            pool.peak(),
+            LEAVES * 2_048
+        );
+        assert_eq!(pool.reserved(), 0, "reservation leaked after the stream");
+    }
+
+    /// The reservation tracks live state, not the whole result: once the output
+    /// exceeds one batch (65,536 paths), doubling the seeds, and so the result,
+    /// leaves the peak where it was. On the complete graph on 100 nodes each
+    /// seed has 99 + 99^2 = 9,900 paths, so 10 seeds (99,000 paths) already span
+    /// two batches and 20 seeds (198,000 paths) four; retaining the result
+    /// would double the peak, and the labelled tolerance is 25%.
+    #[tokio::test]
+    async fn peak_reservation_is_independent_of_result_size_beyond_one_batch() {
+        const NODES: usize = 100;
+        const PER_SEED: usize = (NODES - 1) + (NODES - 1) * (NODES - 1);
+        let dir = TempDir::new().unwrap();
+        let ids = write_complete(dir.path(), NODES);
+
+        let ten = PeakPool::new(usize::MAX / 2);
+        let batches = run_expand_in(ten.clone(), dir.path(), (1, 2), ids[..10].to_vec())
+            .await
+            .unwrap();
+        assert_eq!(rows(&batches), 10 * PER_SEED);
+        assert!(batches.len() >= 2, "99,000 paths must span two batches");
+        assert!(batches.iter().all(|batch| batch.num_rows() <= 65_536));
+        drop(batches);
+        assert_eq!(ten.reserved(), 0, "reservation leaked after the stream");
+
+        let twenty = PeakPool::new(usize::MAX / 2);
+        let batches = run_expand_in(twenty.clone(), dir.path(), (1, 2), ids[..20].to_vec())
+            .await
+            .unwrap();
+        assert_eq!(rows(&batches), 20 * PER_SEED);
+        drop(batches);
+        assert_eq!(twenty.reserved(), 0, "reservation leaked after the stream");
+
+        assert!(
+            ten.peak() >= PER_SEED * 96,
+            "peak {} is below one seed's emitted-path lower bound {}",
+            ten.peak(),
+            PER_SEED * 96
+        );
+        assert!(
+            twenty.peak() * 4 <= ten.peak() * 5,
+            "peak grew with the result: {} bytes for 10 seeds, {} for 20",
+            ten.peak(),
+            twenty.peak()
+        );
+    }
+
+    /// A pool too small for the path state fails the query naming the consumer;
+    /// it neither succeeds unbounded nor panics.
+    #[tokio::test]
+    async fn exhausted_pool_fails_naming_the_path_state_consumer() {
+        let pool = PeakPool::new(64 * 1024);
+        let (result, _dir) = run_star(pool.clone(), 2_000).await;
+        let message = result.unwrap_err().to_string();
+        assert!(
+            message.contains("VarLenExpand path state") && message.contains("Resources exhausted"),
+            "{message}"
+        );
+        assert!(pool.peak() <= 64 * 1024, "the pool limit was exceeded");
+        assert_eq!(pool.reserved(), 0, "reservation leaked after the failure");
+    }
+}
