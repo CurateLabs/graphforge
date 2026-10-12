@@ -5,9 +5,11 @@ use std::sync::Arc;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::common::{DFSchema, Result, tree_node::Transformed};
 use datafusion::logical_expr::utils::{conjunction, split_conjunction};
-use datafusion::logical_expr::{Expr, ExprSchemable, Filter, LogicalPlan, Operator};
+use datafusion::logical_expr::{
+    Expr, ExprSchemable, Extension, Filter, LogicalPlan, Operator, UserDefinedLogicalNode,
+};
 use datafusion::optimizer::{ApplyOrder, OptimizerConfig, OptimizerRule};
-use graphforge_plan::ExpandNode;
+use graphforge_plan::{ExpandNode, VarLenExpandNode};
 
 /// Move total, deterministic input predicates before required fixed expansion.
 ///
@@ -26,6 +28,7 @@ pub fn optimizer_rules() -> Vec<Arc<dyn OptimizerRule + Send + Sync>> {
         .position(|rule| rule.name() == "push_down_filter")
         .expect("pinned DataFusion optimizer includes filter pushdown");
     rules.insert(position + 1, Arc::new(FixedExpandInputPredicates));
+    rules.insert(position + 2, Arc::new(VarLenExpandInputPredicates));
     // Last, so every filter has reached its final place before it is offered
     // to the property scan that can use it.
     rules.push(Arc::new(crate::stored_equality::StoredEqualityHints));
@@ -136,6 +139,53 @@ fn label_membership(
         }
 }
 
+/// Move the total conjuncts of the filter `plan` that read only `input`'s
+/// columns onto `input`, and rebuild the expansion over that filtered input with
+/// `rebuild`. The remaining conjuncts stay in a filter above the expansion.
+fn push_input_predicates(
+    plan: LogicalPlan,
+    input: &Arc<LogicalPlan>,
+    rebuild: impl FnOnce(Arc<LogicalPlan>) -> LogicalPlan,
+) -> Result<Transformed<LogicalPlan>> {
+    let LogicalPlan::Filter(filter) = &plan else {
+        return Ok(Transformed::no(plan));
+    };
+    // Do not alter which rows reach a potentially failing or volatile
+    // residual expression in the same filter.
+    if !total_predicate(&filter.predicate, filter.input.schema()) {
+        return Ok(Transformed::no(plan));
+    }
+    let (push, keep): (Vec<_>, Vec<_>) = split_conjunction(&filter.predicate)
+        .into_iter()
+        .cloned()
+        .partition(|expr| {
+            let columns = expr.column_refs();
+            !crate::expr::is_fixed_relationship_disjoint(expr, filter.input.schema())
+                && !columns.is_empty()
+                && columns
+                    .iter()
+                    .all(|column| column.relation.is_some() && input.schema().has_column(column))
+        });
+    let Some(predicate) = conjunction(push) else {
+        return Ok(Transformed::no(plan));
+    };
+    let replacement = rebuild(Arc::new(LogicalPlan::Filter(Filter::try_new(
+        predicate,
+        Arc::clone(input),
+    )?)));
+    let replacement = match conjunction(keep) {
+        Some(predicate) => LogicalPlan::Filter(Filter::try_new(predicate, Arc::new(replacement))?),
+        None => replacement,
+    };
+    Ok(Transformed::yes(replacement))
+}
+
+fn extension(node: impl UserDefinedLogicalNode + 'static) -> LogicalPlan {
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(node),
+    })
+}
+
 impl OptimizerRule for FixedExpandInputPredicates {
     fn name(&self) -> &'static str {
         "graphforge_fixed_expand_input_predicates"
@@ -153,46 +203,61 @@ impl OptimizerRule for FixedExpandInputPredicates {
         let LogicalPlan::Filter(filter) = &plan else {
             return Ok(Transformed::no(plan));
         };
-        let LogicalPlan::Extension(extension) = filter.input.as_ref() else {
+        let LogicalPlan::Extension(node) = filter.input.as_ref() else {
             return Ok(Transformed::no(plan));
         };
-        let Some(expand) = extension.node.as_any().downcast_ref::<ExpandNode>() else {
-            return Ok(Transformed::no(plan));
-        };
-        // Do not alter which rows reach a potentially failing or volatile
-        // residual expression in the same filter.
-        if !total_predicate(&filter.predicate, filter.input.schema()) {
-            return Ok(Transformed::no(plan));
-        }
-        let (push, keep): (Vec<_>, Vec<_>) = split_conjunction(&filter.predicate)
-            .into_iter()
-            .cloned()
-            .partition(|expr| {
-                let columns = expr.column_refs();
-                !crate::expr::is_fixed_relationship_disjoint(expr, filter.input.schema())
-                    && !columns.is_empty()
-                    && columns.iter().all(|column| {
-                        column.relation.is_some() && expand.input.schema().has_column(column)
-                    })
-            });
-        let Some(predicate) = conjunction(push) else {
+        let Some(expand) = node.node.as_any().downcast_ref::<ExpandNode>() else {
             return Ok(Transformed::no(plan));
         };
         let mut replacement = expand.clone();
-        replacement.input = Arc::new(LogicalPlan::Filter(Filter::try_new(
-            predicate,
-            Arc::clone(&expand.input),
-        )?));
-        let replacement = LogicalPlan::Extension(datafusion::logical_expr::Extension {
-            node: Arc::new(replacement),
-        });
-        let replacement = match conjunction(keep) {
-            Some(predicate) => {
-                LogicalPlan::Filter(Filter::try_new(predicate, Arc::new(replacement))?)
-            }
-            None => replacement,
+        let input = Arc::clone(&expand.input);
+        push_input_predicates(plan, &input, move |filtered| {
+            replacement.input = filtered;
+            extension(replacement)
+        })
+    }
+}
+
+/// Move total, deterministic input predicates before a variable-length
+/// expansion.
+///
+/// The expansion runs once per input row and its output extends that row, so a
+/// predicate over the input's own columns selects the same seed rows before the
+/// expansion as after it. Moving it lets a stored-property equality on the seed
+/// reach the scan that supplies the seed, instead of the expansion starting
+/// from every node of the graph (#1984).
+#[derive(Debug)]
+pub struct VarLenExpandInputPredicates;
+
+impl OptimizerRule for VarLenExpandInputPredicates {
+    fn name(&self) -> &'static str {
+        "graphforge_var_len_expand_input_predicates"
+    }
+
+    fn apply_order(&self) -> Option<ApplyOrder> {
+        Some(ApplyOrder::TopDown)
+    }
+
+    fn rewrite(
+        &self,
+        plan: LogicalPlan,
+        _: &dyn OptimizerConfig,
+    ) -> Result<Transformed<LogicalPlan>> {
+        let LogicalPlan::Filter(filter) = &plan else {
+            return Ok(Transformed::no(plan));
         };
-        Ok(Transformed::yes(replacement))
+        let LogicalPlan::Extension(node) = filter.input.as_ref() else {
+            return Ok(Transformed::no(plan));
+        };
+        let Some(expand) = node.node.as_any().downcast_ref::<VarLenExpandNode>() else {
+            return Ok(Transformed::no(plan));
+        };
+        let mut replacement = expand.clone();
+        let input = Arc::clone(&expand.input);
+        push_input_predicates(plan, &input, move |filtered| {
+            replacement.input = filtered;
+            extension(replacement)
+        })
     }
 }
 
@@ -201,7 +266,7 @@ mod tests {
     use super::*;
     use datafusion::arrow::datatypes::Field;
     use datafusion::common::{Column, TableReference};
-    use datafusion::logical_expr::{EmptyRelation, Extension, col, lit};
+    use datafusion::logical_expr::{EmptyRelation, col, lit};
     use datafusion::optimizer::OptimizerContext;
     use graphforge_ir::Direction;
 
@@ -370,6 +435,115 @@ mod tests {
             lit(1_i64),
         );
         assert!(!total_predicate(&wrong, &schema));
+    }
+
+    fn var_len() -> VarLenExpandNode {
+        let LogicalPlan::Extension(expanded) = expanded() else {
+            unreachable!();
+        };
+        let fixed = expanded.node.as_any().downcast_ref::<ExpandNode>().unwrap();
+        VarLenExpandNode::new(
+            Arc::clone(&fixed.input),
+            "*",
+            0,
+            None,
+            0,
+            1,
+            2,
+            Direction::Out,
+            None,
+            vec![Arc::new(Field::new("score", DataType::Int64, true))],
+            graphforge_plan::var_len_edge_list_field(&[]),
+        )
+    }
+
+    fn rewrite_var_len(node: VarLenExpandNode, predicate: Expr) -> Transformed<LogicalPlan> {
+        VarLenExpandInputPredicates
+            .rewrite(
+                LogicalPlan::Filter(Filter::try_new(predicate, Arc::new(extension(node))).unwrap()),
+                &OptimizerContext::new(),
+            )
+            .unwrap()
+    }
+
+    fn pushed_below(result: &Transformed<LogicalPlan>) -> (Option<Expr>, Expr, VarLenExpandNode) {
+        let (residual, expansion) = match &result.data {
+            LogicalPlan::Filter(residual) => {
+                (Some(residual.predicate.clone()), (*residual.input).clone())
+            }
+            other => (None, other.clone()),
+        };
+        let LogicalPlan::Extension(extension) = &expansion else {
+            panic!("the expansion must remain");
+        };
+        let node = extension
+            .node
+            .as_any()
+            .downcast_ref::<VarLenExpandNode>()
+            .unwrap()
+            .clone();
+        let LogicalPlan::Filter(input) = node.input.as_ref() else {
+            panic!("the input predicate must precede the expansion");
+        };
+        (residual, input.predicate.clone(), node)
+    }
+
+    #[test]
+    fn variable_length_seed_predicate_precedes_the_expansion() {
+        let result = rewrite_var_len(
+            var_len(),
+            column("var_0")
+                .eq(lit(7_i64))
+                .and(column("var_1").gt(lit(2_i64))),
+        );
+        assert!(result.transformed);
+        let (residual, input, node) = pushed_below(&result);
+        assert_eq!(residual, Some(column("var_1").gt(lit(2_i64))));
+        assert_eq!(input, column("var_0").eq(lit(7_i64)));
+        assert_eq!(
+            node.schema(),
+            var_len().schema(),
+            "moving a filter below the expansion leaves its output schema alone"
+        );
+    }
+
+    #[test]
+    fn variable_length_expansion_keeps_everything_but_its_input() {
+        let original = var_len()
+            .with_bound_destination(Some("var_0".to_owned()))
+            .into_reachability();
+        let result = rewrite_var_len(original.clone(), column("var_0").eq(lit(7_i64)));
+        assert!(result.transformed);
+        let (residual, _, node) = pushed_below(&result);
+        assert_eq!(residual, None);
+        assert_eq!(node.mode, original.mode);
+        assert_eq!(node.bound_destination, original.bound_destination);
+        assert_eq!(node.min_hops, original.min_hops);
+        assert_eq!(node.max_hops, original.max_hops);
+        assert_eq!(node.edge_var, original.edge_var);
+        assert_eq!(node.schema(), original.schema());
+    }
+
+    #[test]
+    fn variable_length_destination_and_failing_predicates_stay_above() {
+        assert!(!rewrite_var_len(var_len(), column("var_1").eq(lit(7_i64))).transformed);
+        assert!(
+            !rewrite_var_len(
+                var_len(),
+                column("var_0")
+                    .eq(lit(7_i64))
+                    .and((column("var_1") / lit(0_i64)).gt(lit(0_i64)))
+            )
+            .transformed
+        );
+        let random = datafusion::functions::math::random().call(vec![]);
+        assert!(
+            !rewrite_var_len(
+                var_len(),
+                column("var_0").eq(lit(7_i64)).and(random.gt(lit(0.5)))
+            )
+            .transformed
+        );
     }
 
     #[test]
