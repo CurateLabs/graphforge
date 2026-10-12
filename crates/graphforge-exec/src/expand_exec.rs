@@ -34,7 +34,6 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::Partitioning;
 use datafusion::physical_plan::PlanProperties;
 use datafusion::physical_plan::SendableRecordBatchStream;
-use datafusion::physical_plan::collect;
 use datafusion::physical_plan::execution_plan::Boundedness;
 use datafusion::physical_plan::execution_plan::EmissionType;
 use datafusion::physical_plan::stream::RecordBatchReceiverStream;
@@ -213,9 +212,9 @@ impl ExecutionPlan for VarLenExpandExec {
                 "VarLenExpandExec only has partition 0, got {partition}"
             )));
         }
-        // The input frontier is collected first; the traversal then runs as a
-        // task that sends bounded batches through a small channel, so the paths
-        // of every seed never exist at once (#1986).
+        // The traversal runs as a task that consumes the input as it arrives and
+        // sends bounded batches through a small channel, so the paths of every
+        // seed never exist at once (#1986).
         let input = self.input.clone();
         let cfg = ExpandConfig {
             rel_type_name: self.rel_type_name.clone(),
@@ -232,10 +231,8 @@ impl ExecutionPlan for VarLenExpandExec {
         let mut builder = RecordBatchReceiverStream::builder(self.schema.clone(), 2);
         let tx = builder.tx();
         builder.spawn(async move {
-            let input_batches = collect(input, context).await?;
-            expand_bfs(&cfg, &input_batches, &tx)
-                .await
-                .map_err(to_df_err)
+            let input = datafusion::physical_plan::execute_stream(input, context)?;
+            expand_bfs(&cfg, input, &tx).await.map_err(to_df_err)
         });
         Ok(builder.build())
     }
@@ -381,45 +378,17 @@ type Emission = (usize, u64, Vec<u64>);
 /// Output columns = the input (source) columns, then the destination node's
 /// `TOPOLOGY_NODES_SCHEMA` columns, then a trailing `List<Struct>` edge-list
 /// column (the relationship list bound to the edge var, #709) — for every path
-/// whose hop count lands in `[min_hops, max_hops]`. Seeds are expanded in input
-/// order and each batch is built and sent before the next seed is expanded, so
-/// memory is bounded by one batch plus one seed's paths. Stops quietly once the
+/// whose hop count lands in `[min_hops, max_hops]`. Input batches are consumed
+/// as they arrive and seeds are expanded in input order; each output batch is
+/// built and sent before the next seed is expanded, so memory is bounded by one
+/// input batch, one output batch and one seed's paths. Stops quietly once the
 /// consumer is gone.
 async fn expand_bfs(
     cfg: &ExpandConfig,
-    input_batches: &[RecordBatch],
+    mut input: SendableRecordBatchStream,
     tx: &tokio::sync::mpsc::Sender<Result<RecordBatch, DataFusionError>>,
 ) -> Result<(), GfError> {
-    use arrow::compute::concat_batches;
-
     let exec_err = |m: String| GfError::Execution(m);
-
-    // --- Collect the source frontier (one combined batch). ---
-    let input_schema = input_batches
-        .first()
-        .map_or_else(|| cfg.out_schema.clone(), RecordBatch::schema);
-    let input =
-        concat_batches(&input_schema, input_batches).map_err(|e| exec_err(e.to_string()))?;
-    // Seed column is resolved by qualifier at construction (`var_<src>.node_id`),
-    // so chained expansions — whose input carries several `node_id` columns —
-    // start from the correct source rather than the first `node_id`.
-    if cfg.src_col_idx >= input.num_columns() {
-        return Err(exec_err(format!(
-            "VarLenExpand source column index {} out of range ({} input columns)",
-            cfg.src_col_idx,
-            input.num_columns()
-        )));
-    }
-    let src_ids = u64_column(&input, cfg.src_col_idx)?;
-
-    // Every emitted path copies one input row, so the rows per batch follow the
-    // input's average row width.
-    let row_bytes = input
-        .get_array_memory_size()
-        .checked_div(input.num_rows())
-        .unwrap_or(0)
-        .max(1);
-    let max_rows = (EXPAND_BATCH_INPUT_BYTES / row_bytes).clamp(1, EXPAND_BATCH_MAX_ROWS);
 
     // --- Obtain the directed adjacency the traversal needs (#762). ---
     let mut adjacency = adjacency::AdjacencyReader::for_capture(
@@ -429,36 +398,62 @@ async fn expand_bfs(
         cfg.capture_epoch,
     )?;
 
-    let mut pending: Vec<Emission> = Vec::new();
-    let mut pending_hops = 0usize;
     let mut sent_any = false;
-    for (row, seed) in src_ids.iter().enumerate() {
-        let Some(node) = seed else { continue };
-        for emission in bfs_emit_seed(cfg, &mut adjacency, row, node)? {
-            pending_hops = pending_hops.saturating_add(emission.2.len());
-            pending.push(emission);
-            if pending.len() >= max_rows || pending_hops >= EXPAND_BATCH_MAX_HOPS {
-                let batch = expand_chunk(cfg, &input, &pending)?;
-                pending.clear();
-                pending_hops = 0;
-                sent_any = true;
-                if tx.send(Ok(batch)).await.is_err() {
-                    return Ok(());
+    while let Some(batch) = input.next().await {
+        let input = batch.map_err(GfError::from_execution_error)?;
+        // Seed column is resolved by qualifier at construction (`var_<src>.node_id`),
+        // so chained expansions — whose input carries several `node_id` columns —
+        // start from the correct source rather than the first `node_id`.
+        if cfg.src_col_idx >= input.num_columns() {
+            return Err(exec_err(format!(
+                "VarLenExpand source column index {} out of range ({} input columns)",
+                cfg.src_col_idx,
+                input.num_columns()
+            )));
+        }
+        let src_ids = u64_column(&input, cfg.src_col_idx)?;
+
+        // Every emitted path copies one input row, so the rows per batch follow
+        // the input's average row width.
+        let row_bytes = input
+            .get_array_memory_size()
+            .checked_div(input.num_rows())
+            .unwrap_or(0)
+            .max(1);
+        let max_rows = (EXPAND_BATCH_INPUT_BYTES / row_bytes).clamp(1, EXPAND_BATCH_MAX_ROWS);
+
+        let mut pending: Vec<Emission> = Vec::new();
+        let mut pending_hops = 0usize;
+        for (row, seed) in src_ids.iter().enumerate() {
+            let Some(node) = seed else { continue };
+            for emission in bfs_emit_seed(cfg, &mut adjacency, row, node)? {
+                pending_hops = pending_hops.saturating_add(emission.2.len());
+                pending.push(emission);
+                if pending.len() >= max_rows || pending_hops >= EXPAND_BATCH_MAX_HOPS {
+                    let out = expand_chunk(cfg, &input, &pending)?;
+                    pending.clear();
+                    pending_hops = 0;
+                    sent_any = true;
+                    if tx.send(Ok(out)).await.is_err() {
+                        return Ok(());
+                    }
                 }
             }
         }
-    }
-    if !pending.is_empty() {
-        sent_any = true;
-        let batch = expand_chunk(cfg, &input, &pending)?;
-        if tx.send(Ok(batch)).await.is_err() {
-            return Ok(());
+        if !pending.is_empty() {
+            sent_any = true;
+            let out = expand_chunk(cfg, &input, &pending)?;
+            if tx.send(Ok(out)).await.is_err() {
+                return Ok(());
+            }
         }
     }
-    // No matched paths → one empty output under the planned schema.
+    // No matched paths → one empty output under the planned schema. A closed
+    // receiver only means the consumer is gone.
     if !sent_any {
-        // A closed receiver only means the consumer is gone.
-        let _ = tx.send(Ok(RecordBatch::new_empty(cfg.out_schema.clone()))).await;
+        let _ = tx
+            .send(Ok(RecordBatch::new_empty(cfg.out_schema.clone())))
+            .await;
     }
     Ok(())
 }
