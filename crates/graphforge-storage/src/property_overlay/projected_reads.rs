@@ -1,16 +1,19 @@
 //! Projected reads for authenticated property overlays.
 
+use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
+
 use super::selective_reads::RowGroupSelection;
+use super::uuid_pages::wanted_row_selection;
 use super::{
     Arc, Array, AtomicU64, AuthenticatedPropertyFragment, AuthenticatedPropertyInventory, BTreeMap,
-    BTreeSet, BooleanArray, CountingChunkReader, FragmentHandleGuard, GfError, LiveByteBudget,
-    Mutex, Ordering, PROPERTY_TOMBSTONE_FIELD, ParquetError, ParquetRecordBatchReader,
+    BTreeSet, BooleanArray, FragmentHandleGuard, GfError, LiveByteBudget, Mutex, Ordering,
+    PROPERTY_TOMBSTONE_FIELD, ParquetError, ParquetRecordBatchReader,
     ParquetRecordBatchReaderBuilder, Path, PropertyFile, PropertyInventoryOpenMetrics,
     PropertyOverlayLimits, PropertyOverlayMetrics, PropertyRouteKind, PropertySnapshotRow,
     ReadCounts, RecordBatch, SnapshotScratch, admitted_batch_rows,
-    authenticated_property_inventory_for_route, corrupt, io_error, read_property_targets,
-    snapshot_charge, validate_fragment_schema, validate_parquet_resource_admission,
-    visit_newest_property_snapshots,
+    authenticated_property_inventory_for_route, corrupt, counting_chunk_reader, io_error,
+    read_property_targets, snapshot_charge, validate_fragment_schema,
+    validate_parquet_resource_admission, visit_newest_property_snapshots,
 };
 
 impl AuthenticatedPropertyInventory {
@@ -238,34 +241,31 @@ fn open_projected_fragment(
     }
     let source_reservation = opened.file.reservation_bytes();
     context.budget.charge(source_reservation)?;
-    let source = CountingChunkReader {
-        length: opened.logical_length,
-        file: Arc::clone(&opened.file),
-        counts: context.counts.clone(),
-    };
-    let builder = ParquetRecordBatchReaderBuilder::try_new(source).map_err(parquet_error)?;
+    let source = counting_chunk_reader(&opened, context.counts.clone());
+    let footer =
+        ArrowReaderMetadata::load(&source, ArrowReaderOptions::new()).map_err(parquet_error)?;
     validate_fragment_schema(
-        builder.schema().as_ref(),
+        footer.schema().as_ref(),
         fragment.id,
         fragment.layout,
         context.kind,
         context.route,
     )?;
     let projected = projected_property_columns(
-        builder.schema().as_ref(),
+        footer.schema().as_ref(),
         context.kind,
         context.selected_properties,
     );
     let projection_mask = projected.as_ref().map(|roots| {
-        parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), roots.iter().copied())
+        parquet::arrow::ProjectionMask::roots(footer.parquet_schema(), roots.iter().copied())
     });
     let projected_leaves = projection_mask.as_ref().map(|mask| {
-        (0..builder.parquet_schema().num_columns())
+        (0..footer.parquet_schema().num_columns())
             .filter(|index| mask.leaf_included(*index))
             .collect::<BTreeSet<_>>()
     });
     let page_reservation_bytes = validate_parquet_resource_admission(
-        builder.metadata(),
+        footer.metadata(),
         context.limits,
         opened.file.as_ref(),
         context.counts,
@@ -277,35 +277,37 @@ fn open_projected_fragment(
         let mut retention = context.decoded.lock().expect("property retention lock");
         retention.page_peak = retention.page_peak.max(page_reservation_bytes);
     }
-    let builder = if let Some(mask) = projection_mask {
-        builder.with_projection(mask)
-    } else {
-        builder
-    };
     let selected_groups = context
         .row_groups
-        .select(builder.metadata(), context.kind.uuid_field());
+        .select(footer.metadata(), context.kind.uuid_field());
     // A nominated read decodes only the rows it names. The UUID column of the
-    // selected row groups is read first (one narrow column), and the full
-    // projection is then decoded for the matching rows alone, instead of
-    // decoding every row of each surviving row group.
-    let row_selection = match (&context.row_groups, selected_groups.as_deref()) {
-        (RowGroupSelection::Uuids(wanted), Some(groups)) if !groups.is_empty() => Some(
-            wanted_row_selection(
-                ParquetRecordBatchReaderBuilder::try_new(CountingChunkReader {
-                    length: opened.logical_length,
-                    file: Arc::clone(&opened.file),
-                    counts: context.counts.clone(),
-                })
-                .map_err(parquet_error)?,
+    // selected row groups is read first (one narrow column, and only the pages
+    // its page index leaves possible), and the full projection is then decoded
+    // for the matching rows alone, instead of decoding every row of each
+    // surviving row group.
+    let wanted_rows = match (&context.row_groups, selected_groups.as_deref()) {
+        (RowGroupSelection::Uuids(wanted), Some(groups)) if !groups.is_empty() => {
+            Some(wanted_row_selection(
+                &source,
+                &footer,
                 context.kind.uuid_field(),
                 groups,
                 *wanted,
                 admitted_batch_rows(context.limits),
-            )?
-            .0,
-        ),
+            )?)
+        }
         _ => None,
+    };
+    let (row_selection, paged) = match wanted_rows {
+        Some(rows) => (Some(rows.selection), rows.paged),
+        None => (None, None),
+    };
+    let builder =
+        ParquetRecordBatchReaderBuilder::new_with_metadata(source, paged.unwrap_or(footer));
+    let builder = if let Some(mask) = projection_mask {
+        builder.with_projection(mask)
+    } else {
+        builder
     };
     let builder = match selected_groups {
         Some(groups) => builder.with_row_groups(groups),
@@ -320,67 +322,6 @@ fn open_projected_fragment(
         .build()
         .map_err(parquet_error)?;
     Ok((reader, page_reservation_bytes, opened.file, opened.handle))
-}
-
-/// The rows of `groups` whose UUID is wanted, as a selection relative to the
-/// concatenation of those row groups. Only the UUID column is decoded. Order
-/// is validated here exactly as the row cursor validates it for decoded rows.
-pub(super) fn wanted_row_selection(
-    builder: ParquetRecordBatchReaderBuilder<CountingChunkReader>,
-    uuid_field: &str,
-    groups: &[usize],
-    wanted: &dyn crate::uuid_set::UuidMembership,
-    batch_rows: usize,
-) -> Result<(parquet::arrow::arrow_reader::RowSelection, u64), GfError> {
-    use parquet::arrow::arrow_reader::{RowSelection, RowSelector};
-
-    let root = builder
-        .schema()
-        .index_of(uuid_field)
-        .map_err(|_| corrupt("property fragment lacks its UUID column"))?;
-    let mask = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), [root]);
-    let reader = builder
-        .with_projection(mask)
-        .with_row_groups(groups.to_vec())
-        .with_batch_size(batch_rows)
-        .build()
-        .map_err(parquet_error)?;
-    let mut selectors: Vec<RowSelector> = Vec::new();
-    let mut push = |select: bool, count: usize| match selectors.last_mut() {
-        Some(last) if last.skip != select => last.row_count += count,
-        _ => selectors.push(if select {
-            RowSelector::select(count)
-        } else {
-            RowSelector::skip(count)
-        }),
-    };
-    let mut prior: Option<[u8; 16]> = None;
-    let mut rows_read = 0_u64;
-    for batch in reader {
-        let batch = batch.map_err(super::authenticated_arrow_error)?;
-        let column = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
-            .filter(|column| column.value_length() == 16)
-            .ok_or_else(|| corrupt("property UUID column is not FixedSizeBinary(16)"))?;
-        if column.null_count() != 0 {
-            return Err(corrupt("property UUID column contains null slots"));
-        }
-        for index in 0..column.len() {
-            let mut uuid = [0_u8; 16];
-            uuid.copy_from_slice(column.value(index));
-            // Rows of different row groups of one fragment stay ordered.
-            if prior.is_some_and(|before| before >= uuid) {
-                return Err(corrupt("property fragment UUIDs are duplicate or unsorted"));
-            }
-            prior = Some(uuid);
-            rows_read += 1;
-            push(wanted.contains_uuid(&uuid), 1);
-        }
-    }
-    crate::io_stats::record_property_uuid_selection(rows_read);
-    Ok((RowSelection::from(selectors), rows_read))
 }
 
 pub(super) struct ProjectedMetricSources<'a> {

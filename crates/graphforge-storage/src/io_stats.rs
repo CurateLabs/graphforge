@@ -149,6 +149,9 @@ pub(crate) struct Counters {
     edge_validation_fallbacks: AtomicU64,
     property_uuid_selections: AtomicU64,
     property_uuid_rows_decoded: AtomicU64,
+    property_uuid_pages_considered: AtomicU64,
+    property_uuid_pages_selected: AtomicU64,
+    property_uuid_index_fallbacks: AtomicU64,
     rewrite_commits: AtomicU64,
     topology_rewrite_existing_rows: AtomicU64,
     topology_rewrite_new_rows: AtomicU64,
@@ -237,6 +240,15 @@ pub struct IoSnapshot {
     pub property_uuid_selections: u64,
     /// UUID-column rows those reads decoded to locate wanted rows.
     pub property_uuid_rows_decoded: u64,
+    /// UUID-column pages the page index offered across the row groups those
+    /// reads selected.
+    pub property_uuid_pages_considered: u64,
+    /// UUID-column pages whose min/max range could hold a wanted UUID and were
+    /// therefore decoded.
+    pub property_uuid_pages_selected: u64,
+    /// Property reads that could not use the UUID page index (absent, unreadable
+    /// or failing its sort proof) and decoded the whole UUID column instead.
+    pub property_uuid_index_fallbacks: u64,
     /// Successful non-empty [`RewriteBatch`](crate::RewriteBatch) commits.
     /// This counts persistence cycles, not the number of files in a batch.
     pub rewrite_commits: u64,
@@ -312,6 +324,15 @@ pub fn snapshot() -> Option<IoSnapshot> {
         edge_validation_fallbacks: counters.edge_validation_fallbacks.load(Ordering::Relaxed),
         property_uuid_selections: counters.property_uuid_selections.load(Ordering::Relaxed),
         property_uuid_rows_decoded: counters.property_uuid_rows_decoded.load(Ordering::Relaxed),
+        property_uuid_pages_considered: counters
+            .property_uuid_pages_considered
+            .load(Ordering::Relaxed),
+        property_uuid_pages_selected: counters
+            .property_uuid_pages_selected
+            .load(Ordering::Relaxed),
+        property_uuid_index_fallbacks: counters
+            .property_uuid_index_fallbacks
+            .load(Ordering::Relaxed),
         rewrite_commits: counters.rewrite_commits.load(Ordering::Relaxed),
         topology_rewrite_existing_rows: counters
             .topology_rewrite_existing_rows
@@ -408,6 +429,15 @@ pub fn reset() {
             .store(0, Ordering::Relaxed);
         counters
             .property_uuid_rows_decoded
+            .store(0, Ordering::Relaxed);
+        counters
+            .property_uuid_pages_considered
+            .store(0, Ordering::Relaxed);
+        counters
+            .property_uuid_pages_selected
+            .store(0, Ordering::Relaxed);
+        counters
+            .property_uuid_index_fallbacks
             .store(0, Ordering::Relaxed);
         counters.rewrite_commits.store(0, Ordering::Relaxed);
         counters
@@ -635,6 +665,29 @@ pub(crate) fn record_property_uuid_selection(rows: u64) {
         counters
             .property_uuid_rows_decoded
             .fetch_add(rows, Ordering::Relaxed);
+    });
+}
+
+/// Record the UUID-column pages one page-indexed property read offered and
+/// decoded.
+pub(crate) fn record_property_uuid_pages(considered: u64, selected: u64) {
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters
+            .property_uuid_pages_considered
+            .fetch_add(considered, Ordering::Relaxed);
+        counters
+            .property_uuid_pages_selected
+            .fetch_add(selected, Ordering::Relaxed);
+    });
+}
+
+/// Record a property read that fell back to decoding the whole UUID column
+/// because the page index was absent, unreadable or failed its sort proof.
+pub(crate) fn record_property_uuid_index_fallback() {
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters
+            .property_uuid_index_fallbacks
+            .fetch_add(1, Ordering::Relaxed);
     });
 }
 
