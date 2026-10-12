@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable, Mapping, Sequence
-import contextlib
 from dataclasses import dataclass, field
 import hashlib
 from importlib.metadata import version
