@@ -482,6 +482,10 @@ async fn send_chunk(
 ///
 /// What is held between batches is charged to `reservation` (see
 /// [`VAR_LEN_CONSUMER`]); the pool refusing a charge fails the query.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one loop owns the input batches, the seeds and every charge made for what they hold"
+)]
 async fn expand_bfs(
     cfg: &ExpandConfig,
     mut input: SendableRecordBatchStream,
@@ -576,37 +580,19 @@ async fn expand_bfs(
                         return Ok(());
                     }
                 }
-                let seed_bytes = seed_emissions.iter().fold(0usize, |bytes, emission| {
-                    bytes.saturating_add(emission_bytes(emission.2.len()))
-                });
-                if let Some(sources) = load_chunk_sources(cfg, &seed_emissions, reservation)? {
-                    let mut start = 0usize;
-                    while start < seed_emissions.len() {
-                        let mut end = start;
-                        let mut hops = 0usize;
-                        while end < seed_emissions.len()
-                            && end - start < max_rows
-                            && hops < EXPAND_BATCH_MAX_HOPS
-                        {
-                            hops = hops.saturating_add(seed_emissions[end].2.len());
-                            end += 1;
-                        }
-                        let out = materialise_chunk(
-                            cfg,
-                            &input,
-                            &seed_emissions[start..end],
-                            &sources,
-                            reservation,
-                        )?;
-                        sent_any = true;
-                        if !send_chunk(tx, out, reservation).await {
-                            return Ok(());
-                        }
-                        start = end;
-                    }
-                    sources.release(reservation);
+                if !emit_large_seed(
+                    cfg,
+                    &input,
+                    &seed_emissions,
+                    max_rows,
+                    tx,
+                    reservation,
+                    &mut sent_any,
+                )
+                .await?
+                {
+                    return Ok(());
                 }
-                reservation.shrink(seed_bytes);
                 continue;
             }
             for emission in seed_emissions {
@@ -644,6 +630,53 @@ async fn expand_bfs(
             .await;
     }
     Ok(())
+}
+
+/// Build and send the output batches of a seed whose paths fill several of
+/// them. Its edges, destination nodes and edge properties are read once for the
+/// whole seed and sliced into batches of at most `max_rows` paths and
+/// [`EXPAND_BATCH_MAX_HOPS`] hops. `false` once the consumer is gone.
+async fn emit_large_seed(
+    cfg: &ExpandConfig,
+    input: &RecordBatch,
+    seed_emissions: &[Emission],
+    max_rows: usize,
+    tx: &tokio::sync::mpsc::Sender<Result<RecordBatch, DataFusionError>>,
+    reservation: &mut MemoryReservation,
+    sent_any: &mut bool,
+) -> Result<bool, GfError> {
+    let seed_bytes = seed_emissions.iter().fold(0usize, |bytes, emission| {
+        bytes.saturating_add(emission_bytes(emission.2.len()))
+    });
+    if let Some(sources) = load_chunk_sources(cfg, seed_emissions, reservation)? {
+        let mut start = 0usize;
+        while start < seed_emissions.len() {
+            let mut end = start;
+            let mut hops = 0usize;
+            while end < seed_emissions.len()
+                && end - start < max_rows
+                && hops < EXPAND_BATCH_MAX_HOPS
+            {
+                hops = hops.saturating_add(seed_emissions[end].2.len());
+                end += 1;
+            }
+            let out = materialise_chunk(
+                cfg,
+                input,
+                &seed_emissions[start..end],
+                &sources,
+                reservation,
+            )?;
+            *sent_any = true;
+            if !send_chunk(tx, out, reservation).await {
+                return Ok(false);
+            }
+            start = end;
+        }
+        sources.release(reservation);
+    }
+    reservation.shrink(seed_bytes);
+    Ok(true)
 }
 
 /// What materialising a set of emissions reads from storage: the identity of
@@ -896,18 +929,14 @@ fn expand_chunk(
     emissions: &[Emission],
     reservation: &mut MemoryReservation,
 ) -> Result<RecordBatch, GfError> {
-    match load_chunk_sources(cfg, emissions, reservation)? {
-        Some(sources) => {
-            let out = materialise_chunk(cfg, input, emissions, &sources, reservation)?;
-            sources.release(reservation);
-            Ok(out)
-        }
-        None => {
-            let empty = RecordBatch::new_empty(cfg.out_schema.clone());
-            grow_reservation(reservation, empty.get_array_memory_size())?;
-            Ok(empty)
-        }
-    }
+    let Some(sources) = load_chunk_sources(cfg, emissions, reservation)? else {
+        let empty = RecordBatch::new_empty(cfg.out_schema.clone());
+        grow_reservation(reservation, empty.get_array_memory_size())?;
+        return Ok(empty);
+    };
+    let out = materialise_chunk(cfg, input, emissions, &sources, reservation)?;
+    sources.release(reservation);
+    Ok(out)
 }
 
 /// Edge identity columns of the traversed edges. Only the identity columns (and
@@ -1350,10 +1379,7 @@ fn load_edge_prop_source(
 
     let exec_err = |m: String| GfError::Execution(m);
     if prop_fields.is_empty() {
-        return Ok(EdgePropSource {
-            batches: Vec::new(),
-            uuid_to_loc: HashMap::new(),
-        });
+        return Ok(EdgePropSource::empty());
     }
 
     // Resolve selected rows once per candidate route, then assemble hop order.
