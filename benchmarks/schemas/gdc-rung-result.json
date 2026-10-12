@@ -42,10 +42,11 @@
       "type": "object",
       "properties": {
         "wall_seconds": { "const": 14400 },
+        "query_timeout_seconds": { "type": "integer", "minimum": 1 },
         "memory_bytes": { "const": 4294967296 },
         "cores": { "const": 16 }
       },
-      "required": ["wall_seconds", "memory_bytes", "cores"],
+      "required": ["wall_seconds", "query_timeout_seconds", "memory_bytes", "cores"],
       "additionalProperties": false
     },
     "launch_host": { "type": ["object", "null"] },
@@ -116,7 +117,7 @@
         { "type": "null" }
       ]
     },
-    "claim": { "const": "engineering_evidence_only" },
+    "claim": { "enum": ["engineering_evidence_only", "diagnostic_only"] },
     "certification": { "const": false }
   },
   "required": [

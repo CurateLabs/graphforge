@@ -355,7 +355,11 @@ make -C benchmarks gdc-scorecard-inventory WORK_ROOT=<work root>
 ```
 
 `OUTPUT_DIR` must be outside `WORK_ROOT`. Raw output attaches to #952, not the
-repository. The SNB ladders are
+repository. Each query call is bound by the ladder spec's `query_timeout_seconds`:
+the driver runs every variant in its own process and kills it past the bound, so
+a runaway query fails its samples and not the four-hour rung wall.
+`DIAGNOSTIC=1` skips the quiet-host wait for iteration; its results are
+`diagnostic_only` and no card is built from them. The SNB ladders are
 `LADDER=profiles/gdc/snb-bi-scorecard-ladder-spec.json` and
 `LADDER=profiles/gdc/snb-interactive-scorecard-ladder-spec.json`; their
 workloads and references are built at rung time from the pinned parameters

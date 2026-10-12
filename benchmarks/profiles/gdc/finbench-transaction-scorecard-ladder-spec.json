@@ -6,6 +6,7 @@
   "identity_profile": "scorecard",
   "counts_ladder": "profiles/gdc/finbench-transaction-scorecard-ladder.json",
   "metric_shape": "queries",
+  "query_timeout_seconds": 300,
   "variance_line": "Read-only complex reads TCR1-TCR12 over the bulk-load snapshot; simple reads and writes are not measured.",
   "attribution": "Data and read parameters from the LDBC Financial Benchmark (FinBench) Transaction workload (https://ldbcouncil.org/benchmarks/finbench/); the specification documents are Apache-2.0 and the publisher states no dataset license.",
   "variances": [

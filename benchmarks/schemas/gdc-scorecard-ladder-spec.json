@@ -12,6 +12,11 @@
     "identity_profile": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,40}$" },
     "counts_ladder": { "$ref": "#/$defs/relativePath" },
     "metric_shape": { "enum": ["queries", "graphalytics"] },
+    "query_timeout_seconds": {
+      "description": "The longest one query call may be in flight; the query driver kills the variant's process after it and records a failed sample. A bound, not a measurement.",
+      "type": "integer",
+      "minimum": 1
+    },
     "variance_line": { "type": "string", "minLength": 1, "maxLength": 200 },
     "attribution": { "type": "string", "minLength": 1, "maxLength": 400 },
     "variances": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/variance" } },
@@ -30,6 +35,7 @@
     "identity_profile",
     "counts_ladder",
     "metric_shape",
+    "query_timeout_seconds",
     "variance_line",
     "attribution",
     "variances",

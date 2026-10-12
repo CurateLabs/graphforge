@@ -194,6 +194,7 @@ class Scratch(unittest.TestCase):
         benchexec: Any,
         *,
         opener: Any = serve_fixture_archives,
+        diagnostic: bool = False,
     ) -> gdc_rung.Ladder:
         return gdc_rung.prepare(
             root=ROOT,
@@ -207,6 +208,7 @@ class Scratch(unittest.TestCase):
             storage_medium="SSD",
             opener=opener,
             benchexec=benchexec,
+            diagnostic=diagnostic,
         )
 
 
@@ -369,6 +371,33 @@ class TinyLadderEndToEndTests(Scratch):
         with self.assertRaises(FileExistsError):
             write_card(ROOT, ladder.spec, self.output)
 
+    def test_the_spec_query_timeout_reaches_the_driver_and_the_result(self) -> None:
+        tasks: list[tuple[str, dict[str, Any]]] = []
+        run_phase = gdc_rung.run_phase
+
+        def spy(rung: Any, name: str, task: dict[str, Any], wall_seconds: int) -> Any:
+            tasks.append((name, task))
+            return run_phase(rung, name, task, wall_seconds)
+
+        ladder = self.ladder(self.executables, FakeBenchExec())
+        timeout = ladder.spec.document["query_timeout_seconds"]
+        self.assertEqual(timeout, 120)
+        with patch.object(gdc_rung, "run_phase", spy):
+            results = gdc_rung.climb(
+                ladder,
+                reserved_headroom_bytes=0,
+                quiet_host_wait_seconds=0,
+                through="sf0",
+                quiet_host=lambda _wait: QUIET,
+            )
+        self.assertEqual([r["status"] for r in results], ["passed"])
+        self.assertEqual(results[0]["limits"]["query_timeout_seconds"], timeout)
+        self.assertEqual(results[0]["claim"], "engineering_evidence_only")
+        query_tasks = [task for name, task in tasks if name == "query"]
+        self.assertEqual([task["query_timeout_seconds"] for task in query_tasks], [timeout])
+        evidence = json.loads((self.output / "snb-interactive-sf0-query-evidence.json").read_text())
+        self.assertEqual(evidence["query_timeout_seconds"], timeout)
+
     def test_a_phase_whose_own_cgroup_swapped_fails_naming_and_retaining_the_counters(
         self,
     ) -> None:
@@ -499,6 +528,68 @@ class LadderControlTests(Scratch):
         self.assertEqual(results[0]["failure"]["cause"], "work_root_capacity_refused")
         self.assertEqual(benchexec.stages, [])
         self.assertTrue(gdc_rung.ladder_finished(ladder.spec, results))
+
+    def failed_acquisition_ladder(self, *, diagnostic: bool) -> gdc_rung.Ladder:
+        """A ladder whose first rung fails fast, with no binary or archive needed."""
+
+        def wrong_bytes(_url: str) -> contextlib.AbstractContextManager[io.BytesIO]:
+            return contextlib.closing(io.BytesIO(b"not the pinned archive"))
+
+        return self.ladder(
+            self.executables, FakeBenchExec(), opener=wrong_bytes, diagnostic=diagnostic
+        )
+
+    def climb(self, ladder: gdc_rung.Ladder, **options: Any) -> list[dict[str, Any]]:
+        return gdc_rung.climb(
+            ladder,
+            reserved_headroom_bytes=0,
+            quiet_host_wait_seconds=0,
+            quiet_host=options.pop("quiet_host", lambda _wait: QUIET),
+            **options,
+        )
+
+    def test_a_rung_result_carries_the_spec_query_timeout(self) -> None:
+        ladder = self.failed_acquisition_ladder(diagnostic=False)
+        results = self.climb(ladder)
+        self.assertEqual(
+            results[0]["limits"]["query_timeout_seconds"],
+            ladder.spec.document["query_timeout_seconds"],
+        )
+        self.assertEqual(results[0]["claim"], "engineering_evidence_only")
+        self.assertEqual(results[0]["launch_host"], QUIET)
+
+    def test_a_diagnostic_climb_never_waits_for_a_quiet_host_and_is_never_card_evidence(
+        self,
+    ) -> None:
+        ladder = self.failed_acquisition_ladder(diagnostic=True)
+        results = self.climb(
+            ladder, quiet_host=lambda _wait: self.fail("a diagnostic climb skips the quiet host")
+        )
+        self.assertEqual(results[0]["claim"], "diagnostic_only")
+        self.assertEqual(results[0]["launch_host"], {"skipped": "diagnostic"})
+        published = json.loads((self.output / "snb-interactive-sf0-result.json").read_text())
+        schema = json.loads((ROOT / "schemas/gdc-rung-result.json").read_text())
+        self.assertEqual(list(Draft202012Validator(schema).iter_errors(published)), [])
+        self.assertEqual(published["claim"], "diagnostic_only")
+        # No card is built from it, by the card writer or by the render command.
+        with self.assertRaises(CardError) as refused:
+            write_card(ROOT, ladder.spec, self.output)
+        self.assertEqual(refused.exception.cause, "diagnostic_run")
+        self.assertEqual(sorted(self.output.glob("*-card.*")), [])
+        # A certified climb never resumes over diagnostic results.
+        certified = self.ladder(self.executables, FakeBenchExec())
+        with self.assertRaises(gdc_rung.LadderError) as mismatch:
+            self.climb(certified)
+        self.assertEqual(mismatch.exception.cause, "ladder_claim_mismatch")
+
+    def test_a_diagnostic_climb_never_resumes_over_certified_results(self) -> None:
+        self.climb(self.failed_acquisition_ladder(diagnostic=False))
+        diagnostic = self.failed_acquisition_ladder(diagnostic=True)
+        with self.assertRaises(gdc_rung.LadderError) as mismatch:
+            self.climb(
+                diagnostic, quiet_host=lambda _wait: self.fail("nothing launches on a mismatch")
+            )
+        self.assertEqual(mismatch.exception.cause, "ladder_claim_mismatch")
 
     def test_a_busy_host_launches_nothing_and_records_nothing(self) -> None:
         ladder = self.ladder(self.executables, FakeBenchExec())
@@ -883,6 +974,102 @@ class FailedSampleDescriptionTests(unittest.TestCase):
         self.assertEqual(gdc_rung.describe_failed_samples({"variants": []}), "")
 
 
+class QueryTimeoutContractTests(unittest.TestCase):
+    def test_a_timed_out_and_an_unrun_sample_read_by_their_cause(self) -> None:
+        def failed(binding: str, cause: str, error: str) -> dict[str, Any]:
+            return {
+                "binding_id": binding,
+                "status": "failed",
+                "cause": cause,
+                "error_code": None,
+                "error": error,
+            }
+
+        evidence = {
+            "variants": [
+                {
+                    "query_id": "runaway",
+                    "samples": [
+                        failed(
+                            "first",
+                            "query_timeout",
+                            "no result after 900 s; the variant's process was killed",
+                        ),
+                        failed(
+                            "second",
+                            "not_run",
+                            "variant abandoned after query_timeout on binding first",
+                        ),
+                    ],
+                }
+            ]
+        }
+        self.assertEqual(
+            gdc_rung.describe_failed_samples(evidence),
+            "runaway (first): query_timeout: no result after 900 s; "
+            "the variant's process was killed; "
+            "runaway (second): not_run: variant abandoned after query_timeout on binding first",
+        )
+
+    def test_the_query_phase_passes_the_spec_timeout_to_the_driver(self) -> None:
+        from graphforge_bench import gdc_phase
+
+        class Recorder:
+            def __init__(self) -> None:
+                self.argv: list[list[str]] = []
+
+            def step(self, name: str, argv: Any, **_options: Any) -> Any:
+                self.argv.append(list(argv))
+                return subprocess.CompletedProcess(list(argv), 0, "{}", "")
+
+        phase = Recorder()
+        gdc_phase._query(
+            {
+                "gf": "gf",
+                "driver": "driver",
+                "project": "p",
+                "workload": "w",
+                "expected_counts": "e",
+                "evidence": "out",
+                "results_dir": None,
+                "query_timeout_seconds": 900,
+            },
+            phase,  # type: ignore[arg-type]
+        )
+        driver = phase.argv[-1]
+        self.assertEqual(driver[driver.index("--query-timeout-seconds") + 1], "900")
+
+    def test_every_ladder_spec_declares_a_timeout_and_the_schema_requires_it(self) -> None:
+        schema = json.loads((ROOT / "schemas/gdc-scorecard-ladder-spec.json").read_text())
+        validator = Draft202012Validator(schema)
+        specs = [
+            *sorted((ROOT / "profiles" / "gdc").glob("*scorecard-ladder-spec.json")),
+            *sorted((ROOT / "fixtures" / "gdc").rglob("*ladder-spec.json")),
+        ]
+        self.assertGreaterEqual(len(specs), 8)
+        for path in specs:
+            document = json.loads(path.read_text())
+            self.assertEqual(list(validator.iter_errors(document)), [], path.name)
+            without = {k: v for k, v in document.items() if k != "query_timeout_seconds"}
+            self.assertNotEqual(list(validator.iter_errors(without)), [], path.name)
+            self.assertNotEqual(
+                list(validator.iter_errors({**document, "query_timeout_seconds": 0})), [], path.name
+            )
+        declared = {
+            path.name: json.loads(path.read_text())["query_timeout_seconds"]
+            for path in (ROOT / "profiles" / "gdc").glob("*scorecard-ladder-spec.json")
+        }
+        self.assertEqual(
+            declared,
+            {
+                "graphalytics-scorecard-ladder-spec.json": 900,
+                "snb-bi-scorecard-ladder-spec.json": 600,
+                "snb-interactive-scorecard-ladder-spec.json": 300,
+                "finbench-transaction-scorecard-ladder-spec.json": 300,
+            },
+        )
+
+
 class BenchExecMemoryLimitTests(unittest.TestCase):
     """Each GDC phase runs under the rung envelope; the Graph500 ladder keeps its ceiling."""
 
@@ -934,6 +1121,7 @@ class ExpectedCountsTests(unittest.TestCase):
             "identity_profile": "scorecard",
             "counts_ladder": ladder,
             "metric_shape": "graphalytics" if suite == "graphalytics" else "queries",
+            "query_timeout_seconds": 60,
             "variance_line": "test",
             "attribution": "CC-BY 4.0",
             "variances": [],

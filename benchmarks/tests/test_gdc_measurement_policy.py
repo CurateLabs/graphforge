@@ -24,6 +24,7 @@ def query_evidence() -> dict[str, Any]:
         "certification": False,
         "suite": "fixture",
         "status": "passed",
+        "query_timeout_seconds": 30,
         "failures": [],
         "driver": {"name": QUERY_DRIVER, "version": "0.0.0", "executable_sha256": SHA},
         "inputs": {"workload_sha256": SHA, "expected_counts_sha256": SHA},
@@ -147,6 +148,43 @@ def failed_evidence() -> dict[str, Any]:
     return evidence
 
 
+def timed_out_evidence() -> dict[str, Any]:
+    """Variant q2 timed out in its warm-up: its first binding timed out, the second never ran."""
+    evidence = query_evidence()
+    evidence["variants"].append(
+        {
+            "query_id": "q2",
+            "interface": "graphforge_api::GraphForge::execute_with_params",
+            "ordered": False,
+            "status": "failed",
+            "warmup": {"binding_id": "c1", "excluded": True, "completed": False},
+            "samples": [
+                {
+                    "binding_id": "c1",
+                    "status": "failed",
+                    "cause": "query_timeout",
+                    "error_code": None,
+                    "error": "no result after 30 s; the variant's process was killed",
+                },
+                {
+                    "binding_id": "c2",
+                    "status": "failed",
+                    "cause": "not_run",
+                    "error_code": None,
+                    "error": "variant abandoned after query_timeout on binding c1",
+                },
+            ],
+            "summary": None,
+        }
+    )
+    evidence["status"] = "failed"
+    evidence["failures"] = [
+        {"query_id": "q2", "binding_id": "c1", "cause": "query_timeout", "error_code": None},
+        {"query_id": "q2", "binding_id": "c2", "cause": "not_run", "error_code": None},
+    ]
+    return evidence
+
+
 class QueryLatencyAuthorityTests(unittest.TestCase):
     def refused(self, evidence: dict[str, Any]) -> str:
         with self.assertRaises(GdcMeasurementBoundaryError) as error:
@@ -192,6 +230,32 @@ class QueryLatencyAuthorityTests(unittest.TestCase):
 
     def test_failed_run_with_failed_samples_listed_passes(self) -> None:
         assert_query_latency_authority(failed_evidence())
+
+    def test_timed_out_and_unrun_samples_are_failed_samples_without_latency(self) -> None:
+        assert_query_latency_authority(timed_out_evidence())
+        # The failure list must name them exactly, with the typed cause.
+        evidence = timed_out_evidence()
+        evidence["failures"][1]["cause"] = "query_timeout"
+        self.assertEqual(self.refused(evidence), "failure_record_mismatch")
+        evidence = timed_out_evidence()
+        evidence["failures"].pop()
+        self.assertEqual(self.refused(evidence), "failure_record_mismatch")
+        evidence = timed_out_evidence()
+        evidence["variants"][1]["samples"][0]["latency_ns"] = 30_000_000_000
+        self.assertEqual(self.refused(evidence), "failed_sample_latency")
+
+    def test_the_timeout_is_a_bound_and_any_other_timing_field_is_refused(self) -> None:
+        evidence = query_evidence()
+        evidence["query_timeout_seconds"] = None
+        assert_query_latency_authority(evidence)
+        evidence["query_timeout_seconds"] = 0
+        self.assertEqual(self.refused(evidence), "invalid_document")
+        evidence = query_evidence()
+        del evidence["query_timeout_seconds"]
+        self.assertEqual(self.refused(evidence), "invalid_document")
+        evidence = query_evidence()
+        evidence["wall_seconds"] = 1.5
+        self.assertEqual(self.refused(evidence), "invalid_document")
 
     def test_failed_sample_latency_is_refused(self) -> None:
         evidence = failed_evidence()

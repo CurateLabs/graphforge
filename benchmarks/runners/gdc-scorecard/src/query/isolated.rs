@@ -30,7 +30,7 @@ use super::measure::{
     measure_variant_observed,
 };
 use super::workload::{Variant, parse_workload};
-use super::{QueryCause, QueryError, open_project};
+use super::{MAX_ERROR_BYTES, QueryCause, QueryError, open_project};
 
 /// The hidden subcommand a timeout-bound run re-executes itself with.
 pub const VARIANT_COMMAND: &str = "query-variant";
@@ -104,9 +104,17 @@ pub fn abandonment(termination: &Termination) -> Option<(&'static str, String)> 
                 (None, Some(code)) => format!("exited with status {code} before finishing"),
                 (None, None) => "ended without an exit status".to_owned(),
             };
+            // The error stays within MAX_ERROR_BYTES, keeping the end of stderr.
+            let prefix = format!("the variant's process {how}; stderr tail: ");
+            let mut start = stderr_tail
+                .len()
+                .saturating_sub(MAX_ERROR_BYTES.saturating_sub(prefix.len()));
+            while !stderr_tail.is_char_boundary(start) {
+                start += 1;
+            }
             Some((
                 "query_crashed",
-                format!("the variant's process {how}; stderr tail: {stderr_tail}"),
+                format!("{prefix}{}", &stderr_tail[start..]),
             ))
         }
     }
@@ -535,6 +543,16 @@ mod tests {
         assert_eq!(
             error,
             "the variant's process was killed by signal 9; stderr tail: boom"
+        );
+        let long = Termination::Exited {
+            code: Some(1),
+            signal: None,
+            stderr_tail: format!("{}END", "x".repeat(STDERR_TAIL_BYTES)),
+        };
+        let (_, error) = abandonment(&long).unwrap();
+        assert!(
+            error.len() <= MAX_ERROR_BYTES && error.ends_with("xEND"),
+            "{error}"
         );
         let (_, error) = abandonment(&crashed(Some(2), None)).unwrap();
         assert_eq!(
