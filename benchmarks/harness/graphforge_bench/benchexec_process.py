@@ -64,7 +64,9 @@ def _kill_group(group: int) -> None:
 
 
 def wait_for_phase_trees_empty(
-    cgroups: Sequence[Path], *, timeout_seconds: float = PHASE_TREE_WAIT_SECONDS,
+    cgroups: Sequence[Path],
+    *,
+    timeout_seconds: float = PHASE_TREE_WAIT_SECONDS,
     poll_seconds: float = 0.1,
 ) -> bool:
     """Wait for every recorded BenchExec phase cgroup to lose its processes."""
