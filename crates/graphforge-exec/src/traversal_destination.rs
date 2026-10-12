@@ -67,7 +67,7 @@ fn is_traversal_destination_uuid(plan: &dyn ExecutionPlan, column_index: usize) 
             .is_some_and(|start| start + offset == column_index);
     }
     // A variable-length expansion appends them directly after its input,
-    // followed by the relationship list.
+    // followed by the relationship list (the hop count in reachability mode).
     if plan.downcast_ref::<VarLenExpandExec>().is_some() {
         return plan
             .children()

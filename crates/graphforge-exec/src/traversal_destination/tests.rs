@@ -39,10 +39,9 @@ fn topology_fields() -> Vec<Arc<Field>> {
     TOPOLOGY_NODES_SCHEMA.fields().iter().cloned().collect()
 }
 
-/// The physical expansion and variable-length expansion over a two-column
-/// input that already holds a `node_uuid` of its own, with or without a row
-/// fetch bounding that input.
-async fn traversals(bounded: bool) -> (Arc<dyn ExecutionPlan>, Arc<dyn ExecutionPlan>) {
+/// Plan each of `nodes` over a two-column input that already holds a
+/// `node_uuid` of its own, with or without a row fetch bounding that input.
+async fn plan(nodes: &[&dyn UserDefinedLogicalNode], bounded: bool) -> Vec<Arc<dyn ExecutionPlan>> {
     let dir = TempDir::new().unwrap();
     let catalog = GraphCatalog::open(dir.path(), None, &RuntimeCatalog::new()).unwrap();
     let session = ExecutionSession::new_with_target(
@@ -60,7 +59,27 @@ async fn traversals(bounded: bool) -> (Arc<dyn ExecutionPlan>, Arc<dyn Execution
     } else {
         input
     };
-    let expand = ExpandNode::new(
+    let mut extensions = Vec::new();
+    for node in nodes {
+        extensions.push(
+            GraphForgeExtensionPlanner
+                .plan_extension(
+                    &planner,
+                    *node,
+                    &[],
+                    std::slice::from_ref(&physical),
+                    &state,
+                )
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    extensions
+}
+
+fn expansion() -> ExpandNode {
+    ExpandNode::new(
         logical_input(),
         "KNOWS",
         1,
@@ -78,8 +97,11 @@ async fn traversals(bounded: bool) -> (Arc<dyn ExecutionPlan>, Arc<dyn Execution
         ],
         vec![],
         topology_fields(),
-    );
-    let var_len = VarLenExpandNode::new(
+    )
+}
+
+fn variable_length_expansion() -> VarLenExpandNode {
+    VarLenExpandNode::new(
         logical_input(),
         "KNOWS",
         1,
@@ -91,20 +113,12 @@ async fn traversals(bounded: bool) -> (Arc<dyn ExecutionPlan>, Arc<dyn Execution
         None,
         topology_fields(),
         graphforge_plan::var_len_edge_list_field(&[]),
-    );
-    let mut planned = Vec::new();
-    for node in [
-        &expand as &dyn UserDefinedLogicalNode,
-        &var_len as &dyn UserDefinedLogicalNode,
-    ] {
-        planned.push(
-            GraphForgeExtensionPlanner
-                .plan_extension(&planner, node, &[], std::slice::from_ref(&physical), &state)
-                .await
-                .unwrap()
-                .unwrap(),
-        );
-    }
+    )
+}
+
+/// The physical expansion and variable-length expansion over that input.
+async fn traversals(bounded: bool) -> (Arc<dyn ExecutionPlan>, Arc<dyn ExecutionPlan>) {
+    let mut planned = plan(&[&expansion(), &variable_length_expansion()], bounded).await;
     let var_len = planned.pop().unwrap();
     let expand = planned.pop().unwrap();
     (expand, var_len)
@@ -154,6 +168,28 @@ async fn a_variable_length_expansion_names_its_destination_uuid_and_not_its_inpu
         var_len.as_ref(),
         INPUT_NODE_UUID
     ));
+}
+
+#[tokio::test]
+async fn a_reachability_expansion_names_its_destination_uuid_and_not_its_hop_count() {
+    // Reachability mode replaces the relationship list with the hop count and
+    // leaves the destination's columns directly after the input.
+    let reachability = variable_length_expansion().into_reachability();
+    let planned = plan(&[&reachability], true).await.pop().unwrap();
+    let destination = INPUT_WIDTH + TOPOLOGY_NODES_SCHEMA.index_of("node_uuid").unwrap();
+    assert_eq!(planned.schema().field(destination).name(), "node_uuid");
+    assert_eq!(
+        planned
+            .schema()
+            .fields()
+            .last()
+            .map(|field| field.name().as_str()),
+        Some("hops")
+    );
+    only_destination(planned.as_ref(), destination);
+    assert!(is_frontier_endpoint_uuid(planned.as_ref(), destination));
+    let unbounded = plan(&[&reachability], false).await.pop().unwrap();
+    assert!(!is_frontier_endpoint_uuid(unbounded.as_ref(), destination));
 }
 
 #[tokio::test]
