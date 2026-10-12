@@ -62,6 +62,22 @@ pub struct HopSnapshot {
     pub edge_rows_scanned: u64,
     /// Edge reads that used the full-read fallback.
     pub edge_full_reads: u64,
+    /// Edge reads that used exact dense row selection.
+    pub edge_dense_row_selection_reads: u64,
+    /// Edge reads that used conservative row-group pruning.
+    pub edge_row_group_predicate_reads: u64,
+    /// Edge row groups considered by storage pruning.
+    pub edge_row_groups_considered: u64,
+    /// Edge row groups retained for decoding.
+    pub edge_row_groups_selected: u64,
+    /// Edge-id pages considered by exact dense selection.
+    pub edge_pages_considered: u64,
+    /// Edge-id pages containing selected rows.
+    pub edge_pages_selected: u64,
+    /// Exact edge row ordinals selected before membership validation.
+    pub edge_exact_rows_selected: u64,
+    /// Edge dense selections rejected by output validation.
+    pub edge_validation_fallbacks: u64,
     /// Node filtered reads scheduled.
     pub node_reads_started: u64,
     /// Node filtered reads completed.
@@ -867,7 +883,24 @@ impl graphforge_storage::io_stats::FilteredReadObserver for HopReadObserver {
         table: graphforge_storage::io_stats::FilteredReadTable,
         pruning: graphforge_storage::io_stats::FilteredReadPruning,
     ) {
-        if table != graphforge_storage::io_stats::FilteredReadTable::Node {
+        if table == graphforge_storage::io_stats::FilteredReadTable::Edge {
+            with_hop(self.capture_epoch, self.edge_var, |hop| {
+                match pruning.strategy {
+                    graphforge_storage::io_stats::FilteredReadStrategy::DenseRowSelection => {
+                        hop.edge_dense_row_selection_reads += 1;
+                    }
+                    graphforge_storage::io_stats::FilteredReadStrategy::RowGroupPredicate => {
+                        hop.edge_row_group_predicate_reads += 1;
+                    }
+                    graphforge_storage::io_stats::FilteredReadStrategy::FullFallback => {}
+                }
+                hop.edge_row_groups_considered += pruning.row_groups_considered;
+                hop.edge_row_groups_selected += pruning.row_groups_selected;
+                hop.edge_pages_considered += pruning.pages_considered;
+                hop.edge_pages_selected += pruning.pages_selected;
+                hop.edge_exact_rows_selected += pruning.exact_rows_selected;
+                hop.edge_validation_fallbacks += pruning.validation_fallbacks;
+            });
             return;
         }
         with_hop(self.capture_epoch, self.edge_var, |hop| {
