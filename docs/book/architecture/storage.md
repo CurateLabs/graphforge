@@ -970,6 +970,40 @@ Conventions:
   or migration path.
   Scan-build fallback still materializes a hash map for oracle parity.
 
+### `indexes/property/` — property-equality index
+
+A node anchor `(:L {id: $x})` (or `WHERE n.id = $x` on one label) is answered by a
+persisted equality index instead of a scan of the label's property column (#1983).
+Every property named `id` is indexed (the import session declares no key columns).
+One pair exists per node property route and indexed column whose stored type is
+integer or string:
+
+```
+indexes/property/
+├── <stem>.eq                 # manifest: XXH64 line, then JSON
+└── <stem>.shards/00000000.eqs  # Arrow IPC (value, node_uuid), sorted, 4096 rows each
+```
+
+`<stem>` is a hash of the route and column. The manifest carries the route, column,
+value type, a digest of the route's property objects (path, length, XXH64), and each
+shard's first and last value, length and XXH64. A lookup binary-searches the manifest
+and reads only the shards whose range holds the value, so its reads do not grow with
+the route. The planner pushes `column = literal` into the property scan as before;
+the scan names the index in `EXPLAIN` (`index=property_equality(id)`) when a current
+one answers it. Bytes are a pure function of the route's content.
+
+- **Built at publish.** An initial bulk construction (also an import session onto an empty project, in memory or
+  durable) writes the index inside its own generation. `GraphForge::rebuild_property_indexes`
+  rebuilds it from the current generation and publishes a new one.
+- **Current or not used.** The index answers only while its source digest equals the
+  route's. A project published before the index, or a route changed by a mutation since,
+  is answered by the scan until the next rebuild. A read never builds or repairs an index.
+- **Authenticated.** A manifest or shard that fails its checksum is refused with
+  `GF_VALIDATION`; the scan is not substituted for it.
+- **Semantics.** The index is a candidate source: the newest live snapshot of each
+  candidate is still checked against the predicate, exactly as the footer-statistics
+  path does. Float, boolean and null comparisons are not pushed down and use the scan.
+
 ### Bounded CSR compression
 
 Every production shard publisher uses Arrow IPC Zstd (the pinned Arrow default
