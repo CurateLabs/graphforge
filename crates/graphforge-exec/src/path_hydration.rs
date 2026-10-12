@@ -21,6 +21,10 @@ pub(crate) struct HydrationResource {
     peak_gathered: AtomicU64,
     pub(crate) metrics: ExecutionPlanMetricsSet,
     counters: HashMap<&'static str, Count>,
+    /// The requested read-path observer of the statement this resource was
+    /// planned in. Evaluation runs on whichever worker polls the plan, so the
+    /// observer is carried to it rather than found on the calling thread.
+    lifecycle: graphforge_storage::lifecycle_io::CaptureContext,
 }
 impl std::fmt::Debug for HydrationResource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -61,6 +65,7 @@ impl HydrationResource {
             peak_gathered: AtomicU64::new(0),
             metrics,
             counters,
+            lifecycle: graphforge_storage::lifecycle_io::CaptureContext::current(),
         })
     }
     fn check(&self) -> Result<()> {
@@ -192,6 +197,7 @@ impl ScalarUDFImpl for HydratedPathNodes {
     }
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
         self.resource.check()?;
+        let _lifecycle = self.resource.lifecycle.attach();
         let invocation = Invocation {
             descriptor: &self.descriptor,
             tables: &self.tables,
