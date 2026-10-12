@@ -379,6 +379,7 @@ pub(super) fn wanted_row_selection(
             push(wanted.contains_uuid(&uuid), 1);
         }
     }
+    crate::io_stats::record_property_uuid_selection(rows_read);
     Ok((RowSelection::from(selectors), rows_read))
 }
 

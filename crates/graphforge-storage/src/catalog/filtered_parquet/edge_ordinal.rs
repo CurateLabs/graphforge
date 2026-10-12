@@ -105,6 +105,7 @@ pub(super) fn read_dense_edge_file(
         return Ok(None);
     };
     let Some(layout) = dense_node_layout(&metadata, key_leaf) else {
+        crate::io_stats::record_edge_dense_layout_declined();
         return Ok(None);
     };
     let Some(last_id) = u64::try_from(layout.total_rows)
@@ -121,6 +122,7 @@ pub(super) fn read_dense_edge_file(
     let candidate_rows = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
     let file_rows = u64::try_from(layout.total_rows).unwrap_or(u64::MAX);
     if candidate_rows.saturating_mul(2) > file_rows {
+        crate::io_stats::record_edge_dense_half_file_declined();
         return Ok(None);
     }
 
@@ -131,7 +133,7 @@ pub(super) fn read_dense_edge_file(
         // The file holds none of the requested ids: no row group is selected
         // and nothing but its footer was read.
         record_filtered(FilteredReadKind::Edge, 0);
-        observation.pruning(crate::io_stats::FilteredReadPruning {
+        let pruning = crate::io_stats::FilteredReadPruning {
             strategy: crate::io_stats::FilteredReadStrategy::DenseRowSelection,
             row_groups_considered,
             row_groups_selected: 0,
@@ -140,7 +142,9 @@ pub(super) fn read_dense_edge_file(
             exact_rows_selected: 0,
             metadata_fallbacks: 0,
             validation_fallbacks: 0,
-        });
+        };
+        crate::io_stats::record_edge_dense_pruning(pruning);
+        observation.pruning(pruning);
         observation.complete(0, false);
         return Ok(Some(vec![RecordBatch::new_empty(projected_schema)]));
     }
@@ -171,10 +175,12 @@ pub(super) fn read_dense_edge_file(
     // metadata, and the conservative read decides what it holds.
     if !keys_equal(&batches, candidates) {
         pruning.validation_fallbacks = 1;
+        crate::io_stats::record_edge_dense_pruning(pruning);
         observation.pruning(pruning);
         observation.complete(returned, false);
         return Ok(None);
     }
+    crate::io_stats::record_edge_dense_pruning(pruning);
     observation.pruning(pruning);
     observation.complete(returned, false);
     if batches.is_empty() {

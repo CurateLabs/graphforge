@@ -138,6 +138,17 @@ pub(crate) struct Counters {
     node_exact_rows_selected: AtomicU64,
     node_metadata_fallbacks: AtomicU64,
     node_validation_fallbacks: AtomicU64,
+    edge_dense_row_selection_reads: AtomicU64,
+    edge_dense_layout_declined: AtomicU64,
+    edge_dense_half_file_declined: AtomicU64,
+    edge_row_groups_considered: AtomicU64,
+    edge_row_groups_selected: AtomicU64,
+    edge_pages_considered: AtomicU64,
+    edge_pages_selected: AtomicU64,
+    edge_exact_rows_selected: AtomicU64,
+    edge_validation_fallbacks: AtomicU64,
+    property_uuid_selections: AtomicU64,
+    property_uuid_rows_decoded: AtomicU64,
     rewrite_commits: AtomicU64,
     topology_rewrite_existing_rows: AtomicU64,
     topology_rewrite_new_rows: AtomicU64,
@@ -201,6 +212,31 @@ pub struct IoSnapshot {
     pub node_metadata_fallbacks: u64,
     /// Dense selection attempts rejected by post-read validation.
     pub node_validation_fallbacks: u64,
+    /// Edge reads that used exact dense row selection.
+    pub edge_dense_row_selection_reads: u64,
+    /// Edge files whose footer does not prove the dense `edge_id` layout, so
+    /// the conservative membership read ran instead.
+    pub edge_dense_layout_declined: u64,
+    /// Edge files where the request covered more than half of the file, so
+    /// the conservative membership read ran instead.
+    pub edge_dense_half_file_declined: u64,
+    /// Edge row groups whose metadata was considered by dense selection.
+    pub edge_row_groups_considered: u64,
+    /// Edge row groups retained for decoding by dense selection.
+    pub edge_row_groups_selected: u64,
+    /// Edge-id pages considered by exact dense selection.
+    pub edge_pages_considered: u64,
+    /// Edge-id pages containing selected rows.
+    pub edge_pages_selected: u64,
+    /// Exact edge row ordinals selected before the membership guard.
+    pub edge_exact_rows_selected: u64,
+    /// Dense edge selections rejected by post-read validation.
+    pub edge_validation_fallbacks: u64,
+    /// Property-fragment reads that located wanted rows by decoding the UUID
+    /// column.
+    pub property_uuid_selections: u64,
+    /// UUID-column rows those reads decoded to locate wanted rows.
+    pub property_uuid_rows_decoded: u64,
     /// Successful non-empty [`RewriteBatch`](crate::RewriteBatch) commits.
     /// This counts persistence cycles, not the number of files in a batch.
     pub rewrite_commits: u64,
@@ -261,6 +297,21 @@ pub fn snapshot() -> Option<IoSnapshot> {
         node_exact_rows_selected: counters.node_exact_rows_selected.load(Ordering::Relaxed),
         node_metadata_fallbacks: counters.node_metadata_fallbacks.load(Ordering::Relaxed),
         node_validation_fallbacks: counters.node_validation_fallbacks.load(Ordering::Relaxed),
+        edge_dense_row_selection_reads: counters
+            .edge_dense_row_selection_reads
+            .load(Ordering::Relaxed),
+        edge_dense_layout_declined: counters.edge_dense_layout_declined.load(Ordering::Relaxed),
+        edge_dense_half_file_declined: counters
+            .edge_dense_half_file_declined
+            .load(Ordering::Relaxed),
+        edge_row_groups_considered: counters.edge_row_groups_considered.load(Ordering::Relaxed),
+        edge_row_groups_selected: counters.edge_row_groups_selected.load(Ordering::Relaxed),
+        edge_pages_considered: counters.edge_pages_considered.load(Ordering::Relaxed),
+        edge_pages_selected: counters.edge_pages_selected.load(Ordering::Relaxed),
+        edge_exact_rows_selected: counters.edge_exact_rows_selected.load(Ordering::Relaxed),
+        edge_validation_fallbacks: counters.edge_validation_fallbacks.load(Ordering::Relaxed),
+        property_uuid_selections: counters.property_uuid_selections.load(Ordering::Relaxed),
+        property_uuid_rows_decoded: counters.property_uuid_rows_decoded.load(Ordering::Relaxed),
         rewrite_commits: counters.rewrite_commits.load(Ordering::Relaxed),
         topology_rewrite_existing_rows: counters
             .topology_rewrite_existing_rows
@@ -328,6 +379,35 @@ pub fn reset() {
         counters.node_metadata_fallbacks.store(0, Ordering::Relaxed);
         counters
             .node_validation_fallbacks
+            .store(0, Ordering::Relaxed);
+        counters
+            .edge_dense_row_selection_reads
+            .store(0, Ordering::Relaxed);
+        counters
+            .edge_dense_layout_declined
+            .store(0, Ordering::Relaxed);
+        counters
+            .edge_dense_half_file_declined
+            .store(0, Ordering::Relaxed);
+        counters
+            .edge_row_groups_considered
+            .store(0, Ordering::Relaxed);
+        counters
+            .edge_row_groups_selected
+            .store(0, Ordering::Relaxed);
+        counters.edge_pages_considered.store(0, Ordering::Relaxed);
+        counters.edge_pages_selected.store(0, Ordering::Relaxed);
+        counters
+            .edge_exact_rows_selected
+            .store(0, Ordering::Relaxed);
+        counters
+            .edge_validation_fallbacks
+            .store(0, Ordering::Relaxed);
+        counters
+            .property_uuid_selections
+            .store(0, Ordering::Relaxed);
+        counters
+            .property_uuid_rows_decoded
             .store(0, Ordering::Relaxed);
         counters.rewrite_commits.store(0, Ordering::Relaxed);
         counters
@@ -515,6 +595,64 @@ pub(crate) fn record_node_pruning(pruning: FilteredReadPruning) {
         counters
             .node_validation_fallbacks
             .fetch_add(pruning.validation_fallbacks, Ordering::Relaxed);
+    });
+}
+
+/// Record one dense-selection edge read that reached the Parquet decoder.
+pub(crate) fn record_edge_dense_pruning(pruning: FilteredReadPruning) {
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters
+            .edge_dense_row_selection_reads
+            .fetch_add(1, Ordering::Relaxed);
+        counters
+            .edge_row_groups_considered
+            .fetch_add(pruning.row_groups_considered, Ordering::Relaxed);
+        counters
+            .edge_row_groups_selected
+            .fetch_add(pruning.row_groups_selected, Ordering::Relaxed);
+        counters
+            .edge_pages_considered
+            .fetch_add(pruning.pages_considered, Ordering::Relaxed);
+        counters
+            .edge_pages_selected
+            .fetch_add(pruning.pages_selected, Ordering::Relaxed);
+        counters
+            .edge_exact_rows_selected
+            .fetch_add(pruning.exact_rows_selected, Ordering::Relaxed);
+        counters
+            .edge_validation_fallbacks
+            .fetch_add(pruning.validation_fallbacks, Ordering::Relaxed);
+    });
+}
+
+/// Record one property-fragment read that decoded `rows` UUID-column rows to
+/// locate the rows it wanted.
+pub(crate) fn record_property_uuid_selection(rows: u64) {
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters
+            .property_uuid_selections
+            .fetch_add(1, Ordering::Relaxed);
+        counters
+            .property_uuid_rows_decoded
+            .fetch_add(rows, Ordering::Relaxed);
+    });
+}
+
+/// Record an edge file whose footer does not prove the dense layout.
+pub(crate) fn record_edge_dense_layout_declined() {
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters
+            .edge_dense_layout_declined
+            .fetch_add(1, Ordering::Relaxed);
+    });
+}
+
+/// Record an edge file whose request covered more than half of it.
+pub(crate) fn record_edge_dense_half_file_declined() {
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters
+            .edge_dense_half_file_declined
+            .fetch_add(1, Ordering::Relaxed);
     });
 }
 
