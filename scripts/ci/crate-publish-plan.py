@@ -8,15 +8,19 @@ Usage:
 
 Language-binding implementation crates are not published to crates.io; their
 public distributions ship through PyPI and npm. The Rust CLI is part of the
-crates.io surface.
+crates.io surface. Versioned dev-dependencies are kept in published manifests and
+therefore contribute publish-order edges; path-only dev-dependencies are
+stripped by Cargo and do not.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
-import re
+import subprocess
 import sys
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 CRATES_DIR = ROOT / "crates"
@@ -29,46 +33,70 @@ CRATES_IO_EXCLUDED = frozenset(
     }
 )
 
-PATH_DEP_RE = re.compile(
-    r"^(?P<name>graphforge-[a-z0-9-]+)\s*=\s*\{(?P<body>[^}]*)\}",
-    re.MULTILINE,
-)
-PACKAGE_NAME_RE = re.compile(r'^name\s*=\s*"(?P<name>[^"]+)"', re.MULTILINE)
+
+def _workspace_manifests() -> set[Path]:
+    """Return manifests that define the crates.io candidate workspace set."""
+    return {manifest.resolve() for manifest in CRATES_DIR.glob("*/Cargo.toml")}
 
 
-def _dependencies_section(text: str) -> str:
-    """Return the primary [dependencies] block (exclude dev-dependencies)."""
-    parts = re.split(r"^\[dev-dependencies\]", text, maxsplit=1, flags=re.MULTILINE)
-    return parts[0]
+def _cargo_metadata() -> dict[str, Any]:
+    result = subprocess.run(
+        ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    return json.loads(result.stdout)
 
 
-def parse_crate(manifest: Path) -> tuple[str, set[str], list[str]]:
-    """Return (name, workspace path deps, path-deps missing version=)."""
-    text = manifest.read_text(encoding="utf-8")
-    name_match = PACKAGE_NAME_RE.search(text)
-    if not name_match:
-        raise ValueError(f"missing package name in {manifest}")
-    name = name_match.group("name")
-    deps: set[str] = set()
-    missing_version: list[str] = []
-    for match in PATH_DEP_RE.finditer(_dependencies_section(text)):
-        body = match.group("body")
-        if "path" not in body:
+def classify_dependencies(
+    packages: list[dict[str, Any]], crate_names: set[str]
+) -> tuple[dict[str, set[str]], dict[str, list[str]]]:
+    """Classify metadata dependencies as publish edges or missing versions."""
+    deps_by_crate: dict[str, set[str]] = {}
+    missing_versions: dict[str, list[str]] = {}
+    for package in packages:
+        name = package["name"]
+        if name not in crate_names:
             continue
-        dep = match.group("name")
-        deps.add(dep)
-        if not re.search(r"\bversion\s*=", body):
-            missing_version.append(dep)
-    return name, deps, missing_version
+        deps: set[str] = set()
+        missing: set[str] = set()
+        for dependency in package.get("dependencies", []):
+            dep = dependency["name"]
+            if dep not in crate_names:
+                continue
+            kind = dependency.get("kind")
+            requirement = dependency["req"]
+            if kind in (None, "build"):
+                deps.add(dep)
+                if requirement == "*":
+                    missing.add(dep)
+            elif kind == "dev" and requirement != "*":
+                deps.add(dep)
+        deps_by_crate[name] = deps
+        if missing:
+            missing_versions[name] = sorted(missing)
+    return deps_by_crate, missing_versions
+
+
+def _classify_workspace() -> tuple[dict[str, set[str]], dict[str, list[str]]]:
+    """Classify the dependencies of every crates/*/Cargo.toml package."""
+    manifests = _workspace_manifests()
+    packages = [
+        package
+        for package in _cargo_metadata()["packages"]
+        if Path(package["manifest_path"]).resolve() in manifests
+    ]
+    crate_names = {package["name"] for package in packages}
+    return classify_dependencies(packages, crate_names)
 
 
 def load_workspace() -> dict[str, set[str]]:
-    """Map crate name → set of workspace path dependencies."""
-    crates: dict[str, set[str]] = {}
-    for manifest in sorted(CRATES_DIR.glob("*/Cargo.toml")):
-        name, deps, _ = parse_crate(manifest)
-        crates[name] = deps
-    return crates
+    """Map crate name → workspace dependencies that affect publish order."""
+    deps, _ = _classify_workspace()
+    return deps
 
 
 def topological_publish_order(crates: dict[str, set[str]]) -> list[str]:
@@ -98,14 +126,8 @@ def topological_publish_order(crates: dict[str, set[str]]) -> list[str]:
 
 def path_deps_missing_versions() -> dict[str, list[str]]:
     """Return crate → path deps that lack version= (blocks cargo publish)."""
-    missing: dict[str, list[str]] = {}
-    for manifest in sorted(CRATES_DIR.glob("*/Cargo.toml")):
-        name, _, missing_version = parse_crate(manifest)
-        if name in CRATES_IO_EXCLUDED:
-            continue
-        if missing_version:
-            missing[name] = sorted(missing_version)
-    return missing
+    _, missing = _classify_workspace()
+    return {name: deps for name, deps in missing.items() if name not in CRATES_IO_EXCLUDED}
 
 
 def cmd_list(_: argparse.Namespace) -> int:
