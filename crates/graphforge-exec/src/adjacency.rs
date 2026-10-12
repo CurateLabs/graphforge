@@ -940,6 +940,10 @@ pub struct PersistentAdjacencyProvider {
     state: Mutex<Option<IndexState>>,
     /// Loaded views per `(stem, direction)`.
     cache: Mutex<HashMap<(String, Direction), Arc<Adjacency>>>,
+    /// One decoded-shard index per physical CSR, shared by every view over it
+    /// (the Undirected view composes the Out and In indexes). Dropped with
+    /// `cache` and whenever a rebuild replaces the files.
+    indexes: Mutex<HashMap<(String, csr::Direction), Arc<ShardedCsrIndex>>>,
 }
 
 impl PersistentAdjacencyProvider {
@@ -954,6 +958,7 @@ impl PersistentAdjacencyProvider {
             reset_pending: AtomicBool::new(false),
             state: Mutex::new(None),
             cache: Mutex::new(HashMap::new()),
+            indexes: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1118,9 +1123,19 @@ impl PersistentAdjacencyProvider {
         let directed = |d: csr::Direction| -> Result<AdjacencyInner, LoadFailure> {
             let path = csr::csr_path(self.index_root(), stem, d);
             if csr::sharded_csr_exists(&path) {
-                // Opening admits the shard manifest: a corrupt one is refused
-                // here, before any shard is read.
-                let base = Arc::new(ShardedCsrIndex::open(&path).map_err(LoadFailure::Refuse)?);
+                let shared = self
+                    .indexes
+                    .lock()
+                    .expect("adjacency index lock")
+                    .get(&(stem.to_owned(), d))
+                    .cloned();
+                let reused = shared.is_some();
+                let base = match shared {
+                    Some(base) => base,
+                    // Opening admits the shard manifest: a corrupt one is
+                    // refused here, before any shard is read.
+                    None => Arc::new(ShardedCsrIndex::open(&path).map_err(LoadFailure::Refuse)?),
+                };
                 if let Some(row) = rows
                     .iter()
                     .find(|r| r.relation_type == stem && r.direction == d)
@@ -1132,6 +1147,13 @@ impl PersistentAdjacencyProvider {
                     return Err(LoadFailure::Rebuild(GfError::Storage(
                         "adjacency sharded CSR disagrees with manifest counts (torn read)".into(),
                     )));
+                }
+                if !reused {
+                    // Only an index that agrees with its manifest row is shared.
+                    self.indexes
+                        .lock()
+                        .expect("adjacency index lock")
+                        .insert((stem.to_owned(), d), Arc::clone(&base));
                 }
                 if deltas.is_empty() {
                     return Ok(AdjacencyInner::Sharded(base));
@@ -1187,7 +1209,10 @@ impl PersistentAdjacencyProvider {
             .map_or(0, |d| i64::try_from(d.as_micros()).unwrap_or(i64::MAX));
         // Count attempts before starting so failed linear rebuild work is visible.
         crate::demand::record_adjacency_rebuild();
-        match self.rebuild(now) {
+        let rebuilt = self.rebuild(now);
+        // The rebuild may have replaced the files; indexes opened earlier are stale.
+        self.indexes.lock().expect("adjacency index lock").clear();
+        match rebuilt {
             Ok(rows) => {
                 let covered = Self::rows_cover(&rows, stem, direction);
                 // Index writes don't bump the topology counter, so re-read it
@@ -1232,7 +1257,7 @@ impl PersistentAdjacencyProvider {
     /// view from cache.
     pub fn invalidate(&self) {
         *self.state.lock().expect("adjacency state lock") = None;
-        self.cache.lock().expect("adjacency cache lock").clear();
+        self.drop_views();
     }
 
     /// Cheap cross-query freshness check (#832): one `generation.json` read
@@ -1273,8 +1298,13 @@ impl PersistentAdjacencyProvider {
         };
         if drop_state {
             *state = None;
-            self.cache.lock().expect("adjacency cache lock").clear();
+            self.drop_views();
         }
+    }
+
+    fn drop_views(&self) {
+        self.cache.lock().expect("adjacency cache lock").clear();
+        self.indexes.lock().expect("adjacency index lock").clear();
     }
 
     fn cache_shared_view(
@@ -1790,6 +1820,57 @@ mod tests {
         );
         assert!(scanned.base_csr_entries_expanded() > 0);
         assert_eq!(scanned.backing(), AdjacencyBacking::ScanHashMap);
+    }
+
+    fn sharded_base(inner: &AdjacencyInner) -> &Arc<ShardedCsrIndex> {
+        match inner {
+            AdjacencyInner::Sharded(index) => index,
+            other => panic!("expected a plain sharded view, got {other:?}"),
+        }
+    }
+
+    fn undirected_halves(view: &Adjacency) -> (&Arc<ShardedCsrIndex>, &Arc<ShardedCsrIndex>) {
+        match &view.inner {
+            AdjacencyInner::Undirected { out, inbound } => {
+                (sharded_base(out), sharded_base(inbound))
+            }
+            other => panic!("expected an undirected view, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn views_share_one_decoded_index_per_physical_csr() {
+        let dir = TempDir::new().unwrap();
+        let _ids = write_diamond(dir.path());
+        graphforge_storage::adjacency::build_adjacency_index(dir.path(), TS).unwrap();
+        let provider = persistent_provider(dir.path().to_path_buf(), OntologyMode::Strict);
+
+        let out = provider.adjacency("KNOWS", Direction::Out).unwrap();
+        let undirected = provider.adjacency("KNOWS", Direction::Undirected).unwrap();
+        let inbound = provider.adjacency("KNOWS", Direction::In).unwrap();
+        let (undirected_out, undirected_in) = undirected_halves(&undirected);
+        let out_index = sharded_base(&out.inner);
+        let in_index = sharded_base(&inbound.inner);
+        assert!(Arc::ptr_eq(out_index, undirected_out), "Out index shared");
+        assert!(Arc::ptr_eq(in_index, undirected_in), "In index shared");
+        assert!(!Arc::ptr_eq(out_index, in_index));
+
+        // Out -> Undirected -> Out reads decode each shard of a physical CSR once.
+        let read_all = |view: &Adjacency| view.for_each_row(|_, _| {}).unwrap();
+        read_all(&out);
+        let after_out = out_index.shard_decode_count();
+        let retained = out_index.retained_decoded_bytes();
+        assert!(after_out > 0 && retained > 0);
+        read_all(&undirected);
+        read_all(&out);
+        assert_eq!(out_index.shard_decode_count(), after_out);
+        assert_eq!(out_index.retained_decoded_bytes(), retained);
+        assert_eq!(in_index.shard_decode_count(), in_index.shard_count() as u64);
+
+        // Dropping the cached views also drops the shared indexes.
+        provider.invalidate();
+        let fresh = provider.adjacency("KNOWS", Direction::Out).unwrap();
+        assert!(!Arc::ptr_eq(out_index, sharded_base(&fresh.inner)));
     }
 
     #[test]
