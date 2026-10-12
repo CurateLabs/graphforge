@@ -581,14 +581,14 @@ impl<'a> RowSource<'a> {
                 neighbor_ids: Vec::new(),
             },
             AdjacencyInner::Sharded(base) => Self::Sharded {
-                cursor: base.row_cursor()?,
+                cursor: base.row_cursor(),
             },
             AdjacencyInner::ShardedOverlay {
                 base,
                 replaced,
                 node_extent,
             } => Self::Overlay {
-                cursor: base.row_cursor()?,
+                cursor: base.row_cursor(),
                 replaced,
                 extent: *node_extent,
                 next: 0,
