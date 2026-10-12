@@ -170,6 +170,23 @@ fn assert_walk_is_bounded(source: &CsrIndex, max_spanning_degree: u64) {
     );
     assert!(peak > 0, "the counting allocator saw nothing");
 
+    // Pulling through the cursor directly has the same bound.
+    let fresh = ShardedCsrIndex::open(&path).unwrap();
+    let mut pulled = 0_u64;
+    let (result, pull_peak) = peak_live_bytes(|| -> Result<(), graphforge_core::GfError> {
+        let mut cursor = fresh.row_cursor();
+        while let Some((_, row)) = cursor.next_row()? {
+            pulled += row.len() as u64;
+        }
+        Ok(())
+    });
+    result.unwrap();
+    assert_eq!(pulled, source.edge_ids.len() as u64);
+    assert!(
+        pull_peak <= bound,
+        "cursor held {pull_peak} live bytes; the bound is {bound}"
+    );
+
     // The check can fail: materializing the whole CSR is far over the bound.
     let (full, peak_full) = peak_live_bytes(|| read_csr(&path));
     assert_eq!(&full.unwrap(), source);

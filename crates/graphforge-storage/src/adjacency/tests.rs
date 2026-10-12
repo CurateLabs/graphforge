@@ -1555,6 +1555,17 @@ fn walked(index: &ShardedCsrIndex) -> Result<Vec<(u64, Vec<(u64, u64)>)>, GfErro
     Ok(rows)
 }
 
+fn pulled(index: &ShardedCsrIndex) -> Result<Vec<(u64, Vec<(u64, u64)>)>, GfError> {
+    let mut cursor = index.row_cursor();
+    let mut rows = Vec::new();
+    while let Some((node, row)) = cursor.next_row()? {
+        rows.push((node, row.iter().collect()));
+    }
+    // An exhausted cursor stays exhausted.
+    assert!(cursor.next_row()?.is_none());
+    Ok(rows)
+}
+
 #[test]
 fn walk_rows_equals_random_access_rows_in_both_directions() {
     let directory = TempDir::new().unwrap();
@@ -1587,6 +1598,11 @@ fn walk_rows_equals_random_access_rows_in_both_directions() {
         );
 
         let rows = walked(&walker).unwrap();
+        assert_eq!(
+            pulled(&ShardedCsrIndex::open(&path).unwrap()).unwrap(),
+            rows,
+            "{direction:?} cursor and walk disagree"
+        );
         assert_eq!(
             rows.iter().map(|(node, _)| *node).collect::<Vec<_>>(),
             (0..WALK_FIXTURE_NODES).collect::<Vec<_>>(),
@@ -1735,4 +1751,97 @@ fn walk_rows_of_all_isolated_nodes_visits_every_empty_row_without_decoding() {
         (0..5).map(|node| (node, Vec::new())).collect::<Vec<_>>()
     );
     assert_eq!(index.shard_decode_count(), 0);
+}
+
+#[test]
+fn two_cursors_advance_in_lockstep_and_each_yields_its_full_rows() {
+    let directory = TempDir::new().unwrap();
+    let edges = walk_fixture_edges();
+    let [(_, out_path, out_csr), (_, in_path, in_csr)] =
+        write_walk_fixture(directory.path(), &edges, WALK_FIXTURE_NODES, 3);
+    let (out, inward) = (
+        ShardedCsrIndex::open(&out_path).unwrap(),
+        ShardedCsrIndex::open(&in_path).unwrap(),
+    );
+    let (mut out_cursor, mut in_cursor) = (out.row_cursor(), inward.row_cursor());
+    let mut merged = Vec::new();
+    // An undirected export pulls node n from both before moving to n + 1.
+    loop {
+        let out_row = out_cursor
+            .next_row()
+            .unwrap()
+            .map(|(node, row)| (node, row.iter().collect::<Vec<_>>()));
+        let in_row = in_cursor
+            .next_row()
+            .unwrap()
+            .map(|(node, row)| (node, row.iter().collect::<Vec<_>>()));
+        match (out_row, in_row) {
+            (None, None) => break,
+            (Some((out_node, outgoing)), Some((in_node, incoming))) => {
+                assert_eq!(out_node, in_node, "cursors stay on the same node");
+                merged.push((out_node, outgoing, incoming));
+            }
+            other => panic!("cursors ended at different nodes: {other:?}"),
+        }
+    }
+    assert_eq!(merged.len() as u64, WALK_FIXTURE_NODES);
+    for (node, outgoing, incoming) in merged {
+        assert_eq!(outgoing, out_csr.row(node).iter().collect::<Vec<_>>());
+        assert_eq!(incoming, in_csr.row(node).iter().collect::<Vec<_>>());
+    }
+    for index in [&out, &inward] {
+        assert_eq!(index.retained_decoded_bytes(), 0);
+        assert_eq!(index.shard_decode_count(), index.shard_count() as u64);
+    }
+}
+
+#[test]
+fn a_cursor_refuses_corruption_and_overlap_on_the_pull_that_reaches_it() {
+    let directory = TempDir::new().unwrap();
+    let edges = walk_fixture_edges();
+    let [(_, path, _), _] = write_walk_fixture(directory.path(), &edges, WALK_FIXTURE_NODES, 3);
+    let index = ShardedCsrIndex::open(&path).unwrap();
+    let victim = index.root.join(&index.manifest.shards[2].file);
+    let mut bytes = std::fs::read(&victim).unwrap();
+    let middle = bytes.len() / 2;
+    bytes[middle] ^= 1;
+    std::fs::write(&victim, bytes).unwrap();
+
+    let fresh = ShardedCsrIndex::open(&path).unwrap();
+    let mut cursor = fresh.row_cursor();
+    let mut pulls = 0;
+    let error = loop {
+        match cursor.next_row() {
+            Ok(Some(_)) => pulls += 1,
+            Ok(None) => panic!("the corrupt shard must be refused"),
+            Err(error) => break error,
+        }
+    };
+    assert!(error.to_string().contains("checksum"), "{error}");
+    assert!(pulls > 0, "rows before the corrupt shard are still served");
+    // The failed shard is retried, not skipped.
+    assert!(
+        cursor
+            .next_row()
+            .unwrap_err()
+            .to_string()
+            .contains("checksum")
+    );
+
+    let mut overlapping = index.clone();
+    let wide = overlapping
+        .manifest
+        .shards
+        .iter()
+        .position(|record| record.node_count > 1)
+        .expect("fixture has a multi-row shard");
+    overlapping.manifest.shards[wide + 1].first_node = overlapping.manifest.shards[wide].first_node;
+    let decodes = overlapping.shard_decode_count();
+    let error = overlapping
+        .row_cursor()
+        .next_row()
+        .err()
+        .expect("overlap refused");
+    assert!(error.to_string().contains("overlap"), "{error}");
+    assert_eq!(overlapping.shard_decode_count(), decodes);
 }
