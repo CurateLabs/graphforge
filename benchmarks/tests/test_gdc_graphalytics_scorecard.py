@@ -491,6 +491,11 @@ class RealLadderTests(unittest.TestCase):
             self.assertEqual(
                 {variant["id"] for variant in workload["variants"]}, set(graph.algorithms)
             )
+            by_id = {variant["id"]: variant for variant in workload["variants"]}
+            if "bfs" in by_id:
+                self.assertEqual(by_id["bfs"]["operation"]["by"], "bfs_depth")
+            if "sssp" in by_id:
+                self.assertEqual(by_id["sssp"]["operation"]["by"], "dijkstra_cost")
 
 
 if __name__ == "__main__":
