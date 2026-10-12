@@ -60,12 +60,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 mod dense_node_identities;
+mod export_streams;
 mod filtered_parquet;
 mod property_readers;
 mod providers;
 
 pub use dense_node_identities::{
     DenseNodeIdentities, DenseNodeIdentityError, read_dense_node_identities,
+};
+pub use export_streams::{
+    visit_edge_identities, visit_edge_property_batches, visit_node_identities,
 };
 pub use filtered_parquet::read_edges_filtered;
 pub use filtered_parquet::read_edges_filtered_from_inventory;

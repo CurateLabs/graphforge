@@ -9,12 +9,14 @@
 )]
 
 use graphforge_value::EntityTypeSelection;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use arrow::array::{
     Array, FixedSizeBinaryArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
-    Int64Array, ListArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+    Int64Array, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
 use graphforge_core::hash_observation::ContractSha256 as Sha256;
 use graphforge_core::{GfError, OntologyMode};
@@ -26,7 +28,17 @@ use sha2::Digest;
 use crate::adjacency::AdjacencyProvider;
 use crate::algorithm_partition::{PartitionValue, ResolvedPartitionMap};
 
-type NodeUuidMap = HashMap<u64, [u8; 16]>;
+mod topology;
+
+#[cfg(test)]
+mod export_tests;
+#[cfg(all(test, feature = "algorithms-extended"))]
+mod parity_tests;
+
+use topology::{
+    EdgeIdentity, NodeSet, TopologyBuilder, TopologyGraph, resolve_edge_uuids, resolve_weights,
+    select_nodes,
+};
 
 const VECTOR_NODE_LIMIT: usize = 4_096;
 const VECTOR_CELL_LIMIT: usize = 16_777_216;
@@ -96,69 +108,322 @@ struct LogicalProjectionEdge {
 
 /// Algorithm graph with deterministic surrogate ordering and UUID round trips.
 ///
-/// Neighbor storage is CSR-style (#340): one flat `AlgorithmEdge` vector plus
-/// per-node offset ranges. UUID identity keeps a compact by-id map and the
-/// reverse UUID map only where lookup requires them — not a second full-graph
-/// edge hash map.
+/// The structure is a [`TopologyGraph`]: a CSR over `u32` node ordinals plus
+/// parallel UUID, weight and edge-identity arrays, with no map keyed by an edge
+/// or a node (#1974). This type is the surrogate-keyed view the algorithm
+/// kernels were written against. [`Self::neighbors`] materializes
+/// [`AlgorithmEdge`]s on demand, so kernels that only walk neighbors should
+/// prefer [`Self::neighbor_ordinals`] and [`Self::neighbor_weights`].
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AdjacencyGraph {
-    directed: bool,
-    node_ids: Vec<u64>,
-    node_uuid_by_id: HashMap<u64, [u8; 16]>,
-    node_id_by_uuid: HashMap<[u8; 16], u64>,
-    /// Maps node surrogate → row index into [`Self::neighbor_offsets`].
-    neighbor_row: HashMap<u64, u32>,
-    /// CSR offsets over [`Self::neighbor_edges`], length `row_count + 1`.
-    neighbor_offsets: Vec<u32>,
-    /// Flat adjacency entries in CSR order.
-    neighbor_edges: Vec<AlgorithmEdge>,
+    topology: TopologyGraph,
+    /// `node_ids()` of a dense graph, materialized on first use.
+    dense_node_ids: OnceLock<Vec<u64>>,
+    uuid_lookup: UuidLookup,
     node_vectors: HashMap<u64, Vec<f64>>,
     node_initial_labels: HashMap<u64, i64>,
     inventory: Option<std::sync::Arc<graphforge_storage::AuthenticatedPropertyInventory>>,
+    evidence: AlgorithmExportEvidence,
 }
 
-/// Build CSR neighbor arrays from `(node_id, edge)` pairs already sorted by
-/// `(node_id, edge_id, neighbor_id)`.
-fn neighbor_csr_from_sorted(
-    sorted: &[(u64, AlgorithmEdge)],
-) -> (HashMap<u64, u32>, Vec<u32>, Vec<AlgorithmEdge>) {
-    let mut neighbor_row = HashMap::new();
-    let mut neighbor_offsets = Vec::new();
-    let mut neighbor_edges = Vec::with_capacity(sorted.len());
-    neighbor_offsets.push(0);
-    let mut row = 0_u32;
-    let mut index = 0usize;
-    while index < sorted.len() {
-        let node_id = sorted[index].0;
-        neighbor_row.insert(node_id, row);
-        while index < sorted.len() && sorted[index].0 == node_id {
-            neighbor_edges.push(sorted[index].1);
-            index += 1;
-        }
-        neighbor_offsets
-            .push(u32::try_from(neighbor_edges.len()).expect("algorithm neighbor count fits u32"));
-        row = row.saturating_add(1);
-    }
-    (neighbor_row, neighbor_offsets, neighbor_edges)
+/// What an export read and expanded, as structural evidence that it did not
+/// build the edge-scale state the previous export did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AlgorithmExportEvidence {
+    /// Entries held in hash maps by the adjacency view the export read. A
+    /// persisted CSR serves every row without any; a scan-built fallback view
+    /// holds one per adjacency entry. The export builds no hash map of its own.
+    pub(crate) edge_scale_hash_entries: u64,
+    /// Edge-table rows the export streamed to resolve edge identity or weights.
+    /// Zero when the export needs neither.
+    pub(crate) edge_rows_read: u64,
 }
 
-fn neighbor_csr_from_map(
-    mut neighbors: HashMap<u64, Vec<AlgorithmEdge>>,
-) -> (HashMap<u64, u32>, Vec<u32>, Vec<AlgorithmEdge>) {
-    let mut sorted = Vec::new();
-    let mut keys = neighbors.keys().copied().collect::<Vec<_>>();
-    keys.sort_unstable();
-    for node_id in keys {
-        let mut entries = neighbors.remove(&node_id).unwrap_or_default();
-        entries.sort_by_key(|edge| (edge.edge_id, edge.neighbor_id));
-        for edge in entries {
-            sorted.push((node_id, edge));
+/// Which per-edge facts an export keeps besides the topology.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EdgeIdentityDemand {
+    /// Topology (and weights, when requested) only. No edge table is read
+    /// unless a weight is requested.
+    Omit,
+    /// Also keep each slot's edge id and UUID, for kernels that report edges.
+    Retain,
+}
+
+/// Node lookups by UUID without a hash map.
+///
+/// The paths verbs look up one or two UUIDs, which a scan answers without
+/// building anything. A caller that keeps looking (the property loaders do one
+/// per property row) gets a UUID-sorted permutation, built once.
+#[derive(Debug, Default)]
+struct UuidLookup {
+    scans: AtomicUsize,
+    sorted: OnceLock<Vec<u32>>,
+}
+
+/// Lookups answered by a scan before a sorted permutation is built.
+const LINEAR_UUID_LOOKUPS: usize = 2;
+
+impl Clone for UuidLookup {
+    fn clone(&self) -> Self {
+        Self {
+            scans: AtomicUsize::new(self.scans.load(Ordering::Relaxed)),
+            sorted: self.sorted.clone(),
         }
     }
-    neighbor_csr_from_sorted(&sorted)
+}
+
+impl UuidLookup {
+    /// Ordinal of the first node with `target`, if any.
+    fn find(&self, uuids: &[[u8; 16]], target: &[u8; 16]) -> Option<usize> {
+        let sorted = match self.sorted.get() {
+            Some(sorted) => sorted,
+            None if self.scans.fetch_add(1, Ordering::Relaxed) < LINEAR_UUID_LOOKUPS => {
+                return uuids.iter().position(|uuid| uuid == target);
+            }
+            None => self.sorted.get_or_init(|| {
+                let mut order: Vec<u32> = (0..uuids.len())
+                    .map(|ordinal| u32::try_from(ordinal).unwrap_or(u32::MAX))
+                    .collect();
+                order.sort_unstable_by_key(|&ordinal| (uuids[ordinal as usize], ordinal));
+                order
+            }),
+        };
+        let first = sorted.partition_point(|&ordinal| uuids[ordinal as usize] < *target);
+        sorted
+            .get(first)
+            .map(|&ordinal| ordinal as usize)
+            .filter(|&ordinal| uuids[ordinal] == *target)
+    }
+}
+
+/// The adjacency entries of one node, materialized as [`AlgorithmEdge`]s on
+/// access from the ordinal topology and its edge identity.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct NeighborView<'a> {
+    graph: &'a AdjacencyGraph,
+    start: usize,
+    end: usize,
+}
+
+impl<'a> NeighborView<'a> {
+    /// Number of entries.
+    #[must_use]
+    pub(crate) fn len(&self) -> usize {
+        self.end - self.start
+    }
+
+    /// Whether the node has no entries.
+    #[must_use]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.start == self.end
+    }
+
+    /// Entry `index`, if present.
+    #[must_use]
+    pub(crate) fn get(&self, index: usize) -> Option<AlgorithmEdge> {
+        (index < self.len()).then(|| self.graph.algorithm_edge(self.start + index))
+    }
+
+    /// Entries in order.
+    #[must_use]
+    pub(crate) fn iter(&self) -> NeighborIter<'a> {
+        NeighborIter {
+            graph: self.graph,
+            front: self.start,
+            back: self.end,
+        }
+    }
+
+    /// Materialize the entries.
+    #[must_use]
+    pub(crate) fn to_vec(&self) -> Vec<AlgorithmEdge> {
+        self.iter().collect()
+    }
+}
+
+/// Iterator over a [`NeighborView`].
+#[derive(Clone, Debug)]
+pub(crate) struct NeighborIter<'a> {
+    graph: &'a AdjacencyGraph,
+    front: usize,
+    back: usize,
+}
+
+impl Iterator for NeighborIter<'_> {
+    type Item = AlgorithmEdge;
+
+    fn next(&mut self) -> Option<AlgorithmEdge> {
+        (self.front < self.back).then(|| {
+            let edge = self.graph.algorithm_edge(self.front);
+            self.front += 1;
+            edge
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.back - self.front;
+        (remaining, Some(remaining))
+    }
+}
+
+impl DoubleEndedIterator for NeighborIter<'_> {
+    fn next_back(&mut self) -> Option<AlgorithmEdge> {
+        (self.front < self.back).then(|| {
+            self.back -= 1;
+            self.graph.algorithm_edge(self.back)
+        })
+    }
+}
+
+impl ExactSizeIterator for NeighborIter<'_> {}
+
+impl<'a> IntoIterator for NeighborView<'a> {
+    type Item = AlgorithmEdge;
+    type IntoIter = NeighborIter<'a>;
+
+    fn into_iter(self) -> NeighborIter<'a> {
+        self.iter()
+    }
+}
+
+impl<'a> IntoIterator for &NeighborView<'a> {
+    type Item = AlgorithmEdge;
+    type IntoIter = NeighborIter<'a>;
+
+    fn into_iter(self) -> NeighborIter<'a> {
+        self.iter()
+    }
 }
 
 impl AdjacencyGraph {
+    /// Wrap an exported topology with the authority it was read under.
+    fn from_topology(
+        topology: TopologyGraph,
+        inventory: Option<std::sync::Arc<graphforge_storage::AuthenticatedPropertyInventory>>,
+        evidence: AlgorithmExportEvidence,
+    ) -> Self {
+        Self {
+            topology,
+            dense_node_ids: OnceLock::new(),
+            uuid_lookup: UuidLookup::default(),
+            node_vectors: HashMap::new(),
+            node_initial_labels: HashMap::new(),
+            inventory,
+            evidence,
+        }
+    }
+
+    /// Build a graph from per-node entries `(node_id, entry)`, with the node ids
+    /// ascending and `uuids[n]` the UUID of the `n`th. Entries are ordered by
+    /// `(edge_id, neighbor_id)` within a node. This is the construction used by
+    /// resolved projections and by fixtures; an export never goes through it.
+    /// A neighbor that is not one of `node_ids` is kept as an unresolvable
+    /// ordinal so malformed fixtures stay malformed.
+    fn from_entries(
+        directed: bool,
+        node_ids: Vec<u64>,
+        uuids: Vec<[u8; 16]>,
+        mut entries: Vec<(u64, AlgorithmEdge)>,
+    ) -> Self {
+        entries.sort_by_key(|(node, edge)| (*node, edge.edge_id, edge.neighbor_id));
+        let nodes = NodeSet::from_ids(node_ids, u64::MAX);
+        let node_count = nodes.len();
+        let unresolvable = u32::try_from(node_count).unwrap_or(u32::MAX);
+        let mut counts = vec![0_u32; node_count];
+        let mut neighbors = Vec::with_capacity(entries.len());
+        let mut identity = EdgeIdentity::default();
+        let mut weights = Vec::with_capacity(entries.len());
+        let mut sources = Vec::with_capacity(entries.len());
+        for (node, edge) in &entries {
+            let Some(source) = nodes.ordinal_of(*node) else {
+                continue;
+            };
+            counts[source] += 1;
+            sources.push(source);
+            neighbors.push(
+                nodes
+                    .ordinal_of(edge.neighbor_id)
+                    .and_then(|ordinal| u32::try_from(ordinal).ok())
+                    .unwrap_or(unresolvable),
+            );
+            identity.edge_ids.push(edge.edge_id);
+            identity.edge_uuids.push(edge.edge_uuid);
+            weights.push(edge.weight);
+        }
+        debug_assert!(sources.windows(2).all(|pair| pair[0] <= pair[1]));
+        let mut offsets = Vec::with_capacity(node_count + 1);
+        offsets.push(0);
+        for count in counts {
+            offsets.push(offsets.last().copied().unwrap_or(0) + count);
+        }
+        Self::from_topology(
+            TopologyGraph {
+                directed,
+                offsets,
+                neighbors,
+                weights: Some(weights),
+                uuids,
+                nodes,
+                identity: Some(identity),
+            },
+            None,
+            AlgorithmExportEvidence::default(),
+        )
+    }
+
+    fn algorithm_edge(&self, slot: usize) -> AlgorithmEdge {
+        let topology = &self.topology;
+        let identity = topology.identity.as_ref().expect(
+            "AdjacencyGraph::neighbors needs an export that retained edge identity; \
+             an identity-free export is read through neighbor_ordinals",
+        );
+        AlgorithmEdge {
+            edge_id: identity.edge_ids[slot],
+            edge_uuid: identity.edge_uuids[slot],
+            neighbor_id: topology.node_id_of(topology.neighbors[slot] as usize),
+            weight: topology
+                .weights
+                .as_ref()
+                .map_or(1.0, |weights| weights[slot]),
+        }
+    }
+
+    /// The ordinal topology behind this view.
+    pub(crate) fn topology(&self) -> &TopologyGraph {
+        &self.topology
+    }
+
+    /// What the export that produced this graph read and expanded.
+    pub(crate) fn export_evidence(&self) -> AlgorithmExportEvidence {
+        self.evidence
+    }
+
+    /// Number of selected nodes.
+    pub(crate) fn node_count(&self) -> usize {
+        self.topology.node_count()
+    }
+
+    /// Ordinal of `node_id` among the selected nodes, in ascending id order.
+    pub(crate) fn ordinal_of(&self, node_id: u64) -> Option<usize> {
+        self.topology.ordinal_of(node_id)
+    }
+
+    /// Surrogate `node_id` of the selected node at `ordinal`.
+    pub(crate) fn node_id_of_ordinal(&self, ordinal: usize) -> u64 {
+        self.topology.node_id_of(ordinal)
+    }
+
+    /// Neighbor ordinals of the node at `ordinal`, in adjacency order.
+    pub(crate) fn neighbor_ordinals(&self, ordinal: usize) -> &[u32] {
+        self.topology.neighbor_ordinals(ordinal)
+    }
+
+    /// Edge weights aligned with [`Self::neighbor_ordinals`], when a weight
+    /// property was requested.
+    pub(crate) fn neighbor_weights(&self, ordinal: usize) -> Option<&[f64]> {
+        self.topology.neighbor_weights(ordinal)
+    }
+
     pub(crate) fn retain_inventory(
         &mut self,
         inventory: Option<std::sync::Arc<graphforge_storage::AuthenticatedPropertyInventory>>,
@@ -215,23 +480,17 @@ impl AdjacencyGraph {
         node_uuid_by_id: HashMap<u64, [u8; 16]>,
         neighbors: HashMap<u64, Vec<AlgorithmEdge>>,
     ) -> Self {
-        let node_id_by_uuid = node_uuid_by_id
+        // The UUIDs run in node order and stop at the first node without one,
+        // which leaves the later nodes unresolvable.
+        let uuids = node_ids
             .iter()
-            .map(|(node_id, uuid)| (*uuid, *node_id))
+            .map_while(|node_id| node_uuid_by_id.get(node_id).copied())
             .collect();
-        let (neighbor_row, neighbor_offsets, neighbor_edges) = neighbor_csr_from_map(neighbors);
-        Self {
-            directed,
-            node_ids,
-            node_uuid_by_id,
-            node_id_by_uuid,
-            neighbor_row,
-            neighbor_offsets,
-            neighbor_edges,
-            node_vectors: HashMap::new(),
-            node_initial_labels: HashMap::new(),
-            inventory: None,
-        }
+        let entries = neighbors
+            .into_iter()
+            .flat_map(|(node, edges)| edges.into_iter().map(move |edge| (node, edge)))
+            .collect();
+        Self::from_entries(directed, node_ids, uuids, entries)
     }
 
     /// Fingerprint public UUID topology without execution surrogates.
@@ -242,8 +501,15 @@ impl AdjacencyGraph {
             GfError::Execution("algorithm projection node count exceeds UInt64 range".into())
         })?;
 
+        if self.topology.identity.is_none() && !self.topology.neighbors.is_empty() {
+            return Err(GfError::Execution(
+                "algorithm projection fingerprint needs an export that retained edge identity"
+                    .into(),
+            ));
+        }
+        let directed = self.is_directed();
         let mut logical_edges: BTreeMap<[u8; 16], LogicalProjectionEdge> = BTreeMap::new();
-        for &source_id in &self.node_ids {
+        for &source_id in self.node_ids() {
             let source_uuid = self.node_uuid(source_id).ok_or_else(|| {
                 GfError::Execution("algorithm projection source has no UUID identity".into())
             })?;
@@ -256,7 +522,7 @@ impl AdjacencyGraph {
                         "algorithm projection edge weight is not finite".into(),
                     ));
                 }
-                let (source, target) = if self.directed || source_uuid <= target_uuid {
+                let (source, target) = if directed || source_uuid <= target_uuid {
                     (source_uuid, target_uuid)
                 } else {
                     (target_uuid, source_uuid)
@@ -273,7 +539,7 @@ impl AdjacencyGraph {
                     }
                     std::collections::btree_map::Entry::Occupied(mut entry) => {
                         let existing = entry.get_mut();
-                        if self.directed
+                        if directed
                             || existing.source_uuid != source
                             || existing.target_uuid != target
                             || existing.weight_bits != weight
@@ -289,7 +555,7 @@ impl AdjacencyGraph {
                 }
             }
         }
-        if !self.directed && logical_edges.values().any(|edge| edge.mirror_count != 2) {
+        if !directed && logical_edges.values().any(|edge| edge.mirror_count != 2) {
             return Err(GfError::Execution(
                 "undirected algorithm projection edge is missing its mirrored adjacency".into(),
             ));
@@ -300,7 +566,7 @@ impl AdjacencyGraph {
 
         let mut digest = Sha256::new();
         digest.update(b"graphforge_algorithm_projection_v1");
-        digest.update([u8::from(self.directed)]);
+        digest.update([u8::from(directed)]);
         digest.update(node_count.to_le_bytes());
         for uuid in nodes {
             digest.update(uuid);
@@ -407,15 +673,7 @@ impl AdjacencyGraph {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let node_uuid_by_id = node_ids
-            .iter()
-            .copied()
-            .zip(projection.nodes.iter().copied())
-            .collect::<HashMap<_, _>>();
-        let node_id_by_uuid = node_uuid_by_id
-            .iter()
-            .map(|(&id, &uuid)| (uuid, id))
-            .collect::<HashMap<_, _>>();
+        let ordinal_of = |uuid: &[u8; 16]| projection.nodes.binary_search(uuid).ok();
 
         projection
             .edges
@@ -429,113 +687,108 @@ impl AdjacencyGraph {
                 "resolved graph projection contains duplicate edge UUID".into(),
             ));
         }
-        let mut neighbors: HashMap<u64, Vec<AlgorithmEdge>> = HashMap::new();
-        for (index, edge) in projection.edges.into_iter().enumerate() {
+        let mut entries = Vec::with_capacity(projection.edges.len() * 2);
+        for (index, edge) in projection.edges.iter().enumerate() {
             if !edge.weight.is_finite() {
                 return Err(GfError::Validation(
                     "resolved graph projection edge weight must be finite".into(),
                 ));
             }
-            let source = node_id_by_uuid
-                .get(&edge.source_uuid)
-                .copied()
-                .ok_or_else(|| {
-                    GfError::Validation(
-                        "resolved graph projection edge source UUID is not selected".into(),
-                    )
-                })?;
-            let target = node_id_by_uuid
-                .get(&edge.target_uuid)
-                .copied()
-                .ok_or_else(|| {
-                    GfError::Validation(
-                        "resolved graph projection edge target UUID is not selected".into(),
-                    )
-                })?;
+            let source = ordinal_of(&edge.source_uuid).ok_or_else(|| {
+                GfError::Validation(
+                    "resolved graph projection edge source UUID is not selected".into(),
+                )
+            })?;
+            let target = ordinal_of(&edge.target_uuid).ok_or_else(|| {
+                GfError::Validation(
+                    "resolved graph projection edge target UUID is not selected".into(),
+                )
+            })?;
             let edge_id = u64::try_from(index).map_err(|_| {
                 GfError::Validation(
                     "resolved graph projection edge count exceeds UInt64 range".into(),
                 )
             })?;
-            neighbors.entry(source).or_default().push(AlgorithmEdge {
+            let (source, target) = (node_ids[source], node_ids[target]);
+            let entry = |neighbor_id| AlgorithmEdge {
                 edge_id,
                 edge_uuid: edge.edge_uuid,
-                neighbor_id: target,
+                neighbor_id,
                 weight: edge.weight,
-            });
+            };
+            entries.push((source, entry(target)));
             if !projection.directed {
-                neighbors.entry(target).or_default().push(AlgorithmEdge {
-                    edge_id,
-                    edge_uuid: edge.edge_uuid,
-                    neighbor_id: source,
-                    weight: edge.weight,
-                });
+                entries.push((target, entry(source)));
             }
         }
-        for entries in neighbors.values_mut() {
-            entries.sort_by_key(|edge| (edge.edge_id, edge.neighbor_id));
-        }
-        let (neighbor_row, neighbor_offsets, neighbor_edges) = neighbor_csr_from_map(neighbors);
-        Ok(Self {
-            directed: projection.directed,
+        Ok(Self::from_entries(
+            projection.directed,
             node_ids,
-            node_uuid_by_id,
-            node_id_by_uuid,
-            neighbor_row,
-            neighbor_offsets,
-            neighbor_edges,
-            node_vectors: HashMap::new(),
-            node_initial_labels: HashMap::new(),
-            inventory: None,
-        })
+            projection.nodes.clone(),
+            entries,
+        ))
     }
 
     /// Whether the exported topology preserves edge orientation.
     #[must_use]
     pub(crate) fn is_directed(&self) -> bool {
-        self.directed
+        self.topology.directed
     }
 
     /// Selected public node identities in deterministic surrogate order.
     pub(crate) fn node_uuids(&self) -> impl Iterator<Item = [u8; 16]> + '_ {
-        self.node_ids
-            .iter()
-            .map(|node_id| self.node_uuid_by_id[node_id])
+        self.topology.uuids.iter().copied()
     }
 
-    /// Selected node surrogates in ascending order.
+    /// Selected node surrogates in ascending order. A graph over consecutive ids
+    /// has no stored id array; the slice is built on the first call, so a kernel
+    /// that walks ordinals never pays for it.
     #[must_use]
     pub(crate) fn node_ids(&self) -> &[u64] {
-        &self.node_ids
+        match &self.topology.nodes {
+            NodeSet::Sparse { ids, .. } => ids,
+            NodeSet::Dense { first, count } => self.dense_node_ids.get_or_init(|| {
+                (0..*count as u64)
+                    .map(|ordinal| first.saturating_add(ordinal))
+                    .collect()
+            }),
+        }
     }
 
     /// Adjacency entries for `node_id`, ordered by `(edge_id, neighbor_id)`.
+    ///
+    /// Entries are built on access from the ordinal topology. This needs an
+    /// export that retained edge identity.
     #[must_use]
-    pub(crate) fn neighbors(&self, node_id: u64) -> &[AlgorithmEdge] {
-        let Some(&row) = self.neighbor_row.get(&node_id) else {
-            return &[];
-        };
-        let row = usize::try_from(row).unwrap_or(usize::MAX);
-        if row + 1 >= self.neighbor_offsets.len() {
-            return &[];
+    pub(crate) fn neighbors(&self, node_id: u64) -> NeighborView<'_> {
+        let slots = self
+            .topology
+            .ordinal_of(node_id)
+            .map_or(0..0, |ordinal| self.topology.slots(ordinal));
+        NeighborView {
+            graph: self,
+            start: slots.start,
+            end: slots.end,
         }
-        let start = usize::try_from(self.neighbor_offsets[row]).unwrap_or(0);
-        let end = usize::try_from(self.neighbor_offsets[row + 1]).unwrap_or(start);
-        let end = end.min(self.neighbor_edges.len());
-        let start = start.min(end);
-        &self.neighbor_edges[start..end]
     }
 
     /// Resolve an internal node surrogate to its public UUID.
     #[must_use]
     pub(crate) fn node_uuid(&self, node_id: u64) -> Option<[u8; 16]> {
-        self.node_uuid_by_id.get(&node_id).copied()
+        self.topology
+            .ordinal_of(node_id)
+            .and_then(|ordinal| self.topology.uuids.get(ordinal).copied())
     }
 
     /// Resolve a public UUID to its internal node surrogate.
+    ///
+    /// The first lookups scan the UUID array; a caller that keeps looking pays
+    /// once for a UUID-sorted permutation. Neither builds a hash map.
     #[must_use]
     pub(crate) fn node_id(&self, node_uuid: &[u8; 16]) -> Option<u64> {
-        self.node_id_by_uuid.get(node_uuid).copied()
+        self.uuid_lookup
+            .find(&self.topology.uuids, node_uuid)
+            .map(|ordinal| self.topology.node_id_of(ordinal))
     }
 
     /// Exact graph-native label, loaded only for synchronous label propagation.
@@ -554,9 +807,9 @@ impl AdjacencyGraph {
         &mut self,
         vectors: HashMap<u64, Vec<f64>>,
     ) -> Result<(), GfError> {
-        if vectors.len() != self.node_ids.len()
+        if vectors.len() != self.node_count()
             || self
-                .node_ids
+                .node_ids()
                 .iter()
                 .any(|node_id| !vectors.contains_key(node_id))
         {
@@ -571,95 +824,71 @@ impl AdjacencyGraph {
     /// Whether no nodes survived selection.
     #[must_use]
     pub(crate) fn is_empty(&self) -> bool {
-        self.node_ids.is_empty()
+        self.node_count() == 0
     }
 
     /// Number of direction-expanded adjacency entries.
     pub(crate) fn edge_entry_count(&self) -> u64 {
-        u64::try_from(self.neighbor_edges.len()).unwrap_or(u64::MAX)
+        u64::try_from(self.topology.neighbors.len()).unwrap_or(u64::MAX)
     }
 
     #[cfg(test)]
     pub(crate) fn with_test_counts(nodes: u64, edges: u64) -> Self {
         let node_ids: Vec<u64> = (0..nodes).collect();
-        let node_uuid_by_id = node_ids
+        let uuids = node_ids
             .iter()
-            .map(|&id| (id, u128::from(id).to_be_bytes()))
-            .collect::<HashMap<_, _>>();
-        let node_id_by_uuid = node_uuid_by_id
-            .iter()
-            .map(|(&id, &uuid)| (uuid, id))
+            .map(|&id| u128::from(id).to_be_bytes())
             .collect();
-        let neighbors = if nodes == 0 {
-            HashMap::new()
+        let entries = if nodes == 0 {
+            Vec::new()
         } else {
-            HashMap::from([(
-                0,
-                (0..edges)
-                    .map(|edge_id| AlgorithmEdge {
-                        edge_id,
-                        edge_uuid: u128::from(edge_id).to_be_bytes(),
-                        neighbor_id: edge_id % nodes,
-                        weight: 1.0,
-                    })
-                    .collect(),
-            )])
+            (0..edges)
+                .map(|edge_id| {
+                    (
+                        0,
+                        AlgorithmEdge {
+                            edge_id,
+                            edge_uuid: u128::from(edge_id).to_be_bytes(),
+                            neighbor_id: edge_id % nodes,
+                            weight: 1.0,
+                        },
+                    )
+                })
+                .collect()
         };
-        let (neighbor_row, neighbor_offsets, neighbor_edges) = neighbor_csr_from_map(neighbors);
-        Self {
-            directed: false,
-            node_ids,
-            node_uuid_by_id,
-            node_id_by_uuid,
-            neighbor_row,
-            neighbor_offsets,
-            neighbor_edges,
-            node_vectors: HashMap::new(),
-            node_initial_labels: HashMap::new(),
-            inventory: None,
-        }
+        Self::from_entries(false, node_ids, uuids, entries)
     }
 
     #[cfg(test)]
     pub(crate) fn with_test_edges(nodes: u64, edges: &[(u64, u64)]) -> Self {
         let node_ids: Vec<u64> = (0..nodes).collect();
-        let node_uuid_by_id = node_ids
+        let uuids = node_ids
             .iter()
-            .map(|&id| (id, u128::from(id).to_be_bytes()))
-            .collect::<HashMap<_, _>>();
-        let node_id_by_uuid = node_uuid_by_id
-            .iter()
-            .map(|(&id, &uuid)| (uuid, id))
+            .map(|&id| u128::from(id).to_be_bytes())
             .collect();
-        let mut neighbors: HashMap<u64, Vec<AlgorithmEdge>> = HashMap::new();
-        for (edge_id, &(source, target)) in edges.iter().enumerate() {
-            let edge_id = u64::try_from(edge_id).expect("test edge count fits u64");
-            neighbors.entry(source).or_default().push(AlgorithmEdge {
-                edge_id,
-                edge_uuid: u128::from(edge_id).to_be_bytes(),
-                neighbor_id: target,
-                weight: 1.0,
-            });
-        }
-        let (neighbor_row, neighbor_offsets, neighbor_edges) = neighbor_csr_from_map(neighbors);
-        Self {
-            directed: false,
-            node_ids,
-            node_uuid_by_id,
-            node_id_by_uuid,
-            neighbor_row,
-            neighbor_offsets,
-            neighbor_edges,
-            node_vectors: HashMap::new(),
-            node_initial_labels: HashMap::new(),
-            inventory: None,
-        }
+        let entries = edges
+            .iter()
+            .enumerate()
+            .map(|(edge_id, &(source, target))| {
+                let edge_id = u64::try_from(edge_id).expect("test edge count fits u64");
+                (
+                    source,
+                    AlgorithmEdge {
+                        edge_id,
+                        edge_uuid: u128::from(edge_id).to_be_bytes(),
+                        neighbor_id: target,
+                        weight: 1.0,
+                    },
+                )
+            })
+            .collect();
+        Self::from_entries(false, node_ids, uuids, entries)
     }
 
     #[cfg(test)]
     pub(crate) fn with_test_directed_edges(nodes: u64, edges: &[(u64, u64)]) -> Self {
         let mut graph = Self::with_test_edges(nodes, edges);
-        graph.directed = true;
+        graph.topology.directed = true;
         graph
     }
 
@@ -670,32 +899,19 @@ impl AdjacencyGraph {
     ) -> Self {
         let mut graph =
             Self::with_test_directed_edges(u64::try_from(node_uuids.len()).unwrap(), edges);
-        graph.node_uuid_by_id = node_uuids
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(id, uuid)| (u64::try_from(id).unwrap(), uuid))
-            .collect();
-        graph.node_id_by_uuid = graph
-            .node_uuid_by_id
-            .iter()
-            .map(|(&id, &uuid)| (uuid, id))
-            .collect();
+        graph.topology.uuids = node_uuids.to_vec();
+        graph.uuid_lookup = UuidLookup::default();
         graph
     }
 
     #[cfg(test)]
     pub(crate) fn with_test_undirected_multigraph(nodes: u64, edges: &[(u64, u64, u64)]) -> Self {
         let node_ids: Vec<u64> = (0..nodes).collect();
-        let node_uuid_by_id = node_ids
+        let uuids = node_ids
             .iter()
-            .map(|&id| (id, u128::from(id).to_be_bytes()))
-            .collect::<HashMap<_, _>>();
-        let node_id_by_uuid = node_uuid_by_id
-            .iter()
-            .map(|(&id, &uuid)| (uuid, id))
+            .map(|&id| u128::from(id).to_be_bytes())
             .collect();
-        let mut neighbors: HashMap<u64, Vec<AlgorithmEdge>> = HashMap::new();
+        let mut entries = Vec::new();
         for &(edge_id, source, target) in edges {
             let edge = |neighbor_id| AlgorithmEdge {
                 edge_id,
@@ -703,34 +919,25 @@ impl AdjacencyGraph {
                 neighbor_id,
                 weight: 1.0,
             };
-            neighbors.entry(source).or_default().push(edge(target));
+            entries.push((source, edge(target)));
             if source != target {
-                neighbors.entry(target).or_default().push(edge(source));
+                entries.push((target, edge(source)));
             }
         }
-        let (neighbor_row, neighbor_offsets, neighbor_edges) = neighbor_csr_from_map(neighbors);
-        Self {
-            directed: false,
-            node_ids,
-            node_uuid_by_id,
-            node_id_by_uuid,
-            neighbor_row,
-            neighbor_offsets,
-            neighbor_edges,
-            node_vectors: HashMap::new(),
-            node_initial_labels: HashMap::new(),
-            inventory: None,
-        }
+        Self::from_entries(false, node_ids, uuids, entries)
     }
 
     #[cfg(test)]
     pub(crate) fn with_test_edge_weights(mut self, weights: &[f64]) -> Self {
-        let mut edges = self.neighbor_edges.iter_mut().collect::<Vec<_>>();
-        edges.sort_unstable_by_key(|edge| edge.edge_id);
-        assert_eq!(edges.len(), weights.len());
-        for (edge, &weight) in edges.into_iter().zip(weights) {
-            edge.weight = weight;
+        let identity = self.topology.identity.as_ref().expect("fixture identity");
+        let mut slots = (0..identity.edge_ids.len()).collect::<Vec<_>>();
+        slots.sort_by_key(|&slot| identity.edge_ids[slot]);
+        assert_eq!(slots.len(), weights.len());
+        let mut assigned = vec![1.0; slots.len()];
+        for (slot, &weight) in slots.into_iter().zip(weights) {
+            assigned[slot] = weight;
         }
+        self.topology.weights = Some(assigned);
         self
     }
 }
@@ -750,26 +957,26 @@ pub(crate) fn export_node_selection_from_files(
     files: &graphforge_storage::TopologyFiles,
     label: EntityTypeSelection,
 ) -> Result<AdjacencyGraph, GfError> {
-    let (node_ids, node_uuid_by_id) = selected_nodes(files, label)?;
-    let node_id_by_uuid = node_uuid_by_id
-        .iter()
-        .map(|(&node_id, &uuid)| (uuid, node_id))
-        .collect();
-    Ok(AdjacencyGraph {
-        directed: false,
-        node_ids,
-        node_uuid_by_id,
-        node_id_by_uuid,
-        neighbor_row: HashMap::new(),
-        neighbor_offsets: vec![0],
-        neighbor_edges: Vec::new(),
-        node_vectors: HashMap::new(),
-        node_initial_labels: HashMap::new(),
-        inventory: None,
-    })
+    // No edges follow, so no CSR bounds the rank table: lookups by id search.
+    let selected = select_nodes(files, label, 0)?;
+    let count = selected.nodes.len();
+    Ok(AdjacencyGraph::from_topology(
+        TopologyGraph {
+            directed: false,
+            offsets: vec![0; count + 1],
+            neighbors: Vec::new(),
+            weights: None,
+            uuids: selected.uuids,
+            nodes: selected.nodes,
+            identity: None,
+        },
+        None,
+        AlgorithmExportEvidence::default(),
+    ))
 }
 
-/// Export the provider's adjacency into the Rust algorithm graph.
+/// Export the provider's adjacency into the Rust algorithm graph, keeping each
+/// adjacency slot's edge id and UUID for kernels that report edges.
 ///
 /// A requested weight property is strict: every selected edge must have one
 /// non-NULL numeric value. Missing, NULL, non-numeric, NaN, and infinite values
@@ -785,86 +992,162 @@ pub(crate) fn export_adjacency(
     mode: OntologyMode,
     selection: AdjacencySelection<'_>,
 ) -> Result<AdjacencyGraph, GfError> {
-    let mut adjacency =
+    export_topology(provider, dir, mode, selection, EdgeIdentityDemand::Retain)
+}
+
+/// Export the provider's adjacency as an ordinal topology (#1974).
+///
+/// The export is one sequential pass over the adjacency view's rows, in node
+/// order, keeping the neighbors of each selected node that are themselves
+/// selected. Nothing is sorted and no map is keyed by an edge or a node. The
+/// edge table is read only to resolve edge UUIDs for [`EdgeIdentityDemand::Retain`]
+/// or to look up a requested weight; a plain topology export reads none.
+///
+/// # Errors
+/// As [`export_adjacency`].
+pub(crate) fn export_topology(
+    provider: &dyn AdjacencyProvider,
+    dir: &Path,
+    mode: OntologyMode,
+    selection: AdjacencySelection<'_>,
+    identity: EdgeIdentityDemand,
+) -> Result<AdjacencyGraph, GfError> {
+    let adjacency =
         crate::adjacency::AdjacencyReader::new(provider, selection.via, selection.direction)?;
-    let topology = match provider.admitted_inventory() {
-        Some(inventory) => graphforge_storage::TopologyFiles::from_inventory(&inventory)?,
+    let inventory = provider.admitted_inventory();
+    let files = match &inventory {
+        Some(inventory) => graphforge_storage::TopologyFiles::from_inventory(inventory)?,
         None => graphforge_storage::TopologyFiles::discover_legacy(dir)?,
     };
-    let (node_ids, node_uuid_by_id) = selected_nodes(&topology, selection.label)?;
-    let selected: HashSet<u64> = node_ids.iter().copied().collect();
+    let selected = select_nodes(&files, selection.label, adjacency.node_extent())?;
+    let node_count = selected.nodes.len();
 
-    // Bound projection work by the selected node set (#340): look up each
-    // selected node's CSR/map row instead of scanning the complete graph.
-    let mut raw = Vec::new();
-    let mut edge_ids = HashSet::new();
-    for &node_id in &node_ids {
-        adjacency.with_neighbors(node_id, |neighbors| {
-            for (edge_id, neighbor_id) in neighbors.iter() {
-                if selected.contains(&neighbor_id) {
-                    raw.push((node_id, edge_id, neighbor_id));
-                    edge_ids.insert(edge_id);
-                }
-            }
-        })?;
-    }
-    raw.sort_unstable();
-
-    let inventory = provider.admitted_inventory();
-    let edge_uuids =
-        selected_edge_uuids(dir, mode, selection.via, &edge_ids, inventory.as_deref())?;
-    let weights = match selection.weight {
-        Some(property) => selected_weights(
-            dir,
-            selection.via,
-            property,
-            &edge_uuids,
-            inventory.as_deref(),
-        )?,
-        None => HashMap::new(),
+    let keep_edge_ids = identity == EdgeIdentityDemand::Retain || selection.weight.is_some();
+    let entry_hint = if node_count == 0 {
+        0
+    } else {
+        adjacency.entry_count()?
     };
-
-    let mut sorted = Vec::with_capacity(raw.len());
-    for (node_id, edge_id, neighbor_id) in raw {
-        let edge_uuid = edge_uuids.get(&edge_id).copied().ok_or_else(|| {
-            GfError::Execution(format!("adjacency edge {edge_id} has no topology UUID"))
+    let mut builder = TopologyBuilder::new(node_count, entry_hint, keep_edge_ids)?;
+    if node_count > 0 {
+        adjacency.walk_rows(|node_id, edge_ids, neighbor_ids| {
+            let Some(ordinal) = selected.nodes.ordinal_of(node_id) else {
+                return Ok(());
+            };
+            if ordinal != builder.next_ordinal() {
+                return Err(GfError::Execution(format!(
+                    "adjacency row {node_id} arrived out of node order"
+                )));
+            }
+            builder.push_row(&selected.nodes, edge_ids, neighbor_ids)
         })?;
-        let weight = selection.weight.map_or(1.0, |_| {
-            weights.get(&edge_uuid).copied().unwrap_or(f64::NAN)
-        });
-        if !weight.is_finite() {
-            return Err(GfError::Validation(format!(
-                "edge weight is missing, NULL, NaN, or infinite for edge {}",
-                uuid_text(&edge_uuid)
-            )));
-        }
-        sorted.push((
-            node_id,
-            AlgorithmEdge {
-                edge_id,
-                edge_uuid,
-                neighbor_id,
-                weight,
-            },
-        ));
     }
-    sorted.sort_by_key(|(node_id, edge)| (*node_id, edge.edge_id, edge.neighbor_id));
-    let (neighbor_row, neighbor_offsets, neighbor_edges) = neighbor_csr_from_sorted(&sorted);
-    let node_id_by_uuid = node_uuid_by_id
-        .iter()
-        .map(|(&id, &uuid)| (uuid, id))
-        .collect();
-    Ok(AdjacencyGraph {
-        directed: !matches!(selection.direction, Direction::Undirected),
-        node_ids,
-        node_uuid_by_id,
-        node_id_by_uuid,
-        neighbor_row,
-        neighbor_offsets,
-        neighbor_edges,
-        node_vectors: HashMap::new(),
-        node_initial_labels: HashMap::new(),
+    let (offsets, neighbors, edge_ids) = builder.finish(node_count);
+
+    let mut evidence = AlgorithmExportEvidence {
+        edge_scale_hash_entries: adjacency.hash_entries(),
+        edge_rows_read: 0,
+    };
+    let mut retained = None;
+    let mut weights = None;
+    if let Some(edge_ids) = edge_ids {
+        let (edge_uuids, rows) = resolve_edge_uuids(&files, selection.via, mode, &edge_ids)?;
+        evidence.edge_rows_read = rows;
+        if let Some(property) = selection.weight {
+            weights = Some(resolve_weights(
+                dir,
+                inventory.as_deref(),
+                selection.via,
+                property,
+                &edge_uuids,
+            )?);
+        }
+        if identity == EdgeIdentityDemand::Retain {
+            retained = Some(EdgeIdentity {
+                edge_ids,
+                edge_uuids,
+            });
+        }
+    }
+    Ok(AdjacencyGraph::from_topology(
+        TopologyGraph {
+            directed: !matches!(selection.direction, Direction::Undirected),
+            offsets,
+            neighbors,
+            weights,
+            uuids: selected.uuids,
+            nodes: selected.nodes,
+            identity: retained,
+        },
         inventory,
+        evidence,
+    ))
+}
+
+/// Shape and evidence of one analyst export, for resource measurements that
+/// live outside this crate (#1974).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AnalystExportShape {
+    /// Selected nodes.
+    pub nodes: usize,
+    /// Adjacency entries kept, both orientations of an undirected export.
+    pub entries: usize,
+    /// Whether a weight per entry was kept.
+    pub weighted: bool,
+    /// Whether the edge id and UUID of each entry were kept.
+    pub identity: bool,
+    /// Hash-map entries held by the adjacency view the export read.
+    pub edge_scale_hash_entries: u64,
+    /// Edge-table rows the export streamed.
+    pub edge_rows_read: u64,
+}
+
+/// Run the real analyst export and report its shape. The graph is dropped on
+/// return, so a caller measuring a heap peak around this call sees the export's
+/// own peak.
+///
+/// # Errors
+/// As the export: storage, execution and weight-validation errors.
+#[doc(hidden)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one flat entry point for measurements outside this crate"
+)]
+pub fn export_analyst_topology(
+    provider: &dyn AdjacencyProvider,
+    dir: &Path,
+    mode: OntologyMode,
+    label: EntityTypeSelection,
+    via: &str,
+    direction: Direction,
+    weight: Option<&str>,
+    retain_identity: bool,
+) -> Result<AnalystExportShape, GfError> {
+    let graph = export_topology(
+        provider,
+        dir,
+        mode,
+        AdjacencySelection {
+            label,
+            via,
+            direction,
+            weight,
+        },
+        if retain_identity {
+            EdgeIdentityDemand::Retain
+        } else {
+            EdgeIdentityDemand::Omit
+        },
+    )?;
+    let evidence = graph.export_evidence();
+    Ok(AnalystExportShape {
+        nodes: graph.node_count(),
+        entries: graph.topology().neighbors.len(),
+        weighted: graph.topology().weights.is_some(),
+        identity: graph.topology().identity.is_some(),
+        edge_scale_hash_entries: evidence.edge_scale_hash_entries,
+        edge_rows_read: evidence.edge_rows_read,
     })
 }
 
@@ -878,11 +1161,11 @@ pub(crate) fn load_node_vectors(
     if graph.is_empty() {
         return Ok(());
     }
-    validate_vector_shape(graph.node_ids.len(), 1)?;
+    validate_vector_shape(graph.node_count(), 1)?;
     let mut values = HashMap::new();
     for stem in property_stems {
         for (uuid, row) in graph.node_property_rows(dir, stem).map_err(storage_error)? {
-            if !graph.node_id_by_uuid.contains_key(&uuid) {
+            if !graph.node_id(&uuid).is_some() {
                 continue;
             }
             if let Some(value) = row.get(property)
@@ -898,9 +1181,9 @@ pub(crate) fn load_node_vectors(
     }
 
     let mut dimension = None;
-    let mut vectors = HashMap::with_capacity(graph.node_ids.len());
-    for &node_id in &graph.node_ids {
-        let uuid = graph.node_uuid_by_id[&node_id];
+    let mut vectors = HashMap::with_capacity(graph.node_count());
+    for &node_id in graph.node_ids() {
+        let uuid = selected_uuid(graph, node_id)?;
         let value = values.get(&uuid).ok_or_else(|| {
             GfError::Validation(format!(
                 "node {} is missing vector property {property:?}",
@@ -918,7 +1201,7 @@ pub(crate) fn load_node_vectors(
             }
         } else {
             dimension = Some(vector.len());
-            validate_vector_shape(graph.node_ids.len(), vector.len())?;
+            validate_vector_shape(graph.node_count(), vector.len())?;
         }
         vectors.insert(node_id, vector);
     }
@@ -937,7 +1220,7 @@ pub(crate) fn load_node_initial_labels(
             .node_property_rows(dir, &stem)
             .map_err(storage_error)?
         {
-            let Some(&node_id) = graph.node_id_by_uuid.get(&uuid) else {
+            let Some(node_id) = graph.node_id(&uuid) else {
                 continue;
             };
             let Some(value) = row.get(property) else {
@@ -963,7 +1246,7 @@ pub(crate) fn load_node_initial_labels(
         if !labels.contains_key(&node) {
             return Err(GfError::Validation(format!(
                 "node {} is missing initial label property {property:?}",
-                uuid_text(&graph.node_uuid_by_id[&node])
+                uuid_text(&selected_uuid(graph, node)?)
             )));
         }
     }
@@ -983,7 +1266,7 @@ pub(crate) fn load_node_numeric_property(
             .node_property_rows(dir, &stem)
             .map_err(storage_error)?
         {
-            let Some(&node_id) = graph.node_id_by_uuid.get(&uuid) else {
+            let Some(node_id) = graph.node_id(&uuid) else {
                 continue;
             };
             let Some(value) = row.get(property) else {
@@ -1014,7 +1297,7 @@ pub(crate) fn load_node_numeric_property(
         if !values.contains_key(&node_id) {
             return Err(GfError::Validation(format!(
                 "node {} is missing property {property:?}",
-                uuid_text(&graph.node_uuid_by_id[&node_id])
+                uuid_text(&selected_uuid(graph, node_id)?)
             )));
         }
     }
@@ -1036,7 +1319,7 @@ pub(crate) fn load_node_scalar_features(
         .map(|property| load_node_numeric_property(graph, dir, property))
         .collect::<Result<Vec<_>, _>>()?;
     let vectors = graph
-        .node_ids
+        .node_ids()
         .iter()
         .map(|&node_id| {
             let vector = columns
@@ -1061,7 +1344,7 @@ pub(crate) fn load_node_feature_properties(
         return Ok(());
     }
     let mut combined = graph
-        .node_ids
+        .node_ids()
         .iter()
         .map(|&node_id| (node_id, Vec::new()))
         .collect::<HashMap<_, _>>();
@@ -1072,7 +1355,7 @@ pub(crate) fn load_node_feature_properties(
                 .node_property_rows(dir, &stem)
                 .map_err(storage_error)?
             {
-                if !graph.node_id_by_uuid.contains_key(&uuid) {
+                if !graph.node_id(&uuid).is_some() {
                     continue;
                 }
                 if let Some(value) = row.get(property)
@@ -1087,8 +1370,8 @@ pub(crate) fn load_node_feature_properties(
             }
         }
         let mut width = None;
-        for &node_id in &graph.node_ids {
-            let uuid = graph.node_uuid_by_id[&node_id];
+        for &node_id in graph.node_ids() {
+            let uuid = selected_uuid(graph, node_id)?;
             let value = values.get(&uuid).ok_or_else(|| {
                 GfError::Validation(format!(
                     "node {} is missing feature property {property:?}",
@@ -1114,6 +1397,13 @@ pub(crate) fn load_node_feature_properties(
         }
     }
     graph.replace_node_vectors(combined)
+}
+
+/// UUID of a node the graph selected.
+fn selected_uuid(graph: &AdjacencyGraph, node_id: u64) -> Result<[u8; 16], GfError> {
+    graph
+        .node_uuid(node_id)
+        .ok_or_else(|| GfError::Execution("selected node has no UUID identity".into()))
 }
 
 fn decode_feature(property: &str, uuid: &[u8; 16], value: &IrLiteral) -> Result<Vec<f64>, GfError> {
@@ -1233,143 +1523,6 @@ fn validate_vector_shape(nodes: usize, dimension: usize) -> Result<(), GfError> 
         )));
     }
     Ok(())
-}
-
-fn selected_nodes(
-    files: &graphforge_storage::TopologyFiles,
-    label: EntityTypeSelection,
-) -> Result<(Vec<u64>, NodeUuidMap), GfError> {
-    if label == EntityTypeSelection::Missing {
-        return Ok((Vec::new(), HashMap::new()));
-    }
-    let mut rows = Vec::new();
-    for batch in graphforge_storage::read_nodes_from_files(files).map_err(storage_error)? {
-        let uuids = fixed_binary(&batch, "node_uuid")?;
-        let ids = uint64(&batch, "node_id")?;
-        let labels = batch
-            .column_by_name("type_ids")
-            .and_then(|column| column.as_any().downcast_ref::<ListArray>())
-            .ok_or_else(|| GfError::Execution("node topology type_ids is not List".into()))?;
-        for row in 0..batch.num_rows() {
-            if ids.is_null(row) || uuids.is_null(row) {
-                continue;
-            }
-            if let EntityTypeSelection::Known(label) = label {
-                let values = labels.value(row);
-                let values = values
-                    .as_any()
-                    .downcast_ref::<UInt32Array>()
-                    .ok_or_else(|| {
-                        GfError::Execution("node topology type_ids values are not UInt32".into())
-                    })?;
-                if !values.values().contains(&label.encode()) {
-                    continue;
-                }
-            }
-            rows.push((ids.value(row), uuid_at(uuids, row)?));
-        }
-    }
-    rows.sort_unstable_by_key(|&(id, _)| id);
-    let node_ids = rows.iter().map(|&(id, _)| id).collect();
-    Ok((node_ids, rows.into_iter().collect()))
-}
-
-fn selected_edge_uuids(
-    dir: &Path,
-    mode: OntologyMode,
-    via: &str,
-    edge_ids: &HashSet<u64>,
-    inventory: Option<&graphforge_storage::AuthenticatedPropertyInventory>,
-) -> Result<HashMap<u64, [u8; 16]>, GfError> {
-    let mut out = HashMap::new();
-    // An advisory ontology can be adopted after exploratory writes. Resolve a
-    // named relation from the union so UUID lookup sees both the original
-    // `_exploratory.parquet` rows and any later typed rows, matching adjacency.
-    let read_name = if matches!(mode, OntologyMode::Advisory) && via != "*" {
-        "*"
-    } else {
-        via
-    };
-    let batches = match inventory {
-        Some(inventory) => graphforge_storage::read_edges_filtered_from_inventory(
-            inventory, read_name, mode, edge_ids,
-        ),
-        None => graphforge_storage::read_edges_filtered(dir, read_name, mode, edge_ids),
-    }
-    .map_err(storage_error)?;
-    for batch in batches {
-        let ids = uint64(&batch, "edge_id")?;
-        let uuids = fixed_binary(&batch, "edge_uuid")?;
-        let relation_names = batch
-            .column_by_name("rel_type_name")
-            .and_then(|column| column.as_any().downcast_ref::<arrow::array::StringArray>());
-        for row in 0..batch.num_rows() {
-            if via != "*" && relation_names.is_some_and(|names| names.value(row) != via) {
-                continue;
-            }
-            if !ids.is_null(row) && !uuids.is_null(row) {
-                out.insert(ids.value(row), uuid_at(uuids, row)?);
-            }
-        }
-    }
-    Ok(out)
-}
-
-fn selected_weights(
-    dir: &Path,
-    via: &str,
-    property: &str,
-    edge_uuids: &HashMap<u64, [u8; 16]>,
-    inventory: Option<&graphforge_storage::AuthenticatedPropertyInventory>,
-) -> Result<HashMap<[u8; 16], f64>, GfError> {
-    let wanted: HashSet<[u8; 16]> = edge_uuids.values().copied().collect();
-    if wanted.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let stems = if via == "*" {
-        match inventory {
-            Some(inventory) => inventory
-                .routes(graphforge_storage::PropertyRouteKind::Edge)
-                .map(str::to_owned)
-                .collect(),
-            None => graphforge_storage::list_edge_property_stems(dir),
-        }
-    } else {
-        vec![via.to_owned()]
-    };
-    let mut out = HashMap::new();
-    for stem in stems {
-        let batches = match inventory {
-            Some(inventory) => {
-                graphforge_storage::read_edge_properties_from_inventory(dir, inventory, &stem)
-            }
-            None => graphforge_storage::read_edge_properties(dir, &stem),
-        }
-        .map_err(storage_error)?;
-        for batch in batches {
-            let uuids = fixed_binary(&batch, "edge_uuid")?;
-            let values = batch.column_by_name(property).ok_or_else(|| {
-                GfError::Validation(format!("edge weight property {property:?} does not exist"))
-            })?;
-            for row in 0..batch.num_rows() {
-                if uuids.is_null(row) {
-                    continue;
-                }
-                let uuid = uuid_at(uuids, row)?;
-                if wanted.contains(&uuid) && !values.is_null(row) {
-                    out.insert(
-                        uuid,
-                        numeric_value(values.as_ref(), row).ok_or_else(|| {
-                            GfError::Validation(format!(
-                                "edge weight property {property:?} must be numeric"
-                            ))
-                        })?,
-                    );
-                }
-            }
-        }
-    }
-    Ok(out)
 }
 
 fn numeric_value(array: &dyn Array, row: usize) -> Option<f64> {
@@ -1880,7 +2033,7 @@ mod tests {
             Some(fixture.ids[1])
         );
         assert_eq!(
-            out.neighbors(fixture.ids[0])[0].edge_uuid,
+            out.neighbors(fixture.ids[0]).get(0).unwrap().edge_uuid,
             to_bytes(&fixture.edges[0])
         );
 
@@ -1933,8 +2086,8 @@ mod tests {
         let target = new_v7();
         let edge = new_v7();
         let label = EntityTypeId::decode(1).unwrap();
-        writer.create_node_with_labels(source, &[label]).unwrap();
-        writer.create_node_with_labels(target, &[label]).unwrap();
+        let source_id = writer.create_node_with_labels(source, &[label]).unwrap();
+        let target_id = writer.create_node_with_labels(target, &[label]).unwrap();
         let edge_id = writer.create_edge(edge, "CON", &source, &target).unwrap();
         writer
             .set_edge_properties(
@@ -1986,19 +2139,28 @@ mod tests {
         assert_eq!(scores.len(), 2);
         assert!(scores.values().all(|value| *value == 7.0));
         for relation in ["CON", "*"] {
-            let identities = selected_edge_uuids(
+            let provider = scan_provider(dir.path().to_path_buf(), OntologyMode::Strict);
+            let graph = export_adjacency(
+                &provider,
                 dir.path(),
                 OntologyMode::Strict,
-                relation,
-                &HashSet::from([edge_id]),
-                Some(&inventory),
+                AdjacencySelection {
+                    via: relation,
+                    weight: Some("cost"),
+                    ..selection(Direction::Out)
+                },
             )
             .unwrap();
-            assert_eq!(identities, HashMap::from([(edge_id, to_bytes(&edge))]));
-            let weights =
-                selected_weights(dir.path(), relation, "cost", &identities, Some(&inventory))
-                    .unwrap();
-            assert_eq!(weights, HashMap::from([(to_bytes(&edge), -2.5)]));
+            assert_eq!(
+                graph.neighbors(source_id).to_vec(),
+                vec![AlgorithmEdge {
+                    edge_id,
+                    edge_uuid: to_bytes(&edge),
+                    neighbor_id: target_id,
+                    weight: -2.5,
+                }],
+                "relation {relation}"
+            );
         }
     }
 
@@ -2520,35 +2682,27 @@ mod tests {
         let uuid1 = u128::from(11_u8).to_be_bytes();
         let edge_uuid = u128::from(12_u8).to_be_bytes();
         let base = || {
-            let (neighbor_row, neighbor_offsets, neighbor_edges) =
-                neighbor_csr_from_map(HashMap::from([(
+            AdjacencyGraph::from_entries(
+                true,
+                vec![0, 1],
+                vec![uuid0, uuid1],
+                vec![(
                     0,
-                    vec![AlgorithmEdge {
+                    AlgorithmEdge {
                         edge_id: 0,
                         neighbor_id: 1,
                         edge_uuid,
                         weight: 2.5,
-                    }],
-                )]));
-            AdjacencyGraph {
-                directed: true,
-                node_ids: vec![0, 1],
-                node_uuid_by_id: HashMap::from([(0, uuid0), (1, uuid1)]),
-                node_id_by_uuid: HashMap::from([(uuid0, 0), (uuid1, 1)]),
-                neighbor_row,
-                neighbor_offsets,
-                neighbor_edges,
-                node_vectors: HashMap::new(),
-                node_initial_labels: HashMap::new(),
-                inventory: None,
-            }
+                    },
+                )],
+            )
         };
 
         let valid = base().projection_fingerprint().expect("valid projection");
         assert_ne!(valid.as_bytes(), &[0; 32]);
 
         let mut missing_target = base();
-        missing_target.neighbor_edges[0].neighbor_id = 9;
+        missing_target.topology.neighbors[0] = 9;
         assert_eq!(
             missing_target
                 .projection_fingerprint()
@@ -2558,14 +2712,18 @@ mod tests {
         );
 
         let mut non_finite = base();
-        non_finite.neighbor_edges[0].weight = f64::NAN;
+        non_finite
+            .topology
+            .weights
+            .as_mut()
+            .expect("fixture weights")[0] = f64::NAN;
         assert_eq!(
             non_finite.projection_fingerprint().unwrap_err().to_string(),
             "execution error: algorithm projection edge weight is not finite"
         );
 
         let mut unmirrored = base();
-        unmirrored.directed = false;
+        unmirrored.topology.directed = false;
         assert_eq!(
             unmirrored.projection_fingerprint().unwrap_err().to_string(),
             "execution error: undirected algorithm projection edge is missing its mirrored adjacency"

@@ -516,6 +516,232 @@ fn merge_undirected_row<'a>(out: &NeighborRow<'a>, inbound: &NeighborRow<'a>) ->
     NeighborRow::owned(entries)
 }
 
+/// Sequential source of one adjacency view's rows in node order.
+///
+/// Every node `0..extent` is yielded exactly once, empty rows included, as
+/// parallel `(edge_ids, neighbor_ids)` slices in the order [`Adjacency::neighbors`]
+/// returns them. A persisted CSR is read through a [`csr::CsrRowCursor`], so no
+/// decoded shard outlives the row it served and none enters the shard cache.
+enum RowSource<'a> {
+    Empty,
+    Map {
+        map: &'a HashMap<u64, Vec<(u64, u64)>>,
+        extent: u64,
+        next: u64,
+        edge_ids: Vec<u64>,
+        neighbor_ids: Vec<u64>,
+    },
+    Sharded {
+        cursor: csr::CsrRowCursor<'a>,
+    },
+    Overlay {
+        cursor: csr::CsrRowCursor<'a>,
+        replaced: &'a HashMap<u64, Vec<(u64, u64)>>,
+        extent: u64,
+        next: u64,
+        edge_ids: Vec<u64>,
+        neighbor_ids: Vec<u64>,
+    },
+    Merged(Box<MergedRows<'a>>),
+}
+
+/// Out and in rows of the same node, merged by ascending `edge_id` with the
+/// out entry first on a tie (see [`merge_undirected_row`]).
+struct MergedRows<'a> {
+    out: RowSource<'a>,
+    inbound: RowSource<'a>,
+    out_extent: u64,
+    in_extent: u64,
+    extent: u64,
+    next: u64,
+    edge_ids: Vec<u64>,
+    neighbor_ids: Vec<u64>,
+}
+
+type SourceRow<'r> = (u64, &'r [u64], &'r [u64]);
+
+fn copy_pairs(entries: &[(u64, u64)], edge_ids: &mut Vec<u64>, neighbor_ids: &mut Vec<u64>) {
+    edge_ids.clear();
+    neighbor_ids.clear();
+    for &(edge_id, neighbor_id) in entries {
+        edge_ids.push(edge_id);
+        neighbor_ids.push(neighbor_id);
+    }
+}
+
+impl<'a> RowSource<'a> {
+    fn open(inner: &'a AdjacencyInner) -> Result<Self, GfError> {
+        Ok(match inner {
+            AdjacencyInner::Empty => Self::Empty,
+            AdjacencyInner::Map(map) => Self::Map {
+                map,
+                extent: inner.node_extent(),
+                next: 0,
+                edge_ids: Vec::new(),
+                neighbor_ids: Vec::new(),
+            },
+            AdjacencyInner::Sharded(base) => Self::Sharded {
+                cursor: base.row_cursor()?,
+            },
+            AdjacencyInner::ShardedOverlay {
+                base,
+                replaced,
+                node_extent,
+            } => Self::Overlay {
+                cursor: base.row_cursor()?,
+                replaced,
+                extent: *node_extent,
+                next: 0,
+                edge_ids: Vec::new(),
+                neighbor_ids: Vec::new(),
+            },
+            AdjacencyInner::Undirected { out, inbound } => {
+                let out_extent = out.node_extent();
+                let in_extent = inbound.node_extent();
+                Self::Merged(Box::new(MergedRows {
+                    out: Self::open(out)?,
+                    inbound: Self::open(inbound)?,
+                    out_extent,
+                    in_extent,
+                    extent: out_extent.max(in_extent),
+                    next: 0,
+                    edge_ids: Vec::new(),
+                    neighbor_ids: Vec::new(),
+                }))
+            }
+        })
+    }
+
+    fn next_row(&mut self) -> Result<Option<SourceRow<'_>>, GfError> {
+        match self {
+            Self::Empty => Ok(None),
+            Self::Map {
+                map,
+                extent,
+                next,
+                edge_ids,
+                neighbor_ids,
+            } => {
+                if *next >= *extent {
+                    return Ok(None);
+                }
+                let node = *next;
+                *next += 1;
+                copy_pairs(
+                    map.get(&node).map_or(&[], Vec::as_slice),
+                    edge_ids,
+                    neighbor_ids,
+                );
+                Ok(Some((node, edge_ids, neighbor_ids)))
+            }
+            Self::Sharded { cursor } => Ok(cursor.next_row()?.map(|(node, row)| {
+                let len = row.len();
+                (node, &row.edge_ids[..len], &row.neighbor_ids[..len])
+            })),
+            Self::Overlay {
+                cursor,
+                replaced,
+                extent,
+                next,
+                edge_ids,
+                neighbor_ids,
+            } => {
+                if *next >= *extent {
+                    return Ok(None);
+                }
+                let node = *next;
+                *next += 1;
+                // The base cursor must advance for every node it covers, even
+                // when the delta replaces the row.
+                let base = cursor.next_row()?;
+                if let Some(row) = replaced.get(&node) {
+                    copy_pairs(row, edge_ids, neighbor_ids);
+                    return Ok(Some((node, edge_ids, neighbor_ids)));
+                }
+                Ok(Some(match base {
+                    Some((_, row)) => {
+                        let len = row.len();
+                        (node, &row.edge_ids[..len], &row.neighbor_ids[..len])
+                    }
+                    None => (node, &[], &[]),
+                }))
+            }
+            Self::Merged(merged) => merged.next_row(),
+        }
+    }
+}
+
+impl MergedRows<'_> {
+    fn next_row(&mut self) -> Result<Option<SourceRow<'_>>, GfError> {
+        if self.next >= self.extent {
+            return Ok(None);
+        }
+        let node = self.next;
+        self.next += 1;
+        let out = if node < self.out_extent {
+            self.out.next_row()?
+        } else {
+            None
+        };
+        let inbound = if node < self.in_extent {
+            self.inbound.next_row()?
+        } else {
+            None
+        };
+        let (out_edges, out_neighbors) = out.map_or((&[][..], &[][..]), |(_, e, n)| (e, n));
+        let (in_edges, in_neighbors) = inbound.map_or((&[][..], &[][..]), |(_, e, n)| (e, n));
+        if in_edges.is_empty() {
+            return Ok(Some((node, out_edges, out_neighbors)));
+        }
+        if out_edges.is_empty() {
+            return Ok(Some((node, in_edges, in_neighbors)));
+        }
+        self.edge_ids.clear();
+        self.neighbor_ids.clear();
+        let (mut o, mut i) = (0, 0);
+        while o < out_edges.len() || i < in_edges.len() {
+            let take_out =
+                i >= in_edges.len() || (o < out_edges.len() && out_edges[o] <= in_edges[i]);
+            if take_out {
+                self.edge_ids.push(out_edges[o]);
+                self.neighbor_ids.push(out_neighbors[o]);
+                o += 1;
+            } else {
+                self.edge_ids.push(in_edges[i]);
+                self.neighbor_ids.push(in_neighbors[i]);
+                i += 1;
+            }
+        }
+        Ok(Some((node, &self.edge_ids, &self.neighbor_ids)))
+    }
+}
+
+impl Adjacency {
+    /// Visit every node `0..node_extent` once, in ascending order, with its row
+    /// as parallel `(edge_ids, neighbor_ids)` slices. Each row is exactly what
+    /// [`Self::neighbors`] returns for that node, including the undirected
+    /// out-before-in merge.
+    ///
+    /// Unlike calling [`Self::neighbors`] per node, a persisted CSR is decoded
+    /// one shard at a time and none is retained, and an undirected pair of
+    /// indexes is advanced in lockstep rather than expanded. The slices are only
+    /// valid inside the visit.
+    ///
+    /// # Errors
+    /// Returns the storage error of a shard that cannot be authenticated and
+    /// decoded, or the visitor's error.
+    pub(crate) fn walk_rows(
+        &self,
+        mut visit: impl FnMut(u64, &[u64], &[u64]) -> Result<(), GfError>,
+    ) -> Result<(), GfError> {
+        let mut source = RowSource::open(&self.inner)?;
+        while let Some((node, edge_ids, neighbor_ids)) = source.next_row()? {
+            visit(node, edge_ids, neighbor_ids)?;
+        }
+        Ok(())
+    }
+}
+
 /// Single adjacency abstraction (ADR 0005): implementations decide *how* a
 /// view is produced (scan-build now; disk-loaded CSR with scan fallback in
 /// #761) — consumers only see [`Adjacency`].
@@ -645,6 +871,25 @@ impl<'a> AdjacencyReader<'a> {
 
     pub(crate) fn node_extent(&self) -> u64 {
         self.view.node_extent()
+    }
+
+    /// Adjacency entries the view holds, both orientations of an undirected view.
+    pub(crate) fn entry_count(&self) -> Result<u64, GfError> {
+        self.view.edge_entry_count()
+    }
+
+    /// Hash-map entries the view expanded its base adjacency into. A persisted
+    /// CSR serves rows without any; a scan-built view holds one per entry.
+    pub(crate) fn hash_entries(&self) -> u64 {
+        self.view.base_csr_entries_expanded()
+    }
+
+    /// Sequential pass over every row; see [`Adjacency::walk_rows`].
+    pub(crate) fn walk_rows(
+        &self,
+        visit: impl FnMut(u64, &[u64], &[u64]) -> Result<(), GfError>,
+    ) -> Result<(), GfError> {
+        self.view.walk_rows(visit)
     }
 
     /// Consume a successfully authenticated row once, preserving borrowed
@@ -2150,5 +2395,92 @@ mod tests {
             assert_eq!(first, (0, 1));
         }
         assert_eq!(visits, 2, "each successful row is consumed exactly once");
+    }
+
+    type WalkedRows = Vec<(u64, Vec<(u64, u64)>)>;
+
+    fn walked_rows(view: &Adjacency) -> WalkedRows {
+        let mut rows = Vec::new();
+        view.walk_rows(|node, edge_ids, neighbor_ids| {
+            assert_eq!(edge_ids.len(), neighbor_ids.len());
+            rows.push((
+                node,
+                edge_ids
+                    .iter()
+                    .copied()
+                    .zip(neighbor_ids.iter().copied())
+                    .collect(),
+            ));
+            Ok(())
+        })
+        .unwrap();
+        rows
+    }
+
+    /// A sequential pass must hand out exactly the rows `neighbors` serves, for
+    /// every view a provider can build: a scan-built map, a multi-shard CSR, a
+    /// CSR with a delta overlay that grows the node extent, and the undirected
+    /// merge of each (self-loops and parallel edges included).
+    #[test]
+    fn walk_rows_equals_neighbors_for_every_view_kind_and_direction() {
+        let dir = TempDir::new().unwrap();
+        write_diamond(dir.path());
+        let mut options = csr::AdjacencyBuildOptions::default();
+        options.shard_max_edges = 2;
+        csr::build_adjacency_index_into_with_options(dir.path(), dir.path(), TS, &options, || {
+            Ok(())
+        })
+        .unwrap();
+
+        let mut covered = std::collections::BTreeSet::new();
+        let mut check = |provider: &dyn AdjacencyProvider, label: &str| {
+            for direction in [Direction::Out, Direction::In, Direction::Undirected] {
+                let view = provider.adjacency("KNOWS", direction).unwrap();
+                covered.insert(format!("{:?}", view.backing()));
+                let rows = walked_rows(&view);
+                assert_eq!(
+                    rows.iter().map(|(node, _)| *node).collect::<Vec<_>>(),
+                    (0..view.node_extent()).collect::<Vec<_>>(),
+                    "{label} {direction:?}: every node once, in order"
+                );
+                for (node, row) in &rows {
+                    assert_eq!(
+                        row,
+                        &view.neighbors(*node).unwrap().to_vec(),
+                        "{label} {direction:?} node {node}"
+                    );
+                }
+                assert!(
+                    rows.iter().any(|(_, row)| !row.is_empty()),
+                    "{label} {direction:?} is not vacuous"
+                );
+            }
+        };
+        check(
+            &scan_provider(dir.path().to_path_buf(), OntologyMode::Strict),
+            "scan",
+        );
+        check(
+            &persistent_provider(dir.path().to_path_buf(), OntologyMode::Strict),
+            "csr",
+        );
+
+        // A post-build CREATE is served as base CSR plus delta overlay, with
+        // nodes past the base extent.
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+        let (x, y) = (new_v7(), new_v7());
+        let person = EntityTypeId::decode(0).unwrap();
+        writer.create_node(x, person).unwrap();
+        writer.create_node(y, person).unwrap();
+        writer.create_edge(new_v7(), "KNOWS", &x, &y).unwrap();
+        writer.flush().unwrap();
+        check(
+            &persistent_provider(dir.path().to_path_buf(), OntologyMode::Strict),
+            "overlay",
+        );
+        assert_eq!(
+            covered.into_iter().collect::<Vec<_>>(),
+            ["CsrNative", "CsrOverlay", "CsrUndirected", "ScanHashMap"]
+        );
     }
 }

@@ -105,7 +105,9 @@ pub mod read_resource;
 pub mod write_resource;
 #[cfg(feature = "algorithms-extended")]
 pub use algorithm_embedding_options::validate_embedding_options;
-pub use algorithm_graph::AlgorithmProjectionFingerprint;
+pub use algorithm_graph::{
+    AlgorithmProjectionFingerprint, AnalystExportShape, export_analyst_topology,
+};
 pub(crate) mod algorithm_arrow_sink;
 #[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_embedding_node2vec;
