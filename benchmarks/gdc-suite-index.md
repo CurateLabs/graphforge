@@ -496,8 +496,8 @@ archives (`graphforge_bench.gdc_graphalytics_scorecard`):
   run or refused, and each run is dispatched as the graph needs. Otherwise the
   rung fails with `archive_properties_mismatch`.
 - **Algorithms** (`graphalytics-scorecard-workload-<graph>.json`), each run
-  three times after one excluded warm-up: BFS as `paths(by=bfs)` and SSSP as
-  `paths(by=dijkstra, weight=weight)`, each from the source vertex selected by
+  three times after one excluded warm-up: BFS as `paths(by=bfs_depth)` and SSSP as
+  `paths(by=dijkstra_cost, weight=weight)`, each from the source vertex selected by
   `NodeSelector::Uuid` (the converter's node UUID for that vertex); WCC as
   `cluster(by=components)`; PR as `rank(by=pagerank)` with the archive's
   damping factor and exact iteration count; CDLP as

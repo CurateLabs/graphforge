@@ -310,11 +310,11 @@ pub fn map_algorithm(job: &AlgorithmJob) -> Result<MappingOutcome, SuiteError> {
             };
             Ok(MappingOutcome::Compatible(PublicApiMapping {
                 verb: "paths".into(),
-                by: "bfs".into(),
+                by: "bfs_depth".into(),
                 directed: job.directed,
                 weight_property: None,
                 notes: format!(
-                    "derive hop depth from paths(source={source}, by=bfs); unreachable={BFS_UNREACHABLE}"
+                    "derive hop depth from paths(source={source}, by=bfs_depth); unreachable={BFS_UNREACHABLE}"
                 ),
             }))
         }
@@ -373,11 +373,11 @@ pub fn map_algorithm(job: &AlgorithmJob) -> Result<MappingOutcome, SuiteError> {
                 .unwrap_or_else(|| "weight".into());
             Ok(MappingOutcome::Compatible(PublicApiMapping {
                 verb: "paths".into(),
-                by: "dijkstra".into(),
+                by: "dijkstra_cost".into(),
                 directed: job.directed,
                 weight_property: Some(weight.clone()),
                 notes: format!(
-                    "derive distances from paths(source={source}, by=dijkstra, weight={weight}); unreachable=+infinity"
+                    "derive distances from paths(source={source}, by=dijkstra_cost, weight={weight}); unreachable=+infinity"
                 ),
             }))
         }
@@ -755,7 +755,7 @@ fn execute_live_output(live: &LiveGraph, job: &AlgorithmJob) -> Result<VertexMap
                     Some(selector),
                     None,
                     PathsOptions {
-                        by: PathAlgorithm::Bfs,
+                        by: PathAlgorithm::BfsDepth,
                         directed: job.directed,
                         ..Default::default()
                     },
@@ -800,7 +800,7 @@ fn execute_live_output(live: &LiveGraph, job: &AlgorithmJob) -> Result<VertexMap
                     Some(selector),
                     None,
                     PathsOptions {
-                        by: PathAlgorithm::Dijkstra,
+                        by: PathAlgorithm::DijkstraCost,
                         directed: job.directed,
                         weight: job.weight_property.clone(),
                         ..Default::default()
@@ -1373,6 +1373,19 @@ mod tests {
                 matches!(outcome, MappingOutcome::Compatible(_)),
                 "{algorithm}"
             );
+        }
+        // BFS and SSSP need a cost per vertex and no path, so they run the
+        // cost-only catalog values (#1974).
+        for (algorithm, by) in [
+            (Algorithm::Bfs, "bfs_depth"),
+            (Algorithm::Sssp, "dijkstra_cost"),
+        ] {
+            match map_algorithm(&sample_job(algorithm)).unwrap() {
+                MappingOutcome::Compatible(mapping) => {
+                    assert_eq!((mapping.verb.as_str(), mapping.by.as_str()), ("paths", by));
+                }
+                other => panic!("{algorithm}: {other:?}"),
+            }
         }
         let mut undirected_lcc = sample_job(Algorithm::Lcc);
         undirected_lcc.directed = false;
