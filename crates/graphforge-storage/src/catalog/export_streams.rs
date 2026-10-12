@@ -17,7 +17,8 @@ use graphforge_value::{EntityTypeId, PrimaryEntityTypeId};
 use parquet::arrow::ProjectionMask;
 
 /// Rows decoded per batch by the projected readers below.
-const STREAM_BATCH_ROWS: usize = 64 * 1024;
+pub const EXPORT_STREAM_BATCH_ROWS: usize = 64 * 1024;
+const STREAM_BATCH_ROWS: usize = EXPORT_STREAM_BATCH_ROWS;
 
 fn read_error(error: impl std::fmt::Display) -> GfError {
     GfError::Storage(error.to_string())
@@ -98,6 +99,28 @@ pub fn visit_node_identities(
         crate::io_stats::record_node_full_read(rows);
     }
     Ok(())
+}
+
+/// Rows of every node file of `files`, summed from the Parquet footers.
+///
+/// Nothing is decoded. A caller that has just selected nodes compares its count
+/// with this to learn whether the selection is the whole table.
+///
+/// # Errors
+/// Returns [`GfError::Storage`] when a footer cannot be read.
+pub fn count_node_rows(files: &crate::TopologyFiles) -> Result<u64, GfError> {
+    let mut total = 0_u64;
+    for (path, _) in &files.nodes {
+        let rows = admitted_parquet(path)
+            .map_err(data_fusion_error)?
+            .metadata()
+            .file_metadata()
+            .num_rows();
+        total = total
+            .checked_add(u64::try_from(rows).map_err(|_| read_error("negative row count"))?)
+            .ok_or_else(|| read_error("node row count overflows u64"))?;
+    }
+    Ok(total)
 }
 
 fn visit_node_batch(

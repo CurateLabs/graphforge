@@ -245,24 +245,59 @@ pub(crate) fn select_nodes(
     stream_nodes(files, known, rank_cap)
 }
 
+/// Stream the selected nodes twice: once to count them, then to fill vectors of
+/// exactly that length. Growing a vector while streaming would hold up to three
+/// times the final size for the length of a reallocation.
 fn stream_nodes(
     files: &TopologyFiles,
     label: Option<EntityTypeId>,
     rank_cap: u64,
 ) -> Result<SelectedNodes, GfError> {
+    let mut count = 0_usize;
+    graphforge_storage::visit_node_identities(files, label, |_, _| {
+        count += 1;
+        Ok(())
+    })?;
     let mut ids = Vec::new();
+    ids.try_reserve_exact(count)
+        .map_err(|_| size_error("analyst export node id allocation failed"))?;
     let mut uuids = Vec::new();
+    uuids
+        .try_reserve_exact(count)
+        .map_err(|_| size_error("analyst export node UUID allocation failed"))?;
     graphforge_storage::visit_node_identities(files, label, |id, uuid| {
+        if ids.len() == count {
+            return Err(size_error("node files changed while being read"));
+        }
         ids.push(id);
         uuids.push(*uuid);
         Ok(())
     })?;
-    ids.shrink_to_fit();
-    uuids.shrink_to_fit();
     Ok(SelectedNodes {
         nodes: NodeSet::from_ids(ids, rank_cap),
         uuids,
     })
+}
+
+/// Adjacency entries a walk keeps for `nodes`: those of a selected node that
+/// point at a selected node. Counting them first lets the topology reserve
+/// exactly what it retains, however small a subset of a large view that is.
+pub(crate) fn count_retained_entries(
+    walk: impl FnOnce(&mut dyn FnMut(u64, &[u64], &[u64]) -> Result<(), GfError>) -> Result<(), GfError>,
+    nodes: &NodeSet,
+) -> Result<u64, GfError> {
+    let mut retained = 0_u64;
+    walk(&mut |node_id, edge_ids, neighbor_ids| {
+        if nodes.ordinal_of(node_id).is_some() {
+            let len = edge_ids.len().min(neighbor_ids.len());
+            retained += neighbor_ids[..len]
+                .iter()
+                .filter(|&&neighbor| nodes.ordinal_of(neighbor).is_some())
+                .count() as u64;
+        }
+        Ok(())
+    })?;
+    Ok(retained)
 }
 
 /// Sequential builder of the offsets and neighbor arrays.

@@ -36,8 +36,8 @@ mod export_tests;
 mod parity_tests;
 
 use topology::{
-    EdgeIdentity, NodeSet, TopologyBuilder, TopologyGraph, resolve_edge_uuids, resolve_weights,
-    select_nodes,
+    EdgeIdentity, NodeSet, TopologyBuilder, TopologyGraph, count_retained_entries,
+    resolve_edge_uuids, resolve_weights, select_nodes,
 };
 
 const VECTOR_NODE_LIMIT: usize = 4_096;
@@ -1023,10 +1023,19 @@ pub(crate) fn export_topology(
     let node_count = selected.nodes.len();
 
     let keep_edge_ids = identity == EdgeIdentityDemand::Retain || selection.weight.is_some();
+    // A selection that is the whole node table keeps every entry the view
+    // holds, so the view's count is exact. A subset keeps only some, and
+    // reserving the view's count would charge a tiny subset of a large view for
+    // all of it: count what the walk keeps first.
     let entry_hint = if node_count == 0 {
         0
-    } else {
+    } else if selected.nodes.len() as u64 == graphforge_storage::count_node_rows(&files)? {
         adjacency.entry_count()?
+    } else {
+        count_retained_entries(
+            |visit| adjacency.walk_rows(|node, edges, neighbors| visit(node, edges, neighbors)),
+            &selected.nodes,
+        )?
     };
     let mut builder = TopologyBuilder::new(node_count, entry_hint, keep_edge_ids)?;
     if node_count > 0 {
@@ -1082,73 +1091,6 @@ pub(crate) fn export_topology(
         inventory,
         evidence,
     ))
-}
-
-/// Shape and evidence of one analyst export, for resource measurements that
-/// live outside this crate (#1974).
-#[doc(hidden)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AnalystExportShape {
-    /// Selected nodes.
-    pub nodes: usize,
-    /// Adjacency entries kept, both orientations of an undirected export.
-    pub entries: usize,
-    /// Whether a weight per entry was kept.
-    pub weighted: bool,
-    /// Whether the edge id and UUID of each entry were kept.
-    pub identity: bool,
-    /// Hash-map entries held by the adjacency view the export read.
-    pub edge_scale_hash_entries: u64,
-    /// Edge-table rows the export streamed.
-    pub edge_rows_read: u64,
-}
-
-/// Run the real analyst export and report its shape. The graph is dropped on
-/// return, so a caller measuring a heap peak around this call sees the export's
-/// own peak.
-///
-/// # Errors
-/// As the export: storage, execution and weight-validation errors.
-#[doc(hidden)]
-#[allow(
-    clippy::too_many_arguments,
-    reason = "one flat entry point for measurements outside this crate"
-)]
-pub fn export_analyst_topology(
-    provider: &dyn AdjacencyProvider,
-    dir: &Path,
-    mode: OntologyMode,
-    label: EntityTypeSelection,
-    via: &str,
-    direction: Direction,
-    weight: Option<&str>,
-    retain_identity: bool,
-) -> Result<AnalystExportShape, GfError> {
-    let graph = export_topology(
-        provider,
-        dir,
-        mode,
-        AdjacencySelection {
-            label,
-            via,
-            direction,
-            weight,
-        },
-        if retain_identity {
-            EdgeIdentityDemand::Retain
-        } else {
-            EdgeIdentityDemand::Omit
-        },
-    )?;
-    let evidence = graph.export_evidence();
-    Ok(AnalystExportShape {
-        nodes: graph.node_count(),
-        entries: graph.topology().neighbors.len(),
-        weighted: graph.topology().weights.is_some(),
-        identity: graph.topology().identity.is_some(),
-        edge_scale_hash_entries: evidence.edge_scale_hash_entries,
-        edge_rows_read: evidence.edge_rows_read,
-    })
 }
 
 /// Load one graph-native numeric-list property for every selected node.
