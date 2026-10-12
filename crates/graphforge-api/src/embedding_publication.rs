@@ -629,6 +629,31 @@ mod tests {
     }
 
     #[test]
+    fn publication_resolves_property_match_selectors_while_holding_visibility() {
+        // `publish_caller_embeddings` holds the write permit; the selector's
+        // anchored lookup must not wait on graph visibility behind it.
+        let graph = GraphForge::new(None).unwrap();
+        node(&graph, "alice");
+        let info = graph
+            .publish_caller_embeddings(request(
+                "by-match",
+                "v1",
+                2,
+                vec![row(
+                    NodeSelector::Match {
+                        label: "Document".to_owned(),
+                        property: "name".to_owned(),
+                        value: PropValue::Str("alice".to_owned()),
+                    },
+                    &[1.0, 2.0],
+                )],
+                false,
+            ))
+            .unwrap();
+        assert_eq!(info.active.unwrap().vector_count, 1);
+    }
+
+    #[test]
     fn property_match_is_resolved_again_for_the_retry_source() {
         let dir = tempfile::tempdir().unwrap();
         let graph = GraphForge::new(Some(dir.path().to_str().unwrap())).unwrap();
