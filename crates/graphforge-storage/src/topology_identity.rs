@@ -161,6 +161,24 @@ struct Fragment {
     rows: u64,
 }
 
+/// Map `items` with `map`, keeping their order: in parallel, unless the caller
+/// is itself a rayon worker, which does the work alone.
+///
+/// A probe is reached from the jobs of a pool, and under a lock: an import
+/// normalizes its batches on the compute pool, and every batch takes the
+/// facade's probe lock to open or use the probe. A worker that joins nested
+/// parallel work runs whatever it can find while it waits for the join, and
+/// that includes a sibling batch, which waits for the lock the worker holds. So
+/// the worker deadlocks itself (#1881). A worker is already one unit of its
+/// pool's parallelism, so it takes none more.
+fn map_in_order<T: Sync, R: Send>(items: &[T], map: impl Fn(&T) -> R + Sync + Send) -> Vec<R> {
+    if rayon::current_thread_index().is_some() {
+        items.iter().map(map).collect()
+    } else {
+        items.par_iter().map(map).collect()
+    }
+}
+
 fn footer_cache() -> &'static Mutex<HashMap<FileKey, Arc<Fragment>>> {
     static CACHE: OnceLock<Mutex<HashMap<FileKey, Arc<Fragment>>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -611,16 +629,16 @@ impl TopologyIdentityProbe {
         files: &crate::TopologyFiles,
         topology_generation: u64,
     ) -> Result<Self, GfError> {
-        let nodes = files
-            .node_fragments()
-            .par_iter()
-            .map(|(path, _)| load_fragment(path, "node_uuid", Some("node_id")))
-            .collect::<Result<Vec<_>, _>>()?;
-        let edges = files
-            .edge_fragments()
-            .par_iter()
-            .map(|(_, path, _)| load_fragment(path, "edge_uuid", None))
-            .collect::<Result<Vec<_>, _>>()?;
+        let nodes = map_in_order(files.node_fragments(), |(path, _)| {
+            load_fragment(path, "node_uuid", Some("node_id"))
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+        let edges = map_in_order(files.edge_fragments(), |(_, path, _)| {
+            load_fragment(path, "edge_uuid", None)
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             nodes,
             edges,
@@ -666,28 +684,30 @@ impl TopologyIdentityProbe {
             .sum::<u64>();
         let authenticated_objects =
             (node_entries.len() + edge_entries.len() + usize::from(deleted_entry.is_some())) as u64;
-        let leases = node_entries
+        let every_entry = node_entries
             .iter()
             .chain(edge_entries.iter())
             .copied()
             .chain(deleted_entry)
-            .collect::<Vec<_>>()
-            .par_iter()
-            .map(|entry| {
-                crate::graph_object_store::open_graph_object_with_checksum(container_root, entry)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Vec<_>>();
+        let leases = map_in_order(&every_entry, |entry| {
+            crate::graph_object_store::open_graph_object_with_checksum(container_root, entry)
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
         let path_of = |entry: &crate::GraphFileEntry| {
             crate::graph_object_path(container_root, &entry.content_sha256)
         };
-        let nodes = node_entries
-            .par_iter()
-            .map(|entry| load_fragment(&path_of(entry)?, "node_uuid", Some("node_id")))
-            .collect::<Result<Vec<_>, _>>()?;
-        let edges = edge_entries
-            .par_iter()
-            .map(|entry| load_fragment(&path_of(entry)?, "edge_uuid", None))
-            .collect::<Result<Vec<_>, _>>()?;
+        let nodes = map_in_order(&node_entries, |entry| {
+            load_fragment(&path_of(entry)?, "node_uuid", Some("node_id"))
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+        let edges = map_in_order(&edge_entries, |entry| {
+            load_fragment(&path_of(entry)?, "edge_uuid", None)
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
         let deleted = match deleted_entry {
             Some(entry) => {
                 parse_deleted_identities(std::fs::File::open(path_of(entry)?).map_err(storage)?)?
@@ -790,20 +810,19 @@ impl TopologyIdentityProbe {
         // Rayon workers carry the caller's requested I/O measurement, so the
         // bytes a probe reads are attributed to the operation that asked.
         let capture = crate::lifecycle_io::CaptureContext::current();
-        let hits = tasks
-            .par_iter()
-            .map(|plan| {
-                let _scope = capture.attach();
-                let mut found = Vec::new();
-                fragments[plan.fragment].scan_group(
-                    plan.group,
-                    plan.rows.as_deref(),
-                    &sorted,
-                    &mut found,
-                )?;
-                Ok((plan.pages, plan.bytes, found))
-            })
-            .collect::<Result<Vec<_>, GfError>>()?;
+        let hits = map_in_order(&tasks, |plan| {
+            let _scope = capture.attach();
+            let mut found = Vec::new();
+            fragments[plan.fragment].scan_group(
+                plan.group,
+                plan.rows.as_deref(),
+                &sorted,
+                &mut found,
+            )?;
+            Ok((plan.pages, plan.bytes, found))
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, GfError>>()?;
         let mut resolved: Vec<Option<u64>> = vec![None; sorted.len()];
         for (pages, bytes, found) in hits {
             metrics.file_seeks += 1;

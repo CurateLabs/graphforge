@@ -392,3 +392,131 @@ fn a_uuid_held_by_two_fragments_is_corrupt_topology() {
         .to_string();
     assert!(error.contains("more than one topology row"), "{error}");
 }
+
+/// Opening a probe on a worker of a rayon pool, under a lock that a sibling
+/// job of the pool also wants, must not wait for other workers' help.
+///
+/// An import normalizes its batches on the compute pool, and each batch takes
+/// the facade's probe lock to open or use the probe. A worker that joins
+/// nested parallel work runs whatever it can find while it waits, and that
+/// includes the sibling batch, which waits for the lock the worker holds: the
+/// worker has deadlocked itself (#1881). So a worker opens the probe by itself.
+///
+/// The schedule is forced. The pool has two workers. One is held busy while
+/// the first job takes the lock and starts to open the probe; the sibling is
+/// queued behind it. The footer cache is held shut, so the open is parked
+/// inside its first fragment. Releasing the second worker then lets it steal
+/// the second fragment's load (if the open was parallel) or take the sibling
+/// (if it was not). Releasing the footer cache lets the first worker finish
+/// its small fragment long before the second finishes its large one. A
+/// parallel open leaves the first worker waiting for the second, with the
+/// sibling as the only work it can find.
+#[test]
+fn a_worker_opens_a_probe_under_a_lock_without_running_a_sibling_job() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc::channel;
+    use std::time::{Duration, Instant};
+
+    /// Long enough for a worker to reach the footer cache or to steal; the
+    /// outcome does not depend on it unless the host stalls for longer.
+    const SETTLE: Duration = Duration::from_millis(300);
+    const DEADLINE: Duration = Duration::from_secs(30);
+    fn wait_for(flag: &AtomicBool, what: &str) {
+        let deadline = Instant::now() + DEADLINE;
+        while !flag.load(Ordering::Acquire) {
+            assert!(Instant::now() < deadline, "{what}");
+            std::thread::yield_now();
+        }
+    }
+
+    let small = TempDir::new().unwrap();
+    let large = TempDir::new().unwrap();
+    let root = TempDir::new().unwrap();
+    let write = |dir: &TempDir, rows| {
+        write_fragment_as(
+            dir.path(),
+            "node_uuid",
+            Some("node_id"),
+            EnabledStatistics::Page,
+            None,
+            rows,
+        )
+    };
+    // The large fragment has hundreds of row groups, so its footer takes far
+    // longer to read than the small one's.
+    let files = crate::TopologyFiles {
+        nodes: vec![
+            (write(&small, ROWS), "small.parquet".to_owned()),
+            (write(&large, ROWS * 100), "large.parquet".to_owned()),
+        ],
+        edges: Vec::new(),
+    };
+    let root = root.path().to_owned();
+
+    let pool = Arc::new(
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap(),
+    );
+    let lock = Arc::new(Mutex::new(()));
+    let (second_worker_running, release_second_worker) = (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let (opener_holds_lock, sibling_running) = (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let (opened, opened_rx) = channel();
+    let (sibling_done, sibling_done_rx) = channel();
+
+    // The first job of the pool holds one worker until it is released.
+    pool.spawn({
+        let (running, release) = (second_worker_running.clone(), release_second_worker.clone());
+        move || {
+            running.store(true, Ordering::Release);
+            while !release.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+        }
+    });
+    wait_for(&second_worker_running, "the pool never ran its first job");
+
+    // Hold the footer cache shut before the open starts.
+    let footer_cache_shut = footer_cache().lock().unwrap();
+    pool.spawn({
+        let (lock, holds) = (lock.clone(), opener_holds_lock.clone());
+        move || {
+            let _held = lock.lock().unwrap();
+            holds.store(true, Ordering::Release);
+            let probe = TopologyIdentityProbe::open(&root, &files, 1);
+            let _ = opened.send(probe.map(|probe| probe.count(UuidIndexKind::Node)));
+        }
+    });
+    wait_for(&opener_holds_lock, "the opener never took the lock");
+    pool.spawn({
+        let (lock, running) = (lock.clone(), sibling_running.clone());
+        move || {
+            running.store(true, Ordering::Release);
+            let _held = lock.lock().unwrap();
+            let _ = sibling_done.send(());
+        }
+    });
+    std::thread::sleep(SETTLE);
+    release_second_worker.store(true, Ordering::Release);
+    std::thread::sleep(SETTLE);
+    drop(footer_cache_shut);
+
+    // A worker that ran the sibling inside its own open has deadlocked: the
+    // deadline fails the test, and the pool's threads stay blocked.
+    let rows = opened_rx
+        .recv_timeout(DEADLINE)
+        .expect("the opener never finished: it ran the sibling job while holding the lock")
+        .unwrap();
+    assert_eq!(rows, ROWS as u64 * 101);
+    sibling_done_rx
+        .recv_timeout(DEADLINE)
+        .expect("the sibling job never got the lock");
+    assert!(sibling_running.load(Ordering::Acquire));
+}
