@@ -32,6 +32,18 @@ pub(super) fn nominate_partitioned_left(
     nominate_partitioned_left_selected(join, None)
 }
 
+/// Rebuild a partitioned LEFT enrichment as a CollectLeft join whose completed
+/// preserved side nominates the UUIDs its direct property scan reads.
+///
+/// Nomination only prunes the scan, the join's probe side, and a LEFT join
+/// keeps every build row, so the result cannot change. `selected_key` is the
+/// caller's proof that a key-only scan may be pruned from that build column;
+/// without it only a scan that projects property payload qualifies.
+///
+/// When the join's projection drops the build key, the hash distribution it
+/// advertises names a column the output no longer has, and no repartition may
+/// evaluate it. The rewrite then carries the key through the join as a hidden
+/// trailing column, hashes on that, and projects it away again.
 pub(super) fn nominate_partitioned_left_selected(
     join: &HashJoinExec,
     selected_key: Option<usize>,
@@ -48,10 +60,11 @@ pub(super) fn nominate_partitioned_left_selected(
         return Ok(None);
     }
     let output = original.output_partitioning().clone();
-    if !matches!(&output, Partitioning::Hash(_, count) if *count > 0) {
+    let Partitioning::Hash(_, partitions) = &output else {
         return Ok(None);
-    }
-    if selected_key.is_none() && super::has_unknown_hash_key(&output, original) {
+    };
+    let partitions = *partitions;
+    if partitions == 0 {
         return Ok(None);
     }
     let Some((scan, build_column)) = matching_scan(join, selected_key.is_some()) else {
@@ -72,7 +85,7 @@ pub(super) fn nominate_partitioned_left_selected(
         Arc::clone(&nomination),
     ));
     let nominated: Arc<dyn ExecutionPlan> = Arc::new(scan.with_uuid_nomination(nomination));
-    if selected_key.is_none() {
+    if selected_key.is_none() && !super::has_unknown_hash_key(&output, original) {
         let rebuilt = join
             .builder()
             .with_new_children(vec![tapped, nominated])?
@@ -86,10 +99,10 @@ pub(super) fn nominate_partitioned_left_selected(
         return Ok(Some(Arc::new(RepartitionExec::try_new(rebuilt, output)?)));
     }
 
-    let original_projection = join.projection.as_ref().map(|p| p.to_vec());
-    let mut lifted_projection = original_projection.clone().unwrap_or_else(|| {
-        (0..join.left().schema().fields().len() + join.right().schema().fields().len()).collect()
-    });
+    let Some(original_projection) = join.projection.as_ref().map(|p| p.to_vec()) else {
+        return Ok(None);
+    };
+    let mut lifted_projection = original_projection;
     let hidden_output_index = lifted_projection.len();
     lifted_projection.push(build_column);
 
@@ -101,9 +114,6 @@ pub(super) fn nominate_partitioned_left_selected(
         .reset_state()
         .recompute_properties()
         .build_exec()?;
-    if original_projection.is_none() {
-        return Ok(None);
-    }
     if rebuilt.schema().fields().len() != original.schema().fields().len() + 1 {
         return Ok(None);
     }
@@ -112,10 +122,7 @@ pub(super) fn nominate_partitioned_left_selected(
         rebuilt,
         Partitioning::Hash(
             vec![Arc::new(Column::new(&key_name, hidden_output_index))],
-            match output {
-                Partitioning::Hash(_, count) => count,
-                _ => unreachable!(),
-            },
+            partitions,
         ),
     )?);
     let projection: Vec<(Arc<dyn datafusion::physical_expr::PhysicalExpr>, String)> =
