@@ -144,6 +144,12 @@ pub fn execute_query(
 }
 
 fn bfs_path_length(batch: &RecordBatch) -> Result<QueryResult, SuiteError> {
+    if batch.num_columns() != 3 {
+        return Err(SuiteError::LiveExecution(format!(
+            "bfs_depth output has {} columns, expected source, target, and cost",
+            batch.num_columns()
+        )));
+    }
     let length = match batch.num_rows() {
         0 => -1,
         1 => {
