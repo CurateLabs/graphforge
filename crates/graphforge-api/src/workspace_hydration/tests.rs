@@ -1,7 +1,6 @@
 use super::*;
 use arrow::array::Int64Array;
 
-mod links;
 mod placement;
 mod reclaim;
 

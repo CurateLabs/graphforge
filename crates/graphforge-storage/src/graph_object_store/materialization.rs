@@ -362,6 +362,27 @@ fn is_mutable_artifact_control(relative_path: &str) -> bool {
     }
 }
 
+/// Whether hydration copies `relative_path` into a single-link file instead of
+/// linking the content-store object (#1992). The complete set is:
+///
+/// - the semantic route table and the mutable artifact controls above, which a
+///   writable facade replaces or locks in place;
+/// - the ordinal identity manifest, receipt and lock, which its writer rewrites
+///   and locks;
+/// - `tombstones-v4-*` runs. They are not mutable and are copied today only
+///   because they are not in `graph_admission::is_hard_linked_identity_artifact`
+///   with the `forward-v4-*` and `ordinal-v4-*` runs: a linked run's bytes must
+///   be admitted by a writer's capture before they can name a new digest, and
+///   no such admission is arranged for tombstones.
+///
+/// Every other payload is linked. A fresh workspace that copies anything else
+/// is a defect; `graph_workspace_links.rs` closes this set.
+///
+/// A facade that commits writes new payloads into its own workspace and
+/// publishes them by copying into the content store, so until it reopens, its
+/// workspace holds a second physical copy of what it just published
+/// (`install_captured_source_with_lease`). That is a property of publication,
+/// not of hydration, and a reopened workspace links those objects.
 fn requires_single_link_materialization(relative_path: &str) -> bool {
     if relative_path == crate::route_component::TABLE_FILE
         || is_mutable_artifact_control(relative_path)
