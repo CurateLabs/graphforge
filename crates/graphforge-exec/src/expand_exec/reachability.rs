@@ -21,6 +21,7 @@ use super::UInt64Array;
 use super::adjacency;
 use super::charge;
 use super::demand;
+use super::edge_filter::Wanted;
 use super::grow_reservation;
 use super::hash_table_bytes;
 use super::output_batch_rows;
@@ -263,7 +264,7 @@ struct ReachSet {
 }
 
 /// Move the reservation from `held` to `now` bytes.
-fn settle(
+pub(super) fn settle(
     reservation: &mut MemoryReservation,
     held: &mut usize,
     now: usize,
@@ -464,10 +465,32 @@ fn reach_from_seed(
     let mut cycle =
         (seed_pending && cfg.direction == Direction::Undirected).then(SeedCycle::default);
 
+    // With an edge predicate the search runs over the relationships that pass
+    // it. Each level's passing relationships are decided together, a batch of
+    // frontier nodes at a time (`PhysicalEdgeFilter::crossable`): `crossable`
+    // is the batch's answer and `batch_end` is the frontier index it stops at.
+    let edge_filter = cfg.edge_filter.as_deref();
+    let mut crossable: HashSet<u64> = HashSet::new();
+
     let mut level = 0_u64;
     'levels: while !hits.done() && !frontier.is_empty() && max_hops.is_none_or(|max| level < max) {
         level += 1;
-        for &node in &frontier {
+        let mut batch_end = 0_usize;
+        for (index, &node) in frontier.iter().enumerate() {
+            if let Some(filter) = edge_filter
+                && index == batch_end
+            {
+                let wanted = Wanted {
+                    visited: &visited,
+                    seed,
+                    seed_pending,
+                    every: cycle.is_some() && seed_pending,
+                };
+                let (edges, taken) =
+                    filter.crossable(cfg, adjacency, &frontier[index..], &wanted, reservation)?;
+                crossable = edges;
+                batch_end = index + taken;
+            }
             let branch = match &cycle {
                 Some(cycle) => cycle.branch_of(node, seed)?,
                 None => seed,
@@ -475,7 +498,10 @@ fn reach_from_seed(
             let mut returns_to_seed = false;
             adjacency.with_neighbors(node, |neighbors| {
                 examined = examined.saturating_add(neighbors.len());
-                for (_, neighbor) in neighbors.iter() {
+                for (edge, neighbor) in neighbors.iter() {
+                    if edge_filter.is_some() && !crossable.contains(&edge) {
+                        continue;
+                    }
                     if neighbor == seed {
                         returns_to_seed = true;
                     } else if visited.insert(neighbor) {
@@ -511,6 +537,10 @@ fn reach_from_seed(
                 hits.closed(seed, cycle, max_hops);
             }
             let live = hash_table_bytes(visited.capacity(), std::mem::size_of::<u64>())
+                .saturating_add(hash_table_bytes(
+                    crossable.capacity(),
+                    std::mem::size_of::<u64>(),
+                ))
                 .saturating_add(8 * (frontier.capacity() + next.capacity()))
                 .saturating_add(hits.bytes())
                 .saturating_add(cycle.as_ref().map_or(0, SeedCycle::bytes));
@@ -536,7 +566,7 @@ fn reach_from_seed(
     {
         hits.closed(seed, cycle, max_hops);
     }
-    drop((visited, frontier, next, cycle));
+    drop((visited, frontier, next, cycle, crossable));
     settle(reservation, &mut held, hits.bytes())?;
     if cfg.capture_epoch != 0 {
         demand::record_candidates(cfg.capture_epoch, cfg.edge_var, examined);

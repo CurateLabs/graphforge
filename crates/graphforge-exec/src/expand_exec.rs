@@ -41,6 +41,7 @@ use datafusion::physical_plan::execution_plan::Boundedness;
 use datafusion::physical_plan::execution_plan::EmissionType;
 use datafusion::physical_plan::stream::RecordBatchReceiverStream;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+use edge_filter::PhysicalEdgeFilter;
 use futures::StreamExt;
 use graphforge_core::GfError;
 use graphforge_core::OntologyMode;
@@ -151,6 +152,9 @@ pub struct VarLenExpandExec {
     /// by the extension planner (#761).
     provider: Arc<dyn AdjacencyProvider>,
     capture_epoch: u64,
+    /// The `ALL(e IN r WHERE ..)` predicate each crossed edge must satisfy;
+    /// only reachability expansions carry one (#1984).
+    edge_filter: Option<Arc<PhysicalEdgeFilter>>,
 }
 
 impl VarLenExpandExec {
@@ -198,7 +202,21 @@ impl VarLenExpandExec {
             props,
             provider,
             capture_epoch: demand::stamp_capture_epoch().unwrap_or(0),
+            edge_filter: None,
         }
+    }
+
+    /// Require every edge the expansion crosses to satisfy `predicate`, a
+    /// planned expression over one struct made of `fields` (see
+    /// [`graphforge_plan::EdgeFilter`]).
+    #[must_use]
+    pub fn with_edge_filter(
+        mut self,
+        predicate: Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        fields: &[arrow::datatypes::FieldRef],
+    ) -> Self {
+        self.edge_filter = Some(Arc::new(PhysicalEdgeFilter::new(predicate, fields)));
+        self
     }
 }
 
@@ -229,6 +247,9 @@ impl DisplayAs for VarLenExpandExec {
         )?;
         if self.expansion == VarLenMode::Reachability {
             f.write_str(", mode=reachability")?;
+        }
+        if let Some(filter) = &self.edge_filter {
+            write!(f, ", edge_filter={}", filter.predicate())?;
         }
         Ok(())
     }
@@ -272,6 +293,7 @@ impl ExecutionPlan for VarLenExpandExec {
             props,
             provider: self.provider.clone(),
             capture_epoch: self.capture_epoch,
+            edge_filter: self.edge_filter.clone(),
         }))
     }
 
@@ -299,6 +321,7 @@ impl ExecutionPlan for VarLenExpandExec {
             out_schema: self.schema.clone(),
             provider: self.provider.clone(),
             capture_epoch: self.capture_epoch,
+            edge_filter: self.edge_filter.clone(),
             lifecycle: graphforge_storage::lifecycle_io::CaptureContext::current(),
         };
         let mut reservation = MemoryConsumer::new(VAR_LEN_CONSUMER)
@@ -426,6 +449,8 @@ pub(super) struct ExpandConfig {
     /// Adjacency source (#762) — moved into the `'static` execute future.
     pub(super) provider: Arc<dyn AdjacencyProvider>,
     pub(super) capture_epoch: u64,
+    /// The predicate every crossed edge must satisfy (reachability only).
+    pub(super) edge_filter: Option<Arc<PhysicalEdgeFilter>>,
     /// The statement's read-path observer. The traversal runs as a spawned
     /// task, so each synchronous section attaches it to count its reads.
     pub(super) lifecycle: graphforge_storage::lifecycle_io::CaptureContext,
@@ -2859,6 +2884,7 @@ fn expand_single_hop_chunk(
     Ok(output)
 }
 
+mod edge_filter;
 mod reachability;
 #[cfg(test)]
 mod tests;
