@@ -540,13 +540,9 @@ fn gather_path_node_props(
             )?)?;
             let upper = b.get_array_memory_size();
             h.reserve(upper)?;
-            // The targeted reader yields requested rows only, so the batch is
-            // normally kept whole rather than copied.
-            let filtered = if indices.len() == b.num_rows() {
-                b.clone()
-            } else {
-                take_record_batch_rows(b, &indices)?
-            };
+            // A compact copy: the decoder's builders leave slack in the batch
+            // that the retained reservation must not carry.
+            let filtered = take_record_batch_rows(b, &indices)?;
             let retained = filtered.get_array_memory_size();
             if retained < upper {
                 h.reservation
