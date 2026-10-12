@@ -57,11 +57,11 @@ test("live registry contracts are catalog-exhaustive and descriptor reachable", 
   const forge = new GraphForge();
   const node = forge.addNode("Person", { name: "Ada" });
   const contracts = forge.algorithmDescriptorContracts();
-  assert.equal(contracts.length, 94);
+  assert.equal(contracts.length, 96);
   assert.equal(
     new Set(contracts.map(({ verb, algorithm }) => `${verb}.${algorithm}`))
       .size,
-    94,
+    96,
   );
 
   const byVerb = Object.fromEntries(
@@ -138,7 +138,7 @@ test("registry discovery and descriptor preparation stay knowledge isolated", as
     assert.ok(before.size > 0);
 
     const contracts = reopened.algorithmDescriptorContracts();
-    assert.equal(contracts.length, 94);
+    assert.equal(contracts.length, 96);
     const descriptor = reopened.prepareRankInvocation(
       "Person",
       "degree",
