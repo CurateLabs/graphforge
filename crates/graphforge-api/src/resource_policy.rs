@@ -232,7 +232,9 @@ pub(crate) const MAX_MEMORY_BUDGET_BYTES: u64 = 1024 * 1024 * 1024 * 1024; // 1 
 /// [`QUERY_BUDGET_NUMERATOR`] / [`QUERY_BUDGET_DENOMINATOR`] of the limit,
 /// within [`DEFAULT_MEMORY_BUDGET_BYTES`] and [`MAX_DERIVED_QUERY_BUDGET_BYTES`].
 #[must_use]
-pub fn derive_query_memory_budget(host_limit_bytes: Option<u64>) -> (u64, MemoryBudgetSource) {
+pub(crate) fn derive_query_memory_budget(
+    host_limit_bytes: Option<u64>,
+) -> (u64, MemoryBudgetSource) {
     match host_limit_bytes {
         Some(limit) => (
             (limit / QUERY_BUDGET_DENOMINATOR * QUERY_BUDGET_NUMERATOR)

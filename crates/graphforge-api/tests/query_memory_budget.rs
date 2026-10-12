@@ -3,28 +3,28 @@
 
 use graphforge_api::{
     ExecutionResourcePolicy, GraphForge, GraphForgeOptions, MemoryBudgetSource, ResourcePolicyMode,
-    SpillPolicy, derive_query_memory_budget,
+    SpillPolicy,
 };
 
 const STATED: u64 = 48 * 1024 * 1024;
+const FLOOR: u64 = 512 * 1024 * 1024;
+const CAP: u64 = 32 * 1024 * 1024 * 1024;
 
 #[test]
 fn the_default_budget_is_derived_from_the_process_limit_and_reported() {
     let graph = GraphForge::new(None).unwrap();
     let diagnostics = graph.resource_diagnostics();
     assert!(diagnostics.memory_budget_bytes >= 512 * 1024 * 1024);
-    let host_limit = match diagnostics.memory_budget_source {
-        MemoryBudgetSource::DerivedFromHostLimit { host_limit_bytes } => Some(host_limit_bytes),
-        MemoryBudgetSource::DerivedWithoutHostLimit => None,
+    // The documented rule: half the process's hard memory limit, within a
+    // 512 MiB floor and a 32 GiB cap; the floor when no limit is readable.
+    let expected = match diagnostics.memory_budget_source {
+        MemoryBudgetSource::DerivedFromHostLimit { host_limit_bytes } => {
+            (host_limit_bytes / 2).clamp(FLOOR, CAP)
+        }
+        MemoryBudgetSource::DerivedWithoutHostLimit => FLOOR,
         other => panic!("the default budget must be derived, not {other:?}"),
     };
-    assert_eq!(
-        (
-            diagnostics.memory_budget_bytes,
-            diagnostics.memory_budget_source
-        ),
-        derive_query_memory_budget(host_limit)
-    );
+    assert_eq!(diagnostics.memory_budget_bytes, expected);
 }
 
 #[test]
