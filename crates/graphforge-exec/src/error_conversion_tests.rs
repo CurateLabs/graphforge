@@ -397,18 +397,19 @@ async fn panicking_dataframe(spawned: bool) -> datafusion::dataframe::DataFrame 
         Volatility::Volatile,
         Arc::new(|_| panic!("offset overflow")),
     );
-    let frame = context.read_batch(batch).unwrap();
-    let frame = if spawned {
-        // Repartitioning runs the producing operators in spawned tasks.
+    let frame = context
+        .read_batch(batch)
+        .unwrap()
+        .select(vec![function.call(vec![col("input")])])
+        .unwrap();
+    if spawned {
+        // Repartitioning drives the panicking projection in a spawned task.
         frame
             .repartition(datafusion::logical_expr::Partitioning::RoundRobinBatch(2))
             .unwrap()
     } else {
         frame
-    };
-    frame
-        .select(vec![function.call(vec![col("input")])])
-        .unwrap()
+    }
 }
 
 fn assert_typed_panic(error: &GfError) {
@@ -446,4 +447,24 @@ async fn operator_panic_is_typed_for_collect_and_stream_on_both_thread_kinds() {
             .expect_err("panicking operator must fail the stream");
         assert_typed_panic(&GfError::from_execution_error(failure));
     }
+}
+
+// DataFusion's repartition shares one `Arc<JoinError>` under a "Join Error"
+// context; that exact shape must be recognised as a panic (#1986).
+#[tokio::test]
+async fn shared_join_error_from_a_panicked_task_is_typed() {
+    let plan = failing_dataframe()
+        .await
+        .create_physical_plan()
+        .await
+        .unwrap();
+    let join = tokio::spawn(async { panic!("offset overflow") })
+        .await
+        .expect_err("task must panic");
+    let wrapped = DataFusionError::Context(
+        "Join Error".into(),
+        Box::new(DataFusionError::External(Box::new(Arc::new(join)))),
+    );
+    let typed = super::task_panic::from_task_error(wrapped, &plan);
+    assert_typed_panic(&GfError::from_execution_error(typed));
 }

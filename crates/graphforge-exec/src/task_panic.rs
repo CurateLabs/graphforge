@@ -56,7 +56,15 @@ pub(crate) fn from_task_error(
 ) -> DataFusionError {
     let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
     while let Some(current) = source {
-        if let Some(join) = current.downcast_ref::<tokio::task::JoinError>()
+        // DataFusion's repartition shares one `Arc<JoinError>` across outputs.
+        let join = current
+            .downcast_ref::<tokio::task::JoinError>()
+            .or_else(|| {
+                current
+                    .downcast_ref::<Arc<tokio::task::JoinError>>()
+                    .map(AsRef::as_ref)
+            });
+        if let Some(join) = join
             && join.is_panic()
         {
             return typed(&join.to_string(), plan);
