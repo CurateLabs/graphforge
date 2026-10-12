@@ -116,8 +116,36 @@ fn disabled_spill_resolves_to_no_directory_and_creates_no_scratch() {
 }
 
 #[test]
-fn an_in_memory_instance_does_not_spill_by_default() {
+fn an_in_memory_instance_spills_into_the_scratch_of_its_private_project_by_default() {
     let graph = GraphForge::new_with_options(None, options(SpillPolicy::default())).unwrap();
+    let resources = graph.session_resource_config().unwrap();
+    assert!(resources.spill_enabled);
+    assert_eq!(
+        resources.spill_max_bytes,
+        Some(DEFAULT_QUERY_SPILL_MAX_BYTES)
+    );
+    let directory = resources.spill_directory.unwrap();
+    assert!(directory.is_dir());
+    assert_eq!(
+        directory.parent().unwrap().file_name().unwrap(),
+        QUERY_SPILL_DIR
+    );
+    graph.execute("RETURN 1 AS one").unwrap();
+    // The scratch lives in the instance's temporary project: gone with it.
+    drop(graph);
+    assert!(!directory.exists());
+}
+
+#[test]
+fn an_in_memory_instance_with_spill_disabled_has_no_scratch() {
+    let graph = GraphForge::new_with_options(
+        None,
+        options(SpillPolicy {
+            enabled: false,
+            ..SpillPolicy::default()
+        }),
+    )
+    .unwrap();
     let resources = graph.session_resource_config().unwrap();
     assert!(!resources.spill_enabled);
     assert_eq!(resources.spill_directory, None);
