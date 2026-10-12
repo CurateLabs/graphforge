@@ -7,6 +7,7 @@ use datafusion::physical_expr::expressions::{Column, lit};
 use datafusion::physical_expr::{Partitioning, PhysicalExpr};
 use datafusion::physical_plan::empty::EmptyExec;
 use datafusion::physical_plan::filter::FilterExecBuilder;
+use datafusion::physical_plan::limit::GlobalLimitExec;
 use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner};
 use graphforge_core::OntologyMode;
 use graphforge_ir::{Direction, RuntimeCatalog};
@@ -39,8 +40,9 @@ fn topology_fields() -> Vec<Arc<Field>> {
 }
 
 /// The physical expansion and variable-length expansion over a two-column
-/// input that already holds a `node_uuid` of its own.
-async fn traversals() -> (Arc<dyn ExecutionPlan>, Arc<dyn ExecutionPlan>) {
+/// input that already holds a `node_uuid` of its own, with or without a row
+/// fetch bounding that input.
+async fn traversals(bounded: bool) -> (Arc<dyn ExecutionPlan>, Arc<dyn ExecutionPlan>) {
     let dir = TempDir::new().unwrap();
     let catalog = GraphCatalog::open(dir.path(), None, &RuntimeCatalog::new()).unwrap();
     let session = ExecutionSession::new_with_target(
@@ -52,7 +54,12 @@ async fn traversals() -> (Arc<dyn ExecutionPlan>, Arc<dyn ExecutionPlan>) {
     .unwrap();
     let state = session.context().state();
     let planner = DefaultPhysicalPlanner::default();
-    let physical: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(input_schema()));
+    let input: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(input_schema()));
+    let physical: Arc<dyn ExecutionPlan> = if bounded {
+        Arc::new(GlobalLimitExec::new(input, 0, Some(8)))
+    } else {
+        input
+    };
     let expand = ExpandNode::new(
         logical_input(),
         "KNOWS",
@@ -123,7 +130,7 @@ fn only_destination(plan: &dyn ExecutionPlan, destination: usize) {
 
 #[tokio::test]
 async fn an_expansion_names_its_destination_uuid_and_not_its_inputs() {
-    let (expand, _) = traversals().await;
+    let (expand, _) = traversals(true).await;
     let destination =
         INPUT_WIDTH + EDGE_WIDTH + TOPOLOGY_NODES_SCHEMA.index_of("node_uuid").unwrap();
     assert_eq!(expand.schema().field(destination).name(), "node_uuid");
@@ -138,7 +145,7 @@ async fn an_expansion_names_its_destination_uuid_and_not_its_inputs() {
 
 #[tokio::test]
 async fn a_variable_length_expansion_names_its_destination_uuid_and_not_its_inputs() {
-    let (_, var_len) = traversals().await;
+    let (_, var_len) = traversals(true).await;
     let destination = INPUT_WIDTH + TOPOLOGY_NODES_SCHEMA.index_of("node_uuid").unwrap();
     assert_eq!(var_len.schema().field(destination).name(), "node_uuid");
     only_destination(var_len.as_ref(), destination);
@@ -151,7 +158,7 @@ async fn a_variable_length_expansion_names_its_destination_uuid_and_not_its_inpu
 
 #[tokio::test]
 async fn the_destination_is_followed_through_row_preserving_operators() {
-    let (expand, var_len) = traversals().await;
+    let (expand, var_len) = traversals(true).await;
     for (traversal, destination) in [
         (
             expand,
@@ -214,4 +221,29 @@ fn a_topology_scan_is_never_a_traversal_destination() {
     let scan: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(Arc::clone(&TOPOLOGY_NODES_SCHEMA)));
     assert!(!is_traversal_destination_uuid(scan.as_ref(), 0));
     assert!(!is_frontier_endpoint_uuid(scan.as_ref(), 0));
+}
+
+#[tokio::test]
+async fn only_a_bounded_traversal_may_prune_its_enrichment() {
+    // The pruned join collects its frontier into one Arrow batch, so a
+    // traversal that no anchor or fetch bounds keeps its partitioned join.
+    let (bounded_expand, bounded_var_len) = traversals(true).await;
+    let (unbounded_expand, unbounded_var_len) = traversals(false).await;
+    let offset = TOPOLOGY_NODES_SCHEMA.index_of("node_uuid").unwrap();
+    for (bounded, unbounded, destination) in [
+        (
+            bounded_expand,
+            unbounded_expand,
+            INPUT_WIDTH + EDGE_WIDTH + offset,
+        ),
+        (bounded_var_len, unbounded_var_len, INPUT_WIDTH + offset),
+    ] {
+        assert!(is_frontier_endpoint_uuid(bounded.as_ref(), destination));
+        assert!(!is_frontier_endpoint_uuid(unbounded.as_ref(), destination));
+        // Lineage alone does not depend on the bound.
+        assert!(is_traversal_destination_uuid(
+            unbounded.as_ref(),
+            destination
+        ));
+    }
 }

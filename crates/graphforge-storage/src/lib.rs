@@ -40,7 +40,8 @@ mod property_join_nomination;
 mod property_join_nomination_tests;
 mod uuid_set;
 pub use property_filter_approval::{
-    PropertyFilterApprovalRule, SelectedEndpointPropertyFilterApprovalRule, is_filtered_uuid_seed,
+    PropertyFilterApprovalRule, SelectedEndpointPropertyFilterApprovalRule, frontier_has_bound,
+    is_filtered_uuid_seed,
 };
 pub mod storage_attribution;
 pub mod transient_composition;

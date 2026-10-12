@@ -3,6 +3,7 @@ use crate::SelectedEndpointPropertyFilterApprovalRule;
 use datafusion::physical_expr::Partitioning;
 use datafusion::physical_optimizer::sanity_checker::SanityCheckPlan;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+use datafusion::physical_plan::limit::GlobalLimitExec;
 
 fn enrichment(scan: PropertyOverlayExec, partitions: usize) -> Arc<dyn ExecutionPlan> {
     enrichment_with_projection(scan, partitions, vec![0, 1, 2])
@@ -184,12 +185,20 @@ fn partitioned_left_enrichment_lifts_a_projected_away_hash_key_to_nominate() {
 }
 
 #[test]
-fn partitioned_left_enrichment_lifts_a_hidden_key_of_an_unanchored_frontier() {
+fn partitioned_left_enrichment_lifts_a_hidden_key_of_a_fetch_bounded_frontier() {
     let config = ConfigOptions::default();
     for partitions in [1, 2, 4] {
-        // Only the property column of the scan survives the projection, so
-        // neither side's UUID is visible above the join.
-        let original = enrichment_with_projection(property_scan(None, None), partitions, vec![2]);
+        // `ORDER BY ... LIMIT` bounds the frontier. Only the property column
+        // of the scan survives the projection, so neither side's UUID is
+        // visible above the join.
+        let frontier: Arc<dyn ExecutionPlan> = Arc::new(GlobalLimitExec::new(
+            input_with_values(&[Some([1; 16]), Some([2; 16]), None]),
+            0,
+            Some(10),
+        ));
+        assert!(crate::frontier_has_bound(frontier.as_ref()));
+        let original =
+            enrichment_from_frontier(frontier, property_scan(None, None), partitions, vec![2]);
         let optimized = PropertyFilterApprovalRule
             .optimize(Arc::clone(&original), &config)
             .unwrap();
@@ -201,6 +210,36 @@ fn partitioned_left_enrichment_lifts_a_hidden_key_of_an_unanchored_frontier() {
             .optimize(Arc::clone(&optimized), &config)
             .unwrap();
         assert!(Arc::ptr_eq(&optimized, &repeated));
+    }
+}
+
+#[test]
+fn partitioned_left_enrichment_keeps_a_hidden_key_of_an_unbounded_frontier() {
+    let config = ConfigOptions::default();
+    for partitions in [1, 2, 4] {
+        // Nothing bounds how many rows reach the join, and a CollectLeft build
+        // concatenates its input into one Arrow batch. The partitioned join
+        // splits that build, so the ordinary rule leaves it alone...
+        let original = enrichment_with_projection(property_scan(None, None), partitions, vec![2]);
+        assert!(!crate::frontier_has_bound(
+            original
+                .downcast_ref::<HashJoinExec>()
+                .unwrap()
+                .left()
+                .as_ref()
+        ));
+        let unchanged = PropertyFilterApprovalRule
+            .optimize(Arc::clone(&original), &config)
+            .unwrap();
+        assert!(Arc::ptr_eq(&original, &unchanged));
+
+        // ...unless the caller proves the frontier is the selected one. A
+        // visible key keeps the unchanged rewrite for any frontier.
+        let visible = enrichment_with_projection(property_scan(None, None), partitions, vec![0, 2]);
+        let optimized = PropertyFilterApprovalRule
+            .optimize(Arc::clone(&visible), &config)
+            .unwrap();
+        assert!(!Arc::ptr_eq(&visible, &optimized));
     }
 }
 

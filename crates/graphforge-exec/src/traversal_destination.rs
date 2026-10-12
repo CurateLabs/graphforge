@@ -6,7 +6,8 @@
 //! enrichment reads, so the storage layer may prune a key-only scan to it
 //! without changing the join. A topology scan has no such frontier: a
 //! whole-graph `count(*)` must still authenticate the whole property route it
-//! joins, so a scan's own UUID column never qualifies.
+//! joins, so a scan's own UUID column never qualifies. A traversal whose rows
+//! no anchor or fetch bounds keeps its partitioned join.
 
 use datafusion::physical_expr::expressions::Column;
 use datafusion::physical_plan::ExecutionPlan;
@@ -20,11 +21,15 @@ use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMerge
 use crate::expand_exec::{ExpandExec, VarLenExpandExec, is_selected_endpoint_uuid};
 
 /// Whether `column_index` of `plan` is a UUID the property scan joined to it
-/// may be pruned to: the destination of an expansion, or the exact endpoint an
-/// equality-selected seed reaches.
+/// may be pruned to: the destination of an expansion whose input is bounded,
+/// or the exact endpoint an equality-selected seed reaches.
+///
+/// The bound matters because the pruned join collects its build side into one
+/// Arrow batch; see [`graphforge_storage::frontier_has_bound`].
 pub(crate) fn is_frontier_endpoint_uuid(plan: &dyn ExecutionPlan, column_index: usize) -> bool {
     is_selected_endpoint_uuid(plan, column_index)
-        || is_traversal_destination_uuid(plan, column_index)
+        || (is_traversal_destination_uuid(plan, column_index)
+            && graphforge_storage::frontier_has_bound(plan))
 }
 
 /// The position of `node_uuid` within the destination node's topology columns.

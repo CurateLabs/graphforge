@@ -73,6 +73,12 @@ pub(super) fn nominate_partitioned_left_selected(
     if selected_key.is_some_and(|selected| selected != build_column) {
         return Ok(None);
     }
+    // A hidden key is lifted only for a bounded frontier: the CollectLeft
+    // build concatenates it into one Arrow batch (see `frontier_has_bound`).
+    let hidden_key = selected_key.is_none() && super::has_unknown_hash_key(&output, original);
+    if hidden_key && !super::frontier_has_bound(join.left().as_ref()) {
+        return Ok(None);
+    }
     // Keep the preserved side's operators. NULL keys are omitted
     // from the nomination, but their unmatched LEFT rows remain in the join.
     let nomination = UuidBuildKeyNomination::new();
@@ -85,7 +91,7 @@ pub(super) fn nominate_partitioned_left_selected(
         Arc::clone(&nomination),
     ));
     let nominated: Arc<dyn ExecutionPlan> = Arc::new(scan.with_uuid_nomination(nomination));
-    if selected_key.is_none() && !super::has_unknown_hash_key(&output, original) {
+    if selected_key.is_none() && !hidden_key {
         let rebuilt = join
             .builder()
             .with_new_children(vec![tapped, nominated])?

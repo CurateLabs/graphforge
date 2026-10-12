@@ -612,18 +612,24 @@ has validated, as before. The merge reads rows in UUID order, so results keep
 the order of the spooled merge.
 
 A completed join frontier can nominate destination UUIDs before a property
-scan opens its fragments. Every LEFT enrichment whose scan projects property
+scan opens its fragments. A LEFT enrichment whose scan projects property
 payload nominates from its build side, whatever produced that frontier: the
 join still decides matches, NULL preservation, and output multiplicity, and a
 LEFT join keeps every build row, so pruning the scan cannot change a result.
-Key-only destination scans require proof that the frontier comes from the
-exact expansion source selected by a strict equality join; an unrelated
-equality or ambiguous source identity does not qualify, so `count(*)` still
-authenticates the whole route it joins. When an embedded LEFT join projection
-hides the UUID, the rewrite retains it through repartitioning and removes it
-afterward. Rewrites that cannot lift the key reject unknown partition keys
-rather than turning optimizer metadata into an executable hash expression.
-Frontier memory remains subject to the query pool.
+Key-only destination scans require proof that the frontier comes from a
+traversal destination (or the exact expansion source an equality join
+selects); a topology scan's own UUID is never such a frontier, so `count(*)`
+still authenticates the whole route it joins. When an embedded LEFT join
+projection hides the UUID, the rewrite retains it through repartitioning and
+removes it afterward; rewrites that cannot lift the key reject unknown
+partition keys rather than turning optimizer metadata into an executable hash
+expression. The rewritten join is a CollectLeft join, which concatenates its
+whole build side into one Arrow batch, so a frontier that nothing bounds (an
+equality anchor or a row fetch such as `ORDER BY ... LIMIT`) could exceed the
+32-bit offsets of a variable-width column. The hidden-key rewrite and the
+traversal-destination proof therefore require a bounded frontier; an unbounded
+one keeps its partitioned join, whose build is split. Frontier memory remains
+subject to the query pool.
 
 The Rust facade regression `property_read_pushdown` compares fixed-fanout
 anchored queries while unrelated destination rows and fragments grow, at one,
