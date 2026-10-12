@@ -117,10 +117,12 @@ def publish(directory: Path, dist_tag: str) -> None:
         if is_published(name, version):
             print(f"{name}@{version}: already published, skipping", flush=True)
             continue
+        # An absolute path: npm reads a relative `dir/file.tgz` as a GitHub
+        # `owner/repo` shorthand and tries to clone it over git.
         command = [
             "npm",
             "publish",
-            str(tarball),
+            str(tarball.resolve()),
             "--access",
             "public",
             "--provenance",
