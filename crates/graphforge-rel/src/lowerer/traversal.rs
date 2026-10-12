@@ -4,12 +4,51 @@ use super::scans::{
     edge_property_candidate_stems, edge_property_schema, join_edge_properties, lower_edge_scan,
     lower_node_scan, lower_typed_edge_scan, project_typed_edge_route,
 };
+use crate::expr::LoweredEdgePredicate;
+
 use super::{
     Arc, DfExpr, Direction, EXPLORATORY_EDGE_SCHEMA, Extension, HashMap, HashSet, JoinType,
     LogicalPlan, LogicalPlanBuilder, LoweringError, LoweringSnapshot, MapUnsupportedExpr,
     OntologyMode, RelationTypeId, TOPOLOGY_NODES_SCHEMA, TYPED_EDGE_SCHEMA, VarId,
     VarLenExpandNode, VarMap, var_alias,
 };
+
+/// The persisted edge-property columns of relation `rel_name` (#755), without
+/// the topology fields.
+///
+/// Mirrors the fixed-hop `join_edge_properties`: read the dynamic on-disk
+/// schema and drop the `edge_uuid` key + any name colliding with the struct's
+/// four topology fields (`edge_uuid`/`src_uuid`/`dst_uuid`/`rel_type`). A
+/// wildcard (`*`) has no single property file, so it unions EVERY relation's
+/// fields (#1023) — sorted stem order for determinism, first concrete type of
+/// a name wins, forced nullable since an edge from a relation without the
+/// column is NULL (the exec coalesces each edge's values from its own
+/// relation's file).
+fn edge_property_fields(
+    dir_path: &LoweringSnapshot,
+    rel_name: &str,
+) -> Vec<datafusion::arrow::datatypes::Field> {
+    let topology_names = ["edge_uuid", "src_uuid", "dst_uuid", "rel_type"];
+    let mut positions = std::collections::HashMap::<String, usize>::new();
+    let mut fields: Vec<datafusion::arrow::datatypes::Field> = Vec::new();
+    for stem in edge_property_candidate_stems(dir_path, rel_name) {
+        let prop_table = edge_property_schema(dir_path, &stem);
+        for f in prop_table.fields() {
+            if topology_names.contains(&f.name().as_str()) {
+                continue;
+            }
+            if let Some(&position) = positions.get(f.name()) {
+                if fields[position].data_type() == &datafusion::arrow::datatypes::DataType::Null {
+                    fields[position] = f.as_ref().clone().with_nullable(true);
+                }
+            } else {
+                positions.insert(f.name().clone(), fields.len());
+                fields.push(f.as_ref().clone().with_nullable(true));
+            }
+        }
+    }
+    fields
+}
 
 /// Lower a variable-length `Expand` (`min_hops != 1 || max_hops != Some(1)`)
 /// into the `VarLenExpandNode` Extension whose physical execution (physical execution) runs an
@@ -33,6 +72,7 @@ fn lower_var_len_expand(
     inference_rules: &HashMap<RelationTypeId, Vec<(String, String)>>,
     target: Option<(&LoweringSnapshot, OntologyMode)>,
     reachability: bool,
+    edge_predicates: Option<LoweredEdgePredicate>,
 ) -> Result<LogicalPlan, LoweringError> {
     use datafusion::logical_expr::col;
 
@@ -59,11 +99,12 @@ fn lower_var_len_expand(
         .and_then(|rt| inference_rules.get(&rt))
         .cloned()
         .unwrap_or_default();
-    // The reachability proof (`graphforge_ir::reachability_expansions`) covers
-    // only an expansion that produces its own, unconstrained relationship list;
-    // an inference rule wraps the node in auditable closure events, so it keeps
-    // the trail enumeration it was specified against.
-    let reachability = reachability && bound_edge_list.is_none() && infer_rules.is_empty();
+    // The caller has already vetoed reachability for a bound relationship list
+    // or an inference rule (`Lowerer::lower_pipeline_op`).
+    debug_assert!(
+        !reachability || (bound_edge_list.is_none() && infer_rules.is_empty()),
+        "reachability mode requires an unbound relationship list and no inference rules"
+    );
     let rel_for_infer = rel_name.clone();
     // Lowering discovers the logical output schema here; execution resolves
     // the graph resource from its own session context.
@@ -83,32 +124,37 @@ fn lower_var_len_expand(
     // — sorted stem order for determinism, first concrete type of a name wins,
     // forced nullable since an edge from a relation without the column is NULL
     // (the exec coalesces each edge's values from its own relation's file).
-    let topology_names = ["edge_uuid", "src_uuid", "dst_uuid", "rel_type"];
     let prop_fields: Vec<datafusion::arrow::datatypes::Field> = if reachability {
         // No relationship list is produced, so its properties are not needed.
         Vec::new()
     } else {
-        let mut positions = std::collections::HashMap::<String, usize>::new();
-        let mut fields: Vec<datafusion::arrow::datatypes::Field> = Vec::new();
-        for stem in edge_property_candidate_stems(dir_path, &rel_name) {
-            let prop_table = edge_property_schema(dir_path, &stem);
-            for f in prop_table.fields() {
-                if topology_names.contains(&f.name().as_str()) {
-                    continue;
-                }
-                if let Some(&position) = positions.get(f.name()) {
-                    if fields[position].data_type() == &datafusion::arrow::datatypes::DataType::Null
-                    {
-                        fields[position] = f.as_ref().clone().with_nullable(true);
-                    }
-                } else {
-                    positions.insert(f.name().clone(), fields.len());
-                    fields.push(f.as_ref().clone().with_nullable(true));
-                }
-            }
-        }
-        fields
+        edge_property_fields(dir_path, &rel_name)
     };
+    // The properties a pushed per-relationship predicate reads: the relation's
+    // persisted columns, restricted to the ones the predicate names. A property
+    // no relation file has is NULL on every edge, so it gets a typeless column.
+    let edge_filter = edge_predicates.map(|lowered| {
+        let discovered = edge_property_fields(dir_path, &rel_name);
+        let fields = lowered
+            .properties
+            .iter()
+            .map(|name| {
+                let field = discovered
+                    .iter()
+                    .find(|field| field.name() == name)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        datafusion::arrow::datatypes::Field::new(
+                            name,
+                            datafusion::arrow::datatypes::DataType::Null,
+                            true,
+                        )
+                    });
+                Arc::new(field)
+            })
+            .collect();
+        graphforge_plan::EdgeFilter::new(lowered.predicate, fields)
+    });
 
     // The output extends the input with the destination node's columns,
     // qualified `var_<dst>` (mirrors a `NodeScan(dst)`), then a trailing
@@ -131,7 +177,7 @@ fn lower_var_len_expand(
     )
     .with_bound_destination(bound_dst.clone());
     let node = if reachability {
-        node.into_reachability()
+        node.into_reachability().with_edge_filter(edge_filter)
     } else {
         node
     };
@@ -239,6 +285,7 @@ pub(super) fn lower_expand(
     inference_rules: &HashMap<RelationTypeId, Vec<(String, String)>>,
     target: Option<(&LoweringSnapshot, OntologyMode)>,
     reachability: bool,
+    edge_predicates: Option<LoweredEdgePredicate>,
     #[cfg(feature = "differential-testing")] relational_reference: bool,
 ) -> Result<LogicalPlan, LoweringError> {
     // Variable-length expand cannot be expressed in relational algebra; emit
@@ -259,6 +306,7 @@ pub(super) fn lower_expand(
             inference_rules,
             target,
             reachability,
+            edge_predicates,
         );
     }
 

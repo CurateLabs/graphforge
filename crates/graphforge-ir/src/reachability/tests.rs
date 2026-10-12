@@ -277,6 +277,40 @@ fn a_filter_of_only_lifted_conjuncts_has_no_residual() {
 }
 
 #[test]
+fn withdrawn_edge_predicates_are_lowered_by_their_filters_and_the_hoist_stays() {
+    let plan = bind(TCR3_SHAPE);
+    let mut reachability = reachability_expansions(&plan.ops, &plan.exprs);
+    let expand = plan
+        .ops
+        .iter()
+        .position(|op| matches!(op, GraphOp::Expand { .. }))
+        .unwrap();
+    let before = reachability.expansion_at(expand).cloned().unwrap();
+    assert!(!before.edge_predicates.is_empty());
+
+    reachability.withdraw_edge_predicates(expand);
+
+    for (index, op) in plan.ops.iter().enumerate() {
+        if let GraphOp::Filter { predicate } = op {
+            assert_eq!(
+                reachability.residual_conjuncts(&plan.exprs, index, *predicate),
+                None,
+                "filter {index} must lower unchanged once its conjunct is withdrawn"
+            );
+        }
+    }
+    let after = reachability.expansion_at(expand).unwrap();
+    assert!(after.edge_predicates.is_empty());
+    assert_eq!(after.hoisted_destination_ops, before.hoisted_destination_ops);
+    assert_eq!(after.vacuous_uniqueness, before.vacuous_uniqueness);
+
+    // Withdrawing where nothing was recorded changes nothing.
+    let snapshot = reachability.clone();
+    reachability.withdraw_edge_predicates(expand + 100);
+    assert_eq!(reachability, snapshot);
+}
+
+#[test]
 fn a_pinned_destination_is_still_hoisted_when_the_window_filter_follows_it() {
     let plan = bind(TCR3_SHAPE);
     let reachability = reachability_expansions(&plan.ops, &plan.exprs);

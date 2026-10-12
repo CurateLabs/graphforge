@@ -186,6 +186,17 @@ impl ReachabilityPlan {
         self.expansions.is_empty()
     }
 
+    /// Stop treating the per-relationship predicates of the `Expand` at
+    /// `op_index` as the search's own, because the lowerer keeps that expansion on
+    /// trails. Their `Filter`s then lower unchanged, so no predicate is dropped.
+    /// The destination hoist and the vacuous-uniqueness skips do not depend on the
+    /// search mode and stay.
+    pub fn withdraw_edge_predicates(&mut self, op_index: usize) {
+        if let Some(expansion) = self.expansions.get_mut(&op_index) {
+            expansion.edge_predicates.clear();
+        }
+    }
+
     /// The conjuncts of the `Filter` at `op_index` (whose predicate is
     /// `predicate`) that remain after the per-relationship predicates the search
     /// applies itself are removed, in plan order. `None` when no conjunct of this

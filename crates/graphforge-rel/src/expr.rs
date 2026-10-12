@@ -169,6 +169,17 @@ pub struct NodeShape {
     pub prop_names: Vec<String>,
 }
 
+/// The per-relationship predicate of a reachability expansion, lowered over the
+/// synthetic struct column [`graphforge_plan::VAR_LEN_EDGE_ELEMENT`]
+/// (see [`ExprLowerer::lower_edge_predicates`]).
+#[derive(Clone, Debug)]
+pub struct LoweredEdgePredicate {
+    /// The conjunction of every pushed predicate.
+    pub predicate: DfExpr,
+    /// The relationship properties the predicate reads, sorted and unique.
+    pub properties: Vec<String>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EntityIdentityKind {
     Node,
@@ -1039,6 +1050,75 @@ impl<'a> ExprLowerer<'a> {
             args.push(qualified_col(base, &prop));
         }
         Some(null_unless(present, named_struct(args)))
+    }
+
+    /// The name a property is stored under: the catalog name, or `prop_<id>`
+    /// for a runtime-catalog property the ontology does not name. The same
+    /// resolution [`resolve_prop_col`](Self::resolve_prop_col) applies.
+    fn property_name(&self, prop: PropertyId) -> String {
+        self.prop_names
+            .get(&prop)
+            .cloned()
+            .unwrap_or_else(|| format!("prop_{prop}"))
+    }
+
+    /// `l AND r` under Cypher's three-valued logic, refusing a proven
+    /// non-boolean operand exactly as the binary `AND` lowering does (#956).
+    fn boolean_and(&self, l: DfExpr, r: DfExpr) -> Result<DfExpr, LoweringError> {
+        if self.is_known_non_bool(&l) || self.is_known_non_bool(&r) {
+            return Err(LoweringError::InvalidType(
+                "AND requires boolean operands".to_owned(),
+            ));
+        }
+        Ok(CYPHER_AND.call(vec![l, r]))
+    }
+
+    /// Lower `ids` as the left-associated `AND` of its members, the shape the
+    /// parser gives `a AND b AND c`. `ids` must not be empty.
+    pub(crate) fn lower_conjunction(&self, ids: &[ExprId]) -> Result<DfExpr, LoweringError> {
+        let mut conjuncts = ids.iter().map(|&id| self.lower(id));
+        let first = conjuncts
+            .next()
+            .ok_or_else(|| LoweringError::UnsupportedExpr("empty conjunction".to_owned()))??;
+        conjuncts.try_fold(first, |acc, next| self.boolean_and(acc, next?))
+    }
+
+    /// Lower the per-relationship predicates a reachability expansion tests on
+    /// each edge it traverses (see `graphforge_ir::EdgePredicate`).
+    ///
+    /// Each predicate is lowered with its loop variable bound to the synthetic
+    /// struct column [`VAR_LEN_EDGE_ELEMENT`], so the relationship's properties
+    /// are struct fields and the expression refers to no other column. The
+    /// predicates are combined with `AND`; parameters stay placeholders for the
+    /// session to bind.
+    pub(crate) fn lower_edge_predicates(
+        &self,
+        predicates: &[graphforge_ir::EdgePredicate],
+    ) -> Result<LoweredEdgePredicate, LoweringError> {
+        let mut combined: Option<DfExpr> = None;
+        let mut properties = std::collections::BTreeSet::new();
+        for predicate in predicates {
+            let mut element_vars = VarMap::new();
+            element_vars.insert(predicate.loop_var, graphforge_plan::VAR_LEN_EDGE_ELEMENT);
+            let lowered = ExprLowerer::with_prop_names(
+                self.arena,
+                &element_vars,
+                self.prop_names.clone(),
+            )
+            .with_elem_struct_col(graphforge_plan::VAR_LEN_EDGE_ELEMENT.to_owned())
+            .lower(predicate.predicate)?;
+            combined = Some(match combined {
+                Some(acc) => self.boolean_and(acc, lowered)?,
+                None => lowered,
+            });
+            properties.extend(predicate.properties.iter().map(|&p| self.property_name(p)));
+        }
+        let predicate = combined
+            .ok_or_else(|| LoweringError::UnsupportedExpr("no edge predicates".to_owned()))?;
+        Ok(LoweredEdgePredicate {
+            predicate,
+            properties: properties.into_iter().collect(),
+        })
     }
 
     /// Lower `all/any/none/single(loop_var IN list WHERE predicate)` (#955) to a
