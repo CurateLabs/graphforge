@@ -42,11 +42,7 @@ impl RustAlgorithm for MaxCardinalityMatching {
         for &source_id in graph.node_ids() {
             let source = cardinality_matching_node_uuid(graph, source_id)?;
             for edge in graph.neighbors(source_id) {
-                if work.is_multiple_of(4_096) {
-                    control.checkpoint()?;
-                } else {
-                    control.check_cancelled()?;
-                }
+                control.check_cancelled()?;
                 work = work.saturating_add(1);
                 edges.push(MatchingEdge {
                     edge: edge.edge_uuid,
@@ -90,11 +86,7 @@ impl RustAlgorithm for MaxWeightMatching {
         for &source_id in graph.node_ids() {
             let source_uuid = matching_node_uuid(graph, source_id)?;
             for edge in graph.neighbors(source_id) {
-                if work.is_multiple_of(4_096) {
-                    control.checkpoint()?;
-                } else {
-                    control.check_cancelled()?;
-                }
+                control.check_cancelled()?;
                 work = work.saturating_add(1);
                 edges.push(WeightedEdge {
                     edge_uuid: edge.edge_uuid,
@@ -141,11 +133,7 @@ impl RustAlgorithm for Conductance {
         for &source_id in graph.node_ids() {
             let source = conductance_node_uuid(graph, source_id)?;
             for edge in graph.neighbors(source_id) {
-                if scanned.is_multiple_of(4_096) {
-                    control.checkpoint()?;
-                } else {
-                    control.check_cancelled()?;
-                }
+                control.check_cancelled()?;
                 scanned = scanned.saturating_add(1);
                 let target = conductance_node_uuid(graph, edge.neighbor_id)?;
                 let (source_uuid, target_uuid) = if source <= target {
@@ -212,11 +200,7 @@ impl RustAlgorithm for Modularity {
         for &source_id in graph.node_ids() {
             let source = partition_metric_node_uuid(graph, source_id, "modularity")?;
             for edge in graph.neighbors(source_id) {
-                if scanned.is_multiple_of(4_096) {
-                    control.checkpoint()?;
-                } else {
-                    control.check_cancelled()?;
-                }
+                control.check_cancelled()?;
                 scanned = scanned.saturating_add(1);
                 let target = partition_metric_node_uuid(graph, edge.neighbor_id, "modularity")?;
                 let projected = ModularityEdge {

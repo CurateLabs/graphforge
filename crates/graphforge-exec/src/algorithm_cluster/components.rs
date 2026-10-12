@@ -9,6 +9,8 @@ use super::{
 
 pub(super) struct Components;
 
+/// Components is one pass over the edges, so it polls cancellation every this many
+/// edges and never consumes the `iterations` limit, which counts rounds (#1974).
 const COMPONENTS_CHECKPOINT_EDGES: usize = 16_384;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,7 +56,7 @@ impl RustAlgorithm for Components {
         let mut sink = control.output_sink(algorithm)?;
         for index in 0..node_count {
             if index.is_multiple_of(COMPONENTS_CHECKPOINT_EDGES) {
-                control.checkpoint()?;
+                control.check_cancelled()?;
             }
             let root = find(&mut parents, index);
             let community_id = if let Some(id) = ids[root] {
@@ -105,7 +107,7 @@ fn components_union_serial(
     for source in 0..graph.node_count() {
         for target in selected_neighbors(graph, source)? {
             if visited_edges.is_multiple_of(COMPONENTS_CHECKPOINT_EDGES) {
-                control.checkpoint()?;
+                control.check_cancelled()?;
             }
             visited_edges += 1;
             union(parents, source, target);
@@ -122,7 +124,7 @@ fn components_union_parallel(
     let pool = control
         .compute_pool()
         .ok_or_else(|| execution("parallel components requires an instance-owned compute pool"))?;
-    control.checkpoint()?;
+    control.check_cancelled()?;
     let ranges = component_source_chunks(graph.node_count(), control.compute_threads());
     let chunk_results = run_components_on_pool(pool, || {
         Ok(ranges

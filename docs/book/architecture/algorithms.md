@@ -133,11 +133,14 @@ missing values. No execution surrogate is exposed. `write_property` atomically p
 score only after successful execution; omitting it never mutates the graph.
 
 PageRank uses the shared hard caps of 10,000,000 selected nodes, 100,000,000 selected
-adjacency entries, 10,000,000 output rows, and 10,000 iteration checkpoints, plus cooperative
-cancellation. Invalid labels or relationship selectors, unavailable catalog values, limit
-violations, cancellation, adjacency/storage failures, and shaping/write-back failures remain
-structured Rust errors. Python and Node only translate arguments and Arrow IPC around this
-same handler; neither binding contains an algorithm or fallback.
+adjacency entries, 10,000,000 output rows, and 10,000 iterations, plus cooperative
+cancellation. The iteration cap counts rounds of an iterative algorithm, one per round or
+sweep; the work inside a round, and a single-pass algorithm's work, polls cancellation and is
+bounded by the node and adjacency-entry caps instead of consuming iterations. Invalid labels
+or relationship selectors, unavailable catalog values, limit violations, cancellation,
+adjacency/storage failures, and shaping/write-back failures remain structured Rust errors.
+Python and Node only translate arguments and Arrow IPC around this same handler; neither
+binding contains an algorithm or fallback.
 
 `RankOptions.pagerank` can configure finite damping in `[0, 1]` and an exact
 iteration count. Fixed rounds never stop early on convergence. The same serial

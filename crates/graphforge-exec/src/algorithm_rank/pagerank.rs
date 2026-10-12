@@ -81,7 +81,7 @@ impl RustAlgorithm for PageRank {
         let mut sink = control.output_sink(algorithm)?;
         for (index, &score) in scores.iter().enumerate() {
             if index % 1024 == 0 {
-                control.checkpoint()?;
+                control.check_cancelled()?;
             }
             let uuid = graph
                 .uuid_of_ordinal(index)

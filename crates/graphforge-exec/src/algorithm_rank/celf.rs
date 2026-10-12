@@ -137,7 +137,7 @@ fn celf_spread(
                 .ok_or_else(|| execution("selected node has no UUID identity"))?;
             for edge in graph.neighbors(node_ids[source]) {
                 if traversed_edges > 0 && traversed_edges.is_multiple_of(1024) {
-                    control.checkpoint()?;
+                    control.check_cancelled()?;
                 }
                 traversed_edges += 1;
                 let target = indices

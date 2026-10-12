@@ -376,9 +376,12 @@ impl<'a> WorkControl<'a> {
         Self { control, steps: 0 }
     }
 
+    /// Count one step and poll cancellation every [`CHECKPOINT_INTERVAL`] steps.
+    /// Steps are bounded by the vector limits, so they never consume the
+    /// `iterations` limit, which counts rounds (#1974).
     fn tick(&mut self) -> Result<(), AlgorithmError> {
         if self.steps.is_multiple_of(CHECKPOINT_INTERVAL) {
-            self.control.checkpoint()?;
+            self.control.check_cancelled()?;
         }
         self.steps += 1;
         Ok(())
@@ -693,10 +696,10 @@ mod tests {
             },
             AlgorithmCancellation::default(),
         );
-        assert!(matches!(
-            SingleLinkageHierarchy::from_tree(130, &chain, &mut WorkControl::new(&limited)),
-            Err(AlgorithmError::IterationLimit { .. })
-        ));
+        // Steps poll cancellation and consume no iterations (#1974).
+        assert!(
+            SingleLinkageHierarchy::from_tree(130, &chain, &mut WorkControl::new(&limited)).is_ok()
+        );
         let cancelled = AlgorithmCancellation::default();
         cancelled.cancel();
         let cancelled = AlgorithmControl::new(AlgorithmLimits::default(), cancelled);
@@ -871,13 +874,15 @@ mod tests {
             iterations: 1,
             ..AlgorithmLimits::default()
         };
-        assert!(matches!(
-            chain.stable_labels(
-                130,
-                &AlgorithmControl::new(limits, AlgorithmCancellation::default())
-            ),
-            Err(AlgorithmError::IterationLimit { .. })
-        ));
+        // Steps poll cancellation and consume no iterations (#1974).
+        assert!(
+            chain
+                .stable_labels(
+                    130,
+                    &AlgorithmControl::new(limits, AlgorithmCancellation::default())
+                )
+                .is_ok()
+        );
         let cancellation = AlgorithmCancellation::default();
         cancellation.cancel();
         assert_eq!(

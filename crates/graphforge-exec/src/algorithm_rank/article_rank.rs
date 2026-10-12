@@ -243,7 +243,7 @@ fn article_rank_pull_serial(
 ) -> Result<(), AlgorithmError> {
     for (dest, value) in next.iter_mut().enumerate() {
         if dest > 0 && dest.is_multiple_of(ARTICLE_RANK_CHECKPOINT_DESTINATIONS) {
-            control.checkpoint()?;
+            control.check_cancelled()?;
         }
         *value = article_rank_pull_destination(inbound, outdegrees, average_degree, deltas, dest);
     }

@@ -47,23 +47,12 @@ impl RustAlgorithm for CountAutomorphisms {
         edges
             .try_reserve_exact(adjacency_entries)
             .map_err(|_| automorphism_allocation("stored-edge projection"))?;
-        let mut projected = 0_usize;
         for &source_id in graph.node_ids() {
-            if projected.is_multiple_of(4_096) {
-                control.checkpoint()?;
-            } else {
-                control.check_cancelled()?;
-            }
-            projected = projected.saturating_add(1);
+            control.check_cancelled()?;
             let source = automorphism_node_uuid(graph, source_id)?;
             nodes.push(source);
             for edge in graph.neighbors(source_id) {
-                if projected.is_multiple_of(4_096) {
-                    control.checkpoint()?;
-                } else {
-                    control.check_cancelled()?;
-                }
-                projected = projected.saturating_add(1);
+                control.check_cancelled()?;
                 let target = automorphism_node_uuid(graph, edge.neighbor_id)?;
                 let (source, target) = if self.directed || source <= target {
                     (source, target)
@@ -241,7 +230,7 @@ impl RustAlgorithm for IsPlanar {
         let mut projected = 0_usize;
         for &source in graph.node_ids() {
             if projected.is_multiple_of(4_096) {
-                control.checkpoint()?;
+                control.check_cancelled()?;
             }
             projected = projected.saturating_add(1);
             let source_uuid = graph
@@ -252,7 +241,7 @@ impl RustAlgorithm for IsPlanar {
             nodes.push(source_uuid);
             for edge in graph.neighbors(source) {
                 if projected.is_multiple_of(4_096) {
-                    control.checkpoint()?;
+                    control.check_cancelled()?;
                 }
                 projected = projected.saturating_add(1);
                 edges.push(PlanarityEdge {
@@ -295,7 +284,7 @@ impl RustAlgorithm for TriadCensus {
         let mut projected = 0_usize;
         for &source in graph.node_ids() {
             if projected.is_multiple_of(4_096) {
-                control.checkpoint()?;
+                control.check_cancelled()?;
             }
             projected = projected.saturating_add(1);
             let source_uuid = graph
@@ -306,7 +295,7 @@ impl RustAlgorithm for TriadCensus {
             nodes.push(source_uuid);
             for edge in graph.neighbors(source) {
                 if projected.is_multiple_of(4_096) {
-                    control.checkpoint()?;
+                    control.check_cancelled()?;
                 }
                 projected = projected.saturating_add(1);
                 edges.push(TriadEdge {
@@ -359,7 +348,7 @@ impl RustAlgorithm for DyadCensus {
         let mut projected = 0_usize;
         for &source in graph.node_ids() {
             if projected.is_multiple_of(4_096) {
-                control.checkpoint()?;
+                control.check_cancelled()?;
             }
             projected = projected.saturating_add(1);
             let source_uuid = graph
@@ -370,7 +359,7 @@ impl RustAlgorithm for DyadCensus {
             nodes.push(source_uuid);
             for edge in graph.neighbors(source) {
                 if projected.is_multiple_of(4_096) {
-                    control.checkpoint()?;
+                    control.check_cancelled()?;
                 }
                 projected = projected.saturating_add(1);
                 edges.push(DyadEdge {

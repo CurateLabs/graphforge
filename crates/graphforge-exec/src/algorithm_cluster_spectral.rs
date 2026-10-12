@@ -343,10 +343,13 @@ fn rotate(matrix: &mut DenseSymmetric, vectors: &mut DenseSymmetric, p: usize, q
     matrix.set(q, p, 0.0);
 }
 
+/// Counts work and polls cancellation every 1,024 units. Work is bounded by this kernel's
+/// node or vector cap, so it never consumes the `iterations` limit, which counts rounds
+/// (#1974).
 fn checkpoint_chunk(control: &AlgorithmControl, work: &mut usize) -> Result<(), AlgorithmError> {
     *work += 1;
     if (*work).is_multiple_of(1_024) {
-        control.checkpoint()?;
+        control.check_cancelled()?;
     }
     Ok(())
 }

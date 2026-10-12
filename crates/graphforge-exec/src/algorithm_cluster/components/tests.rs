@@ -118,18 +118,16 @@ fn components_handles_empty_graphs_and_shared_limits() {
             limit: 1,
         })
     );
-    assert_eq!(
+    // One pass over the edges consumes no iterations: the limit counts rounds (#1974).
+    assert!(
         execute_components(
             &graph,
             AlgorithmLimits {
                 iterations: 0,
                 ..AlgorithmLimits::default()
             }
-        ),
-        Err(AlgorithmError::IterationLimit {
-            observed: 1,
-            limit: 0,
-        })
+        )
+        .is_ok()
     );
 
     let cancellation = AlgorithmCancellation::default();

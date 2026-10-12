@@ -181,9 +181,11 @@ fn primary_labels(
         .collect()
 }
 
+/// Counts work and polls cancellation every 16,384 units. Work is bounded by the node and
+/// edge limits, so it never consumes the `iterations` limit, which counts rounds (#1974).
 fn checkpoint(control: &AlgorithmControl, work: &mut usize) -> Result<(), AlgorithmError> {
     if work.is_multiple_of(CHECKPOINT_INTERVAL) {
-        control.checkpoint()?;
+        control.check_cancelled()?;
     }
     *work = work.saturating_add(1);
     Ok(())
@@ -267,19 +269,23 @@ mod tests {
                 .unwrap();
         assert_eq!((labels[0], labels[20_000]), (0, 19_999));
 
-        let post_dfs = AlgorithmControl::new(
+        // Work past several 16,384-unit chunks consumes no iterations: the limit
+        // counts rounds (#1974).
+        let no_iterations = AlgorithmControl::new(
             AlgorithmLimits {
-                iterations: 2,
+                iterations: 0,
                 ..AlgorithmLimits::default()
             },
             AlgorithmCancellation::default(),
         );
         assert_eq!(
-            biconnected_labels(&AdjacencyGraph::with_test_edges(16_385, &[]), &post_dfs),
-            Err(AlgorithmError::IterationLimit {
-                observed: 3,
-                limit: 2
-            })
+            biconnected_labels(
+                &AdjacencyGraph::with_test_edges(40_000, &[]),
+                &no_iterations
+            )
+            .unwrap()
+            .len(),
+            40_000
         );
         let cancellation = AlgorithmCancellation::default();
         cancellation.cancel();

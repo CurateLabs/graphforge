@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::algorithm_dispatch::{AlgorithmControl, AlgorithmError};
 
-const CHECKPOINT_INTERVAL: usize = 4_096;
 const MAX_EXACT_FLOAT64_INTEGER: u64 = 1_u64 << 53;
 
 /// One stored directed edge entry in the selected UUID projection.
@@ -175,13 +174,11 @@ fn normalize_edges(
     Ok((neighbors, indegrees))
 }
 
+/// Counts work and polls cancellation. Work is bounded by the node and edge limits,
+/// so it never consumes the `iterations` limit, which counts rounds (#1974).
 fn checkpoint(control: &AlgorithmControl, work: &mut usize) -> Result<(), AlgorithmError> {
     *work = work.saturating_add(1);
-    if work.is_multiple_of(CHECKPOINT_INTERVAL) {
-        control.checkpoint()?;
-    } else {
-        control.check_cancelled()?;
-    }
+    control.check_cancelled()?;
     Ok(())
 }
 

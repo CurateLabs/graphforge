@@ -9,7 +9,7 @@ use graphforge_core::uuid::{Uuid, to_bytes};
 use graphforge_ir::IrLiteral;
 use graphforge_storage::{
     GraphWriter, TopologyFiles, visit_edge_identities, visit_edge_property_batches,
-    visit_node_identities,
+    visit_node_identities, visit_node_property_values,
 };
 use graphforge_value::EntityTypeId;
 use tempfile::TempDir;
@@ -272,4 +272,80 @@ fn edge_property_visitor_errors_are_returned_unchanged() {
     )
     .unwrap_err();
     assert!(matches!(error, graphforge_core::GfError::Validation(_)));
+}
+
+/// Eight nodes with `id` values of every kind a label column can hold: integers,
+/// a float and a string in one column, a node without the column and a node with
+/// no properties at all.
+fn property_fixture() -> (TempDir, Vec<[u8; 16]>) {
+    let dir = TempDir::new().unwrap();
+    let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
+    let mut uuids = Vec::new();
+    for index in 0..8 {
+        let node = uuid(0x42 << 120, index);
+        writer.create_node_with_labels(node, &[label(1)]).unwrap();
+        let props = match index {
+            0..=3 => HashMap::from([("id".to_owned(), IrLiteral::Int(10 + index as i64))]),
+            4 => HashMap::from([("id".to_owned(), IrLiteral::Float(1.5))]),
+            5 => HashMap::from([("id".to_owned(), IrLiteral::Str("seven".to_owned()))]),
+            6 => HashMap::from([("other".to_owned(), IrLiteral::Int(1))]),
+            _ => HashMap::new(),
+        };
+        if !props.is_empty() {
+            writer.set_properties(&node, None, props).unwrap();
+        }
+        uuids.push(to_bytes(&node));
+    }
+    writer.flush().unwrap();
+    (dir, uuids)
+}
+
+#[test]
+fn node_property_values_match_the_row_read_for_one_projected_column() {
+    let (dir, _) = property_fixture();
+    let rows = graphforge_storage::read_node_property_rows(dir.path(), "_untyped").unwrap();
+    for property in ["id", "other", "absent"] {
+        let mut streamed = HashMap::new();
+        visit_node_property_values(dir.path(), None, "_untyped", property, |uuid, value| {
+            assert!(
+                streamed.insert(*uuid, value).is_none(),
+                "one visit per node"
+            );
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            streamed.len(),
+            rows.len(),
+            "{property}: every row is visited"
+        );
+        for (uuid, props) in &rows {
+            assert_eq!(
+                streamed[uuid],
+                props.get(property).cloned(),
+                "{property}: the value decodes as the row read decodes it"
+            );
+        }
+    }
+}
+
+#[test]
+fn node_property_values_report_a_missing_route_and_return_visitor_errors() {
+    let (dir, _) = property_fixture();
+    let mut visits = 0;
+    visit_node_property_values(dir.path(), None, "NoSuchRoute", "id", |_, _| {
+        visits += 1;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(visits, 0);
+
+    let error = visit_node_property_values(dir.path(), None, "_untyped", "id", |_, _| {
+        Err(graphforge_core::GfError::Validation("refused".into()))
+    })
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        graphforge_core::GfError::Validation(message) if message == "refused"
+    ));
 }

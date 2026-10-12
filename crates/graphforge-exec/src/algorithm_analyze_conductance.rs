@@ -254,13 +254,11 @@ fn finite(value: f64) -> Result<f64, AlgorithmError> {
         .ok_or_else(|| execution("conductance accumulation exceeds finite range"))
 }
 
+/// Counts work and polls cancellation. Work is bounded by the node and edge limits,
+/// so it never consumes the `iterations` limit, which counts rounds (#1974).
 fn checkpoint(control: &AlgorithmControl, work: &mut usize) -> Result<(), AlgorithmError> {
     *work += 1;
-    if work.is_multiple_of(4_096) {
-        control.checkpoint()?;
-    } else {
-        control.check_cancelled()?;
-    }
+    control.check_cancelled()?;
     Ok(())
 }
 

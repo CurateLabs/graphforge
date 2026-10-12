@@ -274,10 +274,13 @@ fn canonical_labels(assignments: &[usize]) -> Result<Vec<i64>, AlgorithmError> {
         .collect()
 }
 
+/// Counts work and polls cancellation every 64 units. Work is bounded by this kernel's
+/// node or vector cap, so it never consumes the `iterations` limit, which counts rounds
+/// (#1974).
 fn checkpoint(control: &AlgorithmControl, work: &mut usize) -> Result<(), AlgorithmError> {
     *work += 1;
     if (*work).is_multiple_of(CHECKPOINT_INTERVAL) {
-        control.checkpoint()?;
+        control.check_cancelled()?;
     }
     Ok(())
 }

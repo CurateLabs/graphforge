@@ -100,10 +100,12 @@ fn node_uuid(graph: &AdjacencyGraph, node: u64) -> Result<[u8; 16], AlgorithmErr
         .ok_or_else(|| execution("selected DAG node has no UUID identity"))
 }
 
+/// Counts work and polls cancellation every 4,096 units. Work is bounded by the node and
+/// edge limits, so it never consumes the `iterations` limit, which counts rounds (#1974).
 fn checkpoint(control: &AlgorithmControl, work: &mut usize) -> Result<(), AlgorithmError> {
     *work = work.saturating_add(1);
     if work.is_multiple_of(CHECKPOINT_INTERVAL) {
-        control.checkpoint()?;
+        control.check_cancelled()?;
     }
     Ok(())
 }

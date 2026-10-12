@@ -149,9 +149,11 @@ fn canonical_labels(raw: &[usize], component_count: usize) -> Result<Vec<usize>,
         .collect()
 }
 
+/// Counts work and polls cancellation every 16,384 units. Work is bounded by the node and
+/// edge limits, so it never consumes the `iterations` limit, which counts rounds (#1974).
 fn checkpoint(control: &AlgorithmControl, work: &mut usize) -> Result<(), AlgorithmError> {
     if work.is_multiple_of(CANCELLATION_INTERVAL) {
-        control.checkpoint()?;
+        control.check_cancelled()?;
     }
     *work = work.saturating_add(1);
     Ok(())

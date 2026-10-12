@@ -202,3 +202,141 @@ fn synchronous_mode_preserves_cancellation_and_work_limits() {
         Err(AlgorithmError::IterationLimit { .. })
     ));
 }
+
+/// A directed graph whose every round does many 16,384-unit chunks of work: three
+/// out-arcs per node, so a round visits `nodes` nodes and about `6 * nodes` votes.
+fn generated_directed_arcs(nodes: u64) -> Vec<(u64, u64)> {
+    (0..nodes)
+        .flat_map(|node| {
+            [
+                (node, (node + 1) % nodes),
+                (node, (node * 7 + 3) % nodes),
+                (node, (node * 13 + 5) % nodes),
+            ]
+        })
+        .collect()
+}
+
+/// Synchronous label propagation from its definition, sharing no code with the
+/// kernel: each round every node takes the most frequent label among its
+/// distinct out-neighbors and its distinct in-neighbors (a reciprocal pair votes
+/// twice), the smallest label on a tie, and keeps its label when it has no vote.
+fn reference_synchronous_labels(nodes: u64, arcs: &[(u64, u64)], rounds: u32) -> Vec<i64> {
+    let nodes = usize::try_from(nodes).unwrap();
+    let mut outbound = vec![BTreeSet::new(); nodes];
+    let mut inbound = vec![BTreeSet::new(); nodes];
+    for &(source, target) in arcs {
+        let (source, target) = (
+            usize::try_from(source).unwrap(),
+            usize::try_from(target).unwrap(),
+        );
+        if source != target {
+            outbound[source].insert(target);
+            inbound[target].insert(source);
+        }
+    }
+    let mut labels: Vec<i64> = (0..i64::try_from(nodes).unwrap()).collect();
+    for _ in 0..rounds {
+        labels = (0..nodes)
+            .map(|node| {
+                let mut counts = BTreeMap::<i64, usize>::new();
+                for &voter in outbound[node].iter().chain(&inbound[node]) {
+                    *counts.entry(labels[voter]).or_default() += 1;
+                }
+                counts.values().copied().max().map_or(labels[node], |most| {
+                    *counts.iter().find(|(_, count)| **count == most).unwrap().0
+                })
+            })
+            .collect();
+    }
+    labels
+}
+
+#[test]
+fn synchronous_rounds_finish_when_work_alone_exceeds_the_iteration_limit() {
+    const NODES: u64 = 30_000;
+    const ROUNDS: u32 = 10;
+    let arcs = generated_directed_arcs(NODES);
+    let graph = AdjacencyGraph::with_test_directed_edges(NODES, &arcs);
+    let options = graphforge_core::SynchronousLabelPropagationOptions {
+        iterations: ROUNDS,
+        initial_label_property: None,
+    };
+    let expected = reference_synchronous_labels(NODES, &arcs, ROUNDS);
+
+    // A reference run under the default limit of 10,000.
+    let reference = synchronous_labels(
+        &graph,
+        &options,
+        &AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default()),
+    )
+    .unwrap();
+    assert_eq!(reference, expected);
+
+    // Each round is about 13 chunks of 16,384 work units, so ten rounds read as
+    // over a hundred iterations if work were charged to the limit. The limit
+    // counts rounds: exactly `ROUNDS` suffices and gives the same labels.
+    let control = AlgorithmControl::new(
+        AlgorithmLimits {
+            iterations: u64::from(ROUNDS),
+            ..AlgorithmLimits::default()
+        },
+        AlgorithmCancellation::default(),
+    );
+    assert_eq!(
+        synchronous_labels(&graph, &options, &control).unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn the_iteration_limit_still_stops_synchronous_rounds_that_exceed_it() {
+    let graph = AdjacencyGraph::with_test_directed_edges(4, &[(0, 1), (1, 2), (2, 3)]);
+    let options = graphforge_core::SynchronousLabelPropagationOptions {
+        iterations: 5,
+        initial_label_property: None,
+    };
+    let limited = |iterations| {
+        AlgorithmControl::new(
+            AlgorithmLimits {
+                iterations,
+                ..AlgorithmLimits::default()
+            },
+            AlgorithmCancellation::default(),
+        )
+    };
+    // A tiny graph does almost no work, so only the round count can exceed 3.
+    assert_eq!(
+        synchronous_labels(&graph, &options, &limited(3)),
+        Err(AlgorithmError::IterationLimit {
+            observed: 4,
+            limit: 3
+        })
+    );
+    assert!(synchronous_labels(&graph, &options, &limited(5)).is_ok());
+}
+
+#[test]
+fn asynchronous_propagation_finishes_when_work_alone_exceeds_the_iteration_limit() {
+    // Disjoint 8-cliques: converges in a few rounds, with hundreds of chunks of work.
+    const CLIQUES: u64 = 5_000;
+    let arcs = (0..CLIQUES)
+        .flat_map(|clique| {
+            (0..8).flat_map(move |left| {
+                (left + 1..8).map(move |right| (clique * 8 + left, clique * 8 + right))
+            })
+        })
+        .collect::<Vec<_>>();
+    let graph = AdjacencyGraph::with_test_edges(CLIQUES * 8, &arcs);
+    let reference = execute_label_propagation(&graph, AlgorithmLimits::default()).unwrap();
+    assert_eq!(community_ids(&reference).len(), 40_000);
+
+    let limited = AlgorithmLimits {
+        iterations: 25,
+        ..AlgorithmLimits::default()
+    };
+    assert_eq!(
+        execute_label_propagation(&graph, limited).unwrap(),
+        reference
+    );
+}
