@@ -724,7 +724,11 @@ mod tests {
             edges: 2,
             ..AlgorithmLimits::default()
         };
-        assert!(registry.execute(degree(), &graph, &control(limits)).is_ok());
+        let accepted = registry.execute(degree(), &graph, &control(limits));
+        assert!(
+            accepted.is_ok(),
+            "logical edge count should fit: {accepted:?}"
+        );
 
         let error = registry
             .execute(
