@@ -84,6 +84,9 @@ pub struct VarLenExpandExec {
     /// expansion may have appended (arrow strips qualifiers, so a by-name
     /// lookup at execution time would ambiguously match the first `node_id`).
     src_col_idx: usize,
+    /// Column index of an already-bound destination node's `node_id` within the
+    /// input: only paths reaching that node are materialised (#1986).
+    bound_dst_col_idx: Option<usize>,
     schema: SchemaRef,
     props: Arc<PlanProperties>,
     /// Adjacency source for the BFS — the session-scoped provider injected
@@ -120,6 +123,12 @@ impl VarLenExpandExec {
             .schema()
             .index_of_column_by_name(Some(&src_qual), "node_id")
             .unwrap_or(0);
+        let bound_dst_col_idx = node.bound_destination.as_ref().and_then(|alias| {
+            node.input.schema().index_of_column_by_name(
+                Some(&datafusion::common::TableReference::bare(alias.as_str())),
+                "node_id",
+            )
+        });
         Self {
             input,
             rel_type_name: node.rel_type_name.clone(),
@@ -129,6 +138,7 @@ impl VarLenExpandExec {
             dir,
             mode,
             src_col_idx,
+            bound_dst_col_idx,
             schema,
             props,
             provider,
@@ -195,6 +205,7 @@ impl ExecutionPlan for VarLenExpandExec {
             dir: self.dir.clone(),
             mode: self.mode,
             src_col_idx: self.src_col_idx,
+            bound_dst_col_idx: self.bound_dst_col_idx,
             schema: self.schema.clone(),
             props: self.props.clone(),
             provider: self.provider.clone(),
@@ -224,6 +235,7 @@ impl ExecutionPlan for VarLenExpandExec {
             dir: self.dir.clone(),
             mode: self.mode,
             src_col_idx: self.src_col_idx,
+            bound_dst_col_idx: self.bound_dst_col_idx,
             out_schema: self.schema.clone(),
             provider: self.provider.clone(),
             capture_epoch: self.capture_epoch,
@@ -341,6 +353,9 @@ pub(super) struct ExpandConfig {
     /// Column index of the BFS seed within the input batch (the source
     /// variable's `node_id`); resolved by qualifier at construction time.
     pub(super) src_col_idx: usize,
+    /// Input column of an already-bound destination's `node_id`; paths that do
+    /// not end there are dropped before they are materialised (#1986).
+    pub(super) bound_dst_col_idx: Option<usize>,
     pub(super) out_schema: SchemaRef,
     /// Adjacency source (#762) — moved into the `'static` execute future.
     pub(super) provider: Arc<dyn AdjacencyProvider>,
@@ -412,6 +427,10 @@ async fn expand_bfs(
             )));
         }
         let src_ids = u64_column(&input, cfg.src_col_idx)?;
+        let bound_dst = cfg
+            .bound_dst_col_idx
+            .map(|index| u64_column(&input, index))
+            .transpose()?;
 
         // Every emitted path copies one input row, so the rows per batch follow
         // the input's average row width.
@@ -426,7 +445,14 @@ async fn expand_bfs(
         let mut pending_hops = 0usize;
         for (row, seed) in src_ids.iter().enumerate() {
             let Some(node) = seed else { continue };
-            for emission in bfs_emit_seed(cfg, &mut adjacency, row, node)? {
+            // The query equates the destination with an input node: a NULL
+            // there matches nothing, otherwise only paths ending at it count.
+            let required_dst = match &bound_dst {
+                None => None,
+                Some(ids) if ids.is_null(row) => continue,
+                Some(ids) => Some(ids.value(row)),
+            };
+            for emission in bfs_emit_seed(cfg, &mut adjacency, row, node, required_dst)? {
                 pending_hops = pending_hops.saturating_add(emission.2.len());
                 pending.push(emission);
                 if pending.len() >= max_rows || pending_hops >= EXPAND_BATCH_MAX_HOPS {
@@ -571,6 +597,7 @@ fn bfs_emit_seed(
     adjacency: &mut adjacency::AdjacencyReader<'_>,
     input_row: usize,
     seed: u64,
+    required_dst: Option<u64>,
 ) -> Result<Vec<Emission>, GfError> {
     use std::collections::VecDeque;
 
@@ -584,7 +611,7 @@ fn bfs_emit_seed(
     });
     while let Some(p) = queue.pop_front() {
         let in_range = p.hops >= cfg.min_hops && cfg.max_hops.is_none_or(|m| p.hops <= m);
-        if in_range {
+        if in_range && required_dst.is_none_or(|dst| dst == p.node) {
             emissions.push((p.input_row, p.node, p.edge_path.clone()));
         }
         if cfg.max_hops.is_some_and(|m| p.hops >= m) {

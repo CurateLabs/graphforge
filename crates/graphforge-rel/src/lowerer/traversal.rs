@@ -119,7 +119,8 @@ fn lower_var_len_expand(
         rel_ty,
         dst_fields,
         graphforge_plan::var_len_edge_list_field(&prop_fields),
-    );
+    )
+    .with_bound_destination(bound_dst.clone());
     // Register the destination var so the binder's trailing NodeScan(dst)
     // recognises it as already bound (and stays a no-op, preserving this
     // Extension node as the plan root).
