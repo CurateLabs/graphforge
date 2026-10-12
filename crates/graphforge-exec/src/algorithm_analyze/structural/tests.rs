@@ -561,7 +561,7 @@ fn articulation_points_dispatches_uuid_rows_with_shared_controls() {
             ..AlgorithmLimits::default()
         },
         AlgorithmLimits {
-            edges: 14,
+            edges: 7,
             ..AlgorithmLimits::default()
         },
         AlgorithmLimits {
