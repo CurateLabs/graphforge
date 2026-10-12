@@ -95,6 +95,15 @@ class PhaseSwapTests(ScratchTest):
         self.assertFalse(sampler.swapped)
         self.assertEqual(phase_cgroup.verdict(sampler.evidence()), False)
 
+    def test_cgroup_path_is_kept_when_swap_counters_cannot_be_read(self) -> None:
+        run = self.host.benchexec_run(pswpout=0)
+        (run / "memory.stat").unlink()
+        sampler = self.host.sampler()
+        sampler.sample(PID)
+        evidence = sampler.evidence()
+        self.assertEqual(evidence["runs"], {})
+        self.assertEqual(evidence["cgroup_paths"]["benchmark_r1"], str(run))
+
     def test_other_processes_swapping_on_a_shared_host_do_not_fail_it(self) -> None:
         # /proc/vmstat would count all of this. The launcher's cgroup (everything else the
         # user runs), BenchExec's slice, BenchExec's own process and an unrelated run

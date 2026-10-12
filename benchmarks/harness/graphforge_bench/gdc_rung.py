@@ -310,6 +310,7 @@ class Rung:
     phase_tmp_dirs: list[Path] = field(default_factory=list)
     phase_cgroups: list[Path] = field(default_factory=list)
     phase_tree_alive: bool = False
+    phase_tree_unverified: bool = False
 
     @property
     def prefix(self) -> str:
@@ -368,12 +369,17 @@ def _stage_phase(
         staged[name] = str(target)
     harness = Path(__file__).resolve().parents[1]
     launcher = bin_dir / LAUNCHER_NAME
+    progress_env = (
+        f"export GF_GDC_PROGRESS_PATH={shlex.quote(str(stage / 'query-progress.jsonl'))}\n"
+        if task.get("phase") == "query"
+        else ""
+    )
     launcher.write_text(
         "#!/bin/sh\n"
         f"export TMPDIR={shlex.quote(str(tmp_dir))}\n"
-        f"export GF_GDC_PROGRESS_PATH={shlex.quote(str(stage / 'query-progress.jsonl'))}\n"
-        f"export PYTHONPATH={shlex.quote(str(harness))}\n"
-        f'exec {shlex.quote(sys.executable)} -m graphforge_bench.gdc_phase "$@"\n',
+        + progress_env
+        + f"export PYTHONPATH={shlex.quote(str(harness))}\n"
+        + f'exec {shlex.quote(sys.executable)} -m graphforge_bench.gdc_phase "$@"\n',
         encoding="utf-8",
     )
     launcher.chmod(0o755)
@@ -389,11 +395,32 @@ def _stage_phase(
     return stage, task
 
 
-class _RetainableTemporaryDirectory(tempfile.TemporaryDirectory):
-    """Temporary stage directory that can be kept while a phase tree is alive."""
+def _remove_directory_at(parent_fd: int, name: str) -> None:
+    """Remove a directory relative to an open parent, without following symlinks."""
+    descriptor = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    try:
+        identity = os.fstat(descriptor)
+        with os.scandir(descriptor) as entries:
+            for entry in entries:
+                if entry.is_dir(follow_symlinks=False):
+                    _remove_directory_at(descriptor, entry.name)
+                else:
+                    os.unlink(entry.name, dir_fd=descriptor)
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino):
+            raise ControllerError("owned directory identity changed during teardown")
+        os.rmdir(name, dir_fd=parent_fd)
+    finally:
+        os.close(descriptor)
 
-    def preserve(self) -> None:
-        self._finalizer.detach()
+
+def _remove_owned_directory(path: Path) -> None:
+    """Remove one owned directory using its opened parent as the authority."""
+    parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        _remove_directory_at(parent_fd, path.name)
+    finally:
+        os.close(parent_fd)
 
 
 def _phase_tmp_dir(work_root: Path, *, suite_id: str, rung_id: str, create: bool) -> Path:
@@ -427,26 +454,8 @@ def _clear_phase_tmp(path: Path) -> None:
         os.close(root_fd)
         return
     try:
-        try:
-            descriptor = os.open(
-                name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd
-            )
-        except FileNotFoundError:
-            return
-        try:
-            identity = os.fstat(descriptor)
-            for entry in os.scandir(descriptor):
-                child = entry.name
-                if entry.is_dir(follow_symlinks=False):
-                    shutil.rmtree(child, dir_fd=descriptor)
-                else:
-                    os.unlink(child, dir_fd=descriptor)
-        finally:
-            os.close(descriptor)
-        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-        if (current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino):
-            raise ControllerError("phase TMPDIR identity changed during teardown")
-        os.rmdir(name, dir_fd=parent_fd)
+        with contextlib.suppress(FileNotFoundError):
+            _remove_directory_at(parent_fd, name)
     finally:
         os.close(parent_fd)
         os.close(root_fd)
@@ -587,6 +596,15 @@ def classify_phase(
     return None
 
 
+def _in_flight_detail(detail: str, in_flight: Mapping[str, str]) -> str:
+    """Append a bounded query identity to failure detail."""
+    suffix = (
+        f"; in-flight {in_flight['query_id'][:500]}/"
+        f"{in_flight['binding_id'][:500]} ({in_flight['phase'][:128]})"
+    )
+    return f"{detail[: max(0, 2048 - len(suffix))]}{suffix}"
+
+
 def describe_failed_samples(evidence: Mapping[str, Any]) -> str:
     """Each distinct failed-sample error with its bindings, from the query evidence.
 
@@ -621,8 +639,9 @@ def _hung_detail(raw: Path) -> str:
 
 def run_phase(rung: Rung, name: str, task: dict[str, Any], wall_seconds: int) -> PhaseRun:
     ladder = rung.ladder
-    temporary = _RetainableTemporaryDirectory(prefix=".gf-gdc-authority-", dir=ladder.work_root)
-    with temporary as parent:
+    parent = Path(tempfile.mkdtemp(prefix=".gf-gdc-authority-", dir=ladder.work_root))
+    safe_to_remove = False
+    try:
         stage, task = _stage_phase(
             rung, Path(parent), {"schema": TASK_SCHEMA, **task}, wall_seconds
         )
@@ -631,18 +650,32 @@ def run_phase(rung: Rung, name: str, task: dict[str, Any], wall_seconds: int) ->
         # The phase's own cgroup counters (#1914), not the host's: another process's
         # page-out on a shared host is not this phase's memory.
         swap = phase_cgroup.load_evidence(stage / phase_cgroup.EVIDENCE_NAME)
+        phase_cgroups: list[Path] = []
         if swap is not None:
-            rung.phase_cgroups.extend(
+            path_map = swap.get("cgroup_paths", {})
+            if isinstance(path_map, Mapping):
+                phase_cgroups.extend(
+                    Path(path) for path in path_map.values() if isinstance(path, str) and path
+                )
+            phase_cgroups.extend(
                 Path(str(run["cgroup_path"]))
                 for run in swap["runs"].values()
                 if isinstance(run, Mapping)
                 and isinstance(run.get("cgroup_path"), str)
                 and run["cgroup_path"]
             )
-        if rung.phase_cgroups and not wait_for_phase_trees_empty(rung.phase_cgroups):
+        rung.phase_cgroups.extend(phase_cgroups)
+        rung.phase_cgroups = list(dict.fromkeys(rung.phase_cgroups))
+        if not phase_cgroups:
+            rung.phase_tree_unverified = True
+            rung.fail(
+                "teardown", "phase_tree_unverified", "phase cgroup path could not be observed"
+            )
+        elif not wait_for_phase_trees_empty(phase_cgroups):
             rung.phase_tree_alive = True
-            temporary.preserve()
             rung.fail("teardown", "phase_tree_alive", "phase cgroup still contains processes")
+        else:
+            safe_to_remove = True
         swapped = phase_cgroup.verdict(swap)
         if swap is not None and raw.is_dir():
             # Retain the counters beside the raw output (#1727), even when a known
@@ -683,19 +716,15 @@ def run_phase(rung: Rung, name: str, task: dict[str, Any], wall_seconds: int) ->
         if in_flight is not None:
             result_schema = read_json(ladder.root / "schemas" / "gdc-rung-result.json")
             Draft202012Validator(result_schema["$defs"]["in_flight"]).validate(in_flight)
-            suffix = (
-                f"; in-flight {in_flight['query_id'][:500]}/"
-                f"{in_flight['binding_id'][:500]} ({in_flight['phase'][:128]})"
-            )
-            cause = (
-                cause[0],
-                f"{cause[1][: max(0, 2048 - len(suffix))]}{suffix}",
-            )
+            cause = (cause[0], _in_flight_detail(cause[1], in_flight))
         if cause is not None and raw.is_dir():
             progress_file = stage / "query-progress.jsonl"
             if name == "query" and progress_file.is_file():
                 shutil.copyfile(progress_file, raw / progress_file.name)
             shutil.copytree(raw, ladder.output_dir / f"{rung.prefix}-{name}-benchexec-raw")
+    finally:
+        if safe_to_remove:
+            _remove_owned_directory(parent)
     run = PhaseRun(
         name,
         None
@@ -1029,9 +1058,18 @@ def _check(rung: Rung, evidence: Mapping[str, Any], results_dir: Path, input_roo
 
 def _teardown(rung: Rung) -> dict[str, Any]:
     ladder = rung.ladder
-    alive = rung.phase_tree_alive or not wait_for_phase_trees_empty(rung.phase_cgroups)
+    alive = (
+        rung.phase_tree_alive
+        or rung.phase_tree_unverified
+        or not wait_for_phase_trees_empty(rung.phase_cgroups)
+    )
     if alive:
-        if not rung.phase_tree_alive:
+        if rung.phase_tree_unverified:
+            if not any(failure["cause"] == "phase_tree_unverified" for failure in rung.failures):
+                rung.fail(
+                    "teardown", "phase_tree_unverified", "phase cgroup path could not be observed"
+                )
+        elif not rung.phase_tree_alive:
             rung.fail("teardown", "phase_tree_alive", "phase cgroup still contains processes")
     else:
         reclaim_workspace(ladder.work_root, rung.workspace_name)

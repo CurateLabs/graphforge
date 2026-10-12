@@ -401,7 +401,9 @@ class TinyLadderEndToEndTests(Scratch):
             quiet_host=lambda _wait: QUIET,
         )
         failure = results[0]["failure"]
-        self.assertEqual((failure["phase"], failure["cause"]), ("convert", "phase_swap_unobserved"))
+        self.assertEqual(
+            (failure["phase"], failure["cause"]), ("teardown", "phase_tree_unverified")
+        )
 
     def test_a_hung_benchexec_fails_typed_with_the_supervisor_reason(self) -> None:
         class Hung(FakeBenchExec):
@@ -553,6 +555,112 @@ class LadderControlTests(Scratch):
             gdc_rung._clear_phase_tmp(tmp / "gdc-snb-interactive-sf0-owned")
         self.assertEqual(data.read_text(encoding="utf-8"), "unrelated")
 
+    def test_tmp_ancestor_swap_cannot_redirect_cleanup(self) -> None:
+        tmp = self.work / "tmp"
+        owned = tmp / "gdc-snb-interactive-sf0-owned"
+        owned.mkdir(parents=True)
+        (owned / "leftover").write_text("owned", encoding="utf-8")
+        moved = self.work / "tmp-moved"
+        outside = self.scratch / "outside"
+        outside.mkdir()
+        sentinel = outside / owned.name / "sentinel"
+        sentinel.parent.mkdir()
+        sentinel.write_text("preserve", encoding="utf-8")
+        real_scandir = os.scandir
+        swapped = False
+
+        def swap_after_open(directory: Any) -> Any:
+            nonlocal swapped
+            if isinstance(directory, int) and not swapped:
+                swapped = True
+                tmp.rename(moved)
+                tmp.symlink_to(outside, target_is_directory=True)
+            return real_scandir(directory)
+
+        with patch("graphforge_bench.gdc_rung.os.scandir", side_effect=swap_after_open):
+            gdc_rung._clear_phase_tmp(owned)
+        self.assertTrue(swapped)
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve")
+
+    def test_not_pinned_preserves_unrelated_tmp_files(self) -> None:
+        ladder = self.ladder(self.executables, FakeBenchExec())
+        tmp = self.work / "tmp"
+        tmp.mkdir()
+        unrelated = tmp / "unrelated.txt"
+        unrelated.write_text("preserve", encoding="utf-8")
+        result = gdc_rung.not_pinned(
+            ladder,
+            {"id": "unpublished", "label": "Unpublished", "not_pinned": "dataset is not pinned"},
+        )
+        self.assertEqual(result["failure"]["cause"], gdc_rung.NOT_PINNED)
+        self.assertEqual(unrelated.read_text(encoding="utf-8"), "preserve")
+
+    def test_run_phase_preserves_stage_and_tmp_when_cgroup_stays_populated(self) -> None:
+        stage_seen: list[Path] = []
+        cgroup = self.scratch / "benchmark-populated"
+        cgroup.mkdir()
+        (cgroup / "cgroup.procs").write_text("123\n", encoding="ascii")
+
+        def benchexec(stage: Path, *_args: Any) -> int:
+            stage_seen.append(stage)
+            (stage / "raw").mkdir()
+            (stage / phase_cgroup.EVIDENCE_NAME).write_text(
+                json.dumps(
+                    {
+                        "schema": phase_cgroup.SCHEMA,
+                        "samples": 1,
+                        "cgroup_paths": {"benchmark_populated": str(cgroup)},
+                        "runs": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return 0
+
+        ladder = self.ladder(self.executables, benchexec)
+        self.output.mkdir(exist_ok=True)
+        rung = gdc_rung.Rung(ladder, {"id": "sf0", "label": "SF0"})
+        rung.workspace.mkdir(parents=True)
+        real_wait = gdc_rung.wait_for_phase_trees_empty
+        with patch(
+            "graphforge_bench.gdc_rung.wait_for_phase_trees_empty",
+            side_effect=lambda paths: real_wait(paths, timeout_seconds=0),
+        ):
+            gdc_rung.run_phase(rung, "query", {"phase": "query"}, 10)
+        gdc_rung._teardown(rung)
+        stage = stage_seen[0]
+        self.assertTrue(stage.exists())
+        self.assertTrue(stage.parent.exists())
+        self.assertTrue(rung.phase_tmp_dirs[0].exists())
+        self.assertTrue(rung.workspace.exists())
+        self.assertTrue(rung.phase_tree_alive)
+        self.assertIn("phase_tree_alive", [failure["cause"] for failure in rung.failures])
+
+    def test_run_phase_preserves_stage_when_cgroup_path_is_unknown(self) -> None:
+        stage_seen: list[Path] = []
+
+        def benchexec(stage: Path, *_args: Any) -> int:
+            stage_seen.append(stage)
+            (stage / "raw").mkdir()
+            (stage / phase_cgroup.EVIDENCE_NAME).write_text(
+                json.dumps({"schema": phase_cgroup.SCHEMA, "samples": 0, "runs": {}}),
+                encoding="utf-8",
+            )
+            return 0
+
+        ladder = self.ladder(self.executables, benchexec)
+        self.output.mkdir(exist_ok=True)
+        rung = gdc_rung.Rung(ladder, {"id": "sf0", "label": "SF0"})
+        rung.workspace.mkdir(parents=True)
+        gdc_rung.run_phase(rung, "query", {"phase": "query"}, 10)
+        gdc_rung._teardown(rung)
+        self.assertTrue(stage_seen[0].exists())
+        self.assertTrue(stage_seen[0].parent.exists())
+        self.assertTrue(rung.phase_tmp_dirs[0].exists())
+        self.assertTrue(rung.workspace.exists())
+        self.assertTrue(rung.phase_tree_unverified)
+        self.assertIn("phase_tree_unverified", [failure["cause"] for failure in rung.failures])
+
     def test_live_phase_tree_blocks_all_teardown_cleanup(self) -> None:
         ladder = self.ladder(self.executables, FakeBenchExec())
         rung = gdc_rung.Rung(ladder, {"id": "sf0", "label": "SF0"})
@@ -603,7 +711,7 @@ class LadderControlTests(Scratch):
                 }
             )
             + "\n"
-            + '{"gdc_query":"start","query_id":"run-1',
+            + '{"gdc_query":"start","query_id":"run-1","phase":"run-1',
             encoding="utf-8",
         )
         self.assertEqual(
@@ -639,6 +747,14 @@ class LadderControlTests(Scratch):
 
     def test_no_query_progress_is_null(self) -> None:
         self.assertIsNone(gdc_rung._in_flight_query(self.scratch / "absent.jsonl"))
+
+    def test_in_flight_failure_detail_is_bounded_for_a_long_binding_id(self) -> None:
+        detail = gdc_rung._in_flight_detail(
+            "failure detail " * 300,
+            {"query_id": "BI1", "binding_id": "x" * 8000, "phase": "run-1"},
+        )
+        self.assertLessEqual(len(detail), 2048)
+        self.assertIn("in-flight BI1/", detail)
 
     def test_an_interrupted_attempt_is_not_overwritten(self) -> None:
         ladder = self.ladder(self.executables, FakeBenchExec())
