@@ -571,7 +571,7 @@ class LadderControlTests(Scratch):
 
         def swap_after_open(directory: Any) -> Any:
             nonlocal swapped
-            if isinstance(directory, int) and not swapped:
+            if not swapped:
                 swapped = True
                 tmp.rename(moved)
                 tmp.symlink_to(outside, target_is_directory=True)
