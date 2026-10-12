@@ -354,9 +354,9 @@
       ],
       "cypher": null,
       "interface": "analyst_verb",
-      "invocation": "paths(source=Person{id: $person1Id}, target=Person{id: $person2Id}, by=bfs, via=KNOWS, directed=false)",
+      "invocation": "paths(source=Person{id: $person1Id}, target=Person{id: $person2Id}, by=bfs_depth, via=KNOWS, directed=false)",
       "limit": null,
-      "notes": "paths(by=bfs, via=KNOWS, directed=false) instead of Cypher shortestPath, which is refused with a typed GF_NOT_IMPLEMENTED (#1888 is the decision of record); -1 when the verb returns no row, 0 for equal endpoints as the specification states",
+      "notes": "uses the cost-only paths(by=bfs_depth, via=KNOWS, directed=false) search, which reports the hop count without materializing the path, instead of Cypher shortestPath, which is refused with a typed GF_NOT_IMPLEMENTED (#1888 is the decision of record); -1 when the verb returns no row, 0 for equal endpoints as the specification states",
       "operation": "IC13",
       "parameters": [
         {

@@ -119,7 +119,7 @@ pub fn execute_query(
                     Some(&selector(source_parameter)),
                     Some(&selector(target_parameter)),
                     PathsOptions {
-                        by: PathAlgorithm::Bfs,
+                        by: PathAlgorithm::BfsDepth,
                         via: Some(relationship_type.into()),
                         directed: false,
                         ..Default::default()
@@ -127,7 +127,7 @@ pub fn execute_query(
                 )
                 .map_err(|error| {
                     SuiteError::LiveExecution(format!(
-                        "{} paths failed: {error}",
+                        "{} bfs_depth paths failed: {error}",
                         definition.operation
                     ))
                 })?;
@@ -144,20 +144,28 @@ pub fn execute_query(
 }
 
 fn bfs_path_length(batch: &RecordBatch) -> Result<QueryResult, SuiteError> {
+    if batch.num_columns() != 3 {
+        return Err(SuiteError::LiveExecution(format!(
+            "bfs_depth output has {} columns, expected source, target, and cost",
+            batch.num_columns()
+        )));
+    }
     let length = match batch.num_rows() {
         0 => -1,
         1 => {
             let cost = batch
                 .column_by_name("cost")
                 .and_then(|column| column.as_primitive_opt::<Float64Type>())
-                .ok_or_else(|| SuiteError::LiveExecution("bfs output lacks float64 cost".into()))?;
+                .ok_or_else(|| {
+                    SuiteError::LiveExecution("bfs_depth output lacks float64 cost".into())
+                })?;
             let value = cost.value(0);
             if cost.is_null(0)
                 || value.fract() != 0.0
                 || !(0.0..=f64::from(i32::MAX)).contains(&value)
             {
                 return Err(SuiteError::LiveExecution(format!(
-                    "bfs returned a non-integral hop count {value}"
+                    "bfs_depth returned a non-integral hop count {value}"
                 )));
             }
             // Checked above: an integral value within 0..=i32::MAX.
@@ -167,7 +175,7 @@ fn bfs_path_length(batch: &RecordBatch) -> Result<QueryResult, SuiteError> {
         }
         rows => {
             return Err(SuiteError::LiveExecution(format!(
-                "bfs between two selected nodes returned {rows} rows"
+                "bfs_depth between two selected nodes returned {rows} rows"
             )));
         }
     };
@@ -723,7 +731,7 @@ pub fn run_live_queries() -> Result<SuiteEvidence, SuiteError> {
                     PhaseStatus::Passed
                 },
                 "every runnable read executed through GraphForge.execute_with_params or \
-                 GraphForge.paths(by=bfs)"
+                 GraphForge.paths(by=bfs_depth)"
                     .into(),
             ),
             phase(

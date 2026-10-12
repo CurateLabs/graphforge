@@ -23,7 +23,7 @@
     {
       "kind": "reference_reading",
       "subject": "IC13 and sets",
-      "text": "IC13 runs paths(by=bfs, via=KNOWS, undirected) between the two persons: no row stands for the reference's -1, and the cost column is compared with the hop count. IC1 universities and companies and IC12 tagNames compare as sets of elements, since the specification leaves their order open."
+      "text": "IC13 runs cost-only paths(by=bfs_depth, via=KNOWS, undirected) between the two persons, reporting the hop count without materializing the path: no row stands for the reference's -1, and the cost column is compared with the hop count. IC1 universities and companies and IC12 tagNames compare as sets of elements, since the specification leaves their order open."
     },
     {
       "kind": "rewrite",
@@ -88,7 +88,7 @@
     {
       "kind": "rewrite",
       "subject": "IC13",
-      "text": "paths(by=bfs, via=KNOWS, directed=false) instead of Cypher shortestPath, which is refused with a typed GF_NOT_IMPLEMENTED (#1888 is the decision of record); -1 when the verb returns no row, 0 for equal endpoints as the specification states"
+      "text": "uses the cost-only paths(by=bfs_depth, via=KNOWS, directed=false) search, which reports the hop count without materializing the path, instead of Cypher shortestPath, which is refused with a typed GF_NOT_IMPLEMENTED (#1888 is the decision of record); -1 when the verb returns no row, 0 for equal endpoints as the specification states"
     },
     {
       "kind": "spec_variance",
