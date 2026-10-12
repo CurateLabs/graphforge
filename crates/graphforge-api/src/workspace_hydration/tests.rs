@@ -1,7 +1,9 @@
 use super::*;
 use arrow::array::Int64Array;
 
+mod links;
 mod placement;
+mod reclaim;
 
 fn publish_compact_graph_workspace(project: &Path, workspace: &Path) {
     use graphforge_core::canonical::{CANONICAL_CONTRACT_VERSION, CanonicalDomain, fingerprint};
