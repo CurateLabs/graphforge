@@ -290,6 +290,14 @@ impl Adjacency {
         self.inner.degree(node_id)
     }
 
+    /// Adjacency entries per source node a traversal starting in the densest
+    /// part of the view sees, for planning estimates. Persisted CSR views read
+    /// the shard manifest only; a scan-built map averages over the nodes that
+    /// have entries.
+    pub(crate) fn planning_degree(&self) -> u64 {
+        self.inner.planning_degree()
+    }
+
     /// Copy a bounded chunk of one directed row, without materializing the rest.
     pub(crate) fn neighbor_chunk(
         &self,
@@ -366,6 +374,23 @@ impl AdjacencyInner {
                 .degree(node_id)?
                 .saturating_add(inbound.degree(node_id)?),
         })
+    }
+
+    fn planning_degree(&self) -> u64 {
+        match self {
+            Self::Empty => 0,
+            Self::Map(map) => {
+                let sources = map.values().filter(|row| !row.is_empty()).count().max(1);
+                let entries = map.values().map(Vec::len).sum::<usize>();
+                u64::try_from(entries.div_ceil(sources)).unwrap_or(u64::MAX)
+            }
+            Self::Sharded(csr) | Self::ShardedOverlay { base: csr, .. } => {
+                csr.densest_shard_mean_degree()
+            }
+            Self::Undirected { out, inbound } => out
+                .planning_degree()
+                .saturating_add(inbound.planning_degree()),
+        }
     }
 
     fn is_empty(&self) -> bool {

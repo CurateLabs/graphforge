@@ -334,6 +334,28 @@ impl ExecutionPlan for VarLenExpandExec {
         }))
     }
 
+    fn partition_statistics(
+        &self,
+        partition: Option<usize>,
+    ) -> Result<Arc<datafusion::common::Statistics>, DataFusionError> {
+        crate::expand_statistics::variable_length(
+            &self.input,
+            crate::expand_statistics::Scope {
+                partition,
+                output_partitions: self.props.output_partitioning().partition_count(),
+            },
+            self.provider.as_ref(),
+            &self.rel_type_name,
+            self.direction,
+            crate::expand_statistics::VarLenShape {
+                hops: (self.min_hops, self.max_hops),
+                destination_bound: self.bound_dst_col_idx.is_some(),
+                expansion: self.expansion,
+            },
+            &self.schema,
+        )
+    }
+
     fn execute(
         &self,
         partition: usize,
@@ -1964,6 +1986,24 @@ impl ExecutionPlan for ExpandExec {
 
     fn fetch(&self) -> Option<usize> {
         self.fetch
+    }
+
+    fn partition_statistics(
+        &self,
+        partition: Option<usize>,
+    ) -> Result<Arc<datafusion::common::Statistics>, DataFusionError> {
+        crate::expand_statistics::single_hop(
+            &self.input,
+            crate::expand_statistics::Scope {
+                partition,
+                output_partitions: self.props.output_partitioning().partition_count(),
+            },
+            self.provider.as_ref(),
+            &self.rel_type_name,
+            self.direction,
+            self.fetch,
+            &self.schema,
+        )
     }
 
     fn benefits_from_input_partitioning(&self) -> Vec<bool> {

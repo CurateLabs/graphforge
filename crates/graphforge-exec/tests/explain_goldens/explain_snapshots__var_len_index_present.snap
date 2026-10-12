@@ -2,15 +2,17 @@
 source: crates/graphforge-exec/tests/explain_snapshots.rs
 ---
 ProjectionExec: expr=[1 as one]
-  HashJoinExec: mode=CollectLeft, join_type=Right, on=[(node_uuid@0, node_uuid@0)]
+  HashJoinExec: mode=CollectLeft, join_type=Left, on=[(node_uuid@0, node_uuid@0)]
+    UuidBuildKeyTapExec: column=0
+      FilterExec: array_has(type_ids@1, 1073741824), projection=[node_uuid@0]
+        ProjectionExec: expr=[node_uuid@7 as node_uuid, type_ids@10 as type_ids]
+          VarLenExpandExec: rel=KNOWS, hops=1..2, adjacency=hit
+            HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(node_uuid@0, node_uuid@0)], projection=[node_uuid@0, node_id@1, type_id@2, type_ids@3, created_at@4, updated_at@5, name@7]
+              UuidBuildKeyTapExec: column=0
+                CoalescePartitionsExec
+                  FilterExec: array_has(type_ids@3, 1073741824)
+                    OrderedPartitionStreamExec: input_partitions=3
+                      GraphForgeParquetExec: fragments=3, batch_size=8192, limit=none
+              FilterExec: name@1 = Alice
+                PropertyOverlayExec: route=_untyped, equality=name=Str("Alice")
     PropertyOverlayExec: route=_untyped
-    FilterExec: array_has(type_ids@1, 1073741824), projection=[node_uuid@0]
-      ProjectionExec: expr=[node_uuid@7 as node_uuid, type_ids@10 as type_ids]
-        VarLenExpandExec: rel=KNOWS, hops=1..2, adjacency=hit
-          HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(node_uuid@0, node_uuid@0)], projection=[node_uuid@2, node_id@3, type_id@4, type_ids@5, created_at@6, updated_at@7, name@1]
-            FilterExec: name@1 = Alice
-              PropertyOverlayExec: route=_untyped, equality=name=Str("Alice")
-            FilterExec: array_has(type_ids@3, 1073741824)
-              RepartitionExec: partitioning=RoundRobinBatch(<N>), input_partitions=1
-                OrderedPartitionStreamExec: input_partitions=3
-                  GraphForgeParquetExec: fragments=3, batch_size=8192, limit=none

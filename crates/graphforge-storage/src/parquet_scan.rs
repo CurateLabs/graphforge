@@ -506,6 +506,9 @@ impl ExecutionPlan for GraphForgeParquetExec {
             .iter()
             .map(|_| ColumnStatistics::new_unknown())
             .collect();
+        // The limit applies to each fragment's partition, so it bounds every
+        // fragment's contribution rather than the total.
+        let bounded = |rows: usize| self.limit.map_or(rows, |limit| rows.min(limit));
         let num_rows = match partition {
             None => {
                 if self.fragments.is_empty() {
@@ -514,14 +517,17 @@ impl ExecutionPlan for GraphForgeParquetExec {
                     self.fragments
                         .iter()
                         .map(|f| f.exact_rows)
-                        .try_fold(0usize, |acc, rows| Some(acc.saturating_add(rows?)))
+                        .try_fold(0usize, |acc, rows| Some(acc.saturating_add(bounded(rows?))))
                 }
             }
             Some(idx) => {
                 if self.fragments.is_empty() {
                     (idx == 0).then_some(0usize)
                 } else {
-                    self.fragments.get(idx).and_then(|f| f.exact_rows)
+                    self.fragments
+                        .get(idx)
+                        .and_then(|f| f.exact_rows)
+                        .map(bounded)
                 }
             }
         };
@@ -861,6 +867,20 @@ impl ExecutionPlan for OrderedPartitionStreamExec {
         Ok(Arc::new(Self::new(input)))
     }
 
+    /// The merge replays every child partition, so its single partition holds
+    /// the child's whole input. Without this the default reports nothing and
+    /// every estimate above a node-table scan is lost, including the build-side
+    /// size the hash-join memory rule reads.
+    fn partition_statistics(
+        &self,
+        partition: Option<usize>,
+    ) -> Result<Arc<Statistics>, DataFusionError> {
+        match partition {
+            None | Some(0) => self.input.partition_statistics(None),
+            Some(_) => Ok(Arc::new(Statistics::new_unknown(&self.schema()))),
+        }
+    }
+
     fn execute(
         &self,
         partition: usize,
@@ -1153,6 +1173,67 @@ mod tests {
         assert_eq!(
             plan.partition_statistics(None).unwrap().num_rows,
             Precision::Inexact(6)
+        );
+    }
+
+    /// A fetch limit applies to every fragment's partition, so it bounds each
+    /// fragment's rows rather than the total, and the ordered merge above the
+    /// scan reports the whole input: the estimates the join memory rule reads
+    /// stay available above a multi-fragment node table.
+    #[test]
+    fn fetch_limit_bounds_each_fragment_and_the_ordered_merge_reports_the_sum() {
+        let dir = TempDir::new().unwrap();
+        let fragments: Vec<ParquetFragment> = [5usize, 2, 9]
+            .iter()
+            .enumerate()
+            .map(|(index, rows)| {
+                let path = dir.path().join(format!("{index}.parquet"));
+                write_edges(&path, *rows);
+                ParquetFragment::for_path(path, false)
+            })
+            .collect();
+
+        let unlimited =
+            GraphForgeParquetExec::try_new(edge_schema(), fragments.clone(), None, None, 8)
+                .unwrap();
+        assert_eq!(
+            unlimited.partition_statistics(None).unwrap().num_rows,
+            Precision::Exact(16)
+        );
+
+        let limited =
+            GraphForgeParquetExec::try_new(edge_schema(), fragments.clone(), None, Some(4), 8)
+                .unwrap();
+        // min(5, 4) + min(2, 4) + min(9, 4)
+        assert_eq!(
+            limited.partition_statistics(None).unwrap().num_rows,
+            Precision::Exact(10)
+        );
+        for (partition, rows) in [4usize, 2, 4].into_iter().enumerate() {
+            assert_eq!(
+                limited
+                    .partition_statistics(Some(partition))
+                    .unwrap()
+                    .num_rows,
+                Precision::Exact(rows)
+            );
+        }
+
+        let ordered = GraphForgeParquetExec::try_new(edge_schema(), fragments, None, Some(4), 8)
+            .unwrap()
+            .into_ordered_plan();
+        assert_eq!(ordered.name(), "OrderedPartitionStreamExec");
+        assert_eq!(
+            ordered.partition_statistics(None).unwrap().num_rows,
+            Precision::Exact(10)
+        );
+        assert_eq!(
+            ordered.partition_statistics(Some(0)).unwrap().num_rows,
+            Precision::Exact(10)
+        );
+        assert_eq!(
+            ordered.partition_statistics(Some(1)).unwrap().num_rows,
+            Precision::Absent
         );
     }
 

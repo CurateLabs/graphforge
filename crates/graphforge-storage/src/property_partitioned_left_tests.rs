@@ -376,6 +376,103 @@ fn selected_key_only_scan_supports_existing_collect_left_and_right_shapes() {
     );
 }
 
+/// A LEFT enrichment join that collects its build side, over `right`.
+fn collect_left_enrichment(right: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
+    let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("node_uuid", 0));
+    Arc::new(
+        HashJoinExec::try_new(
+            input_with_values(&[Some([1; 16]), Some([2; 16])]),
+            right,
+            vec![(key.clone(), key)],
+            None,
+            &JoinType::Left,
+            Some(vec![1]),
+            PartitionMode::CollectLeft,
+            NullEquality::NullEqualsNothing,
+            false,
+        )
+        .unwrap(),
+    )
+}
+
+#[test]
+fn collect_left_enrichment_nominates_through_one_round_robin_exchange() {
+    let config = ConfigOptions::default();
+    let rule = SelectedEndpointPropertyFilterApprovalRule::new(|_, index| index == 0);
+    for partitions in [2, 4] {
+        // The exchange only spreads the probe rows over the join's parent
+        // partitions, so the build keys may still prune the scan under it.
+        let spread: Arc<dyn ExecutionPlan> = Arc::new(
+            RepartitionExec::try_new(
+                Arc::new(key_only_property_scan()),
+                Partitioning::RoundRobinBatch(partitions),
+            )
+            .unwrap(),
+        );
+        let original = collect_left_enrichment(spread);
+        let optimized = rule.optimize(original.clone(), &config).unwrap();
+        assert!(!Arc::ptr_eq(&original, &optimized));
+        assert_eq!(optimized.schema().as_ref(), original.schema().as_ref());
+        let join = optimized.downcast_ref::<HashJoinExec>().unwrap();
+        assert_eq!(*join.partition_mode(), PartitionMode::CollectLeft);
+        assert!(
+            join.left().downcast_ref::<UuidBuildKeyTapExec>().is_some(),
+            "the build side must publish its keys"
+        );
+        let exchange = join.right().downcast_ref::<RepartitionExec>().unwrap();
+        assert_eq!(
+            exchange.partitioning(),
+            &Partitioning::RoundRobinBatch(partitions)
+        );
+        let scan = exchange
+            .input()
+            .downcast_ref::<PropertyOverlayExec>()
+            .unwrap();
+        assert!(
+            scan.fresh_selected_endpoint_uuid_column().is_none(),
+            "the scan under the exchange must carry the nomination"
+        );
+
+        // Nominating again changes nothing.
+        let repeated = rule.optimize(optimized.clone(), &config).unwrap();
+        assert!(Arc::ptr_eq(&optimized, &repeated));
+    }
+}
+
+#[test]
+fn collect_left_enrichment_keeps_other_exchanges_over_the_scan() {
+    let config = ConfigOptions::default();
+    let rule = SelectedEndpointPropertyFilterApprovalRule::new(|_, index| index == 0);
+    let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("node_uuid", 0));
+    // A hash exchange moves rows between partitions by key, and an exchange
+    // over something other than the scan hides what the join probes.
+    let hashed: Arc<dyn ExecutionPlan> = Arc::new(
+        RepartitionExec::try_new(
+            Arc::new(key_only_property_scan()),
+            Partitioning::Hash(vec![key], 2),
+        )
+        .unwrap(),
+    );
+    let stacked: Arc<dyn ExecutionPlan> = Arc::new(
+        RepartitionExec::try_new(
+            Arc::new(
+                RepartitionExec::try_new(
+                    Arc::new(key_only_property_scan()),
+                    Partitioning::RoundRobinBatch(2),
+                )
+                .unwrap(),
+            ),
+            Partitioning::RoundRobinBatch(2),
+        )
+        .unwrap(),
+    );
+    for right in [hashed, stacked] {
+        let original = collect_left_enrichment(right);
+        let unchanged = rule.optimize(original.clone(), &config).unwrap();
+        assert!(Arc::ptr_eq(&original, &unchanged));
+    }
+}
+
 #[test]
 fn partitioned_left_enrichment_excludes_scan_limits_and_equalities() {
     let config = ConfigOptions::default();

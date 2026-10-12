@@ -16,6 +16,7 @@ use arrow::array::Array;
 use arrow::array::FixedSizeBinaryArray;
 use arrow::datatypes::SchemaRef;
 use datafusion::common::DataFusionError;
+use datafusion::common::Statistics;
 use datafusion::execution::TaskContext;
 use datafusion::execution::memory_pool::MemoryConsumer;
 use datafusion::execution::memory_pool::MemoryLimit;
@@ -478,6 +479,16 @@ impl ExecutionPlan for UuidBuildKeyTapExec {
         self.input.metrics()
     }
 
+    /// The tap passes every row of its input through unchanged, so its
+    /// statistics are the input's. Left to the default they are unknown, which
+    /// hides the build side's size from every join and traversal above it.
+    fn partition_statistics(
+        &self,
+        partition: Option<usize>,
+    ) -> Result<Arc<Statistics>, DataFusionError> {
+        self.input.partition_statistics(partition)
+    }
+
     fn execute(
         &self,
         partition: usize,
@@ -884,5 +895,61 @@ mod compact_set_budget_tests {
 
         assert!(nomination.observe(&keys([1])).is_err());
         assert!(!nomination.is_abandoned());
+    }
+}
+
+#[cfg(test)]
+mod tap_statistics_tests {
+    use std::sync::Arc;
+
+    use arrow::array::FixedSizeBinaryArray;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use datafusion::common::stats::Precision;
+    use datafusion::datasource::memory::MemorySourceConfig;
+    use datafusion::physical_plan::ExecutionPlan;
+
+    use super::{UuidBuildKeyNomination, UuidBuildKeyTapExec};
+
+    /// A two-partition input of 20 and 30 rows, each an exact count.
+    fn input() -> Arc<dyn ExecutionPlan> {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "node_uuid",
+            DataType::FixedSizeBinary(16),
+            false,
+        )]));
+        let partitions: Vec<Vec<RecordBatch>> = [20_u128, 30]
+            .iter()
+            .map(|rows| {
+                let ids = FixedSizeBinaryArray::try_from_iter(
+                    (0..*rows).map(|value| value.to_be_bytes()),
+                )
+                .unwrap();
+                vec![RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(ids)]).unwrap()]
+            })
+            .collect();
+        MemorySourceConfig::try_new_exec(&partitions, schema, None).unwrap()
+    }
+
+    #[test]
+    fn the_tap_publishes_the_statistics_of_the_input_it_passes_through() {
+        let input = input();
+        let tap = UuidBuildKeyTapExec::new(Arc::clone(&input), 0, UuidBuildKeyNomination::new());
+
+        assert_eq!(
+            tap.partition_statistics(None).unwrap().num_rows,
+            Precision::Exact(50)
+        );
+        for partition in [0, 1] {
+            assert_eq!(
+                tap.partition_statistics(Some(partition)).unwrap(),
+                input.partition_statistics(Some(partition)).unwrap(),
+                "partition {partition}"
+            );
+        }
+        assert_eq!(
+            tap.partition_statistics(Some(0)).unwrap().num_rows,
+            Precision::Exact(20)
+        );
     }
 }

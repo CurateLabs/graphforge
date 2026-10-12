@@ -26,3 +26,136 @@ fn required_v4_destination_identity_fails_closed_without_admitted_session() {
     require_admitted_ordinal_identity(true, true).expect("admitted v4 session");
     require_admitted_ordinal_identity(false, false).expect("legacy generation fallback");
 }
+
+/// A real `ExpandExec` over a real multi-partition input (#1985, #1984).
+///
+/// The traversal expands each input partition on its own, so it has as many
+/// output partitions as its input. The whole plan is estimated from the whole
+/// input; a partition is its even share of that, rounded up, so the shares
+/// never sum to less than the whole.
+#[test]
+fn a_partitioned_single_hop_expansion_estimates_its_even_share_of_the_whole_plan() {
+    use datafusion::common::stats::Precision;
+    use datafusion::datasource::memory::MemorySourceConfig;
+    use datafusion::logical_expr::LogicalPlanBuilder;
+    use datafusion::logical_expr::logical_plan::LogicalTableSource;
+    use graphforge_core::uuid::{Uuid, new_v7};
+
+    const TS: i64 = 1_700_000_000_000_000;
+    const RING: usize = 100;
+    const DEGREE: usize = 3;
+    const SEEDS: usize = 50;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let person = graphforge_value::EntityTypeId::decode(0).unwrap();
+    let mut writer =
+        graphforge_storage::GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+    let uuids: Vec<Uuid> = (0..RING).map(|_| new_v7()).collect();
+    let ids: Vec<u64> = uuids
+        .iter()
+        .map(|uuid| writer.create_node(*uuid, person).unwrap())
+        .collect();
+    for (index, source) in uuids.iter().enumerate() {
+        for offset in 1..=DEGREE {
+            writer
+                .create_edge(new_v7(), "KNOWS", source, &uuids[(index + offset) % RING])
+                .unwrap();
+        }
+    }
+    writer.flush().unwrap();
+    graphforge_storage::adjacency::build_adjacency_index(dir.path(), TS).unwrap();
+
+    let catalog = Arc::new(
+        graphforge_storage::GraphCatalog::open(
+            dir.path(),
+            None,
+            &graphforge_ir::RuntimeCatalog::new(),
+        )
+        .unwrap(),
+    );
+    let provider: Arc<dyn AdjacencyProvider> = Arc::new(
+        adjacency::PersistentAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict)
+            .with_inventory(catalog.admitted_inventory().unwrap()),
+    );
+    let resource = read_resource::GraphReadContext {
+        health: crate::mutation::MutationHealth::default(),
+        dir: dir.path().to_path_buf(),
+        mode: OntologyMode::Strict,
+        catalog,
+        ontology: None,
+    };
+
+    let frontier = Arc::new(arrow::datatypes::Schema::new(vec![Field::new(
+        "node_id",
+        DataType::UInt64,
+        false,
+    )]));
+    let logical = LogicalPlanBuilder::scan(
+        "var_0",
+        Arc::new(LogicalTableSource::new(Arc::clone(&frontier))),
+        None,
+    )
+    .unwrap()
+    .build()
+    .unwrap();
+    let node = graphforge_plan::ExpandNode::new(
+        Arc::new(logical),
+        "KNOWS",
+        0,
+        2,
+        1,
+        Direction::Out,
+        Some(graphforge_value::RelationTypeId::decode(0).unwrap()),
+        vec![],
+        vec![],
+        vec![],
+    );
+
+    let whole = SEEDS * DEGREE;
+    for partitions in [1_usize, 2, 3, 4] {
+        let chunks: Vec<Vec<RecordBatch>> = ids[..SEEDS]
+            .chunks(SEEDS.div_ceil(partitions))
+            .map(|chunk| {
+                vec![
+                    RecordBatch::try_new(
+                        Arc::clone(&frontier),
+                        vec![Arc::new(UInt64Array::from(chunk.to_vec()))],
+                    )
+                    .unwrap(),
+                ]
+            })
+            .collect();
+        let input = MemorySourceConfig::try_new_exec(&chunks, Arc::clone(&frontier), None).unwrap();
+        assert_eq!(
+            input.properties().output_partitioning().partition_count(),
+            partitions
+        );
+
+        let exec = ExpandExec::new(&node, input, Arc::clone(&provider), None, false, &resource);
+        assert_eq!(
+            exec.properties().output_partitioning().partition_count(),
+            partitions
+        );
+        assert_eq!(
+            exec.partition_statistics(None).unwrap().num_rows,
+            Precision::Inexact(whole),
+            "{partitions} partitions"
+        );
+        let mut shares = 0;
+        for partition in 0..partitions {
+            let share = exec.partition_statistics(Some(partition)).unwrap().num_rows;
+            assert_eq!(
+                share,
+                Precision::Inexact(whole.div_ceil(partitions)),
+                "{partitions} partitions, partition {partition}"
+            );
+            if let Precision::Inexact(rows) = share {
+                shares += rows;
+            }
+        }
+        assert!(
+            shares >= whole,
+            "{partitions} partition estimates sum to {shares}, below the whole plan {whole}"
+        );
+    }
+}
