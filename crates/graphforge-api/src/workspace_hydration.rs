@@ -10,19 +10,22 @@ use sha2::Digest;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+mod owner;
+use owner::{PrivateWorkspace, WorkspaceOwner};
+
 /// A selected graph path and the owner keeping its private resources alive.
 /// Pinned generations can read a path different from the temporary guard root.
 #[derive(Clone, Debug)]
 pub(super) struct GraphWorkspace {
     pub(super) dir: PathBuf,
-    pub(super) owner: Arc<tempfile::TempDir>,
+    pub(super) owner: Arc<WorkspaceOwner>,
     pub(super) topology: Arc<graphforge_storage::TopologyFileAuthority>,
 }
 
 impl GraphWorkspace {
     pub(super) fn new(
         dir: PathBuf,
-        owner: Arc<tempfile::TempDir>,
+        owner: Arc<WorkspaceOwner>,
         inventory: &graphforge_storage::AuthenticatedPropertyInventory,
     ) -> Result<Self, GfError> {
         let topology = graphforge_storage::TopologyFileAuthority::from_inventory(&dir, inventory)?;
@@ -435,16 +438,15 @@ pub(super) fn adjacency_provider_for_graph(
 
 // Hydration hard-links immutable payloads. Its private mutable tree must live
 // on the project volume, never in ambient TMPDIR or an immutable generation.
-// The last retained owner removes this directory; opening another facade must
-// not sweep workspaces that may still belong to active readers.
+// The last retained owner removes this directory and holds an advisory lock for
+// as long as it exists. Opening another facade removes only workspaces whose
+// lock is free, because their owner is gone; a live reader's workspace is never
+// touched (#1992, `owner.rs`).
 fn create_graph_workspace(
     generation: &ResolvedProjectGeneration,
-) -> Result<Arc<tempfile::TempDir>, GfError> {
-    tempfile::Builder::new()
-        .prefix("graphforge-graph-workspace-")
-        .tempdir_in(generation.container_root())
-        .map(Arc::new)
-        .map_err(|error| GfError::Storage(format!("failed to create graph workspace: {error}")))
+) -> Result<Arc<WorkspaceOwner>, GfError> {
+    PrivateWorkspace::create(generation.container_root())
+        .map(|workspace| Arc::new(WorkspaceOwner::Private(workspace)))
 }
 
 pub(super) fn hydrate_graph_workspace(
@@ -453,7 +455,7 @@ pub(super) fn hydrate_graph_workspace(
 ) -> Result<
     (
         PathBuf,
-        Arc<tempfile::TempDir>,
+        Arc<WorkspaceOwner>,
         graphforge_storage::GraphFilesOpenEvidence,
     ),
     GfError,
@@ -495,14 +497,14 @@ pub(super) fn hydrate_graph_workspace(
             return Ok((workspace.path().to_path_buf(), workspace, evidence));
         }
         if pin_published_tree {
-            let guard = Arc::new(
+            let guard = Arc::new(WorkspaceOwner::Guard(
                 tempfile::Builder::new()
                     .prefix("graphforge-graph-pinned-")
                     .tempdir()
                     .map_err(|error| {
                         GfError::Storage(format!("failed to create graph workspace guard: {error}"))
                     })?,
-            );
+            ));
             return Ok((
                 tree,
                 guard,
@@ -561,7 +563,7 @@ fn hydrate_compact_graph_workspace(
 ) -> Result<
     (
         PathBuf,
-        Arc<tempfile::TempDir>,
+        Arc<WorkspaceOwner>,
         graphforge_storage::GraphFilesOpenEvidence,
     ),
     GfError,

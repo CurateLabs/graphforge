@@ -6,6 +6,7 @@
   "identity_profile": "scorecard",
   "counts_ladder": "profiles/gdc/snb-bi-fixture-scorecard-ladder.json",
   "metric_shape": "queries",
+  "query_timeout_seconds": 120,
   "variance_line": "Read-only BI reads on the initial snapshot; the insert/delete batches are refused.",
   "attribution": "Data, parameters and the SF10 reference from the LDBC Social Network Benchmark Business Intelligence workload (https://ldbcouncil.org/benchmarks/snb/), used under CC-BY 4.0.",
   "variances": [

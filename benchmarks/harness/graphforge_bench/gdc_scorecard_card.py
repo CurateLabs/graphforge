@@ -83,6 +83,11 @@ def _results(spec: LadderSpec, output_dir: Path) -> list[Mapping[str, Any]]:
             break
         result = read_json(path)
         validate_schema(spec.root, "gdc-rung-result.json", result)
+        if result["claim"] != "engineering_evidence_only":
+            raise CardError(
+                "diagnostic_run",
+                f"{path.name} is {result['claim']}: a diagnostic run is never card evidence",
+            )
         results.append(result)
         if result["status"] != "passed" and not _unpinned(result):
             break

@@ -8,6 +8,11 @@ Per-operation query latency has exactly one authority (#1877): the driver
 clock of ``graphforge-benchmark-gdc-scorecard query``, declared in
 ``docs/development/benchmarking.md``. ``assert_query_latency_authority``
 refuses latency from any other source.
+
+``query_timeout_seconds`` in the evidence is the bound the driver killed a
+variant's process at (or null with no bound). It is a limit the run was held to,
+not a measurement: it never enters a latency or a summary. The refusal of any
+other timing field stands; the evidence schema still lists every key it accepts.
 """
 
 from __future__ import annotations

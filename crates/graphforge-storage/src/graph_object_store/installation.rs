@@ -511,6 +511,10 @@ impl CapturedSource<'_, '_> {
     }
 }
 
+/// Install a captured source into the content store by copying its bytes. A
+/// workspace source stays in its workspace, so the committing facade holds a
+/// second physical copy of every payload it publishes until it reopens and
+/// hydrates the object by link (#1992).
 fn install_captured_source_with_lease(
     lease: &GraphObjectPublicationLease,
     source: &CapturedSource<'_, '_>,

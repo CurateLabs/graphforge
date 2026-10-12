@@ -54,6 +54,24 @@ recorded as `graphforge-gdc-query-clock/1`:
   `GF_*` error code and at most 1 KiB of error text, and no latency. The pass
   continues, so one run surfaces every failure, and the run ends with
   `status: failed`.
+- `query --query-timeout-seconds N` (the ladder spec's `query_timeout_seconds`)
+  runs each variant in a child process, because GraphForge's calls cannot be
+  cancelled. The parent reconciles, then spawns the executable's hidden
+  `query-variant` subcommand once per variant; the child writes one JSON line
+  per event (`start`, `warmup`, `sample`, `done`) and the parent kills it
+  (SIGKILL) when a call has been in flight for N seconds. The clock is
+  unchanged: latency is still the child's `Instant` interval, and the timeout is
+  a bound, never a measurement. Project open is not bounded and each variant
+  reopens the project in its own process. The killed call is a failed sample with
+  cause `query_timeout` (`error_code: null`). If the warm-up timed out, the
+  warm-up is `completed: false`, the first binding is the `query_timeout` and every
+  other binding `not_run`; after a measured-pass timeout the remaining bindings are
+  `not_run`. A child that exits non-zero or by signal before `done` (a crash, a
+  cgroup OOM kill) makes the in-flight binding `query_crashed`, with the exit
+  status or signal and the last 1 KiB of its stderr, and the rest `not_run`.
+  The run then continues with the next variant and ends `status: failed` (exit
+  code 3). The evidence records `query_timeout_seconds`. The four-hour rung wall
+  remains as a backstop.
 - p50 and p95 are nearest-rank over the measured samples only, in
   nanoseconds. A variant with no measured sample has no summary.
 
@@ -70,7 +88,8 @@ per-operation latency not produced by this clock: a foreign clock or producer,
 a summary not derived from its own measured samples, a failed sample or
 warm-up that carries latency, a failure list or status that disagrees with
 the samples, an unreconciled project, or any other timing field in the
-document. These numbers are single-client engineering evidence, not LDBC
+document. The evidence's `query_timeout_seconds` is the bound the run was held
+to, not a timing. These numbers are single-client engineering evidence, not LDBC
 results.
 
 A GDC scorecard card (#1893, `benchmarks/gdc-suite-index.md`, Scorecard

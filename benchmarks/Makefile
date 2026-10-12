@@ -199,7 +199,8 @@ progressive-host-ladder-reclaim: install
 # convert, load and query under BenchExec, checks the reference, reclaims its
 # workspace, and the ladder stops at the first rung that does not pass; the card
 # is rendered into OUTPUT_DIR (outside WORK_ROOT) when the ladder finishes.
-# THROUGH=<rung id> stops early, leaving the ladder open.
+# THROUGH=<rung id> stops early, leaving the ladder open. DIAGNOSTIC=1 skips the
+# quiet-host wait for iteration; its results are diagnostic_only and never card evidence.
 gdc-scorecard-binaries:
 	CARGO_TARGET_DIR="$(HOST_TARGET_DIR)" cargo build --locked --release --manifest-path ../Cargo.toml -p graphforge-cli
 	CARGO_TARGET_DIR="$(HOST_TARGET_DIR)" cargo build --locked --release --manifest-path Cargo.toml --bin graphforge-benchmark-gdc-scorecard
@@ -214,7 +215,8 @@ gdc-scorecard-run: install gdc-scorecard-binaries
 		--benchexec-python "$(BENCHEXEC_PYTHON)" \
 		--reserved-headroom-bytes "$(RESERVED_HEADROOM_BYTES)" \
 		$(if $(QUIET_HOST_WAIT_SECONDS),--quiet-host-wait-seconds "$(QUIET_HOST_WAIT_SECONDS)",) \
-		$(if $(THROUGH),--through "$(THROUGH)",)
+		$(if $(THROUGH),--through "$(THROUGH)",) \
+		$(if $(filter 1,$(DIAGNOSTIC)),--diagnostic,)
 
 gdc-scorecard-render: install
 	test -n "$(LADDER)" && test -n "$(OUTPUT_DIR)"

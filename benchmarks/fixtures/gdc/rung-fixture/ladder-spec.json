@@ -6,6 +6,7 @@
   "identity_profile": "scorecard",
   "counts_ladder": "profiles/gdc/rung-fixture-scorecard-ladder.json",
   "metric_shape": "queries",
+  "query_timeout_seconds": 120,
   "variance_line": "Read-only fixture queries over the bulk-load snapshot; the update stream is refused.",
   "attribution": "Data shape from the LDBC Social Network Benchmark (https://ldbcouncil.org/benchmarks/snb/), used under CC-BY 4.0.",
   "variances": [

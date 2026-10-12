@@ -782,6 +782,11 @@ impl GraphForge {
             ))
             .into());
         }
+        // Resolve before taking the adjacency lock: a selector lookup holds graph
+        // visibility, which rebuild takes before the adjacency write lock.
+        let (source, target) = self.resolve_endpoint_selectors(source, target)?;
+        let source = source.map(|uuid| *uuid.as_bytes());
+        let target = target.map(|uuid| *uuid.as_bytes());
         let _adjacency_visibility = self
             .adjacency_visibility
             .read()
@@ -789,14 +794,6 @@ impl GraphForge {
         let adjacency_provider = self.adjacency_provider_for_session();
         adjacency_provider.revalidate();
         let workspace = self.workspace_for_session();
-        let source = source
-            .map(|selector| self.resolve_node_selector(selector))
-            .transpose()?
-            .map(|uuid| *uuid.as_bytes());
-        let target = target
-            .map(|selector| self.resolve_node_selector(selector))
-            .transpose()?
-            .map(|uuid| *uuid.as_bytes());
         let mut normalized = options.clone();
         normalized.terminal_uuids.sort_unstable();
         normalized.terminal_uuids.dedup();
@@ -1128,6 +1125,9 @@ impl GraphForge {
                 options.by
             )));
         }
+        // Resolve before taking the adjacency lock: a selector lookup holds graph
+        // visibility, which rebuild takes before the adjacency write lock.
+        let (source, target) = self.resolve_endpoint_selectors(source, target)?;
         let _adjacency_visibility = self
             .adjacency_visibility
             .read()
@@ -1135,12 +1135,6 @@ impl GraphForge {
         let adjacency_provider = self.adjacency_provider_for_session();
         adjacency_provider.revalidate();
         let workspace = self.workspace_for_session();
-        let source = source
-            .map(|selector| self.resolve_node_selector(selector))
-            .transpose()?;
-        let target = target
-            .map(|selector| self.resolve_node_selector(selector))
-            .transpose()?;
         graphforge_exec::paths_algorithm_with_compute(
             &graphforge_exec::AdmittedAdjacencyProvider::new(
                 adjacency_provider.as_ref(),

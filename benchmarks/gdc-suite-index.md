@@ -377,7 +377,9 @@ from, its count ladder (`profiles/gdc/*-scorecard-ladder.json`), the card's
 one-line variance and attribution, and per rung the query workload, the
 queries refused at mapping with their typed causes, the pinned reference
 (`graphforge-gdc-rung-reference/1`, `schemas/gdc-rung-reference.json`) or a note
-saying why there is none, and the variances (`rewrite`, `spec_variance`,
+saying why there is none, the `query_timeout_seconds` every query call is held
+to (Graphalytics 900, the S-class job time-out; SNB BI 600; SNB Interactive and
+FinBench 300), and the variances (`rewrite`, `spec_variance`,
 `reference_reading`, `discrepancy`, `scope`).
 
 One rung:
@@ -385,6 +387,12 @@ One rung:
 1. **Admit.** A 60 s quiet-host window, then free space on the work root above
    the declared reserve, as for a Graph500 rung. A refusal is recorded as
    `not_admitted` and stops the ladder; a busy host launches nothing.
+   `run --diagnostic` (`make gdc-scorecard-run DIAGNOSTIC=1`) skips the
+   quiet-host wait, records `launch_host: {"skipped": "diagnostic"}` and stamps
+   each result `claim: diagnostic_only`. Diagnostic runs are for iteration and
+   are not card evidence: `gdc_scorecard_card` refuses them (`diagnostic_run`),
+   and a ladder is never resumed over results of the other claim
+   (`ladder_claim_mismatch`).
 2. **Acquire** the rung's archive from the pinned dataset cache
    (`gdc_dataset_cache`); a pin mismatch is `checksum_mismatch`.
 3. **Convert, load, query**: three BenchExec runs of the
@@ -392,8 +400,13 @@ One rung:
    `graphforge_bench.gdc_phase` on one task. `convert` runs the converter;
    `load` runs `gf import-session` begin, register, validate and commit;
    `query` runs `gf storage-attribution`, then the query driver, which reopens
-   the project, reconciles every count and times each query. The three phases
-   share the rung's four-hour wall. BenchExec runs through
+   the project, reconciles every count and times each query. The driver runs
+   each query variant in its own child process and kills it when one call has
+   been in flight for the spec's `query_timeout_seconds`: GraphForge's calls
+   cannot be cancelled, so a runaway query costs its variant's samples, not the
+   rung (`query_timeout`, and `not_run` for the bindings it prevented; a child
+   that dies is `query_crashed`). The three phases share the rung's four-hour
+   wall, which is a backstop. BenchExec runs through
    `graphforge_bench.benchexec_launcher` (the `fork` start method, see
    `benchexec_process`), in its own process group with a bounded wait: a
    BenchExec that wrote its final results and did not exit within two minutes,
@@ -422,9 +435,14 @@ A rung passes only with no failure and an empty inventory. Typed causes include
 the rung's 4 GiB limit, or a phase's largest single-process peak RSS above 4 GiB),
 `phase_swapped`, `phase_swap_unobserved`, `benchexec_hung`, `convert_failed`, `load_failed`, `count_mismatch`,
 `query_failed`, `reference_mismatch`, `result_digest_mismatch` and
-`teardown_incomplete`. A query that fails at runtime or answers wrongly fails
-the rung, but every query still runs, so the result lists every failure. A
-refused query counts against coverage and is never checked.
+`teardown_incomplete`. A query that fails at runtime, times out, crashes or
+answers wrongly fails the rung, but every other variant still runs, so the
+result lists every failure. The failed-sample causes in the query evidence are
+`query_failed`, `result_unrenderable`, `query_timeout` (the call outlived
+`query_timeout_seconds`), `query_crashed` (the variant's process died; the
+sample carries the exit status or signal and the end of its stderr) and
+`not_run` (an earlier binding of the variant ended it). A refused query counts
+against coverage and is never checked.
 
 Every GDC phase runs with the 4 GiB envelope (`MEMORY_LIMIT_BYTES`) as
 BenchExec's memory limit, unlike the Graph500 ladder's 96 GB ceiling. The

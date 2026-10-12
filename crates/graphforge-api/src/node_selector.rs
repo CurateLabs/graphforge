@@ -4,19 +4,51 @@
     reason = "consumed by the ordered algorithm path vertical slices"
 )]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use arrow::array::{Array, FixedSizeBinaryArray, ListArray, UInt32Array};
+use arrow::array::{Array, FixedSizeBinaryArray};
 use graphforge_core::uuid::Uuid;
 use graphforge_ir::IrLiteral;
 use graphforge_value::EntityTypeId;
 
 use super::{GfError, GraphForge, NodeSelector, PropValue};
 
-const MAX_SELECTOR_ROWS: usize = 1_000_000;
+const SELECTOR_PARAMETER: &str = "selector_value";
 
 impl GraphForge {
-    /// Resolve one typed selector to a UUID without invoking Cypher or an algorithm.
+    /// Resolve the optional source and target selectors of one verb call.
+    ///
+    /// A `Match` selector runs a Cypher read, so the pair resolves under graph
+    /// visibility and sees one published generation. UUID and handle selectors
+    /// need no lock. Callers that already hold graph visibility (the descriptor
+    /// dispatch holds its write permit) must pass only UUID selectors here, as
+    /// the read lock is not reentrant.
+    pub(crate) fn resolve_endpoint_selectors(
+        &self,
+        source: Option<&NodeSelector>,
+        target: Option<&NodeSelector>,
+    ) -> Result<(Option<Uuid>, Option<Uuid>), GfError> {
+        let _visibility = [source, target]
+            .into_iter()
+            .flatten()
+            .any(|selector| matches!(selector, NodeSelector::Match { .. }))
+            .then(|| self.graph_visibility.read())
+            .transpose()?;
+        let source = source
+            .map(|selector| self.resolve_node_selector(selector))
+            .transpose()?;
+        let target = target
+            .map(|selector| self.resolve_node_selector(selector))
+            .transpose()?;
+        Ok((source, target))
+    }
+
+    /// Resolve one typed selector to a UUID without invoking an algorithm.
+    ///
+    /// The caller holds graph visibility (read or write). A `Match` selector
+    /// runs the anchored Cypher lookup `MATCH (n:L {p: $v})`, so it costs what
+    /// that Cypher anchor costs and uses whatever index the planner offers for
+    /// it, instead of scanning the topology and property routes.
     pub(crate) fn resolve_node_selector(&self, selector: &NodeSelector) -> Result<Uuid, GfError> {
         self.graph_visibility.health.check()?;
         match selector {
@@ -49,6 +81,9 @@ impl GraphForge {
         }
     }
 
+    /// Resolve `label`/`property`/`value` to the single node it matches. The
+    /// lookup stops at the second match, so the only bound is the ambiguity
+    /// refusal on matched rows; no scanned-row limit applies.
     fn resolve_property_match(
         &self,
         label: &str,
@@ -58,44 +93,39 @@ impl GraphForge {
         validate_name("label", label)?;
         validate_name("property", property)?;
         let expected = selector_literal(value)?;
-        let Some(label_id) = self.label_id(label)? else {
+        if self.label_id(label)?.is_none() {
             return Err(validation("node selector matched no nodes"));
-        };
-        let candidates = self.node_uuids(Some(label_id))?;
-        let mut observed = HashMap::new();
-        let mut matches = HashSet::new();
-        let mut scanned = 0usize;
-        let inventory = self.property_inventory_for_session();
-        for stem in inventory.routes(graphforge_storage::PropertyRouteKind::Node) {
-            for (bytes, properties) in graphforge_storage::read_node_property_rows_from_inventory(
-                &self.dir(),
-                &inventory,
-                stem,
-            )? {
-                scanned += 1;
-                if scanned > MAX_SELECTOR_ROWS {
-                    return Err(validation("node selector property scan exceeds row limit"));
+        }
+        let query = format!(
+            "MATCH (n:`{label}` {{`{property}`: ${SELECTOR_PARAMETER}}}) \
+             RETURN n.node_uuid AS node_uuid LIMIT 2"
+        );
+        let result = self.execute_read_under_visibility(
+            &query,
+            &HashMap::from([(SELECTOR_PARAMETER.to_owned(), expected)]),
+        )?;
+        let mut matches = Vec::with_capacity(2);
+        for batch in &result.batches {
+            let column = batch
+                .column_by_name("node_uuid")
+                .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
+                .ok_or_else(|| validation("node selector lookup returned malformed node_uuid"))?;
+            for row in 0..column.len() {
+                if column.is_null(row) {
+                    return Err(validation("node selector lookup returned a null node_uuid"));
                 }
-                let uuid = Uuid::from_bytes(bytes);
-                let Some(actual) = properties.get(property) else {
-                    continue;
-                };
-                if candidates.contains(&uuid) {
-                    if observed.insert(uuid, actual.clone()).is_some() {
-                        return Err(validation("node selector found duplicate property rows"));
-                    }
-                    if actual == &expected {
-                        matches.insert(uuid);
-                    }
-                }
+                matches
+                    .push(Uuid::from_slice(column.value(row)).map_err(|_| {
+                        validation("node selector lookup returned a bad node_uuid")
+                    })?);
             }
         }
-        match matches.len() {
-            0 => Err(validation("node selector matched no nodes")),
-            1 => Ok(*matches.iter().next().expect("one match")),
-            count => Err(validation(format!(
-                "node selector matched {count} nodes and is ambiguous"
-            ))),
+        match matches.as_slice() {
+            [] => Err(validation("node selector matched no nodes")),
+            [uuid] => Ok(*uuid),
+            _ => Err(validation(
+                "node selector matched more than one node and is ambiguous",
+            )),
         }
     }
 
@@ -115,51 +145,6 @@ impl GraphForge {
             .expect("runtime catalog poisoned")
             .entity_type_names_with_ids()
             .find_map(|(id, name)| (name == label).then_some(EntityTypeId::runtime(id))))
-    }
-
-    fn node_uuids(&self, label_id: Option<EntityTypeId>) -> Result<HashSet<Uuid>, GfError> {
-        let mut uuids = HashSet::new();
-        let mut scanned = 0usize;
-        for batch in graphforge_storage::read_nodes_from_files(&self.dir().topology_files()?)
-            .map_err(|error| GfError::Storage(error.to_string()))?
-        {
-            let uuid_column = batch
-                .column_by_name("node_uuid")
-                .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
-                .ok_or_else(|| validation("topology has malformed node_uuid data"))?;
-            let labels = batch
-                .column_by_name("type_ids")
-                .and_then(|column| column.as_any().downcast_ref::<ListArray>())
-                .ok_or_else(|| validation("topology has malformed type_ids data"))?;
-            for row in 0..batch.num_rows() {
-                scanned += 1;
-                if scanned > MAX_SELECTOR_ROWS {
-                    return Err(validation("node selector topology scan exceeds row limit"));
-                }
-                if uuid_column.is_null(row) || labels.is_null(row) {
-                    return Err(validation("topology contains null node identity data"));
-                }
-                let uuid = Uuid::from_slice(uuid_column.value(row))
-                    .map_err(|_| validation("topology has malformed node_uuid data"))?;
-                let label_values = labels.value(row);
-                let label_values = label_values
-                    .as_any()
-                    .downcast_ref::<UInt32Array>()
-                    .ok_or_else(|| validation("topology has malformed type_ids data"))?;
-                let mut selected = label_id.is_none();
-                for value in label_values {
-                    let encoded =
-                        value.ok_or_else(|| validation("topology contains null label identity"))?;
-                    let identity = EntityTypeId::decode(encoded)
-                        .map_err(|error| validation(error.to_string()))?;
-                    selected |= label_id == Some(identity);
-                }
-                if selected && !uuids.insert(uuid) {
-                    return Err(validation("topology contains duplicate node UUIDs"));
-                }
-            }
-        }
-        Ok(uuids)
     }
 }
 
@@ -185,7 +170,8 @@ fn selector_literal(value: &PropValue) -> Result<IrLiteral, GfError> {
 }
 
 fn validate_name(kind: &str, name: &str) -> Result<(), GfError> {
-    if name.is_empty() || name.trim() != name || name.chars().any(char::is_control) {
+    // Cypher backtick identifiers have no escape for a backtick.
+    if name.is_empty() || name.trim() != name || name.chars().any(|c| c.is_control() || c == '`') {
         Err(validation(format!("invalid node selector {kind} {name:?}")))
     } else {
         Ok(())
@@ -379,22 +365,77 @@ mod tests {
         };
         // Direct storage edits do not replace an already admitted facade view.
         assert_eq!(other.resolve_node_selector(&duplicate).unwrap(), uuid);
-        // Explicitly admit the malformed workspace to test cross-route duplicate rejection.
-        let generation = other.generation_for_read().unwrap();
-        let (captured, _) = graphforge_storage::capture_graph_files(&other.dir()).unwrap();
-        let inventory =
-            graphforge_storage::AuthenticatedPropertyInventory::from_materialized_inventory(
-                &generation,
-                &other.dir(),
-                captured,
+    }
+
+    #[test]
+    fn interactive_complex_13_selector_shape_returns_the_uuid_selector_paths() {
+        // IC13 names both endpoints as `Person {id: <int>}` and asks for an
+        // undirected BFS over KNOWS.
+        let graph = GraphForge::new(None).unwrap();
+        graph
+            .execute(
+                "CREATE (a:Person {id: 933}), (b:Person {id: 4139}), (c:Person {id: 6597}), \
+                 (d:Person {id: 8333}), (:Person {id: 1}), \
+                 (a)-[:KNOWS]->(b), (c)-[:KNOWS]->(b), (c)-[:KNOWS]->(d)",
             )
             .unwrap();
-        {
-            let mut authority = other.property_authority.lock().unwrap();
-            assert_eq!(Some(authority.generation_uuid), inventory.generation_uuid());
-            authority.inventory = std::sync::Arc::new(inventory);
+        let person = |id: i64| NodeSelector::Match {
+            label: "Person".into(),
+            property: "id".into(),
+            value: PropValue::Int(id),
+        };
+        let uuid_of = |id: i64| {
+            let rows = graph
+                .execute(&format!("MATCH (n:Person {{id: {id}}}) RETURN n.node_uuid"))
+                .unwrap();
+            let column = rows.batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .unwrap();
+            Uuid::from_slice(column.value(0)).unwrap()
+        };
+        let options = PathsOptions {
+            by: crate::PathAlgorithm::Bfs,
+            via: Some("KNOWS".into()),
+            directed: false,
+            ..PathsOptions::default()
+        };
+        let by_match = graph
+            .paths(&person(933), Some(&person(8333)), options.clone())
+            .unwrap();
+        let by_uuid = graph
+            .paths(
+                &NodeSelector::Uuid(uuid_of(933)),
+                Some(&NodeSelector::Uuid(uuid_of(8333))),
+                options.clone(),
+            )
+            .unwrap();
+        assert_eq!(by_match, by_uuid);
+        assert_eq!(by_match.num_rows(), 1);
+        // The path is a -> b <- c -> d, four nodes long.
+        let path = by_match
+            .column_by_name("path")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::ListArray>()
+            .unwrap()
+            .value(0);
+        assert_eq!(path.len(), 4);
+        assert_validation(graph.paths(&person(2), Some(&person(8333)), options));
+    }
+
+    #[test]
+    fn selector_names_that_cypher_cannot_quote_are_refused() {
+        let graph = GraphForge::new(None).unwrap();
+        graph.execute("CREATE (:Person {name: 'Alice'})").unwrap();
+        for (label, property) in [("Per`son", "name"), ("Person", "na`me")] {
+            assert_validation(graph.resolve_node_selector(&NodeSelector::Match {
+                label: label.into(),
+                property: property.into(),
+                value: PropValue::Str("Alice".into()),
+            }));
         }
-        assert_validation(other.resolve_node_selector(&duplicate));
     }
 
     #[test]

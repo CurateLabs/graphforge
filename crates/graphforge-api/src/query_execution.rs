@@ -19,6 +19,14 @@ use super::{
     SendableRecordBatchStream, Span, adjacency_provider_for_graph, mutation_transaction,
 };
 
+/// Whether a read query takes graph read visibility itself or runs for a caller
+/// that already holds visibility.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReadVisibility {
+    Acquire,
+    Held,
+}
+
 impl GraphForge {
     pub(super) fn execute_read_only(&self, cypher: &str) -> Result<ExecutionResult, GfError> {
         if cypher.trim().is_empty() {
@@ -188,6 +196,25 @@ impl GraphForge {
             self.default_composition_snapshot(),
             publish,
             transaction_managed,
+            false,
+        )
+    }
+
+    /// Run one read-only query for a caller that already holds graph visibility
+    /// (read or write). It takes no visibility lock, so a caller inside a
+    /// publishing operation cannot deadlock against its own permit.
+    pub(crate) fn execute_read_under_visibility(
+        &self,
+        cypher: &str,
+        params: &HashMap<String, IrLiteral>,
+    ) -> Result<ExecutionResult, GfError> {
+        self.run_query_with_optional_composition(
+            cypher,
+            params,
+            self.default_composition_snapshot(),
+            false,
+            false,
+            true,
         )
     }
 
@@ -241,7 +268,14 @@ impl GraphForge {
         composition: Arc<CompositionBindingContext>,
         publish: bool,
     ) -> Result<ExecutionResult, GfError> {
-        self.run_query_with_optional_composition(cypher, params, Some(composition), publish, false)
+        self.run_query_with_optional_composition(
+            cypher,
+            params,
+            Some(composition),
+            publish,
+            false,
+            false,
+        )
     }
 
     fn run_query_with_optional_composition(
@@ -251,6 +285,7 @@ impl GraphForge {
         composition: Option<Arc<CompositionBindingContext>>,
         publish: bool,
         transaction_managed: bool,
+        visibility_held: bool,
     ) -> Result<ExecutionResult, GfError> {
         let _admission = self.admit_heavy_query()?;
         let composition = composition
@@ -272,6 +307,11 @@ impl GraphForge {
         if is_mutation && self.read_only {
             return Err(GfError::Execution(
                 "GF_WRITE_RESOURCE_READ_ONLY: session does not authorize writes".into(),
+            ));
+        }
+        if is_mutation && visibility_held {
+            return Err(GfError::Validation(
+                "a query run under held visibility must be read-only".into(),
             ));
         }
         let _mutation_admission = (is_mutation && publish)
@@ -335,6 +375,11 @@ impl GraphForge {
             transaction,
             is_mutation && publish,
             transaction_managed,
+            if visibility_held {
+                ReadVisibility::Held
+            } else {
+                ReadVisibility::Acquire
+            },
         );
         let result = result.map_err(publicize_query_error)?;
         shape_result(result, self.ontology_mode, self.ontology.as_ref())
@@ -359,7 +404,16 @@ impl GraphForge {
         publish: bool,
     ) -> Result<ExecutionResult, GfError> {
         self.run_plan_with_publish_and_bindings(
-            plan, params, publish, None, None, None, None, false, false,
+            plan,
+            params,
+            publish,
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            ReadVisibility::Acquire,
         )
     }
 
@@ -376,6 +430,7 @@ impl GraphForge {
         transaction: Option<graphforge_exec::mutation::MutationTransaction>,
         write_admission_held: bool,
         transaction_managed: bool,
+        read_visibility: ReadVisibility,
     ) -> Result<ExecutionResult, GfError> {
         use graphforge_exec::ExecutionSession;
 
@@ -407,7 +462,7 @@ impl GraphForge {
         let _write_visibility = (is_write && publish && !write_admission_held)
             .then(|| self.graph_visibility.lock())
             .transpose()?;
-        let _read_visibility = (!is_write)
+        let _read_visibility = (!is_write && read_visibility == ReadVisibility::Acquire)
             .then(|| self.graph_visibility.read())
             .transpose()?;
         let workspace = self.workspace_for_session();

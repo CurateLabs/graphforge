@@ -19,13 +19,23 @@ path and the work root is inventoried; a rung only passes with an empty
 inventory.
 
 Each rung gets the Graph500 per-rung envelope: one four-hour wall shared by its
-three phases, a 4 GiB process peak (the largest single-process resident
-high-water mark in a phase), a free-space admission with the declared reserve,
-and a quiet-host launch check. A refused query counts against coverage. A query
-that fails at runtime or returns a wrong answer fails the rung with a typed
-cause, but every query still runs, so every failure is recorded. The ladder
-stops at the first rung that does not pass, and the card is rendered from the
-largest passing rung (``gdc_scorecard_card``).
+three phases (a backstop), a 4 GiB process peak (the largest single-process
+resident high-water mark in a phase), a free-space admission with the declared
+reserve, and a quiet-host launch check. The primary bound on a query is the
+ladder spec's ``query_timeout_seconds``: the driver runs each variant in its own
+process and kills it when one call has been in flight that long, so a runaway
+query costs its variant's samples (``query_timeout``, ``not_run``) and not the
+rung. A process that dies is ``query_crashed``. A refused query counts against
+coverage. A query that fails at runtime, times out, crashes or returns a wrong
+answer fails the rung with a typed cause, but every other variant still runs, so
+every failure is recorded. The ladder stops at the first rung that does not
+pass, and the card is rendered from the largest passing rung
+(``gdc_scorecard_card``).
+
+``run --diagnostic`` is for iterating on a rung: it skips the quiet-host wait
+(``launch_host`` is ``{"skipped": "diagnostic"}``) and stamps every result
+``claim: diagnostic_only``. A card is never built from such results, and a
+certified climb never resumes over them (or the reverse).
 """
 
 from __future__ import annotations
@@ -112,6 +122,9 @@ DEFINITION = "graphforge-gdc-rung-phase-v1"
 DRIVER_NAME = "graphforge-benchmark-gdc-scorecard"
 LAUNCHER_NAME = "graphforge-gdc-phase"
 PHASES = ("convert", "load", "query")
+ENGINEERING_CLAIM = "engineering_evidence_only"
+DIAGNOSTIC_CLAIM = "diagnostic_only"
+DIAGNOSTIC_LAUNCH_HOST = {"skipped": "diagnostic"}
 # The module that builds a declared workload (and reference) in a child process.
 BUILDER_MODULES = {
     "snb-bi": "gdc_snb_scorecard",
@@ -284,6 +297,12 @@ class Ladder:
     host: Mapping[str, Any]
     opener: gdc_dataset_cache.Opener = gdc_dataset_cache.default_opener
     benchexec: BenchExecRunner = host_benchexec
+    # A diagnostic climb skips the quiet-host wait and yields no card evidence.
+    diagnostic: bool = False
+
+    @property
+    def claim(self) -> str:
+        return DIAGNOSTIC_CLAIM if self.diagnostic else ENGINEERING_CLAIM
 
 
 @dataclass
@@ -543,9 +562,11 @@ def describe_failed_samples(evidence: Mapping[str, Any]) -> str:
     for variant in evidence.get("variants", []):
         for sample in variant.get("samples", []):
             if sample.get("status") == "failed":
+                # A timed-out, crashed or skipped sample has no product error code:
+                # its cause names it instead.
                 key = (
                     str(variant.get("query_id")),
-                    str(sample.get("error_code")),
+                    str(sample.get("error_code") or sample.get("cause")),
                     str(sample.get("error")),
                 )
                 grouped.setdefault(key, []).append(str(sample.get("binding_id")))
@@ -914,6 +935,7 @@ def _execute(rung: Rung) -> None:
             "expected_counts": str((ladder.output_dir / expected_name).resolve()),
             "evidence": str(evidence_path),
             "results_dir": str(results_dir) if reference is not None else None,
+            "query_timeout_seconds": ladder.spec.document["query_timeout_seconds"],
         },
     )
     # A query that failed at runtime still wrote evidence for every binding;
@@ -1053,6 +1075,7 @@ def _result(
         "identities": dict(rung.ladder.identities),
         "limits": {
             "wall_seconds": MAXIMUM_WALL_SECONDS,
+            "query_timeout_seconds": rung.ladder.spec.document["query_timeout_seconds"],
             "memory_bytes": MEMORY_LIMIT_BYTES,
             "cores": CORES,
         },
@@ -1063,7 +1086,7 @@ def _result(
         "counts": rung.counts,
         "documents": rung.documents,
         "inventory": inventory,
-        "claim": "engineering_evidence_only",
+        "claim": rung.ladder.claim,
         "certification": False,
     }
 
@@ -1182,6 +1205,9 @@ def _existing_result(ladder: Ladder, rung_spec: Mapping[str, Any]) -> dict[str, 
     current = {key: ladder.identities.get(key) for key in SHARED_IDENTITY_KEYS}
     if recorded != current:
         raise LadderError("ladder_identity_mismatch", prefix)
+    if result["claim"] != ladder.claim:
+        # Diagnostic results never seed a certified climb, nor the reverse.
+        raise LadderError("ladder_claim_mismatch", prefix)
     return result
 
 
@@ -1214,7 +1240,11 @@ def climb(
             break
         if result is None:
             try:
-                launch_host = quiet_host(quiet_host_wait_seconds)
+                launch_host = (
+                    DIAGNOSTIC_LAUNCH_HOST
+                    if ladder.diagnostic
+                    else quiet_host(quiet_host_wait_seconds)
+                )
             except HostRunError as error:
                 # Not a rung outcome: nothing launched, so nothing is recorded.
                 raise LadderError("host_not_quiet", str(error)) from error
@@ -1252,6 +1282,7 @@ def prepare(
     storage_medium: str,
     opener: gdc_dataset_cache.Opener = gdc_dataset_cache.default_opener,
     benchexec: BenchExecRunner = host_benchexec,
+    diagnostic: bool = False,
 ) -> Ladder:
     work_root = require_work_root(work_root)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1270,6 +1301,7 @@ def prepare(
         host=host_facts(work_root, host_label, storage_medium),
         opener=opener,
         benchexec=benchexec,
+        diagnostic=diagnostic,
     )
 
 
@@ -1293,6 +1325,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     run.add_argument("--reserved-headroom-bytes", type=int, default=DEFAULT_RESERVE_BYTES)
     run.add_argument("--quiet-host-wait-seconds", type=int, default=DEFAULT_QUIET_HOST_WAIT_SECONDS)
     run.add_argument("--through", help="stop after this rung id, leaving the ladder open")
+    run.add_argument(
+        "--diagnostic",
+        action="store_true",
+        help="skip the quiet-host wait; results are diagnostic_only and never card evidence",
+    )
     run.add_argument("--host-label", default="OVHC-AGENCY")
     run.add_argument("--storage-medium", default="NVMe")
     args = parser.parse_args(argv)
@@ -1322,6 +1359,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             commit=repository_commit(root),
             host_label=args.host_label,
             storage_medium=args.storage_medium,
+            diagnostic=args.diagnostic,
         )
         try:
             # The same native BenchExec admission the Graph500 host ladder requires.
@@ -1345,7 +1383,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         # A ladder ends at its first typed failure by design; that is a
         # result, published on the card. Only a card that cannot be built
         # (no passing rung) or a refused launch is an error.
-        if summary["finished"]:
+        if ladder.diagnostic:
+            summary["diagnostic"] = True
+        elif summary["finished"]:
             summary["card"] = str(card.write_card(root, ladder.spec, ladder.output_dir)["text"])
         print(json.dumps(summary, sort_keys=True))
         return 0
