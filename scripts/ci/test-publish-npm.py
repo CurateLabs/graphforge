@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import tarfile
 import tempfile
@@ -101,6 +102,16 @@ with tempfile.TemporaryDirectory() as raw:
         "curatelabs-graphforge-agent-skills-x.tgz",
     ], commands
     assert all(command[-2:] == ["--tag", tag] and "--provenance" in command for command in commands)
+
+    # The workflow passes a relative directory (`dist-npm`). npm must still
+    # receive a file path, not `dir/file.tgz`, which it parses as a GitHub
+    # `owner/repo` shorthand (the v0.6.0-rc.2 failure).
+    commands.clear()
+    mod.is_published = lambda _name, _version: False
+    relative = Path(os.path.relpath(root))
+    mod.publish(relative, tag)
+    assert len(commands) == 5, commands
+    assert all(Path(command[2]).is_absolute() for command in commands), commands
 
     # The wrong dist-tag is refused before anything is published.
     commands.clear()
