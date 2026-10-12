@@ -525,7 +525,10 @@ impl ExecutionPlan for GraphForgeParquetExec {
                 }
             }
         };
-        let rows_exact = self.fragments.iter().all(|fragment| fragment.rows_exact);
+        // An anchored scan emits only the rows an index selects; the fragments'
+        // row counts are then an upper bound, never the count it returns.
+        let rows_exact =
+            self.anchor.is_none() && self.fragments.iter().all(|fragment| fragment.rows_exact);
         Ok(Arc::new(Statistics {
             num_rows: match num_rows {
                 Some(n) if rows_exact => Precision::Exact(n),
