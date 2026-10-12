@@ -159,7 +159,22 @@
         "outcome": {
           "enum": ["typed_failure", "not_admitted", "not_attempted", "top_of_ladder"]
         },
-        "cause": { "type": ["string", "null"] }
+        "cause": { "type": ["string", "null"] },
+        "in_flight": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "query_id": { "type": "string", "minLength": 1 },
+                "binding_id": { "type": "string", "minLength": 1 },
+                "phase": { "type": "string", "pattern": "^(warmup|run-[1-9][0-9]*)$" }
+              },
+              "required": ["query_id", "binding_id", "phase"],
+              "additionalProperties": false
+            },
+            { "type": "null" }
+          ]
+        }
       },
       "required": ["label", "outcome", "cause"],
       "additionalProperties": false

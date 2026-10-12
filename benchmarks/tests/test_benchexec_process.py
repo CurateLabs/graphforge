@@ -130,6 +130,28 @@ class ResultsFinalTests(ScratchTest):
         document.write_text(FINAL_RESULTS)
         self.assertTrue(benchexec_process.results_final(self.raw))
 
+    def test_phase_tree_wait_uses_recursive_populated_state(self) -> None:
+        cgroup = self.scratch / "benchmark_fake"
+        cgroup.mkdir()
+        child = cgroup / "delegate_child"
+        child.mkdir()
+        (cgroup / "cgroup.procs").write_text("", encoding="ascii")
+        (child / "cgroup.procs").write_text("123\n", encoding="ascii")
+        (cgroup / "cgroup.events").write_text("populated 1\nfrozen 0\n", encoding="ascii")
+        self.assertFalse(
+            benchexec_process.wait_for_phase_trees_empty(
+                [cgroup], timeout_seconds=0.01, poll_seconds=0.001
+            )
+        )
+        (cgroup / "cgroup.events").write_text("populated 0\nfrozen 0\n", encoding="ascii")
+        self.assertTrue(benchexec_process.wait_for_phase_trees_empty([cgroup]))
+
+    def test_unreadable_cgroup_events_fails_closed(self) -> None:
+        cgroup = self.scratch / "benchmark_unreadable"
+        cgroup.mkdir()
+        (cgroup / "cgroup.procs").write_text("", encoding="ascii")
+        self.assertEqual(benchexec_process.wait_for_phase_trees_state([cgroup]), "unverified")
+
 
 class RunBoundedTests(ScratchTest):
     def test_a_run_that_exits_returns_its_own_status(self) -> None:

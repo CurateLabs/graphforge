@@ -2,6 +2,7 @@
 //! reopen, typed count mismatches, the measured pass and the result digest.
 
 use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
 
 use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray};
@@ -169,6 +170,71 @@ fn durable_project_reconciles_after_reopen_and_every_binding_is_measured() {
         .map(|s| measured(s).result_sha256.clone())
         .collect();
     assert_eq!(digests, repeated);
+}
+
+#[test]
+fn query_progress_is_flushed_in_binding_order() {
+    let root = tempfile::tempdir().unwrap();
+    let project = durable_project(root.path());
+    let workload_path = root.path().join("workload.json");
+    let counts_path = root.path().join("expected-counts.json");
+    let output_path = root.path().join("evidence.json");
+    let mut input = workload(json!([people_by_min_id()]));
+    input["variants"][0]["id"] = json!("people \"by\" min");
+    input["variants"][0]["bindings"][0]["id"] = json!("line one \"quoted\"");
+    std::fs::write(&workload_path, serde_json::to_vec(&input).unwrap()).unwrap();
+    std::fs::write(&counts_path, serde_json::to_vec(&expected(4, 3)).unwrap()).unwrap();
+    let progress_path = root.path().join("progress.jsonl");
+    let result = Command::new(env!("CARGO_BIN_EXE_graphforge-benchmark-gdc-scorecard"))
+        .args([
+            "query",
+            "--project",
+            project.to_str().unwrap(),
+            "--workload",
+            workload_path.to_str().unwrap(),
+            "--expected-counts",
+            counts_path.to_str().unwrap(),
+            "--output",
+            output_path.to_str().unwrap(),
+        ])
+        .env("GF_GDC_PROGRESS_PATH", &progress_path)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let progress: Vec<serde_json::Value> =
+        String::from_utf8(std::fs::read(&progress_path).unwrap())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+    assert_eq!(
+        progress.len(),
+        8,
+        "one start and completion for warmup and each binding: {progress:?}"
+    );
+    for (record, (action, binding, phase)) in progress.iter().zip([
+        ("start", "line one \"quoted\"", "warmup"),
+        ("end", "line one \"quoted\"", "warmup"),
+        ("start", "line one \"quoted\"", "run-1"),
+        ("end", "line one \"quoted\"", "run-1"),
+        ("start", "min-2", "run-2"),
+        ("end", "min-2", "run-2"),
+        ("start", "min-4", "run-3"),
+        ("end", "min-4", "run-3"),
+    ]) {
+        assert_eq!(record["gdc_query"], action);
+        assert_eq!(record["query_id"], "people \"by\" min");
+        assert_eq!(record["binding_id"], binding);
+        assert_eq!(record["phase"], phase);
+        if action == "end" {
+            assert!(record["latency_ns"].is_number());
+            assert!(record["rows"].is_number());
+        }
+    }
 }
 
 #[test]
