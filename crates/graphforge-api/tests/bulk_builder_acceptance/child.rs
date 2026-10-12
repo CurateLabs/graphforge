@@ -8,8 +8,10 @@
 //! child therefore knows which session to resume.
 
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use graphforge_api::{GraphForge, ImportPhase};
 use graphforge_core::{GfError, ProjectErrorCode};
@@ -372,7 +374,7 @@ pub fn run(spec: &ChildSpec, conditions: &Conditions) -> Outcome {
         "GF_BULK_BUILD_MEMORY_BUDGET_BYTES",
         conditions.budget.unwrap_or(RESIDENT_BUDGET).to_string(),
     );
-    let output = command.output().unwrap();
+    let output = output_within_deadline(&mut command);
     let mut lines = BTreeMap::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         for name in [
@@ -396,6 +398,106 @@ pub fn run(spec: &ChildSpec, conditions: &Conditions) -> Outcome {
         lines,
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     }
+}
+
+/// How long a child may run. The slowest builds here take about a minute on a
+/// loaded host; a child still running after this is hung.
+const CHILD_DEADLINE: Duration = Duration::from_secs(600);
+
+/// Run `command` to completion like `Command::output`, but give up on a child
+/// that outlives [`CHILD_DEADLINE`]: kill it and fail the test with what it
+/// printed and where each of its threads was blocked, instead of waiting on it
+/// for the rest of the CI job (#1881).
+fn output_within_deadline(command: &mut Command) -> Output {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Both pipes are drained while the child runs, so a full pipe never blocks it.
+    let drain = |mut pipe: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = pipe.read_to_end(&mut bytes);
+            bytes
+        })
+    };
+    let stdout = drain(Box::new(child.stdout.take().unwrap()));
+    let stderr = drain(Box::new(child.stderr.take().unwrap()));
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > CHILD_DEADLINE {
+            let threads = blocked_threads(child.id());
+            child.kill().unwrap();
+            child.wait().unwrap();
+            let (stdout, stderr) = (stdout.join().unwrap(), stderr.join().unwrap());
+            panic!(
+                "the child ran for more than {CHILD_DEADLINE:?} and was killed\n\
+                 threads at the deadline:\n{threads}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    Output {
+        status,
+        stdout: stdout.join().unwrap(),
+        stderr: stderr.join().unwrap(),
+    }
+}
+
+/// Where each thread of process `pid` is blocked: the stacks from a debugger
+/// when the host has one, else what `/proc` says about every thread. A debugger
+/// cannot attach to a process that is not its descendant where `ptrace_scope`
+/// is 1, so it is also tried through `sudo`.
+fn blocked_threads(pid: u32) -> String {
+    let pid = pid.to_string();
+    let debuggers: [&[&str]; 2] = [
+        &["gdb", "-batch", "-ex", "thread apply all bt", "-p"],
+        &["eu-stack", "-p"],
+    ];
+    for through_sudo in [false, true] {
+        for debugger in debuggers {
+            let mut command = if through_sudo {
+                let mut command = Command::new("sudo");
+                command.arg("-n").args(debugger);
+                command
+            } else {
+                let mut command = Command::new(debugger[0]);
+                command.args(&debugger[1..]);
+                command
+            };
+            // gdb exits successfully when it cannot attach, so look for a frame.
+            if let Ok(output) = command.arg(&pid).stdin(Stdio::null()).output() {
+                let stacks = String::from_utf8_lossy(&output.stdout);
+                if output.status.success() && stacks.contains("#0") {
+                    return stacks.into_owned();
+                }
+            }
+        }
+    }
+    let mut report = String::from("(no debugger on the host; /proc only)\n");
+    if let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) {
+        for task in tasks.flatten() {
+            let read = |name: &str| {
+                std::fs::read_to_string(task.path().join(name))
+                    .map_or_else(|error| format!("<{error}>"), |text| text.trim().to_owned())
+            };
+            report.push_str(&format!(
+                "{} {} wchan={} syscall={}\n",
+                task.file_name().to_string_lossy(),
+                read("comm"),
+                read("wchan"),
+                read("syscall"),
+            ));
+        }
+    }
+    report
 }
 
 pub fn spec_for(project: &Path, sources: &Sources) -> ChildSpec {
