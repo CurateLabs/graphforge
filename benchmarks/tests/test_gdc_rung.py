@@ -17,8 +17,8 @@ import json
 import os
 from pathlib import Path
 import resource
-import signal
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
