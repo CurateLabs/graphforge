@@ -320,3 +320,69 @@ pub fn visit_edge_property_batches(
     }
     outcome.map(|_| ()).map_err(data_fusion_error)
 }
+
+/// The one property a projected batch carries, collected without a map per row.
+#[derive(Default)]
+struct SingleProperty(Option<graphforge_ir::IrLiteral>);
+
+impl Extend<(String, graphforge_ir::IrLiteral)> for SingleProperty {
+    fn extend<I: IntoIterator<Item = (String, graphforge_ir::IrLiteral)>>(&mut self, pairs: I) {
+        for (_, value) in pairs {
+            self.0 = Some(value);
+        }
+    }
+}
+
+/// Visit the newest live row of every node of one node-property route with the
+/// decoded value of `property`, in bounded batches.
+///
+/// A row whose `property` is NULL, or a route that has no such column, is
+/// visited with `None`: the value is never fabricated. Only the node UUID key
+/// and `property` are decoded, and nothing is retained between rows, so a
+/// caller that needs one value per node keeps just that value in its own dense
+/// structure. Values decode exactly as [`read_node_property_rows`](crate::read_node_property_rows)
+/// decodes them. `inventory` is the caller's pinned authority; `None` captures
+/// one for the route.
+///
+/// # Errors
+/// Returns the typed error an admitted read raised when the route cannot be
+/// read; a visitor error stops the read and is returned unchanged.
+pub fn visit_node_property_values(
+    dir: &std::path::Path,
+    inventory: Option<&crate::AuthenticatedPropertyInventory>,
+    route: &str,
+    property: &str,
+    mut visit: impl FnMut(&[u8; 16], Option<graphforge_ir::IrLiteral>) -> Result<(), GfError>,
+) -> Result<(), GfError> {
+    let selected = std::collections::BTreeSet::from([property.to_owned()]);
+    let mut failure: Option<GfError> = None;
+    let outcome = super::property_readers::visit_property_overlay_batched_projected(
+        dir,
+        inventory,
+        route,
+        false,
+        8_192,
+        Some(&selected),
+        |batch| {
+            let decoded = crate::writer::decode_property_batch_into(
+                batch,
+                crate::property_overlay::PropertyRouteKind::Node.uuid_field(),
+                |uuid: [u8; 16], value: SingleProperty| {
+                    if failure.is_none()
+                        && let Err(error) = visit(&uuid, value.0)
+                    {
+                        failure = Some(error);
+                    }
+                },
+            );
+            if let Err(error) = decoded {
+                failure.get_or_insert(error);
+            }
+            Ok(failure.is_none())
+        },
+    );
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    outcome.map(|_| ()).map_err(data_fusion_error)
+}

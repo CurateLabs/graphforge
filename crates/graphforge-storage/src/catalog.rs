@@ -70,7 +70,7 @@ pub use dense_node_identities::{
 };
 pub use export_streams::{
     EXPORT_STREAM_BATCH_ROWS, count_node_rows, visit_edge_identities, visit_edge_property_batches,
-    visit_node_identities,
+    visit_node_identities, visit_node_property_values,
 };
 pub use filtered_parquet::read_edges_filtered;
 pub use filtered_parquet::read_edges_filtered_from_inventory;

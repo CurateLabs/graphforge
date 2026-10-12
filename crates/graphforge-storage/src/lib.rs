@@ -523,7 +523,7 @@ pub use catalog::{
 };
 pub use catalog::{
     EXPORT_STREAM_BATCH_ROWS, count_node_rows, visit_edge_identities, visit_edge_property_batches,
-    visit_node_identities,
+    visit_node_identities, visit_node_property_values,
 };
 
 pub mod runtime_entity_labels;

@@ -128,7 +128,7 @@ fn synchronous_labels(
         .map(|index| {
             if options.initial_label_property.is_some() {
                 graph
-                    .initial_label(graph.node_id_of_ordinal(index))
+                    .initial_label_of_ordinal(index)
                     .ok_or_else(|| execution("selected node has no initial label"))
             } else {
                 i64::try_from(index).map_err(|_| execution("initial label exceeds Int64 range"))

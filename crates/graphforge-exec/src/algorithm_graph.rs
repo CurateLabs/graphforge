@@ -126,7 +126,10 @@ pub(crate) struct AdjacencyGraph {
     dense_node_ids: OnceLock<Vec<u64>>,
     uuid_lookup: UuidLookup,
     node_vectors: HashMap<u64, Vec<f64>>,
-    node_initial_labels: HashMap<u64, i64>,
+    /// Initial label of the node at each ordinal, loaded only for synchronous
+    /// label propagation. Dense and complete, or empty when none were loaded:
+    /// no map keyed by a node (#1974).
+    initial_labels: Vec<i64>,
     inventory: Option<std::sync::Arc<graphforge_storage::AuthenticatedPropertyInventory>>,
     evidence: AlgorithmExportEvidence,
 }
@@ -321,7 +324,7 @@ impl AdjacencyGraph {
             dense_node_ids: OnceLock::new(),
             uuid_lookup: UuidLookup::default(),
             node_vectors: HashMap::new(),
-            node_initial_labels: HashMap::new(),
+            initial_labels: Vec::new(),
             inventory,
             evidence,
         }
@@ -471,6 +474,24 @@ impl AdjacencyGraph {
             }
             None => graphforge_storage::read_node_property_rows(dir, route),
         }
+    }
+
+    /// Stream the newest value of `property` for every row of one node-property
+    /// route, through the admitted inventory when this view holds one.
+    pub(crate) fn visit_node_property_values(
+        &self,
+        dir: &Path,
+        route: &str,
+        property: &str,
+        visit: impl FnMut(&[u8; 16], Option<IrLiteral>) -> Result<(), GfError>,
+    ) -> Result<(), GfError> {
+        graphforge_storage::visit_node_property_values(
+            dir,
+            self.inventory.as_deref(),
+            route,
+            property,
+            visit,
+        )
     }
 
     pub(crate) fn edge_property_batches(
@@ -644,13 +665,16 @@ impl AdjacencyGraph {
                 digest.update(value.to_bits().to_be_bytes());
             }
         }
-        if !self.node_initial_labels.is_empty() {
+        if !self.initial_labels.is_empty() {
             let mut labels = self
-                .node_initial_labels
+                .initial_labels
                 .iter()
-                .map(|(&node, &label)| {
-                    self.node_uuid(node)
-                        .map(|uuid| (uuid, label))
+                .enumerate()
+                .map(|(ordinal, &label)| {
+                    self.topology
+                        .uuids
+                        .get(ordinal)
+                        .map(|&uuid| (uuid, label))
                         .ok_or_else(|| {
                             GfError::Execution(
                                 "initial label projection has no UUID identity".into(),
@@ -817,9 +841,10 @@ impl AdjacencyGraph {
         self.uuid_lookup.find(&self.topology.uuids, node_uuid)
     }
 
-    /// Exact graph-native label, loaded only for synchronous label propagation.
-    pub(crate) fn initial_label(&self, node_id: u64) -> Option<i64> {
-        self.node_initial_labels.get(&node_id).copied()
+    /// Exact graph-native label of the node at `ordinal`, loaded only for
+    /// synchronous label propagation.
+    pub(crate) fn initial_label_of_ordinal(&self, ordinal: usize) -> Option<i64> {
+        self.initial_labels.get(ordinal).copied()
     }
 
     /// Validated feature vector for one selected node.
@@ -1177,48 +1202,56 @@ pub(crate) fn load_node_vectors(
 }
 
 /// Load exact integer labels without passing through a floating-point matrix.
+///
+/// Each node-property route is streamed once with only `property` decoded, and
+/// its labels are written into a dense array by node ordinal. The load holds one
+/// `i64` and one presence flag per selected node, and no map keyed by a node
+/// (#1974). A node with no label in any route, a label that is not `Int64`, or
+/// two routes that disagree on a node's label is refused.
 pub(crate) fn load_node_initial_labels(
     graph: &mut AdjacencyGraph,
     dir: &Path,
     property: &str,
 ) -> Result<(), GfError> {
-    let mut labels = HashMap::new();
+    let nodes = graph.node_count();
+    let mut labels: Vec<i64> = Vec::new();
+    labels
+        .try_reserve_exact(nodes)
+        .map_err(|_| GfError::Execution("initial label allocation failed".into()))?;
+    labels.resize(nodes, 0);
+    let mut present = vec![false; nodes];
     for stem in graph.property_routes(dir, false) {
-        for (uuid, row) in graph
-            .node_property_rows(dir, &stem)
-            .map_err(storage_error)?
-        {
-            let Some(node_id) = graph.node_id(&uuid) else {
-                continue;
+        graph.visit_node_property_values(dir, &stem, property, |uuid, value| {
+            let Some(ordinal) = graph.ordinal_of_uuid(uuid) else {
+                return Ok(());
             };
-            let Some(value) = row.get(property) else {
-                continue;
+            let Some(value) = value else {
+                return Ok(());
             };
             let IrLiteral::Int(label) = value else {
                 return Err(GfError::Validation(format!(
                     "node {} initial label property {property:?} must be Int64",
-                    uuid_text(&uuid)
+                    uuid_text(uuid)
                 )));
             };
-            if let Some(previous) = labels.insert(node_id, *label)
-                && previous != *label
-            {
+            if present[ordinal] && labels[ordinal] != label {
                 return Err(GfError::Validation(format!(
                     "node {} has conflicting initial label property {property:?}",
-                    uuid_text(&uuid)
+                    uuid_text(uuid)
                 )));
             }
-        }
+            labels[ordinal] = label;
+            present[ordinal] = true;
+            Ok(())
+        })?;
     }
-    for &node in graph.node_ids() {
-        if !labels.contains_key(&node) {
-            return Err(GfError::Validation(format!(
-                "node {} is missing initial label property {property:?}",
-                uuid_text(&selected_uuid(graph, node)?)
-            )));
-        }
+    if let Some(ordinal) = present.iter().position(|&found| !found) {
+        return Err(GfError::Validation(format!(
+            "node {} is missing initial label property {property:?}",
+            uuid_text(&selected_uuid(graph, graph.node_id_of_ordinal(ordinal))?)
+        )));
     }
-    graph.node_initial_labels = labels;
+    graph.initial_labels = labels;
     Ok(())
 }
 
