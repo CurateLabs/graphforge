@@ -27,6 +27,34 @@ impl AuthenticatedPropertyInventory {
         authenticated_property_inventory(project)
     }
 
+    /// Admit the property objects of one node route of an unpublished
+    /// construction output, whose route table the builder already holds. The
+    /// objects are the builder's own, named by the digests it just computed.
+    pub(crate) fn capture_route_for_construction(
+        graph_root: &Path,
+        entries: Vec<crate::GraphFileEntry>,
+        table: &crate::route_component::RouteTable,
+        route: &str,
+    ) -> Result<Self, GfError> {
+        let requested = Some((PropertyRouteKind::Node, route));
+        let entries = resolve_versioned_property_entries_for_route(
+            graph_root,
+            entries,
+            requested,
+            Some(table),
+            None,
+        )?;
+        Self::admit_entries_with_admission(
+            graph_root,
+            entries,
+            requested,
+            Some(table),
+            false,
+            None,
+            FragmentAdmission::Eager,
+        )
+    }
+
     /// Capture an unpublished portable graph with the importer's existing
     /// Parquet resource policy applied before any property metadata is decoded.
     pub(crate) fn capture_for_import(
@@ -1130,6 +1158,54 @@ impl AuthenticatedPropertyInventory {
             });
         }
         Ok(())
+    }
+
+    /// The routes of one kind that hold at least one fragment, in name order.
+    pub(crate) fn route_names(&self, kind: PropertyRouteKind) -> Vec<String> {
+        self.routes
+            .iter()
+            .filter(|((candidate, _), fragments)| *candidate == kind && !fragments.is_empty())
+            .map(|((_, route), _)| route.clone())
+            .collect()
+    }
+
+    /// A digest of the exact bytes a route's newest-wins state derives from:
+    /// every object's path, length and XXH64 as the manifest names them. Two
+    /// inventories with equal digests hold the same route; a derived index
+    /// stamped with it is current only while it matches. Reads no payload.
+    pub(crate) fn route_source_digest(
+        &self,
+        kind: PropertyRouteKind,
+        route: &str,
+    ) -> Option<String> {
+        use sha2::{Digest, Sha256};
+        let fragments = self.routes.get(&(kind, route.to_owned()))?;
+        let mut parts = fragments
+            .iter()
+            .flat_map(|fragment| &fragment.parts)
+            .map(|part| {
+                (
+                    part.entry.relative_path.as_str(),
+                    part.entry.byte_length,
+                    part.entry.content_xxh64,
+                )
+            })
+            .collect::<Vec<_>>();
+        parts.sort_unstable();
+        let mut hasher = Sha256::new();
+        for (path, length, xxh64) in parts {
+            hasher.update(u64::try_from(path.len()).unwrap_or(u64::MAX).to_le_bytes());
+            hasher.update(path.as_bytes());
+            hasher.update(length.to_le_bytes());
+            hasher.update(xxh64.to_le_bytes());
+        }
+        Some(
+            hasher
+                .finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+        )
     }
 
     /// Canonical logical schema authenticated across every fragment in a route.

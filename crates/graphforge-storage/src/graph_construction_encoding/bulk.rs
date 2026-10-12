@@ -1231,6 +1231,14 @@ pub(crate) fn encode_bulk(
     )?;
     drop((nodes, edge_side, node_groups, edge_groups));
 
+    super::property_index::write_property_equality_indexes(
+        &output,
+        &output.path().join("graph"),
+        &routes,
+        &mut artifacts,
+        cancelled,
+        &mut evidence,
+    )?;
     installer_extend_adjacency(
         &installer,
         &output,

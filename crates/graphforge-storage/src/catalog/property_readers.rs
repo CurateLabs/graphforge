@@ -168,8 +168,14 @@ where
     let mut metrics = crate::PropertyOverlayMetrics::default();
     // Only a node route's equality is answered from statistics; the candidate
     // read decodes the compared column alone.
-    let candidates = match equality.filter(|_| !is_edge) {
-        Some(equality) => inventory
+    let indexed = match equality.filter(|_| !is_edge) {
+        Some(equality) => crate::property_equality_index::lookup(dir, inventory, stem, equality)
+            .map_err(|error| DataFusionError::External(Box::new(error)))?,
+        None => None,
+    };
+    let candidates = match (indexed, equality.filter(|_| !is_edge)) {
+        (Some(found), _) => Some((found, crate::PropertyOverlayMetrics::default())),
+        (None, Some(equality)) => inventory
             .equality_candidates(
                 kind,
                 stem,
@@ -179,7 +185,7 @@ where
                 collect,
             )
             .map_err(|error| DataFusionError::External(Box::new(error)))?,
-        None => None,
+        (None, None) => None,
     };
     let candidate_uuids = match candidates {
         Some((candidates, work)) => {

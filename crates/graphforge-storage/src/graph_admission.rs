@@ -81,15 +81,27 @@ pub(crate) fn classify(relative_path: &str) -> PayloadClass {
         && !relative_path.contains("/deltas/")
         && (relative_path.ends_with("/index_manifest.parquet")
             || relative_path.ends_with(".csr.json"));
+    // The equality index's manifest authenticates the shards it names, and
+    // each shard is checked by the lookup that reads it.
+    let property_index_manifest = relative_path.starts_with("indexes/property/")
+        && Path::new(relative_path)
+            .extension()
+            .is_some_and(|extension| extension == "eq");
+    let property_index_shard = relative_path.starts_with("indexes/property/")
+        && Path::new(relative_path)
+            .extension()
+            .is_some_and(|extension| extension == "eqs");
     let first_touch = relative_path == "topology/nodes.parquet"
         || relative_path.starts_with("topology/nodes/")
         || relative_path.starts_with("topology/edges/")
         || relative_path.starts_with("properties/")
         || relative_path.starts_with("edge_properties/")
         || relative_path.starts_with("indexes/search/")
+        || property_index_manifest
         || is_hard_linked_identity_artifact(relative_path)
         || adjacency_manifest;
-    let self_authenticating = relative_path.starts_with("topology/uuid-membership/")
+    let self_authenticating = property_index_shard
+        || relative_path.starts_with("topology/uuid-membership/")
         || relative_path.starts_with("deltas/")
         || (relative_path.starts_with("indexes/adjacency/")
             && relative_path.contains(".csr.shards-")
