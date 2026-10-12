@@ -461,6 +461,25 @@ type GatheredPathProps = (
     std::collections::HashMap<[u8; 16], Vec<PropRowLoc>>,
 );
 
+/// The targeted reader's inputs: the requested UUIDs in strictly ascending
+/// order (`unique` holds no repeat, so sorting suffices; the sorted copy is
+/// reserved with the other scratch before any read) and the property columns
+/// the hydrated elements carry.
+fn targeted_read_inputs(
+    h: &Invocation<'_>,
+    unique: &[[u8; 16]],
+) -> (Vec<[u8; 16]>, std::collections::BTreeSet<String>) {
+    let mut targets = unique.to_vec();
+    targets.sort_unstable();
+    let selected = h
+        .fields
+        .iter()
+        .skip(2)
+        .map(|field| field.name().clone())
+        .collect();
+    (targets, selected)
+}
+
 /// Gather property rows for the requested UUID set only, through the targeted
 /// authenticated reader: fragments and row groups are pruned by UUID
 /// statistics, only the descriptor's property columns are decoded, and the
@@ -489,17 +508,7 @@ fn gather_path_node_props(
         return Ok((kept_by_stem, uuid_to_loc));
     }
 
-    // `unique` holds no repeat, so its sorted copy is strictly ascending, as
-    // the targeted reader requires. Reserved with the other scratch before any
-    // read.
-    let mut targets = unique.to_vec();
-    targets.sort_unstable();
-    let selected: std::collections::BTreeSet<String> = h
-        .fields
-        .iter()
-        .skip(2)
-        .map(|field| field.name().clone())
-        .collect();
+    let (targets, selected) = targeted_read_inputs(h, unique);
 
     for si in 0..h.prop_stems.len() {
         h.resource.check()?;

@@ -310,7 +310,11 @@ fn hydrating_path_nodes_reads_do_not_grow_with_unrelated_nodes() {
                 assert_eq!(io.write_bytes, 0, "{io:?}");
                 assert_eq!(io.write_calls, 0, "{io:?}");
             }
-            hydration.push(hydrated_io.read_bytes.saturating_sub(expanded_io.read_bytes));
+            hydration.push(
+                hydrated_io
+                    .read_bytes
+                    .saturating_sub(expanded_io.read_bytes),
+            );
         }
         eprintln!(
             "partitions {target_partitions}: hydration reads at {SMALL_NODES} and {LARGE_NODES} \
@@ -351,7 +355,10 @@ fn hydrated_path_nodes_resolve_the_newest_snapshot_of_each_node() {
     for partitions in [1, 4, 1] {
         let forge = open(&built.project, partitions);
         let (hydrated, io) = measured(&forge, HYDRATED, MUTATED_ANCHOR);
-        assert_eq!(id_lists(&hydrated), expected_lists(MUTATED_ANCHOR, ident_of));
+        assert_eq!(
+            id_lists(&hydrated),
+            expected_lists(MUTATED_ANCHOR, ident_of)
+        );
         assert_eq!(io.write_bytes, 0, "{io:?}");
         assert_eq!(io.write_calls, 0, "{io:?}");
     }

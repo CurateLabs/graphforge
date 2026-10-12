@@ -523,11 +523,45 @@ impl UuidMembership for CompactUuidSet {
 #[cfg(test)]
 mod tests {
     use super::CompactUuidSet;
+    use super::SortedUuids;
     use super::UuidFilter;
     use super::UuidMembership;
 
     fn uuid(value: u128) -> [u8; 16] {
         value.to_be_bytes()
+    }
+
+    #[test]
+    fn sorted_slice_answers_membership_and_closed_ranges_exactly() {
+        let values = [uuid(2), uuid(4), uuid(8)];
+        let set = SortedUuids(&values);
+        assert!(set.is_strictly_ascending());
+        assert_eq!((set.len(), set.is_empty()), (3, false));
+        assert_eq!(
+            (set.min_uuid(), set.max_uuid()),
+            (Some(uuid(2)), Some(uuid(8)))
+        );
+        for value in 0..=9 {
+            assert_eq!(set.contains_uuid(&uuid(value)), [2, 4, 8].contains(&value));
+        }
+        // A closed range holds a member exactly when one lies within it.
+        assert!(set.may_contain_in_range(&uuid(0), &uuid(2)));
+        assert!(set.may_contain_in_range(&uuid(8), &uuid(9)));
+        assert!(set.may_contain_in_range(&uuid(3), &uuid(4)));
+        assert!(!set.may_contain_in_range(&uuid(5), &uuid(7)));
+        assert!(!set.may_contain_in_range(&uuid(9), &uuid(10)));
+        assert!(!set.may_contain_in_range(&uuid(0), &uuid(1)));
+        assert!(!set.any_match_in_range(&uuid(2), &uuid(8), &|member| member == &uuid(5)));
+        assert!(set.any_match_in_range(&uuid(2), &uuid(8), &|member| member == &uuid(4)));
+
+        let empty = SortedUuids(&[]);
+        assert!(empty.is_empty() && empty.is_strictly_ascending());
+        assert!(!empty.may_contain_in_range(&uuid(0), &uuid(u128::MAX)));
+        assert_eq!(empty.min_uuid(), None);
+
+        for unordered in [[uuid(4), uuid(2)], [uuid(2), uuid(2)]] {
+            assert!(!SortedUuids(&unordered).is_strictly_ascending());
+        }
     }
 
     #[test]
