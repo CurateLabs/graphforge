@@ -188,9 +188,25 @@
           ]
         },
         "cause": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,80}$" },
-        "detail": { "type": "string", "maxLength": 2048 }
+        "detail": { "type": "string", "maxLength": 2048 },
+        "in_flight": {
+          "oneOf": [
+            { "$ref": "#/$defs/in_flight" },
+            { "type": "null" }
+          ]
+        }
       },
       "required": ["phase", "cause", "detail"],
+      "additionalProperties": false
+    },
+    "in_flight": {
+      "type": "object",
+      "properties": {
+        "query_id": { "type": "string", "minLength": 1 },
+        "binding_id": { "type": "string", "minLength": 1 },
+        "phase": { "type": "string", "pattern": "^(warmup|run-[1-9][0-9]*)$" }
+      },
+      "required": ["query_id", "binding_id", "phase"],
       "additionalProperties": false
     },
     "phase": {
