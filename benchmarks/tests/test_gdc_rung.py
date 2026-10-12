@@ -146,7 +146,8 @@ class FakeBenchExec:
         ET.ElementTree(result).write(raw / f"benchmark.results.{gdc_rung.DEFINITION}.xml")
         if self.swap is not None:
             pages = 7 if self.swap == "swapped" else 0
-            fake_cgroup = stage / "fake-cgroup"
+            fake_cgroup = work_root.parent / "fake-cgroups" / stage.name
+            fake_cgroup.parent.mkdir(exist_ok=True)
             fake_cgroup.mkdir()
             (fake_cgroup / "cgroup.procs").write_text("", encoding="ascii")
             (fake_cgroup / "cgroup.events").write_text("populated 0\n", encoding="ascii")

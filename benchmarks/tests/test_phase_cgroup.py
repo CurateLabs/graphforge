@@ -143,7 +143,7 @@ class PhaseSwapTests(ScratchTest):
         run = self.host.benchexec_run(pswpout=3, peak=12288)
         sampler = self.host.sampler()
         sampler.sample(PID)
-        for name in ("memory.stat", "memory.swap.peak", "memory.swap.max"):
+        for name in ("memory.stat", "memory.swap.peak", "memory.swap.max", "cgroup.events"):
             (run / name).unlink()  # BenchExec removed the run cgroup
         run.rmdir()
         sampler.sample(PID)
