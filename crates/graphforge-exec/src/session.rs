@@ -364,15 +364,9 @@ fn session_runtime(
     resources: &SessionResourceConfig,
 ) -> Result<Arc<datafusion::execution::runtime_env::RuntimeEnv>, GfError> {
     let memory_budget = usize::try_from(resources.memory_budget_bytes).unwrap_or(usize::MAX);
-    let mut runtime_builder = datafusion::execution::runtime_env::RuntimeEnvBuilder::new();
+    let mut runtime_builder = datafusion::execution::runtime_env::RuntimeEnvBuilder::new()
+        .with_memory_limit(memory_budget, 1.0);
     if let (true, Some(dir)) = (resources.spill_enabled, &resources.spill_directory) {
-        // A spilling query divides the pool fairly among its spillable
-        // consumers. The greedy pool let one partition's aggregate or sort
-        // fill it, and the others then failed to reserve the memory a spill
-        // itself needs (#1985).
-        runtime_builder = runtime_builder.with_memory_pool(Arc::new(
-            datafusion::execution::memory_pool::FairSpillPool::new(memory_budget),
-        ));
         std::fs::create_dir_all(dir)
             .map_err(|error| GfError::Storage(format!("query spill directory: {error}")))?;
         runtime_builder = runtime_builder.with_temp_file_path(dir.clone());
@@ -380,7 +374,6 @@ fn session_runtime(
             runtime_builder = runtime_builder.with_max_temp_directory_size(max);
         }
     } else {
-        runtime_builder = runtime_builder.with_memory_limit(memory_budget, 1.0);
         runtime_builder = runtime_builder.with_disk_manager_builder(
             datafusion::execution::disk_manager::DiskManagerBuilder::default()
                 .with_mode(datafusion::execution::disk_manager::DiskManagerMode::Disabled),

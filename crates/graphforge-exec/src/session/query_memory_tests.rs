@@ -14,8 +14,8 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 
 const MIB: u64 = 1024 * 1024;
-/// Rows per table: 400k keys with a 100-byte payload is about 43 MiB a table.
-const ROWS: i64 = 400_000;
+/// Rows per table: 800k keys with a 100-byte payload is about 86 MiB a table.
+const ROWS: i64 = 800_000;
 
 fn payload_table(batch_rows: usize) -> MemTable {
     let schema = Arc::new(Schema::new(vec![
@@ -111,7 +111,7 @@ fn spills(plan: &Arc<dyn ExecutionPlan>, operator: &str) -> usize {
 const JOIN: &str = "SELECT count(*), sum(a.k), sum(length(a.pad)), sum(length(b.pad)) \
                     FROM a JOIN b ON a.k = b.k";
 
-/// Both sides are about 43 MiB, so a hash join's build side cannot fit a
+/// Both sides are about 86 MiB, so a hash join's build side cannot fit a
 /// 48 MiB pool beside the probe side and its hash table. It must be planned as a spilling sort-merge join and return
 /// what the hash join returns under a pool that holds it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -153,13 +153,13 @@ async fn a_join_whose_build_side_exceeds_the_budget_spills_and_matches_the_large
 const AGGREGATE: &str = "SELECT count(*), sum(k), sum(length(m)) \
                          FROM (SELECT k, max(pad) AS m FROM a GROUP BY k)";
 
-/// 400k groups of a 100-byte maximum are about 50 MiB of group state, past a
-/// 32 MiB pool: the grouped aggregate must spill and return what it returns
+/// 800k groups of a 100-byte maximum are about 100 MiB of group state, past a
+/// 64 MiB pool (two partitions of the 32 MiB each is sized for): the grouped aggregate must spill and return what it returns
 /// under a large pool.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_aggregate_whose_groups_exceed_the_budget_spills_and_matches_the_large_budget() {
     let spill = TempDir::new().unwrap();
-    let (small, _small_dir) = session(32 * MIB, 4, &spill);
+    let (small, _small_dir) = session(64 * MIB, 2, &spill);
     let (small_rows, small_plan) = run(&small, AGGREGATE)
         .await
         .expect("an aggregate over the budget must spill, not exhaust the pool");
@@ -168,7 +168,7 @@ async fn an_aggregate_whose_groups_exceed_the_budget_spills_and_matches_the_larg
         "the groups exceed the budget, so the aggregate must have spilled:\n{}",
         plan_text(&small_plan)
     );
-    let (large, _large_dir) = session(2048 * MIB, 4, &spill);
+    let (large, _large_dir) = session(2048 * MIB, 2, &spill);
     let (large_rows, large_plan) = run(&large, AGGREGATE).await.unwrap();
     assert_eq!(spills(&large_plan, "AggregateExec"), 0);
     assert_eq!(small_rows, large_rows);

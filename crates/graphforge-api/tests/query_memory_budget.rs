@@ -19,9 +19,7 @@ fn instance(budget: u64, spill: SpillPolicy) -> GraphForge {
         None,
         GraphForgeOptions {
             resource: ExecutionResourcePolicy {
-                mode: ResourcePolicyMode::Explicit,
-                tokio_worker_threads: Some(2),
-                target_partitions: Some(2),
+                mode: ResourcePolicyMode::Automatic,
                 memory_budget_bytes: Some(budget),
                 spill,
                 ..ExecutionResourcePolicy::default()
