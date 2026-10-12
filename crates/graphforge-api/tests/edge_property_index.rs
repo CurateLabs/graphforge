@@ -550,7 +550,8 @@ fn a_one_hop_edge_property_read_is_bounded_by_the_frontier_not_the_relation() {
         // statement runs on the capturing thread; with more, the capture sees
         // less, never more.
         let bound = FRONTIER as u64
-            * (largest_blob(&large.project, None) + largest_blob(&large.project, Some("timestamp")))
+            * (largest_blob(&large.project, None)
+                + largest_blob(&large.project, Some("timestamp")))
             + (512 << 10);
         for (size, bytes) in ["small", "large"].into_iter().zip(&reads) {
             assert!(
@@ -661,11 +662,7 @@ fn a_corrupted_index_is_refused_not_rebuilt_or_bypassed() {
         let count = scalar_i64(&run(&forge, NO_PROPERTY, 0));
         assert_eq!(count, FRONTIER as i64, "{label}");
         drop(forge);
-        assert_eq!(
-            digests(&built.project),
-            before,
-            "{label}: the read rebuilt"
-        );
+        assert_eq!(digests(&built.project), before, "{label}: the read rebuilt");
     }
 }
 

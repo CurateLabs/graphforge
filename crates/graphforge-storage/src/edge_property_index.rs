@@ -624,7 +624,9 @@ fn current_manifest(
         return Ok(None);
     }
     if manifest.pack_dir.contains(['/', '\\']) || manifest.pack_dir.starts_with('.') {
-        return Err(validation("manifest names a pack directory outside its own"));
+        return Err(validation(
+            "manifest names a pack directory outside its own",
+        ));
     }
     let ranges = manifest
         .shards

@@ -77,9 +77,16 @@ fn build(fragments: &[RecordBatch]) -> Option<Built> {
     }
     let mut files = builder.finish("_exploratory", "digest").unwrap();
     let manifest_file = files.pop()?;
-    packs.extend(files.into_iter().map(|file| (file.relative_path, file.bytes)));
-    let manifest = decode_manifest(&manifest_file.bytes, Path::new(&manifest_file.relative_path))
-        .unwrap();
+    packs.extend(
+        files
+            .into_iter()
+            .map(|file| (file.relative_path, file.bytes)),
+    );
+    let manifest = decode_manifest(
+        &manifest_file.bytes,
+        Path::new(&manifest_file.relative_path),
+    )
+    .unwrap();
     Some(Built {
         packs,
         manifest_file,
