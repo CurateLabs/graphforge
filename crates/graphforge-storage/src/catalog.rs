@@ -78,6 +78,7 @@ pub use filtered_parquet::read_edges_filtered_observed;
 pub use filtered_parquet::read_edges_filtered_observed_from_inventory;
 pub use filtered_parquet::read_edges_filtered_projected_from_inventory;
 pub use filtered_parquet::read_edges_filtered_projected_observed;
+pub(crate) use filtered_parquet::read_node_fragment_filtered;
 pub use filtered_parquet::read_nodes_filtered;
 pub use filtered_parquet::read_nodes_filtered_observed;
 pub use filtered_parquet::read_nodes_filtered_projected_observed;
@@ -1696,6 +1697,40 @@ impl GraphCatalog {
                 .topology_files()
                 .map_err(|error| DataFusionError::Execution(error.to_string()))?,
         ))
+    }
+
+    /// [`node_table`](Self::node_table) that reads only the nodes a current
+    /// property-equality index on `column` of node route `route` selects for
+    /// `value`, wherever its rows can reach only a join with that route's rows
+    /// for the same equality (#1983). It reads every node when no current index
+    /// answers or the equality is not one an index covers.
+    pub fn anchored_node_table(
+        &self,
+        dir: &Path,
+        route: &str,
+        column: &str,
+        value: &datafusion::scalar::ScalarValue,
+    ) -> Result<TopologyNodeTable, DataFusionError> {
+        let table = self.node_table()?;
+        let inventory = self
+            .schema
+            .authority
+            .read()
+            .expect("property inventory lock poisoned")
+            .property_inventory
+            .clone();
+        Ok(
+            match crate::node_anchor::NodeAnchor::new(
+                dir.to_path_buf(),
+                inventory,
+                route.to_owned(),
+                column,
+                value,
+            ) {
+                Some(anchor) => table.with_anchor(anchor),
+                None => table,
+            },
+        )
     }
 
     /// Relation provider over this session's selected payloads.

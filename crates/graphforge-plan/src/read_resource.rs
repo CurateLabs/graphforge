@@ -37,6 +37,22 @@ pub enum GraphReadTable {
     EdgePropertyKeys(String),
 }
 
+/// A node-property equality that restricts a node-topology scan to the rows an
+/// equality index can select, wherever the scan feeds a join on `node_uuid` to
+/// the property route that holds the equality (#1983).
+///
+/// This is a hint, not a filter: the plan keeps the equality and the join, so
+/// it decides which rows survive. The bound provider may return fewer rows than
+/// the whole table, but only rows that join would have discarded, and returns
+/// every row when no current index answers the equality.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphReadAnchor {
+    /// The node property route the equality is evaluated on.
+    pub route: String,
+    /// `column = literal` on that route, as the property scan receives it.
+    pub equality: Expr,
+}
+
 /// Schema-discovered logical source. Contains no executable provider.
 #[derive(Debug, Clone)]
 pub struct GraphReadSource {
@@ -46,6 +62,8 @@ pub struct GraphReadSource {
     pub composition: Option<String>,
     /// Complete binding assumptions supplied by semantic lowering.
     pub contract: Option<GraphReadContract>,
+    /// Property equality a node-topology scan may be narrowed by.
+    pub anchor: Option<GraphReadAnchor>,
     schema: SchemaRef,
 }
 
@@ -62,6 +80,16 @@ impl GraphReadSource {
             schema: semantic_read_schema(schema),
             composition,
             contract: None,
+            anchor: None,
+        })
+    }
+
+    /// This source narrowed by `anchor`; see [`GraphReadAnchor`].
+    #[must_use]
+    pub fn with_anchor(&self, anchor: GraphReadAnchor) -> Arc<Self> {
+        Arc::new(Self {
+            anchor: Some(anchor),
+            ..self.clone()
         })
     }
 }

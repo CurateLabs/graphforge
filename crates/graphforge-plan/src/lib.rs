@@ -27,7 +27,7 @@
 
 mod literal_key;
 pub mod read_resource;
-pub use read_resource::{GraphReadContract, GraphReadSource, GraphReadTable};
+pub use read_resource::{GraphReadAnchor, GraphReadContract, GraphReadSource, GraphReadTable};
 
 use std::cmp::Ordering;
 use std::fmt;

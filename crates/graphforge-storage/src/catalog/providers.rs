@@ -1,6 +1,7 @@
 //! Streaming DataFusion providers for topology and property tables.
 
 use super::visit_property_overlay_batched_with_inventory;
+use crate::parquet_scan::GraphForgeParquetExec;
 use crate::parquet_scan::ParquetFragment;
 use crate::parquet_scan::scan_fragments;
 use crate::schemas::EXPLORATORY_EDGE_SCHEMA;
@@ -30,6 +31,9 @@ pub struct TopologyNodeTable {
     /// Physical path and, when the authenticated inventory declared it, the
     /// inventory-relative path the row-count hint is taken from.
     fragments: Vec<(PathBuf, Option<String>)>,
+    /// Property equality that lets the scan read only the nodes a current
+    /// index selects (#1983).
+    anchor: Option<Arc<crate::node_anchor::NodeAnchor>>,
 }
 
 impl TopologyNodeTable {
@@ -42,13 +46,20 @@ impl TopologyNodeTable {
                 .iter()
                 .map(|(path, relative)| (path.clone(), Some(relative.clone())))
                 .collect(),
+            anchor: None,
         }
+    }
+
+    pub(crate) fn with_anchor(mut self, anchor: crate::node_anchor::NodeAnchor) -> Self {
+        self.anchor = Some(Arc::new(anchor));
+        self
     }
     /// Create a table backed by one legacy or canonical Parquet fragment.
     #[must_use]
     pub fn new(path: PathBuf) -> Self {
         Self {
             fragments: vec![(path, None)],
+            anchor: None,
         }
     }
 
@@ -63,6 +74,7 @@ impl TopologyNodeTable {
                 .into_iter()
                 .map(|path| (path, None))
                 .collect(),
+            anchor: None,
         })
     }
 
@@ -110,13 +122,26 @@ impl TableProvider for TopologyNodeTable {
                 None => ParquetFragment::for_path(path.clone(), true),
             })
             .collect();
-        scan_fragments(
+        let scan = GraphForgeParquetExec::try_new(
             TOPOLOGY_NODES_SCHEMA.clone(),
             fragments,
             projection,
             limit,
             state.config().batch_size(),
-        )
+        )?;
+        // The anchor applies only while a current index answers its equality;
+        // otherwise this is the whole-table scan it always was.
+        let scan = match &self.anchor {
+            Some(anchor)
+                if anchor
+                    .is_current()
+                    .map_err(|error| DataFusionError::External(Box::new(error)))? =>
+            {
+                scan.with_node_anchor(Arc::clone(anchor))
+            }
+            _ => scan,
+        };
+        Ok(scan.into_ordered_plan())
     }
 }
 

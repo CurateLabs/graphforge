@@ -1098,6 +1098,25 @@ pub fn read_nodes_filtered_observed_from_files(
     Ok(batches)
 }
 
+/// The rows of one node fragment whose `node_id` is in `node_ids`, normalized
+/// to the current topology schema (#1983). A canonical dense fragment decodes
+/// exactly the selected rows by ordinal; any other layout keeps its row-group
+/// pruning and a membership predicate, as [`read_nodes_filtered`] does.
+#[allow(clippy::implicit_hasher)]
+pub(crate) fn read_node_fragment_filtered(
+    path: &Path,
+    node_ids: &std::collections::HashSet<u64>,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    normalize_topology_nodes(read_parquet_filtered_u64(
+        path,
+        TOPOLOGY_NODES_SCHEMA.clone(),
+        "node_id",
+        node_ids,
+        FilteredReadKind::Node,
+        None,
+    )?)
+}
+
 /// Filter destination nodes by `node_id` while physically decoding only the
 /// requested canonical columns plus the join key. Legacy layouts retain full
 /// normalization before projection.
