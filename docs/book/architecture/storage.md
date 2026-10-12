@@ -1003,6 +1003,18 @@ one answers it. Bytes are a pure function of the route's content.
 - **Semantics.** The index is a candidate source: the newest live snapshot of each
   candidate is still checked against the predicate, exactly as the footer-statistics
   path does. Float, boolean and null comparisons are not pushed down and use the scan.
+- **The node topology is anchored too.** The labelled node scan that feeds the join to
+  the property route would otherwise decode every node fragment (`array_has(type_ids, L)`
+  over the whole topology) to meet the one index result. `StoredEqualityHints` therefore
+  also offers the equality to that node scan as an anchor, through column projections and
+  total predicates only. Where a current index answers it, `GraphForgeParquetExec`
+  (`anchor=property_equality(id)` in `EXPLAIN`) resolves the index's UUIDs to `node_id`s
+  through the topology identity columns, pruned by row-group and page statistics, and
+  decodes exactly those rows by ordinal from the fragments that hold them. The label
+  filter and the equality stay in the plan and decide which rows survive, so the answer
+  is the unanchored scan's answer; a node the index names under another label, a deleted
+  node, and a node with several labels behave as they do without the anchor. A stale or
+  absent index leaves the scan whole. Its reads grow with the matches, not the graph.
 
 ### Bounded CSR compression
 
