@@ -616,7 +616,9 @@ def run_phase(rung: Rung, name: str, task: dict[str, Any], wall_seconds: int) ->
                 rung.phase_tree_alive = True
                 rung.fail("teardown", "phase_tree_alive", "phase cgroup still contains processes")
             else:
-                rung.fail("teardown", "phase_tree_unverified", "phase cgroup.events could not be read")
+                rung.fail(
+                    "teardown", "phase_tree_unverified", "phase cgroup.events could not be read"
+                )
         swapped = phase_cgroup.verdict(swap)
         if swap is not None and raw.is_dir():
             # Retain the counters beside the raw output (#1727), even when a known
@@ -1074,8 +1076,10 @@ def run_rung(
         record = rung.workspace / PHASE_CGROUP_RECORD
         try:
             paths = json.loads(record.read_text(encoding="utf-8"))["cgroup_paths"]
-            if not isinstance(paths, list) or not paths or not all(
-                isinstance(path, str) and path for path in paths
+            if (
+                not isinstance(paths, list)
+                or not paths
+                or not all(isinstance(path, str) and path for path in paths)
             ):
                 raise ValueError("missing cgroup paths")
             rung.phase_cgroups = [Path(path) for path in paths]

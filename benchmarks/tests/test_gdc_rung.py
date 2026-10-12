@@ -624,7 +624,9 @@ class LadderControlTests(Scratch):
         self.assertEqual(rung.failures[0]["cause"], "phase_tree_alive")
         self.assertFalse(inventory["empty"])
 
-    def test_exception_during_benchexec_publishes_unverified_result_and_keeps_workspace(self) -> None:
+    def test_exception_during_benchexec_publishes_unverified_result_and_keeps_workspace(
+        self,
+    ) -> None:
         def interrupted(*_args: Any) -> int:
             raise RuntimeError("supervisor interrupted")
 

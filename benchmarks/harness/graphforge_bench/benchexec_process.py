@@ -70,9 +70,12 @@ def wait_for_phase_trees_empty(
     poll_seconds: float = 0.1,
 ) -> bool:
     """Wait for every recorded BenchExec phase cgroup tree to become unpopulated."""
-    return wait_for_phase_trees_state(
-        cgroups, timeout_seconds=timeout_seconds, poll_seconds=poll_seconds
-    ) == "empty"
+    return (
+        wait_for_phase_trees_state(
+            cgroups, timeout_seconds=timeout_seconds, poll_seconds=poll_seconds
+        )
+        == "empty"
+    )
 
 
 def wait_for_phase_trees_state(
