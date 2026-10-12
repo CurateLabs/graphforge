@@ -10,6 +10,7 @@
 
 use super::{admitted_parquet, parquet_err};
 use arrow::array::{Array, FixedSizeBinaryArray, UInt64Array};
+use datafusion::error::DataFusionError;
 use graphforge_core::GfError;
 use parquet::arrow::ProjectionMask;
 
@@ -87,6 +88,19 @@ fn read_error(error: impl std::fmt::Display) -> DenseNodeIdentityError {
     DenseNodeIdentityError::Read(GfError::Storage(error.to_string()))
 }
 
+/// An admission or open failure keeps the typed refusal it was raised as.
+/// Admission of a hydrated payload returns a `GfError` (`GF_VALIDATION` for
+/// corruption) wrapped in `DataFusionError::External`; flattening it to a
+/// storage error would let a caller read corruption as a transient I/O fault.
+fn open_error(error: DataFusionError) -> DenseNodeIdentityError {
+    if let DataFusionError::External(inner) = error.find_root()
+        && let Some(refusal) = inner.downcast_ref::<GfError>()
+    {
+        return DenseNodeIdentityError::Read(refusal.clone());
+    }
+    read_error(error)
+}
+
 /// Read `(node_id, node_uuid)` from every node file of `files`, in file order,
 /// and return the UUIDs by ordinal.
 ///
@@ -102,7 +116,7 @@ pub fn read_dense_node_identities(
     let mut total_rows = 0_usize;
     for (path, _) in &files.nodes {
         let rows = admitted_parquet(path)
-            .map_err(read_error)?
+            .map_err(open_error)?
             .metadata()
             .file_metadata()
             .num_rows();
@@ -116,7 +130,7 @@ pub fn read_dense_node_identities(
         uuids: Vec::with_capacity(total_rows),
     };
     for (path, _) in &files.nodes {
-        let builder = admitted_parquet(path).map_err(read_error)?;
+        let builder = admitted_parquet(path).map_err(open_error)?;
         let mask = ProjectionMask::columns(builder.parquet_schema(), ["node_id", "node_uuid"]);
         let reader = builder
             .with_projection(mask)
@@ -162,4 +176,72 @@ pub fn read_dense_node_identities(
         return Err(read_error("node files changed while being read"));
     }
     Ok(identities)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph_admission::AdmissionBatch;
+
+    /// A node file hydrated the way a compact generation links it: one object
+    /// and a workspace hard link that share an inode, registered for first-touch
+    /// admission against the object's true checksum.
+    #[test]
+    fn corrupt_hydrated_node_payload_keeps_its_validation_refusal() {
+        let source = tempfile::tempdir().unwrap();
+        let mut writer = crate::GraphWriter::open_at(
+            source.path(),
+            graphforge_core::OntologyMode::Exploratory,
+            1_700_000_000_000_000,
+        )
+        .unwrap();
+        for _ in 0..3 {
+            writer
+                .create_node(
+                    graphforge_core::uuid::new_v7(),
+                    graphforge_value::EntityTypeId::decode(0).unwrap(),
+                )
+                .unwrap();
+        }
+        writer.flush().unwrap();
+        let original = crate::TopologyFiles::discover_legacy(source.path()).unwrap();
+        let bytes = std::fs::read(&original.nodes[0].0).unwrap();
+
+        let hydrated = tempfile::tempdir().unwrap();
+        let object = hydrated.path().join("object");
+        let workspace = hydrated.path().join("workspace");
+        let link = workspace.join("nodes.parquet");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(&object, &bytes).unwrap();
+        std::fs::hard_link(&object, &link).unwrap();
+        let entry = crate::GraphFileEntry {
+            relative_path: "nodes.parquet".into(),
+            byte_length: bytes.len() as u64,
+            content_sha256: "0".repeat(64),
+            content_xxh64: crate::corruption_checksum::checksum(&bytes),
+            role: crate::GraphFileRole::Topology,
+        };
+        AdmissionBatch::begin().register(
+            graphforge_filesystem::path_identity(&object).unwrap(),
+            &entry,
+            object.clone(),
+            &workspace,
+            link.clone(),
+        );
+        // Same-inode, same-length corruption away from the Parquet magic, so only
+        // first-touch admission can notice it.
+        let mut corrupt = bytes.clone();
+        corrupt[bytes.len() / 2] ^= 0xff;
+        std::fs::write(&object, corrupt).unwrap();
+        let files = crate::TopologyFiles {
+            nodes: vec![(link, "nodes.parquet".into())],
+            edges: Vec::new(),
+        };
+
+        let error = read_dense_node_identities(&files).unwrap_err();
+        let DenseNodeIdentityError::Read(refusal) = error else {
+            panic!("corruption must be a read refusal");
+        };
+        assert_eq!(refusal.code(), "GF_VALIDATION", "{refusal}");
+    }
 }

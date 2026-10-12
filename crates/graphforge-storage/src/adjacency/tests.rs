@@ -1703,3 +1703,36 @@ fn walk_rows_stops_on_a_visitor_error_and_refuses_unwalkable_overlap() {
         "refused before decoding"
     );
 }
+
+#[test]
+fn walk_rows_of_an_empty_index_visits_nothing() {
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("EMPTY.out.csr");
+    let empty = CsrIndex {
+        offsets: vec![0],
+        ..CsrIndex::default()
+    };
+    write_sharded_csr(&path, &empty, 3).unwrap();
+    let index = ShardedCsrIndex::open(&path).unwrap();
+    assert_eq!((index.node_count(), index.shard_count()), (0, 0));
+    assert!(walked(&index).unwrap().is_empty());
+    assert_eq!(index.shard_decode_count(), 0);
+}
+
+#[test]
+fn walk_rows_of_all_isolated_nodes_visits_every_empty_row_without_decoding() {
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("ISOLATED.out.csr");
+    let isolated = CsrIndex {
+        offsets: vec![0; 6],
+        ..CsrIndex::default()
+    };
+    write_sharded_csr(&path, &isolated, 3).unwrap();
+    let index = ShardedCsrIndex::open(&path).unwrap();
+    assert_eq!((index.node_count(), index.shard_count()), (5, 0));
+    assert_eq!(
+        walked(&index).unwrap(),
+        (0..5).map(|node| (node, Vec::new())).collect::<Vec<_>>()
+    );
+    assert_eq!(index.shard_decode_count(), 0);
+}
