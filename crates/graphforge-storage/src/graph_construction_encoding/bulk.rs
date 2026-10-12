@@ -1044,6 +1044,7 @@ pub(crate) fn encode_bulk(
     drop(lease);
     let meter = PassMeter::start("properties");
     let mut artifacts = Vec::new();
+    let property_index_tap;
     {
         let cache_window =
             graphforge_filesystem::cache_release_window_for_streams(2).map_err(storage)?;
@@ -1058,7 +1059,8 @@ pub(crate) fn encode_bulk(
         } else {
             admission
         };
-        let mut lanes = lanes::ParquetLanes::new(lanes_admission, budgets.max_batch_bytes);
+        let mut lanes =
+            lanes::ParquetLanes::new(lanes_admission, budgets.max_batch_bytes).with_index_tap();
         let mut property_evidence = GraphConstructionEncodingEvidence::default();
         for (rows, groups, kind) in [
             (
@@ -1144,6 +1146,7 @@ pub(crate) fn encode_bulk(
             }
         }
         lanes.flush(&output, &mut property_evidence, cancelled, &mut artifacts)?;
+        property_index_tap = lanes.take_index_tap();
         evidence.output_write_bytes += property_evidence.output_write_bytes;
         evidence.output_write_operations += property_evidence.output_write_operations;
         evidence.fsync_operations += property_evidence.fsync_operations;
@@ -1231,14 +1234,15 @@ pub(crate) fn encode_bulk(
     )?;
     drop((nodes, edge_side, node_groups, edge_groups));
 
-    super::property_index::write_property_equality_indexes(
-        &output,
-        &output.path().join("graph"),
-        &routes,
-        &mut artifacts,
-        cancelled,
-        &mut evidence,
-    )?;
+    if let Some(tap) = property_index_tap {
+        super::property_index::write_property_equality_indexes(
+            &output,
+            &routes,
+            tap,
+            &mut artifacts,
+            &mut evidence,
+        )?;
+    }
     installer_extend_adjacency(
         &installer,
         &output,

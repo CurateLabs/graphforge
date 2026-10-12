@@ -479,6 +479,29 @@ fn the_index_bytes_are_a_function_of_the_content() {
     assert_eq!(digests[0], digests[1]);
 }
 
+/// The index a bulk construction writes from the rows it encodes is the index
+/// a rebuild reads back from the published fragments: same files, same bytes.
+#[test]
+fn the_construction_index_is_the_one_a_rebuild_reads_back() {
+    let _serial = serial();
+    let built = build(SMALL_NODES);
+    let digests = |project: &Path| {
+        let mut files = index_files(project)
+            .into_iter()
+            .map(|f| (f.relative_path, f.content_sha256))
+            .collect::<Vec<_>>();
+        files.sort();
+        files
+    };
+    let at_construction = digests(&built.project);
+    assert!(!at_construction.is_empty());
+    let forge = open(&built.project, 1);
+    let rebuilt = forge.rebuild_property_indexes(None).unwrap();
+    assert_eq!(rebuilt.files as usize, at_construction.len());
+    drop(forge);
+    assert_eq!(digests(&built.project), at_construction);
+}
+
 fn corrupt_object(project: &Path, entry: &graphforge_storage::GraphFileEntry) {
     let generation = graphforge_storage::resolve_project_generation(project).unwrap();
     let object =

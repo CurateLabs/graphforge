@@ -27,34 +27,6 @@ impl AuthenticatedPropertyInventory {
         authenticated_property_inventory(project)
     }
 
-    /// Admit the property objects of one node route of an unpublished
-    /// construction output, whose route table the builder already holds. The
-    /// objects are the builder's own, named by the digests it just computed.
-    pub(crate) fn capture_route_for_construction(
-        graph_root: &Path,
-        entries: Vec<crate::GraphFileEntry>,
-        table: &crate::route_component::RouteTable,
-        route: &str,
-    ) -> Result<Self, GfError> {
-        let requested = Some((PropertyRouteKind::Node, route));
-        let entries = resolve_versioned_property_entries_for_route(
-            graph_root,
-            entries,
-            requested,
-            Some(table),
-            None,
-        )?;
-        Self::admit_entries_with_admission(
-            graph_root,
-            entries,
-            requested,
-            Some(table),
-            false,
-            None,
-            FragmentAdmission::Eager,
-        )
-    }
-
     /// Capture an unpublished portable graph with the importer's existing
     /// Parquet resource policy applied before any property metadata is decoded.
     pub(crate) fn capture_for_import(

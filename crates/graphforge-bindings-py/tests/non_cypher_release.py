@@ -27,8 +27,8 @@ production_source = runpy.run_path(str(Path(__file__).with_name("native_sources.
     "production_source"
 ]
 PYO3_SOURCE = ROOT / "crates/graphforge-bindings-py/src/lib.rs"
-EXPECTED_RUST_DIGEST = "e404f548d91b2b5149f56e803e8c5b637d30dc15b4bfcb189c12434c20fe74cd"
-EXPECTED_RELEASE_DIGEST = "031e08c64ae835103331a8a40e76195477ac7d510e0e6404d2b81f0624a058eb"
+EXPECTED_RUST_DIGEST = "bd3f2e87aec27614d54dd9355394aae2915109af816e75e5a5c82ae08f6bd84c"
+EXPECTED_RELEASE_DIGEST = "ca4c0feb6bc65d2a59aae785334fa2251e617a46092b9c9e76da6b0a4d132955"
 
 PYTHON_ONLY_METHODS = frozenset(
     {
@@ -289,7 +289,7 @@ def _classification_report() -> dict[str, object]:
         for group in manifest["method_evidence_groups"].values()
         for method_id in group["ids"]
     }
-    assert len(release_methods) == 351
+    assert len(release_methods) == 352
     assert _digest(release_methods) == EXPECTED_RELEASE_DIGEST
     assert set(EVIDENCE) == set(manifest["method_evidence_groups"])
 

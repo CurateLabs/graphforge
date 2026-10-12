@@ -21,9 +21,8 @@ impl AuthenticatedPropertyInventory {
         kind: PropertyRouteKind,
         route: &str,
     ) -> Option<String> {
-        use sha2::{Digest, Sha256};
         let fragments = self.routes.get(&(kind, route.to_owned()))?;
-        let mut parts = fragments
+        let parts = fragments
             .iter()
             .flat_map(|fragment| &fragment.parts)
             .map(|part| {
@@ -34,14 +33,6 @@ impl AuthenticatedPropertyInventory {
                 )
             })
             .collect::<Vec<_>>();
-        parts.sort_unstable();
-        let mut hasher = Sha256::new();
-        for (path, length, xxh64) in parts {
-            hasher.update(u64::try_from(path.len()).unwrap_or(u64::MAX).to_le_bytes());
-            hasher.update(path.as_bytes());
-            hasher.update(length.to_le_bytes());
-            hasher.update(xxh64.to_le_bytes());
-        }
-        Some(crate::property_equality_index::hex(&hasher.finalize()))
+        Some(crate::property_equality_index::source_digest(parts))
     }
 }

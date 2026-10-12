@@ -72,6 +72,20 @@ fn stem(route: &str, column: &str) -> String {
     hex(&digest[..16])
 }
 
+/// A digest of the exact objects a route's state derives from: each object's
+/// path, length and XXH64 as the manifest names them, in path order.
+pub(crate) fn source_digest(mut parts: Vec<(&str, u64, u64)>) -> String {
+    parts.sort_unstable();
+    let mut hasher = Sha256::new();
+    for (path, length, xxh64) in parts {
+        hasher.update(u64::try_from(path.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(path.as_bytes());
+        hasher.update(length.to_le_bytes());
+        hasher.update(xxh64.to_le_bytes());
+    }
+    hex(&hasher.finalize())
+}
+
 /// Lowercase hexadecimal text of `bytes`.
 pub(crate) fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
@@ -126,7 +140,7 @@ fn storage(message: &str, error: &std::io::Error) -> GfError {
     GfError::Storage(format!("property equality index: {message}: {error}"))
 }
 
-fn value_type_name(data_type: &DataType) -> Option<&'static str> {
+pub(crate) fn value_type_name(data_type: &DataType) -> Option<&'static str> {
     match data_type {
         DataType::Int64 => Some("int64"),
         DataType::Utf8 => Some("utf8"),
@@ -135,14 +149,14 @@ fn value_type_name(data_type: &DataType) -> Option<&'static str> {
     }
 }
 
-enum Entries {
+pub(crate) enum Entries {
     Int(Vec<(i64, [u8; 16])>),
     Str(Vec<(String, [u8; 16])>),
     Bool(Vec<(bool, [u8; 16])>),
 }
 
 impl Entries {
-    fn new(data_type: &DataType) -> Option<Self> {
+    pub(crate) fn new(data_type: &DataType) -> Option<Self> {
         match data_type {
             DataType::Int64 => Some(Self::Int(Vec::new())),
             DataType::Utf8 => Some(Self::Str(Vec::new())),
@@ -161,7 +175,15 @@ impl Entries {
         }
     }
 
-    fn len(&self) -> usize {
+    pub(crate) fn value_type(&self) -> &'static str {
+        match self {
+            Self::Int(_) => "int64",
+            Self::Str(_) => "utf8",
+            Self::Bool(_) => "bool",
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
         match self {
             Self::Int(entries) => entries.len(),
             Self::Str(entries) => entries.len(),
@@ -169,14 +191,52 @@ impl Entries {
         }
     }
 
-    /// Sort by value then UUID. Rows arrive in UUID order and the sort is
-    /// stable, so equal values stay in UUID order.
-    fn sort(&mut self) {
+    /// Sort by value then UUID, so the bytes do not depend on arrival order.
+    pub(crate) fn sort(&mut self) {
         match self {
-            Self::Int(entries) => entries.sort_by_key(|entry| entry.0),
-            Self::Str(entries) => entries.sort_by(|a, b| a.0.cmp(&b.0)),
-            Self::Bool(entries) => entries.sort_by_key(|entry| entry.0),
+            Self::Int(entries) => entries.sort_unstable(),
+            Self::Str(entries) => entries.sort_unstable(),
+            Self::Bool(entries) => entries.sort_unstable(),
         }
+    }
+
+    /// Append the non-null rows of an Arrow column of this entries' type.
+    /// Returns `false` when the column has a different type.
+    pub(crate) fn push_array(&mut self, array: &dyn Array, uuids: &FixedSizeBinaryArray) -> bool {
+        let uuid = |row: usize| -> Option<[u8; 16]> { uuids.value(row).try_into().ok() };
+        match self {
+            Self::Int(entries) => {
+                let Some(values) = array.as_any().downcast_ref::<Int64Array>() else {
+                    return false;
+                };
+                for row in 0..values.len() {
+                    if let (false, Some(uuid)) = (values.is_null(row), uuid(row)) {
+                        entries.push((values.value(row), uuid));
+                    }
+                }
+            }
+            Self::Str(entries) => {
+                let Some(values) = array.as_any().downcast_ref::<StringArray>() else {
+                    return false;
+                };
+                for row in 0..values.len() {
+                    if let (false, Some(uuid)) = (values.is_null(row), uuid(row)) {
+                        entries.push((values.value(row).to_owned(), uuid));
+                    }
+                }
+            }
+            Self::Bool(entries) => {
+                let Some(values) = array.as_any().downcast_ref::<BooleanArray>() else {
+                    return false;
+                };
+                for row in 0..values.len() {
+                    if let (false, Some(uuid)) = (values.is_null(row), uuid(row)) {
+                        entries.push((values.value(row), uuid));
+                    }
+                }
+            }
+        }
+        true
     }
 
     fn shard(&self, range: std::ops::Range<usize>) -> Result<(RecordBatch, Bound, Bound), GfError> {
@@ -394,7 +454,7 @@ pub fn write_property_equality_indexes(
     Ok(report)
 }
 
-fn index_files(
+pub(crate) fn index_files(
     files: &mut Vec<PropertyEqualityIndexFile>,
     route: &str,
     column: &str,
@@ -597,4 +657,127 @@ fn read_shard(
         return Err(validation("shard row count does not match its manifest"));
     }
     Ok(())
+}
+
+/// Collects the `(value, node_uuid)` rows of one node route as its fragments
+/// are encoded, so a bulk construction indexes the rows it already holds
+/// instead of reading them back. An initial build writes each node once, with
+/// no tombstone; a route that breaks either assumption is not indexed and the
+/// scan answers it.
+pub(crate) struct RouteIndexBuilder {
+    columns: Vec<ColumnRows>,
+    uuids: Vec<[u8; 16]>,
+    unindexable: bool,
+}
+
+struct ColumnRows {
+    column: &'static str,
+    entries: Option<Entries>,
+    unusable: bool,
+}
+
+impl RouteIndexBuilder {
+    pub(crate) fn new() -> Self {
+        Self {
+            columns: INDEXED_COLUMNS
+                .iter()
+                .map(|column| ColumnRows {
+                    column,
+                    entries: None,
+                    unusable: false,
+                })
+                .collect(),
+            uuids: Vec::new(),
+            unindexable: false,
+        }
+    }
+
+    /// Observe one encoded property fragment of the route.
+    pub(crate) fn observe(&mut self, fragment: &RecordBatch) {
+        if self.unindexable {
+            return;
+        }
+        let Some(uuids) = fragment
+            .column_by_name("node_uuid")
+            .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
+        else {
+            self.unindexable = true;
+            return;
+        };
+        if let Some(tombstones) =
+            fragment.column_by_name(crate::property_overlay::PROPERTY_TOMBSTONE_FIELD)
+        {
+            let live = tombstones
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .is_some_and(|flags| flags.true_count() == 0);
+            if !live {
+                self.unindexable = true;
+                return;
+            }
+        }
+        for row in 0..uuids.len() {
+            let Ok(uuid) = uuids.value(row).try_into() else {
+                self.unindexable = true;
+                return;
+            };
+            self.uuids.push(uuid);
+        }
+        for rows in &mut self.columns {
+            let Some(array) = fragment.column_by_name(rows.column) else {
+                continue;
+            };
+            if rows.unusable {
+                continue;
+            }
+            if rows.entries.is_none() {
+                rows.entries = Entries::new(array.data_type());
+            }
+            let pushed = rows
+                .entries
+                .as_mut()
+                .is_some_and(|entries| entries.push_array(array.as_ref(), uuids));
+            if !pushed {
+                rows.unusable = true;
+            }
+        }
+    }
+
+    /// The index files of the route, none when it cannot be indexed.
+    ///
+    /// # Errors
+    /// Propagates an encoding failure.
+    pub(crate) fn finish(
+        mut self,
+        route: &str,
+        source_digest: &str,
+    ) -> Result<Vec<PropertyEqualityIndexFile>, GfError> {
+        let mut files = Vec::new();
+        if self.unindexable {
+            return Ok(files);
+        }
+        self.uuids.sort_unstable();
+        if self.uuids.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Ok(files);
+        }
+        for rows in self.columns {
+            let Some(mut entries) = rows.entries.filter(|_| !rows.unusable) else {
+                continue;
+            };
+            let value_type = entries.value_type();
+            if entries.len() == 0 {
+                continue;
+            }
+            entries.sort();
+            index_files(
+                &mut files,
+                route,
+                rows.column,
+                value_type,
+                source_digest,
+                &entries,
+            )?;
+        }
+        Ok(files)
+    }
 }
