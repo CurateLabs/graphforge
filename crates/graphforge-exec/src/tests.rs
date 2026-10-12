@@ -1,6 +1,7 @@
 use super::*;
 use crate::adjacency::PersistentAdjacencyProvider;
 use crate::create_exec::GraphCreateExec;
+use crate::expand_exec::EdgePropSource;
 use crate::expand_exec::ExpandConfig;
 use crate::expand_exec::build_edge_list_column;
 use crate::row_exec::OptionalConfig;
@@ -230,9 +231,10 @@ fn wave11_low_level_expand_and_optional_schema_guards_fail_closed() {
             dir.path().to_path_buf(),
             OntologyMode::Exploratory,
         )),
+        lifecycle: Default::default(),
     };
     assert!(
-        build_edge_list_column(&cfg, &[], &HashMap::new())
+        build_edge_list_column(&cfg, &[], &HashMap::new(), &EdgePropSource::empty())
             .unwrap_err()
             .to_string()
             .contains("no edge-list column")
@@ -240,7 +242,7 @@ fn wave11_low_level_expand_and_optional_schema_guards_fail_closed() {
     let mut not_list = cfg;
     not_list.out_schema = int_schema;
     assert!(
-        build_edge_list_column(&not_list, &[], &HashMap::new())
+        build_edge_list_column(&not_list, &[], &HashMap::new(), &EdgePropSource::empty())
             .unwrap_err()
             .to_string()
             .contains("must be a List")

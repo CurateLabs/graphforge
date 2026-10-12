@@ -770,7 +770,9 @@ fn read_parquet_filtered_u64_attempt(
     let builder_row_groups = u64::try_from(builder.metadata().num_row_groups()).unwrap_or(u64::MAX);
     if total >= 0 && ids.len() as u64 * 2 > u64::try_from(total).unwrap_or(u64::MAX) {
         drop(builder);
-        let batches = if required {
+        let batches = if let (true, Some(indices)) = (required, projection) {
+            super::read_parquet_required_projected(path, indices)?
+        } else if required {
             read_parquet_required(path)?
         } else {
             read_parquet_or_empty(path, fallback_schema.clone())?
@@ -808,12 +810,13 @@ fn read_parquet_filtered_u64_attempt(
             };
             let filtered_batch = arrow::compute::filter_record_batch(batch, &mask)
                 .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
-            filtered.push(if let Some(indices) = projection {
-                filtered_batch
+            filtered.push(match projection {
+                // The required path decoded only the projected columns.
+                Some(_) if required => filtered_batch,
+                Some(indices) => filtered_batch
                     .project(indices)
-                    .map_err(|error| DataFusionError::ArrowError(Box::new(error), None))?
-            } else {
-                filtered_batch
+                    .map_err(|error| DataFusionError::ArrowError(Box::new(error), None))?,
+                None => filtered_batch,
             });
         }
         if filtered.is_empty() {

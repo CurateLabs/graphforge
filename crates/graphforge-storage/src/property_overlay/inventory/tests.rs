@@ -1032,6 +1032,7 @@ fn segmented_inventory_preserves_values_nulls_and_logical_fragment_identity() {
         &BTreeSet::from([[1_u8; 16]]),
         None,
         true,
+        false,
     )
     .unwrap();
     assert_eq!(

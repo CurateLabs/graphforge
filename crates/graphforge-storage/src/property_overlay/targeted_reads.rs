@@ -1,5 +1,7 @@
 //! Targeted reads for authenticated property overlays.
 
+use parquet::arrow::arrow_reader::{RowSelection, RowSelector};
+
 use super::{
     Array, AuthenticatedPropertyFragment, AuthenticatedPropertyInventory, BTreeMap, BTreeSet,
     BooleanArray, FixedSizeBinaryArray, GfError, OpenPropertyFragment, PROPERTY_TOMBSTONE_FIELD,
@@ -102,6 +104,7 @@ fn resolve_edge_property_owners(
             targets,
             None,
             collect,
+            false,
         )?;
         let present = targets.difference(&result.unresolved).copied();
         if collect {
@@ -170,7 +173,7 @@ pub fn read_authenticated_property_targets_for_inventory(
     route: &str,
     targets: &BTreeSet<[u8; 16]>,
 ) -> Result<PropertyTargetSnapshots, GfError> {
-    let result = read_property_targets(inventory, kind, route, targets, None, true)?;
+    let result = read_property_targets(inventory, kind, route, targets, None, true, false)?;
     Ok(PropertyTargetSnapshots {
         present: targets.difference(&result.unresolved).copied().collect(),
         rows: result.rows,
@@ -207,6 +210,7 @@ pub fn read_authenticated_property_target_data_for_inventory(
         targets,
         None,
         crate::lifecycle_io::is_active(),
+        true,
     )?;
     Ok(PropertyTargetData {
         present: targets.difference(&result.unresolved).copied().collect(),
@@ -229,6 +233,7 @@ pub fn read_authenticated_property_snapshot_data_for_inventory(
         targets,
         None,
         crate::lifecycle_io::is_active(),
+        false,
     )
     .map(|result| result.rows)
 }
@@ -242,7 +247,7 @@ pub fn read_authenticated_property_presence_for_inventory(
     route: &str,
     targets: &BTreeSet<[u8; 16]>,
 ) -> Result<(BTreeSet<[u8; 16]>, PropertyOverlayMetrics), GfError> {
-    let result = read_property_targets(inventory, kind, route, targets, None, true)?;
+    let result = read_property_targets(inventory, kind, route, targets, None, true, false)?;
     let present = targets.difference(&result.unresolved).copied().collect();
     Ok((present, result.metrics))
 }
@@ -261,6 +266,7 @@ pub(crate) fn read_property_presence_data_for_inventory(
         targets,
         None,
         crate::lifecycle_io::is_active(),
+        false,
     )?;
     Ok(targets.difference(&result.unresolved).copied().collect())
 }
@@ -285,6 +291,7 @@ pub(crate) fn read_replay_property_targets(
         targets,
         Some(max_memory_bytes),
         crate::lifecycle_io::is_active(),
+        false,
     )?;
     Ok((result.rows, result.metrics))
 }
@@ -295,6 +302,11 @@ pub(super) struct TargetPropertyRows {
     pub(super) metrics: PropertyOverlayMetrics,
 }
 
+/// `frontier` marks a query read of a bounded frontier: it decodes only the
+/// rows it names and, once a read of a fragment has walked every key of it,
+/// resolves later targets from row-group statistics and the UUID column. Every
+/// other caller (mutation baselines, ownership probes, replay) walks and
+/// decodes exactly as before.
 #[allow(
     clippy::too_many_lines,
     reason = "authenticated targeted read and its resource accounting share one lifecycle"
@@ -306,6 +318,7 @@ pub(super) fn read_property_targets(
     targets: &BTreeSet<[u8; 16]>,
     replay_budget: Option<usize>,
     collect: bool,
+    frontier: bool,
 ) -> Result<TargetPropertyRows, GfError> {
     let mut limits = PropertyOverlayLimits::default();
     if let Some(bytes) = replay_budget {
@@ -400,17 +413,46 @@ pub(super) fn read_property_targets(
                 u64::try_from(builder.metadata().num_row_groups()).unwrap_or(u64::MAX),
             );
         }
-        let row_groups = select_target_row_groups(
-            fragment,
-            &opened,
-            kind,
-            &unresolved,
-            &counts,
-            metrics.as_mut(),
-            admission,
-            targeted_batch_rows,
-            retained_bytes,
-        )?;
+        // The first targeted read of a fragment walks every key of it. The
+        // bytes are authenticated again on every open, so once that walk has
+        // passed, later reads of the same fragment resolve their targets from
+        // row-group statistics and the UUID column alone.
+        let walked = frontier
+            && replay_budget.is_none()
+            && fragment
+                .keys_validated
+                .load(std::sync::atomic::Ordering::Acquire);
+        let target_rows = if walked {
+            select_walked_target_rows(
+                &opened,
+                kind,
+                &unresolved,
+                &counts,
+                metrics.as_mut(),
+                targeted_batch_rows,
+            )?
+        } else {
+            let rows = select_target_row_groups(
+                fragment,
+                &opened,
+                kind,
+                &unresolved,
+                &counts,
+                metrics.as_mut(),
+                admission,
+                targeted_batch_rows,
+                retained_bytes,
+            )?;
+            if replay_budget.is_none() {
+                fragment
+                    .keys_validated
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+            TargetRowSelection {
+                groups: rows.groups,
+                selection: frontier.then_some(rows.selection).flatten(),
+            }
+        };
         let validation = metrics.as_ref().map(|_| {
             let (bytes, calls, seeks) = counts.values();
             let (part_bytes, part_calls) = opened.file.physical_reads();
@@ -420,6 +462,7 @@ pub(super) fn read_property_targets(
                 seeks,
             )
         });
+        let row_groups = target_rows.groups;
         if !row_groups.is_empty() {
             if let Some(metrics) = &mut metrics {
                 metrics.row_groups_selected = metrics
@@ -431,6 +474,7 @@ pub(super) fn read_property_targets(
                     opened: &opened,
                     kind,
                     row_groups,
+                    selection: target_rows.selection,
                     batch_rows: targeted_batch_rows,
                     admission,
                 },
@@ -539,9 +583,10 @@ fn select_target_row_groups(
     admission: TargetReadAdmission,
     targeted_batch_rows: usize,
     retained_bytes: u64,
-) -> Result<Vec<usize>, GfError> {
+) -> Result<TargetRowSelection, GfError> {
     let builder = open_counted_retained_property_builder(opened, counts.clone())?;
     let mut selected_groups = Vec::new();
+    let mut selectors: Vec<RowSelector> = Vec::new();
     let mut prior_uuid = None;
     for index in 0..builder.metadata().num_row_groups() {
         let validation = open_counted_retained_property_builder(opened, counts.clone())?;
@@ -568,6 +613,7 @@ fn select_target_row_groups(
             .build()
             .map_err(parquet_error)?;
         let mut selected = false;
+        let mut group_selectors: Vec<RowSelector> = Vec::new();
         for batch in validation {
             let batch = batch.map_err(authenticated_arrow_error)?;
             charge_target_batch(metrics.as_deref_mut(), &batch, admission, retained_bytes)?;
@@ -602,7 +648,9 @@ fn select_target_row_groups(
                     ));
                 }
                 prior_uuid = Some(uuid);
-                selected |= !unresolved.is_empty() && unresolved.contains(&uuid);
+                let wanted = !unresolved.is_empty() && unresolved.contains(&uuid);
+                selected |= wanted;
+                push_selector(&mut group_selectors, wanted);
                 if tombstones.is_some_and(|values| values.value(row))
                     && batch
                         .columns()
@@ -621,15 +669,86 @@ fn select_target_row_groups(
         }
         if selected {
             selected_groups.push(index);
+            for selector in group_selectors {
+                push_selector_run(&mut selectors, !selector.skip, selector.row_count);
+            }
         }
     }
-    Ok(selected_groups)
+    Ok(TargetRowSelection {
+        groups: selected_groups,
+        selection: Some(RowSelection::from(selectors)),
+    })
+}
+
+/// Resolve the targets of a fragment whose keys a prior read walked: prune row
+/// groups by their UUID statistics, then read the UUID column of the survivors.
+fn select_walked_target_rows(
+    opened: &OpenPropertyFragment,
+    kind: PropertyRouteKind,
+    unresolved: &std::collections::BTreeSet<[u8; 16]>,
+    counts: &ReadCounts,
+    metrics: Option<&mut PropertyOverlayMetrics>,
+    targeted_batch_rows: usize,
+) -> Result<TargetRowSelection, GfError> {
+    let builder = open_counted_retained_property_builder(opened, counts.clone())?;
+    let groups = if unresolved.is_empty() {
+        Vec::new()
+    } else {
+        super::selective_reads::RowGroupSelection::Uuids(unresolved)
+            .select(builder.metadata(), kind.uuid_field())
+            .unwrap_or_else(|| (0..builder.metadata().num_row_groups()).collect())
+    };
+    if groups.is_empty() {
+        return Ok(TargetRowSelection {
+            groups,
+            selection: Some(RowSelection::from(Vec::new())),
+        });
+    }
+    let (selection, rows_read) = super::projected_reads::wanted_row_selection(
+        builder,
+        kind.uuid_field(),
+        &groups,
+        unresolved,
+        targeted_batch_rows,
+    )?;
+    if let Some(metrics) = metrics {
+        metrics.physical_rows = metrics.physical_rows.saturating_add(rows_read);
+    }
+    Ok(TargetRowSelection {
+        groups,
+        selection: Some(selection),
+    })
+}
+
+/// The row groups that hold a target, and the exact rows to decode within
+/// them (relative to the concatenation of those row groups). The validation
+/// pass already walked every key, so decoding can skip the other rows.
+struct TargetRowSelection {
+    groups: Vec<usize>,
+    /// `None` decodes every row of the selected row groups.
+    selection: Option<RowSelection>,
+}
+
+fn push_selector(selectors: &mut Vec<RowSelector>, select: bool) {
+    push_selector_run(selectors, select, 1);
+}
+
+fn push_selector_run(selectors: &mut Vec<RowSelector>, select: bool, count: usize) {
+    match selectors.last_mut() {
+        Some(last) if last.skip != select => last.row_count += count,
+        _ => selectors.push(if select {
+            RowSelector::select(count)
+        } else {
+            RowSelector::skip(count)
+        }),
+    }
 }
 
 struct TargetDecodeOptions<'a> {
     opened: &'a OpenPropertyFragment,
     kind: PropertyRouteKind,
     row_groups: Vec<usize>,
+    selection: Option<RowSelection>,
     batch_rows: usize,
     admission: TargetReadAdmission,
 }
@@ -642,8 +761,13 @@ fn decode_target_row_groups(
     retained_bytes: &mut u64,
     mut metrics: Option<&mut PropertyOverlayMetrics>,
 ) -> Result<(), GfError> {
-    let reader = open_counted_retained_property_builder(options.opened, counts.clone())?
-        .with_row_groups(options.row_groups)
+    let builder = open_counted_retained_property_builder(options.opened, counts.clone())?
+        .with_row_groups(options.row_groups);
+    let builder = match options.selection {
+        Some(selection) => builder.with_row_selection(selection),
+        None => builder,
+    };
+    let reader = builder
         .with_batch_size(options.batch_rows)
         .build()
         .map_err(parquet_error)?;

@@ -241,6 +241,7 @@ impl ExecutionPlan for VarLenExpandExec {
             out_schema: self.schema.clone(),
             provider: self.provider.clone(),
             capture_epoch: self.capture_epoch,
+            lifecycle: graphforge_storage::lifecycle_io::CaptureContext::current(),
         };
         let mut reservation = MemoryConsumer::new(VAR_LEN_CONSUMER)
             .with_can_spill(false)
@@ -367,6 +368,9 @@ pub(super) struct ExpandConfig {
     /// Adjacency source (#762) — moved into the `'static` execute future.
     pub(super) provider: Arc<dyn AdjacencyProvider>,
     pub(super) capture_epoch: u64,
+    /// The statement's read-path observer. The traversal runs as a spawned
+    /// task, so each synchronous section attaches it to count its reads.
+    pub(super) lifecycle: graphforge_storage::lifecycle_io::CaptureContext,
 }
 
 /// One in-progress path during the variable-length BFS.
@@ -487,12 +491,15 @@ async fn expand_bfs(
     let exec_err = |m: String| GfError::Execution(m);
 
     // --- Obtain the directed adjacency the traversal needs (#762). ---
-    let mut adjacency = adjacency::AdjacencyReader::for_capture(
-        cfg.provider.as_ref(),
-        &cfg.rel_type_name,
-        cfg.direction,
-        cfg.capture_epoch,
-    )?;
+    let mut adjacency = {
+        let _capture = cfg.lifecycle.attach();
+        adjacency::AdjacencyReader::for_capture(
+            cfg.provider.as_ref(),
+            &cfg.rel_type_name,
+            cfg.direction,
+            cfg.capture_epoch,
+        )?
+    };
 
     let mut sent_any = false;
     while let Some(batch) = input.next().await {
@@ -516,9 +523,21 @@ async fn expand_bfs(
             .transpose()?;
 
         // Every emitted path copies one input row, so the rows per batch follow
-        // the input's average row width.
-        let row_bytes = input
-            .get_array_memory_size()
+        // the input's average row width. Width is the bytes the rows occupy, not
+        // the capacity of the buffers they were sliced from: one row cut from an
+        // 8,192-row scan batch reports the whole batch's buffers and would cap
+        // every output batch at a handful of paths.
+        let input_slice_bytes = input
+            .columns()
+            .iter()
+            .map(|column| {
+                column
+                    .to_data()
+                    .get_slice_memory_size()
+                    .unwrap_or_else(|_| column.get_array_memory_size())
+            })
+            .sum::<usize>();
+        let row_bytes = input_slice_bytes
             .checked_div(input.num_rows())
             .unwrap_or(0)
             .max(1);
@@ -536,9 +555,61 @@ async fn expand_bfs(
                 Some(ids) if ids.is_null(row) => continue,
                 Some(ids) => Some(ids.value(row)),
             };
-            let seed_paths =
+            let seed_emissions =
                 bfs_emit_seed(cfg, &mut adjacency, row, node, required_dst, reservation)?;
-            for emission in seed_paths {
+            let seed_hops = seed_emissions.iter().fold(0usize, |hops, emission| {
+                hops.saturating_add(emission.2.len())
+            });
+            if seed_emissions.len() >= max_rows || seed_hops >= EXPAND_BATCH_MAX_HOPS {
+                // A seed whose paths fill several output batches shares the
+                // edges, destination nodes and edge properties of those paths
+                // between them: it reads them once and slices the result, not
+                // once per output batch. Its batches never mix with other seeds'.
+                if !pending.is_empty() {
+                    sent_any = true;
+                    let out = expand_chunk(cfg, &input, &pending, reservation)?;
+                    pending.clear();
+                    reservation.shrink(pending_bytes);
+                    pending_hops = 0;
+                    pending_bytes = 0;
+                    if !send_chunk(tx, out, reservation).await {
+                        return Ok(());
+                    }
+                }
+                let seed_bytes = seed_emissions.iter().fold(0usize, |bytes, emission| {
+                    bytes.saturating_add(emission_bytes(emission.2.len()))
+                });
+                if let Some(sources) = load_chunk_sources(cfg, &seed_emissions, reservation)? {
+                    let mut start = 0usize;
+                    while start < seed_emissions.len() {
+                        let mut end = start;
+                        let mut hops = 0usize;
+                        while end < seed_emissions.len()
+                            && end - start < max_rows
+                            && hops < EXPAND_BATCH_MAX_HOPS
+                        {
+                            hops = hops.saturating_add(seed_emissions[end].2.len());
+                            end += 1;
+                        }
+                        let out = materialise_chunk(
+                            cfg,
+                            &input,
+                            &seed_emissions[start..end],
+                            &sources,
+                            reservation,
+                        )?;
+                        sent_any = true;
+                        if !send_chunk(tx, out, reservation).await {
+                            return Ok(());
+                        }
+                        start = end;
+                    }
+                    sources.release(reservation);
+                }
+                reservation.shrink(seed_bytes);
+                continue;
+            }
+            for emission in seed_emissions {
                 pending_hops = pending_hops.saturating_add(emission.2.len());
                 pending_bytes = pending_bytes.saturating_add(emission_bytes(emission.2.len()));
                 pending.push(emission);
@@ -575,74 +646,114 @@ async fn expand_bfs(
     Ok(())
 }
 
-/// Build one output batch for `emissions` (a bounded slice of the traversal).
+/// What materialising a set of emissions reads from storage: the identity of
+/// every traversed edge, the reached destination node records and the relation's
+/// edge properties. Loaded once for the emissions it covers, so a seed whose
+/// paths fill several output batches reads each of them once, not once per batch.
 ///
-/// The sets, edge records and node batch it builds are charged while it runs and
-/// released before it returns; the returned batch stays charged until
-/// [`send_chunk`] hands it on.
-fn expand_chunk(
-    cfg: &ExpandConfig,
-    input: &RecordBatch,
-    emissions: &[Emission],
-    reservation: &mut MemoryReservation,
-) -> Result<RecordBatch, GfError> {
-    let baseline = reservation.size();
-    let out = build_chunk(cfg, input, emissions, reservation)?;
-    let held = reservation.size().saturating_sub(baseline);
-    reservation.shrink(held.saturating_sub(out.get_array_memory_size()));
-    Ok(out)
+/// What it holds is charged to the reservation; [`ChunkSources::release`] gives
+/// the charge back once the last batch built from it has been built.
+struct ChunkSources {
+    edge_records: std::collections::HashMap<u64, EdgeRecord>,
+    node_batch: RecordBatch,
+    node_row: std::collections::HashMap<u64, usize>,
+    edge_props: EdgePropSource,
+    charged: usize,
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "one function owns the batch assembly and every charge made for what it holds"
-)]
-fn build_chunk(
-    cfg: &ExpandConfig,
-    input: &RecordBatch,
-    emissions: &[Emission],
-    reservation: &mut MemoryReservation,
-) -> Result<RecordBatch, GfError> {
-    use std::collections::HashMap;
+impl ChunkSources {
+    fn release(self, reservation: &mut MemoryReservation) {
+        reservation.shrink(self.charged);
+    }
+}
 
-    use arrow::compute::{concat_batches, take};
+/// Charge `bytes` and add them to the running total of `charged`.
+fn charge(
+    reservation: &mut MemoryReservation,
+    charged: &mut usize,
+    bytes: usize,
+) -> Result<(), GfError> {
+    grow_reservation(reservation, bytes)?;
+    *charged = charged.saturating_add(bytes);
+    Ok(())
+}
+
+/// The struct fields of the edge-list column, past the four topology fields:
+/// the relation's persisted edge properties (#755).
+fn edge_list_prop_fields(cfg: &ExpandConfig) -> Result<Vec<arrow::datatypes::FieldRef>, GfError> {
+    use arrow::datatypes::DataType;
 
     let exec_err = |m: String| GfError::Execution(m);
+    let edge_field = cfg
+        .out_schema
+        .fields()
+        .last()
+        .ok_or_else(|| exec_err("output schema has no edge-list column".into()))?;
+    let DataType::List(item) = edge_field.data_type() else {
+        return Err(exec_err("edge-list field must be a List".into()));
+    };
+    let DataType::Struct(struct_fields) = item.data_type() else {
+        return Err(exec_err("edge-list item must be a Struct".into()));
+    };
+    Ok(struct_fields.iter().skip(4).cloned().collect())
+}
+
+/// Read everything `emissions` need from storage. `None` when there is no node
+/// batch to take destinations from, which yields an empty output.
+///
+/// The traversed and reached sets and the edge batches are charged while they
+/// are alive and released before this returns; the edge records, node batch,
+/// row map and edge properties stay charged to the returned sources.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one function owns the storage reads and every charge made for what they hold"
+)]
+fn load_chunk_sources(
+    cfg: &ExpandConfig,
+    emissions: &[Emission],
+    reservation: &mut MemoryReservation,
+) -> Result<Option<ChunkSources>, GfError> {
+    use std::collections::HashMap;
+
+    use arrow::compute::concat_batches;
+
+    let exec_err = |m: String| GfError::Execution(m);
+    let _capture = cfg.lifecycle.attach();
+    // Charged for the whole function, released before it returns.
+    let mut temporary = 0usize;
+    // Charged to the returned sources.
+    let mut charged = 0usize;
 
     let traversed: std::collections::HashSet<u64> = emissions
         .iter()
         .flat_map(|(_, _, path)| path.iter().copied())
         .collect();
-    grow_reservation(reservation, hash_table_bytes(traversed.capacity(), 8))?;
+    charge(
+        reservation,
+        &mut temporary,
+        hash_table_bytes(traversed.capacity(), 8),
+    )?;
 
     // Edge records (public identity + rel type) keyed by edge_id, for assembling
-    // the per-path relationship list (#709) — read lazily for the traversed
+    // the per-path relationship list (#709) - read lazily for the traversed
     // ids only (row-group pruning + row filter; an empty traversal never
     // opens the file).
-    let edge_batches = match cfg.provider.admitted_inventory() {
-        Some(inventory) => graphforge_storage::read_edges_filtered_from_inventory(
-            &inventory,
-            &cfg.rel_type_name,
-            cfg.mode,
-            &traversed,
-        ),
-        None => graphforge_storage::read_edges_filtered(
-            &cfg.dir,
-            &cfg.rel_type_name,
-            cfg.mode,
-            &traversed,
-        ),
-    }
-    .map_err(|e| exec_err(e.to_string()))?;
-    grow_reservation(
+    let edge_batches = read_traversed_edges(cfg, &traversed)?;
+    charge(
         reservation,
+        &mut temporary,
         edge_batches
             .iter()
             .map(RecordBatch::get_array_memory_size)
             .sum(),
     )?;
     let edge_records = build_edge_records(cfg, &edge_batches)?;
-    grow_reservation(reservation, edge_record_table_bytes(&edge_records))?;
+    charge(
+        reservation,
+        &mut charged,
+        edge_record_table_bytes(&edge_records),
+    )?;
+    drop(edge_batches);
 
     // --- Read nodes; map node_id -> row index for destination columns. ---
     // Lazily read only the reached destination node records (#838): the dst
@@ -650,7 +761,11 @@ fn build_chunk(
     // row's seed, which is in `emissions`), so an index Hit no longer scans the
     // whole node table. Source columns come from the input batch, not here.
     let reached: std::collections::HashSet<u64> = emissions.iter().map(|(_, id, _)| *id).collect();
-    grow_reservation(reservation, hash_table_bytes(reached.capacity(), 8))?;
+    charge(
+        reservation,
+        &mut temporary,
+        hash_table_bytes(reached.capacity(), 8),
+    )?;
     let node_batches = graphforge_storage::read_nodes_filtered_from_files(
         &topology_for_provider(cfg.provider.as_ref(), &cfg.dir)?,
         &reached,
@@ -660,25 +775,70 @@ fn build_chunk(
     // but guard defensively: with no node batch there is nothing to reach, so
     // emit zero rows rather than indexing into an empty Vec.
     let Some(first) = node_batches.first() else {
-        let empty = RecordBatch::new_empty(cfg.out_schema.clone());
-        grow_reservation(reservation, empty.get_array_memory_size())?;
-        return Ok(empty);
+        reservation.shrink(temporary.saturating_add(charged));
+        return Ok(None);
     };
     let node_batch =
         concat_batches(&first.schema(), &node_batches).map_err(|e| exec_err(e.to_string()))?;
-    grow_reservation(reservation, node_batch.get_array_memory_size())?;
+    charge(
+        reservation,
+        &mut charged,
+        node_batch.get_array_memory_size(),
+    )?;
     let node_ids = u64_column(&node_batch, 1)?; // node_id is column 1
     let node_row: HashMap<u64, usize> = node_ids
         .iter()
         .enumerate()
         .filter_map(|(i, id)| id.map(|v| (v, i)))
         .collect();
-    grow_reservation(
+    charge(
         reservation,
+        &mut charged,
         hash_table_bytes(node_row.capacity(), std::mem::size_of::<(u64, usize)>()),
     )?;
 
-    // --- Materialise the output batch via `take` on input + node columns. ---
+    // The relation's edge properties for every traversed edge.
+    let prop_fields = edge_list_prop_fields(cfg)?;
+    let mut hop_uuids = std::collections::BTreeSet::new();
+    for id in &traversed {
+        let record = edge_records
+            .get(id)
+            .ok_or_else(|| exec_err(format!("VarLenExpand: no record for edge_id {id}")))?;
+        hop_uuids.insert(record.edge_uuid);
+    }
+    let edge_props = load_edge_prop_source(
+        cfg.provider.admitted_inventory().as_deref(),
+        &cfg.rel_type_name,
+        &cfg.dir,
+        &prop_fields,
+        &hop_uuids,
+    )?;
+    charge(reservation, &mut charged, edge_props.charged_bytes())?;
+
+    reservation.shrink(temporary);
+    Ok(Some(ChunkSources {
+        edge_records,
+        node_batch,
+        node_row,
+        edge_props,
+        charged,
+    }))
+}
+
+/// Build one output batch for `emissions` (a bounded slice of the traversal)
+/// from sources that cover them. The returned batch is charged until
+/// [`send_chunk`] hands it on.
+fn materialise_chunk(
+    cfg: &ExpandConfig,
+    input: &RecordBatch,
+    emissions: &[Emission],
+    sources: &ChunkSources,
+    reservation: &mut MemoryReservation,
+) -> Result<RecordBatch, GfError> {
+    use arrow::compute::take;
+
+    let exec_err = |m: String| GfError::Execution(m);
+    let _capture = cfg.lifecycle.attach();
     let to_u32 = |v: usize| -> Result<u32, GfError> {
         u32::try_from(v).map_err(|_| exec_err(format!("row index {v} exceeds u32")))
     };
@@ -692,7 +852,7 @@ fn build_chunk(
         emissions
             .iter()
             .map(|(_, id, _)| {
-                let row = node_row.get(id).ok_or_else(|| {
+                let row = sources.node_row.get(id).ok_or_else(|| {
                     exec_err(format!(
                         "VarLenExpand reached unknown destination node_id {id}"
                     ))
@@ -702,21 +862,89 @@ fn build_chunk(
             .collect::<Result<Vec<_>, _>>()?,
     );
 
-    let mut columns = Vec::with_capacity(input.num_columns() + node_batch.num_columns() + 1);
+    // --- Materialise the output batch via `take` on input + node columns. ---
+    let mut columns =
+        Vec::with_capacity(input.num_columns() + sources.node_batch.num_columns() + 1);
     for col in input.columns() {
         columns.push(take(col, &src_take, None).map_err(|e| exec_err(e.to_string()))?);
     }
-    for col in node_batch.columns() {
+    for col in sources.node_batch.columns() {
         columns.push(take(col, &dst_take, None).map_err(|e| exec_err(e.to_string()))?);
     }
     // Trailing edge-list column (#709): one `List<Struct>` value per emitted
     // path, in schema order (last). Built from each path's ordered edge ids,
     // plus the relation's edge properties (#755).
-    columns.push(build_edge_list_column(cfg, emissions, &edge_records)?);
+    columns.push(build_edge_list_column(
+        cfg,
+        emissions,
+        &sources.edge_records,
+        &sources.edge_props,
+    )?);
     let out = RecordBatch::try_new(cfg.out_schema.clone(), columns)
         .map_err(|e| exec_err(e.to_string()))?;
     grow_reservation(reservation, out.get_array_memory_size())?;
     Ok(out)
+}
+
+/// Build one output batch for `emissions`, reading what they need.
+///
+/// What is read is charged while the batch is built and released before this
+/// returns; the returned batch stays charged until [`send_chunk`] hands it on.
+fn expand_chunk(
+    cfg: &ExpandConfig,
+    input: &RecordBatch,
+    emissions: &[Emission],
+    reservation: &mut MemoryReservation,
+) -> Result<RecordBatch, GfError> {
+    match load_chunk_sources(cfg, emissions, reservation)? {
+        Some(sources) => {
+            let out = materialise_chunk(cfg, input, emissions, &sources, reservation)?;
+            sources.release(reservation);
+            Ok(out)
+        }
+        None => {
+            let empty = RecordBatch::new_empty(cfg.out_schema.clone());
+            grow_reservation(reservation, empty.get_array_memory_size())?;
+            Ok(empty)
+        }
+    }
+}
+
+/// Edge identity columns of the traversed edges. Only the identity columns (and
+/// the relation name when the file carries one) are decoded; `edge_id` keys the
+/// records.
+fn read_traversed_edges(
+    cfg: &ExpandConfig,
+    traversed: &std::collections::HashSet<u64>,
+) -> Result<Vec<RecordBatch>, GfError> {
+    let exec_err = |m: String| GfError::Execution(m);
+    let mut edge_projection = vec![0_usize, 1, 2];
+    if cfg.mode == OntologyMode::Exploratory || cfg.rel_type_name == "*" {
+        edge_projection.push(
+            graphforge_storage::EXPLORATORY_EDGE_SCHEMA
+                .index_of("rel_type_name")
+                .map_err(|e| exec_err(e.to_string()))?,
+        );
+    }
+    match cfg.provider.admitted_inventory() {
+        Some(inventory) => graphforge_storage::read_edges_filtered_projected_from_inventory(
+            &inventory,
+            &cfg.rel_type_name,
+            cfg.mode,
+            traversed,
+            &edge_projection,
+            None,
+        ),
+        None => graphforge_storage::read_edges_filtered_projected_observed(
+            &cfg.dir,
+            &cfg.rel_type_name,
+            cfg.mode,
+            traversed,
+            &edge_projection,
+            None,
+        ),
+    }
+    .map_err(|e| exec_err(e.to_string()))
 }
 
 /// BFS one source seed over `adjacency`, with per-path relationship
@@ -739,6 +967,8 @@ fn bfs_emit_seed(
     reservation: &mut MemoryReservation,
 ) -> Result<Vec<Emission>, GfError> {
     use std::collections::VecDeque;
+
+    let _capture = cfg.lifecycle.attach();
 
     let mut emissions: Vec<Emission> = Vec::new();
     let mut queue: VecDeque<PathState> = VecDeque::new();
@@ -826,7 +1056,11 @@ fn build_edge_records(
 
     let mut records: HashMap<u64, EdgeRecord> = HashMap::new();
     for batch in edge_batches {
-        let edge_ids = u64_column(batch, 3)?;
+        let edge_id_index = batch
+            .schema()
+            .index_of("edge_id")
+            .map_err(|e| exec_err(e.to_string()))?;
+        let edge_ids = u64_column(batch, edge_id_index)?;
         let edge_uuids = fsb16(batch, 0)?;
         let src_uuids = fsb16(batch, 1)?;
         let dst_uuids = fsb16(batch, 2)?;
@@ -889,6 +1123,7 @@ pub(super) fn build_edge_list_column(
     cfg: &ExpandConfig,
     emissions: &[(usize, u64, Vec<u64>)],
     edge_records: &std::collections::HashMap<u64, EdgeRecord>,
+    edge_props: &EdgePropSource,
 ) -> Result<arrow::array::ArrayRef, GfError> {
     use arrow::array::{
         ArrayRef, FixedSizeBinaryArray, ListArray, StringArray, StructArray, new_empty_array,
@@ -965,13 +1200,7 @@ pub(super) fn build_edge_list_column(
     // Children in `struct_fields` order: edge_uuid, src_uuid, dst_uuid, rel_type,
     // then one array per property field (#755).
     let mut children: Vec<ArrayRef> = vec![edge_arr, src_arr, dst_arr, rel_arr];
-    children.extend(build_edge_prop_children(
-        cfg.provider.admitted_inventory().as_deref(),
-        &cfg.rel_type_name,
-        &cfg.dir,
-        &prop_fields,
-        &edge_uuids,
-    )?);
+    children.extend(edge_prop_children(edge_props, &prop_fields, &edge_uuids)?);
 
     let struct_arr =
         StructArray::try_new(struct_fields, children, None).map_err(|e| exec_err(e.to_string()))?;
@@ -1068,20 +1297,67 @@ fn build_edge_prop_children(
     prop_fields: &[arrow::datatypes::FieldRef],
     hop_edge_uuids: &[[u8; 16]],
 ) -> Result<Vec<arrow::array::ArrayRef>, GfError> {
+    let targets = hop_edge_uuids.iter().copied().collect();
+    let source = load_edge_prop_source(inventory, rel_type_name, dir, prop_fields, &targets)?;
+    edge_prop_children(&source, prop_fields, hop_edge_uuids)
+}
+
+/// The authenticated property rows of a set of edges, resolved once and
+/// assembled into hop order by [`edge_prop_children`] for as many output
+/// batches as the traversal needs.
+pub(super) struct EdgePropSource {
+    batches: Vec<RecordBatch>,
+    /// edge_uuid -> (owning batch, row within it).
+    uuid_to_loc: std::collections::HashMap<[u8; 16], (usize, u32)>,
+}
+
+impl EdgePropSource {
+    /// Bytes this source holds: its row batches and its location table.
+    fn charged_bytes(&self) -> usize {
+        self.batches
+            .iter()
+            .map(RecordBatch::get_array_memory_size)
+            .fold(
+                hash_table_bytes(
+                    self.uuid_to_loc.capacity(),
+                    std::mem::size_of::<([u8; 16], (usize, u32))>(),
+                ),
+                usize::saturating_add,
+            )
+    }
+
+    /// A source for a relation with no edge properties.
+    pub(super) fn empty() -> Self {
+        Self {
+            batches: Vec::new(),
+            uuid_to_loc: std::collections::HashMap::new(),
+        }
+    }
+}
+
+/// Read the selected rows of `targets` from every candidate property route.
+fn load_edge_prop_source(
+    inventory: Option<&graphforge_storage::AuthenticatedPropertyInventory>,
+    rel_type_name: &str,
+    dir: &Path,
+    prop_fields: &[arrow::datatypes::FieldRef],
+    targets: &std::collections::BTreeSet<[u8; 16]>,
+) -> Result<EdgePropSource, GfError> {
     use std::collections::HashMap;
 
-    use arrow::array::{ArrayRef, FixedSizeBinaryArray, UInt32Array, new_null_array};
-    use arrow::compute::kernels::zip::zip;
-    use arrow::compute::{concat_batches, is_not_null, take};
+    use arrow::array::FixedSizeBinaryArray;
+    use arrow::compute::concat_batches;
 
     let exec_err = |m: String| GfError::Execution(m);
     if prop_fields.is_empty() {
-        return Ok(Vec::new());
+        return Ok(EdgePropSource {
+            batches: Vec::new(),
+            uuid_to_loc: HashMap::new(),
+        });
     }
 
     // Resolve selected rows once per candidate route, then assemble hop order.
     let stems = edge_property_stems(inventory, dir, rel_type_name)?;
-    let targets = hop_edge_uuids.iter().copied().collect();
     let mut owners = std::collections::BTreeSet::new();
     let mut prop_batches_by_rel = Vec::with_capacity(stems.len());
     let property_names = prop_fields
@@ -1091,7 +1367,7 @@ fn build_edge_prop_children(
     for stem in &stems {
         let batches = match inventory {
             Some(inventory) => {
-                read_target_edge_properties(inventory, stem, &targets, &property_names, &mut owners)
+                read_target_edge_properties(inventory, stem, targets, &property_names, &mut owners)
             }
             None => graphforge_storage::read_edge_properties_projected(dir, stem, &property_names)
                 .map_err(|e| exec_err(e.to_string())),
@@ -1139,6 +1415,30 @@ fn build_edge_prop_children(
             }
         }
     }
+
+    Ok(EdgePropSource {
+        batches: prop_batches_by_rel,
+        uuid_to_loc,
+    })
+}
+
+/// Assemble one child array per edge-property struct field for the hops
+/// `hop_edge_uuids` (flattened hop order) from an already resolved source.
+fn edge_prop_children(
+    source: &EdgePropSource,
+    prop_fields: &[arrow::datatypes::FieldRef],
+    hop_edge_uuids: &[[u8; 16]],
+) -> Result<Vec<arrow::array::ArrayRef>, GfError> {
+    use arrow::array::{ArrayRef, UInt32Array, new_null_array};
+    use arrow::compute::kernels::zip::zip;
+    use arrow::compute::{is_not_null, take};
+
+    let exec_err = |m: String| GfError::Execution(m);
+    if prop_fields.is_empty() {
+        return Ok(Vec::new());
+    }
+    let prop_batches_by_rel = &source.batches;
+    let uuid_to_loc = &source.uuid_to_loc;
 
     // One take-index per flattened hop PER BATCH: Some(row) only for the hops
     // the batch owns, so each batch's `take` yields NULL everywhere else and
@@ -1538,9 +1838,60 @@ pub(crate) fn is_selected_endpoint_uuid(plan: &dyn ExecutionPlan, column_index: 
     }
 
     if let Some(filter) = plan.downcast_ref::<datafusion::physical_plan::filter::FilterExec>() {
-        return filter.projection().is_none()
-            && filter.schema().as_ref() == filter.input().schema().as_ref()
-            && is_selected_endpoint_uuid(filter.input().as_ref(), column_index);
+        // A filter only drops rows. When it also narrows its columns, follow
+        // the requested column to the input column it passes through.
+        let input_index = match filter.projection() {
+            None => {
+                if filter.schema().as_ref() != filter.input().schema().as_ref() {
+                    return false;
+                }
+                column_index
+            }
+            Some(projection) => {
+                let Some(&input_index) = projection.get(column_index) else {
+                    return false;
+                };
+                let output = filter.schema();
+                let input = filter.input().schema();
+                let (Some(out_field), Some(in_field)) = (
+                    output.fields().get(column_index),
+                    input.fields().get(input_index),
+                ) else {
+                    return false;
+                };
+                if out_field.as_ref() != in_field.as_ref() {
+                    return false;
+                }
+                input_index
+            }
+        };
+        return is_selected_endpoint_uuid(filter.input().as_ref(), input_index);
+    }
+    if let Some(var_len) = plan.downcast_ref::<VarLenExpandExec>() {
+        // The destination identity of a variable-length expansion seeded by an
+        // exact UUID equality: every emitted destination is reached from that
+        // seed, so the nominated frontier is exactly the reached set.
+        let destination_uuid = var_len.input.schema().fields().len()
+            + graphforge_storage::TOPOLOGY_NODES_SCHEMA
+                .index_of("node_uuid")
+                .unwrap_or(usize::MAX / 2);
+        // Exchanges only move rows between partitions.
+        let mut seed: &dyn ExecutionPlan = var_len.input.as_ref();
+        loop {
+            if let Some(exchange) =
+                seed.downcast_ref::<datafusion::physical_plan::repartition::RepartitionExec>()
+            {
+                seed = exchange.input().as_ref();
+            } else if let Some(coalesce) = seed.downcast_ref::<
+                datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec,
+            >() {
+                seed = coalesce.input().as_ref();
+            } else {
+                break;
+            }
+        }
+        let seed_proof = graphforge_storage::is_filtered_uuid_seed(seed, var_len.src_col_idx);
+        return destination_uuid == column_index && seed_proof;
     }
     if let Some(exchange) =
         plan.downcast_ref::<datafusion::physical_plan::repartition::RepartitionExec>()
