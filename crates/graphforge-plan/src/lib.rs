@@ -164,10 +164,23 @@ pub struct VarLenExpandNode {
     pub rel_ty: Option<RelationTypeId>,
     /// Logical semantic assumptions checked against the execution resource.
     pub read_contract: Option<GraphReadContract>,
+    /// Qualifier of an input column pair (`<alias>.node_id`) holding a node the
+    /// reached destination must equal. The lowerer filters on that equality
+    /// directly above this node; naming it here lets the traversal drop other
+    /// paths before they are materialised (#1986). `None` when the destination
+    /// is not already bound.
+    pub bound_destination: Option<String>,
     schema: DFSchemaRef,
 }
 
 impl VarLenExpandNode {
+    /// Declare the input node the reached destination must equal.
+    #[must_use]
+    pub fn with_bound_destination(mut self, alias: Option<String>) -> Self {
+        self.bound_destination = alias;
+        self
+    }
+
     /// Attach semantic assumptions without any execution authority.
     #[must_use]
     pub fn with_read_contract(mut self, contract: Option<GraphReadContract>) -> Self {
@@ -209,6 +222,7 @@ impl VarLenExpandNode {
             direction,
             rel_ty,
             read_contract: None,
+            bound_destination: None,
             schema,
         }
     }
@@ -319,7 +333,8 @@ impl UserDefinedLogicalNodeCore for VarLenExpandNode {
             dst_fields,
             edge_field,
         )
-        .with_read_contract(self.read_contract.clone()))
+        .with_read_contract(self.read_contract.clone())
+        .with_bound_destination(self.bound_destination.clone()))
     }
 }
 

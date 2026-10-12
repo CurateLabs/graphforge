@@ -376,3 +376,95 @@ fn datafusion_error_source_preserves_typed_lowering_and_algorithm_payloads() {
         }
     }
 }
+
+// A panic inside an operator must surface as GF_EXECUTION naming the plan's
+// operators, never as a process abort or a bare join error (#1986).
+async fn panicking_dataframe(spawned: bool) -> datafusion::dataframe::DataFrame {
+    let context = SessionContext::new();
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new(
+            "input",
+            DataType::Int64,
+            false,
+        )])),
+        vec![Arc::new(Int64Array::from(vec![1, 2, 3, 4]))],
+    )
+    .unwrap();
+    let function = create_udf(
+        "graphforge_panicking_operator",
+        vec![DataType::Int64],
+        DataType::Int64,
+        Volatility::Volatile,
+        Arc::new(|_| panic!("offset overflow")),
+    );
+    let frame = context
+        .read_batch(batch)
+        .unwrap()
+        .select(vec![function.call(vec![col("input")])])
+        .unwrap();
+    if spawned {
+        // Repartitioning drives the panicking projection in a spawned task.
+        frame
+            .repartition(datafusion::logical_expr::Partitioning::RoundRobinBatch(2))
+            .unwrap()
+    } else {
+        frame
+    }
+}
+
+fn assert_typed_panic(error: &GfError) {
+    assert_eq!(error.code(), "GF_EXECUTION");
+    let message = error.to_string();
+    assert!(message.contains("query execution panicked"), "{message}");
+    assert!(message.contains("offset overflow"), "{message}");
+    assert!(message.contains("plan operators:"), "{message}");
+    assert!(!message.contains("Join Error"), "{message}");
+}
+
+#[tokio::test]
+async fn operator_panic_is_typed_for_collect_and_stream_on_both_thread_kinds() {
+    for spawned in [false, true] {
+        let physical = panicking_dataframe(spawned)
+            .await
+            .create_physical_plan()
+            .await
+            .unwrap();
+        let (_dir, session) = boundary_session(BoundaryPlanner::Physical(physical));
+        let plan = GraphPlan::builder("openCypher").build();
+        let collected = session
+            .execute_plan(&plan)
+            .await
+            .expect_err("panicking operator must fail the collecting boundary");
+        assert_typed_panic(&collected);
+        let mut stream = session
+            .execute_plan_stream(&plan, &HashMap::new())
+            .await
+            .unwrap();
+        let failure = stream
+            .next()
+            .await
+            .expect("panic must surface as a stream item")
+            .expect_err("panicking operator must fail the stream");
+        assert_typed_panic(&GfError::from_execution_error(failure));
+    }
+}
+
+// DataFusion's repartition shares one `Arc<JoinError>` under a "Join Error"
+// context; that exact shape must be recognised as a panic (#1986).
+#[tokio::test]
+async fn shared_join_error_from_a_panicked_task_is_typed() {
+    let plan = failing_dataframe()
+        .await
+        .create_physical_plan()
+        .await
+        .unwrap();
+    let join = tokio::spawn(async { panic!("offset overflow") })
+        .await
+        .expect_err("task must panic");
+    let wrapped = DataFusionError::Context(
+        "Join Error".into(),
+        Box::new(DataFusionError::External(Box::new(Arc::new(join)))),
+    );
+    let typed = super::task_panic::from_task_error(wrapped, &plan);
+    assert_typed_panic(&GfError::from_execution_error(typed));
+}

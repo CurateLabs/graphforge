@@ -422,7 +422,9 @@ impl Stream for QueryEvidenceStream {
         let Some(inner) = this.inner.as_mut() else {
             return Poll::Ready(None);
         };
-        match inner.as_mut().poll_next(cx) {
+        let polled = crate::task_panic::guard_poll(&this.physical, || inner.as_mut().poll_next(cx))
+            .unwrap_or_else(|error| Poll::Ready(Some(Err(error))));
+        match polled {
             Poll::Ready(Some(Ok(batch))) => {
                 this.returned_batch_bytes = this
                     .returned_batch_bytes
@@ -430,6 +432,7 @@ impl Stream for QueryEvidenceStream {
                 Poll::Ready(Some(Ok(batch)))
             }
             Poll::Ready(Some(Err(error))) => {
+                let error = crate::task_panic::from_task_error(error, &this.physical);
                 this.finalize();
                 Poll::Ready(Some(Err(error)))
             }
