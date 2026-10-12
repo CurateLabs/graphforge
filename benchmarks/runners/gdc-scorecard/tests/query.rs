@@ -196,6 +196,8 @@ fn query_progress_is_flushed_in_binding_order() {
             counts_path.to_str().unwrap(),
             "--output",
             output_path.to_str().unwrap(),
+            "--query-timeout-seconds",
+            "60",
         ])
         .env("GF_GDC_PROGRESS_PATH", &progress_path)
         .output()
@@ -900,4 +902,148 @@ fn the_streamed_digest_is_the_digest_of_the_rendered_rows() {
         }
     }
     assert_eq!(compared, 600);
+}
+
+/// A 12-way cartesian product over the six fixture nodes: about 2e9 rows, which
+/// no machine finishes inside the two-second bound the test sets.
+const RUNAWAY: &str = "MATCH (a),(b),(c),(d),(e),(f),(g),(h),(i),(j),(k),(l) RETURN count(*) AS n";
+
+fn person_components() -> Value {
+    json!({"id": "person-components", "ordered": false, "bindings": [{"id": "all"}],
+           "operation": {"kind": "cluster", "label": "Person", "by": "components", "directed": false}})
+}
+
+#[cfg(unix)]
+fn process_exists(pid: u32) -> bool {
+    let pid = rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
+    rustix::process::test_kill_process(pid).is_ok()
+}
+
+#[test]
+fn a_runaway_variant_costs_its_samples_not_the_run() {
+    let root = tempfile::tempdir().unwrap();
+    let project = durable_project(root.path());
+    let variants = json!([
+        people_by_min_id(),
+        {"id": "runaway", "ordered": false,
+         "bindings": [{"id": "first"}, {"id": "second"}],
+         "operation": {"kind": "cypher", "text": RUNAWAY}},
+        person_components(),
+    ]);
+    let workload_path = root.path().join("workload.json");
+    let counts_path = root.path().join("expected-counts.json");
+    let output_path = root.path().join("evidence.json");
+    let results_path = root.path().join("results");
+    std::fs::create_dir(&results_path).unwrap();
+    std::fs::write(
+        &workload_path,
+        serde_json::to_vec(&workload(variants)).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(&counts_path, serde_json::to_vec(&expected(4, 3)).unwrap()).unwrap();
+    let progress_path = root.path().join("progress.jsonl");
+
+    let started = std::time::Instant::now();
+    let result = Command::new(env!("CARGO_BIN_EXE_graphforge-benchmark-gdc-scorecard"))
+        .args([
+            "query",
+            "--project",
+            project.to_str().unwrap(),
+            "--workload",
+            workload_path.to_str().unwrap(),
+            "--expected-counts",
+            counts_path.to_str().unwrap(),
+            "--output",
+            output_path.to_str().unwrap(),
+            "--query-timeout-seconds",
+            "2",
+            "--results-dir",
+            results_path.to_str().unwrap(),
+        ])
+        .env("GF_GDC_PROGRESS_PATH", &progress_path)
+        .output()
+        .unwrap();
+    let elapsed = started.elapsed();
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        elapsed < std::time::Duration::from_secs(60),
+        "the run took {elapsed:?}: {stderr}"
+    );
+    assert_eq!(result.status.code(), Some(3), "{stderr}");
+
+    let document: Value = serde_json::from_slice(&std::fs::read(&output_path).unwrap()).unwrap();
+    assert_eq!(document["status"], "failed");
+    assert_eq!(document["query_timeout_seconds"], 2);
+    assert_eq!(
+        document["failures"],
+        json!([
+            {"query_id": "runaway", "binding_id": "first", "cause": "query_timeout", "error_code": null},
+            {"query_id": "runaway", "binding_id": "second", "cause": "not_run", "error_code": null},
+        ])
+    );
+    let variants = document["variants"].as_array().unwrap();
+    let statuses: Vec<_> = variants.iter().map(|v| v["status"].clone()).collect();
+    assert_eq!(
+        statuses,
+        [json!("measured"), json!("failed"), json!("measured")]
+    );
+    assert_eq!(variants[0]["summary"]["count"], 3);
+    assert_eq!(variants[2]["summary"]["count"], 1);
+    for good in [&variants[0], &variants[2]] {
+        assert_eq!(good["warmup"]["completed"], true);
+        assert!(
+            good["samples"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|s| s["status"] == "measured")
+        );
+    }
+
+    // The warm-up call never returned, so it is the first binding that timed out.
+    let runaway = &variants[1];
+    assert_eq!(
+        runaway["warmup"],
+        json!({"binding_id": "first", "excluded": true, "completed": false})
+    );
+    assert_eq!(runaway["summary"], Value::Null);
+    assert_eq!(
+        runaway["samples"],
+        json!([
+            {"binding_id": "first", "status": "failed", "cause": "query_timeout", "error_code": null,
+             "error": "no result after 2 s; the variant's process was killed"},
+            {"binding_id": "second", "status": "failed", "cause": "not_run", "error_code": null,
+             "error": "variant abandoned after query_timeout on binding first"},
+        ])
+    );
+
+    // The killed variant left no result file; the four measured samples did.
+    let written = std::fs::read_dir(&results_path).unwrap().count();
+    assert_eq!(written, 4);
+
+    // The progress file shows the runaway call started and never ended.
+    let progress: Vec<Value> = String::from_utf8(std::fs::read(&progress_path).unwrap())
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let runaway_records: Vec<_> = progress
+        .iter()
+        .filter(|record| record["query_id"] == "runaway")
+        .collect();
+    assert_eq!(runaway_records.len(), 1, "{runaway_records:?}");
+    assert_eq!(runaway_records[0]["gdc_query"], "start");
+
+    // The killed child is gone: it was reaped, not left running.
+    #[cfg(unix)]
+    {
+        let pid: u32 = stderr
+            .lines()
+            .find_map(|line| line.strip_prefix("query-variant runaway: child pid "))
+            .unwrap_or_else(|| panic!("the driver names the runaway child's pid: {stderr}"))
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(!process_exists(pid), "child {pid} outlived the run");
+    }
 }

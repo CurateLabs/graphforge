@@ -18,6 +18,7 @@ fn main() -> ExitCode {
     match args.next().as_deref() {
         Some("convert") => {}
         Some("query") => return query_command::main(args),
+        Some(gdc_scorecard::query::VARIANT_COMMAND) => return query_command::variant_main(args),
         _ => return usage(),
     }
     let (mut mapping, mut input_root, mut output_dir) = (None, None, None);

@@ -5,7 +5,11 @@
 //! variant: one excluded warm-up, then one pass over its parameter bindings,
 //! timed by the single declared clock in [`measure`]. Suites supply only
 //! documents (see [`workload`]); the driver has no suite-specific code.
+//!
+//! Given a timeout, [`run_isolated`] measures each variant in a child process
+//! that is killed when one call outlives it (see [`isolated`]).
 
+mod isolated;
 mod measure;
 mod reconcile;
 mod workload;
@@ -19,10 +23,14 @@ use sha2::{Digest, Sha256};
 
 use crate::identity::hex;
 
+pub use isolated::{
+    Isolation, STDERR_TAIL_BYTES, Termination, VARIANT_COMMAND, abandonment, classify_termination,
+    measure_isolated, run_variant_child,
+};
 pub use measure::{
-    Failure, LATENCY_CLOCK, MAX_ERROR_BYTES, Measured, Outcome, RESULT_DIGEST, RESULT_SCHEMA,
-    Rendered, ResultsDir, Sample, Summary, VariantMeasurement, Warmup, measure_variant,
-    nearest_rank, result_digest,
+    Event, Failure, LATENCY_CLOCK, MAX_ERROR_BYTES, Measured, Outcome, RESULT_DIGEST,
+    RESULT_SCHEMA, Rendered, ResultsDir, Sample, Summary, VariantMeasurement, Warmup,
+    measure_variant, measure_variant_observed, nearest_rank, result_digest,
 };
 pub use reconcile::{CountPair, Reconciliation, reconcile};
 pub use workload::{
@@ -147,6 +155,10 @@ pub struct Evidence {
     pub suite: String,
     /// `passed` when every binding of every variant was measured, else `failed`.
     pub status: &'static str,
+    /// The longest a call could be in flight before its process was killed, in
+    /// seconds; `None` when the run measured in-process with no bound. A bound,
+    /// not a measurement.
+    pub query_timeout_seconds: Option<u64>,
     /// Every failed sample, in run order; empty when the run passed.
     pub failures: Vec<FailedSample>,
     pub driver: Driver,
@@ -164,7 +176,7 @@ pub struct FailedSample {
     pub query_id: String,
     pub binding_id: String,
     pub cause: &'static str,
-    pub error_code: Option<&'static str>,
+    pub error_code: Option<String>,
 }
 
 /// Lowercase hex SHA-256 of `bytes`.
@@ -229,15 +241,68 @@ pub fn run_with_results(
     executable_sha256: String,
     results: Option<&ResultsDir>,
 ) -> Result<Evidence, QueryError> {
+    run_measuring(
+        project,
+        workload,
+        expected_counts,
+        executable_sha256,
+        None,
+        |forge, parsed| {
+            parsed
+                .variants
+                .iter()
+                .map(|variant| measure_variant(&forge, variant, results))
+                .collect()
+        },
+    )
+}
+
+/// [`run_with_results`] with each variant measured in its own child process,
+/// killed when one call has been in flight for `isolation.timeout_seconds`.
+/// The parent reconciles, then closes the project before the first child opens
+/// it. A killed or crashed variant becomes failed samples (`query_timeout`,
+/// `query_crashed`, `not_run`) and the run continues with the next variant.
+///
+/// # Errors
+/// As [`run_with_results`], plus `io_error` when a child cannot be run.
+pub fn run_isolated(
+    project: &Path,
+    workload: &[u8],
+    expected_counts: &[u8],
+    executable_sha256: String,
+    results: Option<&ResultsDir>,
+    isolation: &Isolation<'_>,
+) -> Result<Evidence, QueryError> {
+    run_measuring(
+        project,
+        workload,
+        expected_counts,
+        executable_sha256,
+        Some(isolation.timeout_seconds),
+        |forge, parsed| {
+            drop(forge);
+            parsed
+                .variants
+                .iter()
+                .map(|variant| measure_isolated(project, isolation, variant, results))
+                .collect()
+        },
+    )
+}
+
+fn run_measuring(
+    project: &Path,
+    workload: &[u8],
+    expected_counts: &[u8],
+    executable_sha256: String,
+    query_timeout_seconds: Option<u64>,
+    measure: impl FnOnce(GraphForge, &Workload) -> Result<Vec<VariantMeasurement>, QueryError>,
+) -> Result<Evidence, QueryError> {
     let parsed = parse_workload(workload)?;
     let expected = parse_expected_counts(expected_counts)?;
     let forge = open_project(project)?;
     let reconciliation = reconcile(&forge, &expected)?;
-    let variants = parsed
-        .variants
-        .iter()
-        .map(|variant| measure_variant(&forge, variant, results))
-        .collect::<Result<Vec<_>, _>>()?;
+    let variants = measure(forge, &parsed)?;
     let failures: Vec<FailedSample> = variants
         .iter()
         .flat_map(|variant| {
@@ -246,7 +311,7 @@ pub fn run_with_results(
                     query_id: variant.query_id.clone(),
                     binding_id: sample.binding_id.clone(),
                     cause: failure.cause,
-                    error_code: failure.error_code,
+                    error_code: failure.error_code.clone(),
                 })
             })
         })
@@ -260,6 +325,7 @@ pub fn run_with_results(
         } else {
             "failed"
         },
+        query_timeout_seconds,
         failures,
         driver: Driver {
             name: DRIVER,
