@@ -593,7 +593,7 @@ pub fn map_operation(operation: Operation) -> MappingOutcome {
                 interface: "analyst_verb".into(),
                 cypher_shape: format!(
                     "paths(source={label}{{{id_property}: ${source_parameter}}}, \
-                     target={label}{{{id_property}: ${target_parameter}}}, by=bfs, \
+                     target={label}{{{id_property}: ${target_parameter}}}, by=bfs_depth, \
                      via={relationship_type}, directed=false)"
                 ),
                 notes: definition.documented_notes(),

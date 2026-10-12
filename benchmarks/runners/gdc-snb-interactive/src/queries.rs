@@ -54,7 +54,7 @@ pub enum QueryInterface {
     /// Cypher text run by `GraphForge::execute_with_params`.
     Cypher(&'static str),
     /// Unweighted shortest-path length run by `GraphForge::paths` with
-    /// `by=bfs`, undirected, over one relationship type. Both endpoints are
+    /// `by=bfs_depth`, undirected, over one relationship type. Both endpoints are
     /// selected by `label`/`id_property` from the two parameters; no row from
     /// the verb means no path (`-1`), and equal endpoints have length `0`.
     BfsPathLength {
@@ -704,10 +704,12 @@ static DEFINITIONS: [QueryDefinition; 20] = [
         columns: &["shortestPathLength"],
         unordered_list_columns: &[],
         limit: None,
-        notes: "paths(by=bfs, via=KNOWS, directed=false) instead of Cypher shortestPath, \
-                which is refused with a typed GF_NOT_IMPLEMENTED (#1888 is the decision of \
-                record); -1 when the verb returns no row, 0 for equal endpoints as the \
-                specification states",
+        notes: "uses the cost-only paths(by=bfs_depth, via=KNOWS, directed=false) search, \
+                which reports the hop count without materializing the path, instead of Cypher \
+                shortestPath, which \
+                is refused with a typed GF_NOT_IMPLEMENTED (#1888 is the decision of record); \
+                -1 when the verb returns no row, 0 for equal endpoints as the specification \
+                states",
         spec_variance: None,
     },
     QueryDefinition {

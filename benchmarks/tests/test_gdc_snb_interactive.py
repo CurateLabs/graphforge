@@ -323,7 +323,7 @@ class GdcSnbInteractiveSuiteTests(unittest.TestCase):
             if query["operation"] == "IC13":
                 self.assertEqual(query["interface"], "analyst_verb")
                 self.assertIsNone(query["cypher"])
-                self.assertIn("by=bfs", query["invocation"])
+                self.assertIn("by=bfs_depth", query["invocation"])
                 continue
             self.assertEqual(query["interface"], "cypher")
             for parameter in query["parameters"]:

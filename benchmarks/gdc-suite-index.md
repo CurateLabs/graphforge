@@ -591,7 +591,7 @@ published as `<suite>-<rung>-inputs-{workload,reference,notes}.json`:
   and 8.5 GiB, outside the measured phases.
 - **Matching rules** added for these suites: `exact` with `set_columns` (IC1
   universities and companies, IC12 tagNames compare as element sets),
-  `projection` (IC13 compares the `paths(by=bfs)` verb's `cost` with the hop
+  `projection` (IC13 compares the cost-only `paths(by=bfs_depth)` verb's `cost` with the hop
   count; no row stands for -1), and order-preserving `epsilon` for ordered
   results.
 

@@ -813,7 +813,7 @@ def _interactive_rows(
         (length,) = rows[0] if len(rows) == 1 else (None,)
         if not isinstance(length, int) or isinstance(length, bool):
             raise _fail("reference_unconvertible", f"IC13 length {rows!r}")
-        # paths(by=bfs) returns no row when the persons are not connected
+        # paths(by=bfs_depth) returns no row when the persons are not connected
         # (the reference's -1) and one row whose cost is the hop count otherwise.
         return [IC13_COST_COLUMN], ([] if length < 0 else [[render_float(length)]])
     kinds = INTERACTIVE_COLUMN_KINDS[operation]
