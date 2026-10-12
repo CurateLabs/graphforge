@@ -92,9 +92,15 @@ reads, which bound their memory separately, keep a scratch copy beside the sourc
 tree or in the project container; it is removed when that read ends.
 
 Each workspace has a unique owner; the final retained reader releases and removes
-it. Opening another facade never sweeps another reader's workspace. A killed
-process can leave a workspace behind, just as with temporary directories elsewhere;
-automatic crash-orphan reclamation is not provided. These directories are not
+it. The owner holds an exclusive advisory lock on a sibling
+`.gf-workspace-lock-<token>` file for as long as the workspace exists (the
+protocol of the query spill scratch, `query_spill.rs`). A killed process cannot
+remove its workspace, but the operating system releases its lock, so the next
+open of the same project removes every `graphforge-graph-workspace-<token>`
+whose lock it can take, and never one whose lock a live reader holds. A
+workspace without a lock file, left by a build before this protocol, gives no
+signal that its owner is gone and is never reclaimed automatically; remove it
+by hand once no process has the project open. These directories are not
 commit authority. In-memory instances keep their process-owned ephemeral roots
 and continue to work on tmpfs.
 
