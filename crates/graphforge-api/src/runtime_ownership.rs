@@ -35,8 +35,9 @@ impl GraphForge {
 
     /// Session resources for one query. Spill follows the policy (#1595):
     /// disabled means no disk at all; a configured directory is used as given;
-    /// otherwise a durable project spills into its scratch directory, capped
-    /// per query, and any other instance does not spill.
+    /// otherwise a durable project spills into its scratch directory and an
+    /// in-memory instance into the scratch of its private temporary project
+    /// (#1985), each capped per query.
     ///
     /// # Errors
     /// Returns the error from acquiring the project scratch directory.
@@ -89,17 +90,25 @@ impl GraphForge {
     }
 
     /// The project scratch directory for query spill, acquired on first use.
-    /// `None` unless this facade is a durable project, including read-only
-    /// views of one (checkpoints, inspection), which spill like any query.
+    /// `None` for a path-backed facade that is not a durable project; read-only
+    /// views of one (checkpoints, inspection) spill like any query.
     fn query_spill_directory(&self) -> Result<Option<std::path::PathBuf>, GfError> {
-        let Some(project) = &self.path else {
-            return Ok(None);
+        // An in-memory instance is an ephemeral project in a private temporary
+        // directory that its drop removes with everything under it, so its
+        // scratch lives there like a durable project's lives in its own
+        // directory, under the same cap and the same reclaim (#1985).
+        let project = match (&self.path, &self.tempdir) {
+            (Some(project), _) => {
+                if self.lifecycle_mode
+                    != graphforge_storage::filesystem_admission::ProjectLifecycleMode::Durable
+                {
+                    return Ok(None);
+                }
+                project.as_path()
+            }
+            (None, Some(tempdir)) => tempdir.path(),
+            (None, None) => return Ok(None),
         };
-        if self.lifecycle_mode
-            != graphforge_storage::filesystem_admission::ProjectLifecycleMode::Durable
-        {
-            return Ok(None);
-        }
         let mut slot = self
             .query_spill
             .lock()
