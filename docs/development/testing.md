@@ -69,7 +69,7 @@ Part of the **v0.5.0 testing strategy**: the openCypher TCK proves `execute()` l
 semantics, but it does not cover construction, lifecycle, checkpoints, analyst verbs,
 search, or the knowledge/epistemic surfaces. The checked-in
 `tests/contracts/non-cypher-rust-surface.json` manifest classifies every public
-Rust receiver method, all 94 analyst-verb registry entries, and
+Rust receiver method, all 96 analyst-verb registry entries, and
 the supported find/index modes and policies. New public methods or registry values
 must be classified and linked to deterministic evidence before merge.
 

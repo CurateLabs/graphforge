@@ -190,6 +190,8 @@ algorithm_enum!(PathAlgorithm, Bfs, AlgorithmVerb::Paths, {
     Dfs => "dfs",
     RandomWalk => "random_walk",
     TransitiveClosure => "transitive_closure",
+    BfsDepth => "bfs_depth",
+    DijkstraCost => "dijkstra_cost",
 });
 
 algorithm_enum!(AnalyzeAlgorithm, IsDag, AlgorithmVerb::Analyze, {
@@ -328,6 +330,11 @@ const PATH: &[AlgorithmField] = &[
     field("target_uuid", AlgorithmFieldType::Uuid, false),
     field("cost", AlgorithmFieldType::Float64, false),
     field("path", AlgorithmFieldType::UuidList, false),
+];
+const PATH_COST: &[AlgorithmField] = &[
+    field("source_uuid", AlgorithmFieldType::Uuid, false),
+    field("target_uuid", AlgorithmFieldType::Uuid, false),
+    field("cost", AlgorithmFieldType::Float64, false),
 ];
 const RANKED_PATH: &[AlgorithmField] = &[
     field("source_uuid", AlgorithmFieldType::Uuid, false),
@@ -535,6 +542,7 @@ const fn path_schema(value: PathAlgorithm) -> AlgorithmResultSchema {
         PathAlgorithm::Dfs => schema(TRAVERSAL),
         PathAlgorithm::RandomWalk => schema(WALK),
         PathAlgorithm::TransitiveClosure => schema(PAIR),
+        PathAlgorithm::BfsDepth | PathAlgorithm::DijkstraCost => schema(PATH_COST),
         _ => schema(PATH),
     }
 }

@@ -133,6 +133,8 @@ struct Spec {
     rare_every: usize,
     hub_degree: usize,
     weighted: bool,
+    /// Node `i` points at `i + 1 .. i + degree`, so shortest paths are long.
+    ring: bool,
 }
 
 impl Spec {
@@ -144,7 +146,14 @@ impl Spec {
         let mut edges = Vec::new();
         for source in 0..self.nodes {
             for step in 0..self.degree {
-                edges.push((source, (source * 7 + step * 131 + 1) % self.nodes));
+                edges.push((
+                    source,
+                    if self.ring {
+                        (source + step + 1) % self.nodes
+                    } else {
+                        (source * 7 + step * 131 + 1) % self.nodes
+                    },
+                ));
             }
         }
         for step in 0..self.hub_degree {
@@ -509,6 +518,7 @@ fn rank_over_a_whole_label_stays_within_the_export_terms() {
         rare_every: 0,
         hub_degree: 0,
         weighted: false,
+        ring: false,
     };
     let (_directory, project) = build_project(spec);
     let forge = open_indexed(&project);
@@ -533,6 +543,7 @@ fn rank_over_a_tiny_subset_of_a_large_view_pays_for_the_subset() {
         rare_every: 32,
         hub_degree: 150_000,
         weighted: false,
+        ring: false,
     };
     let (_directory, project) = build_project(spec);
     let forge = open_indexed(&project);
@@ -598,6 +609,7 @@ fn weighted_paths_peak_grows_with_the_entries_by_no_more_than_the_export_costs()
         rare_every: 0,
         hub_degree: 0,
         weighted: true,
+        ring: false,
     };
     let large = Spec {
         nodes: 16_000,
@@ -634,4 +646,234 @@ fn weighted_paths_peak_grows_with_the_entries_by_no_more_than_the_export_costs()
         "peak grew by {growth} bytes from {small_edges} to {large_edges} entries \
          ({small_peak} to {large_peak}); the export costs at most {allowed}"
     );
+}
+
+/// One single-source call from node 0 over every relation, and what it held.
+struct SingleSource {
+    rows: Vec<([u8; 16], u64)>,
+    /// Entries in the `path` column, zero when the verb returns none.
+    path_entries: usize,
+    peak: usize,
+    kept: usize,
+}
+
+fn measured_single_source(project: &Path, by: PathAlgorithm, weight: Option<&str>) -> SingleSource {
+    let forge = open_indexed(project);
+    let source = NodeSelector::Uuid(node_uuid(0));
+    let options = PathsOptions {
+        by,
+        via: None,
+        directed: true,
+        weight: weight.map(str::to_owned),
+        ..PathsOptions::default()
+    };
+    let before = CURRENT.load(Ordering::Relaxed);
+    let (batch, peak) = peak_live_bytes(|| forge.paths(&source, None, options.clone()).unwrap());
+    let targets = batch
+        .column_by_name("target_uuid")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+        .unwrap();
+    let costs = batch
+        .column_by_name("cost")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    let rows: Vec<([u8; 16], u64)> = (0..batch.num_rows())
+        .map(|row| {
+            (
+                targets.value(row).try_into().unwrap(),
+                costs.value(row).to_bits(),
+            )
+        })
+        .collect();
+    let path_entries = batch.column_by_name("path").map_or(0, |paths| {
+        let paths = paths
+            .as_any()
+            .downcast_ref::<arrow::array::ListArray>()
+            .unwrap();
+        paths.values().len()
+    });
+    drop(batch);
+    // The rows copied out above are the test's own, not the call's.
+    let own = rows.capacity() * std::mem::size_of::<([u8; 16], u64)>();
+    let kept = CURRENT.load(Ordering::Relaxed).saturating_sub(before + own);
+    SingleSource {
+        rows,
+        path_entries,
+        peak,
+        kept,
+    }
+}
+
+/// `bfs_depth` and `dijkstra_cost` keep no path and no edge identity. Both
+/// graphs hold more entries than one CSR shard, so the cursor's shard is full
+/// in both and cancels.
+///
+/// Per adjacency entry the export holds at most 40 bytes while weights are
+/// matched (neighbors 4, edge ids 8, edge UUIDs 16, weights 8, the UUID-sorted
+/// permutation 4) and the search holds at most 28 (neighbors 4, weights 8, and
+/// a heap entry of 16 per relaxation); `bfs_depth` holds 4 at either point.
+/// Per node: offsets 4, UUIDs 16, the search state (BFS: depth 4 and visit
+/// order 4; Dijkstra: cost 8 and a settled bit), and the result at 40 bytes a
+/// row (two UUIDs and a cost). The Parquet windows are added from row-group
+/// metadata; the property stream's own window is fixed, so it cancels.
+///
+/// `bfs` retains edge ids and UUIDs, 24 bytes per entry, which it is asserted
+/// to hold above `bfs_depth`.
+#[test]
+fn cost_only_paths_hold_no_per_vertex_path_and_grow_by_the_export_costs() {
+    let _guard = serial();
+    let small = Spec {
+        nodes: 3_000,
+        degree: 32,
+        rare_every: 0,
+        hub_degree: 0,
+        weighted: true,
+        ring: false,
+    };
+    let large = Spec {
+        nodes: 12_000,
+        ..small
+    };
+    let (small_edges, large_edges) = (small.edges().len(), large.edges().len());
+    assert_eq!(large_edges, 4 * small_edges);
+    let windows = |project: &Path| {
+        stream_window(project, "nodes", &["node_id", "node_uuid", "type_ids"], 32)
+            + stream_window(project, "edges", &["edge_id", "edge_uuid"], 24)
+    };
+    let (_small_directory, small_project) = build_project(small);
+    let (_large_directory, large_project) = build_project(large);
+    let window_growth = windows(&large_project).saturating_sub(windows(&small_project));
+
+    for (cost_by, paths_by, weight, entry_bytes, node_bytes) in [
+        (
+            PathAlgorithm::BfsDepth,
+            PathAlgorithm::Bfs,
+            None,
+            4,
+            4 + 16 + 4 + 4 + 40,
+        ),
+        (
+            PathAlgorithm::DijkstraCost,
+            PathAlgorithm::Dijkstra,
+            Some("cost"),
+            40,
+            4 + 16 + 9 + 40,
+        ),
+    ] {
+        let cost_small = measured_single_source(&small_project, cost_by, weight);
+        let cost_large = measured_single_source(&large_project, cost_by, weight);
+        let paths_large = measured_single_source(&large_project, paths_by, weight);
+
+        // The same rows and cost bits as the verb that builds paths.
+        assert_eq!(cost_large.rows, paths_large.rows, "{cost_by}");
+        assert!(cost_large.rows.len() > large.nodes / 2, "{cost_by}");
+        assert_eq!(cost_large.path_entries, 0);
+        assert!(
+            cost_large.kept <= cost_small.kept + 32 * (large.nodes - small.nodes),
+            "{cost_by} left {} bytes behind on the small graph and {} on the large",
+            cost_small.kept,
+            cost_large.kept
+        );
+
+        let allowed = entry_bytes * (large_edges - small_edges)
+            + node_bytes * (large.nodes - small.nodes)
+            + window_growth
+            + SLACK;
+        let growth = cost_large.peak.saturating_sub(cost_small.peak);
+        eprintln!(
+            "{cost_by}: grew {growth} of {allowed} ({} to {}); {paths_by} held {}",
+            cost_small.peak, cost_large.peak, paths_large.peak
+        );
+        assert!(
+            growth <= allowed,
+            "{cost_by}: peak grew by {growth} bytes from {small_edges} to {large_edges} entries; \
+             the export and search cost at most {allowed}"
+        );
+
+        // `bfs` retains edge ids and UUIDs (24 bytes an entry) while it runs.
+        // `dijkstra`'s export, which weights make identical, is the peak of
+        // both, so only its per-path cost (the test below) can tell them apart.
+        let extra = if paths_by == PathAlgorithm::Bfs {
+            24 * large_edges
+        } else {
+            0
+        };
+        assert!(
+            paths_large.peak >= cost_large.peak + extra,
+            "{paths_by} held {} bytes; {cost_by} held {} and the paths variant must hold \
+             {extra} more",
+            paths_large.peak,
+            cost_large.peak
+        );
+    }
+}
+
+/// A ring and a pseudo-random graph with the same nodes, entries and weights
+/// differ only in path length: the ring's shortest paths are `n / degree` hops
+/// long, the random graph's a handful. The paths verbs hold a path for every
+/// vertex, `P` entries and at least `16P` bytes (UUIDs) in the result alone, so
+/// the ring costs them `16 * (P_ring - P_random)` more. The cost-only verbs
+/// hold none, so the ring costs them nothing beyond the heap, which this graph
+/// shape keeps below the slack.
+#[test]
+fn cost_only_paths_do_not_pay_for_path_length() {
+    let _guard = serial();
+    let random = Spec {
+        nodes: 3_000,
+        degree: 2,
+        rare_every: 0,
+        hub_degree: 0,
+        weighted: true,
+        ring: false,
+    };
+    let ring = Spec {
+        ring: true,
+        ..random
+    };
+    assert_eq!(random.edges().len(), ring.edges().len());
+    let (_random_directory, random_project) = build_project(random);
+    let (_ring_directory, ring_project) = build_project(ring);
+    for (cost_by, paths_by, weight) in [
+        (PathAlgorithm::BfsDepth, PathAlgorithm::Bfs, None),
+        (
+            PathAlgorithm::DijkstraCost,
+            PathAlgorithm::Dijkstra,
+            Some("cost"),
+        ),
+    ] {
+        let cost_random = measured_single_source(&random_project, cost_by, weight);
+        let cost_ring = measured_single_source(&ring_project, cost_by, weight);
+        let paths_random = measured_single_source(&random_project, paths_by, weight);
+        let paths_ring = measured_single_source(&ring_project, paths_by, weight);
+        assert_eq!(cost_ring.rows, paths_ring.rows, "{cost_by}");
+        assert_eq!(cost_ring.rows.len(), ring.nodes);
+        let longer = paths_ring.path_entries - paths_random.path_entries;
+        assert!(
+            longer >= ring.nodes * ring.nodes / (2 * ring.degree) - paths_random.path_entries,
+            "{paths_by}: {} path entries on the ring",
+            paths_ring.path_entries
+        );
+        eprintln!(
+            "ring {cost_by}: {} (random graph {}); {paths_by}: {} (random graph {}) over \
+             {longer} more path entries",
+            cost_ring.peak, cost_random.peak, paths_ring.peak, paths_random.peak
+        );
+        assert!(
+            cost_ring.peak <= cost_random.peak + SLACK,
+            "{cost_by}: the ring held {} bytes and the random graph {}",
+            cost_ring.peak,
+            cost_random.peak
+        );
+        assert!(
+            paths_ring.peak >= paths_random.peak + 16 * longer,
+            "{paths_by}: the ring held {} bytes and the random graph {}; {longer} more path \
+             entries cost 16 bytes each",
+            paths_ring.peak,
+            paths_random.peak
+        );
+    }
 }

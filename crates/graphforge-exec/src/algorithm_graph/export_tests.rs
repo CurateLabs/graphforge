@@ -185,3 +185,95 @@ fn identity_free_export_reads_no_edge_table_and_builds_no_hash_map() {
     );
     assert_eq!(scanned.topology().neighbors, plain.topology().neighbors);
 }
+
+/// The kernels that read only neighbor ordinals export without edge identity:
+/// running them reads no edge table. `degree` reports edges, keeps identity and
+/// is the positive control, so a zero for the others is not an artifact of what
+/// the capture counts.
+#[test]
+fn ordinal_kernels_run_without_reading_the_edge_table() {
+    use graphforge_core::algorithms::{ClusterAlgorithm, PathAlgorithm, RankAlgorithm};
+    use graphforge_core::{ClusterOptions, PathsOptions, RankOptions};
+
+    let graph = generate(1_500, 6, false);
+    index_with_shards(graph.dir.path(), 1_024);
+    let provider = persistent(graph.dir.path());
+    let dir = graph.dir.path();
+    let edge_rows = || {
+        let stats = graphforge_storage::io_stats::snapshot().expect("capture installed");
+        (
+            stats.edge_full_reads,
+            stats.edge_full_rows,
+            stats.edge_filtered_reads,
+        )
+    };
+    let _capture = graphforge_storage::io_stats::CaptureScope::install();
+    let rank = |by| {
+        let options = RankOptions {
+            by,
+            via: Some("LINK".to_owned()),
+            directed: true,
+            ..RankOptions::default()
+        };
+        crate::algorithm_rank::rank_algorithm(
+            &provider,
+            dir,
+            OntologyMode::Strict,
+            EntityTypeSelection::All,
+            &[],
+            &options,
+        )
+        .unwrap();
+    };
+    let cluster = |by, directed| {
+        let options = ClusterOptions {
+            by,
+            via: Some("LINK".to_owned()),
+            directed,
+            ..ClusterOptions::default()
+        };
+        crate::algorithm_cluster::cluster_algorithm(
+            &provider,
+            dir,
+            OntologyMode::Strict,
+            EntityTypeSelection::All,
+            &[],
+            &options,
+        )
+        .unwrap();
+    };
+    let paths = |by| {
+        let options = PathsOptions {
+            by,
+            via: Some("LINK".to_owned()),
+            directed: true,
+            ..PathsOptions::default()
+        };
+        crate::algorithm_paths::paths_algorithm(
+            &provider,
+            dir,
+            OntologyMode::Strict,
+            Some(node_uuid(0).into_bytes()),
+            None,
+            options,
+        )
+        .unwrap();
+    };
+
+    let before = edge_rows();
+    rank(RankAlgorithm::PageRank);
+    // Not in a lean build: label propagation and clustering coefficient.
+    #[cfg(feature = "algorithms-extended")]
+    rank(RankAlgorithm::ClusteringCoefficient);
+    for directed in [false, true] {
+        cluster(ClusterAlgorithm::Components, directed);
+        #[cfg(feature = "algorithms-extended")]
+        cluster(ClusterAlgorithm::LabelPropagation, directed);
+    }
+    paths(PathAlgorithm::BfsDepth);
+    assert_eq!(edge_rows(), before, "an ordinal kernel read the edge table");
+
+    // A verb that reports edges does read it.
+    rank(RankAlgorithm::Degree);
+    assert_ne!(edge_rows(), before);
+}

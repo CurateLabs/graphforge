@@ -12,14 +12,14 @@ use graphforge_api::{
 use tempfile::TempDir;
 
 #[test]
-fn all_94_public_algorithm_contracts_are_unique_typed_and_repeatable() {
+fn all_public_algorithm_contracts_are_unique_typed_and_repeatable() {
     let first = algorithm_descriptor_contracts();
     let second = algorithm_descriptor_contracts();
     assert_eq!(
         first, second,
         "catalog order and descriptors must be stable"
     );
-    assert_eq!(first.len(), 94);
+    assert_eq!(first.len(), 96);
 
     let identities = first
         .iter()
@@ -45,7 +45,7 @@ fn all_94_public_algorithm_contracts_are_unique_typed_and_repeatable() {
         .collect::<HashSet<_>>();
     assert_eq!(
         identities.len(),
-        94,
+        96,
         "every entry is classified exactly once"
     );
 

@@ -79,8 +79,8 @@ use crate::algorithm_dispatch::{
     AlgorithmOutput, AlgorithmRegistry, AlgorithmValue, DependencyReview, RustAlgorithm,
 };
 use crate::algorithm_graph::{
-    AdjacencyGraph, AdjacencySelection, export_adjacency, load_node_initial_labels,
-    load_node_vectors,
+    AdjacencyGraph, AdjacencySelection, EdgeIdentityDemand, ProjectionPurpose, export_topology,
+    load_node_initial_labels, load_node_vectors,
 };
 #[cfg(feature = "algorithms-extended")]
 use crate::algorithm_k_core::k_core_numbers;
@@ -361,12 +361,12 @@ fn community_output(
 ) -> Result<AlgorithmOutput, AlgorithmError> {
     let mut sink = control.output_sink(Algorithm::Cluster(algorithm))?;
     let mut work = 0_usize;
-    for (index, &node_id) in graph.node_ids().iter().enumerate() {
+    for (index, &community) in communities.iter().enumerate().take(graph.node_count()) {
         checkpoint_chunk(control, &mut work)?;
         let uuid = graph
-            .node_uuid(node_id)
+            .uuid_of_ordinal(index)
             .ok_or_else(|| execution("selected node has no UUID identity"))?;
-        let community = i64::try_from(communities[index])
+        let community = i64::try_from(community)
             .map_err(|_| execution("community count exceeds Int64 result range"))?;
         sink.append_row(&[AlgorithmValue::Uuid(uuid), AlgorithmValue::Int64(community)])?;
     }
@@ -382,10 +382,10 @@ fn label_output(
 ) -> Result<AlgorithmOutput, AlgorithmError> {
     let mut sink = control.output_sink(Algorithm::Cluster(algorithm))?;
     let mut work = 0_usize;
-    for (&node_id, &community) in graph.node_ids().iter().zip(labels) {
+    for (index, &community) in labels.iter().enumerate().take(graph.node_count()) {
         checkpoint_chunk(control, &mut work)?;
         let uuid = graph
-            .node_uuid(node_id)
+            .uuid_of_ordinal(index)
             .ok_or_else(|| execution("selected node has no UUID identity"))?;
         sink.append_row(&[AlgorithmValue::Uuid(uuid), AlgorithmValue::Int64(community)])?;
     }
@@ -501,7 +501,15 @@ pub fn cluster_algorithm_with_compute(
     limits: AlgorithmLimits,
     compute: Option<crate::SharedComputePool>,
 ) -> Result<RecordBatch, GfError> {
-    let graph = cluster_projection(provider, dir, mode, label, property_stems, options)?;
+    let graph = cluster_projection(
+        provider,
+        dir,
+        mode,
+        label,
+        property_stems,
+        options,
+        ProjectionPurpose::Execute,
+    )?;
     let algorithm = Algorithm::Cluster(options.by);
     let output = execute_cluster_configured(
         &graph,
@@ -532,9 +540,17 @@ pub fn cluster_projection_fingerprint(
     property_stems: &[String],
     options: &ClusterOptions,
 ) -> Result<[u8; 32], GfError> {
-    cluster_projection(provider, dir, mode, label, property_stems, options)
-        .and_then(|graph| graph.descriptor_projection_fingerprint())
-        .map(|fingerprint| *fingerprint.as_bytes())
+    cluster_projection(
+        provider,
+        dir,
+        mode,
+        label,
+        property_stems,
+        options,
+        ProjectionPurpose::Fingerprint,
+    )
+    .and_then(|graph| graph.descriptor_projection_fingerprint())
+    .map(|fingerprint| *fingerprint.as_bytes())
 }
 
 fn cluster_projection(
@@ -544,6 +560,7 @@ fn cluster_projection(
     label: EntityTypeSelection,
     property_stems: &[String],
     options: &ClusterOptions,
+    purpose: ProjectionPurpose,
 ) -> Result<AdjacencyGraph, GfError> {
     if let Some(synchronous) = &options.synchronous_label_propagation {
         if options.by != ClusterAlgorithm::LabelPropagation {
@@ -609,7 +626,20 @@ fn cluster_projection(
     } else {
         Direction::Undirected
     };
-    let mut graph = export_adjacency(
+    // Components and label propagation read only neighbor ordinals. Weakly
+    // connected components are the same over the out-edges alone, because
+    // union-find is symmetric; this must never be applied to strongly
+    // connected components.
+    let (direction, identity) = match (purpose, options.by) {
+        (ProjectionPurpose::Execute, ClusterAlgorithm::Components) => {
+            (Direction::Out, EdgeIdentityDemand::Omit)
+        }
+        (ProjectionPurpose::Execute, ClusterAlgorithm::LabelPropagation) => {
+            (direction, EdgeIdentityDemand::Omit)
+        }
+        _ => (direction, EdgeIdentityDemand::Retain),
+    };
+    let mut graph = export_topology(
         provider,
         dir,
         mode,
@@ -619,6 +649,7 @@ fn cluster_projection(
             direction,
             weight: None,
         },
+        identity,
     )?;
     if let Some(property) = options
         .synchronous_label_propagation
@@ -689,22 +720,17 @@ fn normalized_communities_with_progress(
     control: &AlgorithmControl,
     mut progress: impl FnMut(usize),
 ) -> Result<(WeightedAdjacency, CommunityMembers), AlgorithmError> {
-    let node_count = graph.node_ids().len();
-    let mut indices = HashMap::with_capacity(node_count);
+    let node_count = graph.node_count();
     let mut work = 0_usize;
-    for (index, &node_id) in graph.node_ids().iter().enumerate() {
-        checkpoint_chunk(control, &mut work)?;
-        indices.insert(node_id, index);
-    }
     let mut edges = BTreeSet::new();
     let mut observed = 0_usize;
-    for (source, &node_id) in graph.node_ids().iter().enumerate() {
-        for edge in graph.neighbors(node_id) {
+    for source in 0..node_count {
+        for &target in graph.neighbor_ordinals(source) {
             checkpoint_chunk(control, &mut observed)?;
-            let target = indices
-                .get(&edge.neighbor_id)
-                .copied()
-                .ok_or_else(|| execution("adjacency references an unselected node"))?;
+            let target = target as usize;
+            if target >= node_count {
+                return Err(execution("adjacency references an unselected node"));
+            }
             if source != target {
                 edges.insert((source.min(target), source.max(target)));
             }
@@ -715,7 +741,6 @@ fn normalized_communities_with_progress(
     }
 
     let mut weights = vec![BTreeMap::new(); node_count];
-    work = 0;
     for (left, right) in edges {
         checkpoint_chunk(control, &mut work)?;
         weights[left].insert(right, 1.0);

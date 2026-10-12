@@ -13,6 +13,7 @@ mod cluster;
 mod communities;
 mod descriptors;
 mod embedding;
+mod paths_cost;
 mod paths_flow;
 mod paths_shortest;
 mod paths_walk;

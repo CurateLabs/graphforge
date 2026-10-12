@@ -28,7 +28,12 @@ use sha2::Digest;
 use crate::adjacency::AdjacencyProvider;
 use crate::algorithm_partition::{PartitionValue, ResolvedPartitionMap};
 
+#[cfg(feature = "algorithms-extended")]
+mod ordinal_rows;
 mod topology;
+
+#[cfg(feature = "algorithms-extended")]
+pub(crate) use ordinal_rows::OrdinalRows;
 
 #[cfg(test)]
 mod export_tests;
@@ -147,6 +152,15 @@ pub(crate) enum EdgeIdentityDemand {
     Omit,
     /// Also keep each slot's edge id and UUID, for kernels that report edges.
     Retain,
+}
+
+/// Why a projection is exported. A fingerprint digests the public edge
+/// identities of the declared projection; an execution reads only what its
+/// kernel needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProjectionPurpose {
+    Execute,
+    Fingerprint,
 }
 
 /// Node lookups by UUID without a hash map.
@@ -772,6 +786,12 @@ impl AdjacencyGraph {
         }
     }
 
+    /// Public UUID of the selected node at `ordinal`.
+    #[must_use]
+    pub(crate) fn uuid_of_ordinal(&self, ordinal: usize) -> Option<[u8; 16]> {
+        self.topology.uuids.get(ordinal).copied()
+    }
+
     /// Resolve an internal node surrogate to its public UUID.
     #[must_use]
     pub(crate) fn node_uuid(&self, node_id: u64) -> Option<[u8; 16]> {
@@ -789,6 +809,12 @@ impl AdjacencyGraph {
         self.uuid_lookup
             .find(&self.topology.uuids, node_uuid)
             .map(|ordinal| self.topology.node_id_of(ordinal))
+    }
+
+    /// Ordinal of the selected node with `node_uuid`, found without a hash map.
+    #[must_use]
+    pub(crate) fn ordinal_of_uuid(&self, node_uuid: &[u8; 16]) -> Option<usize> {
+        self.uuid_lookup.find(&self.topology.uuids, node_uuid)
     }
 
     /// Exact graph-native label, loaded only for synchronous label propagation.

@@ -3,11 +3,12 @@
 use super::{
     AdjacencyGraph, Algorithm, AlgorithmCapability, AlgorithmControl, AlgorithmError,
     AlgorithmOutput, AssertUnwindSafe, BUILTIN_REVIEW,
-    CLUSTERING_COEFFICIENT_PARALLEL_CROSSOVER_WORK, HashMap, IntoParallelRefIterator,
-    ParallelIterator, RankAlgorithm, RustAlgorithm, catch_unwind, destination_chunks,
-    exact_u64_as_f64, execution, has_arc, rank_scores_output,
+    CLUSTERING_COEFFICIENT_PARALLEL_CROSSOVER_WORK, IntoParallelRefIterator, ParallelIterator,
+    RankAlgorithm, RustAlgorithm, catch_unwind, destination_chunks, exact_u64_as_f64, execution,
+    rank_scores_output,
 };
 
+use crate::algorithm_graph::OrdinalRows;
 use graphforge_core::ClusteringNormalization;
 
 pub(super) struct ClusteringCoefficient;
@@ -60,8 +61,8 @@ pub(crate) enum ClusteringCoefficientExecutionPath {
 }
 
 struct PreparedClusteringCoefficient {
-    outgoing: Vec<Vec<usize>>,
-    incoming: Vec<Vec<usize>>,
+    outgoing: OrdinalRows,
+    incoming: OrdinalRows,
     work_units: u64,
 }
 
@@ -71,46 +72,23 @@ impl PreparedClusteringCoefficient {
     }
 }
 
+fn csr_overflow() -> AlgorithmError {
+    execution("clustering coefficient adjacency exceeds supported range")
+}
+
 fn prepare_clustering_coefficient(
     graph: &AdjacencyGraph,
     control: &AlgorithmControl,
 ) -> Result<PreparedClusteringCoefficient, AlgorithmError> {
-    let node_ids = graph.node_ids();
-    let indices: HashMap<u64, usize> = node_ids
-        .iter()
-        .enumerate()
-        .map(|(index, &node)| (node, index))
-        .collect();
-    let mut outgoing = vec![Vec::new(); node_ids.len()];
     let mut traversed_edges = 0_usize;
-    for (source, &node_id) in node_ids.iter().enumerate() {
-        for edge in graph.neighbors(node_id) {
-            if traversed_edges.is_multiple_of(1024) {
-                control.check_cancelled()?;
-            }
-            traversed_edges += 1;
-            let target = indices
-                .get(&edge.neighbor_id)
-                .copied()
-                .ok_or_else(|| execution("adjacency references an unselected node"))?;
-            if source != target {
-                outgoing[source].push(target);
-            }
+    let outgoing = OrdinalRows::distinct_out(graph, || {
+        if traversed_edges.is_multiple_of(1024) {
+            control.check_cancelled()?;
         }
-        outgoing[source].sort_unstable();
-        outgoing[source].dedup();
-    }
-
-    let mut incoming = vec![Vec::new(); node_ids.len()];
-    for (source, targets) in outgoing.iter().enumerate() {
-        for &target in targets {
-            incoming[target].push(source);
-        }
-    }
-    for sources in &mut incoming {
-        sources.sort_unstable();
-    }
-
+        traversed_edges += 1;
+        Ok(())
+    })?;
+    let incoming = outgoing.transpose()?;
     let work_units = estimate_clustering_coefficient_work(&outgoing, &incoming)?;
     Ok(PreparedClusteringCoefficient {
         outgoing,
@@ -120,20 +98,19 @@ fn prepare_clustering_coefficient(
 }
 
 fn estimate_clustering_coefficient_work(
-    outgoing: &[Vec<usize>],
-    incoming: &[Vec<usize>],
+    outgoing: &OrdinalRows,
+    incoming: &OrdinalRows,
 ) -> Result<u64, AlgorithmError> {
-    outgoing
-        .iter()
-        .zip(incoming)
-        .try_fold(0_u64, |total, (outgoing, incoming)| {
-            let degree = outgoing.len().checked_add(incoming.len()).ok_or_else(|| {
-                execution("clustering coefficient degree exceeds supported range")
-            })?;
-            let degree = u64::try_from(degree)
-                .map_err(|_| execution("clustering coefficient degree exceeds supported range"))?;
-            Ok(total.saturating_add(degree.saturating_mul(degree)))
-        })
+    (0..outgoing.len()).try_fold(0_u64, |total, node| {
+        let degree = outgoing
+            .row(node)
+            .len()
+            .checked_add(incoming.row(node).len())
+            .ok_or_else(|| execution("clustering coefficient degree exceeds supported range"))?;
+        let degree = u64::try_from(degree)
+            .map_err(|_| execution("clustering coefficient degree exceeds supported range"))?;
+        Ok(total.saturating_add(degree.saturating_mul(degree)))
+    })
 }
 
 /// Choose serial vs private-pool parallel execution for clustering coefficient.
@@ -215,10 +192,11 @@ fn clustering_coefficient_score_node(
     control.check_cancelled()?;
     let outgoing = &prepared.outgoing;
     let incoming = &prepared.incoming;
-    let mut neighbors = outgoing[node].clone();
-    neighbors.extend_from_slice(&incoming[node]);
+    let mut neighbors = outgoing.row(node).to_vec();
+    neighbors.extend_from_slice(incoming.row(node));
     neighbors.sort_unstable();
     neighbors.dedup();
+    let node = u32::try_from(node).map_err(|_| csr_overflow())?;
 
     if control.clustering_normalization() == ClusteringNormalization::NeighborEdges {
         let degree = u64::try_from(neighbors.len())
@@ -232,7 +210,7 @@ fn clustering_coefficient_score_node(
         for &first in &neighbors {
             for &second in &neighbors {
                 clustering_coefficient_checkpoint(control, work)?;
-                if first != second && has_arc(outgoing, first, second) {
+                if first != second && outgoing.has_arc(first, second) {
                     edges = edges.checked_add(1).ok_or_else(|| {
                         execution("clustering coefficient edge count exceeds supported range")
                     })?;
@@ -249,16 +227,18 @@ fn clustering_coefficient_score_node(
         };
     }
 
-    let total_degree = outgoing[node]
+    let total_degree = outgoing
+        .row(node as usize)
         .len()
-        .checked_add(incoming[node].len())
+        .checked_add(incoming.row(node as usize).len())
         .ok_or_else(|| execution("clustering coefficient degree exceeds supported range"))?;
     let total_degree = u64::try_from(total_degree)
         .map_err(|_| execution("clustering coefficient degree exceeds supported range"))?;
     let reciprocal_degree = u64::try_from(
-        outgoing[node]
+        outgoing
+            .row(node as usize)
             .iter()
-            .filter(|&&neighbor| has_arc(outgoing, neighbor, node))
+            .filter(|&&neighbor| outgoing.has_arc(neighbor, node))
             .count(),
     )
     .map_err(|_| execution("reciprocal degree exceeds supported range"))?;
@@ -319,8 +299,8 @@ where
     }
 }
 
-fn arc_strength(outgoing: &[Vec<usize>], source: usize, target: usize) -> u64 {
-    u64::from(has_arc(outgoing, source, target)) + u64::from(has_arc(outgoing, target, source))
+fn arc_strength(outgoing: &OrdinalRows, source: u32, target: u32) -> u64 {
+    u64::from(outgoing.has_arc(source, target)) + u64::from(outgoing.has_arc(target, source))
 }
 
 #[cfg(test)]

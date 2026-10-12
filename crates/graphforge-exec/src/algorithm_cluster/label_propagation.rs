@@ -3,9 +3,9 @@
 use super::{
     AdjacencyGraph, Algorithm, AlgorithmCapability, AlgorithmControl, AlgorithmError,
     AlgorithmOutput, BTreeMap, BUILTIN_REVIEW, ClusterAlgorithm, RustAlgorithm,
-    canonicalize_partition, checkpoint_chunk, community_output, execution, normalized_communities,
-    random_index, shuffle,
+    canonicalize_partition, checkpoint_chunk, community_output, execution, random_index, shuffle,
 };
+use crate::algorithm_graph::OrdinalRows;
 
 pub(super) struct LabelPropagation;
 
@@ -54,11 +54,14 @@ fn label_propagation_communities_with_progress(
     control: &AlgorithmControl,
     mut progress: impl FnMut(),
 ) -> Result<Vec<usize>, AlgorithmError> {
-    let (weights, _) = normalized_communities(graph, control)?;
-    let mut labels: Vec<_> = (0..weights.len()).collect();
-    let mut order: Vec<_> = (0..weights.len()).collect();
-    let mut random = 0x004c_4142_454c_u64;
     let mut work = 0;
+    // The distinct neighbors of each node in either direction, ascending.
+    let out = OrdinalRows::distinct_out(graph, || checkpoint_chunk(control, &mut work))?;
+    let neighbors = out.union(&out.transpose()?)?;
+    drop(out);
+    let mut labels: Vec<_> = (0..neighbors.len()).collect();
+    let mut order: Vec<_> = (0..neighbors.len()).collect();
+    let mut random = 0x004c_4142_454c_u64;
 
     loop {
         control.checkpoint()?;
@@ -66,16 +69,16 @@ fn label_propagation_communities_with_progress(
         shuffle(&mut order, &mut random, control, &mut work)?;
         for &node in &order {
             checkpoint_chunk(control, &mut work)?;
-            let dominant = dominant_neighbor_labels(&weights, &labels, node, control, &mut work)?;
+            let dominant = dominant_neighbor_labels(&neighbors, &labels, node, control, &mut work)?;
             if !dominant.is_empty() {
                 labels[node] = dominant[random_index(&mut random, dominant.len())?];
             }
         }
 
         let mut stable = true;
-        for node in 0..weights.len() {
+        for node in 0..neighbors.len() {
             checkpoint_chunk(control, &mut work)?;
-            let dominant = dominant_neighbor_labels(&weights, &labels, node, control, &mut work)?;
+            let dominant = dominant_neighbor_labels(&neighbors, &labels, node, control, &mut work)?;
             if !dominant.is_empty() && !dominant.contains(&labels[node]) {
                 stable = false;
                 break;
@@ -91,16 +94,16 @@ fn label_propagation_communities_with_progress(
 }
 
 fn dominant_neighbor_labels(
-    weights: &[BTreeMap<usize, f64>],
+    neighbors: &OrdinalRows,
     labels: &[usize],
     node: usize,
     control: &AlgorithmControl,
     work: &mut usize,
 ) -> Result<Vec<usize>, AlgorithmError> {
     let mut counts = BTreeMap::new();
-    for &neighbor in weights[node].keys() {
+    for &neighbor in neighbors.row(node) {
         checkpoint_chunk(control, work)?;
-        let count = counts.entry(labels[neighbor]).or_insert(0_usize);
+        let count = counts.entry(labels[neighbor as usize]).or_insert(0_usize);
         *count = count
             .checked_add(1)
             .ok_or_else(|| execution("label frequency exceeds platform range"))?;
@@ -121,56 +124,39 @@ fn synchronous_labels(
     options: &graphforge_core::SynchronousLabelPropagationOptions,
     control: &AlgorithmControl,
 ) -> Result<Vec<i64>, AlgorithmError> {
-    let indices: std::collections::HashMap<_, _> = graph
-        .node_ids()
-        .iter()
-        .enumerate()
-        .map(|(index, &node)| (node, index))
-        .collect();
-    let mut labels = graph
-        .node_ids()
-        .iter()
-        .enumerate()
-        .map(|(index, &node)| {
+    let mut labels = (0..graph.node_count())
+        .map(|index| {
             if options.initial_label_property.is_some() {
                 graph
-                    .initial_label(node)
+                    .initial_label(graph.node_id_of_ordinal(index))
                     .ok_or_else(|| execution("selected node has no initial label"))
             } else {
                 i64::try_from(index).map_err(|_| execution("initial label exceeds Int64 range"))
             }
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let mut votes = vec![Vec::new(); labels.len()];
     let mut work = 0;
-    for (source, &node) in graph.node_ids().iter().enumerate() {
-        let mut targets = std::collections::BTreeSet::new();
-        for edge in graph.neighbors(node) {
-            checkpoint_chunk(control, &mut work)?;
-            let target = indices
-                .get(&edge.neighbor_id)
-                .copied()
-                .ok_or_else(|| execution("adjacency references an unselected node"))?;
-            if target != source {
-                targets.insert(target);
-            }
-        }
-        for target in targets {
-            votes[source].push(target);
-            if graph.is_directed() {
-                votes[target].push(source);
-            }
-        }
-    }
+    // Each node votes for its distinct out-neighbors; a directed graph also
+    // lets each target vote back, without collapsing reciprocal arcs.
+    let outbound = OrdinalRows::distinct_out(graph, || checkpoint_chunk(control, &mut work))?;
+    let inbound = if graph.is_directed() {
+        Some(outbound.transpose()?)
+    } else {
+        None
+    };
     for _ in 0..options.iterations {
         control.checkpoint()?;
         let mut next = labels.clone();
-        for (node, neighbors) in votes.iter().enumerate() {
+        for (node, slot) in next.iter_mut().enumerate() {
             checkpoint_chunk(control, &mut work)?;
             let mut counts = BTreeMap::<i64, usize>::new();
-            for &neighbor in neighbors {
+            let voters = outbound
+                .row(node)
+                .iter()
+                .chain(inbound.as_ref().map_or(&[][..], |rows| rows.row(node)));
+            for &neighbor in voters {
                 checkpoint_chunk(control, &mut work)?;
-                let count = counts.entry(labels[neighbor]).or_default();
+                let count = counts.entry(labels[neighbor as usize]).or_default();
                 *count = count
                     .checked_add(1)
                     .ok_or_else(|| execution("label frequency overflow"))?;
@@ -180,7 +166,7 @@ fn synchronous_labels(
             for (label, count) in counts {
                 if count > maximum {
                     maximum = count;
-                    next[node] = label;
+                    *slot = label;
                 }
             }
         }

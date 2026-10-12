@@ -72,7 +72,9 @@ mod total_neighbors;
 use total_neighbors::TotalNeighbors;
 
 use graphforge_value::EntityTypeSelection;
-use std::collections::{HashMap, VecDeque};
+#[cfg(feature = "algorithms-extended")]
+use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 use std::sync::Arc;
@@ -89,7 +91,9 @@ use crate::algorithm_dispatch::{
     AlgorithmCancellation, AlgorithmCapability, AlgorithmControl, AlgorithmError, AlgorithmLimits,
     AlgorithmOutput, AlgorithmRegistry, AlgorithmValue, DependencyReview, RustAlgorithm,
 };
-use crate::algorithm_graph::{AdjacencyGraph, AdjacencySelection, export_adjacency};
+use crate::algorithm_graph::{
+    AdjacencyGraph, AdjacencySelection, EdgeIdentityDemand, ProjectionPurpose, export_topology,
+};
 #[cfg(feature = "algorithms-extended")]
 use crate::algorithm_k_core::k_core_numbers;
 #[cfg(feature = "algorithms-extended")]
@@ -321,9 +325,9 @@ fn rank_scores_output(
     control: &AlgorithmControl,
 ) -> Result<AlgorithmOutput, AlgorithmError> {
     let mut sink = control.output_sink(algorithm)?;
-    for (&node, score) in graph.node_ids().iter().zip(scores) {
+    for (index, score) in scores.into_iter().enumerate().take(graph.node_count()) {
         let uuid = graph
-            .node_uuid(node)
+            .uuid_of_ordinal(index)
             .ok_or_else(|| execution("selected node has no UUID identity"))?;
         sink.append_row(&[AlgorithmValue::Uuid(uuid), AlgorithmValue::Float64(score)])?;
     }
@@ -437,7 +441,14 @@ pub fn rank_algorithm_with_compute(
     limits: AlgorithmLimits,
     compute: Option<crate::SharedComputePool>,
 ) -> Result<RecordBatch, GfError> {
-    let graph = rank_projection(provider, dir, mode, label, options)?;
+    let graph = rank_projection(
+        provider,
+        dir,
+        mode,
+        label,
+        options,
+        ProjectionPurpose::Execute,
+    )?;
     let algorithm = Algorithm::Rank(options.by);
     let output = execute_rank_with_options(&graph, algorithm, options, limits, compute)?;
     let batch = shape_algorithm_output(algorithm, &output)?;
@@ -456,9 +467,16 @@ pub fn rank_projection_fingerprint(
     label: EntityTypeSelection,
     options: &RankOptions,
 ) -> Result<[u8; 32], GfError> {
-    rank_projection(provider, dir, mode, label, options)
-        .and_then(|graph| graph.descriptor_projection_fingerprint())
-        .map(|fingerprint| *fingerprint.as_bytes())
+    rank_projection(
+        provider,
+        dir,
+        mode,
+        label,
+        options,
+        ProjectionPurpose::Fingerprint,
+    )
+    .and_then(|graph| graph.descriptor_projection_fingerprint())
+    .map(|fingerprint| *fingerprint.as_bytes())
 }
 
 fn rank_projection(
@@ -467,6 +485,7 @@ fn rank_projection(
     mode: OntologyMode,
     label: EntityTypeSelection,
     options: &RankOptions,
+    purpose: ProjectionPurpose,
 ) -> Result<AdjacencyGraph, GfError> {
     validate_rank_options(options)?;
     let via = options.via.as_deref().unwrap_or("*");
@@ -480,7 +499,15 @@ fn rank_projection(
     } else {
         Direction::Undirected
     };
-    export_adjacency(
+    // PageRank and clustering coefficient read only neighbor ordinals.
+    let identity = match (purpose, options.by) {
+        (
+            ProjectionPurpose::Execute,
+            RankAlgorithm::PageRank | RankAlgorithm::ClusteringCoefficient,
+        ) => EdgeIdentityDemand::Omit,
+        _ => EdgeIdentityDemand::Retain,
+    };
+    export_topology(
         provider,
         dir,
         mode,
@@ -490,6 +517,7 @@ fn rank_projection(
             direction,
             weight: None,
         },
+        identity,
     )
 }
 

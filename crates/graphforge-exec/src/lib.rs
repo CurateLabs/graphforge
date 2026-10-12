@@ -124,6 +124,7 @@ pub(crate) mod algorithm_partition;
 mod algorithm_paths;
 pub(crate) mod algorithm_paths_astar;
 pub(crate) mod algorithm_paths_bellman_ford;
+pub(crate) mod algorithm_paths_cost;
 pub(crate) mod algorithm_paths_delta_stepping;
 pub(crate) mod algorithm_paths_dfs;
 pub(crate) mod algorithm_paths_dijkstra;

@@ -1572,8 +1572,14 @@ immutable UUID projection before dispatch and attach interpretations afterward w
 these schemas or values.
 
 **Shortest paths** (`by=`):
-`bfs`, `dijkstra`, `dijkstra_all_pairs`, `astar`, `bellman_ford`,
-`floyd_warshall`, `delta_stepping`, `yens`
+`bfs`, `bfs_depth`, `dijkstra`, `dijkstra_cost`, `dijkstra_all_pairs`, `astar`,
+`bellman_ford`, `floyd_warshall`, `delta_stepping`, `yens`
+
+`bfs_depth` and `dijkstra_cost` return the cost of every reachable node as
+`source_uuid`, `target_uuid`, `cost` with no `path` column, with the rows and cost bits of
+`bfs` and `dijkstra`. They keep no per-node path, so they suit large graphs where only
+distances are needed. `bfs_depth` takes no `weight`; `dijkstra_cost` takes the `weight` rules of
+`dijkstra`.
 
 **Flow** (`by=`):
 `max_flow`, `max_flow_edges`, `min_cut`, `min_cut_edges`, `min_cost_max_flow`,
