@@ -336,7 +336,6 @@ fn pagerank_pull_matches_serial_scatter_contribution_order() {
         let mut scatter = vec![base; scores.len()];
         pagerank_scatter_serial(
             graph,
-            &prepared.indices,
             &scores,
             &mut scatter,
             0.85,

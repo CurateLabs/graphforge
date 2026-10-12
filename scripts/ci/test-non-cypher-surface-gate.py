@@ -31,7 +31,7 @@ class SurfaceGateTests(unittest.TestCase):
     def test_checked_in_inventory_is_complete(self) -> None:
         self.assertEqual(GATE.validate(), [])
         self.assertEqual(len(GATE.public_methods()), 471)
-        self.assertEqual(len(GATE.algorithm_registry()), 94)
+        self.assertEqual(len(GATE.algorithm_registry()), 96)
 
     def test_public_inventory_follows_nested_domain_modules(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

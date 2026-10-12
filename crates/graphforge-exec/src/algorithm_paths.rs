@@ -25,11 +25,13 @@ use crate::algorithm_dispatch::{
     AlgorithmOutput, AlgorithmRegistry, AlgorithmValue, DependencyReview, RustAlgorithm,
 };
 use crate::algorithm_graph::{
-    AdjacencyGraph, AdjacencySelection, export_adjacency, load_node_numeric_property,
+    AdjacencyGraph, AdjacencySelection, EdgeIdentityDemand, export_adjacency, export_topology,
+    load_node_numeric_property,
 };
 use crate::algorithm_output::shape_algorithm_output;
 use crate::algorithm_paths_astar::exact_astar;
 use crate::algorithm_paths_bellman_ford::exact_bellman_ford;
+use crate::algorithm_paths_cost::{BfsDepth, DijkstraCost};
 use crate::algorithm_paths_delta_stepping::exact_delta_stepping;
 use crate::algorithm_paths_dfs::depth_first_search;
 use crate::algorithm_paths_dijkstra::{exact_dijkstra, exact_dijkstra_all_pairs};
@@ -710,8 +712,10 @@ pub(crate) fn register_path_algorithms(
     min_cost_input: Option<Arc<[CostCapacityEdge]>>,
 ) -> Result<(), AlgorithmError> {
     registry.register(Arc::new(Bfs { source, target }))?;
+    registry.register(Arc::new(BfsDepth { source, target }))?;
     registry.register(Arc::new(Dfs { source }))?;
     registry.register(Arc::new(Dijkstra { source, target }))?;
+    registry.register(Arc::new(DijkstraCost { source, target }))?;
     registry.register(Arc::new(DijkstraAllPairs { source }))?;
     registry.register(Arc::new(BellmanFord { source, target }))?;
     registry.register(Arc::new(DeltaStepping { source, target }))?;
@@ -802,7 +806,8 @@ pub fn paths_algorithm_with_compute(
 ) -> Result<RecordBatch, GfError> {
     validate_path_options(source, target, &options)?;
     let via = options.via.as_deref().unwrap_or("*");
-    let graph = export_adjacency(
+    let identity = execution_identity(options.by);
+    let graph = export_topology(
         provider,
         dir,
         mode,
@@ -823,6 +828,7 @@ pub fn paths_algorithm_with_compute(
                 options.weight.as_deref()
             },
         },
+        identity,
     )?;
     let algorithm = Algorithm::Paths(options.by);
     let mut control = AlgorithmControl::new(limits, AlgorithmCancellation::default());
@@ -893,6 +899,16 @@ pub fn paths_algorithm_with_compute(
     }
     let output = registry.execute(algorithm, &graph, &control)?;
     shape_algorithm_output(algorithm, &output).map_err(Into::into)
+}
+
+/// The cost-only searches never report an edge or a path, so their execution
+/// export keeps no edge identity. Fingerprints always keep it.
+fn execution_identity(by: PathAlgorithm) -> EdgeIdentityDemand {
+    if matches!(by, PathAlgorithm::BfsDepth | PathAlgorithm::DijkstraCost) {
+        EdgeIdentityDemand::Omit
+    } else {
+        EdgeIdentityDemand::Retain
+    }
 }
 
 /// Fingerprint the exact topology and graph-native values consumed by paths.
@@ -1041,7 +1057,9 @@ fn validate_path_options(
         by,
         PathAlgorithm::Bfs
             | PathAlgorithm::Dfs
+            | PathAlgorithm::BfsDepth
             | PathAlgorithm::Dijkstra
+            | PathAlgorithm::DijkstraCost
             | PathAlgorithm::DijkstraAllPairs
             | PathAlgorithm::AStar
             | PathAlgorithm::BellmanFord
@@ -1099,11 +1117,7 @@ fn validate_path_options(
             "{by} does not accept random-walk options"
         )));
     }
-    if matches!(
-        by,
-        PathAlgorithm::Bfs | PathAlgorithm::Dfs | PathAlgorithm::TransitiveClosure
-    ) && weight.is_some()
-    {
+    if rejects_weight(by) && weight.is_some() {
         return Err(GfError::Validation(format!(
             "{by} does not accept an edge weight property"
         )));
@@ -1118,6 +1132,17 @@ fn validate_path_options(
     validate_min_cost_properties(by, min_cost, weight, capacity_property, cost_property)?;
     validate_heuristic(by, heuristic)?;
     Ok(())
+}
+
+/// Traversals that count hops and so take no edge weight.
+fn rejects_weight(by: PathAlgorithm) -> bool {
+    matches!(
+        by,
+        PathAlgorithm::Bfs
+            | PathAlgorithm::BfsDepth
+            | PathAlgorithm::Dfs
+            | PathAlgorithm::TransitiveClosure
+    )
 }
 
 fn validate_heuristic(by: PathAlgorithm, heuristic: Option<&str>) -> Result<(), GfError> {

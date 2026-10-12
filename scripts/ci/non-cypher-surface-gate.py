@@ -56,7 +56,7 @@ def public_methods() -> set[str]:
 
 
 def algorithm_registry() -> set[str]:
-    """Expand the macro-owned closed algorithm registry to all 94 wire identities."""
+    """Expand the macro-owned closed algorithm registry to all 96 wire identities."""
     text = ALGORITHMS.read_text()
     result: set[str] = set()
     pattern = re.compile(
@@ -247,9 +247,9 @@ def validate(manifest_path: Path = MANIFEST) -> list[str]:
         errors.append("methods assigned to multiple evidence groups: " + ", ".join(duplicates))
 
     actual_algorithm = algorithm_registry()
-    if len(actual_algorithm) != 94:
+    if len(actual_algorithm) != 96:
         errors.append(
-            "source algorithm registry must contain exactly 94 entries, "
+            "source algorithm registry must contain exactly 96 entries, "
             f"found {len(actual_algorithm)}"
         )
     if missing := sorted(actual_algorithm - algorithm.keys()):

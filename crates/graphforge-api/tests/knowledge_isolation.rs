@@ -274,7 +274,9 @@ const REMAINING_CASES: &[PairedAlgorithmCase] = &[
         vector_property: Some("features"),
     },
     PairedAlgorithmCase::Paths(PathAlgorithm::Bfs),
+    PairedAlgorithmCase::Paths(PathAlgorithm::BfsDepth),
     PairedAlgorithmCase::Paths(PathAlgorithm::Dijkstra),
+    PairedAlgorithmCase::Paths(PathAlgorithm::DijkstraCost),
     PairedAlgorithmCase::Paths(PathAlgorithm::DijkstraAllPairs),
     PairedAlgorithmCase::Paths(PathAlgorithm::AStar),
     PairedAlgorithmCase::Paths(PathAlgorithm::BellmanFord),
@@ -476,6 +478,7 @@ fn execute_standard_path(
             weight: (!matches!(
                 by,
                 PathAlgorithm::Bfs
+                    | PathAlgorithm::BfsDepth
                     | PathAlgorithm::Dfs
                     | PathAlgorithm::TransitiveClosure
                     | PathAlgorithm::MinCostMaxFlow
@@ -1628,7 +1631,9 @@ fn catalog_partition() -> HashMap<Algorithm, CatalogDisposition> {
                 Algorithm::Paths(by) => matches!(
                     by,
                     PathAlgorithm::Bfs
+                        | PathAlgorithm::BfsDepth
                         | PathAlgorithm::Dijkstra
+                        | PathAlgorithm::DijkstraCost
                         | PathAlgorithm::DijkstraAllPairs
                         | PathAlgorithm::AStar
                         | PathAlgorithm::BellmanFord

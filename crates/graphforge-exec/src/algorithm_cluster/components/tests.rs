@@ -266,18 +266,12 @@ fn measure_components_parallel_crossover() {
         for _ in 0..5 {
             let start = Instant::now();
             let mut parents = (0..graph.node_ids().len()).collect::<Vec<_>>();
-            let indices = graph
-                .node_ids()
-                .iter()
-                .enumerate()
-                .map(|(index, &node_id)| (node_id, index))
-                .collect::<HashMap<_, _>>();
-            components_union_serial(&graph, &indices, &mut parents, &serial_control).unwrap();
+            components_union_serial(&graph, &mut parents, &serial_control).unwrap();
             serial_ns = serial_ns.min(start.elapsed().as_nanos());
 
             let start = Instant::now();
             let mut parents = (0..graph.node_ids().len()).collect::<Vec<_>>();
-            components_union_parallel(&graph, &indices, &mut parents, &parallel_control).unwrap();
+            components_union_parallel(&graph, &mut parents, &parallel_control).unwrap();
             parallel_ns = parallel_ns.min(start.elapsed().as_nanos());
         }
         println!(
@@ -287,4 +281,88 @@ fn measure_components_parallel_crossover() {
             parallel_ns
         );
     }
+}
+
+/// Weakly connected components come out the same from the out-edges alone as
+/// from both orientations, which is what lets the execution export skip the
+/// inbound index. The fixture is persisted, so both exports go through the
+/// real CSR views.
+#[test]
+fn components_directed_and_undirected_exports_yield_identical_ids() {
+    use graphforge_core::OntologyMode;
+    use graphforge_core::uuid::Uuid;
+    use graphforge_ir::Direction;
+    use graphforge_storage::GraphWriter;
+    use graphforge_value::{EntityTypeId, EntityTypeSelection};
+
+    use crate::adjacency::PersistentAdjacencyProvider;
+    use crate::algorithm_graph::{EdgeIdentityDemand, export_topology};
+
+    const TS: i64 = 1_700_000_000_000_000;
+    let node_uuid =
+        |index: u128| Uuid::from_u128(0x4000_0000_0000_0000_0000_0000_0000_0000 | index);
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+    let label = EntityTypeId::decode(0).unwrap();
+    for index in 0..12 {
+        writer.create_node(node_uuid(index + 1), label).unwrap();
+    }
+    // Edges point both ways across each component, so only the union of the
+    // orientations connects it: 0->1<-2->3, 4->5<-6, a self-loop on 8, a
+    // two-cycle 9<->10, and 7 and 11 isolated.
+    let edges = [
+        (0, 1),
+        (2, 1),
+        (2, 3),
+        (4, 5),
+        (6, 5),
+        (8, 8),
+        (9, 10),
+        (10, 9),
+    ];
+    for (index, &(source, target)) in edges.iter().enumerate() {
+        writer
+            .create_edge(
+                Uuid::from_u128(0x4100_0000_0000_0000_0000_0000_0000_0000 | index as u128),
+                "LINK",
+                &node_uuid(source + 1),
+                &node_uuid(target + 1),
+            )
+            .unwrap();
+    }
+    writer.flush().unwrap();
+    drop(writer);
+    graphforge_storage::adjacency::build_adjacency_index(dir.path(), TS).unwrap();
+    let inventory = graphforge_storage::GraphCatalog::open(
+        dir.path(),
+        None,
+        &graphforge_ir::RuntimeCatalog::new(),
+    )
+    .unwrap()
+    .admitted_inventory()
+    .unwrap();
+    let provider = PersistentAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict)
+        .with_inventory(inventory);
+
+    let components = |direction, identity| {
+        let graph = export_topology(
+            &provider,
+            dir.path(),
+            OntologyMode::Strict,
+            AdjacencySelection {
+                label: EntityTypeSelection::All,
+                via: "LINK",
+                direction,
+                weight: None,
+            },
+            identity,
+        )
+        .unwrap();
+        component_fingerprint(&execute_components(&graph, AlgorithmLimits::default()).unwrap())
+    };
+    let undirected = components(Direction::Undirected, EdgeIdentityDemand::Retain);
+    let out_only = components(Direction::Out, EdgeIdentityDemand::Omit);
+    assert_eq!(out_only, undirected);
+    let ids: Vec<i64> = undirected.iter().map(|row| row.1).collect();
+    assert_eq!(ids, [0, 0, 0, 0, 1, 1, 1, 2, 3, 4, 4, 5]);
 }

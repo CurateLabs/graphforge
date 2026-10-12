@@ -963,6 +963,7 @@ fn allowed_path_parameter(algorithm: PathAlgorithm, name: &str) -> bool {
         "weight" => !matches!(
             algorithm,
             PathAlgorithm::Bfs
+                | PathAlgorithm::BfsDepth
                 | PathAlgorithm::Dfs
                 | PathAlgorithm::TransitiveClosure
                 | PathAlgorithm::MinCostMaxFlow
@@ -1094,9 +1095,9 @@ mod tests {
     }
 
     #[test]
-    fn registry_is_exhaustive_for_all_94_catalog_entries() {
+    fn registry_is_exhaustive_for_all_catalog_entries() {
         let contracts = algorithm_descriptor_contracts();
-        assert_eq!(contracts.len(), 94);
+        assert_eq!(contracts.len(), 96);
         let identities = contracts
             .iter()
             .map(|contract| {

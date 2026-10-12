@@ -2,7 +2,7 @@
 
 use super::{
     AdjacencyGraph, Algorithm, AlgorithmCapability, AlgorithmControl, AlgorithmError,
-    AlgorithmOutput, AlgorithmValue, AtomicUsize, BUILTIN_REVIEW, HashMap, IntoParallelRefIterator,
+    AlgorithmOutput, AlgorithmValue, AtomicUsize, BUILTIN_REVIEW, IntoParallelRefIterator,
     Ordering, PAGERANK_PARALLEL_CROSSOVER_EDGES, ParallelIterator, RankAlgorithm, RustAlgorithm,
     destination_chunks, exact_u32, execution, run_rank_on_pool,
 };
@@ -32,7 +32,7 @@ impl RustAlgorithm for PageRank {
             control.check_iterations(iterations as usize)?;
         }
         let algorithm = Algorithm::Rank(RankAlgorithm::PageRank);
-        let node_len = graph.node_ids().len();
+        let node_len = graph.node_count();
         if node_len == 0 {
             return AlgorithmOutput::empty(algorithm, control);
         }
@@ -51,14 +51,7 @@ impl RustAlgorithm for PageRank {
             let mut next = vec![base; node_len];
             match path {
                 PageRankExecutionPath::Serial => {
-                    pagerank_scatter_serial(
-                        graph,
-                        &prepared.indices,
-                        &scores,
-                        &mut next,
-                        options.damping,
-                        control,
-                    )?;
+                    pagerank_scatter_serial(graph, &scores, &mut next, options.damping, control)?;
                 }
                 PageRankExecutionPath::Parallel { .. } => {
                     pagerank_pull_parallel(
@@ -86,17 +79,14 @@ impl RustAlgorithm for PageRank {
         }
 
         let mut sink = control.output_sink(algorithm)?;
-        for (index, &node) in graph.node_ids().iter().enumerate() {
+        for (index, &score) in scores.iter().enumerate() {
             if index % 1024 == 0 {
                 control.checkpoint()?;
             }
             let uuid = graph
-                .node_uuid(node)
+                .uuid_of_ordinal(index)
                 .ok_or_else(|| execution("selected node has no UUID identity"))?;
-            sink.append_row(&[
-                AlgorithmValue::Uuid(uuid),
-                AlgorithmValue::Float64(scores[index]),
-            ])?;
+            sink.append_row(&[AlgorithmValue::Uuid(uuid), AlgorithmValue::Float64(score)])?;
         }
         sink.finish()
     }
@@ -117,7 +107,6 @@ struct PageRankInboundCsr {
 }
 
 struct PreparedPageRank {
-    indices: HashMap<u64, usize>,
     outdegrees: Vec<f64>,
     dangling: Vec<usize>,
     inbound: PageRankInboundCsr,
@@ -125,31 +114,24 @@ struct PreparedPageRank {
 }
 
 fn prepare_pagerank(graph: &AdjacencyGraph) -> Result<PreparedPageRank, AlgorithmError> {
-    let node_ids = graph.node_ids();
-    let node_len = node_ids.len();
-    let indices: HashMap<u64, usize> = node_ids
-        .iter()
-        .enumerate()
-        .map(|(index, &node)| (node, index))
-        .collect();
+    let node_len = graph.node_count();
     let mut outdegrees = Vec::with_capacity(node_len);
     let mut dangling = Vec::new();
     let mut inbound_counts = vec![0_u32; node_len];
     let mut edge_count = 0_u64;
-    for (source_index, &source) in node_ids.iter().enumerate() {
-        let edges = graph.neighbors(source);
+    for source_index in 0..node_len {
+        let edges = graph.neighbor_ordinals(source_index);
         let degree = exact_u32(edges.len(), "node degree")?;
         outdegrees.push(f64::from(degree));
         if edges.is_empty() {
             dangling.push(source_index);
             continue;
         }
-        for edge in edges {
-            let target = indices
-                .get(&edge.neighbor_id)
-                .copied()
+        for &target in edges {
+            let count = inbound_counts
+                .get_mut(target as usize)
                 .ok_or_else(|| execution("adjacency references an unselected node"))?;
-            inbound_counts[target] = inbound_counts[target]
+            *count = count
                 .checked_add(1)
                 .ok_or_else(|| execution("inbound degree exceeds supported range"))?;
             edge_count = edge_count
@@ -173,13 +155,10 @@ fn prepare_pagerank(graph: &AdjacencyGraph) -> Result<PreparedPageRank, Algorith
         .map_err(|_| execution("inbound CSR length exceeds supported range"))?;
     let mut sources = vec![0_u32; total];
     let mut write_at = offsets[..node_len].to_vec();
-    for (source_index, &source) in node_ids.iter().enumerate() {
+    for source_index in 0..node_len {
         let source_u32 = exact_u32(source_index, "source ordinal")?;
-        for edge in graph.neighbors(source) {
-            let target = indices
-                .get(&edge.neighbor_id)
-                .copied()
-                .ok_or_else(|| execution("adjacency references an unselected node"))?;
+        for &target in graph.neighbor_ordinals(source_index) {
+            let target = target as usize;
             let slot = usize::try_from(write_at[target])
                 .map_err(|_| execution("inbound write cursor exceeds supported range"))?;
             sources[slot] = source_u32;
@@ -190,7 +169,6 @@ fn prepare_pagerank(graph: &AdjacencyGraph) -> Result<PreparedPageRank, Algorith
     }
 
     Ok(PreparedPageRank {
-        indices,
         outdegrees,
         dangling,
         inbound: PageRankInboundCsr { offsets, sources },
@@ -220,28 +198,23 @@ pub(crate) fn select_pagerank_path(
 
 fn pagerank_scatter_serial(
     graph: &AdjacencyGraph,
-    indices: &HashMap<u64, usize>,
     scores: &[f64],
     next: &mut [f64],
     damping: f64,
     control: &AlgorithmControl,
 ) -> Result<(), AlgorithmError> {
-    for (source_index, &source) in graph.node_ids().iter().enumerate() {
+    for (source_index, &score) in scores.iter().enumerate().take(graph.node_count()) {
         if source_index.is_multiple_of(PAGERANK_CHECKPOINT_DESTINATIONS) {
             control.check_cancelled()?;
         }
-        let edges = graph.neighbors(source);
+        let edges = graph.neighbor_ordinals(source_index);
         if edges.is_empty() {
             continue;
         }
         let outdegree = f64::from(exact_u32(edges.len(), "node degree")?);
-        let contribution = damping * scores[source_index] / outdegree;
-        for edge in edges {
-            let target = indices
-                .get(&edge.neighbor_id)
-                .copied()
-                .ok_or_else(|| execution("adjacency references an unselected node"))?;
-            next[target] += contribution;
+        let contribution = damping * score / outdegree;
+        for &target in edges {
+            next[target as usize] += contribution;
         }
     }
     Ok(())

@@ -589,7 +589,7 @@
       "test_refs": [
         {
           "path": "crates/graphforge-api/tests/algorithm_public_surface.rs",
-          "symbol": "all_94_public_algorithm_contracts_are_unique_typed_and_repeatable"
+          "symbol": "all_public_algorithm_contracts_are_unique_typed_and_repeatable"
         },
         {
           "path": "crates/graphforge-api/tests/algorithm_public_surface.rs",
@@ -605,7 +605,7 @@
         },
         {
           "path": "crates/graphforge-api/src/invocation_descriptor.rs",
-          "symbol": "registry_is_exhaustive_for_all_94_catalog_entries"
+          "symbol": "registry_is_exhaustive_for_all_catalog_entries"
         },
         {
           "path": "crates/graphforge-api/src/invocation_descriptor.rs",
@@ -1550,10 +1550,12 @@
         "paths.astar",
         "paths.bellman_ford",
         "paths.bfs",
+        "paths.bfs_depth",
         "paths.delta_stepping",
         "paths.dfs",
         "paths.dijkstra",
         "paths.dijkstra_all_pairs",
+        "paths.dijkstra_cost",
         "paths.floyd_warshall",
         "paths.gomory_hu_tree",
         "paths.max_flow",
@@ -1609,7 +1611,7 @@
       "test_refs": [
         {
           "path": "crates/graphforge-api/src/invocation_descriptor.rs",
-          "symbol": "registry_is_exhaustive_for_all_94_catalog_entries"
+          "symbol": "registry_is_exhaustive_for_all_catalog_entries"
         },
         {
           "path": "crates/graphforge-api/tests/knowledge_isolation.rs",

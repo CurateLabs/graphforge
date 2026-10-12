@@ -71,40 +71,16 @@ impl AlgorithmArrowSink {
         batch_size: usize,
         output_limit: u64,
     ) -> Result<Self, AlgorithmError> {
-        let schema = algorithm.result_schema();
-        let mut fields = Vec::with_capacity(schema.fields.len());
-        let mut builders = Vec::with_capacity(schema.fields.len());
-        for logical in schema.fields {
-            if matches!(logical.name, "node_id" | "edge_id" | "src_id" | "dst_id") {
-                return Err(shape_error(
-                    "public algorithm schema contains a surrogate field",
-                ));
-            }
-            fields.push(Field::new(
-                logical.name,
-                arrow_type(logical.data_type),
-                logical.nullable,
-            ));
-            builders.push(ColumnBuilder::new(logical.data_type));
-        }
-        let metadata = HashMap::from([
-            (
-                "graphforge.algorithm".to_owned(),
-                algorithm.as_str().to_owned(),
-            ),
-            (
-                "graphforge.verb".to_owned(),
-                algorithm.verb().as_str().to_owned(),
-            ),
-            (
-                "graphforge.algorithm_schema_version".to_owned(),
-                SCHEMA_VERSION.to_owned(),
-            ),
-        ]);
+        let (schema, arrow_schema) = canonical_schema(algorithm)?;
+        let builders = schema
+            .fields
+            .iter()
+            .map(|field| ColumnBuilder::new(field.data_type))
+            .collect();
         Ok(Self {
             algorithm,
             schema,
-            arrow_schema: Arc::new(Schema::new_with_metadata(fields, metadata)),
+            arrow_schema,
             batch_size: batch_size.max(1),
             output_limit,
             builders,
@@ -183,6 +159,64 @@ impl AlgorithmArrowSink {
             peak_builder_rows,
         })
     }
+}
+
+/// The logical and Arrow schemas of `algorithm`, with the canonical metadata.
+fn canonical_schema(
+    algorithm: Algorithm,
+) -> Result<(AlgorithmResultSchema, Arc<Schema>), AlgorithmError> {
+    let schema = algorithm.result_schema();
+    let mut fields = Vec::with_capacity(schema.fields.len());
+    for logical in schema.fields {
+        if matches!(logical.name, "node_id" | "edge_id" | "src_id" | "dst_id") {
+            return Err(shape_error(
+                "public algorithm schema contains a surrogate field",
+            ));
+        }
+        fields.push(Field::new(
+            logical.name,
+            arrow_type(logical.data_type),
+            logical.nullable,
+        ));
+    }
+    let metadata = HashMap::from([
+        (
+            "graphforge.algorithm".to_owned(),
+            algorithm.as_str().to_owned(),
+        ),
+        (
+            "graphforge.verb".to_owned(),
+            algorithm.verb().as_str().to_owned(),
+        ),
+        (
+            "graphforge.algorithm_schema_version".to_owned(),
+            SCHEMA_VERSION.to_owned(),
+        ),
+    ]);
+    Ok((
+        schema,
+        Arc::new(Schema::new_with_metadata(fields, metadata)),
+    ))
+}
+
+/// Wrap finished columns, in schema order, as the canonical single-batch
+/// output of `algorithm`. A handler that knows its row count builds each column
+/// with exact capacity and skips the sink's append, window and coalesce copies.
+pub(crate) fn output_from_columns(
+    algorithm: Algorithm,
+    columns: Vec<ArrayRef>,
+) -> Result<AlgorithmOutput, AlgorithmError> {
+    let (schema, arrow_schema) = canonical_schema(algorithm)?;
+    let batch = RecordBatch::try_new(arrow_schema, columns)
+        .map_err(|error| shape_error(error.to_string()))?;
+    check_batch_capacity(&batch)?;
+    let rows = batch.num_rows();
+    Ok(AlgorithmOutput {
+        schema,
+        batch,
+        internal_batch_count: 1,
+        peak_builder_rows: rows,
+    })
 }
 
 impl ColumnBuilder {

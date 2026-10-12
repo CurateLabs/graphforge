@@ -36,42 +36,41 @@ impl RustAlgorithm for Components {
         graph: &AdjacencyGraph,
         control: &AlgorithmControl,
     ) -> Result<AlgorithmOutput, AlgorithmError> {
-        let node_count = graph.node_ids().len();
+        let node_count = graph.node_count();
         let mut parents: Vec<usize> = (0..node_count).collect();
-        let indices: HashMap<u64, usize> = graph
-            .node_ids()
-            .iter()
-            .enumerate()
-            .map(|(index, &node_id)| (node_id, index))
-            .collect();
         match select_components_path(control, node_count, graph.edge_entry_count()) {
             ComponentsExecutionPath::Serial => {
-                components_union_serial(graph, &indices, &mut parents, control)?;
+                components_union_serial(graph, &mut parents, control)?;
             }
             ComponentsExecutionPath::Parallel { .. } => {
-                components_union_parallel(graph, &indices, &mut parents, control)?;
+                components_union_parallel(graph, &mut parents, control)?;
             }
         }
 
-        let mut ids = HashMap::new();
+        // Component id of each root, assigned in ascending node order.
+        let mut ids = vec![None; node_count];
+        let mut assigned = 0_i64;
         let algorithm = Algorithm::Cluster(ClusterAlgorithm::Components);
         let mut sink = control.output_sink(algorithm)?;
-        for (index, &node_id) in graph.node_ids().iter().enumerate() {
+        for index in 0..node_count {
             if index.is_multiple_of(COMPONENTS_CHECKPOINT_EDGES) {
                 control.checkpoint()?;
             }
             let root = find(&mut parents, index);
-            let community_id = if let Some(&id) = ids.get(&root) {
+            let community_id = if let Some(id) = ids[root] {
                 id
             } else {
-                let id = i64::try_from(ids.len()).map_err(|_| AlgorithmError::Execution {
-                    message: "component count exceeds Int64 result range".into(),
-                })?;
-                ids.insert(root, id);
+                let id = assigned;
+                assigned = assigned
+                    .checked_add(1)
+                    .ok_or_else(|| AlgorithmError::Execution {
+                        message: "component count exceeds Int64 result range".into(),
+                    })?;
+                ids[root] = Some(id);
                 id
             };
             let uuid = graph
-                .node_uuid(node_id)
+                .uuid_of_ordinal(index)
                 .ok_or_else(|| AlgorithmError::Execution {
                     message: "selected node has no UUID identity".into(),
                 })?;
@@ -84,24 +83,32 @@ impl RustAlgorithm for Components {
     }
 }
 
+/// Neighbor ordinals of `source`, each checked to be a selected node.
+fn selected_neighbors(
+    graph: &AdjacencyGraph,
+    source: usize,
+) -> Result<impl Iterator<Item = usize> + '_, AlgorithmError> {
+    let node_count = graph.node_count();
+    let row = graph.neighbor_ordinals(source);
+    if row.iter().any(|&target| target as usize >= node_count) {
+        return Err(execution("adjacency references an unselected node"));
+    }
+    Ok(row.iter().map(|&target| target as usize))
+}
+
 fn components_union_serial(
     graph: &AdjacencyGraph,
-    indices: &HashMap<u64, usize>,
     parents: &mut [usize],
     control: &AlgorithmControl,
 ) -> Result<(), AlgorithmError> {
     let mut visited_edges = 0_usize;
-    for (source_index, &source_id) in graph.node_ids().iter().enumerate() {
-        for edge in graph.neighbors(source_id) {
+    for source in 0..graph.node_count() {
+        for target in selected_neighbors(graph, source)? {
             if visited_edges.is_multiple_of(COMPONENTS_CHECKPOINT_EDGES) {
                 control.checkpoint()?;
             }
             visited_edges += 1;
-            let target_index = indices
-                .get(&edge.neighbor_id)
-                .copied()
-                .ok_or_else(|| execution("adjacency references an unselected node"))?;
-            union(parents, source_index, target_index);
+            union(parents, source, target);
         }
     }
     Ok(())
@@ -109,7 +116,6 @@ fn components_union_serial(
 
 fn components_union_parallel(
     graph: &AdjacencyGraph,
-    indices: &HashMap<u64, usize>,
     parents: &mut [usize],
     control: &AlgorithmControl,
 ) -> Result<(), AlgorithmError> {
@@ -117,11 +123,11 @@ fn components_union_parallel(
         .compute_pool()
         .ok_or_else(|| execution("parallel components requires an instance-owned compute pool"))?;
     control.checkpoint()?;
-    let ranges = component_source_chunks(graph.node_ids().len(), control.compute_threads());
+    let ranges = component_source_chunks(graph.node_count(), control.compute_threads());
     let chunk_results = run_components_on_pool(pool, || {
         Ok(ranges
             .par_iter()
-            .map(|&(start, end)| components_chunk_links(graph, indices, start, end, control))
+            .map(|&(start, end)| components_chunk_links(graph, start, end, control))
             .collect::<Vec<_>>())
     })?;
 
@@ -137,7 +143,6 @@ fn components_union_parallel(
 
 fn components_chunk_links(
     graph: &AdjacencyGraph,
-    indices: &HashMap<u64, usize>,
     start: usize,
     end: usize,
     control: &AlgorithmControl,
@@ -145,18 +150,13 @@ fn components_chunk_links(
     control.check_cancelled()?;
     let mut parents = HashMap::new();
     let mut visited_edges = 0_usize;
-    for (offset, &source_id) in graph.node_ids()[start..end].iter().enumerate() {
-        let source_index = start + offset;
-        for edge in graph.neighbors(source_id) {
+    for source in start..end {
+        for target in selected_neighbors(graph, source)? {
             if visited_edges.is_multiple_of(COMPONENTS_CHECKPOINT_EDGES) {
                 control.check_cancelled()?;
             }
             visited_edges += 1;
-            let target_index = indices
-                .get(&edge.neighbor_id)
-                .copied()
-                .ok_or_else(|| execution("adjacency references an unselected node"))?;
-            local_union(&mut parents, source_index, target_index);
+            local_union(&mut parents, source, target);
         }
     }
     control.check_cancelled()?;

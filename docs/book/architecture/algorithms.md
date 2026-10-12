@@ -1521,7 +1521,9 @@ label/property selectors. Internal adjacency and storage IDs never appear in res
 | Value | Algorithm | Source reference |
 | -------------------- | ----------------------------------------- | ---------------- |
 | `bfs` | Breadth-first search (hop-count distance) | OCG / GDS |
+| `bfs_depth` | Hop-count distance only, no path | GraphForge |
 | `dijkstra` | Dijkstra single-source or source-target | OCG / GDS |
+| `dijkstra_cost` | Dijkstra cost only, no path | GraphForge |
 | `dijkstra_all_pairs` | All-pairs Dijkstra | OCG / GDS |
 | `astar` | A* with caller-supplied heuristic | OCG / GDS |
 | `bellman_ford` | Bellman-Ford (handles negative weights) | OCG / GDS |
@@ -1575,6 +1577,27 @@ The implementation and dispatch owner is `graphforge-exec`; Python and Node only
 convert its Arrow output. Official Neo4j Graph Data Science documentation is an optional
 development parity reference only. GraphForge has no igraph, NetworkX, Neo4j, SciPy, or
 external path-service runtime backend, fallback, packaging dependency, or recovery path.
+
+#### Canonical `bfs_depth` and `dijkstra_cost` contracts
+
+`bfs_depth` and `dijkstra_cost` answer "how far is each node" without a `path` column. They are
+separate catalog values, not an option on `bfs` and `dijkstra`, because one catalog value has
+exactly one result schema. The non-null schema is `source_uuid: FixedSizeBinary(16)`,
+`target_uuid: FixedSizeBinary(16)`, `cost: Float64`.
+
+Rows and cost bits equal the `bfs` and `dijkstra` rows with the `path` column dropped: `bfs_depth`
+orders rows by hop count and then node, `dijkstra_cost` by node. The source emits a zero-cost row,
+a node the source cannot reach emits no row, and a `target` emits one row or none. Option and
+weight rules are those of the verb each mirrors: `bfs_depth` accepts no `weight`;
+`dijkstra_cost` takes an optional `weight` whose values must be finite and non-negative, and a
+non-finite accumulated cost is an error. Both require `k=1`.
+
+Neither keeps a path or edge identity, so the execution export omits edge UUIDs. `bfs_depth` holds
+one `u32` depth and one `u32` visit-order entry per node, `4n + 4n` bytes beyond the
+topology. `dijkstra_cost` holds one `f64` cost per node, a settled bitset, and a heap of at most
+one `(f64, u32)` entry per relaxation, `8n + n/8 + 16m` bytes in the worst case. The result is
+built as one batch with exact column capacity, `40r` bytes for `r` rows, with no intermediate
+rows or coalesce copy. The allocation test `analyst_export_peak.rs` states these terms.
 
 #### Canonical `dijkstra_all_pairs` contract
 
