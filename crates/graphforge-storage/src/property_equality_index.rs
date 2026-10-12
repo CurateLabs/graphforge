@@ -69,7 +69,16 @@ fn stem(route: &str, column: &str) -> String {
     hasher.update([0]);
     hasher.update(column.as_bytes());
     let digest = hasher.finalize();
-    digest[..16].iter().map(|b| format!("{b:02x}")).collect()
+    hex(&digest[..16])
+}
+
+/// Lowercase hexadecimal text of `bytes`.
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut text, byte| {
+        let _ = write!(text, "{byte:02x}");
+        text
+    })
 }
 
 fn manifest_path(project_dir: &Path, route: &str, column: &str) -> PathBuf {
@@ -164,9 +173,9 @@ impl Entries {
     /// stable, so equal values stay in UUID order.
     fn sort(&mut self) {
         match self {
-            Self::Int(entries) => entries.sort_by(|a, b| a.0.cmp(&b.0)),
+            Self::Int(entries) => entries.sort_by_key(|entry| entry.0),
             Self::Str(entries) => entries.sort_by(|a, b| a.0.cmp(&b.0)),
-            Self::Bool(entries) => entries.sort_by(|a, b| a.0.cmp(&b.0)),
+            Self::Bool(entries) => entries.sort_by_key(|entry| entry.0),
         }
     }
 
@@ -372,7 +381,10 @@ pub fn write_property_equality_indexes(
                 std::fs::create_dir_all(parent).map_err(|e| storage("create directory", &e))?;
             }
             std::fs::write(&path, &file.bytes).map_err(|e| storage("write file", &e))?;
-            if file.relative_path.ends_with(".eq") {
+            if Path::new(&file.relative_path)
+                .extension()
+                .is_some_and(|extension| extension == "eq")
+            {
                 report.indexes += 1;
             }
             report.files += 1;
