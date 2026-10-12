@@ -572,7 +572,7 @@ pub use ontology_lifecycle::{
     RuntimeCatalogSnapshot,
 };
 pub use paging::{CancellationToken, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, PageRequest, PageToken};
-pub use property_index::PropertyEqualityIndexBuild;
+pub use property_index::{EdgePropertyIndexBuild, PropertyEqualityIndexBuild, PropertyIndexBuild};
 #[cfg(feature = "provenance")]
 pub use provenance::ProvenanceHistoryRequest;
 pub use resource_policy::{

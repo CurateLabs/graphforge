@@ -26,6 +26,7 @@ pub mod query_spill;
 
 pub mod adjacency;
 pub mod adjacency_delta;
+pub mod edge_property_index;
 pub mod property_equality_index;
 
 mod allocation_operation;

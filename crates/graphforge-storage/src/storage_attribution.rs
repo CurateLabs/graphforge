@@ -1293,9 +1293,12 @@ pub fn classify_graph_artifact(relative_path: &str) -> ArtifactCategory {
             ArtifactCategory::CatalogAndManifests
         }
         (Some("deltas"), _) => ArtifactCategory::TopologyEdges,
-        // The equality index is derived from, and only reads as, property data.
+        // The equality and edge property indexes are derived from, and only
+        // read as, property data.
         (Some("properties" | "edge_properties"), _)
-        | (Some("indexes" | "index"), Some("property")) => ArtifactCategory::Properties,
+        | (Some("indexes" | "index"), Some("property" | "edge-properties")) => {
+            ArtifactCategory::Properties
+        }
         (Some("indexes" | "index"), Some("adjacency")) => ArtifactCategory::Adjacency,
         (Some("indexes" | "index"), Some(name))
             if name.contains("uuid") || name.contains("surrogate") =>
@@ -1914,6 +1917,14 @@ mod tests {
         );
         assert_eq!(
             classify_graph_artifact("indexes/property/0123.shards/00000000.eqs"),
+            ArtifactCategory::Properties
+        );
+        assert_eq!(
+            classify_graph_artifact("indexes/edge-properties/0123.epx"),
+            ArtifactCategory::Properties
+        );
+        assert_eq!(
+            classify_graph_artifact("indexes/edge-properties/0123.packs/00000000.epk"),
             ArtifactCategory::Properties
         );
         assert_eq!(

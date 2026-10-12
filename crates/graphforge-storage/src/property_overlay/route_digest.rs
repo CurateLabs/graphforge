@@ -12,6 +12,13 @@ impl AuthenticatedPropertyInventory {
             .collect()
     }
 
+    /// Whether the route holds at least one fragment.
+    pub(crate) fn has_property_route(&self, kind: PropertyRouteKind, route: &str) -> bool {
+        self.routes
+            .get(&(kind, route.to_owned()))
+            .is_some_and(|fragments| !fragments.is_empty())
+    }
+
     /// A digest of the exact bytes a route's newest-wins state derives from:
     /// every object's path, length and XXH64 as the manifest names them. Two
     /// inventories with equal digests hold the same route; a derived index
