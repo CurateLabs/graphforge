@@ -294,16 +294,22 @@ impl GraphForge {
         &self,
     ) -> Result<std::sync::Arc<crate::identity_probe_cache::IdentityProbe>, graphforge_core::GfError>
     {
-        let workspace = self.dir();
-        let generation = graphforge_storage::read_topology_generation(&workspace)?;
-        self.identity_probe.get_or_open(generation, || {
-            let files = workspace.topology_files()?;
-            let probe =
-                graphforge_storage::TopologyIdentityProbe::open(&workspace, &files, generation)?;
-            Ok(std::sync::Arc::new(
-                crate::identity_probe_cache::IdentityProbe::new(probe, workspace.clone()),
-            ))
-        })
+        self.identity_probe.get_or_open(
+            || {
+                let workspace = self.dir();
+                let generation = graphforge_storage::read_topology_generation(&workspace)?;
+                Ok((generation, workspace))
+            },
+            |generation, workspace| {
+                let files = workspace.topology_files()?;
+                let probe = graphforge_storage::TopologyIdentityProbe::open(
+                    &workspace, &files, generation,
+                )?;
+                Ok(std::sync::Arc::new(
+                    crate::identity_probe_cache::IdentityProbe::new(probe, workspace),
+                ))
+            },
+        )
     }
 }
 

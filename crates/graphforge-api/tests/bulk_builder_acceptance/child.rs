@@ -413,6 +413,8 @@ const PIPE_DRAIN: Duration = Duration::from_secs(30);
 
 /// A pipe of a child, read to its end on a thread of its own so the child
 /// never blocks on a full pipe, and so waiting for the end has a deadline.
+/// The thread ends at the end of the pipe; if a descendant holds it open it
+/// is left behind, and the reader of the receiver has its own deadline.
 fn drain(pipe: impl Read + Send + 'static) -> Receiver<Vec<u8>> {
     let (sender, receiver) = channel();
     std::thread::spawn(move || {
@@ -452,6 +454,7 @@ fn output_within_deadline(command: &mut Command) -> Output {
         }
         if started.elapsed() > CHILD_DEADLINE {
             let threads = blocked_threads(child.id());
+            // SIGKILL ends the process, so the wait that follows is bounded.
             let _ = child.kill();
             let _ = child.wait();
             let text = |pipe: &Receiver<Vec<u8>>| {
@@ -496,6 +499,7 @@ fn stdout_within(arguments: &[&str], limit: Duration) -> Option<String> {
             break status;
         }
         if Instant::now() > deadline {
+            // SIGKILL ends the process, so the wait that follows is bounded.
             let _ = child.kill();
             let _ = child.wait();
             return None;
@@ -541,6 +545,7 @@ fn blocked_threads(pid: u32) -> String {
         }
     }
     let mut report = String::from("(no debugger stacks; /proc only)\n");
+    // Plain reads of /proc files that never block, so no deadline is needed.
     if let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) {
         for task in tasks.flatten() {
             let read = |name: &str| {

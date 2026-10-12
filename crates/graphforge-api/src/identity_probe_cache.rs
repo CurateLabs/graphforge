@@ -61,30 +61,43 @@ impl IdentityProbeCache {
             .map_err(|_| GfError::Storage("identity probe lock poisoned".into()))
     }
 
-    /// The cached probe if it is for `generation`, else the probe `open`
-    /// returns, which is cached unless the cache was invalidated meanwhile.
+    /// The cached probe for the generation `select` finds, else the probe
+    /// `open` returns for it.
     ///
-    /// `open` runs without the cache lock: two callers may both open one, and
-    /// the last to finish is cached. The lock is not held by the returned
-    /// handle either, so callers answer from it without any lock.
-    pub(crate) fn get_or_open(
+    /// `select` picks the workspace and reads its topology generation,
+    /// returning the generation and whatever `open` needs. A probe is only
+    /// cached if no invalidation happened since before `select` ran. That is
+    /// exact because the invalidation count is read under the cache lock
+    /// before the workspace is chosen, and every site that replaces or wipes a
+    /// workspace invalidates after the new state is in place. So whatever
+    /// `select` saw is either newer than every invalidation counted before it,
+    /// or the count has moved and nothing is cached. Sampling the count after
+    /// `select` would miss an invalidation in between: a probe of the replaced
+    /// workspace could then be cached under a generation number that the new
+    /// workspace later reuses (a cleared project counts again from one), and
+    /// serve the wrong nodes. The generation number alone cannot tell the
+    /// two workspaces apart; the count can.
+    ///
+    /// `select` and `open` run without the cache lock: two callers may both
+    /// open one, and the last to finish is cached. The lock is not held by the
+    /// returned handle either, so callers answer from it without any lock.
+    pub(crate) fn get_or_open<T>(
         &self,
-        generation: u64,
-        open: impl FnOnce() -> Result<Arc<IdentityProbe>, GfError>,
+        select: impl FnOnce() -> Result<(u64, T), GfError>,
+        open: impl FnOnce(u64, T) -> Result<Arc<IdentityProbe>, GfError>,
     ) -> Result<Arc<IdentityProbe>, GfError> {
-        let epoch = {
+        let epoch = self.lock()?.epoch;
+        let (generation, selected) = select()?;
+        {
             let state = self.lock()?;
             if let Some(probe) = &state.current
                 && probe.topology_generation() == generation
             {
                 return Ok(Arc::clone(probe));
             }
-            state.epoch
-        };
-        let opened = open()?;
+        }
+        let opened = open(generation, selected)?;
         let mut state = self.lock()?;
-        // An invalidation since the check above says what `opened` was read
-        // from may be gone or replaced: use it, but cache nothing.
         if state.epoch == epoch {
             state.current = Some(Arc::clone(&opened));
         }
@@ -192,24 +205,27 @@ mod tests {
             move || {
                 pool.clone().install(|| {
                     open_in_flight.store(true, Ordering::Release);
-                    let result = cache.get_or_open(generation, || {
-                        // The open joins two pieces of nested work. This
-                        // worker runs the first, which frees the held worker
-                        // and waits for it to steal the second. The second
-                        // waits for the sibling to start. A sibling job queued
-                        // on the pool can then only run on this worker, inside
-                        // its wait for the second.
-                        pool.map_ordered(&[0, 1], |piece| {
-                            if *piece == 0 {
-                                release.store(true, Ordering::Release);
-                                wait_for(&stolen, "the nested work was never stolen");
-                            } else {
-                                stolen.store(true, Ordering::Release);
-                                wait_for(&sibling, "the sibling never started");
-                            }
-                        });
-                        Ok(handle)
-                    });
+                    let result = cache.get_or_open(
+                        || Ok((generation, ())),
+                        |_, ()| {
+                            // The open joins two pieces of nested work. This
+                            // worker runs the first, which frees the held worker
+                            // and waits for it to steal the second. The second
+                            // waits for the sibling to start. A sibling job queued
+                            // on the pool can then only run on this worker, inside
+                            // its wait for the second.
+                            pool.map_ordered(&[0, 1], |piece| {
+                                if *piece == 0 {
+                                    release.store(true, Ordering::Release);
+                                    wait_for(&stolen, "the nested work was never stolen");
+                                } else {
+                                    stolen.store(true, Ordering::Release);
+                                    wait_for(&sibling, "the sibling never started");
+                                }
+                            });
+                            Ok(handle)
+                        },
+                    );
                     let _ = opened.send(result.map(|_| ()));
                 });
             }
@@ -223,7 +239,7 @@ mod tests {
             move || {
                 pool.install(|| {
                     started.store(true, Ordering::Release);
-                    let result = cache.get_or_open(generation, || Ok(handle));
+                    let result = cache.get_or_open(|| Ok((generation, ())), |_, ()| Ok(handle));
                     let _ = sibling_opened.send(result.map(|_| ()));
                 });
             }
@@ -259,11 +275,14 @@ mod tests {
             let handle = handle.clone();
             move || {
                 cache
-                    .get_or_open(generation, || {
-                        inside_open.send(()).unwrap();
-                        resume_rx.recv_timeout(DEADLINE).unwrap();
-                        Ok(handle)
-                    })
+                    .get_or_open(
+                        || Ok((generation, ())),
+                        |_, ()| {
+                            inside_open.send(()).unwrap();
+                            resume_rx.recv_timeout(DEADLINE).unwrap();
+                            Ok(handle)
+                        },
+                    )
                     .unwrap()
             }
         });
@@ -275,8 +294,59 @@ mod tests {
         assert_eq!(used.topology_generation(), generation);
         assert!(cache.state.lock().unwrap().current.is_none());
         // A later caller opens, and caches, its own.
-        cache.get_or_open(generation, || Ok(handle)).unwrap();
+        cache
+            .get_or_open(|| Ok((generation, ())), |_, ()| Ok(handle))
+            .unwrap();
         assert!(cache.state.lock().unwrap().current.is_some());
+    }
+
+    /// An invalidation between a caller picking its workspace and the cache
+    /// noting the invalidation count must keep that caller's probe out of the
+    /// cache. The generation number cannot tell the workspaces apart: a cleared
+    /// project counts again from the same value (#1881).
+    #[test]
+    fn a_workspace_chosen_before_an_invalidation_is_not_cached() {
+        let (graph, _) = graph_with_a_node();
+        let replaced = graph.cached_identity_probe().unwrap();
+        let (other, _) = graph_with_a_node();
+        let current = other.cached_identity_probe().unwrap();
+        // Two workspaces, one generation number.
+        let generation = replaced.topology_generation();
+        assert_eq!(generation, current.topology_generation());
+        let cache = Arc::new(IdentityProbeCache::default());
+        let (chosen, chosen_rx) = channel();
+        let (resume, resume_rx) = channel::<()>();
+        let caller = std::thread::spawn({
+            let (cache, replaced) = (cache.clone(), replaced.clone());
+            move || {
+                cache
+                    .get_or_open(
+                        || {
+                            // The caller has its workspace and its generation.
+                            chosen.send(()).unwrap();
+                            resume_rx.recv_timeout(DEADLINE).unwrap();
+                            Ok((generation, ()))
+                        },
+                        |_, ()| Ok(replaced),
+                    )
+                    .unwrap()
+            }
+        });
+        chosen_rx.recv_timeout(DEADLINE).unwrap();
+        // The workspace is replaced and the cache invalidated.
+        cache.invalidate();
+        resume.send(()).unwrap();
+        let used = caller.join().unwrap();
+        assert!(Arc::ptr_eq(&used, &replaced));
+        assert!(
+            cache.state.lock().unwrap().current.is_none(),
+            "a probe of the replaced workspace was cached"
+        );
+        // The next caller reads the new workspace, not the replaced one.
+        let next = cache
+            .get_or_open(|| Ok((generation, ())), |_, ()| Ok(current.clone()))
+            .unwrap();
+        assert!(Arc::ptr_eq(&next, &current));
     }
 
     /// A caller answers from the handle while another caller asks for it. The
