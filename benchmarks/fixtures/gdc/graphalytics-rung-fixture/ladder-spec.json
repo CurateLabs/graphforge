@@ -6,6 +6,7 @@
   "identity_profile": "scorecard",
   "counts_ladder": "profiles/gdc/graphalytics-rung-fixture-ladder.json",
   "metric_shape": "graphalytics",
+  "query_timeout_seconds": 120,
   "variance_line": "Fixture: Graphalytics algorithms through GraphForge analyst verbs; PR and CDLP are refused.",
   "attribution": "Data format and reference-output format from LDBC Graphalytics (https://ldbcouncil.org/benchmarks/graphalytics/), used under CC-BY 4.0.",
   "variances": [

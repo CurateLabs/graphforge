@@ -59,11 +59,14 @@ pub struct Measured {
 /// Why one binding produced no measurement.
 #[derive(Debug, Serialize)]
 pub struct Failure {
-    /// `query_failed` when the product call returned an error, or
-    /// `result_unrenderable` when its result could not be digested.
+    /// `query_failed` when the product call returned an error,
+    /// `result_unrenderable` when its result could not be digested,
+    /// `query_timeout` or `query_crashed` when the variant's process was killed
+    /// or died in this call (see `isolated`), or `not_run` when an earlier
+    /// binding of the variant ended the variant first.
     pub cause: &'static str,
     /// The product's stable `GfError::code()`, when the product reported the error.
-    pub error_code: Option<&'static str>,
+    pub error_code: Option<String>,
     /// At most [`MAX_ERROR_BYTES`] of the error text.
     pub error: String,
 }
@@ -320,7 +323,7 @@ fn sample(
         Err(error) => {
             return Ok(Outcome::Failed(Failure {
                 cause: "query_failed",
-                error_code: Some(error.code()),
+                error_code: Some(error.code().to_owned()),
                 error: bounded(&error.to_string()),
             }));
         }
@@ -440,6 +443,17 @@ pub fn nearest_rank(sorted: &[u64], percent: u64) -> u64 {
     sorted[usize::try_from(rank - 1).expect("rank fits usize")]
 }
 
+/// What a variant's measurement reports as it goes, so a parent process can
+/// bound each call. The in-process path ignores it.
+pub enum Event<'a> {
+    /// A call is about to start; `phase` is `warmup` or `run-N`.
+    Start { binding_id: &'a str, phase: &'a str },
+    /// The excluded warm-up call returned.
+    Warmup { completed: bool },
+    /// One binding of the measured pass finished.
+    Sample(&'a Sample),
+}
+
 /// Run one excluded warm-up with the first binding, then one measured pass
 /// over every binding in declared order. A binding whose call fails becomes a
 /// failed sample, without latency, and the pass continues.
@@ -452,10 +466,27 @@ pub fn measure_variant(
     variant: &Variant,
     results: Option<&ResultsDir>,
 ) -> Result<VariantMeasurement, QueryError> {
+    measure_variant_observed(forge, variant, results, &mut |_| {})
+}
+
+/// [`measure_variant`], reporting each [`Event`] to `observe` as it happens.
+///
+/// # Errors
+/// As [`measure_variant`].
+pub fn measure_variant_observed(
+    forge: &GraphForge,
+    variant: &Variant,
+    results: Option<&ResultsDir>,
+    observe: &mut dyn FnMut(Event<'_>),
+) -> Result<VariantMeasurement, QueryError> {
     let first = &variant.bindings[0];
     // Only whether the warm-up completed is kept: its result is dropped here, not held
     // through the measured pass beside each sample's own.
     progress_start(&variant.id, &first.id, "warmup");
+    observe(Event::Start {
+        binding_id: &first.id,
+        phase: "warmup",
+    });
     let (warmup_result, warmup_elapsed) = execute(forge, variant, first)?;
     let warmup_rows = warmup_result
         .as_ref()
@@ -470,10 +501,17 @@ pub fn measure_variant(
         warmup_rows,
     );
     drop(warmup_result);
+    observe(Event::Warmup {
+        completed: warmup_completed,
+    });
     let mut samples = Vec::with_capacity(variant.bindings.len());
     for (index, binding) in variant.bindings.iter().enumerate() {
         let phase = format!("run-{}", index + 1);
         progress_start(&variant.id, &binding.id, &phase);
+        observe(Event::Start {
+            binding_id: &binding.id,
+            phase: &phase,
+        });
         let outcome = sample(forge, variant, binding, results)?;
         match &outcome {
             Outcome::Measured(measured) => progress_complete(
@@ -485,11 +523,24 @@ pub fn measure_variant(
             ),
             Outcome::Failed(_) => progress_complete(&variant.id, &binding.id, &phase, 0, 0),
         }
-        samples.push(Sample {
+        let sample = Sample {
             binding_id: binding.id.clone(),
             outcome,
-        });
+        };
+        observe(Event::Sample(&sample));
+        samples.push(sample);
     }
+    Ok(finish_variant(variant, warmup_completed, samples))
+}
+
+/// The variant's record from its warm-up outcome and one sample per binding:
+/// the summary is the nearest-rank of the measured samples only.
+pub(super) fn finish_variant(
+    variant: &Variant,
+    warmup_completed: bool,
+    samples: Vec<Sample>,
+) -> VariantMeasurement {
+    let first = &variant.bindings[0];
     let mut sorted: Vec<u64> = samples
         .iter()
         .filter_map(Sample::measured)
@@ -502,7 +553,7 @@ pub fn measure_variant(
         p95_ns: nearest_rank(&sorted, 95),
     });
     let failed = samples.iter().any(|sample| sample.failure().is_some());
-    Ok(VariantMeasurement {
+    VariantMeasurement {
         query_id: variant.id.clone(),
         interface: variant.operation.interface(),
         ordered: variant.ordered,
@@ -515,7 +566,7 @@ pub fn measure_variant(
         },
         samples,
         summary,
-    })
+    }
 }
 
 fn cell(row: &mut Vec<u8>, text: &str) {
@@ -743,6 +794,56 @@ impl ResultsDir {
             path: path.to_owned(),
             next: Cell::new(0),
         })
+    }
+
+    /// Continue numbering at `next` in a directory that already holds results,
+    /// for a child process that measures one variant of a run.
+    #[must_use]
+    pub fn starting_at(path: &Path, next: u64) -> Self {
+        Self {
+            path: path.to_owned(),
+            next: Cell::new(next),
+        }
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    #[must_use]
+    pub fn next_ordinal(&self) -> u64 {
+        self.next.get()
+    }
+
+    /// Delete every result numbered `ordinal` or later and continue numbering
+    /// at `ordinal`, so a killed child's partly written file never reaches the
+    /// reference check.
+    ///
+    /// # Errors
+    /// `io_error` when the directory cannot be read or a file removed.
+    pub fn discard_from(&self, ordinal: u64) -> Result<(), QueryError> {
+        let io = |error: std::io::Error| {
+            QueryError::new(QueryCause::Io, format!("{}: {error}", self.path.display()))
+        };
+        for entry in std::fs::read_dir(&self.path).map_err(io)? {
+            let entry = entry.map_err(io)?;
+            let name = entry.file_name();
+            let number = name
+                .to_str()
+                .and_then(|name| name.strip_suffix(".json"))
+                .and_then(|stem| stem.parse::<u64>().ok());
+            if number.is_some_and(|number| number >= ordinal) {
+                std::fs::remove_file(entry.path()).map_err(io)?;
+            }
+        }
+        self.next.set(ordinal);
+        Ok(())
+    }
+
+    /// Record that a child wrote results up to, not including, `next`.
+    pub fn advance_to(&self, next: u64) {
+        self.next.set(next);
     }
 
     /// Write one result as compact JSON with its keys in sorted order, the layout
