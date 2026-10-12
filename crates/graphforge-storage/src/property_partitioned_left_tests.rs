@@ -3,6 +3,7 @@ use crate::SelectedEndpointPropertyFilterApprovalRule;
 use datafusion::physical_expr::Partitioning;
 use datafusion::physical_optimizer::sanity_checker::SanityCheckPlan;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+use datafusion::physical_plan::limit::GlobalLimitExec;
 
 fn enrichment(scan: PropertyOverlayExec, partitions: usize) -> Arc<dyn ExecutionPlan> {
     enrichment_with_projection(scan, partitions, vec![0, 1, 2])
@@ -95,8 +96,56 @@ fn key_only_property_scan() -> PropertyOverlayExec {
     .unwrap()
 }
 
+/// Whether `plan` is the projection that hides a lifted UUID: the nominated
+/// join is repartitioned by a key an executable column carries, and the
+/// original schema is restored above it.
+fn assert_hidden_key_is_lifted(
+    original: &Arc<dyn ExecutionPlan>,
+    optimized: &Arc<dyn ExecutionPlan>,
+) {
+    let partitions = match original.output_partitioning() {
+        Partitioning::Hash(_, count) => *count,
+        other => panic!("expected hash partitioning, found {other:?}"),
+    };
+    assert!(!Arc::ptr_eq(original, optimized));
+    assert_eq!(optimized.schema().as_ref(), original.schema().as_ref());
+    let projection = optimized
+        .downcast_ref::<datafusion::physical_plan::projection::ProjectionExec>()
+        .unwrap();
+    let repartition = projection
+        .input()
+        .downcast_ref::<RepartitionExec>()
+        .unwrap();
+    let Partitioning::Hash(keys, count) = repartition.partitioning() else {
+        panic!("the nominated join must be repartitioned by the lifted UUID");
+    };
+    assert_eq!(*count, partitions);
+    assert_eq!(keys.len(), 1);
+    // The distribution metadata of the original join names a key its
+    // projection dropped; the exchange must evaluate a column that exists.
+    assert!(
+        keys[0]
+            .downcast_ref::<datafusion::physical_expr::expressions::UnKnownColumn>()
+            .is_none()
+    );
+    assert_eq!(
+        keys[0]
+            .data_type(repartition.input().schema().as_ref())
+            .unwrap(),
+        DataType::FixedSizeBinary(16)
+    );
+    let join = repartition.input().downcast_ref::<HashJoinExec>().unwrap();
+    assert_eq!(*join.join_type(), JoinType::Left);
+    assert_eq!(*join.partition_mode(), PartitionMode::CollectLeft);
+    assert!(join.left().downcast_ref::<UuidBuildKeyTapExec>().is_some());
+    assert!(join.right().downcast_ref::<PropertyOverlayExec>().is_some());
+    SanityCheckPlan::new()
+        .optimize(Arc::clone(optimized), &ConfigOptions::default())
+        .unwrap();
+}
+
 #[test]
-fn partitioned_left_enrichment_keeps_projected_away_hash_keys_as_metadata() {
+fn partitioned_left_enrichment_lifts_a_projected_away_hash_key_to_nominate() {
     for partitions in [1, 2, 4] {
         // Drop the preserved UUID from a valid equality-seeded frontier. The
         // original join may describe its distribution with an unknown key,
@@ -126,10 +175,85 @@ fn partitioned_left_enrichment_keeps_projected_away_hash_keys_as_metadata() {
             .unwrap_err();
         assert!(error.to_string().contains("UnKnownColumn::evaluate()"));
 
+        // The ordinary rule needs no selected-endpoint proof: nomination only
+        // prunes the scan, and the preserved frontier decides every row.
         let optimized = PropertyFilterApprovalRule
             .optimize(Arc::clone(&original), &ConfigOptions::default())
             .unwrap();
-        assert!(Arc::ptr_eq(&original, &optimized));
+        assert_hidden_key_is_lifted(&original, &optimized);
+    }
+}
+
+#[test]
+fn partitioned_left_enrichment_lifts_a_hidden_key_of_a_fetch_bounded_frontier() {
+    let config = ConfigOptions::default();
+    for partitions in [1, 2, 4] {
+        // `ORDER BY ... LIMIT` bounds the frontier. Only the property column
+        // of the scan survives the projection, so neither side's UUID is
+        // visible above the join.
+        let frontier: Arc<dyn ExecutionPlan> = Arc::new(GlobalLimitExec::new(
+            input_with_values(&[Some([1; 16]), Some([2; 16]), None]),
+            0,
+            Some(10),
+        ));
+        assert!(crate::frontier_has_bound(frontier.as_ref()));
+        let original =
+            enrichment_from_frontier(frontier, property_scan(None, None), partitions, vec![2]);
+        let optimized = PropertyFilterApprovalRule
+            .optimize(Arc::clone(&original), &config)
+            .unwrap();
+        assert_hidden_key_is_lifted(&original, &optimized);
+
+        // Optimizing the result again changes nothing: its build side is
+        // already tapped.
+        let repeated = PropertyFilterApprovalRule
+            .optimize(Arc::clone(&optimized), &config)
+            .unwrap();
+        assert!(Arc::ptr_eq(&optimized, &repeated));
+    }
+}
+
+#[test]
+fn partitioned_left_enrichment_keeps_a_hidden_key_of_an_unbounded_frontier() {
+    let config = ConfigOptions::default();
+    for partitions in [1, 2, 4] {
+        // Nothing bounds how many rows reach the join, and a CollectLeft build
+        // concatenates its input into one Arrow batch. The partitioned join
+        // splits that build, so the ordinary rule leaves it alone...
+        let original = enrichment_with_projection(property_scan(None, None), partitions, vec![2]);
+        assert!(!crate::frontier_has_bound(
+            original
+                .downcast_ref::<HashJoinExec>()
+                .unwrap()
+                .left()
+                .as_ref()
+        ));
+        let unchanged = PropertyFilterApprovalRule
+            .optimize(Arc::clone(&original), &config)
+            .unwrap();
+        assert!(Arc::ptr_eq(&original, &unchanged));
+
+        // ...unless the caller proves the frontier is the selected one. A
+        // visible key keeps the unchanged rewrite for any frontier.
+        let visible = enrichment_with_projection(property_scan(None, None), partitions, vec![0, 2]);
+        let optimized = PropertyFilterApprovalRule
+            .optimize(Arc::clone(&visible), &config)
+            .unwrap();
+        assert!(!Arc::ptr_eq(&visible, &optimized));
+    }
+}
+
+#[test]
+fn partitioned_left_enrichment_keeps_a_hidden_key_when_only_identity_is_read() {
+    let config = ConfigOptions::default();
+    for partitions in [1, 2, 4] {
+        // A key-only route join authenticates the route for `count(*)`; only
+        // a selected-endpoint proof may prune it.
+        let original = enrichment_with_projection(key_only_property_scan(), partitions, vec![1]);
+        let unchanged = PropertyFilterApprovalRule
+            .optimize(Arc::clone(&original), &config)
+            .unwrap();
+        assert!(Arc::ptr_eq(&original, &unchanged));
     }
 }
 

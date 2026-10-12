@@ -526,8 +526,10 @@ pub use expand_exec::{ExpandExec, OntologyInferExec, V4OrdinalIdentityResolver, 
 mod row_exec;
 pub use row_exec::{CorrelatedSeedExec, OptionalMatchExec, UnwindExec};
 mod join_memory;
+mod query_pool;
 mod session;
 mod sort_runs;
+mod traversal_destination;
 pub use session::{
     AdjacencyProviderExt, ExecutionSession, GraphForgeQueryPlanner, SessionResourceConfig,
 };

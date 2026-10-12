@@ -364,8 +364,15 @@ fn session_runtime(
     resources: &SessionResourceConfig,
 ) -> Result<Arc<datafusion::execution::runtime_env::RuntimeEnv>, GfError> {
     let memory_budget = usize::try_from(resources.memory_budget_bytes).unwrap_or(usize::MAX);
+    // DataFusion's greedy pool, reporting its top consumers on exhaustion as
+    // `with_memory_limit` does, and a spilling aggregate keeping the memory it
+    // has just released long enough to sort it (#1985).
+    let pool = datafusion::execution::memory_pool::TrackConsumersPool::new(
+        crate::query_pool::QueryMemoryPool::new(memory_budget),
+        std::num::NonZeroUsize::new(5).expect("five is not zero"),
+    );
     let mut runtime_builder = datafusion::execution::runtime_env::RuntimeEnvBuilder::new()
-        .with_memory_limit(memory_budget, 1.0);
+        .with_memory_pool(Arc::new(pool));
     if let (true, Some(dir)) = (resources.spill_enabled, &resources.spill_directory) {
         std::fs::create_dir_all(dir)
             .map_err(|error| GfError::Storage(format!("query spill directory: {error}")))?;
@@ -742,12 +749,13 @@ impl ExecutionSession {
             // Property scans wait only on completed filters whose producer is
             // still authoritative in this final physical plan.
             .with_physical_optimizer_rule(Arc::new(graphforge_storage::PropertyFilterApprovalRule))
-            // Selected expansion endpoints may carry a UUID that the final
-            // LEFT join projection hides. The storage rule only receives this
-            // opt-in authority after exec proves the exact output lineage.
+            // A key-only property scan joined to a traversal's destination
+            // reads that traversal's frontier. The storage rule only receives
+            // this opt-in authority after exec proves the exact output
+            // lineage, so a whole-graph `count(*)` still reads its whole route.
             .with_physical_optimizer_rule(Arc::new(
                 graphforge_storage::SelectedEndpointPropertyFilterApprovalRule::new(
-                    crate::expand_exec::is_selected_endpoint_uuid,
+                    crate::traversal_destination::is_frontier_endpoint_uuid,
                 ),
             ))
             .build();
