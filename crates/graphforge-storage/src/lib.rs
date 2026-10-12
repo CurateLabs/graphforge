@@ -520,6 +520,10 @@ pub use catalog::{
     visit_node_property_overlay_admitted, visit_nodes_batched, visit_nodes_batched_from_files,
     visit_properties_batched, visit_property_fragments_admitted,
 };
+pub use catalog::{
+    EXPORT_STREAM_BATCH_ROWS, count_node_rows, visit_edge_identities, visit_edge_property_batches,
+    visit_node_identities,
+};
 
 pub mod runtime_entity_labels;
 pub use runtime_entity_labels::{

@@ -273,9 +273,14 @@ requests keep separate out/in CSRs and merge per accessed row (out before in
 on equal `edge_id`) without materializing a full merged hash map. Delta
 overlays attach a bounded replacement map over touched keys only — they do
 not copy the complete valid base CSR. Scan-built fallback retains the
-historical hash-map representation for oracle parity. Analyst
-`export_adjacency` projects selected nodes into a flat CSR of algorithm
-edges rather than duplicating the full graph into per-node heap vectors.
+historical hash-map representation for oracle parity. Analyst exports
+(`export_adjacency`, `export_topology`) walk a persisted CSR once, in node order,
+decoding one shard per direction at a time, into an ordinal topology: `u32`
+offsets and neighbors over the selected nodes, with UUIDs by ordinal and, only
+when requested, per-slot weights and edge identity. Node ids are dense (an
+offset) or ranked (a deleted-node gap or a label subset). No map is keyed by an
+edge or a node, and the edge table is read, as a sorted merge, only to resolve
+edge identity or weights (#1974).
 
 `explain` annotates each traversal node with `adjacency=hit | miss | building`, so plan
 inspection shows whether the accelerator was used (`ExecutionSession::explain_physical`

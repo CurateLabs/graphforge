@@ -180,7 +180,7 @@ fn collect_relaxation_proposals_serial(
             if (edge.weight <= DELTA) != light || current.1.contains(&edge.neighbor_id) {
                 continue;
             }
-            proposals.push((edge.neighbor_id, candidate(&current, edge)?));
+            proposals.push((edge.neighbor_id, candidate(&current, &edge)?));
         }
     }
     Ok(proposals)
@@ -214,7 +214,7 @@ fn collect_relaxation_proposals_parallel(
                         {
                             continue;
                         }
-                        proposals.push((edge.neighbor_id, candidate(&current, edge)?));
+                        proposals.push((edge.neighbor_id, candidate(&current, &edge)?));
                     }
                 }
                 Ok(proposals)

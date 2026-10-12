@@ -432,7 +432,7 @@ impl AlgorithmRegistry {
         control: &AlgorithmControl,
     ) -> Result<AlgorithmOutput, AlgorithmError> {
         control.check_cancelled()?;
-        let node_count = u64::try_from(graph.node_ids().len()).unwrap_or(u64::MAX);
+        let node_count = u64::try_from(graph.node_count()).unwrap_or(u64::MAX);
         if node_count > control.limits.nodes {
             return Err(AlgorithmError::NodeLimit {
                 observed: node_count,

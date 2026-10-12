@@ -592,8 +592,8 @@ fn canonical_nodes(graph: &AdjacencyGraph) -> Vec<([u8; 16], u64)> {
     nodes
 }
 
-fn canonical_candidates(graph: &AdjacencyGraph, node_id: u64) -> Vec<&AlgorithmEdge> {
-    let mut candidates = graph.neighbors(node_id).iter().collect::<Vec<_>>();
+fn canonical_candidates(graph: &AdjacencyGraph, node_id: u64) -> Vec<AlgorithmEdge> {
+    let mut candidates = graph.neighbors(node_id).to_vec();
     candidates.sort_unstable_by_key(|edge| {
         (
             graph
