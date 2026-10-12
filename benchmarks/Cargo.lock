@@ -1753,7 +1753,7 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
 name = "graphforge-api"
-version = "0.6.0-rc.3"
+version = "0.6.0-rc.4"
 dependencies = [
  "arrow",
  "brotli-decompressor",
@@ -1796,7 +1796,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-ast"
-version = "0.6.0-rc.3"
+version = "0.6.0-rc.4"
 dependencies = [
  "graphforge-core",
  "serde",
@@ -1888,7 +1888,7 @@ version = "0.0.0"
 
 [[package]]
 name = "graphforge-core"
-version = "0.6.0-rc.3"
+version = "0.6.0-rc.4"
 dependencies = [
  "serde",
  "serde_yaml_ng",
@@ -1899,7 +1899,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-cypher"
-version = "0.6.0-rc.3"
+version = "0.6.0-rc.4"
 dependencies = [
  "graphforge-ast",
  "graphforge-core",
@@ -1907,7 +1907,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-discovery"
-version = "0.6.0-rc.3"
+version = "0.6.0-rc.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -1917,7 +1917,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-exec"
-version = "0.6.0-rc.3"
+version = "0.6.0-rc.4"
 dependencies = [
  "anyhow",
  "arrow",
@@ -1941,7 +1941,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-filesystem"
-version = "0.6.0-rc.3"
+version = "0.6.0-rc.4"
 dependencies = [
  "fs4 1.1.0",
  "rustix 1.1.5",
@@ -1950,7 +1950,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-io"
-version = "0.6.0-rc.3"
+version = "0.6.0-rc.4"
 dependencies = [
  "arrow",
  "futures",
@@ -1961,7 +1961,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-ir"
-version = "0.6.0-rc.3"
+version = "0.6.0-rc.4"
 dependencies = [
  "arrow",
  "graphforge-ast",
@@ -1975,7 +1975,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-knowledge"
-version = "0.6.0-rc.3"
+version = "0.6.0-rc.4"
 dependencies = [
  "arrow",
  "graphforge-core",
@@ -1988,7 +1988,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-observability"
-version = "0.6.0-rc.3"
+version = "0.6.0-rc.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -1999,7 +1999,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-ontology"
-version = "0.6.0-rc.3"
+version = "0.6.0-rc.4"
 dependencies = [
  "arrow",
  "graphforge-core",
@@ -2015,7 +2015,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-plan"
-version = "0.6.0-rc.3"
+version = "0.6.0-rc.4"
 dependencies = [
  "datafusion",
  "graphforge-core",
@@ -2026,7 +2026,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-portable-oci"
-version = "0.6.0-rc.3"
+version = "0.6.0-rc.4"
 dependencies = [
  "graphforge-core",
  "serde",
@@ -2038,7 +2038,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-provenance"
-version = "0.6.0-rc.3"
+version = "0.6.0-rc.4"
 dependencies = [
  "arrow",
  "graphforge-core",
@@ -2049,7 +2049,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-rel"
-version = "0.6.0-rc.3"
+version = "0.6.0-rc.4"
 dependencies = [
  "arrow-data",
  "chrono",
@@ -2067,7 +2067,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-search"
-version = "0.6.0-rc.3"
+version = "0.6.0-rc.4"
 dependencies = [
  "arrow",
  "graphforge-core",
@@ -2082,7 +2082,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-storage"
-version = "0.6.0-rc.3"
+version = "0.6.0-rc.4"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2118,7 +2118,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-value"
-version = "0.6.0-rc.3"
+version = "0.6.0-rc.4"
 dependencies = [
  "arrow",
  "graphforge-core",
