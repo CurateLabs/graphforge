@@ -210,6 +210,7 @@ pub fn is_complete_node_id_scan(plan: &dyn ExecutionPlan, column: usize) -> bool
         None => Some(column),
     };
     scan.limit.is_none()
+        && scan.anchor.is_none()
         && scan.base_schema.as_ref() == crate::TOPOLOGY_NODES_SCHEMA.as_ref()
         && base_column.is_some_and(|index| {
             scan.base_schema
@@ -350,6 +351,9 @@ pub struct GraphForgeParquetExec {
     limit: Option<usize>,
     /// Planning-time batch size hint (execute re-reads TaskContext).
     batch_size: usize,
+    /// Property equality that narrows a node scan to the nodes a current index
+    /// selects (#1983).
+    anchor: Option<Arc<crate::node_anchor::NodeAnchor>>,
     props: Arc<PlanProperties>,
 }
 
@@ -406,8 +410,16 @@ impl GraphForgeParquetExec {
             fragments,
             limit,
             batch_size: batch_size.max(1),
+            anchor: None,
             props,
         })
+    }
+
+    /// Read only the nodes `anchor` selects while its index is current.
+    #[must_use]
+    pub(crate) fn with_node_anchor(mut self, anchor: Arc<crate::node_anchor::NodeAnchor>) -> Self {
+        self.anchor = Some(anchor);
+        self
     }
 
     /// Natural fragment count declared by this plan (at least one).
@@ -442,7 +454,11 @@ impl DisplayAs for GraphForgeParquetExec {
             self.batch_size,
             self.limit
                 .map_or_else(|| "none".to_owned(), |n| n.to_string())
-        )
+        )?;
+        if let Some(anchor) = &self.anchor {
+            write!(f, ", anchor=property_equality({})", anchor.column())?;
+        }
+        Ok(())
     }
 }
 
@@ -509,7 +525,10 @@ impl ExecutionPlan for GraphForgeParquetExec {
                 }
             }
         };
-        let rows_exact = self.fragments.iter().all(|fragment| fragment.rows_exact);
+        // An anchored scan emits only the rows an index selects; the fragments'
+        // row counts are then an upper bound, never the count it returns.
+        let rows_exact =
+            self.anchor.is_none() && self.fragments.iter().all(|fragment| fragment.rows_exact);
         Ok(Arc::new(Statistics {
             num_rows: match num_rows {
                 Some(n) if rows_exact => Precision::Exact(n),
@@ -547,6 +566,8 @@ impl ExecutionPlan for GraphForgeParquetExec {
         let base_schema = Arc::clone(&self.base_schema);
         let projection = self.projection.clone();
         let limit = self.limit;
+        let anchor = self.anchor.clone();
+        let anchored_fragments = anchor.as_ref().map(|_| self.fragments.clone());
         let batch_size = context.session_config().batch_size().max(1);
         let io = context
             .session_config()
@@ -568,7 +589,28 @@ impl ExecutionPlan for GraphForgeParquetExec {
                     vec![RecordBatch::new_empty(Arc::clone(&schema))]
                 }
                 Some(frag) => {
-                    read_fragment_batches(&frag, &base_schema, projection.as_deref(), batch_size)?
+                    let restricted = match (&anchor, &anchored_fragments) {
+                        (Some(anchor), Some(fragments)) => anchor
+                            .resolve(fragments)
+                            .map_err(|error| DataFusionError::External(Box::new(error)))?,
+                        _ => crate::node_anchor::Resolution::Unrestricted,
+                    };
+                    match restricted {
+                        crate::node_anchor::Resolution::Fragments(selected) => {
+                            read_anchored_fragment(
+                                &frag,
+                                &selected[partition],
+                                &base_schema,
+                                projection.as_deref(),
+                            )?
+                        }
+                        crate::node_anchor::Resolution::Unrestricted => read_fragment_batches(
+                            &frag,
+                            &base_schema,
+                            projection.as_deref(),
+                            batch_size,
+                        )?,
+                    }
                 }
             };
             let batches = apply_limit(batches, limit);
@@ -614,6 +656,33 @@ fn empty_projected_batch(
         ))),
         None => Ok(RecordBatch::new_empty(Arc::clone(base_schema))),
     }
+}
+
+/// The rows of one node fragment an anchor selected, as the plan's schema.
+/// A fragment the anchor selected nothing from is not opened.
+fn read_anchored_fragment(
+    fragment: &ParquetFragment,
+    node_ids: &std::collections::HashSet<u64>,
+    base_schema: &SchemaRef,
+    projection: Option<&[usize]>,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    if node_ids.is_empty() {
+        return Ok(vec![empty_projected_batch(base_schema, projection)?]);
+    }
+    let mut out = Vec::new();
+    for batch in crate::catalog::read_node_fragment_filtered(&fragment.path, node_ids)? {
+        let batch = match projection {
+            Some(indices) => batch.project(indices).map_err(|e| {
+                DataFusionError::ArrowError(Box::new(e), Some("anchored projection".into()))
+            })?,
+            None => batch,
+        };
+        out.push(align_schema(batch, base_schema, projection)?);
+    }
+    if out.is_empty() {
+        out.push(empty_projected_batch(base_schema, projection)?);
+    }
+    Ok(out)
 }
 
 fn read_fragment_batches(

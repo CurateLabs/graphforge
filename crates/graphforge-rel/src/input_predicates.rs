@@ -61,7 +61,7 @@ fn primitive(data_type: &DataType) -> bool {
     )
 }
 
-fn total_predicate(expr: &Expr, schema: &DFSchema) -> bool {
+pub(crate) fn total_predicate(expr: &Expr, schema: &DFSchema) -> bool {
     match expr {
         Expr::BinaryExpr(binary)
             if matches!(

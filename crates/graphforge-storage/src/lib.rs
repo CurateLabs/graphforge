@@ -485,6 +485,7 @@ pub use ordinal_identity_v4::{
     V4OrdinalRevalidationMetrics, V4OrdinalTombstoneBlock, V4OrdinalTombstones,
 };
 
+mod node_anchor;
 pub mod property_overlay;
 mod property_scan;
 mod property_scan_filter;

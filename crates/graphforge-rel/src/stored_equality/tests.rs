@@ -6,11 +6,15 @@ use datafusion::optimizer::OptimizerContext;
 use graphforge_plan::GraphReadTable;
 
 fn nodes() -> SchemaRef {
-    Arc::new(Schema::new(vec![Field::new(
-        "node_uuid",
-        DataType::FixedSizeBinary(16),
-        false,
-    )]))
+    Arc::new(Schema::new(vec![
+        Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+        Field::new(
+            "type_ids",
+            DataType::List(Arc::new(Field::new("item", DataType::UInt32, false))),
+            false,
+        ),
+        Field::new("weight", DataType::Int64, true),
+    ]))
 }
 
 fn properties() -> SchemaRef {
@@ -39,8 +43,10 @@ fn plan(table: GraphReadTable, join: JoinType, projected: bool, predicate: Expr)
     .unwrap()
     .build()
     .unwrap();
+    // The equi-join key sits in `on`, where DataFusion's own optimizer has put
+    // it by the time this rule runs.
     let joined = LogicalPlanBuilder::from(nodes)
-        .join_on(props, join, vec![col("n.node_uuid").eq(col("p.node_uuid"))])
+        .join(props, join, uuid_key("n"), None)
         .unwrap();
     let projected = if projected {
         joined
@@ -54,6 +60,14 @@ fn plan(table: GraphReadTable, join: JoinType, projected: bool, predicate: Expr)
         joined
     };
     projected.filter(predicate).unwrap().build().unwrap()
+}
+
+/// `<alias>.node_uuid = p.node_uuid` as an equi-join key.
+fn uuid_key(alias: &str) -> (Vec<Column>, Vec<Column>) {
+    (
+        vec![Column::from_qualified_name(format!("{alias}.node_uuid"))],
+        vec![Column::from_qualified_name("p.node_uuid")],
+    )
 }
 
 fn rewritten(plan: LogicalPlan) -> (LogicalPlan, bool) {
@@ -354,4 +368,231 @@ fn a_nested_right_join_keeps_expression_evaluation_before_null_rejection() {
         panic!("outer filter");
     };
     assert_eq!(filter.predicate, predicate);
+}
+
+fn node_scan(alias: &str) -> LogicalPlan {
+    LogicalPlanBuilder::scan(
+        alias,
+        GraphReadSource::new(GraphReadTable::Nodes, &nodes(), None),
+        None,
+    )
+    .unwrap()
+    .build()
+    .unwrap()
+}
+
+fn property_scan(alias: &str) -> LogicalPlan {
+    LogicalPlanBuilder::scan(
+        alias,
+        GraphReadSource::new(
+            GraphReadTable::Properties("Entity".into()),
+            &properties(),
+            None,
+        ),
+        None,
+    )
+    .unwrap()
+    .build()
+    .unwrap()
+}
+
+/// `Filter(predicate)` over `left <left join> p` on `left_alias.node_uuid`.
+fn joined(left: LogicalPlan, left_alias: &str, predicate: Expr) -> LogicalPlan {
+    LogicalPlanBuilder::from(left)
+        .join(
+            property_scan("p"),
+            JoinType::Left,
+            uuid_key(left_alias),
+            None,
+        )
+        .unwrap()
+        .filter(predicate)
+        .unwrap()
+        .build()
+        .unwrap()
+}
+
+/// The anchor of the node scan named `alias`, if it has one.
+fn node_anchor(plan: &LogicalPlan, alias: &str) -> Option<GraphReadAnchor> {
+    let mut found = None;
+    plan.apply(|node| {
+        if let LogicalPlan::TableScan(scan) = node
+            && scan.table_name.table() == alias
+            && let Some(source) = scan.source.downcast_ref::<GraphReadSource>()
+        {
+            found = source.anchor.clone();
+        }
+        Ok(TreeNodeRecursion::Continue)
+    })
+    .unwrap();
+    found
+}
+
+fn entity_anchor(equality: Expr) -> Option<GraphReadAnchor> {
+    Some(GraphReadAnchor {
+        route: "Entity".into(),
+        equality,
+    })
+}
+
+fn label_filter(plan: LogicalPlan) -> LogicalPlan {
+    use datafusion::functions_nested::expr_fn::array_has;
+    LogicalPlanBuilder::from(plan)
+        .filter(array_has(col("n.type_ids"), lit(7_u32)))
+        .unwrap()
+        .build()
+        .unwrap()
+}
+
+#[test]
+fn the_equality_anchors_the_node_scan_that_feeds_the_join() {
+    for projected in [true, false] {
+        let predicate = if projected {
+            col("n.ident").eq(lit(7_i64))
+        } else {
+            col("p.ident").eq(lit(7_i64))
+        };
+        let (after, transformed) = rewritten(plan(
+            GraphReadTable::Properties("Entity".into()),
+            JoinType::Left,
+            projected,
+            predicate,
+        ));
+        assert!(transformed);
+        assert_eq!(
+            node_anchor(&after, "n"),
+            entity_anchor(col("p.ident").eq(lit(7_i64))),
+            "projected={projected}"
+        );
+        assert_eq!(node_anchor(&after, "p"), None);
+    }
+}
+
+#[test]
+fn a_conjunction_anchors_by_the_equality_the_property_scan_uses() {
+    let (after, _) = rewritten(joined(
+        node_scan("n"),
+        "n",
+        col("p.ident")
+            .eq(lit(7_i64))
+            .and(col("p.name").eq(lit("ada"))),
+    ));
+    // The left join stays: only a single strict equality admits an inner join.
+    assert_eq!(join_types(&after), vec![JoinType::Left]);
+    assert_eq!(
+        node_anchor(&after, "n"),
+        entity_anchor(col("p.ident").eq(lit(7_i64)))
+    );
+    assert_eq!(
+        scan_filters(&after).first(),
+        Some(&col("p.ident").eq(lit(7_i64)))
+    );
+}
+
+#[test]
+fn the_anchor_looks_through_label_filters_and_column_projections() {
+    let left = LogicalPlanBuilder::from(label_filter(node_scan("n")))
+        .project(vec![
+            col("n.node_uuid").alias_qualified(Some("m"), "node_uuid"),
+            col("n.type_ids").alias_qualified(Some("m"), "type_ids"),
+        ])
+        .unwrap()
+        .build()
+        .unwrap();
+    let (after, transformed) = rewritten(joined(left, "m", col("p.ident").eq(lit(7_i64))));
+    assert!(transformed);
+    assert_eq!(
+        node_anchor(&after, "n"),
+        entity_anchor(col("p.ident").eq(lit(7_i64)))
+    );
+}
+
+#[test]
+fn the_anchor_stops_at_work_that_could_fail_on_a_row_it_would_omit() {
+    let predicate = col("p.ident").eq(lit(7_i64));
+    // A filter whose evaluation can fail.
+    let failing = LogicalPlanBuilder::from(node_scan("n"))
+        .filter((lit(1_i64) / col("n.weight")).gt(lit(0_i64)))
+        .unwrap()
+        .build()
+        .unwrap();
+    // A projection that computes.
+    let computed = LogicalPlanBuilder::from(node_scan("n"))
+        .project(vec![
+            col("n.node_uuid"),
+            (lit(1_i64) / col("n.weight")).alias("inverse"),
+        ])
+        .unwrap()
+        .build()
+        .unwrap();
+    for left in [failing, computed] {
+        let (after, transformed) = rewritten(joined(left, "n", predicate.clone()));
+        // The property scan still takes its hint.
+        assert!(transformed);
+        assert_eq!(node_anchor(&after, "n"), None);
+    }
+}
+
+#[test]
+fn only_a_node_scan_that_supplies_the_join_key_is_anchored() {
+    let predicate = col("p.ident").eq(lit(7_i64));
+    // The key comes from a join of two node scans, not from one scan.
+    let two = LogicalPlanBuilder::from(node_scan("n"))
+        .join(
+            node_scan("m"),
+            JoinType::Inner,
+            (
+                vec![Column::from_qualified_name("n.node_uuid")],
+                vec![Column::from_qualified_name("m.node_uuid")],
+            ),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+    let (after, _) = rewritten(joined(two, "n", predicate.clone()));
+    assert_eq!(node_anchor(&after, "n"), None);
+    assert_eq!(node_anchor(&after, "m"), None);
+
+    // A property scan on the left is not a node scan.
+    let (after, _) = rewritten(joined(property_scan("n"), "n", predicate.clone()));
+    assert_eq!(node_anchor(&after, "n"), None);
+
+    // A join on anything but the node identity.
+    let on_weight = LogicalPlanBuilder::from(node_scan("n"))
+        .join(
+            property_scan("p"),
+            JoinType::Left,
+            (
+                vec![Column::from_qualified_name("n.weight")],
+                vec![Column::from_qualified_name("p.ident")],
+            ),
+            None,
+        )
+        .unwrap()
+        .filter(predicate)
+        .unwrap()
+        .build()
+        .unwrap();
+    let (after, _) = rewritten(on_weight);
+    assert_eq!(node_anchor(&after, "n"), None);
+}
+
+#[test]
+fn an_anchor_is_set_once_and_never_by_an_unsupported_equality() {
+    for predicate in [
+        col("p.ident").eq(lit(7_i64)),
+        col("p.ident")
+            .eq(lit(7_i64))
+            .and(col("p.name").eq(lit("ada"))),
+    ] {
+        let (once, _) = rewritten(joined(node_scan("n"), "n", predicate));
+        assert!(node_anchor(&once, "n").is_some());
+        let (_, transformed) = rewritten(once);
+        assert!(!transformed);
+    }
+    // The stored type is Int64, so a string is no equality the scan can use.
+    let (after, transformed) = rewritten(joined(node_scan("n"), "n", col("p.ident").eq(lit("7"))));
+    assert!(!transformed);
+    assert_eq!(node_anchor(&after, "n"), None);
 }

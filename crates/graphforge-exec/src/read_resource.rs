@@ -60,7 +60,13 @@ impl GraphReadContext {
             ));
         }
         let table: Arc<dyn TableProvider> = match &source.table {
-            GraphReadTable::Nodes => Arc::new(self.catalog.node_table()?),
+            GraphReadTable::Nodes => match source.anchor.as_ref().and_then(anchor_equality) {
+                Some((route, column, value)) => Arc::new(
+                    self.catalog
+                        .anchored_node_table(&self.dir, route, &column, &value)?,
+                ),
+                None => Arc::new(self.catalog.node_table()?),
+            },
             GraphReadTable::Edges(stem)
                 if stem == "_exploratory" && self.mode != OntologyMode::Exploratory =>
             {
@@ -172,4 +178,25 @@ pub(crate) fn bind(
         })
         .map(|result| result.data)?;
     Ok((bound, hydration))
+}
+
+/// The route, column and literal of a node-scan anchor: `column = literal`,
+/// in either operand order.
+fn anchor_equality(
+    anchor: &graphforge_plan::GraphReadAnchor,
+) -> Option<(&str, String, datafusion::scalar::ScalarValue)> {
+    use datafusion::logical_expr::{Expr, Operator};
+    let Expr::BinaryExpr(binary) = &anchor.equality else {
+        return None;
+    };
+    if binary.op != Operator::Eq {
+        return None;
+    }
+    let ((Expr::Column(column), Expr::Literal(literal, _))
+    | (Expr::Literal(literal, _), Expr::Column(column))) =
+        (binary.left.as_ref(), binary.right.as_ref())
+    else {
+        return None;
+    };
+    Some((anchor.route.as_str(), column.name.clone(), literal.clone()))
 }

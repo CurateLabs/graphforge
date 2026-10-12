@@ -16,6 +16,14 @@
 //! sits on the nullable side of a left join under a filter that rejects NULL:
 //! an omitted right row becomes a NULL-extended left row, and that row fails
 //! the same filter.
+//!
+//! The same equality narrows the other side of that join (#1983). A node whose
+//! property row is not selected by the equality fails the filter just as a
+//! NULL-extended row does, so the node-topology scan that feeds the join key
+//! carries the equality as an anchor: where a current index answers it, the
+//! scan reads the matching nodes' rows instead of every node of the graph. The
+//! anchor is a hint of the same kind, so a scan that cannot use it reads
+//! every row and the filter decides, exactly as before.
 
 use std::sync::Arc;
 
@@ -26,7 +34,7 @@ use datafusion::logical_expr::{
     Expr, Filter, Join, JoinType, LogicalPlan, Operator, Projection, TableProviderFilterPushDown,
 };
 use datafusion::optimizer::{ApplyOrder, OptimizerConfig, OptimizerRule};
-use graphforge_plan::GraphReadSource;
+use graphforge_plan::{GraphReadAnchor, GraphReadSource, GraphReadTable};
 
 /// Offer equality conjuncts of a filter to the stored-property scans under it.
 #[derive(Debug)]
@@ -115,25 +123,26 @@ fn hint(
             // outer filter. Keep its NULL padding and evaluation scope intact.
             let promote =
                 strict_equality && matches!(join.right.as_ref(), LogicalPlan::TableScan(_));
-            hint(&join.right, &right, promote)?
-                .map(|right| {
-                    Join::try_new(
-                        Arc::clone(&join.left),
-                        Arc::new(right),
-                        join.on.clone(),
-                        join.filter.clone(),
-                        if promote {
-                            JoinType::Inner
-                        } else {
-                            JoinType::Left
-                        },
-                        join.join_constraint,
-                        join.null_equality,
-                        join.null_aware,
-                    )
-                    .map(LogicalPlan::Join)
-                })
-                .transpose()
+            let hinted = hint(&join.right, &right, promote)?;
+            let left = anchored_left(join, hinted.as_ref().unwrap_or(&join.right))?;
+            if hinted.is_none() && left.is_none() {
+                return Ok(None);
+            }
+            Join::try_new(
+                left.map_or_else(|| Arc::clone(&join.left), Arc::new),
+                hinted.map_or_else(|| Arc::clone(&join.right), Arc::new),
+                join.on.clone(),
+                join.filter.clone(),
+                if promote {
+                    JoinType::Inner
+                } else {
+                    JoinType::Left
+                },
+                join.join_constraint,
+                join.null_equality,
+                join.null_aware,
+            )
+            .map(|joined| Some(LogicalPlan::Join(joined)))
         }
         LogicalPlan::TableScan(scan) => {
             let Some(source) = scan.source.downcast_ref::<GraphReadSource>() else {
@@ -166,6 +175,115 @@ fn hint(
             }
             let mut replacement = scan.clone();
             replacement.filters = filters;
+            Ok(Some(LogicalPlan::TableScan(replacement)))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// The equality a node-property scan will use, as an anchor for the node
+/// scan it joins: the first pushed filter the source supports, which is the
+/// one the bound provider picks.
+fn anchor_of(right: &LogicalPlan) -> Option<GraphReadAnchor> {
+    let LogicalPlan::TableScan(scan) = right else {
+        return None;
+    };
+    let source = scan.source.downcast_ref::<GraphReadSource>()?;
+    let GraphReadTable::Properties(route) = &source.table else {
+        return None;
+    };
+    let equality = scan.filters.iter().find(|filter| {
+        datafusion::logical_expr::TableSource::supports_filters_pushdown(source, &[*filter])
+            .is_ok_and(|support| {
+                support
+                    .iter()
+                    .all(|support| *support != TableProviderFilterPushDown::Unsupported)
+            })
+    })?;
+    Some(GraphReadAnchor {
+        route: route.clone(),
+        equality: equality.clone(),
+    })
+}
+
+/// `join.left` with the node-topology scan that feeds the join's UUID key
+/// anchored by the equality `right` carries, or `None` when there is nothing
+/// to change.
+///
+/// Only a join of exactly `node_uuid = node_uuid` qualifies, and only through
+/// row-wise operators that cannot fail on a row the anchor would omit: column
+/// projections and total predicates. Anything else between the scan and the
+/// join keeps the scan whole.
+fn anchored_left(join: &Join, right: &LogicalPlan) -> Result<Option<LogicalPlan>> {
+    let [(Expr::Column(left_key), Expr::Column(right_key))] = join.on.as_slice() else {
+        return Ok(None);
+    };
+    if join.filter.is_some() || left_key.name != "node_uuid" || right_key.name != "node_uuid" {
+        return Ok(None);
+    }
+    let LogicalPlan::TableScan(properties) = right else {
+        return Ok(None);
+    };
+    if right_key.relation.as_ref() != Some(&properties.table_name) {
+        return Ok(None);
+    }
+    let Some(anchor) = anchor_of(right) else {
+        return Ok(None);
+    };
+    anchor_node_scan(&join.left, left_key, &anchor)
+}
+
+fn anchor_node_scan(
+    plan: &LogicalPlan,
+    key: &Column,
+    anchor: &GraphReadAnchor,
+) -> Result<Option<LogicalPlan>> {
+    match plan {
+        LogicalPlan::Filter(filter) => {
+            if !crate::input_predicates::total_predicate(&filter.predicate, filter.input.schema()) {
+                return Ok(None);
+            }
+            anchor_node_scan(&filter.input, key, anchor)?
+                .map(|input| {
+                    Filter::try_new(filter.predicate.clone(), Arc::new(input))
+                        .map(LogicalPlan::Filter)
+                })
+                .transpose()
+        }
+        LogicalPlan::Projection(projection) => {
+            if !projection
+                .expr
+                .iter()
+                .all(|expr| projected_column(expr).is_some())
+            {
+                return Ok(None);
+            }
+            let Ok(index) = projection.schema.index_of_column(key) else {
+                return Ok(None);
+            };
+            let Some(inner) = projected_column(&projection.expr[index]) else {
+                return Ok(None);
+            };
+            anchor_node_scan(&projection.input, inner, anchor)?
+                .map(|input| {
+                    Projection::try_new(projection.expr.clone(), Arc::new(input))
+                        .map(LogicalPlan::Projection)
+                })
+                .transpose()
+        }
+        LogicalPlan::TableScan(scan) => {
+            let Some(source) = scan.source.downcast_ref::<GraphReadSource>() else {
+                return Ok(None);
+            };
+            if source.table != GraphReadTable::Nodes
+                || source.anchor.is_some()
+                || key.name != "node_uuid"
+                || key.relation.as_ref() != Some(&scan.table_name)
+            {
+                return Ok(None);
+            }
+            let mut replacement = scan.clone();
+            replacement.source = source.with_anchor(anchor.clone());
             Ok(Some(LogicalPlan::TableScan(replacement)))
         }
         _ => Ok(None),

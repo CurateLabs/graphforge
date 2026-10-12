@@ -898,6 +898,56 @@ impl TopologyIdentityProbe {
     }
 }
 
+/// The `node_id` of each of `uuids` that a node fragment in `paths` holds, one
+/// list per path, in `paths` order.
+///
+/// This is [`TopologyIdentityProbe::lookup_node_surrogates`] over bare fragment
+/// paths, keeping which fragment answered: a query anchored by an equality
+/// index reads the matching nodes' topology rows from exactly those fragments
+/// (#1983). Footers come from the process-wide cache, row groups and pages that
+/// cannot hold a requested UUID are skipped by their statistics, and only the
+/// identity and surrogate pages that can are decoded.
+///
+/// # Errors
+/// Returns an error when a fragment fails admission or lacks its identity
+/// columns, or when a selected page cannot be decoded.
+pub(crate) fn node_surrogates_by_fragment(
+    paths: &[&Path],
+    uuids: &std::collections::BTreeSet<[u8; 16]>,
+) -> Result<Vec<Vec<u64>>, GfError> {
+    // A `BTreeSet<[u8; 16]>` iterates in the byte order `plan_group` expects.
+    let sorted: Vec<[u8; 16]> = uuids.iter().copied().collect();
+    let fragments = paths
+        .par_iter()
+        .map(|path| load_fragment(path, "node_uuid", Some("node_id")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut tasks = Vec::new();
+    for (fragment_index, fragment) in fragments.iter().enumerate() {
+        for group in 0..fragment.groups.len() {
+            if let Some(selection) = fragment.plan_group(group, &sorted) {
+                tasks.push((fragment_index, group, selection.rows));
+            }
+        }
+    }
+    // Rayon workers carry the caller's requested I/O measurement, so the bytes
+    // an anchor reads are attributed to the query that asked.
+    let capture = crate::lifecycle_io::CaptureContext::current();
+    let hits = tasks
+        .par_iter()
+        .map(|(fragment_index, group, rows)| {
+            let _scope = capture.attach();
+            let mut found = Vec::new();
+            fragments[*fragment_index].scan_group(*group, rows.as_deref(), &sorted, &mut found)?;
+            Ok((*fragment_index, found))
+        })
+        .collect::<Result<Vec<_>, GfError>>()?;
+    let mut by_fragment = vec![Vec::new(); paths.len()];
+    for (fragment_index, found) in hits {
+        by_fragment[fragment_index].extend(found.into_iter().map(|(_, surrogate)| surrogate));
+    }
+    Ok(by_fragment)
+}
+
 fn deleted_identities_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![Field::new(
         DELETED_IDENTITIES_COLUMN,
