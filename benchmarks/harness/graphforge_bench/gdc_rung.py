@@ -38,7 +38,9 @@ from importlib.metadata import version
 import json
 import os
 from pathlib import Path
+import re
 import secrets
+import shlex
 import shutil
 import stat
 import subprocess
@@ -49,10 +51,16 @@ from typing import Any
 import uuid
 import xml.etree.ElementTree as ET
 
+from jsonschema import Draft202012Validator
+
 from graphforge_bench import gdc_dataset_cache, phase_cgroup
 from graphforge_bench import gdc_graphalytics_scorecard as graphalytics
 from graphforge_bench.benchexec_authority import EvidenceError, Limits, normalize_run
-from graphforge_bench.benchexec_process import HUNG_EVIDENCE, HUNG_STATUS
+from graphforge_bench.benchexec_process import (
+    HUNG_EVIDENCE,
+    HUNG_STATUS,
+    wait_for_phase_trees_state,
+)
 from graphforge_bench.gdc_contracts import GdcContractError
 from graphforge_bench.gdc_measurement_policy import (
     GdcMeasurementBoundaryError,
@@ -99,6 +107,7 @@ from graphforge_bench.progressive_run import (
 )
 
 RESULT_SCHEMA = "graphforge-gdc-rung-result/1"
+PHASE_CGROUP_RECORD = ".phase-cgroup-paths.json"
 DEFINITION = "graphforge-gdc-rung-phase-v1"
 DRIVER_NAME = "graphforge-benchmark-gdc-scorecard"
 LAUNCHER_NAME = "graphforge-gdc-phase"
@@ -298,6 +307,9 @@ class Rung:
     counts: dict[str, Any] | None = None
     references: dict[str, Path] = field(default_factory=dict)
     built: dict[str, Path] = field(default_factory=dict)
+    phase_cgroups: list[Path] = field(default_factory=list)
+    phase_tree_alive: bool = False
+    phase_tree_unverified: bool = False
 
     @property
     def prefix(self) -> str:
@@ -323,14 +335,15 @@ class Rung:
 
 
 def _stage_phase(
-    ladder: Ladder, parent: Path, task: dict[str, Any], wall_seconds: int
+    rung: Rung, parent: Path, task: dict[str, Any], wall_seconds: int
 ) -> tuple[Path, dict[str, Any]]:
     """Stage the definition, identity-checked executables and the phase task."""
+    ladder = rung.ladder
     stage = Path(tempfile.mkdtemp(prefix="gf-gdc-phase-", dir=parent))
     _stage_benchmark_xml(ladder.root, stage, wall_seconds=wall_seconds, definition=DEFINITION)
     bin_dir = stage / "bin"
     bin_dir.mkdir()
-    tmp_dir = (ladder.work_root / "tmp").resolve()
+    tmp_dir = rung.workspace / "tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     staged: dict[str, str] = {}
     for name, source, key in (
@@ -350,11 +363,17 @@ def _stage_phase(
         staged[name] = str(target)
     harness = Path(__file__).resolve().parents[1]
     launcher = bin_dir / LAUNCHER_NAME
+    progress_env = (
+        f"export GF_GDC_PROGRESS_PATH={shlex.quote(str(stage / 'query-progress.jsonl'))}\n"
+        if task.get("phase") == "query"
+        else ""
+    )
     launcher.write_text(
         "#!/bin/sh\n"
-        f'export TMPDIR="{tmp_dir}"\n'
-        f'export PYTHONPATH="{harness}"\n'
-        f'exec "{sys.executable}" -m graphforge_bench.gdc_phase "$@"\n',
+        f"export TMPDIR={shlex.quote(str(tmp_dir))}\n"
+        + progress_env
+        + f"export PYTHONPATH={shlex.quote(str(harness))}\n"
+        + f'exec {shlex.quote(sys.executable)} -m graphforge_bench.gdc_phase "$@"\n',
         encoding="utf-8",
     )
     launcher.chmod(0o755)
@@ -381,6 +400,47 @@ def _phase_telemetry(raw: Path) -> Mapping[str, Any] | None:
             if isinstance(value, Mapping) and value.get("schema") == TELEMETRY_SCHEMA:
                 found.append(value)
     return found[0] if len(found) == 1 else None
+
+
+def _in_flight_query(progress_file: Path) -> dict[str, str] | None:
+    """Parse complete JSONL records and return the last unmatched start."""
+    try:
+        data = progress_file.read_bytes()
+    except OSError:
+        return None
+    pending: dict[tuple[str, str, str], dict[str, str]] = {}
+    for raw_line in data.splitlines(keepends=True):
+        if not raw_line.endswith(b"\n"):
+            continue
+        try:
+            value = json.loads(raw_line)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(value, Mapping):
+            continue
+        action, query_id, binding_id, phase = (
+            value.get("gdc_query"),
+            value.get("query_id"),
+            value.get("binding_id"),
+            value.get("phase"),
+        )
+        if not all(isinstance(item, str) and item for item in (query_id, binding_id, phase)) or (
+            phase != "warmup" and not re.fullmatch(r"run-[1-9][0-9]*", phase)
+        ):
+            continue
+        key = (query_id, binding_id, phase)
+        if action == "start" and set(value) == {"gdc_query", "query_id", "binding_id", "phase"}:
+            pending[key] = {"query_id": query_id, "binding_id": binding_id, "phase": phase}
+        elif (
+            action == "end"
+            and set(value) == {"gdc_query", "query_id", "binding_id", "phase", "latency_ns", "rows"}
+            and isinstance(value.get("latency_ns"), int)
+            and not isinstance(value.get("latency_ns"), bool)
+            and isinstance(value.get("rows"), int)
+            and not isinstance(value.get("rows"), bool)
+        ):
+            pending.pop(key, None)
+    return next(reversed(pending.values()), None) if pending else None
 
 
 def _run_columns(raw: Path) -> dict[str, str]:
@@ -464,6 +524,15 @@ def classify_phase(
     return None
 
 
+def _in_flight_detail(detail: str, in_flight: Mapping[str, str]) -> str:
+    """Append a bounded query identity to failure detail."""
+    suffix = (
+        f"; in-flight {in_flight['query_id'][:500]}/"
+        f"{in_flight['binding_id'][:500]} ({in_flight['phase'][:128]})"
+    )
+    return f"{detail[: max(0, 2048 - len(suffix))]}{suffix}"
+
+
 def describe_failed_samples(evidence: Mapping[str, Any]) -> str:
     """Each distinct failed-sample error with its bindings, from the query evidence.
 
@@ -498,15 +567,71 @@ def _hung_detail(raw: Path) -> str:
 
 def run_phase(rung: Rung, name: str, task: dict[str, Any], wall_seconds: int) -> PhaseRun:
     ladder = rung.ladder
-    with tempfile.TemporaryDirectory(prefix=".gf-gdc-authority-", dir=ladder.work_root) as parent:
+    parent = Path(tempfile.mkdtemp(prefix=".gf-gdc-authority-", dir=ladder.work_root))
+    safe_to_remove = False
+    try:
         stage, task = _stage_phase(
-            ladder, Path(parent), {"schema": TASK_SCHEMA, **task}, wall_seconds
+            rung, Path(parent), {"schema": TASK_SCHEMA, **task}, wall_seconds
+        )
+        rung.phase_tree_unverified = True
+        record = rung.workspace / PHASE_CGROUP_RECORD
+        record.write_text(
+            json.dumps({"cgroup_paths": [], "verified": False}) + "\n", encoding="utf-8"
         )
         status = ladder.benchexec(stage, ladder.executables, ladder.identities, ladder.work_root)
         raw = stage / "raw"
         # The phase's own cgroup counters (#1914), not the host's: another process's
         # page-out on a shared host is not this phase's memory.
         swap = phase_cgroup.load_evidence(stage / phase_cgroup.EVIDENCE_NAME)
+        phase_cgroups: list[Path] = []
+        if swap is not None:
+            path_map = swap.get("cgroup_paths", {})
+            if isinstance(path_map, Mapping):
+                phase_cgroups.extend(
+                    Path(path) for path in path_map.values() if isinstance(path, str) and path
+                )
+            phase_cgroups.extend(
+                Path(str(run["cgroup_path"]))
+                for run in swap["runs"].values()
+                if isinstance(run, Mapping)
+                and isinstance(run.get("cgroup_path"), str)
+                and run["cgroup_path"]
+            )
+        rung.phase_cgroups.extend(phase_cgroups)
+        rung.phase_cgroups = list(dict.fromkeys(rung.phase_cgroups))
+        record.write_text(
+            json.dumps(
+                {"cgroup_paths": [str(path) for path in rung.phase_cgroups], "verified": False}
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        if not phase_cgroups:
+            rung.fail(
+                "teardown", "phase_tree_unverified", "phase cgroup path could not be observed"
+            )
+        else:
+            tree_state = wait_for_phase_trees_state(rung.phase_cgroups)
+            if tree_state == "empty":
+                rung.phase_tree_unverified = False
+                record.write_text(
+                    json.dumps(
+                        {
+                            "cgroup_paths": [str(path) for path in rung.phase_cgroups],
+                            "verified": True,
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                safe_to_remove = True
+            elif tree_state == "alive":
+                rung.phase_tree_alive = True
+                rung.fail("teardown", "phase_tree_alive", "phase cgroup still contains processes")
+            else:
+                rung.fail(
+                    "teardown", "phase_tree_unverified", "phase cgroup.events could not be read"
+                )
         swapped = phase_cgroup.verdict(swap)
         if swap is not None and raw.is_dir():
             # Retain the counters beside the raw output (#1727), even when a known
@@ -539,11 +664,33 @@ def run_phase(rung: Rung, name: str, task: dict[str, Any], wall_seconds: int) ->
             cause = ("benchexec_hung", _hung_detail(raw))
         elif cause is None and status != 0:
             cause = ("benchexec_failed", f"BenchExec exited {status}")
+        in_flight = (
+            _in_flight_query(stage / "query-progress.jsonl")
+            if name == "query" and cause is not None
+            else None
+        )
+        if in_flight is not None:
+            result_schema = read_json(ladder.root / "schemas" / "gdc-rung-result.json")
+            Draft202012Validator(result_schema["$defs"]["in_flight"]).validate(in_flight)
+            cause = (cause[0], _in_flight_detail(cause[1], in_flight))
         if cause is not None and raw.is_dir():
+            progress_file = stage / "query-progress.jsonl"
+            if name == "query" and progress_file.is_file():
+                shutil.copyfile(progress_file, raw / progress_file.name)
             shutil.copytree(raw, ladder.output_dir / f"{rung.prefix}-{name}-benchexec-raw")
+    finally:
+        if safe_to_remove:
+            shutil.rmtree(parent)
     run = PhaseRun(
         name,
-        None if cause is None else {"phase": name, "cause": cause[0], "detail": cause[1]},
+        None
+        if cause is None
+        else {
+            "phase": name,
+            "cause": cause[0],
+            "detail": cause[1],
+            **({"in_flight": in_flight} if name == "query" else {}),
+        },
         telemetry,
         document,
         float(measured["wall_seconds"]) if measured is not None else 0.0,
@@ -867,7 +1014,19 @@ def _check(rung: Rung, evidence: Mapping[str, Any], results_dir: Path, input_roo
 
 def _teardown(rung: Rung) -> dict[str, Any]:
     ladder = rung.ladder
-    reclaim_workspace(ladder.work_root, rung.workspace_name)
+    tree_state = wait_for_phase_trees_state(rung.phase_cgroups)
+    if rung.phase_tree_alive or rung.phase_tree_unverified or tree_state != "empty":
+        if rung.phase_tree_unverified:
+            if not any(failure["cause"] == "phase_tree_unverified" for failure in rung.failures):
+                rung.fail(
+                    "teardown", "phase_tree_unverified", "phase cgroup path could not be observed"
+                )
+        elif rung.phase_tree_alive or tree_state == "alive":
+            rung.fail("teardown", "phase_tree_alive", "phase cgroup still contains processes")
+        else:
+            rung.fail("teardown", "phase_tree_unverified", "phase cgroup.events could not be read")
+    else:
+        reclaim_workspace(ladder.work_root, rung.workspace_name)
     inventory = collect_inventory(ladder.work_root, None)
     rung.publish("inventory", inventory)
     if not inventory["empty"]:
@@ -926,13 +1085,53 @@ def run_rung(
     rung = Rung(ladder, rung_spec)
     if rung.workspace.is_symlink():
         raise LadderError("workspace_link_refused", str(rung.workspace))
-    # A crash can leave a workspace without any published evidence; it holds
-    # nothing this attempt can trust.
-    reclaim_workspace(ladder.work_root, rung.workspace_name)
+    if rung.workspace.exists():
+        record = rung.workspace / PHASE_CGROUP_RECORD
+        try:
+            paths = json.loads(record.read_text(encoding="utf-8"))["cgroup_paths"]
+            if (
+                not isinstance(paths, list)
+                or not paths
+                or not all(isinstance(path, str) and path for path in paths)
+            ):
+                raise ValueError("missing cgroup paths")
+            rung.phase_cgroups = [Path(path) for path in paths]
+            state = wait_for_phase_trees_state(rung.phase_cgroups)
+        except (OSError, ValueError, KeyError, TypeError):
+            state = "unverified"
+        if state != "empty":
+            cause = "phase_tree_alive" if state == "alive" else "phase_tree_unverified"
+            detail = (
+                "phase cgroup still contains processes"
+                if state == "alive"
+                else "existing workspace has no verifiable phase cgroup paths"
+            )
+            rung.fail("teardown", cause, detail)
+            rung.phase_tree_alive = state == "alive"
+            rung.phase_tree_unverified = state == "unverified"
+            inventory = collect_inventory(ladder.work_root, None)
+            rung.publish("inventory", inventory)
+            result = _result(
+                rung,
+                "failed",
+                launch_host=launch_host,
+                capacity=capacity,
+                inventory=inventory,
+            )
+            return _publish_result(rung, result)
+        reclaim_workspace(ladder.work_root, rung.workspace_name)
     try:
         _execute(rung)
-    finally:
-        inventory = _teardown(rung)
+    except BaseException as error:
+        if rung.phase_tree_unverified:
+            rung.fail(
+                "teardown",
+                "phase_tree_unverified",
+                f"phase ended before its cgroup tree was verified: {type(error).__name__}: {error}",
+            )
+        else:
+            rung.fail("harness", "phase_execution_interrupted", f"{type(error).__name__}: {error}")
+    inventory = _teardown(rung)
     status = "failed" if rung.failures else "passed"
     result = _result(rung, status, launch_host=launch_host, capacity=capacity, inventory=inventory)
     return _publish_result(rung, result)

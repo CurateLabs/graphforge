@@ -36,6 +36,7 @@ class RunSwap:
     pswpout_pages: int
     swap_peak_bytes: int
     swap_max: str | None
+    cgroup_path: str = ""
 
     @property
     def swapped(self) -> bool:
@@ -70,7 +71,7 @@ def read_run_swap(cgroup: Path) -> RunSwap | None:
         swap_max: str | None = (cgroup / "memory.swap.max").read_text(encoding="ascii").strip()
     except (OSError, UnicodeDecodeError):
         swap_max = None
-    return RunSwap(pswpout, peak, swap_max)
+    return RunSwap(pswpout, peak, swap_max, str(cgroup.resolve()))
 
 
 def process_cgroup(
@@ -101,6 +102,7 @@ class PhaseSwapSampler:
         self._cgroup_root = cgroup_root
         self._scope: Path | None = None
         self._runs: dict[str, RunSwap] = {}
+        self._run_paths: dict[str, str] = {}
         self.samples = 0
 
     def sample(self, pid: int) -> None:
@@ -115,6 +117,9 @@ class PhaseSwapSampler:
         except OSError:
             return
         for run in runs:
+            # Retain the run identity even when its counters cannot be read. The
+            # harness needs this path to verify the process tree before cleanup.
+            self._run_paths[run.name] = str(run)
             reading = read_run_swap(run)
             if reading is None:
                 continue
@@ -125,6 +130,7 @@ class PhaseSwapSampler:
                     max(reading.pswpout_pages, seen.pswpout_pages),
                     max(reading.swap_peak_bytes, seen.swap_peak_bytes),
                     reading.swap_max,
+                    reading.cgroup_path,
                 )
             self._runs[run.name] = reading
 
@@ -140,11 +146,13 @@ class PhaseSwapSampler:
         return {
             "schema": SCHEMA,
             "samples": self.samples,
+            "cgroup_paths": dict(sorted(self._run_paths.items())),
             "runs": {
                 name: {
                     "pswpout_pages": run.pswpout_pages,
                     "swap_peak_bytes": run.swap_peak_bytes,
                     "swap_max": run.swap_max,
+                    "cgroup_path": run.cgroup_path,
                 }
                 for name, run in sorted(self._runs.items())
             },

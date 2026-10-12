@@ -327,7 +327,7 @@ fn sample(
     };
     let projected = match &variant.columns {
         None => Ok((schema, batches)),
-        Some(columns) => project(&schema, &batches, columns),
+        Some(columns) => project(&schema, batches, columns),
     };
     // The result is rendered a row at a time (#1914): once to digest it and, when the
     // reference check wants the cells, once more to write them. A Graphalytics result
@@ -360,7 +360,7 @@ fn sample(
 /// Keep only the named columns, in the named order, after the clock stops.
 fn project(
     schema: &SchemaRef,
-    batches: &[RecordBatch],
+    batches: Vec<RecordBatch>,
     columns: &[String],
 ) -> Result<(SchemaRef, Vec<RecordBatch>), QueryError> {
     let indices = columns
@@ -379,10 +379,52 @@ fn project(
     };
     let projected = std::sync::Arc::new(schema.project(&indices).map_err(failed)?);
     let batches = batches
-        .iter()
+        .into_iter()
         .map(|batch| batch.project(&indices).map_err(failed))
         .collect::<Result<Vec<_>, _>>()?;
     Ok((projected, batches))
+}
+
+fn write_progress(record: serde_json::Value) {
+    use std::io::Write as _;
+
+    let Some(path) = std::env::var_os("GF_GDC_PROGRESS_PATH") else {
+        return;
+    };
+    let mut bytes = match serde_json::to_vec(&record) {
+        Ok(bytes) => bytes,
+        Err(_) => return,
+    };
+    bytes.push(b'\n');
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
+        return;
+    };
+    // Each JSONL record is one append write with no user-space buffering.
+    let _ = file.write(&bytes);
+}
+
+fn progress_start(query_id: &str, binding_id: &str, phase: &str) {
+    write_progress(serde_json::json!({
+        "gdc_query": "start",
+        "query_id": query_id,
+        "binding_id": binding_id,
+        "phase": phase,
+    }));
+}
+
+fn progress_complete(query_id: &str, binding_id: &str, phase: &str, latency_ns: u128, rows: u64) {
+    write_progress(serde_json::json!({
+        "gdc_query": "end",
+        "query_id": query_id,
+        "binding_id": binding_id,
+        "phase": phase,
+        "latency_ns": latency_ns,
+        "rows": rows,
+    }));
 }
 
 /// Nearest-rank percentile: the smallest sample with at least `percent`% of
@@ -413,12 +455,39 @@ pub fn measure_variant(
     let first = &variant.bindings[0];
     // Only whether the warm-up completed is kept: its result is dropped here, not held
     // through the measured pass beside each sample's own.
-    let warmup_completed = execute(forge, variant, first)?.0.is_ok();
+    progress_start(&variant.id, &first.id, "warmup");
+    let (warmup_result, warmup_elapsed) = execute(forge, variant, first)?;
+    let warmup_rows = warmup_result
+        .as_ref()
+        .map(|(_, batches)| batches.iter().map(|batch| batch.num_rows() as u64).sum())
+        .unwrap_or(0);
+    let warmup_completed = warmup_result.is_ok();
+    progress_complete(
+        &variant.id,
+        &first.id,
+        "warmup",
+        warmup_elapsed.as_nanos(),
+        warmup_rows,
+    );
+    drop(warmup_result);
     let mut samples = Vec::with_capacity(variant.bindings.len());
-    for binding in &variant.bindings {
+    for (index, binding) in variant.bindings.iter().enumerate() {
+        let phase = format!("run-{}", index + 1);
+        progress_start(&variant.id, &binding.id, &phase);
+        let outcome = sample(forge, variant, binding, results)?;
+        match &outcome {
+            Outcome::Measured(measured) => progress_complete(
+                &variant.id,
+                &binding.id,
+                &phase,
+                u128::from(measured.latency_ns),
+                measured.rows,
+            ),
+            Outcome::Failed(_) => progress_complete(&variant.id, &binding.id, &phase, 0, 0),
+        }
         samples.push(Sample {
             binding_id: binding.id.clone(),
-            outcome: sample(forge, variant, binding, results)?,
+            outcome,
         });
     }
     let mut sorted: Vec<u64> = samples

@@ -32,6 +32,7 @@ from pathlib import Path
 import resource
 import subprocess
 import sys
+import threading
 import time
 from typing import Any
 
@@ -80,12 +81,39 @@ class Phase:
         self.steps: list[dict[str, Any]] = []
 
     def step(
-        self, name: str, argv: Sequence[str], *, failure: str
+        self, name: str, argv: Sequence[str], *, failure: str, stream_stderr: bool = False
     ) -> subprocess.CompletedProcess[str]:
         started = time.monotonic()
-        completed = subprocess.run(
-            list(argv), check=False, capture_output=True, text=True, stdin=subprocess.DEVNULL
-        )
+        if stream_stderr:
+            process = subprocess.Popen(
+                list(argv),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+            assert process.stderr is not None
+            stderr_lines: list[str] = []
+
+            def relay_stderr() -> None:
+                for line in process.stderr:
+                    stderr_lines.append(line)
+                    sys.stderr.write(line)
+                    sys.stderr.flush()
+
+            relay = threading.Thread(target=relay_stderr)
+            relay.start()
+            stdout = process.stdout.read() if process.stdout is not None else ""
+            return_code = process.wait()
+            relay.join()
+            completed = subprocess.CompletedProcess(
+                list(argv), return_code, stdout, "".join(stderr_lines)
+            )
+        else:
+            completed = subprocess.run(
+                list(argv), check=False, capture_output=True, text=True, stdin=subprocess.DEVNULL
+            )
         self.steps.append(
             {
                 "step": name,
@@ -195,7 +223,7 @@ def _query(task: Mapping[str, Any], phase: Phase) -> dict[str, Any]:
     if task.get("results_dir") is not None:
         argv += ["--results-dir", task["results_dir"]]
     try:
-        phase.step("query", argv, failure="query_driver_failed")
+        phase.step("query", argv, failure="query_driver_failed", stream_stderr=True)
     except PhaseError as error:
         # Exit 3 writes evidence with failed samples; exit 2 refuses with a
         # typed cause (for example count_mismatch) and writes none.

@@ -42,6 +42,7 @@ class FakeHost:
         if peak is not None:
             (directory / "memory.swap.peak").write_text(f"{peak}\n")
         (directory / "memory.swap.max").write_text(f"{swap_max}\n")
+        (directory / "cgroup.events").write_text("populated 0\n")
         return directory
 
     def place(self, pid: int, path: str) -> None:
@@ -95,6 +96,15 @@ class PhaseSwapTests(ScratchTest):
         self.assertFalse(sampler.swapped)
         self.assertEqual(phase_cgroup.verdict(sampler.evidence()), False)
 
+    def test_cgroup_path_is_kept_when_swap_counters_cannot_be_read(self) -> None:
+        run = self.host.benchexec_run(pswpout=0)
+        (run / "memory.stat").unlink()
+        sampler = self.host.sampler()
+        sampler.sample(PID)
+        evidence = sampler.evidence()
+        self.assertEqual(evidence["runs"], {})
+        self.assertEqual(evidence["cgroup_paths"]["benchmark_r1"], str(run))
+
     def test_other_processes_swapping_on_a_shared_host_do_not_fail_it(self) -> None:
         # /proc/vmstat would count all of this. The launcher's cgroup (everything else the
         # user runs), BenchExec's slice, BenchExec's own process and an unrelated run
@@ -133,7 +143,7 @@ class PhaseSwapTests(ScratchTest):
         run = self.host.benchexec_run(pswpout=3, peak=12288)
         sampler = self.host.sampler()
         sampler.sample(PID)
-        for name in ("memory.stat", "memory.swap.peak", "memory.swap.max"):
+        for name in ("memory.stat", "memory.swap.peak", "memory.swap.max", "cgroup.events"):
             (run / name).unlink()  # BenchExec removed the run cgroup
         run.rmdir()
         sampler.sample(PID)
@@ -152,7 +162,12 @@ class PhaseSwapTests(ScratchTest):
         self.assertTrue(run.is_dir())
         self.assertEqual(
             sampler.evidence()["runs"]["benchmark_r1"],
-            {"pswpout_pages": 11, "swap_peak_bytes": 45056, "swap_max": "0"},
+            {
+                "pswpout_pages": 11,
+                "swap_peak_bytes": 45056,
+                "swap_max": "0",
+                "cgroup_path": str(run.resolve()),
+            },
         )
 
     def test_a_cgroup_that_does_not_report_page_outs_is_unobserved_not_clean(self) -> None:
