@@ -78,7 +78,12 @@ enum Step {
 /// one. A manifest with any other overlap is refused on the first pull, before
 /// any decode, since a single sequential pass could not reproduce `row` for it.
 ///
-/// After an error, a further pull retries the shard that failed.
+/// Every error is terminal. A refusal (checksum, length, structure, missing
+/// shard, overlap) stays the cursor's answer to every later pull and releases
+/// whatever it had assembled, so a row that spans the refused shard can never be
+/// completed by bytes that reappear afterwards. A transient I/O error is not
+/// told apart from a refusal: the consumer holds a half-built export either way,
+/// and a fresh cursor starts over.
 pub struct CsrRowCursor<'a> {
     index: &'a ShardedCsrIndex,
     next_shard: usize,
@@ -89,6 +94,8 @@ pub struct CsrRowCursor<'a> {
     /// Every node below this one has been returned.
     next_node: u64,
     checked: bool,
+    /// The error every pull returns once one has occurred.
+    failed: Option<GfError>,
 }
 
 impl<'a> CsrRowCursor<'a> {
@@ -105,12 +112,42 @@ impl<'a> CsrRowCursor<'a> {
             release_spanning: false,
             next_node: 0,
             checked: false,
+            failed: None,
         }
     }
 
     /// The next `(node_id, row)`, or `None` after node `node_count - 1`. The row
-    /// is valid until the next pull.
+    /// is valid until the next pull. After an error, every pull returns that
+    /// error.
     pub fn next_row(&mut self) -> Result<Option<(u64, CsrRow<'_>)>, GfError> {
+        if let Some(error) = &self.failed {
+            return Err(error.clone());
+        }
+        let step = match self.step() {
+            Ok(step) => step,
+            Err(error) => {
+                self.shard = None;
+                self.spanning.finish();
+                self.release_spanning = false;
+                self.failed = Some(error.clone());
+                return Err(error);
+            }
+        };
+        match step {
+            Step::Done => Ok(None),
+            Step::Empty(node) => Ok(Some((node, EMPTY_ROW))),
+            Step::Spanning(node) => {
+                self.release_spanning = true;
+                Ok(Some((node, self.spanning.row())))
+            }
+            Step::Shard { node, local } => {
+                let shard = self.shard.as_ref().expect("a returned shard row is loaded");
+                Ok(Some((node, shard.csr.row(local))))
+            }
+        }
+    }
+
+    fn step(&mut self) -> Result<Step, GfError> {
         if !self.checked {
             for pair in self.index.manifest.shards.windows(2) {
                 if pair[1].first_node < pair[0].first_node + pair[0].node_count - 1 {
@@ -125,18 +162,7 @@ impl<'a> CsrRowCursor<'a> {
             self.spanning.finish();
             self.release_spanning = false;
         }
-        match self.advance()? {
-            Step::Done => Ok(None),
-            Step::Empty(node) => Ok(Some((node, EMPTY_ROW))),
-            Step::Spanning(node) => {
-                self.release_spanning = true;
-                Ok(Some((node, self.spanning.row())))
-            }
-            Step::Shard { node, local } => {
-                let shard = self.shard.as_ref().expect("a returned shard row is loaded");
-                Ok(Some((node, shard.csr.row(local))))
-            }
-        }
+        self.advance()
     }
 
     fn advance(&mut self) -> Result<Step, GfError> {
@@ -204,5 +230,85 @@ impl<'a> CsrRowCursor<'a> {
                 .get(self.next_shard + 1)
                 .is_some_and(|following| following.first_node <= last_node),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adjacency::write_sharded_csr;
+
+    /// Node 1 holds twelve entries, which at three per shard span shards A-D.
+    fn hub_index(directory: &std::path::Path) -> ShardedCsrIndex {
+        let mut csr = CsrIndex {
+            offsets: vec![0, 0],
+            ..CsrIndex::default()
+        };
+        for entry in 0..12 {
+            csr.edge_ids.push(100 + entry);
+            csr.neighbor_ids.push(entry);
+        }
+        csr.offsets.push(12);
+        csr.offsets.push(12);
+        let path = directory.join("HUB.out.csr");
+        write_sharded_csr(&path, &csr, 3).unwrap();
+        let index = ShardedCsrIndex::open(&path).unwrap();
+        assert_eq!(index.manifest.shards.len(), 4);
+        assert!(
+            index
+                .manifest
+                .shards
+                .iter()
+                .all(|record| record.first_node == 1)
+        );
+        index
+    }
+
+    #[test]
+    fn a_refusal_is_terminal_and_the_hub_is_never_completed_across_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let index = hub_index(directory.path());
+        let shard_c = index.root.join(&index.manifest.shards[2].file);
+        let original = std::fs::read(&shard_c).unwrap();
+        let mut corrupt = original.clone();
+        let middle = corrupt.len() / 2;
+        corrupt[middle] ^= 1;
+        std::fs::write(&shard_c, corrupt).unwrap();
+
+        // The walk and the cursor are refused alike, and the hub is never seen.
+        let fresh = ShardedCsrIndex::open(&index.root.with_file_name("HUB.out.csr")).unwrap();
+        let mut visited = Vec::new();
+        let walked = fresh.walk_rows(|node, row| {
+            visited.push((node, row.len()));
+            Ok(())
+        });
+        assert!(walked.unwrap_err().to_string().contains("checksum"));
+        assert_eq!(visited, vec![(0, 0)]);
+
+        let fresh = ShardedCsrIndex::open(&index.root.with_file_name("HUB.out.csr")).unwrap();
+        let mut cursor = fresh.row_cursor();
+        let first = cursor.next_row().unwrap().map(|(node, _)| node);
+        assert_eq!(first, Some(0));
+        let refusal = cursor.next_row().unwrap_err().to_string();
+        assert!(refusal.contains("checksum"), "{refusal}");
+        assert!(cursor.spanning.edge_ids.capacity() == 0 && cursor.spanning.node.is_none());
+        let decodes = fresh.shard_decode_count();
+
+        // The bytes come back; the cursor still refuses and never yields the hub.
+        std::fs::write(&shard_c, &original).unwrap();
+        for _ in 0..3 {
+            assert_eq!(cursor.next_row().unwrap_err().to_string(), refusal);
+        }
+        assert_eq!(fresh.shard_decode_count(), decodes, "no shard is re-read");
+
+        // A new cursor starts over and yields the whole hub.
+        let mut again = fresh.row_cursor();
+        let mut hub = None;
+        while let Some((node, row)) = again.next_row().unwrap() {
+            if node == 1 {
+                hub = Some(row.len());
+            }
+        }
+        assert_eq!(hub, Some(12));
     }
 }

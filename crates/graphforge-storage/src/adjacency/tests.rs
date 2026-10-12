@@ -1819,7 +1819,7 @@ fn a_cursor_refuses_corruption_and_overlap_on_the_pull_that_reaches_it() {
     };
     assert!(error.to_string().contains("checksum"), "{error}");
     assert!(pulls > 0, "rows before the corrupt shard are still served");
-    // The failed shard is retried, not skipped.
+    // The refusal is terminal.
     assert!(
         cursor
             .next_row()
