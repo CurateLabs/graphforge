@@ -71,8 +71,10 @@ enum Step {
 /// authenticate-then-decode path as random access, so a missing, mis-sized,
 /// checksum-failing or undecodable shard is refused. Decoded shards are dropped
 /// as soon as their rows are consumed and never enter the index's decoded-shard
-/// cache, so the cursor holds one encoded and one decoded shard at a time, plus
-/// the entries of a row that spans shards (which `row` also concatenates).
+/// cache, so the cursor holds one shard at a time: its encoded bytes twice
+/// while Arrow reads the batch (the read buffer and Arrow's block buffer), its
+/// decoded buffers and its CSR copy, plus the entries of a row that spans
+/// shards (which `row` also concatenates).
 ///
 /// The writer lets consecutive shards share only the last row of the earlier
 /// one. A manifest with any other overlap is refused on the first pull, before
