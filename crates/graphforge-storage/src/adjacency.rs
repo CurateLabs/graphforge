@@ -40,6 +40,7 @@ mod builder;
 pub(crate) use builder::TEST_SHARD_LIMITS;
 mod codec;
 mod installation;
+mod row_cursor;
 pub(crate) use builder::build_adjacency_index_for_edge_files_observed;
 pub use builder::{
     ADJACENCY_SPILL_DIR_NAME, AdjacencyBuildMetrics, AdjacencyBuildOptions,
@@ -53,6 +54,7 @@ use installation::{
     csr_temporary_parent, observe_csr_barriers, persist_temp_observed, promote_shards,
     write_csr_shard_bytes_observed,
 };
+pub use row_cursor::CsrRowCursor;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -413,6 +415,29 @@ impl ShardedCsrIndex {
         cache.decodes += 1;
         cache.insert(record.file.clone(), csr, record.decoded_bytes);
         Ok(output)
+    }
+
+    /// Visit every logical row `0..node_count` once, in node order, decoding the
+    /// shards sequentially in manifest order and retaining none of them. A
+    /// visitor error stops the walk and is returned. This drives a
+    /// [`CsrRowCursor`], which defines the rows, their order and the refusals.
+    pub fn walk_rows(
+        &self,
+        mut visit: impl FnMut(u64, CsrRow<'_>) -> Result<(), GfError>,
+    ) -> Result<(), GfError> {
+        let mut cursor = self.row_cursor();
+        while let Some((node, row)) = cursor.next_row()? {
+            visit(node, row)?;
+        }
+        Ok(())
+    }
+
+    /// A pull cursor over every logical row `0..node_count`, for consumers that
+    /// advance several indexes in lockstep (an undirected export merges the out
+    /// and in rows of each node). See [`CsrRowCursor`].
+    #[must_use]
+    pub const fn row_cursor(&self) -> CsrRowCursor<'_> {
+        CsrRowCursor::new(self)
     }
 
     /// Number of shard reads this index authenticated and decoded. Diagnostics

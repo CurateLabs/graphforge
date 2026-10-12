@@ -502,10 +502,11 @@ pub use property_overlay::{
 
 pub mod catalog;
 pub use catalog::{
-    AdmittedSourceFile, EdgePropertyTable, GraphCatalog, PropertyTable, TopologyNodeTable,
-    TypedEdgeTable, UnionEdgeTable, count_edge_rows, count_edge_rows_from_inventory,
-    list_edge_property_stems, list_property_stems, node_property_files, node_property_source_files,
-    node_property_source_fragments, node_topology_present, read_edge_properties,
+    AdmittedSourceFile, DenseNodeIdentities, DenseNodeIdentityError, EdgePropertyTable,
+    GraphCatalog, PropertyTable, TopologyNodeTable, TypedEdgeTable, UnionEdgeTable,
+    count_edge_rows, count_edge_rows_from_inventory, list_edge_property_stems, list_property_stems,
+    node_property_files, node_property_source_files, node_property_source_fragments,
+    node_topology_present, read_dense_node_identities, read_edge_properties,
     read_edge_properties_from_inventory, read_edge_properties_projected,
     read_edge_properties_projected_from_inventory, read_edges, read_edges_filtered,
     read_edges_filtered_from_inventory, read_edges_filtered_observed,
