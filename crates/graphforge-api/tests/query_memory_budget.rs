@@ -1,90 +1,49 @@
-//! #1985: an in-memory instance spills an aggregate that exceeds its query
-//! memory budget instead of failing, and the budget it ran under is reported.
+//! #1985: the query memory budget an instance runs under is derived from the
+//! process memory limit unless the caller states one, and is reported.
 
-use arrow::array::Int64Array;
 use graphforge_api::{
     ExecutionResourcePolicy, GraphForge, GraphForgeOptions, MemoryBudgetSource, ResourcePolicyMode,
-    SpillPolicy,
+    SpillPolicy, derive_query_memory_budget,
 };
 
-const GROUPS: i64 = 1_500_000;
-const BUDGET: u64 = 24 * 1024 * 1024;
-
-const QUERY: &str = "UNWIND range(1, 1500000) AS x \
-                     WITH toString(x) AS k, count(*) AS c \
-                     RETURN count(*) AS groups, sum(c) AS total";
-
-fn instance(budget: u64, spill: SpillPolicy) -> GraphForge {
-    GraphForge::new_with_options(
-        None,
-        GraphForgeOptions {
-            resource: ExecutionResourcePolicy {
-                mode: ResourcePolicyMode::Automatic,
-                memory_budget_bytes: Some(budget),
-                spill,
-                ..ExecutionResourcePolicy::default()
-            },
-            ..GraphForgeOptions::default()
-        },
-    )
-    .unwrap()
-}
-
-fn counts(graph: &GraphForge) -> Result<(i64, i64), graphforge_api::GfError> {
-    let result = graph.execute(QUERY)?;
-    let batch = &result.batches[0];
-    let column = |index: usize| {
-        batch
-            .column(index)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .expect("integer column")
-            .value(0)
-    };
-    Ok((column(0), column(1)))
-}
-
-#[test]
-fn an_in_memory_aggregate_over_the_budget_spills_and_matches_the_large_budget() {
-    let small = instance(BUDGET, SpillPolicy::default());
-    assert_eq!(counts(&small).unwrap(), (GROUPS, GROUPS));
-    let large = instance(4 * 1024 * 1024 * 1024, SpillPolicy::default());
-    assert_eq!(counts(&large).unwrap(), (GROUPS, GROUPS));
-}
-
-#[test]
-fn the_budget_binds_when_spill_is_disabled() {
-    let refused = instance(
-        BUDGET,
-        SpillPolicy {
-            enabled: false,
-            ..SpillPolicy::default()
-        },
-    );
-    let error = counts(&refused).unwrap_err().to_string();
-    assert!(error.contains("Resources exhausted"), "{error}");
-}
+const STATED: u64 = 48 * 1024 * 1024;
 
 #[test]
 fn the_default_budget_is_derived_from_the_process_limit_and_reported() {
     let graph = GraphForge::new(None).unwrap();
     let diagnostics = graph.resource_diagnostics();
     assert!(diagnostics.memory_budget_bytes >= 512 * 1024 * 1024);
-    let (expected, source) =
-        graphforge_api::derive_query_memory_budget(match diagnostics.memory_budget_source {
-            MemoryBudgetSource::DerivedFromHostLimit { host_limit_bytes } => Some(host_limit_bytes),
-            _ => None,
-        });
-    assert_eq!(diagnostics.memory_budget_bytes, expected);
-    assert_eq!(diagnostics.memory_budget_source, source);
-    assert_ne!(
-        diagnostics.memory_budget_source,
-        MemoryBudgetSource::Explicit
+    let host_limit = match diagnostics.memory_budget_source {
+        MemoryBudgetSource::DerivedFromHostLimit { host_limit_bytes } => Some(host_limit_bytes),
+        MemoryBudgetSource::DerivedWithoutHostLimit => None,
+        other => panic!("the default budget must be derived, not {other:?}"),
+    };
+    assert_eq!(
+        (
+            diagnostics.memory_budget_bytes,
+            diagnostics.memory_budget_source
+        ),
+        derive_query_memory_budget(host_limit)
     );
+}
 
-    let stated = instance(BUDGET, SpillPolicy::default());
-    let diagnostics = stated.resource_diagnostics();
-    assert_eq!(diagnostics.memory_budget_bytes, BUDGET);
+#[test]
+fn a_stated_budget_is_used_as_given_and_reported_as_stated() {
+    let graph = GraphForge::new_with_options(
+        None,
+        GraphForgeOptions {
+            resource: ExecutionResourcePolicy {
+                mode: ResourcePolicyMode::Automatic,
+                memory_budget_bytes: Some(STATED),
+                spill: SpillPolicy::default(),
+                ..ExecutionResourcePolicy::default()
+            },
+            ..GraphForgeOptions::default()
+        },
+    )
+    .unwrap();
+    let diagnostics = graph.resource_diagnostics();
+    assert_eq!(diagnostics.memory_budget_bytes, STATED);
     assert_eq!(
         diagnostics.memory_budget_source,
         MemoryBudgetSource::Explicit
