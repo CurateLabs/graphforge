@@ -83,12 +83,16 @@ fn label(index: usize) -> &'static str {
 }
 
 fn construct(project: &Path, nodes: usize, fan_out: usize) {
+    let forge = GraphForge::new(Some(project.to_str().expect("utf-8 path"))).unwrap();
+    construct_into(&forge, nodes, fan_out);
+}
+
+fn construct_into(forge: &GraphForge, nodes: usize, fan_out: usize) {
     let mut fields = CONSTRUCTION_NODE_SCHEMA.fields().to_vec();
     fields.push(Arc::new(Field::new("id", DataType::Int64, true)));
     fields.push(Arc::new(Field::new("name", DataType::Utf8, true)));
     fields.push(Arc::new(Field::new("padding", DataType::Utf8, true)));
     let schema = Arc::new(Schema::new(fields));
-    let forge = GraphForge::new(Some(project.to_str().expect("utf-8 path"))).unwrap();
     let mut session = forge
         .begin_graph_construction(GraphConstructionBudgets {
             max_batch_rows: WRITE_WINDOW,
@@ -597,4 +601,22 @@ fn an_anchored_seed_feeds_an_expansion() {
         expected.sort();
         assert_eq!(answer(&forge, &query), expected, "partitions={partitions}");
     }
+}
+
+/// A project that lives in memory builds the index and anchors the same way.
+#[test]
+fn an_in_memory_project_anchors_too() {
+    let _serial = serial();
+    let forge = GraphForge::new(None).unwrap();
+    construct_into(&forge, 1_000, 0);
+    let ident = scattered(5, 1_000);
+    let query = format!("MATCH (n:Entity {{id: {ident}}}) RETURN n.id AS id, n.name AS name");
+    let physical = plan(&forge, &query);
+    assert!(
+        physical.contains(ANCHORED) && physical.contains(INDEXED),
+        "{physical}"
+    );
+    assert_eq!(answer(&forge, &query), [row(ident, Some("n5"))]);
+    let other = format!("MATCH (n:Other {{id: {ident}}}) RETURN n.id AS id, n.name AS name");
+    assert_eq!(answer(&forge, &other), Vec::<Vec<Option<String>>>::new());
 }
