@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import resource
 import signal
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -649,7 +650,16 @@ class LadderControlTests(Scratch):
         (cgroup / "cgroup.events").write_text("populated 0\n", encoding="ascii")
 
         def leaves_cache(stage: Path, *_args: Any) -> int:
-            rung.workspace.joinpath("tmp", "graphforge-adjacency-cache-leftover").mkdir()
+            launcher = stage / "bin" / gdc_rung.LAUNCHER_NAME
+            tmp_line = next(
+                line
+                for line in launcher.read_text(encoding="utf-8").splitlines()
+                if line.startswith("export TMPDIR=")
+            )
+            phase_tmp = Path(shlex.split(tmp_line.partition("=")[2])[0])
+            cache = phase_tmp / "graphforge-adjacency-cache-leftover"
+            cache.mkdir()
+            (cache / "buffer").write_bytes(b"partial query cache")
             (stage / "raw").mkdir()
             (stage / phase_cgroup.EVIDENCE_NAME).write_text(
                 json.dumps(
