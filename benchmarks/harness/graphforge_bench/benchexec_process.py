@@ -69,24 +69,39 @@ def wait_for_phase_trees_empty(
     timeout_seconds: float = PHASE_TREE_WAIT_SECONDS,
     poll_seconds: float = 0.1,
 ) -> bool:
-    """Wait for every recorded BenchExec phase cgroup to lose its processes."""
+    """Wait for every recorded BenchExec phase cgroup tree to become unpopulated."""
+    return wait_for_phase_trees_state(
+        cgroups, timeout_seconds=timeout_seconds, poll_seconds=poll_seconds
+    ) == "empty"
+
+
+def wait_for_phase_trees_state(
+    cgroups: Sequence[Path],
+    *,
+    timeout_seconds: float = PHASE_TREE_WAIT_SECONDS,
+    poll_seconds: float = 0.1,
+) -> str:
+    """Return `empty`, `alive`, or `unverified` for the recorded recursive trees."""
     deadline = time.monotonic() + timeout_seconds
     while True:
         populated = False
         for cgroup in cgroups:
             try:
-                processes = (cgroup / "cgroup.procs").read_text(encoding="ascii").strip()
-            except FileNotFoundError:
-                continue  # BenchExec already removed this run cgroup.
+                events = (cgroup / "cgroup.events").read_text(encoding="ascii")
             except OSError:
-                return False
-            if processes:
+                return "unverified"
+            values = dict(
+                fields for line in events.splitlines() if len(fields := line.split()) == 2
+            )
+            if values.get("populated") not in {"0", "1"}:
+                return "unverified"
+            if values["populated"] == "1":
                 populated = True
                 break
         if not populated:
-            return True
+            return "empty"
         if time.monotonic() >= deadline:
-            return False
+            return "alive"
         time.sleep(min(poll_seconds, max(0.0, deadline - time.monotonic())))
 
 

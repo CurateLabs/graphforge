@@ -42,6 +42,7 @@ class FakeHost:
         if peak is not None:
             (directory / "memory.swap.peak").write_text(f"{peak}\n")
         (directory / "memory.swap.max").write_text(f"{swap_max}\n")
+        (directory / "cgroup.events").write_text("populated 0\n")
         return directory
 
     def place(self, pid: int, path: str) -> None:

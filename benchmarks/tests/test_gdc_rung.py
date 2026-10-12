@@ -149,6 +149,7 @@ class FakeBenchExec:
             fake_cgroup = stage / "fake-cgroup"
             fake_cgroup.mkdir()
             (fake_cgroup / "cgroup.procs").write_text("", encoding="ascii")
+            (fake_cgroup / "cgroup.events").write_text("populated 0\n", encoding="ascii")
             (stage / phase_cgroup.EVIDENCE_NAME).write_text(
                 json.dumps(
                     {
@@ -532,74 +533,22 @@ class LadderControlTests(Scratch):
             {"empty": False, "entries": ["workspace/leftover"]},
         )
 
-    def test_teardown_removes_only_its_phase_tmp_directory(self) -> None:
-        tmp = self.work / "tmp"
-        owned = tmp / "gdc-snb-interactive-sf0-owned"
-        cache = owned / "graphforge-adjacency-cache-leftover"
+    def test_phase_tmp_cache_leftovers_are_removed_with_the_rung_workspace(self) -> None:
+        ladder = self.ladder(self.executables, FakeBenchExec())
+        rung = gdc_rung.Rung(ladder, {"id": "sf0", "label": "SF0"})
+        cache = rung.workspace / "tmp" / "graphforge-adjacency-cache-leftover"
         cache.mkdir(parents=True)
         (cache / "buffer").write_bytes(b"partial query cache")
-        unrelated = tmp / "unrelated"
-        unrelated.write_text("preserve", encoding="utf-8")
-        gdc_rung._clear_phase_tmp(owned)
-        self.assertFalse(owned.exists())
-        self.assertEqual(unrelated.read_text(encoding="utf-8"), "preserve")
-
-    def test_tmp_parent_symlink_cannot_redirect_cleanup(self) -> None:
-        outside = self.scratch / "outside"
-        outside.mkdir()
-        data = outside / "preserve"
-        data.write_text("unrelated", encoding="utf-8")
-        tmp = self.work / "tmp"
-        tmp.symlink_to(outside, target_is_directory=True)
-        with self.assertRaises(OSError):
-            gdc_rung._clear_phase_tmp(tmp / "gdc-snb-interactive-sf0-owned")
-        self.assertEqual(data.read_text(encoding="utf-8"), "unrelated")
-
-    def test_tmp_ancestor_swap_cannot_redirect_cleanup(self) -> None:
-        tmp = self.work / "tmp"
-        owned = tmp / "gdc-snb-interactive-sf0-owned"
-        owned.mkdir(parents=True)
-        (owned / "leftover").write_text("owned", encoding="utf-8")
-        moved = self.work / "tmp-moved"
-        outside = self.scratch / "outside"
-        outside.mkdir()
-        sentinel = outside / owned.name / "sentinel"
-        sentinel.parent.mkdir()
-        sentinel.write_text("preserve", encoding="utf-8")
-        real_scandir = os.scandir
-        swapped = False
-
-        def swap_after_open(directory: Any) -> Any:
-            nonlocal swapped
-            if not swapped:
-                swapped = True
-                tmp.rename(moved)
-                tmp.symlink_to(outside, target_is_directory=True)
-            return real_scandir(directory)
-
-        with patch("graphforge_bench.gdc_rung.os.scandir", side_effect=swap_after_open):
-            gdc_rung._clear_phase_tmp(owned)
-        self.assertTrue(swapped)
-        self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve")
-
-    def test_not_pinned_preserves_unrelated_tmp_files(self) -> None:
-        ladder = self.ladder(self.executables, FakeBenchExec())
-        tmp = self.work / "tmp"
-        tmp.mkdir()
-        unrelated = tmp / "unrelated.txt"
-        unrelated.write_text("preserve", encoding="utf-8")
-        result = gdc_rung.not_pinned(
-            ladder,
-            {"id": "unpublished", "label": "Unpublished", "not_pinned": "dataset is not pinned"},
-        )
-        self.assertEqual(result["failure"]["cause"], gdc_rung.NOT_PINNED)
-        self.assertEqual(unrelated.read_text(encoding="utf-8"), "preserve")
+        inventory = gdc_rung._teardown(rung)
+        self.assertEqual(inventory, {"empty": True, "entries": []})
+        self.assertFalse(rung.workspace.exists())
 
     def test_run_phase_preserves_stage_and_tmp_when_cgroup_stays_populated(self) -> None:
         stage_seen: list[Path] = []
         cgroup = self.scratch / "benchmark-populated"
         cgroup.mkdir()
         (cgroup / "cgroup.procs").write_text("123\n", encoding="ascii")
+        (cgroup / "cgroup.events").write_text("populated 1\n", encoding="ascii")
 
         def benchexec(stage: Path, *_args: Any) -> int:
             stage_seen.append(stage)
@@ -621,9 +570,9 @@ class LadderControlTests(Scratch):
         self.output.mkdir(exist_ok=True)
         rung = gdc_rung.Rung(ladder, {"id": "sf0", "label": "SF0"})
         rung.workspace.mkdir(parents=True)
-        real_wait = gdc_rung.wait_for_phase_trees_empty
+        real_wait = gdc_rung.wait_for_phase_trees_state
         with patch(
-            "graphforge_bench.gdc_rung.wait_for_phase_trees_empty",
+            "graphforge_bench.gdc_rung.wait_for_phase_trees_state",
             side_effect=lambda paths: real_wait(paths, timeout_seconds=0),
         ):
             gdc_rung.run_phase(rung, "query", {"phase": "query"}, 10)
@@ -631,7 +580,6 @@ class LadderControlTests(Scratch):
         stage = stage_seen[0]
         self.assertTrue(stage.exists())
         self.assertTrue(stage.parent.exists())
-        self.assertTrue(rung.phase_tmp_dirs[0].exists())
         self.assertTrue(rung.workspace.exists())
         self.assertTrue(rung.phase_tree_alive)
         self.assertIn("phase_tree_alive", [failure["cause"] for failure in rung.failures])
@@ -656,7 +604,6 @@ class LadderControlTests(Scratch):
         gdc_rung._teardown(rung)
         self.assertTrue(stage_seen[0].exists())
         self.assertTrue(stage_seen[0].parent.exists())
-        self.assertTrue(rung.phase_tmp_dirs[0].exists())
         self.assertTrue(rung.workspace.exists())
         self.assertTrue(rung.phase_tree_unverified)
         self.assertIn("phase_tree_unverified", [failure["cause"] for failure in rung.failures])
@@ -665,19 +612,62 @@ class LadderControlTests(Scratch):
         ladder = self.ladder(self.executables, FakeBenchExec())
         rung = gdc_rung.Rung(ladder, {"id": "sf0", "label": "SF0"})
         rung.workspace.mkdir(parents=True)
-        owned = self.work / "tmp" / "gdc-snb-interactive-sf0-owned"
-        owned.mkdir(parents=True)
-        rung.phase_tmp_dirs.append(owned)
         cgroup = self.scratch / "benchmark_fake"
         cgroup.mkdir()
         (cgroup / "cgroup.procs").write_text("123\n", encoding="ascii")
+        (cgroup / "cgroup.events").write_text("populated 1\n", encoding="ascii")
         rung.phase_cgroups.append(cgroup)
-        with patch("graphforge_bench.gdc_rung.wait_for_phase_trees_empty", return_value=False):
+        with patch("graphforge_bench.gdc_rung.wait_for_phase_trees_state", return_value="alive"):
             inventory = gdc_rung._teardown(rung)
         self.assertTrue(rung.workspace.exists())
-        self.assertTrue(owned.exists())
         self.assertEqual(rung.failures[0]["cause"], "phase_tree_alive")
         self.assertFalse(inventory["empty"])
+
+    def test_exception_during_benchexec_publishes_unverified_result_and_keeps_workspace(self) -> None:
+        def interrupted(*_args: Any) -> int:
+            raise RuntimeError("supervisor interrupted")
+
+        ladder = self.ladder(self.executables, interrupted)
+        results = gdc_rung.climb(
+            ladder,
+            reserved_headroom_bytes=0,
+            quiet_host_wait_seconds=0,
+            quiet_host=lambda _wait: QUIET,
+        )
+        result = results[0]
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["failure"]["cause"], "phase_tree_unverified")
+        self.assertTrue((self.work / "workspace" / "gdc-snb-interactive-sf0").exists())
+        self.assertTrue((self.output / "snb-interactive-sf0-result.json").is_file())
+
+    def test_phase_tmp_left_by_phase_is_empty_after_teardown_inventory(self) -> None:
+        cgroup = self.scratch / "benchmark-clean"
+        cgroup.mkdir()
+        (cgroup / "cgroup.events").write_text("populated 0\n", encoding="ascii")
+
+        def leaves_cache(stage: Path, *_args: Any) -> int:
+            rung.workspace.joinpath("tmp", "graphforge-adjacency-cache-leftover").mkdir()
+            (stage / "raw").mkdir()
+            (stage / phase_cgroup.EVIDENCE_NAME).write_text(
+                json.dumps(
+                    {
+                        "schema": phase_cgroup.SCHEMA,
+                        "samples": 1,
+                        "cgroup_paths": {"benchmark_clean": str(cgroup)},
+                        "runs": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return 0
+
+        ladder = self.ladder(self.executables, leaves_cache)
+        self.output.mkdir(exist_ok=True)
+        rung = gdc_rung.Rung(ladder, {"id": "sf0", "label": "SF0"})
+        rung.workspace.mkdir(parents=True)
+        gdc_rung.run_phase(rung, "query", {"phase": "query"}, 10)
+        inventory = gdc_rung._teardown(rung)
+        self.assertEqual(inventory, {"empty": True, "entries": []})
 
     def test_json_progress_ignores_torn_final_line_and_preserves_escaped_ids(self) -> None:
         progress = self.scratch / "progress.jsonl"

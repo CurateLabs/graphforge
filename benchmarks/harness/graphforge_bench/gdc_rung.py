@@ -60,7 +60,7 @@ from graphforge_bench.benchexec_authority import EvidenceError, Limits, normaliz
 from graphforge_bench.benchexec_process import (
     HUNG_EVIDENCE,
     HUNG_STATUS,
-    wait_for_phase_trees_empty,
+    wait_for_phase_trees_state,
 )
 from graphforge_bench.gdc_contracts import GdcContractError
 from graphforge_bench.gdc_measurement_policy import (
@@ -108,6 +108,7 @@ from graphforge_bench.progressive_run import (
 )
 
 RESULT_SCHEMA = "graphforge-gdc-rung-result/1"
+PHASE_CGROUP_RECORD = ".phase-cgroup-paths.json"
 DEFINITION = "graphforge-gdc-rung-phase-v1"
 DRIVER_NAME = "graphforge-benchmark-gdc-scorecard"
 LAUNCHER_NAME = "graphforge-gdc-phase"
@@ -307,7 +308,6 @@ class Rung:
     counts: dict[str, Any] | None = None
     references: dict[str, Path] = field(default_factory=dict)
     built: dict[str, Path] = field(default_factory=dict)
-    phase_tmp_dirs: list[Path] = field(default_factory=list)
     phase_cgroups: list[Path] = field(default_factory=list)
     phase_tree_alive: bool = False
     phase_tree_unverified: bool = False
@@ -344,13 +344,8 @@ def _stage_phase(
     _stage_benchmark_xml(ladder.root, stage, wall_seconds=wall_seconds, definition=DEFINITION)
     bin_dir = stage / "bin"
     bin_dir.mkdir()
-    tmp_dir = _phase_tmp_dir(
-        ladder.work_root,
-        suite_id=ladder.spec.suite_id,
-        rung_id=str(rung.spec["id"]),
-        create=True,
-    )
-    rung.phase_tmp_dirs.append(tmp_dir)
+    tmp_dir = rung.workspace / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
     staged: dict[str, str] = {}
     for name, source, key in (
         ("gf", ladder.executables.gf, "gf_sha256"),
@@ -393,72 +388,6 @@ def _stage_phase(
         if path.is_dir():
             path.chmod(0o777)
     return stage, task
-
-
-def _remove_directory_at(parent_fd: int, name: str) -> None:
-    """Remove a directory relative to an open parent, without following symlinks."""
-    descriptor = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
-    try:
-        identity = os.fstat(descriptor)
-        with os.scandir(descriptor) as entries:
-            for entry in entries:
-                if entry.is_dir(follow_symlinks=False):
-                    _remove_directory_at(descriptor, entry.name)
-                else:
-                    os.unlink(entry.name, dir_fd=descriptor)
-        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-        if (current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino):
-            raise ControllerError("owned directory identity changed during teardown")
-        os.rmdir(name, dir_fd=parent_fd)
-    finally:
-        os.close(descriptor)
-
-
-def _remove_owned_directory(path: Path) -> None:
-    """Remove one owned directory using its opened parent as the authority."""
-    parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        _remove_directory_at(parent_fd, path.name)
-    finally:
-        os.close(parent_fd)
-
-
-def _phase_tmp_dir(work_root: Path, *, suite_id: str, rung_id: str, create: bool) -> Path:
-    """Create or validate one exclusive harness-owned phase TMPDIR."""
-    root = work_root.resolve(strict=True)
-    if not create:
-        raise ControllerError("phase TMPDIR must be created exclusively")
-    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        with contextlib.suppress(FileExistsError):
-            os.mkdir("tmp", dir_fd=root_fd)
-        parent_fd = os.open("tmp", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
-        try:
-            name = f"gdc-{suite_id}-{rung_id}-{secrets.token_hex(8)}"
-            os.mkdir(name, dir_fd=parent_fd)
-        finally:
-            os.close(parent_fd)
-    finally:
-        os.close(root_fd)
-    return root / "tmp" / name
-
-
-def _clear_phase_tmp(path: Path) -> None:
-    """Remove exactly one owned TMPDIR using its opened directory as authority."""
-    root = path.parent.parent
-    name = path.name
-    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        parent_fd = os.open("tmp", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
-    except FileNotFoundError:
-        os.close(root_fd)
-        return
-    try:
-        with contextlib.suppress(FileNotFoundError):
-            _remove_directory_at(parent_fd, name)
-    finally:
-        os.close(parent_fd)
-        os.close(root_fd)
 
 
 def _phase_telemetry(raw: Path) -> Mapping[str, Any] | None:
@@ -645,6 +574,9 @@ def run_phase(rung: Rung, name: str, task: dict[str, Any], wall_seconds: int) ->
         stage, task = _stage_phase(
             rung, Path(parent), {"schema": TASK_SCHEMA, **task}, wall_seconds
         )
+        rung.phase_tree_unverified = True
+        record = rung.workspace / PHASE_CGROUP_RECORD
+        record.write_text(json.dumps({"cgroup_paths": []}) + "\n", encoding="utf-8")
         status = ladder.benchexec(stage, ladder.executables, ladder.identities, ladder.work_root)
         raw = stage / "raw"
         # The phase's own cgroup counters (#1914), not the host's: another process's
@@ -666,16 +598,25 @@ def run_phase(rung: Rung, name: str, task: dict[str, Any], wall_seconds: int) ->
             )
         rung.phase_cgroups.extend(phase_cgroups)
         rung.phase_cgroups = list(dict.fromkeys(rung.phase_cgroups))
+        record.write_text(
+            json.dumps({"cgroup_paths": [str(path) for path in rung.phase_cgroups]}) + "\n",
+            encoding="utf-8",
+        )
         if not phase_cgroups:
-            rung.phase_tree_unverified = True
             rung.fail(
                 "teardown", "phase_tree_unverified", "phase cgroup path could not be observed"
             )
-        elif not wait_for_phase_trees_empty(phase_cgroups):
-            rung.phase_tree_alive = True
-            rung.fail("teardown", "phase_tree_alive", "phase cgroup still contains processes")
         else:
-            safe_to_remove = True
+            tree_state = wait_for_phase_trees_state(rung.phase_cgroups)
+            if tree_state == "empty":
+                rung.phase_tree_unverified = False
+                record.unlink(missing_ok=True)
+                safe_to_remove = True
+            elif tree_state == "alive":
+                rung.phase_tree_alive = True
+                rung.fail("teardown", "phase_tree_alive", "phase cgroup still contains processes")
+            else:
+                rung.fail("teardown", "phase_tree_unverified", "phase cgroup.events could not be read")
         swapped = phase_cgroup.verdict(swap)
         if swap is not None and raw.is_dir():
             # Retain the counters beside the raw output (#1727), even when a known
@@ -724,7 +665,7 @@ def run_phase(rung: Rung, name: str, task: dict[str, Any], wall_seconds: int) ->
             shutil.copytree(raw, ladder.output_dir / f"{rung.prefix}-{name}-benchexec-raw")
     finally:
         if safe_to_remove:
-            _remove_owned_directory(parent)
+            shutil.rmtree(parent)
     run = PhaseRun(
         name,
         None
@@ -1058,23 +999,19 @@ def _check(rung: Rung, evidence: Mapping[str, Any], results_dir: Path, input_roo
 
 def _teardown(rung: Rung) -> dict[str, Any]:
     ladder = rung.ladder
-    alive = (
-        rung.phase_tree_alive
-        or rung.phase_tree_unverified
-        or not wait_for_phase_trees_empty(rung.phase_cgroups)
-    )
-    if alive:
+    tree_state = wait_for_phase_trees_state(rung.phase_cgroups)
+    if rung.phase_tree_alive or rung.phase_tree_unverified or tree_state != "empty":
         if rung.phase_tree_unverified:
             if not any(failure["cause"] == "phase_tree_unverified" for failure in rung.failures):
                 rung.fail(
                     "teardown", "phase_tree_unverified", "phase cgroup path could not be observed"
                 )
-        elif not rung.phase_tree_alive:
+        elif rung.phase_tree_alive or tree_state == "alive":
             rung.fail("teardown", "phase_tree_alive", "phase cgroup still contains processes")
+        else:
+            rung.fail("teardown", "phase_tree_unverified", "phase cgroup.events could not be read")
     else:
         reclaim_workspace(ladder.work_root, rung.workspace_name)
-        for path in rung.phase_tmp_dirs:
-            _clear_phase_tmp(path)
     inventory = collect_inventory(ladder.work_root, None)
     rung.publish("inventory", inventory)
     if not inventory["empty"]:
@@ -1133,13 +1070,51 @@ def run_rung(
     rung = Rung(ladder, rung_spec)
     if rung.workspace.is_symlink():
         raise LadderError("workspace_link_refused", str(rung.workspace))
-    # A crash can leave a workspace without any published evidence; it holds
-    # nothing this attempt can trust.
-    reclaim_workspace(ladder.work_root, rung.workspace_name)
+    if rung.workspace.exists():
+        record = rung.workspace / PHASE_CGROUP_RECORD
+        try:
+            paths = json.loads(record.read_text(encoding="utf-8"))["cgroup_paths"]
+            if not isinstance(paths, list) or not paths or not all(
+                isinstance(path, str) and path for path in paths
+            ):
+                raise ValueError("missing cgroup paths")
+            rung.phase_cgroups = [Path(path) for path in paths]
+            state = wait_for_phase_trees_state(rung.phase_cgroups)
+        except (OSError, ValueError, KeyError, TypeError):
+            state = "unverified"
+        if state != "empty":
+            cause = "phase_tree_alive" if state == "alive" else "phase_tree_unverified"
+            detail = (
+                "phase cgroup still contains processes"
+                if state == "alive"
+                else "existing workspace has no verifiable phase cgroup paths"
+            )
+            rung.fail("teardown", cause, detail)
+            rung.phase_tree_alive = state == "alive"
+            rung.phase_tree_unverified = state == "unverified"
+            inventory = collect_inventory(ladder.work_root, None)
+            rung.publish("inventory", inventory)
+            result = _result(
+                rung,
+                "failed",
+                launch_host=launch_host,
+                capacity=capacity,
+                inventory=inventory,
+            )
+            return _publish_result(rung, result)
+        reclaim_workspace(ladder.work_root, rung.workspace_name)
     try:
         _execute(rung)
-    finally:
-        inventory = _teardown(rung)
+    except BaseException as error:
+        if rung.phase_tree_unverified:
+            rung.fail(
+                "teardown",
+                "phase_tree_unverified",
+                f"phase ended before its cgroup tree was verified: {type(error).__name__}: {error}",
+            )
+        else:
+            rung.fail("harness", "phase_execution_interrupted", f"{type(error).__name__}: {error}")
+    inventory = _teardown(rung)
     status = "failed" if rung.failures else "passed"
     result = _result(rung, status, launch_host=launch_host, capacity=capacity, inventory=inventory)
     return _publish_result(rung, result)
