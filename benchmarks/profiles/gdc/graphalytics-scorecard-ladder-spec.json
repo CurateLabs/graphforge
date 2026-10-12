@@ -13,7 +13,7 @@
     {
       "kind": "spec_variance",
       "subject": "Tp",
-      "text": "Tp is the driver clock around one analyst-verb call that returns a materialized Arrow result: paths(by=bfs|dijkstra) also builds each reached vertex's path, and rank and cluster return each vertex's properties. Graphalytics Tp excludes producing output."
+      "text": "Tp is the driver clock around one analyst-verb call that returns a materialized Arrow result: paths(by=bfs_depth|dijkstra_cost) returns only each reached vertex's depth or cost, while rank and cluster return each vertex's properties. Graphalytics Tp excludes producing output."
     },
     {
       "kind": "spec_variance",
