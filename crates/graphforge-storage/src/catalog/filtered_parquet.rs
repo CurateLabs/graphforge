@@ -20,6 +20,10 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
+mod edge_ordinal;
+
+pub(crate) use self::edge_ordinal::EdgeIdRequest;
+
 /// Like [`read_edges`](super::read_edges) but returns only rows whose `edge_id` is in
 /// `edge_ids` — the traversal's lazy edge-record read (#830): on an adjacency
 /// Hit, only the traversed edges' records are needed, not the whole file.
@@ -78,11 +82,12 @@ pub fn read_edges_filtered_observed_from_inventory(
         OntologyMode::Advisory | OntologyMode::Strict => (rel_name, TYPED_EDGE_SCHEMA.clone()),
     };
     let mut batches = Vec::new();
+    let request = EdgeIdRequest::new(edge_ids);
     for (_, path) in inventory.edge_files(Some(route)) {
         batches.extend(read_required_edge_filtered(
             &path,
             Arc::clone(&schema),
-            edge_ids,
+            &request,
             observer,
             None,
         )?);
@@ -226,6 +231,7 @@ pub fn read_edges_filtered_projected_from_inventory(
         return project_batches_with_key(Vec::new(), &schema, projection, "edge_id");
     }
     let mut batches = Vec::new();
+    let request = EdgeIdRequest::new(edge_ids);
     for (_, path) in inventory.edge_files(Some(stem)) {
         let file_schema = admitted_parquet(&path)?.schema().clone();
         if file_schema.fields() != schema.fields() {
@@ -237,7 +243,7 @@ pub fn read_edges_filtered_projected_from_inventory(
         batches.extend(read_required_edge_filtered(
             &path,
             schema.clone(),
-            edge_ids,
+            &request,
             observer,
             Some(projection),
         )?);
@@ -623,13 +629,17 @@ pub(super) fn read_parquet_filtered_u64(
     )
 }
 
+/// Read the requested rows of one admitted edge file. A file whose `edge_id`
+/// column is proven dense is read by row ordinal ([`edge_ordinal`]); every other
+/// file keeps the row-group statistics plus membership predicate read.
 pub(super) fn read_required_edge_filtered(
     path: &Path,
     schema: SchemaRef,
-    ids: &std::collections::HashSet<u64>,
+    request: &EdgeIdRequest<'_>,
     observer: Option<&Arc<dyn crate::io_stats::FilteredReadObserver>>,
     projection: Option<&[usize]>,
 ) -> Result<Vec<RecordBatch>, DataFusionError> {
+    let ids = request.ids();
     let projection = projection
         .map(|indices| canonical_projection_with_key(&schema, indices, "edge_id"))
         .transpose()?;
@@ -638,6 +648,11 @@ pub(super) fn read_required_edge_filtered(
             Some(indices) => project_batches_with_key(Vec::new(), &schema, &indices, "edge_id"),
             None => Ok(vec![RecordBatch::new_empty(schema)]),
         };
+    }
+    if let Some(batches) =
+        edge_ordinal::read_dense_edge_file(path, &schema, request, observer, projection.as_deref())?
+    {
+        return Ok(batches);
     }
     read_parquet_filtered_u64_attempt(
         path,
@@ -860,8 +875,10 @@ fn read_parquet_filtered_u64_attempt(
     let metadata_fallbacks = u64::from(dense_requested && dense.is_none());
     let dense_id_range = dense.as_ref().map(|dense| (dense.first_id, dense.last_id));
 
-    // Exact ordinal selection is node-only. Edges and noncanonical node files
-    // retain the conservative row-group min/max behavior.
+    // Exact ordinal selection here is node-only. Edge files take it before they
+    // reach this function (`edge_ordinal`); noncanonical node files and edge
+    // files without the dense proof retain the conservative row-group min/max
+    // behavior.
     let (keep, selection, mut pruning) = if let Some(dense) = dense {
         let selected_groups = u64::try_from(dense.row_groups.len()).unwrap_or(u64::MAX);
         (
