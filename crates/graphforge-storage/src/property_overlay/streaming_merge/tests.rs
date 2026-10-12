@@ -21,15 +21,22 @@ fn uuid(index: u8) -> [u8; 16] {
 struct Fixture {
     dir: TempDir,
     entries: Vec<crate::GraphFileEntry>,
+    // The project's parent is the property scratch parent, so each fixture
+    // gets its own: a scratch count there sees only this fixture's
+    // directories, not those of tests running beside it in TMPDIR. Dropped
+    // after `dir`, as fields drop in declaration order.
+    _parent: TempDir,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let dir = TempDir::new().unwrap();
+        let parent = TempDir::new().unwrap();
+        let dir = TempDir::new_in(parent.path()).unwrap();
         fs::create_dir_all(dir.path().join("properties/Person")).unwrap();
         Self {
             dir,
             entries: Vec::new(),
+            _parent: parent,
         }
     }
 
