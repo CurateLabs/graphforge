@@ -576,7 +576,9 @@ impl GraphPlanLowerer {
         exprs: &ExprArena,
         var_map: &mut VarMap,
     ) -> Result<LogicalPlan, LoweringError> {
-        let ordered: Vec<&GraphOp> = ops.iter().collect();
+        let reachability = graphforge_ir::reachability_expansions(ops, exprs);
+        let order = reachability.lowering_order(ops.len());
+        let ordered: Vec<&GraphOp> = order.iter().map(|&index| &ops[index]).collect();
 
         // Base relation. Only the FIRST op consumes this base: a scan/source op
         // (NodeScan/EdgeScan/Expand) builds its own plan and ignores it, so a
@@ -592,6 +594,10 @@ impl GraphPlanLowerer {
             .map_unsupported_expr()?;
 
         for (i, op) in ordered.iter().enumerate() {
+            let index = order[i];
+            if reachability.is_vacuous_uniqueness(index) {
+                continue;
+            }
             // A `CREATE` with any clause after it feeds a read (RETURN/WITH/…),
             // so it must emit the created-entity rows rather than the one-row
             // summary (#814 write-result RETURN).
@@ -604,6 +610,7 @@ impl GraphPlanLowerer {
                 create_feeds_read,
                 false,
                 None,
+                reachability.expansion_at(index).is_some(),
             )?;
         }
         Ok(current)
@@ -661,8 +668,14 @@ impl GraphPlanLowerer {
         mut current: LogicalPlan,
         pending_nodes: Option<&RecordBatch>,
     ) -> Result<LogicalPlan, LoweringError> {
-        let ordered: Vec<&GraphOp> = ops.iter().collect();
+        let reachability = graphforge_ir::reachability_expansions(ops, exprs);
+        let order = reachability.lowering_order(ops.len());
+        let ordered: Vec<&GraphOp> = order.iter().map(|&index| &ops[index]).collect();
         for (i, op) in ordered.iter().enumerate() {
+            let index = order[i];
+            if reachability.is_vacuous_uniqueness(index) {
+                continue;
+            }
             let create_feeds_read = matches!(op, GraphOp::Create { .. }) && i + 1 < ordered.len();
             current = self.lower_op_with_arena(
                 op,
@@ -672,6 +685,7 @@ impl GraphPlanLowerer {
                 create_feeds_read,
                 true,
                 pending_nodes,
+                reachability.expansion_at(index).is_some(),
             )?;
         }
         Ok(current)
@@ -720,6 +734,7 @@ impl GraphPlanLowerer {
         create_feeds_read: bool,
         preserve_empty_input: bool,
         pending_nodes: Option<&RecordBatch>,
+        reachability: bool,
     ) -> Result<LogicalPlan, LoweringError> {
         // Scan ops don't use the expression lowerer — handle them first.
         match op {
@@ -817,6 +832,7 @@ impl GraphPlanLowerer {
                     &self.type_id_to_rel_name,
                     &self.inference_rules,
                     self.read_snapshot.as_ref().map(|(s, m)| (s, *m)),
+                    reachability,
                     #[cfg(feature = "differential-testing")]
                     self.relational_fixed_hop_reference,
                 );
