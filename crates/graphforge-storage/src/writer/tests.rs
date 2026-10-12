@@ -513,7 +513,7 @@ fn endpoint_registration_decodes_only_the_pages_that_can_hold_the_endpoints() {
     }
     seed.flush().unwrap();
 
-    let mut lookup = |endpoints: &[Uuid]| {
+    let lookup = |endpoints: &[Uuid]| {
         let mut writer =
             GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS + 1).unwrap();
         let metrics = writer.register_existing_endpoints(endpoints).unwrap();
@@ -931,7 +931,7 @@ fn ordinary_writer_flush_keeps_node_identity_resolvable_across_generations() {
         .create_node(second, EntityTypeId::decode(0).unwrap())
         .unwrap();
     writer.flush().unwrap();
-    let mut index = crate::TopologyIdentityProbe::open_dir(dir.path()).unwrap();
+    let index = crate::TopologyIdentityProbe::open_dir(dir.path()).unwrap();
     assert_eq!(
         index.lookup_node_surrogates(&[first, second]).unwrap().0,
         [Some(1), Some(2)]
@@ -1834,7 +1834,7 @@ fn a_flush_commits_once_and_publishes_no_membership_index() {
     );
     let batches = crate::catalog::read_nodes(dir.path()).unwrap();
     assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
-    let mut index = crate::TopologyIdentityProbe::open_dir(dir.path()).unwrap();
+    let index = crate::TopologyIdentityProbe::open_dir(dir.path()).unwrap();
     assert_eq!(index.count(crate::UuidIndexKind::Node), 1);
     assert_eq!(
         index.probe(crate::UuidIndexKind::Node, &[node]).unwrap().0,

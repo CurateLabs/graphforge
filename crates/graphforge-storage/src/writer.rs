@@ -2517,7 +2517,7 @@ mod promotion_full_width_tests {
         let document = OntologyLoader::load_yaml("ontology_id: wide\nversion: \"1\"\nentity_types:\n  - name: Person\n    abstract: false\nrelation_types:\n  - name: KNOWS\n    src: Person\n    dst: Person\n".as_bytes()).unwrap();
         let ontology = OntologyHandle::new(OntologyCompiler::compile(&document).unwrap());
         crate::promote_runtime_graph_for_ontology(dir.path(), &ontology, &catalog).unwrap();
-        let mut membership = crate::TopologyIdentityProbe::open_dir(dir.path()).unwrap();
+        let membership = crate::TopologyIdentityProbe::open_dir(dir.path()).unwrap();
         assert_eq!(
             membership.lookup_node_surrogates(&[left, right]).unwrap().0,
             [Some(node_base), Some(node_base + 1)]
@@ -2581,7 +2581,7 @@ mod promotion_full_width_tests {
         );
         writer.flush().unwrap();
         drop(writer);
-        let mut membership = crate::TopologyIdentityProbe::open_dir(dir.path()).unwrap();
+        let membership = crate::TopologyIdentityProbe::open_dir(dir.path()).unwrap();
         assert_eq!(
             membership
                 .lookup_node_surrogates(&[left, right, created])

@@ -145,7 +145,7 @@ pub fn read_node_labels_for_uuids(
         .iter()
         .map(|bytes| graphforge_core::uuid::Uuid::from_bytes(*bytes))
         .collect::<Vec<_>>();
-    let mut index =
+    let index =
         crate::TopologyIdentityProbe::open(dir, files, crate::read_topology_generation(dir)?)?;
     let (surrogates, _) = index.lookup_node_surrogates(&uuids)?;
     let mut node_ids = std::collections::HashSet::new();

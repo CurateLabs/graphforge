@@ -1264,8 +1264,8 @@ impl GraphForge {
         let mut existing = HashSet::new();
         if reject_existing {
             let candidates = candidate_uuids(batches, BulkInputKind::Node, "node_uuid")?;
-            let mut probe = open_identity_probe(self, BulkInputKind::Node)?;
-            existing = taken_identities(probe.as_mut(), &candidates, BulkInputKind::Node)?;
+            let probe = open_identity_probe(self, BulkInputKind::Node)?;
+            existing = taken_identities(&probe, &candidates, BulkInputKind::Node)?;
         }
         let mut rows = Vec::new();
         let mut ordinal = first_ordinal;

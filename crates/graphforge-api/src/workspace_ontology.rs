@@ -338,10 +338,7 @@ impl GraphForge {
                 crate::property_inventory_for_hydrated_generation(&self.resolved_generation, &dir)?;
             self.replace_workspace_owner(crate::GraphWorkspace::new(dir, workspace, &inventory)?);
             self.graph_open_evidence = evidence;
-            *self
-                .identity_probe
-                .lock()
-                .expect("UUID membership index lock poisoned") = None;
+            self.identity_probe.invalidate();
         } else {
             self.install_property_generation(&self.resolved_generation)?;
         }

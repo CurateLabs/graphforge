@@ -286,42 +286,31 @@ impl GraphForge {
     /// The identity probe for the committed topology generation, cached on the
     /// facade until the generation moves. It reads the published node and edge
     /// Parquet, so a lookup is bounded by the candidates, not the graph.
+    ///
+    /// The handle holds no lock: the probe opens, and answers, in parallel on
+    /// the caller's pool, and a lock held across that is a deadlock waiting for
+    /// a sibling job (see `identity_probe_cache`).
     pub(crate) fn cached_identity_probe(
         &self,
-    ) -> Result<
-        std::sync::MutexGuard<'_, Option<graphforge_storage::TopologyIdentityProbe>>,
-        graphforge_core::GfError,
-    > {
-        let current_generation = graphforge_storage::read_topology_generation(&self.dir())?;
-        let mut cached = self.identity_probe.lock().map_err(|_| {
-            graphforge_core::GfError::Storage("identity probe lock poisoned".into())
-        })?;
-        if cached
-            .as_ref()
-            .is_some_and(|probe| probe.topology_generation() != current_generation)
-        {
-            *cached = None;
-        }
-        if cached.is_none() {
-            let dir = self.dir();
-            let files = dir.topology_files()?;
-            *cached = Some(graphforge_storage::TopologyIdentityProbe::open(
-                &dir,
-                &files,
-                current_generation,
-            )?);
-        }
-        Ok(cached)
+    ) -> Result<std::sync::Arc<crate::identity_probe_cache::IdentityProbe>, graphforge_core::GfError>
+    {
+        let workspace = self.dir();
+        let generation = graphforge_storage::read_topology_generation(&workspace)?;
+        self.identity_probe.get_or_open(generation, || {
+            let files = workspace.topology_files()?;
+            let probe =
+                graphforge_storage::TopologyIdentityProbe::open(&workspace, &files, generation)?;
+            Ok(std::sync::Arc::new(
+                crate::identity_probe_cache::IdentityProbe::new(probe, workspace.clone()),
+            ))
+        })
     }
 }
 
 fn open_identity_probe(
     graph: &GraphForge,
     input_kind: BulkInputKind,
-) -> Result<
-    std::sync::MutexGuard<'_, Option<graphforge_storage::TopologyIdentityProbe>>,
-    BulkValidationError,
-> {
+) -> Result<std::sync::Arc<crate::identity_probe_cache::IdentityProbe>, BulkValidationError> {
     graph.cached_identity_probe().map_err(|error| {
         contract_error(
             input_kind,
@@ -336,25 +325,22 @@ fn existing_edge_context(
     endpoint_candidates: &[Uuid],
     edge_candidates: Option<&[Uuid]>,
 ) -> Result<(HashSet<Uuid>, HashSet<Uuid>), BulkValidationError> {
-    let mut probe = open_identity_probe(graph, BulkInputKind::Edge)?;
-    let known_nodes = live_nodes(probe.as_mut(), endpoint_candidates, BulkInputKind::Edge)?;
+    let probe = open_identity_probe(graph, BulkInputKind::Edge)?;
+    let known_nodes = live_nodes(&probe, endpoint_candidates, BulkInputKind::Edge)?;
     let Some(edge_candidates) = edge_candidates else {
         return Ok((known_nodes, HashSet::new()));
     };
-    let existing = taken_identities(probe.as_mut(), edge_candidates, BulkInputKind::Edge)?;
+    let existing = taken_identities(&probe, edge_candidates, BulkInputKind::Edge)?;
     Ok((known_nodes, existing))
 }
 
 /// Probe `candidates` (sorted, deduplicated) and return the live nodes among
 /// them. Membership only: callers never iterate the result.
 fn live_nodes(
-    probe: Option<&mut graphforge_storage::TopologyIdentityProbe>,
+    probe: &graphforge_storage::TopologyIdentityProbe,
     candidates: &[Uuid],
     input_kind: BulkInputKind,
 ) -> Result<HashSet<Uuid>, BulkValidationError> {
-    let Some(probe) = probe else {
-        return Ok(HashSet::new());
-    };
     let (found, _) = probe
         .probe(graphforge_storage::UuidIndexKind::Node, candidates)
         .map_err(|error| {
@@ -371,13 +357,10 @@ fn live_nodes(
 /// or a deleted entity. Node and edge UUIDs share one namespace and a deleted
 /// UUID is never reused, exactly as the commit enforces.
 fn taken_identities(
-    probe: Option<&mut graphforge_storage::TopologyIdentityProbe>,
+    probe: &graphforge_storage::TopologyIdentityProbe,
     candidates: &[Uuid],
     input_kind: BulkInputKind,
 ) -> Result<HashSet<Uuid>, BulkValidationError> {
-    let Some(probe) = probe else {
-        return Ok(HashSet::new());
-    };
     let (found, _) = probe.taken(candidates).map_err(|error| {
         contract_error(
             input_kind,

@@ -659,11 +659,7 @@ impl GraphConstructionSession<'_> {
             published.generation_uuid,
             refreshed.read_authority,
         );
-        *self
-            .graph
-            .identity_probe
-            .lock()
-            .expect("UUID membership lock poisoned") = None;
+        self.graph.identity_probe.invalidate();
         // Release old reader handles before their workspace; streams own their pins.
         drop(old_workspace);
         Ok(GraphConstructionPublicationReceipt {
