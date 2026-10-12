@@ -415,6 +415,85 @@ impl ShardedCsrIndex {
         Ok(output)
     }
 
+    /// Visit every logical row `0..node_count` once, in node order, decoding the
+    /// shards sequentially in manifest order and retaining none of them.
+    ///
+    /// Each row is exactly what [`Self::row`] returns for that node: a row that
+    /// continues across shards arrives concatenated in shard order, and nodes
+    /// that no shard covers arrive empty. Unlike [`Self::row`], a decoded shard
+    /// is dropped as soon as its rows are visited and never enters the decoded
+    /// shard cache, so a full pass holds one encoded and one decoded shard at a
+    /// time (plus the entries of a row that spans shards, which `row` also
+    /// concatenates). Every shard goes through the same
+    /// authenticate-then-decode path as random access, so a missing, mis-sized,
+    /// checksum-failing or undecodable shard refuses the walk. A visitor error
+    /// stops the walk and is returned.
+    ///
+    /// The writer lets consecutive shards share only the last row of the
+    /// earlier one. A manifest with any other overlap is refused up front, since
+    /// a single sequential pass could not reproduce [`Self::row`] for it.
+    pub fn walk_rows(
+        &self,
+        mut visit: impl FnMut(u64, CsrRow<'_>) -> Result<(), GfError>,
+    ) -> Result<(), GfError> {
+        let shards = &self.manifest.shards;
+        for pair in shards.windows(2) {
+            if pair[1].first_node < pair[0].first_node + pair[0].node_count - 1 {
+                return Err(corrupt_index(
+                    "CSR shards overlap beyond a shared boundary row",
+                ));
+            }
+        }
+        let empty = CsrRow {
+            edge_ids: &[],
+            neighbor_ids: &[],
+        };
+        // The row currently being concatenated across shards, if any.
+        let mut spanning = SpanningRow::default();
+        // Every node below this one has been visited.
+        let mut next_node = 0_u64;
+        for (index, record) in shards.iter().enumerate() {
+            let csr = read_authenticated_shard(&self.root.join(&record.file), record)?;
+            self.cache
+                .lock()
+                .map_err(|_| GfError::Storage("CSR shard cache lock poisoned".into()))?
+                .decodes += 1;
+            let last_node = record.first_node + record.node_count - 1;
+            let continues_next = shards
+                .get(index + 1)
+                .is_some_and(|following| following.first_node <= last_node);
+            for local in 0..record.node_count {
+                let node = record.first_node + local;
+                let row = csr.row(local);
+                let defers = continues_next && node == last_node;
+                if spanning.node == Some(node) {
+                    spanning.append(row);
+                    if !defers {
+                        visit(node, spanning.row())?;
+                        spanning.finish();
+                        next_node = node + 1;
+                    }
+                    continue;
+                }
+                while next_node < node {
+                    visit(next_node, empty)?;
+                    next_node += 1;
+                }
+                if defers {
+                    spanning.start(node, row);
+                } else {
+                    visit(node, row)?;
+                    next_node = node + 1;
+                }
+            }
+        }
+        while next_node < self.manifest.node_count {
+            visit(next_node, empty)?;
+            next_node += 1;
+        }
+        Ok(())
+    }
+
     /// Number of shard reads this index authenticated and decoded. Diagnostics
     /// for the bounded-decode guarantee of `#1518`: random-access frontiers
     /// must not drive this toward the frontier length.
@@ -439,6 +518,44 @@ impl ShardedCsrIndex {
             .lock()
             .map(|cache| cache.retained_bytes)
             .unwrap_or_default()
+    }
+}
+
+/// The logical row [`ShardedCsrIndex::walk_rows`] is concatenating because it
+/// continues from one shard into the next.
+#[derive(Default)]
+struct SpanningRow {
+    node: Option<u64>,
+    edge_ids: Vec<u64>,
+    neighbor_ids: Vec<u64>,
+}
+
+impl SpanningRow {
+    fn start(&mut self, node: u64, row: CsrRow<'_>) {
+        self.node = Some(node);
+        self.edge_ids.clear();
+        self.neighbor_ids.clear();
+        self.append(row);
+    }
+
+    fn append(&mut self, row: CsrRow<'_>) {
+        self.edge_ids.extend_from_slice(row.edge_ids);
+        self.neighbor_ids.extend_from_slice(row.neighbor_ids);
+    }
+
+    fn row(&self) -> CsrRow<'_> {
+        CsrRow {
+            edge_ids: &self.edge_ids,
+            neighbor_ids: &self.neighbor_ids,
+        }
+    }
+
+    /// Release the visited row's buffers so a hub row is not held for the rest
+    /// of the walk.
+    fn finish(&mut self) {
+        self.node = None;
+        self.edge_ids = Vec::new();
+        self.neighbor_ids = Vec::new();
     }
 }
 

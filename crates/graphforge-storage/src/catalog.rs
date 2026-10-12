@@ -59,10 +59,14 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+mod dense_node_identities;
 mod filtered_parquet;
 mod property_readers;
 mod providers;
 
+pub use dense_node_identities::{
+    DenseNodeIdentities, DenseNodeIdentityError, read_dense_node_identities,
+};
 pub use filtered_parquet::read_edges_filtered;
 pub use filtered_parquet::read_edges_filtered_from_inventory;
 pub use filtered_parquet::read_edges_filtered_observed;
