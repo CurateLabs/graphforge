@@ -629,8 +629,12 @@ The Rust facade regression `property_read_pushdown` compares fixed-fanout
 anchored queries while unrelated destination rows and fragments grow, at one,
 two, and four partitions. It warms authentication metadata, checks read-path
 byte growth and zero application write counters, and preserves result counts.
-Run it with `cargo nextest run --locked -p graphforge-api --test
-property_read_pushdown` in an isolated `CARGO_TARGET_DIR`. SF1 syscall evidence
+`enrichment_frontier_reads` does the same for enrichments whose frontier no
+equality selects (after `ORDER BY ... LIMIT` or a further hop) and whose
+projection drops the node UUID, on a route large enough to plan partitioned
+hash joins. Run them with `cargo nextest run --locked -p graphforge-api --test
+property_read_pushdown --test enrichment_frontier_reads` in an isolated
+`CARGO_TARGET_DIR`. SF1 syscall evidence
 must distinguish query file-content writes from startup materialization and
 empty spill-directory creation; application counters alone do not cover all
 process filesystem activity. Measurement results belong on the producing issue.

@@ -41,10 +41,10 @@ fn destination_uuid_offset() -> Option<usize> {
 /// only choose, order, and move rows, so the column keeps its meaning.
 fn is_traversal_destination_uuid(plan: &dyn ExecutionPlan, column_index: usize) -> bool {
     let schema = plan.schema();
-    if !schema
+    if schema
         .fields()
         .get(column_index)
-        .is_some_and(|field| field.name() == "node_uuid")
+        .is_none_or(|field| field.name() != "node_uuid")
     {
         return false;
     }
@@ -119,3 +119,6 @@ fn is_traversal_destination_uuid(plan: &dyn ExecutionPlan, column_index: usize) 
     input.schema().as_ref() == schema.as_ref()
         && is_traversal_destination_uuid(input.as_ref(), column_index)
 }
+
+#[cfg(test)]
+mod tests;
