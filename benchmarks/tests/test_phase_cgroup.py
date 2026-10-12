@@ -152,7 +152,12 @@ class PhaseSwapTests(ScratchTest):
         self.assertTrue(run.is_dir())
         self.assertEqual(
             sampler.evidence()["runs"]["benchmark_r1"],
-            {"pswpout_pages": 11, "swap_peak_bytes": 45056, "swap_max": "0"},
+            {
+                "pswpout_pages": 11,
+                "swap_peak_bytes": 45056,
+                "swap_max": "0",
+                "cgroup_path": str(run.resolve()),
+            },
         )
 
     def test_a_cgroup_that_does_not_report_page_outs_is_unobserved_not_clean(self) -> None:
