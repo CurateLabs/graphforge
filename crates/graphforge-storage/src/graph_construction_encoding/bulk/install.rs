@@ -97,7 +97,7 @@ impl<'a> Installer<'a> {
         let mut writer = ArrowWriter::try_new(
             Vec::with_capacity(batch.get_array_memory_size() / 2),
             batch.schema(),
-            Some(crate::permanent_parquet::writer_properties().build()),
+            Some(super::super::lanes::parquet_writer_properties(relative)),
         )
         .map_err(storage)?;
         writer.write(batch).map_err(storage)?;

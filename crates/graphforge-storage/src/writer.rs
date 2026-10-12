@@ -163,7 +163,7 @@ fn replay_resource_limit(message: impl Into<String>) -> GfError {
 }
 
 fn replay_writer_properties(max_batch_rows: usize) -> parquet::file::properties::WriterProperties {
-    crate::permanent_parquet::writer_properties()
+    crate::permanent_parquet::point_access_writer_properties()
         .set_max_row_group_row_count(Some(max_batch_rows))
         .set_dictionary_enabled(false)
         .build()
