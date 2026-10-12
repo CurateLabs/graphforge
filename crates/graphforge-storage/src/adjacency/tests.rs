@@ -1487,21 +1487,25 @@ fn ignored_arrow_boundary_simulation_via_tiny_flush_threshold() {
     assert!(validate_adjacency_index(dir.path()).unwrap().is_empty());
 }
 
+const WALK_FIXTURE_NODES: u64 = 14;
+
 /// Edge list whose degrees cover isolated nodes, an out-hub (node 2) and an
 /// in-hub (node 5) that each span several shards at three entries per shard, and
 /// uncovered gaps between shards.
 fn walk_fixture_edges() -> Vec<(u64, u64, u64)> {
-    let degrees = [2_u64, 0, 7, 1, 0, 0, 3, 0, 2, 5, 0, 0];
-    let nodes = degrees.len() as u64;
+    let degrees: [u64; WALK_FIXTURE_NODES as usize] =
+        [0_u64, 2, 0, 7, 1, 0, 0, 3, 0, 2, 5, 0, 0, 0];
+    // Targets stay below the last nodes, which therefore have no incoming entries.
+    const TARGETS: u64 = 11;
     let mut edge = 100;
     let mut edges = Vec::new();
     for (source, degree) in degrees.iter().enumerate() {
         for step in 0..*degree {
             edge += 1;
-            edges.push((source as u64, edge, (source as u64 + step + 1) % nodes));
+            edges.push((source as u64, edge, (source as u64 + step + 1) % TARGETS));
         }
     }
-    for source in 0..nodes {
+    for source in [1, 3, 4, 7, 9, 10] {
         edge += 1;
         edges.push((source, edge, 5));
     }
@@ -1555,7 +1559,9 @@ fn walked(index: &ShardedCsrIndex) -> Result<Vec<(u64, Vec<(u64, u64)>)>, GfErro
 fn walk_rows_equals_random_access_rows_in_both_directions() {
     let directory = TempDir::new().unwrap();
     let edges = walk_fixture_edges();
-    for (direction, path, csr) in write_walk_fixture(directory.path(), &edges, 12, 3) {
+    for (direction, path, csr) in
+        write_walk_fixture(directory.path(), &edges, WALK_FIXTURE_NODES, 3)
+    {
         let walker = ShardedCsrIndex::open(&path).unwrap();
         let random = ShardedCsrIndex::open(&path).unwrap();
         assert!(walker.shard_count() >= 4, "{direction:?} must span shards");
@@ -1570,10 +1576,20 @@ fn walk_rows_equals_random_access_rows_in_both_directions() {
             "{direction:?} fixture must hold a row that spans shards: {firsts:?}"
         );
 
+        let covered = |node: u64| {
+            walker.manifest.shards.iter().any(|record| {
+                (record.first_node..record.first_node + record.node_count).contains(&node)
+            })
+        };
+        assert!(
+            (0..WALK_FIXTURE_NODES).any(|node| !covered(node)),
+            "{direction:?} fixture must hold nodes no shard covers"
+        );
+
         let rows = walked(&walker).unwrap();
         assert_eq!(
             rows.iter().map(|(node, _)| *node).collect::<Vec<_>>(),
-            (0..12).collect::<Vec<_>>(),
+            (0..WALK_FIXTURE_NODES).collect::<Vec<_>>(),
             "{direction:?} must visit every node once, in order"
         );
         for (node, row) in &rows {
@@ -1597,7 +1613,7 @@ fn walk_rows_equals_random_access_rows_in_both_directions() {
 fn walk_rows_decodes_each_shard_once_and_retains_none() {
     let directory = TempDir::new().unwrap();
     let edges = walk_fixture_edges();
-    let [(_, path, _), _] = write_walk_fixture(directory.path(), &edges, 12, 3);
+    let [(_, path, _), _] = write_walk_fixture(directory.path(), &edges, WALK_FIXTURE_NODES, 3);
     let index = ShardedCsrIndex::open(&path).unwrap();
     assert_eq!(index.shard_decode_count(), 0);
 
@@ -1605,13 +1621,17 @@ fn walk_rows_decodes_each_shard_once_and_retains_none() {
     assert_eq!(index.retained_decoded_bytes(), 0);
     assert_eq!(index.shard_decode_count(), index.shard_count() as u64);
 
-    // Random access afterwards still decodes and caches on its own account.
-    index.row(0).unwrap();
-    assert!(index.retained_decoded_bytes() > 0);
+    // A walk neither reads nor disturbs what random access cached, and still
+    // re-authenticates every shard.
+    index.row(3).unwrap();
+    let cached = index.retained_decoded_bytes();
+    let decodes = index.shard_decode_count();
+    assert!(cached > 0 && decodes > index.shard_count() as u64);
     walked(&index).unwrap();
+    assert_eq!(index.retained_decoded_bytes(), cached);
     assert_eq!(
         index.shard_decode_count(),
-        2 * index.shard_count() as u64 + 1
+        decodes + index.shard_count() as u64
     );
 }
 
@@ -1619,7 +1639,7 @@ fn walk_rows_decodes_each_shard_once_and_retains_none() {
 fn walk_rows_refuses_corrupt_and_missing_shards_like_random_access() {
     let directory = TempDir::new().unwrap();
     let edges = walk_fixture_edges();
-    let [(_, path, _), _] = write_walk_fixture(directory.path(), &edges, 12, 3);
+    let [(_, path, _), _] = write_walk_fixture(directory.path(), &edges, WALK_FIXTURE_NODES, 3);
     let reader = ShardedCsrIndex::open(&path).unwrap();
     let victim = reader.root.join(&reader.manifest.shards[2].file);
     let original = std::fs::read(&victim).unwrap();
@@ -1649,7 +1669,7 @@ fn walk_rows_refuses_corrupt_and_missing_shards_like_random_access() {
 fn walk_rows_stops_on_a_visitor_error_and_refuses_unwalkable_overlap() {
     let directory = TempDir::new().unwrap();
     let edges = walk_fixture_edges();
-    let [(_, path, _), _] = write_walk_fixture(directory.path(), &edges, 12, 3);
+    let [(_, path, _), _] = write_walk_fixture(directory.path(), &edges, WALK_FIXTURE_NODES, 3);
     let index = ShardedCsrIndex::open(&path).unwrap();
 
     let mut seen = 0;
