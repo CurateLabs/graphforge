@@ -4,7 +4,7 @@ adr: "0059"
 status: "Accepted"
 date: "2026-10-12"
 superseded_by: null
-revisit_when: "An edge property read still scales with the route after the index exists, a per-hop edge predicate needs positional access that a UUID lookup cannot give (reachability mode, #1984), property fragments adopt per-block authentication that makes the index redundant, or the index's manifest outgrows a single read per statement"
+revisit_when: "An edge property read still scales with the route after the index exists, a per-hop edge predicate needs positional access that a UUID lookup cannot give, property fragments adopt per-block authentication that makes the index redundant, or the index's manifest outgrows a single read per statement"
 ---
 
 # ADR 0059: Edge properties are read through a derived, authenticated shard index
@@ -132,6 +132,13 @@ It is keyed by edge UUID, not by CSR entry offset, so a per-hop predicate that
 runs while a traversal still holds only `edge_id`s resolves their UUIDs first
 (an ordinal-selected read of the edge file's `edge_uuid` column).
 
+The reachability mode of variable-length expansion (S6b, #1984) is the third
+consumer. Its pushed `ALL(e IN r WHERE p)` predicate does not need positional access:
+for each search level it resolves the UUIDs of that level's frontier relationships,
+calls the lookup once for them (in batches of at most 65,536 relationships), and
+evaluates `p` over the returned columns. The lookup falls back to the overlay exactly
+as above, so a stale or missing index changes cost and never the answer.
+
 Demand pruning of the `rels` list (not materialising properties a statement
 never reads) is separate work: the list still carries every property of the
 relation, now read from the index.
@@ -149,8 +156,8 @@ relation, now read from the index.
   property row to its edge's rank, which the over-budget plan does not hold. The
   UUID-keyed shards give the same asymptotic result (reads proportional to the
   frontier's shards) with none of that coupling. The per-hop predicate of the
-  reachability mode (S6) is the case that may need positional access; this
-  record's `revisit_when` names it.
+  reachability mode (S6b) was the case that might have needed positional
+  access; it resolves UUIDs once per search level and did not.
 - **Align the values to `edge_id`.** Same rank-resolution problem at build time
   as the CSR order, and `edge_id` is not stable across mutation.
 - **A read-side-only fix.** Keeps a whole-object checksum per fragment per

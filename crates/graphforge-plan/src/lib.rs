@@ -36,7 +36,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use datafusion::arrow::datatypes::{DataType, Field, Fields, Schema};
-use datafusion::common::{DFSchema, DFSchemaRef, Result as DfResult, TableReference};
+use datafusion::common::tree_node::{Transformed, TreeNode};
+use datafusion::common::{DFSchema, DFSchemaRef, ParamValues, Result as DfResult, TableReference};
 use datafusion::logical_expr::{Expr, ExprSchemable, LogicalPlan, UserDefinedLogicalNodeCore};
 
 use graphforge_ir::{Direction, IrLiteral};
@@ -152,6 +153,103 @@ pub enum VarLenMode {
     Reachability,
 }
 
+/// Name of the single column an [`EdgeFilter`] predicate reads: a struct of
+/// the relationship's referenced properties.
+///
+/// The predicate of `ALL(e IN r WHERE <predicate>)` is lowered once, with `e`
+/// bound to this column, so `e.since` is `get_field(__gf_elem, 'since')`.
+pub const VAR_LEN_EDGE_ELEMENT: &str = "__gf_elem";
+
+/// A per-relationship predicate a [`VarLenMode::Reachability`] expansion
+/// applies to every edge it traverses: only edges for which it is `true` are
+/// followed.
+///
+/// It is the `ALL(e IN r WHERE <predicate>)` conjunct of the query, lifted by
+/// `graphforge_ir::reachability_expansions` when the predicate reads only the
+/// relationship's own properties, parameters and literals; see that module for
+/// the proof that following only the passing edges yields exactly the nodes and
+/// shortest lengths the trail enumeration would.
+///
+/// The predicate is deliberately **not** an expression of the logical node
+/// ([`UserDefinedLogicalNodeCore::expressions`] stays empty). It reads a
+/// synthetic column that exists in no plan schema, so exposing it would send it
+/// through the analyzer's type coercion, which cannot resolve the column.
+/// Parameters are substituted by [`EdgeFilter::with_param_values`] instead.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EdgeFilter {
+    predicate: Expr,
+    fields: Vec<Arc<Field>>,
+}
+
+impl EdgeFilter {
+    /// A predicate over [`VAR_LEN_EDGE_ELEMENT`], a struct with `fields`: the
+    /// edge properties the predicate reads, in a fixed order.
+    #[must_use]
+    pub fn new(predicate: Expr, fields: Vec<Arc<Field>>) -> Self {
+        Self { predicate, fields }
+    }
+
+    /// The predicate, reading the [`VAR_LEN_EDGE_ELEMENT`] column.
+    #[must_use]
+    pub fn predicate(&self) -> &Expr {
+        &self.predicate
+    }
+
+    /// The edge properties the predicate reads, as the fields of the
+    /// [`VAR_LEN_EDGE_ELEMENT`] struct.
+    #[must_use]
+    pub fn fields(&self) -> &[Arc<Field>] {
+        &self.fields
+    }
+
+    /// The type of the [`VAR_LEN_EDGE_ELEMENT`] column.
+    #[must_use]
+    pub fn element_type(&self) -> DataType {
+        DataType::Struct(Fields::from(self.fields.clone()))
+    }
+
+    /// The one-column schema the predicate is evaluated against.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the fields cannot form a schema.
+    pub fn element_schema(&self) -> DfResult<DFSchema> {
+        DFSchema::from_unqualified_fields(
+            Fields::from(vec![Field::new(
+                VAR_LEN_EDGE_ELEMENT,
+                self.element_type(),
+                true,
+            )]),
+            std::collections::HashMap::new(),
+        )
+    }
+
+    /// Replace every parameter in the predicate with its value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the predicate names a parameter `values` does not
+    /// bind.
+    pub fn with_param_values(self, values: &ParamValues) -> DfResult<Self> {
+        let predicate = self
+            .predicate
+            .transform_up(|expr| match expr {
+                Expr::Placeholder(placeholder) => {
+                    let (value, metadata) = values
+                        .get_placeholders_with_values(&placeholder.id)?
+                        .into_inner();
+                    Ok(Transformed::yes(Expr::Literal(value, metadata)))
+                }
+                other => Ok(Transformed::no(other)),
+            })?
+            .data;
+        Ok(Self {
+            predicate,
+            fields: self.fields,
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // VarLenExpandNode
 // ---------------------------------------------------------------------------
@@ -204,6 +302,9 @@ pub struct VarLenExpandNode {
     pub bound_destination: Option<String>,
     /// How rows are produced; fixes the trailing column of the schema.
     pub mode: VarLenMode,
+    /// Predicate every traversed edge must satisfy. Only meaningful, and only
+    /// set, in [`VarLenMode::Reachability`].
+    pub edge_filter: Option<EdgeFilter>,
     schema: DFSchemaRef,
 }
 
@@ -239,6 +340,16 @@ impl VarLenExpandNode {
             var_len_hops_field(),
         );
         self.mode = VarLenMode::Reachability;
+        self
+    }
+
+    /// Follow only the edges that satisfy `filter` (see [`EdgeFilter`]).
+    ///
+    /// The caller owns the proof that this does not change the query's result;
+    /// it is only valid in [`VarLenMode::Reachability`].
+    #[must_use]
+    pub fn with_edge_filter(mut self, filter: Option<EdgeFilter>) -> Self {
+        self.edge_filter = filter;
         self
     }
 
@@ -288,6 +399,7 @@ impl VarLenExpandNode {
             read_contract: None,
             bound_destination: None,
             mode: VarLenMode::Trails,
+            edge_filter: None,
             schema,
         }
     }
@@ -363,6 +475,9 @@ impl UserDefinedLogicalNodeCore for VarLenExpandNode {
         if self.mode == VarLenMode::Reachability {
             f.write_str(", mode=reachability")?;
         }
+        if let Some(filter) = &self.edge_filter {
+            write!(f, ", edge_filter={}", filter.predicate)?;
+        }
         Ok(())
     }
 
@@ -400,6 +515,7 @@ impl UserDefinedLogicalNodeCore for VarLenExpandNode {
         .with_read_contract(self.read_contract.clone())
         .with_bound_destination(self.bound_destination.clone());
         node.mode = self.mode;
+        node.edge_filter.clone_from(&self.edge_filter);
         Ok(node)
     }
 }

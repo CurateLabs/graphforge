@@ -576,7 +576,7 @@ impl GraphPlanLowerer {
         exprs: &ExprArena,
         var_map: &mut VarMap,
     ) -> Result<LogicalPlan, LoweringError> {
-        let reachability = graphforge_ir::reachability_expansions(ops, exprs);
+        let mut reachability = graphforge_ir::reachability_expansions(ops, exprs);
         let order = reachability.lowering_order(ops.len());
         let ordered: Vec<&GraphOp> = order.iter().map(|&index| &ops[index]).collect();
 
@@ -602,18 +602,96 @@ impl GraphPlanLowerer {
             // so it must emit the created-entity rows rather than the one-row
             // summary (#814 write-result RETURN).
             let create_feeds_read = matches!(op, GraphOp::Create { .. }) && i + 1 < ordered.len();
-            current = self.lower_op_with_arena(
+            current = self.lower_pipeline_op(
+                index,
                 op,
+                &mut reachability,
                 current,
                 exprs,
                 var_map,
                 create_feeds_read,
                 false,
                 None,
-                reachability.expansion_at(index).is_some(),
             )?;
         }
         Ok(current)
+    }
+
+    /// Lower the operator at `index` of a pipeline whose reachability analysis
+    /// is `reachability`.
+    ///
+    /// Whether an expansion runs in reachability mode is decided here, before
+    /// the expansion or any filter is lowered, because the filters that follow
+    /// it were already analysed on the assumption that it does. A
+    /// per-relationship predicate that the search applies to each edge is not
+    /// lowered again by the `Filter` that carried it; if the expansion cannot
+    /// run in reachability mode the predicates are withdrawn, so those filters
+    /// lower in full and the predicate is never dropped.
+    ///
+    /// The reachability proof (`graphforge_ir::reachability_expansions`) covers
+    /// only an expansion that produces its own, unconstrained relationship
+    /// list: one whose relationship variable is already bound upstream keeps
+    /// the list it was bound to, and an inference rule wraps the node in
+    /// auditable closure events, so both keep the trail enumeration they were
+    /// specified against.
+    #[allow(clippy::too_many_arguments)]
+    fn lower_pipeline_op(
+        &self,
+        index: usize,
+        op: &GraphOp,
+        reachability: &mut graphforge_ir::ReachabilityPlan,
+        current: LogicalPlan,
+        exprs: &ExprArena,
+        var_map: &mut VarMap,
+        create_feeds_read: bool,
+        preserve_empty_input: bool,
+        pending_nodes: Option<&RecordBatch>,
+    ) -> Result<LogicalPlan, LoweringError> {
+        if let GraphOp::Expand { edge, rel_ty, .. } = op
+            && reachability.expansion_at(index).is_some()
+        {
+            let has_inference_rules = rel_ty
+                .and_then(|rt| self.inference_rules.get(&rt))
+                .is_some_and(|rules| !rules.is_empty());
+            if var_map.get(*edge).is_some() || has_inference_rules {
+                reachability.withdraw_edge_predicates(index);
+                return self.lower_op_with_arena(
+                    op,
+                    current,
+                    exprs,
+                    var_map,
+                    create_feeds_read,
+                    preserve_empty_input,
+                    pending_nodes,
+                    None,
+                );
+            }
+        }
+        if let GraphOp::Filter { predicate } = op
+            && let Some(rest) = reachability.residual_conjuncts(exprs, index, *predicate)
+        {
+            if rest.is_empty() {
+                return Ok(current);
+            }
+            let lowerer = self
+                .expr_lowerer(exprs, var_map)
+                .with_input_schema(current.schema().clone());
+            let df_pred = lowerer.lower_conjunction(&rest)?;
+            return LogicalPlanBuilder::from(current)
+                .filter(df_pred)
+                .and_then(LogicalPlanBuilder::build)
+                .map_unsupported_expr();
+        }
+        self.lower_op_with_arena(
+            op,
+            current,
+            exprs,
+            var_map,
+            create_feeds_read,
+            preserve_empty_input,
+            pending_nodes,
+            reachability.expansion_at(index),
+        )
     }
 
     /// Lower an operator pipeline over an existing correlated input.
@@ -668,7 +746,7 @@ impl GraphPlanLowerer {
         mut current: LogicalPlan,
         pending_nodes: Option<&RecordBatch>,
     ) -> Result<LogicalPlan, LoweringError> {
-        let reachability = graphforge_ir::reachability_expansions(ops, exprs);
+        let mut reachability = graphforge_ir::reachability_expansions(ops, exprs);
         let order = reachability.lowering_order(ops.len());
         let ordered: Vec<&GraphOp> = order.iter().map(|&index| &ops[index]).collect();
         for (i, op) in ordered.iter().enumerate() {
@@ -677,15 +755,16 @@ impl GraphPlanLowerer {
                 continue;
             }
             let create_feeds_read = matches!(op, GraphOp::Create { .. }) && i + 1 < ordered.len();
-            current = self.lower_op_with_arena(
+            current = self.lower_pipeline_op(
+                index,
                 op,
+                &mut reachability,
                 current,
                 exprs,
                 var_map,
                 create_feeds_read,
                 true,
                 pending_nodes,
-                reachability.expansion_at(index).is_some(),
             )?;
         }
         Ok(current)
@@ -734,7 +813,7 @@ impl GraphPlanLowerer {
         create_feeds_read: bool,
         preserve_empty_input: bool,
         pending_nodes: Option<&RecordBatch>,
-        reachability: bool,
+        reachability: Option<&graphforge_ir::ReachabilityExpansion>,
     ) -> Result<LogicalPlan, LoweringError> {
         // Scan ops don't use the expression lowerer — handle them first.
         match op {
@@ -818,6 +897,15 @@ impl GraphPlanLowerer {
                 min_hops,
                 max_hops,
             } => {
+                // The per-relationship predicates are lowered before `var_map`
+                // is borrowed mutably for the expansion.
+                let edge_predicates = match reachability {
+                    Some(expansion) if !expansion.edge_predicates.is_empty() => Some(
+                        self.expr_lowerer(exprs, var_map)
+                            .lower_edge_predicates(&expansion.edge_predicates)?,
+                    ),
+                    _ => None,
+                };
                 return lower_expand(
                     *src,
                     *edge,
@@ -832,7 +920,8 @@ impl GraphPlanLowerer {
                     &self.type_id_to_rel_name,
                     &self.inference_rules,
                     self.read_snapshot.as_ref().map(|(s, m)| (s, *m)),
-                    reachability,
+                    reachability.is_some(),
+                    edge_predicates,
                     #[cfg(feature = "differential-testing")]
                     self.relational_fixed_hop_reference,
                 );

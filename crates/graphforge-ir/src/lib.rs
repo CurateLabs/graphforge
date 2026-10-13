@@ -529,7 +529,9 @@ pub mod property_demand;
 pub use property_demand::{PropertyDemand, property_demand};
 
 pub mod reachability;
-pub use reachability::{ReachabilityExpansion, ReachabilityPlan, reachability_expansions};
+pub use reachability::{
+    EdgePredicate, ReachabilityExpansion, ReachabilityPlan, conjuncts, reachability_expansions,
+};
 
 /// Shared Arrow schema definitions, independent of storage implementations.
 pub mod arrow_schema;

@@ -9,6 +9,46 @@ use datafusion::logical_expr::{
 use datafusion::scalar::ScalarValue;
 use std::sync::Arc;
 
+/// Plan `expr`, an expression embedded in a list UDF, over `schema`.
+///
+/// The logical optimizer never reaches an expression held inside a UDF, so it
+/// is never simplified. Some functions exist only in their simplified form once
+/// planned (`coalesce` is rewritten to a `CASE`; planning the original fails
+/// with "should have been simplified"), so the expression is simplified here
+/// first. Simplification preserves the expression's type and meaning.
+pub(super) fn plan_embedded(
+    expr: &DfExpr,
+    schema: &datafusion::common::DFSchema,
+) -> datafusion::error::Result<Arc<dyn datafusion::physical_expr::PhysicalExpr>> {
+    use datafusion::logical_expr::execution_props::ExecutionProps;
+    use datafusion::logical_expr::simplify::SimplifyContext;
+    use datafusion::optimizer::simplify_expressions::ExprSimplifier;
+    let simplifier = ExprSimplifier::new(
+        SimplifyContext::builder()
+            .with_schema(Arc::new(schema.clone()))
+            .build(),
+    );
+    let expr = simplifier.simplify(expr.clone())?;
+    datafusion::physical_expr::create_physical_expr(&expr, schema, &ExecutionProps::new())
+}
+
+/// Whether `expr`, an expression embedded in a list UDF, applies to elements of
+/// the type `schema` declares: the plan-time type check of a quantifier or list
+/// comprehension predicate.
+///
+/// The type is resolved on `expr` as written, because simplification can
+/// replace a type-checked operator with one planning does not check
+/// (`cypher_eq(x % 2, 0)` over strings simplifies to a plain `=`, which plans
+/// and then fails when it runs), and the simplified form must plan.
+pub(super) fn check_embedded(
+    expr: &DfExpr,
+    schema: &datafusion::common::DFSchema,
+) -> datafusion::error::Result<()> {
+    use datafusion::logical_expr::ExprSchemable;
+    expr.get_type(schema)?;
+    plan_embedded(expr, schema).map(drop)
+}
+
 // ---------------------------------------------------------------------------
 // cypher_quantifier UDF (all/any/none/single)
 // ---------------------------------------------------------------------------
@@ -185,8 +225,6 @@ impl ScalarUDFImpl for CypherQuantifier {
         use datafusion::arrow::datatypes::{Field, Schema};
         use datafusion::common::DFSchema;
         use datafusion::error::DataFusionError;
-        use datafusion::logical_expr::execution_props::ExecutionProps;
-        use datafusion::physical_expr::create_physical_expr;
         use std::sync::Arc;
 
         validate_heterogeneous_arguments(&args.args)?;
@@ -218,7 +256,7 @@ impl ScalarUDFImpl for CypherQuantifier {
         // (e.g. `x.a = 2` against the Int64 default of a statically-empty
         // list) only errors if a non-empty row actually evaluates it — every
         // empty row short-circuits to the fold identity below.
-        let phys = create_physical_expr(&self.predicate, &df_schema, &ExecutionProps::new());
+        let phys = plan_embedded(&self.predicate, &df_schema);
 
         let mut out = BooleanArray::builder(rows);
         for row in 0..rows {
@@ -309,8 +347,6 @@ impl CypherListComp {
     ) -> datafusion::error::Result<DataType> {
         use datafusion::arrow::datatypes::{Field, Schema};
         use datafusion::common::DFSchema;
-        use datafusion::logical_expr::execution_props::ExecutionProps;
-        use datafusion::physical_expr::create_physical_expr;
         let Some(proj) = &self.projection else {
             return Ok(elem_type.clone());
         };
@@ -320,7 +356,7 @@ impl CypherListComp {
         }
         let schema = Schema::new(fields);
         let df_schema = DFSchema::try_from(schema.clone())?;
-        let phys = create_physical_expr(proj, &df_schema, &ExecutionProps::new())?;
+        let phys = plan_embedded(proj, &df_schema)?;
         phys.data_type(&schema)
     }
 
@@ -493,8 +529,6 @@ impl ScalarUDFImpl for CypherListComp {
         use datafusion::arrow::datatypes::{Field, Schema};
         use datafusion::common::DFSchema;
         use datafusion::error::DataFusionError;
-        use datafusion::logical_expr::execution_props::ExecutionProps;
-        use datafusion::physical_expr::create_physical_expr;
         use std::sync::Arc;
 
         validate_heterogeneous_arguments(&args.args)?;
@@ -528,16 +562,15 @@ impl ScalarUDFImpl for CypherListComp {
         }
         let schema = Arc::new(Schema::new(fields));
         let df_schema = DFSchema::try_from(schema.as_ref().clone())?;
-        let props = ExecutionProps::new();
         let filter_phys = self
             .filter
             .as_ref()
-            .map(|f| create_physical_expr(f, &df_schema, &props))
+            .map(|f| plan_embedded(f, &df_schema))
             .transpose()?;
         let proj_phys = self
             .projection
             .as_ref()
-            .map(|p| create_physical_expr(p, &df_schema, &props))
+            .map(|p| plan_embedded(p, &df_schema))
             .transpose()?;
 
         if self.outer_names.is_empty() {
