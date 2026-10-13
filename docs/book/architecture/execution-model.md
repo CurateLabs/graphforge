@@ -89,11 +89,39 @@ joins remain in the plan and subsequent standard optimizer passes place the
 inserted filters through those joins.
 
 An unrecognized, volatile, potentially failing, or mixed-OR expression blocks
-movement of the entire filter. Fixed-hop relationship-disjoint checks are
-recognized by implementation type and exact UInt64 operands and remain residual.
-Destination/edge references cannot cross their producing expansion. Optional,
-variable-length and path operators have no new pushdown permission. This rule
-changes neither persisted representations nor authentication and recovery paths.
+movement of the entire filter. A relationship-disjoint check is recognized by
+implementation type and by the types of its two column operands: it errors only
+on a malformed heterogeneous value encoding, so over columns whose types contain
+none (a relationship id, a trail of relationship ids) it is total and does not
+block the movement. It refers to a hop's own edge, so it always remains residual
+above the expansion. Destination/edge references cannot cross their producing
+expansion. Optional
+and path operators have no new pushdown permission. This rule changes neither
+persisted representations nor authentication and recovery paths.
+
+`VarLenExpandInputPredicates` applies the same movement across a variable-length
+`VarLenExpandNode`. The expansion runs once per input row and its output extends
+that row, so a total predicate over the input's own columns selects the same seed
+rows before the expansion as after it. A conjunct over the destination or the
+path stays above. Moving the seed predicate lets a stored-property equality on
+the seed (`MATCH (m {id: $x})-[:R*0..]->(p)`, with or without a label
+disjunction in `WHERE`) reach the node scan that supplies the seed, instead of
+the expansion starting from every node of the graph.
+
+DataFusion moves a filter one operator per optimizer pass and runs a fixed
+number of passes, so a seed predicate would reach the scan only when the pattern
+is shallow. When `FixedExpandInputPredicates` moves a predicate below a fixed
+hop it therefore continues down the subtree in one traversal, applying
+DataFusion's filter pushdown and both expansion rules at each operator. It
+makes no move those rules would not make, only all of them at once. The
+traversal ends at a variable-length expansion, leaving the filter directly above
+the plan that supplies the seed, where the stored-equality hints read it. A
+label disjunction and an `id` equality on the same node then anchor through the
+property-equality index and read the topology rows of the matching nodes by
+ordinal, however many hops follow. The disjunction and the equality stay as
+filters, so a label mismatch returns no rows and a stale index falls back to the
+scan with identical results. `EXPLAIN` names the anchor
+(`anchor=property_equality(id)`) only when a current index exists.
 
 The public eight-route fixture asserts 16 first-hop and 256 second-hop candidates
 for its selective equality and range queries, with an independent exact UUID
