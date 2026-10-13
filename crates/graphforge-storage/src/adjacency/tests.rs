@@ -209,7 +209,7 @@ fn high_degree_row_spans_hard_capped_shards_in_order() {
         let chunk = reader.row_chunk(0, offset, 3).unwrap();
         assert!(chunk.len() <= 3);
         chunks.extend(chunk);
-        let cache = reader.cache.lock().unwrap();
+        let cache = reader.cache.read().unwrap();
         assert!(
             cache
                 .entries
@@ -358,7 +358,7 @@ fn decoded_shard_cache_evicts_by_bytes_and_serves_correct_rows() {
             );
         }
     }
-    let cache = reader.cache.lock().unwrap();
+    let cache = reader.cache.read().unwrap();
     assert!(
         cache.retained_bytes <= one_shard,
         "retained {} exceeds the one-shard bound",
@@ -389,7 +389,7 @@ fn decoded_shard_cache_holds_every_shard_within_budget() {
     for node in [0_u64, 3, 1, 4, 2, 5, 0, 5, 1, 4, 2, 3] {
         reader.row(node).unwrap();
     }
-    let cache = reader.cache.lock().unwrap();
+    let cache = reader.cache.read().unwrap();
     assert_eq!(cache.entries.len(), 3);
     assert_eq!(cache.retained_bytes, total);
     assert!(cache.retained_bytes <= cache.budget_bytes);
@@ -403,7 +403,7 @@ fn default_cache_budget_matches_documented_bytes() {
     write_sharded_csr(&path, &sample_csr(), 2).unwrap();
     let reader = ShardedCsrIndex::open(&path).unwrap();
     assert_eq!(
-        reader.cache.lock().unwrap().budget_bytes,
+        reader.cache.read().unwrap().budget_bytes,
         DEFAULT_DECODED_SHARD_CACHE_BYTES
     );
     assert_eq!(DEFAULT_DECODED_SHARD_CACHE_BYTES, 1024 * 1024 * 1024);
@@ -442,12 +442,122 @@ fn failed_decode_evicts_nothing() {
     std::fs::write(&victim_path, bytes).unwrap();
 
     assert!(reader.row(5).is_err());
-    let cache = reader.cache.lock().unwrap();
+    let cache = reader.cache.read().unwrap();
     assert_eq!(cache.entries.len(), 2);
     assert_eq!(cache.decodes, 2);
     assert_eq!(
         cache.retained_bytes,
         total - manifest.shards[2].decoded_bytes
+    );
+}
+
+/// Three single-shard-sized shards over six nodes, plus the file name of the
+/// shard that holds each pair of nodes.
+fn three_shard_fixture(directory: &Path) -> (PathBuf, CsrIndex, CsrShardManifest) {
+    let path = directory.join("KNOWS.out.csr");
+    let expected = CsrIndex {
+        offsets: vec![0, 1, 2, 3, 4, 5, 6],
+        edge_ids: (100..106).collect(),
+        neighbor_ids: (200..206).collect(),
+    };
+    write_sharded_csr(&path, &expected, 2).unwrap();
+    let manifest_bytes = std::fs::read(path.with_extension("csr.json")).unwrap();
+    let manifest: CsrShardManifest = serde_json::from_slice(&manifest_bytes).unwrap();
+    (path, expected, manifest)
+}
+
+/// A hit refreshes the shard's recency, so the eviction takes the shard that
+/// was used least recently, not the one inserted first.
+#[test]
+fn decoded_shard_cache_evicts_the_least_recently_used_shard() {
+    let directory = TempDir::new().unwrap();
+    let (path, _, manifest) = three_shard_fixture(directory.path());
+    let one_shard = manifest.shards[0].decoded_bytes;
+    let reader = open_with_budget(&path, one_shard.saturating_mul(2)).unwrap();
+
+    reader.row(0).unwrap(); // shard 0 decoded
+    reader.row(2).unwrap(); // shard 1 decoded
+    reader.row(1).unwrap(); // shard 0 hit: shard 1 is now the least recent
+    reader.row(4).unwrap(); // shard 2 decoded; shard 1 is evicted
+    assert_eq!(reader.shard_decode_count(), 3);
+
+    let retained: Vec<_> = reader
+        .cache
+        .read()
+        .unwrap()
+        .entries
+        .iter()
+        .map(|entry| entry.file.clone())
+        .collect();
+    assert_eq!(retained.len(), 2);
+    assert!(retained.contains(&manifest.shards[0].file));
+    assert!(retained.contains(&manifest.shards[2].file));
+}
+
+/// Readers of a retained shard run `map` at the same time: neither waits for
+/// the other to leave the cache (#1985). A serialising cache never lets both
+/// closures be inside together, so each waits out its deadline and the peak
+/// stays 1: the test fails instead of hanging.
+#[test]
+fn retained_shard_rows_are_mapped_by_concurrent_readers_together() {
+    use std::sync::atomic::AtomicUsize;
+    use std::time::{Duration, Instant};
+
+    let directory = TempDir::new().unwrap();
+    let (path, _, manifest) = three_shard_fixture(directory.path());
+    let reader = open_with_budget(&path, u64::MAX / 2).unwrap();
+    reader.row(0).unwrap();
+    let record = &manifest.shards[0];
+
+    let inside = AtomicUsize::new(0);
+    let peak = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..2 {
+            scope.spawn(|| {
+                reader
+                    .map_record_row(record, 0, |_| {
+                        let now = inside.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(now, Ordering::SeqCst);
+                        let deadline = Instant::now() + Duration::from_secs(10);
+                        while peak.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+                            std::thread::yield_now();
+                        }
+                        inside.fetch_sub(1, Ordering::SeqCst);
+                    })
+                    .unwrap();
+            });
+        }
+    });
+    assert_eq!(
+        peak.load(Ordering::SeqCst),
+        2,
+        "two readers of a retained shard never ran together"
+    );
+}
+
+/// Readers that race to a cold shard decode it once and all see its rows.
+#[test]
+fn concurrent_readers_of_a_cold_shard_decode_it_once() {
+    let directory = TempDir::new().unwrap();
+    let (path, expected, manifest) = three_shard_fixture(directory.path());
+    let reader = open_with_budget(&path, u64::MAX / 2).unwrap();
+
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            scope.spawn(|| {
+                for node in [0_u64, 1] {
+                    assert_eq!(
+                        reader.row(node).unwrap(),
+                        expected.row(node).iter().collect::<Vec<_>>()
+                    );
+                }
+            });
+        }
+    });
+    assert_eq!(reader.shard_decode_count(), 1);
+    assert_eq!(
+        reader.retained_decoded_bytes(),
+        manifest.shards[0].decoded_bytes
     );
 }
 
@@ -458,7 +568,7 @@ fn open_with_budget(path: &Path, budget_bytes: u64) -> Result<ShardedCsrIndex, G
     Ok(ShardedCsrIndex {
         root: reader.root.clone(),
         manifest,
-        cache: std::sync::Arc::new(std::sync::Mutex::new(DecodedShardCache::new(budget_bytes))),
+        cache: std::sync::Arc::new(std::sync::RwLock::new(DecodedShardCache::new(budget_bytes))),
     })
 }
 

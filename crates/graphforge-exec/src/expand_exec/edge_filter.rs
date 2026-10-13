@@ -21,7 +21,7 @@ use graphforge_plan::VAR_LEN_EDGE_ELEMENT;
 
 use super::reachability::settle;
 use super::{
-    ExpandConfig, MemoryReservation, adjacency, build_edge_records, charge, edge_prop_children,
+    ChunkedReservation, ExpandConfig, adjacency, build_edge_records, charge, edge_prop_children,
     edge_record_table_bytes, hash_table_bytes, load_edge_prop_source, read_traversed_edges,
 };
 
@@ -101,7 +101,7 @@ impl PhysicalEdgeFilter {
         adjacency: &mut adjacency::AdjacencyReader<'_>,
         nodes: &[u64],
         wanted: &Wanted<'_>,
-        reservation: &mut MemoryReservation,
+        reservation: &mut ChunkedReservation,
     ) -> Result<(HashSet<u64>, usize), GfError> {
         let exec_err = |m: String| GfError::Execution(format!("VarLenExpand edge filter: {m}"));
         // Charged for the whole call, released before it returns.

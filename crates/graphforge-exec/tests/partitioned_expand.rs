@@ -17,9 +17,11 @@ use std::sync::Arc;
 use arrow::array::{Array, FixedSizeBinaryArray, ListArray, StructArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
+use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
+use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::{ExecutionPlan, Partitioning, collect_partitioned};
-use datafusion::prelude::SessionContext;
+use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_datasource::memory::MemorySourceConfig;
 use tempfile::TempDir;
 
@@ -338,5 +340,89 @@ async fn execute_rejects_a_partition_the_input_does_not_have() {
     assert!(
         error.to_string().contains("has 4 partitions"),
         "unexpected error: {error}"
+    );
+}
+
+/// Run the expansion over `split` against a greedy pool of `limit` bytes and
+/// report whether it fit, asserting the pool is empty once the streams ended.
+async fn fits_in(dir: &Path, node: &VarLenExpandNode, split: &[Vec<u64>], limit: usize) -> bool {
+    let pool = Arc::new(GreedyMemoryPool::new(limit));
+    let runtime = RuntimeEnvBuilder::new()
+        .with_memory_pool(pool.clone() as Arc<dyn MemoryPool>)
+        .build_arc()
+        .unwrap();
+    let context = SessionContext::new_with_config_rt(SessionConfig::new(), runtime);
+    let exec = var_len_exec(dir, node, partitioned_input(split));
+    let result = collect_partitioned(exec, context.task_ctx()).await;
+    assert_eq!(
+        pool.reserved(),
+        0,
+        "a reservation outlived the query at limit {limit}"
+    );
+    match result {
+        Ok(_) => true,
+        Err(error) => {
+            let message = error.to_string();
+            assert!(
+                message.contains("VarLenExpand path state")
+                    && message.contains("Resources exhausted"),
+                "limit {limit} failed with something other than the typed budget error: {message}"
+            );
+            false
+        }
+    }
+}
+
+/// The smallest budget under which `split` fits.
+async fn smallest_budget(dir: &Path, node: &VarLenExpandNode, split: &[Vec<u64>]) -> usize {
+    let mut high = 64 * 1024;
+    while !fits_in(dir, node, split, high).await {
+        high *= 2;
+    }
+    let mut low = 0;
+    while high - low > 1 {
+        let mid = low + (high - low) / 2;
+        if fits_in(dir, node, split, mid).await {
+            high = mid;
+        } else {
+            low = mid;
+        }
+    }
+    high
+}
+
+/// Chunked charging (#1985) leaves the budget meaningful across partitions. A
+/// partition that alone needs `need` bytes cannot run in a pool below `need`
+/// whatever the other partitions hold, so the four-partition query fails typed
+/// one byte under the largest solo need, and the pool is empty afterwards. A
+/// pool that holds every partition at its own peak plus the slack each may keep
+/// (under two chunks of 16 KiB at this size, four partitions) lets it run.
+#[tokio::test]
+async fn the_budget_holds_across_partitions() {
+    const SLACK_ALLOWANCE: usize = 4 * 2 * 16 * 1024;
+    let dir = TempDir::new().unwrap();
+    let ids = write_random_graph(dir.path());
+    let node = var_len_node(1, 4);
+    let split = split_seeds(&ids, 4);
+
+    let mut needs = Vec::new();
+    for seeds in &split {
+        needs.push(smallest_budget(dir.path(), &node, std::slice::from_ref(seeds)).await);
+    }
+    let largest = *needs.iter().max().unwrap();
+    assert!(
+        largest > 16 * 1024,
+        "a partition's {largest} byte need must span chunks to test the slack"
+    );
+
+    assert!(
+        !fits_in(dir.path(), &node, &split, largest - 1).await,
+        "the query fit in {} bytes, below one partition's own need {largest}",
+        largest - 1
+    );
+    let together: usize = needs.iter().sum();
+    assert!(
+        fits_in(dir.path(), &node, &split, together + SLACK_ALLOWANCE).await,
+        "the query did not fit in the partitions' needs {together} plus the slack allowance"
     );
 }

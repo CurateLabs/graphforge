@@ -216,7 +216,7 @@ impl<'a> CsrRowCursor<'a> {
         let csr = read_authenticated_shard(&self.index.root.join(&record.file), record)?;
         self.index
             .cache
-            .lock()
+            .write()
             .map_err(|_| GfError::Storage("CSR shard cache lock poisoned".into()))?
             .decodes += 1;
         let last_node = record.first_node + record.node_count - 1;

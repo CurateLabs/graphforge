@@ -3,6 +3,7 @@
 use crate::ValueAt;
 use crate::adjacency;
 use crate::adjacency::AdjacencyProvider;
+use crate::chunked_reservation::ChunkedReservation;
 use crate::demand;
 use crate::read_resource;
 use crate::string_column;
@@ -26,8 +27,6 @@ use arrow::datatypes::SchemaRef;
 use arrow::datatypes::TimeUnit;
 use datafusion::common::DataFusionError;
 use datafusion::execution::TaskContext;
-use datafusion::execution::memory_pool::MemoryConsumer;
-use datafusion::execution::memory_pool::MemoryReservation;
 use datafusion::logical_expr::UserDefinedLogicalNode;
 use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::DisplayAs;
@@ -384,9 +383,7 @@ impl ExecutionPlan for VarLenExpandExec {
             edge_filter: self.edge_filter.clone(),
             lifecycle: graphforge_storage::lifecycle_io::CaptureContext::current(),
         };
-        let mut reservation = MemoryConsumer::new(VAR_LEN_CONSUMER)
-            .with_can_spill(false)
-            .register(context.memory_pool());
+        let mut reservation = ChunkedReservation::register(VAR_LEN_CONSUMER, context.memory_pool());
         let mut builder = RecordBatchReceiverStream::builder(self.schema.clone(), 2);
         let tx = builder.tx();
         builder.spawn(async move {
@@ -596,7 +593,7 @@ fn edge_record_table_bytes(records: &std::collections::HashMap<u64, EdgeRecord>)
     )
 }
 
-fn grow_reservation(reservation: &mut MemoryReservation, bytes: usize) -> Result<(), GfError> {
+fn grow_reservation(reservation: &mut ChunkedReservation, bytes: usize) -> Result<(), GfError> {
     reservation
         .try_grow(bytes)
         .map_err(GfError::from_execution_error)
@@ -608,7 +605,7 @@ async fn send_chunk(
     cfg: &ExpandConfig,
     tx: &tokio::sync::mpsc::Sender<Result<RecordBatch, DataFusionError>>,
     out: RecordBatch,
-    reservation: &mut MemoryReservation,
+    reservation: &mut ChunkedReservation,
 ) -> bool {
     let bytes = out.get_array_memory_size();
     if cfg.capture_epoch != 0 {
@@ -664,7 +661,7 @@ async fn expand_bfs(
     cfg: &ExpandConfig,
     mut input: SendableRecordBatchStream,
     tx: &tokio::sync::mpsc::Sender<Result<RecordBatch, DataFusionError>>,
-    reservation: &mut MemoryReservation,
+    reservation: &mut ChunkedReservation,
 ) -> Result<(), GfError> {
     if cfg.expansion == VarLenMode::Reachability {
         return reach_bfs(cfg, input, tx, reservation).await;
@@ -803,7 +800,7 @@ async fn emit_large_seed(
     seed_emissions: &[Emission],
     max_rows: usize,
     tx: &tokio::sync::mpsc::Sender<Result<RecordBatch, DataFusionError>>,
-    reservation: &mut MemoryReservation,
+    reservation: &mut ChunkedReservation,
     sent_any: &mut bool,
 ) -> Result<bool, GfError> {
     let seed_bytes = seed_emissions.iter().fold(0usize, |bytes, emission| {
@@ -856,14 +853,14 @@ struct ChunkSources {
 }
 
 impl ChunkSources {
-    fn release(self, reservation: &mut MemoryReservation) {
+    fn release(self, reservation: &mut ChunkedReservation) {
         reservation.shrink(self.charged);
     }
 }
 
 /// Charge `bytes` and add them to the running total of `charged`.
 fn charge(
-    reservation: &mut MemoryReservation,
+    reservation: &mut ChunkedReservation,
     charged: &mut usize,
     bytes: usize,
 ) -> Result<(), GfError> {
@@ -905,7 +902,7 @@ fn edge_list_prop_fields(cfg: &ExpandConfig) -> Result<Vec<arrow::datatypes::Fie
 fn load_chunk_sources(
     cfg: &ExpandConfig,
     emissions: &[Emission],
-    reservation: &mut MemoryReservation,
+    reservation: &mut ChunkedReservation,
 ) -> Result<Option<ChunkSources>, GfError> {
     use std::collections::HashMap;
 
@@ -1043,7 +1040,7 @@ fn materialise_chunk(
     input: &RecordBatch,
     emissions: &[Emission],
     sources: &ChunkSources,
-    reservation: &mut MemoryReservation,
+    reservation: &mut ChunkedReservation,
 ) -> Result<RecordBatch, GfError> {
     use arrow::compute::take;
 
@@ -1115,7 +1112,7 @@ fn expand_chunk(
     cfg: &ExpandConfig,
     input: &RecordBatch,
     emissions: &[Emission],
-    reservation: &mut MemoryReservation,
+    reservation: &mut ChunkedReservation,
 ) -> Result<RecordBatch, GfError> {
     let Some(sources) = load_chunk_sources(cfg, emissions, reservation)? else {
         let empty = RecordBatch::new_empty(cfg.out_schema.clone());
@@ -1181,7 +1178,7 @@ fn bfs_emit_seed(
     input_row: usize,
     seed: u64,
     required_dst: Option<u64>,
-    reservation: &mut MemoryReservation,
+    reservation: &mut ChunkedReservation,
 ) -> Result<Vec<Emission>, GfError> {
     use std::collections::VecDeque;
 
