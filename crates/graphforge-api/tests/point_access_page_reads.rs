@@ -182,10 +182,11 @@ const EDGE_COUNT: &str =
 /// is unused, so the expansion reads no edge row.
 const DESTINATION_PROPERTY: &str =
     "MATCH (a:Entity {ident: $ident})-[e:LINK]->(b:Entity) RETURN sum(b.ident) AS n";
-/// Counts the frontier's one edge to a destination that is demanded for no
-/// label, so the label index cannot answer it and the node row is read.
-const UNLABELLED_DESTINATION: &str =
-    "MATCH (a:Entity {ident: $ident})-[e:LINK]->(b) RETURN count(e) AS n";
+/// Reads a node column of the frontier's one destination that neither the
+/// label index nor the destination's identity holds, so the node row is read by
+/// dense ordinal.
+const DESTINATION_CREATED_AT: &str =
+    "MATCH (a:Entity {ident: $ident})-[e:LINK]->(b) RETURN count(b.created_at) AS n";
 
 /// The project at `nodes` and the statement run twice: the first admits the
 /// footers, adjacency index and key walks once per session, the second is the
@@ -335,16 +336,16 @@ fn a_fixed_frontier_decodes_the_pages_of_its_rows_as_the_relation_doubles() {
     }
 }
 
-/// A destination demanded for nothing the label index holds still reads its
-/// node row by dense ordinal, and that read decodes the one page of the wanted
-/// row however many node files the table holds.
+/// A destination demanded for a column beyond its identity and labels still
+/// reads its node row by dense ordinal, and that read decodes the one page of
+/// the wanted row however many node files the table holds.
 #[test]
 fn a_destination_node_read_decodes_one_page_as_the_node_table_doubles() {
     let _serial = serial();
     for ident in FRONTIERS {
         let mut seen = Vec::new();
         for nodes in [SMALL_NODES, LARGE_NODES] {
-            let hop = run(nodes, UNLABELLED_DESTINATION, ident, 1);
+            let hop = run(nodes, DESTINATION_CREATED_AT, ident, 1);
             eprintln!("{}", summary(nodes, ident, &hop));
             assert_eq!(hop.value, 1, "{nodes} nodes");
             seen.push(decoded(nodes, ident, &hop, EdgeRow::Read, NodeRow::Read));
