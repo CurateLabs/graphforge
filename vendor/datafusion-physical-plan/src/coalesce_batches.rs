@@ -1,0 +1,369 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+//! [`CoalesceBatchesExec`] combines small batches into larger batches.
+
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+
+use super::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
+use super::{DisplayAs, ExecutionPlanProperties, PlanProperties, Statistics};
+use crate::projection::ProjectionExec;
+use crate::stream::EmptyRecordBatchStream;
+use crate::{
+    DisplayFormatType, ExecutionPlan, RecordBatchStream, SendableRecordBatchStream,
+    check_if_same_properties,
+};
+
+use arrow::datatypes::SchemaRef;
+use arrow::record_batch::RecordBatch;
+use datafusion_common::Result;
+use datafusion_execution::TaskContext;
+use datafusion_physical_expr::PhysicalExpr;
+
+use crate::coalesce::{LimitedBatchCoalescer, PushBatchStatus};
+use crate::execution_plan::CardinalityEffect;
+use crate::filter_pushdown::{
+    ChildPushdownResult, FilterDescription, FilterPushdownPhase,
+    FilterPushdownPropagation,
+};
+use crate::sort_pushdown::SortOrderPushdownResult;
+use datafusion_common::config::ConfigOptions;
+use datafusion_physical_expr_common::sort_expr::PhysicalSortExpr;
+use futures::ready;
+use futures::stream::{Stream, StreamExt};
+
+/// `CoalesceBatchesExec` combines small batches into larger batches for more
+/// efficient vectorized processing by later operators.
+///
+/// The operator buffers batches until it collects `target_batch_size` rows and
+/// then emits a single concatenated batch. When only a limited number of rows
+/// are necessary (specified by the `fetch` parameter), the operator will stop
+/// buffering and returns the final batch once the number of collected rows
+/// reaches the `fetch` value.
+///
+/// See [`LimitedBatchCoalescer`] for more information
+#[deprecated(
+    since = "52.0.0",
+    note = "We now use BatchCoalescer from arrow-rs instead of a dedicated operator"
+)]
+#[derive(Debug, Clone)]
+pub struct CoalesceBatchesExec {
+    /// The input plan
+    input: Arc<dyn ExecutionPlan>,
+    /// Minimum number of rows for coalescing batches
+    target_batch_size: usize,
+    /// Maximum number of rows to fetch, `None` means fetching all rows
+    fetch: Option<usize>,
+    /// Execution metrics
+    metrics: ExecutionPlanMetricsSet,
+    cache: Arc<PlanProperties>,
+}
+
+#[expect(deprecated)]
+impl CoalesceBatchesExec {
+    /// Create a new CoalesceBatchesExec
+    pub fn new(input: Arc<dyn ExecutionPlan>, target_batch_size: usize) -> Self {
+        let cache = Self::compute_properties(&input);
+        Self {
+            input,
+            target_batch_size,
+            fetch: None,
+            metrics: ExecutionPlanMetricsSet::new(),
+            cache: Arc::new(cache),
+        }
+    }
+
+    /// Update fetch with the argument
+    pub fn with_fetch(mut self, fetch: Option<usize>) -> Self {
+        self.fetch = fetch;
+        self
+    }
+
+    /// The input plan
+    pub fn input(&self) -> &Arc<dyn ExecutionPlan> {
+        &self.input
+    }
+
+    /// Minimum number of rows for coalesces batches
+    pub fn target_batch_size(&self) -> usize {
+        self.target_batch_size
+    }
+
+    /// This function creates the cache object that stores the plan properties such as schema, equivalence properties, ordering, partitioning, etc.
+    fn compute_properties(input: &Arc<dyn ExecutionPlan>) -> PlanProperties {
+        // The coalesce batches operator does not make any changes to the
+        // partitioning of its input.
+        PlanProperties::new(
+            input.equivalence_properties().clone(), // Equivalence Properties
+            input.output_partitioning().clone(),    // Output Partitioning
+            input.pipeline_behavior(),
+            input.boundedness(),
+        )
+    }
+
+    fn with_new_children_and_same_properties(
+        &self,
+        mut children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Self {
+        Self {
+            input: children.swap_remove(0),
+            metrics: ExecutionPlanMetricsSet::new(),
+            ..Self::clone(self)
+        }
+    }
+}
+
+#[expect(deprecated)]
+impl DisplayAs for CoalesceBatchesExec {
+    fn fmt_as(
+        &self,
+        t: DisplayFormatType,
+        f: &mut std::fmt::Formatter,
+    ) -> std::fmt::Result {
+        match t {
+            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+                write!(
+                    f,
+                    "CoalesceBatchesExec: target_batch_size={}",
+                    self.target_batch_size,
+                )?;
+                if let Some(fetch) = self.fetch {
+                    write!(f, ", fetch={fetch}")?;
+                };
+
+                Ok(())
+            }
+            DisplayFormatType::TreeRender => {
+                writeln!(f, "target_batch_size={}", self.target_batch_size)?;
+                if let Some(fetch) = self.fetch {
+                    write!(f, "limit={fetch}")?;
+                };
+                Ok(())
+            }
+        }
+    }
+}
+
+#[expect(deprecated)]
+impl ExecutionPlan for CoalesceBatchesExec {
+    fn name(&self) -> &'static str {
+        "CoalesceBatchesExec"
+    }
+
+    /// Return a reference to Any that can be used for downcasting
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.cache
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
+    }
+
+    fn maintains_input_order(&self) -> Vec<bool> {
+        vec![true]
+    }
+
+    fn benefits_from_input_partitioning(&self) -> Vec<bool> {
+        vec![false]
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        mut children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        check_if_same_properties!(self, children);
+        Ok(Arc::new(
+            CoalesceBatchesExec::new(children.swap_remove(0), self.target_batch_size)
+                .with_fetch(self.fetch),
+        ))
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        Ok(Box::pin(CoalesceBatchesStream {
+            input: self.input.execute(partition, context)?,
+            coalescer: LimitedBatchCoalescer::new(
+                self.input.schema(),
+                self.target_batch_size,
+                self.fetch,
+            ),
+            baseline_metrics: BaselineMetrics::new(&self.metrics, partition),
+            completed: false,
+        }))
+    }
+
+    fn metrics(&self) -> Option<MetricsSet> {
+        Some(self.metrics.clone_inner())
+    }
+
+    fn partition_statistics(&self, partition: Option<usize>) -> Result<Arc<Statistics>> {
+        let stats = Arc::unwrap_or_clone(self.input.partition_statistics(partition)?);
+        Ok(Arc::new(stats.with_fetch(self.fetch, 0, 1)?))
+    }
+
+    fn with_fetch(&self, limit: Option<usize>) -> Option<Arc<dyn ExecutionPlan>> {
+        Some(Arc::new(CoalesceBatchesExec {
+            input: Arc::clone(&self.input),
+            target_batch_size: self.target_batch_size,
+            fetch: limit,
+            metrics: self.metrics.clone(),
+            cache: Arc::clone(&self.cache),
+        }))
+    }
+
+    fn fetch(&self) -> Option<usize> {
+        self.fetch
+    }
+
+    fn cardinality_effect(&self) -> CardinalityEffect {
+        CardinalityEffect::Equal
+    }
+
+    fn try_swapping_with_projection(
+        &self,
+        projection: &ProjectionExec,
+    ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        match self.input.try_swapping_with_projection(projection)? {
+            Some(new_input) => Ok(Some(
+                Arc::new(self.clone()).with_new_children(vec![new_input])?,
+            )),
+            None => Ok(None),
+        }
+    }
+
+    fn gather_filters_for_pushdown(
+        &self,
+        _phase: FilterPushdownPhase,
+        parent_filters: Vec<Arc<dyn PhysicalExpr>>,
+        _config: &ConfigOptions,
+    ) -> Result<FilterDescription> {
+        FilterDescription::from_children(parent_filters, &self.children())
+    }
+
+    fn handle_child_pushdown_result(
+        &self,
+        _phase: FilterPushdownPhase,
+        child_pushdown_result: ChildPushdownResult,
+        _config: &ConfigOptions,
+    ) -> Result<FilterPushdownPropagation<Arc<dyn ExecutionPlan>>> {
+        Ok(FilterPushdownPropagation::if_all(child_pushdown_result))
+    }
+
+    fn try_pushdown_sort(
+        &self,
+        order: &[PhysicalSortExpr],
+    ) -> Result<SortOrderPushdownResult<Arc<dyn ExecutionPlan>>> {
+        // CoalesceBatchesExec is transparent for sort ordering - it preserves order
+        // Delegate to the child and wrap with a new CoalesceBatchesExec
+        self.input.try_pushdown_sort(order)?.try_map(|new_input| {
+            Ok(Arc::new(
+                CoalesceBatchesExec::new(new_input, self.target_batch_size)
+                    .with_fetch(self.fetch),
+            ) as Arc<dyn ExecutionPlan>)
+        })
+    }
+}
+
+/// Stream for [`CoalesceBatchesExec`]. See [`CoalesceBatchesExec`] for more details.
+struct CoalesceBatchesStream {
+    /// The input plan
+    input: SendableRecordBatchStream,
+    /// Buffer for combining batches
+    coalescer: LimitedBatchCoalescer,
+    /// Execution metrics
+    baseline_metrics: BaselineMetrics,
+    /// is the input stream exhausted or limit reached?
+    completed: bool,
+}
+
+impl Stream for CoalesceBatchesStream {
+    type Item = Result<RecordBatch>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        let poll = self.poll_next_inner(cx);
+        self.baseline_metrics.record_poll(poll)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        // we can't predict the size of incoming batches so re-use the size hint from the input
+        self.input.size_hint()
+    }
+}
+
+impl CoalesceBatchesStream {
+    fn poll_next_inner(
+        self: &mut Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<RecordBatch>>> {
+        let cloned_time = self.baseline_metrics.elapsed_compute().clone();
+        loop {
+            // If there is any completed batch ready, return it
+            if let Some(batch) = self.coalescer.next_completed_batch() {
+                return Poll::Ready(Some(Ok(batch)));
+            }
+            if self.completed {
+                // If input is done and no batches are ready, return None to signal end of stream.
+                return Poll::Ready(None);
+            }
+            // Attempt to pull the next batch from the input stream.
+            let input_batch = ready!(self.input.poll_next_unpin(cx));
+            // Start timing the operation. The timer records time upon being dropped.
+            let _timer = cloned_time.timer();
+
+            match input_batch {
+                None => {
+                    // Input stream is exhausted, finalize any remaining batches
+                    self.completed = true;
+                    self.input =
+                        Box::pin(EmptyRecordBatchStream::new(self.coalescer.schema()));
+                    self.coalescer.finish()?;
+                }
+                Some(Ok(batch)) => {
+                    match self.coalescer.push_batch(batch)? {
+                        PushBatchStatus::Continue => {
+                            // Keep pushing more batches
+                        }
+                        PushBatchStatus::LimitReached => {
+                            // limit was reached, so stop early
+                            self.completed = true;
+                            self.input = Box::pin(EmptyRecordBatchStream::new(
+                                self.coalescer.schema(),
+                            ));
+                            self.coalescer.finish()?;
+                        }
+                    }
+                }
+                // Error case
+                other => return Poll::Ready(other),
+            }
+        }
+    }
+}
+
+impl RecordBatchStream for CoalesceBatchesStream {
+    fn schema(&self) -> SchemaRef {
+        self.coalescer.schema()
+    }
+}
