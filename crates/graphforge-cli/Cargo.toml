@@ -6,6 +6,10 @@ edition.workspace = true
 license.workspace = true
 license-file.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords = ["graph", "cypher", "knowledge-graph", "arrow"]
+categories = ["command-line-utilities", "database"]
 
 [[bin]]
 name = "gf"

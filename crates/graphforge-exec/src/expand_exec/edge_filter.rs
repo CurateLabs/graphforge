@@ -225,7 +225,12 @@ impl PhysicalEdgeFilter {
                     child.len()
                 )));
             }
-            typed.push(declared_type(field, child, rows)?);
+            typed.push(declared_type(
+                field,
+                child,
+                rows,
+                "VarLenExpand edge filter",
+            )?);
         }
         let element: ArrayRef = if self.fields.is_empty() {
             Arc::new(StructArray::new_empty_fields(rows, None))
@@ -258,7 +263,12 @@ impl PhysicalEdgeFilter {
 /// field; its values are all `NULL`. Any other type difference is a widening
 /// the union schema made over several relation files, and a cast that cannot
 /// be made is an error rather than a silent `NULL`.
-fn declared_type(field: &FieldRef, child: ArrayRef, rows: usize) -> Result<ArrayRef, GfError> {
+pub(super) fn declared_type(
+    field: &FieldRef,
+    child: ArrayRef,
+    rows: usize,
+    context: &str,
+) -> Result<ArrayRef, GfError> {
     if child.data_type() == field.data_type() {
         return Ok(child);
     }
@@ -267,7 +277,7 @@ fn declared_type(field: &FieldRef, child: ArrayRef, rows: usize) -> Result<Array
     }
     cast(&child, field.data_type()).map_err(|e| {
         GfError::Execution(format!(
-            "VarLenExpand edge filter: property {} is {} but is declared {}: {e}",
+            "{context}: property {} is {} but is declared {}: {e}",
             field.name(),
             child.data_type(),
             field.data_type()

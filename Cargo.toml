@@ -38,6 +38,8 @@ edition = "2024"
 license = "Apache-2.0"
 license-file = "LICENSE"
 repository = "https://github.com/CurateLabs/graphforge"
+homepage = "https://graphforge.sh"
+documentation = "https://docs.graphforge.sh"
 
 [workspace.dependencies]
 # Error handling
