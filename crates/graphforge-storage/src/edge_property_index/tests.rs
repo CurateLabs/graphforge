@@ -5,6 +5,7 @@
 
 use super::*;
 use arrow::array::{BooleanArray, FixedSizeBinaryBuilder, Float64Array, Int64Array, StringArray};
+use arrow::datatypes::Field;
 
 fn uuid(index: u128) -> [u8; 16] {
     (0x2000_0000_0000_0000_0000_0000_0000_0000_u128 | (index + 1)).to_be_bytes()
@@ -150,6 +151,40 @@ fn write_packs(root: &Path, packs: &Files) -> PathBuf {
     directory
 }
 
+/// A whole column read through the page path: its directory opened against the
+/// seal, then every page read and authenticated.
+fn read_column(
+    packs: &mut PackHandles,
+    seal: BlobSeal,
+    rows: u64,
+    keys: Keys,
+) -> Result<ArrayRef, GfError> {
+    let blob = packs.open_blob(seal, rows, keys)?;
+    let count = usize::try_from(rows).unwrap().div_ceil(blob.page_rows());
+    let wanted: Vec<usize> = (0..count).collect();
+    let pages = packs.read_pages(&blob, &wanted)?;
+    let pages: Vec<&dyn Array> = pages.iter().map(AsRef::as_ref).collect();
+    arrow::compute::concat(&pages).map_err(|e| validation(e.to_string()))
+}
+
+/// Every blob of a built index, read whole from packs written to disk, which
+/// authenticates each directory against its seal and each page against the
+/// directory.
+fn read_every_blob(built: &Built) {
+    let dir = tempfile::tempdir().unwrap();
+    let directory = write_packs(dir.path(), &built.packs);
+    let mut packs = PackHandles::new(directory, built.manifest.page_rows);
+    for shard in &built.manifest.shards {
+        read_column(&mut packs, shard.uuids, shard.rows, Keys::Uuid).unwrap();
+        if let Some(ids) = shard.ids {
+            read_column(&mut packs, ids, shard.rows, Keys::Id).unwrap();
+        }
+        for column in &shard.columns {
+            read_column(&mut packs, column.blob, shard.rows, Keys::Values).unwrap();
+        }
+    }
+}
+
 #[test]
 fn fragments_are_cut_into_row_bounded_shards_each_blob_sealed_in_the_manifest() {
     let built = build(&[fragment(0, 10_000, 4)]).expect("indexed");
@@ -167,12 +202,7 @@ fn fragments_are_cut_into_row_bounded_shards_each_blob_sealed_in_the_manifest() 
     // per stored column, per shard.
     assert_eq!(built.packs.len(), 1);
     assert_eq!(seals(manifest).len(), 3 * 3);
-    for seal in seals(manifest) {
-        assert_eq!(
-            crate::corruption_checksum::checksum(blob(&built.packs, seal)),
-            seal.xxh64
-        );
-    }
+    read_every_blob(&built);
     // Ranges are the shard's first and last UUID.
     assert_eq!(manifest.shards[0].first, hex(&uuid(0)));
     assert_eq!(manifest.shards[0].last, hex(&uuid(4095)));
@@ -216,12 +246,9 @@ fn a_route_larger_than_a_pack_fills_consecutive_packs_with_contiguous_blobs() {
             expected_offset = 0;
         }
         assert_eq!(seal.offset, expected_offset);
-        assert_eq!(
-            crate::corruption_checksum::checksum(blob(&built.packs, seal)),
-            seal.xxh64
-        );
         expected_offset += seal.byte_length;
     }
+    read_every_blob(&built);
     assert_eq!(expected_pack as usize, built.packs.len() - 1);
     assert_eq!(
         expected_offset,
@@ -249,20 +276,20 @@ fn a_blob_is_read_back_exactly_and_each_blob_is_sealed_alone() {
     let dir = tempfile::tempdir().unwrap();
     let directory = write_packs(dir.path(), &built.packs);
 
-    let mut packs = PackHandles::new(directory.clone());
-    let uuids = packs.read_column(shard.uuids, shard.rows).unwrap();
+    let mut packs = PackHandles::new(directory.clone(), built.manifest.page_rows);
+    let uuids = read_column(&mut packs, shard.uuids, shard.rows, Keys::Uuid).unwrap();
     let uuids = uuids
         .as_any()
         .downcast_ref::<FixedSizeBinaryArray>()
         .unwrap();
     assert_eq!(uuids.value(0), uuid(7));
     assert_eq!(uuids.value(99), uuid(106));
-    let column = packs.read_column(timestamps, shard.rows).unwrap();
+    let column = read_column(&mut packs, timestamps, shard.rows, Keys::Values).unwrap();
     let column = column.as_any().downcast_ref::<Int64Array>().unwrap();
     assert_eq!(column.value(0), 21);
     assert_eq!(column.value(99), 106 * 3);
     // A blob read with the wrong row count is refused.
-    assert!(packs.read_column(timestamps, shard.rows + 1).is_err());
+    assert!(read_column(&mut packs, timestamps, shard.rows + 1, Keys::Values).is_err());
 
     // A flipped byte in one blob fails that blob and no other.
     let pack_path = directory.join("00000000.epk");
@@ -271,20 +298,20 @@ fn a_blob_is_read_back_exactly_and_each_blob_is_sealed_alone() {
     let last = usize::try_from(memos.offset + memos.byte_length).unwrap() - 1;
     flipped[last] ^= 1;
     std::fs::write(&pack_path, &flipped).unwrap();
-    let mut packs = PackHandles::new(directory.clone());
-    let error = packs.read_column(memos, shard.rows).unwrap_err();
+    let mut packs = PackHandles::new(directory.clone(), built.manifest.page_rows);
+    let error = read_column(&mut packs, memos, shard.rows, Keys::Values).unwrap_err();
     assert_eq!(error.code(), "GF_VALIDATION", "{error}");
-    packs.read_column(timestamps, shard.rows).unwrap();
-    packs.read_column(shard.uuids, shard.rows).unwrap();
+    read_column(&mut packs, timestamps, shard.rows, Keys::Values).unwrap();
+    read_column(&mut packs, shard.uuids, shard.rows, Keys::Uuid).unwrap();
 
     // A pack cut short inside a blob fails that blob; the blobs before it
     // still read.
     let cut = usize::try_from(memos.offset).unwrap() + 1;
     std::fs::write(&pack_path, &original[..cut]).unwrap();
-    let mut packs = PackHandles::new(directory.clone());
-    let error = packs.read_column(memos, shard.rows).unwrap_err();
+    let mut packs = PackHandles::new(directory.clone(), built.manifest.page_rows);
+    let error = read_column(&mut packs, memos, shard.rows, Keys::Values).unwrap_err();
     assert_eq!(error.code(), "GF_VALIDATION", "{error}");
-    packs.read_column(timestamps, shard.rows).unwrap();
+    read_column(&mut packs, timestamps, shard.rows, Keys::Values).unwrap();
 
     // A seal that names bytes past the end of the pack, or past the pack bound,
     // is refused rather than read.
@@ -293,20 +320,20 @@ fn a_blob_is_read_back_exactly_and_each_blob_is_sealed_alone() {
         ..memos
     };
     std::fs::write(&pack_path, &original).unwrap();
-    let mut packs = PackHandles::new(directory.clone());
-    let error = packs.read_column(past_end, shard.rows).unwrap_err();
+    let mut packs = PackHandles::new(directory.clone(), built.manifest.page_rows);
+    let error = read_column(&mut packs, past_end, shard.rows, Keys::Values).unwrap_err();
     assert_eq!(error.code(), "GF_VALIDATION", "{error}");
     let oversize = BlobSeal {
         byte_length: PACK_BYTES as u64 + 1,
         ..memos
     };
-    let error = packs.read_column(oversize, shard.rows).unwrap_err();
+    let error = read_column(&mut packs, oversize, shard.rows, Keys::Values).unwrap_err();
     assert_eq!(error.code(), "GF_VALIDATION", "{error}");
 
     // A pack that is gone is an error, not an empty answer.
     std::fs::remove_file(&pack_path).unwrap();
-    let mut packs = PackHandles::new(directory);
-    assert!(packs.read_column(timestamps, shard.rows).is_err());
+    let mut packs = PackHandles::new(directory, built.manifest.page_rows);
+    assert!(read_column(&mut packs, timestamps, shard.rows, Keys::Values).is_err());
 }
 
 #[test]
@@ -334,7 +361,7 @@ fn a_blob_that_cannot_fit_a_pack_leaves_the_route_to_the_property_overlay() {
         Ok(())
     };
     let sealed = builder
-        .append(&vec![0_u8; PACK_BYTES + 1], &mut write)
+        .append(&vec![0_u8; PACK_BYTES + 1], 0, &mut write)
         .unwrap();
     assert!(sealed.is_none());
     // A poisoned builder indexes nothing, and writes no manifest.
@@ -359,13 +386,13 @@ fn a_blob_that_would_overflow_a_pack_starts_the_next_one() {
         Ok(())
     };
     let first = builder
-        .append(&vec![1_u8; PACK_BYTES - 10], &mut write)
+        .append(&vec![1_u8; PACK_BYTES - 10], 0, &mut write)
         .unwrap()
         .unwrap();
     // Exactly the room left: it still fits.
-    let second = builder.append(&[2_u8; 10], &mut write).unwrap().unwrap();
+    let second = builder.append(&[2_u8; 10], 0, &mut write).unwrap().unwrap();
     // One byte more than the room left: the pack is flushed first.
-    let third = builder.append(&[3_u8; 1], &mut write).unwrap().unwrap();
+    let third = builder.append(&[3_u8; 1], 0, &mut write).unwrap().unwrap();
     assert_eq!((first.pack, first.offset), (0, 0));
     assert_eq!((second.pack, second.offset), (0, PACK_BYTES as u64 - 10));
     assert_eq!((third.pack, third.offset), (1, 0));
@@ -486,21 +513,16 @@ fn ids_are_sealed_beside_the_uuids_with_the_range_they_span() {
     assert_eq!(manifest.topology_digest.as_deref(), Some("topology"));
     // A UUID blob, an id blob and two column blobs per shard.
     assert_eq!(seals(manifest).len(), 3 * 4);
-    for seal in seals(manifest) {
-        assert_eq!(
-            crate::corruption_checksum::checksum(blob(&built.packs, seal)),
-            seal.xxh64
-        );
-    }
+    read_every_blob(&built);
     let dir = tempfile::tempdir().unwrap();
     let directory = write_packs(dir.path(), &built.packs);
-    let mut packs = PackHandles::new(directory);
+    let mut packs = PackHandles::new(directory, manifest.page_rows);
     let mut start = 0;
     for shard in &manifest.shards {
         let window = &ids[start..start + shard.rows as usize];
         assert_eq!(shard.id_min, window.iter().copied().min());
         assert_eq!(shard.id_max, window.iter().copied().max());
-        let column = packs.read_column(shard.ids.unwrap(), shard.rows).unwrap();
+        let column = read_column(&mut packs, shard.ids.unwrap(), shard.rows, Keys::Id).unwrap();
         let column = column.as_any().downcast_ref::<UInt64Array>().unwrap();
         assert_eq!(column.values().as_ref(), window, "ids stay in UUID order");
         start += shard.rows as usize;
@@ -519,7 +541,7 @@ fn a_shard_is_read_back_by_id_with_the_rows_of_those_ids() {
     let shard = &built.manifest.shards[0];
     let dir = tempfile::tempdir().unwrap();
     let directory = write_packs(dir.path(), &built.packs);
-    let mut packs = PackHandles::new(directory);
+    let mut packs = PackHandles::new(directory, built.manifest.page_rows);
     let properties = ["timestamp".to_owned()];
     let demanded = demanded_columns(&built.manifest, &properties);
     let range = (shard.id_min.unwrap(), shard.id_max.unwrap());
@@ -570,7 +592,10 @@ fn a_corrupt_id_blob_is_refused_not_answered() {
     )
     .expect("indexed");
     let shard = &built.manifest.shards[0];
-    let mut packs = PackHandles::new(write_packs(&dir.path().join("range"), &built.packs));
+    let mut packs = PackHandles::new(
+        write_packs(&dir.path().join("range"), &built.packs),
+        built.manifest.page_rows,
+    );
     let demanded = demanded_columns(&built.manifest, &properties);
     let narrowed = (shard.id_min.unwrap() + 1, shard.id_max.unwrap());
     let error = read_hit_shard_by_id(
@@ -595,7 +620,10 @@ fn a_corrupt_id_blob_is_refused_not_answered() {
     )
     .expect("indexed");
     let shard = &built.manifest.shards[0];
-    let mut packs = PackHandles::new(write_packs(&dir.path().join("duplicate"), &built.packs));
+    let mut packs = PackHandles::new(
+        write_packs(&dir.path().join("duplicate"), &built.packs),
+        built.manifest.page_rows,
+    );
     let error = read_hit_shard_by_id(
         &mut packs,
         shard,
