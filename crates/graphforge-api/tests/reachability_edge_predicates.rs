@@ -580,27 +580,31 @@ fn a_per_edge_filter_reads_indexed_properties_by_edge_id() {
         observe: false,
     };
     let expected = search.expected(&built.edges, 0, 7, 20, 80);
-    let query = search
-        .query()
-        .replace("MATCH (s:Entity {ident: $s})", "MATCH (s:Entity)")
-        .replace(
-            "WHERE ALL(e IN r WHERE",
-            "WHERE s.node_uuid = $s AND ALL(e IN r WHERE",
-        );
+    assert!(built.edges.iter().any(|edge| edge.timestamp.is_none()));
+    let query = search.query();
+    let baseline_query = query.replace(
+        " WHERE ALL(e IN r WHERE $lo < e.timestamp AND e.timestamp < $hi)",
+        "",
+    );
     let params = HashMap::from([
-        ("s".to_owned(), IrLiteral::Uuid(*node_uuid(0).as_bytes())),
+        ("s".to_owned(), IrLiteral::Int(0)),
         ("d".to_owned(), IrLiteral::Int(7)),
         ("lo".to_owned(), IrLiteral::Int(20)),
         ("hi".to_owned(), IrLiteral::Int(80)),
     ]);
 
-    // Warm inventory and adjacency admission before attributing the query.
+    // Warm inventory and adjacency admission before attributing the queries.
     assert_eq!(
         answer(&forge, &search, 0, 7, 20, 80),
         expected,
         "indexed lookup must preserve reachability results"
     );
     let _capture = CaptureScope::install();
+    io_stats::reset();
+    forge
+        .execute_with_params(&baseline_query, &params)
+        .expect("the traversal without its per-edge filter executes");
+    let baseline_io = io_stats::snapshot().expect("requested baseline I/O statistics");
     io_stats::reset();
     let result = forge
         .execute_with_params(&query, &params)
@@ -619,18 +623,18 @@ fn a_per_edge_filter_reads_indexed_properties_by_edge_id() {
     );
 
     let io = io_stats::snapshot().expect("requested I/O statistics");
-    assert_eq!(io.edge_full_reads, 0, "no edge UUIDs were read");
-    assert_eq!(io.edge_filtered_reads, 0, "no edge UUIDs were read");
+    assert_eq!(io.edge_full_reads, baseline_io.edge_full_reads);
+    assert_eq!(io.edge_filtered_reads, baseline_io.edge_filtered_reads);
     assert_eq!(
-        io.property_uuid_selections, 0,
-        "no UUID-keyed property lookup"
+        io.property_uuid_selections, baseline_io.property_uuid_selections,
+        "the per-edge filter performs no UUID-keyed property lookup"
     );
     assert_eq!(
-        io.property_uuid_rows_decoded, 0,
-        "no UUID rows were decoded"
+        io.property_uuid_rows_decoded, baseline_io.property_uuid_rows_decoded,
+        "the per-edge filter decodes no UUID rows"
     );
     assert_eq!(
-        io.property_uuid_pages_selected, 0,
-        "no UUID pages were read"
+        io.property_uuid_pages_selected, baseline_io.property_uuid_pages_selected,
+        "the per-edge filter reads no UUID pages"
     );
 }
