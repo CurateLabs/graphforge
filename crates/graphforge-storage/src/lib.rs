@@ -101,6 +101,7 @@ pub use graph_construction::{
 pub mod graph_admission;
 pub mod graph_files;
 mod graph_read_inventory;
+mod node_label_index;
 mod topology_files;
 #[cfg(test)]
 pub(crate) use graph_files::graph_files_root_participant;
@@ -120,6 +121,7 @@ pub use graph_read_inventory::{
     GraphReadFileEntry, GraphReadInventory, capture_graph_read_inventory,
     capture_graph_read_inventory_with_topology,
 };
+pub use node_label_index::{GatheredNodeLabels, NodeLabelIndex, NodeLabelSet};
 pub use topology_files::{TopologyFileAuthority, TopologyFiles, enumerate_topology_files};
 
 #[allow(

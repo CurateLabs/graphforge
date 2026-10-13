@@ -179,6 +179,32 @@ pub(crate) fn read_parquet_required_projected(
     Ok(vec![merged])
 }
 
+/// Decode only the `node_id`, `type_id` and (when the file has it) `type_ids`
+/// root columns of one admitted node file. Legacy files without `type_ids` are
+/// returned as they are; the caller derives the singleton membership from the
+/// primary exactly as [`normalize_topology_nodes`] does. Reads no other column
+/// and records no node-read statistic.
+pub(crate) fn read_node_label_columns(path: &Path) -> Result<Vec<RecordBatch>, DataFusionError> {
+    let builder = admitted_parquet(path)?;
+    let schema = builder.schema().clone();
+    let column = |name: &str| {
+        schema.index_of(name).map_err(|error| {
+            DataFusionError::Execution(format!(
+                "node file {} has no {name} column: {error}",
+                path.display()
+            ))
+        })
+    };
+    let mut indices = vec![column("node_id")?, column("type_id")?];
+    if let Ok(type_ids) = schema.index_of("type_ids") {
+        indices.push(type_ids);
+    }
+    let mask =
+        parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), indices.iter().copied());
+    let reader = builder.with_projection(mask).build().map_err(parquet_err)?;
+    reader.collect::<Result<Vec<_>, _>>().map_err(parquet_err)
+}
+
 /// Normalize legacy scalar-label topology batches to the current multi-label
 /// schema. Existing `type_id` values become singleton `type_ids` lists.
 pub(crate) fn normalize_topology_nodes(
