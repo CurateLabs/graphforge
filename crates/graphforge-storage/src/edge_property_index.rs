@@ -51,7 +51,10 @@
 //! position in those files; an index without ids, or whose ids no longer match,
 //! still answers UUID lookups ([`lookup_edge_properties`]). A missing or stale
 //! index is not used and is never rebuilt by a read; the property overlay
-//! answers instead. A manifest or blob that fails its checksum is refused.
+//! answers instead. A manifest or blob that fails its checksum is refused, and
+//! so is a manifest the reader cannot decode, such as one written before the
+//! manifest named its page size (`page_rows`): the index is derived data, a read
+//! never repairs it, and the refusal names `rebuild_property_indexes`.
 //! Routes that hold a tombstone, or whose fragments disagree on the type of a
 //! column, are not indexed. Ids are all-or-nothing per route: when any row
 //! cannot be joined to a topology row, or the topology's UUID pages overlap too
@@ -166,10 +169,9 @@ struct Manifest {
     topology_digest: Option<String>,
     rows: u64,
     /// Rows per page of every blob, so a lookup decodes the pages that hold
-    /// its rows. Absent from an index built before paging, whose blobs are one
-    /// page each; those are read whole until the index is rebuilt.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    page_rows: Option<u32>,
+    /// its rows. Required: a manifest written before paging has no such field,
+    /// does not decode, and is refused until the index is rebuilt.
+    page_rows: u32,
     pack_dir: String,
     columns: Vec<String>,
     shards: Vec<ShardEntry>,
@@ -201,8 +203,21 @@ fn encode_manifest(manifest: &Manifest) -> Result<Vec<u8>, GfError> {
     Ok(bytes)
 }
 
+/// What a refused manifest tells the operator to do. The index is derived data:
+/// a reader never repairs it, and an explicit rebuild replaces it.
+const REBUILD_HINT: &str = "run rebuild_property_indexes to replace the index";
+
+/// Decode and authenticate a manifest. One the reader cannot use is refused,
+/// never read around: damage, a format it does not know, and an index built
+/// before the manifest named `page_rows` all fail here, and all are repaired by
+/// rebuilding the derived index.
 fn decode_manifest(bytes: &[u8], path: &Path) -> Result<Manifest, GfError> {
-    let corrupt = || validation(format!("manifest {} failed its checksum", path.display()));
+    let corrupt = || {
+        validation(format!(
+            "manifest {} failed its checksum; {REBUILD_HINT}",
+            path.display()
+        ))
+    };
     if bytes.len() < 17 || bytes[16] != b'\n' {
         return Err(corrupt());
     }
@@ -214,20 +229,22 @@ fn decode_manifest(bytes: &[u8], path: &Path) -> Result<Manifest, GfError> {
     if crate::corruption_checksum::checksum(body) != expected {
         return Err(corrupt());
     }
-    let manifest: Manifest = serde_json::from_slice(body).map_err(|_| corrupt())?;
+    let manifest: Manifest = serde_json::from_slice(body).map_err(|error| {
+        validation(format!(
+            "manifest {} does not decode ({error}); {REBUILD_HINT}",
+            path.display()
+        ))
+    })?;
     if manifest.format != FORMAT {
         return Err(validation(format!(
-            "manifest {} has unsupported format {:?}",
+            "manifest {} has unsupported format {:?}; {REBUILD_HINT}",
             path.display(),
             manifest.format
         )));
     }
-    if manifest
-        .page_rows
-        .is_some_and(|rows| rows == 0 || rows as usize > SHARD_ROWS)
-    {
+    if manifest.page_rows == 0 || manifest.page_rows as usize > SHARD_ROWS {
         return Err(validation(format!(
-            "manifest {} has an invalid page size",
+            "manifest {} has an invalid page size; {REBUILD_HINT}",
             path.display()
         )));
     }
@@ -553,7 +570,7 @@ impl EdgeRouteIndexBuilder {
             source_digest: source_digest.to_owned(),
             topology_digest,
             rows: self.rows,
-            page_rows: Some(u32::try_from(PAGE_ROWS).expect("page rows fit u32")),
+            page_rows: u32::try_from(PAGE_ROWS).expect("page rows fit u32"),
             pack_dir: self.pack_dir,
             columns: self.columns.into_iter().map(|(name, _)| name).collect(),
             shards: self.shards,
@@ -730,7 +747,8 @@ struct CurrentManifest {
 }
 
 /// The manifest of a current index for this route, `None` when no current
-/// index exists. A checksum failure is an error.
+/// index exists (no manifest, or one for other source objects). A manifest that
+/// fails its checksum, does not decode or has an unknown format is an error.
 fn current_manifest(
     project_dir: &Path,
     inventory: &AuthenticatedPropertyInventory,
@@ -825,8 +843,10 @@ struct HitShard<K> {
 /// checked against the manifest.
 ///
 /// # Errors
-/// A manifest or blob that fails its checksum or is malformed, or an edge that
-/// two shards both hold.
+/// A manifest that does not decode (including one written before paging, which
+/// the error tells the caller to replace with `rebuild_property_indexes`), a
+/// manifest or blob that fails its checksum or is malformed, or an edge that two
+/// shards both hold.
 pub fn lookup_edge_properties(
     project_dir: &Path,
     inventory: &AuthenticatedPropertyInventory,
@@ -894,8 +914,7 @@ pub struct IndexedEdgeIds {
 /// cannot answer by id.
 ///
 /// # Errors
-/// A manifest or blob that fails its checksum or is malformed, or an edge that
-/// two shards both hold.
+/// As [`lookup_edge_properties`].
 pub fn lookup_edge_properties_by_id(
     project_dir: &Path,
     inventory: &AuthenticatedPropertyInventory,

@@ -109,17 +109,6 @@ fn build_with(
     })
 }
 
-/// The bytes the seal names inside the packs of a built index.
-fn blob(packs: &Files, seal: BlobSeal) -> &[u8] {
-    let (path, bytes) = &packs[seal.pack as usize];
-    assert_eq!(
-        path,
-        &format!("indexes/edge-properties/route.packs/{:08}.epk", seal.pack)
-    );
-    let start = usize::try_from(seal.offset).unwrap();
-    &bytes[start..start + usize::try_from(seal.byte_length).unwrap()]
-}
-
 /// Every blob a manifest names, in the order the builder appended them.
 fn seals(manifest: &Manifest) -> Vec<BlobSeal> {
     manifest
@@ -783,7 +772,7 @@ fn int64s(array: &ArrayRef) -> Vec<i64> {
 #[test]
 fn a_lookup_decodes_only_the_pages_that_hold_its_targets() {
     let built = build(&[fragment(0, 2_000, 4)]).expect("indexed");
-    assert_eq!(built.manifest.page_rows, Some(PAGE_ROWS as u32));
+    assert_eq!(built.manifest.page_rows, PAGE_ROWS as u32);
     assert_eq!(built.manifest.shards.len(), 1, "one shard of 16 pages");
     let shard = &built.manifest.shards[0];
     let timestamps = column_named(&built.manifest, shard, "timestamp");
@@ -953,158 +942,69 @@ fn ids_out_of_uuid_order_are_found_through_page_ranges_that_overlap() {
 }
 
 #[test]
-fn a_manifest_names_a_usable_page_size_or_none() {
+fn a_manifest_names_a_usable_page_size() {
     let built = build(&[fragment(0, 8, 4)]).expect("indexed");
     let path = Path::new("indexes/edge-properties/x.epx");
     let mut manifest = decode_manifest(&built.manifest_file.bytes, path).unwrap();
     for rows in [0, SHARD_ROWS as u32 + 1] {
-        manifest.page_rows = Some(rows);
+        manifest.page_rows = rows;
         let error = decode_manifest(&encode_manifest(&manifest).unwrap(), path).unwrap_err();
         assert_eq!(error.code(), "GF_VALIDATION", "{error}");
+        assert!(error.to_string().contains("rebuild_property_indexes"));
     }
-    manifest.page_rows = None;
+    manifest.page_rows = PAGE_ROWS as u32;
     assert!(decode_manifest(&encode_manifest(&manifest).unwrap(), path).is_ok());
 }
 
-/// The blob this crate wrote before pages: one Zstd Arrow IPC batch covering the
-/// column, sealed by the XXH64 of its bytes.
-fn whole_blob(name: &str, array: &ArrayRef) -> (Vec<u8>, u64) {
-    let nullable = name != UUID_COLUMN && name != ID_COLUMN;
-    let schema = Arc::new(Schema::new(vec![Field::new(
-        name,
-        array.data_type().clone(),
-        nullable,
-    )]));
-    let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::clone(array)]).unwrap();
-    let options = arrow::ipc::writer::IpcWriteOptions::default()
-        .try_with_compression(Some(arrow::ipc::CompressionType::ZSTD))
-        .unwrap();
-    let mut bytes = Vec::new();
-    {
-        let mut writer =
-            arrow::ipc::writer::StreamWriter::try_new_with_options(&mut bytes, &schema, options)
-                .unwrap();
-        writer.write(&batch).unwrap();
-        writer.finish().unwrap();
-    }
-    let xxh64 = crate::corruption_checksum::checksum(&bytes);
-    (bytes, xxh64)
+/// The manifest of an index built before pages: the current document without
+/// `page_rows`, sealed by its own checksum so only its content is at issue.
+fn manifest_written_before_pages(built: &Built) -> Vec<u8> {
+    let mut document: serde_json::Value =
+        serde_json::from_slice(&built.manifest_file.bytes[17..]).unwrap();
+    document
+        .as_object_mut()
+        .unwrap()
+        .remove("page_rows")
+        .expect("the current manifest names its page size");
+    let body = serde_json::to_vec(&document).unwrap();
+    let mut bytes = format!("{:016x}\n", crate::corruption_checksum::checksum(&body)).into_bytes();
+    bytes.extend_from_slice(&body);
+    bytes
 }
 
 #[test]
-fn an_index_built_before_pages_is_still_read_whole() {
-    let ids = descending_ids(0, 300);
-    let built = build_with(
-        &[fragment(0, 300, 4)],
-        &[Some(ids.clone())],
-        Some("topology"),
-    )
-    .expect("indexed");
-    let dir = tempfile::tempdir().unwrap();
-    let paged_directory = write_packs(&dir.path().join("paged"), &built.packs);
-    let mut paged = PackHandles::new(paged_directory, built.manifest.page_rows);
+fn a_manifest_written_before_pages_is_refused_until_the_index_is_rebuilt() {
+    let built = build(&[fragment(0, 8, 4)]).expect("indexed");
+    let old = manifest_written_before_pages(&built);
+    let path = Path::new("indexes/edge-properties/x.epx");
 
-    // The same index in the old layout: every column one batch, one pack, and a
-    // manifest without a page size.
-    let legacy_directory = dir.path().join("legacy").join("route.packs");
-    std::fs::create_dir_all(&legacy_directory).unwrap();
-    let mut pack = Vec::new();
-    let mut place = |name: &str, array: ArrayRef| {
-        let (bytes, xxh64) = whole_blob(name, &array);
-        let seal = BlobSeal {
-            pack: 0,
-            offset: pack.len() as u64,
-            byte_length: bytes.len() as u64,
-            xxh64,
-        };
-        pack.extend_from_slice(&bytes);
-        seal
-    };
-    let source = &built.manifest.shards[0];
-    let mut legacy_shard = source.clone();
-    legacy_shard.uuids = place(
-        UUID_COLUMN,
-        read_column(&mut paged, source.uuids, source.rows, Keys::Uuid).unwrap(),
-    );
-    legacy_shard.ids = Some(place(
-        ID_COLUMN,
-        read_column(&mut paged, source.ids.unwrap(), source.rows, Keys::Id).unwrap(),
-    ));
-    for column in &mut legacy_shard.columns {
-        let name = &built.manifest.columns[column.column];
-        let array = read_column(&mut paged, column.blob, source.rows, Keys::Values).unwrap();
-        column.blob = place(name, array);
-    }
-    std::fs::write(legacy_directory.join("00000000.epk"), &pack).unwrap();
-    let legacy = Manifest {
-        format: built.manifest.format.clone(),
-        route: built.manifest.route.clone(),
-        source_digest: built.manifest.source_digest.clone(),
-        topology_digest: built.manifest.topology_digest.clone(),
-        rows: built.manifest.rows,
-        page_rows: None,
-        pack_dir: built.manifest.pack_dir.clone(),
-        columns: built.manifest.columns.clone(),
-        shards: vec![legacy_shard.clone()],
-    };
-    let bytes = encode_manifest(&legacy).unwrap();
-    assert!(!String::from_utf8_lossy(&bytes).contains("page_rows"));
-    let legacy = decode_manifest(&bytes, Path::new("x.epx")).unwrap();
-    assert_eq!(legacy.page_rows, None);
-
-    let properties = ["timestamp".to_owned(), "memo".to_owned()];
-    let paged_demand = demanded_columns(&built.manifest, &properties);
-    let demanded = demanded_columns(&legacy, &properties);
-    let mut old = PackHandles::new(legacy_directory.clone(), legacy.page_rows);
-    // By UUID: the rows a paged read returns, from a blob read whole.
-    let targets = [uuid(3), uuid(150), uuid(299), uuid(1_000)];
-    let expected = read_hit_shard(&mut paged, source, &targets, &paged_demand)
-        .unwrap()
-        .expect("held");
-    let hit = read_hit_shard(&mut old, &legacy_shard, &targets, &demanded)
-        .unwrap()
-        .expect("held");
-    assert_eq!(hit.keys, [uuid(3), uuid(150), uuid(299)]);
-    assert_eq!(hit.keys, expected.keys);
-    assert_eq!(hit.columns, expected.columns);
-    assert_eq!(int64s(&hit.columns[&0]), [9, 450, 897]);
-
-    // By id.
-    let mut by_id = vec![ids[3], ids[150], ids[299]];
-    by_id.sort_unstable();
-    let range = (source.id_min.unwrap(), source.id_max.unwrap());
-    let expected = read_hit_shard_by_id(
-        &mut paged,
-        source,
-        source.ids.unwrap(),
-        range,
-        &by_id,
-        &paged_demand,
-    )
-    .unwrap()
-    .expect("held");
-    let hit = read_hit_shard_by_id(
-        &mut old,
-        &legacy_shard,
-        legacy_shard.ids.unwrap(),
-        range,
-        &by_id,
-        &demanded,
-    )
-    .unwrap()
-    .expect("held");
-    assert_eq!(hit.keys, by_id);
-    assert_eq!(hit.keys, expected.keys);
-    assert_eq!(hit.columns, expected.columns);
-
-    // The old checksum still authenticates: a flipped byte is refused.
-    let timestamps = column_named(&legacy, &legacy_shard, "timestamp");
-    let mut damaged = pack.clone();
-    damaged[usize::try_from(timestamps.offset + timestamps.byte_length).unwrap() - 1] ^= 1;
-    std::fs::write(legacy_directory.join("00000000.epk"), damaged).unwrap();
-    let mut old = PackHandles::new(legacy_directory, legacy.page_rows);
-    let error = read_hit_shard(&mut old, &legacy_shard, &targets, &demanded)
-        .err()
-        .expect("a damaged whole blob is refused");
+    // The same refusal as any manifest the reader cannot use: a typed error
+    // that names the explicit rebuild, never a repair or a silent bypass.
+    let error = decode_manifest(&old, path).unwrap_err();
     assert_eq!(error.code(), "GF_VALIDATION", "{error}");
+    let message = error.to_string();
+    assert!(message.contains("does not decode"), "{message}");
+    assert!(message.contains("page_rows"), "{message}");
+    assert!(message.contains("rebuild_property_indexes"), "{message}");
+    let mut corrupt = built.manifest_file.bytes.clone();
+    let last = corrupt.len() - 2;
+    corrupt[last] ^= 1;
+    let damaged = decode_manifest(&corrupt, path).unwrap_err().to_string();
+    assert!(damaged.contains("rebuild_property_indexes"), "{damaged}");
+
+    // The refusal comes before the staleness check that sends a read to the
+    // property overlay: a current-format manifest of other source objects is
+    // not indexed, the old layout is an error.
+    let project = tempfile::tempdir().unwrap();
+    let inventory =
+        AuthenticatedPropertyInventory::from_entries_at_root(project.path(), Vec::new()).unwrap();
+    let route = built.manifest.route.clone();
+    let manifest_path = project.path().join(manifest_relative_path(&route));
+    std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+    std::fs::write(&manifest_path, &built.manifest_file.bytes).unwrap();
+    assert!(!is_current(project.path(), &inventory, &route).unwrap());
+    std::fs::write(&manifest_path, &old).unwrap();
+    let error = is_current(project.path(), &inventory, &route).unwrap_err();
+    assert_eq!(error.code(), "GF_VALIDATION", "{error}");
+    assert!(error.to_string().contains("rebuild_property_indexes"));
 }

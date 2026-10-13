@@ -116,16 +116,17 @@ same blob is answered. This narrows the old guarantee only in blast radius, not
 in what is trusted; a statement never decodes a byte that no checksum covered,
 and a mismatch is `GF_VALIDATION` as before.
 
-A manifest without `page_rows` names the layout before pages: every blob is one
-batch covered by one XXH64 in its seal. It still reads, through the same reader
-as one page checked against the blob's seal, so a durable project whose index
-was built before pages answers without a rebuild. Nothing rewrites it on read;
-`rebuild_property_indexes` replaces it with the paged layout. Writers only write
-pages, so the whole-blob reader is a retained read path for projects that
-exist, not a second format that is still produced. This is a deliberate
-exception to the pre-1.0 rule of replacing formats in place, made so that
-published SF1 projects keep answering; delete the reader when no supported
-project predates pages.
+The format name stays `graphforge-edge-property-index/1`: the layout before pages
+is superseded in place, not versioned. `page_rows` is a required manifest field, so
+the manifest of an index built before pages does not decode, and the reader refuses
+it as it refuses every manifest it cannot use (damage, an unknown format, an invalid
+page size): `GF_VALIDATION`, naming the manifest and `rebuild_property_indexes`. It
+is not treated as absent or stale, so a statement that reads edge properties through
+the index of such a project fails instead of silently answering from the overlay.
+There is no whole-blob reader. The index is derived data and the fragments remain
+the authority, so a project whose index predates pages runs
+`rebuild_property_indexes` once, and the rebuilt index is paged. Nothing rewrites it
+on read.
 
 Page size trades decode work against bytes: each page is its own Zstd frame, so
 smaller pages decode less per target and compress worse. IC5 touches about one
@@ -283,6 +284,11 @@ relation, now read from the index.
 - A project published before the index, one built by a staged append, and a
   route changed since the build answer through the overlay until
   `rebuild_property_indexes`. Nothing breaks and nothing is rebuilt silently.
+- A project whose edge-property index was built before pages is not that case:
+  its manifest does not decode, so a statement that reads edge properties through
+  the index fails with `GF_VALIDATION` until `rebuild_property_indexes` replaces
+  the index. Statements that read no edge property through the index are
+  unaffected.
 - A route poisoned mid-build (a tombstone, an unsorted fragment, a conflicting
   column type, a single value over 1 MiB) is not indexed; packs written before
   the decision stay in the generation as unreferenced files.

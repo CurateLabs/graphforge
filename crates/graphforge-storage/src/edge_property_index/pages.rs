@@ -20,10 +20,10 @@
 //! is fixed by the shard's row count and the manifest's `page_rows`, so a
 //! reader knows how long the directory entries are before it has read them.
 //!
-//! A manifest without `page_rows` names the layout this replaced: each blob is
-//! one batch covered by one checksum. [`PackHandles`] still reads it, as a blob
-//! of a single page, so an index built before paging answers until it is
-//! rebuilt.
+//! Every manifest names `page_rows`. An index built before paging has none, so
+//! its manifest does not decode and is refused like any other manifest the
+//! reader cannot use; the index is derived data and `rebuild_property_indexes`
+//! replaces it.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -193,16 +193,6 @@ struct Page {
     hi: u128,
 }
 
-#[derive(Debug)]
-enum Layout {
-    /// One batch covered by the blob's checksum, as before paging.
-    Whole,
-    Paged {
-        schema: Vec<u8>,
-        pages: Vec<Page>,
-    },
-}
-
 /// A column blob whose directory has been read and checked against its seal.
 #[derive(Debug)]
 pub(super) struct OpenBlob {
@@ -210,11 +200,13 @@ pub(super) struct OpenBlob {
     keys: Keys,
     rows: u64,
     page_rows: u64,
-    layout: Layout,
+    /// The IPC schema message every page is decoded against.
+    schema: Vec<u8>,
+    pages: Vec<Page>,
 }
 
 impl OpenBlob {
-    /// Rows of each page but the last. A whole blob is a single page.
+    /// Rows of each page but the last.
     pub(super) fn page_rows(&self) -> usize {
         usize::try_from(self.page_rows).expect("page rows fit usize")
     }
@@ -225,20 +217,15 @@ impl OpenBlob {
         usize::try_from(self.page_rows.min(self.rows - start)).expect("page rows fit usize")
     }
 
-    fn bounds(&self, page: usize) -> Option<(u128, u128)> {
-        match &self.layout {
-            Layout::Whole => None,
-            Layout::Paged { pages, .. } => Some((pages[page].lo, pages[page].hi)),
-        }
+    fn bounds(&self, page: usize) -> (u128, u128) {
+        (self.pages[page].lo, self.pages[page].hi)
     }
 
     /// The pages that can hold `targets`, each with the targets that fall in
     /// it. UUID pages are disjoint and ascending, so a target belongs to at
     /// most one, and `targets` must ascend.
     pub(super) fn uuid_pages(&self, targets: &[[u8; 16]]) -> Vec<(usize, Range<usize>)> {
-        let Layout::Paged { pages, .. } = &self.layout else {
-            return vec![(0, 0..targets.len())];
-        };
+        let pages = &self.pages;
         let mut found: Vec<(usize, Range<usize>)> = Vec::new();
         for (index, target) in targets.iter().enumerate() {
             let key = uuid_key(target);
@@ -258,9 +245,7 @@ impl OpenBlob {
     /// ascend. Ids are in UUID order, so page ranges may overlap and one id
     /// can only be ruled out by its page's bounds, not its neighbours'.
     pub(super) fn id_pages(&self, targets: &[u64]) -> Vec<usize> {
-        let Layout::Paged { pages, .. } = &self.layout else {
-            return vec![0];
-        };
+        let pages = &self.pages;
         (0..pages.len())
             .filter(|&index| {
                 let (lo, hi) = (pages[index].lo, pages[index].hi);
@@ -272,10 +257,10 @@ impl OpenBlob {
 
     /// The ids of the blob lie in `min..=max`, as the shard's manifest entry says.
     pub(super) fn check_id_range(&self, min: u64, max: u64) -> Result<(), GfError> {
-        if let Layout::Paged { pages, .. } = &self.layout
-            && pages
-                .iter()
-                .any(|page| page.lo < u128::from(min) || page.hi > u128::from(max))
+        if self
+            .pages
+            .iter()
+            .any(|page| page.lo < u128::from(min) || page.hi > u128::from(max))
         {
             return Err(validation("shard id lies outside its manifest range"));
         }
@@ -307,7 +292,7 @@ fn check_page(
     keys: Keys,
     array: &ArrayRef,
     rows: usize,
-    bounds: Option<(u128, u128)>,
+    bounds: (u128, u128),
 ) -> Result<(), GfError> {
     if array.len() != rows {
         return Err(validation("blob shape does not match its manifest"));
@@ -326,11 +311,7 @@ fn check_page(
             if (1..uuids.len()).any(|row| uuids.value(row - 1) >= uuids.value(row)) {
                 return Err(validation("shard UUIDs are not strictly ascending"));
             }
-            if rows > 0
-                && bounds.is_some_and(|bounds| {
-                    bounds != (uuid_key(uuids.value(0)), uuid_key(uuids.value(rows - 1)))
-                })
-            {
+            if rows > 0 && bounds != (uuid_key(uuids.value(0)), uuid_key(uuids.value(rows - 1))) {
                 return Err(validation("page does not match its directory entry"));
             }
         }
@@ -338,7 +319,7 @@ fn check_page(
             if array.data_type() != &DataType::UInt64 || array.null_count() != 0 {
                 return Err(validation("shard id column has the wrong type"));
             }
-            if rows > 0 && bounds.is_some() && Some(page_bounds(keys, array)?) != bounds {
+            if rows > 0 && page_bounds(keys, array)? != bounds {
                 return Err(validation("page does not match its directory entry"));
             }
         }
@@ -350,13 +331,13 @@ fn check_page(
 /// open for the rest of the lookup.
 pub(super) struct PackHandles {
     directory: PathBuf,
-    /// Rows per page of the route's blobs; `None` for the layout before paging.
-    page_rows: Option<u32>,
+    /// Rows per page of the route's blobs, from its manifest.
+    page_rows: u32,
     open: BTreeMap<u32, (PathBuf, File)>,
 }
 
 impl PackHandles {
-    pub(super) fn new(directory: PathBuf, page_rows: Option<u32>) -> Self {
+    pub(super) fn new(directory: PathBuf, page_rows: u32) -> Self {
         Self {
             directory,
             page_rows,
@@ -402,24 +383,15 @@ impl PackHandles {
         Ok(bytes)
     }
 
-    /// Open the blob `seal` names: its directory when paged, read from the end
-    /// of the blob and checked against the seal.
+    /// Open the blob `seal` names: its directory, read from the end of the blob
+    /// and checked against the seal.
     pub(super) fn open_blob(
         &mut self,
         seal: BlobSeal,
         rows: u64,
         keys: Keys,
     ) -> Result<OpenBlob, GfError> {
-        let Some(page_rows) = self.page_rows else {
-            return Ok(OpenBlob {
-                seal,
-                keys,
-                rows,
-                page_rows: rows.max(1),
-                layout: Layout::Whole,
-            });
-        };
-        let page_rows = u64::from(page_rows);
+        let page_rows = u64::from(self.page_rows);
         let count =
             usize::try_from(rows.div_ceil(page_rows)).map_err(|_| self.corrupt(seal.pack))?;
         let fixed = count * keys.entry_bytes() + TRAILER_BYTES;
@@ -483,10 +455,8 @@ impl PackHandles {
             keys,
             rows,
             page_rows,
-            layout: Layout::Paged {
-                schema: schema.to_vec(),
-                pages,
-            },
+            schema: schema.to_vec(),
+            pages,
         })
     }
 
@@ -499,11 +469,7 @@ impl PackHandles {
         wanted: &[usize],
     ) -> Result<Vec<ArrayRef>, GfError> {
         debug_assert!(wanted.windows(2).all(|pair| pair[0] < pair[1]));
-        let Layout::Paged { schema, pages } = &blob.layout else {
-            let array = self.read_whole(blob)?;
-            check_page(blob.keys, &array, blob.rows_in(0), None)?;
-            return Ok(vec![array]);
-        };
+        let (schema, pages) = (&blob.schema, &blob.pages);
         let pack = blob.seal.pack;
         let mut decoder = StreamDecoder::new();
         let mut header = Buffer::from_slice_ref(schema);
@@ -555,26 +521,5 @@ impl PackHandles {
             next = end;
         }
         Ok(arrays)
-    }
-
-    /// The whole column of a blob written before paging, checked against its
-    /// seal.
-    fn read_whole(&mut self, blob: &OpenBlob) -> Result<ArrayRef, GfError> {
-        let seal = blob.seal;
-        let bytes = self.read_range(seal.pack, seal.offset, seal.byte_length)?;
-        if crate::corruption_checksum::checksum(&bytes) != seal.xxh64 {
-            return Err(self.corrupt(seal.pack));
-        }
-        let mut reader =
-            arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(&bytes), None)
-                .map_err(|e| validation(e.to_string()))?;
-        let batch = reader
-            .next()
-            .ok_or_else(|| validation("blob holds no batch"))?
-            .map_err(|e| validation(e.to_string()))?;
-        if reader.next().is_some() || batch.num_columns() != 1 {
-            return Err(validation("blob shape does not match its manifest"));
-        }
-        Ok(Arc::clone(batch.column(0)))
     }
 }
