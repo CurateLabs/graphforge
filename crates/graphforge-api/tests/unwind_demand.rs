@@ -184,3 +184,54 @@ fn collecting_then_unwinding_feeds_a_further_match() {
         &["1,3", "1,3", "2,1", "2,2", "3,2", "3,2", "3,3"],
     );
 }
+
+// ---------------------------------------------------------------------------
+// Plan shape
+// ---------------------------------------------------------------------------
+
+/// Collect each node's neighbours, then explode them: the input of the UNWIND
+/// carries the collected list and the grouped node's whole row, and the parent
+/// reads two identities.
+const COLLECT_THEN_UNWIND: &str = "MATCH (a:W)-[:K]->(b:W) WITH a, collect(b) AS bs UNWIND bs AS b \
+     RETURN a.id AS a, b.id AS b";
+
+/// The `N` of the `copied=N` the plan's `UnwindExec` line prints: how many
+/// input columns UNWIND copies for every element it emits.
+fn unwind_copied_columns(forge: &GraphForge, query: &str) -> usize {
+    let explain = forge
+        .explain(query)
+        .unwrap_or_else(|e| panic!("{query}: {e:?}"));
+    let plan = explain
+        .split_once("PhysicalPlan\n------------\n")
+        .expect("physical-plan section")
+        .1;
+    let line = plan
+        .lines()
+        .find(|line| line.contains("UnwindExec"))
+        .unwrap_or_else(|| panic!("no `UnwindExec` in the plan:\n{plan}"));
+    let (_, tail) = line
+        .split_once("copied=")
+        .unwrap_or_else(|| panic!("`UnwindExec` prints no copied columns: {line}\n{plan}"));
+    tail.chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .unwrap_or_else(|_| panic!("no number after `copied=` in `{line}`"))
+}
+
+/// The columns UNWIND copies per element are the ones the parent reads, however
+/// many properties the grouped node carries, and the collected list itself is
+/// not one of them.
+#[test]
+fn unwind_copies_the_same_columns_over_wide_nodes() {
+    let narrow = unwind_copied_columns(&forge(0), COLLECT_THEN_UNWIND);
+    let wide = unwind_copied_columns(&forge(40), COLLECT_THEN_UNWIND);
+    assert_eq!(
+        narrow, wide,
+        "the columns UNWIND copies grew with the unread properties"
+    );
+    assert!(
+        wide <= 3,
+        "UNWIND copies {wide} columns for a parent that reads two identities"
+    );
+}
