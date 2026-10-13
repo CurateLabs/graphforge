@@ -32,6 +32,23 @@ pub(super) fn plan_embedded(
     datafusion::physical_expr::create_physical_expr(&expr, schema, &ExecutionProps::new())
 }
 
+/// Whether `expr`, an expression embedded in a list UDF, applies to elements of
+/// the type `schema` declares: the plan-time type check of a quantifier or list
+/// comprehension predicate.
+///
+/// The type is resolved on `expr` as written, because simplification can
+/// replace a type-checked operator with one planning does not check
+/// (`cypher_eq(x % 2, 0)` over strings simplifies to a plain `=`, which plans
+/// and then fails when it runs), and the simplified form must plan.
+pub(super) fn check_embedded(
+    expr: &DfExpr,
+    schema: &datafusion::common::DFSchema,
+) -> datafusion::error::Result<()> {
+    use datafusion::logical_expr::ExprSchemable;
+    expr.get_type(schema)?;
+    plan_embedded(expr, schema).map(drop)
+}
+
 // ---------------------------------------------------------------------------
 // cypher_quantifier UDF (all/any/none/single)
 // ---------------------------------------------------------------------------

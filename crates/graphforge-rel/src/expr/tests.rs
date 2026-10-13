@@ -479,6 +479,43 @@ fn cypher_quantifier_runs_predicates_that_planning_rewrites() {
 }
 
 #[test]
+fn a_predicate_that_cannot_apply_to_the_list_elements_is_refused_at_planning() {
+    use graphforge_ir::QuantifierKind::All;
+
+    // `all(x IN ['Clara'] WHERE x % 2 = 0)`: arithmetic over strings is an
+    // openCypher `InvalidArgumentType`, raised when the query is planned, not
+    // when it runs.
+    let mut arena = ExprArena::new();
+    let mut vm = VarMap::new();
+    vm.insert(VarId(0), "x");
+    let name = arena.push(IrExpr::Literal(IrLiteral::Str("Clara".into())));
+    let list = arena.push(IrExpr::ListLiteral(vec![name]));
+    let element = arena.push(IrExpr::VarRef(VarId(0)));
+    let two = arena.push(IrExpr::Literal(IrLiteral::Int(2)));
+    let zero = arena.push(IrExpr::Literal(IrLiteral::Int(0)));
+    let remainder = arena.push(IrExpr::BinaryOp {
+        op: BinaryOpKind::Mod,
+        left: element,
+        right: two,
+    });
+    let even = arena.push(IrExpr::BinaryOp {
+        op: BinaryOpKind::Eq,
+        left: remainder,
+        right: zero,
+    });
+    let quantifier = arena.push(IrExpr::Quantifier {
+        kind: All,
+        loop_var: VarId(0),
+        list,
+        predicate: even,
+    });
+    let error = make_lowerer(&arena, &vm)
+        .lower(quantifier)
+        .expect_err("a string is not a number");
+    assert!(matches!(error, LoweringError::InvalidType(_)), "{error:?}");
+}
+
+#[test]
 fn quantifier_over_struct_elements_reads_a_property_no_element_stores_as_null() {
     use datafusion::arrow::datatypes::{DataType, Field, Fields, Schema};
     use datafusion::common::DFSchema;

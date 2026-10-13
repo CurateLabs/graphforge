@@ -24,7 +24,7 @@ use list_values::{
 };
 mod list_execution;
 pub use list_execution::rewrite_embedded_expressions;
-use list_execution::{CypherInvariantQuantifier, CypherListComp, CypherQuantifier, plan_embedded};
+use list_execution::{CypherInvariantQuantifier, CypherListComp, CypherQuantifier, check_embedded};
 #[cfg(test)]
 use list_execution::{INVARIANT_QUANTIFIER_ROWS, reduce_invariant_quantifier, reduce_quantifier};
 mod scalar_execution;
@@ -1247,7 +1247,7 @@ impl<'a> ExprLowerer<'a> {
             use datafusion::common::DFSchema;
             let schema = Schema::new(vec![Field::new(&elem_name, elem_type, true)]);
             if let Ok(df_schema) = DFSchema::try_from(schema)
-                && plan_embedded(&pred_expr, &df_schema).is_err()
+                && check_embedded(&pred_expr, &df_schema).is_err()
             {
                 return Err(LoweringError::InvalidType(format!(
                     "quantifier predicate cannot apply to the list's element type ({kind:?})"
@@ -1394,7 +1394,7 @@ impl<'a> ExprLowerer<'a> {
             use datafusion::common::DFSchema;
             let schema = Schema::new(vec![Field::new(&elem_name, elem_type, true)]);
             if let Ok(df_schema) = DFSchema::try_from(schema)
-                && plan_embedded(fexpr, &df_schema).is_err()
+                && check_embedded(fexpr, &df_schema).is_err()
             {
                 return Err(LoweringError::InvalidType(
                     "list comprehension filter cannot apply to the list's element type".into(),
