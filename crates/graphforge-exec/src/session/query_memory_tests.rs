@@ -7,8 +7,10 @@ use super::*;
 use arrow::array::{Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
+use datafusion::common::tree_node::TreeNode;
 use datafusion::datasource::MemTable;
-use datafusion::physical_plan::displayable;
+use datafusion::physical_plan::{DisplayAs, DisplayFormatType, PlanProperties, displayable};
+use futures::StreamExt;
 use graphforge_ir::RuntimeCatalog;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -116,12 +118,92 @@ fn session_over(
     (session, dir)
 }
 
+/// Yields the thread once after each batch its input produces, before handing
+/// the batch on. Placed over an exchange it lets every other task that can run
+/// on the thread, the consumers of the exchange among them, run between two
+/// batches the exchange moves.
+#[derive(Debug)]
+struct YieldingExec {
+    input: Arc<dyn ExecutionPlan>,
+    properties: Arc<PlanProperties>,
+}
+
+impl YieldingExec {
+    fn over(input: Arc<dyn ExecutionPlan>) -> Arc<Self> {
+        let properties = Arc::clone(input.properties());
+        Arc::new(Self { input, properties })
+    }
+}
+
+impl DisplayAs for YieldingExec {
+    fn fmt_as(&self, _: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "YieldingExec")
+    }
+}
+
+impl ExecutionPlan for YieldingExec {
+    fn name(&self) -> &str {
+        "YieldingExec"
+    }
+
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.properties
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        mut children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        Ok(Self::over(children.swap_remove(0)))
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream, DataFusionError> {
+        let yielding = self.input.execute(partition, context)?.then(|batch| async {
+            tokio::task::yield_now().await;
+            batch
+        });
+        Ok(Box::pin(RecordBatchStreamAdapter::new(
+            self.input.schema(),
+            yielding,
+        )))
+    }
+}
+
 /// Run `sql`; its rendered rows and the physical plan with its metrics.
 async fn run(
     session: &ExecutionSession,
     sql: &str,
 ) -> Result<(Vec<String>, Arc<dyn ExecutionPlan>), DataFusionError> {
-    let plan = session.ctx.sql(sql).await?.create_physical_plan().await?;
+    run_plan(session, sql, false).await
+}
+
+/// `run`, with a [`YieldingExec`] over every repartition when
+/// `yield_after_exchange_batches`.
+async fn run_plan(
+    session: &ExecutionSession,
+    sql: &str,
+    yield_after_exchange_batches: bool,
+) -> Result<(Vec<String>, Arc<dyn ExecutionPlan>), DataFusionError> {
+    let mut plan = session.ctx.sql(sql).await?.create_physical_plan().await?;
+    if yield_after_exchange_batches {
+        plan = plan
+            .transform_up(|node| {
+                Ok(if node.name() == "RepartitionExec" {
+                    Transformed::yes(YieldingExec::over(node) as Arc<dyn ExecutionPlan>)
+                } else {
+                    Transformed::no(node)
+                })
+            })?
+            .data;
+    }
     let batches =
         datafusion::physical_plan::collect(Arc::clone(&plan), session.ctx.task_ctx()).await?;
     let rows = batches
@@ -211,10 +293,11 @@ async fn aggregate_spills_and_matches_the_large_budget(
     budget: u64,
     partitions: usize,
     keys: &[i64],
+    yield_after_exchange_batches: bool,
 ) {
     let spill = TempDir::new().unwrap();
     let (small, _small_dir) = session_over(budget, partitions, &spill, keys);
-    let (small_rows, small_plan) = run(&small, AGGREGATE)
+    let (small_rows, small_plan) = run_plan(&small, AGGREGATE, yield_after_exchange_batches)
         .await
         .expect("an aggregate over the budget must spill, not exhaust the pool");
     assert!(
@@ -240,7 +323,7 @@ async fn aggregate_spills_and_matches_the_large_budget(
 /// 64 MiB pool shared by the two partitions it is sized for.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_aggregate_whose_groups_exceed_the_budget_spills_and_matches_the_large_budget() {
-    aggregate_spills_and_matches_the_large_budget(64 * MIB, 2, &sequential_keys()).await;
+    aggregate_spills_and_matches_the_large_budget(64 * MIB, 2, &sequential_keys(), false).await;
 }
 
 /// Nine tenths of the groups hash into one of the two partitions, so that
@@ -254,5 +337,41 @@ async fn an_aggregate_whose_groups_exceed_the_budget_spills_and_matches_the_larg
 /// run 38245644578).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_aggregate_with_one_dominant_partition_spills_and_matches_the_large_budget() {
-    aggregate_spills_and_matches_the_large_budget(64 * MIB, 2, &skewed_keys(2, 90)).await;
+    aggregate_spills_and_matches_the_large_budget(64 * MIB, 2, &skewed_keys(2, 90), false).await;
+}
+
+/// The plan of the aggregate in the test below is
+///
+/// ```text
+/// AggregateExec: mode=FinalPartitioned, gby=[k], aggr=[max(a.pad)]
+///   RepartitionExec: partitioning=Hash([k@0], 2), input_partitions=2
+///     AggregateExec: mode=Partial, gby=[k], aggr=[max(a.pad)]
+///       DataSourceExec: partitions=2
+/// ```
+///
+/// Nine tenths of the groups reach the first output partition of the exchange.
+/// Its aggregate spills; the other, which gets the rest, spills as well and then
+/// waits for its input to end, holding 1.7 MiB of restarted state, and merges
+/// its spill files at the end. A partition of the exchange that its consumer
+/// does not read as fast as the partial aggregates fill it keeps the batches in
+/// the pool, and DataFusion's repartition spills them only when the pool
+/// refuses them. On a pool that gave the exchange everything up to the
+/// budget, the merge of the idle aggregate found 0 B available for its two
+/// consecutive reservations of a batch and failed with `Additional allocation
+/// failed for GroupedHashAggregateStream` while the exchange held 46 to 58 MB of
+/// the 64 MB pool (pull request runs 38341391991 and 38362228787).
+///
+/// The failure depends on the order in which the tasks run, which a runtime of
+/// several threads decides by timing, so it appeared in one run of a hundred or
+/// less. A runtime of one thread runs the tasks in a fixed order, and one yield
+/// after each batch the exchange moves reproduces the order in which the
+/// exchange fills the pool before the idle aggregate merges, every time. No
+/// other count of yields does (none, two, four, eight and thirty-two pass on
+/// the pool without a floor), and neither does a pause on a runtime of several
+/// threads, so this test pins one interleaving, not the class; the pool's own
+/// tests pin the rule that closes the class.
+#[tokio::test(flavor = "current_thread")]
+async fn an_aggregate_that_waits_while_the_exchange_fills_the_pool_spills_and_matches_the_large_budget()
+ {
+    aggregate_spills_and_matches_the_large_budget(64 * MIB, 2, &skewed_keys(2, 90), true).await;
 }
