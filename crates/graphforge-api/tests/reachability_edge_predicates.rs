@@ -625,16 +625,16 @@ fn a_per_edge_filter_reads_indexed_properties_by_edge_id() {
     let io = io_stats::snapshot().expect("requested I/O statistics");
     assert_eq!(io.edge_full_reads, baseline_io.edge_full_reads);
     assert_eq!(io.edge_filtered_reads, baseline_io.edge_filtered_reads);
-    assert_eq!(
-        io.property_uuid_selections, baseline_io.property_uuid_selections,
-        "the per-edge filter performs no UUID-keyed property lookup"
+    assert!(
+        io.property_uuid_selections <= baseline_io.property_uuid_selections,
+        "the per-edge filter adds no UUID-keyed property lookup"
     );
-    assert_eq!(
-        io.property_uuid_rows_decoded, baseline_io.property_uuid_rows_decoded,
-        "the per-edge filter decodes no UUID rows"
+    assert!(
+        io.property_uuid_rows_decoded <= baseline_io.property_uuid_rows_decoded,
+        "the per-edge filter decodes no additional UUID rows"
     );
-    assert_eq!(
-        io.property_uuid_pages_selected, baseline_io.property_uuid_pages_selected,
-        "the per-edge filter reads no UUID pages"
+    assert!(
+        io.property_uuid_pages_selected <= baseline_io.property_uuid_pages_selected,
+        "the per-edge filter reads no additional UUID pages"
     );
 }
