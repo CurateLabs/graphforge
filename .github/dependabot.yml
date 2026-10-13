@@ -117,8 +117,8 @@ updates:
   # Root npm / pnpm workspace
   # Repo standard pins TypeScript exactly to 5.9.3 (see
   # docs/development/typescript-toolchain.md and root pnpm.overrides).
-  # The iac/pulumi/typescript entry below carries the same typescript
-  # major-update guardrail.
+  # Both npm entries ignore every typescript update: the exact pin moves only
+  # in a coordinated upgrade across all direct pins and overrides.
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
@@ -135,11 +135,10 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
-    # Pin stays 5.9.3; ignore majors so Dependabot cannot open unplanned 6+/7+ PRs.
-    # Coordinated pin/override bumps are manual (policy doc + all direct pins).
+    # Pin stays 5.9.3; coordinated pin/override bumps are manual (policy doc +
+    # all direct pins), so Dependabot never bumps typescript.
     ignore:
       - dependency-name: "typescript"
-        update-types: ["version-update:semver-major"]
     groups:
       npm-minor-patch:
         patterns:
@@ -195,7 +194,6 @@ updates:
     # Same TypeScript 5.9.3 pin as the root workspace.
     ignore:
       - dependency-name: "typescript"
-        update-types: ["version-update:semver-major"]
     groups:
       pulumi-typescript-minor-patch:
         patterns:
