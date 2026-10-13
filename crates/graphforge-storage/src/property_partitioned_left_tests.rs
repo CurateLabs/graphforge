@@ -361,9 +361,11 @@ fn selected_key_only_scan_supports_existing_collect_left_and_right_shapes() {
     assert_eq!(restored.schema().as_ref(), right_plan.schema().as_ref());
     let swapped = restored.input().downcast_ref::<HashJoinExec>().unwrap();
     assert_eq!(*swapped.join_type(), JoinType::Left);
+    assert_eq!(*swapped.partition_mode(), PartitionMode::Partitioned);
+    let build = swapped.left().downcast_ref::<RepartitionExec>().unwrap();
     assert!(
-        swapped
-            .left()
+        build
+            .input()
             .downcast_ref::<UuidBuildKeyTapExec>()
             .is_some()
     );

@@ -12,9 +12,7 @@ use datafusion::physical_plan::joins::{HashJoinExec, PartitionMode};
 use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 
-use crate::property_join_nomination::{
-    NominationLimits, UuidBuildKeyNomination, UuidBuildKeyTapExec,
-};
+use crate::property_join_nomination::UuidBuildKeyTapExec;
 use crate::property_scan::PropertyOverlayExec;
 
 fn unordered_bounded(plan: &dyn ExecutionPlan) -> bool {
@@ -33,12 +31,6 @@ pub(super) fn nominate_partitioned_left(
 ) -> Result<Option<Arc<dyn ExecutionPlan>>, DataFusionError> {
     nominate_partitioned_left_selected(join, None)
 }
-
-/// A frontier naming more than `1 / NOMINATION_ROUTE_DIVISOR` of its route's
-/// rows is not nominated: past about half the route, one sequential scan
-/// reads less than the point reads the nominated set would drive, so the
-/// nomination abandons itself and the scan runs unpruned.
-const NOMINATION_ROUTE_DIVISOR: usize = 2;
 
 /// Prune a partitioned LEFT enrichment's direct property scan to the UUIDs
 /// its preserved side produces, without changing the join.
@@ -89,11 +81,7 @@ pub(super) fn nominate_partitioned_left_selected(
     }
     // Keep the preserved side's operators. NULL keys are omitted from the
     // nomination, but their unmatched LEFT rows remain in the join.
-    let nomination = UuidBuildKeyNomination::with_limits(NominationLimits {
-        max_ids: scan
-            .planned_rows()
-            .map(|rows| rows / NOMINATION_ROUTE_DIVISOR),
-    });
+    let nomination = super::route_nomination(scan);
     let frontier: Arc<dyn ExecutionPlan> = Arc::new(CoalescePartitionsExec::new(
         super::exchanges::elide(Arc::clone(join.left()))?,
     ));

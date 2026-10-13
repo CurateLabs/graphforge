@@ -22,8 +22,28 @@ use datafusion::physical_plan::joins::HashJoinExec;
 use datafusion::physical_plan::joins::PartitionMode;
 use datafusion::physical_plan::repartition::RepartitionExec;
 
-use crate::property_join_nomination::{UuidBuildKeyNomination, UuidBuildKeyTapExec};
+use crate::property_join_nomination::{
+    NominationLimits, UuidBuildKeyNomination, UuidBuildKeyTapExec,
+};
 use crate::property_scan::PropertyOverlayExec;
+
+/// A frontier naming more than `1 / NOMINATION_ROUTE_DIVISOR` of its route's
+/// rows is not nominated: past about half the route, one sequential scan
+/// reads less than the point reads the nominated set would drive, so the
+/// nomination abandons itself and the scan runs unpruned.
+const NOMINATION_ROUTE_DIVISOR: usize = 2;
+
+/// A nomination for `scan` that abandons once the preserved frontier names
+/// more than half of the route's planned rows, or its key set would outgrow
+/// an eighth of the query pool. Abandoning only stops the pruning; the scan
+/// then reads the route as the un-nominated join would.
+fn route_nomination(scan: &PropertyOverlayExec) -> Arc<UuidBuildKeyNomination> {
+    UuidBuildKeyNomination::with_limits(NominationLimits {
+        max_ids: scan
+            .planned_rows()
+            .map(|rows| rows / NOMINATION_ROUTE_DIVISOR),
+    })
+}
 
 /// Approves only finite UUID keys collected from a surviving join's build side.
 ///
@@ -277,8 +297,14 @@ fn has_unknown_hash_key(partitioning: &Partitioning, plan: &dyn ExecutionPlan) -
 /// Reorient the exact physical shape used for a partitioned destination
 /// enrichment: a direct property scan is the build side of CollectLeft RIGHT,
 /// and the preserved frontier produces the parent's RoundRobin partitions.
-/// Swapping makes the frontier the single LEFT-preserved build side, so a
-/// completed frontier UUID nomination can safely prune only that direct scan.
+///
+/// The swapped join is rebuilt as a hash-partitioned LEFT join, not a
+/// CollectLeft one, so the frontier is never concatenated into one Arrow batch
+/// (a CollectLeft build overflows 32-bit offsets on wide frontier rows). The
+/// frontier is tapped on its key column as it streams, then hashed into the
+/// parent's partition count; the scan is hashed the same way, and waits for the
+/// completed tap before it reads only the frontier's keys. A single-partition
+/// parent keeps the CollectLeft join as DataFusion planned it.
 fn nominate_collect_left_right(
     join: &HashJoinExec,
 ) -> Result<Option<Arc<dyn ExecutionPlan>>, DataFusionError> {
@@ -301,6 +327,12 @@ fn nominate_collect_left_right_inner(
 
     let join_plan: &dyn ExecutionPlan = join;
     let output_partitioning = join_plan.output_partitioning().clone();
+    let Partitioning::RoundRobinBatch(partitions) = output_partitioning else {
+        return Ok(None);
+    };
+    if partitions < 2 {
+        return Ok(None);
+    }
     let Some(scan) = join.left().downcast_ref::<PropertyOverlayExec>() else {
         return Ok(None);
     };
@@ -362,8 +394,11 @@ fn nominate_collect_left_right_inner(
     }) else {
         return Ok(None);
     };
+    let Some(swapped_scan) = swapped_join.right().downcast_ref::<PropertyOverlayExec>() else {
+        return Ok(None);
+    };
 
-    let nomination = UuidBuildKeyNomination::new();
+    let nomination = route_nomination(swapped_scan);
     let coalesced_frontier: Arc<dyn ExecutionPlan> =
         Arc::new(CoalescePartitionsExec::new(Arc::clone(swapped_join.left())));
     let tapped_frontier: Arc<dyn ExecutionPlan> = Arc::new(UuidBuildKeyTapExec::new(
@@ -371,22 +406,35 @@ fn nominate_collect_left_right_inner(
         build_column,
         Arc::clone(&nomination),
     ));
-    let Some(swapped_scan) = swapped_join.right().downcast_ref::<PropertyOverlayExec>() else {
-        return Ok(None);
-    };
+    let (build_keys, probe_keys): (Vec<_>, Vec<_>) = swapped_join
+        .on()
+        .iter()
+        .map(|(build, probe)| (Arc::clone(build), Arc::clone(probe)))
+        .unzip();
+    let build: Arc<dyn ExecutionPlan> = Arc::new(RepartitionExec::try_new(
+        tapped_frontier,
+        Partitioning::Hash(build_keys, partitions),
+    )?);
     let nominated_scan: Arc<dyn ExecutionPlan> =
         Arc::new(swapped_scan.with_uuid_nomination(nomination));
+    let probe: Arc<dyn ExecutionPlan> = Arc::new(RepartitionExec::try_new(
+        nominated_scan,
+        Partitioning::Hash(probe_keys, partitions),
+    )?);
     let rewritten = swapped_join
         .builder()
-        .with_new_children(vec![tapped_frontier, nominated_scan])?
+        .with_partition_mode(PartitionMode::Partitioned)
+        .with_new_children(vec![build, probe])?
         .reset_state()
         .recompute_properties()
         .build_exec()?;
     if rewritten.schema().as_ref() != join.schema().as_ref() {
         return Ok(None);
     }
-    let restored: Arc<dyn ExecutionPlan> =
-        Arc::new(RepartitionExec::try_new(rewritten, output_partitioning)?);
+    let restored: Arc<dyn ExecutionPlan> = Arc::new(RepartitionExec::try_new(
+        rewritten,
+        Partitioning::RoundRobinBatch(partitions),
+    )?);
     Ok(Some(restored))
 }
 
@@ -502,7 +550,7 @@ fn nominate_existing_collect_left_inner(
         return Ok(None);
     }
 
-    let nomination = UuidBuildKeyNomination::new();
+    let nomination = route_nomination(scan);
     let tapped_left: Arc<dyn ExecutionPlan> = Arc::new(UuidBuildKeyTapExec::new(
         Arc::clone(join.left()),
         build_column,

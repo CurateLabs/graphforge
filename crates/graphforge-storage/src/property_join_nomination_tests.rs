@@ -385,6 +385,9 @@ fn direct_collect_left_enrichment_taps_only_eligible_scans() {
 
 #[test]
 fn partitioned_collect_left_right_enrichment_swaps_and_restores_parent_contract() {
+    use datafusion::physical_expr::Partitioning;
+    use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+
     let rule = PropertyFilterApprovalRule;
     let config = ConfigOptions::default();
     for partitions in [2, 4] {
@@ -395,7 +398,7 @@ fn partitioned_collect_left_right_enrichment_swaps_and_restores_parent_contract(
         assert!(original_join.contains_projection());
         assert_eq!(
             original.output_partitioning(),
-            &datafusion::physical_expr::Partitioning::RoundRobinBatch(partitions)
+            &Partitioning::RoundRobinBatch(partitions)
         );
         assert!(crate::property_filter_approval::is_filtered_seed_uuid_key(
             original_join.right().as_ref(),
@@ -406,29 +409,54 @@ fn partitioned_collect_left_right_enrichment_swaps_and_restores_parent_contract(
         let restored = optimized.downcast_ref::<RepartitionExec>().unwrap();
         assert_eq!(
             restored.partitioning(),
-            &datafusion::physical_expr::Partitioning::RoundRobinBatch(partitions)
+            &Partitioning::RoundRobinBatch(partitions)
         );
         assert_eq!(restored.schema().as_ref(), original.schema().as_ref());
         let join = restored.input().downcast_ref::<HashJoinExec>().unwrap();
         assert_eq!(*join.join_type(), JoinType::Left);
-        assert_eq!(*join.partition_mode(), PartitionMode::CollectLeft);
+        // The preserved frontier is hash-partitioned, never collected into one
+        // build batch: a wide frontier would overflow a single Arrow batch.
+        assert_eq!(*join.partition_mode(), PartitionMode::Partitioned);
         assert_eq!(join.schema().as_ref(), original.schema().as_ref());
         assert!(join.contains_projection());
-        assert!(join.left().downcast_ref::<UuidBuildKeyTapExec>().is_some());
-        let coalesced = join
-            .left()
-            .downcast_ref::<UuidBuildKeyTapExec>()
-            .unwrap()
-            .children()[0]
-            .downcast_ref::<datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec>(
-            )
+
+        let build = join.left().downcast_ref::<RepartitionExec>().unwrap();
+        assert!(matches!(
+            build.partitioning(),
+            Partitioning::Hash(keys, count) if keys.len() == 1 && *count == partitions
+        ));
+        let tap = build.input().downcast_ref::<UuidBuildKeyTapExec>().unwrap();
+        let coalesced = tap.children()[0]
+            .downcast_ref::<CoalescePartitionsExec>()
             .unwrap();
         assert_eq!(
             coalesced.input().output_partitioning(),
-            &datafusion::physical_expr::Partitioning::RoundRobinBatch(partitions)
+            &Partitioning::RoundRobinBatch(partitions)
         );
-        assert!(join.right().downcast_ref::<PropertyOverlayExec>().is_some());
+
+        let probe = join.right().downcast_ref::<RepartitionExec>().unwrap();
+        assert!(matches!(
+            probe.partitioning(),
+            Partitioning::Hash(keys, count) if keys.len() == 1 && *count == partitions
+        ));
+        assert!(
+            probe
+                .input()
+                .downcast_ref::<PropertyOverlayExec>()
+                .is_some()
+        );
     }
+}
+
+#[test]
+fn single_partition_right_enrichment_keeps_its_collect_left_join() {
+    let rule = PropertyFilterApprovalRule;
+    let config = ConfigOptions::default();
+    let original = right_enrichment_join(property_scan(None, None), 1, None);
+    let unchanged = rule.optimize(Arc::clone(&original), &config).unwrap();
+    let join = unchanged.downcast_ref::<HashJoinExec>().unwrap();
+    assert_eq!(*join.join_type(), JoinType::Right);
+    assert_eq!(*join.partition_mode(), PartitionMode::CollectLeft);
 }
 
 #[test]
