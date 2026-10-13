@@ -767,8 +767,16 @@ fn optional_enrichment_preserves_fanout_and_missing_properties() {
             )
             .unwrap();
         assert!(plan.contains("UuidBuildKeyTapExec"), "{plan}");
+        // One partition keeps the single collected build; more partitions
+        // stream the preserved side through a partitioned LEFT join so no
+        // build side is concatenated into one batch.
+        let mode = if partitions == 1 {
+            "CollectLeft"
+        } else {
+            "Partitioned"
+        };
         assert!(
-            plan.contains("HashJoinExec: mode=CollectLeft, join_type=Left"),
+            plan.contains(&format!("HashJoinExec: mode={mode}, join_type=Left")),
             "{plan}"
         );
         let (batches, io) = measured(&forge, query, 5);
