@@ -371,7 +371,9 @@ pub(super) fn read_property_targets(
         // authenticating every fragment it walks.
         if replay_budget.is_none()
             && !range_may_hold_unresolved(
-                inventory.fragment_footer_of(fragment, kind, route)?.uuid_range,
+                inventory
+                    .fragment_footer_of(fragment, kind, route)?
+                    .uuid_range,
                 &unresolved,
             )
         {
