@@ -204,6 +204,111 @@ fn identity_free_export_reads_no_edge_table_and_builds_no_hash_map() {
     assert_eq!(scanned.topology().neighbors, plain.topology().neighbors);
 }
 
+#[test]
+fn bfs_execution_omits_edge_identity_and_keeps_tie_paths() {
+    use arrow::array::{Array, FixedSizeBinaryArray, Float64Array, ListArray};
+    use graphforge_core::PathsOptions;
+    use graphforge_core::algorithms::PathAlgorithm;
+
+    let dir = TempDir::new().unwrap();
+    let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+    let label = EntityTypeId::decode(0).unwrap();
+    for index in 0..5 {
+        writer.create_node(node_uuid(index), label).unwrap();
+    }
+    // The two routes to node 3 tie, and 0 -> 1 is parallel. Ascending node ids
+    // select the path through 1, regardless of edge identity ordering.
+    for (index, (source, target)) in [(0, 2), (0, 1), (0, 1), (1, 3), (2, 3), (1, 4)]
+        .into_iter()
+        .enumerate()
+    {
+        writer
+            .create_edge(
+                edge_uuid(index),
+                "LINK",
+                &node_uuid(source),
+                &node_uuid(target),
+            )
+            .unwrap();
+    }
+    writer.flush().unwrap();
+    index_with_shards(dir.path(), 16);
+    let provider = persistent(dir.path());
+    drop(provider.adjacency("LINK", Direction::Out).unwrap());
+
+    let _capture = graphforge_storage::io_stats::CaptureScope::install();
+    let before = graphforge_storage::io_stats::snapshot().unwrap();
+    let batch = crate::algorithm_paths::paths_algorithm(
+        &provider,
+        dir.path(),
+        OntologyMode::Strict,
+        Some(node_uuid(0).into_bytes()),
+        None,
+        PathsOptions {
+            by: PathAlgorithm::Bfs,
+            via: Some("LINK".to_owned()),
+            directed: true,
+            ..PathsOptions::default()
+        },
+    )
+    .unwrap();
+    let after = graphforge_storage::io_stats::snapshot().unwrap();
+    assert_eq!(after.edge_full_reads, before.edge_full_reads);
+    assert_eq!(after.edge_full_rows, before.edge_full_rows);
+
+    let sources = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<FixedSizeBinaryArray>()
+        .unwrap();
+    let targets = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<FixedSizeBinaryArray>()
+        .unwrap();
+    let distances = batch
+        .column(2)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    let paths = batch
+        .column(3)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    let actual: Vec<_> = (0..batch.num_rows())
+        .map(|row| {
+            assert_eq!(sources.value(row), node_uuid(0).as_bytes());
+            let target = (0..5)
+                .find(|&index| targets.value(row) == node_uuid(index).as_bytes())
+                .unwrap();
+            let path_values = paths.value(row);
+            let path_values = path_values
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .unwrap();
+            let path = (0..path_values.len())
+                .map(|index| {
+                    (0..5)
+                        .find(|&node| path_values.value(index) == node_uuid(node).as_bytes())
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            (target, distances.value(row), path)
+        })
+        .collect();
+    assert_eq!(
+        actual,
+        vec![
+            (0, 0.0, vec![0]),
+            (1, 1.0, vec![0, 1]),
+            (2, 1.0, vec![0, 2]),
+            (3, 2.0, vec![0, 1, 3]),
+            (4, 2.0, vec![0, 1, 4]),
+        ]
+    );
+}
+
 /// The kernels that read only neighbor ordinals export without edge identity:
 /// running them reads no edge table. `degree` reports edges, keeps identity and
 /// is the positive control, so a zero for the others is not an artifact of what
