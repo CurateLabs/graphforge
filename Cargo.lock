@@ -1699,8 +1699,6 @@ dependencies = [
 [[package]]
 name = "datafusion-physical-plan"
 version = "54.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9bc84da934c903407ba297971ebcc020c4c1a38aafd765d6c144c76eff3fa6a1"
 dependencies = [
  "arrow",
  "arrow-data",

@@ -69,3 +69,13 @@ def test_retired_repository_identity_is_rejected_in_manifests(tmp_path: Path) ->
         )
         is None
     )
+
+
+def test_vendored_third_party_source_is_not_scanned_but_its_notice_is() -> None:
+    root = license_check.ROOT
+    upstream = root / "vendor" / "datafusion-physical-plan" / "src" / "lib.rs"
+    notice = root / "vendor" / "datafusion-physical-plan" / "GRAPHFORGE.md"
+    assert license_check.is_vendored_third_party(upstream)
+    assert not license_check.is_vendored_third_party(notice)
+    assert not license_check.is_vendored_third_party(root / "crates" / "graphforge-exec" / "lib.rs")
+    assert not license_check.is_vendored_third_party(root / "vendor")

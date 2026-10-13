@@ -128,6 +128,13 @@ FORBIDDEN_PATTERNS = (
     re.compile(r"\bC" + r"LA\b"),
 )
 SCAN_EXCLUSIONS = frozenset(THIRD_PARTY_NOTICE_COPIES)
+# Third-party source vendored under vendor/ keeps its upstream licence headers
+# verbatim (the Apache Software Foundation header names "contributor license
+# agreements"), as Apache-2.0 section 4(c) requires. The forbidden-claim scan
+# skips that code. The notice file we write for each vendored crate and every
+# first-party file stay scanned.
+VENDORED_DIR = ROOT / "vendor"
+VENDORED_NOTICE_NAME = "GRAPHFORGE.md"
 IGNORED_PARTS = {".git", ".venv", "node_modules", "target"}
 
 
@@ -140,6 +147,10 @@ def label(path: Path) -> str:
 
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
+
+
+def is_vendored_third_party(path: Path) -> bool:
+    return VENDORED_DIR in path.parents and path.name != VENDORED_NOTICE_NAME
 
 
 def tracked_text_paths() -> list[Path]:
@@ -158,7 +169,7 @@ def tracked_text_paths() -> list[Path]:
             path = ROOT / raw.decode("utf-8")
         except UnicodeDecodeError:
             continue
-        if path not in SCAN_EXCLUSIONS and path.is_file():
+        if path not in SCAN_EXCLUSIONS and not is_vendored_third_party(path) and path.is_file():
             paths.append(path)
     return paths
 
