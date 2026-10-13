@@ -269,6 +269,82 @@ fn page_pruning_reduces_the_bytes_the_file_system_serves() {
     assert!(narrow * 5 < file_len, "{narrow} of a {file_len} byte file");
 }
 
+/// A fragment of the fixture's identities followed by a payload column the
+/// probe never decodes, with the fixture's row groups and pages.
+fn write_fragment_with_payload(dir: &Path) -> PathBuf {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+        Field::new("node_id", DataType::UInt64, false),
+        Field::new("payload", DataType::UInt64, false),
+    ]));
+    let properties = crate::permanent_parquet::writer_properties()
+        .set_max_row_group_row_count(Some(GROUP_ROWS))
+        .set_data_page_row_count_limit(PAGE_ROWS)
+        .set_write_batch_size(PAGE_ROWS / 2)
+        .set_statistics_enabled(EnabledStatistics::Page)
+        .build();
+    let path = dir.join("with_payload.parquet");
+    let mut writer = ArrowWriter::try_new(
+        std::fs::File::create(&path).unwrap(),
+        Arc::clone(&schema),
+        Some(properties),
+    )
+    .unwrap();
+    for start in (0..ROWS).step_by(PAGE_ROWS) {
+        let rows = start..start + PAGE_ROWS;
+        let uuids = FixedSizeBinaryArray::try_from_iter(
+            rows.clone().map(|row| identity(row).as_bytes().to_vec()),
+        )
+        .unwrap();
+        let columns: Vec<Arc<dyn Array>> = vec![
+            Arc::new(uuids),
+            Arc::new(UInt64Array::from_iter_values(
+                rows.clone().map(|row| row as u64 + 1),
+            )),
+            Arc::new(UInt64Array::from_iter_values(rows.map(|row| row as u64))),
+        ];
+        writer
+            .write(&RecordBatch::try_new(Arc::clone(&schema), columns).unwrap())
+            .unwrap();
+    }
+    writer.close().unwrap();
+    path
+}
+
+#[test]
+fn a_cached_footer_keeps_the_page_layout_of_the_decoded_columns_only() {
+    // The cache holds a fragment for as long as the process lives, and a facade
+    // holds its probes: what they keep must not grow with the columns a probe
+    // never reads, nor with a column index it has already copied the bounds
+    // out of.
+    let dir = TempDir::new().unwrap();
+    let path = write_fragment_with_payload(dir.path());
+    let fragment = load_fragment(&path, "node_uuid", Some("node_id")).unwrap();
+    let metadata = fragment.metadata.metadata();
+    assert!(
+        metadata.column_index().is_none(),
+        "the column index is read once, for the page bounds"
+    );
+    let offsets = metadata.offset_index().expect("the page index was read");
+    assert_eq!(offsets.len() as u64, GROUPS);
+    let pages = (PAGES / GROUPS) as usize;
+    for group in offsets {
+        assert_eq!(group[0].page_locations().len(), pages, "node_uuid");
+        assert_eq!(group[1].page_locations().len(), pages, "node_id");
+        assert!(
+            group[2].page_locations().is_empty(),
+            "payload is not decoded"
+        );
+    }
+    // What is kept is what a page-selective decode needs.
+    let probe = probe_over(vec![fragment], Vec::new());
+    let (surrogates, metrics) = probe
+        .lookup_node_surrogates(&[identity(1_205), identity(3_999)])
+        .unwrap();
+    assert_eq!(surrogates, [Some(1_206), Some(4_000)]);
+    assert_eq!(metrics.pages_read, 2, "one page in each of two row groups");
+}
+
 #[test]
 fn a_cached_footer_never_sends_a_probe_to_the_path_it_was_first_read_from() {
     // Hydration hard-links one content-addressed object into every workspace, so
