@@ -1217,6 +1217,30 @@ fn collect_expr_columns(expr: &Arc<dyn PhysicalExpr>, required: &mut BTreeSet<us
     );
 }
 
+/// Record whether a variable-length expansion's trailing edge list is read.
+///
+/// The traversal reads its input columns whole: the seed, the bound
+/// destination and every column the rows carry forward. Only the trailing edge
+/// list is optional, and it is the one column that reads the edge file.
+fn rewrite_var_len_materialization(
+    plan: &Arc<dyn ExecutionPlan>,
+    var_len: &VarLenExpandExec,
+    required: &BTreeSet<usize>,
+) -> Result<Arc<dyn ExecutionPlan>> {
+    let width = var_len.schema().fields().len();
+    let edge_list_demanded = width
+        .checked_sub(1)
+        .is_some_and(|last| required.contains(&last));
+    let input = Arc::clone(plan.children()[0]);
+    let all_input = (0..input.schema().fields().len()).collect::<BTreeSet<_>>();
+    let child = rewrite_materialization(input, &all_input)?;
+    let rebuilt = Arc::clone(plan).with_new_children(vec![child])?;
+    let var_len = rebuilt.downcast_ref::<VarLenExpandExec>().ok_or_else(|| {
+        DataFusionError::Internal("VarLenExpandExec rewrite changed physical type".into())
+    })?;
+    Ok(var_len.with_edge_list_demanded(edge_list_demanded))
+}
+
 /// Propagate exact physical output demand through operators whose column
 /// dependency is explicit. Unknown and multi-input operators are conservative
 /// barriers and require every child column.
@@ -1277,22 +1301,7 @@ fn rewrite_materialization(
     }
 
     if let Some(var_len) = plan.downcast_ref::<VarLenExpandExec>() {
-        // The traversal reads its input columns whole: the seed, the bound
-        // destination and every column the rows carry forward. Only the
-        // trailing edge list is optional, and it is the one column that reads
-        // the edge file.
-        let width = var_len.schema().fields().len();
-        let edge_list_demanded = width
-            .checked_sub(1)
-            .is_some_and(|last| required.contains(&last));
-        let input = Arc::clone(plan.children()[0]);
-        let all_input = (0..input.schema().fields().len()).collect::<BTreeSet<_>>();
-        let child = rewrite_materialization(input, &all_input)?;
-        let rebuilt = plan.with_new_children(vec![child])?;
-        let var_len = rebuilt.downcast_ref::<VarLenExpandExec>().ok_or_else(|| {
-            DataFusionError::Internal("VarLenExpandExec rewrite changed physical type".into())
-        })?;
-        return Ok(var_len.with_edge_list_demanded(edge_list_demanded));
+        return rewrite_var_len_materialization(&plan, var_len, required);
     }
 
     if let Some(aggregate) = plan.downcast_ref::<AggregateExec>() {
