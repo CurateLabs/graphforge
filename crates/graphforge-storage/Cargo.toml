@@ -6,6 +6,8 @@ edition.workspace = true
 license.workspace = true
 license-file.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
 # `benches/ingest_gate.rs` is a shared module (the two-sided ingest gate's
 # judgment, #1476) included by the `storage_io` bench and by
 # `tests/ingest_gate_verdict.rs`, not a bench binary, so bench autodiscovery

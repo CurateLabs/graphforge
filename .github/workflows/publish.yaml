@@ -23,6 +23,10 @@ on:
       - scripts/publish_npm.py
       - scripts/set_release_version.py
       - scripts/ci/crate-publish-plan.py
+      - scripts/templates/crate-readme.md
+      - scripts/sync_project_skills.py
+      - crates/graphforge-cli/build.rs
+      - crates/graphforge-cli/project-skills/**
       - scripts/ci/prepare-napi-packages.py
       - scripts/ci/validate-napi-artifacts.py
       - scripts/ci/multi-ontology-packaged-smoke.mjs
@@ -414,9 +418,9 @@ jobs:
           retention-days: 7
 
   crates:
-    name: Package crates
+    name: Build packaged crates
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master as of 2026-08-05
@@ -434,8 +438,9 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
-      # The same order and flags the publish job uses, without the upload.
-      - name: Package every crate in publish order
+      # Cargo builds pristine tarballs, using a temporary registry for selected
+      # unpublished dependencies. All uploads wait for this job to pass.
+      - name: Build every packaged crate in publish order
         run: python3 scripts/publish_crates.py --dry-run
       - name: Require LICENSE and NOTICE inside every publishable package
         run: |
@@ -537,11 +542,14 @@ jobs:
     name: Install from the registries and run
     needs: [version, publish]
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       RELEASE_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master as of 2026-08-05
+        with:
+          toolchain: "1.96.0"
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -567,6 +575,15 @@ jobs:
         run: >-
           uv run --isolated --no-project --refresh --with "graphforge==$PYTHON_VERSION"
           python crates/graphforge-bindings-py/tests/smoke.py
+      - name: Install and run the crates.io CLI outside the workspace
+        run: |
+          mkdir -p "$RUNNER_TEMP/published-cli-build"
+          cd "$RUNNER_TEMP/published-cli-build"
+          cargo install graphforge-cli --version "$RELEASE_VERSION" --locked \
+            --root "$RUNNER_TEMP/published-cli"
+          actual="$("$RUNNER_TEMP/published-cli/bin/gf" --version)"
+          echo "$actual"
+          test "$actual" = "graphforge $RELEASE_VERSION"
       - name: Run the npm packages
         run: |
           mkdir -p "$RUNNER_TEMP/published-smoke"

@@ -201,13 +201,8 @@ def cargo_publish(
     run_publish: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
     now: Callable[[], datetime] | None = None,
 ) -> None:
-    """Run ``cargo publish`` for one crate, sleeping through bounded 429 waits.
-
-    Uses ``--no-verify``: some crates (notably ``graphforge-cli``) embed
-    workspace paths such as ``project-skills`` that are outside the packaged
-    tarball, so a verify build from the tarball alone would fail.
-    """
-    command = ["cargo", "publish", "-p", name, "--locked", "--no-verify"]
+    """Verify and publish one crate, sleeping through bounded 429 waits."""
+    command = ["cargo", "publish", "-p", name, "--locked"]
     runner = run_publish or _default_cargo_publish_run
     clock = now or (lambda: datetime.now(timezone.utc))
     waited = 0.0
@@ -291,8 +286,12 @@ def crate_exists(name: str) -> bool:
 
 
 def package(order: list[str]) -> None:
-    """Package every crate without uploading: the dry run of a release."""
-    command = ["cargo", "package", "--locked", "--no-verify", "--allow-dirty"]
+    """Build every extracted crate before uploading: the dry run of a release.
+
+    Selecting the entire publish set lets Cargo resolve unpublished workspace
+    dependencies from its temporary package registry during verification.
+    """
+    command = ["cargo", "package", "--locked", "--allow-dirty"]
     for name in order:
         command += ["-p", name]
     run(command)

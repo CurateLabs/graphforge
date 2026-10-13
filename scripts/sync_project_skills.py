@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "project-skills"
 MANIFEST = SOURCE / "manifest.json"
 DISTRIBUTION_COPIES = (
+    ROOT / "crates" / "graphforge-cli" / "project-skills",
     ROOT / "crates" / "graphforge-bindings-py" / "python" / "graphforge" / "_project_skills",
     ROOT / "packages" / "cli" / "project-skills",
 )

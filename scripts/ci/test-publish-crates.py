@@ -8,7 +8,9 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
+import tempfile
 
 SCRIPT = Path(__file__).parents[1] / "publish_crates.py"
 
@@ -148,8 +150,8 @@ mod.cargo_publish(
     now=lambda: fixed_now,
 )
 assert publish_calls == [
-    ["cargo", "publish", "-p", "graphforge-plan", "--locked", "--no-verify"],
-    ["cargo", "publish", "-p", "graphforge-plan", "--locked", "--no-verify"],
+    ["cargo", "publish", "-p", "graphforge-plan", "--locked"],
+    ["cargo", "publish", "-p", "graphforge-plan", "--locked"],
 ]
 assert sleeps == [268 + mod.RATE_LIMIT_BUFFER_SECONDS]
 
@@ -178,7 +180,7 @@ try:
     raise AssertionError("expected non-429 publish failure")
 except subprocess.CalledProcessError as exc:
     assert exc.returncode == 101
-assert publish_calls == [["cargo", "publish", "-p", "graphforge-plan", "--locked", "--no-verify"]]
+assert publish_calls == [["cargo", "publish", "-p", "graphforge-plan", "--locked"]]
 assert sleeps == []
 
 # A revoke outage is visible to the operator but cannot turn an accepted publish
@@ -254,7 +256,6 @@ assert commands == [
         "cargo",
         "package",
         "--locked",
-        "--no-verify",
         "--allow-dirty",
         "-p",
         "graphforge-core",
@@ -262,5 +263,52 @@ assert commands == [
         "graphforge-io",
     ]
 ], commands
+
+# Exercise Cargo's pristine-package build with the real CLI build script and
+# its shipped inputs, outside the workspace. Restoring the original escaping
+# input path must fail the same verification used before release uploads.
+with tempfile.TemporaryDirectory(prefix="graphforge-packaged-build-") as directory:
+    root = Path(directory)
+    fixture = root / "source"
+    fixture.mkdir()
+    (fixture / "src").mkdir()
+    (fixture / "src" / "lib.rs").write_text("", encoding="utf-8")
+    (fixture / "Cargo.toml").write_text(
+        '[package]\nname = "graphforge-packaged-build"\nversion = "0.0.0"\n'
+        'edition = "2024"\nlicense = "Apache-2.0"\n',
+        encoding="utf-8",
+    )
+    cli = SCRIPT.parents[1] / "crates" / "graphforge-cli"
+    build_script = (cli / "build.rs").read_text(encoding="utf-8")
+    (fixture / "build.rs").write_text(build_script, encoding="utf-8")
+    shutil.copytree(cli / "project-skills", fixture / "project-skills")
+    environment = {**os.environ, "CARGO_TARGET_DIR": str(root / "target")}
+    subprocess.run(
+        ["cargo", "generate-lockfile", "--offline"],
+        cwd=fixture,
+        env=environment,
+        check=True,
+    )
+    command = ["cargo", "package", "--locked", "--allow-dirty", "--offline"]
+    verified = subprocess.run(
+        command, cwd=fixture, env=environment, capture_output=True, text=True, check=False
+    )
+    assert verified.returncode == 0, verified.stderr
+    assert "Verifying graphforge-packaged-build" in verified.stderr
+
+    # Known positive: the exact repository-relative input from the broken CLI.
+    assert 'manifest_dir.join("project-skills")' in build_script
+    (fixture / "build.rs").write_text(
+        build_script.replace(
+            'manifest_dir.join("project-skills")',
+            'manifest_dir.join("../../project-skills")',
+        ),
+        encoding="utf-8",
+    )
+    rejected = subprocess.run(
+        command, cwd=fixture, env=environment, capture_output=True, text=True, check=False
+    )
+    assert rejected.returncode != 0, rejected.stderr
+    assert "read canonical project-skills directory" in rejected.stderr
 
 print("publish crates tests passed")

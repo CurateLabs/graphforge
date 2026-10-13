@@ -6,6 +6,10 @@ edition.workspace = true
 license.workspace = true
 license-file.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords = ["graph", "cypher", "knowledge-graph", "arrow"]
+categories = ["database", "science"]
 
 [features]
 # Preserve the existing facade for default consumers. Lean engine users can
