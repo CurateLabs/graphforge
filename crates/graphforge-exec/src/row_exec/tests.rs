@@ -412,9 +412,59 @@ fn optional_match_demand_is_the_keys_plus_the_columns_it_outputs() {
     assert_eq!(demand(&plain, &[3]), (vec![0], vec![0, 2]));
     assert_eq!(demand(&plain, &[2, 3]), (vec![0], vec![0, 1, 2]));
 
-    // A correlated sub-plan is seeded with every outer column, so it demands the
-    // whole outer row whatever the output needs.
+    // A correlated sub-plan is seeded with the outer rows, but the columns it
+    // reads from them are known only after the sub-plan is rewritten, so the
+    // split itself asks the outer input for no more than the join and the
+    // output need.
     let correlated = exec(&node.with_correlated_seed(5));
-    assert_eq!(demand(&correlated, &[]), (vec![0, 1], vec![0]));
-    assert_eq!(demand(&correlated, &[3]), (vec![0, 1], vec![0, 2]));
+    assert_eq!(correlated.correlated_seed_id(), Some(5));
+    assert_eq!(plain.correlated_seed_id(), None);
+    assert_eq!(demand(&correlated, &[]), (vec![0], vec![0]));
+    assert_eq!(demand(&correlated, &[3]), (vec![0], vec![0, 2]));
+}
+
+#[test]
+fn correlated_seed_demand_is_what_the_sub_plan_reads_through_its_leaves() {
+    use arrow::datatypes::Field;
+    use datafusion::physical_plan::union::UnionExec;
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("a", DataType::UInt64, false),
+        Field::new("b", DataType::UInt64, false),
+        Field::new("c", DataType::UInt64, false),
+    ]));
+    let leaf = |seed: u64, demand: Option<&[usize]>| -> Arc<dyn ExecutionPlan> {
+        let leaf = CorrelatedSeedExec::with_rows(seed, schema.clone(), None);
+        Arc::new(match demand {
+            Some(demand) => leaf.with_demand(demand.iter().copied().collect()),
+            None => leaf,
+        })
+    };
+    let demand_of = |plans: Vec<Arc<dyn ExecutionPlan>>, seed: u64| {
+        let plan: Arc<dyn ExecutionPlan> = UnionExec::try_new(plans).unwrap();
+        correlated_seed_demand(&plan, seed)
+            .into_iter()
+            .collect::<Vec<_>>()
+    };
+
+    // The leaves of one seed contribute the union of what each was asked for.
+    assert_eq!(
+        demand_of(vec![leaf(3, Some(&[0])), leaf(3, Some(&[2]))], 3),
+        vec![0, 2]
+    );
+    // A leaf no demand reached stands for every column.
+    assert_eq!(
+        demand_of(vec![leaf(3, Some(&[1])), leaf(3, None)], 3),
+        vec![0, 1, 2]
+    );
+    // A leaf of another seed is not this sub-plan's concern.
+    assert_eq!(
+        demand_of(vec![leaf(3, Some(&[1])), leaf(4, Some(&[0, 2]))], 3),
+        vec![1]
+    );
+    // An empty demand stays empty rather than widening to the whole row.
+    assert_eq!(
+        demand_of(vec![leaf(3, Some(&[])), leaf(3, Some(&[]))], 3),
+        Vec::<usize>::new()
+    );
 }
