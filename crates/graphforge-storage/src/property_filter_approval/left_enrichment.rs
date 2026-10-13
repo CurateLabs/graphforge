@@ -116,7 +116,10 @@ pub(super) fn nominate_partitioned_left_selected(
         .recompute_properties()
         .build_exec()?;
     if rebuilt.schema().as_ref() != original.schema().as_ref()
-        || !same_distribution(rebuilt.output_partitioning(), original.output_partitioning())
+        || !same_distribution(
+            rebuilt.output_partitioning(),
+            original.output_partitioning(),
+        )
     {
         return Ok(None);
     }

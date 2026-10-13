@@ -26,7 +26,8 @@ use crate::expand_exec::{ExpandExec, VarLenExpandExec, is_selected_endpoint_uuid
 /// The frontier need not be bounded. The storage layer collects only its key
 /// column, under a row and memory limit, and keeps the join partitioned.
 pub(crate) fn is_frontier_endpoint_uuid(plan: &dyn ExecutionPlan, column_index: usize) -> bool {
-    is_selected_endpoint_uuid(plan, column_index) || is_traversal_destination_uuid(plan, column_index)
+    is_selected_endpoint_uuid(plan, column_index)
+        || is_traversal_destination_uuid(plan, column_index)
 }
 
 /// The position of `node_uuid` within the destination node's topology columns.
