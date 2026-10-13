@@ -27,6 +27,7 @@ use crate::write_resource;
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
+use datafusion::common::DFSchema;
 use datafusion::common::DataFusionError;
 use datafusion::common::ParamValues;
 use datafusion::common::tree_node::Transformed;
@@ -177,6 +178,7 @@ fn plan_var_len_extension(
 
 fn plan_expand_extension(
     expand: &graphforge_plan::ExpandNode,
+    planner: &dyn PhysicalPlanner,
     physical_inputs: &[Arc<dyn ExecutionPlan>],
     session_state: &SessionState,
 ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
@@ -199,14 +201,43 @@ fn plan_expand_extension(
     let ordinal_identities = identity_extension
         .as_ref()
         .and_then(|extension| extension.0.as_ref().map(Arc::clone));
-    Ok(Arc::new(ExpandExec::new(
+    let mut exec = ExpandExec::new(
         expand,
         input,
         provider,
         ordinal_identities,
         ordinal_identity_required,
         &resource,
-    )))
+    );
+    if let Some(predicate) = &expand.edge_predicate {
+        // The predicate reads some of the hop's own relationship property
+        // columns, which are not in any plan schema once the expansion's output
+        // is left behind, so it is planned against a schema of just those
+        // columns, in the order the expansion hands them to it.
+        let read = predicate.column_refs();
+        let mut columns = Vec::new();
+        for (qualifier, field) in expand.edge_property_fields() {
+            if read.iter().any(|column| {
+                column.relation.as_ref() == Some(&qualifier) && column.name == *field.name()
+            }) {
+                columns.push((Some(qualifier), field));
+            }
+        }
+        let fields: Vec<_> = columns.iter().map(|(_, field)| Arc::clone(field)).collect();
+        let schema = Arc::new(DFSchema::new_with_metadata(
+            columns,
+            std::collections::HashMap::new(),
+        )?);
+        let simplifier = ExprSimplifier::new(
+            SimplifyContext::builder()
+                .with_schema(Arc::clone(&schema))
+                .build(),
+        );
+        let predicate = simplifier.simplify(predicate.clone())?;
+        let predicate = planner.create_physical_expr(&predicate, &schema, session_state)?;
+        exec = exec.with_edge_predicate(predicate, &fields);
+    }
+    Ok(Arc::new(exec))
 }
 
 /// Plans GraphForge's custom logical [`Extension`](LogicalPlan::Extension)
@@ -265,7 +296,8 @@ impl ExtensionPlanner for GraphForgeExtensionPlanner {
             )?)));
         }
         if let Some(expand) = node.as_any().downcast_ref::<graphforge_plan::ExpandNode>() {
-            return plan_expand_extension(expand, physical_inputs, session_state).map(Some);
+            return plan_expand_extension(expand, planner, physical_inputs, session_state)
+                .map(Some);
         }
         if let Some(var_len) = node.as_any().downcast_ref::<VarLenExpandNode>() {
             return plan_var_len_extension(var_len, planner, physical_inputs, session_state)

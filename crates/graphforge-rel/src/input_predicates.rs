@@ -31,6 +31,7 @@ pub fn optimizer_rules() -> Vec<Arc<dyn OptimizerRule + Send + Sync>> {
         .expect("pinned DataFusion optimizer includes filter pushdown");
     rules.insert(position + 1, Arc::new(FixedExpandInputPredicates));
     rules.insert(position + 2, Arc::new(VarLenExpandInputPredicates));
+    rules.insert(position + 3, Arc::new(FixedExpandEdgePredicates));
     // Last, so every filter has reached its final place before it is offered
     // to the property scan that can use it.
     rules.push(Arc::new(crate::stored_equality::StoredEqualityHints));
@@ -271,6 +272,91 @@ impl OptimizerRule for FixedExpandInputPredicates {
         config: &dyn OptimizerConfig,
     ) -> Result<Transformed<LogicalPlan>> {
         Self::push(plan, Some(config))
+    }
+}
+
+/// Copy the total, deterministic conjuncts of a filter over an adjacency-backed
+/// single-hop expansion that read only the hop's own relationship properties
+/// into the expansion, so it tests them on each traversed edge before it reads
+/// the edge's destination.
+///
+/// The filter above the expansion tests the same conjuncts on the rows that
+/// survive the destination read. Testing them earlier selects the same edges,
+/// so the filter stays where it is: this rule only changes how many destinations
+/// the expansion reads, never which rows leave it. Every conjunct moved is
+/// total (see [`total_predicate`]) and so is the whole filter, which is what
+/// lets an edge be dropped early without hiding an error a later conjunct would
+/// have raised on it.
+#[derive(Debug)]
+pub struct FixedExpandEdgePredicates;
+
+impl FixedExpandEdgePredicates {
+    fn push(plan: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
+        let LogicalPlan::Filter(filter) = &plan else {
+            return Ok(Transformed::no(plan));
+        };
+        let LogicalPlan::Extension(node) = filter.input.as_ref() else {
+            return Ok(Transformed::no(plan));
+        };
+        let Some(expand) = node.node.as_any().downcast_ref::<ExpandNode>() else {
+            return Ok(Transformed::no(plan));
+        };
+        if !total_predicate(&filter.predicate, filter.input.schema()) {
+            return Ok(Transformed::no(plan));
+        }
+        let properties: Vec<datafusion::common::Column> = expand
+            .edge_property_fields()
+            .into_iter()
+            .map(|(qualifier, field)| {
+                datafusion::common::Column::new(Some(qualifier), field.name())
+            })
+            .collect();
+        let mut pushed = expand
+            .edge_predicate
+            .as_ref()
+            .map(|predicate| {
+                split_conjunction(predicate)
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let before = pushed.len();
+        for conjunct in split_conjunction(&filter.predicate) {
+            let columns = conjunct.column_refs();
+            if !columns.is_empty()
+                && columns.iter().all(|column| properties.contains(column))
+                && !pushed.contains(conjunct)
+            {
+                pushed.push(conjunct.clone());
+            }
+        }
+        if pushed.len() == before {
+            return Ok(Transformed::no(plan));
+        }
+        let replacement = expand.clone().with_edge_predicate(conjunction(pushed));
+        Ok(Transformed::yes(LogicalPlan::Filter(Filter::try_new(
+            filter.predicate.clone(),
+            Arc::new(extension(replacement)),
+        )?)))
+    }
+}
+
+impl OptimizerRule for FixedExpandEdgePredicates {
+    fn name(&self) -> &'static str {
+        "graphforge_fixed_expand_edge_predicates"
+    }
+
+    fn apply_order(&self) -> Option<ApplyOrder> {
+        Some(ApplyOrder::TopDown)
+    }
+
+    fn rewrite(
+        &self,
+        plan: LogicalPlan,
+        _: &dyn OptimizerConfig,
+    ) -> Result<Transformed<LogicalPlan>> {
+        Self::push(plan)
     }
 }
 
