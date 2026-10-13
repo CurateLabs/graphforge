@@ -431,8 +431,18 @@ fn nominate_collect_left_right_inner(
     if rewritten.schema().as_ref() != join.schema().as_ref() {
         return Ok(None);
     }
-    let restored: Arc<dyn ExecutionPlan> = Arc::new(RepartitionExec::try_new(
+    // The partitioned join emits one small final batch per hash partition. The
+    // CollectLeft join it replaces emitted full batches from a single stream,
+    // and a parent that works per input batch (a write probes its targets once
+    // per batch) must keep seeing those. A single-output exchange coalesces the
+    // partitions' batches up to the batch size before the parent's exchange
+    // fans them out again.
+    let merged: Arc<dyn ExecutionPlan> = Arc::new(RepartitionExec::try_new(
         rewritten,
+        Partitioning::RoundRobinBatch(1),
+    )?);
+    let restored: Arc<dyn ExecutionPlan> = Arc::new(RepartitionExec::try_new(
+        merged,
         Partitioning::RoundRobinBatch(partitions),
     )?);
     Ok(Some(restored))
