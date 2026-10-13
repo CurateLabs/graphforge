@@ -1,14 +1,16 @@
 //! Point-access reads decompress the pages of the rows they want, and a page is
 //! small (#1984).
 //!
-//! A one-hop expansion from a fixed frontier selects its edge and destination
-//! rows by dense ordinal. The selection is exact, so what a read decompresses is
-//! decided by the writer's page size: the 20,480-row pages of the original
-//! layout made every wanted ordinal cost twenty thousand decoded rows. These
-//! tests build projects with the construction writer, whose edge, node and
-//! property files hold 2,048-row pages, double the relation and the node table,
-//! and count the rows held by the pages the readers decoded. The counters are
-//! exact and deterministic; the gate never measures time.
+//! A one-hop expansion from a fixed frontier selects its edge rows by dense
+//! ordinal. The selection is exact, so what a read decompresses is decided by
+//! the writer's page size: the 20,480-row pages of the original layout made
+//! every wanted ordinal cost twenty thousand decoded rows. The destination is
+//! identified from the node label index and needs no node row: a hop that wants
+//! its labels reads no node page. These tests build projects with the
+//! construction writer, whose edge, node and property files hold 2,048-row
+//! pages, double the relation and the node table, and count the rows held by
+//! the pages the readers decoded. The counters are exact and deterministic; the
+//! gate never measures time.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -239,11 +241,12 @@ enum EdgeRow {
 }
 
 /// The reads were exact dense-ordinal selections that never fell back, and each
-/// wanted row cost at most the rows of one page of the layout.
+/// wanted row cost at most the rows of one page of the layout. The destination
+/// is identified from the label index, so no node row is read for it.
 fn decoded(nodes: usize, ident: i64, hop: &Measured, edge: EdgeRow) -> Decoded {
     let io = &hop.io;
     let context = summary(nodes, ident, hop);
-    assert!(io.node_dense_row_selection_reads > 0, "{context}");
+    assert_eq!(io.node_dense_row_selection_reads, 0, "{context}");
     assert_eq!(io.edge_full_reads, 0, "{context}");
     assert_eq!(io.node_full_reads, 0, "{context}");
     assert_eq!(io.edge_dense_layout_declined, 0, "{context}");
@@ -251,7 +254,8 @@ fn decoded(nodes: usize, ident: i64, hop: &Measured, edge: EdgeRow) -> Decoded {
     assert_eq!(io.edge_validation_fallbacks, 0, "{context}");
     assert_eq!(io.node_validation_fallbacks, 0, "{context}");
     assert_eq!(io.property_uuid_index_fallbacks, 0, "{context}");
-    assert_eq!(io.node_exact_rows_selected, 1, "{context}");
+    assert_eq!(io.node_exact_rows_selected, 0, "{context}");
+    assert_eq!(io.node_page_rows_selected, 0, "{context}");
     match edge {
         EdgeRow::Read => {
             assert!(io.edge_dense_row_selection_reads > 0, "{context}");
@@ -267,11 +271,6 @@ fn decoded(nodes: usize, ident: i64, hop: &Measured, edge: EdgeRow) -> Decoded {
         io.edge_page_rows_selected <= PAGE_ROWS,
         "one edge row decoded {} rows of pages: {context}",
         io.edge_page_rows_selected
-    );
-    assert!(
-        io.node_page_rows_selected <= PAGE_ROWS,
-        "one node row decoded {} rows of pages: {context}",
-        io.node_page_rows_selected
     );
     assert!(
         io.property_uuid_pages_selected <= io.property_uuid_selections,
