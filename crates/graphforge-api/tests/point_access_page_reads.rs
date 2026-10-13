@@ -182,11 +182,11 @@ const EDGE_COUNT: &str =
 /// is unused, so the expansion reads no edge row.
 const DESTINATION_PROPERTY: &str =
     "MATCH (a:Entity {ident: $ident})-[e:LINK]->(b:Entity) RETURN sum(b.ident) AS n";
-/// Reads a node column of the frontier's one destination that neither the
-/// label index nor the destination's identity holds, so the node row is read by
-/// dense ordinal.
-const DESTINATION_CREATED_AT: &str =
-    "MATCH (a:Entity {ident: $ident})-[e:LINK]->(b) RETURN count(b.created_at) AS n";
+/// Counts the frontier's one edge and reads a node column of its destination
+/// that neither the label index nor the destination's identity holds, so the
+/// edge row and the node row are both read by dense ordinal.
+const EDGE_AND_DESTINATION_CREATED_AT: &str = "MATCH (a:Entity {ident: $ident})-[e:LINK]->(b) \
+     RETURN count(e) AS n, count(b.created_at) AS created";
 
 /// The project at `nodes` and the statement run twice: the first admits the
 /// footers, adjacency index and key walks once per session, the second is the
@@ -345,7 +345,7 @@ fn a_destination_node_read_decodes_one_page_as_the_node_table_doubles() {
     for ident in FRONTIERS {
         let mut seen = Vec::new();
         for nodes in [SMALL_NODES, LARGE_NODES] {
-            let hop = run(nodes, DESTINATION_CREATED_AT, ident, 1);
+            let hop = run(nodes, EDGE_AND_DESTINATION_CREATED_AT, ident, 1);
             eprintln!("{}", summary(nodes, ident, &hop));
             assert_eq!(hop.value, 1, "{nodes} nodes");
             seen.push(decoded(nodes, ident, &hop, EdgeRow::Read, NodeRow::Read));
