@@ -13,10 +13,17 @@ name: CodSpeed
 # margin is an unbanked gain whose failure prints the constant to write
 # (#1476) — so a slow drift that never regresses in a single step cannot pass
 # indefinitely, and an improvement cannot land unrecorded (#1387).
+#
+# The walltime job runs weekly, not nightly: a run spends about 56 minutes on
+# the codspeed-macro runner, and CodSpeed's free plan includes 600 macro runner
+# minutes a month. The simulation job uses no macro minutes and stays nightly.
 on:
   workflow_dispatch:
   schedule:
-    - cron: "17 7 * * *"
+    # Nightly except Monday: simulation only.
+    - cron: "17 7 * * 0,2-6"
+    # Monday: simulation plus the macro-runner walltime job.
+    - cron: "17 7 * * 1"
 
 permissions:
   actions: read
@@ -67,7 +74,9 @@ jobs:
         run: |
           set -euo pipefail
           should_run=true
-          if [[ "${{ github.event_name }}" == "schedule" && "${{ steps.previous.outputs.sha }}" == "${{ steps.main.outputs.sha }}" ]]; then
+          # The weekly walltime run is never skipped: the previous successful
+          # run on this SHA may have been a simulation-only night.
+          if [[ "${{ github.event_name }}" == "schedule" && "${{ github.event.schedule }}" != "17 7 * * 1" && "${{ steps.previous.outputs.sha }}" == "${{ steps.main.outputs.sha }}" ]]; then
             should_run=false
           fi
           echo "should-run=$should_run" >> "$GITHUB_OUTPUT"
@@ -111,7 +120,9 @@ jobs:
   storage-walltime:
     name: Durable Storage Walltime (CodSpeed Macro ARM64)
     needs: nightly
-    if: needs.nightly.outputs.should-run == 'true'
+    if: >-
+      needs.nightly.outputs.should-run == 'true' &&
+      (github.event_name == 'workflow_dispatch' || github.event.schedule == '17 7 * * 1')
     # Walltime comparisons require CodSpeed's isolated bare-metal runner.
     # Shared hosted runners are intentionally not a fallback.
     runs-on: codspeed-macro

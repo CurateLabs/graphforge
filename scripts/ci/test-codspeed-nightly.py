@@ -13,7 +13,10 @@ triggers = workflow["on"]
 assert "pull_request" not in triggers
 assert "push" not in triggers
 assert "workflow_dispatch" in triggers
-assert triggers["schedule"] == [{"cron": "17 7 * * *"}]
+# Nightly simulation except Monday; Monday adds the macro-runner walltime job,
+# which CodSpeed's free plan only affords weekly.
+WEEKLY = "17 7 * * 1"
+assert triggers["schedule"] == [{"cron": "17 7 * * 0,2-6"}, {"cron": WEEKLY}]
 
 jobs = workflow["jobs"]
 assert workflow["permissions"]["actions"] == "read"
@@ -34,11 +37,19 @@ assert "steps.previous.outputs.sha" in decision
 assert "steps.main.outputs.sha" in decision
 assert "should_run=true" in decision
 assert "should_run=false" in decision
+assert f'github.event.schedule }}}}" != "{WEEKLY}"' in decision
 
-for job_name in ("benchmarks", "storage-walltime"):
+walltime_if = (
+    "needs.nightly.outputs.should-run == 'true' && "
+    f"(github.event_name == 'workflow_dispatch' || github.event.schedule == '{WEEKLY}')"
+)
+for job_name, condition in (
+    ("benchmarks", "needs.nightly.outputs.should-run == 'true'"),
+    ("storage-walltime", walltime_if),
+):
     job = jobs[job_name]
     assert job["needs"] == "nightly"
-    assert job["if"] == "needs.nightly.outputs.should-run == 'true'"
+    assert job["if"] == condition, job["if"]
     checkout = next(step for step in job["steps"] if "actions/checkout@" in step.get("uses", ""))
     assert checkout["with"]["ref"] == "${{ needs.nightly.outputs.sha }}"
 

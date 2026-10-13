@@ -333,13 +333,14 @@ temp-root and admitted-host requirements are documented per workload in
 
 # Benchmarking with CodSpeed
 
-**Status:** Continuous on every pull request to `main` (`CodSpeed` workflow)
+**Status:** Scheduled against the latest `main` (`CodSpeed` workflow)
 
-The `CodSpeed` workflow measures a fixed set of Rust benchmarks on every pull
-request and reports the delta against the base commit. It is not part of the
-`CI Gate` aggregate, but the PR must still reach the repository's required
-`CLEAN` state: a red **CodSpeed Performance Analysis** check must be resolved or
-receive an explicit, evidence-backed maintainer disposition.
+The `CodSpeed` workflow measures a fixed set of Rust benchmarks against the
+latest `main` and reports the delta against the previous run. CPU simulation
+runs nightly; the `codspeed-macro` walltime job runs weekly, because CodSpeed's
+free plan includes 600 macro runner minutes a month and one walltime run takes
+about 56. Pull requests do not trigger it, and it is not part of the `CI Gate`
+aggregate.
 
 ## What is measured
 
@@ -425,14 +426,14 @@ deliberate improvement must each fail in the expected direction before a clean
 pass is trusted.
 
 Two of the four limits are **host-bound**. The throughput floor and the CPU
-ceiling are banked from the isolated `codspeed-macro` runner the nightly runs
-on, which is an ARM64 machine bound by its device rather than its CPU; its
-numbers say nothing about an x86_64 development host, and the reverse. The
-nightly declares the host with `GF_INGEST_GATE_BANKED_HOST=codspeed-macro` and
+ceiling are banked from the isolated `codspeed-macro` runner the weekly
+walltime job runs on, which is an ARM64 machine bound by its device rather than
+its CPU; its numbers say nothing about an x86_64 development host, and the
+reverse. The job declares the host with `GF_INGEST_GATE_BANKED_HOST=codspeed-macro` and
 both limits are judged there. Run anywhere else, as in the command above, they
 are printed as `not judged` notes and only the two deterministic byte-counter
 limits can fail. Do not set that variable on another machine, and do not bank a
-throughput or CPU constant from a local run: re-bank from scheduled nightlies
+throughput or CPU constant from a local run: re-bank from scheduled walltime runs
 and put the table on the issue.
 
 Per-region wall, CPU, fsync, and byte attribution for one import comes from the
