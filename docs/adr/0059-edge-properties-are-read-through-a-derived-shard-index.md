@@ -4,16 +4,16 @@ adr: "0059"
 status: "Accepted"
 date: "2026-10-12"
 superseded_by: null
-revisit_when: "An edge property read still scales with the route after the index exists, a per-hop edge predicate needs positional access that a UUID lookup cannot give, property fragments adopt per-block authentication that makes the index redundant, or the index's manifest outgrows a single read per statement"
+revisit_when: "An edge property read still scales with the route after the index exists, a per-hop edge predicate needs positional access that an edge-id or UUID lookup cannot give, a mutation preserves edge ids so the id join need not be rebuilt after a topology write, property fragments adopt per-block authentication that makes the index redundant, or the index's manifest outgrows a single read per statement"
 ---
 
 # ADR 0059: Edge properties are read through a derived, authenticated shard index
 
 **Status:** Accepted
 
-**Implementation:** #1984 (second wave, slice S4b). Edge identity by dense
-ordinal (slice S4a) is independent and needs no ADR: it adds no persisted
-artifact.
+**Implementation:** #1984 (second wave, slice S4b; slice S11 adds the edge-id
+key described under Use). Edge identity by dense ordinal (slice S4a) is
+independent and needs no ADR: it adds no persisted artifact.
 
 **Related:**
 - ADR 0004 / ADR 0037 (derived indexes are rebuildable and never authoritative)
@@ -64,6 +64,14 @@ One manifest and a directory of packs per edge property route:
   it, as a Zstd-compressed Arrow IPC stream of one batch with no field
   metadata. A shard holds at most 4,096 rows and at most 1 MiB per column.
 
+A shard may also carry the surrogate `edge_id` of each of its rows as a further
+blob (a Zstd-compressed Arrow IPC stream of one non-null `UInt64` column, in the
+shard's UUID order) and its smallest and largest id, and the manifest then
+records `topology_digest`, the digest of the route's canonical edge topology
+files that the ids were joined from. All three are optional manifest fields, so
+an index without them is still `graphforge-edge-property-index/1` and reads
+exactly as before.
+
 The columns are separate blobs so a statement reads only the properties it
 demands: a route that also stores a wide `memo` costs a `timestamp` lookup
 nothing, and a damaged `memo` blob refuses only the statements that demand
@@ -97,6 +105,13 @@ its length and XXH64.
   mutation appends a fragment and changes the digest, so the index goes stale
   and the overlay answers, exactly as before the index existed, until an
   explicit rebuild.
+- The ids of an index are addressable only while its `topology_digest` equals
+  the digest the generation inventory records for the route's topology files
+  (path, length and content XXH64 of each) and every shard carries ids. A
+  mutation that writes topology changes that digest without touching the
+  property fragments, so the UUID key still answers and the id key is refused
+  until a rebuild. Edge ids are not stable across mutation, which is why the
+  digest, not the ids, is what the index trusts.
 - Only routes with no tombstone and a single type per column are indexed.
 
 ### Build
@@ -107,6 +122,15 @@ its length and XXH64.
   multi-object fragments to scratch and break write-once accounting). The
   manifest is written last. A pack never passes the 4 MiB property object
   bound, so the write-once accounting of the generation holds.
+- The ids are joined while the index is cut: the tap resolves each shard's UUIDs
+  against the same construction's topology pages (the resolver reads only the
+  UUID page statistics and the pages that can hold a candidate) and records the
+  topology digest computed from the installer artifacts. A route is left
+  without ids when its topology cannot be joined: a row with no edge, a UUID
+  page layout whose stabbing number is too high to resolve by point reads
+  (topology written by mutation is not in UUID order), or a property route
+  whose name has no topology of its own (a qualified owner). Such a route keeps
+  the UUID key.
 - `GraphForge::rebuild_property_indexes` rebuilds both the node equality index
   and this one from the current generation's newest-wins state in UUID order
   and publishes a new generation. Both directories are replaced under the
@@ -131,6 +155,22 @@ the rows the route holds for them as Arrow arrays; the executor's
 It is keyed by edge UUID, not by CSR entry offset, so a per-hop predicate that
 runs while a traversal still holds only `edge_id`s resolves their UUIDs first
 (an ordinal-selected read of the edge file's `edge_uuid` column).
+
+A second entry point, `lookup_edge_properties_by_id`, takes the surrogate
+`edge_id`s a traversal already holds and returns the same rows keyed by id. It
+reads the manifest, the id blob of each shard whose id range holds a target, and
+the demanded column blobs of the shards with a match; it never reads an
+`edge_uuid`. It answers `NotAddressable` when the manifest is missing, predates
+ids, or its `topology_digest` is not the route's current one, and the caller
+then keys the read by UUID. One-hop expansion (`expand_single_hop_chunk`) uses
+it when the statement demands, of the edge variable, only its `edge_id` and
+properties: the properties of the hop's edges are fetched by the ids the CSR
+entries carry, no edge file is opened, and the `edge_uuid` column is not read.
+That is what makes a hop's property read cost the frontier's shards and not the
+edge file. The choice is made per chunk, so a hop whose route is not
+addressable reads the UUID key exactly as before. Variable-length expansion, the
+reachability mode and any statement that demands another stored field of the
+edge (its UUID, its timestamps, a whole-edge return) stay on the UUID key.
 
 The reachability mode of variable-length expansion (S6b, #1984) is the third
 consumer. Its pushed `ALL(e IN r WHERE p)` predicate does not need positional access:
@@ -157,9 +197,18 @@ relation, now read from the index.
   UUID-keyed shards give the same asymptotic result (reads proportional to the
   frontier's shards) with none of that coupling. The per-hop predicate of the
   reachability mode (S6b) was the case that might have needed positional
-  access; it resolves UUIDs once per search level and did not.
-- **Align the values to `edge_id`.** Same rank-resolution problem at build time
-  as the CSR order, and `edge_id` is not stable across mutation.
+  access; it resolves UUIDs once per search level and did not. S11 later
+  reached the no-edge-read result for a one-hop property read through the
+  edge-id key described under Use, without the CSR coupling.
+- **Align the values to `edge_id`** (make the id the only key). Same
+  rank-resolution problem at build time as the CSR order, and `edge_id` is not
+  stable across mutation. S11 takes the part of this that survives: the UUID
+  stays the key, and the build also joins each row to its topology `edge_id`
+  and records the topology digest it joined against, so a hop that holds ids
+  skips the edge file. The join happens where the topology is already installed
+  (bulk construction) or readable (rebuild), costs one page-pruned resolve per
+  fragment, and is withdrawn, not guessed, when a row has no topology row or the
+  topology's UUID pages are too entangled to resolve by point reads.
 - **A read-side-only fix.** Keeps a whole-object checksum per fragment per
   statement.
 
@@ -177,3 +226,17 @@ relation, now read from the index.
   shard: 0.8 MB for the 3.1 million rows of the SF1 FinBench edge route and 0.5 MB
   for the 4.0 million rows of the SF1 IC route.
 - A lookup reads the byte range of a blob out of its pack, not the pack.
+- Ids add 8 bytes per row before compression and 16 bytes per shard of bounds.
+  Adding them changes no existing byte of an index without ids.
+- A topology-only mutation (an edge with no properties) leaves the UUID key
+  current and withdraws the id key until `rebuild_property_indexes`; the
+  statement is answered by the UUID key meanwhile and returns the same rows. The
+  UUID path costs the edge file's `edge_uuid` column, so a project that mutates
+  topology should rebuild after a batch.
+- The manifest lists every shard, so it grows with the route in both keys. Shard
+  bytes read are bounded by the frontier; the manifest read is not. When the
+  manifest outgrows a single read per statement the index needs a second level
+  (see `revisit_when`).
+- The manifest's `topology_digest` differs between two constructions of the same
+  input because topology rows carry a wall-clock `created_at`; the pack bytes and
+  every other manifest field are identical.

@@ -1,6 +1,10 @@
 //! Edge-property reads for traversal output: resolve the authenticated
 //! property rows of a set of edges once ([`EdgePropSource`]) and assemble them
 //! into hop order ([`edge_prop_children`]).
+//!
+//! The rows are keyed by `edge_uuid`, or, when every candidate route's index is
+//! addressable by edge id ([`EdgeIdPropSource`]), by the surrogate `edge_id` a
+//! traversal already holds, so the edge file's UUID column is never read.
 
 use super::hash_table_bytes;
 use arrow::array::Array;
@@ -241,6 +245,121 @@ pub(super) fn edge_prop_children(
     prop_fields: &[arrow::datatypes::FieldRef],
     hop_edge_uuids: &[[u8; 16]],
 ) -> Result<Vec<arrow::array::ArrayRef>, GfError> {
+    assemble_children(&source.batches, prop_fields, hop_edge_uuids.len(), |hop| {
+        source.uuid_to_loc.get(&hop_edge_uuids[hop]).copied()
+    })
+}
+
+/// The authenticated property rows of a set of edges, keyed by surrogate
+/// `edge_id` instead of `edge_uuid`, so locating a hop's row never needs the
+/// edge file's UUID column. Assembled into hop order by
+/// [`edge_prop_children_by_id`].
+pub(super) struct EdgeIdPropSource {
+    batches: Vec<RecordBatch>,
+    /// edge_id -> (owning batch, row within it).
+    id_to_loc: std::collections::HashMap<u64, (usize, u32)>,
+}
+
+/// Read the selected rows of the edges with surrogate ids `targets` from every
+/// candidate property route, through the routes' edge-id-addressable indexes.
+///
+/// `Ok(None)` when the properties cannot be located by id: no inventory, or a
+/// candidate route whose index is missing, stale, or predates ids. The caller
+/// then keys the read by `edge_uuid` through [`load_edge_prop_source`], which
+/// also reads such a route's property fragments.
+pub(super) fn load_edge_prop_source_by_id(
+    inventory: Option<&graphforge_storage::AuthenticatedPropertyInventory>,
+    rel_type_name: &str,
+    dir: &Path,
+    prop_fields: &[arrow::datatypes::FieldRef],
+    targets: &std::collections::BTreeSet<u64>,
+) -> Result<Option<EdgeIdPropSource>, GfError> {
+    use arrow::array::UInt64Array;
+    use arrow::compute::concat_batches;
+
+    let exec_err = |m: String| GfError::Execution(m);
+    let Some(inventory) = inventory else {
+        return Ok(None);
+    };
+    if prop_fields.is_empty() {
+        return Ok(Some(EdgeIdPropSource {
+            batches: Vec::new(),
+            id_to_loc: std::collections::HashMap::new(),
+        }));
+    }
+    let stems = edge_property_stems(Some(inventory), dir, rel_type_name)?;
+    let mut owners = std::collections::BTreeSet::new();
+    let property_names = prop_fields
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
+    let mut batches_by_route = Vec::with_capacity(stems.len());
+    for stem in &stems {
+        let Some(batches) = crate::edge_property_index::indexed_edge_property_batches_by_id(
+            inventory,
+            dir,
+            stem,
+            targets,
+            &property_names,
+            &mut owners,
+        )?
+        else {
+            return Ok(None);
+        };
+        if let Some(first) = batches.first() {
+            batches_by_route.push(
+                concat_batches(&first.schema(), &batches).map_err(|e| exec_err(e.to_string()))?,
+            );
+        }
+    }
+
+    // edge_id -> (owning batch, row within it). `owners` already refused an
+    // edge two routes hold; a repeat inside one batch is refused here.
+    let mut id_to_loc = std::collections::HashMap::new();
+    for (bi, batch) in batches_by_route.iter().enumerate() {
+        let ids = batch
+            .column_by_name("edge_id")
+            .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
+            .ok_or_else(|| exec_err("edge-property index rows missing a UInt64 edge_id".into()))?;
+        for (row, id) in ids.values().iter().enumerate() {
+            let location = (
+                bi,
+                u32::try_from(row)
+                    .map_err(|_| exec_err(format!("edge-property row {row} exceeds u32")))?,
+            );
+            if id_to_loc.insert(*id, location).is_some() {
+                return Err(exec_err(
+                    "edge properties have multiple physical owners".into(),
+                ));
+            }
+        }
+    }
+    Ok(Some(EdgeIdPropSource {
+        batches: batches_by_route,
+        id_to_loc,
+    }))
+}
+
+/// As [`edge_prop_children`], for the hops `hop_edge_ids` (flattened hop
+/// order) from a source keyed by surrogate edge id.
+pub(super) fn edge_prop_children_by_id(
+    source: &EdgeIdPropSource,
+    prop_fields: &[arrow::datatypes::FieldRef],
+    hop_edge_ids: &[u64],
+) -> Result<Vec<arrow::array::ArrayRef>, GfError> {
+    assemble_children(&source.batches, prop_fields, hop_edge_ids.len(), |hop| {
+        source.id_to_loc.get(&hop_edge_ids[hop]).copied()
+    })
+}
+
+/// One child array per field of `prop_fields` for `hops` flattened hops, where
+/// `locate(hop)` names the batch and row that hold the hop's edge, if any.
+fn assemble_children(
+    prop_batches_by_rel: &[RecordBatch],
+    prop_fields: &[arrow::datatypes::FieldRef],
+    hops: usize,
+    locate: impl Fn(usize) -> Option<(usize, u32)>,
+) -> Result<Vec<arrow::array::ArrayRef>, GfError> {
     use arrow::array::{ArrayRef, UInt32Array, new_null_array};
     use arrow::compute::kernels::zip::zip;
     use arrow::compute::{is_not_null, take};
@@ -249,18 +368,15 @@ pub(super) fn edge_prop_children(
     if prop_fields.is_empty() {
         return Ok(Vec::new());
     }
-    let prop_batches_by_rel = &source.batches;
-    let uuid_to_loc = &source.uuid_to_loc;
 
     // One take-index per flattened hop PER BATCH: Some(row) only for the hops
     // the batch owns, so each batch's `take` yields NULL everywhere else and
     // the per-field coalesce below can simply prefer non-null.
     let take_by_batch: Vec<UInt32Array> = (0..prop_batches_by_rel.len())
         .map(|bi| {
-            hop_edge_uuids
-                .iter()
-                .map(|u| match uuid_to_loc.get(u) {
-                    Some(&(owner, row)) if owner == bi => Some(row),
+            (0..hops)
+                .map(|hop| match locate(hop) {
+                    Some((owner, row)) if owner == bi => Some(row),
                     _ => None,
                 })
                 .collect()
@@ -269,7 +385,7 @@ pub(super) fn edge_prop_children(
 
     let mut children: Vec<ArrayRef> = Vec::with_capacity(prop_fields.len());
     for field in prop_fields {
-        let mut child: ArrayRef = new_null_array(field.data_type(), hop_edge_uuids.len());
+        let mut child: ArrayRef = new_null_array(field.data_type(), hops);
         for (bi, b) in prop_batches_by_rel.iter().enumerate() {
             // Field advertised in the union schema but absent in this file
             // (or absent on disk entirely) -> this relation contributes NULLs.

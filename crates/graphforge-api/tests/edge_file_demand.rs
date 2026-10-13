@@ -260,25 +260,33 @@ fn unused_edge_statements() -> Vec<Statement> {
     ]
 }
 
-/// Statements that read the edge variable and so must read the edge file.
+/// Statements that read only a property of the edge variable. The edge-property
+/// index addresses a bulk-built relation by the `edge_id` the adjacency already
+/// holds, so the edge file is not read for them either (#1984).
+fn ordinal_property_statements() -> Vec<Statement> {
+    vec![statement(
+        format!("{ONE_HOP} RETURN r.weight AS w ORDER BY w"),
+        "w",
+        &[10, 11],
+    )]
+}
+
+/// Statements that read the edge variable's identity and so must read the edge
+/// file. A one-hop `RETURN r` is asserted by
+/// `a_returned_edge_variable_carries_the_stored_edge_uuids`.
 fn demanded_edge_statements() -> Vec<Statement> {
-    vec![
-        statement(
-            format!("{ONE_HOP} RETURN r.weight AS w ORDER BY w"),
-            "w",
-            &[10, 11],
-        ),
-        statement(
-            format!("{VAR_LEN} RETURN size(r) AS len ORDER BY len"),
-            "len",
-            &[1, 1, 2, 2, 2, 2],
-        ),
-    ]
+    vec![statement(
+        format!("{VAR_LEN} RETURN size(r) AS len ORDER BY len"),
+        "len",
+        &[1, 1, 2, 2, 2, 2],
+    )]
 }
 
 /// An expansion whose edge variable is never read decodes nothing from the
-/// edge file, however many edge files the relation spans. Statements that do
-/// read the edge variable decode the frontier's edges and no others.
+/// edge file, however many edge files the relation spans, and neither does a
+/// one-hop expansion that reads only an edge property, which the edge-property
+/// index serves by edge id. Statements that read the edge variable's identity
+/// decode the frontier's edges and no others.
 ///
 /// The single-hop expansion's own counters are asserted at one and at four
 /// partitions. The storage counters, which also cover the variable-length
@@ -323,6 +331,34 @@ fn an_unused_edge_variable_reads_no_edge_file_as_the_relation_doubles() {
                 query,
                 column,
                 expected,
+            } in ordinal_property_statements()
+            {
+                let plan = forge.explain(&query).unwrap();
+                assert!(plan.contains("Expand"), "{plan}");
+                let run = warm_measured(&forge, &query);
+                assert_eq!(
+                    run.int_column(column),
+                    expected,
+                    "{nodes} nodes, {partitions} partitions: {query}"
+                );
+                assert_eq!(
+                    run.hop_edge_work, [0; 4],
+                    "an edge property keyed by edge id reads no edge file: \
+                     {nodes} nodes, {partitions} partitions: {query}"
+                );
+                if partitions == 1 {
+                    assert_eq!(
+                        run.edge_work(),
+                        [0; 4],
+                        "{nodes} nodes: {query}\n{:?}",
+                        run.io
+                    );
+                }
+            }
+            for Statement {
+                query,
+                column,
+                expected,
             } in demanded_edge_statements()
             {
                 let run = warm_measured(&forge, &query);
@@ -331,13 +367,6 @@ fn an_unused_edge_variable_reads_no_edge_file_as_the_relation_doubles() {
                     expected,
                     "{nodes} nodes, {partitions} partitions: {query}"
                 );
-                if query.starts_with(ONE_HOP) {
-                    assert!(
-                        run.hop_edge_work[0] > 0 && run.hop_edge_work[1] > 0,
-                        "a demanded edge variable reads edge rows: {query}\n{:?}",
-                        run.hop_edge_work
-                    );
-                }
                 if partitions == 1 {
                     assert!(
                         run.io.edge_filtered_rows > 0,
