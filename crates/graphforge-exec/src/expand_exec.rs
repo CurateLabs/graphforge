@@ -2739,9 +2739,12 @@ fn expand_single_hop_chunk(
     } else {
         None
     };
-    let node_batch = if let Some(node_batch) = labelled_destination {
+    let node_batch = if let Some(destination) = labelled_destination {
         drop(node_permit);
-        node_batch
+        if let Some(lookup) = &destination.identity_lookup {
+            demand::record_identity_lookup(cfg.capture_epoch, cfg.edge_var, lookup);
+        }
+        destination.batch
     } else {
         let node_batches = if required.is_some() {
             graphforge_storage::read_nodes_filtered_projected_observed_from_files(

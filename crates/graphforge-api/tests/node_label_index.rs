@@ -13,8 +13,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use arrow::array::{
-    Array, ArrayRef, FixedSizeBinaryBuilder, Int64Array, Int64Builder, ListArray, RecordBatch,
-    StringArray,
+    Array, ArrayRef, FixedSizeBinaryArray, FixedSizeBinaryBuilder, Int64Array, Int64Builder,
+    ListArray, RecordBatch, StringArray,
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use graphforge_api::{
@@ -22,6 +22,7 @@ use graphforge_api::{
     GraphConstructionBudgets, GraphForge, GraphForgeOptions, LifecycleIoCapture,
 };
 use graphforge_core::uuid::Uuid;
+use graphforge_exec::demand;
 use graphforge_ir::IrLiteral;
 use graphforge_storage::io_stats;
 
@@ -388,4 +389,54 @@ fn multi_label_destinations_keep_their_whole_label_set() {
             assert_eq!(lookups, 12);
         }
     }
+}
+
+/// A label-filtered hop that also returns the destination UUID takes the UUID
+/// from the ordinal identity authority and attributes that lookup to the hop,
+/// while the labels still come from the index and no node file is read.
+#[test]
+fn a_label_filtered_hop_returning_uuids_attributes_its_identity_lookup() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    construct(dir.path());
+    let forge = open(dir.path(), 1);
+    let query = "MATCH (a:Entity {ident: $ident})-[e:LINK]->(b:Target) RETURN b.node_uuid AS id";
+    let params = |ident: i64| HashMap::from([("ident".to_owned(), IrLiteral::Int(ident))]);
+    let _capture = LifecycleIoCapture::install();
+    io_stats::reset();
+    // Node 3 links to the `Target` 4, node 5 to the `Entity` 6.
+    let (reached, snapshot) = demand::capture(|| forge.execute_with_params(query, &params(3)));
+    let reached = reached.expect("statement executes");
+    let io = io_stats::snapshot().expect("requested I/O statistics");
+    let uuids = reached
+        .batches
+        .iter()
+        .flat_map(|batch| {
+            let column = batch
+                .column_by_name("id")
+                .expect("id column")
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .expect("id is a UUID");
+            (0..column.len())
+                .map(|row| column.value(row).to_vec())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(uuids, [node_uuid(4).as_bytes().to_vec()]);
+    assert_eq!(io.node_filtered_reads, 0, "{io:?}");
+    assert_eq!(io.node_full_reads, 0, "{io:?}");
+    assert_eq!(io.node_label_index_lookups, 1, "{io:?}");
+    let hop = snapshot.hops.values().next().expect("one hop");
+    assert!(hop.identity_read_calls > 0, "{snapshot:#?}");
+    assert!(hop.identity_bytes_read > 0, "{snapshot:#?}");
+
+    let (rejected, _) = demand::capture(|| forge.execute_with_params(query, &params(5)));
+    assert!(
+        rejected
+            .expect("statement executes")
+            .batches
+            .iter()
+            .all(|batch| batch.num_rows() == 0)
+    );
 }

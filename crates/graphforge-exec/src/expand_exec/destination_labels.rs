@@ -15,6 +15,7 @@ use arrow::array::RecordBatch;
 use arrow::compute::filter;
 use arrow::datatypes::SchemaRef;
 use graphforge_core::GfError;
+use graphforge_storage::V4OrdinalLookupMetrics;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -47,6 +48,13 @@ impl DemandedColumns {
     }
 }
 
+/// Destination rows answered from the label index, with the identity lookup
+/// that supplied `node_uuid` (absent when the hop does not demand it).
+pub(super) struct SynthesisedDestination {
+    pub(super) batch: RecordBatch,
+    pub(super) identity_lookup: Option<V4OrdinalLookupMetrics>,
+}
+
 /// Synthesise the destination rows of `reached` from the label index.
 ///
 /// Returns `Ok(None)` when the hop demands a column the index cannot supply,
@@ -68,7 +76,7 @@ pub(super) fn synthesise_destination_batch(
     edge_end: usize,
     projection: &[usize],
     reached: &HashSet<u64>,
-) -> Result<Option<RecordBatch>, GfError> {
+) -> Result<Option<SynthesisedDestination>, GfError> {
     let Some(demanded) = DemandedColumns::classify(out_schema, edge_end, projection) else {
         return Ok(None);
     };
@@ -89,6 +97,7 @@ pub(super) fn synthesise_destination_batch(
     if let Some(type_ids) = gathered.type_ids {
         columns.push(("type_ids", Arc::new(type_ids)));
     }
+    let mut identity_lookup = None;
     if let (true, Some(identities)) = (demanded.node_uuid, ordinal_identities) {
         let lookup = identities.lookup_node_uuids(&present)?;
         let mut builder = FixedSizeBinaryBuilder::with_capacity(present.len(), 16);
@@ -104,6 +113,7 @@ pub(super) fn synthesise_destination_batch(
                 None => keep.push(false),
             }
         }
+        identity_lookup = Some(lookup.metrics);
         let uuids: ArrayRef = Arc::new(builder.finish());
         columns.push(("node_uuid", uuids));
         if keep.iter().any(|kept| !kept) {
@@ -119,7 +129,10 @@ pub(super) fn synthesise_destination_batch(
             }
         }
     }
-    RecordBatch::try_from_iter(columns)
-        .map(Some)
-        .map_err(|error| GfError::Execution(error.to_string()))
+    let batch = RecordBatch::try_from_iter(columns)
+        .map_err(|error| GfError::Execution(error.to_string()))?;
+    Ok(Some(SynthesisedDestination {
+        batch,
+        identity_lookup,
+    }))
 }

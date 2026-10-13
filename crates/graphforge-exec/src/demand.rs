@@ -647,26 +647,44 @@ pub(crate) fn record_identity_projection(
         hop.projected_columns = hop
             .projected_columns
             .max(projected_columns.try_into().unwrap_or(u64::MAX));
-        hop.identity_ranges_selected = hop
-            .identity_ranges_selected
-            .saturating_add(metrics.ranges_selected);
-        hop.identity_read_calls = hop
-            .identity_read_calls
-            .saturating_add(metrics.sequential_read_calls);
-        hop.identity_bytes_read = hop.identity_bytes_read.saturating_add(metrics.bytes_read);
-        hop.identity_peak_buffer_bytes = hop
-            .identity_peak_buffer_bytes
-            .max(metrics.peak_buffer_bytes);
-        hop.identity_per_record_seeks = hop
-            .identity_per_record_seeks
-            .saturating_add(metrics.per_record_seeks);
-        hop.identity_revalidation_calls = hop
-            .identity_revalidation_calls
-            .saturating_add(metrics.revalidation_calls);
-        hop.identity_revalidation_bytes = hop
-            .identity_revalidation_bytes
-            .saturating_add(metrics.revalidation_bytes);
+        add_identity_lookup(hop, metrics);
     });
+}
+
+/// Attribute one ordinal identity lookup to a hop that answered its destination
+/// from the identity authority but still ran the general edge path, so the
+/// hop's projected-chunk counters stay with `record_materialization_projection`.
+pub(crate) fn record_identity_lookup(
+    epoch: u64,
+    edge_var: u32,
+    metrics: &graphforge_storage::V4OrdinalLookupMetrics,
+) {
+    with_hop(epoch, edge_var, |hop| add_identity_lookup(hop, metrics));
+}
+
+fn add_identity_lookup(
+    hop: &mut HopSnapshot,
+    metrics: &graphforge_storage::V4OrdinalLookupMetrics,
+) {
+    hop.identity_ranges_selected = hop
+        .identity_ranges_selected
+        .saturating_add(metrics.ranges_selected);
+    hop.identity_read_calls = hop
+        .identity_read_calls
+        .saturating_add(metrics.sequential_read_calls);
+    hop.identity_bytes_read = hop.identity_bytes_read.saturating_add(metrics.bytes_read);
+    hop.identity_peak_buffer_bytes = hop
+        .identity_peak_buffer_bytes
+        .max(metrics.peak_buffer_bytes);
+    hop.identity_per_record_seeks = hop
+        .identity_per_record_seeks
+        .saturating_add(metrics.per_record_seeks);
+    hop.identity_revalidation_calls = hop
+        .identity_revalidation_calls
+        .saturating_add(metrics.revalidation_calls);
+    hop.identity_revalidation_bytes = hop
+        .identity_revalidation_bytes
+        .saturating_add(metrics.revalidation_bytes);
 }
 
 pub(crate) fn record_materialization_projection(
