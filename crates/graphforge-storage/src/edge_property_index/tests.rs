@@ -727,3 +727,384 @@ fn ids_that_do_not_cover_the_batch_are_refused() {
         .unwrap_err();
     assert_eq!(error.code(), "GF_VALIDATION", "{error}");
 }
+
+/// Where each page of a paged blob lies in it, read from the directory the
+/// blob ends with. This restates the layout of `pages.rs` on purpose: a change
+/// to it must change the tests that tamper with a page.
+fn page_extents(blob: &[u8], rows: usize, key_width: usize) -> Vec<std::ops::Range<usize>> {
+    let count = rows.div_ceil(PAGE_ROWS);
+    let entry = 4 + 8 + 2 * key_width;
+    let schema_length = u32::from_le_bytes(blob[blob.len() - 4..].try_into().unwrap()) as usize;
+    let entries = blob.len() - 4 - count * entry;
+    let mut start = 0;
+    let extents: Vec<_> = (0..count)
+        .map(|page| {
+            let at = entries + page * entry;
+            let length = u32::from_le_bytes(blob[at..at + 4].try_into().unwrap()) as usize;
+            let extent = start..start + length;
+            start += length;
+            extent
+        })
+        .collect();
+    assert_eq!(start + schema_length, entries, "the pages fill the blob");
+    extents
+}
+
+/// Flip a byte in the middle of `page` of the blob `seal` names, in the pack
+/// file below `directory`.
+fn flip_page(directory: &Path, seal: BlobSeal, rows: usize, key_width: usize, page: usize) {
+    let path = directory.join(format!("{:08}.epk", seal.pack));
+    let mut bytes = std::fs::read(&path).unwrap();
+    let start = usize::try_from(seal.offset).unwrap();
+    let end = start + usize::try_from(seal.byte_length).unwrap();
+    let extent = page_extents(&bytes[start..end], rows, key_width)[page].clone();
+    bytes[start + extent.start + extent.len() / 2] ^= 1;
+    std::fs::write(path, bytes).unwrap();
+}
+
+fn column_named(manifest: &Manifest, shard: &ShardEntry, name: &str) -> BlobSeal {
+    shard
+        .columns
+        .iter()
+        .find(|column| manifest.columns[column.column] == name)
+        .unwrap()
+        .blob
+}
+
+fn int64s(array: &ArrayRef) -> Vec<i64> {
+    array
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap()
+        .values()
+        .to_vec()
+}
+
+#[test]
+fn a_lookup_decodes_only_the_pages_that_hold_its_targets() {
+    let built = build(&[fragment(0, 2_000, 4)]).expect("indexed");
+    assert_eq!(built.manifest.page_rows, Some(PAGE_ROWS as u32));
+    assert_eq!(built.manifest.shards.len(), 1, "one shard of 16 pages");
+    let shard = &built.manifest.shards[0];
+    let timestamps = column_named(&built.manifest, shard, "timestamp");
+    let rows = shard.rows as usize;
+    assert_eq!(rows.div_ceil(PAGE_ROWS), 16);
+
+    let dir = tempfile::tempdir().unwrap();
+    let directory = write_packs(dir.path(), &built.packs);
+    // A page of the UUID blob and a page of the timestamp blob that hold none of
+    // the targets below are damaged.
+    flip_page(&directory, shard.uuids, rows, 16, 5);
+    flip_page(&directory, timestamps, rows, 0, 7);
+
+    let properties = ["timestamp".to_owned()];
+    let demanded = demanded_columns(&built.manifest, &properties);
+    let mut packs = PackHandles::new(directory.clone(), built.manifest.page_rows);
+    // Rows 3 and 1500 lie in pages 0 and 11: the damaged pages are never read.
+    let targets = [uuid(3), uuid(1_500)];
+    let hit = read_hit_shard(&mut packs, shard, &targets, &demanded)
+        .unwrap()
+        .expect("the shard holds both");
+    assert_eq!(hit.keys, targets);
+    assert_eq!(int64s(&hit.columns[&0]), [9, 4_500]);
+
+    // A target in the damaged UUID page is refused, not answered or skipped.
+    let error = read_hit_shard(&mut packs, shard, &[uuid(5 * 128 + 1)], &demanded)
+        .err()
+        .expect("a damaged UUID page is refused");
+    assert_eq!(error.code(), "GF_VALIDATION", "{error}");
+    // A target whose column page is damaged is refused too.
+    let error = read_hit_shard(&mut packs, shard, &[uuid(7 * 128 + 2)], &demanded)
+        .err()
+        .expect("a damaged column page is refused");
+    assert_eq!(error.code(), "GF_VALIDATION", "{error}");
+    // Reading either blob whole meets the damage.
+    for (seal, keys) in [(shard.uuids, Keys::Uuid), (timestamps, Keys::Values)] {
+        let error = read_column(&mut packs, seal, shard.rows, keys).unwrap_err();
+        assert_eq!(error.code(), "GF_VALIDATION", "{error}");
+    }
+    // The other column of the shard is untouched.
+    let memos = column_named(&built.manifest, shard, "memo");
+    read_column(&mut packs, memos, shard.rows, Keys::Values).unwrap();
+}
+
+#[test]
+fn a_directory_that_disagrees_with_its_pages_is_refused() {
+    let built = build(&[fragment(0, 400, 4)]).expect("indexed");
+    let shard = &built.manifest.shards[0];
+    let rows = shard.rows as usize;
+    let dir = tempfile::tempdir().unwrap();
+    let directory = write_packs(dir.path(), &built.packs);
+    let path = directory.join("00000000.epk");
+    let original = std::fs::read(&path).unwrap();
+    let properties = ["timestamp".to_owned()];
+    let demanded = demanded_columns(&built.manifest, &properties);
+
+    // Edit the UUID directory and seal the edit, as a writer that computed the
+    // directory wrongly would have: the seal is then valid and only the
+    // directory's claims about the pages can catch it.
+    let reseal = |edit: &dyn Fn(&mut [u8], usize)| {
+        let seal = shard.uuids;
+        let start = usize::try_from(seal.offset).unwrap();
+        let end = start + usize::try_from(seal.byte_length).unwrap();
+        let mut bytes = original.clone();
+        let whole = &mut bytes[start..end];
+        let pages_end = page_extents(whole, rows, 16).last().unwrap().end;
+        let schema_length =
+            u32::from_le_bytes(whole[whole.len() - 4..].try_into().unwrap()) as usize;
+        let tail = &mut whole[pages_end..];
+        edit(tail, schema_length);
+        let xxh64 = crate::corruption_checksum::checksum(tail);
+        std::fs::write(&path, bytes).unwrap();
+        BlobSeal { xxh64, ..seal }
+    };
+    let lookup = |seal: BlobSeal| {
+        let forged = ShardEntry {
+            uuids: seal,
+            ..shard.clone()
+        };
+        let mut packs = PackHandles::new(directory.clone(), built.manifest.page_rows);
+        read_hit_shard(&mut packs, &forged, &[uuid(3)], &demanded).err()
+    };
+
+    // Unedited, the same reseal changes nothing.
+    assert!(lookup(reseal(&|_, _| {})).is_none());
+    // A least key the first page does not start with.
+    let error = lookup(reseal(&|tail, schema| tail[schema + 12 + 15] ^= 1))
+        .expect("the page does not hold the key its entry names");
+    assert_eq!(error.code(), "GF_VALIDATION", "{error}");
+    // A length that leaves bytes of the blob unaccounted for.
+    let error = lookup(reseal(&|tail, schema| tail[schema] ^= 1))
+        .expect("the directory must account for every byte");
+    assert_eq!(error.code(), "GF_VALIDATION", "{error}");
+    // A page checksum that is not the page's.
+    let error =
+        lookup(reseal(&|tail, schema| tail[schema + 4] ^= 1)).expect("a page must match its entry");
+    assert_eq!(error.code(), "GF_VALIDATION", "{error}");
+}
+
+#[test]
+fn ids_out_of_uuid_order_are_found_through_page_ranges_that_overlap() {
+    // A multiplicative permutation: every page of 128 ids spans nearly the
+    // whole id range, so no page can be ruled out by its neighbours.
+    let ids: Vec<u64> = (0..2_000_u64)
+        .map(|row| (row * 7_919 + 13) % 1_000_003)
+        .collect();
+    let built = build_with(
+        &[fragment(0, 2_000, 4)],
+        &[Some(ids.clone())],
+        Some("topology"),
+    )
+    .expect("indexed");
+    let shard = &built.manifest.shards[0];
+    let range = (shard.id_min.unwrap(), shard.id_max.unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let directory = write_packs(dir.path(), &built.packs);
+    let mut packs = PackHandles::new(directory, built.manifest.page_rows);
+    let blob = packs
+        .open_blob(shard.ids.unwrap(), shard.rows, Keys::Id)
+        .unwrap();
+    assert!(
+        blob.id_pages(&[ids[3]]).len() > 1,
+        "the ranges of several pages hold the id"
+    );
+
+    let properties = ["timestamp".to_owned()];
+    let demanded = demanded_columns(&built.manifest, &properties);
+    let mut targets: Vec<u64> = [3_usize, 777, 1_500, 1_999]
+        .iter()
+        .map(|row| ids[*row])
+        .collect();
+    targets.sort_unstable();
+    let hit = read_hit_shard_by_id(
+        &mut packs,
+        shard,
+        shard.ids.unwrap(),
+        range,
+        &targets,
+        &demanded,
+    )
+    .unwrap()
+    .expect("the shard holds every target");
+    assert_eq!(hit.keys, targets);
+    let expected: Vec<i64> = targets
+        .iter()
+        .map(|id| ids.iter().position(|held| held == id).unwrap() as i64 * 3)
+        .collect();
+    assert_eq!(int64s(&hit.columns[&0]), expected);
+
+    // An id inside the range that no row holds is found in no page.
+    let absent = (range.0 + 1..)
+        .find(|id| !ids.contains(id))
+        .expect("the range has gaps");
+    assert!(absent < range.1);
+    assert!(
+        read_hit_shard_by_id(
+            &mut packs,
+            shard,
+            shard.ids.unwrap(),
+            range,
+            &[absent],
+            &demanded,
+        )
+        .unwrap()
+        .is_none()
+    );
+}
+
+#[test]
+fn a_manifest_names_a_usable_page_size_or_none() {
+    let built = build(&[fragment(0, 8, 4)]).expect("indexed");
+    let path = Path::new("indexes/edge-properties/x.epx");
+    let mut manifest = decode_manifest(&built.manifest_file.bytes, path).unwrap();
+    for rows in [0, SHARD_ROWS as u32 + 1] {
+        manifest.page_rows = Some(rows);
+        let error = decode_manifest(&encode_manifest(&manifest).unwrap(), path).unwrap_err();
+        assert_eq!(error.code(), "GF_VALIDATION", "{error}");
+    }
+    manifest.page_rows = None;
+    assert!(decode_manifest(&encode_manifest(&manifest).unwrap(), path).is_ok());
+}
+
+/// The blob this crate wrote before pages: one Zstd Arrow IPC batch covering the
+/// column, sealed by the XXH64 of its bytes.
+fn whole_blob(name: &str, array: &ArrayRef) -> (Vec<u8>, u64) {
+    let nullable = name != UUID_COLUMN && name != ID_COLUMN;
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        name,
+        array.data_type().clone(),
+        nullable,
+    )]));
+    let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::clone(array)]).unwrap();
+    let options = arrow::ipc::writer::IpcWriteOptions::default()
+        .try_with_compression(Some(arrow::ipc::CompressionType::ZSTD))
+        .unwrap();
+    let mut bytes = Vec::new();
+    {
+        let mut writer =
+            arrow::ipc::writer::StreamWriter::try_new_with_options(&mut bytes, &schema, options)
+                .unwrap();
+        writer.write(&batch).unwrap();
+        writer.finish().unwrap();
+    }
+    let xxh64 = crate::corruption_checksum::checksum(&bytes);
+    (bytes, xxh64)
+}
+
+#[test]
+fn an_index_built_before_pages_is_still_read_whole() {
+    let ids = descending_ids(0, 300);
+    let built = build_with(
+        &[fragment(0, 300, 4)],
+        &[Some(ids.clone())],
+        Some("topology"),
+    )
+    .expect("indexed");
+    let dir = tempfile::tempdir().unwrap();
+    let paged_directory = write_packs(&dir.path().join("paged"), &built.packs);
+    let mut paged = PackHandles::new(paged_directory, built.manifest.page_rows);
+
+    // The same index in the old layout: every column one batch, one pack, and a
+    // manifest without a page size.
+    let legacy_directory = dir.path().join("legacy").join("route.packs");
+    std::fs::create_dir_all(&legacy_directory).unwrap();
+    let mut pack = Vec::new();
+    let mut place = |name: &str, array: ArrayRef| {
+        let (bytes, xxh64) = whole_blob(name, &array);
+        let seal = BlobSeal {
+            pack: 0,
+            offset: pack.len() as u64,
+            byte_length: bytes.len() as u64,
+            xxh64,
+        };
+        pack.extend_from_slice(&bytes);
+        seal
+    };
+    let source = &built.manifest.shards[0];
+    let mut legacy_shard = source.clone();
+    legacy_shard.uuids = place(
+        UUID_COLUMN,
+        read_column(&mut paged, source.uuids, source.rows, Keys::Uuid).unwrap(),
+    );
+    legacy_shard.ids = Some(place(
+        ID_COLUMN,
+        read_column(&mut paged, source.ids.unwrap(), source.rows, Keys::Id).unwrap(),
+    ));
+    for column in &mut legacy_shard.columns {
+        let name = &built.manifest.columns[column.column];
+        let array = read_column(&mut paged, column.blob, source.rows, Keys::Values).unwrap();
+        column.blob = place(name, array);
+    }
+    std::fs::write(legacy_directory.join("00000000.epk"), &pack).unwrap();
+    let legacy = Manifest {
+        format: built.manifest.format.clone(),
+        route: built.manifest.route.clone(),
+        source_digest: built.manifest.source_digest.clone(),
+        topology_digest: built.manifest.topology_digest.clone(),
+        rows: built.manifest.rows,
+        page_rows: None,
+        pack_dir: built.manifest.pack_dir.clone(),
+        columns: built.manifest.columns.clone(),
+        shards: vec![legacy_shard.clone()],
+    };
+    let bytes = encode_manifest(&legacy).unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains("page_rows"));
+    let legacy = decode_manifest(&bytes, Path::new("x.epx")).unwrap();
+    assert_eq!(legacy.page_rows, None);
+
+    let properties = ["timestamp".to_owned(), "memo".to_owned()];
+    let paged_demand = demanded_columns(&built.manifest, &properties);
+    let demanded = demanded_columns(&legacy, &properties);
+    let mut old = PackHandles::new(legacy_directory.clone(), legacy.page_rows);
+    // By UUID: the rows a paged read returns, from a blob read whole.
+    let targets = [uuid(3), uuid(150), uuid(299), uuid(1_000)];
+    let expected = read_hit_shard(&mut paged, source, &targets, &paged_demand)
+        .unwrap()
+        .expect("held");
+    let hit = read_hit_shard(&mut old, &legacy_shard, &targets, &demanded)
+        .unwrap()
+        .expect("held");
+    assert_eq!(hit.keys, [uuid(3), uuid(150), uuid(299)]);
+    assert_eq!(hit.keys, expected.keys);
+    assert_eq!(hit.columns, expected.columns);
+    assert_eq!(int64s(&hit.columns[&0]), [9, 450, 897]);
+
+    // By id.
+    let mut by_id = vec![ids[3], ids[150], ids[299]];
+    by_id.sort_unstable();
+    let range = (source.id_min.unwrap(), source.id_max.unwrap());
+    let expected = read_hit_shard_by_id(
+        &mut paged,
+        source,
+        source.ids.unwrap(),
+        range,
+        &by_id,
+        &paged_demand,
+    )
+    .unwrap()
+    .expect("held");
+    let hit = read_hit_shard_by_id(
+        &mut old,
+        &legacy_shard,
+        legacy_shard.ids.unwrap(),
+        range,
+        &by_id,
+        &demanded,
+    )
+    .unwrap()
+    .expect("held");
+    assert_eq!(hit.keys, by_id);
+    assert_eq!(hit.keys, expected.keys);
+    assert_eq!(hit.columns, expected.columns);
+
+    // The old checksum still authenticates: a flipped byte is refused.
+    let timestamps = column_named(&legacy, &legacy_shard, "timestamp");
+    let mut damaged = pack.clone();
+    damaged[usize::try_from(timestamps.offset + timestamps.byte_length).unwrap() - 1] ^= 1;
+    std::fs::write(legacy_directory.join("00000000.epk"), damaged).unwrap();
+    let mut old = PackHandles::new(legacy_directory, legacy.page_rows);
+    let error = read_hit_shard(&mut old, &legacy_shard, &targets, &demanded)
+        .err()
+        .expect("a damaged whole blob is refused");
+    assert_eq!(error.code(), "GF_VALIDATION", "{error}");
+}
