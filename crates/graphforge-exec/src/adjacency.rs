@@ -811,6 +811,20 @@ pub trait AdjacencyProvider: Send + Sync {
     fn edge_cardinality(&self, rel_type_name: &str, direction: Direction) -> Result<u64, GfError> {
         self.adjacency(rel_type_name, direction)?.edge_entry_count()
     }
+
+    /// The per-ordinal label index of the authenticated node files, shared by
+    /// every operation over this generation.
+    ///
+    /// `Ok(None)` means this provider does not serve one (no authenticated
+    /// inventory, or the index would exceed the provider byte budget); the
+    /// caller then reads the node files, which stays the authority.
+    ///
+    /// # Errors
+    /// Returns [`GfError`] when the authenticated node files cannot be read as
+    /// a label index.
+    fn node_labels(&self) -> Result<Option<Arc<graphforge_storage::NodeLabelIndex>>, GfError> {
+        Ok(None)
+    }
 }
 
 /// Operation-scoped adjacency view carrying already-admitted graph metadata.
@@ -855,6 +869,10 @@ impl AdjacencyProvider for AdmittedAdjacencyProvider<'_> {
 
     fn edge_cardinality(&self, relation: &str, direction: Direction) -> Result<u64, GfError> {
         self.provider.edge_cardinality(relation, direction)
+    }
+
+    fn node_labels(&self) -> Result<Option<Arc<graphforge_storage::NodeLabelIndex>>, GfError> {
+        self.provider.node_labels()
     }
 }
 
@@ -1214,6 +1232,17 @@ pub struct PersistentAdjacencyProvider {
     /// (the Undirected view composes the Out and In indexes). Dropped with
     /// `cache` and whenever a rebuild replaces the files.
     indexes: Mutex<HashMap<(String, csr::Direction), Arc<ShardedCsrIndex>>>,
+    /// The per-ordinal label index of the authenticated node files, built on
+    /// first demand and keyed by the topology generation it was built at.
+    /// Dropped with `cache` and when the generation moves.
+    node_labels: Mutex<Option<LabelIndexEntry>>,
+}
+
+/// One built (or declined) label index and the topology generation it describes.
+struct LabelIndexEntry {
+    generation: u64,
+    /// `None` when the index would exceed the provider byte budget.
+    index: Option<Arc<graphforge_storage::NodeLabelIndex>>,
 }
 
 impl PersistentAdjacencyProvider {
@@ -1229,6 +1258,7 @@ impl PersistentAdjacencyProvider {
             state: Mutex::new(None),
             cache: Mutex::new(HashMap::new()),
             indexes: Mutex::new(HashMap::new()),
+            node_labels: Mutex::new(None),
         }
     }
 
@@ -1570,11 +1600,21 @@ impl PersistentAdjacencyProvider {
             *state = None;
             self.drop_views();
         }
+        // The label index is keyed by generation alone: it does not depend on
+        // the CSR state above, so it follows the counter even when that state
+        // was never read.
+        let mut labels = self.node_labels.lock().expect("node label index lock");
+        if labels.as_ref().is_some_and(|entry| {
+            !read_topology_generation(&self.dir).is_ok_and(|g| g == entry.generation)
+        }) {
+            *labels = None;
+        }
     }
 
     fn drop_views(&self) {
         self.cache.lock().expect("adjacency cache lock").clear();
         self.indexes.lock().expect("adjacency index lock").clear();
+        *self.node_labels.lock().expect("node label index lock") = None;
     }
 
     fn cache_shared_view(
@@ -1639,6 +1679,36 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
         &self,
     ) -> Option<Arc<graphforge_storage::AuthenticatedPropertyInventory>> {
         self.scan.admitted_inventory()
+    }
+
+    fn node_labels(&self) -> Result<Option<Arc<graphforge_storage::NodeLabelIndex>>, GfError> {
+        // Authenticated node files only: a provider without an inventory would
+        // have to discover files from the directory, which is not authority.
+        let Some(inventory) = self.scan.admitted_inventory() else {
+            return Ok(None);
+        };
+        // The build is serialized so concurrent partitions share one index.
+        let mut entry = self.node_labels.lock().expect("node label index lock");
+        // Read before building: a generation that moves during the build then
+        // fails the next `revalidate` rather than being recorded as current.
+        let generation = read_topology_generation(&self.dir)?;
+        if let Some(cached) = entry
+            .as_ref()
+            .filter(|cached| cached.generation == generation)
+        {
+            return Ok(cached.index.clone());
+        }
+        let files = graphforge_storage::TopologyFiles::from_inventory(&inventory)?;
+        let index = graphforge_storage::NodeLabelIndex::build(
+            &files,
+            graphforge_storage::adjacency::DEFAULT_DECODED_SHARD_CACHE_BYTES,
+        )?
+        .map(Arc::new);
+        *entry = Some(LabelIndexEntry {
+            generation,
+            index: index.clone(),
+        });
+        Ok(index)
     }
 
     fn adjacency(

@@ -172,6 +172,9 @@ pub(crate) struct Counters {
     workspace_checkpoint_flushes: AtomicU64,
     workspace_checkpoints: AtomicU64,
     workspace_checkpoint_source_bytes: AtomicU64,
+    node_label_index_builds: AtomicU64,
+    node_label_index_bytes: AtomicU64,
+    node_label_index_lookups: AtomicU64,
 }
 
 /// A point-in-time copy of requested I/O counters. Difference two
@@ -289,6 +292,13 @@ pub struct IoSnapshot {
     pub workspace_checkpoints: u64,
     /// Bytes declared by source inventories for those checkpoint captures.
     pub workspace_checkpoint_source_bytes: u64,
+    /// Per-ordinal node label indexes built from the admitted node files.
+    pub node_label_index_builds: u64,
+    /// Resident bytes of the label indexes counted by `node_label_index_builds`.
+    pub node_label_index_bytes: u64,
+    /// Destination-label lookups answered from a label index, one per
+    /// expansion chunk that read no node file.
+    pub node_label_index_lookups: u64,
 }
 
 /// Capture requested counters, or report an unavailable observation.
@@ -375,6 +385,9 @@ pub fn snapshot() -> Option<IoSnapshot> {
         workspace_checkpoint_source_bytes: counters
             .workspace_checkpoint_source_bytes
             .load(Ordering::Relaxed),
+        node_label_index_builds: counters.node_label_index_builds.load(Ordering::Relaxed),
+        node_label_index_bytes: counters.node_label_index_bytes.load(Ordering::Relaxed),
+        node_label_index_lookups: counters.node_label_index_lookups.load(Ordering::Relaxed),
     })
 }
 
@@ -490,6 +503,11 @@ pub fn reset() {
         counters
             .workspace_checkpoint_source_bytes
             .store(0, Ordering::Relaxed);
+        counters.node_label_index_builds.store(0, Ordering::Relaxed);
+        counters.node_label_index_bytes.store(0, Ordering::Relaxed);
+        counters
+            .node_label_index_lookups
+            .store(0, Ordering::Relaxed);
     });
 }
 
@@ -521,6 +539,27 @@ pub(crate) fn record_workspace_checkpoint_copy(bytes: u64, flushes: u64) {
         counters
             .workspace_checkpoint_flushes
             .fetch_add(flushes, Ordering::Relaxed);
+    });
+}
+
+/// Record one per-ordinal node label index build and its resident size.
+pub(crate) fn record_node_label_index_build(bytes: u64) {
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters
+            .node_label_index_builds
+            .fetch_add(1, Ordering::Relaxed);
+        counters
+            .node_label_index_bytes
+            .fetch_add(bytes, Ordering::Relaxed);
+    });
+}
+
+/// Record one chunk of destination labels answered from a label index.
+pub(crate) fn record_node_label_index_lookup() {
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters
+            .node_label_index_lookups
+            .fetch_add(1, Ordering::Relaxed);
     });
 }
 

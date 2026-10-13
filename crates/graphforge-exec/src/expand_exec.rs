@@ -2722,27 +2722,53 @@ fn expand_single_hop_chunk(
             .len()
             .saturating_add(1_usize.saturating_sub(node_key_already_demanded)),
     );
-    let node_batches = if required.is_some() {
-        graphforge_storage::read_nodes_filtered_projected_observed_from_files(
-            &topology_for_provider(cfg.provider.as_ref(), &cfg.dir)?,
-            &reached,
+    // A destination demanded for identity and labels only is answered from the
+    // provider's label index; any other demand reads the node files.
+    let labelled_destination = if required.is_some() {
+        destination_labels::synthesise_destination_batch(
+            cfg.provider.as_ref(),
+            cfg.ordinal_identities.as_ref(),
+            &cfg.out_schema,
+            edge_end,
             &node_projection,
-            node_observer.as_ref(),
-        )
-    } else {
-        graphforge_storage::read_nodes_filtered_observed_from_files(
-            &topology_for_provider(cfg.provider.as_ref(), &cfg.dir)?,
             &reached,
-            node_observer.as_ref(),
-        )
-    }
-    .map_err(|e| exec_err(e.to_string()))?;
-    drop(node_permit);
-    let Some(first) = node_batches.first() else {
-        return Ok(RecordBatch::new_empty(cfg.out_schema.clone()));
+        )?
+    } else {
+        None
     };
-    let node_batch =
-        concat_batches(&first.schema(), &node_batches).map_err(|e| exec_err(e.to_string()))?;
+    let node_batch = if let Some(destination) = labelled_destination {
+        drop(node_permit);
+        demand::record_label_index_rows(
+            cfg.capture_epoch,
+            cfg.edge_var,
+            destination.batch.num_rows(),
+        );
+        for lookup in &destination.identity_lookups {
+            demand::record_identity_lookup(cfg.capture_epoch, cfg.edge_var, lookup);
+        }
+        destination.batch
+    } else {
+        let node_batches = if required.is_some() {
+            graphforge_storage::read_nodes_filtered_projected_observed_from_files(
+                &topology_for_provider(cfg.provider.as_ref(), &cfg.dir)?,
+                &reached,
+                &node_projection,
+                node_observer.as_ref(),
+            )
+        } else {
+            graphforge_storage::read_nodes_filtered_observed_from_files(
+                &topology_for_provider(cfg.provider.as_ref(), &cfg.dir)?,
+                &reached,
+                node_observer.as_ref(),
+            )
+        }
+        .map_err(|e| exec_err(e.to_string()))?;
+        drop(node_permit);
+        let Some(first) = node_batches.first() else {
+            return Ok(RecordBatch::new_empty(cfg.out_schema.clone()));
+        };
+        concat_batches(&first.schema(), &node_batches).map_err(|e| exec_err(e.to_string()))?
+    };
     let node_id_index = node_batch
         .schema()
         .index_of("node_id")
@@ -2882,6 +2908,7 @@ fn expand_single_hop_chunk(
     Ok(output)
 }
 
+mod destination_labels;
 mod edge_filter;
 mod edge_predicate;
 mod edge_properties;
