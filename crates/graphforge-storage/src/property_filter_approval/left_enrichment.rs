@@ -6,7 +6,7 @@ use arrow::datatypes::DataType;
 use datafusion::common::{DataFusionError, JoinType};
 use datafusion::physical_expr::Partitioning;
 use datafusion::physical_expr::equivalence::AcrossPartitions;
-use datafusion::physical_expr::expressions::Column;
+use datafusion::physical_expr::expressions::{Column, UnKnownColumn};
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::joins::{HashJoinExec, PartitionMode};
 use datafusion::physical_plan::repartition::RepartitionExec;
@@ -68,7 +68,6 @@ pub(super) fn nominate_partitioned_left_selected(
         || join.on().len() != 1
         || !unordered_bounded(original)
         || !unordered_bounded(join.left().as_ref())
-        || join.left().downcast_ref::<UuidBuildKeyTapExec>().is_some()
     {
         return Ok(None);
     }
@@ -117,11 +116,31 @@ pub(super) fn nominate_partitioned_left_selected(
         .recompute_properties()
         .build_exec()?;
     if rebuilt.schema().as_ref() != original.schema().as_ref()
-        || rebuilt.output_partitioning() != original.output_partitioning()
+        || !same_distribution(rebuilt.output_partitioning(), original.output_partitioning())
     {
         return Ok(None);
     }
     Ok(Some(rebuilt))
+}
+
+/// Whether two outputs hash their rows into the same partitions. A join whose
+/// projection drops its hash key reports that key as an `UnKnownColumn`, which
+/// by design equals nothing, so two such keys match by name.
+fn same_distribution(rebuilt: &Partitioning, original: &Partitioning) -> bool {
+    let (Partitioning::Hash(rebuilt, count), Partitioning::Hash(original, expected)) =
+        (rebuilt, original)
+    else {
+        return false;
+    };
+    count == expected
+        && rebuilt.len() == original.len()
+        && rebuilt.iter().zip(original).all(|(left, right)| {
+            left.dyn_eq(right.as_ref())
+                || left
+                    .downcast_ref::<UnKnownColumn>()
+                    .zip(right.downcast_ref::<UnKnownColumn>())
+                    .is_some_and(|(left, right)| left.name() == right.name())
+        })
 }
 
 /// Bind only the exact direct scan behind its ordinary UUID hash exchange.
