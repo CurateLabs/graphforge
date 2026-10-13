@@ -178,13 +178,17 @@ fn a_shared_subexpression_is_walked_once_and_still_counted() {
 fn snapshot() -> LoweringSnapshot {
     let schema = |columns: &[&str]| {
         Arc::new(Schema::new(
-            std::iter::once(Field::new("node_uuid", DataType::FixedSizeBinary(16), false))
-                .chain(
-                    columns
-                        .iter()
-                        .map(|c| Field::new(*c, DataType::Utf8, false)),
-                )
-                .collect::<Vec<_>>(),
+            std::iter::once(Field::new(
+                "node_uuid",
+                DataType::FixedSizeBinary(16),
+                false,
+            ))
+            .chain(
+                columns
+                    .iter()
+                    .map(|c| Field::new(*c, DataType::Utf8, false)),
+            )
+            .collect::<Vec<_>>(),
         ))
     };
     LoweringSnapshot {
@@ -208,11 +212,7 @@ fn hydration(demand: PathNodeDemand) -> PathNodeHydration {
 }
 
 fn field_names(hydration: &PathNodeHydration) -> Vec<&str> {
-    hydration
-        .fields
-        .iter()
-        .map(|f| f.name().as_str())
-        .collect()
+    hydration.fields.iter().map(|f| f.name().as_str()).collect()
 }
 
 #[test]

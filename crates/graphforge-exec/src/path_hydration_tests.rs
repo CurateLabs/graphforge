@@ -26,6 +26,12 @@ impl Drop for PathHydrationTestGuard {
     }
 }
 fn test_udf(hydrate: TestHydration) -> HydratedPathNodes {
+    test_udf_with_demand(hydrate, graphforge_rel::expr::PathNodeDemand::Whole)
+}
+fn test_udf_with_demand(
+    hydrate: TestHydration,
+    demand: graphforge_rel::expr::PathNodeDemand,
+) -> HydratedPathNodes {
     let dir = hydrate.dir.unwrap();
     let catalog = Arc::new(
         graphforge_storage::GraphCatalog::open(&dir, None, &graphforge_ir::RuntimeCatalog::new())
@@ -57,7 +63,7 @@ fn test_udf(hydrate: TestHydration) -> HydratedPathNodes {
             labels_by_type: hydrate.labels_by_type,
             prop_stems: hydrate.prop_stems,
             fields: hydrate.fields,
-            demand: graphforge_rel::expr::PathNodeDemand::Whole,
+            demand,
         },
         tables,
         resource,
@@ -1272,4 +1278,213 @@ fn hydration_retains_selected_recovery_health_and_typed_failure() {
     );
     assert_eq!(udf.resource.counters["node_batches"].value(), 0);
     assert_eq!(udf.resource.pool.reserved(), 0);
+}
+
+/// Two stems, two nodes: `1` carries `title` (Company) and `name` (Person)
+/// and both labels, `2` carries only `name` and one label.
+fn two_stem_fixture() -> (tempfile::TempDir, TestHydration, [u8; 16], [u8; 16]) {
+    use graphforge_core::uuid::{new_v7, to_bytes};
+    use graphforge_ir::IrLiteral;
+    use graphforge_value::EntityTypeId;
+    use std::collections::HashMap;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut writer = graphforge_storage::GraphWriter::open_at(
+        dir.path(),
+        graphforge_core::OntologyMode::Advisory,
+        0,
+    )
+    .unwrap();
+    let person = EntityTypeId::decode(1).unwrap();
+    let company = EntityTypeId::decode(2).unwrap();
+    let one = new_v7();
+    let two = new_v7();
+    writer
+        .create_node_with_labels(one, &[person, company])
+        .unwrap();
+    writer.create_node_with_labels(two, &[person]).unwrap();
+    for (node, stem, key, value) in [
+        (one, "Company", "title", "CEO"),
+        (one, "Person", "name", "Ada"),
+        (two, "Person", "name", "Bob"),
+    ] {
+        writer
+            .set_properties(
+                &node,
+                Some(stem),
+                HashMap::from([(key.into(), IrLiteral::Str(value.into()))]),
+            )
+            .unwrap();
+    }
+    writer.flush().unwrap();
+    let field = |name: &str, ty| arrow::datatypes::Field::new(name, ty, name != "node_uuid");
+    let hydrate = TestHydration {
+        dir: Some(dir.path().to_path_buf()),
+        labels_by_type: vec![(person, "Person".into()), (company, "Company".into())],
+        prop_stems: vec!["Company".into(), "Person".into()],
+        fields: vec![
+            field("node_uuid", DataType::FixedSizeBinary(16)),
+            field("labels", DataType::new_list(DataType::Utf8, true)),
+            field("name", DataType::Utf8),
+            field("title", DataType::Utf8),
+        ]
+        .into(),
+    };
+    (dir, hydrate, to_bytes(&one), to_bytes(&two))
+}
+
+/// A one-row seed column and a one-row `List<Struct{src_uuid, dst_uuid}>`
+/// edge column holding the single edge `from -> to`, for node UUIDs minted by
+/// the storage writer.
+fn one_edge_inputs(
+    from: [u8; 16],
+    to: [u8; 16],
+) -> (
+    datafusion::arrow::array::ArrayRef,
+    datafusion::arrow::array::ArrayRef,
+) {
+    use datafusion::arrow::array::StructBuilder;
+    use datafusion::arrow::array::{FixedSizeBinaryArray, FixedSizeBinaryBuilder, ListBuilder};
+
+    let seed = Arc::new(FixedSizeBinaryArray::try_from_iter([from].iter().copied()).unwrap())
+        as datafusion::arrow::array::ArrayRef;
+    let fields: datafusion::arrow::datatypes::Fields = vec![
+        arrow::datatypes::Field::new("src_uuid", DataType::FixedSizeBinary(16), false),
+        arrow::datatypes::Field::new("dst_uuid", DataType::FixedSizeBinary(16), false),
+    ]
+    .into();
+    let mut b = ListBuilder::new(StructBuilder::new(
+        fields,
+        vec![
+            Box::new(FixedSizeBinaryBuilder::new(16)),
+            Box::new(FixedSizeBinaryBuilder::new(16)),
+        ],
+    ));
+    for (index, value) in [from, to].into_iter().enumerate() {
+        b.values()
+            .field_builder::<FixedSizeBinaryBuilder>(index)
+            .unwrap()
+            .append_value(value)
+            .unwrap();
+    }
+    b.values().append(true);
+    b.append(true);
+    (seed, Arc::new(b.finish()))
+}
+
+fn struct_field_names(out: &arrow::array::ArrayRef) -> Vec<String> {
+    let DataType::List(item) = out.data_type() else {
+        panic!("list output, got {:?}", out.data_type())
+    };
+    let DataType::Struct(fields) = item.data_type() else {
+        panic!("struct element")
+    };
+    fields.iter().map(|f| f.name().clone()).collect()
+}
+
+#[test]
+fn narrowed_demand_skips_the_label_scan_and_unobserved_stems() {
+    // #1984: a demand that observes only `name` reads neither the topology
+    // for labels nor the `Company` stem, and returns the same `name` values
+    // as whole hydration.
+    use graphforge_rel::expr::PathNodeDemand;
+
+    let _guard = PathHydrationTestGuard::arm();
+    let (_dir, whole_hydrate, one, two) = two_stem_fixture();
+    let (seed, rels) = one_edge_inputs(one, two);
+
+    let whole = invoke_udf(
+        &test_udf(whole_hydrate.clone()),
+        seed.clone(),
+        rels.clone(),
+        8,
+    )
+    .unwrap();
+    let whole_snap = path_hydration_stats::snapshot();
+    assert!(
+        whole_snap.node_batches_read > 0,
+        "whole hydration scans labels"
+    );
+    assert_eq!(whole_snap.property_stems_opened, 2);
+    assert_eq!(
+        struct_field_names(&whole),
+        ["node_uuid", "labels", "name", "title"]
+    );
+
+    let narrowed_hydrate = TestHydration {
+        labels_by_type: vec![],
+        prop_stems: vec!["Person".into()],
+        fields: vec![
+            arrow::datatypes::Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+            arrow::datatypes::Field::new("name", DataType::Utf8, true),
+        ]
+        .into(),
+        ..whole_hydrate
+    };
+    let demand = PathNodeDemand::Observed {
+        labels: false,
+        properties: ["name".to_owned()].into(),
+    };
+    let udf = test_udf_with_demand(narrowed_hydrate, demand);
+    assert!(!udf.descriptor.demand.labels());
+    let narrowed = invoke_udf(&udf, seed, rels, 8).unwrap();
+    let snap = path_hydration_stats::snapshot();
+    assert_eq!(
+        snap.node_batches_read, 0,
+        "no label scan when labels are unobserved"
+    );
+    assert_eq!(snap.node_rows_examined, 0);
+    assert_eq!(
+        snap.property_stems_opened, 1,
+        "the Company stem is not opened"
+    );
+    assert_eq!(struct_field_names(&narrowed), ["node_uuid", "name"]);
+
+    assert_eq!(
+        path_node_prop_strings(&narrowed, 0, "name"),
+        path_node_prop_strings(&whole, 0, "name")
+    );
+    assert_eq!(
+        path_node_prop_strings(&narrowed, 0, "name"),
+        Some(vec![Some("Ada".into()), Some("Bob".into())])
+    );
+    assert_eq!(path_node_bytes(&narrowed, 0), path_node_bytes(&whole, 0));
+}
+
+#[test]
+fn labels_only_demand_scans_labels_and_opens_no_stem() {
+    use graphforge_rel::expr::PathNodeDemand;
+
+    let _guard = PathHydrationTestGuard::arm();
+    let (_dir, hydrate, one, two) = two_stem_fixture();
+    let (seed, rels) = one_edge_inputs(one, two);
+    let hydrate = TestHydration {
+        prop_stems: vec![],
+        fields: vec![
+            arrow::datatypes::Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+            arrow::datatypes::Field::new("labels", DataType::new_list(DataType::Utf8, true), true),
+        ]
+        .into(),
+        ..hydrate
+    };
+    let demand = PathNodeDemand::Observed {
+        labels: true,
+        properties: Default::default(),
+    };
+    let out = invoke_udf(&test_udf_with_demand(hydrate, demand), seed, rels, 8).unwrap();
+    let snap = path_hydration_stats::snapshot();
+    assert!(snap.node_batches_read > 0);
+    assert_eq!(snap.property_stems_opened, 0);
+    assert_eq!(struct_field_names(&out), ["node_uuid", "labels"]);
+    let mut labels = path_node_label_lists(&out, 0).unwrap();
+    for node in &mut labels {
+        node.sort();
+    }
+    assert_eq!(
+        labels,
+        vec![
+            vec![Some("Company".to_owned()), Some("Person".to_owned())],
+            vec![Some("Person".to_owned())]
+        ]
+    );
 }
