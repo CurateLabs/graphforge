@@ -47,14 +47,6 @@ source: crates/graphforge-ir/tests/golden.rs
       }
     },
     {
-      "RelationshipUnique": {
-        "edge": 3,
-        "prior_edges": [
-          1
-        ]
-      }
-    },
-    {
       "NodeScan": {
         "var": 4,
         "ty": 3
