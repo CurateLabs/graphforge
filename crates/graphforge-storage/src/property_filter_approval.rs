@@ -541,7 +541,7 @@ fn nominate_existing_collect_left_inner(
     {
         return Ok(None);
     }
-    let Some(scan) = join.right().downcast_ref::<PropertyOverlayExec>() else {
+    let Some((scan, exchanged)) = collect_left_probe_scan(join.right()) else {
         return Ok(None);
     };
     let uuid_index = if selected_key.is_some() {
@@ -584,13 +584,47 @@ fn nominate_existing_collect_left_inner(
         build_column,
         Arc::clone(&nomination),
     ));
-    let nominated_right: Arc<dyn ExecutionPlan> = Arc::new(scan.with_uuid_nomination(nomination));
+    let nominated_scan: Arc<dyn ExecutionPlan> = Arc::new(scan.with_uuid_nomination(nomination));
+    // The exchange keeps its partitioning, so the join's output properties
+    // are the ones it had.
+    let nominated_right = if exchanged {
+        Arc::clone(join.right()).with_new_children(vec![nominated_scan])?
+    } else {
+        nominated_scan
+    };
     let rebuilt = join
         .builder()
         .with_new_children(vec![tapped_left, nominated_right])?
         .recompute_properties()
         .build_exec()?;
     Ok(Some(rebuilt))
+}
+
+/// The property scan a CollectLeft join probes, and whether a round-robin
+/// exchange sits between them.
+///
+/// A CollectLeft join accepts any distribution of its probe side, so with more
+/// than one target partition DataFusion fans the probe scan out over a
+/// round-robin exchange that deals batches to the join's partitions. The
+/// exchange moves rows between partitions and cannot change which rows the
+/// scan produces, so the scan beneath it may be nominated from the build side
+/// exactly as a direct scan is. Any other operator between them (a filter, a
+/// projection, a hash or order-preserving exchange) is not recognised.
+fn collect_left_probe_scan(right: &Arc<dyn ExecutionPlan>) -> Option<(&PropertyOverlayExec, bool)> {
+    if let Some(scan) = right.downcast_ref::<PropertyOverlayExec>() {
+        return Some((scan, false));
+    }
+    let exchange = right.downcast_ref::<RepartitionExec>()?;
+    if !matches!(exchange.partitioning(), Partitioning::RoundRobinBatch(count) if *count > 0)
+        || exchange.preserve_order()
+        || !left_enrichment::unordered_bounded(exchange)
+    {
+        return None;
+    }
+    let scan = exchange.input().downcast_ref::<PropertyOverlayExec>()?;
+    (left_enrichment::unordered_bounded(scan)
+        && exchange.schema().as_ref() == scan.schema().as_ref())
+    .then_some((scan, true))
 }
 
 fn attach_nomination(

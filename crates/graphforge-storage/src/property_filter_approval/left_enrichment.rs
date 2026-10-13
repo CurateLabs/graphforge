@@ -15,7 +15,7 @@ use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 use crate::property_join_nomination::UuidBuildKeyTapExec;
 use crate::property_scan::PropertyOverlayExec;
 
-fn unordered_bounded(plan: &dyn ExecutionPlan) -> bool {
+pub(super) fn unordered_bounded(plan: &dyn ExecutionPlan) -> bool {
     plan.fetch().is_none()
         && plan.output_ordering().is_none()
         && !plan.boundedness().is_unbounded()

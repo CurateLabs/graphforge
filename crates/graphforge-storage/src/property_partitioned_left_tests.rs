@@ -436,6 +436,176 @@ fn partitioned_left_enrichment_is_idempotent_and_rejects_other_exchanges() {
     }
 }
 
+/// A LEFT enrichment planned as CollectLeft: the single-partition frontier is
+/// the build and `probe` is whatever DataFusion placed above the property
+/// scan. With statistics on the preserved side it chooses this mode over a
+/// hash-partitioned join, and then deals the probe scan out to the join's
+/// partitions over a round-robin exchange.
+fn collect_left_enrichment(
+    frontier: Arc<dyn ExecutionPlan>,
+    probe: Arc<dyn ExecutionPlan>,
+    projection: Vec<usize>,
+) -> Arc<dyn ExecutionPlan> {
+    let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("node_uuid", 0));
+    Arc::new(
+        HashJoinExec::try_new(
+            frontier,
+            probe,
+            vec![(key.clone(), key)],
+            None,
+            &JoinType::Left,
+            Some(projection),
+            PartitionMode::CollectLeft,
+            NullEquality::NullEqualsNothing,
+            false,
+        )
+        .unwrap(),
+    )
+}
+
+fn round_robin(plan: Arc<dyn ExecutionPlan>, partitions: usize) -> Arc<dyn ExecutionPlan> {
+    Arc::new(RepartitionExec::try_new(plan, Partitioning::RoundRobinBatch(partitions)).unwrap())
+}
+
+#[test]
+fn collect_left_enrichment_nominates_a_scan_behind_a_round_robin_exchange() {
+    let config = ConfigOptions::default();
+    let frontier = input_with_values(&[Some([1; 16]), Some([2; 16])]);
+    for partitions in [2, 4] {
+        let scan = property_scan(None, None);
+        assert!(scan.fresh_nomination_uuid_column().is_some());
+        let original = collect_left_enrichment(
+            Arc::clone(&frontier),
+            round_robin(Arc::new(scan), partitions),
+            vec![0, 1, 2],
+        );
+        SanityCheckPlan::new()
+            .optimize(original.clone(), &config)
+            .unwrap();
+
+        let optimized = PropertyFilterApprovalRule
+            .optimize(original.clone(), &config)
+            .unwrap();
+        assert!(!Arc::ptr_eq(&original, &optimized));
+        assert_eq!(optimized.schema().as_ref(), original.schema().as_ref());
+        assert_eq!(
+            optimized.output_partitioning().partition_count(),
+            original.output_partitioning().partition_count()
+        );
+        let join = optimized.downcast_ref::<HashJoinExec>().unwrap();
+        assert_eq!(*join.join_type(), JoinType::Left);
+        assert_eq!(*join.partition_mode(), PartitionMode::CollectLeft);
+        let tap = join.left().downcast_ref::<UuidBuildKeyTapExec>().unwrap();
+        assert!(Arc::ptr_eq(tap.children()[0], &frontier));
+        // The exchange survives with its partitioning; only the scan beneath
+        // it is nominated.
+        let exchange = join.right().downcast_ref::<RepartitionExec>().unwrap();
+        assert_eq!(
+            exchange.partitioning(),
+            &Partitioning::RoundRobinBatch(partitions)
+        );
+        let nominated = exchange
+            .input()
+            .downcast_ref::<PropertyOverlayExec>()
+            .unwrap();
+        assert!(nominated.nomination_uuid_column().is_some());
+        assert_eq!(nominated.fresh_nomination_uuid_column(), None);
+        SanityCheckPlan::new()
+            .optimize(optimized.clone(), &config)
+            .unwrap();
+
+        // The tap and nomination are installed once.
+        let repeated = PropertyFilterApprovalRule
+            .optimize(optimized.clone(), &config)
+            .unwrap();
+        assert!(Arc::ptr_eq(&optimized, &repeated));
+    }
+}
+
+#[test]
+fn collect_left_enrichment_keeps_probes_it_cannot_prove_are_the_scan() {
+    let config = ConfigOptions::default();
+    let frontier = input_with_values(&[Some([1; 16]), Some([2; 16])]);
+    let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("node_uuid", 0));
+    let scan = || -> Arc<dyn ExecutionPlan> { Arc::new(property_scan(None, None)) };
+    let limited: Arc<dyn ExecutionPlan> = Arc::new(GlobalLimitExec::new(
+        Arc::new(CoalescePartitionsExec::new(scan())),
+        0,
+        Some(10),
+    ));
+    let probes: Vec<(&str, Arc<dyn ExecutionPlan>)> = vec![
+        (
+            "a hash exchange",
+            Arc::new(
+                RepartitionExec::try_new(scan(), Partitioning::Hash(vec![key.clone()], 4)).unwrap(),
+            ),
+        ),
+        ("an exchange over a fetch", round_robin(limited, 4)),
+        (
+            "an exchange over a limited scan",
+            round_robin(Arc::new(property_scan(Some(1), None)), 4),
+        ),
+        (
+            "an exchange over an equality scan",
+            round_robin(
+                Arc::new(property_scan(
+                    None,
+                    Some(PropertyEquality {
+                        column: "ident".into(),
+                        value: EqualityValue::Int(1),
+                    }),
+                )),
+                4,
+            ),
+        ),
+        ("two exchanges", round_robin(round_robin(scan(), 2), 4)),
+    ];
+    for (name, probe) in probes {
+        let original = collect_left_enrichment(Arc::clone(&frontier), probe, vec![0, 1, 2]);
+        let unchanged = PropertyFilterApprovalRule
+            .optimize(original.clone(), &config)
+            .unwrap();
+        assert!(Arc::ptr_eq(&original, &unchanged), "{name} was rewritten");
+    }
+}
+
+#[test]
+fn selected_endpoint_nominates_a_key_only_scan_behind_a_round_robin_exchange() {
+    let config = ConfigOptions::default();
+    let frontier = input_with_values(&[Some([1; 16]), Some([2; 16])]);
+    let original = collect_left_enrichment(
+        Arc::clone(&frontier),
+        round_robin(Arc::new(key_only_property_scan()), 4),
+        vec![1],
+    );
+
+    let optimized = SelectedEndpointPropertyFilterApprovalRule::new(|_, index| index == 0)
+        .optimize(original.clone(), &config)
+        .unwrap();
+    assert!(!Arc::ptr_eq(&original, &optimized));
+    assert_eq!(optimized.schema().as_ref(), original.schema().as_ref());
+    assert_eq!(
+        optimized.output_partitioning().partition_count(),
+        original.output_partitioning().partition_count()
+    );
+    let join = optimized.downcast_ref::<HashJoinExec>().unwrap();
+    assert_eq!(*join.partition_mode(), PartitionMode::CollectLeft);
+    assert!(join.left().downcast_ref::<UuidBuildKeyTapExec>().is_some());
+    let exchange = join.right().downcast_ref::<RepartitionExec>().unwrap();
+    assert_eq!(exchange.partitioning(), &Partitioning::RoundRobinBatch(4));
+    let nominated = exchange
+        .input()
+        .downcast_ref::<PropertyOverlayExec>()
+        .unwrap();
+    assert_eq!(nominated.fresh_selected_endpoint_uuid_column(), None);
+
+    // A selector that does not name the frontier's key authorizes nothing.
+    let unchanged = SelectedEndpointPropertyFilterApprovalRule::new(|_, index| index == 1)
+        .optimize(original.clone(), &config)
+        .unwrap();
+    assert!(Arc::ptr_eq(&original, &unchanged));
+}
+
 #[test]
 fn identity_only_enrichment_keeps_its_partitioned_join_without_a_uuid_set() {
     let config = ConfigOptions::default();
