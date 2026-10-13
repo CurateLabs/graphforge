@@ -2,7 +2,8 @@
 //!
 //! Skill files are copied into `OUT_DIR` and embedded with `include_bytes!`
 //! paths relative to the generated module, so the compiled bytes come from one
-//! build-script snapshot of the canonical `project-skills/` tree.
+//! build-script snapshot of the package-local `project-skills/` tree. The sync
+//! script generates this copy from the canonical bundle at the repository root.
 
 use std::env;
 use std::fmt::Write as _;
@@ -31,7 +32,7 @@ fn rust_string(value: &str) -> String {
 fn main() {
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest dir"));
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("out dir"));
-    let root = manifest_dir.join("../../project-skills");
+    let root = manifest_dir.join("project-skills");
     println!("cargo:rerun-if-changed={}", root.display());
 
     let manifest = root.join("manifest.json");

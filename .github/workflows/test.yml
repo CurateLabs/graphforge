@@ -280,10 +280,21 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
           key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: cargo-nextest@0.9.145
+      # nextest runs the test binaries in parallel; plain `cargo test` ran them
+      # one after another and outgrew the timeout as facade tests were added.
+      # The cucumber `bdd` harness and the doctests cannot run under nextest,
+      # so they run under cargo test, as in the Rust Harness job.
       - name: Build and test the lean API and core executor
         run: |
-          cargo test --locked -p graphforge-api --no-default-features
-          cargo test --locked -p graphforge-exec --no-default-features --features algorithms-core
+          cargo nextest run --locked --no-fail-fast -p graphforge-api --no-default-features -E 'not binary(bdd)'
+          cargo test --locked -p graphforge-api --no-default-features --test bdd
+          cargo test --locked -p graphforge-api --no-default-features --doc
+          cargo nextest run --locked --no-fail-fast -p graphforge-exec --no-default-features --features algorithms-core
+          cargo test --locked -p graphforge-exec --no-default-features --features algorithms-core --doc
 
   # #[cfg(windows)] lock and handle behavior in graphforge-storage does not run
   # on the Linux lane; durable-project tests need ext4/xfs/btrfs and do not run
