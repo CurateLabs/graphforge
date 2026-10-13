@@ -24,7 +24,7 @@ use list_values::{
 };
 mod list_execution;
 pub use list_execution::rewrite_embedded_expressions;
-use list_execution::{CypherInvariantQuantifier, CypherListComp, CypherQuantifier};
+use list_execution::{CypherInvariantQuantifier, CypherListComp, CypherQuantifier, check_embedded};
 #[cfg(test)]
 use list_execution::{INVARIANT_QUANTIFIER_ROWS, reduce_invariant_quantifier, reduce_quantifier};
 mod scalar_execution;
@@ -169,6 +169,17 @@ pub struct NodeShape {
     pub prop_names: Vec<String>,
 }
 
+/// The per-relationship predicate of a reachability expansion, lowered over the
+/// synthetic struct column [`graphforge_plan::VAR_LEN_EDGE_ELEMENT`]
+/// (see [`ExprLowerer::lower_edge_predicates`]).
+#[derive(Clone, Debug)]
+pub struct LoweredEdgePredicate {
+    /// The conjunction of every pushed predicate.
+    pub predicate: DfExpr,
+    /// The relationship properties the predicate reads, sorted and unique.
+    pub properties: Vec<String>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EntityIdentityKind {
     Node,
@@ -225,6 +236,11 @@ pub struct ExprLowerer<'a> {
     /// a single struct column, not a table whose fields are top-level columns.
     /// Empty elsewhere; its length is the current nesting depth.
     elem_struct_cols: Vec<String>,
+    /// The field names of each element column in [`elem_struct_cols`] whose
+    /// list has a statically known `Struct` element type, keyed by column. A
+    /// property that is not among them is one no element stores, so reading it
+    /// is `NULL` (Cypher), not a planning error.
+    elem_struct_fields: HashMap<String, Vec<String>>,
     /// Immutable dataset schemas used to describe hydrated `nodes(p)` values.
     /// Schema-only explanation retains the original UUID-only shape.
     read_target: Option<graphforge_ir::LoweringSnapshot>,
@@ -262,6 +278,7 @@ impl<'a> ExprLowerer<'a> {
             props_authoritative: false,
             input_schema: None,
             elem_struct_cols: Vec::new(),
+            elem_struct_fields: HashMap::new(),
             read_target: None,
             now: std::sync::OnceLock::new(),
         }
@@ -288,6 +305,7 @@ impl<'a> ExprLowerer<'a> {
             props_authoritative: false,
             input_schema: None,
             elem_struct_cols: Vec::new(),
+            elem_struct_fields: HashMap::new(),
             read_target: None,
             now: std::sync::OnceLock::new(),
         }
@@ -322,6 +340,7 @@ impl<'a> ExprLowerer<'a> {
             props_authoritative,
             input_schema: None,
             elem_struct_cols: Vec::new(),
+            elem_struct_fields: HashMap::new(),
             read_target: None,
             now: std::sync::OnceLock::new(),
         }
@@ -343,6 +362,20 @@ impl<'a> ExprLowerer<'a> {
     #[must_use]
     pub fn with_elem_struct_col(mut self, col: String) -> Self {
         self.elem_struct_cols.push(col);
+        self
+    }
+
+    /// Record the field names of the `Struct` elements bound to `col` (see
+    /// [`elem_struct_fields`](Self::elem_struct_fields)). A column whose
+    /// element type is not a struct has no entry.
+    #[must_use]
+    pub fn with_elem_struct_fields(mut self, col: &str, element_type: Option<&DataType>) -> Self {
+        if let Some(DataType::Struct(fields)) = element_type {
+            self.elem_struct_fields.insert(
+                col.to_owned(),
+                fields.iter().map(|f| f.name().clone()).collect(),
+            );
+        }
         self
     }
 
@@ -421,6 +454,25 @@ impl<'a> ExprLowerer<'a> {
                     && let Some(out) = self.lower_static_value_access(*base, &prop_name)?
                 {
                     return Ok(out);
+                }
+                // A relationship or map element of a quantifier / comprehension
+                // list whose static element type is a struct: a property that
+                // is none of the struct's fields is one no element stores, so
+                // it reads `null` (Cypher) rather than failing to plan.
+                if let IrExpr::VarRef(v) = self.arena.get(*base)
+                    && let Some(fields) = self
+                        .var_map
+                        .get(*v)
+                        .and_then(|column| self.elem_struct_fields.get(column))
+                {
+                    let prop_name = self
+                        .prop_names
+                        .get(prop)
+                        .cloned()
+                        .unwrap_or_else(|| format!("prop_{prop}"));
+                    if !fields.contains(&prop_name) {
+                        return Ok(lit(ScalarValue::Null));
+                    }
                 }
                 // Cypher: reading a property a node does not have yields `null`,
                 // not an error. The columns resolvable under a node var's
@@ -1041,6 +1093,72 @@ impl<'a> ExprLowerer<'a> {
         Some(null_unless(present, named_struct(args)))
     }
 
+    /// The name a property is stored under: the catalog name, or `prop_<id>`
+    /// for a runtime-catalog property the ontology does not name. The same
+    /// resolution [`resolve_prop_col`](Self::resolve_prop_col) applies.
+    fn property_name(&self, prop: PropertyId) -> String {
+        self.prop_names
+            .get(&prop)
+            .cloned()
+            .unwrap_or_else(|| format!("prop_{prop}"))
+    }
+
+    /// `l AND r` under Cypher's three-valued logic, refusing a proven
+    /// non-boolean operand exactly as the binary `AND` lowering does (#956).
+    fn boolean_and(&self, l: DfExpr, r: DfExpr) -> Result<DfExpr, LoweringError> {
+        if self.is_known_non_bool(&l) || self.is_known_non_bool(&r) {
+            return Err(LoweringError::InvalidType(
+                "AND requires boolean operands".to_owned(),
+            ));
+        }
+        Ok(CYPHER_AND.call(vec![l, r]))
+    }
+
+    /// Lower `ids` as the left-associated `AND` of its members, the shape the
+    /// parser gives `a AND b AND c`. `ids` must not be empty.
+    pub(crate) fn lower_conjunction(&self, ids: &[ExprId]) -> Result<DfExpr, LoweringError> {
+        let mut conjuncts = ids.iter().map(|&id| self.lower(id));
+        let first = conjuncts
+            .next()
+            .ok_or_else(|| LoweringError::UnsupportedExpr("empty conjunction".to_owned()))??;
+        conjuncts.try_fold(first, |acc, next| self.boolean_and(acc, next?))
+    }
+
+    /// Lower the per-relationship predicates a reachability expansion tests on
+    /// each edge it traverses (see `graphforge_ir::EdgePredicate`).
+    ///
+    /// Each predicate is lowered with its loop variable bound to the synthetic
+    /// struct column [`VAR_LEN_EDGE_ELEMENT`], so the relationship's properties
+    /// are struct fields and the expression refers to no other column. The
+    /// predicates are combined with `AND`; parameters stay placeholders for the
+    /// session to bind.
+    pub(crate) fn lower_edge_predicates(
+        &self,
+        predicates: &[graphforge_ir::EdgePredicate],
+    ) -> Result<LoweredEdgePredicate, LoweringError> {
+        let mut combined: Option<DfExpr> = None;
+        let mut properties = std::collections::BTreeSet::new();
+        for predicate in predicates {
+            let mut element_vars = VarMap::new();
+            element_vars.insert(predicate.loop_var, graphforge_plan::VAR_LEN_EDGE_ELEMENT);
+            let lowered =
+                ExprLowerer::with_prop_names(self.arena, &element_vars, self.prop_names.clone())
+                    .with_elem_struct_col(graphforge_plan::VAR_LEN_EDGE_ELEMENT.to_owned())
+                    .lower(predicate.predicate)?;
+            combined = Some(match combined {
+                Some(acc) => self.boolean_and(acc, lowered)?,
+                None => lowered,
+            });
+            properties.extend(predicate.properties.iter().map(|&p| self.property_name(p)));
+        }
+        let predicate = combined
+            .ok_or_else(|| LoweringError::UnsupportedExpr("no edge predicates".to_owned()))?;
+        Ok(LoweredEdgePredicate {
+            predicate,
+            properties: properties.into_iter().collect(),
+        })
+    }
+
     /// Lower `all/any/none/single(loop_var IN list WHERE predicate)` (#955) to a
     /// `cypher_quantifier` UDF call. The predicate is lowered with `loop_var`
     /// mapped to a synthetic element column `__gf_elem` and any OUTER variables to
@@ -1094,7 +1212,9 @@ impl<'a> ExprLowerer<'a> {
             for c in &self.elem_struct_cols {
                 l = l.with_elem_struct_col(c.clone());
             }
+            l.elem_struct_fields.clone_from(&self.elem_struct_fields);
             l.with_elem_struct_col(elem_name.clone())
+                .with_elem_struct_fields(&elem_name, self.list_element_type(&list_expr).as_ref())
         };
         let pred_expr = pred_lowerer.lower(predicate)?;
 
@@ -1125,11 +1245,9 @@ impl<'a> ExprLowerer<'a> {
         {
             use datafusion::arrow::datatypes::{Field, Schema};
             use datafusion::common::DFSchema;
-            use datafusion::logical_expr::execution_props::ExecutionProps;
-            use datafusion::physical_expr::create_physical_expr;
             let schema = Schema::new(vec![Field::new(&elem_name, elem_type, true)]);
             if let Ok(df_schema) = DFSchema::try_from(schema)
-                && create_physical_expr(&pred_expr, &df_schema, &ExecutionProps::new()).is_err()
+                && check_embedded(&pred_expr, &df_schema).is_err()
             {
                 return Err(LoweringError::InvalidType(format!(
                     "quantifier predicate cannot apply to the list's element type ({kind:?})"
@@ -1213,7 +1331,9 @@ impl<'a> ExprLowerer<'a> {
             for c in &self.elem_struct_cols {
                 l = l.with_elem_struct_col(c.clone());
             }
+            l.elem_struct_fields.clone_from(&self.elem_struct_fields);
             l.with_elem_struct_col(elem_name.clone())
+                .with_elem_struct_fields(&elem_name, self.list_element_type(&list_expr).as_ref())
         };
         let mut filter_expr = filter.map(|f| clause_lowerer.lower(f)).transpose()?;
         let mut projection_expr = projection.map(|p| clause_lowerer.lower(p)).transpose()?;
@@ -1272,11 +1392,9 @@ impl<'a> ExprLowerer<'a> {
         {
             use datafusion::arrow::datatypes::{Field, Schema};
             use datafusion::common::DFSchema;
-            use datafusion::logical_expr::execution_props::ExecutionProps;
-            use datafusion::physical_expr::create_physical_expr;
             let schema = Schema::new(vec![Field::new(&elem_name, elem_type, true)]);
             if let Ok(df_schema) = DFSchema::try_from(schema)
-                && create_physical_expr(fexpr, &df_schema, &ExecutionProps::new()).is_err()
+                && check_embedded(fexpr, &df_schema).is_err()
             {
                 return Err(LoweringError::InvalidType(
                     "list comprehension filter cannot apply to the list's element type".into(),

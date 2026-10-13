@@ -28,13 +28,18 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use datafusion::common::DataFusionError;
+use datafusion::common::ParamValues;
+use datafusion::common::tree_node::Transformed;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::execution::TaskContext;
 use datafusion::execution::context::QueryPlanner;
 use datafusion::execution::context::SessionState;
+use datafusion::logical_expr::Extension;
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::logical_expr::LogicalPlanBuilder;
 use datafusion::logical_expr::UserDefinedLogicalNode;
+use datafusion::logical_expr::simplify::SimplifyContext;
+use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
@@ -128,6 +133,48 @@ struct OwnedSessionAdjacency(RwLock<Arc<PersistentAdjacencyProvider>>);
 /// ordinal identity authority.
 pub(crate) struct OrdinalIdentityResolverExt(pub Option<Arc<V4OrdinalIdentitySession>>);
 
+fn plan_var_len_extension(
+    var_len: &VarLenExpandNode,
+    planner: &dyn PhysicalPlanner,
+    physical_inputs: &[Arc<dyn ExecutionPlan>],
+    session_state: &SessionState,
+) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+    let input = physical_inputs.first().cloned().ok_or_else(|| {
+        DataFusionError::Internal("VarLenExpand requires one physical input".into())
+    })?;
+    let resource = read_resource::required(session_state)?;
+    resource.validate(var_len.read_contract.as_ref())?;
+    let provider = session_state
+        .config()
+        .get_extension::<AdjacencyProviderExt>()
+        .ok_or_else(|| DataFusionError::Plan("GF_READ_RESOURCE_MISSING: adjacency".into()))?
+        .0
+        .clone();
+    let mut expand = VarLenExpandExec::new(
+        var_len,
+        input,
+        provider,
+        resource.dir.clone(),
+        resource.mode,
+    );
+    if let Some(filter) = &var_len.edge_filter {
+        // The predicate reads one synthetic struct column, which exists in no
+        // plan schema, so it is planned against its own. The logical optimizer
+        // never sees it, so it is simplified here: functions such as `coalesce`
+        // exist only in their simplified form once planned.
+        let schema = Arc::new(filter.element_schema()?);
+        let simplifier = ExprSimplifier::new(
+            SimplifyContext::builder()
+                .with_schema(Arc::clone(&schema))
+                .build(),
+        );
+        let predicate = simplifier.simplify(filter.predicate().clone())?;
+        let predicate = planner.create_physical_expr(&predicate, &schema, session_state)?;
+        expand = expand.with_edge_filter(predicate, filter.fields());
+    }
+    Ok(Arc::new(expand))
+}
+
 fn plan_expand_extension(
     expand: &graphforge_plan::ExpandNode,
     physical_inputs: &[Arc<dyn ExecutionPlan>],
@@ -171,7 +218,7 @@ pub(super) struct GraphForgeExtensionPlanner;
 impl ExtensionPlanner for GraphForgeExtensionPlanner {
     async fn plan_extension(
         &self,
-        _planner: &dyn PhysicalPlanner,
+        planner: &dyn PhysicalPlanner,
         node: &dyn UserDefinedLogicalNode,
         logical_inputs: &[&LogicalPlan],
         physical_inputs: &[Arc<dyn ExecutionPlan>],
@@ -221,24 +268,8 @@ impl ExtensionPlanner for GraphForgeExtensionPlanner {
             return plan_expand_extension(expand, physical_inputs, session_state).map(Some);
         }
         if let Some(var_len) = node.as_any().downcast_ref::<VarLenExpandNode>() {
-            let input = physical_inputs.first().cloned().ok_or_else(|| {
-                DataFusionError::Internal("VarLenExpand requires one physical input".into())
-            })?;
-            let resource = read_resource::required(session_state)?;
-            resource.validate(var_len.read_contract.as_ref())?;
-            let provider = session_state
-                .config()
-                .get_extension::<AdjacencyProviderExt>()
-                .ok_or_else(|| DataFusionError::Plan("GF_READ_RESOURCE_MISSING: adjacency".into()))?
-                .0
-                .clone();
-            return Ok(Some(Arc::new(VarLenExpandExec::new(
-                var_len,
-                input,
-                provider,
-                resource.dir.clone(),
-                resource.mode,
-            ))));
+            return plan_var_len_extension(var_len, planner, physical_inputs, session_state)
+                .map(Some);
         }
         if let Some(opt) = node.as_any().downcast_ref::<OptionalMatchNode>() {
             // inputs() order is [outer, optional], so physical_inputs matches.
@@ -1601,9 +1632,7 @@ impl ExecutionSession {
         let logical = lowerer.lower_plan(plan)?;
 
         // Bind `$name` query parameters to their values, replacing the
-        // DataFusion placeholders with literals. Skipped when there are no
-        // params (the common read path) — `with_param_values` would otherwise
-        // walk the plan needlessly; with params, a placeholder lacking a value
+        // DataFusion placeholders with literals. A placeholder lacking a value
         // surfaces as a clear `GfError::Plan`.
         let logical = bind_query_params(logical, params)?;
 
@@ -1681,13 +1710,41 @@ fn bind_query_params(
     // `$name` placeholders fail at plan time instead of depending on whether
     // the optimizer happens to evaluate the expression (empty-graph scans can
     // otherwise skip the placeholder and silently return zero rows).
-    let values: HashMap<String, datafusion::scalar::ScalarValue> = params
+    let values: ParamValues = params
         .iter()
         .map(|(name, lit)| (name.clone(), graphforge_rel::ir_literal_to_scalar(lit)))
-        .collect();
+        .collect::<HashMap<String, datafusion::scalar::ScalarValue>>()
+        .into();
+    let logical = logical
+        .with_param_values(values.clone())
+        .map_err(GfError::from_plan_error)?;
+    bind_edge_filter_params(logical, &values).map_err(GfError::from_plan_error)
+}
+
+/// Bind `$name` parameters inside the opaque per-edge predicates of
+/// reachability expansions, which `with_param_values` cannot reach because the
+/// predicate is not one of the extension node's expressions.
+fn bind_edge_filter_params(
+    logical: LogicalPlan,
+    values: &ParamValues,
+) -> Result<LogicalPlan, DataFusionError> {
     logical
-        .with_param_values(values)
-        .map_err(GfError::from_plan_error)
+        .transform_up_with_subqueries(|plan| {
+            let LogicalPlan::Extension(extension) = &plan else {
+                return Ok(Transformed::no(plan));
+            };
+            let Some(expand) = extension.node.as_any().downcast_ref::<VarLenExpandNode>() else {
+                return Ok(Transformed::no(plan));
+            };
+            let Some(filter) = &expand.edge_filter else {
+                return Ok(Transformed::no(plan));
+            };
+            let bound = filter.clone().with_param_values(values)?;
+            Ok(Transformed::yes(LogicalPlan::Extension(Extension {
+                node: Arc::new(expand.clone().with_edge_filter(Some(bound))),
+            })))
+        })
+        .map(|transformed| transformed.data)
 }
 
 #[cfg(test)]
