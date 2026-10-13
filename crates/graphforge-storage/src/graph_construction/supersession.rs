@@ -278,12 +278,6 @@ pub(super) fn retire_staged_payload(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), GfError> {
     super::reject_cancelled(cancelled)?;
-    #[cfg(test)]
-    eprintln!(
-        "DEBUG retire pid={} name={} shaped={shaped} completed={completed}",
-        std::process::id(),
-        receipt.name
-    );
     let key = format!(
         "{:016x}:{}",
         receipt.identity.volume_serial, receipt.identity.file_id
@@ -350,11 +344,6 @@ pub(super) fn retire_staged_payload(
     }
     if let Some(allocated) = active {
         if allocated != receipt.allocated_bytes {
-            #[cfg(test)]
-            eprintln!(
-                "DEBUG mismatch name={} ledger={allocated} receipt={}",
-                receipt.name, receipt.allocated_bytes
-            );
             return Err(storage(
                 "supersession missing predecessor allocation changed",
             ));
