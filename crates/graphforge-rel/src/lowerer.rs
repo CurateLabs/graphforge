@@ -27,6 +27,7 @@
 
 mod fast_path;
 mod nested_queries;
+mod node_group_keys;
 mod primary_property_value;
 mod scans;
 mod semantic_node_properties;
@@ -1645,10 +1646,7 @@ impl GraphPlanLowerer {
         };
 
         if distinct {
-            output = LogicalPlanBuilder::from(output)
-                .distinct()
-                .and_then(LogicalPlanBuilder::build)
-                .map_unsupported_expr()?;
+            output = node_group_keys::distinct(output)?;
         }
 
         // 4. Install the new scope: WITH resets it to exactly its aliases, so
@@ -1933,10 +1931,27 @@ fn lower_aggregate(
         })
         .collect();
 
-    let aggregate = LogicalPlanBuilder::from(input)
-        .aggregate(group_exprs, aggr_exprs?)
-        .and_then(LogicalPlanBuilder::build)
-        .map_unsupported_expr()?;
+    let aggr_exprs = aggr_exprs?;
+    let aggregate_count = aggr_exprs.len();
+    // A grouped node variable is keyed by its identity and carries the rest
+    // of its columns, so unread properties leave the group key (#1985).
+    let narrowed = node_group_keys::NodeGroupKeys::new(&group_exprs);
+    let aggregate = match &narrowed {
+        Some(narrowed) => LogicalPlanBuilder::from(input)
+            .aggregate(
+                narrowed.keys().to_vec(),
+                aggr_exprs
+                    .into_iter()
+                    .chain(narrowed.carried().iter().cloned())
+                    .collect::<Vec<_>>(),
+            )
+            .and_then(LogicalPlanBuilder::build)
+            .map_unsupported_expr()?,
+        None => LogicalPlanBuilder::from(input)
+            .aggregate(group_exprs, aggr_exprs)
+            .and_then(LogicalPlanBuilder::build)
+            .map_unsupported_expr()?,
+    };
     // openCypher `sum` over no (non-null) values is `0`, where SQL `SUM` is
     // null (#1887 D13). Every other aggregate keeps SQL's empty-input result:
     // `count` is 0, `collect` is `[]`, and `avg`/`min`/`max`/percentiles are null.
@@ -1945,35 +1960,53 @@ fn lower_aggregate(
         .filter(|a| matches!(a.func, AggFunc::Sum | AggFunc::SumDistinct))
         .map(|a| a.alias.as_str())
         .collect::<Vec<_>>();
-    if row_marker_aliases.is_empty() && sum_aliases.is_empty() {
+    if narrowed.is_none() && row_marker_aliases.is_empty() && sum_aliases.is_empty() {
         return Ok(aggregate);
     }
 
-    let visible_columns = aggregate
-        .schema()
-        .iter()
-        .filter(|(_, field)| !row_marker_aliases.iter().any(|alias| alias == field.name()))
-        .map(|(qualifier, field)| {
+    // The columns the query's operators above expect: the group columns in
+    // their original order, then the aggregates.
+    let outputs = match &narrowed {
+        Some(narrowed) => narrowed.outputs(aggregate_count),
+        None => (0..aggregate.schema().fields().len())
+            .map(|index| node_group_keys::Output {
+                index,
+                restored: None,
+            })
+            .collect(),
+    };
+    let visible_columns = outputs
+        .into_iter()
+        .filter_map(|output| {
+            let (qualifier, field) = aggregate.schema().qualified_field(output.index);
+            if row_marker_aliases.iter().any(|alias| alias == field.name()) {
+                return None;
+            }
             let column = DfExpr::Column(datafusion::common::Column::new(
                 qualifier.cloned(),
                 field.name(),
             ));
+            if let Some(restored) = output.restored {
+                return Some(Ok(node_group_keys::restored_column(column, restored)));
+            }
             if !sum_aliases.contains(&field.name().as_str()) {
-                return Ok(column);
+                return Some(Ok(column));
             }
             let zero = match field.data_type() {
                 datafusion::arrow::datatypes::DataType::Null => {
-                    datafusion::scalar::ScalarValue::Int64(Some(0))
+                    Ok(datafusion::scalar::ScalarValue::Int64(Some(0)))
                 }
                 data_type => datafusion::scalar::ScalarValue::new_zero(data_type).map_err(|e| {
                     LoweringError::UnsupportedExpr(format!("sum over {data_type}: {e}"))
-                })?,
+                }),
             };
-            Ok(datafusion::functions::core::expr_fn::coalesce(vec![
-                column,
-                datafusion::logical_expr::lit(zero),
-            ])
-            .alias(field.name()))
+            Some(zero.map(|zero| {
+                datafusion::functions::core::expr_fn::coalesce(vec![
+                    column,
+                    datafusion::logical_expr::lit(zero),
+                ])
+                .alias(field.name())
+            }))
         })
         .collect::<Result<Vec<_>, LoweringError>>()?;
     LogicalPlanBuilder::from(aggregate)

@@ -298,6 +298,24 @@ impl ShardedCsrIndex {
         self.manifest.edge_count
     }
 
+    /// The most adjacency entries per source row any shard holds on average,
+    /// rounded up, from the manifest alone (no shard payload is read).
+    ///
+    /// A mean over every row of the index is near one for a relation whose
+    /// sources are a small block of the identity space (the people who author
+    /// millions of messages); the densest shard is the degree a traversal that
+    /// starts in that block sees. Planning uses it to estimate how many rows a
+    /// traversal emits.
+    #[must_use]
+    pub fn densest_shard_mean_degree(&self) -> u64 {
+        self.manifest
+            .shards
+            .iter()
+            .map(|shard| shard.edge_count.div_ceil(shard.node_count.max(1)))
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Read one logical row without loading unrelated shards.
     pub fn row(&self, node_id: u64) -> Result<Vec<(u64, u64)>, GfError> {
         if node_id >= self.manifest.node_count {

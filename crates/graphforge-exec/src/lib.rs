@@ -526,6 +526,7 @@ mod expand_exec;
 pub use expand_exec::{ExpandExec, OntologyInferExec, V4OrdinalIdentityResolver, VarLenExpandExec};
 mod row_exec;
 pub use row_exec::{CorrelatedSeedExec, OptionalMatchExec, UnwindExec};
+mod expand_statistics;
 mod join_memory;
 mod query_pool;
 mod session;

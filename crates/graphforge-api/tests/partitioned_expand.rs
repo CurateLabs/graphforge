@@ -36,6 +36,13 @@ const EDGES: usize = 3 * NODES;
 /// expected multisets stay small.
 const ONE_HOP_ANCHORS: i64 = 3_000;
 const MULTI_HOP_ANCHORS: i64 = 300;
+/// Rows per batch. The node scans publish their exact row counts (#1985), and
+/// the planner spreads a plan over partitions only when it estimates more than
+/// one batch of rows: a plan that fits one batch cannot use a second core. The
+/// default batch (8192 rows) holds this whole fixture, so the plan under test
+/// would correctly stay on one partition; a smaller batch makes the fixture
+/// span many.
+const BATCH_SIZE: usize = 256;
 
 fn node_uuid(index: usize) -> Uuid {
     Uuid::from_u128(0x1000_0000_0000_0000_0000_0000_0000_0000 | (index as u128 + 1))
@@ -146,6 +153,7 @@ fn open(project: &Path, target_partitions: usize) -> GraphForge {
         GraphForgeOptions {
             resource: ExecutionResourcePolicy {
                 target_partitions: Some(target_partitions),
+                batch_size: Some(BATCH_SIZE),
                 ..ExecutionResourcePolicy::default()
             },
             ..GraphForgeOptions::default()
