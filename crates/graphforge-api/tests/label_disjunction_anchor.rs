@@ -647,6 +647,177 @@ fn multi_label_shared_and_deleted_nodes_answer_as_the_scan_does() {
     run(false, &after_delete, "scanned");
 }
 
+/// The message-to-forum-moderator statement of the GDC harness: a variable-length
+/// expansion from the message, then fixed hops to the forum and its moderator.
+/// The relationship-uniqueness tests the lowering adds between the hops must not
+/// keep the seed predicates above the expansion.
+const MODERATOR_OF_MESSAGE: &str = "MATCH (m)-[:REPLY_OF*0..]->(p:Post)<-[:CONTAINER_OF]-(f:Forum)\
+     -[:HAS_MODERATOR]->(mod:Person) \
+     WHERE (m:Post OR m:Comment) AND m.id = $ident \
+     RETURN f.id AS forumId, f.title AS forumTitle, mod.id AS moderatorId, \
+            mod.firstName AS moderatorFirstName, mod.lastName AS moderatorLastName";
+
+/// The same expansion followed by six fixed hops, a pattern deeper than the
+/// optimizer's passes could carry a seed predicate across one operator at a time.
+const DEEP_FROM_MESSAGE: &str = "MATCH (m)-[:REPLY_OF*0..]->(p:Post)<-[:CONTAINER_OF]-(f:Forum)\
+     -[:HAS_MODERATOR]->(u:Person)<-[:HAS_MODERATOR]-(g:Forum)-[:CONTAINER_OF]->(q:Post)\
+     <-[:REPLY_OF]-(c:Comment)<-[:REPLY_OF]-(d:Comment) \
+     WHERE (m:Post OR m:Comment) AND m.id = $ident RETURN d.id AS id";
+
+fn moderator_row(
+    forum: i64,
+    title: &str,
+    person: i64,
+    first: &str,
+    last: &str,
+) -> Vec<Option<String>> {
+    vec![
+        Some(forum.to_string()),
+        Some(title.to_owned()),
+        Some(person.to_string()),
+        Some(first.to_owned()),
+        Some(last.to_owned()),
+    ]
+}
+
+/// A message anchored through the index seeds the expansion that continues
+/// through fixed hops to the forum and its moderator, and answers as the scan
+/// does, anchored and not.
+#[test]
+fn a_message_anchor_seeds_the_expansion_through_to_the_forum_moderator() {
+    let _serial = serial();
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project");
+    let writer = GraphForge::new(Some(project.to_str().unwrap())).unwrap();
+    for statement in [
+        "CREATE (:Forum {id: 1, title: 'Wall of Ann'})\
+         -[:HAS_MODERATOR]->(:Person {id: 2, firstName: 'Ann', lastName: 'Lee'})",
+        "MATCH (f:Forum {id: 1}) CREATE (f)-[:CONTAINER_OF]->(:Post {id: 10})",
+        "MATCH (p:Post {id: 10}) CREATE (:Comment {id: 11})-[:REPLY_OF]->(p)",
+        "MATCH (c:Comment {id: 11}) CREATE (:Comment {id: 12})-[:REPLY_OF]->(c)",
+        "CREATE (:Forum {id: 3, title: 'Wall of Bo'})\
+         -[:HAS_MODERATOR]->(:Person {id: 4, firstName: 'Bo', lastName: 'Ray'})",
+        "MATCH (f:Forum {id: 3}) CREATE (f)-[:CONTAINER_OF]->(:Post {id: 20})",
+        "MATCH (p:Post {id: 20}) CREATE (:Comment {id: 21})-[:REPLY_OF]->(p)",
+        // A post in no forum, and a person that shares a message's id.
+        "CREATE (:Post {id: 30})",
+        "CREATE (:Person {id: 11, firstName: 'Cy', lastName: 'Day'})",
+    ] {
+        writer.execute(statement).unwrap();
+    }
+    drop(writer);
+    let forge = open(&project, 1);
+    forge.rebuild_property_indexes(None).unwrap();
+
+    let ann = vec![moderator_row(1, "Wall of Ann", 2, "Ann", "Lee")];
+    let bo = vec![moderator_row(3, "Wall of Bo", 4, "Bo", "Ray")];
+    let cases: Vec<(i64, Rows)> = vec![
+        // The post itself, a reply to it, and a reply to that reply.
+        (10, ann.clone()),
+        (11, ann.clone()),
+        (12, ann),
+        (20, bo.clone()),
+        (21, bo),
+        // A post in no forum, a person, and a value nothing holds.
+        (30, vec![]),
+        (2, vec![]),
+        (99, vec![]),
+    ];
+    let run = |anchored: bool, stage: &str| {
+        for (ident, expected) in &cases {
+            let physical = plan(
+                &forge,
+                &MODERATOR_OF_MESSAGE.replace("$ident", &ident.to_string()),
+            );
+            assert_eq!(
+                physical.contains(ANCHORED) && physical.contains(INDEXED),
+                anchored,
+                "{stage}: {ident}\n{physical}"
+            );
+            assert_eq!(
+                &answer(&forge, MODERATOR_OF_MESSAGE, *ident),
+                expected,
+                "{stage}: {ident}"
+            );
+        }
+    };
+    run(true, "anchored");
+
+    // The scan gives the same answers once a write leaves the index stale, and
+    // rebuilding the index restores the anchor.
+    forge.execute("CREATE (:Place {id: 99})").unwrap();
+    run(false, "stale");
+    forge.rebuild_property_indexes(None).unwrap();
+    run(true, "rebuilt");
+    // A seed predicate crosses every later hop, however many the pattern has.
+    let physical = plan(&forge, &DEEP_FROM_MESSAGE.replace("$ident", "10"));
+    assert!(
+        physical.contains(ANCHORED) && physical.contains(INDEXED),
+        "{physical}"
+    );
+}
+
+/// The anchored seed narrows what the whole statement reads: the seed scan of
+/// the message reads the matching node's rows by ordinal instead of every
+/// node's, through the hops to a forum and its moderator.
+#[test]
+fn a_message_anchor_narrows_the_reads_of_the_statement_to_the_moderator() {
+    let _serial = serial();
+    let built = build(2_048);
+    let nodes = built.nodes;
+    let forge = open(&built.project, 1);
+    // One forum holds the root post of the reply forest and has a moderator.
+    let post = scattered(0, nodes);
+    let person = scattered(3, nodes);
+    forge
+        .execute(&format!(
+            "MATCH (p:Post {{id: {post}}}), (u:Person {{id: {person}}}) \
+             CREATE (f:Forum {{id: 5000000, title: 'forum'}}), \
+                    (f)-[:CONTAINER_OF]->(p), (f)-[:HAS_MODERATOR]->(u) \
+             SET u.firstName = 'Ann', u.lastName = 'Lee'"
+        ))
+        .unwrap();
+    let forum = vec![
+        Some("5000000".to_owned()),
+        Some("forum".to_owned()),
+        Some(person.to_string()),
+        Some("Ann".to_owned()),
+        Some("Lee".to_owned()),
+    ];
+    // The comment two replies below the root post, the post itself, and a
+    // person, which is no message and so matches the disjunction nowhere.
+    let cases: Vec<(usize, Rows)> = vec![(5, vec![forum.clone()]), (0, vec![forum]), (3, vec![])];
+    let check = |anchored: bool| {
+        for (seed, expected) in &cases {
+            let ident = scattered(*seed, nodes);
+            let physical = plan(
+                &forge,
+                &MODERATOR_OF_MESSAGE.replace("$ident", &ident.to_string()),
+            );
+            assert_eq!(
+                physical.contains(ANCHORED) && physical.contains(INDEXED),
+                anchored,
+                "{seed}\n{physical}"
+            );
+            assert_eq!(
+                &answer(&forge, MODERATOR_OF_MESSAGE, ident),
+                expected,
+                "{seed}"
+            );
+        }
+        measured(&forge, MODERATOR_OF_MESSAGE, scattered(5, nodes)).1
+    };
+    let stale = check(false);
+    forge.rebuild_property_indexes(None).unwrap();
+    let anchored = check(true);
+    // The fixed hops to the forum read the same rows either way, so the row
+    // counters agree; the seed scan is what the anchor narrows, in bytes.
+    assert!(
+        anchored.observed + (64 << 10) < stale.observed,
+        "the anchor did not narrow the reads: {stale:?} -> {anchored:?}"
+    );
+}
+
 /// An in-memory project builds the index and anchors the same way.
 #[test]
 fn an_in_memory_project_anchors_too() {

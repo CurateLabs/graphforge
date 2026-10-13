@@ -2193,9 +2193,17 @@ pub(crate) fn relationship_disjoint(left: DfExpr, right: DfExpr) -> DfExpr {
     CYPHER_RELATIONSHIP_DISJOINT.call(vec![left, right])
 }
 
-// Exact fixed-hop residual admitted by the input-predicate optimizer. Do not
-// identify UDFs by name: another implementation may use the same name.
-pub(crate) fn is_fixed_relationship_disjoint(
+/// A relationship-uniqueness test over two relationship columns that cannot
+/// fail on any row, as admitted by the input-predicate optimizer. Do not
+/// identify UDFs by name: another implementation may use the same name.
+///
+/// The function errors only when an argument's type contains a heterogeneous
+/// value encoding whose wire data is malformed. A column whose type contains no
+/// such encoding (a relationship id, or a list of relationship structs without
+/// heterogeneous properties) is never validated, so the test yields true or
+/// false for every row. The type check is the proof: a type that may carry a
+/// heterogeneous value, or whose resolution fails, is not total.
+pub(crate) fn is_total_relationship_disjoint(
     expr: &DfExpr,
     schema: &datafusion::common::DFSchema,
 ) -> bool {
@@ -2203,11 +2211,20 @@ pub(crate) fn is_fixed_relationship_disjoint(
     let DfExpr::ScalarFunction(function) = expr else {
         return false;
     };
-    function.func.inner().downcast_ref::<CypherRelationshipDisjoint>().is_some()
+    function
+        .func
+        .inner()
+        .downcast_ref::<CypherRelationshipDisjoint>()
+        .is_some()
         && function.args.len() == 2
         && function.args.iter().all(|arg| {
-            matches!(arg, DfExpr::Column(column) if column.relation.is_some() && column.name == "edge_id")
-                && arg.get_type(schema).ok() == Some(DataType::UInt64)
+            matches!(arg, DfExpr::Column(_))
+                && arg.get_type(schema).is_ok_and(|data_type| {
+                    matches!(
+                        graphforge_value::heterogeneous::contains_heterogeneous(&data_type),
+                        Ok(false)
+                    )
+                })
         })
 }
 

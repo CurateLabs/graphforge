@@ -3,11 +3,13 @@
 use std::sync::Arc;
 
 use datafusion::arrow::datatypes::DataType;
-use datafusion::common::{DFSchema, Result, tree_node::Transformed};
+use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
+use datafusion::common::{DFSchema, Result};
 use datafusion::logical_expr::utils::{conjunction, split_conjunction};
 use datafusion::logical_expr::{
     Expr, ExprSchemable, Extension, Filter, LogicalPlan, Operator, UserDefinedLogicalNode,
 };
+use datafusion::optimizer::push_down_filter::PushDownFilter;
 use datafusion::optimizer::{ApplyOrder, OptimizerConfig, OptimizerRule};
 use graphforge_plan::{ExpandNode, VarLenExpandNode};
 
@@ -105,7 +107,7 @@ pub(crate) fn total_predicate(expr: &Expr, schema: &DFSchema) -> bool {
         // operands and fails only through them.
         Expr::ScalarFunction(function) if label_membership(function, schema) => true,
         _ => {
-            crate::expr::is_fixed_relationship_disjoint(expr, schema)
+            crate::expr::is_total_relationship_disjoint(expr, schema)
                 || matches!(
                     expr,
                     Expr::ScalarFunction(function)
@@ -142,9 +144,13 @@ fn label_membership(
 /// Move the total conjuncts of the filter `plan` that read only `input`'s
 /// columns onto `input`, and rebuild the expansion over that filtered input with
 /// `rebuild`. The remaining conjuncts stay in a filter above the expansion.
+///
+/// With `settle`, the moved filter is then carried on down through the plan
+/// that supplies `input` (see [`settle_filter`]).
 fn push_input_predicates(
     plan: LogicalPlan,
     input: &Arc<LogicalPlan>,
+    settle: Option<&dyn OptimizerConfig>,
     rebuild: impl FnOnce(Arc<LogicalPlan>) -> LogicalPlan,
 ) -> Result<Transformed<LogicalPlan>> {
     let LogicalPlan::Filter(filter) = &plan else {
@@ -160,7 +166,9 @@ fn push_input_predicates(
         .cloned()
         .partition(|expr| {
             let columns = expr.column_refs();
-            !crate::expr::is_fixed_relationship_disjoint(expr, filter.input.schema())
+            // A relationship-uniqueness test relates relationships the
+            // expansion produces; it is never a seed predicate.
+            !crate::expr::is_total_relationship_disjoint(expr, filter.input.schema())
                 && !columns.is_empty()
                 && columns
                     .iter()
@@ -169,10 +177,12 @@ fn push_input_predicates(
     let Some(predicate) = conjunction(push) else {
         return Ok(Transformed::no(plan));
     };
-    let replacement = rebuild(Arc::new(LogicalPlan::Filter(Filter::try_new(
-        predicate,
-        Arc::clone(input),
-    )?)));
+    let moved = LogicalPlan::Filter(Filter::try_new(predicate, Arc::clone(input))?);
+    let moved = match settle {
+        Some(config) => settle_filter(moved, config)?,
+        None => moved,
+    };
+    let replacement = rebuild(Arc::new(moved));
     let replacement = match conjunction(keep) {
         Some(predicate) => LogicalPlan::Filter(Filter::try_new(predicate, Arc::new(replacement))?),
         None => replacement,
@@ -180,10 +190,70 @@ fn push_input_predicates(
     Ok(Transformed::yes(replacement))
 }
 
+/// Carry a filter that was just moved onto an expansion input on down through
+/// the plan that supplies that input, in one traversal.
+///
+/// A seed predicate on the first node of a pattern has to cross every later
+/// hop, and between two hops the plan holds projections, the left joins that
+/// hydrate node properties, and the label filters of the nodes that were
+/// matched. DataFusion moves a filter one such operator per optimizer pass and
+/// the optimizer runs a fixed number of passes, so the depth of the pattern
+/// would decide whether the predicate reaches the scan. This applies the same
+/// rules down the whole subtree instead: DataFusion's own filter pushdown at
+/// each operator, then the expansion rules at each expansion. It makes no
+/// move those rules would not make, only all of them at once, and it is one
+/// finite traversal of the subtree (#1984).
+///
+/// A variable-length expansion ends the traversal. Its seed is where a seed
+/// predicate belongs, and the filter is left there, directly above the plan
+/// that supplies the seed, for the stored-equality hints to read before any
+/// further pushdown folds it into the scans.
+fn settle_filter(plan: LogicalPlan, config: &dyn OptimizerConfig) -> Result<LogicalPlan> {
+    plan.transform_down(|node| {
+        let node = PushDownFilter::new()
+            .rewrite(node, config)?
+            .transform_data(|node| FixedExpandInputPredicates::push(node, None))?;
+        let sunk = VarLenExpandInputPredicates::push(node.data)?;
+        Ok(Transformed::new(
+            sunk.data,
+            sunk.transformed || node.transformed,
+            if sunk.transformed {
+                TreeNodeRecursion::Jump
+            } else {
+                TreeNodeRecursion::Continue
+            },
+        ))
+    })
+    .map(|transformed| transformed.data)
+}
+
 fn extension(node: impl UserDefinedLogicalNode + 'static) -> LogicalPlan {
     LogicalPlan::Extension(Extension {
         node: Arc::new(node),
     })
+}
+
+impl FixedExpandInputPredicates {
+    fn push(
+        plan: LogicalPlan,
+        settle: Option<&dyn OptimizerConfig>,
+    ) -> Result<Transformed<LogicalPlan>> {
+        let LogicalPlan::Filter(filter) = &plan else {
+            return Ok(Transformed::no(plan));
+        };
+        let LogicalPlan::Extension(node) = filter.input.as_ref() else {
+            return Ok(Transformed::no(plan));
+        };
+        let Some(expand) = node.node.as_any().downcast_ref::<ExpandNode>() else {
+            return Ok(Transformed::no(plan));
+        };
+        let mut replacement = expand.clone();
+        let input = Arc::clone(&expand.input);
+        push_input_predicates(plan, &input, settle, move |filtered| {
+            replacement.input = filtered;
+            extension(replacement)
+        })
+    }
 }
 
 impl OptimizerRule for FixedExpandInputPredicates {
@@ -198,23 +268,9 @@ impl OptimizerRule for FixedExpandInputPredicates {
     fn rewrite(
         &self,
         plan: LogicalPlan,
-        _: &dyn OptimizerConfig,
+        config: &dyn OptimizerConfig,
     ) -> Result<Transformed<LogicalPlan>> {
-        let LogicalPlan::Filter(filter) = &plan else {
-            return Ok(Transformed::no(plan));
-        };
-        let LogicalPlan::Extension(node) = filter.input.as_ref() else {
-            return Ok(Transformed::no(plan));
-        };
-        let Some(expand) = node.node.as_any().downcast_ref::<ExpandNode>() else {
-            return Ok(Transformed::no(plan));
-        };
-        let mut replacement = expand.clone();
-        let input = Arc::clone(&expand.input);
-        push_input_predicates(plan, &input, move |filtered| {
-            replacement.input = filtered;
-            extension(replacement)
-        })
+        Self::push(plan, Some(config))
     }
 }
 
@@ -228,6 +284,27 @@ impl OptimizerRule for FixedExpandInputPredicates {
 /// from every node of the graph (#1984).
 #[derive(Debug)]
 pub struct VarLenExpandInputPredicates;
+
+impl VarLenExpandInputPredicates {
+    /// The moved filter is not carried on into the seed: see [`settle_filter`].
+    fn push(plan: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
+        let LogicalPlan::Filter(filter) = &plan else {
+            return Ok(Transformed::no(plan));
+        };
+        let LogicalPlan::Extension(node) = filter.input.as_ref() else {
+            return Ok(Transformed::no(plan));
+        };
+        let Some(expand) = node.node.as_any().downcast_ref::<VarLenExpandNode>() else {
+            return Ok(Transformed::no(plan));
+        };
+        let mut replacement = expand.clone();
+        let input = Arc::clone(&expand.input);
+        push_input_predicates(plan, &input, None, move |filtered| {
+            replacement.input = filtered;
+            extension(replacement)
+        })
+    }
+}
 
 impl OptimizerRule for VarLenExpandInputPredicates {
     fn name(&self) -> &'static str {
@@ -243,21 +320,7 @@ impl OptimizerRule for VarLenExpandInputPredicates {
         plan: LogicalPlan,
         _: &dyn OptimizerConfig,
     ) -> Result<Transformed<LogicalPlan>> {
-        let LogicalPlan::Filter(filter) = &plan else {
-            return Ok(Transformed::no(plan));
-        };
-        let LogicalPlan::Extension(node) = filter.input.as_ref() else {
-            return Ok(Transformed::no(plan));
-        };
-        let Some(expand) = node.node.as_any().downcast_ref::<VarLenExpandNode>() else {
-            return Ok(Transformed::no(plan));
-        };
-        let mut replacement = expand.clone();
-        let input = Arc::clone(&expand.input);
-        push_input_predicates(plan, &input, move |filtered| {
-            replacement.input = filtered;
-            extension(replacement)
-        })
+        Self::push(plan)
     }
 }
 
@@ -562,5 +625,268 @@ mod tests {
             Expr::Column(Column::new(Some(TableReference::bare("var_3")), "edge_id")),
         );
         assert!(total_predicate(&disjoint, &schema));
+    }
+
+    fn fields_of(columns: &[(&str, &str, DataType)]) -> DFSchema {
+        DFSchema::new_with_metadata(
+            columns
+                .iter()
+                .map(|(var, name, data_type)| {
+                    (
+                        Some(TableReference::bare(*var)),
+                        Arc::new(Field::new(*name, data_type.clone(), true)),
+                    )
+                })
+                .collect(),
+            Default::default(),
+        )
+        .unwrap()
+    }
+
+    fn named(var: &str, name: &str) -> Expr {
+        Expr::Column(Column::new(Some(TableReference::bare(var)), name))
+    }
+
+    #[test]
+    fn relationship_disjointness_is_total_by_type_not_by_column_name() {
+        let relationship = DataType::Struct(
+            vec![
+                Field::new("edge_uuid", DataType::FixedSizeBinary(16), false),
+                Field::new("rel_type", DataType::Utf8, true),
+            ]
+            .into(),
+        );
+        let trail = DataType::List(Arc::new(Field::new("item", relationship, true)));
+        let schema = fields_of(&[
+            ("var_1", "rels", trail.clone()),
+            ("var_3", "edge_id", DataType::UInt64),
+            ("var_5", "edge_id", DataType::UInt64),
+        ]);
+        let disjoint = |left: Expr, right: Expr| crate::expr::relationship_disjoint(left, right);
+        // A trail of relationships against one relationship, as a
+        // variable-length hop followed by a fixed hop produces.
+        assert!(total_predicate(
+            &disjoint(named("var_1", "rels"), named("var_3", "edge_id")),
+            &schema
+        ));
+        assert!(total_predicate(
+            &disjoint(named("var_3", "edge_id"), named("var_5", "edge_id")),
+            &schema
+        ));
+        // A column the schema does not hold cannot be typed.
+        assert!(!total_predicate(
+            &disjoint(named("var_1", "rels"), named("var_9", "edge_id")),
+            &schema
+        ));
+        // An argument that is not a column is not proven by its type.
+        assert!(!total_predicate(
+            &disjoint(named("var_1", "rels"), lit(1_u64)),
+            &schema
+        ));
+    }
+
+    #[test]
+    fn relationship_disjointness_over_heterogeneous_values_is_not_total() {
+        // Properties carried in the heterogeneous encoding are validated when
+        // the test reads them, and malformed wire data makes the call fail.
+        let heterogeneous = DataType::Struct(graphforge_value::heterogeneous::scalar_fields());
+        let holds = |data_type: DataType| {
+            let schema = fields_of(&[
+                ("var_1", "rels", data_type),
+                ("var_3", "edge_id", DataType::UInt64),
+            ]);
+            total_predicate(
+                &crate::expr::relationship_disjoint(
+                    named("var_1", "rels"),
+                    named("var_3", "edge_id"),
+                ),
+                &schema,
+            )
+        };
+        assert!(!holds(heterogeneous.clone()));
+        assert!(!holds(DataType::List(Arc::new(Field::new(
+            "item",
+            DataType::Struct(vec![Field::new("props", heterogeneous, true)].into()),
+            true
+        )))));
+        assert!(holds(DataType::UInt64));
+    }
+
+    fn seed() -> Arc<LogicalPlan> {
+        let LogicalPlan::Extension(expanded) = expanded() else {
+            unreachable!();
+        };
+        let fixed = expanded.node.as_any().downcast_ref::<ExpandNode>().unwrap();
+        Arc::clone(&fixed.input)
+    }
+
+    fn var_len_from(
+        input: Arc<LogicalPlan>,
+        source: u32,
+        destination: u32,
+        edge: u32,
+    ) -> LogicalPlan {
+        extension(VarLenExpandNode::new(
+            input,
+            "*",
+            0,
+            None,
+            source,
+            destination,
+            edge,
+            Direction::Out,
+            None,
+            vec![Arc::new(Field::new("score", DataType::Int64, true))],
+            graphforge_plan::var_len_edge_list_field(&[]),
+        ))
+    }
+
+    fn expand_from(input: LogicalPlan, source: u32, destination: u32, edge: u32) -> LogicalPlan {
+        extension(ExpandNode::new(
+            Arc::new(input),
+            "*",
+            source,
+            destination,
+            edge,
+            Direction::Out,
+            None,
+            vec![Arc::new(Field::new("edge_id", DataType::UInt64, false))],
+            vec![],
+            vec![Arc::new(Field::new("score", DataType::Int64, true))],
+        ))
+    }
+
+    fn keep_scores(input: LogicalPlan, variables: &[&str]) -> LogicalPlan {
+        LogicalPlan::Projection(
+            datafusion::logical_expr::Projection::try_new(
+                variables.iter().map(|variable| column(variable)).collect(),
+                Arc::new(input),
+            )
+            .unwrap(),
+        )
+    }
+
+    /// The operators of a single-input plan from the top down, one per line.
+    fn outline(plan: &LogicalPlan) -> Vec<String> {
+        let mut lines = Vec::new();
+        let mut current = plan;
+        loop {
+            lines.push(match current {
+                LogicalPlan::Filter(filter) => format!("Filter {}", filter.predicate),
+                LogicalPlan::Projection(_) => "Projection".to_owned(),
+                LogicalPlan::Extension(extension) => extension.node.name().to_owned(),
+                LogicalPlan::EmptyRelation(_) => "Empty".to_owned(),
+                other => panic!("unexpected operator {}", other.display()),
+            });
+            match current.inputs().as_slice() {
+                [only] => current = only,
+                _ => return lines,
+            }
+        }
+    }
+
+    fn filter_over(predicate: Expr, input: LogicalPlan) -> LogicalPlan {
+        LogicalPlan::Filter(Filter::try_new(predicate, Arc::new(input)).unwrap())
+    }
+
+    #[test]
+    fn a_seed_predicate_sinks_through_the_chain_to_a_variable_length_seed() {
+        // The first node of `(a)-[*]->(b)-[]->(c)`: the predicate is on `a`, and
+        // between it and the scan lie a projection and the variable-length
+        // expansion that `a` seeds.
+        let chain = expand_from(
+            keep_scores(var_len_from(seed(), 0, 1, 2), &["var_0", "var_1"]),
+            1,
+            3,
+            4,
+        );
+        let selected = column("var_0").eq(lit(7_i64));
+        let result = FixedExpandInputPredicates
+            .rewrite(
+                filter_over(selected.clone(), chain),
+                &OptimizerContext::new(),
+            )
+            .unwrap();
+        assert!(result.transformed);
+        assert_eq!(
+            outline(&result.data),
+            [
+                "Expand".to_owned(),
+                "Projection".to_owned(),
+                "VarLenExpand".to_owned(),
+                format!("Filter {selected}"),
+                "Empty".to_owned(),
+            ],
+            "the predicate must end directly above the plan that seeds the \
+             variable-length expansion, with nothing left above the hop"
+        );
+    }
+
+    #[test]
+    fn the_sink_stops_at_the_seed_of_a_variable_length_expansion() {
+        // Two variable-length expansions in sequence. The predicate belongs on
+        // the seed of the later one; it stays above the plan that supplies that
+        // seed, where the stored-equality hints read it, and is not carried into
+        // the earlier expansion's input.
+        let earlier = keep_scores(var_len_from(seed(), 0, 1, 2), &["var_0", "var_1"]);
+        let later = var_len_from(Arc::new(earlier), 1, 3, 4);
+        let selected = column("var_0").eq(lit(7_i64));
+        let result = FixedExpandInputPredicates
+            .rewrite(
+                filter_over(selected.clone(), expand_from(later, 3, 5, 6)),
+                &OptimizerContext::new(),
+            )
+            .unwrap();
+        assert!(result.transformed);
+        assert_eq!(
+            outline(&result.data),
+            [
+                "Expand".to_owned(),
+                "VarLenExpand".to_owned(),
+                format!("Filter {selected}"),
+                "Projection".to_owned(),
+                "VarLenExpand".to_owned(),
+                "Empty".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_relationship_disjointness_test_is_never_a_seed_predicate() {
+        // Both relationships are columns of the input, so the test could be
+        // evaluated there; it still relates relationships and stays above.
+        let edges = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: Arc::new(fields_of(&[
+                ("var_0", "score", DataType::Int64),
+                ("var_5", "edge_id", DataType::UInt64),
+                ("var_6", "edge_id", DataType::UInt64),
+            ])),
+        });
+        let disjoint = crate::expr::relationship_disjoint(
+            named("var_5", "edge_id"),
+            named("var_6", "edge_id"),
+        );
+        let selected = column("var_0").eq(lit(7_i64));
+        let result = rewrite_var_len(
+            VarLenExpandNode::new(
+                Arc::new(edges),
+                "*",
+                0,
+                None,
+                0,
+                1,
+                2,
+                Direction::Out,
+                None,
+                vec![Arc::new(Field::new("score", DataType::Int64, true))],
+                graphforge_plan::var_len_edge_list_field(&[]),
+            ),
+            selected.clone().and(disjoint.clone()),
+        );
+        assert!(result.transformed);
+        let (residual, moved, _) = pushed_below(&result);
+        assert_eq!(moved, selected);
+        assert_eq!(residual, Some(disjoint));
     }
 }
