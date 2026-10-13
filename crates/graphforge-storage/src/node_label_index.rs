@@ -361,23 +361,20 @@ impl Builder {
             let primary = primaries.value(row);
             self.scratch.clear();
             self.scratch.push(primary);
-            match (memberships, member_values) {
-                (Some(lists), Some(values)) => {
-                    let offsets = lists.value_offsets();
-                    let start = usize::try_from(offsets[row])
-                        .map_err(|_| invalid("negative membership offset"))?;
-                    let end = usize::try_from(offsets[row + 1])
-                        .map_err(|_| invalid("negative membership offset"))?;
-                    self.scratch.extend_from_slice(&values.values()[start..end]);
-                }
-                _ => {
-                    // A file written before multi-label membership: the primary
-                    // is the singleton membership, and an unlabelled node has none.
-                    let primary = PrimaryEntityTypeId::decode(primary)
-                        .map_err(|error| invalid(&format!("primary row {row}: {error}")))?;
-                    if let Some(label) = primary.label() {
-                        self.scratch.push(label.encode());
-                    }
+            if let (Some(lists), Some(values)) = (memberships, member_values) {
+                let offsets = lists.value_offsets();
+                let start = usize::try_from(offsets[row])
+                    .map_err(|_| invalid("negative membership offset"))?;
+                let end = usize::try_from(offsets[row + 1])
+                    .map_err(|_| invalid("negative membership offset"))?;
+                self.scratch.extend_from_slice(&values.values()[start..end]);
+            } else {
+                // A file written before multi-label membership: the primary
+                // is the singleton membership, and an unlabelled node has none.
+                let primary = PrimaryEntityTypeId::decode(primary)
+                    .map_err(|error| invalid(&format!("primary row {row}: {error}")))?;
+                if let Some(label) = primary.label() {
+                    self.scratch.push(label.encode());
                 }
             }
             let set = match self.last_set {
