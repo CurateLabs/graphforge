@@ -1,9 +1,10 @@
-//! #1985: a join above a traversal is planned for the rows the traversal is
+//! #1985: a join above a traversal is planned for the bytes the traversal is
 //! estimated to emit. `ExpandExec` publishes its input rows times the degree of
-//! the relation, so a join whose build side is a traversal's output that cannot
-//! fit the query memory pool becomes a spilling sort-merge join, and one that
-//! fits stays a hash join. Without the estimate the join has no size to compare
-//! with the pool and stays a hash join whatever the traversal emits.
+//! the relation times the width of an output row, so a join whose build side is
+//! a traversal's output that cannot fit the query memory pool becomes a
+//! spilling sort-merge join, and one that fits stays a hash join. Without the
+//! estimate the join has no size to compare with the pool and stays a hash join
+//! whatever the traversal emits.
 
 use arrow::array::Int64Array;
 use graphforge_api::{

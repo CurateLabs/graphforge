@@ -1,4 +1,4 @@
-//! Row and byte estimates for the traversal operators (#1985).
+//! Size estimates for the traversal operators (#1985).
 //!
 //! `ExpandExec` and `VarLenExpandExec` read their adjacency at execution, so
 //! DataFusion cannot know how many rows they emit. Left unpublished, the
@@ -25,6 +25,7 @@ use graphforge_ir::Direction;
 use graphforge_plan::VarLenMode;
 
 use crate::adjacency::{AdjacencyProvider, AdjacencyStatus};
+use crate::join_memory::row_width;
 
 /// Hops of an unbounded variable-length expansion the estimate follows.
 const UNBOUNDED_HOPS_ESTIMATED: u32 = 8;
@@ -60,16 +61,38 @@ fn relation_degree(
 
 /// Statistics of an operator over `schema` emitting `rows`.
 ///
-/// Only the row count is published. DataFusion's join selection compares byte
-/// sizes against its collect threshold when both sides publish one, and the
-/// width of a traversal's output schema is an upper bound on what a row holds
-/// (every variable-width column is charged a fixed size), so a byte size would
-/// push a traversal's output over a threshold its rows are under and reorder
-/// joins the estimate has no business reordering. The join memory rule derives
-/// the bytes it compares with the pool from the rows and the schema's row width.
+/// The estimate is published as a byte size, not a row count, with one
+/// exception: an input known to be empty emits nothing, which is a fact and is
+/// published as an exact zero row count.
+///
+/// The row count is withheld because DataFusion reads it as more than a size.
+/// With `use_row_number_estimates_to_optimize_partitioning` set, an estimate at
+/// or under one batch is taken as proof that no exchange below it can help, and
+/// the planner removes the round-robin and hash exchanges that parallelise the
+/// plan. A mean-degree estimate is a lower bound on a skewed relation (the
+/// nodes a query reaches have a higher degree than the mean, the friendship
+/// paradox), so it can fall under one batch for a plan that emits millions of
+/// rows. Measured on SNB Interactive IC3 at SF1, the removed exchanges made the
+/// query about 1.5x slower. A byte size carries the same information for the
+/// [`join_memory`](crate::join_memory) rule, which compares it with the pool,
+/// and leaves the exchange rules, which read rows, with the unknown they had
+/// before.
+///
+/// The bytes are `rows` times the schema's row width, the arithmetic the join
+/// memory rule applies to a row count, so its decision is the one a row count
+/// would have produced.
 fn statistics(schema: &SchemaRef, rows: Precision<usize>) -> Arc<Statistics> {
     let mut statistics = Statistics::new_unknown(schema);
-    statistics.num_rows = rows;
+    statistics.total_byte_size = match rows {
+        Precision::Exact(0) => Precision::Exact(0),
+        Precision::Exact(rows) | Precision::Inexact(rows) => {
+            Precision::Inexact(rows.saturating_mul(row_width(schema)))
+        }
+        Precision::Absent => Precision::Absent,
+    };
+    if rows == Precision::Exact(0) {
+        statistics.num_rows = Precision::Exact(0);
+    }
     Arc::new(statistics)
 }
 
@@ -245,6 +268,36 @@ mod tests {
             Precision::Exact(count) | Precision::Inexact(count) => count,
             Precision::Absent => panic!("a known count"),
         }
+    }
+
+    /// An estimate is published as bytes alone: a row count under one batch
+    /// makes DataFusion drop the exchanges that spread the plan over cores, and
+    /// a mean-degree estimate is a lower bound on a skewed relation. Only an
+    /// empty input, which is a fact, publishes a row count.
+    #[test]
+    fn an_estimate_is_published_as_bytes_and_never_as_rows() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("node_id", DataType::UInt64, false),
+            Field::new("name", DataType::Utf8, true),
+        ]));
+        let width = row_width(&schema);
+        assert_eq!(width, 8 + 64);
+
+        for rows in [Precision::Exact(5), Precision::Inexact(5)] {
+            let published = statistics(&schema, rows);
+            assert_eq!(published.num_rows, Precision::Absent);
+            assert_eq!(published.total_byte_size, Precision::Inexact(5 * width));
+        }
+        let saturated = statistics(&schema, Precision::Inexact(usize::MAX));
+        assert_eq!(saturated.total_byte_size, Precision::Inexact(usize::MAX));
+
+        let unknown = statistics(&schema, Precision::Absent);
+        assert_eq!(unknown.num_rows, Precision::Absent);
+        assert_eq!(unknown.total_byte_size, Precision::Absent);
+
+        let empty = statistics(&schema, Precision::Exact(0));
+        assert_eq!(empty.num_rows, Precision::Exact(0));
+        assert_eq!(empty.total_byte_size, Precision::Exact(0));
     }
 
     #[test]

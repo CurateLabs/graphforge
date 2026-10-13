@@ -515,10 +515,7 @@ fn find_matching_candidate(
 
 /// An existing single-partition LEFT enrichment join can safely nominate
 /// direct property reads from its build UUIDs without changing join semantics
-/// or output properties. Keep the association on this exact scan edge: the scan
-/// itself, or the scan behind one unordered RoundRobin exchange, which only
-/// spreads the probe rows over the parent's partitions (a probe row that no
-/// build key matches is dropped by a LEFT join either way).
+/// or output properties. Keep the association on this exact direct scan edge.
 fn nominate_existing_collect_left(
     join: &HashJoinExec,
 ) -> Result<Option<Arc<dyn ExecutionPlan>>, DataFusionError> {
@@ -544,18 +541,7 @@ fn nominate_existing_collect_left_inner(
     {
         return Ok(None);
     }
-    let (scan, exchange) = if let Some(scan) = join.right().downcast_ref::<PropertyOverlayExec>() {
-        (scan, None)
-    } else if let Some(exchange) = join.right().downcast_ref::<RepartitionExec>()
-        && !exchange.preserve_order()
-        && matches!(
-            exchange.partitioning(),
-            Partitioning::RoundRobinBatch(count) if *count > 0
-        )
-        && let Some(scan) = exchange.input().downcast_ref::<PropertyOverlayExec>()
-    {
-        (scan, Some(join.right()))
-    } else {
+    let Some(scan) = join.right().downcast_ref::<PropertyOverlayExec>() else {
         return Ok(None);
     };
     let uuid_index = if selected_key.is_some() {
@@ -598,11 +584,7 @@ fn nominate_existing_collect_left_inner(
         build_column,
         Arc::clone(&nomination),
     ));
-    let nominated_scan: Arc<dyn ExecutionPlan> = Arc::new(scan.with_uuid_nomination(nomination));
-    let nominated_right = match exchange {
-        Some(exchange) => Arc::clone(exchange).with_new_children(vec![nominated_scan])?,
-        None => nominated_scan,
-    };
+    let nominated_right: Arc<dyn ExecutionPlan> = Arc::new(scan.with_uuid_nomination(nomination));
     let rebuilt = join
         .builder()
         .with_new_children(vec![tapped_left, nominated_right])?

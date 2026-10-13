@@ -1,10 +1,13 @@
-//! `VarLenExpandExec` publishes the rows it is estimated to emit, so the join
+//! `VarLenExpandExec` publishes the bytes it is estimated to emit, so the join
 //! memory rule can plan the joins above it (#1985).
 //!
 //! The estimate is the input rows times the relation's degree, from the CSR
-//! manifest the persistent provider serves. A relation that is not served from
-//! a fresh persisted index publishes no estimate: reading its adjacency would
-//! scan the edge table while planning.
+//! manifest the persistent provider serves, times the width of an output row.
+//! It is published as a byte size and never as a row count: DataFusion reads a
+//! row count under one batch as proof that no exchange can help, and a
+//! mean-degree estimate is a lower bound on a skewed relation. A relation that
+//! is not served from a fresh persisted index publishes no estimate: reading
+//! its adjacency would scan the edge table while planning.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -135,14 +138,29 @@ fn expand(
     )
 }
 
-/// The estimated rows and bytes of `exec`.
-fn estimate(exec: &VarLenExpandExec) -> (Precision<usize>, Precision<usize>) {
-    let statistics = exec.partition_statistics(None).unwrap();
-    (statistics.num_rows, statistics.total_byte_size)
+/// Bytes an output row of `exec` is charged: the width of each fixed-width
+/// column and 64 for every other.
+fn row_width(exec: &VarLenExpandExec) -> usize {
+    let width: usize = exec
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.data_type().primitive_width().unwrap_or(64))
+        .sum();
+    assert!(width > 0);
+    width
+}
+
+/// The bytes `exec` is estimated to emit for `partition` (`None` is the whole
+/// plan). The row count is never published for an estimate.
+fn estimated_bytes(exec: &VarLenExpandExec, partition: Option<usize>) -> Precision<usize> {
+    let statistics = exec.partition_statistics(partition).unwrap();
+    assert_eq!(statistics.num_rows, Precision::Absent);
+    statistics.total_byte_size
 }
 
 #[tokio::test]
-async fn a_traversal_over_a_persisted_index_estimates_rows_from_the_relation_degree() {
+async fn a_traversal_over_a_persisted_index_estimates_bytes_from_the_relation_degree() {
     let dir = TempDir::new().unwrap();
     let ids = write_ring(dir.path());
     let entries = RING * DEGREE;
@@ -168,18 +186,9 @@ async fn a_traversal_over_a_persisted_index_estimates_rows_from_the_relation_deg
             &node(direction, min_hops, max_hops),
             frontier(&ids).await,
         );
-        let (rows, bytes) = estimate(&exec);
         assert_eq!(
-            rows,
-            Precision::Inexact(SEEDS * per_seed),
-            "{direction:?} {min_hops}..{max_hops:?}"
-        );
-        // Only rows are published: the join memory rule derives the bytes from
-        // the rows and the schema, and a byte size would move DataFusion's
-        // collect-left thresholds.
-        assert_eq!(
-            bytes,
-            Precision::Absent,
+            estimated_bytes(&exec, None),
+            Precision::Inexact(SEEDS * per_seed * row_width(&exec)),
             "{direction:?} {min_hops}..{max_hops:?}"
         );
     }
@@ -209,15 +218,9 @@ async fn a_reachability_traversal_is_bounded_by_the_nodes_it_can_reach() {
             &node(Direction::Out, min_hops, max_hops).into_reachability(),
             frontier(&ids).await,
         );
-        let (rows, bytes) = estimate(&exec);
         assert_eq!(
-            rows,
-            Precision::Inexact(SEEDS * per_seed),
-            "reachability {min_hops}..{max_hops:?}"
-        );
-        assert_eq!(
-            bytes,
-            Precision::Absent,
+            estimated_bytes(&exec, None),
+            Precision::Inexact(SEEDS * per_seed * row_width(&exec)),
             "reachability {min_hops}..{max_hops:?}"
         );
     }
@@ -230,8 +233,8 @@ async fn a_reachability_traversal_is_bounded_by_the_nodes_it_can_reach() {
         frontier(&ids).await,
     );
     assert_eq!(
-        estimate(&trails).0,
-        Precision::Inexact(SEEDS * RING * DEGREE)
+        estimated_bytes(&trails, None),
+        Precision::Inexact(SEEDS * RING * DEGREE * row_width(&trails))
     );
 }
 
@@ -250,8 +253,9 @@ async fn a_traversal_without_a_persisted_index_publishes_no_estimate() {
         &node(Direction::Out, 1, Some(2)),
         frontier(&ids).await,
     );
-    let (rows, bytes) = estimate(&exec);
-    assert_eq!((rows, bytes), (Precision::Absent, Precision::Absent));
+    let statistics = exec.partition_statistics(None).unwrap();
+    assert_eq!(statistics.num_rows, Precision::Absent);
+    assert_eq!(statistics.total_byte_size, Precision::Absent);
 }
 
 #[tokio::test]
@@ -271,7 +275,10 @@ async fn an_empty_frontier_is_estimated_to_emit_nothing() {
         &node(Direction::Out, 1, Some(3)),
         input,
     );
-    assert_eq!(estimate(&exec).0, Precision::Exact(0));
+    // An empty input is a fact, not an estimate: both counts are exact zeros.
+    let statistics = exec.partition_statistics(None).unwrap();
+    assert_eq!(statistics.num_rows, Precision::Exact(0));
+    assert_eq!(statistics.total_byte_size, Precision::Exact(0));
 }
 
 /// A frontier of the first [`SEEDS`] node ids read as `partitions` partitions.
@@ -309,9 +316,9 @@ async fn the_only_output_partition_is_estimated_as_the_whole_plan() {
         partitioned_frontier(&ids, 1),
     );
     assert_eq!(exec.properties().output_partitioning().partition_count(), 1);
-    let whole = Precision::Inexact(SEEDS * DEGREE);
-    assert_eq!(exec.partition_statistics(None).unwrap().num_rows, whole);
-    assert_eq!(exec.partition_statistics(Some(0)).unwrap().num_rows, whole);
+    let whole = Precision::Inexact(SEEDS * DEGREE * row_width(&exec));
+    assert_eq!(estimated_bytes(&exec, None), whole);
+    assert_eq!(estimated_bytes(&exec, Some(0)), whole);
 }
 
 #[tokio::test]
@@ -323,7 +330,6 @@ async fn a_partitioned_variable_length_traversal_estimates_its_even_share_of_the
     // whole input; a partition is its even share of that, rounded up, so the
     // shares never sum to less than the whole. (`ExpandExec` is constructed
     // only inside its crate; its own test covers the same rule.)
-    let whole = SEEDS * DEGREE;
     for partitions in [2, 3, 4] {
         let exec = expand(
             dir.path(),
@@ -335,20 +341,18 @@ async fn a_partitioned_variable_length_traversal_estimates_its_even_share_of_the
             exec.properties().output_partitioning().partition_count(),
             partitions
         );
-        assert_eq!(
-            exec.partition_statistics(None).unwrap().num_rows,
-            Precision::Inexact(whole)
-        );
+        let whole = SEEDS * DEGREE * row_width(&exec);
+        assert_eq!(estimated_bytes(&exec, None), Precision::Inexact(whole));
         let mut shares = 0;
         for partition in 0..partitions {
-            let share = exec.partition_statistics(Some(partition)).unwrap().num_rows;
+            let share = estimated_bytes(&exec, Some(partition));
             assert_eq!(
                 share,
                 Precision::Inexact(whole.div_ceil(partitions)),
                 "{partitions} partitions, partition {partition}"
             );
-            if let Precision::Inexact(rows) = share {
-                shares += rows;
+            if let Precision::Inexact(bytes) = share {
+                shares += bytes;
             }
         }
         assert!(shares >= whole, "{partitions} shares sum to {shares}");

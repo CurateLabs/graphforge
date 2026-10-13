@@ -32,7 +32,8 @@ fn required_v4_destination_identity_fails_closed_without_admitted_session() {
 /// The traversal expands each input partition on its own, so it has as many
 /// output partitions as its input. The whole plan is estimated from the whole
 /// input; a partition is its even share of that, rounded up, so the shares
-/// never sum to less than the whole.
+/// never sum to less than the whole. The estimate is a byte size, never a row
+/// count (see `expand_statistics`).
 #[test]
 fn a_partitioned_single_hop_expansion_estimates_its_even_share_of_the_whole_plan() {
     use datafusion::common::stats::Precision;
@@ -111,7 +112,6 @@ fn a_partitioned_single_hop_expansion_estimates_its_even_share_of_the_whole_plan
         vec![],
     );
 
-    let whole = SEEDS * DEGREE;
     for partitions in [1_usize, 2, 3, 4] {
         let chunks: Vec<Vec<RecordBatch>> = ids[..SEEDS]
             .chunks(SEEDS.div_ceil(partitions))
@@ -136,21 +136,34 @@ fn a_partitioned_single_hop_expansion_estimates_its_even_share_of_the_whole_plan
             exec.properties().output_partitioning().partition_count(),
             partitions
         );
+        // A row is charged the width of each fixed-width column and 64 bytes for
+        // every other, as the join memory rule charges it.
+        let row_width: usize = exec
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.data_type().primitive_width().unwrap_or(64))
+            .sum();
+        let whole = SEEDS * DEGREE * row_width;
+        let statistics = exec.partition_statistics(None).unwrap();
+        assert_eq!(statistics.num_rows, Precision::Absent);
         assert_eq!(
-            exec.partition_statistics(None).unwrap().num_rows,
+            statistics.total_byte_size,
             Precision::Inexact(whole),
             "{partitions} partitions"
         );
         let mut shares = 0;
         for partition in 0..partitions {
-            let share = exec.partition_statistics(Some(partition)).unwrap().num_rows;
+            let statistics = exec.partition_statistics(Some(partition)).unwrap();
+            assert_eq!(statistics.num_rows, Precision::Absent);
+            let share = statistics.total_byte_size;
             assert_eq!(
                 share,
                 Precision::Inexact(whole.div_ceil(partitions)),
                 "{partitions} partitions, partition {partition}"
             );
-            if let Precision::Inexact(rows) = share {
-                shares += rows;
+            if let Precision::Inexact(bytes) = share {
+                shares += bytes;
             }
         }
         assert!(

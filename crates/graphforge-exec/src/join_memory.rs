@@ -74,7 +74,9 @@ fn estimated_bytes(plan: &Arc<dyn ExecutionPlan>) -> Option<usize> {
     Some(rows.saturating_mul(row_width(&plan.schema())))
 }
 
-fn row_width(schema: &SchemaRef) -> usize {
+/// Bytes a row of `schema` is assumed to occupy: the width of each fixed-width
+/// column, and [`VARIABLE_WIDTH_VALUE_BYTES`] for every other.
+pub(crate) fn row_width(schema: &SchemaRef) -> usize {
     schema
         .fields()
         .iter()
