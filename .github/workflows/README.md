@@ -146,9 +146,12 @@ deployments remain serialized to GitHub Pages.
 
 Runs once nightly against the exact latest `main` SHA, plus explicit manual
 dispatch. Pull requests and pushes do not trigger CodSpeed. The latest
-successful scheduled workflow SHA skips all nightly benchmark runners when
+successful scheduled workflow SHA skips the nightly benchmark runners when
 `main` has not changed; missing or unsuccessful prior evidence fails closed to
-running the suite. Its Cargo
+running the suite. The `codspeed-macro` walltime job runs only on the Monday
+schedule and on manual dispatch, and the Monday run is never skipped: one run
+takes about 56 macro runner minutes, and CodSpeed's free plan includes 600 a
+month. Its Cargo
 build is a diagnostic path, not part of CI Gate.
 Comparable-run and measurement-floor triage is documented in
 [`docs/development/benchmarking.md`](../../docs/development/benchmarking.md).
