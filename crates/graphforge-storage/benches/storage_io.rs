@@ -308,16 +308,19 @@ const INGEST_DENSITY_EDGES: u64 = 131_072;
 /// acceptance gate lives in #1478 and stays separate from this interim
 /// regression floor (#1476).
 ///
-/// **Banked: 9,000 edges/sec** (#1672). Host class: the isolated
-/// `codspeed-macro` ARM64 runner the nightly runs on. Build profile: `cargo
-/// bench --release` (divan, bench profile). Source: the twelve consecutive
-/// scheduled nightlies of 2026-09-19 through 2026-09-30, tabulated on #1672.
-/// The binding rung is the smallest: it measured 9,959 to 11,954 edges/sec,
-/// so the floor sits 10% under the lowest night. The larger rung measured
-/// 15,732 to 18,959 and is therefore held only loosely by this one floor; its
+/// **Banked: 10,400 edges/sec** (#1672), raised from 9,000. Host class: the
+/// isolated `codspeed-macro` ARM64 runner the walltime job runs on. Build
+/// profile: `cargo bench --release` (divan, bench profile). Source: the three
+/// scheduled runs of 2026-10-11 through 2026-10-13 (38145785173, 38279688675,
+/// 38419034262), the first after #1966 moved every initial build onto the bulk
+/// builder; tabulated on #1672. The binding rung is the smallest: it measured
+/// 11,642 to 12,037 edges/sec, so the floor sits 10% under the lowest night
+/// and the ratchet trigger, 14,560, sits 21% over the best. The larger rung
+/// measured 18,276 to 21,549 and is held only loosely by this one floor; its
 /// cost is held by the CPU ceiling.
 ///
-/// The 15,000 this replaces was banked on the shared x86_64 development host
+/// The 9,000 it replaces was banked from the twelve nightlies of 2026-09-19
+/// through 2026-09-30 (9,959 to 11,954 edges/sec). The 15,000 before that was banked on the shared x86_64 development host
 /// and never applied to this runner: the gate failed every night from the day
 /// it landed, and because it runs first the walltime series recorded nothing.
 /// The runner spends about a quarter of a core on this workload — it is bound
@@ -330,7 +333,7 @@ const INGEST_DENSITY_EDGES: u64 = 131_072;
 /// [`INGEST_RATCHET_MARGIN_EDGES_PER_SECOND`] is an unbanked gain. On any
 /// other host both are reported as notes: a loaded developer machine moved
 /// ±48% with no code change, which is host contention and not a verdict.
-const INGEST_FLOOR_EDGES_PER_SECOND: f64 = 9_000.0;
+const INGEST_FLOOR_EDGES_PER_SECOND: f64 = 10_400.0;
 
 /// Ceiling on bytes read per published edge, enforced at every swept size.
 ///
@@ -341,11 +344,13 @@ const INGEST_FLOOR_EDGES_PER_SECOND: f64 = 9_000.0;
 /// at 524,288 edges and 2,412 at 8,388,608, so the same overhead is already
 /// visible an order of magnitude smaller.
 ///
-/// **Banked: 1,325 bytes/edge** (#1672), lowered from 2,500. This is the
-/// constant the gate itself printed as an unbanked gain on every nightly from
-/// 2026-09-19: 1,238 bytes/edge at 524,288 edges and 1,261 at 8,388,608,
-/// reproduced to the byte across twelve nights, with 5% headroom over the
-/// worst. The counters are deterministic and independent of host, load and
+/// **Banked: 1,151 bytes/edge** (#1672), lowered from 1,325. This is the
+/// constant the gate printed as an unbanked gain on the scheduled runs of
+/// 2026-10-11 through 2026-10-13 (38145785173, 38279688675, 38419034262):
+/// 1,089 bytes/edge at 524,288 edges and 1,095 to 1,096 at 8,388,608, with 5%
+/// headroom over the worst. The 1,325 it replaces was banked the same way from
+/// 1,238 and 1,261 bytes/edge on the nightlies of 2026-09-19 through
+/// 2026-09-30. The counters are deterministic and independent of host, load and
 /// architecture, so this limit is judged on every host. `git blame` this line
 /// for the exact banking commit.
 ///
@@ -361,7 +366,7 @@ const INGEST_FLOOR_EDGES_PER_SECOND: f64 = 9_000.0;
 /// parent, divided by published edges. These are storage-layer attribution
 /// counters, not logical record sizes and not harness or whole-rung traffic;
 /// do not transfer them across rung / ingest / validate scopes (#1476).
-const INGEST_CEILING_BYTES_READ_PER_EDGE: f64 = 1_325.0;
+const INGEST_CEILING_BYTES_READ_PER_EDGE: f64 = 1_151.0;
 
 /// Ceiling on process CPU microseconds per published edge, enforced at every
 /// swept size.
@@ -371,14 +376,16 @@ const INGEST_CEILING_BYTES_READ_PER_EDGE: f64 = 1_325.0;
 /// microseconds per edge on the ARM64 runner as on the x86_64 development
 /// host. It is therefore host-bound, like the throughput floor.
 ///
-/// **Banked: 25.0 µs/edge** (#1672). Host class: the isolated `codspeed-macro`
-/// ARM64 runner. Build profile: `cargo bench --release` (divan, bench
-/// profile). Source: the twelve scheduled nightlies of 2026-09-19 through
-/// 2026-09-30, tabulated on #1672. The binding rung is the smallest, at 23.46
-/// to 23.98 µs/edge, a 2% spread; the ceiling sits 4% over the worst night.
-/// The larger rung measured 17.80 to 19.53.
+/// **Banked: 20.0 µs/edge** (#1672), lowered from 25.0. Host class: the
+/// isolated `codspeed-macro` ARM64 runner. Build profile: `cargo bench
+/// --release` (divan, bench profile). Source: the three scheduled runs of
+/// 2026-10-11 through 2026-10-13 (38145785173, 38279688675, 38419034262),
+/// tabulated on #1672. The binding rung is the smallest, at 19.01 to 19.12
+/// µs/edge; the ceiling sits 4.6% over the worst night and the ratchet
+/// trigger, 15.0, 21% under the best. The larger rung measured 14.36 to 14.42.
 ///
-/// The 14.0 this replaces was banked on the x86_64 host (9.84–13.82 there).
+/// The 25.0 it replaces was banked from the twelve nightlies of 2026-09-19
+/// through 2026-09-30 (23.46 to 23.98 µs/edge). The 14.0 before that was banked on the x86_64 host (9.84–13.82 there).
 /// #1476 recorded in this comment that a first isolated run outside that band
 /// should re-baseline the constant rather than remove the gate, and that is
 /// what this is. The #1387 acceptance criterion of under 9.0 was stated
@@ -388,7 +395,7 @@ const INGEST_CEILING_BYTES_READ_PER_EDGE: f64 = 1_325.0;
 /// regression; the worst size more than
 /// [`INGEST_RATCHET_MARGIN_CPU_MICROS_PER_EDGE`] under it is an unbanked gain.
 /// On any other host both are reported as notes.
-const INGEST_CEILING_CPU_MICROS_PER_EDGE: f64 = 25.0;
+const INGEST_CEILING_CPU_MICROS_PER_EDGE: f64 = 20.0;
 
 /// Maximum tolerated growth in bytes read per edge from the smallest swept size
 /// to the largest.
