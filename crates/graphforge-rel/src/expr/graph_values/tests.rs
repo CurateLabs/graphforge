@@ -32,6 +32,7 @@ fn hydrated_path_nodes_return_type_carries_labels_and_props() {
             Field::new("name", DataType::Utf8, true),
         ]
         .into(),
+        demand: PathNodeDemand::Whole,
     })
     .return_type(&[])
     .unwrap();
