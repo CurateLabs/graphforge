@@ -4,13 +4,14 @@
 //! A one-hop expansion from a fixed frontier selects its edge rows by dense
 //! ordinal. The selection is exact, so what a read decompresses is decided by
 //! the writer's page size: the 20,480-row pages of the original layout made
-//! every wanted ordinal cost twenty thousand decoded rows. The destination is
-//! identified from the node label index and needs no node row: a hop that wants
-//! its labels reads no node page. These tests build projects with the
-//! construction writer, whose edge, node and property files hold 2,048-row
-//! pages, double the relation and the node table, and count the rows held by
-//! the pages the readers decoded. The counters are exact and deterministic; the
-//! gate never measures time.
+//! every wanted ordinal cost twenty thousand decoded rows. A destination wanted
+//! for nothing beyond its identity and labels is answered from the node label
+//! index and reads no node page. A destination whose hop demands anything else
+//! still selects its node row by dense ordinal, and that read decodes one page.
+//! These tests build projects with the construction writer, whose edge, node
+//! and property files hold 2,048-row pages, double the relation and the node
+//! table, and count the rows held by the pages the readers decoded. The
+//! counters are exact and deterministic; the gate never measures time.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -181,6 +182,10 @@ const EDGE_COUNT: &str =
 /// is unused, so the expansion reads no edge row.
 const DESTINATION_PROPERTY: &str =
     "MATCH (a:Entity {ident: $ident})-[e:LINK]->(b:Entity) RETURN sum(b.ident) AS n";
+/// Counts the frontier's one edge to a destination that is demanded for no
+/// label, so the label index cannot answer it and the node row is read.
+const UNLABELLED_DESTINATION: &str =
+    "MATCH (a:Entity {ident: $ident})-[e:LINK]->(b) RETURN count(e) AS n";
 
 /// The project at `nodes` and the statement run twice: the first admits the
 /// footers, adjacency index and key walks once per session, the second is the
@@ -240,13 +245,22 @@ enum EdgeRow {
     Unread,
 }
 
+/// Whether the measured statement reads its destination's node row.
+#[derive(Clone, Copy)]
+enum NodeRow {
+    /// The destination is wanted for identity and labels only: the label index
+    /// answers it and no node file is read.
+    Unread,
+    /// The destination demands a column the label index cannot supply: one node
+    /// row is read by dense ordinal.
+    Read,
+}
+
 /// The reads were exact dense-ordinal selections that never fell back, and each
-/// wanted row cost at most the rows of one page of the layout. The destination
-/// is identified from the label index, so no node row is read for it.
-fn decoded(nodes: usize, ident: i64, hop: &Measured, edge: EdgeRow) -> Decoded {
+/// wanted row cost at most the rows of one page of the layout.
+fn decoded(nodes: usize, ident: i64, hop: &Measured, edge: EdgeRow, node: NodeRow) -> Decoded {
     let io = &hop.io;
     let context = summary(nodes, ident, hop);
-    assert_eq!(io.node_dense_row_selection_reads, 0, "{context}");
     assert_eq!(io.edge_full_reads, 0, "{context}");
     assert_eq!(io.node_full_reads, 0, "{context}");
     assert_eq!(io.edge_dense_layout_declined, 0, "{context}");
@@ -254,8 +268,22 @@ fn decoded(nodes: usize, ident: i64, hop: &Measured, edge: EdgeRow) -> Decoded {
     assert_eq!(io.edge_validation_fallbacks, 0, "{context}");
     assert_eq!(io.node_validation_fallbacks, 0, "{context}");
     assert_eq!(io.property_uuid_index_fallbacks, 0, "{context}");
-    assert_eq!(io.node_exact_rows_selected, 0, "{context}");
-    assert_eq!(io.node_page_rows_selected, 0, "{context}");
+    match node {
+        NodeRow::Read => {
+            assert!(io.node_dense_row_selection_reads > 0, "{context}");
+            assert_eq!(io.node_exact_rows_selected, 1, "{context}");
+            assert!(
+                io.node_page_rows_selected <= PAGE_ROWS,
+                "one node row decoded {} rows of pages: {context}",
+                io.node_page_rows_selected
+            );
+        }
+        NodeRow::Unread => {
+            assert_eq!(io.node_dense_row_selection_reads, 0, "{context}");
+            assert_eq!(io.node_exact_rows_selected, 0, "{context}");
+            assert_eq!(io.node_page_rows_selected, 0, "{context}");
+        }
+    }
     match edge {
         EdgeRow::Read => {
             assert!(io.edge_dense_row_selection_reads > 0, "{context}");
@@ -301,7 +329,25 @@ fn a_fixed_frontier_decodes_the_pages_of_its_rows_as_the_relation_doubles() {
             let hop = run(nodes, EDGE_COUNT, ident, 1);
             eprintln!("{}", summary(nodes, ident, &hop));
             assert_eq!(hop.value, 1, "{nodes} nodes");
-            seen.push(decoded(nodes, ident, &hop, EdgeRow::Read));
+            seen.push(decoded(nodes, ident, &hop, EdgeRow::Read, NodeRow::Unread));
+        }
+        assert_eq!(seen[0], seen[1], "ident {ident}");
+    }
+}
+
+/// A destination demanded for nothing the label index holds still reads its
+/// node row by dense ordinal, and that read decodes the one page of the wanted
+/// row however many node files the table holds.
+#[test]
+fn a_destination_node_read_decodes_one_page_as_the_node_table_doubles() {
+    let _serial = serial();
+    for ident in FRONTIERS {
+        let mut seen = Vec::new();
+        for nodes in [SMALL_NODES, LARGE_NODES] {
+            let hop = run(nodes, UNLABELLED_DESTINATION, ident, 1);
+            eprintln!("{}", summary(nodes, ident, &hop));
+            assert_eq!(hop.value, 1, "{nodes} nodes");
+            seen.push(decoded(nodes, ident, &hop, EdgeRow::Read, NodeRow::Read));
         }
         assert_eq!(seen[0], seen[1], "ident {ident}");
     }
@@ -320,7 +366,13 @@ fn a_frontier_property_read_decodes_uuid_pages_as_the_route_grows() {
             eprintln!("{}", summary(nodes, ident, &hop));
             assert_eq!(hop.value, ident + 1, "{nodes} nodes");
             assert!(hop.io.property_uuid_selections > 0, "{hop:?}");
-            seen.push(decoded(nodes, ident, &hop, EdgeRow::Unread));
+            seen.push(decoded(
+                nodes,
+                ident,
+                &hop,
+                EdgeRow::Unread,
+                NodeRow::Unread,
+            ));
         }
         assert_eq!(seen[0], seen[1], "ident {ident}");
         assert_eq!(seen[1], seen[2], "ident {ident}");
