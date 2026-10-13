@@ -520,7 +520,18 @@ async fn wave11_physical_graph_execs_reject_missing_children_and_invalid_partiti
             Ok(_) => panic!("{} accepted invalid partition", plan.name()),
             Err(error) => error,
         };
-        assert!(error.to_string().contains("only has partition 0"));
+        // Expansion serves one output partition per input partition, so it
+        // names the input's partition count; the others only have partition 0.
+        let expected = if plan.name().ends_with("ExpandExec") {
+            "has 1 partitions, got partition 1"
+        } else {
+            "only has partition 0"
+        };
+        assert!(
+            error.to_string().contains(expected),
+            "{}: {error}",
+            plan.name()
+        );
     }
     assert!(
         optional

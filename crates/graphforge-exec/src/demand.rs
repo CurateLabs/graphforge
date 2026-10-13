@@ -29,8 +29,8 @@ use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties, RecordBatchStream,
-    SendableRecordBatchStream,
+    DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, Partitioning,
+    PlanProperties, RecordBatchStream, SendableRecordBatchStream,
 };
 use futures::Stream;
 use futures::task::AtomicWaker;
@@ -1463,6 +1463,21 @@ fn rewrite_bounded(
         plan.with_new_children(rewritten_children)?
     };
     if let Some(expand) = rebuilt.downcast_ref::<ExpandExec>() {
+        // A demanded hop is one pull stream: the demand, the soft batch goal
+        // and the cancellation point are counted across every row it emits, and
+        // an unordered limit takes whichever rows arrive first. An expansion
+        // over several input partitions would pull them concurrently, so the
+        // bounded plan reads its input through one stream instead.
+        let rebuilt = if expand.input.output_partitioning().partition_count() > 1 {
+            let single: Arc<dyn ExecutionPlan> =
+                Arc::new(CoalescePartitionsExec::new(Arc::clone(&expand.input)));
+            Arc::clone(&rebuilt).with_new_children(vec![single])?
+        } else {
+            rebuilt
+        };
+        let expand = rebuilt.downcast_ref::<ExpandExec>().ok_or_else(|| {
+            DataFusionError::Internal("ExpandExec rewrite changed physical type".into())
+        })?;
         return Ok(expand.with_demand(batch_goal, demand));
     }
     Ok(rebuilt)

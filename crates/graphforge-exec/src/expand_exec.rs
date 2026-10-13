@@ -33,6 +33,7 @@ use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::DisplayAs;
 use datafusion::physical_plan::DisplayFormatType;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::ExecutionPlanProperties;
 use datafusion::physical_plan::Partitioning;
 use datafusion::physical_plan::PlanProperties;
 use datafusion::physical_plan::SendableRecordBatchStream;
@@ -55,6 +56,55 @@ use std::sync::Mutex;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+
+// ---------------------------------------------------------------------------
+// Partitioning shared by the traversal operators
+// ---------------------------------------------------------------------------
+
+/// Plan properties of a traversal operator: partition `i` of the output is
+/// computed from partition `i` of `input`, so the operator exposes exactly the
+/// input's partition count and no ordering.
+///
+/// Every input row is expanded independently of every other, so the rows of
+/// the output are the same multiset however the input is split. A traversal
+/// therefore runs on as many tasks as the planner gave its input (#1984).
+///
+/// A round-robin input stays round-robin: that partitioning promises nothing
+/// about which rows share a partition, so it survives any per-row expansion,
+/// and the storage approval rules that recognise a round-robin frontier keep
+/// matching the plan they matched when an exchange sat above the traversal.
+/// A hash input would no longer hash the expanded columns, so it is reported
+/// as unknown.
+fn partitioned_properties(
+    schema: &SchemaRef,
+    input: &Arc<dyn ExecutionPlan>,
+) -> Arc<PlanProperties> {
+    let partitioning = match input.output_partitioning() {
+        Partitioning::RoundRobinBatch(partitions) => Partitioning::RoundRobinBatch(*partitions),
+        other => Partitioning::UnknownPartitioning(other.partition_count()),
+    };
+    Arc::new(PlanProperties::new(
+        EquivalenceProperties::new(Arc::clone(schema)),
+        partitioning,
+        EmissionType::Incremental,
+        Boundedness::Bounded,
+    ))
+}
+
+/// Reject a partition number the input cannot serve.
+fn check_partition(
+    operator: &str,
+    input: &Arc<dyn ExecutionPlan>,
+    partition: usize,
+) -> Result<(), DataFusionError> {
+    let partitions = input.output_partitioning().partition_count();
+    if partition >= partitions {
+        return Err(DataFusionError::Internal(format!(
+            "{operator} has {partitions} partitions, got partition {partition}"
+        )));
+    }
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // VarLenExpandExec — physical node for variable-length Expand
@@ -115,12 +165,7 @@ impl VarLenExpandExec {
         mode: OntologyMode,
     ) -> Self {
         let schema: SchemaRef = Arc::new(node.schema().as_arrow().clone());
-        let props = Arc::new(PlanProperties::new(
-            EquivalenceProperties::new(schema.clone()),
-            Partitioning::UnknownPartitioning(1),
-            EmissionType::Incremental,
-            Boundedness::Bounded,
-        ));
+        let props = partitioned_properties(&schema, &input);
         // The seed is the source variable's node_id. Resolve its column index
         // from the qualified logical input schema (`var_<src>.node_id`); fall
         // back to 0 only if the binder shape is unexpected (the input always
@@ -210,6 +255,7 @@ impl ExecutionPlan for VarLenExpandExec {
             .into_iter()
             .next()
             .ok_or_else(|| DataFusionError::Internal("VarLenExpandExec needs one child".into()))?;
+        let props = partitioned_properties(&self.schema, &input);
         Ok(Arc::new(Self {
             input,
             rel_type_name: self.rel_type_name.clone(),
@@ -223,7 +269,7 @@ impl ExecutionPlan for VarLenExpandExec {
             expansion: self.expansion,
             edge_var: self.edge_var,
             schema: self.schema.clone(),
-            props: self.props.clone(),
+            props,
             provider: self.provider.clone(),
             capture_epoch: self.capture_epoch,
         }))
@@ -234,11 +280,7 @@ impl ExecutionPlan for VarLenExpandExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream, DataFusionError> {
-        if partition != 0 {
-            return Err(DataFusionError::Internal(format!(
-                "VarLenExpandExec only has partition 0, got {partition}"
-            )));
-        }
+        check_partition("VarLenExpandExec", &self.input, partition)?;
         // The traversal runs as a task that consumes the input as it arrives and
         // sends bounded batches through a small channel, so the paths of every
         // seed never exist at once (#1986).
@@ -265,7 +307,7 @@ impl ExecutionPlan for VarLenExpandExec {
         let mut builder = RecordBatchReceiverStream::builder(self.schema.clone(), 2);
         let tx = builder.tx();
         builder.spawn(async move {
-            let input = datafusion::physical_plan::execute_stream(input, context)?;
+            let input = input.execute(partition, context)?;
             expand_bfs(&cfg, input, &tx, &mut reservation)
                 .await
                 .map_err(to_df_err)
@@ -293,12 +335,7 @@ impl OntologyInferExec {
     #[must_use]
     pub fn new(node: &graphforge_plan::OntologyInferNode, input: Arc<dyn ExecutionPlan>) -> Self {
         let schema: SchemaRef = Arc::new(node.schema().as_arrow().clone());
-        let props = Arc::new(PlanProperties::new(
-            EquivalenceProperties::new(schema.clone()),
-            Partitioning::UnknownPartitioning(1),
-            EmissionType::Incremental,
-            Boundedness::Bounded,
-        ));
+        let props = partitioned_properties(&schema, &input);
         Self {
             input,
             rule_id: node.rule_id.clone(),
@@ -346,12 +383,13 @@ impl ExecutionPlan for OntologyInferExec {
             .into_iter()
             .next()
             .ok_or_else(|| DataFusionError::Internal("OntologyInferExec needs one child".into()))?;
+        let props = partitioned_properties(&self.schema, &input);
         Ok(Arc::new(Self {
             input,
             rule_id: self.rule_id.clone(),
             confidence_model: self.confidence_model.clone(),
             schema: self.schema.clone(),
-            props: self.props.clone(),
+            props,
         }))
     }
 
@@ -1769,12 +1807,7 @@ impl ExpandExec {
         resource: &read_resource::GraphReadContext,
     ) -> Self {
         let schema: SchemaRef = Arc::new(node.schema().as_arrow().clone());
-        let props = Arc::new(PlanProperties::new(
-            EquivalenceProperties::new(schema.clone()),
-            Partitioning::UnknownPartitioning(1),
-            EmissionType::Incremental,
-            Boundedness::Bounded,
-        ));
+        let props = partitioned_properties(&schema, &input);
         let src_qual = datafusion::common::TableReference::bare(format!("var_{}", node.src_var));
         let src_col_idx = node
             .input
@@ -2061,6 +2094,13 @@ impl ExecutionPlan for ExpandExec {
             .into_iter()
             .next()
             .ok_or_else(|| DataFusionError::Internal("ExpandExec needs one child".into()))?;
+        let props = partitioned_properties(&self.schema, &input);
+        if self.fetch.is_some() && props.output_partitioning().partition_count() > 1 {
+            return Err(DataFusionError::Internal(
+                "ExpandExec fetch bounds one output stream and cannot span several partitions"
+                    .into(),
+            ));
+        }
         Ok(Arc::new(Self {
             input,
             rel_type_name: self.rel_type_name.clone(),
@@ -2072,7 +2112,7 @@ impl ExecutionPlan for ExpandExec {
             input_width: self.input_width,
             selected_destination_uuid_index: self.selected_destination_uuid_index,
             schema: self.schema.clone(),
-            props: self.props.clone(),
+            props,
             provider: self.provider.clone(),
             fetch: self.fetch,
             edge_var: self.edge_var,
@@ -2086,6 +2126,12 @@ impl ExecutionPlan for ExpandExec {
     }
 
     fn with_fetch(&self, fetch: Option<usize>) -> Option<Arc<dyn ExecutionPlan>> {
+        // `fetch` bounds the rows of one output stream. Across several
+        // partitions each would emit up to `fetch` rows, so the limit stays in
+        // the operator above, which sees every partition.
+        if self.props.output_partitioning().partition_count() > 1 {
+            return None;
+        }
         Some(Arc::new(Self {
             input: Arc::clone(&self.input),
             rel_type_name: self.rel_type_name.clone(),
@@ -2115,9 +2161,10 @@ impl ExecutionPlan for ExpandExec {
     }
 
     fn benefits_from_input_partitioning(&self) -> Vec<bool> {
-        // ExpandExec has one output partition and explicitly coalesces a
-        // multi-partition child with execute_stream. Advertising a benefit here
-        // inserts an eager round-robin exchange that cannot parallelize the hop.
+        // The hop runs on the partitions its input already has. A planner
+        // exchange is inserted only where another rule asks for one; a
+        // single-partition input keeps its plan shape, which the fixed-hop fast
+        // paths rely on.
         vec![false]
     }
 
@@ -2126,16 +2173,12 @@ impl ExecutionPlan for ExpandExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream, DataFusionError> {
-        if partition != 0 {
-            return Err(DataFusionError::Internal(format!(
-                "ExpandExec only has partition 0, got {partition}"
-            )));
-        }
+        check_partition("ExpandExec", &self.input, partition)?;
         let input = self.input.clone();
         let cfg = self.single_hop_config(&context);
         let schema = self.schema.clone();
         let batch_size = context.session_config().batch_size();
-        let input_stream = datafusion::physical_plan::execute_stream(input, context)?;
+        let input_stream = input.execute(partition, context)?;
         let remaining = self.fetch;
         let initial_batch_goal = self
             .demand_batch
