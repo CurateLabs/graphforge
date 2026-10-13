@@ -48,11 +48,11 @@ impl DemandedColumns {
     }
 }
 
-/// Destination rows answered from the label index, with the identity lookup
-/// that supplied `node_uuid` (absent when the hop does not demand it).
+/// Destination rows answered from the label index, with the identity lookups
+/// that supplied `node_uuid` (none when the hop does not demand it).
 pub(super) struct SynthesisedDestination {
     pub(super) batch: RecordBatch,
-    pub(super) identity_lookup: Option<V4OrdinalLookupMetrics>,
+    pub(super) identity_lookups: Vec<V4OrdinalLookupMetrics>,
 }
 
 /// Synthesise the destination rows of `reached` from the label index.
@@ -97,23 +97,27 @@ pub(super) fn synthesise_destination_batch(
     if let Some(type_ids) = gathered.type_ids {
         columns.push(("type_ids", Arc::new(type_ids)));
     }
-    let mut identity_lookup = None;
+    let mut identity_lookups = Vec::new();
     if let (true, Some(identities)) = (demanded.node_uuid, ordinal_identities) {
-        let lookup = identities.lookup_node_uuids(&present)?;
         let mut builder = FixedSizeBinaryBuilder::with_capacity(present.len(), 16);
         let mut keep = Vec::with_capacity(present.len());
-        for uuid in &lookup.values {
-            match uuid {
-                Some(uuid) => {
-                    builder
-                        .append_value(uuid.as_bytes())
-                        .map_err(|error| GfError::Execution(error.to_string()))?;
-                    keep.push(true);
+        // The identity authority bounds one request, and the node-file read this
+        // replaces had no such bound, so a large frontier is looked up in chunks.
+        for requested in present.chunks(identities.max_requested_ids().max(1)) {
+            let lookup = identities.lookup_node_uuids(requested)?;
+            for uuid in &lookup.values {
+                match uuid {
+                    Some(uuid) => {
+                        builder
+                            .append_value(uuid.as_bytes())
+                            .map_err(|error| GfError::Execution(error.to_string()))?;
+                        keep.push(true);
+                    }
+                    None => keep.push(false),
                 }
-                None => keep.push(false),
             }
+            identity_lookups.push(lookup.metrics);
         }
-        identity_lookup = Some(lookup.metrics);
         let uuids: ArrayRef = Arc::new(builder.finish());
         columns.push(("node_uuid", uuids));
         if keep.iter().any(|kept| !kept) {
@@ -133,6 +137,6 @@ pub(super) fn synthesise_destination_batch(
         .map_err(|error| GfError::Execution(error.to_string()))?;
     Ok(Some(SynthesisedDestination {
         batch,
-        identity_lookup,
+        identity_lookups,
     }))
 }

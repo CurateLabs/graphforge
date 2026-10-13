@@ -2746,7 +2746,7 @@ fn expand_single_hop_chunk(
             cfg.edge_var,
             destination.batch.num_rows(),
         );
-        if let Some(lookup) = &destination.identity_lookup {
+        for lookup in &destination.identity_lookups {
             demand::record_identity_lookup(cfg.capture_epoch, cfg.edge_var, lookup);
         }
         destination.batch
