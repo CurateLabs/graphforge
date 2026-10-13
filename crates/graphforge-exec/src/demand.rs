@@ -36,7 +36,7 @@ use datafusion::physical_plan::{
 use futures::Stream;
 use futures::task::AtomicWaker;
 
-use crate::{ExpandExec, OptionalMatchExec, VarLenExpandExec};
+use crate::{ExpandExec, OptionalMatchExec, UnwindExec, VarLenExpandExec};
 
 /// Per-hop deterministic work counters.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1299,6 +1299,19 @@ fn rewrite_materialization(
         return plan.with_new_children(vec![child]);
     }
 
+    if let Some(unwind) = plan.downcast_ref::<UnwindExec>() {
+        // The input rows are copied once per element, so the columns nobody
+        // reads are the cost. The list column stays demanded: the explode needs
+        // it even when the parent does not.
+        let child_required = unwind.input_demand(required)?;
+        let child = rewrite_materialization(Arc::clone(plan.children()[0]), &child_required)?;
+        let rebuilt = plan.with_new_children(vec![child])?;
+        let unwind = rebuilt.downcast_ref::<UnwindExec>().ok_or_else(|| {
+            DataFusionError::Internal("UnwindExec rewrite changed physical type".into())
+        })?;
+        return Ok(unwind.with_required_output(required.clone()));
+    }
+
     let mut child_required = required.clone();
     if let Some(filter) = plan.downcast_ref::<FilterExec>() {
         // A FilterExec may carry DataFusion's own output projection. Its
@@ -1541,6 +1554,7 @@ fn contains_demand_expand(plan: &Arc<dyn ExecutionPlan>) -> bool {
 fn contains_materializable_expand(plan: &Arc<dyn ExecutionPlan>) -> bool {
     plan.is::<ExpandExec>()
         || plan.is::<VarLenExpandExec>()
+        || plan.is::<UnwindExec>()
         || plan
             .children()
             .into_iter()

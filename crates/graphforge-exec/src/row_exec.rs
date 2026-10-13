@@ -524,6 +524,13 @@ pub(super) fn optional_join(
 /// per element — the input columns plus a new `alias` column bound to the
 /// element. A null or empty list yields **zero** rows for that input row
 /// (the input row is dropped), matching openCypher.
+///
+/// Copying an input column once per exploded element is the cost of this node,
+/// and a wide input (a collected list of structs, a node's properties) makes it
+/// large. [`UnwindExec::with_required_output`] records the output columns the
+/// parent reads; the others are emitted as nulls instead of being copied. The
+/// schema never changes, and a column whose field is not nullable is always
+/// copied.
 pub struct UnwindExec {
     input: Arc<dyn ExecutionPlan>,
     list_expr: DfExpr,
@@ -535,6 +542,9 @@ pub struct UnwindExec {
     input_dfschema: datafusion::common::DFSchemaRef,
     schema: SchemaRef,
     props: Arc<PlanProperties>,
+    /// Output columns the parent reads; `None` means every column. Only input
+    /// columns outside this set are skipped. The element column is always built.
+    required_output: Option<BTreeSet<usize>>,
 }
 
 impl UnwindExec {
@@ -556,7 +566,71 @@ impl UnwindExec {
             input_dfschema: node.input.schema().clone(),
             schema,
             props,
+            required_output: None,
         }
+    }
+
+    /// The input columns this node needs to produce `required` output columns:
+    /// the demanded input columns plus every column the list expression reads.
+    /// The list column itself is needed to explode the rows even when the
+    /// parent never reads it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the planning error if the list expression cannot be planned
+    /// against the input schema.
+    pub(crate) fn input_demand(
+        &self,
+        required: &BTreeSet<usize>,
+    ) -> Result<BTreeSet<usize>, DataFusionError> {
+        let input_width = self.input_schema.fields().len();
+        let mut demand: BTreeSet<usize> = required
+            .iter()
+            .copied()
+            .filter(|index| *index < input_width)
+            .collect();
+        let list = create_physical_expr(
+            &self.list_expr,
+            &self.input_dfschema,
+            &ExecutionProps::new(),
+        )?;
+        demand.extend(
+            datafusion::physical_expr::utils::collect_columns(&list)
+                .iter()
+                .map(datafusion::physical_expr::expressions::Column::index),
+        );
+        Ok(demand)
+    }
+
+    /// The same node emitting only the `required` output columns (plus the
+    /// element column). Call it on a node whose input was already narrowed to
+    /// [`UnwindExec::input_demand`].
+    #[must_use]
+    pub(crate) fn with_required_output(&self, required: BTreeSet<usize>) -> Arc<dyn ExecutionPlan> {
+        let input_width = self.input_schema.fields().len();
+        let narrowed = (0..input_width).any(|index| !required.contains(&index));
+        Arc::new(Self {
+            input: Arc::clone(&self.input),
+            list_expr: self.list_expr.clone(),
+            input_schema: self.input_schema.clone(),
+            input_dfschema: self.input_dfschema.clone(),
+            schema: self.schema.clone(),
+            props: self.props.clone(),
+            required_output: narrowed.then_some(required),
+        })
+    }
+
+    /// How many input columns are copied per element: the demanded ones, and
+    /// the non-nullable ones, which a null array cannot stand in for.
+    fn copied_columns(&self) -> usize {
+        let width = self.input_schema.fields().len();
+        self.required_output.as_ref().map_or(width, |required| {
+            (0..width)
+                .filter(|index| {
+                    required.contains(index) || !self.schema.field(*index).is_nullable()
+                })
+                .count()
+        })
     }
 }
 
@@ -568,7 +642,12 @@ impl fmt::Debug for UnwindExec {
 
 impl DisplayAs for UnwindExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "UnwindExec: list={}", self.list_expr)
+        write!(f, "UnwindExec: list={}", self.list_expr)?;
+        // Printed only for a narrowed node so an unmasked plan reads as before.
+        if self.required_output.is_some() {
+            write!(f, ", copied={}", self.copied_columns())?;
+        }
+        Ok(())
     }
 }
 
@@ -606,6 +685,7 @@ impl ExecutionPlan for UnwindExec {
             input_dfschema: self.input_dfschema.clone(),
             schema: self.schema.clone(),
             props: self.props.clone(),
+            required_output: self.required_output.clone(),
         }))
     }
 
@@ -625,6 +705,7 @@ impl ExecutionPlan for UnwindExec {
             input_schema: self.input_schema.clone(),
             input_dfschema: self.input_dfschema.clone(),
             out_schema: self.schema.clone(),
+            required_output: self.required_output.clone(),
         };
         let schema = self.schema.clone();
         let fut = async move {
@@ -644,6 +725,8 @@ struct UnwindConfig {
     input_schema: SchemaRef,
     input_dfschema: datafusion::common::DFSchemaRef,
     out_schema: SchemaRef,
+    /// Output columns the parent reads (`None`: all). See [`UnwindExec`].
+    required_output: Option<BTreeSet<usize>>,
 }
 
 /// Evaluate `list_expr` per input row and explode the resulting list into one
@@ -715,8 +798,19 @@ fn unwind_explode(
 
     let input_take = UInt32Array::from(input_take);
     let mut columns: Vec<arrow::array::ArrayRef> = Vec::with_capacity(input.num_columns() + 1);
-    for col in input.columns() {
-        columns.push(take(col, &input_take, None).map_err(|e| exec_err(e.to_string()))?);
+    for (index, col) in input.columns().iter().enumerate() {
+        let field = cfg.out_schema.field(index);
+        let skipped = field.is_nullable()
+            && cfg
+                .required_output
+                .as_ref()
+                .is_some_and(|required| !required.contains(&index));
+        columns.push(if skipped {
+            // Nobody reads this column: a null array is not a copy of it.
+            arrow::array::new_null_array(field.data_type(), input_take.len())
+        } else {
+            take(col, &input_take, None).map_err(|e| exec_err(e.to_string()))?
+        });
     }
     // The element column is the concatenation of every row's element sub-array,
     // already aligned with `input_take` (which repeats each row per element).
