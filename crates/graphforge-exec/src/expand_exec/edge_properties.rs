@@ -260,6 +260,22 @@ pub(super) struct EdgeIdPropSource {
     id_to_loc: std::collections::HashMap<u64, (usize, u32)>,
 }
 
+impl EdgeIdPropSource {
+    /// Bytes this source holds: its row batches and its location table.
+    pub(super) fn charged_bytes(&self) -> usize {
+        self.batches
+            .iter()
+            .map(RecordBatch::get_array_memory_size)
+            .fold(
+                hash_table_bytes(
+                    self.id_to_loc.capacity(),
+                    std::mem::size_of::<(u64, (usize, u32))>(),
+                ),
+                usize::saturating_add,
+            )
+    }
+}
+
 /// Read the selected rows of the edges with surrogate ids `targets` from every
 /// candidate property route, through the routes' edge-id-addressable indexes.
 ///
