@@ -19,6 +19,10 @@ use std::collections::HashSet;
 
 mod anchor;
 
+/// The function name `node_struct_expr` emits for a whole-node value; the
+/// relational lowerer and `collect_identity` match on it.
+pub(super) const NODE_STRUCT_CALL: &str = "_node_struct";
+
 impl Binder {
     pub(super) fn lower_match(
         &self,
@@ -1042,7 +1046,7 @@ impl Binder {
             args.push(lit);
         }
         s.builder.push_expr(IrExpr::FunctionCall {
-            name: "_node_struct".to_string(),
+            name: NODE_STRUCT_CALL.to_string(),
             args,
         })
     }
