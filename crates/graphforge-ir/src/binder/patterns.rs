@@ -51,19 +51,26 @@ impl Binder {
             };
             // Relationship isomorphism spans every pattern of one MATCH.
             let mut match_edges = Vec::new();
-            for pat in &m.patterns {
+            for (ordinal, pat) in m.patterns.iter().enumerate() {
                 // A pattern that mentions a node the query already binds starts
-                // there, so its expansions join to rows that exist instead of
-                // crossing a scan of the pattern's first node with them (#1984).
-                // `node_vars` also covers a node carried through `WITH`, whose
-                // output variable keeps no `VarKind`.
-                let anchored = anchor::anchor_on_bound_node(pat, |name| {
-                    sub_state
-                        .vars
-                        .get(name)
-                        .is_some_and(|id| sub_state.node_vars.contains_key(id))
-                });
-                match anchored {
+                // there, and a path that ends on a second bound node is closed
+                // from that node, so its expansions join to rows that exist
+                // instead of crossing a scan or fanning out to every neighbour
+                // of a meeting node (#1984). `node_vars` also covers a node
+                // carried through `WITH`, whose output variable keeps no
+                // `VarKind`.
+                let planned = anchor::start_from_bound_nodes(
+                    pat,
+                    ordinal,
+                    anchor::Rewrite::HeadAndClosingHops,
+                    |name| {
+                        sub_state
+                            .vars
+                            .get(name)
+                            .is_some_and(|id| sub_state.node_vars.contains_key(id))
+                    },
+                );
+                match planned {
                     Some(parts) => {
                         for part in &parts {
                             self.lower_match_path_pattern(part, &mut match_edges, &mut sub_state);
@@ -72,6 +79,7 @@ impl Binder {
                     None => self.lower_match_path_pattern(pat, &mut match_edges, &mut sub_state),
                 }
             }
+            anchor::forget_meeting_names(&mut sub_state.vars);
             if let Some(w) = &m.where_clause {
                 self.lower_where(w, &mut sub_state);
             }
@@ -117,9 +125,30 @@ impl Binder {
         } else {
             // Relationship isomorphism spans every pattern of one MATCH.
             let mut match_edges = Vec::new();
-            for pat in &m.patterns {
-                self.lower_match_path_pattern(pat, &mut match_edges, s);
+            for (ordinal, pat) in m.patterns.iter().enumerate() {
+                // A path that ends on a second bound node is closed from that
+                // node (#1984). Unlike OPTIONAL MATCH, a MATCH keeps the
+                // pattern's first node as the start of its lowering.
+                let planned = anchor::start_from_bound_nodes(
+                    pat,
+                    ordinal,
+                    anchor::Rewrite::ClosingHops,
+                    |name| {
+                        s.vars
+                            .get(name)
+                            .is_some_and(|id| s.node_vars.contains_key(id))
+                    },
+                );
+                match planned {
+                    Some(parts) => {
+                        for part in &parts {
+                            self.lower_match_path_pattern(part, &mut match_edges, s);
+                        }
+                    }
+                    None => self.lower_match_path_pattern(pat, &mut match_edges, s),
+                }
             }
+            anchor::forget_meeting_names(&mut s.vars);
             if let Some(w) = &m.where_clause {
                 self.lower_where(w, s);
             }

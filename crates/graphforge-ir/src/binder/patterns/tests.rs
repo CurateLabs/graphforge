@@ -1473,3 +1473,361 @@ fn optional_match_after_an_aggregating_with_anchors_on_the_group_key() {
     assert_eq!(hops.len(), 2);
     assert_eq!(hops[0].0, forum);
 }
+
+// -----------------------------------------------------------------------
+// A path that closes on a second bound node (#1984)
+// -----------------------------------------------------------------------
+
+/// The relationship variable of each expansion, in plan order.
+fn expand_edges(ops: &[GraphOp]) -> Vec<VarId> {
+    ops.iter()
+        .filter_map(|op| match op {
+            GraphOp::Expand { edge, .. } => Some(*edge),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Each relationship-uniqueness check, in plan order.
+fn uniqueness_checks(ops: &[GraphOp]) -> Vec<(VarId, Vec<VarId>)> {
+    ops.iter()
+        .filter_map(|op| match op {
+            GraphOp::RelationshipUnique { edge, prior_edges } => Some((*edge, prior_edges.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The ops that lower the pattern under test: the child of the first
+/// `OPTIONAL MATCH`, or the plan's own ops when the clause is a plain `MATCH`.
+fn pattern_ops(plan: &GraphPlan) -> Vec<GraphOp> {
+    plan.ops
+        .iter()
+        .find_map(|op| match op {
+            GraphOp::Optional { child } => Some(child.ops.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| plan.ops.clone())
+}
+
+/// The variables of the leading node scans: the nodes a test's first `MATCH`
+/// binds before the pattern under test.
+fn leading_scans(ops: &[GraphOp], count: usize) -> Vec<VarId> {
+    let scans: Vec<VarId> = ops
+        .iter()
+        .filter_map(|op| match op {
+            GraphOp::NodeScan { var, .. } => Some(*var),
+            _ => None,
+        })
+        .take(count)
+        .collect();
+    assert_eq!(scans.len(), count, "{ops:?}");
+    scans
+}
+
+const CLOSING_PATTERN: &str = "(friend)<-[:HAS_CREATOR]-(post:Post)-[:HAS_TAG]->(:Tag)\
+                               <-[:HAS_INTEREST]-(person)";
+
+/// The shape this rewrite exists for, checked on the ops of either clause kind.
+fn assert_closes_from_the_bound_node(ops: &[GraphOp], outer: &[VarId]) {
+    let (person, friend) = (outer[0], outer[1]);
+    // No hop expands into the bound `person`: every arrival at it is the
+    // reversed closing hop, which leaves it.
+    let hops = expands(ops);
+    assert_eq!(hops.len(), 3, "{ops:?}");
+    assert!(hops.iter().all(|hop| hop.1 != person), "{hops:?}");
+    // friend -> post -> tag, then person -> the same tag.
+    assert_eq!(hops[0].0, friend);
+    assert_eq!(hops[1].0, hops[0].1, "the second hop continues the first");
+    assert_eq!(hops[2].0, person, "the closing hop leaves the bound node");
+    assert_eq!(
+        hops[2].1, hops[1].1,
+        "both halves meet on the node before the closing hop"
+    );
+    assert_eq!(
+        hops.iter().map(|hop| hop.2).collect::<Vec<_>>(),
+        vec![
+            crate::Direction::In,
+            crate::Direction::Out,
+            crate::Direction::Out
+        ],
+        "the closing hop is read backwards: the tag is the target of HAS_INTEREST"
+    );
+    // The scan of `person` is the only scan the closing half needs and it is
+    // bound by the outer query, so nothing is scanned from scratch.
+    assert!(unanchored_scans(ops, outer).is_empty(), "{ops:?}");
+}
+
+#[test]
+fn optional_match_closes_a_path_on_a_bound_node_from_that_node() {
+    let (ops, outer) = optional_child(&format!(
+        "MATCH (person:Person {{id: 1}}), (friend:Person {{id: 2}}) \
+         OPTIONAL MATCH {CLOSING_PATTERN} RETURN friend, person, post"
+    ));
+    assert_eq!(outer.len(), 2, "{outer:?}");
+    assert_closes_from_the_bound_node(&ops, &outer);
+}
+
+#[test]
+fn match_closes_a_path_on_a_bound_node_from_that_node() {
+    let plan = bind_plan(&format!(
+        "MATCH (person:Person {{id: 1}}), (friend:Person {{id: 2}}) \
+         MATCH {CLOSING_PATTERN} RETURN friend, person, post"
+    ));
+    let outer = leading_scans(&plan.ops, 2);
+    // The two scans of the first clause are the only scans from scratch.
+    assert_eq!(unanchored_scans(&plan.ops, &[]), outer, "{:?}", plan.ops);
+    assert_closes_from_the_bound_node(&plan.ops, &outer);
+}
+
+#[test]
+fn the_meeting_node_keeps_its_labels_and_properties() {
+    let (ops, outer) = optional_child(
+        "MATCH (f:Forum), (z:Tag) \
+         OPTIONAL MATCH (f)-[:R]->(x)-[:Q]->(m:Mid {k: 1})-[:S]->(z) RETURN f, m, z",
+    );
+    assert!(unanchored_scans(&ops, &outer).is_empty(), "{ops:?}");
+    let hops = expands(&ops);
+    assert_eq!(hops.len(), 3, "{ops:?}");
+    let meeting = hops[1].1;
+    assert_eq!((hops[2].0, hops[2].1), (outer[1], meeting), "{hops:?}");
+    // The first half enforces the label and the property once; the closing
+    // half re-reads the meeting node bare.
+    let scans = |labelled: bool| {
+        ops.iter()
+            .filter(|op| {
+                matches!(op, GraphOp::NodeScan { var, ty }
+                    if *var == meeting && ty.is_some() == labelled)
+            })
+            .count()
+    };
+    assert_eq!((scans(true), scans(false)), (1, 1), "{ops:?}");
+    let filters = ops
+        .iter()
+        .filter(|op| matches!(op, GraphOp::Filter { .. }))
+        .count();
+    assert_eq!(filters, 1, "the property filter is applied once: {ops:?}");
+}
+
+#[test]
+fn two_patterns_of_one_clause_close_on_distinct_anonymous_meeting_nodes() {
+    // One relationship type throughout, so that every pair of relationships
+    // is subject to uniqueness whatever rule decides which pairs need it.
+    let (ops, outer) = optional_child(
+        "MATCH (a:Forum), (b:Tag) \
+         OPTIONAL MATCH (a)-[:R]->()-[:R]->()-[:R]->(b), \
+                        (a)-[:R]->()-[:R]->()-[:R]->(b) RETURN a, b",
+    );
+    assert!(unanchored_scans(&ops, &outer).is_empty(), "{ops:?}");
+    let hops = expands(&ops);
+    assert_eq!(hops.len(), 6, "{ops:?}");
+    assert_eq!(hops[2].1, hops[1].1);
+    assert_eq!(hops[5].1, hops[4].1);
+    assert_ne!(
+        hops[1].1, hops[4].1,
+        "the two patterns do not share their anonymous nodes"
+    );
+    // All six relationships stay mutually distinct across the patterns.
+    let edges = expand_edges(&ops);
+    let checks = uniqueness_checks(&ops);
+    assert_eq!(checks.last(), Some(&(edges[5], edges[..5].to_vec())));
+}
+
+#[test]
+fn relationship_uniqueness_spans_both_halves_of_a_split_path() {
+    // Every relationship has the same declared type, so each pair can match
+    // the same stored relationship. The closing hop is checked against both
+    // relationships of the first half, not only against the one it meets.
+    for (clause, query) in [
+        (
+            "OPTIONAL MATCH",
+            "MATCH (f), (p) OPTIONAL MATCH (f)-[:E]->(m)-[:E]->(t)<-[:E]-(p) RETURN m",
+        ),
+        (
+            "MATCH",
+            "MATCH (f), (p) MATCH (f)-[:E]->(m)-[:E]->(t)<-[:E]-(p) RETURN m",
+        ),
+        (
+            "undirected",
+            "MATCH (f), (p) OPTIONAL MATCH (f)-[:E]-(m)-[:E]-(t)-[:E]-(p) RETURN m",
+        ),
+        (
+            "untyped",
+            "MATCH (f), (p) OPTIONAL MATCH (f)-[]-(m)-[]-(t)-[]-(p) RETURN m",
+        ),
+    ] {
+        let plan = bind_plan(query);
+        let ops = pattern_ops(&plan);
+        let hops = expands(&ops);
+        assert_eq!(hops.len(), 3, "{clause}: {ops:?}");
+        // The closing hop leaves the bound node and meets the first half on
+        // its last node: the plan is split, not blind.
+        assert_eq!(hops[2].1, hops[1].1, "{clause}: {hops:?}");
+        let edges = expand_edges(&ops);
+        assert_eq!(
+            uniqueness_checks(&ops),
+            vec![
+                (edges[1], vec![edges[0]]),
+                (edges[2], vec![edges[0], edges[1]]),
+            ],
+            "{clause}: {ops:?}"
+        );
+    }
+}
+
+#[test]
+fn an_anonymous_meeting_node_is_not_visible_to_return_star() {
+    let plan = bind_plan(
+        "MATCH (f:Forum), (z:Tag) \
+         OPTIONAL MATCH (f)-[:R]->()-[:Q]->()-[:S]->(z) RETURN *",
+    );
+    let aliases: Vec<String> = plan
+        .ops
+        .iter()
+        .rev()
+        .find_map(|op| match op {
+            GraphOp::Project { items, .. } => Some(
+                items
+                    .iter()
+                    .filter_map(|item| item.alias.clone())
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .expect("RETURN * projects");
+    let mut sorted = aliases.clone();
+    sorted.sort();
+    assert_eq!(sorted, ["f", "z"], "{aliases:?}");
+}
+
+#[test]
+fn every_later_bound_node_closes_its_own_path() {
+    let (ops, outer) = optional_child(
+        "MATCH (a:Forum), (b:Tag), (c:Post) \
+         OPTIONAL MATCH (a)-[:R]->(x)-[:R2]->(x2)-[:S]->(b)-[:T]->(y)-[:T2]->(y2)-[:U]->(c) \
+         RETURN a, b, c, x, y",
+    );
+    assert!(unanchored_scans(&ops, &outer).is_empty(), "{ops:?}");
+    let (a, b, c) = (outer[0], outer[1], outer[2]);
+    let hops = expands(&ops);
+    // a -> x -> x2, b -> x2, then b -> y -> y2, c -> y2.
+    assert_eq!(hops.len(), 6, "{ops:?}");
+    assert_eq!(
+        hops.iter().map(|hop| hop.0).collect::<Vec<_>>(),
+        [a, hops[0].1, b, b, hops[3].1, c]
+    );
+    assert_eq!(hops[2].1, hops[1].1, "a and b meet on x2");
+    assert_eq!(hops[5].1, hops[4].1, "b and c meet on y2");
+    assert_ne!(hops[1].1, hops[4].1);
+}
+
+#[test]
+fn optional_match_reads_its_head_backwards_and_still_closes_on_the_last_bound_node() {
+    // `a` is bound after unbound `z`, and `b` closes the rest: z <- a, a -> x
+    // -> y, then b -> y.
+    let (ops, outer) = optional_child(
+        "MATCH (a:Forum), (b:Tag) \
+         OPTIONAL MATCH (z)-[:R]->(a)-[:S]->(x)-[:T]->(y)-[:V]->(b) RETURN a, b, x, y, z",
+    );
+    assert!(unanchored_scans(&ops, &outer).is_empty(), "{ops:?}");
+    let (a, b) = (outer[0], outer[1]);
+    let hops = expands(&ops);
+    assert_eq!(hops.len(), 4, "{ops:?}");
+    assert_eq!(
+        hops.iter().map(|hop| hop.0).collect::<Vec<_>>(),
+        [a, a, hops[1].1, b]
+    );
+    assert_eq!(
+        hops.iter().map(|hop| hop.2).collect::<Vec<_>>(),
+        vec![
+            crate::Direction::In,
+            crate::Direction::Out,
+            crate::Direction::Out,
+            crate::Direction::In
+        ]
+    );
+    assert_eq!(hops[3].1, hops[2].1, "a and b meet on y");
+}
+
+#[test]
+fn bound_nodes_that_follow_each_other_directly_keep_their_order() {
+    // The hop between two bound nodes already starts at a bound node, and the
+    // hop after the second one continues from it.
+    for query in [
+        "MATCH (a:Forum), (b:Tag) OPTIONAL MATCH (a)-[:R]->(b)-[:S]->(x) RETURN a, b, x",
+        "MATCH (a:Forum), (b:Tag) OPTIONAL MATCH (a)-[:R]->(b), (b)-[:S]->(x) RETURN a, b, x",
+    ] {
+        let (ops, outer) = optional_child(query);
+        let hops = expands(&ops);
+        assert_eq!(hops.len(), 2, "{query}: {ops:?}");
+        assert_eq!(
+            (hops[0].0, hops[0].1, hops[1].0),
+            (outer[0], outer[1], outer[1]),
+            "{query}: {ops:?}"
+        );
+    }
+}
+
+#[test]
+fn a_path_that_closes_after_one_unbound_node_keeps_its_order() {
+    // `person` and `liker` are bound and one message separates them. Either
+    // direction of the closing hop is the better plan for some graph, and no
+    // statistics are available to the binder: the diamond is lowered as
+    // written, so the last hop expands from the message into the bound liker.
+    for clause in ["MATCH", "OPTIONAL MATCH"] {
+        let plan = bind_plan(&format!(
+            "MATCH (person:Person {{id: 1}}), (liker:Person {{id: 2}}) \
+             {clause} (person)<-[:HAS_CREATOR]-(message)<-[like:LIKES]-(liker) \
+             WHERE like.creationDate = 7 RETURN message"
+        ));
+        let outer = leading_scans(&plan.ops, 2);
+        let ops = pattern_ops(&plan);
+        let hops = expands(&ops);
+        assert_eq!(hops.len(), 2, "{clause}: {ops:?}");
+        assert_eq!(hops[0].0, outer[0], "{clause}: starts at the bound person");
+        assert_eq!(
+            (hops[1].0, hops[1].1),
+            (hops[0].1, outer[1]),
+            "{clause}: the last hop expands into the bound liker"
+        );
+    }
+}
+
+#[test]
+fn patterns_the_rewrite_cannot_reverse_still_expand_into_the_closing_node() {
+    for query in [
+        // A named path would list its nodes in the other order.
+        "MATCH (a:Forum), (z:Tag) {m} p = (a)-[:R]->(x)-[:Q]->(y)-[:S]->(z) RETURN a",
+        // A named variable-length relationship would list its edges in the
+        // other order.
+        "MATCH (a:Forum), (z:Tag) {m} (a)-[:R]->(x)-[:Q]->(y)-[r:S*1..2]->(z) RETURN a",
+        // A property that reads another variable depends on binding order.
+        "MATCH (a:Forum), (z:Tag) {m} (a)-[:R]->(x {k: a.k})-[:Q]->(y)-[:S]->(z) RETURN a",
+        "MATCH (a:Forum), (z:Tag) {m} (a)-[:R]->(x)-[:Q]->(y)-[:S {k: a.k}]->(z) RETURN a",
+    ] {
+        for clause in ["MATCH", "OPTIONAL MATCH"] {
+            let query = query.replace("{m}", clause);
+            let plan = bind_plan(&query);
+            let z = leading_scans(&plan.ops, 2)[1];
+            let ops = pattern_ops(&plan);
+            assert!(
+                expands(&ops).iter().any(|hop| hop.1 == z),
+                "{query} should keep expanding into the bound node: {ops:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_path_with_one_bound_node_at_its_start_is_unchanged() {
+    for clause in ["MATCH", "OPTIONAL MATCH"] {
+        let plan = bind_plan(&format!(
+            "MATCH (a:Forum) {clause} (a)-[:R]->(x)-[:S]->(y) RETURN a, x, y"
+        ));
+        let a = leading_scans(&plan.ops, 1)[0];
+        let ops = pattern_ops(&plan);
+        let hops = expands(&ops);
+        assert_eq!(hops.len(), 2, "{clause}: {ops:?}");
+        assert_eq!((hops[0].0, hops[1].0), (a, hops[0].1), "{clause}");
+    }
+}
