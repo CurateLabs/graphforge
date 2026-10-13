@@ -396,66 +396,22 @@ impl EdgeRouteIndexBuilder {
         }
         let ids = ids.filter(|_| self.ids_complete);
         self.ids_complete &= ids.is_some();
-        let Some(uuid_column) = fragment.column_by_name(UUID_COLUMN) else {
+        let Some((uuid_column, uuids)) = indexable_uuids(fragment) else {
             self.poisoned = true;
             return Ok(());
         };
-        let Some(uuids) = uuid_column
-            .as_any()
-            .downcast_ref::<FixedSizeBinaryArray>()
-            .filter(|uuids| uuids.value_length() == 16 && uuids.null_count() == 0)
-        else {
+        let Some(stored) = self.stored_columns(fragment) else {
             self.poisoned = true;
             return Ok(());
         };
-        if let Some(tombstones) = fragment.column_by_name(PROPERTY_TOMBSTONE_FIELD) {
-            let live = tombstones
-                .as_any()
-                .downcast_ref::<BooleanArray>()
-                .is_some_and(|flags| flags.true_count() == 0);
-            if !live {
-                self.poisoned = true;
-                return Ok(());
-            }
-        }
-        if (1..uuids.len()).any(|row| uuids.value(row - 1) >= uuids.value(row)) {
-            self.poisoned = true;
-            return Ok(());
-        }
-        let mut stored: Vec<(usize, &str, &ArrayRef)> = Vec::new();
-        let fragment_schema = fragment.schema();
-        for (field, column) in fragment_schema.fields().iter().zip(fragment.columns()) {
-            let name = field.name();
-            // A column the route no longer stores a value for is Null-typed and
-            // reads as absent either way.
-            if name == UUID_COLUMN
-                || name == PROPERTY_TOMBSTONE_FIELD
-                || column.data_type() == &DataType::Null
-            {
-                continue;
-            }
-            let Some(index) = self.column_index(name, column.data_type()) else {
+        let mut start = 0;
+        while start < fragment.num_rows() {
+            // A single value past the shard bound cannot be sharded, and the
+            // route is left to the property overlay.
+            let Some(length) = shard_length(&stored, start, fragment.num_rows() - start) else {
                 self.poisoned = true;
                 return Ok(());
             };
-            stored.push((index, name.as_str(), column));
-        }
-        let mut start = 0;
-        while start < fragment.num_rows() {
-            // A shard holds up to SHARD_ROWS rows, fewer when a column's slice
-            // would pass SHARD_BYTES. A single value past the bound cannot be
-            // sharded, and the route is left to the property overlay.
-            let mut length = SHARD_ROWS.min(fragment.num_rows() - start);
-            while stored
-                .iter()
-                .any(|(_, _, column)| slice_bytes(column, start, length) > SHARD_BYTES)
-            {
-                if length == 1 {
-                    self.poisoned = true;
-                    return Ok(());
-                }
-                length = (length / 2).max(1);
-            }
             let uuid_bytes = encode_column(
                 UUID_COLUMN,
                 &DataType::FixedSizeBinary(16),
@@ -466,18 +422,10 @@ impl EdgeRouteIndexBuilder {
             };
             let id_blob = match ids {
                 Some(ids) => {
-                    let window = &ids[start..start + length];
-                    let bytes = encode_column(
-                        ID_COLUMN,
-                        &DataType::UInt64,
-                        Arc::new(UInt64Array::from(window.to_vec())),
-                    )?;
-                    let Some(seal) = self.append(&bytes, write)? else {
+                    let Some(blob) = self.append_ids(&ids[start..start + length], write)? else {
                         return Ok(());
                     };
-                    let min = window.iter().copied().min().expect("non-empty shard");
-                    let max = window.iter().copied().max().expect("non-empty shard");
-                    Some((seal, min, max))
+                    Some(blob)
                 }
                 None => None,
             };
@@ -511,6 +459,51 @@ impl EdgeRouteIndexBuilder {
             start += length;
         }
         Ok(())
+    }
+
+    /// The columns of `fragment` the index stores, each with its route-level
+    /// index. `None` when an earlier fragment stored one under another type.
+    fn stored_columns<'a>(&mut self, fragment: &'a RecordBatch) -> Option<Vec<StoredColumn<'a>>> {
+        let mut stored = Vec::new();
+        for (field, column) in fragment
+            .schema_ref()
+            .fields()
+            .iter()
+            .zip(fragment.columns())
+        {
+            let name = field.name();
+            // A column the route no longer stores a value for is Null-typed and
+            // reads as absent either way.
+            if name == UUID_COLUMN
+                || name == PROPERTY_TOMBSTONE_FIELD
+                || column.data_type() == &DataType::Null
+            {
+                continue;
+            }
+            let index = self.column_index(name, column.data_type())?;
+            stored.push((index, name.as_str(), column));
+        }
+        Some(stored)
+    }
+
+    /// Append the id blob of one shard window, with the least and greatest id it
+    /// holds. `None` when the blob cannot fit any pack.
+    fn append_ids(
+        &mut self,
+        window: &[u64],
+        write: &mut dyn FnMut(String, Vec<u8>) -> Result<(), GfError>,
+    ) -> Result<Option<IdBlob>, GfError> {
+        let bytes = encode_column(
+            ID_COLUMN,
+            &DataType::UInt64,
+            Arc::new(UInt64Array::from(window.to_vec())),
+        )?;
+        let Some(seal) = self.append(&bytes, write)? else {
+            return Ok(None);
+        };
+        let min = window.iter().copied().min().expect("non-empty shard");
+        let max = window.iter().copied().max().expect("non-empty shard");
+        Ok(Some((seal, min, max)))
     }
 
     /// The files that complete the index of the route: the last pack and the
@@ -986,12 +979,59 @@ fn demanded_columns<'a>(
         .collect()
 }
 
+/// A stored property column of a fragment: its route-level index, name and array.
+type StoredColumn<'a> = (usize, &'a str, &'a ArrayRef);
+
+/// A shard's id blob and the least and greatest edge id it holds.
+type IdBlob = (BlobSeal, u64, u64);
+
+/// The property columns gathered for a lookup, by name, in demanded order.
+type GatheredColumns = Vec<(String, ArrayRef)>;
+
+/// The UUID column of a fragment when it can be indexed: 16-byte, non-null,
+/// strictly ascending, and with no tombstoned row.
+fn indexable_uuids(fragment: &RecordBatch) -> Option<(&ArrayRef, &FixedSizeBinaryArray)> {
+    let column = fragment.column_by_name(UUID_COLUMN)?;
+    let uuids = column
+        .as_any()
+        .downcast_ref::<FixedSizeBinaryArray>()
+        .filter(|uuids| uuids.value_length() == 16 && uuids.null_count() == 0)?;
+    if let Some(tombstones) = fragment.column_by_name(PROPERTY_TOMBSTONE_FIELD) {
+        let live = tombstones
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .is_some_and(|flags| flags.true_count() == 0);
+        if !live {
+            return None;
+        }
+    }
+    (1..uuids.len())
+        .all(|row| uuids.value(row - 1) < uuids.value(row))
+        .then_some((column, uuids))
+}
+
+/// The rows of the shard that starts at `start`: up to `SHARD_ROWS`, fewer when
+/// a column's slice would pass `SHARD_BYTES`. `None` when one row alone does.
+fn shard_length(stored: &[StoredColumn<'_>], start: usize, remaining: usize) -> Option<usize> {
+    let mut length = SHARD_ROWS.min(remaining);
+    while stored
+        .iter()
+        .any(|(_, _, column)| slice_bytes(column, start, length) > SHARD_BYTES)
+    {
+        if length == 1 {
+            return None;
+        }
+        length = (length / 2).max(1);
+    }
+    Some(length)
+}
+
 /// The requested edges the hit shards hold, ascending, and one array per
 /// demanded column in that order. Two shards holding one edge is corrupt.
 fn assemble<K: Ord + Copy>(
     hits: &[HitShard<K>],
     demanded: &BTreeMap<usize, &String>,
-) -> Result<(Vec<K>, Vec<(String, ArrayRef)>), GfError> {
+) -> Result<(Vec<K>, GatheredColumns), GfError> {
     let mut located: Vec<(K, usize, usize)> = hits
         .iter()
         .enumerate()
@@ -1137,7 +1177,7 @@ fn gather_columns<K>(
     hits: &[HitShard<K>],
     indices: &[(usize, usize)],
     demanded: &BTreeMap<usize, &String>,
-) -> Result<Vec<(String, ArrayRef)>, GfError> {
+) -> Result<GatheredColumns, GfError> {
     let mut columns = Vec::new();
     for (index, property) in demanded {
         // The shards that store the column fix its type; the others read NULL.
