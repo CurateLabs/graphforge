@@ -211,7 +211,10 @@ fn run(forge: &GraphForge, query: &str, params: &HashMap<String, IrLiteral>) -> 
         graphforge_exec::demand::capture(|| forge.execute_with_params(query, params));
     let result = result.unwrap_or_else(|e| panic!("{query}: {e}"));
     let (node_rows, edge_rows) = demand.hops.values().fold((0, 0), |(nodes, edges), hop| {
-        (nodes + hop.node_rows_returned, edges + hop.edge_rows_returned)
+        (
+            nodes + hop.node_rows_returned,
+            edges + hop.edge_rows_returned,
+        )
     });
     Run {
         batches: result.batches,
@@ -265,7 +268,10 @@ fn a_relationship_predicate_reads_only_the_passing_destinations() {
             expected_weights(|_| true),
             "{partitions} partitions"
         );
-        assert_eq!(everything.node_rows, SPOKES as u64, "{partitions} partitions");
+        assert_eq!(
+            everything.node_rows, SPOKES as u64,
+            "{partitions} partitions"
+        );
 
         // The same rows, filtered by the test: what the unpushed form returns.
         let filtered_by_test: BTreeMap<i64, Option<i64>> = everything
@@ -356,7 +362,10 @@ fn a_null_property_is_excluded_by_the_pushed_predicate_and_kept_by_is_null() {
             &format!("{HUB} WHERE r.weight > $x RETURN b.ident AS v"),
             &HashMap::from([("x".to_owned(), IrLiteral::Null)]),
         );
-        assert!(nothing.int_column("v").is_empty(), "{partitions} partitions");
+        assert!(
+            nothing.int_column("v").is_empty(),
+            "{partitions} partitions"
+        );
     }
 }
 
@@ -439,7 +448,9 @@ fn a_filter_that_can_fail_or_reads_the_destination_is_not_pushed() {
         // hop on every row.
         let error = forge
             .execute_with_params(
-                &format!("{HUB} WHERE r.weight > $x AND 10 / (r.weight - 5) > 1 RETURN b.ident AS v"),
+                &format!(
+                    "{HUB} WHERE r.weight > $x AND 10 / (r.weight - 5) > 1 RETURN b.ident AS v"
+                ),
                 &threshold(),
             )
             .err();

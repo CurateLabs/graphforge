@@ -538,6 +538,133 @@ mod tests {
         );
     }
 
+    /// An expansion whose relationship (variable 2) stores a `weight` property
+    /// and whose destination (variable 1) has a `score` column.
+    fn expanded_with_edge_property() -> LogicalPlan {
+        let schema = DFSchema::new_with_metadata(
+            vec![(
+                Some(TableReference::bare("var_0")),
+                Arc::new(Field::new("score", DataType::Int64, true)),
+            )],
+            Default::default(),
+        )
+        .unwrap();
+        let input = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: Arc::new(schema),
+        });
+        LogicalPlan::Extension(Extension {
+            node: Arc::new(ExpandNode::new(
+                Arc::new(input),
+                "*",
+                0,
+                1,
+                2,
+                Direction::Out,
+                None,
+                vec![Arc::new(Field::new("edge_id", DataType::UInt64, false))],
+                vec![Arc::new(Field::new("weight", DataType::Int64, true))],
+                vec![Arc::new(Field::new("score", DataType::Int64, true))],
+            )),
+        })
+    }
+
+    fn weight() -> Expr {
+        Expr::Column(Column::new(Some(TableReference::bare("var_2")), "weight"))
+    }
+
+    fn rewrite_edge_predicates(plan: LogicalPlan, predicate: Expr) -> Transformed<LogicalPlan> {
+        FixedExpandEdgePredicates
+            .rewrite(
+                LogicalPlan::Filter(Filter::try_new(predicate, Arc::new(plan)).unwrap()),
+                &OptimizerContext::new(),
+            )
+            .unwrap()
+    }
+
+    /// The filter above the expansion and the predicate the expansion carries.
+    fn edge_predicate_of(result: &Transformed<LogicalPlan>) -> (Expr, Option<Expr>) {
+        let LogicalPlan::Filter(filter) = &result.data else {
+            panic!("the filter above the expansion must stay");
+        };
+        let LogicalPlan::Extension(extension) = filter.input.as_ref() else {
+            panic!("the expansion must stay under the filter");
+        };
+        let expand = extension
+            .node
+            .as_any()
+            .downcast_ref::<ExpandNode>()
+            .expect("an expansion node");
+        (filter.predicate.clone(), expand.edge_predicate.clone())
+    }
+
+    #[test]
+    fn relationship_conjunct_moves_into_the_expansion_and_the_filter_stays() {
+        let predicate = weight().gt(lit(5_i64));
+        let result = rewrite_edge_predicates(expanded_with_edge_property(), predicate.clone());
+        assert!(result.transformed);
+        let (above, pushed) = edge_predicate_of(&result);
+        assert_eq!(above, predicate);
+        assert_eq!(pushed, Some(predicate));
+    }
+
+    #[test]
+    fn only_conjuncts_over_the_relationship_properties_move() {
+        let relationship = weight().gt_eq(lit(5_i64)).and(weight().is_not_null());
+        let other_variable = column("var_1").gt(lit(2_i64));
+        let predicate = relationship.clone().and(other_variable);
+        let result = rewrite_edge_predicates(expanded_with_edge_property(), predicate.clone());
+        assert!(result.transformed);
+        let (above, pushed) = edge_predicate_of(&result);
+        assert_eq!(above, predicate);
+        assert_eq!(pushed, Some(relationship));
+    }
+
+    #[test]
+    fn a_conjunct_over_the_relationship_and_another_variable_stays_above() {
+        let mixed = weight().gt(column("var_1"));
+        let result = rewrite_edge_predicates(expanded_with_edge_property(), mixed);
+        assert!(!result.transformed);
+    }
+
+    #[test]
+    fn relationship_topology_and_constant_conjuncts_do_not_move() {
+        let topology = Expr::Column(Column::new(Some(TableReference::bare("var_2")), "edge_id"))
+            .gt(lit(3_u64));
+        assert!(!rewrite_edge_predicates(expanded_with_edge_property(), topology).transformed);
+        let constant = lit(1_i64).eq(lit(1_i64));
+        assert!(!rewrite_edge_predicates(expanded_with_edge_property(), constant).transformed);
+    }
+
+    #[test]
+    fn a_filter_that_can_fail_moves_nothing() {
+        // Arithmetic can overflow, so the filter is not total: dropping an edge
+        // early could hide an error the full filter raises on that edge.
+        let can_fail = (weight() + lit(1_i64)).gt(lit(3_i64));
+        let predicate = weight().gt(lit(5_i64)).and(can_fail);
+        let result = rewrite_edge_predicates(expanded_with_edge_property(), predicate);
+        assert!(!result.transformed);
+    }
+
+    #[test]
+    fn an_expansion_without_relationship_properties_is_left_alone() {
+        let result = rewrite_edge_predicates(expanded(), column("var_1").gt(lit(2_i64)));
+        assert!(!result.transformed);
+    }
+
+    #[test]
+    fn moving_the_conjunct_twice_changes_nothing() {
+        let predicate = weight().gt(lit(5_i64));
+        let once = rewrite_edge_predicates(expanded_with_edge_property(), predicate.clone());
+        let LogicalPlan::Filter(filter) = once.data else {
+            panic!("the filter must stay");
+        };
+        let again = FixedExpandEdgePredicates
+            .rewrite(LogicalPlan::Filter(filter), &OptimizerContext::new())
+            .unwrap();
+        assert!(!again.transformed);
+    }
+
     fn labelled() -> DFSchema {
         DFSchema::new_with_metadata(
             vec![
