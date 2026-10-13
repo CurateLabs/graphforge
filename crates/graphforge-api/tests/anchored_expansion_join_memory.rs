@@ -11,10 +11,11 @@
 //! above the join's share of the pool, and counts bytes through the lifecycle
 //! read-path counters, never time.
 //!
-//! The fixture is a ring: node `i` links forward to `i + 1` and `i + 2`, for
-//! the first few thousand nodes (the rest only add route). `id` is a
-//! permutation of the node index, so no fragment's footer statistics exclude a
-//! value and only the persisted equality index finds one row.
+//! The fixture is a ring: node `i` links forward to `i + 1` and `i + 2`, so a
+//! node starts 14 trails of one to three hops, and the route of the graph is
+//! above the smallest pool's share for a join. `id` is a permutation of the
+//! node index, so no fragment's footer statistics exclude a value and only the
+//! persisted equality index finds one row.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -37,11 +38,9 @@ const PADDING_BYTES: usize = 64;
 /// Above the 131,072 rows below which DataFusion collects a join side.
 const SMALL_NODES: usize = 140_000;
 const LARGE_NODES: usize = 2 * SMALL_NODES;
-/// Nodes with outgoing edges when the traversal is anchored; the others are
-/// the unrelated route.
-const LINKED_NODES: usize = 4 * 1024;
-/// Nodes of the graph in which every node links forward.
-const RING_NODES: usize = SMALL_NODES;
+/// The hops of the anchored statements and of the unanchored one.
+const ANCHORED_HOPS: usize = 3;
+const UNANCHORED_HOPS: usize = 3;
 /// The ring node the anchored statements start from.
 const ANCHOR_NODE: usize = 5;
 /// Nodes whose index is this modulo 1,000 have no `ident`, so an enrichment
@@ -105,13 +104,13 @@ fn padding(index: usize) -> String {
     text
 }
 
-/// The nodes a linked node links to.
+/// The nodes a node links to.
 fn neighbours(index: usize, nodes: usize) -> [usize; 2] {
     [(index + 1) % nodes, (index + 2) % nodes]
 }
 
-/// `nodes` nodes, of which the first `linked` link forward.
-fn construct(dir: &Path, nodes: usize, linked: usize) {
+/// A ring of `nodes` nodes, each linking forward to the next two.
+fn construct(dir: &Path, nodes: usize) {
     let mut fields = CONSTRUCTION_NODE_SCHEMA.fields().to_vec();
     fields.push(Arc::new(Field::new("id", DataType::Int64, true)));
     fields.push(Arc::new(Field::new("ident", DataType::Int64, true)));
@@ -150,7 +149,7 @@ fn construct(dir: &Path, nodes: usize, linked: usize) {
             .append_nodes(&format!("nodes-{start}"), &batch)
             .unwrap();
     }
-    let edges = linked * 2;
+    let edges = nodes * 2;
     for start in (0..edges).step_by(WRITE_WINDOW) {
         let end = (start + WRITE_WINDOW).min(edges);
         let rows = end - start;
@@ -182,13 +181,12 @@ fn construct(dir: &Path, nodes: usize, linked: usize) {
 }
 
 /// The nodes one to `hops` hops from `start`, one per trail.
-fn trails(start: usize, nodes: usize, linked: usize, hops: usize) -> Vec<usize> {
+fn trails(start: usize, nodes: usize, hops: usize) -> Vec<usize> {
     let mut reached = Vec::new();
     let mut frontier = vec![start];
     for _ in 0..hops {
         frontier = frontier
             .iter()
-            .filter(|node| **node < linked)
             .flat_map(|node| neighbours(*node, nodes))
             .collect();
         reached.extend(
@@ -202,10 +200,10 @@ fn trails(start: usize, nodes: usize, linked: usize, hops: usize) -> Vec<usize> 
 }
 
 /// What `sum(p.ident)` returns for the trails of `starts`.
-fn expected_sum(starts: impl IntoIterator<Item = usize>, nodes: usize, linked: usize) -> i64 {
+fn expected_sum(starts: impl IntoIterator<Item = usize>, nodes: usize, hops: usize) -> i64 {
     starts
         .into_iter()
-        .flat_map(|start| trails(start, nodes, linked, 3))
+        .flat_map(|start| trails(start, nodes, hops))
         .filter_map(ident)
         .sum()
 }
@@ -292,10 +290,10 @@ struct Built {
     project: std::path::PathBuf,
 }
 
-fn build(nodes: usize, linked: usize) -> Built {
+fn build(nodes: usize) -> Built {
     let root = tempfile::tempdir().expect("project directory");
     let project = root.path().join("project");
-    construct(&project, nodes, linked);
+    construct(&project, nodes);
     Built {
         _root: root,
         project,
@@ -354,8 +352,8 @@ fn assert_anchored_plan_keeps_the_hash_join(name: &str, plan: &str) {
 #[test]
 fn an_anchored_traversal_keeps_its_hash_join_and_its_pruned_enrichment() {
     let _serial = serial();
-    let small = build(SMALL_NODES, LINKED_NODES);
-    let large = build(LARGE_NODES, LINKED_NODES);
+    let small = build(SMALL_NODES);
+    let large = build(LARGE_NODES);
     for (name, query) in [
         ("anchored", ANCHORED),
         ("behind a type test", ANCHORED_BEHIND_A_TYPE_TEST),
@@ -368,7 +366,7 @@ fn an_anchored_traversal_keeps_its_hash_join_and_its_pruned_enrichment() {
             let (value, bytes) = steady(&forge, query, scattered(ANCHOR_NODE + 1, nodes), anchor);
             assert_eq!(
                 value,
-                expected_sum([ANCHOR_NODE], nodes, LINKED_NODES),
+                expected_sum([ANCHOR_NODE], nodes, ANCHORED_HOPS),
                 "{name}, {nodes} nodes"
             );
             reads.push(bytes);
@@ -382,6 +380,20 @@ fn an_anchored_traversal_keeps_its_hash_join_and_its_pruned_enrichment() {
     }
 }
 
+/// A value no index shard can hold is a bound of zero rows, which the plan
+/// must not take for an empty route: the statement keeps its plan and answers
+/// with no trail.
+#[test]
+fn an_anchor_beyond_every_index_shard_keeps_the_plan_and_finds_nothing() {
+    let _serial = serial();
+    let built = build(SMALL_NODES);
+    let forge = open(&built.project, SMALL_POOL);
+    let missing = SMALL_NODES as i64 + 7;
+    assert_anchored_plan_keeps_the_hash_join("missing anchor", &plan(&forge, ANCHORED, missing));
+    let (value, _) = measured(&forge, ANCHORED, missing);
+    assert_eq!(value, 0, "no node holds the id");
+}
+
 /// The estimate is the seeds' rows times the rows a seed reaches, not a
 /// constant: a traversal from every node, whose trails and route cannot fit
 /// the smallest pool, is still planned as a spilling sort-merge join, and
@@ -389,7 +401,7 @@ fn an_anchored_traversal_keeps_its_hash_join_and_its_pruned_enrichment() {
 #[test]
 fn a_traversal_from_every_node_that_exceeds_the_pool_is_planned_as_a_sort_merge_join() {
     let _serial = serial();
-    let built = build(RING_NODES, RING_NODES);
+    let built = build(SMALL_NODES);
 
     // The smallest pool the facade admits cannot run the sorts of any
     // sort-merge join (each reserves 10 MiB to merge its spills), so the plan
@@ -398,7 +410,7 @@ fn a_traversal_from_every_node_that_exceeds_the_pool_is_planned_as_a_sort_merge_
     let small_plan = plan(&small, UNANCHORED, 0);
     assert!(
         join_above_traversal(&small_plan).is_some_and(|join| join.starts_with("SortMergeJoinExec")),
-        "{RING_NODES} seeds with 14 trails each cannot fit {SMALL_POOL} bytes of pool:\n{small_plan}"
+        "{SMALL_NODES} seeds with 14 trails each cannot fit {SMALL_POOL} bytes of pool:\n{small_plan}"
     );
 
     let large = open(&built.project, LARGE_POOL);
@@ -411,9 +423,9 @@ fn a_traversal_from_every_node_that_exceeds_the_pool_is_planned_as_a_sort_merge_
     assert_eq!(
         value,
         expected_sum(
-            (0..RING_NODES).filter(|node| label(*node) == "Entity"),
-            RING_NODES,
-            RING_NODES
+            (0..SMALL_NODES).filter(|node| label(*node) == "Entity"),
+            SMALL_NODES,
+            UNANCHORED_HOPS
         ),
         "the answer under the pool that holds the hash join"
     );

@@ -162,9 +162,11 @@ impl PropertyOverlayExec {
         // A current index answers the equality, so the scan emits only the
         // objects holding the value: the manifest's bound replaces the
         // route-wide row count the planner would otherwise charge to a lookup.
+        // A value no shard can hold stays one row, since zero is the exact
+        // statistic that declares the route empty and a bound is no proof.
         let planned_rows = match (planned_rows, equality_bound) {
             (Some(rows), Some(bound)) => {
-                Some(rows.min(usize::try_from(bound).unwrap_or(usize::MAX)))
+                Some(rows.min(usize::try_from(bound).unwrap_or(usize::MAX).max(1)))
             }
             (rows, _) => rows,
         };
