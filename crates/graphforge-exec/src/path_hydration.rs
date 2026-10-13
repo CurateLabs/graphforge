@@ -44,6 +44,7 @@ impl HydrationResource {
             "node_rows",
             "node_gathered",
             "stems",
+            "property_columns",
             "property_batches",
             "property_rows",
             "property_gathered",
@@ -510,6 +511,9 @@ fn gather_path_node_props(
     for si in 0..h.prop_stems.len() {
         h.resource.check()?;
         h.resource.record("stems", 1);
+        // The columns decoded from this stem: what the element observes, not
+        // what the stem holds (#1984).
+        h.resource.record("property_columns", selected.len() as u64);
         let mut remaining: HashSet<[u8; 16]> = unique.iter().copied().collect();
         let mut kept: Vec<datafusion::arrow::array::RecordBatch> = Vec::new();
         h.tables[si].visit_authenticated_targets(&targets, &selected, batch_size, |b| {
