@@ -470,3 +470,176 @@ async fn a_destination_absent_from_the_label_index_is_reported_unknown() {
         "{error}"
     );
 }
+
+/// An identity authority that owns every ordinal but those in `disowned`, with
+/// a UUID derived from the ordinal, recording the size of each request.
+fn authority_disowning<'a>(
+    disowned: &'a [u64],
+    requests: &'a std::cell::RefCell<Vec<usize>>,
+) -> impl FnMut(&[u64]) -> Result<graphforge_storage::V4OrdinalLookup, GfError> + 'a {
+    use graphforge_core::uuid::Uuid;
+    move |ids| {
+        requests.borrow_mut().push(ids.len());
+        let values = ids
+            .iter()
+            .map(|id| (!disowned.contains(id)).then(|| Uuid::from_u128(u128::from(*id) + 1)))
+            .collect::<Vec<_>>();
+        let found = values.iter().flatten().count() as u64;
+        Ok(graphforge_storage::V4OrdinalLookup {
+            values,
+            metrics: graphforge_storage::V4OrdinalLookupMetrics {
+                requested: ids.len() as u64,
+                unique_requested: ids.len() as u64,
+                found,
+                ..Default::default()
+            },
+        })
+    }
+}
+
+fn destination_columns(ordinals: &[u64]) -> Vec<(&'static str, arrow::array::ArrayRef)> {
+    vec![
+        (
+            "node_id",
+            Arc::new(arrow::array::UInt64Array::from(ordinals.to_vec())),
+        ),
+        (
+            "type_id",
+            Arc::new(arrow::array::UInt32Array::from(
+                ordinals
+                    .iter()
+                    .map(|id| *id as u32 + 100)
+                    .collect::<Vec<_>>(),
+            )),
+        ),
+    ]
+}
+
+/// A frontier larger than one identity request is looked up in requests of at
+/// most the authority's bound, each reported, and the UUIDs line up with the
+/// ordinals in request order (#1984).
+#[test]
+fn a_large_frontier_is_looked_up_in_bounded_requests() {
+    use arrow::array::{Array, FixedSizeBinaryArray, UInt64Array};
+
+    let ordinals = (10..17).collect::<Vec<u64>>();
+    let requests = std::cell::RefCell::new(Vec::new());
+    let resolved = destination_rows::resolve_identities(
+        &ordinals,
+        3,
+        true,
+        authority_disowning(&[], &requests),
+    )
+    .unwrap();
+    assert_eq!(*requests.borrow(), vec![3, 3, 1]);
+
+    let (batch, lookups) =
+        destination_rows::assemble_batch(destination_columns(&ordinals), Some(resolved)).unwrap();
+    assert_eq!(lookups.len(), 3);
+    assert_eq!(lookups.iter().map(|l| l.found).sum::<u64>(), 7);
+    assert_eq!(batch.num_rows(), 7);
+    let node_ids = batch
+        .column_by_name("node_id")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap();
+    let uuids = batch
+        .column_by_name("node_uuid")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<FixedSizeBinaryArray>()
+        .unwrap();
+    for row in 0..batch.num_rows() {
+        assert_eq!(
+            uuids.value(row),
+            (u128::from(node_ids.value(row)) + 1).to_be_bytes()
+        );
+    }
+}
+
+/// An ordinal the identity authority does not own is dropped from every
+/// column, so the hop's missing-destination check reports it; no UUID is
+/// invented and no other row shifts (#1984).
+#[test]
+fn a_destination_the_identity_authority_disowns_is_dropped_from_every_column() {
+    use arrow::array::{Array, FixedSizeBinaryArray, UInt32Array, UInt64Array};
+
+    let ordinals = vec![3, 4, 5, 6];
+    let requests = std::cell::RefCell::new(Vec::new());
+    let resolved = destination_rows::resolve_identities(
+        &ordinals,
+        2,
+        true,
+        authority_disowning(&[4, 6], &requests),
+    )
+    .unwrap();
+    let (batch, lookups) =
+        destination_rows::assemble_batch(destination_columns(&ordinals), Some(resolved)).unwrap();
+
+    assert_eq!(lookups.iter().map(|l| l.found).sum::<u64>(), 2);
+    let ids = |name: &str| -> Vec<u64> {
+        let column = batch.column_by_name(name).unwrap();
+        column
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .map(|a| a.values().to_vec())
+            .or_else(|| {
+                column
+                    .as_any()
+                    .downcast_ref::<UInt32Array>()
+                    .map(|a| a.values().iter().map(|v| u64::from(*v)).collect())
+            })
+            .unwrap()
+    };
+    assert_eq!(ids("node_id"), vec![3, 5]);
+    assert_eq!(ids("type_id"), vec![103, 105]);
+    let uuids = batch
+        .column_by_name("node_uuid")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<FixedSizeBinaryArray>()
+        .unwrap();
+    assert_eq!(uuids.len(), 2);
+    assert_eq!(uuids.value(0), 4u128.to_be_bytes());
+    assert_eq!(uuids.value(1), 6u128.to_be_bytes());
+}
+
+/// A hop that demands no UUID still asks the authority which nodes exist, as
+/// the node-file read it replaces did, and adds no `node_uuid` column
+/// (#1984).
+#[test]
+fn an_identity_only_destination_without_uuids_still_checks_existence() {
+    let ordinals = vec![3, 4, 5];
+    let requests = std::cell::RefCell::new(Vec::new());
+    let resolved = destination_rows::resolve_identities(
+        &ordinals,
+        8,
+        false,
+        authority_disowning(&[4], &requests),
+    )
+    .unwrap();
+    let (batch, lookups) = destination_rows::assemble_batch(
+        destination_columns(&ordinals)[..1].to_vec(),
+        Some(resolved),
+    )
+    .unwrap();
+    assert_eq!(lookups.len(), 1);
+    assert!(batch.column_by_name("node_uuid").is_none());
+    assert_eq!(batch.num_rows(), 2);
+}
+
+/// An authority that answers a different number of ordinals than it was asked
+/// would misalign UUIDs with rows, so it is an error rather than a guess.
+#[test]
+fn an_identity_answer_of_the_wrong_length_is_an_error() {
+    let error = destination_rows::resolve_identities(&[1, 2, 3], 8, true, |_| {
+        Ok(graphforge_storage::V4OrdinalLookup {
+            values: vec![None],
+            metrics: graphforge_storage::V4OrdinalLookupMetrics::default(),
+        })
+    })
+    .err()
+    .expect("a short answer must fail");
+    assert!(error.to_string().contains("1 of 3"), "{error}");
+}
