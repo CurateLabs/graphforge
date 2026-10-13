@@ -845,4 +845,296 @@ mod tests {
                 .contains("must be numeric")
         );
     }
+
+    /// `collect(DISTINCT)` accumulator behaviour: Cypher DISTINCT equality, first-seen
+    /// order, and work that stays linear in the number of values collected.
+    mod collect_distinct {
+        use super::*;
+        use crate::expr::tests::values::{float, int, ints, node, relationship, text};
+        use datafusion::arrow::array::{ArrayRef, Float64Array, Int64Array, ListArray};
+        use datafusion::arrow::datatypes::Int64Type;
+        use datafusion::logical_expr::Accumulator;
+        use std::cell::Cell;
+
+        fn collected(acc: &mut CollectAcc) -> ArrayRef {
+            let ScalarValue::List(list) = acc.evaluate().unwrap() else {
+                panic!("collect must return a list")
+            };
+            list.value(0)
+        }
+
+        fn float_bits(values: &ArrayRef) -> Vec<u64> {
+            let floats = values.as_any().downcast_ref::<Float64Array>().unwrap();
+            floats.values().iter().map(|f| f.to_bits()).collect()
+        }
+
+        fn float_array(values: Vec<Option<f64>>) -> ArrayRef {
+            Arc::new(Float64Array::from(values))
+        }
+
+        #[test]
+        fn mixed_numbers_equal_across_types_collapse_and_nan_never_does() {
+            let mut acc = CollectAcc::new(true, DataType::Float64);
+            for v in [
+                int(3),
+                float(3.0), // equals 3
+                float(2.5),
+                int(2), // not equal to 2.5
+                float(f64::NAN),
+                float(f64::NAN), // NaN equals nothing, itself included
+                text("3"),       // a string is not the number
+                int(0),
+                float(-0.0), // equals 0
+                ScalarValue::Int64(None),
+                ScalarValue::Float64(None),
+                float(f64::INFINITY),
+                float(f64::INFINITY),
+            ] {
+                acc.push_value(v);
+            }
+            assert_eq!(
+                acc.values,
+                vec![
+                    int(3),
+                    float(2.5),
+                    int(2),
+                    float(f64::NAN),
+                    float(f64::NAN),
+                    text("3"),
+                    int(0),
+                    float(f64::INFINITY),
+                ]
+            );
+        }
+
+        #[test]
+        fn nested_lists_and_maps_compare_element_wise() {
+            use crate::expr::tests::values::{large_list, list, map};
+            let mut acc = CollectAcc::new(true, DataType::Null);
+            let floats = |items: &[f64]| {
+                let items: Vec<_> = items.iter().copied().map(float).collect();
+                list(&items, &DataType::Float64)
+            };
+            let nested = |inner: ScalarValue| list(&[inner.clone()], &inner.data_type());
+            let with_null = list(&[int(1), ScalarValue::Int64(None)], &DataType::Int64);
+            for v in [
+                ints(&[1, 2]),
+                floats(&[1.0, 2.0]), // equals [1, 2]
+                ints(&[2, 1]),
+                ints(&[]),
+                ints(&[]),
+                nested(ints(&[1])),
+                nested(floats(&[1.0])), // equals [[1]]
+                large_list(&[int(1), int(2)], &DataType::Int64), // a LargeList is another type
+                with_null.clone(),      // [1, null] equals nothing, itself included
+                with_null.clone(),
+                map(vec![("a", int(1)), ("b", int(2))]),
+                map(vec![("b", float(2.0)), ("a", float(1.0))]), // same map
+                map(vec![("a", int(1))]),
+                map(vec![("a", ScalarValue::Int64(None))]), // a null value: equals nothing
+                map(vec![("a", ScalarValue::Int64(None))]),
+            ] {
+                acc.push_value(v);
+            }
+            let kept = &acc.values;
+            assert_eq!(kept.len(), 11, "{kept:#?}");
+            assert_eq!(kept[0], ints(&[1, 2]));
+            assert_eq!(kept[1], ints(&[2, 1]));
+            assert_eq!(kept[2], ints(&[]));
+            assert_eq!(kept[3], nested(ints(&[1])));
+            assert_eq!(kept[4], large_list(&[int(1), int(2)], &DataType::Int64));
+            assert_eq!(kept[5], with_null);
+            assert_eq!(kept[6], with_null);
+            assert_eq!(kept[7], map(vec![("a", int(1)), ("b", int(2))]));
+            assert_eq!(kept[8], map(vec![("a", int(1))]));
+            // A map holding a null value equals nothing, itself included.
+            assert_eq!(kept[9], map(vec![("a", ScalarValue::Int64(None))]));
+            assert_eq!(kept[10], map(vec![("a", ScalarValue::Int64(None))]));
+        }
+
+        #[test]
+        fn entities_collapse_by_identity_not_by_properties() {
+            let mut acc = CollectAcc::new(true, DataType::Null);
+            for v in [
+                node(1, 5),
+                node(2, 5), // same properties, different node
+                node(1, 6), // same node, different properties
+                relationship(1, 5),
+                relationship(1, 6),
+                node(3, 5),
+            ] {
+                acc.push_value(v);
+            }
+            // A node and a relationship with one identity stay distinct values.
+            assert_eq!(
+                acc.values,
+                vec![node(1, 5), node(2, 5), relationship(1, 5), node(3, 5)]
+            );
+        }
+
+        #[test]
+        fn update_batch_dedups_a_float_column_keeping_first_seen_order() {
+            let mut acc = CollectAcc::new(true, DataType::Float64);
+            let column = float_array(vec![
+                Some(1.0),
+                Some(f64::NAN),
+                Some(1.0),
+                None,
+                Some(f64::NAN),
+                Some(2.0),
+                Some(-0.0),
+                Some(0.0),
+            ]);
+            acc.update_batch(&[column]).unwrap();
+            assert_eq!(
+                float_bits(&collected(&mut acc)),
+                [
+                    1.0_f64.to_bits(),
+                    f64::NAN.to_bits(),
+                    f64::NAN.to_bits(),
+                    2.0_f64.to_bits(),
+                    (-0.0_f64).to_bits(),
+                ]
+            );
+        }
+
+        #[test]
+        fn update_batch_dedups_a_node_column_by_identity() {
+            let rows = [node(1, 5), node(2, 5), node(1, 6), node(3, 5), node(2, 9)];
+            let column = ScalarValue::iter_to_array(rows.clone()).unwrap();
+            let mut acc = CollectAcc::new(true, column.data_type().clone());
+            acc.update_batch(&[column]).unwrap();
+            // Equal-property nodes stay apart; repeated identities collapse onto the first.
+            assert_eq!(
+                acc.values,
+                vec![rows[0].clone(), rows[1].clone(), rows[3].clone()]
+            );
+            assert_eq!(collected(&mut acc).len(), 3);
+        }
+
+        #[test]
+        fn non_distinct_collect_keeps_every_non_null_value() {
+            let mut acc = CollectAcc::new(false, DataType::Float64);
+            let column = float_array(vec![Some(1.0), Some(1.0), None, Some(f64::NAN), Some(1.0)]);
+            acc.update_batch(&[column]).unwrap();
+            assert_eq!(collected(&mut acc).len(), 4);
+        }
+
+        fn partial(values: Vec<Option<f64>>) -> CollectAcc {
+            let mut acc = CollectAcc::new(true, DataType::Float64);
+            acc.update_batch(&[float_array(values)]).unwrap();
+            acc
+        }
+
+        fn merge_state(into: &mut CollectAcc, from: &mut CollectAcc) {
+            let state = from.state().unwrap().remove(0).to_array().unwrap();
+            into.merge_batch(&[state]).unwrap();
+        }
+
+        #[test]
+        fn merge_batch_across_partial_states_matches_one_sequential_pass() {
+            let first = vec![Some(1.0), Some(f64::NAN), Some(2.0), Some(1.0)];
+            let second = vec![Some(f64::NAN), Some(2.0), Some(3.0), None, Some(1.0)];
+            let third = vec![Some(3.0), Some(0.0), Some(-0.0), Some(4.0)];
+
+            let mut sequential = CollectAcc::new(true, DataType::Float64);
+            for batch in [&first, &second, &third] {
+                sequential
+                    .update_batch(&[float_array(batch.clone())])
+                    .unwrap();
+            }
+
+            let mut merged = CollectAcc::new(true, DataType::Float64);
+            for batch in [&first, &second, &third] {
+                merge_state(&mut merged, &mut partial(batch.clone()));
+            }
+            assert_eq!(
+                float_bits(&collected(&mut merged)),
+                float_bits(&collected(&mut sequential))
+            );
+            // 1, NaN, 2, NaN, 3, 0, 4: both NaNs survive, -0.0 collapses onto 0.0.
+            assert_eq!(collected(&mut merged).len(), 7);
+
+            // A partial state that overlaps what the target already holds only adds the new.
+            let mut target = partial(first.clone());
+            merge_state(&mut target, &mut partial(second.clone()));
+            assert_eq!(
+                float_bits(&collected(&mut target)),
+                [1.0, f64::NAN, 2.0, f64::NAN, 3.0].map(f64::to_bits)
+            );
+        }
+
+        #[test]
+        fn merge_batch_skips_null_states_and_null_elements_and_spans_rows() {
+            let states: ArrayRef = Arc::new(ListArray::from_iter_primitive::<Int64Type, _, _>([
+                Some(vec![Some(1), Some(2), None]),
+                None,
+                Some(vec![Some(2), Some(3)]),
+                Some(vec![]),
+                Some(vec![Some(1), Some(4)]),
+            ]));
+            let mut acc = CollectAcc::new(true, DataType::Int64);
+            acc.merge_batch(&[states]).unwrap();
+            let kept = collected(&mut acc);
+            let kept = kept.as_any().downcast_ref::<Int64Array>().unwrap();
+            assert_eq!(kept.values().to_vec(), vec![1, 2, 3, 4]);
+        }
+
+        #[test]
+        fn distinct_collect_charges_its_membership_index() {
+            let mut distinct = CollectAcc::new(true, DataType::Int64);
+            let mut plain = CollectAcc::new(false, DataType::Int64);
+            for n in 0..1_000 {
+                distinct.push_value(int(n));
+                plain.push_value(int(n));
+            }
+            assert_eq!(distinct.values, plain.values);
+            assert!(
+                distinct.size() >= plain.size() + 1_000 * std::mem::size_of::<usize>(),
+                "distinct {} vs plain {}",
+                distinct.size(),
+                plain.size()
+            );
+        }
+
+        /// Push `values` then the same values again, counting equality evaluations.
+        fn comparisons_for(values: &[ScalarValue]) -> (usize, usize) {
+            let mut acc = CollectAcc::new(true, DataType::Null);
+            let calls = Cell::new(0_usize);
+            let counting = |a: &ScalarValue, b: &ScalarValue| {
+                calls.set(calls.get() + 1);
+                crate::expr::value_semantics::cypher_value_eq(a, b)
+            };
+            for v in values.iter().chain(values) {
+                acc.push_value_with(v.clone(), counting);
+            }
+            assert_eq!(
+                acc.values.len(),
+                values.len(),
+                "every distinct value kept once"
+            );
+            (values.len(), calls.get())
+        }
+
+        #[test]
+        fn distinct_collect_does_linear_equality_work() {
+            // Each of n distinct values is compared against (almost) nothing on its
+            // first sight and against its one twin on its second: about n comparisons
+            // in all. A scan of every value seen would need n(n-1)/2 + n^2/2, which is
+            // quadratic and fails the bound at both sizes.
+            for n in [2_000_i64, 4_000] {
+                let numbers: Vec<_> = (0..n)
+                    .map(|i| if i % 2 == 0 { int(i) } else { float(i as f64) })
+                    .collect();
+                let nodes: Vec<_> = (0..n).map(|i| node(u64::try_from(i).unwrap(), 0)).collect();
+                for (label, values) in [("numbers", numbers), ("nodes", nodes)] {
+                    let (distinct, comparisons) = comparisons_for(&values);
+                    assert!(
+                        comparisons <= 2 * distinct,
+                        "{label}: {comparisons} comparisons for {distinct} distinct values"
+                    );
+                }
+            }
+        }
+    }
 }

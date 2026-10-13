@@ -1122,8 +1122,7 @@ impl DistinctIndex {
 
     /// Heap bytes held by the index (the struct itself is counted by its owner).
     pub(super) fn heap_size(&self) -> usize {
-        self.heads.capacity()
-            * (std::mem::size_of::<u64>() + std::mem::size_of::<usize>() + 1)
+        self.heads.capacity() * (std::mem::size_of::<u64>() + std::mem::size_of::<usize>() + 1)
             + self.links.capacity() * std::mem::size_of::<usize>()
     }
 }
@@ -1849,5 +1848,389 @@ mod tests {
         assert!(!bools.value(1), "true IN [false]");
         assert!(bools.is_null(2), "true IN [null] -> null");
         assert!(!bools.value(3), "true IN []");
+    }
+
+    /// `cypher_equality_hash` and `DistinctIndex`: the bucketing behind
+    /// `collect(DISTINCT)` must never separate two values `cypher_value_eq` calls
+    /// equal, and must reproduce a full scan's output exactly.
+    mod distinct_bucketing {
+        use super::*;
+        use crate::expr::tests::values::{
+            float, int, large_list, list, map, node, path, relationship, text, uuid,
+        };
+        use crate::expr::{date_scalar, duration_scalar, localdatetime_scalar};
+        use crate::temporal::DurationValue;
+        use datafusion::arrow::datatypes::DataType;
+
+        const HOUR: i64 = 3_600_000_000_000;
+
+        fn ints(items: &[i64]) -> ScalarValue {
+            crate::expr::tests::values::ints(items)
+        }
+
+        fn floats(items: &[f64]) -> ScalarValue {
+            let items: Vec<_> = items.iter().copied().map(float).collect();
+            list(&items, &DataType::Float64)
+        }
+
+        /// `value` as a heterogeneous-list element (the tagged encoding).
+        fn tagged(value: &ScalarValue) -> ScalarValue {
+            let depth = het_depth(value).expect("a het-encodable value");
+            let array = build_het_struct(std::slice::from_ref(value), depth).expect("tagged");
+            ScalarValue::try_from_array(&array, 0).expect("row 0")
+        }
+
+        fn duration(months: i64, days: i64, seconds: i64, nanos: i64) -> ScalarValue {
+            duration_scalar(Some(DurationValue {
+                months,
+                days,
+                seconds,
+                nanos,
+            }))
+        }
+
+        /// Values chosen to straddle every arm of `cypher_value_eq`: numerics that
+        /// are equal across types, NaN and null in every position, containers in
+        /// both list encodings and in tagged form, entities that share identity
+        /// but not properties (and the reverse), and each temporal kind.
+        fn corpus() -> Vec<ScalarValue> {
+            let n = |id, x| node(id, x);
+            vec![
+                // numbers
+                int(0),
+                int(1),
+                int(-1),
+                int(2),
+                int(1 << 53),
+                int((1 << 53) + 1),
+                int(i64::MAX),
+                int(i64::MAX - 1),
+                ScalarValue::Int32(Some(1)),
+                ScalarValue::UInt64(Some(1)),
+                ScalarValue::Float32(Some(1.0)),
+                float(0.0),
+                float(-0.0),
+                float(1.0),
+                float(1.5),
+                float(2.0),
+                float(9_223_372_036_854_775_808.0),
+                float(f64::INFINITY),
+                float(f64::NEG_INFINITY),
+                float(f64::NAN),
+                // nulls
+                ScalarValue::Int64(None),
+                ScalarValue::Utf8(None),
+                ScalarValue::Null,
+                // strings and booleans
+                text(""),
+                text("a"),
+                text("A"),
+                text("1"),
+                ScalarValue::Boolean(Some(true)),
+                ScalarValue::Boolean(Some(false)),
+                // lists, native and large, mixed element types, null and NaN inside
+                ints(&[]),
+                ints(&[1]),
+                ints(&[1, 2]),
+                ints(&[2, 1]),
+                floats(&[1.0]),
+                floats(&[1.0, 2.0]),
+                floats(&[f64::NAN]),
+                large_list(&[int(1)], &DataType::Int64),
+                list(&[text("a")], &DataType::Utf8),
+                list(&[ints(&[1])], &ints(&[1]).data_type()),
+                list(&[floats(&[1.0])], &floats(&[1.0]).data_type()),
+                list(&[int(1), ScalarValue::Int64(None)], &DataType::Int64),
+                // maps: key order is irrelevant, null and NaN values are unhashable
+                map(vec![("a", int(1)), ("b", int(2))]),
+                map(vec![("b", int(2)), ("a", int(1))]),
+                map(vec![("a", float(1.0)), ("b", int(2))]),
+                map(vec![("a", int(1))]),
+                map(vec![("a", ScalarValue::Int64(None))]),
+                map(vec![("a", float(f64::NAN))]),
+                map(vec![("m", map(vec![("a", int(1))]))]),
+                map(vec![("m", map(vec![("a", float(1.0))]))]),
+                // entities: identity decides, properties do not
+                n(1, 5),
+                n(1, 6),
+                n(2, 5),
+                relationship(1, 5),
+                relationship(1, 6),
+                relationship(2, 5),
+                uuid(1),
+                uuid(2),
+                path(&[n(1, 0), n(2, 0)], &[relationship(7, 0)]),
+                path(&[n(1, 9), n(2, 9)], &[relationship(7, 9)]),
+                path(&[n(1, 0), n(3, 0)], &[relationship(7, 0)]),
+                path(&[n(1, 0), n(2, 0)], &[relationship(8, 0)]),
+                // temporals
+                date_scalar(Some(0)),
+                date_scalar(Some(1)),
+                date_scalar(None),
+                localdatetime_scalar(Some((0, 0))),
+                localdatetime_scalar(Some((0, 1))),
+                time_scalar(Some((12 * HOUR, 3_600))),
+                time_scalar(Some((12 * HOUR, 0))),
+                datetime_scalar(Some((5_000, 12 * HOUR, 3_600, None))),
+                datetime_scalar(Some((5_000, 12 * HOUR, 3_600, Some("Europe/Paris".into())))),
+                datetime_scalar(Some((5_000, 12 * HOUR, 0, None))),
+                duration(0, 1, 0, 0),
+                duration(0, 1, 0, 0),
+                duration(1, 0, 0, 0),
+                // tagged (heterogeneous-list element) forms
+                tagged(&int(1)),
+                tagged(&float(1.0)),
+                tagged(&text("a")),
+                tagged(&ints(&[1, 2])),
+                tagged(&floats(&[1.0, 2.0])),
+                tagged(&map(vec![("a", int(1)), ("b", int(2))])),
+            ]
+        }
+
+        #[test]
+        fn equal_values_share_a_hash_and_unhashable_values_equal_nothing() {
+            let corpus = corpus();
+            let mut equal_pairs = 0;
+            let mut unhashable = 0;
+            for (i, a) in corpus.iter().enumerate() {
+                let ha = cypher_equality_hash(a);
+                unhashable += usize::from(ha.is_none());
+                for (j, b) in corpus.iter().enumerate() {
+                    let hb = cypher_equality_hash(b);
+                    if cypher_value_eq(a, b) == Some(true) {
+                        equal_pairs += usize::from(i != j);
+                        assert!(
+                            ha.is_some() && ha == hb,
+                            "{a:?} == {b:?} but their hashes are {ha:?} and {hb:?}"
+                        );
+                    }
+                }
+                if ha.is_none() {
+                    assert!(
+                        corpus.iter().all(|b| cypher_value_eq(a, b) != Some(true)
+                            && cypher_value_eq(b, a) != Some(true)),
+                        "{a:?} is unhashable but equals something"
+                    );
+                }
+            }
+            // The property must not be vacuous.
+            assert!(
+                equal_pairs >= 40,
+                "only {equal_pairs} equal pairs in corpus"
+            );
+            assert!(
+                unhashable >= 8,
+                "only {unhashable} unhashable values in corpus"
+            );
+        }
+
+        #[test]
+        fn hash_agrees_across_numeric_types_zero_signs_and_encodings() {
+            let h = |v: &ScalarValue| cypher_equality_hash(v).expect("hashable");
+            assert_eq!(h(&int(1)), h(&float(1.0)));
+            assert_eq!(h(&int(1)), h(&ScalarValue::UInt64(Some(1))));
+            assert_eq!(h(&int(1)), h(&ScalarValue::Float32(Some(1.0))));
+            assert_eq!(h(&float(0.0)), h(&float(-0.0)));
+            assert_eq!(h(&int(0)), h(&float(-0.0)));
+            assert_eq!(h(&ints(&[1, 2])), h(&floats(&[1.0, 2.0])));
+            assert_eq!(h(&int(1)), h(&tagged(&int(1))));
+            assert_eq!(h(&int(1)), h(&tagged(&float(1.0))));
+            assert_eq!(h(&ints(&[1, 2])), h(&tagged(&floats(&[1.0, 2.0]))));
+            assert_eq!(
+                h(&map(vec![("a", int(1)), ("b", int(2))])),
+                h(&map(vec![("b", int(2)), ("a", float(1.0))]))
+            );
+            // A node and a relationship are each equal to their bare identity.
+            assert_eq!(h(&node(4, 0)), h(&node(4, 99)));
+            assert_eq!(h(&node(4, 0)), h(&uuid(4)));
+            assert_eq!(h(&relationship(4, 0)), h(&uuid(4)));
+        }
+
+        #[test]
+        fn hash_separates_values_that_are_not_equal() {
+            let h = |v: &ScalarValue| cypher_equality_hash(v).expect("hashable");
+            let distinct = [
+                int(1),
+                int(2),
+                float(1.5),
+                text("a"),
+                text("A"),
+                text("1"),
+                ScalarValue::Boolean(Some(true)),
+                ScalarValue::Boolean(Some(false)),
+                ints(&[1, 2]),
+                ints(&[2, 1]),
+                ints(&[1]),
+                ints(&[]),
+                large_list(&[int(1)], &DataType::Int64),
+                map(vec![("a", int(1))]),
+                map(vec![("b", int(1))]),
+                node(1, 0),
+                node(2, 0),
+                path(&[node(1, 0)], &[]),
+                date_scalar(Some(0)),
+                localdatetime_scalar(Some((0, 0))),
+                duration(0, 1, 0, 0),
+                duration(1, 0, 0, 0),
+            ];
+            for (i, a) in distinct.iter().enumerate() {
+                for b in &distinct[i + 1..] {
+                    assert_ne!(cypher_value_eq(a, b), Some(true), "{a:?} vs {b:?}");
+                    assert_ne!(h(a), h(b), "{a:?} and {b:?} share a bucket needlessly");
+                }
+            }
+        }
+
+        #[test]
+        fn nan_null_and_null_bearing_containers_are_unhashable() {
+            for value in [
+                float(f64::NAN),
+                ScalarValue::Float32(Some(f32::NAN)),
+                ScalarValue::Int64(None),
+                ScalarValue::Null,
+                floats(&[f64::NAN]),
+                list(&[int(1), ScalarValue::Int64(None)], &DataType::Int64),
+                map(vec![("a", ScalarValue::Int64(None))]),
+                map(vec![("a", float(f64::NAN))]),
+                date_scalar(None),
+            ] {
+                assert_eq!(cypher_equality_hash(&value), None, "{value:?}");
+            }
+        }
+
+        /// What `collect(DISTINCT)` did before it was bucketed: scan every kept value.
+        fn naive_distinct(input: &[ScalarValue]) -> Vec<ScalarValue> {
+            let mut kept: Vec<ScalarValue> = Vec::new();
+            for v in input {
+                if !kept
+                    .iter()
+                    .any(|seen| cypher_value_eq(seen, v) == Some(true))
+                {
+                    kept.push(v.clone());
+                }
+            }
+            kept
+        }
+
+        fn indexed_distinct(input: &[ScalarValue]) -> Vec<ScalarValue> {
+            let mut kept = Vec::new();
+            let mut index = DistinctIndex::default();
+            for v in input {
+                index.admit(&mut kept, v.clone(), cypher_value_eq);
+            }
+            kept
+        }
+
+        #[test]
+        fn index_matches_a_full_scan_over_the_corpus_in_any_order() {
+            let corpus = corpus();
+            let mut orders = vec![corpus.clone(), corpus.iter().rev().cloned().collect()];
+            // Doubling every value exercises rejection of repeats.
+            orders.push(corpus.iter().chain(corpus.iter()).cloned().collect());
+            let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+            for _ in 0..8 {
+                let mut shuffled = corpus.clone();
+                for i in (1..shuffled.len()).rev() {
+                    state = state
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    shuffled.swap(i, usize::try_from(state >> 33).unwrap() % (i + 1));
+                }
+                orders.push(shuffled);
+            }
+            for order in &orders {
+                assert_eq!(indexed_distinct(order), naive_distinct(order));
+            }
+        }
+
+        #[test]
+        fn index_matches_a_full_scan_over_a_dense_random_workload() {
+            let mut state = 42_u64;
+            let mut next = |bound: u64| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                (state >> 33) % bound
+            };
+            let input: Vec<ScalarValue> = (0..3_000)
+                .map(|_| {
+                    let small = i64::try_from(next(12)).unwrap();
+                    match next(9) {
+                        0 => int(small),
+                        1 => float(small as f64),
+                        2 => float(small as f64 + 0.5),
+                        3 => text(&small.to_string()),
+                        4 => ints(&[small, small + 1]),
+                        5 => floats(&[small as f64, f64::from(u8::try_from(next(3)).unwrap())]),
+                        6 => node(next(12), small),
+                        7 => relationship(next(12), small),
+                        _ => map(vec![("k", int(small)), ("j", float(small as f64))]),
+                    }
+                })
+                .collect();
+            let kept = indexed_distinct(&input);
+            assert_eq!(kept, naive_distinct(&input));
+            // The workload really collapses: far fewer kept than offered.
+            assert!(
+                kept.len() * 10 < input.len(),
+                "kept {} of {}",
+                kept.len(),
+                input.len()
+            );
+        }
+
+        #[test]
+        fn a_shared_bucket_is_resolved_by_equality_not_by_hash() {
+            // A node, a relationship and a bare uuid with one identity are forced into
+            // one bucket (the node and the relationship each equal the bare uuid), yet
+            // a node never equals a relationship.
+            let (n, r, u) = (node(1, 0), relationship(1, 0), uuid(1));
+            assert_eq!(cypher_equality_hash(&n), cypher_equality_hash(&r));
+            assert_eq!(cypher_value_eq(&n, &r), Some(false));
+            assert_eq!(
+                indexed_distinct(&[n.clone(), r.clone(), u.clone()]),
+                vec![n, r]
+            );
+
+            // `i64::MAX` and `i64::MAX - 1` both equal the float 2^63 (equality goes
+            // through f64) but not each other (it goes through i128), so they must
+            // share a bucket and still both be kept.
+            let (hi, lo, f) = (
+                int(i64::MAX),
+                int(i64::MAX - 1),
+                float(9_223_372_036_854_775_808.0),
+            );
+            assert_eq!(cypher_value_eq(&hi, &f), Some(true));
+            assert_eq!(cypher_value_eq(&lo, &f), Some(true));
+            assert_eq!(cypher_value_eq(&hi, &lo), Some(false));
+            assert_eq!(cypher_equality_hash(&hi), cypher_equality_hash(&lo));
+            assert_eq!(indexed_distinct(&[hi.clone(), lo.clone(), f]), vec![hi, lo]);
+        }
+
+        #[test]
+        fn unhashable_values_are_kept_and_never_deduplicated() {
+            let nan = float(f64::NAN);
+            let holey = list(&[int(1), ScalarValue::Int64(None)], &DataType::Int64);
+            let input = vec![
+                nan.clone(),
+                nan.clone(),
+                holey.clone(),
+                holey.clone(),
+                int(1),
+            ];
+            assert_eq!(indexed_distinct(&input), input);
+            assert_eq!(naive_distinct(&input), input);
+        }
+
+        #[test]
+        fn index_charges_memory_proportional_to_the_values_it_tracks() {
+            let mut kept = Vec::new();
+            let mut index = DistinctIndex::default();
+            assert_eq!(index.heap_size(), 0);
+            for n in 0..1_000 {
+                index.admit(&mut kept, int(n), cypher_value_eq);
+            }
+            assert!(index.heap_size() >= 1_000 * std::mem::size_of::<usize>());
+        }
     }
 }

@@ -1952,3 +1952,97 @@ fn exact_zero_uncorrelated_list_comprehension_preserves_null_and_empty_rows() {
     assert_eq!(output.value_length(1), 0);
     assert_eq!(output.value_length(2), 2);
 }
+
+/// Value builders for the tests of Cypher value equality and `collect(DISTINCT)`:
+/// numbers, strings, lists, maps, nodes, relationships and paths as the
+/// `ScalarValue`s the executor produces.
+pub(in crate::expr) mod values {
+    use datafusion::arrow::array::{ArrayRef, StructArray};
+    use datafusion::arrow::datatypes::{DataType, Field};
+    use datafusion::scalar::ScalarValue;
+    use std::sync::Arc;
+
+    pub fn int(n: i64) -> ScalarValue {
+        ScalarValue::Int64(Some(n))
+    }
+
+    pub fn float(f: f64) -> ScalarValue {
+        ScalarValue::Float64(Some(f))
+    }
+
+    pub fn text(s: &str) -> ScalarValue {
+        ScalarValue::Utf8(Some(s.to_owned()))
+    }
+
+    /// A native `List` of `items`, all of Arrow type `element`.
+    pub fn list(items: &[ScalarValue], element: &DataType) -> ScalarValue {
+        ScalarValue::List(ScalarValue::new_list(items, element, true))
+    }
+
+    /// A native `LargeList` of `items`, all of Arrow type `element`.
+    pub fn large_list(items: &[ScalarValue], element: &DataType) -> ScalarValue {
+        ScalarValue::LargeList(ScalarValue::new_large_list(items, element))
+    }
+
+    pub fn ints(items: &[i64]) -> ScalarValue {
+        let items: Vec<_> = items.iter().copied().map(int).collect();
+        list(&items, &DataType::Int64)
+    }
+
+    /// A struct row with the named single-row fields, in the given order.
+    pub fn record(fields: Vec<(&str, ScalarValue)>) -> ScalarValue {
+        let (names, columns): (Vec<_>, Vec<_>) = fields
+            .into_iter()
+            .map(|(name, value)| {
+                let array: ArrayRef = ScalarValue::iter_to_array([value]).unwrap();
+                (
+                    Arc::new(Field::new(name, array.data_type().clone(), true)),
+                    array,
+                )
+            })
+            .unzip();
+        ScalarValue::Struct(Arc::new(
+            StructArray::try_new(names.into(), columns, None).unwrap(),
+        ))
+    }
+
+    /// A Cypher map: a struct with no reserved entity field name.
+    pub fn map(entries: Vec<(&str, ScalarValue)>) -> ScalarValue {
+        record(entries)
+    }
+
+    pub fn uuid(n: u64) -> ScalarValue {
+        let mut bytes = n.to_le_bytes().to_vec();
+        bytes.resize(16, 0);
+        ScalarValue::FixedSizeBinary(16, Some(bytes))
+    }
+
+    /// A node with identity `id` and one property `x`.
+    pub fn node(id: u64, x: i64) -> ScalarValue {
+        record(vec![("node_uuid", uuid(id)), ("x", int(x))])
+    }
+
+    /// A relationship with identity `id` and one property `x`. Like an engine
+    /// relationship it carries its endpoints, which equality ignores: only a struct
+    /// with an endpoint field is recognised as a relationship rather than a map.
+    pub fn relationship(id: u64, x: i64) -> ScalarValue {
+        record(vec![
+            ("edge_uuid", uuid(id)),
+            ("src_uuid", uuid(1_000)),
+            ("dst_uuid", uuid(2_000)),
+            ("x", int(x)),
+        ])
+    }
+
+    /// A path over `nodes` and `relationships`, each a list of same-shaped entities.
+    pub fn path(nodes: &[ScalarValue], relationships: &[ScalarValue]) -> ScalarValue {
+        let list_of = |items: &[ScalarValue]| {
+            let element = items.first().map_or(DataType::Null, ScalarValue::data_type);
+            list(items, &element)
+        };
+        record(vec![
+            ("nodes", list_of(nodes)),
+            ("relationships", list_of(relationships)),
+        ])
+    }
+}
