@@ -21,10 +21,12 @@
 //! | `PatternComprehension { child, .. }` | correlated aggregate + left join |
 //! | `ListElementPatternComprehension { .. }` | ordinal unwind + correlated aggregate + regroup |
 //! | `Unwind { list_expr, alias }` | `UnwindNode` (`graphforge-plan` Extension stub) |
+//! | `Expand` run from an anchor an aggregation or `DISTINCT` already bound | `AnchoredExpansionNode`: the run is expanded once per distinct anchor and hash-joined back to the input (see `anchored_expansion`) |
 //!
 //! Graph-native operators (#578) lower to `graphforge-plan` logical stub nodes wrapped
 //! as [`LogicalPlan::Extension`]; their physical execution is deferred to physical execution.
 
+mod anchored_expansion;
 mod fast_path;
 mod nested_queries;
 mod node_group_keys;
@@ -65,9 +67,9 @@ use graphforge_ir::{
 };
 use graphforge_ontology::OntologyHandle;
 use graphforge_plan::{
-    CorrelatedSeedNode, DeleteTarget, GraphCreateNode, GraphDeleteNode, GraphRemoveNode,
-    GraphSetNode, OptionalMatchNode, RemoveTarget, ResolvedEdgeSpec, ResolvedNodeSpec, SetTarget,
-    UnwindNode, VarLenExpandNode,
+    AnchoredExpansionNode, CorrelatedSeedNode, DeleteTarget, GraphCreateNode, GraphDeleteNode,
+    GraphRemoveNode, GraphSetNode, OptionalMatchNode, RemoveTarget, ResolvedEdgeSpec,
+    ResolvedNodeSpec, SetTarget, UnwindNode, VarLenExpandNode,
 };
 use graphforge_value::{EntityTypeId, PropertyId, RelationTypeId};
 
@@ -625,11 +627,24 @@ impl GraphPlanLowerer {
             .build()
             .map_unsupported_expr()?;
 
-        for (i, op) in ordered.iter().enumerate() {
+        let decorrelate = self.may_decorrelate(&ordered, reachability.is_empty());
+        let mut next = 0;
+        while next < ordered.len() {
+            let i = next;
+            next += 1;
+            let op = ordered[i];
             let index = order[i];
             if reachability.is_vacuous_uniqueness(index) {
                 continue;
             }
+            // A scan of a node an aggregation or `DISTINCT` already bound may
+            // start a pattern that is expanded once per distinct node instead
+            // of once per row (#1984).
+            let anchor = if decorrelate {
+                Self::anchored_expansion_anchor(&ordered, i, var_map)
+            } else {
+                None
+            };
             // A `CREATE` with any clause after it feeds a read (RETURN/WITH/…),
             // so it must emit the created-entity rows rather than the one-row
             // summary (#814 write-result RETURN).
@@ -645,6 +660,18 @@ impl GraphPlanLowerer {
                 false,
                 None,
             )?;
+            if let Some(anchor) = anchor
+                && let Some((plan, consumed)) = self.try_lower_anchored_expansion(
+                    &ordered[next..],
+                    exprs,
+                    anchor,
+                    &current,
+                    var_map,
+                )?
+            {
+                current = plan;
+                next += consumed;
+            }
         }
         Ok(current)
     }
