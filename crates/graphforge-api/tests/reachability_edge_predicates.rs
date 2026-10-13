@@ -23,6 +23,8 @@ use graphforge_api::{
 };
 use graphforge_core::uuid::Uuid;
 use graphforge_ir::IrLiteral;
+use graphforge_storage::io_stats;
+use graphforge_storage::io_stats::CaptureScope;
 
 const NODES: usize = 11;
 
@@ -563,4 +565,65 @@ fn the_predicate_reads_timestamps_from_the_index() {
         })
         .collect();
     assert_eq!(n, search.expected(&stamped, 0, 5, -1, 1));
+}
+
+/// A traversal already has edge ids, so an indexed per-edge filter reads its
+/// demanded properties without resolving those edges' UUIDs. The oracle also
+/// covers NULL property values, which the `ALL` predicate excludes.
+#[test]
+fn a_per_edge_filter_reads_indexed_properties_by_edge_id() {
+    let built = build();
+    let forge = open(&built.project);
+    let search = Search {
+        direction: Direction::Out,
+        hops: "1..4",
+        observe: false,
+    };
+    let expected = search.expected(&built.edges, 0, 7, 20, 80);
+    let params = HashMap::from([
+        ("s".to_owned(), IrLiteral::Int(0)),
+        ("d".to_owned(), IrLiteral::Int(7)),
+        ("lo".to_owned(), IrLiteral::Int(20)),
+        ("hi".to_owned(), IrLiteral::Int(80)),
+    ]);
+
+    // Warm inventory and adjacency admission before attributing the query.
+    assert_eq!(
+        answer(&forge, &search, 0, 7, 20, 80),
+        expected,
+        "indexed lookup must preserve reachability results"
+    );
+    let _capture = CaptureScope::install();
+    io_stats::reset();
+    let result = forge
+        .execute_with_params(&search.query(), &params)
+        .expect("the filtered traversal executes");
+    assert_eq!(result.batches.len(), 1);
+    assert_eq!(
+        result.batches[0]
+            .column_by_name("n")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0),
+        expected,
+        "NULL and absent property values still exclude an edge"
+    );
+
+    let io = io_stats::snapshot().expect("requested I/O statistics");
+    assert_eq!(io.edge_full_reads, 0, "no edge UUIDs were read");
+    assert_eq!(io.edge_filtered_reads, 0, "no edge UUIDs were read");
+    assert_eq!(
+        io.property_uuid_selections, 0,
+        "no UUID-keyed property lookup"
+    );
+    assert_eq!(
+        io.property_uuid_rows_decoded, 0,
+        "no UUID rows were decoded"
+    );
+    assert_eq!(
+        io.property_uuid_pages_selected, 0,
+        "no UUID pages were read"
+    );
 }
