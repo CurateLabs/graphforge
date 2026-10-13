@@ -582,7 +582,7 @@ fn a_per_edge_filter_reads_indexed_properties_by_edge_id() {
     let expected = search.expected(&built.edges, 0, 7, 20, 80);
     let query = search.query().replace("ident: $s", "node_uuid: $s");
     let params = HashMap::from([
-        ("s".to_owned(), IrLiteral::Uuid(node_uuid(0))),
+        ("s".to_owned(), IrLiteral::Uuid(*node_uuid(0).as_bytes())),
         ("d".to_owned(), IrLiteral::Int(7)),
         ("lo".to_owned(), IrLiteral::Int(20)),
         ("hi".to_owned(), IrLiteral::Int(80)),
