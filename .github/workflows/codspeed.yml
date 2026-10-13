@@ -103,7 +103,7 @@ jobs:
         run: python3 scripts/ci/check-storage-benchmarks.py
 
       - name: Run benchmarks
-        uses: CodSpeedHQ/action@373d6868929f444bc08d901fd0eb0ad52a8875ea # v5.2.1
+        uses: CodSpeedHQ/action@c4fd08a3a159bd0cc208da1e0edf32b8c47d75e5 # v5.4.0
         with:
           mode: simulation
           run: cargo codspeed run
@@ -161,7 +161,7 @@ jobs:
       - name: Build durable filesystem benchmarks only
         if: ${{ !cancelled() }}
         run: cargo codspeed build -m walltime -p graphforge-storage --bench storage_io
-      - uses: CodSpeedHQ/action@373d6868929f444bc08d901fd0eb0ad52a8875ea # v5.2.1
+      - uses: CodSpeedHQ/action@c4fd08a3a159bd0cc208da1e0edf32b8c47d75e5 # v5.4.0
         if: ${{ !cancelled() }}
         with:
           mode: walltime
