@@ -83,15 +83,67 @@ fn multiplicity_insensitive_aggregates_are_reachability() {
 #[test]
 fn a_later_expansion_of_the_destination_keeps_the_proof() {
     // IC3: the destination is expanded again before it is made distinct. The
-    // second relationship has a different relation type, so the uniqueness
-    // constraint against the first is vacuous.
-    let expansion = analysis(
+    // second relationship has a different relation type, so it can never be
+    // one of the trail's relationships: the binder emits no uniqueness
+    // constraint between them (#1984), and nothing reads the list.
+    let query = "MATCH (person:N {id: $id})-[:KNOWS*1..2]-(friend)-[:LOCATED_IN]->(city) \
+                 WHERE NOT person = friend AND NOT city.id IN $cities \
+                 WITH DISTINCT friend RETURN friend.id AS id";
+    let plan = bind(query);
+    assert!(
+        !plan
+            .ops
+            .iter()
+            .any(|op| matches!(op, GraphOp::RelationshipUnique { .. })),
+        "no uniqueness constraint between relationships of different types"
+    );
+    let expansion = analysis(query).expect("IC3 is reachability");
+    assert!(expansion.vacuous_uniqueness.is_empty());
+}
+
+#[test]
+fn a_vacuous_uniqueness_constraint_keeps_the_proof() {
+    // The binder no longer emits `RelationshipUnique` between relationships of
+    // known, different types, so this rule only guards plans built some other
+    // way. It must still recognise the constraint as vacuous.
+    let mut plan = bind(
         "MATCH (person:N {id: $id})-[:KNOWS*1..2]-(friend)-[:LOCATED_IN]->(city) \
-         WHERE NOT person = friend AND NOT city.id IN $cities \
          WITH DISTINCT friend RETURN friend.id AS id",
-    )
-    .expect("IC3 is reachability");
-    assert_eq!(expansion.vacuous_uniqueness.len(), 1);
+    );
+    let edges: Vec<VarId> = plan
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            GraphOp::Expand { edge, .. } => Some(*edge),
+            _ => None,
+        })
+        .collect();
+    let [trail, located] = edges[..] else {
+        panic!("two expansions: {edges:?}");
+    };
+    let after = plan
+        .ops
+        .iter()
+        .rposition(|op| matches!(op, GraphOp::Expand { .. }))
+        .expect("the second expansion")
+        + 1;
+    plan.ops.insert(
+        after,
+        GraphOp::RelationshipUnique {
+            edge: located,
+            prior_edges: vec![trail],
+        },
+    );
+    let reachability = reachability_expansions(&plan.ops, &plan.exprs);
+    let expand = plan
+        .ops
+        .iter()
+        .position(|op| matches!(op, GraphOp::Expand { .. }))
+        .expect("the trail expansion");
+    let expansion = reachability
+        .expansion_at(expand)
+        .expect("a vacuous constraint keeps the proof");
+    assert_eq!(expansion.vacuous_uniqueness, vec![after]);
 }
 
 #[test]

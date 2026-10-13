@@ -164,7 +164,7 @@ impl Binder {
     fn lower_match_path_pattern(
         &self,
         pat: &PathPattern,
-        match_edges: &mut Vec<VarId>,
+        match_edges: &mut Vec<(VarId, Option<RelationTypeId>)>,
         s: &mut BinderState,
     ) {
         let mut prev_node_var: Option<VarId> = None;
@@ -288,8 +288,18 @@ impl Binder {
                             .lower_relationship_type_predicate(edge_var, &rel.types, rel.span, s);
                         s.builder.push_op_mut(GraphOp::Filter { predicate });
                     }
-                    let prior_edges = match_edges.clone();
-                    if match_edges.contains(&edge_var) {
+                    // Only resolved single-type hops can prove disjointness.
+                    // Alternations and wildcards keep the conservative check;
+                    // comparing syntax names is unsound because composition
+                    // aliases and qualified names can resolve to one ID.
+                    let prior_edges: Vec<_> = match_edges
+                        .iter()
+                        .filter_map(|(prior_edge, prior_rel_ty)| match (*prior_rel_ty, rel_ty) {
+                            (Some(prior), Some(current)) if prior != current => None,
+                            _ => Some(*prior_edge),
+                        })
+                        .collect();
+                    if match_edges.iter().any(|(prior, _)| *prior == edge_var) {
                         s.errors.push(BindError::new(
                             BindErrorKind::InvalidArgument,
                             rel.span,
@@ -302,7 +312,7 @@ impl Binder {
                             prior_edges,
                         });
                     }
-                    match_edges.push(edge_var);
+                    match_edges.push((edge_var, rel_ty));
                     if bound_rel_type_conflict {
                         push_false_filter(s);
                     }
