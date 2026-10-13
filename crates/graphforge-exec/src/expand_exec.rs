@@ -145,6 +145,11 @@ pub struct VarLenExpandExec {
     expansion: VarLenMode,
     /// The edge variable, the key of this hop's demand counters.
     edge_var: u32,
+    /// Whether any operator above reads the trailing edge-list column. When
+    /// none does, the traversal still produces one row per trail but reads no
+    /// edge file: the trails come from the adjacency's edge ids alone and the
+    /// column holds nulls.
+    edge_list_demanded: bool,
     schema: SchemaRef,
     props: Arc<PlanProperties>,
     /// Adjacency source for the BFS — the session-scoped provider injected
@@ -194,11 +199,37 @@ impl VarLenExpandExec {
             bound_dst_col_idx,
             expansion: node.mode,
             edge_var: node.edge_var,
+            edge_list_demanded: true,
             schema,
             props,
             provider,
             capture_epoch: demand::stamp_capture_epoch().unwrap_or(0),
         }
+    }
+
+    /// Declare whether any operator above reads the edge-list column.
+    ///
+    /// Only a trail expansion has one; a reachability expansion produces hop
+    /// counts and keeps its plan unchanged.
+    pub(super) fn with_edge_list_demanded(&self, demanded: bool) -> Arc<dyn ExecutionPlan> {
+        Arc::new(Self {
+            input: Arc::clone(&self.input),
+            rel_type_name: self.rel_type_name.clone(),
+            direction: self.direction,
+            min_hops: self.min_hops,
+            max_hops: self.max_hops,
+            dir: self.dir.clone(),
+            mode: self.mode,
+            src_col_idx: self.src_col_idx,
+            bound_dst_col_idx: self.bound_dst_col_idx,
+            expansion: self.expansion,
+            edge_var: self.edge_var,
+            edge_list_demanded: demanded || self.expansion != VarLenMode::Trails,
+            schema: Arc::clone(&self.schema),
+            props: Arc::clone(&self.props),
+            provider: Arc::clone(&self.provider),
+            capture_epoch: self.capture_epoch,
+        })
     }
 }
 
@@ -268,6 +299,7 @@ impl ExecutionPlan for VarLenExpandExec {
             bound_dst_col_idx: self.bound_dst_col_idx,
             expansion: self.expansion,
             edge_var: self.edge_var,
+            edge_list_demanded: self.edge_list_demanded,
             schema: self.schema.clone(),
             props,
             provider: self.provider.clone(),
@@ -296,6 +328,7 @@ impl ExecutionPlan for VarLenExpandExec {
             bound_dst_col_idx: self.bound_dst_col_idx,
             expansion: self.expansion,
             edge_var: self.edge_var,
+            edge_list_demanded: self.edge_list_demanded,
             out_schema: self.schema.clone(),
             provider: self.provider.clone(),
             capture_epoch: self.capture_epoch,
@@ -422,6 +455,9 @@ pub(super) struct ExpandConfig {
     pub(super) expansion: VarLenMode,
     /// The edge variable, the key of this hop's demand counters.
     pub(super) edge_var: u32,
+    /// Whether the trailing edge-list column is read above this expansion; see
+    /// [`VarLenExpandExec`]. Always true for a reachability expansion.
+    pub(super) edge_list_demanded: bool,
     pub(super) out_schema: SchemaRef,
     /// Adjacency source (#762) — moved into the `'static` execute future.
     pub(super) provider: Arc<dyn AdjacencyProvider>,
@@ -830,10 +866,17 @@ fn load_chunk_sources(
     // Charged to the returned sources.
     let mut charged = 0usize;
 
-    let traversed: std::collections::HashSet<u64> = emissions
-        .iter()
-        .flat_map(|(_, _, path)| path.iter().copied())
-        .collect();
+    // Nothing is read from an edge file when no operator above reads the
+    // relationship list: the trails are already complete from the adjacency's
+    // edge ids, so there is nothing to look up.
+    let traversed: std::collections::HashSet<u64> = if cfg.edge_list_demanded {
+        emissions
+            .iter()
+            .flat_map(|(_, _, path)| path.iter().copied())
+            .collect()
+    } else {
+        std::collections::HashSet::new()
+    };
     charge(
         reservation,
         &mut temporary,
@@ -844,22 +887,27 @@ fn load_chunk_sources(
     // the per-path relationship list (#709) - read lazily for the traversed
     // ids only (row-group pruning + row filter; an empty traversal never
     // opens the file).
-    let edge_batches = read_traversed_edges(cfg, &traversed)?;
-    charge(
-        reservation,
-        &mut temporary,
-        edge_batches
-            .iter()
-            .map(RecordBatch::get_array_memory_size)
-            .sum(),
-    )?;
-    let edge_records = build_edge_records(cfg, &edge_batches)?;
-    charge(
-        reservation,
-        &mut charged,
-        edge_record_table_bytes(&edge_records),
-    )?;
-    drop(edge_batches);
+    let edge_records = if cfg.edge_list_demanded {
+        let edge_batches = read_traversed_edges(cfg, &traversed)?;
+        charge(
+            reservation,
+            &mut temporary,
+            edge_batches
+                .iter()
+                .map(RecordBatch::get_array_memory_size)
+                .sum(),
+        )?;
+        let edge_records = build_edge_records(cfg, &edge_batches)?;
+        charge(
+            reservation,
+            &mut charged,
+            edge_record_table_bytes(&edge_records),
+        )?;
+        drop(edge_batches);
+        edge_records
+    } else {
+        HashMap::new()
+    };
 
     // --- Read nodes; map node_id -> row index for destination columns. ---
     // Lazily read only the reached destination node records (#838): the dst
@@ -904,21 +952,25 @@ fn load_chunk_sources(
     )?;
 
     // The relation's edge properties for every traversed edge.
-    let prop_fields = edge_list_prop_fields(cfg)?;
-    let mut hop_uuids = std::collections::BTreeSet::new();
-    for id in &traversed {
-        let record = edge_records
-            .get(id)
-            .ok_or_else(|| exec_err(format!("VarLenExpand: no record for edge_id {id}")))?;
-        hop_uuids.insert(record.edge_uuid);
-    }
-    let edge_props = load_edge_prop_source(
-        cfg.provider.admitted_inventory().as_deref(),
-        &cfg.rel_type_name,
-        &cfg.dir,
-        &prop_fields,
-        &hop_uuids,
-    )?;
+    let edge_props = if cfg.edge_list_demanded {
+        let prop_fields = edge_list_prop_fields(cfg)?;
+        let mut hop_uuids = std::collections::BTreeSet::new();
+        for id in &traversed {
+            let record = edge_records
+                .get(id)
+                .ok_or_else(|| exec_err(format!("VarLenExpand: no record for edge_id {id}")))?;
+            hop_uuids.insert(record.edge_uuid);
+        }
+        load_edge_prop_source(
+            cfg.provider.admitted_inventory().as_deref(),
+            &cfg.rel_type_name,
+            &cfg.dir,
+            &prop_fields,
+            &hop_uuids,
+        )?
+    } else {
+        EdgePropSource::empty()
+    };
     charge(reservation, &mut charged, edge_props.charged_bytes())?;
 
     reservation.shrink(temporary);
@@ -980,12 +1032,23 @@ fn materialise_chunk(
     // Trailing edge-list column (#709): one `List<Struct>` value per emitted
     // path, in schema order (last). Built from each path's ordered edge ids,
     // plus the relation's edge properties (#755).
-    columns.push(build_edge_list_column(
-        cfg,
-        emissions,
-        &sources.edge_records,
-        &sources.edge_props,
-    )?);
+    if cfg.edge_list_demanded {
+        columns.push(build_edge_list_column(
+            cfg,
+            emissions,
+            &sources.edge_records,
+            &sources.edge_props,
+        )?);
+    } else {
+        // No operator above reads the list, so no entry of it is ever looked
+        // up; the column is nullable and carries nulls.
+        let edge_field = cfg
+            .out_schema
+            .fields()
+            .last()
+            .ok_or_else(|| exec_err("output schema has no edge-list column".into()))?;
+        columns.push(new_null_array(edge_field.data_type(), emissions.len()));
+    }
     let out = RecordBatch::try_new(cfg.out_schema.clone(), columns)
         .map_err(|e| exec_err(e.to_string()))?;
     grow_reservation(reservation, out.get_array_memory_size())?;

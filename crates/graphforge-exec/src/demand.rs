@@ -35,7 +35,7 @@ use datafusion::physical_plan::{
 use futures::Stream;
 use futures::task::AtomicWaker;
 
-use crate::ExpandExec;
+use crate::{ExpandExec, VarLenExpandExec};
 
 /// Per-hop deterministic work counters.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1276,6 +1276,25 @@ fn rewrite_materialization(
         return Ok(expand.with_required_output(mask));
     }
 
+    if let Some(var_len) = plan.downcast_ref::<VarLenExpandExec>() {
+        // The traversal reads its input columns whole: the seed, the bound
+        // destination and every column the rows carry forward. Only the
+        // trailing edge list is optional, and it is the one column that reads
+        // the edge file.
+        let width = var_len.schema().fields().len();
+        let edge_list_demanded = width
+            .checked_sub(1)
+            .is_some_and(|last| required.contains(&last));
+        let input = Arc::clone(plan.children()[0]);
+        let all_input = (0..input.schema().fields().len()).collect::<BTreeSet<_>>();
+        let child = rewrite_materialization(input, &all_input)?;
+        let rebuilt = plan.with_new_children(vec![child])?;
+        let var_len = rebuilt.downcast_ref::<VarLenExpandExec>().ok_or_else(|| {
+            DataFusionError::Internal("VarLenExpandExec rewrite changed physical type".into())
+        })?;
+        return Ok(var_len.with_edge_list_demanded(edge_list_demanded));
+    }
+
     if let Some(aggregate) = plan.downcast_ref::<AggregateExec>() {
         let mut child_required = BTreeSet::new();
         if aggregate.group_expr().is_empty()
@@ -1390,6 +1409,7 @@ fn contains_demand_expand(plan: &Arc<dyn ExecutionPlan>) -> bool {
 /// stop at that blocking boundary.
 fn contains_materializable_expand(plan: &Arc<dyn ExecutionPlan>) -> bool {
     plan.is::<ExpandExec>()
+        || plan.is::<VarLenExpandExec>()
         || plan
             .children()
             .into_iter()
