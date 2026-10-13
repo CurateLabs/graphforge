@@ -1752,3 +1752,6 @@ mod tests;
 
 #[cfg(test)]
 mod query_memory_tests;
+
+#[cfg(test)]
+mod spill_pool_regression_tests;
