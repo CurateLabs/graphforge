@@ -294,7 +294,7 @@ fn compress(batch: &RecordBatch, stop: &AtomicBool) -> Result<Vec<Vec<u8>>, GfEr
             stop,
         },
         batch.schema(),
-        Some(crate::permanent_parquet::writer_properties().build()),
+        Some(crate::permanent_parquet::point_access_writer_properties().build()),
     )
     .map_err(storage)?;
     writer.write(batch).map_err(storage)?;
@@ -308,6 +308,23 @@ pub(super) enum Encoded {
 
 fn is_property_object(relative: &str) -> bool {
     relative.starts_with("properties/") || relative.starts_with("edge_properties/")
+}
+
+/// The writer policy for one object. Node and edge topology and property
+/// objects are fetched by row position or key, so they take small data pages.
+/// Everything else, such as `topology/surrogate_tails.parquet`, is read whole
+/// and keeps the larger pages.
+pub(super) fn parquet_writer_properties(
+    relative: &str,
+) -> parquet::file::properties::WriterProperties {
+    if is_property_object(relative)
+        || relative.starts_with("topology/nodes/")
+        || relative.starts_with("topology/edges/")
+    {
+        crate::permanent_parquet::point_access_writer_properties().build()
+    } else {
+        crate::permanent_parquet::writer_properties().build()
+    }
 }
 
 /// Streams the chunks of one logical Parquet stream as a single `Read`.
@@ -456,7 +473,7 @@ pub(super) fn write_parquet_chunks(
         let mut writer = ArrowWriter::try_new(
             sink,
             batch.schema(),
-            Some(crate::permanent_parquet::writer_properties().build()),
+            Some(parquet_writer_properties(relative)),
         )
         .map_err(storage)?;
         #[cfg(any(test, feature = "test-support"))]

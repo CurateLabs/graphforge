@@ -20,7 +20,8 @@ use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{
     ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder, RowSelection,
 };
-use parquet::file::metadata::PageIndexPolicy;
+use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
+use parquet::file::page_index::offset_index::OffsetIndexMetaData;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -33,8 +34,11 @@ pub const DELETED_IDENTITIES_PATH: &str = "topology/deleted_identities.parquet";
 
 const DELETED_IDENTITIES_COLUMN: &str = "uuid";
 const READ_BATCH_ROWS: usize = 16 * 1024;
-/// Footers retained process-wide. A footer is a few hundred bytes per row
-/// group, so this bounds the cache to tens of megabytes.
+/// Fragments retained process-wide, and cleared together when the cap is
+/// reached. A fragment is the row-group metadata plus the page layout of the
+/// columns a probe decodes ([`retained_metadata`]), so it grows with the
+/// number of row groups and with the number of pages in those columns, not
+/// with the number of columns in the file.
 const FOOTER_CACHE_ENTRIES: usize = 1 << 17;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -284,6 +288,47 @@ fn chunk_pages(
         .collect()
 }
 
+/// The footer a fragment keeps for as long as it is cached.
+///
+/// Reading the page index loads the offset index of every column and the
+/// column index of every column. A probe prunes by the identity column's page
+/// bounds, which [`page_bounds`] has already copied out, and decodes only
+/// `leaves`, so only their page locations are needed to read a row selection.
+/// Keeping the rest would make every cached file, and so every facade that
+/// probed it, hold a record per page of every column; with the small pages
+/// that make a point lookup cheap that is a record of the whole file's layout.
+/// The column index is dropped entirely, and the offset index of any column
+/// that is not decoded is left empty. The reader only indexes the offset index
+/// of the row groups and columns it decodes.
+fn retained_metadata(metadata: Arc<ParquetMetaData>, leaves: &[usize]) -> ParquetMetaData {
+    let mut builder = Arc::unwrap_or_clone(metadata).into_builder();
+    let offsets = builder.take_offset_index().map(|groups| {
+        groups
+            .into_iter()
+            .map(|columns| {
+                columns
+                    .into_iter()
+                    .enumerate()
+                    .map(|(leaf, index)| {
+                        if leaves.contains(&leaf) {
+                            index
+                        } else {
+                            OffsetIndexMetaData {
+                                page_locations: Vec::new(),
+                                unencoded_byte_array_data_bytes: None,
+                            }
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    });
+    builder
+        .set_column_index(None)
+        .set_offset_index(offsets)
+        .build()
+}
+
 fn load_fragment(
     path: &Path,
     uuid_column: &str,
@@ -315,6 +360,9 @@ fn load_fragment(
     )
     .map_err(|error| storage(format!("{}: {error}", path.display())))?;
     let parquet_metadata = Arc::clone(builder.metadata());
+    // The builder holds the other reference to the footer, which is stripped
+    // below; release it so the footer is moved rather than copied.
+    drop(builder);
     let descriptor = parquet_metadata.file_metadata().schema_descr();
     let uuid_leaf = leaf_index(descriptor, uuid_column)
         .ok_or_else(|| storage(format!("{} lacks {uuid_column}", path.display())))?;
@@ -355,8 +403,11 @@ fn load_fragment(
             probe_bytes,
         });
     }
-    let metadata = ArrowReaderMetadata::try_new(parquet_metadata, ArrowReaderOptions::new())
-        .map_err(storage)?;
+    let metadata = ArrowReaderMetadata::try_new(
+        Arc::new(retained_metadata(parquet_metadata, &leaves)),
+        ArrowReaderOptions::new(),
+    )
+    .map_err(storage)?;
     let fragment = Arc::new(Fragment {
         key,
         path: path.to_path_buf(),

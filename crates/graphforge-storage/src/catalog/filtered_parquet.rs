@@ -335,6 +335,9 @@ struct DenseNodeSelection {
     selection: parquet::arrow::arrow_reader::RowSelection,
     pages_considered: u64,
     pages_selected: u64,
+    /// Rows held by the selected pages: what a decoder decompresses to return
+    /// `exact_rows_selected` of them.
+    page_rows_selected: u64,
     exact_rows_selected: u64,
     first_id: u64,
     last_id: u64,
@@ -527,6 +530,7 @@ fn dense_node_selection(
     let mut selected_groups = Vec::new();
     let mut ranges = Vec::with_capacity(ordinals.len());
     let mut selected_pages = 0u64;
+    let mut selected_page_rows = 0u64;
     let mut ordinal_cursor = 0usize;
     let mut file_start = 0usize;
     let mut retained_start = 0usize;
@@ -547,6 +551,13 @@ fn dense_node_selection(
                 let page = group_pages[group_idx].partition_point(|&start| start <= local) - 1;
                 if last_page != Some(page) {
                     selected_pages = selected_pages.checked_add(1)?;
+                    let page_start = group_pages[group_idx][page];
+                    let page_end = group_pages[group_idx]
+                        .get(page + 1)
+                        .copied()
+                        .unwrap_or(rows);
+                    selected_page_rows = selected_page_rows
+                        .checked_add(u64::try_from(page_end.checked_sub(page_start)?).ok()?)?;
                     last_page = Some(page);
                 }
             }
@@ -563,6 +574,7 @@ fn dense_node_selection(
         ),
         pages_considered,
         pages_selected: selected_pages,
+        page_rows_selected: selected_page_rows,
         exact_rows_selected: u64::try_from(ordinals.len()).ok()?,
         first_id,
         last_id: max_id,
@@ -846,6 +858,7 @@ fn read_parquet_filtered_u64_attempt(
                 row_groups_selected: builder_row_groups,
                 pages_considered: 0,
                 pages_selected: 0,
+                page_rows_selected: 0,
                 exact_rows_selected: 0,
                 metadata_fallbacks: 0,
                 validation_fallbacks: 0,
@@ -890,6 +903,7 @@ fn read_parquet_filtered_u64_attempt(
                 row_groups_selected: selected_groups,
                 pages_considered: dense.pages_considered,
                 pages_selected: dense.pages_selected,
+                page_rows_selected: dense.page_rows_selected,
                 exact_rows_selected: dense.exact_rows_selected,
                 metadata_fallbacks: 0,
                 validation_fallbacks: 0,
@@ -925,6 +939,7 @@ fn read_parquet_filtered_u64_attempt(
                 row_groups_selected: selected_groups,
                 pages_considered: 0,
                 pages_selected: 0,
+                page_rows_selected: 0,
                 exact_rows_selected: 0,
                 metadata_fallbacks,
                 validation_fallbacks: 0,

@@ -547,7 +547,11 @@ fn project_property_directory(
                 table,
             )?);
             let mut staged = crate::staging::RewriteBatch::new();
-            staged.stage_batches(&path, projected.schema(), std::iter::once(Ok(projected)))?;
+            staged.stage_point_access_batches(
+                &path,
+                projected.schema(),
+                std::iter::once(Ok(projected)),
+            )?;
             let bytes = fs::metadata(staged.staged_temp(&path).expect("staged projection"))
                 .map_err(storage)?
                 .len();

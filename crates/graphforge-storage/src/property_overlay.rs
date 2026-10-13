@@ -51,11 +51,12 @@ mod parquet_budget;
 pub(crate) use parquet_budget::replay_parquet_reader_reservation;
 use parquet_budget::{
     CountingChunkReader, ReadCounts, TargetReadAdmission, admit_target_footer, admitted_batch_rows,
-    charge_target_batch, open_counted_retained_property_builder, parquet_resource_admission,
-    replay_decoder_limit, retained_read_at, validate_fragment_schema,
+    charge_target_batch, counting_chunk_reader, open_counted_retained_property_builder,
+    parquet_resource_admission, replay_decoder_limit, retained_read_at, validate_fragment_schema,
     validate_parquet_resource_admission,
 };
 mod snapshot_merge;
+mod uuid_pages;
 use snapshot_merge::{io_error, json_error};
 pub(crate) use snapshot_merge::{snapshot_charge, visit_newest_property_snapshots};
 

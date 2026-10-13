@@ -1,6 +1,9 @@
 //! Targeted reads for authenticated property overlays.
 
-use parquet::arrow::arrow_reader::{RowSelection, RowSelector};
+use parquet::arrow::arrow_reader::{
+    ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder, RowSelection,
+    RowSelector,
+};
 
 use super::{
     Array, AuthenticatedPropertyFragment, AuthenticatedPropertyInventory, BTreeMap, BTreeSet,
@@ -8,9 +11,9 @@ use super::{
     PropertyOverlayLimits, PropertyOverlayMetrics, PropertyRouteKind, PropertySnapshotRow,
     ReadCounts, RecordBatch, SnapshotScratch, TargetReadAdmission, Uuid, admit_target_footer,
     admitted_batch_rows, authenticated_arrow_error, charge_target_batch, corrupt,
-    decode_snapshot_batch, open_counted_retained_property_builder, parquet_error,
-    parquet_resource_admission, replay_decoder_limit, snapshot_charge, validate_fragment_schema,
-    validate_parquet_resource_admission,
+    counting_chunk_reader, decode_snapshot_batch, open_counted_retained_property_builder,
+    parquet_error, parquet_resource_admission, replay_decoder_limit, snapshot_charge,
+    validate_fragment_schema, validate_parquet_resource_admission,
 };
 
 /// Cumulative probe I/O and serial decoder peaks. The identity containers are
@@ -451,6 +454,7 @@ pub(super) fn read_property_targets(
             TargetRowSelection {
                 groups: rows.groups,
                 selection: frontier.then_some(rows.selection).flatten(),
+                paged: None,
             }
         };
         let validation = metrics.as_ref().map(|_| {
@@ -475,6 +479,7 @@ pub(super) fn read_property_targets(
                     kind,
                     row_groups,
                     selection: target_rows.selection,
+                    paged: target_rows.paged,
                     batch_rows: targeted_batch_rows,
                     admission,
                 },
@@ -677,6 +682,7 @@ fn select_target_row_groups(
     Ok(TargetRowSelection {
         groups: selected_groups,
         selection: Some(RowSelection::from(selectors)),
+        paged: None,
     })
 }
 
@@ -690,33 +696,38 @@ fn select_walked_target_rows(
     metrics: Option<&mut PropertyOverlayMetrics>,
     targeted_batch_rows: usize,
 ) -> Result<TargetRowSelection, GfError> {
-    let builder = open_counted_retained_property_builder(opened, counts.clone())?;
+    let source = counting_chunk_reader(opened, counts.clone());
+    let footer =
+        ArrowReaderMetadata::load(&source, ArrowReaderOptions::new()).map_err(parquet_error)?;
     let groups = if unresolved.is_empty() {
         Vec::new()
     } else {
         super::selective_reads::RowGroupSelection::Uuids(unresolved)
-            .select(builder.metadata(), kind.uuid_field())
-            .unwrap_or_else(|| (0..builder.metadata().num_row_groups()).collect())
+            .select(footer.metadata(), kind.uuid_field())
+            .unwrap_or_else(|| (0..footer.metadata().num_row_groups()).collect())
     };
     if groups.is_empty() {
         return Ok(TargetRowSelection {
             groups,
             selection: Some(RowSelection::from(Vec::new())),
+            paged: None,
         });
     }
-    let (selection, rows_read) = super::projected_reads::wanted_row_selection(
-        builder,
+    let wanted = super::uuid_pages::wanted_row_selection(
+        &source,
+        &footer,
         kind.uuid_field(),
         &groups,
         unresolved,
         targeted_batch_rows,
     )?;
     if let Some(metrics) = metrics {
-        metrics.physical_rows = metrics.physical_rows.saturating_add(rows_read);
+        metrics.physical_rows = metrics.physical_rows.saturating_add(wanted.rows_decoded);
     }
     Ok(TargetRowSelection {
         groups,
-        selection: Some(selection),
+        selection: Some(wanted.selection),
+        paged: wanted.paged,
     })
 }
 
@@ -727,6 +738,9 @@ struct TargetRowSelection {
     groups: Vec<usize>,
     /// `None` decodes every row of the selected row groups.
     selection: Option<RowSelection>,
+    /// The footer plus page index that produced `selection`, so the decode
+    /// skips unselected pages through the offset index.
+    paged: Option<ArrowReaderMetadata>,
 }
 
 fn push_selector(selectors: &mut Vec<RowSelector>, select: bool) {
@@ -749,6 +763,7 @@ struct TargetDecodeOptions<'a> {
     kind: PropertyRouteKind,
     row_groups: Vec<usize>,
     selection: Option<RowSelection>,
+    paged: Option<ArrowReaderMetadata>,
     batch_rows: usize,
     admission: TargetReadAdmission,
 }
@@ -761,8 +776,14 @@ fn decode_target_row_groups(
     retained_bytes: &mut u64,
     mut metrics: Option<&mut PropertyOverlayMetrics>,
 ) -> Result<(), GfError> {
-    let builder = open_counted_retained_property_builder(options.opened, counts.clone())?
-        .with_row_groups(options.row_groups);
+    let builder = match options.paged {
+        Some(paged) => ParquetRecordBatchReaderBuilder::new_with_metadata(
+            counting_chunk_reader(options.opened, counts.clone()),
+            paged,
+        ),
+        None => open_counted_retained_property_builder(options.opened, counts.clone())?,
+    }
+    .with_row_groups(options.row_groups);
     let builder = match options.selection {
         Some(selection) => builder.with_row_selection(selection),
         None => builder,
