@@ -17,9 +17,7 @@
 
 use arrow::array::Array;
 use arrow::util::display::array_value_to_string;
-use graphforge_api::{
-    ExecutionResourcePolicy, ExplainStage, GraphForge, GraphForgeOptions,
-};
+use graphforge_api::{ExecutionResourcePolicy, ExplainStage, GraphForge, GraphForgeOptions};
 use graphforge_exec::demand;
 
 const PARTITIONS: [usize; 2] = [1, 4];
@@ -208,7 +206,10 @@ fn latest_like_per_liker_matches_the_per_row_form() {
         &latest_like_query("", ["", ""]),
         &latest_like_query(
             "",
-            ["ORDER BY person.id, liker.id", "ORDER BY person.id, liker.id"],
+            [
+                "ORDER BY person.id, liker.id",
+                "ORDER BY person.id, liker.id",
+            ],
         ),
         2,
         &[
@@ -263,7 +264,10 @@ fn empty_input_returns_no_rows() {
         &latest_like_query("person.id = 999 AND ", ["", ""]),
         &latest_like_query(
             "person.id = 999 AND ",
-            ["ORDER BY person.id, liker.id", "ORDER BY person.id, liker.id"],
+            [
+                "ORDER BY person.id, liker.id",
+                "ORDER BY person.id, liker.id",
+            ],
         ),
         2,
         &[],
@@ -287,7 +291,11 @@ fn paired_posts_rows(rows: &[(&str, &str)], others: &[&str]) -> Vec<Vec<String>>
     let mut all = Vec::new();
     for (person, post) in rows {
         for other in others {
-            all.push(vec![(*person).to_owned(), (*post).to_owned(), (*other).to_owned()]);
+            all.push(vec![
+                (*person).to_owned(),
+                (*post).to_owned(),
+                (*other).to_owned(),
+            ]);
         }
     }
     all.sort();
@@ -337,7 +345,11 @@ fn an_anchor_is_expanded_once_however_many_rows_carry_it() {
             "{partitions} partitions: the per-row form reads the anchor once per row"
         );
 
-        assert_eq!(rows(&forge, &rewritten), expected, "{partitions} partitions");
+        assert_eq!(
+            rows(&forge, &rewritten),
+            expected,
+            "{partitions} partitions"
+        );
         assert_eq!(rows(&forge, &per_row), expected, "{partitions} partitions");
     }
 }
@@ -365,7 +377,11 @@ fn a_predicate_over_the_input_applies_after_the_join() {
             1,
             "{partitions} partitions"
         );
-        assert_eq!(rows(&forge, &rewritten), expected, "{partitions} partitions");
+        assert_eq!(
+            rows(&forge, &rewritten),
+            expected,
+            "{partitions} partitions"
+        );
         assert_eq!(rows(&forge, &per_row), expected, "{partitions} partitions");
     }
 }
