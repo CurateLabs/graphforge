@@ -17,6 +17,8 @@ use graphforge_core::Span;
 use graphforge_value::{EntityTypeId, RelationTypeId};
 use std::collections::HashSet;
 
+mod anchor;
+
 impl Binder {
     pub(super) fn lower_match(
         &self,
@@ -46,7 +48,25 @@ impl Binder {
             // Relationship isomorphism spans every pattern of one MATCH.
             let mut match_edges = Vec::new();
             for pat in &m.patterns {
-                self.lower_match_path_pattern(pat, &mut match_edges, &mut sub_state);
+                // A pattern that mentions a node the query already binds starts
+                // there, so its expansions join to rows that exist instead of
+                // crossing a scan of the pattern's first node with them (#1984).
+                // `node_vars` also covers a node carried through `WITH`, whose
+                // output variable keeps no `VarKind`.
+                let anchored = anchor::anchor_on_bound_node(pat, |name| {
+                    sub_state
+                        .vars
+                        .get(name)
+                        .is_some_and(|id| sub_state.node_vars.contains_key(id))
+                });
+                match anchored {
+                    Some(parts) => {
+                        for part in &parts {
+                            self.lower_match_path_pattern(part, &mut match_edges, &mut sub_state);
+                        }
+                    }
+                    None => self.lower_match_path_pattern(pat, &mut match_edges, &mut sub_state),
+                }
             }
             if let Some(w) = &m.where_clause {
                 self.lower_where(w, &mut sub_state);
