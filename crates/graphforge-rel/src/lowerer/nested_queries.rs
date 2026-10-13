@@ -1,5 +1,7 @@
 //! Nested queries lowering.
 
+use std::collections::BTreeSet;
+
 use super::{
     Arc, CorrelatedSeedNode, DfExpr, ExprArena, ExprFunctionExt, ExprId, ExprSchemable, Extension,
     GraphOp, GraphPlan, GraphPlanLowerer, IrExpr, JoinType, LogicalPlan, LogicalPlanBuilder,
@@ -531,87 +533,17 @@ impl GraphPlanLowerer {
         outer: &LogicalPlan,
         var_map: &VarMap,
     ) -> Result<Option<NarrowedSeed>, LoweringError> {
-        use datafusion::common::{Column, TableReference};
-        use std::collections::BTreeSet;
+        use datafusion::common::Column;
 
-        const IDENTITY: [&str; 4] = ["node_uuid", "node_id", "type_id", "type_ids"];
-        const KEYS: [&str; 3] = ["node_uuid", "node_id", "edge_uuid"];
-
-        let plain_pattern = ops.iter().all(|op| match op {
-            GraphOp::NodeScan { .. } | GraphOp::Filter { .. } => true,
-            GraphOp::Expand {
-                min_hops: 1,
-                max_hops: Some(1),
-                ..
-            } => true,
-            GraphOp::RelationshipUnique { edge, prior_edges } => {
-                var_map.get(*edge).is_none()
-                    && prior_edges.iter().all(|e| var_map.get(*e).is_none())
-            }
-            _ => false,
-        });
-        if !plain_pattern
-            || var_map
-                .var_ids()
-                .any(|var| ops.iter().any(|op| graph_op_binds_relationship(op, var)))
-        {
+        if !is_plain_pattern(ops, var_map) {
             return Ok(None);
         }
-
         let schema = outer.schema();
-        let mut seed_columns = BTreeSet::new();
-        let mut key_columns = BTreeSet::new();
-        let mut moved_scans = Vec::new();
-        for var in var_map.var_ids() {
-            let read_by_expression = expression_references_var(exprs, var);
-            if !read_by_expression && !ops.iter().any(|op| graph_op_binds_var(op, var)) {
-                continue;
-            }
-            let Some(alias) = var_map.get(var) else {
-                continue;
-            };
-            let qualifier = TableReference::bare(alias);
-            let own = schema
-                .iter()
-                .enumerate()
-                .filter(|(_, (found, field))| match found {
-                    Some(found) => **found == qualifier,
-                    None => field.name() == alias,
-                })
-                .map(|(index, (_, field))| (index, field.name().as_str()))
-                .collect::<Vec<_>>();
-            if own.is_empty() {
-                return Ok(None);
-            }
-            let column_named = |names: &[&str]| {
-                names
-                    .iter()
-                    .find_map(|name| own.iter().find(|(_, found)| found == name))
-                    .map(|(index, _)| *index)
-            };
-            match column_named(&KEYS) {
-                Some(index) => {
-                    key_columns.insert(index);
-                }
-                None => key_columns.extend(own.iter().map(|(index, _)| *index)),
-            }
-            if read_by_expression {
-                seed_columns.extend(own.iter().map(|(index, _)| *index));
-            } else {
-                seed_columns.extend(
-                    own.iter()
-                        .filter(|(_, name)| IDENTITY.contains(name))
-                        .map(|(index, _)| *index),
-                );
-                if column_named(&["node_uuid"]).is_none() {
-                    return Ok(None);
-                }
-            }
-        }
-        if key_columns.is_empty() {
+        let Some((seed_columns, key_columns)) = named_columns(ops, exprs, schema, var_map) else {
             return Ok(None);
-        }
+        };
 
+        let mut moved_scans = Vec::new();
         let mut remaining = Vec::with_capacity(ops.len());
         for op in ops {
             if let GraphOp::NodeScan { var, ty } = op
@@ -872,6 +804,101 @@ fn outer_column_keys(outer: &LogicalPlan, inner: &LogicalPlan) -> Option<Vec<(us
                 .map(|inner_idx| (outer_idx, inner_idx))
         })
         .collect()
+}
+
+/// Whether `ops` is a plain pattern: node scans, filters, single-hop
+/// traversals and uniqueness checks over edges the pattern binds itself.
+///
+/// Every other operator, and a pattern that matches an outer relationship
+/// again, keeps the whole outer row as its seed: this is an eligibility check
+/// for the narrow seed, not a second way to evaluate the predicate.
+fn is_plain_pattern(ops: &[GraphOp], var_map: &VarMap) -> bool {
+    let all_plain = ops.iter().all(|op| match op {
+        GraphOp::NodeScan { .. }
+        | GraphOp::Filter { .. }
+        | GraphOp::Expand {
+            min_hops: 1,
+            max_hops: Some(1),
+            ..
+        } => true,
+        GraphOp::RelationshipUnique { edge, prior_edges } => {
+            var_map.get(*edge).is_none() && prior_edges.iter().all(|e| var_map.get(*e).is_none())
+        }
+        _ => false,
+    });
+    all_plain
+        && !var_map
+            .var_ids()
+            .any(|var| ops.iter().any(|op| graph_op_binds_relationship(op, var)))
+}
+
+/// The columns of `schema` a narrow seed carries and joins back on, for the
+/// outer variables `ops` names: `(seed columns, key columns)` as schema
+/// indices, or `None` when a named variable has no columns there or no
+/// `node_uuid` to resolve a label from.
+///
+/// A variable an expression reads contributes every column it has; one the
+/// pattern only matches again contributes its identity columns. Matched rows
+/// join back on the first of `node_uuid`, `node_id`, `edge_uuid`, or on all of
+/// the variable's columns when it has none of them.
+fn named_columns(
+    ops: &[GraphOp],
+    exprs: &ExprArena,
+    schema: &datafusion::common::DFSchemaRef,
+    var_map: &VarMap,
+) -> Option<(BTreeSet<usize>, BTreeSet<usize>)> {
+    use datafusion::common::TableReference;
+
+    const IDENTITY: [&str; 4] = ["node_uuid", "node_id", "type_id", "type_ids"];
+    const KEYS: [&str; 3] = ["node_uuid", "node_id", "edge_uuid"];
+
+    let mut seed_columns = BTreeSet::new();
+    let mut key_columns = BTreeSet::new();
+    for var in var_map.var_ids() {
+        let read_by_expression = expression_references_var(exprs, var);
+        if !read_by_expression && !ops.iter().any(|op| graph_op_binds_var(op, var)) {
+            continue;
+        }
+        let Some(alias) = var_map.get(var) else {
+            continue;
+        };
+        let qualifier = TableReference::bare(alias);
+        let own = schema
+            .iter()
+            .enumerate()
+            .filter(|(_, (found, field))| match found {
+                Some(found) => **found == qualifier,
+                None => field.name() == alias,
+            })
+            .map(|(index, (_, field))| (index, field.name().as_str()))
+            .collect::<Vec<_>>();
+        if own.is_empty() {
+            return None;
+        }
+        let column_named = |names: &[&str]| {
+            names
+                .iter()
+                .find_map(|name| own.iter().find(|(_, found)| found == name))
+                .map(|(index, _)| *index)
+        };
+        match column_named(&KEYS) {
+            Some(index) => {
+                key_columns.insert(index);
+            }
+            None => key_columns.extend(own.iter().map(|(index, _)| *index)),
+        }
+        if read_by_expression {
+            seed_columns.extend(own.iter().map(|(index, _)| *index));
+        } else {
+            seed_columns.extend(
+                own.iter()
+                    .filter(|(_, name)| IDENTITY.contains(name))
+                    .map(|(index, _)| *index),
+            );
+            column_named(&["node_uuid"])?;
+        }
+    }
+    (!key_columns.is_empty()).then_some((seed_columns, key_columns))
 }
 
 /// A correlated pattern predicate's seed narrowed to the outer variables it
