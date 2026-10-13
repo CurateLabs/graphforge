@@ -580,8 +580,9 @@ fn a_per_edge_filter_reads_indexed_properties_by_edge_id() {
         observe: false,
     };
     let expected = search.expected(&built.edges, 0, 7, 20, 80);
+    let query = search.query().replace("ident: $s", "node_uuid: $s");
     let params = HashMap::from([
-        ("s".to_owned(), IrLiteral::Int(0)),
+        ("s".to_owned(), IrLiteral::Uuid(node_uuid(0))),
         ("d".to_owned(), IrLiteral::Int(7)),
         ("lo".to_owned(), IrLiteral::Int(20)),
         ("hi".to_owned(), IrLiteral::Int(80)),
@@ -596,7 +597,7 @@ fn a_per_edge_filter_reads_indexed_properties_by_edge_id() {
     let _capture = CaptureScope::install();
     io_stats::reset();
     let result = forge
-        .execute_with_params(&search.query(), &params)
+        .execute_with_params(&query, &params)
         .expect("the filtered traversal executes");
     assert_eq!(result.batches.len(), 1);
     assert_eq!(
