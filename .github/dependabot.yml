@@ -3,8 +3,9 @@
 
 version: 2
 updates:
-  # Python dependencies
-  - package-ecosystem: "pip"
+  # Python dependencies. The uv ecosystem updates uv.lock with pyproject.toml;
+  # pip left it stale, so CI's `uv sync --locked` failed (#1844).
+  - package-ecosystem: "uv"
     directory: "/"
     schedule:
       interval: "weekly"
@@ -116,8 +117,8 @@ updates:
   # Root npm / pnpm workspace
   # Repo standard pins TypeScript exactly to 5.9.3 (see
   # docs/development/typescript-toolchain.md and root pnpm.overrides).
-  # If npm Dependabot is later added for iac/pulumi/typescript, it must carry
-  # the same typescript major-update guardrail below.
+  # Both npm entries ignore every typescript update: the exact pin moves only
+  # in a coordinated upgrade across all direct pins and overrides.
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
@@ -134,13 +135,67 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
-    # Pin stays 5.9.3; ignore majors so Dependabot cannot open unplanned 6+/7+ PRs.
-    # Coordinated pin/override bumps are manual (policy doc + all direct pins).
+    # Pin stays 5.9.3; coordinated pin/override bumps are manual (policy doc +
+    # all direct pins), so Dependabot never bumps typescript.
     ignore:
       - dependency-name: "typescript"
-        update-types: ["version-update:semver-major"]
     groups:
       npm-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Pulumi Python component (own pyproject.toml and uv.lock, linted and tested
+  # by the Pulumi job in test.yml).
+  - package-ecosystem: "uv"
+    directory: "/iac/pulumi/python"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/New_York"
+    open-pull-requests-limit: 2
+    reviewers:
+      - "DecisionNerd"
+    labels:
+      - "dependencies"
+      - "python"
+    commit-message:
+      prefix: "chore"
+      prefix-development: "chore"
+      include: "scope"
+    groups:
+      pulumi-python-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Pulumi TypeScript component (own package.json and package-lock.json).
+  - package-ecosystem: "npm"
+    directory: "/iac/pulumi/typescript"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/New_York"
+    open-pull-requests-limit: 2
+    reviewers:
+      - "DecisionNerd"
+    labels:
+      - "dependencies"
+      - "javascript"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    # Same TypeScript 5.9.3 pin as the root workspace.
+    ignore:
+      - dependency-name: "typescript"
+    groups:
+      pulumi-typescript-minor-patch:
         patterns:
           - "*"
         update-types:
