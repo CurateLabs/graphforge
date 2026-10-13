@@ -402,6 +402,38 @@ fn nominate_collect_left_right_inner(
         return Ok(None);
     };
 
+    let rewritten =
+        rebuild_swapped_as_partitioned(swapped_join, swapped_scan, build_column, partitions)?;
+    if rewritten.schema().as_ref() != join.schema().as_ref() {
+        return Ok(None);
+    }
+    // The partitioned join emits one small final batch per hash partition. The
+    // CollectLeft join it replaces emitted full batches from a single stream,
+    // and a parent that works per input batch (a write probes its targets once
+    // per batch) must keep seeing those. A single-output exchange coalesces the
+    // partitions' batches up to the batch size before the parent's exchange
+    // fans them out again.
+    let merged: Arc<dyn ExecutionPlan> = Arc::new(RepartitionExec::try_new(
+        rewritten,
+        Partitioning::RoundRobinBatch(1),
+    )?);
+    let restored: Arc<dyn ExecutionPlan> = Arc::new(RepartitionExec::try_new(
+        merged,
+        Partitioning::RoundRobinBatch(partitions),
+    )?);
+    Ok(Some(restored))
+}
+
+/// Rebuild the swapped CollectLeft LEFT join as a hash-partitioned one: the
+/// frontier (its build side) is coalesced, tapped on `build_column` for the
+/// nomination, and hashed into `partitions`; the scan is nominated and hashed
+/// the same way.
+fn rebuild_swapped_as_partitioned(
+    swapped_join: &HashJoinExec,
+    swapped_scan: &PropertyOverlayExec,
+    build_column: usize,
+    partitions: usize,
+) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
     let nomination = route_nomination(swapped_scan);
     let coalesced_frontier: Arc<dyn ExecutionPlan> =
         Arc::new(CoalescePartitionsExec::new(Arc::clone(swapped_join.left())));
@@ -425,31 +457,13 @@ fn nominate_collect_left_right_inner(
         nominated_scan,
         Partitioning::Hash(probe_keys, partitions),
     )?);
-    let rewritten = swapped_join
+    swapped_join
         .builder()
         .with_partition_mode(PartitionMode::Partitioned)
         .with_new_children(vec![build, probe])?
         .reset_state()
         .recompute_properties()
-        .build_exec()?;
-    if rewritten.schema().as_ref() != join.schema().as_ref() {
-        return Ok(None);
-    }
-    // The partitioned join emits one small final batch per hash partition. The
-    // CollectLeft join it replaces emitted full batches from a single stream,
-    // and a parent that works per input batch (a write probes its targets once
-    // per batch) must keep seeing those. A single-output exchange coalesces the
-    // partitions' batches up to the batch size before the parent's exchange
-    // fans them out again.
-    let merged: Arc<dyn ExecutionPlan> = Arc::new(RepartitionExec::try_new(
-        rewritten,
-        Partitioning::RoundRobinBatch(1),
-    )?);
-    let restored: Arc<dyn ExecutionPlan> = Arc::new(RepartitionExec::try_new(
-        merged,
-        Partitioning::RoundRobinBatch(partitions),
-    )?);
-    Ok(Some(restored))
+        .build_exec()
 }
 
 fn collect_left_right_is_eligible(join: &HashJoinExec) -> bool {
