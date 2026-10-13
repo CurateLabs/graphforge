@@ -136,7 +136,7 @@ jobs:
 
       - name: Install cargo-deny and cargo-about
         if: needs.changes.outputs.licenses == 'true'
-        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: cargo-deny@0.20.2,cargo-about@0.9.1
       - name: Check third-party Rust licenses and notices
@@ -176,7 +176,7 @@ jobs:
           toolchain: "1.96.0"
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: cargo-nextest@0.9.145
 
@@ -217,7 +217,7 @@ jobs:
         with:
           toolchain: "1.96.0"
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: cargo-nextest@0.9.145
       - name: Cache Cargo registry
