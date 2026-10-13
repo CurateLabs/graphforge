@@ -432,6 +432,7 @@ impl SeedCycle {
 /// The visited set, frontier and result are charged to `reservation` as they
 /// grow; the frontier and visited set are released on return and the result is
 /// left charged for the caller (`ReachSet::charged`).
+#[allow(clippy::too_many_lines)]
 fn reach_from_seed(
     cfg: &ExpandConfig,
     adjacency: &mut adjacency::AdjacencyReader<'_>,

@@ -133,6 +133,48 @@ struct OwnedSessionAdjacency(RwLock<Arc<PersistentAdjacencyProvider>>);
 /// ordinal identity authority.
 pub(crate) struct OrdinalIdentityResolverExt(pub Option<Arc<V4OrdinalIdentitySession>>);
 
+fn plan_var_len_extension(
+    var_len: &VarLenExpandNode,
+    planner: &dyn PhysicalPlanner,
+    physical_inputs: &[Arc<dyn ExecutionPlan>],
+    session_state: &SessionState,
+) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+    let input = physical_inputs.first().cloned().ok_or_else(|| {
+        DataFusionError::Internal("VarLenExpand requires one physical input".into())
+    })?;
+    let resource = read_resource::required(session_state)?;
+    resource.validate(var_len.read_contract.as_ref())?;
+    let provider = session_state
+        .config()
+        .get_extension::<AdjacencyProviderExt>()
+        .ok_or_else(|| DataFusionError::Plan("GF_READ_RESOURCE_MISSING: adjacency".into()))?
+        .0
+        .clone();
+    let mut expand = VarLenExpandExec::new(
+        var_len,
+        input,
+        provider,
+        resource.dir.clone(),
+        resource.mode,
+    );
+    if let Some(filter) = &var_len.edge_filter {
+        // The predicate reads one synthetic struct column, which exists in no
+        // plan schema, so it is planned against its own. The logical optimizer
+        // never sees it, so it is simplified here: functions such as `coalesce`
+        // exist only in their simplified form once planned.
+        let schema = Arc::new(filter.element_schema()?);
+        let simplifier = ExprSimplifier::new(
+            SimplifyContext::builder()
+                .with_schema(Arc::clone(&schema))
+                .build(),
+        );
+        let predicate = simplifier.simplify(filter.predicate().clone())?;
+        let predicate = planner.create_physical_expr(&predicate, &schema, session_state)?;
+        expand = expand.with_edge_filter(predicate, filter.fields());
+    }
+    Ok(Arc::new(expand))
+}
+
 fn plan_expand_extension(
     expand: &graphforge_plan::ExpandNode,
     physical_inputs: &[Arc<dyn ExecutionPlan>],
@@ -226,41 +268,8 @@ impl ExtensionPlanner for GraphForgeExtensionPlanner {
             return plan_expand_extension(expand, physical_inputs, session_state).map(Some);
         }
         if let Some(var_len) = node.as_any().downcast_ref::<VarLenExpandNode>() {
-            let input = physical_inputs.first().cloned().ok_or_else(|| {
-                DataFusionError::Internal("VarLenExpand requires one physical input".into())
-            })?;
-            let resource = read_resource::required(session_state)?;
-            resource.validate(var_len.read_contract.as_ref())?;
-            let provider = session_state
-                .config()
-                .get_extension::<AdjacencyProviderExt>()
-                .ok_or_else(|| DataFusionError::Plan("GF_READ_RESOURCE_MISSING: adjacency".into()))?
-                .0
-                .clone();
-            let mut expand = VarLenExpandExec::new(
-                var_len,
-                input,
-                provider,
-                resource.dir.clone(),
-                resource.mode,
-            );
-            if let Some(filter) = &var_len.edge_filter {
-                // The predicate reads one synthetic struct column, which exists
-                // in no plan schema, so it is planned against its own. The
-                // logical optimizer never sees it, so it is simplified here:
-                // functions such as `coalesce` exist only in their simplified
-                // form once planned.
-                let schema = Arc::new(filter.element_schema()?);
-                let simplifier = ExprSimplifier::new(
-                    SimplifyContext::builder()
-                        .with_schema(Arc::clone(&schema))
-                        .build(),
-                );
-                let predicate = simplifier.simplify(filter.predicate().clone())?;
-                let predicate = planner.create_physical_expr(&predicate, &schema, session_state)?;
-                expand = expand.with_edge_filter(predicate, filter.fields());
-            }
-            return Ok(Some(Arc::new(expand)));
+            return plan_var_len_extension(var_len, planner, physical_inputs, session_state)
+                .map(Some);
         }
         if let Some(opt) = node.as_any().downcast_ref::<OptionalMatchNode>() {
             // inputs() order is [outer, optional], so physical_inputs matches.

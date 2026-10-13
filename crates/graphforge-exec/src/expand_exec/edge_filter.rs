@@ -179,7 +179,10 @@ impl PhysicalEdgeFilter {
             charge(
                 reservation,
                 &mut temporary,
-                children.iter().map(|c| c.get_array_memory_size()).sum(),
+                children
+                    .iter()
+                    .map(arrow::array::Array::get_array_memory_size)
+                    .sum(),
             )?;
             children
         };

@@ -515,7 +515,7 @@ impl UserDefinedLogicalNodeCore for VarLenExpandNode {
         .with_read_contract(self.read_contract.clone())
         .with_bound_destination(self.bound_destination.clone());
         node.mode = self.mode;
-        node.edge_filter = self.edge_filter.clone();
+        node.edge_filter.clone_from(&self.edge_filter);
         Ok(node)
     }
 }
