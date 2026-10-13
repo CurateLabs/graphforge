@@ -89,6 +89,9 @@ pub struct HopSnapshot {
     pub node_reads_failed: u64,
     /// Node rows returned by filtered reads.
     pub node_rows_returned: u64,
+    /// Destination rows answered from the per-ordinal label index, which reads
+    /// no node file and so is absent from `node_rows_returned`.
+    pub node_label_index_rows: u64,
     /// Node rows scanned by Parquet predicates.
     pub node_rows_scanned: u64,
     /// Node reads that used the full-read fallback.
@@ -660,6 +663,15 @@ pub(crate) fn record_identity_lookup(
     metrics: &graphforge_storage::V4OrdinalLookupMetrics,
 ) {
     with_hop(epoch, edge_var, |hop| add_identity_lookup(hop, metrics));
+}
+
+/// Attribute destination rows answered from the label index to a hop.
+pub(crate) fn record_label_index_rows(epoch: u64, edge_var: u32, rows: usize) {
+    with_hop(epoch, edge_var, |hop| {
+        hop.node_label_index_rows = hop
+            .node_label_index_rows
+            .saturating_add(rows.try_into().unwrap_or(u64::MAX));
+    });
 }
 
 fn add_identity_lookup(

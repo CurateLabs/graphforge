@@ -10,7 +10,8 @@
 //! The fixture is a hub: node 0 links to every other node, and relationship `i`
 //! (to node `i`) has weight `i`, except that every eighth weight is `NULL`.
 //! The gate counts the destination rows the expansion operator reports having
-//! read, never time.
+//! resolved, whether from the node files or from the label index that answers a
+//! destination demanded for its labels alone, never time.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -154,8 +155,8 @@ fn build() -> Built {
 /// What a statement returned and what its hops read.
 struct Run {
     batches: Vec<RecordBatch>,
-    /// Destination node rows the expansion operators returned from storage,
-    /// summed over the hops.
+    /// Destination rows the expansion operators resolved, summed over the hops:
+    /// those returned by node-file reads and those answered by the label index.
     node_rows: u64,
     /// Relationship rows the expansion operators returned from the edge file.
     edge_rows: u64,
@@ -212,7 +213,7 @@ fn run(forge: &GraphForge, query: &str, params: &HashMap<String, IrLiteral>) -> 
     let result = result.unwrap_or_else(|e| panic!("{query}: {e}"));
     let (node_rows, edge_rows) = demand.hops.values().fold((0, 0), |(nodes, edges), hop| {
         (
-            nodes + hop.node_rows_returned,
+            nodes + hop.node_rows_returned + hop.node_label_index_rows,
             edges + hop.edge_rows_returned,
         )
     });

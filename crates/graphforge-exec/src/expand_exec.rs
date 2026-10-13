@@ -2741,6 +2741,11 @@ fn expand_single_hop_chunk(
     };
     let node_batch = if let Some(destination) = labelled_destination {
         drop(node_permit);
+        demand::record_label_index_rows(
+            cfg.capture_epoch,
+            cfg.edge_var,
+            destination.batch.num_rows(),
+        );
         if let Some(lookup) = &destination.identity_lookup {
             demand::record_identity_lookup(cfg.capture_epoch, cfg.edge_var, lookup);
         }
