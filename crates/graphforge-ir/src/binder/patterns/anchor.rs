@@ -61,7 +61,7 @@ pub(super) fn anchor_on_bound_node(
     Some(vec![derived(pattern, head), derived(pattern, tail)])
 }
 
-fn derived(pattern: &PathPattern, elements: Vec<PathElement>) -> PathPattern {
+pub(super) fn derived(pattern: &PathPattern, elements: Vec<PathElement>) -> PathPattern {
     PathPattern {
         var: None,
         elements,
@@ -71,7 +71,7 @@ fn derived(pattern: &PathPattern, elements: Vec<PathElement>) -> PathPattern {
 
 /// `elements` read from the last element to the first, with each relationship
 /// pointing the other way.
-fn reversed(elements: &[PathElement]) -> Vec<PathElement> {
+pub(super) fn reversed(elements: &[PathElement]) -> Vec<PathElement> {
     elements
         .iter()
         .rev()
@@ -89,7 +89,7 @@ fn reversed(elements: &[PathElement]) -> Vec<PathElement> {
         .collect()
 }
 
-fn reorderable(element: &PathElement) -> bool {
+pub(super) fn reorderable(element: &PathElement) -> bool {
     match element {
         PathElement::Node(NodePattern { properties, .. }) => {
             constant_properties(properties.as_ref())
@@ -103,7 +103,7 @@ fn reorderable(element: &PathElement) -> bool {
 
 /// Whether an inline property map reads no variable. Only literals and
 /// parameters qualify; anything else is left in textual order.
-fn constant_properties(properties: Option<&Expr>) -> bool {
+pub(super) fn constant_properties(properties: Option<&Expr>) -> bool {
     match properties {
         None => true,
         Some(Expr::Map(map)) => map

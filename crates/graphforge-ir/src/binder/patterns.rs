@@ -18,6 +18,7 @@ use graphforge_value::{EntityTypeId, RelationTypeId};
 use std::collections::HashSet;
 
 mod anchor;
+mod correlated_equality;
 
 /// The function name `node_struct_expr` emits for a whole-node value; the
 /// relational lowerer and `collect_identity` match on it.
@@ -115,14 +116,7 @@ impl Binder {
                 child: Box::new(child),
             });
         } else {
-            // Relationship isomorphism spans every pattern of one MATCH.
-            let mut match_edges = Vec::new();
-            for pat in &m.patterns {
-                self.lower_match_path_pattern(pat, &mut match_edges, s);
-            }
-            if let Some(w) = &m.where_clause {
-                self.lower_where(w, s);
-            }
+            self.lower_plain_match(m, s);
         }
     }
 
