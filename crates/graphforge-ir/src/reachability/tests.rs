@@ -301,7 +301,10 @@ fn withdrawn_edge_predicates_are_lowered_by_their_filters_and_the_hoist_stays() 
     }
     let after = reachability.expansion_at(expand).unwrap();
     assert!(after.edge_predicates.is_empty());
-    assert_eq!(after.hoisted_destination_ops, before.hoisted_destination_ops);
+    assert_eq!(
+        after.hoisted_destination_ops,
+        before.hoisted_destination_ops
+    );
     assert_eq!(after.vacuous_uniqueness, before.vacuous_uniqueness);
 
     // Withdrawing where nothing was recorded changes nothing.

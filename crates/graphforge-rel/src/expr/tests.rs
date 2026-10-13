@@ -449,6 +449,105 @@ fn cypher_quantifier_mixed_batch_and_unplannable_predicate() {
     );
 }
 
+#[test]
+fn cypher_quantifier_runs_predicates_that_planning_rewrites() {
+    use datafusion::arrow::array::ListArray;
+    use datafusion::arrow::datatypes::Int64Type;
+    use graphforge_ir::QuantifierKind::All;
+
+    // `coalesce` exists only in its simplified form (a `CASE`) once planned: the
+    // predicate sits inside the UDF, where the logical optimizer never reaches,
+    // so the UDF must simplify it before planning it. Rows: [1, 2], [1, NULL],
+    // [0, 2].
+    let list = std::sync::Arc::new(ListArray::from_iter_primitive::<Int64Type, _, _>(vec![
+        Some(vec![Some(1), Some(2)]),
+        Some(vec![Some(1), Option::None]),
+        Some(vec![Some(0), Some(2)]),
+    ])) as datafusion::arrow::array::ArrayRef;
+    let predicate = datafusion::functions::core::expr_fn::coalesce(vec![
+        col_literal("__gf_elem"),
+        DfExpr::Literal(ScalarValue::Int64(Some(0)), Option::None),
+    ])
+    .gt(DfExpr::Literal(ScalarValue::Int64(Some(0)), Option::None));
+    let out = invoke_cypher_quantifier(All, predicate, list).expect("no error");
+    assert_eq!(
+        (0..3)
+            .map(|row| out.is_valid(row).then(|| out.value(row)))
+            .collect::<Vec<_>>(),
+        vec![Some(true), Some(false), Some(false)]
+    );
+}
+
+#[test]
+fn quantifier_over_struct_elements_reads_a_property_no_element_stores_as_null() {
+    use datafusion::arrow::datatypes::{DataType, Field, Fields, Schema};
+    use datafusion::common::DFSchema;
+    use graphforge_ir::QuantifierKind::All;
+
+    // `rels` is a list of structs holding only `w`, the shape of a relationship
+    // list over relation files that store `w`. Cypher reads a property nobody
+    // stores as `null`; it does not fail to plan (#1984).
+    let element = DataType::Struct(Fields::from(vec![Field::new("w", DataType::Int64, true)]));
+    let schema = Schema::new(vec![Field::new(
+        "rels",
+        DataType::List(std::sync::Arc::new(Field::new("item", element, true))),
+        true,
+    )]);
+    let df_schema = std::sync::Arc::new(DFSchema::try_from(schema).unwrap());
+
+    let w = PropertyId::runtime(graphforge_value::RuntimePropId::new(0).unwrap());
+    let absent = PropertyId::runtime(graphforge_value::RuntimePropId::new(1).unwrap());
+    let mut prop_names = HashMap::new();
+    prop_names.insert(w, "w".to_owned());
+    prop_names.insert(absent, "absent".to_owned());
+    let mut vm = VarMap::new();
+    vm.insert(VarId(0), "rels");
+
+    let lower = |prop: PropertyId| {
+        let mut arena = ExprArena::new();
+        let list = arena.push(IrExpr::VarRef(VarId(0)));
+        let element = arena.push(IrExpr::VarRef(VarId(1)));
+        let read = arena.push(IrExpr::PropertyAccess {
+            base: element,
+            prop,
+        });
+        let zero = arena.push(IrExpr::Literal(IrLiteral::Int(0)));
+        let gt = arena.push(IrExpr::BinaryOp {
+            op: BinaryOpKind::Gt,
+            left: read,
+            right: zero,
+        });
+        let quantifier = arena.push(IrExpr::Quantifier {
+            kind: All,
+            loop_var: VarId(1),
+            list,
+            predicate: gt,
+        });
+        ExprLowerer::with_prop_names(&arena, &vm, prop_names.clone())
+            .with_input_schema(df_schema.clone())
+            .lower(quantifier)
+    };
+
+    // The predicate lives inside the quantifier UDF.
+    let predicate_of = |lowered: DfExpr| -> String {
+        let DfExpr::ScalarFunction(f) = &lowered else {
+            panic!("a quantifier lowers to its UDF: {lowered}")
+        };
+        f.func
+            .inner()
+            .downcast_ref::<CypherQuantifier>()
+            .expect("the cypher quantifier UDF")
+            .predicate
+            .to_string()
+    };
+    let stored = predicate_of(lower(w).expect("a stored property lowers"));
+    assert!(stored.contains("get_field"), "{stored}");
+    let missing = predicate_of(
+        lower(absent).expect("an unstored property reads null rather than failing to plan"),
+    );
+    assert!(!missing.contains("get_field"), "{missing}");
+}
+
 /// Build a minimal lowerer with no ontology.
 pub(super) fn make_lowerer<'a>(arena: &'a ExprArena, var_map: &'a VarMap) -> ExprLowerer<'a> {
     ExprLowerer::new(arena, None, var_map)

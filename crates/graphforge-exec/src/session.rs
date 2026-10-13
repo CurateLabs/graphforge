@@ -38,6 +38,8 @@ use datafusion::logical_expr::Extension;
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::logical_expr::LogicalPlanBuilder;
 use datafusion::logical_expr::UserDefinedLogicalNode;
+use datafusion::logical_expr::simplify::SimplifyContext;
+use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
@@ -244,12 +246,18 @@ impl ExtensionPlanner for GraphForgeExtensionPlanner {
             );
             if let Some(filter) = &var_len.edge_filter {
                 // The predicate reads one synthetic struct column, which exists
-                // in no plan schema, so it is planned against its own.
-                let predicate = planner.create_physical_expr(
-                    filter.predicate(),
-                    &filter.element_schema()?,
-                    session_state,
-                )?;
+                // in no plan schema, so it is planned against its own. The
+                // logical optimizer never sees it, so it is simplified here:
+                // functions such as `coalesce` exist only in their simplified
+                // form once planned.
+                let schema = Arc::new(filter.element_schema()?);
+                let simplifier = ExprSimplifier::new(
+                    SimplifyContext::builder()
+                        .with_schema(Arc::clone(&schema))
+                        .build(),
+                );
+                let predicate = simplifier.simplify(filter.predicate().clone())?;
+                let predicate = planner.create_physical_expr(&predicate, &schema, session_state)?;
                 expand = expand.with_edge_filter(predicate, filter.fields());
             }
             return Ok(Some(Arc::new(expand)));
