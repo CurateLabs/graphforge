@@ -183,8 +183,45 @@ impl Graph {
     }
 }
 
+/// One cell of a result, rendered. The elements of a list are sorted before
+/// they are rendered: the lists these queries return come from
+/// `collect(DISTINCT ...)`, which defines no order, so two correct plans may
+/// return the same set in different orders. Sorting the elements compares the
+/// same content (every element, with its multiplicity) and ignores only the
+/// order.
+fn render_cell(name: &str, col: &arrow::array::ArrayRef, row: usize) -> String {
+    use arrow::array::AsArray;
+    use arrow::datatypes::DataType;
+
+    let render = |array: &arrow::array::ArrayRef, index: usize| {
+        if array.is_null(index) {
+            "NULL".to_owned()
+        } else {
+            arrow::util::display::array_value_to_string(array, index)
+                .unwrap_or_else(|e| panic!("render {name} at row {row}: {e}"))
+        }
+    };
+    let elements = if col.is_null(row) {
+        None
+    } else {
+        match col.data_type() {
+            DataType::List(_) => Some(col.as_list::<i32>().value(row)),
+            DataType::LargeList(_) => Some(col.as_list::<i64>().value(row)),
+            _ => None,
+        }
+    };
+    match elements {
+        Some(values) => {
+            let mut items: Vec<String> = (0..values.len()).map(|i| render(&values, i)).collect();
+            items.sort();
+            format!("[{}]", items.join(", "))
+        }
+        None => render(col, row),
+    }
+}
+
 /// Canonical multiset of a result's rows: column-name-sorted `name=value`
-/// rendering per row, rows sorted.
+/// rendering per row (list elements sorted, see [`render_cell`]), rows sorted.
 fn canonical_rows(result: &ExecutionResult) -> Vec<String> {
     let mut rows = Vec::new();
     for batch in &result.batches {
@@ -199,15 +236,7 @@ fn canonical_rows(result: &ExecutionResult) -> Vec<String> {
         for row in 0..batch.num_rows() {
             let parts: Vec<String> = cols
                 .iter()
-                .map(|(name, col)| {
-                    let rendered = if col.is_null(row) {
-                        "NULL".to_owned()
-                    } else {
-                        arrow::util::display::array_value_to_string(col, row)
-                            .unwrap_or_else(|e| panic!("render {name} at row {row}: {e}"))
-                    };
-                    format!("{name}={rendered}")
-                })
+                .map(|(name, col)| format!("{name}={}", render_cell(name, col, row)))
                 .collect();
             rows.push(parts.join(","));
         }

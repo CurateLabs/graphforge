@@ -19,7 +19,9 @@ use datafusion::physical_plan::test::TestMemoryExec;
 use futures::StreamExt;
 
 use crate::property_filter_approval::PropertyFilterApprovalRule;
-use crate::property_join_nomination::{UuidBuildKeyNomination, UuidBuildKeyTapExec};
+use crate::property_join_nomination::{
+    NominationLimits, UuidBuildKeyNomination, UuidBuildKeyTapExec,
+};
 use crate::property_overlay::{EqualityValue, PropertyEquality};
 use crate::property_scan::{PropertyOverlayExec, PropertyScanOptions};
 
@@ -64,6 +66,33 @@ async fn tap_forwards_batches_and_publishes_deduplicated_non_null_uuid_keys() {
     assert_eq!(ids.len(), 2);
     assert!(ids.contains(&first));
     assert!(ids.contains(&second));
+}
+
+#[tokio::test]
+async fn a_tap_past_its_row_cap_abandons_but_still_forwards_every_row() {
+    let first = 9_u128.to_be_bytes();
+    let second = 2_u128.to_be_bytes();
+    let third = 5_u128.to_be_bytes();
+    let input = input_with_values(&[Some(first), Some(second), Some(third), Some(first)]);
+    let nomination = UuidBuildKeyNomination::with_limits(NominationLimits { max_ids: Some(2) });
+    let tap = UuidBuildKeyTapExec::new(input, 0, Arc::clone(&nomination));
+    let mut stream = tap.execute(0, Arc::new(TaskContext::default())).unwrap();
+
+    // The abandoned nomination is a scan decision only: the join's build rows
+    // all arrive.
+    let forwarded = stream.next().await.unwrap().unwrap();
+    assert_eq!(forwarded.num_rows(), 4);
+    assert!(stream.next().await.is_none());
+    assert!(nomination.is_abandoned());
+    assert!(
+        nomination.ids().is_none(),
+        "an abandoned nomination must not publish a partial key set"
+    );
+    let (consumer, _receiver) = tokio::sync::mpsc::channel(1);
+    let waited = tokio::time::timeout(Duration::from_secs(1), nomination.wait(&consumer))
+        .await
+        .expect("an abandoned nomination must wake its waiters");
+    assert!(waited.unwrap());
 }
 
 #[tokio::test]
@@ -356,6 +385,9 @@ fn direct_collect_left_enrichment_taps_only_eligible_scans() {
 
 #[test]
 fn partitioned_collect_left_right_enrichment_swaps_and_restores_parent_contract() {
+    use datafusion::physical_expr::Partitioning;
+    use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+
     let rule = PropertyFilterApprovalRule;
     let config = ConfigOptions::default();
     for partitions in [2, 4] {
@@ -366,7 +398,7 @@ fn partitioned_collect_left_right_enrichment_swaps_and_restores_parent_contract(
         assert!(original_join.contains_projection());
         assert_eq!(
             original.output_partitioning(),
-            &datafusion::physical_expr::Partitioning::RoundRobinBatch(partitions)
+            &Partitioning::RoundRobinBatch(partitions)
         );
         assert!(crate::property_filter_approval::is_filtered_seed_uuid_key(
             original_join.right().as_ref(),
@@ -377,29 +409,62 @@ fn partitioned_collect_left_right_enrichment_swaps_and_restores_parent_contract(
         let restored = optimized.downcast_ref::<RepartitionExec>().unwrap();
         assert_eq!(
             restored.partitioning(),
-            &datafusion::physical_expr::Partitioning::RoundRobinBatch(partitions)
+            &Partitioning::RoundRobinBatch(partitions)
         );
         assert_eq!(restored.schema().as_ref(), original.schema().as_ref());
-        let join = restored.input().downcast_ref::<HashJoinExec>().unwrap();
+        // The partitioned join emits one small final batch per hash partition.
+        // A single-output exchange merges them back to full batches before the
+        // restored exchange fans them out, so a per-batch parent sees the batch
+        // structure the CollectLeft join gave it.
+        let merged = restored.input().downcast_ref::<RepartitionExec>().unwrap();
+        assert_eq!(merged.partitioning(), &Partitioning::RoundRobinBatch(1));
+        assert_eq!(merged.schema().as_ref(), original.schema().as_ref());
+        assert!(!merged.preserve_order());
+        let join = merged.input().downcast_ref::<HashJoinExec>().unwrap();
         assert_eq!(*join.join_type(), JoinType::Left);
-        assert_eq!(*join.partition_mode(), PartitionMode::CollectLeft);
+        // The preserved frontier is hash-partitioned, never collected into one
+        // build batch: a wide frontier would overflow a single Arrow batch.
+        assert_eq!(*join.partition_mode(), PartitionMode::Partitioned);
         assert_eq!(join.schema().as_ref(), original.schema().as_ref());
         assert!(join.contains_projection());
-        assert!(join.left().downcast_ref::<UuidBuildKeyTapExec>().is_some());
-        let coalesced = join
-            .left()
-            .downcast_ref::<UuidBuildKeyTapExec>()
-            .unwrap()
-            .children()[0]
-            .downcast_ref::<datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec>(
-            )
+
+        let build = join.left().downcast_ref::<RepartitionExec>().unwrap();
+        assert!(matches!(
+            build.partitioning(),
+            Partitioning::Hash(keys, count) if keys.len() == 1 && *count == partitions
+        ));
+        let tap = build.input().downcast_ref::<UuidBuildKeyTapExec>().unwrap();
+        let coalesced = tap.children()[0]
+            .downcast_ref::<CoalescePartitionsExec>()
             .unwrap();
         assert_eq!(
             coalesced.input().output_partitioning(),
-            &datafusion::physical_expr::Partitioning::RoundRobinBatch(partitions)
+            &Partitioning::RoundRobinBatch(partitions)
         );
-        assert!(join.right().downcast_ref::<PropertyOverlayExec>().is_some());
+
+        let probe = join.right().downcast_ref::<RepartitionExec>().unwrap();
+        assert!(matches!(
+            probe.partitioning(),
+            Partitioning::Hash(keys, count) if keys.len() == 1 && *count == partitions
+        ));
+        assert!(
+            probe
+                .input()
+                .downcast_ref::<PropertyOverlayExec>()
+                .is_some()
+        );
     }
+}
+
+#[test]
+fn single_partition_right_enrichment_keeps_its_collect_left_join() {
+    let rule = PropertyFilterApprovalRule;
+    let config = ConfigOptions::default();
+    let original = right_enrichment_join(property_scan(None, None), 1, None);
+    let unchanged = rule.optimize(Arc::clone(&original), &config).unwrap();
+    let join = unchanged.downcast_ref::<HashJoinExec>().unwrap();
+    assert_eq!(*join.join_type(), JoinType::Right);
+    assert_eq!(*join.partition_mode(), PartitionMode::CollectLeft);
 }
 
 #[test]

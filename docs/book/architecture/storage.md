@@ -623,22 +623,31 @@ still authenticates the whole route it joins. When an embedded LEFT join
 projection hides the UUID, the rewrite retains it through repartitioning and
 removes it afterward; rewrites that cannot lift the key reject unknown
 partition keys rather than turning optimizer metadata into an executable hash
-expression. The rewritten join is a CollectLeft join, which concatenates its
-whole build side into one Arrow batch, so a frontier that nothing bounds (an
-equality anchor or a row fetch such as `ORDER BY ... LIMIT`) could exceed the
-32-bit offsets of a variable-width column. The hidden-key rewrite and the
-traversal-destination proof therefore require a bounded frontier; an unbounded
-one keeps its partitioned join, whose build is split. Frontier memory remains
-subject to the query pool.
+expression. The join keeps its partitions and its build rows stream: a tap on
+the preserved side records only the UUID key column (one 16-byte key per
+distinct row, charged to the query pool) and forwards every batch, so no build
+row is concatenated and a frontier of wide rows cannot overflow the 32-bit
+offsets of a variable-width column. Nothing has to bound the frontier: no
+equality anchor or row fetch is required to nominate. The nomination bounds
+itself instead, because a frontier that names much of its route is cheaper to
+scan than to point-read. It abandons, and the scan then reads the whole route
+exactly as the un-nominated join would, once the frontier holds more than half
+of the route's planned rows (a footer upper bound, or the manifest estimate
+when footer statistics are off; an inexact estimate can abandon too early or
+too late but never changes a result) or once its key set would outgrow an
+eighth of the query pool. The plan has the same shape either way, and a pool
+that refuses a reservation below that cap is still an error.
 
 The Rust facade regression `property_read_pushdown` compares fixed-fanout
 anchored queries while unrelated destination rows and fragments grow, at one,
 two, and four partitions. It warms authentication metadata, checks read-path
 byte growth and zero application write counters, and preserves result counts.
 `enrichment_frontier_reads` does the same for enrichments whose frontier no
-equality selects (after `ORDER BY ... LIMIT` or a further hop) and whose
-projection drops the node UUID, on a route large enough to plan partitioned
-hash joins. Run them with `cargo nextest run --locked -p graphforge-api --test
+equality selects (after `ORDER BY ... LIMIT`, a further hop, or a label scan of
+a few nodes with nothing bounding it) and whose projection drops the node UUID,
+on a route large enough to plan partitioned hash joins; it also checks that a
+frontier past half the route abandons its nomination and returns every row.
+Run them with `cargo nextest run --locked -p graphforge-api --test
 property_read_pushdown --test enrichment_frontier_reads` in an isolated
 `CARGO_TARGET_DIR`. SF1 syscall evidence
 must distinguish query file-content writes from startup materialization and

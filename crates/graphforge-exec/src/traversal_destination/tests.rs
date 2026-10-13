@@ -189,7 +189,7 @@ async fn a_reachability_expansion_names_its_destination_uuid_and_not_its_hop_cou
     only_destination(planned.as_ref(), destination);
     assert!(is_frontier_endpoint_uuid(planned.as_ref(), destination));
     let unbounded = plan(&[&reachability], false).await.pop().unwrap();
-    assert!(!is_frontier_endpoint_uuid(unbounded.as_ref(), destination));
+    assert!(is_frontier_endpoint_uuid(unbounded.as_ref(), destination));
 }
 
 #[tokio::test]
@@ -260,9 +260,10 @@ fn a_topology_scan_is_never_a_traversal_destination() {
 }
 
 #[tokio::test]
-async fn only_a_bounded_traversal_may_prune_its_enrichment() {
-    // The pruned join collects its frontier into one Arrow batch, so a
-    // traversal that no anchor or fetch bounds keeps its partitioned join.
+async fn a_traversal_may_prune_its_enrichment_whether_or_not_a_bound_limits_it() {
+    // The pruned join collects only the frontier's key column, under a row and
+    // memory limit, so nothing about the traversal's input decides whether its
+    // destination may be pruned to.
     let (bounded_expand, bounded_var_len) = traversals(true).await;
     let (unbounded_expand, unbounded_var_len) = traversals(false).await;
     let offset = TOPOLOGY_NODES_SCHEMA.index_of("node_uuid").unwrap();
@@ -274,12 +275,11 @@ async fn only_a_bounded_traversal_may_prune_its_enrichment() {
         ),
         (bounded_var_len, unbounded_var_len, INPUT_WIDTH + offset),
     ] {
-        assert!(is_frontier_endpoint_uuid(bounded.as_ref(), destination));
-        assert!(!is_frontier_endpoint_uuid(unbounded.as_ref(), destination));
-        // Lineage alone does not depend on the bound.
-        assert!(is_traversal_destination_uuid(
-            unbounded.as_ref(),
-            destination
-        ));
+        for plan in [bounded, unbounded] {
+            assert!(is_frontier_endpoint_uuid(plan.as_ref(), destination));
+            assert!(is_traversal_destination_uuid(plan.as_ref(), destination));
+            // The input's own UUID is never the frontier's endpoint.
+            assert!(!is_frontier_endpoint_uuid(plan.as_ref(), INPUT_NODE_UUID));
+        }
     }
 }
