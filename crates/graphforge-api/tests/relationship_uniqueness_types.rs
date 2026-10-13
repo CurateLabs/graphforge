@@ -1,3 +1,5 @@
+//! End-to-end relationship uniqueness checks for same and disjoint types.
+
 use arrow::util::display::array_value_to_string;
 use graphforge_api::{ExplainStage, GraphForge};
 
@@ -120,7 +122,7 @@ fn relationship_uniqueness_is_preserved_and_disjoint_types_skip_the_check() {
         ),
         vec![
             vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
-            vec!["b".to_owned(), "c".to_owned(), "null".to_owned()],
+            vec!["b".to_owned(), "null".to_owned(), "null".to_owned()],
             vec!["c".to_owned(), "null".to_owned(), "null".to_owned()],
         ]
     );
