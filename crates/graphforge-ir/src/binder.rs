@@ -8,6 +8,7 @@
 //! - Populates the [`crate::ExprArena`] while lowering WHERE / RETURN expressions
 //! - Supports three ontology modes (exploratory / advisory / strict)
 
+mod collect_identity;
 mod expressions;
 mod patterns;
 mod projection;
@@ -337,7 +338,9 @@ impl Binder {
         if let Some(error) = unsupported::parameter_rows_across_labels(ast) {
             return Err(vec![error]);
         }
-        Ok(state.builder.build())
+        let mut plan = state.builder.build();
+        collect_identity::narrow_node_collects(&mut plan);
+        Ok(plan)
     }
 
     fn bind_union_query(
