@@ -294,7 +294,18 @@ with tempfile.TemporaryDirectory(prefix="graphforge-packaged-build-") as directo
         command, cwd=fixture, env=environment, capture_output=True, text=True, check=False
     )
     assert verified.returncode == 0, verified.stderr
-    assert "Verifying graphforge-packaged-build" in verified.stderr
+    # Inspect build outputs instead of Cargo's terminal-colored progress text.
+    # These files are absent if package verification does not run the script.
+    modules = list((root / "target").rglob("project_skills.rs"))
+    assert len(modules) == 1, modules
+    embedded = modules[0].parent / "project_skills_embed"
+    manifest = (fixture / "project-skills" / "manifest.json").read_bytes()
+    assert (embedded / "manifest.json").read_bytes() == manifest
+    for entry in json.loads(manifest)["files"]:
+        relative = entry["path"]
+        assert (embedded / relative).read_bytes() == (
+            fixture / "project-skills" / relative
+        ).read_bytes()
 
     # Known positive: the exact repository-relative input from the broken CLI.
     assert 'manifest_dir.join("project-skills")' in build_script
