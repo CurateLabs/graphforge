@@ -164,7 +164,7 @@ impl Binder {
     fn lower_match_path_pattern(
         &self,
         pat: &PathPattern,
-        match_edges: &mut Vec<(VarId, Option<HashSet<String>>)>,
+        match_edges: &mut Vec<(VarId, Option<RelationTypeId>)>,
         s: &mut BinderState,
     ) {
         let mut prev_node_var: Option<VarId> = None;
@@ -288,21 +288,15 @@ impl Binder {
                             .lower_relationship_type_predicate(edge_var, &rel.types, rel.span, s);
                         s.builder.push_op_mut(GraphOp::Filter { predicate });
                     }
-                    let declared_types = (!rel.types.is_empty())
-                        .then(|| rel.types.iter().cloned().collect::<HashSet<_>>());
+                    // Only resolved single-type hops can prove disjointness.
+                    // Alternations and wildcards keep the conservative check;
+                    // comparing syntax names is unsound because composition
+                    // aliases and qualified names can resolve to one ID.
                     let prior_edges: Vec<_> = match_edges
                         .iter()
-                        .filter_map(|(prior_edge, prior_types)| {
-                            match (prior_types, declared_types.as_ref()) {
-                                (Some(prior_types), Some(current_types))
-                                    if !prior_types
-                                        .iter()
-                                        .any(|name| current_types.contains(name)) =>
-                                {
-                                    None
-                                }
-                                _ => Some(*prior_edge),
-                            }
+                        .filter_map(|(prior_edge, prior_rel_ty)| match (*prior_rel_ty, rel_ty) {
+                            (Some(prior), Some(current)) if prior != current => None,
+                            _ => Some(*prior_edge),
                         })
                         .collect();
                     if match_edges.iter().any(|(prior, _)| *prior == edge_var) {
@@ -318,7 +312,7 @@ impl Binder {
                             prior_edges,
                         });
                     }
-                    match_edges.push((edge_var, declared_types));
+                    match_edges.push((edge_var, rel_ty));
                     if bound_rel_type_conflict {
                         push_false_filter(s);
                     }

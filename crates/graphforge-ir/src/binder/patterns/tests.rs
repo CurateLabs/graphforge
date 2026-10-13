@@ -1,13 +1,18 @@
 use super::super::tests::{empty_state, expect_bind_error, make_binder};
 use super::super::{BindError, BindErrorKind, Binder, BinderState, VarKind};
 use crate::catalog::RuntimeCatalog;
+use crate::composition_binding::{CompositionBindingContext, CompositionBindingLimits};
 use crate::expr::{BinaryOpKind, IrExpr, IrLiteral};
 use crate::plan::{GraphOp, GraphPlan, OntologyMode, PATTERN_COMPREHENSION_VALUE_ALIAS};
 use crate::{ExprId, VarId};
 use graphforge_ast::{AstClause, BinaryOpKind as AstBinOp, Expr, Literal};
 use graphforge_core::TypeId;
 use graphforge_cypher::parse;
-use graphforge_ontology::{OntologyCompiler, OntologyHandle, OntologyLoader};
+use graphforge_ontology::composition::{CompositionLimits, compile_legacy_single_ontology};
+use graphforge_ontology::{
+    EntityTypeDef, OntologyCompiler, OntologyDoc, OntologyHandle, OntologyLoader, RelationTypeDef,
+    SemanticFlags,
+};
 use graphforge_value::{EntityTypeId, RuntimeEntityId};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -162,6 +167,11 @@ fn relationship_uniqueness_uses_declared_type_overlap() {
         uniqueness("MATCH (a)-[:X|Y]->(b)-[:Y]->(c) RETURN a").len(),
         1
     );
+    assert_eq!(
+        uniqueness("MATCH (a)-[:X|Y]->(b)-[:Z]->(c) RETURN a").len(),
+        1,
+        "an alternation has no single resolved type id, so it keeps the check"
+    );
     assert_eq!(uniqueness("MATCH (a)-[:X]->(b)-[]->(c) RETURN a").len(), 1);
 
     let three_hop_query = "MATCH (a)-[:X]->(b)-[:Y]->(c)-[:X]->(d) RETURN a";
@@ -178,6 +188,52 @@ fn relationship_uniqueness_uses_declared_type_overlap() {
         three_hops[0].1,
         vec![first_edge.expect("first relationship expansion")],
         "the third hop must compare only with the first X hop"
+    );
+}
+
+#[test]
+fn relationship_uniqueness_compares_resolved_type_ids_for_qualified_names() {
+    let doc = OntologyDoc {
+        ontology_id: "https://example.test/ex".into(),
+        version: "1".into(),
+        entity_types: vec![EntityTypeDef {
+            name: "Person".into(),
+            r#abstract: false,
+            parent: None,
+        }],
+        relation_types: vec![RelationTypeDef {
+            name: "knows".into(),
+            src: "Person".into(),
+            dst: "Person".into(),
+            inverse: None,
+            semantic: SemanticFlags::default(),
+        }],
+        properties: vec![],
+        constraints: vec![],
+        migrations: vec![],
+    };
+    let composition = Arc::new(
+        compile_legacy_single_ontology(&doc, false, CompositionLimits::default())
+            .expect("compile test composition"),
+    );
+    let context = Arc::new(CompositionBindingContext::new(
+        composition,
+        vec![],
+        CompositionBindingLimits::default(),
+    ));
+    let catalog = Arc::new(Mutex::new(RuntimeCatalog::new()));
+    let binder = Binder::new(None, catalog, OntologyMode::Strict).with_composition(context);
+    let query = "MATCH (a)-[:knows]->(b)-[:ex:knows]->(c) RETURN a";
+    let plan = binder
+        .bind(&parse(query).unwrap())
+        .expect("qualified and unqualified spellings resolve");
+    assert_eq!(
+        plan.ops
+            .iter()
+            .filter(|op| matches!(op, GraphOp::RelationshipUnique { .. }))
+            .count(),
+        1,
+        "equal resolved relation type IDs must retain RelationshipUnique"
     );
 }
 
