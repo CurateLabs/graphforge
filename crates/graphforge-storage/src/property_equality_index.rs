@@ -562,6 +562,43 @@ pub(crate) fn is_current(
     Ok(current_manifest(project_dir, inventory, route, equality)?.is_some())
 }
 
+/// The shards whose value range can hold `value`, in key order. Entries are
+/// sorted by value, so these are contiguous.
+fn shards_holding<'a>(
+    manifest: &'a Manifest,
+    value: &'a EqualityValue,
+) -> impl Iterator<Item = &'a ShardEntry> + 'a {
+    let first = manifest.shards.partition_point(|shard| {
+        compare(&shard.last, value).is_some_and(std::cmp::Ordering::is_lt)
+    });
+    manifest.shards[first..].iter().take_while(move |shard| {
+        compare(&shard.first, value).is_some_and(std::cmp::Ordering::is_le)
+    })
+}
+
+/// An upper bound on the objects holding the value, from a current index's
+/// manifest alone; `None` when no current index answers. Entries are sorted by
+/// value in fixed-size shards, so a selective value bounds to a shard or two
+/// however large the route is. The manifest is the read that proved the index
+/// current; no shard is opened.
+///
+/// # Errors
+/// A manifest that fails its checksum or does not decode.
+pub(crate) fn matching_rows_bound(
+    project_dir: &Path,
+    inventory: &AuthenticatedPropertyInventory,
+    route: &str,
+    equality: &PropertyEquality,
+) -> Result<Option<u64>, GfError> {
+    Ok(
+        current_manifest(project_dir, inventory, route, equality)?.map(|manifest| {
+            shards_holding(&manifest, &equality.value)
+                .map(|shard| shard.rows)
+                .fold(0_u64, u64::saturating_add)
+        }),
+    )
+}
+
 /// The UUIDs whose newest live snapshot holds the value, from a current index;
 /// `None` when no current index answers. Reads the manifest and only the
 /// shards whose range holds the value, each checked against the manifest.
@@ -577,15 +614,9 @@ pub(crate) fn lookup(
     let Some(manifest) = current_manifest(project_dir, inventory, route, equality)? else {
         return Ok(None);
     };
-    let first = manifest.shards.partition_point(|shard| {
-        compare(&shard.last, &equality.value).is_some_and(std::cmp::Ordering::is_lt)
-    });
     let dir = shard_dir(project_dir, route, &equality.column);
     let mut found = BTreeSet::new();
-    for shard in &manifest.shards[first..] {
-        if compare(&shard.first, &equality.value).is_none_or(std::cmp::Ordering::is_gt) {
-            break;
-        }
+    for shard in shards_holding(&manifest, &equality.value) {
         read_shard(&dir, shard, &equality.value, &mut found)?;
     }
     Ok(Some(found))

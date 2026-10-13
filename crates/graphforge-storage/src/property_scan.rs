@@ -150,13 +150,25 @@ impl PropertyOverlayExec {
         } else {
             (None, None)
         };
-        let equality_index = match (&options.equality, inventory.as_deref(), is_edge) {
+        let equality_bound = match (&options.equality, inventory.as_deref(), is_edge) {
             (Some(equality), Some(inventory), false) => {
-                crate::property_equality_index::is_current(&project, inventory, &route, equality)
-                    .map_err(|error| DataFusionError::External(Box::new(error)))?
+                crate::property_equality_index::matching_rows_bound(
+                    &project, inventory, &route, equality,
+                )
+                .map_err(|error| DataFusionError::External(Box::new(error)))?
             }
-            _ => false,
+            _ => None,
         };
+        // A current index answers the equality, so the scan emits only the
+        // objects holding the value: the manifest's bound replaces the
+        // route-wide row count the planner would otherwise charge to a lookup.
+        let planned_rows = match (planned_rows, equality_bound) {
+            (Some(rows), Some(bound)) => {
+                Some(rows.min(usize::try_from(bound).unwrap_or(usize::MAX)))
+            }
+            (rows, _) => rows,
+        };
+        let equality_index = equality_bound.is_some();
         Ok(Self {
             project,
             inventory,
