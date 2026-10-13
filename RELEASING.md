@@ -14,7 +14,9 @@ release. GraphForge ships one version across 21 crates (crates.io), the
 
 Build jobs: 3 wheels (Linux x86_64 manylinux 2_17, macOS arm64, Windows
 amd64), the sdist, 5 Node addons, the 8 npm tarballs, and a dry-run package of
-every crate. The publish job needs all of them and runs crates.io, then PyPI,
+every crate. Cargo extracts and builds every `.crate` before any upload, using
+its temporary package registry for dependencies in the same publish set.
+The publish job needs all of them and runs crates.io, then PyPI,
 then npm, then the GitHub Release. Every registry step skips a version that is
 already published. A tag run fails before any upload if the tag is not
 `v<workspace version>`.
@@ -103,6 +105,16 @@ move a tag.
 The last job, `verify-published`, waits up to 15 minutes for PyPI and npm to
 serve the version, installs `graphforge` from PyPI and the npm packages
 `@curatelabs/graphforge` and `@curatelabs/graphforge-cli` from npm, and runs
-smoke tests. It does not install the crates or the agent-skills package. Also
-confirm by hand that the 21 crates show the version on crates.io and that the
-GitHub Release exists.
+smoke tests. It also runs `cargo install graphforge-cli --version <version>
+--locked` outside the workspace and checks the installed `gf --version`.
+It does not install the agent-skills package. Confirm by hand that all 21
+crates.io pages render their README, docs.rs builds `graphforge-api` and
+`graphforge-cli` at that version, and the GitHub Release exists. Record these
+publication results on the release issue (#1095).
+
+Crate READMEs come from `scripts/templates/crate-readme.md` and Cargo package
+descriptions. After changing either, run
+`python3 scripts/ci/crate-publish-plan.py write-readmes`; the publish-plan check
+rejects missing or stale pages. The CLI's package-local `project-skills/` is
+generated from the canonical root bundle by
+`python3 scripts/sync_project_skills.py --write`; its parity check rejects drift.

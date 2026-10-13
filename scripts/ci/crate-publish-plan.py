@@ -5,6 +5,7 @@ Usage:
     python3 scripts/ci/crate-publish-plan.py list
     python3 scripts/ci/crate-publish-plan.py check
     python3 scripts/ci/crate-publish-plan.py dry-run-commands
+    python3 scripts/ci/crate-publish-plan.py write-readmes
 
 Language-binding implementation crates are not published to crates.io; their
 public distributions ship through PyPI and npm. The Rust CLI is part of the
@@ -24,6 +25,82 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 CRATES_DIR = ROOT / "crates"
+README_TEMPLATE = ROOT / "scripts" / "templates" / "crate-readme.md"
+
+QUICKSTARTS = {
+    "graphforge-api": """
+## Quickstart
+
+Create a Rust binary with `cargo new my-graph` and enter its directory. Add
+`graphforge-api` at the version shown on this crate page (replace `<version>`):
+
+```sh
+cargo add graphforge-api@<version>
+```
+
+Replace `src/main.rs` with:
+
+```rust
+use graphforge_api::GraphForge;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let graph = GraphForge::new(None)?;
+    graph.execute("CREATE (:Person {name: 'Alice'})")?;
+    let result = graph.execute("MATCH (p:Person) RETURN p.name AS name")?;
+    for batch in result.batches {
+        println!("{batch:?}");
+    }
+    Ok(())
+}
+```
+
+Run `cargo run`. This example uses the full engine in memory; its data lasts
+only for this process. Query results are Arrow record batches.
+""",
+    "graphforge-cli": """
+## Quickstart
+
+Install the version shown on this crate page (replace `<version>`):
+
+```sh
+cargo install graphforge-cli --version <version> --locked
+gf --version
+gf --help
+mkdir my-graph
+cd my-graph
+gf init
+gf skills status
+```
+
+`gf init` creates repository-local GraphForge configuration and installs the
+embedded agent skills. Durable projects require an ext4, xfs, or btrfs volume
+at the project root. Follow the
+[first graph guide](https://docs.graphforge.sh/guide/quickstart/) to load and
+query connected data.
+""",
+}
+
+
+def expected_readme(package: dict[str, Any]) -> str:
+    """Render a crate page from one template and Cargo's description."""
+    return README_TEMPLATE.read_text(encoding="utf-8").format(
+        name=package["name"],
+        description=package["description"].rstrip("."),
+        quickstart=QUICKSTARTS.get(package["name"], ""),
+    )
+
+
+def check_readmes(packages: list[dict[str, Any]], names: list[str]) -> list[str]:
+    """Require current generated READMEs in every publishable package."""
+    errors = []
+    for package in packages:
+        if package["name"] not in names:
+            continue
+        path = Path(package["manifest_path"]).parent / "README.md"
+        if not path.is_file() or path.read_text(encoding="utf-8") != expected_readme(package):
+            errors.append(f"{package['name']}: missing or stale README.md; run write-readmes")
+    return errors
+
 
 # Implementation crates published through language registries, not crates.io.
 CRATES_IO_EXCLUDED = frozenset(
@@ -152,6 +229,8 @@ def cmd_check(_: argparse.Namespace) -> int:
             f"{name}: path dependencies missing version= for cargo publish: " + ", ".join(deps)
         )
 
+    errors.extend(check_readmes(_cargo_metadata()["packages"], order))
+
     if errors:
         print("crate publish plan check FAILED:", file=sys.stderr)
         for error in errors:
@@ -175,6 +254,15 @@ def cmd_dry_run_commands(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_write_readmes(_: argparse.Namespace) -> int:
+    names = topological_publish_order(load_workspace())
+    for package in _cargo_metadata()["packages"]:
+        if package["name"] in names:
+            path = Path(package["manifest_path"]).parent / "README.md"
+            path.write_text(expected_readme(package), encoding="utf-8")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -182,12 +270,15 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("list", help="Print crates.io publish order").set_defaults(func=cmd_list)
     sub.add_parser(
         "check",
-        help="Fail on name conflicts, cycles, or missing path+version deps",
+        help="Fail on name conflicts, cycles, missing path+version deps, or stale READMEs",
     ).set_defaults(func=cmd_check)
     sub.add_parser(
         "dry-run-commands",
         help="Print cargo publish --dry-run commands when unblocked",
     ).set_defaults(func=cmd_dry_run_commands)
+    sub.add_parser(
+        "write-readmes", help="Generate crate READMEs from the shared template"
+    ).set_defaults(func=cmd_write_readmes)
 
     args = parser.parse_args(argv)
     return args.func(args)

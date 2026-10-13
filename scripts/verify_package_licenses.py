@@ -88,7 +88,6 @@ def verify_cargo_crate(name: str) -> list[str]:
             name,
             "--list",
             "--allow-dirty",
-            "--no-verify",
         ]
     )
     if result.returncode != 0:

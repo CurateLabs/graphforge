@@ -7,6 +7,7 @@ import importlib.util
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = Path(__file__).with_name("crate-publish-plan.py")
@@ -135,6 +136,22 @@ assert names.index("graphforge-discovery") < names.index("graphforge-hub-publish
 checked = run("check")
 assert checked.returncode == 0, checked.stderr
 assert "21 crates" in checked.stdout
+
+# A removed package README is a known positive for the release check.
+with tempfile.TemporaryDirectory() as directory:
+    package_dir = Path(directory)
+    package = {
+        "name": "graphforge-example",
+        "description": "Example internal layer",
+        "manifest_path": str(package_dir / "Cargo.toml"),
+    }
+    readme = package_dir / "README.md"
+    readme.write_text(mod.expected_readme(package), encoding="utf-8")
+    assert mod.check_readmes([package], [package["name"]]) == []
+    readme.unlink()
+    assert mod.check_readmes([package], [package["name"]]) == [
+        "graphforge-example: missing or stale README.md; run write-readmes"
+    ]
 
 dry = run("dry-run-commands")
 assert dry.returncode == 0, dry.stderr

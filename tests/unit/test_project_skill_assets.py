@@ -14,6 +14,7 @@ PYTHON_COPY = (
     ROOT / "crates" / "graphforge-bindings-py" / "python" / "graphforge" / "_project_skills"
 )
 NPM_COPY = ROOT / "packages" / "cli" / "project-skills"
+RUST_COPY = ROOT / "crates" / "graphforge-cli" / "project-skills"
 
 
 def test_generated_distribution_assets_are_current() -> None:
@@ -38,11 +39,11 @@ def test_manifest_names_host_discoverable_skills() -> None:
         assert (SOURCE / skill / "SKILL.md").is_file()
 
 
-def test_python_and_npm_payloads_are_exact_copies() -> None:
+def test_packaged_payloads_are_exact_copies() -> None:
     canonical = {
         path.relative_to(SOURCE): path.read_bytes() for path in SOURCE.rglob("*") if path.is_file()
     }
-    for destination in (PYTHON_COPY, NPM_COPY):
+    for destination in (PYTHON_COPY, NPM_COPY, RUST_COPY):
         packaged = {
             path.relative_to(destination): path.read_bytes()
             for path in destination.rglob("*")
@@ -54,7 +55,7 @@ def test_python_and_npm_payloads_are_exact_copies() -> None:
 def test_digest_protected_assets_are_checked_out_with_lf_bytes() -> None:
     protected = [
         path.relative_to(ROOT)
-        for base in (SOURCE, PYTHON_COPY, NPM_COPY)
+        for base in (SOURCE, PYTHON_COPY, NPM_COPY, RUST_COPY)
         for path in base.rglob("*")
         if path.is_file()
     ]
