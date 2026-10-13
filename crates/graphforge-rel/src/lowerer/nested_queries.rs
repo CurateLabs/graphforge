@@ -61,7 +61,7 @@ impl GraphPlanLowerer {
             Some(GraphOp::Project { .. }) => (&child.ops[..child.ops.len() - 1], true),
             _ => (child.ops.as_slice(), false),
         };
-        if child_reads_outer_rows(child, var_map)
+        if (child_reads_outer_rows(child, var_map) || child_rebinds_outer_nodes(child, var_map))
             && let Some(plan) =
                 self.lower_correlated_exists(child_ops, &child.exprs, negated, &input, var_map)?
         {
@@ -762,6 +762,34 @@ fn child_reads_outer_rows(child: &GraphPlan, outer_vm: &VarMap) -> bool {
     })
 }
 
+/// Whether `child` matches again an outer node variable: its pattern names a
+/// node the outer scope already bound (`NOT (a)-[:T]-(b)` over `a` and `b`),
+/// so it re-binds that node instead of reading it from an expression.
+///
+/// The binder scans every node of a pattern, bound or not, so these children
+/// read no outer variable by [`child_reads_outer_rows`], yet each outer row
+/// decides which nodes the pattern may start from. Seeded with the outer rows,
+/// the re-bound node is a filter on the seed and the traversal starts there,
+/// where the unseeded child scans every relationship of the graph and joins
+/// the result back.
+///
+/// A relationship the outer scope bound (`(a)-[r]->(b)` over an earlier `r`)
+/// is left to the identity-key join; so is a pattern that shares nothing.
+fn child_rebinds_outer_nodes(child: &GraphPlan, outer_vm: &VarMap) -> bool {
+    let mut rebinds_node = false;
+    for var in outer_vm.var_ids() {
+        if child
+            .ops
+            .iter()
+            .any(|op| graph_op_binds_relationship(op, var))
+        {
+            return false;
+        }
+        rebinds_node |= child.ops.iter().any(|op| graph_op_binds_var(op, var));
+    }
+    rebinds_node
+}
+
 fn plan_references_var(plan: &GraphPlan, var: VarId) -> bool {
     let expression_reference = (0..plan.exprs.len()).any(|index| {
         let index = u32::try_from(index).expect("ExprArena length is capped at u32::MAX");
@@ -791,6 +819,16 @@ fn graph_op_binds_var(op: &GraphOp, var: VarId) -> bool {
         | GraphOp::EdgeScan { var: found, .. }
         | GraphOp::TypedEdgeScan { var: found, .. } => *found == var,
         GraphOp::Expand { src, edge, dst, .. } => *src == var || *edge == var || *dst == var,
+        _ => false,
+    }
+}
+
+fn graph_op_binds_relationship(op: &GraphOp, var: VarId) -> bool {
+    match op {
+        GraphOp::EdgeScan { var: found, .. } | GraphOp::TypedEdgeScan { var: found, .. } => {
+            *found == var
+        }
+        GraphOp::Expand { edge, .. } => *edge == var,
         _ => false,
     }
 }
