@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
@@ -17,6 +18,7 @@ use arrow::datatypes::SchemaRef;
 use datafusion::common::DataFusionError;
 use datafusion::execution::TaskContext;
 use datafusion::execution::memory_pool::MemoryConsumer;
+use datafusion::execution::memory_pool::MemoryLimit;
 use datafusion::execution::memory_pool::MemoryReservation;
 use datafusion::physical_plan::DisplayAs;
 use datafusion::physical_plan::DisplayFormatType;
@@ -31,12 +33,31 @@ use tokio::sync::watch;
 
 pub(crate) const NOMINATION_BASE_BYTES: usize = 512;
 
+/// A bounded nomination holds at most this fraction of its query pool.
+///
+/// Completion keeps the hash table and the sorted copy alive together, so the
+/// peak is about twice the cap: an eighth of the pool leaves a quarter for the
+/// nomination and three quarters for the join and every other operator.
+const NOMINATION_POOL_FRACTION: usize = 8;
+
 #[derive(Clone, Debug)]
 enum NominationStatus {
     Pending,
     Complete,
+    /// The build side outgrew the nomination's limits. The scan reads its
+    /// whole route, exactly as it would without a nomination.
+    Abandoned,
     Unknown,
     Failed(Arc<str>),
+}
+
+/// The limits past which a nomination stops collecting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct NominationLimits {
+    /// Most distinct build keys worth pruning to: past about half the rows of
+    /// the route the scan reads, a scan is cheaper than the point reads the
+    /// nomination would make. `None` when the route's size is unknown.
+    pub(crate) max_ids: Option<usize>,
 }
 
 /// One completed build-side UUID set, shared by its matching probe scans.
@@ -47,10 +68,27 @@ pub(crate) struct UuidBuildKeyNomination {
     completed: OnceLock<CompactUuidSet>,
     reservation: Mutex<Option<MemoryReservation>>,
     started: AtomicBool,
+    /// `Some` for a nomination that may abandon itself.
+    limits: Option<NominationLimits>,
+    /// Bytes the collecting set may reserve; `usize::MAX` for none. Fixed by
+    /// `start` from the query pool of a bounded nomination.
+    byte_cap: AtomicUsize,
 }
 
 impl UuidBuildKeyNomination {
+    /// A nomination that collects every build key or fails on a denied
+    /// reservation.
     pub(crate) fn new() -> Arc<Self> {
+        Self::with_optional_limits(None)
+    }
+
+    /// A nomination that abandons itself, and lets its scan read the whole
+    /// route, once the build side outgrows `limits` or an eighth of the pool.
+    pub(crate) fn with_limits(limits: NominationLimits) -> Arc<Self> {
+        Self::with_optional_limits(Some(limits))
+    }
+
+    fn with_optional_limits(limits: Option<NominationLimits>) -> Arc<Self> {
         let (status, _) = watch::channel(NominationStatus::Pending);
         Arc::new(Self {
             status,
@@ -58,7 +96,14 @@ impl UuidBuildKeyNomination {
             completed: OnceLock::new(),
             reservation: Mutex::new(None),
             started: AtomicBool::new(false),
+            limits,
+            byte_cap: AtomicUsize::new(usize::MAX),
         })
+    }
+
+    /// A pending nomination with the same limits, for a re-executed plan.
+    fn fresh(&self) -> Arc<Self> {
+        Self::with_optional_limits(self.limits)
     }
 
     fn start(&self, context: &TaskContext) -> Result<(), DataFusionError> {
@@ -70,6 +115,12 @@ impl UuidBuildKeyNomination {
         let reservation =
             MemoryConsumer::new("GraphForge UUID build nomination").register(context.memory_pool());
         reservation.try_grow(NOMINATION_BASE_BYTES)?;
+        if self.limits.is_some()
+            && let MemoryLimit::Finite(pool) = context.memory_pool().memory_limit()
+        {
+            self.byte_cap
+                .store(pool / NOMINATION_POOL_FRACTION, Ordering::Release);
+        }
         *self
             .reservation
             .lock()
@@ -77,7 +128,23 @@ impl UuidBuildKeyNomination {
         Ok(())
     }
 
+    /// Stop collecting: free the set, keep no key list, and let the scan read
+    /// its whole route. The build rows themselves keep streaming to the join.
+    fn abandon(&self, collecting: &mut CompactUuidSet, reservation: &MemoryReservation) {
+        drop(std::mem::take(collecting));
+        reservation.free();
+        self.set_terminal(NominationStatus::Abandoned);
+    }
+
+    /// Whether the nomination gave up, so its scan has no key set to prune to.
+    pub(crate) fn is_abandoned(&self) -> bool {
+        matches!(*self.status.borrow(), NominationStatus::Abandoned)
+    }
+
     fn observe(&self, values: &FixedSizeBinaryArray) -> Result<(), DataFusionError> {
+        if self.is_abandoned() {
+            return Ok(());
+        }
         for row in 0..values.len() {
             if values.is_null(row) {
                 continue;
@@ -105,6 +172,15 @@ impl UuidBuildKeyNomination {
                 )
             })?;
 
+            if self
+                .limits
+                .and_then(|limits| limits.max_ids)
+                .is_some_and(|max_ids| collecting.len() >= max_ids)
+            {
+                self.abandon(&mut collecting, reservation);
+                return Ok(());
+            }
+
             if collecting.needs_growth_for(&uuid) {
                 let new_capacity = collecting.capacity_for_next_insert().map_err(|()| {
                     DataFusionError::ResourcesExhausted("UUID nomination capacity overflow".into())
@@ -115,6 +191,10 @@ impl UuidBuildKeyNomination {
                             "UUID nomination allocation size overflow".into(),
                         )
                     })?;
+                if requested_bytes > self.byte_cap.load(Ordering::Acquire) {
+                    self.abandon(&mut collecting, reservation);
+                    return Ok(());
+                }
                 let old_bytes = collecting.storage_bytes();
                 reservation.try_grow(requested_bytes)?;
                 let mut replacement = match CompactUuidSet::allocate(new_capacity) {
@@ -161,6 +241,9 @@ impl UuidBuildKeyNomination {
     }
 
     fn complete(&self) -> Result<(), DataFusionError> {
+        if self.is_abandoned() {
+            return Ok(());
+        }
         let mut keys = std::mem::take(
             &mut *self
                 .collecting
@@ -287,7 +370,7 @@ impl UuidBuildKeyNomination {
         loop {
             match status.borrow_and_update().clone() {
                 NominationStatus::Pending => {}
-                NominationStatus::Complete => return Ok(true),
+                NominationStatus::Complete | NominationStatus::Abandoned => return Ok(true),
                 NominationStatus::Unknown => {
                     return Err(DataFusionError::Execution(
                         "UUID build nomination ended before successful completion".into(),
@@ -383,7 +466,7 @@ impl ExecutionPlan for UuidBuildKeyTapExec {
         Ok(Arc::new(Self::new(
             Arc::clone(&self.input),
             self.uuid_column,
-            UuidBuildKeyNomination::new(),
+            self.nomination.fresh(),
         )))
     }
 

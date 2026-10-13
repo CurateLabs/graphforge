@@ -51,24 +51,6 @@ pub fn is_filtered_uuid_seed(plan: &dyn ExecutionPlan, source_node_id_index: usi
     equality_anchor::is_filtered_uuid_seed(plan, source_node_id_index)
 }
 
-/// Whether an operator at or below `plan` bounds how many rows reach it: a
-/// strict property-equality anchor, or a row fetch (`ORDER BY ... LIMIT`).
-///
-/// A completed frontier becomes the single build side of a CollectLeft join,
-/// which concatenates it into one Arrow batch whose 32-bit offsets cannot
-/// address an unbounded number of variable-width values. A partitioned join
-/// splits that build, so a frontier with no bound keeps it.
-pub fn frontier_has_bound(plan: &dyn ExecutionPlan) -> bool {
-    plan.fetch().is_some()
-        || plan
-            .downcast_ref::<PropertyOverlayExec>()
-            .is_some_and(|scan| scan.equality_uuid_column().is_some())
-        || plan
-            .children()
-            .into_iter()
-            .any(|child| frontier_has_bound(child.as_ref()))
-}
-
 #[cfg(test)]
 pub(super) fn is_filtered_seed_uuid_key(plan: &dyn ExecutionPlan, uuid_index: usize) -> bool {
     equality_anchor::filtered_seed_uuid_key(plan, uuid_index)

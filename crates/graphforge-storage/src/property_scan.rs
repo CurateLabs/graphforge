@@ -381,6 +381,13 @@ impl PropertyOverlayExec {
         })
     }
 
+    /// The route's planned row count: the authenticated footer upper bound
+    /// when footer statistics are on, else the manifest's inexact estimate,
+    /// capped by any limit. `None` without a route inventory.
+    pub(crate) const fn planned_rows(&self) -> Option<usize> {
+        self.planned_rows
+    }
+
     pub(crate) fn with_uuid_nomination(
         &self,
         nomination: Arc<crate::property_join_nomination::UuidBuildKeyNomination>,
@@ -554,9 +561,11 @@ impl ExecutionPlan for PropertyOverlayExec {
                     }
                 }
             }
+            // An abandoned nomination (its frontier outgrew its bound) has no
+            // key set by design: the scan reads unpruned for it.
             if uuid_nominations
                 .iter()
-                .any(|nomination| nomination.ids().is_none())
+                .any(|nomination| nomination.ids().is_none() && !nomination.is_abandoned())
             {
                 let _ = sender
                     .send(Err(DataFusionError::Internal(

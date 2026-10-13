@@ -12,7 +12,9 @@ use datafusion::physical_plan::joins::{HashJoinExec, PartitionMode};
 use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 
-use crate::property_join_nomination::{UuidBuildKeyNomination, UuidBuildKeyTapExec};
+use crate::property_join_nomination::{
+    NominationLimits, UuidBuildKeyNomination, UuidBuildKeyTapExec,
+};
 use crate::property_scan::PropertyOverlayExec;
 
 fn unordered_bounded(plan: &dyn ExecutionPlan) -> bool {
@@ -32,18 +34,29 @@ pub(super) fn nominate_partitioned_left(
     nominate_partitioned_left_selected(join, None)
 }
 
-/// Rebuild a partitioned LEFT enrichment as a CollectLeft join whose completed
-/// preserved side nominates the UUIDs its direct property scan reads.
+/// A frontier naming more than `1 / NOMINATION_ROUTE_DIVISOR` of its route's
+/// rows is not nominated: past about half the route, one sequential scan
+/// reads less than the point reads the nominated set would drive, so the
+/// nomination abandons itself and the scan runs unpruned.
+const NOMINATION_ROUTE_DIVISOR: usize = 2;
+
+/// Prune a partitioned LEFT enrichment's direct property scan to the UUIDs
+/// its preserved side produces, without changing the join.
 ///
+/// The join stays partitioned. Its preserved side is tapped on the key column
+/// as it streams (one 16-byte key per distinct row, charged to the query
+/// pool) and re-hashed into the same partitions, so no build row is
+/// concatenated or held beyond what the partitioned join already holds; the
+/// scan waits for the tap to see the whole frontier and reads only its keys.
 /// Nomination only prunes the scan, the join's probe side, and a LEFT join
 /// keeps every build row, so the result cannot change. `selected_key` is the
 /// caller's proof that a key-only scan may be pruned from that build column;
 /// without it only a scan that projects property payload qualifies.
 ///
-/// When the join's projection drops the build key, the hash distribution it
-/// advertises names a column the output no longer has, and no repartition may
-/// evaluate it. The rewrite then carries the key through the join as a hidden
-/// trailing column, hashes on that, and projects it away again.
+/// The nomination bounds itself: it abandons, and the scan then reads the
+/// whole route as the un-nominated join would, once the frontier names more
+/// than half the route's planned rows or its key set would outgrow an eighth
+/// of the query pool. The plan keeps the same shape either way.
 pub(super) fn nominate_partitioned_left_selected(
     join: &HashJoinExec,
     selected_key: Option<usize>,
@@ -59,12 +72,14 @@ pub(super) fn nominate_partitioned_left_selected(
     {
         return Ok(None);
     }
-    let output = original.output_partitioning().clone();
-    let Partitioning::Hash(_, partitions) = &output else {
+    let Partitioning::Hash(_, partitions) = original.output_partitioning() else {
         return Ok(None);
     };
     let partitions = *partitions;
-    if partitions == 0 {
+    if partitions == 0
+        || join.left().output_partitioning().partition_count() != partitions
+        || join.right().output_partitioning().partition_count() != partitions
+    {
         return Ok(None);
     }
     let Some((scan, build_column)) = matching_scan(join, selected_key.is_some()) else {
@@ -73,15 +88,13 @@ pub(super) fn nominate_partitioned_left_selected(
     if selected_key.is_some_and(|selected| selected != build_column) {
         return Ok(None);
     }
-    // A hidden key is lifted only for a bounded frontier: the CollectLeft
-    // build concatenates it into one Arrow batch (see `frontier_has_bound`).
-    let hidden_key = selected_key.is_none() && super::has_unknown_hash_key(&output, original);
-    if hidden_key && !super::frontier_has_bound(join.left().as_ref()) {
-        return Ok(None);
-    }
-    // Keep the preserved side's operators. NULL keys are omitted
-    // from the nomination, but their unmatched LEFT rows remain in the join.
-    let nomination = UuidBuildKeyNomination::new();
+    // Keep the preserved side's operators. NULL keys are omitted from the
+    // nomination, but their unmatched LEFT rows remain in the join.
+    let nomination = UuidBuildKeyNomination::with_limits(NominationLimits {
+        max_ids: scan
+            .planned_rows()
+            .map(|rows| rows / NOMINATION_ROUTE_DIVISOR),
+    });
     let frontier: Arc<dyn ExecutionPlan> = Arc::new(CoalescePartitionsExec::new(
         super::exchanges::elide(Arc::clone(join.left()))?,
     ));
@@ -90,60 +103,25 @@ pub(super) fn nominate_partitioned_left_selected(
         build_column,
         Arc::clone(&nomination),
     ));
-    let nominated: Arc<dyn ExecutionPlan> = Arc::new(scan.with_uuid_nomination(nomination));
-    if selected_key.is_none() && !hidden_key {
-        let rebuilt = join
-            .builder()
-            .with_new_children(vec![tapped, nominated])?
-            .with_partition_mode(PartitionMode::CollectLeft)
-            .reset_state()
-            .recompute_properties()
-            .build_exec()?;
-        if rebuilt.schema().as_ref() != original.schema().as_ref() {
-            return Ok(None);
-        }
-        return Ok(Some(Arc::new(RepartitionExec::try_new(rebuilt, output)?)));
-    }
-
-    let Some(original_projection) = join.projection.as_ref().map(|p| p.to_vec()) else {
-        return Ok(None);
-    };
-    let mut lifted_projection = original_projection;
-    let hidden_output_index = lifted_projection.len();
-    lifted_projection.push(build_column);
-
+    let build_key = Arc::clone(&join.on()[0].0);
+    let build: Arc<dyn ExecutionPlan> = Arc::new(RepartitionExec::try_new(
+        tapped,
+        Partitioning::Hash(vec![build_key], partitions),
+    )?);
+    let probe = Arc::clone(join.right())
+        .with_new_children(vec![Arc::new(scan.with_uuid_nomination(nomination))])?;
     let rebuilt = join
         .builder()
-        .with_projection(Some(lifted_projection))
-        .with_new_children(vec![tapped, nominated])?
-        .with_partition_mode(PartitionMode::CollectLeft)
+        .with_new_children(vec![build, probe])?
         .reset_state()
         .recompute_properties()
         .build_exec()?;
-    if rebuilt.schema().fields().len() != original.schema().fields().len() + 1 {
+    if rebuilt.schema().as_ref() != original.schema().as_ref()
+        || rebuilt.output_partitioning() != original.output_partitioning()
+    {
         return Ok(None);
     }
-    let key_name = rebuilt.schema().field(hidden_output_index).name().clone();
-    let repartition = Arc::new(RepartitionExec::try_new(
-        rebuilt,
-        Partitioning::Hash(
-            vec![Arc::new(Column::new(&key_name, hidden_output_index))],
-            partitions,
-        ),
-    )?);
-    let projection: Vec<(Arc<dyn datafusion::physical_expr::PhysicalExpr>, String)> =
-        (0..original.schema().fields().len())
-            .map(|index| {
-                (
-                    Arc::new(Column::new(repartition.schema().field(index).name(), index))
-                        as Arc<dyn datafusion::physical_expr::PhysicalExpr>,
-                    repartition.schema().field(index).name().clone(),
-                )
-            })
-            .collect();
-    Ok(Some(Arc::new(
-        datafusion::physical_plan::projection::ProjectionExec::try_new(projection, repartition)?,
-    )))
+    Ok(Some(rebuilt))
 }
 
 /// Bind only the exact direct scan behind its ordinary UUID hash exchange.

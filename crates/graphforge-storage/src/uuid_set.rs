@@ -211,7 +211,6 @@ impl CompactUuidSet {
     pub(crate) const INITIAL_CAPACITY: usize = 16;
     const SLOT_CHUNK_CAPACITY: usize = 4_096;
 
-    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.len
     }
