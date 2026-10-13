@@ -567,20 +567,14 @@ fn a_cancelled_node_scratch_build_leaves_no_scratch_and_the_rerun_is_identical()
                 !scratch_dir(&session).exists(),
                 "cancelled after {polls_before_cancel}"
             );
-            // A budget below the fixed floor is refused before any decoding.
-            let mut reduced = node_scratch_plan(&nodes, &edges, 2);
-            reduced.memory_budget = Some(1);
-            let error = session
-                .prepare_bulk_encoding(1, &reduced, || false)
-                .unwrap_err();
-            assert!(matches!(
-                error,
-                GfError::Project {
-                    code: graphforge_core::ProjectErrorCode::ResourceLimit,
-                    ..
-                }
-            ));
-            assert!(!scratch_dir(&session).exists());
+            // A budget below the fixed floor is refused before any decoding,
+            // unless the cancel landed after the inventory was pinned.
+            reduced_budget_after_cancel(
+                &mut session,
+                node_scratch_plan(&nodes, &edges, 2),
+                &expected,
+                &format!("cancelled after {polls_before_cancel} polls"),
+            );
         }
         let rerun = session
             .prepare_bulk_encoding(1, &node_scratch_plan(&nodes, &edges, 2), || false)
@@ -592,6 +586,38 @@ fn a_cancelled_node_scratch_build_leaves_no_scratch_and_the_rerun_is_identical()
         );
         assert!(!scratch_dir(&session).exists());
     }
+}
+
+#[test]
+fn a_cancel_after_the_inventory_is_pinned_leaves_a_complete_build_the_next_call_reuses() {
+    let _gate = crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::with_gate(
+        32 << 10,
+    );
+    let (nodes, edges) = clustered_node_graph(1_021, 3_001);
+    let expected = bulk_with(&nodes, &edges, 2, 4).unwrap();
+    let _forced =
+        crate::graph_construction_encoding::bulk_test_support::ForcedPartitions::set(6, 4);
+    let root = TempDir::new().unwrap();
+    let mut session = pinned(&root);
+    let error =
+        cancel_after_inventory_install(&mut session, &node_scratch_plan(&nodes, &edges, 2));
+    assert!(error.to_string().contains("cancelled"), "{error}");
+    assert!(!scratch_dir(&session).exists());
+    assert!(
+        session.checkpoint.encoding_inventory_sha256.is_some(),
+        "the cancel landed before the inventory was pinned"
+    );
+    reduced_budget_after_cancel(
+        &mut session,
+        node_scratch_plan(&nodes, &edges, 2),
+        &expected,
+        "cancelled after the pin",
+    );
+    let rerun = session
+        .prepare_bulk_encoding(1, &node_scratch_plan(&nodes, &edges, 2), || false)
+        .unwrap();
+    assert_eq!(expected, inventory(&rerun));
+    assert!(!scratch_dir(&session).exists());
 }
 
 const NODE_SCRATCH_CRASH_PARTITIONS: &str = "GF_BULK_NODE_SCRATCH_PARTITIONS";

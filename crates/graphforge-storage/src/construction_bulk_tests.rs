@@ -2420,19 +2420,12 @@ mod bulk_builder {
                 // A live budget drop cannot make this fixed bulk route build
                 // resident tables it no longer has room for. Restoring the
                 // budget below still completes the same valid input.
-                let mut reduced = scratch_plan(&nodes, &edges, 2);
-                reduced.memory_budget = Some(1);
-                let error = session
-                    .prepare_bulk_encoding(1, &reduced, || false)
-                    .unwrap_err();
-                assert!(matches!(
-                    error,
-                    GfError::Project {
-                        code: graphforge_core::ProjectErrorCode::ResourceLimit,
-                        ..
-                    }
-                ));
-                assert!(!scratch_dir(&session).exists());
+                reduced_budget_after_cancel(
+                    &mut session,
+                    scratch_plan(&nodes, &edges, 2),
+                    &expected,
+                    &format!("cancelled after {polls_before_cancel} polls"),
+                );
             }
             let rerun = session
                 .prepare_bulk_encoding(1, &scratch_plan(&nodes, &edges, 2), || false)
@@ -2978,6 +2971,7 @@ mod bulk_builder {
 
     include!("construction_chunk_spool_tests.rs");
     include!("construction_bulk_tests/read_back.rs");
+    include!("construction_bulk_tests/cancel_after_pin.rs");
 
     mod node_scratch {
         include!("construction_bulk_tests/node_scratch.rs");
