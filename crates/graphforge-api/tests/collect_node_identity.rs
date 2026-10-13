@@ -410,6 +410,59 @@ fn the_interactive_ic5_query_collects_identities() {
     assert_eq!(rows(&graph, &whole), expected, "whole IC5");
 }
 
+/// IC5 with the bound `forum` in the middle of the OPTIONAL path, so the
+/// anchor rewrite (#2023) splits the path into two patterns that both start
+/// at `forum`. Both halves test membership in `friends`, and the list still
+/// narrows: the pass sees the operators the split produces.
+fn ic5_split(extra: &str) -> String {
+    format!(
+        "MATCH (person:Person {{id: 1}})-[:KNOWS*1..2]-(friend)
+         WHERE NOT person = friend
+         WITH DISTINCT friend
+         MATCH (friend)<-[membership:HAS_MEMBER]-(forum)
+         WHERE membership.joinDate > 4
+         WITH forum, collect(friend) AS friends
+         OPTIONAL MATCH (friend)<-[:HAS_CREATOR]-(post)<-[:CONTAINER_OF]-(forum)-[:HAS_MEMBER]->(member)
+         WHERE friend IN friends AND member IN friends{extra}
+         WITH forum, count(post) AS postCount
+         RETURN forum.title AS forumName, postCount
+         ORDER BY postCount DESC, forum.id ASC"
+    )
+}
+
+#[test]
+fn both_halves_of_a_split_optional_path_test_the_narrowed_list() {
+    let graph = forums();
+    let narrowed = ic5_split("");
+    let whole = ic5_split(" AND size([m IN friends | m.id]) >= 0");
+
+    let plan = graph
+        .explain_stage(&narrowed, ExplainStage::PhysicalPlan)
+        .unwrap_or_else(|error| panic!("{narrowed}: {error}"));
+    assert!(
+        !plan.contains("CrossJoinExec") && !plan.contains("NestedLoopJoinExec"),
+        "the OPTIONAL path is anchored on forum, not crossed with a scan:\n{plan}"
+    );
+    let lines = physical_collect_lines(&graph, &narrowed);
+    assert!(!lines.is_empty(), "no collect in the physical plan");
+    for line in &lines {
+        assert!(!line.contains("named_struct"), "split IC5 narrows: {line}");
+    }
+    for line in &physical_collect_lines(&graph, &whole) {
+        assert!(
+            line.contains("named_struct"),
+            "the element read keeps it whole: {line}"
+        );
+    }
+
+    // Friends are Bob and Cat. Alpha: Bob's posts 100 and 101, times the
+    // friend memberships Bob (two HAS_MEMBER edges) and Cat (one) = 6. Beta:
+    // Cat's post 102 times Cat's one membership = 1.
+    let expected = table(&[&["alpha", "6"], &["beta", "1"]]);
+    assert_eq!(rows(&graph, &narrowed), expected, "narrowed split IC5");
+    assert_eq!(rows(&graph, &whole), expected, "whole split IC5");
+}
+
 #[test]
 fn union_branches_narrow_independently() {
     let graph = forums();
