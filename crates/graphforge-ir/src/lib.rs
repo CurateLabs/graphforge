@@ -176,6 +176,19 @@ pub enum Direction {
     Undirected,
 }
 
+impl Direction {
+    /// The direction of the same relationship read from its other end:
+    /// `(a)-[:R]->(b)` is `(b)<-[:R]-(a)`.
+    #[must_use]
+    pub const fn reversed(self) -> Self {
+        match self {
+            Self::Out => Self::In,
+            Self::In => Self::Out,
+            Self::Undirected => Self::Undirected,
+        }
+    }
+}
+
 /// Sort direction for ORDER BY keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SortOrder {

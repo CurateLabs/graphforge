@@ -73,6 +73,7 @@ fn lower_var_len_expand(
     target: Option<(&LoweringSnapshot, OntologyMode)>,
     reachability: bool,
     edge_predicates: Option<LoweredEdgePredicate>,
+    reverse_edge_list: bool,
 ) -> Result<LogicalPlan, LoweringError> {
     use datafusion::logical_expr::col;
 
@@ -175,7 +176,8 @@ fn lower_var_len_expand(
         dst_fields,
         graphforge_plan::var_len_edge_list_field(&prop_fields),
     )
-    .with_bound_destination(bound_dst.clone());
+    .with_bound_destination(bound_dst.clone())
+    .with_reversed_edge_list(reverse_edge_list);
     let node = if reachability {
         node.into_reachability().with_edge_filter(edge_filter)
     } else {
@@ -268,6 +270,55 @@ fn lower_var_len_expand(
     Ok(plan)
 }
 
+/// Lower a trail-semantics variable-length `Expand` whose destination `scan_var`
+/// is still to be scanned and whose source `bound_var` is already bound, by
+/// searching from the bound end of the pattern (#1984).
+///
+/// `(scan_var)-[edge*lo..hi]->(bound_var)` is the same set of trails as
+/// `(bound_var)<-[edge*lo..hi]-(scan_var)` with every relationship list read
+/// backwards, so the search is seeded from the bound node's rows, walks the
+/// reversed direction, and the node reverses each emitted relationship list to
+/// the order of the pattern as written. The seeds then scale with the bound
+/// end's reach rather than with the scanned label's population.
+///
+/// `scan_var` is registered as the destination exactly as an ordinary
+/// expansion registers its destination, so the caller's `NodeScan(scan_var)`
+/// applies the label and joins the properties the way it does for a
+/// destination reached by any other expansion.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn lower_var_len_expand_from_bound_end(
+    scan_var: VarId,
+    edge: VarId,
+    bound_var: VarId,
+    rel_ty: Option<RelationTypeId>,
+    dir: Direction,
+    min_hops: u16,
+    max_hops: Option<u16>,
+    input: LogicalPlan,
+    var_map: &mut VarMap,
+    type_id_to_rel_name: &HashMap<RelationTypeId, String>,
+    inference_rules: &HashMap<RelationTypeId, Vec<(String, String)>>,
+    target: Option<(&LoweringSnapshot, OntologyMode)>,
+) -> Result<LogicalPlan, LoweringError> {
+    lower_var_len_expand(
+        bound_var,
+        edge,
+        scan_var,
+        rel_ty,
+        dir.reversed(),
+        min_hops,
+        max_hops,
+        input,
+        var_map,
+        type_id_to_rel_name,
+        inference_rules,
+        target,
+        false,
+        None,
+        true,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)]
 pub(super) fn lower_expand(
@@ -307,6 +358,7 @@ pub(super) fn lower_expand(
             target,
             reachability,
             edge_predicates,
+            false,
         );
     }
 

@@ -145,6 +145,10 @@ pub struct VarLenExpandExec {
     /// Column index of an already-bound destination node's `node_id` within the
     /// input: only paths reaching that node are materialised (#1986).
     bound_dst_col_idx: Option<usize>,
+    /// Whether each emitted edge list is reversed: the lowerer seeded the
+    /// traversal from the far end of the pattern, so the trail runs
+    /// end-to-seed and the pattern as written reads it seed-to-end (#1984).
+    reverse_edge_list: bool,
     /// Whether rows are trails or reached nodes; see [`VarLenMode`].
     expansion: VarLenMode,
     /// The edge variable, the key of this hop's demand counters.
@@ -204,6 +208,7 @@ impl VarLenExpandExec {
             mode,
             src_col_idx,
             bound_dst_col_idx,
+            reverse_edge_list: node.reverse_edge_list,
             expansion: node.mode,
             edge_var: node.edge_var,
             edge_list_demanded: true,
@@ -230,6 +235,7 @@ impl VarLenExpandExec {
             mode: self.mode,
             src_col_idx: self.src_col_idx,
             bound_dst_col_idx: self.bound_dst_col_idx,
+            reverse_edge_list: self.reverse_edge_list,
             expansion: self.expansion,
             edge_var: self.edge_var,
             edge_list_demanded: demanded || self.expansion != VarLenMode::Trails,
@@ -322,6 +328,7 @@ impl ExecutionPlan for VarLenExpandExec {
             mode: self.mode,
             src_col_idx: self.src_col_idx,
             bound_dst_col_idx: self.bound_dst_col_idx,
+            reverse_edge_list: self.reverse_edge_list,
             expansion: self.expansion,
             edge_var: self.edge_var,
             edge_list_demanded: self.edge_list_demanded,
@@ -374,6 +381,7 @@ impl ExecutionPlan for VarLenExpandExec {
             mode: self.mode,
             src_col_idx: self.src_col_idx,
             bound_dst_col_idx: self.bound_dst_col_idx,
+            reverse_edge_list: self.reverse_edge_list,
             expansion: self.expansion,
             edge_var: self.edge_var,
             edge_list_demanded: self.edge_list_demanded,
@@ -498,6 +506,8 @@ pub(super) struct ExpandConfig {
     /// Input column of an already-bound destination's `node_id`; paths that do
     /// not end there are dropped before they are materialised (#1986).
     pub(super) bound_dst_col_idx: Option<usize>,
+    /// Whether each emitted edge list is reversed; see [`VarLenExpandExec`].
+    pub(super) reverse_edge_list: bool,
     /// Whether rows are trails or reached nodes; see [`VarLenMode`].
     pub(super) expansion: VarLenMode,
     /// The edge variable, the key of this hop's demand counters.
@@ -1200,7 +1210,13 @@ fn bfs_emit_seed(
         let in_range = p.hops >= cfg.min_hops && cfg.max_hops.is_none_or(|m| p.hops <= m);
         if in_range && required_dst.is_none_or(|dst| dst == p.node) {
             grow_reservation(reservation, emission_bytes(p.edge_path.len()))?;
-            emissions.push((p.input_row, p.node, p.edge_path.clone()));
+            let mut edge_path = p.edge_path.clone();
+            if cfg.reverse_edge_list {
+                // Seeded from the far end of the pattern: restore the order of
+                // the pattern as written (#1984).
+                edge_path.reverse();
+            }
+            emissions.push((p.input_row, p.node, edge_path));
         }
         if cfg.max_hops.is_some_and(|m| p.hops >= m) {
             reservation.shrink(path_state_bytes(&p));

@@ -649,7 +649,8 @@ fn hoistable_destination_ops(ops: &[GraphOp], exprs: &ExprArena, index: usize) -
 }
 
 /// Whether `id` mentions `var`, anywhere in its tree.
-fn mentions_var(exprs: &ExprArena, id: ExprId, var: VarId) -> bool {
+#[must_use]
+pub fn mentions_var(exprs: &ExprArena, id: ExprId, var: VarId) -> bool {
     let mut found = false;
     visit(exprs, id, &mut |expr| {
         if matches!(expr, IrExpr::VarRef(v) if *v == var) {
