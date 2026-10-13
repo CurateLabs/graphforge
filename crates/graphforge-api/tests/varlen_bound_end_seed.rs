@@ -524,6 +524,8 @@ fn a_missing_or_null_end_returns_no_rows() {
                 "(o:N)-[r:E*0..3]->(x)",
                 "o.id AS start, [e IN r | e.k] AS keys",
             );
+            assert!(is_reversed(&forge, &subject), "{prefix}: subject is reversed");
+            assert!(!is_reversed(&forge, &baseline), "{prefix}: baseline is not");
             assert_eq!(answer(&forge, &subject), Vec::<String>::new(), "{prefix}");
             assert_eq!(answer(&forge, &baseline), Vec::<String>::new(), "{prefix}");
         }
@@ -539,7 +541,7 @@ fn shapes_the_search_does_not_reverse_keep_the_unreversed_plan() {
             "inline filter on the scanned variable",
             "MATCH (x:N {id: 5}) MATCH (o:N {id: 1})-[r:E*1..3]->(x) RETURN o.id, [e IN r | e.k]",
         ),
-        // The edge variable is already bound by an earlier clause.
+        // A later predicate on the scanned variable narrows its scan.
         (
             "predicate on the scanned variable",
             "MATCH (x:N {id: 5}) MATCH (o:N)-[r:E*1..3]->(x) WHERE o.id = 1 RETURN o.id, [e IN r | e.k]",
