@@ -4,7 +4,8 @@ use super::{
     Arc, CorrelatedSeedNode, DfExpr, ExprArena, ExprFunctionExt, ExprId, ExprSchemable, Extension,
     GraphOp, GraphPlan, GraphPlanLowerer, IrExpr, JoinType, LogicalPlan, LogicalPlanBuilder,
     LoweringError, MapUnsupportedExpr, OptionalMatchNode, PATTERN_COMPREHENSION_VALUE_ALIAS,
-    UnwindNode, VarId, VarMap, array_agg, list_index_range, lower_filter, var_alias,
+    UnwindNode, VarId, VarMap, array_agg, filter_node_by_type, list_index_range, lower_filter,
+    var_alias,
 };
 
 impl GraphPlanLowerer {
@@ -459,7 +460,7 @@ impl GraphPlanLowerer {
     /// A subquery that reads an outer variable its own pattern does not bind
     /// (in its WHERE, or inside a nested subquery) runs once per distinct outer
     /// row: its pipeline is seeded with those rows, and the result joins back
-    /// on every outer column with null-safe equality. A null outer value (an
+    /// on the outer columns with null-safe equality. A null outer value (an
     /// unmatched earlier OPTIONAL MATCH) is then evaluated by the subquery's
     /// predicates instead of dropping the row, and duplicate outer rows each
     /// see their own matches (#1887 D15).
@@ -471,9 +472,16 @@ impl GraphPlanLowerer {
     /// semi or anti join is the optional-match node over the distinct matched
     /// seed rows, with a marker column that says whether a seed row matched.
     ///
-    /// Returns `None` when the subquery's pipeline does not keep every outer
-    /// column (a full subquery projecting with WITH), leaving the identity-key
-    /// correlation in place.
+    /// A subquery that is only traversals, node scans and filters is seeded
+    /// with the columns of the outer variables it names, not the whole outer
+    /// row: a node it matches again contributes its identity, and the
+    /// matched rows join back on one identity column per variable. Every
+    /// column of an outer row rides through the seeded traversal otherwise,
+    /// and each neighbour of the start node repeats all of them (#1984).
+    ///
+    /// Returns `None` when the subquery's pipeline does not keep the seed's
+    /// columns (a full subquery projecting with WITH), leaving the
+    /// identity-key correlation in place.
     fn lower_correlated_exists(
         &self,
         child_ops: &[GraphOp],
@@ -482,56 +490,168 @@ impl GraphPlanLowerer {
         input: &LogicalPlan,
         var_map: &VarMap,
     ) -> Result<Option<LogicalPlan>, LoweringError> {
-        use datafusion::common::Column;
-        use datafusion::logical_expr::lit;
-
-        const MATCHED: &str = "__gf_correlated_matched";
-
+        if let Some(narrowed) = self.narrow_correlated_seed(child_ops, exprs, input, var_map)? {
+            let mut child_vm = var_map.clone();
+            let child_plan =
+                self.lower_pipeline_from(&narrowed.ops, exprs, &mut child_vm, narrowed.seed, None)?;
+            if let Some(join_keys) = column_keys(input, &child_plan, &narrowed.key_columns) {
+                return correlated_exists_join(
+                    input,
+                    narrowed.seed_id,
+                    child_plan,
+                    &join_keys,
+                    negated,
+                )
+                .map(Some);
+            }
+        }
         let (seed_id, seed) = correlated_seed(input)?;
         let mut child_vm = var_map.clone();
         let child_plan = self.lower_pipeline_from(child_ops, exprs, &mut child_vm, seed, None)?;
         let Some(join_keys) = outer_column_keys(input, &child_plan) else {
             return Ok(None);
         };
-        // One row per seed row that matched, however many matches it had.
-        let mut matched_projection = join_keys
+        correlated_exists_join(input, seed_id, child_plan, &join_keys, negated).map(Some)
+    }
+
+    /// The seed of a correlated pattern predicate narrowed to the outer
+    /// variables it names, or `None` when the predicate is not a plain
+    /// pattern of single-hop traversals, node scans and filters over them.
+    ///
+    /// A variable the pattern only matches again contributes its identity
+    /// (`node_uuid`, `node_id`, `type_id`, `type_ids`); a variable an
+    /// expression reads contributes every column it has. The scan of an
+    /// outer node that no expression reads would only re-resolve what the
+    /// seed already holds, so it moves onto the seed: the identity the
+    /// traversal starts from and the label the node must carry.
+    fn narrow_correlated_seed(
+        &self,
+        ops: &[GraphOp],
+        exprs: &ExprArena,
+        outer: &LogicalPlan,
+        var_map: &VarMap,
+    ) -> Result<Option<NarrowedSeed>, LoweringError> {
+        use datafusion::common::{Column, TableReference};
+        use std::collections::BTreeSet;
+
+        const IDENTITY: [&str; 4] = ["node_uuid", "node_id", "type_id", "type_ids"];
+        const KEYS: [&str; 3] = ["node_uuid", "node_id", "edge_uuid"];
+
+        let plain_pattern = ops.iter().all(|op| match op {
+            GraphOp::NodeScan { .. } | GraphOp::Filter { .. } => true,
+            GraphOp::Expand {
+                min_hops: 1,
+                max_hops: Some(1),
+                ..
+            } => true,
+            GraphOp::RelationshipUnique { edge, prior_edges } => {
+                var_map.get(*edge).is_none()
+                    && prior_edges.iter().all(|e| var_map.get(*e).is_none())
+            }
+            _ => false,
+        });
+        if !plain_pattern
+            || var_map
+                .var_ids()
+                .any(|var| ops.iter().any(|op| graph_op_binds_relationship(op, var)))
+        {
+            return Ok(None);
+        }
+
+        let schema = outer.schema();
+        let mut seed_columns = BTreeSet::new();
+        let mut key_columns = BTreeSet::new();
+        let mut moved_scans = Vec::new();
+        for var in var_map.var_ids() {
+            let read_by_expression = expression_references_var(exprs, var);
+            if !read_by_expression && !ops.iter().any(|op| graph_op_binds_var(op, var)) {
+                continue;
+            }
+            let Some(alias) = var_map.get(var) else {
+                continue;
+            };
+            let qualifier = TableReference::bare(alias);
+            let own = schema
+                .iter()
+                .enumerate()
+                .filter(|(_, (found, field))| match found {
+                    Some(found) => **found == qualifier,
+                    None => field.name() == alias,
+                })
+                .map(|(index, (_, field))| (index, field.name().as_str()))
+                .collect::<Vec<_>>();
+            if own.is_empty() {
+                return Ok(None);
+            }
+            let column_named = |names: &[&str]| {
+                names
+                    .iter()
+                    .find_map(|name| own.iter().find(|(_, found)| found == name))
+                    .map(|(index, _)| *index)
+            };
+            match column_named(&KEYS) {
+                Some(index) => {
+                    key_columns.insert(index);
+                }
+                None => key_columns.extend(own.iter().map(|(index, _)| *index)),
+            }
+            if read_by_expression {
+                seed_columns.extend(own.iter().map(|(index, _)| *index));
+            } else {
+                seed_columns.extend(
+                    own.iter()
+                        .filter(|(_, name)| IDENTITY.contains(name))
+                        .map(|(index, _)| *index),
+                );
+                if column_named(&["node_uuid"]).is_none() {
+                    return Ok(None);
+                }
+            }
+        }
+        if key_columns.is_empty() {
+            return Ok(None);
+        }
+
+        let mut remaining = Vec::with_capacity(ops.len());
+        for op in ops {
+            if let GraphOp::NodeScan { var, ty } = op
+                && let Some(alias) = var_map.get(*var)
+                && !expression_references_var(exprs, *var)
+            {
+                moved_scans.push((alias, *ty));
+            } else {
+                remaining.push(op.clone());
+            }
+        }
+
+        let leaf = CorrelatedSeedNode::new(schema.clone());
+        let seed_id = leaf.id();
+        let projection = seed_columns
             .iter()
-            .map(|(_, inner_idx)| {
-                DfExpr::Column(schema_join_column(child_plan.schema(), *inner_idx))
+            .map(|&index| {
+                let (qualifier, field) = schema.qualified_field(index);
+                DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
             })
             .collect::<Vec<_>>();
-        matched_projection.push(lit(true).alias(MATCHED));
-        let matched = LogicalPlanBuilder::from(child_plan)
-            .project(matched_projection)
-            .and_then(LogicalPlanBuilder::distinct)
-            .and_then(LogicalPlanBuilder::build)
-            .map_unsupported_expr()?;
-        let outer_width = join_keys.len();
-        let keys = (0..outer_width)
-            .zip(&join_keys)
-            .map(|(matched_idx, (outer_idx, _))| (*outer_idx, matched_idx))
-            .collect::<Vec<_>>();
-        let optional = OptionalMatchNode::new(
-            Arc::new(input.clone()),
-            Arc::new(matched),
-            keys,
-            vec![outer_width],
-        )
-        .with_correlated_seed(seed_id);
-        let marker = DfExpr::Column(Column::from_name(MATCHED));
-        let predicate = if negated {
-            marker.is_null()
-        } else {
-            marker.is_not_null()
-        };
-        LogicalPlanBuilder::from(LogicalPlan::Extension(Extension {
-            node: Arc::new(optional),
+        let mut seed = LogicalPlanBuilder::from(LogicalPlan::Extension(Extension {
+            node: Arc::new(leaf),
         }))
-        .filter(predicate)
-        .and_then(|builder| builder.project(plan_columns(input)))
+        .project(projection)
+        .and_then(LogicalPlanBuilder::distinct)
         .and_then(LogicalPlanBuilder::build)
-        .map_unsupported_expr()
-        .map(Some)
+        .map_unsupported_expr()?;
+        for (alias, ty) in moved_scans {
+            seed = self.enrich_bound_node(seed, alias)?;
+            if let Some(type_id) = ty {
+                seed = filter_node_by_type(seed, alias, type_id)?;
+            }
+        }
+        Ok(Some(NarrowedSeed {
+            seed_id,
+            seed,
+            ops: remaining,
+            key_columns: key_columns.into_iter().collect(),
+        }))
     }
 
     /// The outer rows with the columns a correlated sub-plan would add for the
@@ -754,6 +874,101 @@ fn outer_column_keys(outer: &LogicalPlan, inner: &LogicalPlan) -> Option<Vec<(us
         .collect()
 }
 
+/// A correlated pattern predicate's seed narrowed to the outer variables it
+/// names: the seed plan, the operators left to lower on top of it, and the
+/// outer columns the matched rows join back on.
+struct NarrowedSeed {
+    seed_id: u64,
+    seed: LogicalPlan,
+    ops: Vec<GraphOp>,
+    key_columns: Vec<usize>,
+}
+
+/// The semi or anti join of a correlated subquery back to `outer`: the
+/// distinct `join_keys` columns of the subquery's matches with a marker, left
+/// joined null-safe to the outer rows by the optional-match node that binds the
+/// seed `seed_id`. The marker is null for an outer row the subquery did not
+/// match, so `negated` keeps those and the positive form keeps the others.
+fn correlated_exists_join(
+    outer: &LogicalPlan,
+    seed_id: u64,
+    child_plan: LogicalPlan,
+    join_keys: &[(usize, usize)],
+    negated: bool,
+) -> Result<LogicalPlan, LoweringError> {
+    use datafusion::common::Column;
+    use datafusion::logical_expr::lit;
+
+    const MATCHED: &str = "__gf_correlated_matched";
+
+    // One row per seed row that matched, however many matches it had.
+    let mut matched_projection = join_keys
+        .iter()
+        .map(|(_, inner_idx)| DfExpr::Column(schema_join_column(child_plan.schema(), *inner_idx)))
+        .collect::<Vec<_>>();
+    matched_projection.push(lit(true).alias(MATCHED));
+    let matched = LogicalPlanBuilder::from(child_plan)
+        .project(matched_projection)
+        .and_then(LogicalPlanBuilder::distinct)
+        .and_then(LogicalPlanBuilder::build)
+        .map_unsupported_expr()?;
+    let key_width = join_keys.len();
+    let keys = join_keys
+        .iter()
+        .enumerate()
+        .map(|(matched_idx, (outer_idx, _))| (*outer_idx, matched_idx))
+        .collect::<Vec<_>>();
+    let optional = OptionalMatchNode::new(
+        Arc::new(outer.clone()),
+        Arc::new(matched),
+        keys,
+        vec![key_width],
+    )
+    .with_correlated_seed(seed_id);
+    let marker = DfExpr::Column(Column::from_name(MATCHED));
+    let predicate = if negated {
+        marker.is_null()
+    } else {
+        marker.is_not_null()
+    };
+    LogicalPlanBuilder::from(LogicalPlan::Extension(Extension {
+        node: Arc::new(optional),
+    }))
+    .filter(predicate)
+    .and_then(|builder| builder.project(plan_columns(outer)))
+    .and_then(LogicalPlanBuilder::build)
+    .map_unsupported_expr()
+}
+
+/// The given `outer` columns paired with the same qualified column of a
+/// subquery pipeline seeded from the outer rows, or `None` if the pipeline
+/// dropped one.
+fn column_keys(
+    outer: &LogicalPlan,
+    inner: &LogicalPlan,
+    columns: &[usize],
+) -> Option<Vec<(usize, usize)>> {
+    columns
+        .iter()
+        .map(|&outer_idx| {
+            let (qualifier, field) = outer.schema().qualified_field(outer_idx);
+            inner
+                .schema()
+                .index_of_column_by_name(qualifier, field.name())
+                .map(|inner_idx| (outer_idx, inner_idx))
+        })
+        .collect()
+}
+
+/// Whether an expression of `exprs` reads the variable `var`. Expressions
+/// embed no sub-plans, so the arena holds every read.
+fn expression_references_var(exprs: &ExprArena, var: VarId) -> bool {
+    (0..exprs.len()).any(|index| {
+        let index = u32::try_from(index).expect("ExprArena length is capped at u32::MAX");
+        matches!(exprs.get(ExprId(index)), IrExpr::VarRef(found) if *found == var)
+    })
+}
+
 /// Whether `child` reads an outer variable that none of its own operators
 /// binds — in an expression or inside a nested subquery.
 fn child_reads_outer_rows(child: &GraphPlan, outer_vm: &VarMap) -> bool {
@@ -791,11 +1006,7 @@ fn child_rebinds_outer_nodes(child: &GraphPlan, outer_vm: &VarMap) -> bool {
 }
 
 fn plan_references_var(plan: &GraphPlan, var: VarId) -> bool {
-    let expression_reference = (0..plan.exprs.len()).any(|index| {
-        let index = u32::try_from(index).expect("ExprArena length is capped at u32::MAX");
-        matches!(plan.exprs.get(ExprId(index)), IrExpr::VarRef(found) if *found == var)
-    });
-    expression_reference
+    expression_references_var(&plan.exprs, var)
         || plan.ops.iter().any(|op| {
             graph_op_binds_var(op, var)
                 || match op {

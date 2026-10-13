@@ -19,6 +19,9 @@ use graphforge_api::GraphForge;
 use graphforge_exec::demand::{self, DemandSnapshot};
 use graphforge_ir::IrLiteral;
 
+#[path = "support/bulk_fixture.rs"]
+mod bulk_fixture;
+
 /// Six `P` nodes (`id` 1 to 6; node 4 is also a `Q`) and these `K`
 /// relationships:
 ///
@@ -457,6 +460,169 @@ fn a_predicate_that_names_the_same_nodes_as_a_longer_match() {
 }
 
 // ---------------------------------------------------------------------------
+// The seed carries only what the predicate names
+// ---------------------------------------------------------------------------
+
+/// The number after `key=` on `line`.
+fn number_after(line: &str, key: &str) -> usize {
+    let (_, tail) = line
+        .split_once(key)
+        .unwrap_or_else(|| panic!("`{key}` not in `{line}`"));
+    tail.chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .unwrap_or_else(|_| panic!("no number after `{key}` in `{line}`"))
+}
+
+/// The expansion the predicate's seed feeds: the nearest one above the last
+/// seed leaf. Earlier clauses that are themselves correlated print their own
+/// seeds first; the predicate filters their rows, so its seed comes last.
+fn seeded_expansion(plan: &[String]) -> &str {
+    let seed = plan
+        .iter()
+        .rposition(|line| line.contains("CorrelatedSeedExec"))
+        .unwrap_or_else(|| panic!("no seed in the plan:\n{}", plan.join("\n")));
+    plan[..seed]
+        .iter()
+        .rev()
+        .find(|line| line.contains("ExpandExec"))
+        .unwrap_or_else(|| panic!("no seeded expansion:\n{}", plan.join("\n")))
+}
+
+/// The columns the predicate's matches join back to the outer rows on: the
+/// outermost join, since the predicate filters what earlier clauses produce.
+fn join_keys(plan: &[String]) -> usize {
+    let join = plan
+        .iter()
+        .find(|line| line.contains("OptionalMatchExec"))
+        .unwrap_or_else(|| panic!("no join in the plan:\n{}", plan.join("\n")));
+    number_after(join, "keys=")
+}
+
+/// What `assert_narrow` expects of a predicate's plan.
+struct Narrow {
+    /// Columns the predicate's matches join back to the outer rows on.
+    keys: usize,
+    /// Most columns the expansion the seed feeds may carry: the identities of
+    /// the seed's node and the anchor, the identity of the node it reaches, and
+    /// the edge id a longer pattern keeps for relationship uniqueness.
+    columns: usize,
+    /// Also check the `NOT` form; the binder has no `NOT EXISTS { .. }`.
+    negated: bool,
+}
+
+/// `predicate` over `outer` joins back and expands from the seed as `narrow`
+/// says, so the seed never carries an outer row's other columns.
+fn assert_narrow(forge: &GraphForge, outer: &str, predicate: &str, narrow: Narrow) {
+    let mut queries = vec![format!("{outer} WHERE {predicate} RETURN a.id AS id")];
+    if narrow.negated {
+        queries.push(format!("{outer} WHERE NOT {predicate} RETURN a.id AS id"));
+    }
+    for query in queries {
+        let plan = physical(forge, &query);
+        let text = plan.join("\n");
+        assert_eq!(join_keys(&plan), narrow.keys, "{query}\n{text}");
+        let width = number_after(seeded_expansion(&plan), "projection=");
+        assert!(
+            width <= narrow.columns,
+            "the seeded expansion carries {width} columns, not at most {}: {query}\n{text}",
+            narrow.columns
+        );
+    }
+}
+
+#[test]
+fn the_correlated_seed_carries_only_the_identity_of_the_named_nodes() {
+    // The outer rows are 82 columns wide on a real graph. The predicate names b
+    // and a, so the seed is their identities and the matches join back on two.
+    let forge = forge();
+    let outer = "MATCH (a:P {id: 1})-[:K]-(b)";
+    let plan = physical(
+        &forge,
+        &format!("{outer} WHERE NOT (b)-[:K]-(a) RETURN b.id AS id"),
+    );
+    let text = plan.join("\n");
+    assert_eq!(join_keys(&plan), 2, "{text}");
+    let seeded = seeded_expansion(&plan);
+    let main_path = plan
+        .iter()
+        .map(String::as_str)
+        .find(|line| line.contains("ExpandExec") && !std::ptr::eq(*line, seeded))
+        .expect("the outer expansion");
+    assert!(
+        number_after(seeded, "projection=") < number_after(main_path, "projection="),
+        "the seeded expansion should carry fewer columns than the outer one:\n{text}"
+    );
+    let seed = plan
+        .iter()
+        .position(|line| line.contains("CorrelatedSeedExec"))
+        .expect("seed");
+    assert!(
+        plan[seed - 1].matches(" as ").count() <= 8,
+        "the seed should project the identities only:\n{text}"
+    );
+}
+
+#[test]
+fn a_narrow_seed_serves_every_shape_of_predicate_over_bound_nodes() {
+    let forge = forge();
+    let outer = "MATCH (a:P {id: 1})-[:K]-(b)";
+    let single = |keys| Narrow {
+        keys,
+        columns: 3,
+        negated: true,
+    };
+    // One variable named: one key.
+    assert_narrow(&forge, outer, "(b)-[:K]->()", single(1));
+    // A label on a re-bound node moves onto the seed beside its identity.
+    assert_narrow(&forge, outer, "(b:Q)-[:K]-(a)", single(2));
+    assert_narrow(&forge, outer, "(b)-[:K]-(a:Q)", single(2));
+    // Two traversals; the middle node is the predicate's own.
+    assert_narrow(
+        &forge,
+        outer,
+        "EXISTS { (b)-[:K]->()-[:K]->(a) }",
+        Narrow {
+            keys: 2,
+            columns: 5,
+            negated: false,
+        },
+    );
+    // A property on a re-bound node is read from the node, not from the seed.
+    assert_narrow(&forge, outer, "(b {id: 3})-[:K]-(a)", single(2));
+    // A NULL outer binding (an unmatched OPTIONAL MATCH) joins back null-safe.
+    assert_narrow(
+        &forge,
+        "MATCH (a:P) WHERE a.id <= 4 OPTIONAL MATCH (a)<-[:K]-(x:Q) WITH a, x",
+        "(a)-[:K]-(x)",
+        single(2),
+    );
+}
+
+#[test]
+fn a_predicate_that_reads_an_outer_property_seeds_that_variables_columns() {
+    // The subquery compares what it reaches with a.id, so a rides through whole
+    // while b is only its identity.
+    let forge = forge();
+    let outer = "MATCH (a:P {id: 1})-[:K]-(b)";
+    let predicate = "EXISTS { MATCH (b)-[:K]->(c) WHERE c.id > a.id RETURN c.id }";
+    // b is 2 (twice), 3 or 4; 2 reaches 3 and 5, 3 reaches 3, and 4 reaches
+    // only a itself.
+    expect(
+        &forge,
+        &format!("{outer} WHERE {predicate} RETURN b.id AS id"),
+        &["2", "2", "3"],
+    );
+    let plan = physical(
+        &forge,
+        &format!("{outer} WHERE {predicate} RETURN b.id AS id"),
+    );
+    assert_eq!(join_keys(&plan), 2, "{}", plan.join("\n"));
+    assert_eq!(operators(&plan, "CorrelatedSeedExec"), 1, "{plan:?}");
+}
+
+// ---------------------------------------------------------------------------
 // Growth
 // ---------------------------------------------------------------------------
 
@@ -539,4 +705,67 @@ fn predicate_work_does_not_grow_with_the_graph() {
         "MATCH (a:P {id: 1})-[:K]-(b) RETURN b.id AS id",
         "MATCH (a:P {id: 1})-[:K]-(b) WHERE EXISTS { (b)-[:K]->()-[:K]->(a) } RETURN b.id AS id",
     );
+}
+
+/// A ring of 64 `Entity` nodes built through bulk construction, where node `i`
+/// links to the next two nodes: a compact generation that carries the ordinal
+/// identities the identity-only expansion reads. Nothing in a project built by
+/// Cypher `CREATE` does.
+#[test]
+fn the_seeded_expansion_reads_identities_without_touching_edges_or_nodes() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let path = dir.path().join("state");
+    bulk_fixture::generate_bulk_graph_with_properties(&path, 64, 2, false);
+    let forge = GraphForge::new(Some(path.to_str().expect("UTF-8 path"))).expect("opens");
+    let outer = format!(
+        "MATCH (a:Entity {{name: '{}'}})-[:LINK]->(b)",
+        bulk_fixture::fixture_node_name(0)
+    );
+    let base = format!("{outer} RETURN b.node_uuid AS id");
+    let query = format!("{outer} WHERE NOT (b)-[:LINK]->(a) RETURN b.node_uuid AS id");
+
+    let plan = physical(&forge, &query);
+    let text = plan.join("\n");
+    let seeded = seeded_expansion(&plan);
+    assert!(seeded.contains("identity=v4"), "{seeded}\n{text}");
+    assert_eq!(number_after(seeded, "projection="), 3, "{text}");
+    assert_eq!(join_keys(&plan), 2, "{text}");
+
+    let (plain, plain_work) = demand::capture(|| forge.execute(&base));
+    let (filtered, work) = demand::capture(|| forge.execute(&query));
+    // Node 0 links to nodes 1 and 2, and neither links back.
+    let expected: Vec<String> = [1, 2]
+        .iter()
+        .map(|&node| {
+            bulk_fixture::fixture_node_uuid(node)
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect()
+        })
+        .collect();
+    assert_eq!(rows(&plain.expect("base executes").batches), expected);
+    assert_eq!(
+        rows(&filtered.expect("predicate executes").batches),
+        expected
+    );
+
+    let seeded_hops: Vec<_> = work
+        .hops
+        .iter()
+        .filter(|(hop, _)| !plain_work.hops.contains_key(hop))
+        .collect();
+    assert_eq!(seeded_hops.len(), 1, "{:?}", work.hops);
+    let hop = seeded_hops[0].1;
+    assert_eq!(hop.input_rows, 2, "{hop:?}");
+    assert_eq!(hop.candidates_generated, 4, "{hop:?}");
+    assert_eq!(hop.edge_reads_started, 0, "{hop:?}");
+    assert_eq!(hop.edge_full_reads, 0, "{hop:?}");
+    assert_eq!(hop.node_reads_started, 0, "{hop:?}");
+    assert_eq!(hop.node_full_reads, 0, "{hop:?}");
+    assert_eq!(hop.edge_projected_columns, 0, "{hop:?}");
+    assert_eq!(hop.node_projected_columns, 0, "{hop:?}");
+    // The identities come from the ordinal ranges the base expansion already
+    // read, or from one read of their own.
+    assert!(hop.identity_ranges_selected > 0, "{hop:?}");
 }
