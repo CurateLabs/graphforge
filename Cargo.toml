@@ -27,8 +27,10 @@ members = [
 ]
 # Vendored third-party crates are path dependencies through [patch.crates-io]
 # below. Excluding them keeps them from becoming members, so fmt, clippy and the
-# workspace test run never lint or test code we do not own.
-exclude = ["vendor/*"]
+# workspace test run never lint or test code we do not own. Cargo matches each
+# `exclude` entry as a literal path (a `vendor/*` glob is not recognised), so list
+# every vendored crate here.
+exclude = ["vendor/datafusion-physical-plan"]
 
 [workspace.package]
 version = "0.6.0-rc.4"

@@ -49,10 +49,11 @@ use super::spill_manager::SpillManager;
 /// **Lock ordering discipline**: Never hold both locks simultaneously to prevent deadlock.
 /// Always: acquire outer lock → release outer lock → acquire inner lock (if needed).
 struct SpillPoolShared {
-    /// Queue of ALL files (including the current write file if it exists).
-    /// Readers always read from the front of this queue (FIFO).
-    /// Each file has its own lock to enable concurrent reader/writer access.
-    files: VecDeque<Arc<Mutex<ActiveSpillFileShared>>>,
+    /// Files created by writers that the reader has not picked up yet, in creation
+    /// order. The reader moves them into its own list on every poll (see
+    /// [`SpillPoolReader`]), so this queue only ever holds files the reader has not
+    /// seen. Each file has its own lock to enable concurrent reader/writer access.
+    new_files: VecDeque<Arc<Mutex<ActiveSpillFileShared>>>,
     /// SpillManager for creating files and tracking metrics
     spill_manager: Arc<SpillManager>,
     /// Pool-level waker to notify when new files are available (single reader)
@@ -70,7 +71,7 @@ impl SpillPoolShared {
     /// Creates a new shared pool state
     fn new(spill_manager: Arc<SpillManager>) -> Self {
         Self {
-            files: VecDeque::new(),
+            new_files: VecDeque::new(),
             spill_manager,
             waker: None,
             open_write_files: VecDeque::new(),
@@ -192,7 +193,7 @@ impl SpillPoolWriter {
 
             // Re-acquire lock and push to shared queue
             shared = self.shared.lock();
-            shared.files.push_back(Arc::clone(&file_shared));
+            shared.new_files.push_back(Arc::clone(&file_shared));
             shared.wake(); // Wake readers waiting for new files
             file_shared
         };
@@ -523,17 +524,34 @@ struct SpillFile {
     spill_manager: Arc<SpillManager>,
 }
 
-impl Stream for SpillFile {
-    type Item = Result<RecordBatch>;
+/// Outcome of polling a single file of the pool, see [`SpillFile::poll_file`].
+enum FilePoll {
+    /// A batch was read from the file, or reading it failed.
+    Item(Result<RecordBatch>),
+    /// The file's stream ended: every batch written to it has been read and the
+    /// writer has finished it (the caller verifies the latter).
+    Done,
+    /// Every batch written so far has been read, but the writer has not finished
+    /// the file. The file's waker is registered, so the task is woken when the
+    /// writer appends another batch or finishes the file.
+    CaughtUp,
+    /// The file has unread batches, but the underlying I/O is not ready yet. The
+    /// I/O has registered the task's waker.
+    Pending,
+}
 
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
+impl SpillFile {
+    /// Polls the file for its next batch.
+    ///
+    /// Unlike a plain stream poll this tells the caller *why* no batch is
+    /// available, so [`SpillPoolReader`] can move on to a newer file when this
+    /// one is only waiting for its writer, but keeps waiting on it while its
+    /// data is still being read from disk (which keeps batches in file order).
+    fn poll_file(&mut self, cx: &mut std::task::Context<'_>) -> FilePoll {
         use std::task::Poll;
 
         // Step 1: Lock shared state and check coordination
-        let (should_read, file) = {
+        let file = {
             let mut shared = self.shared.lock();
 
             // Determine if we can read
@@ -541,24 +559,23 @@ impl Stream for SpillFile {
 
             if batches_read < shared.batches_written {
                 // More data available to read - take the file if we don't have a reader yet
-                let file = if self.reader.is_none() {
+                if self.reader.is_none() {
                     shared.file.take()
                 } else {
                     None
-                };
-                (true, file)
+                }
             } else if shared.writer_finished {
                 // No more data and writer is done - EOF
-                return Poll::Ready(None);
+                return FilePoll::Done;
             } else {
                 // Caught up to writer, but writer still active - register waker and wait
                 shared.register_waker(cx.waker().clone());
-                return Poll::Pending;
+                return FilePoll::CaughtUp;
             }
         }; // Lock released here
 
         // Step 2: Lazy-create reader stream if needed
-        if self.reader.is_none() && should_read {
+        if self.reader.is_none() {
             if let Some(file) = file {
                 // we want this unbuffered because files are actively being written to
                 match self
@@ -571,36 +588,35 @@ impl Stream for SpillFile {
                             batches_read: 0,
                         });
                     }
-                    Err(e) => return Poll::Ready(Some(Err(e))),
+                    Err(e) => return FilePoll::Item(Err(e)),
                 }
             } else {
                 // File not available yet (writer hasn't finished or already taken)
                 // Register waker and wait for file to be ready
                 let mut shared = self.shared.lock();
                 shared.register_waker(cx.waker().clone());
-                return Poll::Pending;
+                return FilePoll::CaughtUp;
             }
         }
 
         // Step 3: Poll the reader stream (no lock held)
-        if let Some(reader) = &mut self.reader {
-            match reader.stream.poll_next_unpin(cx) {
-                Poll::Ready(Some(Ok(batch))) => {
-                    // Successfully read a batch - increment counter
-                    reader.batches_read += 1;
-                    Poll::Ready(Some(Ok(batch)))
-                }
-                Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
-                Poll::Ready(None) => {
-                    // Stream exhausted unexpectedly
-                    // This shouldn't happen if coordination is correct, but handle gracefully
-                    Poll::Ready(None)
-                }
-                Poll::Pending => Poll::Pending,
-            }
-        } else {
+        let Some(reader) = &mut self.reader else {
             // Should not reach here, but handle gracefully
-            Poll::Ready(None)
+            return FilePoll::Done;
+        };
+        match reader.stream.poll_next_unpin(cx) {
+            Poll::Ready(Some(Ok(batch))) => {
+                // Successfully read a batch - increment counter
+                reader.batches_read += 1;
+                FilePoll::Item(Ok(batch))
+            }
+            Poll::Ready(Some(Err(e))) => FilePoll::Item(Err(e)),
+            Poll::Ready(None) => {
+                // Stream exhausted unexpectedly
+                // This shouldn't happen if coordination is correct, but handle gracefully
+                FilePoll::Done
+            }
+            Poll::Pending => FilePoll::Pending,
         }
     }
 }
@@ -622,11 +638,31 @@ impl Stream for SpillFile {
 ///
 /// This makes it suitable for continuous streaming scenarios where the writer may
 /// produce data intermittently.
+///
+/// # Reading from several open files
+///
+/// With a single writer handle at most one file is open for writing at a time and
+/// every earlier file is finished, so reading the files oldest first is exactly
+/// FIFO. With cloned writers, concurrent pushes can leave more than one file open,
+/// and a batch may land in a newer file while the oldest file is drained but not
+/// finished. The reader therefore polls every file it knows about, oldest first,
+/// and returns the first batch that is available. A file that is merely caught up
+/// with its writer is skipped; the reader only waits on a file while that file has
+/// unread batches whose bytes are still being read from disk, which keeps batches
+/// in file order (strict FIFO for one writer).
+///
+/// This matters for [`RepartitionExec`](crate::repartition::RepartitionExec), which
+/// sends a "spilled" marker through its channel after every `push_batch` and then
+/// blocks on this stream until it yields a batch. If the reader only ever drained the
+/// oldest file, it could wait for a batch that had been written to a newer file; with
+/// the channel gate closed the writers could not push anything to wake it, so the
+/// query would deadlock (<https://github.com/apache/datafusion/issues/24883>).
 pub struct SpillPoolReader {
     /// Shared reference to the spill pool
     shared: Arc<Mutex<SpillPoolShared>>,
-    /// Current SpillFile we're reading from
-    current_file: Option<SpillFile>,
+    /// Files this reader has picked up from the pool and not fully consumed yet, in
+    /// creation order. Each carries its own lazily-created stream and read position.
+    files: VecDeque<SpillFile>,
     /// Schema of the spilled data
     schema: SchemaRef,
 }
@@ -642,7 +678,7 @@ impl SpillPoolReader {
     fn new(shared: Arc<Mutex<SpillPoolShared>>, schema: SchemaRef) -> Self {
         Self {
             shared,
-            current_file: None,
+            files: VecDeque::new(),
             schema,
         }
     }
@@ -657,75 +693,81 @@ impl Stream for SpillPoolReader {
     ) -> std::task::Poll<Option<Self::Item>> {
         use std::task::Poll;
 
+        // `Self: Unpin`; reborrow once so `files` and `shared` can be used together
+        let this = &mut *self;
+
         loop {
-            // If we have a current file, try to read from it
-            if let Some(ref mut file) = self.current_file {
-                match file.poll_next_unpin(cx) {
-                    Poll::Ready(Some(Ok(batch))) => {
-                        // Got a batch, return it
-                        return Poll::Ready(Some(Ok(batch)));
+            // Pick up the files writers have created since the last poll, in
+            // creation order.
+            {
+                let mut shared = this.shared.lock();
+                while let Some(file_shared) = shared.new_files.pop_front() {
+                    let spill_manager = Arc::clone(&shared.spill_manager);
+                    this.files.push_back(SpillFile {
+                        shared: file_shared,
+                        reader: None,
+                        spill_manager,
+                    });
+                }
+            } // Lock released here
+
+            // Poll the files oldest first and return the first available batch.
+            // A file that is finished and fully read is dropped, which releases
+            // its disk space. A file that is only waiting for its writer has
+            // registered its own waker, so we move on to the next file instead
+            // of waiting on it.
+            let mut idx = 0;
+            while idx < this.files.len() {
+                match this.files[idx].poll_file(cx) {
+                    FilePoll::Item(item) => {
+                        // Got a batch (or an error), return it
+                        return Poll::Ready(Some(item));
                     }
-                    Poll::Ready(Some(Err(e))) => {
-                        // Error reading batch
-                        return Poll::Ready(Some(Err(e)));
-                    }
-                    Poll::Ready(None) => {
-                        // Current file stream exhausted
+                    FilePoll::Done => {
+                        // File stream exhausted
                         // Check if this file is marked as writer_finished
-                        let writer_finished = { file.shared.lock().writer_finished };
+                        let writer_finished =
+                            { this.files[idx].shared.lock().writer_finished };
 
                         if writer_finished {
-                            // File is complete, pop it from the queue and move to next
-                            let mut shared = self.shared.lock();
-                            shared.files.pop_front();
-                            drop(shared); // Release lock
-
-                            // Clear current file and continue loop to get next file
-                            self.current_file = None;
-                            continue;
+                            // File is complete, drop it and move on to the next
+                            this.files.remove(idx);
                         } else {
                             // Stream exhausted but writer not finished - unexpected
                             // This shouldn't happen with proper coordination
                             return Poll::Ready(None);
                         }
                     }
-                    Poll::Pending => {
-                        // File not ready yet (waiting for writer)
-                        // Register waker so we get notified when writer adds more batches
-                        let mut shared = self.shared.lock();
-                        shared.register_waker(cx.waker().clone());
+                    FilePoll::Pending => {
+                        // The oldest file with unread batches is still being read
+                        // from disk. Wait for it rather than skipping ahead, so
+                        // batches come back in file order (FIFO for one writer).
                         return Poll::Pending;
+                    }
+                    FilePoll::CaughtUp => {
+                        // Nothing to read here until its writer appends more; a
+                        // newer file may have unread batches, so try the next one
+                        idx += 1;
                     }
                 }
             }
 
-            // No current file, need to get the next one
-            let mut shared = self.shared.lock();
+            // No known file has an unread batch
+            let mut shared = this.shared.lock();
 
-            // Peek at the front of the queue (don't pop yet)
-            if let Some(file_shared) = shared.files.front() {
-                // Create a SpillFile from the shared state
-                let spill_manager = Arc::clone(&shared.spill_manager);
-                let file_shared = Arc::clone(file_shared);
-                drop(shared); // Release lock before creating SpillFile
-
-                self.current_file = Some(SpillFile {
-                    shared: file_shared,
-                    reader: None,
-                    spill_manager,
-                });
-
-                // Continue loop to poll the new file
+            if !shared.new_files.is_empty() {
+                // A writer created a file while we were polling; pick it up
                 continue;
             }
 
-            // No files in queue - check if writer is done
-            if shared.active_writer_count == 0 {
+            if this.files.is_empty() && shared.active_writer_count == 0 {
                 // Writer is done and no more files will be added - EOF
                 return Poll::Ready(None);
             }
 
-            // Writer still active, register waker that will get notified when new files are added
+            // Writer still active: register the pool-level waker so we are
+            // notified when a new file is created or the last writer is dropped.
+            // Each pending file has registered its own waker for new batches.
             shared.register_waker(cx.waker().clone());
             return Poll::Pending;
         }
@@ -1586,6 +1628,195 @@ mod tests {
             final_disk_usage, 0,
             "Disk usage should be 0 after all files dropped, got {final_disk_usage}"
         );
+
+        Ok(())
+    }
+
+    fn first_value(batch: &RecordBatch) -> i32 {
+        use arrow::array::AsArray;
+        batch
+            .column(0)
+            .as_primitive::<arrow::datatypes::Int32Type>()
+            .value(0)
+    }
+
+    /// Takes the file a writer is currently appending to out of the pool, as
+    /// `push_batch` does for the duration of a write. While it is out, another
+    /// `push_batch` finds no open file and starts one of its own. Hand the file
+    /// back with [`return_open_write_file`].
+    fn check_out_open_write_file(
+        writer: &SpillPoolWriter,
+    ) -> Arc<Mutex<ActiveSpillFileShared>> {
+        writer
+            .shared
+            .lock()
+            .open_write_files
+            .pop_front()
+            .expect("the writer must have an open file")
+    }
+
+    fn return_open_write_file(
+        writer: &SpillPoolWriter,
+        file: Arc<Mutex<ActiveSpillFileShared>>,
+    ) {
+        writer.shared.lock().open_write_files.push_back(file);
+    }
+
+    /// Regression test for <https://github.com/apache/datafusion/issues/24883>.
+    ///
+    /// Two writers overlap, so the pool holds two open files with one batch
+    /// each. The reader, which only ever drained the oldest file, parked on that
+    /// file once it had read its single batch even though the second batch was
+    /// on disk. `RepartitionExec` blocks on this stream once per pushed batch
+    /// and, with its channel gate closed, cannot push anything else to wake it.
+    ///
+    /// The reader must yield both batches while both writers are still alive.
+    ///
+    /// Upstream holds writer 1 inside its first disk write with I/O hooks that
+    /// this version of the crate does not have. Here writer 1 is instead
+    /// between the two lock sections of `push_batch`, with its file checked out
+    /// of the open-file queue, which leaves the pool in the same state.
+    #[tokio::test]
+    async fn test_reader_does_not_wait_on_drained_file_while_another_has_data()
+    -> Result<()> {
+        let (writer1, mut reader, metrics) =
+            create_spill_channel_with_metrics(1024 * 1024);
+        let writer2 = writer1.clone();
+
+        // Writer 1 writes its batch and is then in the middle of its next push,
+        // with its file checked out.
+        writer1.push_batch(&create_test_batch(0, 10))?;
+        let checked_out = check_out_open_write_file(&writer1);
+
+        // Writer 2 pushes while writer 1 is mid-push, so it starts a second file.
+        writer2.push_batch(&create_test_batch(10, 10))?;
+        return_open_write_file(&writer1, checked_out);
+        assert_eq!(
+            metrics.spill_file_count.value(),
+            2,
+            "the writers must have written to two different files"
+        );
+
+        // Both batches are on disk and both writers are still alive, so no file
+        // is finished. The reader must yield both batches without waiting for a
+        // writer.
+        let mut values = vec![];
+        for _ in 0..2 {
+            let batch = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                reader.next(),
+            )
+            .await
+            .expect(
+                "reader waited on a drained file while another file had an unread batch",
+            )
+            .expect("reader must not signal EOF while writers are alive")?;
+            assert_eq!(batch.num_rows(), 10);
+            values.push(first_value(&batch));
+        }
+        // Multiple writers: the order between their batches is not guaranteed.
+        values.sort_unstable();
+        assert_eq!(values, vec![0, 10]);
+
+        // Only once every writer is gone does the reader signal EOF.
+        drop(writer1);
+        drop(writer2);
+        assert!(reader.next().await.is_none());
+
+        Ok(())
+    }
+
+    /// A reader parked on a drained file that is still open must be woken when
+    /// another writer starts a new file and writes to it.
+    #[tokio::test]
+    async fn test_reader_parked_on_drained_file_is_woken_by_a_new_file() -> Result<()> {
+        let (writer1, mut reader) = create_spill_channel(1024 * 1024);
+        let writer2 = writer1.clone();
+
+        writer1.push_batch(&create_test_batch(0, 10))?;
+        let first = reader.next().await.unwrap()?;
+        assert_eq!(first_value(&first), 0);
+
+        // The reader has drained the only file, which is still open, and parks.
+        let checked_out = check_out_open_write_file(&writer1);
+        let parked = tokio::spawn(async move {
+            let item = reader.next().await;
+            (reader, item)
+        });
+        tokio::task::yield_now().await;
+
+        // Writer 2 finds no open file, so it starts a new one and writes to it.
+        writer2.push_batch(&create_test_batch(10, 10))?;
+        return_open_write_file(&writer1, checked_out);
+
+        let (mut reader, item) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), parked)
+                .await
+                .expect("reader parked on a drained file was not woken by the new file")
+                .expect("reader task must not panic");
+        let batch = item.expect("reader must not signal EOF while writers are alive")?;
+        assert_eq!(first_value(&batch), 10);
+
+        drop(writer1);
+        drop(writer2);
+        assert!(reader.next().await.is_none());
+
+        Ok(())
+    }
+
+    /// A spill file that cannot be read must fail the reader rather than stall
+    /// it. `RepartitionExec` blocks on this stream after every spilled marker,
+    /// so an error that is swallowed here would hang the query exactly like the
+    /// deadlock this module guards against.
+    ///
+    /// Upstream covers a file that does not open and a file that opens and then
+    /// fails, with I/O hooks this version of the crate does not have. Here the
+    /// file is removed (the read fails when it is opened) or overwritten with
+    /// bytes that are not an IPC message (the read fails while decoding). The
+    /// stream is created infallibly in this version, so both failures reach the
+    /// reader from a poll of the file's stream.
+    #[tokio::test]
+    async fn test_read_errors_are_reported_to_the_reader() -> Result<()> {
+        fn spill_file_path(writer: &SpillPoolWriter) -> std::path::PathBuf {
+            let shared = writer.shared.lock();
+            let file = shared.new_files[0].lock();
+            file.file
+                .as_ref()
+                .expect("the reader has not taken the file yet")
+                .path()
+                .to_path_buf()
+        }
+
+        async fn assert_reader_reports(damage: fn(&std::path::Path)) -> Result<()> {
+            let (writer, mut reader) = create_spill_channel(1024 * 1024);
+
+            // Nothing reads the file until the reader does, so every read that
+            // the pool makes is a read of the batch below.
+            writer.push_batch(&create_test_batch(0, 10))?;
+            damage(&spill_file_path(&writer));
+
+            let item =
+                tokio::time::timeout(std::time::Duration::from_secs(5), reader.next())
+                    .await
+                    .expect("reader must report the read error instead of waiting")
+                    .expect(
+                        "reader must report the read error instead of signalling EOF",
+                    );
+            let err = item.expect_err("a failed read must not produce a batch");
+            println!("reported read error: {err}");
+            Ok(())
+        }
+
+        assert_reader_reports(|path| std::fs::remove_file(path).unwrap()).await?;
+        // An IPC continuation marker and an 8 byte message length, followed by 8
+        // bytes that are not a flatbuffer message.
+        assert_reader_reports(|path| {
+            let mut bytes = vec![0xFF; 4];
+            bytes.extend_from_slice(&8_u32.to_le_bytes());
+            bytes.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+            std::fs::write(path, bytes).unwrap()
+        })
+        .await?;
 
         Ok(())
     }
