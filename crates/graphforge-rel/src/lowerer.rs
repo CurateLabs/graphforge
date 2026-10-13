@@ -17,7 +17,7 @@
 //! | `Expand { .. min_hops=1, max_hops=Some(1) }` | provider-backed `ExpandNode` (relational fallback for schema-only/bound-edge plans) |
 //! | `Expand { variable-length }` | `VarLenExpandNode` (`graphforge-plan` Extension stub) |
 //! | `Optional { child }` | `OptionalMatchNode` (`graphforge-plan` Extension stub); a child that reads an outer variable starts from a `CorrelatedSeedNode` |
-//! | `Exists { child, .. }` | `LeftSemi` / `LeftAnti` join; correlated key union for alternatives; a child that reads an outer variable is an `OptionalMatchNode` over a `CorrelatedSeedNode` |
+//! | `Exists { child, .. }` | `LeftSemi` / `LeftAnti` join; correlated key union for alternatives; a child that reads an outer variable or matches an outer node again is an `OptionalMatchNode` over a `CorrelatedSeedNode` |
 //! | `PatternComprehension { child, .. }` | correlated aggregate + left join |
 //! | `ListElementPatternComprehension { .. }` | ordinal unwind + correlated aggregate + regroup |
 //! | `Unwind { list_expr, alias }` | `UnwindNode` (`graphforge-plan` Extension stub) |
