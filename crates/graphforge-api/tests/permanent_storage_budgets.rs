@@ -929,8 +929,15 @@ fn validate_storage_budgets(f: Fixture, storage: &graphforge_storage::StorageAtt
             } else {
                 0
             },
+            // The edge-property index (ADR 0059) is Properties bytes. It frames
+            // every blob as 128-row pages, each an Arrow IPC message plus a
+            // directory entry, so a shard of 129 to 255 rows pays a second
+            // page. At up to about 256 bytes of framing per page and four blobs
+            // (UUID, id and two columns) per page of 128 edges, that is 8 bytes
+            // per edge. The random fixture's 116 to 158 row shards measure
+            // about 6 bytes per edge.
             if f.properties {
-                64 * (nodes + edges) + 2048 * (node_shards + edge_shards)
+                64 * (nodes + edges) + 8 * edges + 2048 * (node_shards + edge_shards)
             } else {
                 0
             },

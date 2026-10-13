@@ -61,12 +61,12 @@ One manifest and a directory of packs per edge property route:
   blob and for each of its column blobs.
 - `<stem>.packs/<n>.epk`, a pack: consecutive blobs, up to 4 MiB, one write.
   A blob is the sorted `edge_uuid` column of a shard, or one property column of
-  it, as a Zstd-compressed Arrow IPC stream of one batch with no field
-  metadata. A shard holds at most 4,096 rows and at most 1 MiB per column.
+  it, cut into Zstd-compressed Arrow IPC pages with no field metadata (see
+  Pages). A shard holds at most 4,096 rows and at most 1 MiB per column.
 
 A shard may also carry the surrogate `edge_id` of each of its rows as a further
-blob (a Zstd-compressed Arrow IPC stream of one non-null `UInt64` column, in the
-shard's UUID order) and its smallest and largest id, and the manifest then
+blob (a paged non-null `UInt64` column, in the shard's UUID order) and its
+smallest and largest id, and the manifest then
 records `topology_digest`, the digest of the route's canonical edge topology
 files that the ids were joined from. All three are optional manifest fields, so
 an index without them is still `graphforge-edge-property-index/1` and reads
@@ -77,6 +77,72 @@ demands: a route that also stores a wide `memo` costs a `timestamp` lookup
 nothing, and a damaged `memo` blob refuses only the statements that demand
 `memo`. The values are the route's own Arrow values, so every type the overlay
 stores is stored; nothing is re-encoded.
+
+#### Pages
+
+A blob used to be one Zstd Arrow IPC batch of the whole column, so a lookup of
+three rows decoded all 4,096 of a shard's, and Zstd decode of the pack columns
+was the largest share of an edge-property read (23.6% of the SF1 IC5 profile
+for the `joinDate` read alone). A blob is now cut into pages of 128
+rows, each one IPC record batch message compressed with Zstd, and ends with a
+directory:
+
+```text
+[page 0] ... [page n-1][schema][entry 0] ... [entry n-1][schema length u32]
+```
+
+An entry is the page's byte length (`u32`), its XXH64 (`u64`) and, for the UUID
+and id columns, the least and greatest key in the page (16 and 8 bytes,
+big-endian). Page offsets are the running sum of the lengths and the directory
+must account for every byte of the blob, so they are not stored. The schema is
+written once, in the directory, not per page.
+
+The manifest records `page_rows`, so the number of pages of a shard, and with
+it the length of a directory, is known before the directory is read. A
+lookup reads the directory (one read of its tail, a second only when the
+schema outgrows the 256 bytes the first read allows for), chooses the pages
+that can hold its keys, and reads and decodes only those; adjacent pages
+coalesce into one read. UUID pages are disjoint and strictly ascending, so a
+UUID names its page; ids are in UUID order and not sorted, so an id lookup reads
+every page whose bounds contain the id. A property column carries no bounds and
+is read at the pages of the rows the key lookup found.
+
+The seal of a blob covers its directory, and the directory carries the XXH64
+of every page, so the chain from the manifest to a byte a lookup decodes is
+unbroken and a page is checked when it is read. The cost is that damage inside
+a page is found by the statements that read that page, not by every statement
+that touches the blob: a statement whose rows are in an undamaged page of the
+same blob is answered. This narrows the old guarantee only in blast radius, not
+in what is trusted; a statement never decodes a byte that no checksum covered,
+and a mismatch is `GF_VALIDATION` as before.
+
+The format name stays `graphforge-edge-property-index/1`: the layout before pages
+is superseded in place, not versioned. `page_rows` is a required manifest field, so
+the manifest of an index built before pages does not decode, and the reader refuses
+it as it refuses every manifest it cannot use (damage, an unknown format, an invalid
+page size): `GF_VALIDATION`, naming the manifest and `rebuild_property_indexes`. It
+is not treated as absent or stale, so a statement that reads edge properties through
+the index of such a project fails instead of silently answering from the overlay.
+There is no whole-blob reader. The index is derived data and the fragments remain
+the authority, so a project whose index predates pages runs
+`rebuild_property_indexes` once, and the rebuilt index is paged. Nothing rewrites it
+on read.
+
+Page size trades decode work against bytes: each page is its own Zstd frame, so
+smaller pages decode less per target and compress worse. IC5 touches about one
+page per target (a shard lookup wants about 7 of the 32 id pages at 128 rows),
+so the pages are sparse and the target is the unit that matters. Measured on the
+SF1 IC project's edge route, IC5 binding 1, CPU (user plus system) under a
+shared host at load 14 to 23, and the bytes of the route's index:
+
+| rows per page | whole blob (before) | 64 | 128 | 256 | 512 |
+| --- | --- | --- | --- | --- | --- |
+| IC5 CPU, seconds | 45.8 | about 40.8 | 38 to 40 | about 40 to 42 | 43.1 |
+| index bytes | 97.5 MB | 230 MB | 160 MB | 126 MB | 110 MB |
+
+128 rows is the least CPU. 256 gives back about half of the growth for about 5%
+more CPU, and 512 loses most of the gain. The count is `PAGE_ROWS` and is
+recorded in each manifest as `page_rows`, so changing it changes no reader.
 
 #### Why packs and not a file per blob
 
@@ -97,8 +163,9 @@ its length and XXH64.
 - The index is derived and rebuildable. The fragments remain the authority.
 - The manifest is first-touch (checked once per hydration, like the adjacency
   manifest); packs are self-authenticating (hydration neither reads nor
-  registers their bytes, only links them) and every lookup checks the length and
-  XXH64 of each blob it reads against the manifest, whichever pack holds it. A
+  registers their bytes, only links them) and every lookup checks the length
+  and XXH64 of the directory of each blob it reads against the manifest, and of
+  each page it decodes against the directory, whichever pack holds it. A
   failure is `GF_VALIDATION`. The overlay is not substituted for a corrupted
   index, and a read never rebuilds one.
 - An index is current only while its source digest equals the route's. A
@@ -217,15 +284,32 @@ relation, now read from the index.
 - A project published before the index, one built by a staged append, and a
   route changed since the build answer through the overlay until
   `rebuild_property_indexes`. Nothing breaks and nothing is rebuilt silently.
+- A project whose edge-property index was built before pages is not that case:
+  its manifest does not decode, so a statement that reads edge properties through
+  the index fails with `GF_VALIDATION` until `rebuild_property_indexes` replaces
+  the index. Statements that read no edge property through the index are
+  unaffected.
 - A route poisoned mid-build (a tombstone, an unsorted fragment, a conflicting
   column type, a single value over 1 MiB) is not indexed; packs written before
   the decision stay in the generation as unreferenced files.
-- The index adds about the size of the indexed columns plus 16 bytes per row.
+- The index adds about the size of the indexed columns plus 16 bytes per row
+  before compression. Paging costs more on top, because a Zstd frame per 128
+  rows compresses worse than one per 4,096: the edge-property route of the SF1
+  IC project grew from 25 files and 97.5 MB to 40 files and 159.9 MB (+64%), and
+  the SF1 FinBench project's from 39 files and 158.3 MB to 74 files and 300.6 MB
+  (+90%), and `rebuild_property_indexes` took 33 s instead of 25 s on IC. Pages of
+  256 rows would grow IC by 30%; a shared Zstd dictionary or coarser pages for
+  columns that are read whole are the ways to trade the bytes back.
 - The manifest is read whole by every lookup that touches its route: about 100
   bytes per blob (a seal and its share of the shard's bounds), so about 1 KB per
   shard: 0.8 MB for the 3.1 million rows of the SF1 FinBench edge route and 0.5 MB
   for the 4.0 million rows of the SF1 IC route.
-- A lookup reads the byte range of a blob out of its pack, not the pack.
+- A lookup reads the directory of a blob and the pages it needs out of its pack,
+  not the blob and not the pack, and decodes only those pages. Each lookup
+  re-reads the directories it needs; nothing caches a directory or a decoded
+  page across lookups, so a page that several lookups of one statement want is
+  read and decoded once per lookup. A cache is a follow-up and needs its memory
+  accounted in the query pool.
 - Ids add 8 bytes per row before compression and 16 bytes per shard of bounds.
   Adding them changes no existing byte of an index without ids.
 - A topology-only mutation (an edge with no properties) leaves the UUID key

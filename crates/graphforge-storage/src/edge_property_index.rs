@@ -51,7 +51,10 @@
 //! position in those files; an index without ids, or whose ids no longer match,
 //! still answers UUID lookups ([`lookup_edge_properties`]). A missing or stale
 //! index is not used and is never rebuilt by a read; the property overlay
-//! answers instead. A manifest or blob that fails its checksum is refused.
+//! answers instead. A manifest or blob that fails its checksum is refused, and
+//! so is a manifest the reader cannot decode, such as one written before the
+//! manifest named its page size (`page_rows`): the index is derived data, a read
+//! never repairs it, and the refusal names `rebuild_property_indexes`.
 //! Routes that hold a tombstone, or whose fragments disagree on the type of a
 //! column, are not indexed. Ids are all-or-nothing per route: when any row
 //! cannot be joined to a topology row, or the topology's UUID pages overlap too
@@ -59,14 +62,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, BooleanArray, FixedSizeBinaryArray, UInt32Array, UInt64Array, new_null_array,
+    Array, ArrayRef, BooleanArray, FixedSizeBinaryArray, UInt64Array, new_null_array,
 };
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Schema};
 use arrow::record_batch::RecordBatch;
 use graphforge_core::GfError;
 use serde::{Deserialize, Serialize};
@@ -78,6 +81,9 @@ use crate::property_overlay::{
     PropertyOverlayLimits, PropertyRouteKind, RouteRead,
 };
 use crate::topology_identity::EdgeIdResolver;
+
+mod pages;
+use pages::{Keys, PAGE_ROWS, PackHandles, encode_paged};
 
 /// Manifest format identifier.
 pub const FORMAT: &str = "graphforge-edge-property-index/1";
@@ -162,6 +168,10 @@ struct Manifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     topology_digest: Option<String>,
     rows: u64,
+    /// Rows per page of every blob, so a lookup decodes the pages that hold
+    /// its rows. Required: a manifest written before paging has no such field,
+    /// does not decode, and is refused until the index is rebuilt.
+    page_rows: u32,
     pack_dir: String,
     columns: Vec<String>,
     shards: Vec<ShardEntry>,
@@ -193,8 +203,21 @@ fn encode_manifest(manifest: &Manifest) -> Result<Vec<u8>, GfError> {
     Ok(bytes)
 }
 
+/// What a refused manifest tells the operator to do. The index is derived data:
+/// a reader never repairs it, and an explicit rebuild replaces it.
+const REBUILD_HINT: &str = "run rebuild_property_indexes to replace the index";
+
+/// Decode and authenticate a manifest. One the reader cannot use is refused,
+/// never read around: damage, a format it does not know, and an index built
+/// before the manifest named `page_rows` all fail here, and all are repaired by
+/// rebuilding the derived index.
 fn decode_manifest(bytes: &[u8], path: &Path) -> Result<Manifest, GfError> {
-    let corrupt = || validation(format!("manifest {} failed its checksum", path.display()));
+    let corrupt = || {
+        validation(format!(
+            "manifest {} failed its checksum; {REBUILD_HINT}",
+            path.display()
+        ))
+    };
     if bytes.len() < 17 || bytes[16] != b'\n' {
         return Err(corrupt());
     }
@@ -206,12 +229,23 @@ fn decode_manifest(bytes: &[u8], path: &Path) -> Result<Manifest, GfError> {
     if crate::corruption_checksum::checksum(body) != expected {
         return Err(corrupt());
     }
-    let manifest: Manifest = serde_json::from_slice(body).map_err(|_| corrupt())?;
+    let manifest: Manifest = serde_json::from_slice(body).map_err(|error| {
+        validation(format!(
+            "manifest {} does not decode ({error}); {REBUILD_HINT}",
+            path.display()
+        ))
+    })?;
     if manifest.format != FORMAT {
         return Err(validation(format!(
-            "manifest {} has unsupported format {:?}",
+            "manifest {} has unsupported format {:?}; {REBUILD_HINT}",
             path.display(),
             manifest.format
+        )));
+    }
+    if manifest.page_rows == 0 || manifest.page_rows as usize > SHARD_ROWS {
+        return Err(validation(format!(
+            "manifest {} has an invalid page size; {REBUILD_HINT}",
+            path.display()
         )));
     }
     Ok(manifest)
@@ -224,36 +258,6 @@ fn slice_bytes(column: &ArrayRef, start: usize, length: usize) -> usize {
         .to_data()
         .get_slice_memory_size()
         .unwrap_or(usize::MAX)
-}
-
-/// One column as a Zstd-compressed Arrow IPC stream of a single batch.
-fn encode_column(name: &str, data_type: &DataType, array: ArrayRef) -> Result<Vec<u8>, GfError> {
-    // Field metadata is a hash map: leaving it out keeps the bytes a function
-    // of the content. The UUID and id columns are the only non-null ones.
-    let nullable = name != UUID_COLUMN && name != ID_COLUMN;
-    let schema = Arc::new(Schema::new(vec![Field::new(
-        name,
-        data_type.clone(),
-        nullable,
-    )]));
-    let batch = RecordBatch::try_new(Arc::clone(&schema), vec![array])
-        .map_err(|e| validation(e.to_string()))?;
-    let mut bytes = Vec::new();
-    {
-        // Zstd, as the CSR shards: the index must not cost more than the
-        // compressed fragments it indexes.
-        let options = arrow::ipc::writer::IpcWriteOptions::default()
-            .try_with_compression(Some(arrow::ipc::CompressionType::ZSTD))
-            .map_err(|e| validation(e.to_string()))?;
-        let mut writer =
-            arrow::ipc::writer::StreamWriter::try_new_with_options(&mut bytes, &schema, options)
-                .map_err(|e| validation(e.to_string()))?;
-        writer
-            .write(&batch)
-            .map_err(|e| validation(e.to_string()))?;
-        writer.finish().map_err(|e| validation(e.to_string()))?;
-    }
-    Ok(bytes)
 }
 
 /// One file of a built index, by its path relative to the graph root.
@@ -328,12 +332,27 @@ impl EdgeRouteIndexBuilder {
         Ok(())
     }
 
-    /// Append one blob to the pack being filled, starting a new pack when it
-    /// would pass `PACK_BYTES`. `None` when the blob cannot fit any pack, which
-    /// leaves the route to the property overlay.
+    /// Encode one column of a shard as a paged blob and append it to the pack
+    /// being filled. `None` when the blob cannot fit any pack.
+    fn append_column(
+        &mut self,
+        name: &str,
+        data_type: &DataType,
+        array: &ArrayRef,
+        keys: Keys,
+        write: &mut dyn FnMut(String, Vec<u8>) -> Result<(), GfError>,
+    ) -> Result<Option<BlobSeal>, GfError> {
+        let (blob, xxh64) = encode_paged(name, data_type, array, keys, PAGE_ROWS)?;
+        self.append(&blob, xxh64, write)
+    }
+
+    /// Append one blob, sealed by `xxh64`, to the pack being filled, starting a
+    /// new pack when it would pass `PACK_BYTES`. `None` when the blob cannot fit
+    /// any pack, which leaves the route to the property overlay.
     fn append(
         &mut self,
         blob: &[u8],
+        xxh64: u64,
         write: &mut dyn FnMut(String, Vec<u8>) -> Result<(), GfError>,
     ) -> Result<Option<BlobSeal>, GfError> {
         if blob.len() > PACK_BYTES {
@@ -347,7 +366,7 @@ impl EdgeRouteIndexBuilder {
             pack: self.packs_written,
             offset: self.pack.len() as u64,
             byte_length: blob.len() as u64,
-            xxh64: crate::corruption_checksum::checksum(blob),
+            xxh64,
         };
         self.pack.extend_from_slice(blob);
         Ok(Some(seal))
@@ -412,12 +431,14 @@ impl EdgeRouteIndexBuilder {
                 self.poisoned = true;
                 return Ok(());
             };
-            let uuid_bytes = encode_column(
+            let Some(uuid_seal) = self.append_column(
                 UUID_COLUMN,
                 &DataType::FixedSizeBinary(16),
-                uuid_column.slice(start, length),
-            )?;
-            let Some(uuid_seal) = self.append(&uuid_bytes, write)? else {
+                &uuid_column.slice(start, length),
+                Keys::Uuid,
+                write,
+            )?
+            else {
                 return Ok(());
             };
             let id_blob = match ids {
@@ -431,8 +452,14 @@ impl EdgeRouteIndexBuilder {
             };
             let mut columns = Vec::with_capacity(stored.len());
             for (index, name, column) in &stored {
-                let bytes = encode_column(name, column.data_type(), column.slice(start, length))?;
-                let Some(blob) = self.append(&bytes, write)? else {
+                let Some(blob) = self.append_column(
+                    name,
+                    column.data_type(),
+                    &column.slice(start, length),
+                    Keys::Values,
+                    write,
+                )?
+                else {
                     return Ok(());
                 };
                 columns.push(ColumnEntry {
@@ -493,12 +520,9 @@ impl EdgeRouteIndexBuilder {
         window: &[u64],
         write: &mut dyn FnMut(String, Vec<u8>) -> Result<(), GfError>,
     ) -> Result<Option<IdBlob>, GfError> {
-        let bytes = encode_column(
-            ID_COLUMN,
-            &DataType::UInt64,
-            Arc::new(UInt64Array::from(window.to_vec())),
-        )?;
-        let Some(seal) = self.append(&bytes, write)? else {
+        let ids: ArrayRef = Arc::new(UInt64Array::from(window.to_vec()));
+        let Some(seal) = self.append_column(ID_COLUMN, &DataType::UInt64, &ids, Keys::Id, write)?
+        else {
             return Ok(None);
         };
         let min = window.iter().copied().min().expect("non-empty shard");
@@ -546,6 +570,7 @@ impl EdgeRouteIndexBuilder {
             source_digest: source_digest.to_owned(),
             topology_digest,
             rows: self.rows,
+            page_rows: u32::try_from(PAGE_ROWS).expect("page rows fit u32"),
             pack_dir: self.pack_dir,
             columns: self.columns.into_iter().map(|(name, _)| name).collect(),
             shards: self.shards,
@@ -722,7 +747,8 @@ struct CurrentManifest {
 }
 
 /// The manifest of a current index for this route, `None` when no current
-/// index exists. A checksum failure is an error.
+/// index exists (no manifest, or one for other source objects). A manifest that
+/// fails its checksum, does not decode or has an unknown format is an error.
 fn current_manifest(
     project_dir: &Path,
     inventory: &AuthenticatedPropertyInventory,
@@ -817,8 +843,10 @@ struct HitShard<K> {
 /// checked against the manifest.
 ///
 /// # Errors
-/// A manifest or blob that fails its checksum or is malformed, or an edge that
-/// two shards both hold.
+/// A manifest that does not decode (including one written before paging, which
+/// the error tells the caller to replace with `rebuild_property_indexes`), a
+/// manifest or blob that fails its checksum or is malformed, or an edge that two
+/// shards both hold.
 pub fn lookup_edge_properties(
     project_dir: &Path,
     inventory: &AuthenticatedPropertyInventory,
@@ -834,7 +862,10 @@ pub fn lookup_edge_properties(
     };
     let demanded = demanded_columns(&current.manifest, properties);
     let sorted: Vec<[u8; 16]> = targets.iter().copied().collect();
-    let mut packs = PackHandles::new(index_dir(project_dir).join(&current.manifest.pack_dir));
+    let mut packs = PackHandles::new(
+        index_dir(project_dir).join(&current.manifest.pack_dir),
+        current.manifest.page_rows,
+    );
     let mut hits: Vec<HitShard<[u8; 16]>> = Vec::new();
     for (shard, (first, last)) in current.manifest.shards.iter().zip(&current.ranges) {
         let begin = sorted.partition_point(|target| target < first);
@@ -883,8 +914,7 @@ pub struct IndexedEdgeIds {
 /// cannot answer by id.
 ///
 /// # Errors
-/// A manifest or blob that fails its checksum or is malformed, or an edge that
-/// two shards both hold.
+/// As [`lookup_edge_properties`].
 pub fn lookup_edge_properties_by_id(
     project_dir: &Path,
     inventory: &AuthenticatedPropertyInventory,
@@ -903,7 +933,10 @@ pub fn lookup_edge_properties_by_id(
     }
     let demanded = demanded_columns(&current.manifest, properties);
     let sorted: Vec<u64> = targets.iter().copied().collect();
-    let mut packs = PackHandles::new(index_dir(project_dir).join(&current.manifest.pack_dir));
+    let mut packs = PackHandles::new(
+        index_dir(project_dir).join(&current.manifest.pack_dir),
+        current.manifest.page_rows,
+    );
     let mut hits: Vec<HitShard<u64>> = Vec::new();
     for shard in &current.manifest.shards {
         let (Some(seal), Some(min), Some(max)) = (shard.ids, shard.id_min, shard.id_max) else {
@@ -1068,24 +1101,25 @@ fn read_hit_shard(
     targets: &[[u8; 16]],
     demanded: &BTreeMap<usize, &String>,
 ) -> Result<Option<HitShard<[u8; 16]>>, GfError> {
-    let uuids = packs.read_column(shard.uuids, shard.rows)?;
-    let wrong_type = || validation("shard UUID column has the wrong type");
-    if uuids.data_type() != &DataType::FixedSizeBinary(16) || uuids.null_count() != 0 {
-        return Err(wrong_type());
+    let blob = packs.open_blob(shard.uuids, shard.rows, Keys::Uuid)?;
+    let located = blob.uuid_pages(targets);
+    if located.is_empty() {
+        return Ok(None);
     }
-    let uuids = uuids
-        .as_any()
-        .downcast_ref::<FixedSizeBinaryArray>()
-        .ok_or_else(wrong_type)?;
-    if (1..uuids.len()).any(|row| uuids.value(row - 1) >= uuids.value(row)) {
-        return Err(validation("shard UUIDs are not strictly ascending"));
-    }
+    let wanted: Vec<usize> = located.iter().map(|(page, _)| *page).collect();
+    let decoded = packs.read_pages(&blob, &wanted)?;
     let mut rows = Vec::new();
     let mut found = Vec::new();
-    for target in targets {
-        if let Some(row) = find_uuid(uuids, target) {
-            rows.push(row);
-            found.push(*target);
+    for ((page, range), array) in located.iter().zip(&decoded) {
+        let uuids = array
+            .as_any()
+            .downcast_ref::<FixedSizeBinaryArray>()
+            .ok_or_else(|| validation("shard UUID column has the wrong type"))?;
+        for target in &targets[range.clone()] {
+            if let Some(row) = find_uuid(uuids, target) {
+                rows.push(page * blob.page_rows() + row);
+                found.push(*target);
+            }
         }
     }
     if rows.is_empty() {
@@ -1109,22 +1143,23 @@ fn read_hit_shard_by_id(
     targets: &[u64],
     demanded: &BTreeMap<usize, &String>,
 ) -> Result<Option<HitShard<u64>>, GfError> {
-    let ids = packs.read_column(seal, shard.rows)?;
-    let wrong_type = || validation("shard id column has the wrong type");
-    if ids.data_type() != &DataType::UInt64 || ids.null_count() != 0 {
-        return Err(wrong_type());
-    }
-    let ids = ids
-        .as_any()
-        .downcast_ref::<UInt64Array>()
-        .ok_or_else(wrong_type)?;
+    let blob = packs.open_blob(seal, shard.rows, Keys::Id)?;
+    blob.check_id_range(min, max)?;
+    let wanted = blob.id_pages(targets);
+    let decoded = packs.read_pages(&blob, &wanted)?;
     let mut located: Vec<(u64, usize)> = Vec::new();
-    for (row, id) in ids.values().iter().enumerate() {
-        if *id < min || *id > max {
-            return Err(validation("shard id lies outside its manifest range"));
-        }
-        if targets.binary_search(id).is_ok() {
-            located.push((*id, row));
+    for (page, array) in wanted.iter().zip(&decoded) {
+        let ids = array
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .ok_or_else(|| validation("shard id column has the wrong type"))?;
+        for (offset, id) in ids.values().iter().enumerate() {
+            if *id < min || *id > max {
+                return Err(validation("shard id lies outside its manifest range"));
+            }
+            if targets.binary_search(id).is_ok() {
+                located.push((*id, page * blob.page_rows() + offset));
+            }
         }
     }
     if located.is_empty() {
@@ -1152,19 +1187,16 @@ fn take_columns(
     rows: &[usize],
     demanded: &BTreeMap<usize, &String>,
 ) -> Result<BTreeMap<usize, ArrayRef>, GfError> {
-    let indices = rows
-        .iter()
-        .map(|row| u32::try_from(*row))
-        .collect::<Result<Vec<_>, _>>()
-        .map(UInt32Array::from)
-        .map_err(|_| validation("shard row index exceeds u32"))?;
     let mut columns = BTreeMap::new();
     for entry in &shard.columns {
         if !demanded.contains_key(&entry.column) {
             continue;
         }
-        let array = packs.read_column(entry.blob, shard.rows)?;
-        let taken = arrow::compute::take(array.as_ref(), &indices, None)
+        let blob = packs.open_blob(entry.blob, shard.rows, Keys::Values)?;
+        let (wanted, positions) = blob.row_pages(rows);
+        let decoded = packs.read_pages(&blob, &wanted)?;
+        let sources = decoded.iter().map(AsRef::as_ref).collect::<Vec<_>>();
+        let taken = arrow::compute::interleave(&sources, &positions)
             .map_err(|e| validation(e.to_string()))?;
         columns.insert(entry.column, taken);
     }
@@ -1215,69 +1247,4 @@ fn find_uuid(uuids: &FixedSizeBinaryArray, target: &[u8; 16]) -> Option<usize> {
         }
     }
     None
-}
-
-/// The packs of one route, opened when a lookup first reads from them and kept
-/// open for the rest of the lookup.
-struct PackHandles {
-    directory: PathBuf,
-    open: BTreeMap<u32, (PathBuf, File)>,
-}
-
-impl PackHandles {
-    fn new(directory: PathBuf) -> Self {
-        Self {
-            directory,
-            open: BTreeMap::new(),
-        }
-    }
-
-    /// The bytes `seal` names, checked against its checksum.
-    fn read_blob(&mut self, seal: BlobSeal) -> Result<Vec<u8>, GfError> {
-        if let std::collections::btree_map::Entry::Vacant(slot) = self.open.entry(seal.pack) {
-            let path = self
-                .directory
-                .join(format!("{:08}.{PACK_EXTENSION}", seal.pack));
-            let file = File::open(&path).map_err(|e| storage("open pack", &e))?;
-            slot.insert((path, file));
-        }
-        let (path, file) = self.open.get_mut(&seal.pack).expect("pack was just opened");
-        let corrupt = || validation(format!("pack {} failed its checksum", path.display()));
-        if seal.byte_length > PACK_BYTES as u64 {
-            return Err(corrupt());
-        }
-        file.seek(SeekFrom::Start(seal.offset))
-            .map_err(|e| storage("seek pack", &e))?;
-        let mut bytes = Vec::new();
-        file.take(seal.byte_length)
-            .read_to_end(&mut bytes)
-            .map_err(|e| storage("read pack", &e))?;
-        crate::lifecycle_io::record_read(
-            crate::StorageIoPhase::ReadPathScan,
-            bytes.len() as u64,
-            1,
-        );
-        if bytes.len() as u64 != seal.byte_length
-            || crate::corruption_checksum::checksum(&bytes) != seal.xxh64
-        {
-            return Err(corrupt());
-        }
-        Ok(bytes)
-    }
-
-    /// Read one blob, check it against its seal and decode its single column.
-    fn read_column(&mut self, seal: BlobSeal, rows: u64) -> Result<ArrayRef, GfError> {
-        let bytes = self.read_blob(seal)?;
-        let mut reader =
-            arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(&bytes), None)
-                .map_err(|e| validation(e.to_string()))?;
-        let batch = reader
-            .next()
-            .ok_or_else(|| validation("blob holds no batch"))?
-            .map_err(|e| validation(e.to_string()))?;
-        if reader.next().is_some() || batch.num_columns() != 1 || batch.num_rows() as u64 != rows {
-            return Err(validation("blob shape does not match its manifest"));
-        }
-        Ok(Arc::clone(batch.column(0)))
-    }
 }

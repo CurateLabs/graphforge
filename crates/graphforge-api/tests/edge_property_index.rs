@@ -623,6 +623,65 @@ fn a_one_hop_edge_property_read_is_bounded_by_the_frontier_not_the_relation() {
     }
 }
 
+/// The bytes of the column (or of the edge ids) over all shards: what a read of
+/// every shard would take if it read each blob whole.
+fn blob_bytes(project: &Path, column: Option<&str>) -> u64 {
+    let manifest = manifest(project);
+    (0..manifest["shards"].as_array().unwrap().len())
+        .map(|shard| column_blob(&manifest, shard, column).byte_length)
+        .sum()
+}
+
+/// A one-hop read of a fixed frontier reads the pages that hold its edges, not
+/// the blobs of the shards they lie in. Each frontier edge lies in a page of
+/// its own, so the read is bounded by one page of the edge ids and one page of
+/// the column per edge, and by the directories of the blobs it opens. The route
+/// doubles, the frontier reaches twice the shards, and the bound is still the
+/// frontier's: it is smaller than the blobs it would otherwise decode.
+#[test]
+fn a_one_hop_edge_property_read_decodes_the_pages_of_the_frontier_not_the_blobs() {
+    let _serial = serial();
+    let small = build(SMALL_EDGES);
+    let large = build(LARGE_EDGES);
+    let page_rows = manifest(&large.project)["page_rows"]
+        .as_u64()
+        .expect("the index names its page size");
+    // A page of 8-byte values, with the framing of its message and frame.
+    let page = page_rows * 8 + 1_024;
+    // The directory of a blob of one shard: a schema, then a length, a checksum
+    // and, for edge ids, the two 8-byte bounds of every page.
+    let directory = (WINDOW as u64).div_ceil(page_rows) * (12 + 16) + 512;
+    let bound = FRONTIER as u64 * (2 * page + 2 * directory);
+    let whole = blob_bytes(&large.project, None) + blob_bytes(&large.project, Some("timestamp"));
+    assert!(
+        bound < whole,
+        "the bound must separate the pages from the blobs: {bound} of {whole} bytes"
+    );
+    for partitions in [1, 4] {
+        let mut extra = Vec::new();
+        for built in [&small, &large] {
+            let forge = open(&built.project, partitions);
+            // The first statements admit the session's footers, the adjacency
+            // index and the index manifest.
+            let _ = run(&forge, SUM_TIMESTAMPS, 0);
+            let _ = run(&forge, NO_PROPERTY, 0);
+            let (_, hop) = measured(&forge, NO_PROPERTY, 0);
+            let (batches, read) = measured(&forge, SUM_TIMESTAMPS, 0);
+            assert_eq!(scalar_i64(&batches), frontier_timestamps());
+            extra.push((read.saturating_sub(hop), read, hop));
+        }
+        eprintln!("partitions={partitions}: (pack, read, hop) bytes {extra:?}");
+        for (size, (pack, read, hop)) in ["small", "large"].into_iter().zip(&extra) {
+            assert!(
+                *pack <= bound,
+                "partitions={partitions}: the {size} route read {pack} pack bytes \
+                 ({read} against {hop} for the hop alone); bound {bound}, \
+                 blobs {whole} bytes"
+            );
+        }
+    }
+}
+
 /// Flip one bit of the byte at `position` of the stored object of `entry`.
 fn corrupt_object(
     project: &Path,
@@ -654,19 +713,62 @@ fn corrupt_manifest(project: &Path) {
     corrupt_object(project, &entry, |length| length - 1);
 }
 
-/// Corrupt the middle of one blob, inside the pack that holds it. The pack's
-/// other blobs, which have their own seals, are left intact.
-fn corrupt_blob(project: &Path, blob: Blob) {
+/// The inventory entry of the pack that holds `blob`.
+fn pack_entry(project: &Path, blob: Blob) -> graphforge_storage::GraphFileEntry {
     let suffix = format!("/{:08}.epk", blob.pack);
-    let entry = index_files(project)
+    index_files(project)
         .into_iter()
         .find(|file| file.relative_path.ends_with(&suffix))
-        .expect("the generation declares the pack");
-    let at = (blob.offset + blob.byte_length / 2) as usize;
+        .expect("the generation declares the pack")
+}
+
+/// Where each page of a paged blob of `rows` rows lies in it, read from the
+/// directory the blob ends with: an entry of a length, a checksum and the two
+/// bounds of the page's keys (`key_width` bytes each), then the schema's length.
+/// This restates the layout on purpose: a change to it must change this test.
+fn page_extents(
+    project: &Path,
+    blob: Blob,
+    rows: u64,
+    page_rows: u64,
+    key_width: u64,
+) -> Vec<std::ops::Range<u64>> {
+    let pack = std::fs::read(object_of(project, &pack_entry(project, blob))).unwrap();
+    let start = blob.offset as usize;
+    let stored = &pack[start..start + blob.byte_length as usize];
+    let pages = rows.div_ceil(page_rows) as usize;
+    let entry = (4 + 8 + 2 * key_width) as usize;
+    let entries = stored.len() - 4 - pages * entry;
+    let mut end = 0;
+    (0..pages)
+        .map(|page| {
+            let at = entries + page * entry;
+            let length = u64::from(u32::from_le_bytes(stored[at..at + 4].try_into().unwrap()));
+            let extent = end..end + length;
+            end += length;
+            extent
+        })
+        .collect()
+}
+
+/// Corrupt one byte of a blob, `position` bytes into it, inside the pack that
+/// holds it. The pack's other blobs, which have their own seals, are left
+/// intact.
+fn corrupt_blob_at(project: &Path, blob: Blob, position: u64) {
+    assert!(position < blob.byte_length, "the byte lies inside the blob");
+    let entry = pack_entry(project, blob);
+    let at = (blob.offset + position) as usize;
     corrupt_object(project, &entry, |length| {
         assert!(at < length, "the blob lies inside its pack");
         at
     });
+}
+
+/// Corrupt the directory of a blob: the schema, page lengths, checksums and key
+/// bounds that end it, and that its seal covers. Every lookup that opens the
+/// blob verifies the directory first, so none can read a page of it.
+fn corrupt_directory(project: &Path, blob: Blob) {
+    corrupt_blob_at(project, blob, blob.byte_length - 1);
 }
 
 fn digests(project: &Path) -> Vec<(String, String)> {
@@ -709,11 +811,11 @@ fn a_corrupted_index_is_refused_not_rebuilt_or_bypassed() {
             "manifest" => corrupt_manifest(&built.project),
             "id blob" => {
                 let manifest = manifest(&built.project);
-                corrupt_blob(&built.project, column_blob(&manifest, 0, None));
+                corrupt_directory(&built.project, column_blob(&manifest, 0, None));
             }
             _ => {
                 let manifest = manifest(&built.project);
-                corrupt_blob(&built.project, column_blob(&manifest, 0, Some("timestamp")));
+                corrupt_directory(&built.project, column_blob(&manifest, 0, Some("timestamp")));
             }
         }
         // Opening reads no index payload.
@@ -740,7 +842,7 @@ fn a_corrupted_blob_refuses_only_the_statements_that_demand_its_column() {
     let damaged = column_blob(&manifest, 0, Some("memo"));
     let intact = column_blob(&manifest, 0, Some("timestamp"));
     assert_eq!(damaged.pack, intact.pack, "both blobs are in one pack");
-    corrupt_blob(&built.project, damaged);
+    corrupt_directory(&built.project, damaged);
 
     let forge = open(&built.project, 1);
     let error = refusal(&forge, MEMOS, 0);
@@ -762,13 +864,60 @@ fn a_one_hop_property_read_does_not_read_the_edge_uuid_blob() {
     let built = build(SMALL_EDGES);
     let before = digests(&built.project);
     let manifest = manifest(&built.project);
-    corrupt_blob(&built.project, uuid_blob(&manifest, 0));
+    corrupt_directory(&built.project, uuid_blob(&manifest, 0));
 
     let forge = open(&built.project, 1);
     let sum = scalar_i64(&run(&forge, SUM_TIMESTAMPS, 0));
     assert_eq!(sum, frontier_timestamps());
     let error = refusal(&forge, RETURN_EDGES, 0);
     assert_eq!(error.code(), "GF_VALIDATION", "{error}");
+    drop(forge);
+    assert_eq!(digests(&built.project), before, "the read rebuilt");
+}
+
+/// A blob is read a page at a time, and each page carries its own checksum: a
+/// page the statement does not read cannot refuse it, and a page it does read
+/// refuses it. Shard 0 holds the edges with the smallest edge ids, in the order
+/// of the small route's slots, so the frontier edges in it lie `STRIDE / 2` rows
+/// apart from row 0, and a page between or after them holds none.
+#[test]
+fn a_damaged_page_refuses_only_the_statements_that_read_it() {
+    let _serial = serial();
+    let built = build(SMALL_EDGES);
+    let before = digests(&built.project);
+    let manifest = manifest(&built.project);
+    let page_rows = manifest["page_rows"].as_u64().expect("a page size");
+    let rows = manifest["shards"][0]["rows"].as_u64().unwrap();
+    let occupied = (0..rows)
+        .step_by(STRIDE / 2)
+        .map(|row| row / page_rows)
+        .collect::<Vec<_>>();
+    let pages = rows.div_ceil(page_rows);
+    let unread = (0..pages)
+        .rev()
+        .find(|page| !occupied.contains(page))
+        .expect("a page of shard 0 holds no frontier edge");
+    let ids = column_blob(&manifest, 0, None);
+    let timestamps = column_blob(&manifest, 0, Some("timestamp"));
+    for (blob, key_width) in [(ids, 8), (timestamps, 0)] {
+        let extent = &page_extents(&built.project, blob, rows, page_rows, key_width)
+            [usize::try_from(unread).unwrap()];
+        corrupt_blob_at(&built.project, blob, (extent.start + extent.end) / 2);
+    }
+    let forge = open(&built.project, 1);
+    let sum = scalar_i64(&run(&forge, SUM_TIMESTAMPS, 0));
+    assert_eq!(sum, frontier_timestamps());
+    drop(forge);
+
+    // The first page of the timestamps holds the first frontier edge's value.
+    let first = page_extents(&built.project, timestamps, rows, page_rows, 0)[0].clone();
+    corrupt_blob_at(&built.project, timestamps, (first.start + first.end) / 2);
+    let forge = open(&built.project, 1);
+    let error = refusal(&forge, SUM_TIMESTAMPS, 0);
+    assert_eq!(error.code(), "GF_VALIDATION", "{error}");
+    // A statement that reads no edge property is unaffected.
+    let count = scalar_i64(&run(&forge, NO_PROPERTY, 0));
+    assert_eq!(count, FRONTIER as i64);
     drop(forge);
     assert_eq!(digests(&built.project), before, "the read rebuilt");
 }
