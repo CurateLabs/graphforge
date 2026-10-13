@@ -468,3 +468,176 @@ fn a_uuid_held_by_two_fragments_is_corrupt_topology() {
         .to_string();
     assert!(error.contains("more than one topology row"), "{error}");
 }
+
+/// A fragment `name` holding the fixture identities of `rows` (ascending), each
+/// with `edge_id` equal to its one-based rank, in the fixture's pages.
+fn write_edge_rows(dir: &Path, name: &str, rows: &[usize]) -> PathBuf {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("edge_uuid", DataType::FixedSizeBinary(16), false),
+        Field::new("edge_id", DataType::UInt64, false),
+    ]));
+    let properties = crate::permanent_parquet::writer_properties()
+        .set_max_row_group_row_count(Some(GROUP_ROWS))
+        .set_data_page_row_count_limit(PAGE_ROWS)
+        .set_write_batch_size(PAGE_ROWS / 2)
+        .set_statistics_enabled(EnabledStatistics::Page)
+        .build();
+    let path = dir.join(format!("{name}.parquet"));
+    let mut writer = ArrowWriter::try_new(
+        std::fs::File::create(&path).unwrap(),
+        Arc::clone(&schema),
+        Some(properties),
+    )
+    .unwrap();
+    for page in rows.chunks(PAGE_ROWS) {
+        let uuids = FixedSizeBinaryArray::try_from_iter(
+            page.iter().map(|row| identity(*row).as_bytes().to_vec()),
+        )
+        .unwrap();
+        let ids = UInt64Array::from_iter_values(page.iter().map(|row| *row as u64 + 1));
+        writer
+            .write(
+                &RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(uuids), Arc::new(ids)])
+                    .unwrap(),
+            )
+            .unwrap();
+    }
+    writer.close().unwrap();
+    path
+}
+
+fn bytes_of(identities: &[Uuid]) -> Vec<[u8; 16]> {
+    identities.iter().map(|uuid| *uuid.as_bytes()).collect()
+}
+
+fn resolver_over(paths: &[PathBuf]) -> EdgeIdResolver {
+    let paths: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
+    EdgeIdResolver::open(&paths).unwrap()
+}
+
+#[test]
+fn edge_ids_come_from_the_rows_that_hold_each_uuid() {
+    let dir = TempDir::new().unwrap();
+    let path = write_fragment(
+        dir.path(),
+        "edge_uuid",
+        Some("edge_id"),
+        EnabledStatistics::Page,
+    );
+    let resolver = resolver_over(&[path]);
+    let candidates = bytes_of(&[identity(1_205), absent_after(1_250), identity(3_999)]);
+    assert_eq!(
+        resolver.resolve(&candidates).unwrap(),
+        [Some(1_206), None, Some(4_000)],
+        "an absent UUID resolves to nothing, not to a neighbour"
+    );
+    assert_eq!(resolver.resolve(&[]).unwrap(), []);
+}
+
+#[test]
+fn edge_ids_resolve_across_disjoint_files_and_the_input_must_ascend() {
+    let dir = TempDir::new().unwrap();
+    let first: Vec<usize> = (0..ROWS / 2).collect();
+    let second: Vec<usize> = (ROWS / 2..ROWS).collect();
+    let paths = [
+        write_edge_rows(dir.path(), "first", &first),
+        write_edge_rows(dir.path(), "second", &second),
+    ];
+    let resolver = resolver_over(&paths);
+    let candidates = bytes_of(&[
+        identity(7),
+        identity(1_999),
+        identity(2_000),
+        identity(3_999),
+    ]);
+    assert_eq!(
+        resolver.resolve(&candidates).unwrap(),
+        [Some(8), Some(2_000), Some(2_001), Some(4_000)]
+    );
+    for unordered in [
+        bytes_of(&[identity(9), identity(8)]),
+        bytes_of(&[identity(8), identity(8)]),
+    ] {
+        let error = resolver.resolve(&unordered).unwrap_err().to_string();
+        assert!(error.contains("not strictly ascending"), "{error}");
+    }
+}
+
+#[test]
+fn a_uuid_held_by_two_edge_files_is_corrupt_topology() {
+    let dir = TempDir::new().unwrap();
+    let first = write_fragment(
+        dir.path(),
+        "edge_uuid",
+        Some("edge_id"),
+        EnabledStatistics::Page,
+    );
+    let copy = dir.path().join("second.parquet");
+    std::fs::copy(&first, &copy).unwrap();
+    let resolver = resolver_over(&[first, copy]);
+    let error = resolver
+        .resolve(&bytes_of(&[identity(10)]))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("more than one topology row"), "{error}");
+}
+
+#[test]
+fn the_stabbing_number_is_one_for_disjoint_files_and_counts_overlap() {
+    let dir = TempDir::new().unwrap();
+    let all: Vec<usize> = (0..ROWS).collect();
+    let disjoint = write_edge_rows(dir.path(), "disjoint", &all);
+    assert_eq!(resolver_over(&[disjoint]).stabbing_number(), 1);
+
+    // Two files interleaving the same identity range: each page of one spans two
+    // pages of the other, so three pages can hold one UUID only where they meet.
+    let even: Vec<usize> = (0..ROWS).step_by(2).collect();
+    let odd: Vec<usize> = (1..ROWS).step_by(2).collect();
+    let interleaved = [
+        write_edge_rows(dir.path(), "even", &even),
+        write_edge_rows(dir.path(), "odd", &odd),
+    ];
+    assert_eq!(resolver_over(&interleaved).stabbing_number(), 2);
+
+    // Without statistics nothing can be ruled out: every row group counts as
+    // holding every UUID.
+    let unbounded = write_fragment(
+        dir.path(),
+        "edge_uuid",
+        Some("edge_id"),
+        EnabledStatistics::None,
+    );
+    assert_eq!(resolver_over(&[unbounded]).stabbing_number(), GROUPS);
+}
+
+#[test]
+fn a_footer_cached_without_the_id_column_does_not_serve_a_caller_that_decodes_ids() {
+    // The cache is keyed by the file alone. The node-count probe loads edge files
+    // without `edge_id`; the resolver loads the same files with it. Whichever came
+    // first must not decide what the other can decode.
+    let dir = TempDir::new().unwrap();
+    let path = write_fragment(
+        dir.path(),
+        "edge_uuid",
+        Some("edge_id"),
+        EnabledStatistics::Page,
+    );
+    let candidates = bytes_of(&[identity(1_205)]);
+
+    let without_ids = load_fragment(&path, "edge_uuid", None).unwrap();
+    assert!(without_ids.id_leaf.is_none());
+    let resolver = EdgeIdResolver::open(&[path.as_path()]).unwrap();
+    assert_eq!(resolver.resolve(&candidates).unwrap(), [Some(1_206)]);
+
+    // And the other way round: a fragment cached with ids must not make an
+    // identity-only caller decode a column it never asked for.
+    let with_ids = load_fragment(&path, "edge_uuid", Some("edge_id")).unwrap();
+    assert!(with_ids.id_leaf.is_some());
+    let identity_only = load_fragment(&path, "edge_uuid", None).unwrap();
+    assert!(identity_only.id_leaf.is_none());
+    let probe = probe_over(Vec::new(), vec![identity_only]);
+    let (present, _) = probe
+        .probe(UuidIndexKind::Edge, &[identity(1_205)])
+        .unwrap();
+    assert_eq!(present, [true]);
+}

@@ -53,7 +53,10 @@ impl AuthenticatedPropertyInventory {
     /// narrowed to a property route, or the relation has no topology file).
     /// Reads no payload.
     pub(crate) fn edge_topology_source_digest(&self, route: &str) -> Option<String> {
-        let files = self.edge_routes.get(route).filter(|files| !files.is_empty())?;
+        let files = self
+            .edge_routes
+            .get(route)
+            .filter(|files| !files.is_empty())?;
         let parts = files
             .iter()
             .map(|file| {

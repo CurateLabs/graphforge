@@ -340,6 +340,7 @@ fn load_fragment(
         .map_err(|_| storage("footer cache poisoned"))?
         .get(&key)
         && found.uuid_column_is(uuid_column)
+        && found.id_column_is(id_column)
     {
         // One object is hard-linked under many workspace paths, and a footer
         // read through one describes them all. The reader must open the path
@@ -434,6 +435,21 @@ impl Fragment {
             .columns()
             .get(self.uuid_leaf)
             .is_some_and(|column| column.path().string() == name)
+    }
+
+    /// Whether this footer was read for exactly the id column `name` (`None`
+    /// for an identity-only read). A footer keeps the metadata of the leaves it
+    /// was loaded for, so one read without the id column cannot serve a caller
+    /// that decodes ids, and the reverse would decode a column nobody asked for.
+    fn id_column_is(&self, name: Option<&str>) -> bool {
+        let loaded = self.id_leaf.and_then(|leaf| {
+            self.metadata
+                .parquet_schema()
+                .columns()
+                .get(leaf)
+                .map(|column| column.path().string())
+        });
+        loaded.as_deref() == name
     }
 
     /// Whether any of the sorted `candidates` lies within `bounds`.
@@ -1080,6 +1096,9 @@ pub fn stage_deleted_identities(
         &batch,
     )
 }
+
+mod edge_ids;
+pub(crate) use edge_ids::EdgeIdResolver;
 
 #[cfg(test)]
 mod tests;
