@@ -109,6 +109,21 @@ impl<'a> Installer<'a> {
         self.written.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// The artifacts installed so far whose path starts with `prefix`.
+    pub(super) fn artifacts_under(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<ConstructionEncodedArtifact>, GfError> {
+        Ok(self
+            .artifacts
+            .lock()
+            .map_err(|_| storage("bulk artifact list poisoned"))?
+            .iter()
+            .filter(|artifact| artifact.path.starts_with(prefix))
+            .cloned()
+            .collect())
+    }
+
     pub(super) fn into_artifacts(self) -> Result<Vec<ConstructionEncodedArtifact>, GfError> {
         self.artifacts
             .into_inner()

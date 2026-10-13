@@ -337,6 +337,58 @@ fn the_index_is_published_with_the_generation() {
     assert!(fragments >= 3, "the route spans fragments: {fragments}");
 }
 
+/// The surrogate edge ids every shard publishes, and the digest of the topology
+/// they were joined from: `None` unless every shard carries its ids.
+fn published_ids(manifest: &serde_json::Value) -> Option<(String, Vec<(u64, u64)>)> {
+    let digest = manifest["topology_digest"].as_str()?.to_owned();
+    let bounds = manifest["shards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|shard| {
+            shard["ids"].as_object()?;
+            Some((shard["id_min"].as_u64()?, shard["id_max"].as_u64()?))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some((digest, bounds))
+}
+
+/// Construction joins the edge property rows to the canonical topology it has
+/// just installed, so the index is addressable by `edge_id` from the first
+/// open. The digest it records is the one a rebuild derives from the same
+/// inventory, which is what lets a reader trust the ids only while the topology
+/// is the one they came from.
+#[test]
+fn construction_publishes_edge_ids_keyed_to_the_topology_digest() {
+    let _serial = serial();
+    let built = build(SMALL_EDGES);
+    let (digest, bounds) = published_ids(&manifest(&built.project))
+        .expect("every shard of a constructed route carries its edge ids");
+    assert!(bounds.len() > 1, "the route spans shards: {bounds:?}");
+    assert!(
+        bounds.iter().all(|(min, max)| 0 < *min && min <= max),
+        "edge ids are positive surrogate ids: {bounds:?}"
+    );
+
+    let forge = open(&built.project, 1);
+    forge.rebuild_property_indexes(None).unwrap();
+    drop(forge);
+    let (rebuilt_digest, rebuilt_bounds) =
+        published_ids(&manifest(&built.project)).expect("a rebuilt route carries its edge ids");
+    assert_eq!(
+        digest, rebuilt_digest,
+        "construction and a rebuild name the same topology"
+    );
+    assert_eq!(
+        bounds.iter().map(|(min, _)| *min).min(),
+        rebuilt_bounds.iter().map(|(min, _)| *min).min()
+    );
+    assert_eq!(
+        bounds.iter().map(|(_, max)| *max).max(),
+        rebuilt_bounds.iter().map(|(_, max)| *max).max()
+    );
+}
+
 /// The values of every property type come back as generated, from the index
 /// and again from the property overlay once a write has made the index stale.
 #[test]
@@ -738,7 +790,11 @@ fn a_stale_index_is_not_used_until_rebuilt() {
 }
 
 /// The same bytes for the same content: two constructions of one input agree,
-/// and two successive rebuilds of one project agree.
+/// and two successive rebuilds of one project agree. The edge topology a
+/// construction installs carries the instant it was built (`created_at`), so
+/// the digest the manifest records of that topology is the one field two
+/// constructions of one input do not share; every pack and every other
+/// manifest field is the same.
 #[test]
 fn the_index_bytes_are_a_function_of_the_content() {
     let _serial = serial();
@@ -746,7 +802,27 @@ fn the_index_bytes_are_a_function_of_the_content() {
     let second = build(SMALL_EDGES);
     let at_construction = digests(&first.project);
     assert!(!at_construction.is_empty());
-    assert_eq!(at_construction, digests(&second.project));
+    let packs = |project: &Path| {
+        digests(project)
+            .into_iter()
+            .filter(|(path, _)| path.ends_with(".epk"))
+            .collect::<Vec<_>>()
+    };
+    assert!(!packs(&first.project).is_empty());
+    assert_eq!(packs(&first.project), packs(&second.project));
+    let without_topology_digest = |project: &Path| {
+        let mut manifest = manifest(project);
+        manifest
+            .as_object_mut()
+            .unwrap()
+            .remove("topology_digest")
+            .expect("the manifest names the topology its ids came from");
+        manifest
+    };
+    assert_eq!(
+        without_topology_digest(&first.project),
+        without_topology_digest(&second.project)
+    );
 
     let mut rebuilt = Vec::new();
     for _ in 0..2 {

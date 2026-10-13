@@ -150,9 +150,11 @@ impl ParquetLanes {
     }
 
     /// Collect the rows the persisted property indexes cover (node equality
-    /// rows, edge property shards) from every fragment pushed from now on.
-    pub(super) fn with_index_tap(mut self) -> Self {
-        self.index_tap = Some(super::property_index::PropertyIndexTap::default());
+    /// rows, edge property shards) from every fragment pushed from now on. Edge
+    /// property rows are joined to `topology`, the canonical edge files already
+    /// installed.
+    pub(super) fn with_index_tap(mut self, topology: super::property_index::EdgeTopology) -> Self {
+        self.index_tap = Some(super::property_index::PropertyIndexTap::new(topology));
         self
     }
 
