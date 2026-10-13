@@ -190,7 +190,7 @@ fn the_collected_list_holds_uuids_not_node_structs() {
     assert_whole_collect(&graph, &whole);
 
     // The element type is the `node_uuid` column's type, with no struct
-    // around it, so the list is two fields narrower per element.
+    // around it: no labels and no property columns per element.
     let plan = collect_lines(&graph, &narrowed).join("\n");
     assert!(plan.contains("ps:List(FixedSizeBinary(16))"), "{plan}");
     let plan = collect_lines(&graph, &whole).join("\n");

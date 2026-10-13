@@ -2,9 +2,11 @@
 //!
 //! The binder lowers `collect(n)` over a bound node variable to
 //! `collect(_node_struct(n))`, so every collected element is a whole node
-//! value. The `cypher_collect` aggregate buffers one `ScalarValue::Struct`
-//! per input row and has no spill path, so a collect over a large node set
-//! (the SNB Interactive IC5 `collect(friend)`) dominates memory and time.
+//! value: the `node_uuid`, the `labels`, and a field for every property
+//! column of the node's scan (19 fields on SNB). The `cypher_collect`
+//! aggregate buffers one `ScalarValue::Struct` per input row and has no spill
+//! path, so a collect over a large node set (the SNB Interactive IC5
+//! `collect(friend)`) dominates memory and time.
 //!
 //! When every use of the collected list is identity-only, no consumer can
 //! observe anything but each element's `node_uuid`. This pass then rewrites
@@ -34,14 +36,16 @@
 //! * `<node> IN list`. The lowerer emits `cypher_in(lhs, list)`, which loops
 //!   `cypher_in_elems` -> `cypher_value_eq` per element. A NULL operand or
 //!   element makes the comparison NULL in both forms, before any type
-//!   dispatch. For two non-NULL nodes the struct form reaches
-//!   `entity_identity_eq`, which compares only `node_uuid`; the identity form
-//!   compares two `FixedSizeBinary(16)` scalars, the same bytes. A struct
-//!   left operand against an identity list element takes the dedicated
-//!   `(Struct(entity), FixedSizeBinary)` arm, which compares `node_uuid`
-//!   too. The membership test therefore needs the left operand to be a node
-//!   (an edge uuid or a scalar is not comparable the same way), which is what
-//!   the "always a node" analysis below guarantees.
+//!   dispatch. For two non-NULL nodes every combination compares the same
+//!   16 `node_uuid` bytes. A bare node variable on the left lowers to its
+//!   `node_uuid` column, so the struct form takes the dedicated
+//!   `(Struct(entity), FixedSizeBinary)` arm and the identity form compares
+//!   two `FixedSizeBinary(16)` scalars. A whole-node struct on the left
+//!   (a node that arrives as a struct column) takes `entity_identity_eq`
+//!   against a struct element, and the same dedicated arm against an
+//!   identity element. The membership test therefore needs the left operand
+//!   to be a node (an edge uuid or a scalar is not comparable the same way),
+//!   which is what the "always a node" analysis below guarantees.
 //! * `size`/`count`. `CypherSize` dispatches on the list type, not the
 //!   element type, and `count` reads only the list's own nullness.
 //!
