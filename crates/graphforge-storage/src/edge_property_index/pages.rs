@@ -385,7 +385,9 @@ impl PackHandles {
         let (_, file) = self.open.get_mut(&pack).expect("pack was just opened");
         file.seek(SeekFrom::Start(offset))
             .map_err(|e| storage("seek pack", &e))?;
-        let mut bytes = Vec::new();
+        // Sized to the range so it is one `read`, not the doubling probe an empty
+        // buffer makes; `length` is bounded by `PACK_BYTES` above.
+        let mut bytes = Vec::with_capacity(length as usize);
         file.take(length)
             .read_to_end(&mut bytes)
             .map_err(|e| storage("read pack", &e))?;
