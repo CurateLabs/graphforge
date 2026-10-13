@@ -15,8 +15,9 @@
 //! decodes about its own rows. Topology written by mutations assigns ids in
 //! arrival order, so its pages span the whole UUID space and a window would
 //! decode them all. [`EdgeIdResolver::stabbing_number`] measures that overlap
-//! once at open, and the builders refuse to resolve past [`MAX_STABBING_PAGES`]:
-//! such a route keeps its UUID-keyed index.
+//! once at open, and the builders refuse to resolve when it passes
+//! [`MAX_STABBING_PAGES`] ([`EdgeIdResolver::is_point_readable`]): such a route
+//! keeps its UUID-keyed index.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -30,7 +31,7 @@ use super::{Fragment, load_fragment, storage};
 /// a cheap point read. A window decodes every page whose bounds hold any of its
 /// UUIDs, so this bounds the decode amplification of resolving one window at a
 /// small multiple of the window's own pages.
-pub(crate) const MAX_STABBING_PAGES: u64 = 64;
+const MAX_STABBING_PAGES: u64 = 64;
 
 /// UUID to `edge_id` lookups over one route's canonical topology files.
 pub(crate) struct EdgeIdResolver {
@@ -87,6 +88,14 @@ impl EdgeIdResolver {
             }
         }
         unbounded + peak
+    }
+
+    /// Whether a window of UUIDs decodes about its own pages: the files'
+    /// [`stabbing_number`](Self::stabbing_number) is within the bound that
+    /// keeps a join a set of point reads. When false, the builders keep the
+    /// route's UUID-keyed index instead of joining ids.
+    pub(crate) fn is_point_readable(&self) -> bool {
+        self.stabbing_number() <= MAX_STABBING_PAGES
     }
 
     /// The `edge_id` of each of the strictly ascending `candidates`, in

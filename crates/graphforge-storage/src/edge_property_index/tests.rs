@@ -65,17 +65,31 @@ struct Built {
 }
 
 fn build(fragments: &[RecordBatch]) -> Option<Built> {
+    let ids = vec![None; fragments.len()];
+    build_with(fragments, &ids, None)
+}
+
+/// As [`build`], with the topology ids of each fragment's rows (`None` for a
+/// fragment the join could not resolve) and the digest of the topology they
+/// were joined from.
+fn build_with(
+    fragments: &[RecordBatch],
+    ids: &[Option<Vec<u64>>],
+    topology_digest: Option<&str>,
+) -> Option<Built> {
     let mut builder = EdgeRouteIndexBuilder::new("route.packs".to_owned());
     let mut packs = Vec::new();
-    for fragment in fragments {
+    for (fragment, ids) in fragments.iter().zip(ids) {
         builder
-            .observe(fragment, &mut |path, bytes| {
+            .observe(fragment, ids.as_deref(), &mut |path, bytes| {
                 packs.push((path, bytes));
                 Ok(())
             })
             .unwrap();
     }
-    let mut files = builder.finish("_exploratory", "digest").unwrap();
+    let mut files = builder
+        .finish("_exploratory", "digest", topology_digest)
+        .unwrap();
     let manifest_file = files.pop()?;
     packs.extend(
         files
@@ -111,8 +125,18 @@ fn seals(manifest: &Manifest) -> Vec<BlobSeal> {
         .shards
         .iter()
         .flat_map(|shard| {
-            std::iter::once(shard.uuids).chain(shard.columns.iter().map(|column| column.blob))
+            std::iter::once(shard.uuids)
+                .chain(shard.ids)
+                .chain(shard.columns.iter().map(|column| column.blob))
         })
+        .collect()
+}
+
+/// Topology ids for the rows `first..first + rows` of a fragment that run
+/// against the UUID order, as ids do when topology was not written in UUID order.
+fn descending_ids(first: u128, rows: usize) -> Vec<u64> {
+    (0..rows as u64)
+        .map(|row| 10_000_000 - (first as u64 + row) * 7)
         .collect()
 }
 
@@ -314,8 +338,15 @@ fn a_blob_that_cannot_fit_a_pack_leaves_the_route_to_the_property_overlay() {
         .unwrap();
     assert!(sealed.is_none());
     // A poisoned builder indexes nothing, and writes no manifest.
-    builder.observe(&fragment(0, 8, 4), &mut write).unwrap();
-    assert!(builder.finish("_exploratory", "digest").unwrap().is_empty());
+    builder
+        .observe(&fragment(0, 8, 4), None, &mut write)
+        .unwrap();
+    assert!(
+        builder
+            .finish("_exploratory", "digest", None)
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(written, 0);
 }
 
@@ -440,4 +471,231 @@ fn a_manifest_that_fails_its_checksum_is_refused() {
     let error = decode_manifest(&corrupt, path).unwrap_err();
     assert_eq!(error.code(), "GF_VALIDATION", "{error}");
     assert!(decode_manifest(&built.manifest_file.bytes[..10], path).is_err());
+}
+
+#[test]
+fn ids_are_sealed_beside_the_uuids_with_the_range_they_span() {
+    let ids = descending_ids(0, 10_000);
+    let built = build_with(
+        &[fragment(0, 10_000, 4)],
+        &[Some(ids.clone())],
+        Some("topology"),
+    )
+    .expect("indexed");
+    let manifest = &built.manifest;
+    assert_eq!(manifest.topology_digest.as_deref(), Some("topology"));
+    // A UUID blob, an id blob and two column blobs per shard.
+    assert_eq!(seals(manifest).len(), 3 * 4);
+    for seal in seals(manifest) {
+        assert_eq!(
+            crate::corruption_checksum::checksum(blob(&built.packs, seal)),
+            seal.xxh64
+        );
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let directory = write_packs(dir.path(), &built.packs);
+    let mut packs = PackHandles::new(directory);
+    let mut start = 0;
+    for shard in &manifest.shards {
+        let window = &ids[start..start + shard.rows as usize];
+        assert_eq!(shard.id_min, window.iter().copied().min());
+        assert_eq!(shard.id_max, window.iter().copied().max());
+        let column = packs.read_column(shard.ids.unwrap(), shard.rows).unwrap();
+        let column = column.as_any().downcast_ref::<UInt64Array>().unwrap();
+        assert_eq!(column.values().as_ref(), window, "ids stay in UUID order");
+        start += shard.rows as usize;
+    }
+}
+
+#[test]
+fn a_shard_is_read_back_by_id_with_the_rows_of_those_ids() {
+    let ids = descending_ids(0, 100);
+    let built = build_with(
+        &[fragment(0, 100, 4)],
+        &[Some(ids.clone())],
+        Some("topology"),
+    )
+    .expect("indexed");
+    let shard = &built.manifest.shards[0];
+    let dir = tempfile::tempdir().unwrap();
+    let directory = write_packs(dir.path(), &built.packs);
+    let mut packs = PackHandles::new(directory);
+    let properties = ["timestamp".to_owned()];
+    let demanded = demanded_columns(&built.manifest, &properties);
+    let range = (shard.id_min.unwrap(), shard.id_max.unwrap());
+    // Rows 99, 50 and 3 by id, and an id inside the shard's range that no row
+    // holds: the shard answers only what it holds, in id order.
+    let mut targets = vec![ids[99], ids[50], ids[3], ids[99] + 1];
+    targets.sort_unstable();
+    let hit = read_hit_shard_by_id(
+        &mut packs,
+        shard,
+        shard.ids.unwrap(),
+        range,
+        &targets,
+        &demanded,
+    )
+    .unwrap()
+    .expect("the shard holds three of the targets");
+    assert_eq!(hit.keys, [ids[99], ids[50], ids[3]]);
+    let timestamps = hit.columns.get(&0).expect("the demanded column is read");
+    let timestamps = timestamps.as_any().downcast_ref::<Int64Array>().unwrap();
+    assert_eq!(timestamps.values().as_ref(), [99 * 3, 50 * 3, 3 * 3]);
+    // The column that was not demanded stays unread.
+    assert_eq!(hit.columns.len(), 1);
+    // A shard holding none of the ids answers nothing.
+    let none = read_hit_shard_by_id(
+        &mut packs,
+        shard,
+        shard.ids.unwrap(),
+        range,
+        &[ids[99] + 1],
+        &demanded,
+    )
+    .unwrap();
+    assert!(none.is_none());
+}
+
+#[test]
+fn a_corrupt_id_blob_is_refused_not_answered() {
+    let dir = tempfile::tempdir().unwrap();
+    let properties = ["timestamp".to_owned()];
+
+    // An id outside the range the manifest promises.
+    let ids = descending_ids(0, 100);
+    let built = build_with(
+        &[fragment(0, 100, 4)],
+        &[Some(ids.clone())],
+        Some("topology"),
+    )
+    .expect("indexed");
+    let shard = &built.manifest.shards[0];
+    let mut packs = PackHandles::new(write_packs(&dir.path().join("range"), &built.packs));
+    let demanded = demanded_columns(&built.manifest, &properties);
+    let narrowed = (shard.id_min.unwrap() + 1, shard.id_max.unwrap());
+    let error = read_hit_shard_by_id(
+        &mut packs,
+        shard,
+        shard.ids.unwrap(),
+        narrowed,
+        &[ids[3]],
+        &demanded,
+    )
+    .err()
+    .expect("an id outside the manifest range is refused");
+    assert_eq!(error.code(), "GF_VALIDATION", "{error}");
+
+    // One id held by two rows is two owners of one edge.
+    let mut duplicated = descending_ids(0, 100);
+    duplicated[40] = duplicated[10];
+    let built = build_with(
+        &[fragment(0, 100, 4)],
+        &[Some(duplicated.clone())],
+        Some("topology"),
+    )
+    .expect("indexed");
+    let shard = &built.manifest.shards[0];
+    let mut packs = PackHandles::new(write_packs(&dir.path().join("duplicate"), &built.packs));
+    let error = read_hit_shard_by_id(
+        &mut packs,
+        shard,
+        shard.ids.unwrap(),
+        (shard.id_min.unwrap(), shard.id_max.unwrap()),
+        &[duplicated[10]],
+        &demanded,
+    )
+    .err()
+    .expect("a duplicated id is refused");
+    assert!(matches!(error, GfError::Project { .. }), "{error}");
+}
+
+#[test]
+fn ids_are_published_all_or_none_and_only_with_their_topology_digest() {
+    let fragments = [fragment(0, 5_000, 4), fragment(5_000, 100, 4)];
+    let ids = [
+        Some(descending_ids(0, 5_000)),
+        Some(descending_ids(5_000, 100)),
+    ];
+    let published = |built: &Built| {
+        built
+            .manifest
+            .shards
+            .iter()
+            .map(|shard| {
+                (
+                    shard.ids.is_some(),
+                    shard.id_min.is_some(),
+                    shard.id_max.is_some(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let joined = build_with(&fragments, &ids, Some("topology")).expect("indexed");
+    assert!(joined.manifest.topology_digest.is_some());
+    assert!(
+        published(&joined)
+            .iter()
+            .all(|shard| *shard == (true, true, true))
+    );
+
+    // Ids joined without a topology digest cannot be shown current: withdrawn.
+    let undated = build_with(&fragments, &ids, None).expect("indexed");
+    assert_eq!(undated.manifest.topology_digest, None);
+    assert!(
+        published(&undated)
+            .iter()
+            .all(|shard| *shard == (false, false, false))
+    );
+
+    // One fragment the join could not resolve withdraws the whole route's ids,
+    // whichever side of it the resolved fragments are on.
+    for partial in [[None, ids[1].clone()], [ids[0].clone(), None], [None, None]] {
+        let built = build_with(&fragments, &partial, Some("topology")).expect("indexed");
+        assert_eq!(built.manifest.topology_digest, None);
+        assert!(
+            published(&built)
+                .iter()
+                .all(|shard| *shard == (false, false, false))
+        );
+        // The UUID-keyed index is intact.
+        assert_eq!(built.manifest.rows, 5_100);
+    }
+}
+
+#[test]
+fn an_index_without_ids_has_the_bytes_it_had_before_ids_existed() {
+    let built = build(&[fragment(0, 100, 4)]).expect("indexed");
+    let text = String::from_utf8_lossy(&built.manifest_file.bytes);
+    for key in ["topology_digest", "\"ids\"", "id_min", "id_max"] {
+        assert!(!text.contains(key), "{key} in {text}");
+    }
+    assert_eq!(built.manifest.topology_digest, None);
+    assert!(
+        built
+            .manifest
+            .shards
+            .iter()
+            .all(|shard| shard.ids.is_none())
+    );
+    // The keys appear only when the ids do.
+    let joined = build_with(
+        &[fragment(0, 100, 4)],
+        &[Some(descending_ids(0, 100))],
+        Some("t"),
+    )
+    .expect("indexed");
+    let text = String::from_utf8_lossy(&joined.manifest_file.bytes);
+    for key in ["topology_digest", "\"ids\"", "id_min", "id_max"] {
+        assert!(text.contains(key), "{key} missing from {text}");
+    }
+}
+
+#[test]
+fn ids_that_do_not_cover_the_batch_are_refused() {
+    let mut builder = EdgeRouteIndexBuilder::new("route.packs".to_owned());
+    let error = builder
+        .observe(&fragment(0, 8, 4), Some(&[1, 2, 3]), &mut |_, _| Ok(()))
+        .unwrap_err();
+    assert_eq!(error.code(), "GF_VALIDATION", "{error}");
 }

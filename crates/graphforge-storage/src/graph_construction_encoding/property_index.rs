@@ -54,7 +54,7 @@ impl PropertyIndexTap {
                 .edge_routes
                 .entry(component.to_owned())
                 .or_insert_with(|| EdgeRouteIndexBuilder::new(format!("{component}.packs")))
-                .observe(fragment, &mut |relative, bytes| {
+                .observe(fragment, None, &mut |relative, bytes| {
                     copy_artifact(Cursor::new(bytes), output, &relative, artifacts, evidence)
                 });
         }
@@ -111,7 +111,7 @@ pub(super) fn write_property_equality_indexes(
         let parts = route_parts(artifacts, "edge_properties/", &component);
         files.extend(
             builder
-                .finish(route, &source_digest(parts))?
+                .finish(route, &source_digest(parts), None)?
                 .into_iter()
                 .map(|file| (file.relative_path, file.bytes)),
         );
