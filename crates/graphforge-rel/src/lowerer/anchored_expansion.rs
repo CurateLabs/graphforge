@@ -66,7 +66,9 @@ impl GraphPlanLowerer {
     /// operator that shapes the rows before it must be an aggregation or a
     /// `DISTINCT`: only then is the input already materialized, so retaining it
     /// for the join costs no early termination. A sort, limit or skip is not
-    /// accepted because the join does not preserve the input order.
+    /// accepted because the join does not preserve the input order. A `LIMIT`
+    /// the rows stream into is not accepted either: the per-row expansion stops
+    /// at the limit, the joined one would not (see [`limit_streams_from`]).
     pub(super) fn anchored_expansion_anchor(
         ordered: &[&GraphOp],
         at: usize,
@@ -87,7 +89,9 @@ impl GraphPlanLowerer {
                 } => {}
                 GraphOp::Aggregate { .. }
                 | GraphOp::Project { distinct: true, .. }
-                | GraphOp::With { distinct: true, .. } => return Some(*var),
+                | GraphOp::With { distinct: true, .. } => {
+                    return (!limit_streams_from(&ordered[at + 1..])).then_some(*var);
+                }
                 _ => return None,
             }
         }
@@ -162,6 +166,40 @@ impl GraphPlanLowerer {
         }
         run.finish(input, rest, seed, &anchor_alias, anchor_input_col, var_map)
     }
+}
+
+/// Whether a `LIMIT` is reached from `ops` through operators that pass rows on
+/// as they arrive.
+///
+/// The physical planner stops a limited traversal once the limit is met, and
+/// bounds each hop's batches by the limit, only while every operator between
+/// the hop and the limit streams. Expanding once per distinct anchor and
+/// joining back would read the expansion unbounded, so such a pipeline keeps
+/// its per-row expansion. A sort, an aggregation or any other blocking
+/// operator in between consumes all its input first and ends the search.
+fn limit_streams_from(ops: &[&GraphOp]) -> bool {
+    for op in ops {
+        match op {
+            GraphOp::Limit { .. } | GraphOp::LimitParam { .. } | GraphOp::LimitExpr { .. } => {
+                return true;
+            }
+            GraphOp::NodeScan { .. }
+            | GraphOp::Expand { .. }
+            | GraphOp::RelationshipUnique { .. }
+            | GraphOp::Filter { .. }
+            | GraphOp::Skip { .. }
+            | GraphOp::SkipParam { .. }
+            | GraphOp::SkipExpr { .. }
+            | GraphOp::Project {
+                distinct: false, ..
+            }
+            | GraphOp::With {
+                distinct: false, ..
+            } => {}
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// An equality `body = input` that may become a join key.

@@ -404,3 +404,52 @@ fn a_streaming_input_is_not_decorrelated() {
         assert_eq!(rows(&forge, query), expected, "{partitions} partitions");
     }
 }
+
+/// A `LIMIT` the expansion streams into is met by the per-row expansion as soon
+/// as enough rows arrive, and the physical planner bounds the hop by it. Joining
+/// the expansion back would read it unbounded, so the expansion stays per row.
+/// A sort in between consumes every row first, so there the join applies.
+#[test]
+fn a_limit_the_expansion_streams_into_is_not_decorrelated() {
+    let streaming = "MATCH (liker:Person)
+                     OPTIONAL MATCH (liker)-[:LIKES]->(message)-[:HAS_CREATOR]->(creator:Person)
+                     WITH creator, liker, count(*) AS likes
+                     WITH creator
+                     MATCH (creator)<-[:HAS_CREATOR]-(post:Post)
+                     RETURN creator.id AS creatorId, post.id AS postId LIMIT 3";
+    let sorted = format!(
+        "{} ORDER BY postId, creatorId LIMIT 4",
+        creator_posts_query("")
+    );
+    let sorted_expected = table(&[&["1", "100"], &["1", "100"], &["1", "100"], &["1", "101"]]);
+    let universe = table(&[&["1", "100"], &["1", "101"], &["2", "102"]]);
+    for partitions in PARTITIONS {
+        let forge = forge(partitions);
+        let plan = physical_plan(&forge, streaming);
+        assert_eq!(
+            anchored_expansions(&plan),
+            0,
+            "{partitions} partitions: the streaming limit's plan\n{plan}"
+        );
+        let streamed = rows(&forge, streaming);
+        assert_eq!(streamed.len(), 3, "{partitions} partitions: {streamed:?}");
+        for row in &streamed {
+            assert!(
+                universe.contains(row),
+                "{partitions} partitions: {row:?} is not a creator and post"
+            );
+        }
+
+        let plan = physical_plan(&forge, &sorted);
+        assert_eq!(
+            anchored_expansions(&plan),
+            1,
+            "{partitions} partitions: the sorted limit's plan\n{plan}"
+        );
+        assert_eq!(
+            rows(&forge, &sorted),
+            sorted_expected,
+            "{partitions} partitions: {sorted}"
+        );
+    }
+}
