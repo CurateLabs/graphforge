@@ -14,6 +14,10 @@
 //! stop a large join from being planned as a hash join, so it errs high. A
 //! relation without a fresh persisted CSR publishes nothing: reading its view
 //! would scan the edge table during planning.
+//!
+//! An input row count that is itself only an estimate, and larger than the
+//! node identities the relation covers, is not believed (see
+//! [`credible_seed_rows`]): the traversal then publishes nothing.
 
 use std::sync::Arc;
 
@@ -151,6 +155,30 @@ fn scaled(input: Precision<usize>, per_row: u64) -> Precision<usize> {
     }
 }
 
+/// The input row count a traversal can scale, or `Absent` when the count cannot
+/// be believed.
+///
+/// A traversal starts from the nodes of its input, and the relation covers
+/// `nodes` node identities, so an input *estimated* at more rows than that is
+/// not a count of seeds. It is DataFusion's arithmetic over an operator that
+/// publishes no estimate, such as a cross join of two unfiltered scans, and
+/// scaling it by a degree yields a size far beyond any real result (a 579 TB
+/// build side on SNB Interactive IC6 at SF1, which planned a sort-merge join of
+/// a whole node table for a query that runs in seconds). An exact count is a
+/// fact and is kept, whatever its size: only an estimate is doubted.
+///
+/// The threshold is a heuristic. An input can be estimated under `nodes` and
+/// still repeat seeds, and the figure then overstates the work. A count of
+/// distinct seeds would replace it.
+fn credible_seed_rows(input: Precision<usize>, nodes: u64) -> Precision<usize> {
+    match input {
+        Precision::Inexact(rows) if !u64::try_from(rows).is_ok_and(|rows| rows <= nodes) => {
+            Precision::Absent
+        }
+        input => input,
+    }
+}
+
 /// `rows` limited to `fetch`.
 fn capped(rows: Precision<usize>, fetch: Option<usize>) -> Precision<usize> {
     match (rows, fetch) {
@@ -173,7 +201,10 @@ pub(crate) fn single_hop(
 ) -> datafusion::common::Result<Arc<Statistics>> {
     let input_rows = input.partition_statistics(None)?.num_rows;
     let rows = match relation_degree(provider, relation, direction) {
-        Some(degree) => scaled(input_rows, degree.per_node),
+        Some(degree) => scaled(
+            credible_seed_rows(input_rows, degree.nodes),
+            degree.per_node,
+        ),
         None => Precision::Absent,
     };
     Ok(scope.of(statistics(schema, capped(rows, fetch))))
@@ -211,8 +242,11 @@ pub(crate) fn variable_length(
 ) -> datafusion::common::Result<Arc<Statistics>> {
     let input_rows = input.partition_statistics(None)?.num_rows;
     let rows = match relation_degree(provider, relation, direction) {
-        Some(_) if shape.destination_bound => scaled(input_rows, 1),
+        Some(degree) if shape.destination_bound => {
+            scaled(credible_seed_rows(input_rows, degree.nodes), 1)
+        }
         Some(degree) => {
+            let seeds = credible_seed_rows(input_rows, degree.nodes);
             let (min_hops, max_hops) = shape.hops;
             let first = u32::from(min_hops);
             let last = max_hops
@@ -230,7 +264,7 @@ pub(crate) fn variable_length(
             if shape.expansion == VarLenMode::Reachability {
                 per_seed = per_seed.min(degree.nodes.max(1));
             }
-            scaled(input_rows, per_seed)
+            scaled(seeds, per_seed)
         }
         None => Precision::Absent,
     };
@@ -298,6 +332,37 @@ mod tests {
         let empty = statistics(&schema, Precision::Exact(0));
         assert_eq!(empty.num_rows, Precision::Exact(0));
         assert_eq!(empty.total_byte_size, Precision::Exact(0));
+    }
+
+    /// An estimated input larger than the nodes the relation covers is
+    /// arithmetic over an unestimated operator, not a count of seeds. An exact
+    /// count is a fact and is kept at any size.
+    #[test]
+    fn an_estimated_input_larger_than_the_node_extent_is_not_believed() {
+        assert_eq!(
+            credible_seed_rows(Precision::Inexact(100), 100),
+            Precision::Inexact(100)
+        );
+        assert_eq!(
+            credible_seed_rows(Precision::Inexact(101), 100),
+            Precision::Absent
+        );
+        assert_eq!(
+            credible_seed_rows(Precision::Inexact(usize::MAX), 100),
+            Precision::Absent
+        );
+        assert_eq!(
+            credible_seed_rows(Precision::Exact(101), 100),
+            Precision::Exact(101)
+        );
+        assert_eq!(
+            credible_seed_rows(Precision::Exact(0), 0),
+            Precision::Exact(0)
+        );
+        assert_eq!(
+            credible_seed_rows(Precision::Absent, 100),
+            Precision::Absent
+        );
     }
 
     #[test]

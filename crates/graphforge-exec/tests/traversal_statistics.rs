@@ -358,3 +358,75 @@ async fn a_partitioned_variable_length_traversal_estimates_its_even_share_of_the
         assert!(shares >= whole, "{partitions} shares sum to {shares}");
     }
 }
+
+/// A frontier that publishes only `rows` as its row count.
+fn frontier_with_rows(rows: Precision<usize>) -> Arc<dyn ExecutionPlan> {
+    use datafusion::common::Statistics;
+    use datafusion::physical_plan::test::exec::StatisticsExec;
+
+    let schema = frontier_schema();
+    let mut statistics = Statistics::new_unknown(&schema);
+    statistics.num_rows = rows;
+    Arc::new(StatisticsExec::new(statistics, schema.as_ref().clone()))
+}
+
+#[tokio::test]
+async fn an_estimated_input_larger_than_the_node_extent_is_not_believed() {
+    let dir = TempDir::new().unwrap();
+    let ids = write_ring(dir.path());
+    let extent = usize::try_from(*ids.iter().max().unwrap()).unwrap() + 1;
+
+    for (name, node) in [
+        ("single hop", node(Direction::Out, 1, Some(1))),
+        ("trails", node(Direction::Out, 1, Some(2))),
+        (
+            "reachability",
+            node(Direction::Out, 1, Some(2)).into_reachability(),
+        ),
+    ] {
+        // An estimate as large as the identities the relation covers can still
+        // be a count of seeds: it is scaled like any other.
+        let credible = expand(
+            dir.path(),
+            persistent(dir.path()),
+            &node,
+            frontier_with_rows(Precision::Inexact(extent)),
+        );
+        assert!(
+            matches!(
+                credible.partition_statistics(None).unwrap().total_byte_size,
+                Precision::Inexact(bytes) if bytes > 0
+            ),
+            "{name}: {extent} estimated seeds"
+        );
+
+        // One identity more cannot be: it is DataFusion's arithmetic over an
+        // operator with no estimate (a cross join of two scans), and scaling it
+        // by a degree would publish a size no result has.
+        let doubted = expand(
+            dir.path(),
+            persistent(dir.path()),
+            &node,
+            frontier_with_rows(Precision::Inexact(extent + 1)),
+        );
+        let statistics = doubted.partition_statistics(None).unwrap();
+        assert_eq!(statistics.num_rows, Precision::Absent, "{name}");
+        assert_eq!(statistics.total_byte_size, Precision::Absent, "{name}");
+
+        // A count that is exact is a fact, however large.
+        let exact = expand(
+            dir.path(),
+            persistent(dir.path()),
+            &node,
+            frontier_with_rows(Precision::Exact(extent + 1)),
+        );
+        assert!(
+            matches!(
+                exact.partition_statistics(None).unwrap().total_byte_size,
+                Precision::Inexact(bytes) if bytes > 0
+            ),
+            "{name}: {} exact seeds",
+            extent + 1
+        );
+    }
+}
