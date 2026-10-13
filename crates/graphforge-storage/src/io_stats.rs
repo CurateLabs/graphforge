@@ -379,6 +379,7 @@ pub fn snapshot() -> Option<IoSnapshot> {
 }
 
 /// Reset the current capture; an inactive caller remains inactive.
+#[allow(clippy::too_many_lines)] // One zeroing store per counter; a helper would hide a missed one.
 pub fn reset() {
     let _ = crate::lifecycle_io::with_io_stats(|counters| {
         counters.edge_full_reads.store(0, Ordering::Relaxed);
