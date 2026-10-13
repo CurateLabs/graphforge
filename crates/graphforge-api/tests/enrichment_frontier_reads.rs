@@ -318,21 +318,29 @@ fn idents(batches: &[RecordBatch]) -> Vec<Option<i64>> {
     values
 }
 
+/// The property scans a statement plans: all of them, and those among them
+/// that resolve the ids of the nodes a scan of the topology finds (a label
+/// scan's own nodes: the seed of a traversal, not a frontier that reached
+/// them), which plan no tap.
+#[derive(Clone, Copy)]
+struct PlannedScans {
+    all: usize,
+    own: usize,
+}
+
 /// Every property scan that enriches a frontier waits for the UUIDs of the
-/// frontier that reaches it, whatever the partition count. `at_least` is how
-/// many scans the statements plan, and `own_scans` how many of them resolve the
-/// ids of the nodes that a scan of the topology finds (the label scan's own
-/// nodes: the seed of the traversal, not a frontier that reached them), which
-/// plan no tap.
+/// frontier that reaches it, whatever the partition count. `planned` is, for
+/// each statement in order, the scans it plans: a node variable whose
+/// properties the statement never reads plans none, so the count is exact.
 fn un_nominated_scans(
     forge: &GraphForge,
     partitions: usize,
     statements: &[(&'static str, String, i64)],
-    at_least: usize,
-    own_scans: usize,
+    planned: &[PlannedScans],
 ) -> Vec<String> {
+    assert_eq!(statements.len(), planned.len(), "one count per statement");
     let mut found = Vec::new();
-    for (name, query, _) in statements {
+    for ((name, query, _), planned) in statements.iter().zip(planned) {
         let plan = forge
             .explain_stage(
                 &query.replace("$ident", &ANCHOR.to_string()),
@@ -341,14 +349,15 @@ fn un_nominated_scans(
             .expect("physical plan");
         let scans = plan.matches("PropertyOverlayExec").count();
         let taps = plan.matches("UuidBuildKeyTapExec").count();
-        assert!(
-            scans >= at_least,
-            "{name}: at least {at_least} property scans:\n{plan}"
+        assert_eq!(
+            scans, planned.all,
+            "{name}, partitions {partitions}: property scans planned:\n{plan}"
         );
-        if taps + own_scans != scans {
+        if taps + planned.own != scans {
             found.push(format!(
                 "{name}, partitions {partitions}: {scans} property scans, {taps} taps, \
-                 {own_scans} not enriching a frontier:\n{plan}"
+                 {} not enriching a frontier:\n{plan}",
+                planned.own
             ));
         }
     }
@@ -439,8 +448,15 @@ fn enrichment_is_bounded_by_its_frontier() {
             &small_forge,
             target_partitions,
             &statements(),
-            3,
-            0,
+            &[
+                // The anchor, the node ordered by and the node summed.
+                PlannedScans { all: 3, own: 0 },
+                PlannedScans { all: 3, own: 0 },
+                // The anchor and the value: the middle node reads nothing.
+                PlannedScans { all: 2, own: 0 },
+                // Only the anchor reads a property.
+                PlannedScans { all: 1, own: 0 },
+            ],
         ));
         assert_preserved_rows_survive(&small_forge, target_partitions);
         grew.extend(reads_that_grew(
@@ -582,8 +598,15 @@ fn enrichment_of_an_unanchored_frontier_is_bounded_by_it() {
             &small_forge,
             target_partitions,
             &seed_statements(),
-            2,
-            1,
+            &[
+                // The label scan's nodes read nothing, so only the value
+                // they reach is enriched.
+                PlannedScans { all: 1, own: 0 },
+                PlannedScans { all: 1, own: 0 },
+                // No node reads a property, so the plan keeps the key of
+                // every route (the label scan's own and the two it reaches).
+                PlannedScans { all: 3, own: 1 },
+            ],
         ));
         assert_seed_rows_survive(&small_forge, target_partitions);
         grew.extend(reads_that_grew(
@@ -629,8 +652,7 @@ fn a_frontier_past_half_the_route_keeps_the_whole_scan_and_every_row() {
             &forge,
             target_partitions,
             std::slice::from_ref(&sum),
-            2,
-            1,
+            &[PlannedScans { all: 1, own: 0 }],
         ));
         let (value, _) = steady(&forge, sum.0, &sum.1);
         assert_eq!(value, sum.2, "partitions {target_partitions}");
