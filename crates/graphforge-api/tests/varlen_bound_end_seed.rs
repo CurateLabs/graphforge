@@ -524,7 +524,10 @@ fn a_missing_or_null_end_returns_no_rows() {
                 "(o:N)-[r:E*0..3]->(x)",
                 "o.id AS start, [e IN r | e.k] AS keys",
             );
-            assert!(is_reversed(&forge, &subject), "{prefix}: subject is reversed");
+            assert!(
+                is_reversed(&forge, &subject),
+                "{prefix}: subject is reversed"
+            );
             assert!(!is_reversed(&forge, &baseline), "{prefix}: baseline is not");
             assert_eq!(answer(&forge, &subject), Vec::<String>::new(), "{prefix}");
             assert_eq!(answer(&forge, &baseline), Vec::<String>::new(), "{prefix}");
@@ -559,5 +562,70 @@ fn shapes_the_search_does_not_reverse_keep_the_unreversed_plan() {
     ] {
         assert!(!is_reversed(&forge, query), "{name}");
         assert!(!answer(&forge, query).is_empty(), "{name}");
+    }
+}
+
+/// The trails of [`trails`] whose every edge key is below `limit`.
+fn trails_below(min: usize, max: usize, limit: i64) -> Vec<String> {
+    trails(min, max, END, |_| true)
+        .into_iter()
+        .filter(|trail| {
+            let (_, keys) = trail.split_once(',').expect("trail");
+            keys.trim_matches(|c| c == '[' || c == ']')
+                .split(", ")
+                .filter(|key| !key.is_empty())
+                .all(|key| key.parse::<i64>().expect("key") < limit)
+        })
+        .collect()
+}
+
+#[test]
+fn a_per_edge_predicate_keeps_its_meaning_in_both_modes() {
+    for partitions in PARTITIONS {
+        let forge = forge(partitions, 0);
+        let bound = "MATCH (x:N {id: 5}) MATCH (o:N)-[r:E*1..3]->(x)";
+        let all = "ALL(e IN r WHERE e.k < 900)";
+
+        // The relationship list is returned, so the search enumerates trails
+        // and the predicate filters their lists: the search runs from the end.
+        let returned = "o.id AS start, [e IN r | e.k] AS keys";
+        let subject = format!("{bound} WHERE {all} RETURN {returned}");
+        let baseline = format!("{bound} WHERE {all} AND o.id >= 0 RETURN {returned}");
+        let context = format!("{partitions} partitions, enumerated");
+        let rows = assert_same(&forge, &context, &subject, &baseline);
+        let mut expected = trails_below(1, 3, 900);
+        expected.sort();
+        assert_eq!(rows, expected, "{context}");
+        assert!(
+            expected.len() < trails(1, 3, END, |_| true).len(),
+            "the predicate removes trails"
+        );
+
+        // Only the set of starts is returned, so the search is a reachability
+        // search that applies the predicate to each edge itself. That mode is
+        // not reversed, and its answer does not change.
+        let subject = format!("{bound} WHERE {all} RETURN DISTINCT o.id AS start");
+        let plan = forge
+            .explain_stage(&subject, ExplainStage::PhysicalPlan)
+            .expect("plan");
+        assert!(
+            plan.contains("mode=reachability"),
+            "{partitions} partitions:\n{plan}"
+        );
+        assert!(
+            !plan.contains("edge_list=reversed"),
+            "{partitions} partitions:\n{plan}"
+        );
+        let mut starts: Vec<String> = trails_below(1, 3, 900)
+            .iter()
+            .map(|trail| trail.split(',').next().expect("start").to_owned())
+            .collect();
+        starts.sort();
+        starts.dedup();
+        assert_eq!(
+            answer(&forge, &subject),
+            starts,
+            "{partitions} partitions, reachability"
+        );
     }
 }
