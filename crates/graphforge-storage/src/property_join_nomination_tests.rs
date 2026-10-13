@@ -19,7 +19,9 @@ use datafusion::physical_plan::test::TestMemoryExec;
 use futures::StreamExt;
 
 use crate::property_filter_approval::PropertyFilterApprovalRule;
-use crate::property_join_nomination::{UuidBuildKeyNomination, UuidBuildKeyTapExec};
+use crate::property_join_nomination::{
+    NominationLimits, UuidBuildKeyNomination, UuidBuildKeyTapExec,
+};
 use crate::property_overlay::{EqualityValue, PropertyEquality};
 use crate::property_scan::{PropertyOverlayExec, PropertyScanOptions};
 
@@ -64,6 +66,33 @@ async fn tap_forwards_batches_and_publishes_deduplicated_non_null_uuid_keys() {
     assert_eq!(ids.len(), 2);
     assert!(ids.contains(&first));
     assert!(ids.contains(&second));
+}
+
+#[tokio::test]
+async fn a_tap_past_its_row_cap_abandons_but_still_forwards_every_row() {
+    let first = 9_u128.to_be_bytes();
+    let second = 2_u128.to_be_bytes();
+    let third = 5_u128.to_be_bytes();
+    let input = input_with_values(&[Some(first), Some(second), Some(third), Some(first)]);
+    let nomination = UuidBuildKeyNomination::with_limits(NominationLimits { max_ids: Some(2) });
+    let tap = UuidBuildKeyTapExec::new(input, 0, Arc::clone(&nomination));
+    let mut stream = tap.execute(0, Arc::new(TaskContext::default())).unwrap();
+
+    // The abandoned nomination is a scan decision only: the join's build rows
+    // all arrive.
+    let forwarded = stream.next().await.unwrap().unwrap();
+    assert_eq!(forwarded.num_rows(), 4);
+    assert!(stream.next().await.is_none());
+    assert!(nomination.is_abandoned());
+    assert!(
+        nomination.ids().is_none(),
+        "an abandoned nomination must not publish a partial key set"
+    );
+    let (consumer, _receiver) = tokio::sync::mpsc::channel(1);
+    let waited = tokio::time::timeout(Duration::from_secs(1), nomination.wait(&consumer))
+        .await
+        .expect("an abandoned nomination must wake its waiters");
+    assert!(waited.unwrap());
 }
 
 #[tokio::test]
