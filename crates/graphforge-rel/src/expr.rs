@@ -15,6 +15,8 @@ use graph_values::{
     null_utf8_list, resolve_path_builtin,
 };
 pub use graph_values::{PathNodeHydration, evaluate_path_nodes, path_node_hydration_descriptor};
+mod path_node_demand;
+pub use path_node_demand::PathNodeDemand;
 mod list_values;
 #[cfg(test)]
 use list_values::het_depth;
@@ -730,7 +732,7 @@ impl<'a> ExprLowerer<'a> {
                 }
                 resolve_builtin(name, lowered, {
                     let hydration = if name.eq_ignore_ascii_case("_path_nodes") {
-                        self.path_node_hydration()?
+                        self.path_node_hydration(PathNodeDemand::Whole)?
                     } else {
                         None
                     };
@@ -1179,7 +1181,7 @@ impl<'a> ExprLowerer<'a> {
             0 => "__gf_elem".to_owned(),
             d => format!("__gf_elem_{d}"),
         };
-        let list_expr = self.lower(list)?;
+        let list_expr = self.lower_clause_list(list, loop_var, &[predicate], false)?;
         if let IrExpr::Literal(IrLiteral::Bool(predicate)) = self.arena.get(predicate) {
             let udf =
                 ScalarUDF::new_from_impl(CypherInvariantQuantifier::new(kind, Some(*predicate)));
@@ -1288,7 +1290,8 @@ impl<'a> ExprLowerer<'a> {
             0 => "__gf_elem".to_owned(),
             d => format!("__gf_elem_{d}"),
         };
-        let list_expr = self.lower(list)?;
+        let clauses: Vec<ExprId> = filter.into_iter().chain(projection).collect();
+        let list_expr = self.lower_clause_list(list, loop_var, &clauses, projection.is_none())?;
         let clause_schema = self.list_element_type(&list_expr).and_then(|element_type| {
             let mut fields = self.input_schema.as_ref().map_or_else(Vec::new, |schema| {
                 schema

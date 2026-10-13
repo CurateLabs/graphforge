@@ -1,8 +1,8 @@
 //! Graph values, metadata, and neutral path hydration descriptors.
 
 use super::{
-    ExprId, ExprLowerer, IrExpr, IrLiteral, LoweringError, VarId, col_literal, decode_het,
-    qualified_col, validate_heterogeneous_arguments,
+    ExprId, ExprLowerer, IrExpr, IrLiteral, LoweringError, PathNodeDemand, VarId, col_literal,
+    decode_het, qualified_col, validate_heterogeneous_arguments,
 };
 use datafusion::arrow::datatypes::DataType;
 use datafusion::logical_expr::{
@@ -415,31 +415,16 @@ impl ExprLowerer<'_> {
     /// occurrence of a name wins, forced nullable — a node without the column
     /// is NULL). `None` without a read target (schema-only lowering), keeping
     /// the UDF's original `node_uuid`-only shape.
-    pub(super) fn path_node_hydration(&self) -> Result<Option<PathNodeHydration>, LoweringError> {
-        use datafusion::arrow::datatypes::Field;
+    ///
+    /// `demand` narrows the element to what the consuming expression observes
+    /// (#1984); [`PathNodeDemand::Whole`] is the full union above.
+    pub(super) fn path_node_hydration(
+        &self,
+        demand: PathNodeDemand,
+    ) -> Result<Option<PathNodeHydration>, LoweringError> {
         let Some(dir) = self.read_target.as_ref() else {
             return Ok(None);
         };
-        let stems = dir.node_property_stems.clone();
-        let mut fields = vec![
-            Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
-            Field::new("labels", DataType::new_list(DataType::Utf8, true), true),
-        ];
-        let mut seen: std::collections::HashSet<String> =
-            fields.iter().map(|f| f.name().clone()).collect();
-        for stem in &stems {
-            let table = dir.node_properties.get(stem).ok_or_else(|| {
-                LoweringError::UnsupportedExpr(format!(
-                    "lowering snapshot missing node property schema for stem {stem}"
-                ))
-            })?;
-            for f in table.fields() {
-                if f.name() == "node_uuid" || !seen.insert(f.name().clone()) {
-                    continue;
-                }
-                fields.push(f.as_ref().clone().with_nullable(true));
-            }
-        }
         let mut labels_by_type: Vec<(graphforge_value::EntityTypeId, String)> = self
             .type_id_to_entity_name
             .iter()
@@ -450,11 +435,7 @@ impl ExprLowerer<'_> {
                 .cmp(&right.encode())
                 .then_with(|| left_name.cmp(right_name))
         });
-        Ok(Some(PathNodeHydration {
-            labels_by_type,
-            prop_stems: stems,
-            fields: fields.into(),
-        }))
+        PathNodeHydration::build(dir, labels_by_type, demand).map(Some)
     }
 }
 
@@ -826,13 +807,93 @@ fn path_node_struct_fields() -> datafusion::arrow::datatypes::Fields {
 /// `Hash`/`Eq`.
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct PathNodeHydration {
-    /// `type_id → label` (ontology + runtime catalog), sorted by id.
+    /// `type_id → label` (ontology + runtime catalog), sorted by id. Empty
+    /// when the demand does not observe labels.
     pub labels_by_type: Vec<(graphforge_value::EntityTypeId, String)>,
-    /// The `properties/<stem>.parquet` stems whose fields form the union,
-    /// sorted — the invoke coalesces each node's values across them.
+    /// The `properties/<stem>.parquet` stems that hold at least one demanded
+    /// property, sorted — the invoke coalesces each node's values across them.
     pub prop_stems: Vec<String>,
-    /// The full element fields: `node_uuid`, `labels`, then the property union.
+    /// The element fields: `node_uuid`, `labels` when demanded, then the
+    /// demanded part of the property union.
     pub fields: datafusion::arrow::datatypes::Fields,
+    /// What the consuming expression observes. Execution rebuilds the
+    /// descriptor from the live catalog with this demand and rejects a plan
+    /// whose baked descriptor differs.
+    pub demand: PathNodeDemand,
+}
+
+impl PathNodeHydration {
+    /// The property fields of the element: everything after `node_uuid` and,
+    /// when the demand observes them, `labels`.
+    #[must_use]
+    pub fn property_fields(&self) -> &[datafusion::arrow::datatypes::FieldRef] {
+        &self.fields[1 + usize::from(self.demand.labels())..]
+    }
+
+    /// The descriptor for `demand` over the node property schemas of
+    /// `snapshot`. Lowering and execution both call this, so a plan baked at
+    /// lowering binds only against a catalog that yields the same descriptor.
+    ///
+    /// Fields keep their [`PathNodeDemand::Whole`] order, so narrowing never
+    /// reorders the surviving columns. `labels` is reserved even when it is
+    /// not an element field: a stored property of that name stays shadowed.
+    ///
+    /// # Errors
+    /// A stem in `snapshot` has no schema.
+    pub fn build(
+        snapshot: &graphforge_ir::LoweringSnapshot,
+        mut labels_by_type: Vec<(graphforge_value::EntityTypeId, String)>,
+        demand: PathNodeDemand,
+    ) -> Result<Self, LoweringError> {
+        use datafusion::arrow::datatypes::Field;
+        let mut fields = vec![Field::new(
+            "node_uuid",
+            DataType::FixedSizeBinary(16),
+            false,
+        )];
+        if demand.labels() {
+            fields.push(Field::new(
+                "labels",
+                DataType::new_list(DataType::Utf8, true),
+                true,
+            ));
+        } else {
+            labels_by_type.clear();
+        }
+        let mut seen: std::collections::HashSet<String> =
+            ["node_uuid".to_owned(), "labels".to_owned()].into();
+        let mut prop_stems = Vec::new();
+        for stem in &snapshot.node_property_stems {
+            let table = snapshot.node_properties.get(stem).ok_or_else(|| {
+                LoweringError::UnsupportedExpr(format!(
+                    "lowering snapshot missing node property schema for stem {stem}"
+                ))
+            })?;
+            // A stem is read when it holds any demanded column, including one
+            // an earlier stem already contributed: values coalesce across
+            // stems, so dropping a later stem would drop its values.
+            let mut demanded = matches!(demand, PathNodeDemand::Whole);
+            for f in table.fields() {
+                let name = f.name();
+                if name == "node_uuid" || name == "labels" || !demand.wants_property(name) {
+                    continue;
+                }
+                demanded = true;
+                if seen.insert(name.clone()) {
+                    fields.push(f.as_ref().clone().with_nullable(true));
+                }
+            }
+            if demanded {
+                prop_stems.push(stem.clone());
+            }
+        }
+        Ok(Self {
+            labels_by_type,
+            prop_stems,
+            fields: fields.into(),
+            demand,
+        })
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]

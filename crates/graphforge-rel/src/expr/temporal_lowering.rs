@@ -7,8 +7,8 @@ use super::{
     CYPHER_DATETIME_TRUNCATE, CYPHER_DURATION_BETWEEN, CYPHER_DURATION_PARSE,
     CYPHER_LOCALDATETIME_PROJECT, CYPHER_LOCALDATETIME_TRUNCATE, CYPHER_LOCALTIME_PROJECT,
     CYPHER_LOCALTIME_TRUNCATE, CYPHER_TIME_PROJECT, CYPHER_TIME_TRUNCATE, DfExpr, ExprId,
-    ExprLowerer, IrExpr, IrLiteral, LoweringError, ScalarValue, date_scalar, datetime_scalar,
-    duration_scalar, lit, localdatetime_scalar, render_temporal, resolve_builtin,
+    ExprLowerer, IrExpr, IrLiteral, LoweringError, PathNodeDemand, ScalarValue, date_scalar,
+    datetime_scalar, duration_scalar, lit, localdatetime_scalar, render_temporal, resolve_builtin,
     temporal_null_scalar, time_scalar,
 };
 
@@ -179,7 +179,7 @@ impl ExprLowerer<'_> {
             .collect::<Result<_, _>>()?;
         resolve_builtin(name, lowered, {
             let hydration = if name.eq_ignore_ascii_case("_path_nodes") {
-                self.path_node_hydration()?
+                self.path_node_hydration(PathNodeDemand::Whole)?
             } else {
                 None
             };
