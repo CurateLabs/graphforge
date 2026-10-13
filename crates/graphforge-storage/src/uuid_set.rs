@@ -199,6 +199,9 @@ impl UuidMembership for UuidFilter<'_> {
     }
 }
 
+/// A half-open UUID interval `low..high`, unbounded above when `high` is `None`.
+pub(crate) type UuidInterval = ([u8; 16], Option<[u8; 16]>);
+
 /// The half-open UUID interval `low..high`, unbounded above when `high` is
 /// `None`, optionally intersected with another membership.
 ///
@@ -214,11 +217,8 @@ pub(crate) struct UuidRange<'a> {
 }
 
 impl<'a> UuidRange<'a> {
-    pub(crate) fn new(
-        low: [u8; 16],
-        high: Option<[u8; 16]>,
-        inner: Option<&'a dyn UuidMembership>,
-    ) -> Self {
+    pub(crate) fn new(interval: UuidInterval, inner: Option<&'a dyn UuidMembership>) -> Self {
+        let (low, high) = interval;
         Self { low, high, inner }
     }
 
@@ -765,7 +765,7 @@ mod tests {
 
     #[test]
     fn range_alone_is_a_half_open_interval_that_clips_range_probes() {
-        let range = UuidRange::new(uuid(10), Some(uuid(20)), None);
+        let range = UuidRange::new((uuid(10), Some(uuid(20))), None);
         assert!(!range.is_empty());
         assert_eq!(
             (range.min_uuid(), range.max_uuid()),
@@ -790,7 +790,7 @@ mod tests {
 
     #[test]
     fn range_without_an_upper_bound_reaches_the_largest_uuid() {
-        let range = UuidRange::new(uuid(10), None, None);
+        let range = UuidRange::new((uuid(10), None), None);
         assert_eq!(range.max_uuid(), Some([u8::MAX; 16]));
         assert!(range.contains_uuid(&[u8::MAX; 16]));
         assert!(!range.contains_uuid(&uuid(9)));
@@ -801,9 +801,9 @@ mod tests {
     #[test]
     fn empty_ranges_contain_nothing() {
         for range in [
-            UuidRange::new(uuid(10), Some(uuid(10)), None),
-            UuidRange::new(uuid(10), Some(uuid(3)), None),
-            UuidRange::new(uuid(0), Some(uuid(0)), None),
+            UuidRange::new((uuid(10), Some(uuid(10))), None),
+            UuidRange::new((uuid(10), Some(uuid(3))), None),
+            UuidRange::new((uuid(0), Some(uuid(0))), None),
         ] {
             assert!(range.is_empty());
             assert_eq!((range.min_uuid(), range.max_uuid()), (None, None));
@@ -817,7 +817,7 @@ mod tests {
     fn range_over_a_membership_is_the_intersection() {
         let values = [uuid(2), uuid(12), uuid(15), uuid(30)];
         let inner = SortedUuids(&values);
-        let range = UuidRange::new(uuid(10), Some(uuid(20)), Some(&inner));
+        let range = UuidRange::new((uuid(10), Some(uuid(20))), Some(&inner));
         assert!(!range.is_empty());
         for value in 0..40 {
             assert_eq!(
@@ -840,7 +840,7 @@ mod tests {
         // A membership never claims a whole span.
         assert!(!range.contains_every_in_range(&uuid(12), &uuid(12)));
         // An inner set with nothing inside the interval has no bounds.
-        let outside = UuidRange::new(uuid(100), Some(uuid(200)), Some(&inner));
+        let outside = UuidRange::new((uuid(100), Some(uuid(200))), Some(&inner));
         assert!(!outside.may_contain_in_range(&uuid(0), &[u8::MAX; 16]));
         assert_eq!((outside.min_uuid(), outside.max_uuid()), (None, None));
     }

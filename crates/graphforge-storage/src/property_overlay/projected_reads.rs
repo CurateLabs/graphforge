@@ -2,7 +2,7 @@
 
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
 
-use super::selective_reads::RowGroupSelection;
+use super::selective_reads::{RowGroupSelection, groups_fully_covered};
 use super::uuid_pages::wanted_row_selection;
 use super::{
     Arc, Array, AtomicU64, AuthenticatedPropertyFragment, AuthenticatedPropertyInventory, BTreeMap,
@@ -286,7 +286,17 @@ fn open_projected_fragment(
     // for the matching rows alone, instead of decoding every row of each
     // surviving row group.
     let wanted_rows = match (&context.row_groups, selected_groups.as_deref()) {
-        (RowGroupSelection::Uuids(wanted), Some(groups)) if !groups.is_empty() => {
+        // A partition's key range covers whole row groups of a fragment: every
+        // row of them is wanted, so the UUID column need not be read to choose.
+        (RowGroupSelection::Uuids(wanted), Some(groups))
+            if !groups.is_empty()
+                && !groups_fully_covered(
+                    footer.metadata(),
+                    context.kind.uuid_field(),
+                    groups,
+                    *wanted,
+                ) =>
+        {
             Some(wanted_row_selection(
                 &source,
                 &footer,

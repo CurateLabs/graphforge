@@ -133,7 +133,8 @@ pub(crate) fn uuid_range(
     range
 }
 
-fn uuid_bounds(group: &RowGroupMetaData, leaf: usize) -> Option<([u8; 16], [u8; 16])> {
+/// The smallest and largest UUID of one row group, from its statistics.
+pub(super) fn uuid_bounds(group: &RowGroupMetaData, leaf: usize) -> Option<([u8; 16], [u8; 16])> {
     let statistics = group.column(leaf).statistics()?;
     if statistics.is_min_max_deprecated() {
         return None;
@@ -149,6 +150,24 @@ fn group_may_hold_uuid(
     targets: &dyn crate::uuid_set::UuidMembership,
 ) -> bool {
     uuid_bounds(group, leaf).is_none_or(|(min, max)| targets.may_contain_in_range(&min, &max))
+}
+
+/// Whether `targets` holds every UUID that can fall in each of `groups`, so no
+/// row of them needs a per-row membership decision. A group without statistics
+/// is never covered.
+pub(crate) fn groups_fully_covered(
+    metadata: &ParquetMetaData,
+    uuid_field: &str,
+    groups: &[usize],
+    targets: &dyn crate::uuid_set::UuidMembership,
+) -> bool {
+    let Some(leaf) = column_leaf(metadata, uuid_field) else {
+        return false;
+    };
+    groups.iter().all(|&group| {
+        uuid_bounds(metadata.row_group(group), leaf)
+            .is_some_and(|(min, max)| targets.contains_every_in_range(&min, &max))
+    })
 }
 
 /// Whether a fragment can hold a row with `value` in the column.
