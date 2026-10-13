@@ -10,11 +10,11 @@ homepage.workspace = true
 documentation.workspace = true
 
 [dependencies]
-graphforge-core = { version = "0.6.0-rc.4", path = "../graphforge-core" }
-graphforge-ast = { version = "0.6.0-rc.4", path = "../graphforge-ast" }
+graphforge-core = { version = "0.6.0-rc.5", path = "../graphforge-core" }
+graphforge-ast = { version = "0.6.0-rc.5", path = "../graphforge-ast" }
 
 [dev-dependencies]
-graphforge-ir = { version = "0.6.0-rc.4", path = "../graphforge-ir" }
+graphforge-ir = { version = "0.6.0-rc.5", path = "../graphforge-ir" }
 serde_json = { workspace = true }
 divan = { workspace = true }
 
