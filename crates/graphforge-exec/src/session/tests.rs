@@ -299,6 +299,90 @@ async fn extension_planner_builds_scan_backed_expand_variants_and_optional_join(
     );
 }
 
+/// Expansion serves one output partition per input partition (#1984), so the
+/// planner's exchange rules can spread one query's expansion over several
+/// cores. A single hop and a variable-length hop must both keep the input's
+/// partition count and refuse a partition the input does not have.
+#[tokio::test]
+async fn extension_planner_expands_each_input_partition() {
+    use datafusion::physical_plan::ExecutionPlanProperties;
+    use datafusion_datasource::memory::MemorySourceConfig;
+
+    let dir = TempDir::new().unwrap();
+    let (input, serial) = empty_write_input();
+    let expand = graphforge_plan::ExpandNode::new(
+        input.clone(),
+        "KNOWS",
+        1,
+        2,
+        3,
+        graphforge_ir::Direction::Out,
+        None,
+        vec![],
+        vec![],
+        vec![],
+    );
+    let var_len = VarLenExpandNode::new(
+        input,
+        "KNOWS",
+        1,
+        Some(2),
+        1,
+        2,
+        3,
+        graphforge_ir::Direction::Out,
+        None,
+        vec![],
+        graphforge_plan::var_len_edge_list_field(&[]),
+    );
+    let catalog = GraphCatalog::open(dir.path(), None, &RuntimeCatalog::new()).unwrap();
+    let session = ExecutionSession::new_with_target(
+        catalog,
+        None,
+        dir.path().to_path_buf(),
+        OntologyMode::Strict,
+    )
+    .unwrap();
+    let state = session.context().state();
+    let planner = DefaultPhysicalPlanner::default();
+
+    for partitions in [1_usize, 3] {
+        let input: Arc<dyn ExecutionPlan> =
+            MemorySourceConfig::try_new_exec(&vec![Vec::new(); partitions], serial.schema(), None)
+                .unwrap();
+        for (node, name) in [
+            (&expand as &dyn UserDefinedLogicalNode, "ExpandExec"),
+            (&var_len as &dyn UserDefinedLogicalNode, "VarLenExpandExec"),
+        ] {
+            let plan = GraphForgeExtensionPlanner
+                .plan_extension(&planner, node, &[], std::slice::from_ref(&input), &state)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(plan.name(), name);
+            assert_eq!(
+                plan.output_partitioning().partition_count(),
+                partitions,
+                "{name} must keep the {partitions} partitions of its input"
+            );
+            for partition in 0..partitions {
+                plan.execute(partition, SessionContext::new().task_ctx())
+                    .unwrap_or_else(|error| panic!("{name} partition {partition}: {error}"));
+            }
+            let error = match plan.execute(partitions, SessionContext::new().task_ctx()) {
+                Ok(_) => panic!("{name} accepted partition {partitions}"),
+                Err(error) => error,
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("has {partitions} partitions")),
+                "{name}: {error}"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn wave11_merge_requires_an_explicit_write_target() {
     let session = make_session();
