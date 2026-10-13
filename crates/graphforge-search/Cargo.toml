@@ -10,10 +10,10 @@ homepage.workspace = true
 documentation.workspace = true
 
 [dependencies]
-graphforge-core = { version = "0.6.0-rc.4", path = "../graphforge-core" }
-graphforge-value = { version = "0.6.0-rc.4", path = "../graphforge-value" }
+graphforge-core = { version = "0.6.0-rc.5", path = "../graphforge-core" }
+graphforge-value = { version = "0.6.0-rc.5", path = "../graphforge-value" }
 arrow = { workspace = true }
-graphforge-storage = { version = "0.6.0-rc.4", path = "../graphforge-storage" }
+graphforge-storage = { version = "0.6.0-rc.5", path = "../graphforge-storage" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tantivy = { workspace = true }
