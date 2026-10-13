@@ -175,7 +175,8 @@ fn measured(forge: &GraphForge, query: &str, ident: i64) -> Measured {
 /// Counts the frontier's one edge; the destination node is never projected.
 const EDGE_COUNT: &str =
     "MATCH (a:Entity {ident: $ident})-[e:LINK]->(b:Entity) RETURN count(e) AS n";
-/// Reads a property of the frontier's one destination node.
+/// Reads a property of the frontier's one destination node; the edge variable
+/// is unused, so the expansion reads no edge row.
 const DESTINATION_PROPERTY: &str =
     "MATCH (a:Entity {ident: $ident})-[e:LINK]->(b:Entity) RETURN sum(b.ident) AS n";
 
@@ -226,12 +227,22 @@ struct Decoded {
     uuid_rows: u64,
 }
 
+/// Whether the measured statement demands its edge variable, so that the
+/// expansion reads the edge row.
+#[derive(Clone, Copy)]
+enum EdgeRow {
+    /// The statement uses the edge: one edge row is read by dense ordinal.
+    Read,
+    /// The edge variable is unused: its adjacency comes from the CSR and the
+    /// edge file is not read at all.
+    Unread,
+}
+
 /// The reads were exact dense-ordinal selections that never fell back, and each
 /// wanted row cost at most the rows of one page of the layout.
-fn decoded(nodes: usize, ident: i64, hop: &Measured) -> Decoded {
+fn decoded(nodes: usize, ident: i64, hop: &Measured, edge: EdgeRow) -> Decoded {
     let io = &hop.io;
     let context = summary(nodes, ident, hop);
-    assert!(io.edge_dense_row_selection_reads > 0, "{context}");
     assert!(io.node_dense_row_selection_reads > 0, "{context}");
     assert_eq!(io.edge_full_reads, 0, "{context}");
     assert_eq!(io.node_full_reads, 0, "{context}");
@@ -240,8 +251,18 @@ fn decoded(nodes: usize, ident: i64, hop: &Measured) -> Decoded {
     assert_eq!(io.edge_validation_fallbacks, 0, "{context}");
     assert_eq!(io.node_validation_fallbacks, 0, "{context}");
     assert_eq!(io.property_uuid_index_fallbacks, 0, "{context}");
-    assert_eq!(io.edge_exact_rows_selected, 1, "{context}");
     assert_eq!(io.node_exact_rows_selected, 1, "{context}");
+    match edge {
+        EdgeRow::Read => {
+            assert!(io.edge_dense_row_selection_reads > 0, "{context}");
+            assert_eq!(io.edge_exact_rows_selected, 1, "{context}");
+        }
+        EdgeRow::Unread => {
+            assert_eq!(io.edge_dense_row_selection_reads, 0, "{context}");
+            assert_eq!(io.edge_exact_rows_selected, 0, "{context}");
+            assert_eq!(io.edge_page_rows_selected, 0, "{context}");
+        }
+    }
     assert!(
         io.edge_page_rows_selected <= PAGE_ROWS,
         "one edge row decoded {} rows of pages: {context}",
@@ -281,7 +302,7 @@ fn a_fixed_frontier_decodes_the_pages_of_its_rows_as_the_relation_doubles() {
             let hop = run(nodes, EDGE_COUNT, ident, 1);
             eprintln!("{}", summary(nodes, ident, &hop));
             assert_eq!(hop.value, 1, "{nodes} nodes");
-            seen.push(decoded(nodes, ident, &hop));
+            seen.push(decoded(nodes, ident, &hop, EdgeRow::Read));
         }
         assert_eq!(seen[0], seen[1], "ident {ident}");
     }
@@ -300,7 +321,7 @@ fn a_frontier_property_read_decodes_uuid_pages_as_the_route_grows() {
             eprintln!("{}", summary(nodes, ident, &hop));
             assert_eq!(hop.value, ident + 1, "{nodes} nodes");
             assert!(hop.io.property_uuid_selections > 0, "{hop:?}");
-            seen.push(decoded(nodes, ident, &hop));
+            seen.push(decoded(nodes, ident, &hop, EdgeRow::Unread));
         }
         assert_eq!(seen[0], seen[1], "ident {ident}");
         assert_eq!(seen[1], seen[2], "ident {ident}");

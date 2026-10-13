@@ -915,13 +915,14 @@ fn run_scale(nodes: usize, fan_out: usize) -> ScaleResult {
 }
 
 fn assert_indexed_limit_io(io: &io_stats::IoSnapshot) {
-    // A terminal immutable shard with fewer than twice the demand rows may
-    // legitimately take the filtered reader's >50% full-shard fallback. That
-    // remains neighborhood-bounded; a full large shard does not.
-    assert!(io.edge_full_reads <= 1, "{io:?}");
-    assert!(io.edge_full_rows < (2 * LIMIT) as u64, "{io:?}");
-    assert!(io.edge_filtered_reads >= 1, "{io:?}");
-    assert!(io.edge_filtered_rows > 0, "{io:?}");
+    // Every caller leaves its edge variables unused, so the adjacency index
+    // supplies edge ids and destinations and no edge file is read (#1984). The
+    // demanded-edge reads, and their neighborhood bound, are covered by
+    // `edge_file_demand` and `edge_frontier_reads`.
+    assert_eq!(io.edge_full_reads, 0, "{io:?}");
+    assert_eq!(io.edge_full_rows, 0, "{io:?}");
+    assert_eq!(io.edge_filtered_reads, 0, "{io:?}");
+    assert_eq!(io.edge_filtered_rows, 0, "{io:?}");
     assert_eq!(io.node_full_reads, 0, "{io:?}");
     assert!(io.node_filtered_reads >= 1, "{io:?}");
 }

@@ -42,6 +42,10 @@ use datafusion::physical_plan::execution_plan::EmissionType;
 use datafusion::physical_plan::stream::RecordBatchReceiverStream;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use edge_filter::PhysicalEdgeFilter;
+pub(crate) use edge_properties::EdgePropSource;
+use edge_properties::build_edge_prop_children;
+use edge_properties::edge_prop_children;
+use edge_properties::load_edge_prop_source;
 use futures::StreamExt;
 use graphforge_core::GfError;
 use graphforge_core::OntologyMode;
@@ -146,6 +150,11 @@ pub struct VarLenExpandExec {
     expansion: VarLenMode,
     /// The edge variable, the key of this hop's demand counters.
     edge_var: u32,
+    /// Whether any operator above reads the trailing edge-list column. When
+    /// none does, the traversal still produces one row per trail but reads no
+    /// edge file: the trails come from the adjacency's edge ids alone and the
+    /// column holds nulls.
+    edge_list_demanded: bool,
     schema: SchemaRef,
     props: Arc<PlanProperties>,
     /// Adjacency source for the BFS — the session-scoped provider injected
@@ -198,12 +207,39 @@ impl VarLenExpandExec {
             bound_dst_col_idx,
             expansion: node.mode,
             edge_var: node.edge_var,
+            edge_list_demanded: true,
             schema,
             props,
             provider,
             capture_epoch: demand::stamp_capture_epoch().unwrap_or(0),
             edge_filter: None,
         }
+    }
+
+    /// Declare whether any operator above reads the edge-list column.
+    ///
+    /// Only a trail expansion has one; a reachability expansion produces hop
+    /// counts and keeps its plan unchanged.
+    pub(super) fn with_edge_list_demanded(&self, demanded: bool) -> Arc<dyn ExecutionPlan> {
+        Arc::new(Self {
+            input: Arc::clone(&self.input),
+            rel_type_name: self.rel_type_name.clone(),
+            direction: self.direction,
+            min_hops: self.min_hops,
+            max_hops: self.max_hops,
+            dir: self.dir.clone(),
+            mode: self.mode,
+            src_col_idx: self.src_col_idx,
+            bound_dst_col_idx: self.bound_dst_col_idx,
+            expansion: self.expansion,
+            edge_var: self.edge_var,
+            edge_list_demanded: demanded || self.expansion != VarLenMode::Trails,
+            schema: Arc::clone(&self.schema),
+            props: Arc::clone(&self.props),
+            provider: Arc::clone(&self.provider),
+            capture_epoch: self.capture_epoch,
+            edge_filter: self.edge_filter.clone(),
+        })
     }
 
     /// Require every edge the expansion crosses to satisfy `predicate`, a
@@ -289,6 +325,7 @@ impl ExecutionPlan for VarLenExpandExec {
             bound_dst_col_idx: self.bound_dst_col_idx,
             expansion: self.expansion,
             edge_var: self.edge_var,
+            edge_list_demanded: self.edge_list_demanded,
             schema: self.schema.clone(),
             props,
             provider: self.provider.clone(),
@@ -318,6 +355,7 @@ impl ExecutionPlan for VarLenExpandExec {
             bound_dst_col_idx: self.bound_dst_col_idx,
             expansion: self.expansion,
             edge_var: self.edge_var,
+            edge_list_demanded: self.edge_list_demanded,
             out_schema: self.schema.clone(),
             provider: self.provider.clone(),
             capture_epoch: self.capture_epoch,
@@ -445,6 +483,9 @@ pub(super) struct ExpandConfig {
     pub(super) expansion: VarLenMode,
     /// The edge variable, the key of this hop's demand counters.
     pub(super) edge_var: u32,
+    /// Whether the trailing edge-list column is read above this expansion; see
+    /// [`VarLenExpandExec`]. Always true for a reachability expansion.
+    pub(super) edge_list_demanded: bool,
     pub(super) out_schema: SchemaRef,
     /// Adjacency source (#762) — moved into the `'static` execute future.
     pub(super) provider: Arc<dyn AdjacencyProvider>,
@@ -855,10 +896,17 @@ fn load_chunk_sources(
     // Charged to the returned sources.
     let mut charged = 0usize;
 
-    let traversed: std::collections::HashSet<u64> = emissions
-        .iter()
-        .flat_map(|(_, _, path)| path.iter().copied())
-        .collect();
+    // Nothing is read from an edge file when no operator above reads the
+    // relationship list: the trails are already complete from the adjacency's
+    // edge ids, so there is nothing to look up.
+    let traversed: std::collections::HashSet<u64> = if cfg.edge_list_demanded {
+        emissions
+            .iter()
+            .flat_map(|(_, _, path)| path.iter().copied())
+            .collect()
+    } else {
+        std::collections::HashSet::new()
+    };
     charge(
         reservation,
         &mut temporary,
@@ -869,22 +917,27 @@ fn load_chunk_sources(
     // the per-path relationship list (#709) - read lazily for the traversed
     // ids only (row-group pruning + row filter; an empty traversal never
     // opens the file).
-    let edge_batches = read_traversed_edges(cfg, &traversed)?;
-    charge(
-        reservation,
-        &mut temporary,
-        edge_batches
-            .iter()
-            .map(RecordBatch::get_array_memory_size)
-            .sum(),
-    )?;
-    let edge_records = build_edge_records(cfg, &edge_batches)?;
-    charge(
-        reservation,
-        &mut charged,
-        edge_record_table_bytes(&edge_records),
-    )?;
-    drop(edge_batches);
+    let edge_records = if cfg.edge_list_demanded {
+        let edge_batches = read_traversed_edges(cfg, &traversed)?;
+        charge(
+            reservation,
+            &mut temporary,
+            edge_batches
+                .iter()
+                .map(RecordBatch::get_array_memory_size)
+                .sum(),
+        )?;
+        let edge_records = build_edge_records(cfg, &edge_batches)?;
+        charge(
+            reservation,
+            &mut charged,
+            edge_record_table_bytes(&edge_records),
+        )?;
+        drop(edge_batches);
+        edge_records
+    } else {
+        HashMap::new()
+    };
 
     // --- Read nodes; map node_id -> row index for destination columns. ---
     // Lazily read only the reached destination node records (#838): the dst
@@ -929,21 +982,25 @@ fn load_chunk_sources(
     )?;
 
     // The relation's edge properties for every traversed edge.
-    let prop_fields = edge_list_prop_fields(cfg)?;
-    let mut hop_uuids = std::collections::BTreeSet::new();
-    for id in &traversed {
-        let record = edge_records
-            .get(id)
-            .ok_or_else(|| exec_err(format!("VarLenExpand: no record for edge_id {id}")))?;
-        hop_uuids.insert(record.edge_uuid);
-    }
-    let edge_props = load_edge_prop_source(
-        cfg.provider.admitted_inventory().as_deref(),
-        &cfg.rel_type_name,
-        &cfg.dir,
-        &prop_fields,
-        &hop_uuids,
-    )?;
+    let edge_props = if cfg.edge_list_demanded {
+        let prop_fields = edge_list_prop_fields(cfg)?;
+        let mut hop_uuids = std::collections::BTreeSet::new();
+        for id in &traversed {
+            let record = edge_records
+                .get(id)
+                .ok_or_else(|| exec_err(format!("VarLenExpand: no record for edge_id {id}")))?;
+            hop_uuids.insert(record.edge_uuid);
+        }
+        load_edge_prop_source(
+            cfg.provider.admitted_inventory().as_deref(),
+            &cfg.rel_type_name,
+            &cfg.dir,
+            &prop_fields,
+            &hop_uuids,
+        )?
+    } else {
+        EdgePropSource::empty()
+    };
     charge(reservation, &mut charged, edge_props.charged_bytes())?;
 
     reservation.shrink(temporary);
@@ -1005,12 +1062,23 @@ fn materialise_chunk(
     // Trailing edge-list column (#709): one `List<Struct>` value per emitted
     // path, in schema order (last). Built from each path's ordered edge ids,
     // plus the relation's edge properties (#755).
-    columns.push(build_edge_list_column(
-        cfg,
-        emissions,
-        &sources.edge_records,
-        &sources.edge_props,
-    )?);
+    if cfg.edge_list_demanded {
+        columns.push(build_edge_list_column(
+            cfg,
+            emissions,
+            &sources.edge_records,
+            &sources.edge_props,
+        )?);
+    } else {
+        // No operator above reads the list, so no entry of it is ever looked
+        // up; the column is nullable and carries nulls.
+        let edge_field = cfg
+            .out_schema
+            .fields()
+            .last()
+            .ok_or_else(|| exec_err("output schema has no edge-list column".into()))?;
+        columns.push(new_null_array(edge_field.data_type(), emissions.len()));
+    }
     let out = RecordBatch::try_new(cfg.out_schema.clone(), columns)
         .map_err(|e| exec_err(e.to_string()))?;
     grow_reservation(reservation, out.get_array_memory_size())?;
@@ -1342,293 +1410,6 @@ pub(super) fn build_edge_list_column(
     let list = ListArray::try_new(item.clone(), offsets, Arc::new(struct_arr), None)
         .map_err(|e| exec_err(e.to_string()))?;
     Ok(Arc::new(list))
-}
-
-fn read_target_edge_properties(
-    inventory: &graphforge_storage::AuthenticatedPropertyInventory,
-    dir: &Path,
-    stem: &str,
-    targets: &std::collections::BTreeSet<[u8; 16]>,
-    property_names: &[String],
-    owners: &mut std::collections::BTreeSet<[u8; 16]>,
-) -> Result<Vec<arrow::record_batch::RecordBatch>, GfError> {
-    // A route with a current persisted index is read through its small
-    // authenticated shards; any other route, as before, from its fragments.
-    if let Some(batches) = crate::edge_property_index::indexed_edge_property_batches(
-        inventory,
-        dir,
-        stem,
-        targets,
-        property_names,
-        owners,
-    )? {
-        return Ok(batches);
-    }
-    let selected = graphforge_storage::read_authenticated_property_target_data_for_inventory(
-        inventory,
-        graphforge_storage::PropertyRouteKind::Edge,
-        stem,
-        targets,
-    )?;
-    if selected.present.iter().any(|uuid| !owners.insert(*uuid)) {
-        return Err(GfError::Project {
-            code: graphforge_core::ProjectErrorCode::ProjectCorrupt,
-            message: "edge properties have multiple authenticated owners".into(),
-        });
-    }
-    let schema = inventory.route_schema(graphforge_storage::PropertyRouteKind::Edge, stem)?;
-    match schema {
-        Some(schema) => {
-            let indices = schema
-                .fields()
-                .iter()
-                .enumerate()
-                .filter(|(_, field)| {
-                    field.name() == "edge_uuid" || property_names.contains(field.name())
-                })
-                .map(|(index, _)| index)
-                .collect::<Vec<_>>();
-            let projected = schema
-                .project(&indices)
-                .map_err(GfError::from_execution_error)?;
-            Ok(vec![selected.edge_batch(&projected)?])
-        }
-        None => Ok(Vec::new()),
-    }
-}
-
-fn edge_property_stems(
-    inventory: Option<&graphforge_storage::AuthenticatedPropertyInventory>,
-    dir: &Path,
-    rel_type_name: &str,
-) -> Result<Vec<String>, GfError> {
-    Ok(if rel_type_name == "*" {
-        match inventory {
-            Some(inventory) => inventory
-                .routes(graphforge_storage::PropertyRouteKind::Edge)
-                .map(str::to_owned)
-                .collect(),
-            None => graphforge_storage::list_edge_property_stems(dir),
-        }
-    } else {
-        let mut candidates = vec![rel_type_name.to_owned()];
-        let has_shared = match inventory {
-            Some(inventory) => inventory
-                .route_schema(graphforge_storage::PropertyRouteKind::Edge, "_exploratory")?
-                .is_some(),
-            None => graphforge_storage::list_edge_property_stems(dir)
-                .iter()
-                .any(|stem| stem == "_exploratory"),
-        };
-        if rel_type_name != "_exploratory" && has_shared {
-            candidates.push("_exploratory".to_owned());
-        }
-        candidates.sort();
-        candidates
-    })
-}
-
-/// Build one child array per edge-property struct field (#755), in field order.
-///
-/// Authenticates candidate owners and retains values for flattened hop UUIDs.
-/// Named traversals select the logical route and shared construction route;
-/// wildcard traversals select every route. Tombstones participate in ownership
-/// refusal but never contribute values. Missing properties become NULL under
-/// the lowering's nullable union schema. Returns no children without properties.
-/// `hop_edge_uuids` is in flattened hop order (matching the topology children).
-fn build_edge_prop_children(
-    inventory: Option<&graphforge_storage::AuthenticatedPropertyInventory>,
-    rel_type_name: &str,
-    dir: &Path,
-    prop_fields: &[arrow::datatypes::FieldRef],
-    hop_edge_uuids: &[[u8; 16]],
-) -> Result<Vec<arrow::array::ArrayRef>, GfError> {
-    let targets = hop_edge_uuids.iter().copied().collect();
-    let source = load_edge_prop_source(inventory, rel_type_name, dir, prop_fields, &targets)?;
-    edge_prop_children(&source, prop_fields, hop_edge_uuids)
-}
-
-/// The authenticated property rows of a set of edges, resolved once and
-/// assembled into hop order by [`edge_prop_children`] for as many output
-/// batches as the traversal needs.
-pub(super) struct EdgePropSource {
-    batches: Vec<RecordBatch>,
-    /// edge_uuid -> (owning batch, row within it).
-    uuid_to_loc: std::collections::HashMap<[u8; 16], (usize, u32)>,
-}
-
-impl EdgePropSource {
-    /// Bytes this source holds: its row batches and its location table.
-    fn charged_bytes(&self) -> usize {
-        self.batches
-            .iter()
-            .map(RecordBatch::get_array_memory_size)
-            .fold(
-                hash_table_bytes(
-                    self.uuid_to_loc.capacity(),
-                    std::mem::size_of::<([u8; 16], (usize, u32))>(),
-                ),
-                usize::saturating_add,
-            )
-    }
-
-    /// A source for a relation with no edge properties.
-    pub(super) fn empty() -> Self {
-        Self {
-            batches: Vec::new(),
-            uuid_to_loc: std::collections::HashMap::new(),
-        }
-    }
-}
-
-/// Read the selected rows of `targets` from every candidate property route.
-fn load_edge_prop_source(
-    inventory: Option<&graphforge_storage::AuthenticatedPropertyInventory>,
-    rel_type_name: &str,
-    dir: &Path,
-    prop_fields: &[arrow::datatypes::FieldRef],
-    targets: &std::collections::BTreeSet<[u8; 16]>,
-) -> Result<EdgePropSource, GfError> {
-    use std::collections::HashMap;
-
-    use arrow::array::FixedSizeBinaryArray;
-    use arrow::compute::concat_batches;
-
-    let exec_err = |m: String| GfError::Execution(m);
-    if prop_fields.is_empty() {
-        return Ok(EdgePropSource::empty());
-    }
-
-    // Resolve selected rows once per candidate route, then assemble hop order.
-    let stems = edge_property_stems(inventory, dir, rel_type_name)?;
-    let mut owners = std::collections::BTreeSet::new();
-    let mut prop_batches_by_rel = Vec::with_capacity(stems.len());
-    let property_names = prop_fields
-        .iter()
-        .map(|field| field.name().clone())
-        .collect::<Vec<_>>();
-    for stem in &stems {
-        let batches = match inventory {
-            Some(inventory) => read_target_edge_properties(
-                inventory,
-                dir,
-                stem,
-                targets,
-                &property_names,
-                &mut owners,
-            ),
-            None => graphforge_storage::read_edge_properties_projected(dir, stem, &property_names)
-                .map_err(|e| exec_err(e.to_string())),
-        }?;
-        if let Some(first) = batches.first() {
-            prop_batches_by_rel.push(
-                concat_batches(&first.schema(), &batches).map_err(|e| exec_err(e.to_string()))?,
-            );
-        }
-    }
-
-    // edge_uuid -> (owning batch, row within it). An edge belongs to exactly
-    // one physical owner; duplicate ownership is corruption, not precedence.
-    let mut uuid_to_loc: HashMap<[u8; 16], (usize, u32)> = HashMap::new();
-    for (bi, b) in prop_batches_by_rel.iter().enumerate() {
-        let key = b
-            .column_by_name("edge_uuid")
-            .and_then(|c| c.as_any().downcast_ref::<FixedSizeBinaryArray>())
-            // `downcast_ref` accepts any fixed-width binary column; require
-            // width 16 so `copy_from_slice` into `[u8; 16]` can't panic on a
-            // malformed on-disk file.
-            .filter(|a| a.value_length() == 16)
-            .ok_or_else(|| {
-                exec_err("edge-property file missing a FixedSizeBinary(16) edge_uuid column".into())
-            })?;
-        for r in 0..key.len() {
-            // A null key would `copy_from_slice` 16 zero bytes (a bogus UUID);
-            // surface a corrupt file as an error instead.
-            if key.is_null(r) {
-                return Err(exec_err(format!(
-                    "edge-property file has a null edge_uuid at row {r}"
-                )));
-            }
-            let mut u = [0u8; 16];
-            u.copy_from_slice(key.value(r));
-            let location = (
-                bi,
-                u32::try_from(r)
-                    .map_err(|_| exec_err(format!("edge-property row {r} exceeds u32")))?,
-            );
-            if uuid_to_loc.insert(u, location).is_some() {
-                return Err(exec_err(
-                    "edge properties have multiple physical owners".into(),
-                ));
-            }
-        }
-    }
-
-    Ok(EdgePropSource {
-        batches: prop_batches_by_rel,
-        uuid_to_loc,
-    })
-}
-
-/// Assemble one child array per edge-property struct field for the hops
-/// `hop_edge_uuids` (flattened hop order) from an already resolved source.
-fn edge_prop_children(
-    source: &EdgePropSource,
-    prop_fields: &[arrow::datatypes::FieldRef],
-    hop_edge_uuids: &[[u8; 16]],
-) -> Result<Vec<arrow::array::ArrayRef>, GfError> {
-    use arrow::array::{ArrayRef, UInt32Array, new_null_array};
-    use arrow::compute::kernels::zip::zip;
-    use arrow::compute::{is_not_null, take};
-
-    let exec_err = |m: String| GfError::Execution(m);
-    if prop_fields.is_empty() {
-        return Ok(Vec::new());
-    }
-    let prop_batches_by_rel = &source.batches;
-    let uuid_to_loc = &source.uuid_to_loc;
-
-    // One take-index per flattened hop PER BATCH: Some(row) only for the hops
-    // the batch owns, so each batch's `take` yields NULL everywhere else and
-    // the per-field coalesce below can simply prefer non-null.
-    let take_by_batch: Vec<UInt32Array> = (0..prop_batches_by_rel.len())
-        .map(|bi| {
-            hop_edge_uuids
-                .iter()
-                .map(|u| match uuid_to_loc.get(u) {
-                    Some(&(owner, row)) if owner == bi => Some(row),
-                    _ => None,
-                })
-                .collect()
-        })
-        .collect();
-
-    let mut children: Vec<ArrayRef> = Vec::with_capacity(prop_fields.len());
-    for field in prop_fields {
-        let mut child: ArrayRef = new_null_array(field.data_type(), hop_edge_uuids.len());
-        for (bi, b) in prop_batches_by_rel.iter().enumerate() {
-            // Field advertised in the union schema but absent in this file
-            // (or absent on disk entirely) -> this relation contributes NULLs.
-            let Some(col) = b.column_by_name(field.name()) else {
-                continue;
-            };
-            // A route whose last value was removed advertises Null. Its
-            // contribution is null in the concrete union type as well.
-            if col.data_type() == &arrow::datatypes::DataType::Null {
-                continue;
-            }
-            let taken = take(col, &take_by_batch[bi], None).map_err(|e| exec_err(e.to_string()))?;
-            child = if prop_batches_by_rel.len() == 1 {
-                // Single relation: `take` alone reproduces the #755 behavior.
-                taken
-            } else {
-                let mask = is_not_null(&taken).map_err(|e| exec_err(e.to_string()))?;
-                zip(&mask, &taken, &child).map_err(|e| exec_err(e.to_string()))?
-            };
-        }
-        children.push(child);
-    }
-    Ok(children)
 }
 
 // ---------------------------------------------------------------------------
@@ -2468,10 +2249,21 @@ fn expand_single_hop_chunk(
     let dst_width = graphforge_storage::TOPOLOGY_NODES_SCHEMA.fields().len();
     let edge_end = cfg.out_schema.fields().len().saturating_sub(dst_width);
     let required = cfg.required_output.as_deref();
+    let edge_topology_width = edge_end
+        .saturating_sub(cfg.input_width)
+        .saturating_sub(cfg.edge_prop_count);
+    let edge_topology_end = cfg.input_width + edge_topology_width;
+    // The edge file is needed only for what the CSR does not carry: the edge's
+    // UUID and endpoints, and its properties. The CSR entry already holds the
+    // edge's ordinal `edge_id`, so a hop whose edge variable is demanded for
+    // nothing beyond that ordinal reads no edge file (#1984).
     let edge_materialization_unused = required.is_some_and(|mask| {
         mask.get(cfg.input_width..edge_end).is_some_and(|fields| {
             fields.iter().enumerate().all(|(offset, needed)| {
-                !needed || cfg.out_schema.field(cfg.input_width + offset).name() == "edge_id"
+                let index = cfg.input_width + offset;
+                !needed
+                    || (index < edge_topology_end
+                        && cfg.out_schema.field(index).name() == "edge_id")
             })
         })
     });
@@ -2607,9 +2399,6 @@ fn expand_single_hop_chunk(
             cfg.capture_epoch,
         )) as Arc<dyn graphforge_storage::io_stats::FilteredReadObserver>
     });
-    let edge_topology_width = edge_end
-        .saturating_sub(cfg.input_width)
-        .saturating_sub(cfg.edge_prop_count);
     let relationship_properties_required = required.is_none_or(|mask| {
         mask[cfg.input_width + edge_topology_width..edge_end]
             .iter()
@@ -2623,61 +2412,75 @@ fn expand_single_hop_chunk(
     if relationship_properties_required {
         edge_projection.push(0);
     }
-    let admitted_inventory = cfg.provider.admitted_inventory();
-    let edge_batches =
-        if let Some(inventory) = admitted_inventory.as_deref().filter(|_| required.is_some()) {
-            graphforge_storage::read_edges_filtered_projected_from_inventory(
-                inventory,
-                &cfg.rel_type_name,
-                cfg.mode,
-                &traversed,
-                &edge_projection,
-                edge_observer.as_ref(),
-            )
-        } else if required.is_some() {
-            graphforge_storage::read_edges_filtered_projected_observed(
-                &cfg.dir,
-                &cfg.rel_type_name,
-                cfg.mode,
-                &traversed,
-                &edge_projection,
-                edge_observer.as_ref(),
-            )
-        } else if let Some(inventory) = admitted_inventory.as_deref() {
-            graphforge_storage::read_edges_filtered_observed_from_inventory(
-                inventory,
-                &cfg.rel_type_name,
-                cfg.mode,
-                &traversed,
-                edge_observer.as_ref(),
-            )
-        } else {
-            graphforge_storage::read_edges_filtered_observed(
-                &cfg.dir,
-                &cfg.rel_type_name,
-                cfg.mode,
-                &traversed,
-                edge_observer.as_ref(),
-            )
+    // A hop whose edge variable is demanded for nothing beyond its ordinal
+    // reads no edge file: the CSR entry already supplies `edge_id` (#1984).
+    let edge_batch = if edge_materialization_unused {
+        drop(edge_permit);
+        None
+    } else {
+        let admitted_inventory = cfg.provider.admitted_inventory();
+        let edge_batches =
+            if let Some(inventory) = admitted_inventory.as_deref().filter(|_| required.is_some()) {
+                graphforge_storage::read_edges_filtered_projected_from_inventory(
+                    inventory,
+                    &cfg.rel_type_name,
+                    cfg.mode,
+                    &traversed,
+                    &edge_projection,
+                    edge_observer.as_ref(),
+                )
+            } else if required.is_some() {
+                graphforge_storage::read_edges_filtered_projected_observed(
+                    &cfg.dir,
+                    &cfg.rel_type_name,
+                    cfg.mode,
+                    &traversed,
+                    &edge_projection,
+                    edge_observer.as_ref(),
+                )
+            } else if let Some(inventory) = admitted_inventory.as_deref() {
+                graphforge_storage::read_edges_filtered_observed_from_inventory(
+                    inventory,
+                    &cfg.rel_type_name,
+                    cfg.mode,
+                    &traversed,
+                    edge_observer.as_ref(),
+                )
+            } else {
+                graphforge_storage::read_edges_filtered_observed(
+                    &cfg.dir,
+                    &cfg.rel_type_name,
+                    cfg.mode,
+                    &traversed,
+                    edge_observer.as_ref(),
+                )
+            }
+            .map_err(|e| exec_err(e.to_string()))?;
+        drop(edge_permit);
+        let edge_schema = edge_batches
+            .first()
+            .map(RecordBatch::schema)
+            .ok_or_else(|| exec_err("Expand: edge scan returned no batches".into()))?;
+        Some(concat_batches(&edge_schema, &edge_batches).map_err(|e| exec_err(e.to_string()))?)
+    };
+    // Position of each traversed edge within the edge batch, by `edge_id`.
+    let edge_row: HashMap<u64, usize> = match edge_batch.as_ref() {
+        Some(edge_batch) => {
+            let edge_id_index = edge_batch
+                .schema()
+                .index_of("edge_id")
+                .map_err(|error| exec_err(error.to_string()))?;
+            let edge_ids_col = u64_column(edge_batch, edge_id_index)?;
+            (0..edge_batch.num_rows())
+                .filter_map(|i| edge_ids_col.value_at(i).map(|id| (id, i)))
+                .collect()
         }
-        .map_err(|e| exec_err(e.to_string()))?;
-    drop(edge_permit);
-    let edge_schema = edge_batches
-        .first()
-        .map(RecordBatch::schema)
-        .ok_or_else(|| exec_err("Expand: edge scan returned no batches".into()))?;
-    let edge_batch =
-        concat_batches(&edge_schema, &edge_batches).map_err(|e| exec_err(e.to_string()))?;
-    let edge_id_index = edge_batch
-        .schema()
-        .index_of("edge_id")
-        .map_err(|error| exec_err(error.to_string()))?;
-    let edge_ids_col = u64_column(&edge_batch, edge_id_index)?;
-    let edge_row: HashMap<u64, usize> = (0..edge_batch.num_rows())
-        .filter_map(|i| edge_ids_col.value_at(i).map(|id| (id, i)))
-        .collect();
-    let edge_uuids = relationship_properties_required
-        .then(|| {
+        None => HashMap::new(),
+    };
+    let edge_uuids = edge_batch
+        .as_ref()
+        .filter(|_| relationship_properties_required)
+        .map(|edge_batch| {
             edge_batch
                 .column_by_name("edge_uuid")
                 .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
@@ -2715,9 +2518,7 @@ fn expand_single_hop_chunk(
         .map_err(|error| exec_err(error.to_string()))?;
     let edge_key_already_demanded = usize::from(edge_projection.contains(&edge_key_index));
     let node_key_already_demanded = usize::from(node_projection.contains(&1));
-    demand::record_materialization_projection(
-        cfg.capture_epoch,
-        cfg.edge_var,
+    let edge_projected_columns = if edge_batch.is_some() {
         edge_projection
             .len()
             .saturating_add(1_usize.saturating_sub(edge_key_already_demanded))
@@ -2726,7 +2527,14 @@ fn expand_single_hop_chunk(
                     .iter()
                     .filter(|needed| **needed)
                     .count()
-            })),
+            }))
+    } else {
+        0
+    };
+    demand::record_materialization_projection(
+        cfg.capture_epoch,
+        cfg.edge_var,
+        edge_projected_columns,
         node_projection
             .len()
             .saturating_add(1_usize.saturating_sub(node_key_already_demanded)),
@@ -2773,19 +2581,22 @@ fn expand_single_hop_chunk(
     let mut dst_take: Vec<u32> = Vec::new();
     let mut output_edge_uuids: Vec<[u8; 16]> = Vec::new();
     for &(row, edge_id, neighbor) in &triples {
-        let Some(&edge_idx) = edge_row.get(&edge_id) else {
-            return Err(exec_err(format!(
-                "Expand: adjacency entry references unknown edge_id {edge_id}"
-            )));
-        };
         let Some(&dst_idx) = node_row.get(&neighbor) else {
             return Err(exec_err(format!(
                 "Expand reached unknown destination node_id {neighbor}"
             )));
         };
         src_take.push(to_u32(row)?);
-        edge_take.push(to_u32(edge_idx)?);
         dst_take.push(to_u32(dst_idx)?);
+        if edge_batch.is_none() {
+            continue;
+        }
+        let Some(&edge_idx) = edge_row.get(&edge_id) else {
+            return Err(exec_err(format!(
+                "Expand: adjacency entry references unknown edge_id {edge_id}"
+            )));
+        };
+        edge_take.push(to_u32(edge_idx)?);
         if let Some(edge_uuids) = edge_uuids {
             if edge_uuids.is_null(edge_idx) {
                 return Err(exec_err(format!(
@@ -2824,7 +2635,9 @@ fn expand_single_hop_chunk(
         .enumerate()
     {
         let index = cfg.input_width + offset;
-        columns.push(if required.is_none_or(|mask| mask[index]) {
+        columns.push(if !required.is_none_or(|mask| mask[index]) {
+            unused_expand_column(field, triples.len())?
+        } else if let Some(edge_batch) = edge_batch.as_ref() {
             let column = edge_batch.column_by_name(field.name()).ok_or_else(|| {
                 exec_err(format!(
                     "Expand: projected edge column {} is absent",
@@ -2833,7 +2646,14 @@ fn expand_single_hop_chunk(
             })?;
             take(column, &edge_take, None).map_err(|error| exec_err(error.to_string()))?
         } else {
-            unused_expand_column(field, triples.len())?
+            // No edge file was read: the only demanded edge column is the
+            // ordinal the CSR carries.
+            Arc::new(UInt64Array::from(
+                triples
+                    .iter()
+                    .map(|(_, edge_id, _)| *edge_id)
+                    .collect::<Vec<_>>(),
+            ))
         });
     }
     let demanded_property_fields = prop_fields
@@ -2885,6 +2705,7 @@ fn expand_single_hop_chunk(
 }
 
 mod edge_filter;
+mod edge_properties;
 mod reachability;
 #[cfg(test)]
 mod tests;
