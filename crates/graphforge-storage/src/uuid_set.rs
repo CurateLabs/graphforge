@@ -21,6 +21,13 @@ pub(crate) trait UuidMembership: Sync {
         max: &[u8; 16],
         matches: &dyn Fn(&[u8; 16]) -> bool,
     ) -> bool;
+
+    /// Whether every UUID in `min..=max` is a member. A read that knows this
+    /// for a whole row group has no row to filter out of it. The default is
+    /// the safe answer: unknown.
+    fn contains_every_in_range(&self, _min: &[u8; 16], _max: &[u8; 16]) -> bool {
+        false
+    }
 }
 
 impl UuidMembership for BTreeSet<[u8; 16]> {
@@ -189,6 +196,116 @@ impl UuidMembership for UuidFilter<'_> {
             (None, Some(candidates)) => candidates.range(*min..=*max).any(matches),
             (None, None) => false,
         }
+    }
+}
+
+/// The half-open UUID interval `low..high`, unbounded above when `high` is
+/// `None`, optionally intersected with another membership.
+///
+/// A partitioned scan gives each partition one interval, so a key's base,
+/// mutation and tombstone rows all fall in the same partition and the
+/// newest-wins merge stays correct inside it. Reads consult the interval
+/// through the same membership calls that prune fragments, row groups and
+/// pages, so a partition opens only what intersects its interval.
+pub(crate) struct UuidRange<'a> {
+    low: [u8; 16],
+    high: Option<[u8; 16]>,
+    inner: Option<&'a dyn UuidMembership>,
+}
+
+impl<'a> UuidRange<'a> {
+    pub(crate) fn new(
+        low: [u8; 16],
+        high: Option<[u8; 16]>,
+        inner: Option<&'a dyn UuidMembership>,
+    ) -> Self {
+        Self { low, high, inner }
+    }
+
+    /// The largest UUID inside the interval, `None` for an empty interval.
+    fn top(&self) -> Option<[u8; 16]> {
+        match self.high {
+            None => Some([u8::MAX; 16]),
+            Some(high) => u128::from_be_bytes(high)
+                .checked_sub(1)
+                .map(u128::to_be_bytes)
+                .filter(|top| *top >= self.low),
+        }
+    }
+
+    /// The smallest and largest UUID a member can be, `None` when none can.
+    fn bounds(&self) -> Option<([u8; 16], [u8; 16])> {
+        let top = self.top()?;
+        match self.inner {
+            None => Some((self.low, top)),
+            Some(inner) => self.clip(&inner.min_uuid()?, &inner.max_uuid()?),
+        }
+    }
+
+    fn in_interval(&self, uuid: &[u8; 16]) -> bool {
+        *uuid >= self.low && self.high.is_none_or(|high| *uuid < high)
+    }
+
+    /// `min..=max` clipped to the interval, `None` when nothing remains.
+    fn clip(&self, min: &[u8; 16], max: &[u8; 16]) -> Option<([u8; 16], [u8; 16])> {
+        let low = (*min).max(self.low);
+        let high = (*max).min(self.top()?);
+        (low <= high).then_some((low, high))
+    }
+}
+
+impl UuidMembership for UuidRange<'_> {
+    /// An upper bound: the inner set's size, or unbounded without one.
+    fn len(&self) -> usize {
+        self.inner.map_or(usize::MAX, |inner| inner.len())
+    }
+
+    fn contains_uuid(&self, uuid: &[u8; 16]) -> bool {
+        self.in_interval(uuid) && self.inner.is_none_or(|inner| inner.contains_uuid(uuid))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.top().is_none() || self.inner.is_some_and(|inner| inner.is_empty())
+    }
+
+    fn min_uuid(&self) -> Option<[u8; 16]> {
+        self.bounds().map(|(min, _)| min)
+    }
+
+    fn max_uuid(&self) -> Option<[u8; 16]> {
+        self.bounds().map(|(_, max)| max)
+    }
+
+    fn may_contain_in_range(&self, min: &[u8; 16], max: &[u8; 16]) -> bool {
+        let Some((low, high)) = self.clip(min, max) else {
+            return false;
+        };
+        self.inner
+            .is_none_or(|inner| inner.may_contain_in_range(&low, &high))
+    }
+
+    /// Exact with an inner membership. Without one the interval cannot be
+    /// enumerated, so a non-empty overlap is reported as a match: pruning
+    /// only ever skips work, and every row read is still filtered by
+    /// `contains_uuid`.
+    fn any_match_in_range(
+        &self,
+        min: &[u8; 16],
+        max: &[u8; 16],
+        matches: &dyn Fn(&[u8; 16]) -> bool,
+    ) -> bool {
+        let Some((low, high)) = self.clip(min, max) else {
+            return false;
+        };
+        self.inner
+            .is_none_or(|inner| inner.any_match_in_range(&low, &high, matches))
+    }
+
+    fn contains_every_in_range(&self, min: &[u8; 16], max: &[u8; 16]) -> bool {
+        self.inner.is_none()
+            && min <= max
+            && *min >= self.low
+            && self.top().is_some_and(|top| *max <= top)
     }
 }
 
@@ -525,6 +642,7 @@ mod tests {
     use super::SortedUuids;
     use super::UuidFilter;
     use super::UuidMembership;
+    use super::UuidRange;
 
     fn uuid(value: u128) -> [u8; 16] {
         value.to_be_bytes()
@@ -643,5 +761,87 @@ mod tests {
         for &value in &values {
             assert!(set.contains(&value));
         }
+    }
+
+    #[test]
+    fn range_alone_is_a_half_open_interval_that_clips_range_probes() {
+        let range = UuidRange::new(uuid(10), Some(uuid(20)), None);
+        assert!(!range.is_empty());
+        assert_eq!(
+            (range.min_uuid(), range.max_uuid()),
+            (Some(uuid(10)), Some(uuid(19)))
+        );
+        for value in [0, 9, 10, 15, 19, 20, 21, u128::MAX] {
+            assert_eq!(range.contains_uuid(&uuid(value)), (10..20).contains(&value));
+        }
+        // A probe touching the interval, even at one end, may hold a member;
+        // one wholly outside it cannot.
+        assert!(range.may_contain_in_range(&uuid(0), &uuid(10)));
+        assert!(range.may_contain_in_range(&uuid(19), &uuid(40)));
+        assert!(!range.may_contain_in_range(&uuid(0), &uuid(9)));
+        assert!(!range.may_contain_in_range(&uuid(20), &uuid(40)));
+        assert!(range.any_match_in_range(&uuid(12), &uuid(14), &|_| false));
+        assert!(!range.any_match_in_range(&uuid(20), &uuid(30), &|_| true));
+        // Only a probe inside the interval is wholly covered.
+        assert!(range.contains_every_in_range(&uuid(10), &uuid(19)));
+        assert!(!range.contains_every_in_range(&uuid(9), &uuid(19)));
+        assert!(!range.contains_every_in_range(&uuid(10), &uuid(20)));
+    }
+
+    #[test]
+    fn range_without_an_upper_bound_reaches_the_largest_uuid() {
+        let range = UuidRange::new(uuid(10), None, None);
+        assert_eq!(range.max_uuid(), Some([u8::MAX; 16]));
+        assert!(range.contains_uuid(&[u8::MAX; 16]));
+        assert!(!range.contains_uuid(&uuid(9)));
+        assert!(range.contains_every_in_range(&uuid(10), &[u8::MAX; 16]));
+        assert!(!range.may_contain_in_range(&uuid(0), &uuid(9)));
+    }
+
+    #[test]
+    fn empty_ranges_contain_nothing() {
+        for range in [
+            UuidRange::new(uuid(10), Some(uuid(10)), None),
+            UuidRange::new(uuid(10), Some(uuid(3)), None),
+            UuidRange::new(uuid(0), Some(uuid(0)), None),
+        ] {
+            assert!(range.is_empty());
+            assert_eq!((range.min_uuid(), range.max_uuid()), (None, None));
+            assert!(!range.contains_uuid(&uuid(10)));
+            assert!(!range.may_contain_in_range(&uuid(0), &[u8::MAX; 16]));
+            assert!(!range.contains_every_in_range(&uuid(10), &uuid(10)));
+        }
+    }
+
+    #[test]
+    fn range_over_a_membership_is_the_intersection() {
+        let values = [uuid(2), uuid(12), uuid(15), uuid(30)];
+        let inner = SortedUuids(&values);
+        let range = UuidRange::new(uuid(10), Some(uuid(20)), Some(&inner));
+        assert!(!range.is_empty());
+        for value in 0..40 {
+            assert_eq!(
+                range.contains_uuid(&uuid(value)),
+                [12, 15].contains(&value),
+                "{value}"
+            );
+        }
+        assert_eq!(
+            (range.min_uuid(), range.max_uuid()),
+            (Some(uuid(10)), Some(uuid(19)))
+        );
+        // The inner set decides a probe, clipped to the interval.
+        assert!(range.may_contain_in_range(&uuid(0), &uuid(12)));
+        assert!(!range.may_contain_in_range(&uuid(0), &uuid(11)));
+        assert!(!range.may_contain_in_range(&uuid(16), &uuid(40)));
+        assert!(!range.may_contain_in_range(&uuid(25), &uuid(35)));
+        assert!(range.any_match_in_range(&uuid(0), &uuid(40), &|value| *value == uuid(15)));
+        assert!(!range.any_match_in_range(&uuid(0), &uuid(40), &|value| *value == uuid(30)));
+        // A membership never claims a whole span.
+        assert!(!range.contains_every_in_range(&uuid(12), &uuid(12)));
+        // An inner set with nothing inside the interval has no bounds.
+        let outside = UuidRange::new(uuid(100), Some(uuid(200)), Some(&inner));
+        assert!(!outside.may_contain_in_range(&uuid(0), &[u8::MAX; 16]));
+        assert_eq!((outside.min_uuid(), outside.max_uuid()), (None, None));
     }
 }
