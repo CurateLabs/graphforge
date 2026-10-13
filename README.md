@@ -127,9 +127,15 @@ graphforge-cypher → graphforge-ir → graphforge-plan → graphforge-rel → g
 ## Development
 
 ```bash
-uv sync --dev                                # install with dev dependencies
+uv sync --all-extras --inexact               # Python dependencies; keeps the built wheel
+pnpm install                                 # Node dependencies
+
 make check                                   # all static checks (mirrors CI Lint)
 make test-rust ARGS="-p graphforge-storage"  # Rust tests, narrowed to a crate
+
+# The binding suites test the built wheel and addon; rebuild after changing Rust
+uv run maturin develop --release -m crates/graphforge-bindings-py/Cargo.toml
+pnpm --filter @curatelabs/graphforge build
 make test-python                             # Python binding suites
 make test-node                               # Node binding suites
 ```
