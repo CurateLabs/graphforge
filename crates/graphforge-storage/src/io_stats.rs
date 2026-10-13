@@ -157,6 +157,8 @@ pub(crate) struct Counters {
     property_uuid_pages_considered: AtomicU64,
     property_uuid_pages_selected: AtomicU64,
     property_uuid_index_fallbacks: AtomicU64,
+    property_fragments_opened: AtomicU64,
+    property_fragment_authentication_bytes: AtomicU64,
     rewrite_commits: AtomicU64,
     topology_rewrite_existing_rows: AtomicU64,
     topology_rewrite_new_rows: AtomicU64,
@@ -258,6 +260,13 @@ pub struct IoSnapshot {
     /// Property reads that could not use the UUID page index (absent, unreadable
     /// or failing its sort proof) and decoded the whole UUID column instead.
     pub property_uuid_index_fallbacks: u64,
+    /// Property fragments a targeted read opened and authenticated. A fragment
+    /// whose UUID range holds none of the wanted keys is not counted: it is not
+    /// opened.
+    pub property_fragments_opened: u64,
+    /// Bytes those opens authenticated against the inventory's length and
+    /// checksum.
+    pub property_fragment_authentication_bytes: u64,
     /// Successful non-empty [`RewriteBatch`](crate::RewriteBatch) commits.
     /// This counts persistence cycles, not the number of files in a batch.
     pub rewrite_commits: u64,
@@ -343,6 +352,10 @@ pub fn snapshot() -> Option<IoSnapshot> {
             .load(Ordering::Relaxed),
         property_uuid_index_fallbacks: counters
             .property_uuid_index_fallbacks
+            .load(Ordering::Relaxed),
+        property_fragments_opened: counters.property_fragments_opened.load(Ordering::Relaxed),
+        property_fragment_authentication_bytes: counters
+            .property_fragment_authentication_bytes
             .load(Ordering::Relaxed),
         rewrite_commits: counters.rewrite_commits.load(Ordering::Relaxed),
         topology_rewrite_existing_rows: counters
@@ -452,6 +465,12 @@ pub fn reset() {
             .store(0, Ordering::Relaxed);
         counters
             .property_uuid_index_fallbacks
+            .store(0, Ordering::Relaxed);
+        counters
+            .property_fragments_opened
+            .store(0, Ordering::Relaxed);
+        counters
+            .property_fragment_authentication_bytes
             .store(0, Ordering::Relaxed);
         counters.rewrite_commits.store(0, Ordering::Relaxed);
         counters
@@ -708,6 +727,19 @@ pub(crate) fn record_property_uuid_index_fallback() {
         counters
             .property_uuid_index_fallbacks
             .fetch_add(1, Ordering::Relaxed);
+    });
+}
+
+/// Record one property fragment a targeted read opened, and the bytes its
+/// authentication read.
+pub(crate) fn record_property_fragment_read(authentication_bytes: u64) {
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters
+            .property_fragments_opened
+            .fetch_add(1, Ordering::Relaxed);
+        counters
+            .property_fragment_authentication_bytes
+            .fetch_add(authentication_bytes, Ordering::Relaxed);
     });
 }
 

@@ -305,6 +305,16 @@ pub(super) struct TargetPropertyRows {
     pub(super) metrics: PropertyOverlayMetrics,
 }
 
+/// Whether a fragment whose footer proves `range` can hold a row for any
+/// unresolved key. A fragment without a proven range can hold any key, and so
+/// can one with an inverted range, which the open path then rejects.
+fn range_may_hold_unresolved(
+    range: Option<([u8; 16], [u8; 16])>,
+    unresolved: &BTreeSet<[u8; 16]>,
+) -> bool {
+    range.is_none_or(|(low, high)| low > high || unresolved.range(low..=high).next().is_some())
+}
+
 /// `frontier` marks a query read of a bounded frontier: it decodes only the
 /// rows it names and, once a read of a fragment has walked every key of it,
 /// resolves later targets from row-group statistics and the UUID column. Every
@@ -356,6 +366,17 @@ pub(super) fn read_property_targets(
             SnapshotScratch::Directory(scratch.path())
         });
     for fragment in fragments.iter().rev() {
+        // A fragment whose UUID range holds no unresolved key cannot change the
+        // result, so it is neither opened nor authenticated. Replay keeps
+        // authenticating every fragment it walks.
+        if replay_budget.is_none()
+            && !range_may_hold_unresolved(
+                inventory.fragment_footer_of(fragment, kind, route)?.uuid_range,
+                &unresolved,
+            )
+        {
+            continue;
+        }
         let counts = ReadCounts::new(collect);
         let opened = inventory.open_fragment(fragment, snapshot_scratch)?;
         let source_reservation = opened.file.reservation_bytes();
@@ -498,6 +519,7 @@ pub(super) fn read_property_targets(
             .authentication_block_equivalents
             .saturating_add(part_blocks);
         let authentication_read_calls = opened.authentication_read_calls.saturating_add(part_calls);
+        crate::io_stats::record_property_fragment_read(authentication_bytes);
         if let Some(metrics) = &mut metrics {
             metrics.authentication_bytes = metrics
                 .authentication_bytes
