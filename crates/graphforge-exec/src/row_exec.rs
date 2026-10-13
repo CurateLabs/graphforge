@@ -26,6 +26,7 @@ use graphforge_core::GfError;
 use graphforge_plan::CorrelatedSeedNode;
 use graphforge_plan::OptionalMatchNode;
 use graphforge_plan::UnwindNode;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
 
@@ -82,6 +83,41 @@ impl OptionalMatchExec {
             schema,
             props,
         }
+    }
+
+    /// Split a demand on this node's output columns into the columns each
+    /// input must really produce: `(outer, inner)`.
+    ///
+    /// The output is the outer columns followed by `inner_keep_idx` inner
+    /// columns. Beyond the demanded output, the join reads the key columns of
+    /// both sides. A correlated sub-plan is seeded with every outer column, so
+    /// it demands the whole outer row.
+    pub(crate) fn input_demand(
+        &self,
+        required: &BTreeSet<usize>,
+    ) -> (BTreeSet<usize>, BTreeSet<usize>) {
+        let outer_width = self.outer.schema().fields().len();
+        let mut outer_required = if self.correlated_seed.is_some() {
+            (0..outer_width).collect::<BTreeSet<_>>()
+        } else {
+            required
+                .iter()
+                .copied()
+                .filter(|index| *index < outer_width)
+                .collect()
+        };
+        let mut inner_required = BTreeSet::new();
+        for &(outer_key, inner_key) in &self.join_keys {
+            outer_required.insert(outer_key);
+            inner_required.insert(inner_key);
+        }
+        inner_required.extend(
+            required
+                .iter()
+                .filter_map(|index| index.checked_sub(outer_width))
+                .filter_map(|kept| self.inner_keep_idx.get(kept).copied()),
+        );
+        (outer_required, inner_required)
     }
 }
 

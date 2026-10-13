@@ -603,6 +603,8 @@ impl AuthenticatedPropertyInventory {
                     .push(AdmittedEdgeFile {
                         path: root.join(&relative),
                         relative_path: entry.relative_path.clone(),
+                        byte_length: entry.byte_length,
+                        content_xxh64: entry.content_xxh64,
                     });
             }
             if requested_routes.is_none() && is_node_topology_path(&entry.relative_path) {
@@ -612,6 +614,8 @@ impl AuthenticatedPropertyInventory {
                 declared_nodes.push(AdmittedEdgeFile {
                     path: root.join(&relative),
                     relative_path: entry.relative_path.clone(),
+                    byte_length: entry.byte_length,
+                    content_xxh64: entry.content_xxh64,
                 });
             }
             entries.push((entry, relative));
@@ -1555,6 +1559,8 @@ fn admit_node_paths(
         files.push(AdmittedEdgeFile {
             path,
             relative_path: entry.relative_path.clone(),
+            byte_length: entry.byte_length,
+            content_xxh64: entry.content_xxh64,
         });
     }
     validate_declared_node_files(&mut files)?;
@@ -1594,6 +1600,8 @@ fn admit_edge_route_paths(
             .push(AdmittedEdgeFile {
                 path,
                 relative_path: entry.relative_path.clone(),
+                byte_length: entry.byte_length,
+                content_xxh64: entry.content_xxh64,
             });
     }
     Ok(routes)

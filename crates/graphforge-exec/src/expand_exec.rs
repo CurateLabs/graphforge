@@ -2257,16 +2257,20 @@ fn expand_single_hop_chunk(
     // UUID and endpoints, and its properties. The CSR entry already holds the
     // edge's ordinal `edge_id`, so a hop whose edge variable is demanded for
     // nothing beyond that ordinal reads no edge file (#1984).
-    let edge_materialization_unused = required.is_some_and(|mask| {
-        mask.get(cfg.input_width..edge_end).is_some_and(|fields| {
-            fields.iter().enumerate().all(|(offset, needed)| {
-                let index = cfg.input_width + offset;
-                !needed
-                    || (index < edge_topology_end
-                        && cfg.out_schema.field(index).name() == "edge_id")
+    let ordinal_topology_only = required.is_some_and(|mask| {
+        mask.get(cfg.input_width..edge_topology_end)
+            .is_some_and(|fields| {
+                fields.iter().enumerate().all(|(offset, needed)| {
+                    !needed || cfg.out_schema.field(cfg.input_width + offset).name() == "edge_id"
+                })
             })
-        })
     });
+    let relationship_properties_required = required.is_none_or(|mask| {
+        mask[edge_topology_end..edge_end]
+            .iter()
+            .any(|needed| *needed)
+    });
+    let edge_materialization_unused = ordinal_topology_only && !relationship_properties_required;
     let destination_uuid_index = edge_end;
     let destination_id_index = edge_end + 1;
     let destination_identity_only = required.is_some_and(|mask| {
@@ -2399,11 +2403,37 @@ fn expand_single_hop_chunk(
             cfg.capture_epoch,
         )) as Arc<dyn graphforge_storage::io_stats::FilteredReadObserver>
     });
-    let relationship_properties_required = required.is_none_or(|mask| {
-        mask[cfg.input_width + edge_topology_width..edge_end]
-            .iter()
-            .any(|needed| *needed)
-    });
+    let prop_fields: Vec<arrow::datatypes::FieldRef> = cfg
+        .out_schema
+        .fields()
+        .iter()
+        .skip(edge_topology_end)
+        .take(cfg.edge_prop_count)
+        .cloned()
+        .collect();
+    let demanded_property_fields = prop_fields
+        .iter()
+        .enumerate()
+        .filter(|(offset, _)| required.is_none_or(|mask| mask[edge_topology_end + offset]))
+        .map(|(_, field)| Arc::clone(field))
+        .collect::<Vec<_>>();
+    // A hop that reads the edge only for its ordinal and its properties finds
+    // the properties by the `edge_id` the CSR already holds, in a property index
+    // addressed by edge id: the edge file, and its 16-byte `edge_uuid` column,
+    // are not read at all (#1984). A route whose index cannot answer by id
+    // (older, stale, or not joined to its topology) keeps the UUID-keyed read.
+    let id_keyed_properties = if relationship_properties_required && ordinal_topology_only {
+        let targets: std::collections::BTreeSet<u64> = traversed.iter().copied().collect();
+        edge_properties::load_edge_prop_source_by_id(
+            cfg.provider.admitted_inventory().as_deref(),
+            &cfg.rel_type_name,
+            &cfg.dir,
+            &demanded_property_fields,
+            &targets,
+        )?
+    } else {
+        None
+    };
     let mut edge_projection = (0..edge_topology_width)
         .filter(|offset| required.is_none_or(|mask| mask[cfg.input_width + offset]))
         .collect::<Vec<_>>();
@@ -2412,9 +2442,10 @@ fn expand_single_hop_chunk(
     if relationship_properties_required {
         edge_projection.push(0);
     }
-    // A hop whose edge variable is demanded for nothing beyond its ordinal
-    // reads no edge file: the CSR entry already supplies `edge_id` (#1984).
-    let edge_batch = if edge_materialization_unused {
+    // A hop whose edge variable is demanded for nothing beyond its ordinal (and
+    // properties found by that ordinal) reads no edge file: the CSR entry
+    // already supplies `edge_id` (#1984).
+    let edge_batch = if edge_materialization_unused || id_keyed_properties.is_some() {
         drop(edge_permit);
         None
     } else {
@@ -2614,14 +2645,6 @@ fn expand_single_hop_chunk(
 
     // Assemble columns in ExpandNode schema order: input ++ edge topology ++
     // edge properties (nullable) ++ destination node.
-    let prop_fields: Vec<arrow::datatypes::FieldRef> = cfg
-        .out_schema
-        .fields()
-        .iter()
-        .skip(cfg.input_width + edge_topology_width)
-        .take(cfg.edge_prop_count)
-        .cloned()
-        .collect();
     let mut columns = Vec::with_capacity(cfg.out_schema.fields().len());
     for column in input.columns() {
         columns.push(take(column, &src_take, None).map_err(|error| exec_err(error.to_string()))?);
@@ -2656,21 +2679,21 @@ fn expand_single_hop_chunk(
             ))
         });
     }
-    let demanded_property_fields = prop_fields
-        .iter()
-        .enumerate()
-        .filter(|(offset, _)| {
-            required.is_none_or(|mask| mask[cfg.input_width + edge_topology_width + offset])
-        })
-        .map(|(_, field)| Arc::clone(field))
-        .collect::<Vec<_>>();
-    let demanded_property_columns = build_edge_prop_children(
-        cfg.provider.admitted_inventory().as_deref(),
-        &cfg.rel_type_name,
-        &cfg.dir,
-        &demanded_property_fields,
-        &output_edge_uuids,
-    )?;
+    let demanded_property_columns = if let Some(source) = id_keyed_properties.as_ref() {
+        let hop_edge_ids = triples
+            .iter()
+            .map(|(_, edge_id, _)| *edge_id)
+            .collect::<Vec<_>>();
+        edge_properties::edge_prop_children_by_id(source, &demanded_property_fields, &hop_edge_ids)?
+    } else {
+        build_edge_prop_children(
+            cfg.provider.admitted_inventory().as_deref(),
+            &cfg.rel_type_name,
+            &cfg.dir,
+            &demanded_property_fields,
+            &output_edge_uuids,
+        )?
+    };
     let demanded_properties = demanded_property_fields
         .iter()
         .map(|field| field.name().clone())

@@ -226,6 +226,9 @@ pub struct AuthenticatedPropertyInventory {
 struct AdmittedEdgeFile {
     path: PathBuf,
     relative_path: String,
+    /// Length and XXH64 the graph-files manifest declares for the object.
+    byte_length: u64,
+    content_xxh64: u64,
 }
 
 /// One-time I/O performed while admitting and authenticating an immutable

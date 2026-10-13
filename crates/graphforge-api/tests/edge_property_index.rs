@@ -337,6 +337,58 @@ fn the_index_is_published_with_the_generation() {
     assert!(fragments >= 3, "the route spans fragments: {fragments}");
 }
 
+/// The surrogate edge ids every shard publishes, and the digest of the topology
+/// they were joined from: `None` unless every shard carries its ids.
+fn published_ids(manifest: &serde_json::Value) -> Option<(String, Vec<(u64, u64)>)> {
+    let digest = manifest["topology_digest"].as_str()?.to_owned();
+    let bounds = manifest["shards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|shard| {
+            shard["ids"].as_object()?;
+            Some((shard["id_min"].as_u64()?, shard["id_max"].as_u64()?))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some((digest, bounds))
+}
+
+/// Construction joins the edge property rows to the canonical topology it has
+/// just installed, so the index is addressable by `edge_id` from the first
+/// open. The digest it records is the one a rebuild derives from the same
+/// inventory, which is what lets a reader trust the ids only while the topology
+/// is the one they came from.
+#[test]
+fn construction_publishes_edge_ids_keyed_to_the_topology_digest() {
+    let _serial = serial();
+    let built = build(SMALL_EDGES);
+    let (digest, bounds) = published_ids(&manifest(&built.project))
+        .expect("every shard of a constructed route carries its edge ids");
+    assert!(bounds.len() > 1, "the route spans shards: {bounds:?}");
+    assert!(
+        bounds.iter().all(|(min, max)| 0 < *min && min <= max),
+        "edge ids are positive surrogate ids: {bounds:?}"
+    );
+
+    let forge = open(&built.project, 1);
+    forge.rebuild_property_indexes(None).unwrap();
+    drop(forge);
+    let (rebuilt_digest, rebuilt_bounds) =
+        published_ids(&manifest(&built.project)).expect("a rebuilt route carries its edge ids");
+    assert_eq!(
+        digest, rebuilt_digest,
+        "construction and a rebuild name the same topology"
+    );
+    assert_eq!(
+        bounds.iter().map(|(min, _)| *min).min(),
+        rebuilt_bounds.iter().map(|(min, _)| *min).min()
+    );
+    assert_eq!(
+        bounds.iter().map(|(_, max)| *max).max(),
+        rebuilt_bounds.iter().map(|(_, max)| *max).max()
+    );
+}
+
 /// The values of every property type come back as generated, from the index
 /// and again from the property overlay once a write has made the index stale.
 #[test]
@@ -482,11 +534,16 @@ fn blob_of(seal: &serde_json::Value) -> Blob {
     }
 }
 
-/// The blob of `column` in shard `shard`, or the shard's UUID blob.
+/// The blob of the shard's edge UUIDs.
+fn uuid_blob(manifest: &serde_json::Value, shard: usize) -> Blob {
+    blob_of(&manifest["shards"][shard]["uuids"])
+}
+
+/// The blob of `column` in shard `shard`, or the shard's edge id blob.
 fn column_blob(manifest: &serde_json::Value, shard: usize, column: Option<&str>) -> Blob {
     let shard = &manifest["shards"][shard];
     let Some(column) = column else {
-        return blob_of(&shard["uuids"]);
+        return blob_of(&shard["ids"]);
     };
     let index = manifest["columns"]
         .as_array()
@@ -503,7 +560,7 @@ fn column_blob(manifest: &serde_json::Value, shard: usize, column: Option<&str>)
     blob_of(entry)
 }
 
-/// The largest blob of the column (or of the UUIDs) over all shards.
+/// The largest blob of the column (or of the edge ids) over all shards.
 fn largest_blob(project: &Path, column: Option<&str>) -> u64 {
     let manifest = manifest(project);
     (0..manifest["shards"].as_array().unwrap().len())
@@ -513,9 +570,11 @@ fn largest_blob(project: &Path, column: Option<&str>) -> u64 {
 }
 
 /// A one-hop read of a fixed frontier's edge property is bounded by the
-/// frontier: at most the UUID blob and the demanded column blob of the one
+/// frontier: at most the edge id blob and the demanded column blob of the one
 /// shard that holds each frontier edge, whatever the size of the route. The
 /// route doubles, and every edge of the frontier is still found in one shard.
+/// The read never touches an edge UUID blob or the edge file's `edge_uuid`
+/// column: the traversal holds the edge ids and the index is addressed by them.
 #[test]
 fn a_one_hop_edge_property_read_is_bounded_by_the_frontier_not_the_relation() {
     let _serial = serial();
@@ -621,6 +680,8 @@ fn digests(project: &Path) -> Vec<(String, String)> {
 
 const NO_PROPERTY: &str = "MATCH (a:Entity {ident: $ident})-[e:LINK]->(b) RETURN count(b) AS n";
 const MEMOS: &str = "MATCH (a:Entity {ident: $ident})-[e:LINK]->(b) RETURN e.memo AS memo";
+/// Returns the edge itself, so its properties are keyed by the stored UUID.
+const RETURN_EDGES: &str = "MATCH (a:Entity {ident: $ident})-[e:LINK]->(b) RETURN e";
 
 /// Execute `query` for the node `ident` and return the error it fails with.
 fn refusal(forge: &GraphForge, query: &str, ident: i64) -> graphforge_core::GfError {
@@ -632,20 +693,21 @@ fn refusal(forge: &GraphForge, query: &str, ident: i64) -> graphforge_core::GfEr
         .expect_err("a corrupted index must be refused")
 }
 
-/// A manifest, or a blob of the UUIDs or of a demanded column, that fails its
-/// checksum is refused with `GF_VALIDATION` by the lookup that reads it. It is
-/// not served, the property overlay is not substituted for it, and nothing is
-/// rebuilt by the read.
+/// A manifest, or a blob of the edge ids or of a demanded column, that fails
+/// its checksum is refused with `GF_VALIDATION` by the lookup that reads it. It
+/// is not served, the property overlay is not substituted for it, and nothing
+/// is rebuilt by the read.
 #[test]
 fn a_corrupted_index_is_refused_not_rebuilt_or_bypassed() {
     let _serial = serial();
-    for label in ["manifest", "uuid blob", "timestamp blob"] {
+    for label in ["manifest", "id blob", "timestamp blob"] {
         let built = build(SMALL_EDGES);
         let before = digests(&built.project);
-        // The frontier's edges hold the smallest UUIDs, so shard 0 serves it.
+        // The frontier's edges hold the smallest edge ids and UUIDs, so shard 0
+        // serves it.
         match label {
             "manifest" => corrupt_manifest(&built.project),
-            "uuid blob" => {
+            "id blob" => {
                 let manifest = manifest(&built.project);
                 corrupt_blob(&built.project, column_blob(&manifest, 0, None));
             }
@@ -689,6 +751,88 @@ fn a_corrupted_blob_refuses_only_the_statements_that_demand_its_column() {
     assert_eq!(sum, frontier_timestamps());
     drop(forge);
     assert_eq!(digests(&built.project), before, "the read rebuilt");
+}
+
+/// A one-hop property read is addressed by edge id, so it does not read the
+/// edge UUID blob: damage there leaves it intact. A statement keyed by UUID (it
+/// returns the edge) reads that blob, verifies its seal and is refused.
+#[test]
+fn a_one_hop_property_read_does_not_read_the_edge_uuid_blob() {
+    let _serial = serial();
+    let built = build(SMALL_EDGES);
+    let before = digests(&built.project);
+    let manifest = manifest(&built.project);
+    corrupt_blob(&built.project, uuid_blob(&manifest, 0));
+
+    let forge = open(&built.project, 1);
+    let sum = scalar_i64(&run(&forge, SUM_TIMESTAMPS, 0));
+    assert_eq!(sum, frontier_timestamps());
+    let error = refusal(&forge, RETURN_EDGES, 0);
+    assert_eq!(error.code(), "GF_VALIDATION", "{error}");
+    drop(forge);
+    assert_eq!(digests(&built.project), before, "the read rebuilt");
+}
+
+/// Run `query` and report what the expansion operators read of the edge file:
+/// reads started, rows returned, rows scanned and columns materialised, summed
+/// over the hops. These counters are process-wide and exact at any partition
+/// count for a single hop.
+fn edge_file_reads(forge: &GraphForge, query: &str, ident: i64) -> (Vec<RecordBatch>, u64) {
+    let parameters = HashMap::from([("ident".to_owned(), IrLiteral::Int(ident))]);
+    let (result, demand) =
+        graphforge_exec::demand::capture(|| forge.execute_with_params(query, &parameters));
+    let reads = demand
+        .hops
+        .values()
+        .map(|hop| {
+            hop.edge_reads_started
+                + hop.edge_rows_returned
+                + hop.edge_rows_scanned
+                + hop.edge_projected_columns
+        })
+        .sum();
+    (result.expect("statement executes").batches, reads)
+}
+
+/// An index published before edge ids were joined to the topology, or whose ids
+/// no longer match the topology, answers every statement as it did: keyed by
+/// UUID, through the edge file. A write that touches only the topology makes
+/// the ids stale and leaves the UUID-keyed index current; a rebuild publishes
+/// ids for the new topology and the read is addressed by id again.
+#[test]
+fn a_topology_write_returns_the_read_to_the_uuid_key_until_the_index_is_rebuilt() {
+    let _serial = serial();
+    let built = build(SMALL_EDGES);
+    let (_, fragment_bytes) = property_fragments(&built.project);
+    let forge = open(&built.project, 1);
+    // The first statement admits the session's footers and the adjacency index.
+    let _ = run(&forge, SUM_TIMESTAMPS, 0);
+    let (batches, reads) = edge_file_reads(&forge, SUM_TIMESTAMPS, 0);
+    assert_eq!(scalar_i64(&batches), frontier_timestamps());
+    assert_eq!(reads, 0, "ids address the index; no edge file is read");
+
+    // An edge with no property changes the topology and no property fragment.
+    forge
+        .execute("MATCH (a:Entity {ident: 1}), (b:Entity {ident: 2}) CREATE (a)-[:LINK]->(b)")
+        .unwrap();
+    let _ = run(&forge, SUM_TIMESTAMPS, 0);
+    let (batches, reads) = edge_file_reads(&forge, SUM_TIMESTAMPS, 0);
+    assert_eq!(scalar_i64(&batches), frontier_timestamps());
+    assert!(reads > 0, "stale ids must key the read by UUID: {reads}");
+    // The UUID-keyed index still describes the route, so the read is not the
+    // property overlay's: it stays a fraction of the route's fragment bytes.
+    let (_, keyed) = measured(&forge, SUM_TIMESTAMPS, 0);
+    assert!(
+        keyed < fragment_bytes / 4,
+        "the UUID key must still use the index: {keyed} of {fragment_bytes} bytes"
+    );
+
+    let report = forge.rebuild_property_indexes(None).unwrap();
+    assert!(report.edge_properties.indexes >= 1, "{report:?}");
+    let _ = run(&forge, SUM_TIMESTAMPS, 0);
+    let (batches, reads) = edge_file_reads(&forge, SUM_TIMESTAMPS, 0);
+    assert_eq!(scalar_i64(&batches), frontier_timestamps());
+    assert_eq!(reads, 0, "the rebuilt ids address the new topology");
 }
 
 /// A write changes the route, so the index no longer describes it and is not
@@ -738,7 +882,11 @@ fn a_stale_index_is_not_used_until_rebuilt() {
 }
 
 /// The same bytes for the same content: two constructions of one input agree,
-/// and two successive rebuilds of one project agree.
+/// and two successive rebuilds of one project agree. The edge topology a
+/// construction installs carries the instant it was built (`created_at`), so
+/// the digest the manifest records of that topology is the one field two
+/// constructions of one input do not share; every pack and every other
+/// manifest field is the same.
 #[test]
 fn the_index_bytes_are_a_function_of_the_content() {
     let _serial = serial();
@@ -746,7 +894,27 @@ fn the_index_bytes_are_a_function_of_the_content() {
     let second = build(SMALL_EDGES);
     let at_construction = digests(&first.project);
     assert!(!at_construction.is_empty());
-    assert_eq!(at_construction, digests(&second.project));
+    let packs = |project: &Path| {
+        digests(project)
+            .into_iter()
+            .filter(|(path, _)| path.ends_with(".epk"))
+            .collect::<Vec<_>>()
+    };
+    assert!(!packs(&first.project).is_empty());
+    assert_eq!(packs(&first.project), packs(&second.project));
+    let without_topology_digest = |project: &Path| {
+        let mut manifest = manifest(project);
+        manifest
+            .as_object_mut()
+            .unwrap()
+            .remove("topology_digest")
+            .expect("the manifest names the topology its ids came from");
+        manifest
+    };
+    assert_eq!(
+        without_topology_digest(&first.project),
+        without_topology_digest(&second.project)
+    );
 
     let mut rebuilt = Vec::new();
     for _ in 0..2 {

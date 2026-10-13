@@ -1059,8 +1059,14 @@ pub(crate) fn encode_bulk(
         } else {
             admission
         };
-        let mut lanes =
-            lanes::ParquetLanes::new(lanes_admission, budgets.max_batch_bytes).with_index_tap();
+        // Edge topology is installed before the property section, so the edge
+        // property index can resolve each row's `edge_uuid` to its `edge_id`.
+        let edge_topology = super::property_index::EdgeTopology::new(
+            output.path().join("graph"),
+            installer.artifacts_under("topology/edges/")?,
+        );
+        let mut lanes = lanes::ParquetLanes::new(lanes_admission, budgets.max_batch_bytes)
+            .with_index_tap(edge_topology);
         let mut property_evidence = GraphConstructionEncodingEvidence::default();
         for (rows, groups, kind) in [
             (

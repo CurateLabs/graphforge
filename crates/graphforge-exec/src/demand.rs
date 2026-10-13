@@ -16,7 +16,7 @@ use std::task::{Context, Poll};
 
 use arrow::datatypes::SchemaRef;
 use datafusion::common::config::ConfigOptions;
-use datafusion::common::{DataFusionError, Result};
+use datafusion::common::{DataFusionError, JoinSide, JoinType, Result};
 use datafusion::execution::TaskContext;
 use datafusion::physical_expr::utils::collect_columns;
 use datafusion::physical_expr::{PhysicalExpr, ScalarFunctionExpr};
@@ -24,6 +24,7 @@ use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::aggregates::AggregateExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::filter::FilterExec;
+use datafusion::physical_plan::joins::HashJoinExec;
 use datafusion::physical_plan::limit::{GlobalLimitExec, LocalLimitExec};
 use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
@@ -35,7 +36,7 @@ use datafusion::physical_plan::{
 use futures::Stream;
 use futures::task::AtomicWaker;
 
-use crate::{ExpandExec, VarLenExpandExec};
+use crate::{ExpandExec, OptionalMatchExec, VarLenExpandExec};
 
 /// Per-hop deterministic work counters.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1371,6 +1372,10 @@ fn rewrite_materialization(
         return plan.with_new_children(vec![child]);
     }
 
+    if let Some(rewritten) = rewrite_join_materialization(&plan, required)? {
+        return Ok(rewritten);
+    }
+
     let children = plan.children();
     if children.len() != 1 {
         let rewritten = children
@@ -1394,6 +1399,84 @@ fn rewrite_materialization(
     };
     let child = rewrite_materialization(Arc::clone(child), &next)?;
     plan.with_new_children(vec![child])
+}
+
+/// Split demand across the two inputs of an `OPTIONAL MATCH` or a hash join
+/// whose output is its left columns followed by its right columns.
+///
+/// `OptionalMatchExec` and the inner-style `HashJoinExec` read only the key,
+/// filter and demanded output columns of each input, so a one-hop expansion
+/// below them keeps its precise mask instead of reading the edge file for a
+/// barrier. Any other join type (semi, anti, mark) keeps the barrier. Returns
+/// `None` when `plan` is not one of the two.
+fn rewrite_join_materialization(
+    plan: &Arc<dyn ExecutionPlan>,
+    required: &BTreeSet<usize>,
+) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+    let (left_required, right_required) =
+        if let Some(optional) = plan.downcast_ref::<OptionalMatchExec>() {
+            optional.input_demand(required)
+        } else if let Some(join) = plan.downcast_ref::<HashJoinExec>() {
+            match hash_join_input_demand(join, required) {
+                Some(demand) => demand,
+                None => return Ok(None),
+            }
+        } else {
+            return Ok(None);
+        };
+    let children = plan.children();
+    let left = rewrite_materialization(Arc::clone(children[0]), &left_required)?;
+    let right = rewrite_materialization(Arc::clone(children[1]), &right_required)?;
+    Arc::clone(plan)
+        .with_new_children(vec![left, right])
+        .map(Some)
+}
+
+/// The columns a hash join reads from its left and right inputs to produce
+/// `required` output columns, or `None` for a join type whose output is not
+/// left columns followed by right columns.
+fn hash_join_input_demand(
+    join: &HashJoinExec,
+    required: &BTreeSet<usize>,
+) -> Option<(BTreeSet<usize>, BTreeSet<usize>)> {
+    if !matches!(
+        join.join_type(),
+        JoinType::Inner | JoinType::Left | JoinType::Right | JoinType::Full
+    ) {
+        return None;
+    }
+    let left_width = join.left().schema().fields().len();
+    // The output may be a projection of the join schema (left ++ right).
+    let joined = match &join.projection {
+        Some(projection) => required
+            .iter()
+            .filter_map(|output| projection.get(*output).copied())
+            .collect(),
+        None => required.clone(),
+    };
+    let mut left = BTreeSet::new();
+    let mut right = BTreeSet::new();
+    for index in joined {
+        match index.checked_sub(left_width) {
+            Some(right_index) => right.insert(right_index),
+            None => left.insert(index),
+        };
+    }
+    for (left_key, right_key) in join.on() {
+        collect_expr_columns(left_key, &mut left);
+        collect_expr_columns(right_key, &mut right);
+    }
+    for column in join
+        .filter()
+        .map_or(&[][..], |filter| filter.column_indices())
+    {
+        match column.side {
+            JoinSide::Left => left.insert(column.index),
+            JoinSide::Right => right.insert(column.index),
+            JoinSide::None => return None,
+        };
+    }
+    Some((left, right))
 }
 
 fn materialization_transparent(plan: &dyn ExecutionPlan) -> bool {
