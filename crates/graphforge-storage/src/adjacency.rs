@@ -58,6 +58,7 @@ pub use row_cursor::CsrRowCursor;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use arrow::array::{
     Array, LargeListArray, RecordBatch, StringArray, StructArray, TimestampMicrosecondArray,
@@ -136,7 +137,9 @@ struct CachedShard {
     file: String,
     csr: CsrIndex,
     decoded_bytes: u64,
-    last_used: u64,
+    /// The cache tick of the latest use. Atomic so that a hit, which holds the
+    /// cache only for reading, can refresh it.
+    last_used: AtomicU64,
 }
 
 /// Byte-budgeted least-recently-used cache of decoded shards. Random-access
@@ -146,12 +149,16 @@ struct CachedShard {
 /// by the configured budget, not by the graph (#1518). Entries survive until a
 /// replacement fully authenticates, so a failed read never evicts the usable
 /// state.
+///
+/// A lookup that hits only reads the entry list and refreshes two atomics, so
+/// readers on different threads do not queue behind one another; only an insert
+/// or an eviction needs exclusive access (#1985).
 #[derive(Debug, Default)]
 struct DecodedShardCache {
     entries: Vec<CachedShard>,
     retained_bytes: u64,
     budget_bytes: u64,
-    tick: u64,
+    tick: AtomicU64,
     decodes: u64,
 }
 
@@ -167,9 +174,12 @@ impl DecodedShardCache {
         self.entries.iter().position(|entry| entry.file == file)
     }
 
-    fn note_hit(&mut self, index: usize) {
-        self.tick += 1;
-        self.entries[index].last_used = self.tick;
+    /// Mark entry `index` the most recently used. Shared access suffices: the
+    /// tick and the entry's stamp are atomics, and an order that two concurrent
+    /// hits settle either way is still a valid least-recently-used order.
+    fn note_hit(&self, index: usize) {
+        let tick = self.tick.fetch_add(1, Ordering::Relaxed) + 1;
+        self.entries[index].last_used.store(tick, Ordering::Relaxed);
     }
 
     /// Insert a fully authenticated shard, evicting least-recently-used
@@ -177,13 +187,13 @@ impl DecodedShardCache {
     /// the hard shard caps) still caches alone instead of being dropped, so
     /// the retained total never exceeds `max(budget, one shard)`.
     fn insert(&mut self, file: String, csr: CsrIndex, decoded_bytes: u64) {
-        self.tick += 1;
+        let tick = self.tick.fetch_add(1, Ordering::Relaxed) + 1;
         while !self.entries.is_empty() && self.retained_bytes + decoded_bytes > self.budget_bytes {
             let victim = self
                 .entries
                 .iter()
                 .enumerate()
-                .min_by_key(|(_, entry)| entry.last_used)
+                .min_by_key(|(_, entry)| entry.last_used.load(Ordering::Relaxed))
                 .map(|(index, _)| index)
                 .expect("non-empty entries");
             let removed = self.entries.remove(victim);
@@ -194,7 +204,7 @@ impl DecodedShardCache {
             file,
             csr,
             decoded_bytes,
-            last_used: self.tick,
+            last_used: AtomicU64::new(tick),
         });
     }
 }
@@ -209,7 +219,7 @@ pub struct ShardedCsrIndex {
     // sequential traversal still pays O(shards) decodes, while random-access
     // frontiers stop paying one decode per row (#1518). Reader memory stays
     // bounded by the budget, never by the graph (#1094).
-    cache: std::sync::Arc<std::sync::Mutex<DecodedShardCache>>,
+    cache: std::sync::Arc<std::sync::RwLock<DecodedShardCache>>,
 }
 
 impl ShardedCsrIndex {
@@ -280,7 +290,7 @@ impl ShardedCsrIndex {
         Ok(Self {
             root,
             manifest,
-            cache: std::sync::Arc::new(std::sync::Mutex::new(DecodedShardCache::new(
+            cache: std::sync::Arc::new(std::sync::RwLock::new(DecodedShardCache::new(
                 DEFAULT_DECODED_SHARD_CACHE_BYTES,
             ))),
         })
@@ -414,10 +424,27 @@ impl ShardedCsrIndex {
         node_id: u64,
         map: impl FnOnce(CsrRow<'_>) -> T,
     ) -> Result<T, GfError> {
+        // A hit holds the cache for reading while `map` runs, so parallel
+        // partitions reading rows of the same shards never wait on each other.
+        // `map` only reads the row; it must not touch this cache again.
+        {
+            let cache = self
+                .cache
+                .read()
+                .map_err(|_| GfError::Storage("CSR shard cache lock poisoned".into()))?;
+            if let Some(index) = cache.position(&record.file) {
+                cache.note_hit(index);
+                return Ok(map(cache.entries[index]
+                    .csr
+                    .row(node_id - record.first_node)));
+            }
+        }
         let mut cache = self
             .cache
-            .lock()
+            .write()
             .map_err(|_| GfError::Storage("CSR shard cache lock poisoned".into()))?;
+        // Another reader may have decoded the shard while this one waited for
+        // exclusive access.
         if let Some(index) = cache.position(&record.file) {
             cache.note_hit(index);
             return Ok(map(cache.entries[index]
@@ -464,7 +491,7 @@ impl ShardedCsrIndex {
     #[must_use]
     pub fn shard_decode_count(&self) -> u64 {
         self.cache
-            .lock()
+            .read()
             .map(|cache| cache.decodes)
             .unwrap_or_default()
     }
@@ -479,7 +506,7 @@ impl ShardedCsrIndex {
     #[must_use]
     pub fn retained_decoded_bytes(&self) -> u64 {
         self.cache
-            .lock()
+            .read()
             .map(|cache| cache.retained_bytes)
             .unwrap_or_default()
     }
