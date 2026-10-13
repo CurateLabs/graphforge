@@ -136,6 +136,52 @@ fn relationship_uniqueness_restarts_at_each_match_clause() {
 }
 
 #[test]
+fn relationship_uniqueness_uses_declared_type_overlap() {
+    let (binder, _catalog) = make_binder(OntologyMode::Exploratory);
+    let uniqueness = |query: &str| {
+        let plan = binder
+            .bind(&parse(query).unwrap())
+            .unwrap_or_else(|errors| panic!("{query}: {errors:?}"));
+        plan.ops
+            .iter()
+            .filter_map(|op| match op {
+                GraphOp::RelationshipUnique { edge, prior_edges } => {
+                    Some((*edge, prior_edges.clone()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    assert!(uniqueness("MATCH (a)<-[:X]-(b)<-[:Y]-(c) RETURN a").is_empty());
+    assert_eq!(
+        uniqueness("MATCH (a)-[:X]->(b)-[:X]->(c) RETURN a").len(),
+        1
+    );
+    assert_eq!(
+        uniqueness("MATCH (a)-[:X|Y]->(b)-[:Y]->(c) RETURN a").len(),
+        1
+    );
+    assert_eq!(uniqueness("MATCH (a)-[:X]->(b)-[]->(c) RETURN a").len(), 1);
+
+    let three_hop_query = "MATCH (a)-[:X]->(b)-[:Y]->(c)-[:X]->(d) RETURN a";
+    let three_hops = uniqueness(three_hop_query);
+    assert_eq!(three_hops.len(), 1);
+    let plan = binder
+        .bind(&parse(three_hop_query).unwrap())
+        .expect("three-hop pattern binds");
+    let first_edge = plan.ops.iter().find_map(|op| match op {
+        GraphOp::Expand { edge, .. } => Some(*edge),
+        _ => None,
+    });
+    assert_eq!(
+        three_hops[0].1,
+        vec![first_edge.expect("first relationship expansion")],
+        "the third hop must compare only with the first X hop"
+    );
+}
+
+#[test]
 fn reusing_a_relationship_variable_across_patterns_of_one_match_is_rejected() {
     let (binder, _catalog) = make_binder(OntologyMode::Exploratory);
     let ast = parse("MATCH (a)-[r]->(b), (b)-[r]->(c) RETURN a").unwrap();
