@@ -1103,3 +1103,271 @@ fn exact_zero_nested_pattern_comprehension_cardinality_is_rejected() {
         "errors={errors:?}"
     );
 }
+
+// -----------------------------------------------------------------------
+// OPTIONAL MATCH anchoring on a bound node (#1984)
+// -----------------------------------------------------------------------
+
+fn bind_plan(query: &str) -> GraphPlan {
+    let (binder, _) = make_binder(OntologyMode::Exploratory);
+    let ast = parse(query).unwrap();
+    binder.bind(&ast).expect("query binds")
+}
+
+/// The ops of the first `OPTIONAL MATCH` child plan together with the
+/// variables the enclosing query had already bound before it.
+fn optional_child(query: &str) -> (Vec<GraphOp>, Vec<VarId>) {
+    let plan = bind_plan(query);
+    let mut outer = Vec::new();
+    for op in &plan.ops {
+        match op {
+            GraphOp::NodeScan { var, .. } => outer.push(*var),
+            // A node carried through `WITH` is bound under its output variable.
+            GraphOp::With { items, .. } | GraphOp::Project { items, .. } => {
+                outer.extend(items.iter().filter_map(|item| item.out_var));
+            }
+            GraphOp::Optional { child } => return (child.ops.clone(), outer),
+            _ => {}
+        }
+    }
+    panic!("query has no OPTIONAL MATCH");
+}
+
+/// Variables a scan introduces from nothing: scans of a variable that is
+/// neither bound by the enclosing query nor reached by an earlier expansion.
+/// A scan like this is the full node scan that the lowering cross-joins with
+/// the outer rows.
+fn unanchored_scans(ops: &[GraphOp], outer: &[VarId]) -> Vec<VarId> {
+    let mut bound: HashSet<VarId> = outer.iter().copied().collect();
+    let mut fresh = Vec::new();
+    for op in ops {
+        match op {
+            GraphOp::NodeScan { var, .. } => {
+                if bound.insert(*var) {
+                    fresh.push(*var);
+                }
+            }
+            GraphOp::Expand { src, dst, .. } => {
+                assert!(
+                    bound.contains(src),
+                    "expand source {src:?} is not bound yet"
+                );
+                bound.insert(*dst);
+            }
+            _ => {}
+        }
+    }
+    fresh
+}
+
+fn expands(ops: &[GraphOp]) -> Vec<(VarId, VarId, crate::Direction, u16, Option<u16>)> {
+    ops.iter()
+        .filter_map(|op| match op {
+            GraphOp::Expand {
+                src,
+                dst,
+                dir,
+                min_hops,
+                max_hops,
+                ..
+            } => Some((*src, *dst, *dir, *min_hops, *max_hops)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn optional_match_expands_from_a_bound_last_node() {
+    let (ops, outer) =
+        optional_child("MATCH (f:Forum) OPTIONAL MATCH (p:Post)<-[:CONTAINER_OF]-(f) RETURN f, p");
+    let f = outer[0];
+    assert!(
+        matches!(ops.first(), Some(GraphOp::NodeScan { var, ty: None }) if *var == f),
+        "the OPTIONAL MATCH starts at the bound node: {ops:?}"
+    );
+    assert!(unanchored_scans(&ops, &outer).is_empty(), "{ops:?}");
+    // `(p)<-[:CONTAINER_OF]-(f)` read from `f` is an outgoing hop to `p`.
+    let hops = expands(&ops);
+    assert_eq!(hops.len(), 1);
+    assert_eq!((hops[0].0, hops[0].2), (f, crate::Direction::Out));
+    // The new node keeps its label filter, applied after the hop.
+    assert!(
+        ops.iter()
+            .any(|op| matches!(op, GraphOp::NodeScan { var, ty: Some(_) } if *var == hops[0].1)),
+        "{ops:?}"
+    );
+}
+
+#[test]
+fn optional_match_reverses_direction_for_each_hop() {
+    // `(friend)<-[:HAS_CREATOR]-(post)<-[:CONTAINER_OF]-(forum)` with only
+    // `forum` bound reads as `(forum)-[:CONTAINER_OF]->(post)-[:HAS_CREATOR]->(friend)`.
+    let (ops, outer) = optional_child(
+        "MATCH (forum:Forum) WITH forum \
+         OPTIONAL MATCH (friend)<-[:HAS_CREATOR]-(post)<-[:CONTAINER_OF]-(forum) \
+         WHERE friend.id = 7 \
+         RETURN forum, post",
+    );
+    // The `WITH forum` output is the last outer variable.
+    let forum = *outer.last().unwrap();
+    assert!(
+        matches!(ops.first(), Some(GraphOp::NodeScan { var, .. }) if *var == forum),
+        "{ops:?}"
+    );
+    assert!(unanchored_scans(&ops, &outer).is_empty(), "{ops:?}");
+    let hops = expands(&ops);
+    assert_eq!(hops.len(), 2);
+    assert_eq!(hops[0].0, forum);
+    assert_eq!(
+        hops[1].0, hops[0].1,
+        "the second hop continues from the first"
+    );
+    assert!(
+        hops.iter().all(|h| h.2 == crate::Direction::Out),
+        "{hops:?}"
+    );
+    // The WHERE stays inside the OPTIONAL MATCH.
+    assert!(ops.iter().any(|op| matches!(op, GraphOp::Filter { .. })));
+}
+
+#[test]
+fn optional_match_keeps_undirected_hops_undirected() {
+    let (ops, outer) =
+        optional_child("MATCH (f:Forum) OPTIONAL MATCH (p)-[:KNOWS]-(f) RETURN f, p");
+    assert!(unanchored_scans(&ops, &outer).is_empty(), "{ops:?}");
+    let hops = expands(&ops);
+    assert_eq!(hops.len(), 1);
+    assert_eq!(hops[0].0, outer[0]);
+    assert_eq!(hops[0].2, crate::Direction::Undirected);
+}
+
+#[test]
+fn optional_match_splits_a_pattern_at_a_bound_middle_node() {
+    // `(a)<-[:R]-(f)-[:S]->(b)` with `f` bound is two hops from `f`:
+    // `(f)-[:R]->(a)` and `(f)-[:S]->(b)`.
+    let (ops, outer) = optional_child(
+        "MATCH (f:Forum) OPTIONAL MATCH (a:Post)<-[:R]-(f)-[:S]->(b:Tag) RETURN f, a, b",
+    );
+    let f = outer[0];
+    assert!(unanchored_scans(&ops, &outer).is_empty(), "{ops:?}");
+    let hops = expands(&ops);
+    assert_eq!(hops.len(), 2);
+    assert!(hops.iter().all(|h| h.0 == f), "{hops:?}");
+    assert_eq!(
+        hops.iter().map(|h| h.2).collect::<Vec<_>>(),
+        vec![crate::Direction::Out, crate::Direction::Out]
+    );
+    // The bound node's own labels and properties are not re-applied to the
+    // second half, and the first half does not re-apply them either.
+    let scans_of_f = ops
+        .iter()
+        .filter(|op| matches!(op, GraphOp::NodeScan { var, .. } if *var == f))
+        .count();
+    assert_eq!(scans_of_f, 2, "{ops:?}");
+}
+
+#[test]
+fn optional_match_with_a_var_length_hop_expands_from_the_bound_node() {
+    let (ops, outer) =
+        optional_child("MATCH (f:Forum) OPTIONAL MATCH (a)-[:KNOWS*1..2]->(f) RETURN f, a");
+    assert!(unanchored_scans(&ops, &outer).is_empty(), "{ops:?}");
+    let hops = expands(&ops);
+    assert_eq!(hops.len(), 1);
+    assert_eq!(
+        hops[0],
+        (outer[0], hops[0].1, crate::Direction::In, 1, Some(2))
+    );
+}
+
+#[test]
+fn optional_match_starting_at_the_bound_node_is_unchanged() {
+    let (ops, outer) =
+        optional_child("MATCH (f:Forum) OPTIONAL MATCH (f)-[:R]->(p:Post) RETURN f, p");
+    assert!(
+        matches!(ops.first(), Some(GraphOp::NodeScan { var, .. }) if *var == outer[0]),
+        "{ops:?}"
+    );
+    let hops = expands(&ops);
+    assert_eq!(hops.len(), 1);
+    assert_eq!((hops[0].0, hops[0].2), (outer[0], crate::Direction::Out));
+}
+
+#[test]
+fn optional_match_without_a_bound_node_is_unchanged() {
+    let (ops, outer) =
+        optional_child("MATCH (f:Forum) OPTIONAL MATCH (a:Post)-[:R]->(b) RETURN f, a");
+    // Nothing is bound, so the pattern still starts with a scan of `a`; `b`
+    // is reached by the hop.
+    assert_eq!(unanchored_scans(&ops, &outer).len(), 1, "{ops:?}");
+    let hops = expands(&ops);
+    assert_eq!(hops.len(), 1);
+    assert_eq!(hops[0].2, crate::Direction::Out);
+}
+
+#[test]
+fn optional_match_keeps_patterns_the_rewrite_cannot_reverse() {
+    for query in [
+        // A named path would list its nodes in the other order.
+        "MATCH (f:Forum) OPTIONAL MATCH p = (a)-[:R]->(f) RETURN f, p",
+        // A named variable-length relationship would list its edges in the
+        // other order.
+        "MATCH (f:Forum) OPTIONAL MATCH (a)-[r:R*1..2]->(f) RETURN f, r",
+        // A property that reads another variable depends on binding order.
+        "MATCH (f:Forum) OPTIONAL MATCH (a {k: f.k})-[:R]->(f) RETURN f, a",
+        "MATCH (f:Forum) OPTIONAL MATCH (a)-[:R {k: f.k}]->(f) RETURN f, a",
+    ] {
+        let (ops, outer) = optional_child(query);
+        assert!(
+            !unanchored_scans(&ops, &outer).is_empty(),
+            "{query} should keep its written order: {ops:?}"
+        );
+    }
+}
+
+#[test]
+fn match_patterns_are_not_reordered() {
+    // Only OPTIONAL MATCH is anchored; a plain MATCH keeps its written order.
+    let plan = bind_plan("MATCH (f:Forum) MATCH (a:Post)<-[:R]-(f) RETURN f, a");
+    let hops = expands(&plan.ops);
+    assert_eq!(hops.len(), 1);
+    assert_eq!(hops[0].2, crate::Direction::In);
+}
+
+#[test]
+fn optional_match_after_an_aggregating_with_anchors_on_the_group_key() {
+    // The shape of an analytical query: the group key `forum` leaves the
+    // aggregating `WITH` as a node, and the OPTIONAL MATCH reads it last.
+    let plan = bind_plan(
+        "MATCH (f:Person)-[:KNOWS]-(friend) \
+         MATCH (friend)<-[:HAS_MEMBER]-(forum) \
+         WITH forum, collect(friend) AS friends \
+         OPTIONAL MATCH (friend)<-[:HAS_CREATOR]-(post)<-[:CONTAINER_OF]-(forum) \
+         WHERE friend IN friends \
+         WITH forum, count(post) AS postCount \
+         RETURN forum, postCount",
+    );
+    let forum = plan
+        .ops
+        .iter()
+        .find_map(|op| match op {
+            GraphOp::Aggregate { group_vars, .. } => group_vars.first().copied().flatten(),
+            _ => None,
+        })
+        .expect("the aggregating WITH names its group key");
+    let child = plan
+        .ops
+        .iter()
+        .find_map(|op| match op {
+            GraphOp::Optional { child } => Some(child.ops.clone()),
+            _ => None,
+        })
+        .expect("query has an OPTIONAL MATCH");
+    assert!(
+        matches!(child.first(), Some(GraphOp::NodeScan { var, .. }) if *var == forum),
+        "{child:?}"
+    );
+    assert!(unanchored_scans(&child, &[forum]).is_empty(), "{child:?}");
+    let hops = expands(&child);
+    assert_eq!(hops.len(), 2);
+    assert_eq!(hops[0].0, forum);
+}
