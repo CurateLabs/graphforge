@@ -1691,9 +1691,7 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
         let mut entry = self.node_labels.lock().expect("node label index lock");
         // Read before building: a generation that moves during the build then
         // fails the next `revalidate` rather than being recorded as current.
-        let Ok(generation) = read_topology_generation(&self.dir) else {
-            return Ok(None);
-        };
+        let generation = read_topology_generation(&self.dir)?;
         if let Some(cached) = entry
             .as_ref()
             .filter(|cached| cached.generation == generation)
