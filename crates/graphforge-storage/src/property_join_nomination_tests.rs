@@ -412,7 +412,15 @@ fn partitioned_collect_left_right_enrichment_swaps_and_restores_parent_contract(
             &Partitioning::RoundRobinBatch(partitions)
         );
         assert_eq!(restored.schema().as_ref(), original.schema().as_ref());
-        let join = restored.input().downcast_ref::<HashJoinExec>().unwrap();
+        // The partitioned join emits one small final batch per hash partition.
+        // A single-output exchange merges them back to full batches before the
+        // restored exchange fans them out, so a per-batch parent sees the batch
+        // structure the CollectLeft join gave it.
+        let merged = restored.input().downcast_ref::<RepartitionExec>().unwrap();
+        assert_eq!(merged.partitioning(), &Partitioning::RoundRobinBatch(1));
+        assert_eq!(merged.schema().as_ref(), original.schema().as_ref());
+        assert!(!merged.preserve_order());
+        let join = merged.input().downcast_ref::<HashJoinExec>().unwrap();
         assert_eq!(*join.join_type(), JoinType::Left);
         // The preserved frontier is hash-partitioned, never collected into one
         // build batch: a wide frontier would overflow a single Arrow batch.

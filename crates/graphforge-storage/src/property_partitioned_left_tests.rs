@@ -358,8 +358,13 @@ fn selected_key_only_scan_supports_existing_collect_left_and_right_shapes() {
         .optimize(right_plan.clone(), &config)
         .unwrap();
     let restored = right_result.downcast_ref::<RepartitionExec>().unwrap();
+    assert_eq!(restored.partitioning(), &Partitioning::RoundRobinBatch(2));
     assert_eq!(restored.schema().as_ref(), right_plan.schema().as_ref());
-    let swapped = restored.input().downcast_ref::<HashJoinExec>().unwrap();
+    // The swapped join's per-partition batches merge into one stream before the
+    // restored exchange fans them out again.
+    let merged = restored.input().downcast_ref::<RepartitionExec>().unwrap();
+    assert_eq!(merged.partitioning(), &Partitioning::RoundRobinBatch(1));
+    let swapped = merged.input().downcast_ref::<HashJoinExec>().unwrap();
     assert_eq!(*swapped.join_type(), JoinType::Left);
     assert_eq!(*swapped.partition_mode(), PartitionMode::Partitioned);
     let build = swapped.left().downcast_ref::<RepartitionExec>().unwrap();

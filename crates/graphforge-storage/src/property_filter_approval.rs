@@ -303,8 +303,12 @@ fn has_unknown_hash_key(partitioning: &Partitioning, plan: &dyn ExecutionPlan) -
 /// (a CollectLeft build overflows 32-bit offsets on wide frontier rows). The
 /// frontier is tapped on its key column as it streams, then hashed into the
 /// parent's partition count; the scan is hashed the same way, and waits for the
-/// completed tap before it reads only the frontier's keys. A single-partition
-/// parent keeps the CollectLeft join as DataFusion planned it.
+/// completed tap before it reads only the frontier's keys. The partitioned
+/// join emits a small final batch per hash partition, so a single-output
+/// exchange merges them back to full batches before the parent's exchange fans
+/// them out; a parent that works per input batch (a write probes its targets
+/// once per batch) keeps seeing the batches the CollectLeft join gave it. A
+/// single-partition parent keeps the CollectLeft join as DataFusion planned it.
 fn nominate_collect_left_right(
     join: &HashJoinExec,
 ) -> Result<Option<Arc<dyn ExecutionPlan>>, DataFusionError> {
