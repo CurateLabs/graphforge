@@ -102,7 +102,7 @@ impl GraphPlanLowerer {
         // A secondary label is a membership filter, not a physical property route.
         // Authenticated routes retain UUID identity and immutable primary ownership.
         for (index, (stem, schema)) in snapshot.node_properties.iter().enumerate() {
-            let columns: Vec<_> = schema
+            let mut columns: Vec<_> = schema
                 .fields()
                 .iter()
                 .filter(|field| {
@@ -112,6 +112,14 @@ impl GraphPlanLowerer {
                         && !existing.contains(field.name())
                 })
                 .collect();
+            // Only the properties the query reads are joined. A route with none
+            // to project is not joined at all: the join would be a LEFT join on
+            // `node_uuid` against a route that holds at most one row per UUID,
+            // so it could neither drop nor repeat a row of the scan, and it
+            // would scan the route's whole key column to say so. A property read
+            // on this variable still joins, and authenticates, every route that
+            // owns one of its columns.
+            columns.retain(|field| self.node_property_needed(var, field.name()));
             if columns.is_empty() {
                 continue;
             }

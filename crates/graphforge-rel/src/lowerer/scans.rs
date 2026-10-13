@@ -153,6 +153,21 @@ impl GraphPlanLowerer {
         if prop_cols.is_empty() {
             return Ok(scan);
         }
+        // Project only the columns the plan reads for this variable. When it
+        // reads none there is no join: a LEFT join on `node_uuid` against a route
+        // that holds at most one row per UUID can neither drop nor repeat a row
+        // of the scan, and the node scan already supplies the variable's
+        // identity, labels and existence. Keeping it would scan the route's whole
+        // key column, and again each time an already-enriched variable is matched
+        // again, with no payload for storage to nominate a narrower scan against.
+        // `join_semantic_node_properties` makes the same cut for semantic routes.
+        let prop_cols: Vec<String> = prop_cols
+            .into_iter()
+            .filter(|name| self.node_property_needed(var, name))
+            .collect();
+        if prop_cols.is_empty() {
+            return Ok(scan);
+        }
 
         let prop_alias = format!("{node_alias}__props");
         let prop_src = graphforge_plan::GraphReadSource::new(

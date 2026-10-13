@@ -23,6 +23,7 @@ impl GraphPlanLowerer {
             produce_one_row: true,
             schema: input_schema,
         });
+        self.set_node_property_demand(graphforge_ir::NodePropertyDemand::everything());
         self.lower_pipeline_from(ops, exprs, var_map, input, Some(pending_nodes))
             .and_then(|plan| self.attach_graph_contract(plan))
             .map_err(GfError::from)
