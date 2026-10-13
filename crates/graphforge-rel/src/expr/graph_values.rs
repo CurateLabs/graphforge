@@ -823,6 +823,13 @@ pub struct PathNodeHydration {
 }
 
 impl PathNodeHydration {
+    /// The property fields of the element: everything after `node_uuid` and,
+    /// when the demand observes them, `labels`.
+    #[must_use]
+    pub fn property_fields(&self) -> &[datafusion::arrow::datatypes::FieldRef] {
+        &self.fields[1 + usize::from(self.demand.labels())..]
+    }
+
     /// The descriptor for `demand` over the node property schemas of
     /// `snapshot`. Lowering and execution both call this, so a plan baked at
     /// lowering binds only against a catalog that yields the same descriptor.

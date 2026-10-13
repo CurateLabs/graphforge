@@ -57,6 +57,7 @@ fn test_udf(hydrate: TestHydration) -> HydratedPathNodes {
             labels_by_type: hydrate.labels_by_type,
             prop_stems: hydrate.prop_stems,
             fields: hydrate.fields,
+            demand: graphforge_rel::expr::PathNodeDemand::Whole,
         },
         tables,
         resource,

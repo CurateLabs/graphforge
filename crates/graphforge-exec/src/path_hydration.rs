@@ -106,30 +106,6 @@ impl HydrationResource {
                     .catalog
                     .lowering_snapshot(Some(&self.graph.dir))
                     .map_err(|error| DataFusionError::External(Box::new(error)))?;
-                let mut fields = vec![
-                    arrow::datatypes::Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
-                    arrow::datatypes::Field::new(
-                        "labels",
-                        DataType::new_list(DataType::Utf8, true),
-                        true,
-                    ),
-                ];
-                let mut seen = fields
-                    .iter()
-                    .map(|f| f.name().clone())
-                    .collect::<std::collections::HashSet<_>>();
-                for stem in &snapshot.node_property_stems {
-                    let schema = snapshot.node_properties.get(stem).ok_or_else(|| {
-                        DataFusionError::Plan(
-                            "GF_READ_RESOURCE_INCOMPATIBLE: path hydration schema".into(),
-                        )
-                    })?;
-                    for field in schema.fields() {
-                        if seen.insert(field.name().clone()) {
-                            fields.push(field.as_ref().clone().with_nullable(true));
-                        }
-                    }
-                }
                 let mut labels = graphforge_rel::GraphPlanLowerer::new(
                     Some(&snapshot),
                     self.graph.ontology.as_ref(),
@@ -138,10 +114,20 @@ impl HydrationResource {
                 .read_contract()
                 .labels;
                 labels.sort_by(|a, b| a.0.encode().cmp(&b.0.encode()).then_with(|| a.1.cmp(&b.1)));
-                if descriptor.prop_stems != snapshot.node_property_stems
-                    || descriptor.fields != fields.into()
-                    || descriptor.labels_by_type != labels
-                {
+                // Rebuild through the constructor lowering used, so a demand
+                // narrowed at lowering (#1984) binds only against a catalog
+                // that yields the same descriptor.
+                let expected = graphforge_rel::expr::PathNodeHydration::build(
+                    &snapshot,
+                    labels,
+                    descriptor.demand.clone(),
+                )
+                .map_err(|_| {
+                    DataFusionError::Plan(
+                        "GF_READ_RESOURCE_INCOMPATIBLE: path hydration schema".into(),
+                    )
+                })?;
+                if *descriptor != expected {
                     return Err(DataFusionError::Plan(
                         "GF_READ_RESOURCE_INCOMPATIBLE: path hydration schema or labels".into(),
                     ));
@@ -249,10 +235,15 @@ fn hydrate_path_node_children(
 ) -> datafusion::error::Result<Vec<datafusion::arrow::array::ArrayRef>> {
     // Reserve bucket capacity (including spare buckets and control bytes), not
     // merely occupied entries. One scratch set is live at a time during gather.
-    h.reserve(hash_table_bytes::<(
-        [u8; 16],
-        Vec<graphforge_value::EntityTypeId>,
-    )>(flat.len())?)?;
+    // The labels scratch is live only when the element carries labels; a
+    // demand that does not observe them skips the topology scan (#1984).
+    let labels = h.demand.labels();
+    if labels {
+        h.reserve(hash_table_bytes::<(
+            [u8; 16],
+            Vec<graphforge_value::EntityTypeId>,
+        )>(flat.len())?)?;
+    }
     h.reserve(hash_table_bytes::<([u8; 16], Vec<PropRowLoc>)>(flat.len())?)?;
     h.reserve(hash_table_bytes::<[u8; 16]>(flat.len())?)?;
     // The stable-first unique run, and the sorted copy the property reader
@@ -261,10 +252,17 @@ fn hydrate_path_node_children(
     h.reserve(allocation_bytes::<[u8; 16]>(flat.len())?)?;
     let unique = unique_path_uuids(flat);
     h.resource.record("requested", unique.len() as u64);
-    let labels_of = gather_path_node_labels(h, &unique, batch_size)?;
+    let labels_of = if labels {
+        Some(gather_path_node_labels(h, &unique, batch_size)?)
+    } else {
+        None
+    };
     let props_of = gather_path_node_props(h, &unique, batch_size)?;
     h.resource.check()?;
-    let mut children = vec![expand_path_node_labels(h, flat, &labels_of)?];
+    let mut children = Vec::with_capacity(h.fields.len() - 1);
+    if let Some(labels_of) = &labels_of {
+        children.push(expand_path_node_labels(h, flat, labels_of)?);
+    }
     children.extend(expand_path_node_props(h, flat, &props_of)?);
     Ok(children)
 }
@@ -472,9 +470,8 @@ fn targeted_read_inputs(
     let mut targets = unique.to_vec();
     targets.sort_unstable();
     let selected = h
-        .fields
+        .property_fields()
         .iter()
-        .skip(2)
         .map(|field| field.name().clone())
         .collect();
     (targets, selected)
@@ -632,8 +629,8 @@ fn expand_path_node_props(
 
     let exec_err = |m: String| DataFusionError::Execution(m);
     let (kept_by_stem, uuid_to_loc) = gathered;
-    let mut children = Vec::with_capacity(h.fields.len().saturating_sub(2));
-    for field in h.fields.iter().skip(2) {
+    let mut children = Vec::with_capacity(h.property_fields().len());
+    for field in h.property_fields() {
         h.resource.check()?;
         let mut child: ArrayRef = new_null_array(field.data_type(), flat.len());
         for (si, batches) in kept_by_stem.iter().enumerate() {
