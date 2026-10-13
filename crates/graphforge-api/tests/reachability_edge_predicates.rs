@@ -173,6 +173,44 @@ fn index_files(project: &Path) -> Vec<graphforge_storage::GraphFileEntry> {
         .collect()
 }
 
+/// Corrupt the UUID blob of the edge-property index while leaving the edge-id
+/// and property blobs intact. An edge-id lookup must remain readable.
+fn corrupt_edge_property_uuid_blob(project: &Path) {
+    let files = index_files(project);
+    let manifest_entry = files
+        .iter()
+        .find(|file| file.relative_path.ends_with(".epx"))
+        .expect("the generation declares an edge-property index");
+    let generation = graphforge_storage::resolve_project_generation(project).unwrap();
+    let manifest_object = graphforge_storage::graph_object_path(
+        generation.container_root(),
+        &manifest_entry.content_sha256,
+    )
+    .unwrap();
+    let bytes = std::fs::read(manifest_object).unwrap();
+    assert_eq!(bytes[16], b'\n');
+    let manifest: serde_json::Value = serde_json::from_slice(&bytes[17..]).unwrap();
+    let uuids = &manifest["shards"][0]["uuids"];
+    let pack = uuids["pack"].as_u64().unwrap();
+    let offset = uuids["offset"].as_u64().unwrap();
+    let byte_length = uuids["byte_length"].as_u64().unwrap();
+    let pack_suffix = format!("/{pack:08}.epk");
+    let pack_entry = files
+        .iter()
+        .find(|file| file.relative_path.ends_with(&pack_suffix))
+        .expect("the generation declares the UUID blob's pack");
+    let pack_object = graphforge_storage::graph_object_path(
+        generation.container_root(),
+        &pack_entry.content_sha256,
+    )
+    .unwrap();
+    let mut bytes = std::fs::read(&pack_object).unwrap();
+    let at = usize::try_from(offset + byte_length - 1).unwrap();
+    assert!(at < bytes.len(), "UUID blob lies inside its pack");
+    bytes[at] ^= 1;
+    std::fs::write(pack_object, bytes).unwrap();
+}
+
 /// Which way a pattern's relationship points from its first node.
 #[derive(Clone, Copy, Debug)]
 enum Direction {
@@ -636,5 +674,25 @@ fn a_per_edge_filter_reads_indexed_properties_by_edge_id() {
     assert!(
         io.property_uuid_pages_selected <= baseline_io.property_uuid_pages_selected,
         "the per-edge filter reads no additional UUID pages"
+    );
+
+    // The UUID-keyed route must open the damaged blob and fail. A successful
+    // result here proves that this traversal addresses the property index by
+    // edge id; the result still matches the NULL-aware BFS oracle.
+    drop(forge);
+    corrupt_edge_property_uuid_blob(&built.project);
+    let forge = open(&built.project);
+    let after_corruption = forge
+        .execute_with_params(&query, &params)
+        .expect("edge-id lookup does not read the edge-property UUID blob");
+    assert_eq!(
+        after_corruption.batches[0]
+            .column_by_name("n")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0),
+        expected
     );
 }
