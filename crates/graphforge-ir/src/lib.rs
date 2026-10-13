@@ -406,6 +406,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn direction_reversal_swaps_the_ends_of_a_directed_edge() {
+        assert_eq!(Direction::Out.reversed(), Direction::In);
+        assert_eq!(Direction::In.reversed(), Direction::Out);
+        assert_eq!(Direction::Undirected.reversed(), Direction::Undirected);
+        for dir in [Direction::Out, Direction::In, Direction::Undirected] {
+            assert_eq!(dir.reversed().reversed(), dir);
+        }
+    }
+
+    #[test]
     fn ir_version_display() {
         let v = IrVersion {
             major: 1,

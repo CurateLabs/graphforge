@@ -493,6 +493,114 @@ async fn edge_list_records_hop_counts() {
     );
 }
 
+/// Write the chain `n1 -> n2 -> ... -> nN` and return the node ids with the
+/// uuid of each edge, in chain order.
+fn write_chain_with_edges(dir: &Path, count: usize) -> (Vec<u64>, Vec<Uuid>) {
+    let mut w = GraphWriter::open_at(dir, OntologyMode::Strict, TS).unwrap();
+    let uuids: Vec<Uuid> = (0..count).map(|_| new_v7()).collect();
+    let ids: Vec<u64> = uuids
+        .iter()
+        .map(|u| w.create_node(*u, PERSON).unwrap())
+        .collect();
+    let mut edges = Vec::new();
+    for pair in uuids.windows(2) {
+        let edge = new_v7();
+        w.create_edge(edge, "KNOWS", &pair[0], &pair[1]).unwrap();
+        edges.push(edge);
+    }
+    w.flush().unwrap();
+    (ids, edges)
+}
+
+/// Run the expand over `seeds` and return each output row's edge list as the
+/// uuids it names, in list order. Rows are sorted so the result does not
+/// depend on emission order.
+async fn run_expand_edge_lists(
+    dir: &std::path::Path,
+    node: &VarLenExpandNode,
+    seeds: &[u64],
+) -> Vec<Vec<Uuid>> {
+    use arrow::array::{FixedSizeBinaryArray, ListArray, StructArray};
+
+    let ctx = SessionContext::new();
+    let batch = RecordBatch::try_new(
+        frontier_schema(),
+        vec![Arc::new(UInt64Array::from(seeds.to_vec()))],
+    )
+    .unwrap();
+    let input: Arc<dyn ExecutionPlan> = ctx
+        .read_batch(batch)
+        .unwrap()
+        .create_physical_plan()
+        .await
+        .unwrap();
+    let exec = make_exec(dir, OntologyMode::Strict, node, input);
+    let out = collect(exec, ctx.task_ctx()).await.unwrap();
+
+    let mut lists = Vec::new();
+    for b in &out {
+        let list = b
+            .column(b.num_columns() - 1)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .expect("trailing column is a ListArray");
+        for i in 0..b.num_rows() {
+            let row = list.value(i);
+            let row = row.as_any().downcast_ref::<StructArray>().unwrap();
+            let uuids = row
+                .column_by_name("edge_uuid")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .unwrap();
+            lists.push(
+                (0..uuids.len())
+                    .map(|j| Uuid::from_slice(uuids.value(j)).unwrap())
+                    .collect(),
+            );
+        }
+    }
+    lists.sort();
+    lists
+}
+
+#[tokio::test]
+async fn a_reversed_edge_list_names_the_same_edges_from_the_far_end() {
+    // n1 -> n2 -> n3 -> n4 -> n5 with edges e0..e3.
+    let dir = TempDir::new().unwrap();
+    let (ids, e) = write_chain_with_edges(dir.path(), 5);
+
+    // Out from n1 over 1..3: each list is the walk in search order.
+    let node = make_node(dir.path(), Direction::Out, 1, Some(3), 0, 1);
+    let forward = run_expand_edge_lists(dir.path(), &node, &[ids[0]]).await;
+    let mut expected = vec![vec![e[0]], vec![e[0], e[1]], vec![e[0], e[1], e[2]]];
+    expected.sort();
+    assert_eq!(forward, expected, "search order is the default");
+
+    // The same walk with the list reversed names the same edges, last first.
+    let reversed = node.clone().with_reversed_edge_list(true);
+    let backward = run_expand_edge_lists(dir.path(), &reversed, &[ids[0]]).await;
+    let mut expected = vec![vec![e[0]], vec![e[1], e[0]], vec![e[2], e[1], e[0]]];
+    expected.sort();
+    assert_eq!(backward, expected);
+
+    // Searching In from n5 and reversing yields the path as written
+    // `(n_k)-[*]->(n5)`, from its first edge to its last: the order an
+    // unreversed Out search from `n_k` would give.
+    let node_in =
+        make_node(dir.path(), Direction::In, 1, Some(3), 0, 1).with_reversed_edge_list(true);
+    let from_end = run_expand_edge_lists(dir.path(), &node_in, &[ids[4]]).await;
+    let mut expected = vec![vec![e[3]], vec![e[2], e[3]], vec![e[1], e[2], e[3]]];
+    expected.sort();
+    assert_eq!(from_end, expected);
+
+    // A zero-hop path has no edges to reorder.
+    let zero =
+        make_node(dir.path(), Direction::Out, 0, Some(1), 0, 1).with_reversed_edge_list(true);
+    let lists = run_expand_edge_lists(dir.path(), &zero, &[ids[0]]).await;
+    assert_eq!(lists, vec![vec![], vec![e[0]]]);
+}
+
 #[tokio::test]
 async fn edge_list_zero_hop_self_path_is_empty_list() {
     // KNOWS*0..1 → the 0-hop self path has an EMPTY (non-null) edge list, and

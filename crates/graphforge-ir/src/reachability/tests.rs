@@ -514,3 +514,33 @@ fn lowering_order_is_plan_order_without_a_hoist() {
         (0..plan.ops.len()).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn a_variable_is_mentioned_wherever_it_appears_in_a_predicate() {
+    let plan = bind("MATCH (a)-[r:T*1..2]->(b) WHERE a.id = 1 AND size(r) > 0 RETURN a, b");
+    let (scan, edge, dst) = plan
+        .ops
+        .iter()
+        .find_map(|op| match op {
+            GraphOp::Expand { src, edge, dst, .. } => Some((*src, *edge, *dst)),
+            _ => None,
+        })
+        .expect("the query has an expansion");
+    let predicates: Vec<ExprId> = plan
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            GraphOp::Filter { predicate } => Some(*predicate),
+            _ => None,
+        })
+        .collect();
+    assert!(!predicates.is_empty(), "the query has a filter");
+    let any = |var: VarId| {
+        predicates
+            .iter()
+            .any(|predicate| mentions_var(&plan.exprs, *predicate, var))
+    };
+    assert!(any(scan), "`a.id = 1` mentions the scan variable");
+    assert!(any(edge), "`size(r) > 0` mentions the relationship");
+    assert!(!any(dst), "no predicate mentions `b`");
+}

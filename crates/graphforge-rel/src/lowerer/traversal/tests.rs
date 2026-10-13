@@ -3,7 +3,7 @@ use super::super::*;
 use datafusion::logical_expr::LogicalPlan as DfLogicalPlan;
 use graphforge_core::TypeId;
 
-use graphforge_ir::{Direction, GraphPlan, VarId};
+use graphforge_ir::{Direction, GraphPlan, IrExpr, VarId};
 
 fn var_len_plan() -> GraphPlan {
     GraphPlan::builder("openCypher")
@@ -52,6 +52,10 @@ fn expand_var_len_produces_extension_node() {
     assert_eq!(node.direction, Direction::Out);
     assert_eq!(node.min_hops, 1);
     assert_eq!(node.max_hops, Some(3));
+    assert!(
+        !node.reverse_edge_list,
+        "an unanchored expansion keeps the edge list in search order"
+    );
     assert_eq!(node.read_contract.as_ref(), Some(&lowerer.read_contract()));
     assert!(!format!("{node:?}").contains(&dir.path().display().to_string()));
 
@@ -60,6 +64,162 @@ fn expand_var_len_produces_extension_node() {
     let schema = UserDefinedLogicalNodeCore::schema(node);
     let dst = datafusion::common::TableReference::bare("var_2");
     assert!(schema.field_with_qualified_name(&dst, "node_id").is_ok());
+}
+
+/// Every variable-length expansion in `plan`, outermost first.
+fn var_len_nodes(plan: &DfLogicalPlan) -> Vec<graphforge_plan::VarLenExpandNode> {
+    use graphforge_plan::VarLenExpandNode;
+    let mut found = Vec::new();
+    if let DfLogicalPlan::Extension(ext) = plan
+        && let Some(node) = ext.node.as_any().downcast_ref::<VarLenExpandNode>()
+    {
+        found.push(node.clone());
+    }
+    for input in plan.inputs() {
+        found.extend(var_len_nodes(input));
+    }
+    found
+}
+
+/// `(person)` is scanned first as variable 2, then
+/// `(other)-[*1..3]->(person)` scans `other` as variable 0 and expands to
+/// the already-bound variable 2.
+fn bound_end_plan(dir: Direction, extra_filter: Option<IrExpr>) -> GraphPlan {
+    let mut builder = GraphPlan::builder("openCypher");
+    let filter = extra_filter.map(|expr| builder.push_expr(expr));
+    let mut builder = builder
+        .push_op(GraphOp::NodeScan {
+            var: VarId(2),
+            ty: None,
+        })
+        .push_op(GraphOp::NodeScan {
+            var: VarId(0),
+            ty: None,
+        })
+        .push_op(GraphOp::Expand {
+            src: VarId(0),
+            edge: VarId(1),
+            dst: VarId(2),
+            rel_ty: None,
+            dir,
+            min_hops: 1,
+            max_hops: Some(3),
+        });
+    if let Some(predicate) = filter {
+        builder = builder.push_op(GraphOp::Filter { predicate });
+    }
+    builder.build()
+}
+
+fn lower_to_var_len_nodes(plan: &GraphPlan) -> Vec<graphforge_plan::VarLenExpandNode> {
+    let (dir, catalog, _rc) = make_catalog_and_lowerer();
+    let lowerer = GraphPlanLowerer::new_for_reads(
+        &graphforge_storage::lowering_snapshot(Some(&catalog), Some(dir.path())).unwrap(),
+        None,
+        OntologyMode::Strict,
+    )
+    .unwrap();
+    var_len_nodes(&lowerer.lower_plan(plan).unwrap())
+}
+
+#[test]
+fn a_bound_end_expansion_is_searched_from_the_bound_end() {
+    for (dir, searched_from_bound_end) in [
+        (Direction::Out, Direction::In),
+        (Direction::In, Direction::Out),
+        (Direction::Undirected, Direction::Undirected),
+    ] {
+        let nodes = lower_to_var_len_nodes(&bound_end_plan(dir, None));
+        let [node] = nodes.as_slice() else {
+            panic!("expected one expansion for {dir:?}, got {}", nodes.len());
+        };
+        // The bound end is the search source and the scanned variable is
+        // the destination, read in the reverse direction, with each edge
+        // list put back into the order of the written pattern.
+        assert_eq!(node.src_var, 2, "{dir:?}");
+        assert_eq!(node.dst_var, 0, "{dir:?}");
+        assert_eq!(node.direction, searched_from_bound_end, "{dir:?}");
+        assert_eq!((node.min_hops, node.max_hops), (1, Some(3)), "{dir:?}");
+        assert!(node.reverse_edge_list, "{dir:?}");
+    }
+}
+
+#[test]
+fn a_later_filter_that_does_not_mention_the_scan_keeps_the_bound_end_search() {
+    // `WHERE true`-shaped filters narrow nothing about the scanned variable.
+    let plan = bound_end_plan(
+        Direction::Out,
+        Some(IrExpr::Literal(graphforge_ir::IrLiteral::Bool(true))),
+    );
+    let nodes = lower_to_var_len_nodes(&plan);
+    let [node] = nodes.as_slice() else {
+        panic!("expected one expansion, got {}", nodes.len());
+    };
+    assert!(node.reverse_edge_list);
+    assert_eq!((node.src_var, node.dst_var), (2, 0));
+}
+
+#[test]
+fn a_later_filter_on_the_scanned_variable_keeps_the_written_direction() {
+    // The scan of `other` is narrowed by the filter, so searching from it
+    // costs less than searching from the bound end.
+    let mut builder = GraphPlan::builder("openCypher");
+    let scanned = builder.push_expr(IrExpr::VarRef(VarId(0)));
+    let predicate = builder.push_expr(IrExpr::UnaryOp {
+        op: graphforge_ir::UnaryOpKind::IsNotNull,
+        expr: scanned,
+    });
+    let plan = builder
+        .push_op(GraphOp::NodeScan {
+            var: VarId(2),
+            ty: None,
+        })
+        .push_op(GraphOp::NodeScan {
+            var: VarId(0),
+            ty: None,
+        })
+        .push_op(GraphOp::Expand {
+            src: VarId(0),
+            edge: VarId(1),
+            dst: VarId(2),
+            rel_ty: None,
+            dir: Direction::Out,
+            min_hops: 1,
+            max_hops: Some(3),
+        })
+        .push_op(GraphOp::Filter { predicate })
+        .build();
+    let nodes = lower_to_var_len_nodes(&plan);
+    let [node] = nodes.as_slice() else {
+        panic!("expected one expansion, got {}", nodes.len());
+    };
+    // The search still starts at the scanned `other` and walks the pattern as
+    // written; the bound end only filters what it emits.
+    assert!(!node.reverse_edge_list);
+    assert_eq!(node.src_var, 0);
+    assert_eq!(node.direction, Direction::Out);
+}
+
+#[test]
+fn a_fixed_hop_to_a_bound_end_is_not_a_bound_end_search() {
+    let mut plan = bound_end_plan(Direction::Out, None);
+    for op in &mut plan.ops {
+        if let GraphOp::Expand {
+            min_hops, max_hops, ..
+        } = op
+        {
+            (*min_hops, *max_hops) = (1, Some(1));
+        }
+    }
+    let (dir, catalog, _rc) = make_catalog_and_lowerer();
+    let lowerer = GraphPlanLowerer::new_for_reads(
+        &graphforge_storage::lowering_snapshot(Some(&catalog), Some(dir.path())).unwrap(),
+        None,
+        OntologyMode::Strict,
+    )
+    .unwrap();
+    let lowered = lowerer.lower_plan(&plan).unwrap();
+    assert!(var_len_nodes(&lowered).is_empty());
 }
 
 #[test]

@@ -2134,6 +2134,32 @@ mod tests {
     }
 
     #[test]
+    fn var_len_expand_edge_list_reversal_is_explained_and_survives_a_rewrite() {
+        let plain = var_len("KNOWS", 1, Some(3));
+        assert!(!plain.reverse_edge_list);
+        let explain = |node: &VarLenExpandNode| wrap(node.clone()).display().to_string();
+        assert!(!explain(&plain).contains("edge_list"));
+
+        let reversed = plain.with_reversed_edge_list(true);
+        assert!(reversed.reverse_edge_list);
+        assert!(
+            explain(&reversed).ends_with(", edge_list=reversed"),
+            "{}",
+            explain(&reversed)
+        );
+
+        // An optimizer rule rebuilds the node through `with_exprs_and_inputs`.
+        let rebuilt = UserDefinedLogicalNodeCore::with_exprs_and_inputs(
+            &reversed,
+            vec![],
+            vec![(*empty_plan()).clone()],
+        )
+        .unwrap();
+        assert!(rebuilt.reverse_edge_list);
+        assert!(!rebuilt.with_reversed_edge_list(false).reverse_edge_list);
+    }
+
+    #[test]
     fn var_len_expand_schema_extends_input_with_dst_and_edge_fields() {
         use datafusion::common::TableReference;
         // empty input has 0 fields; output = 0 + 2 dst fields + 1 edge-list col.
