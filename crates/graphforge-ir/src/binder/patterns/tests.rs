@@ -223,7 +223,7 @@ fn relationship_uniqueness_compares_resolved_type_ids_for_qualified_names() {
     ));
     let catalog = Arc::new(Mutex::new(RuntimeCatalog::new()));
     let binder = Binder::new(None, catalog, OntologyMode::Strict).with_composition(context);
-    let query = "MATCH (a)-[:knows]->(b)-[:ex:knows]->(c) RETURN a";
+    let query = "MATCH (a)-[:knows]->(b)-[:`ex:knows`]->(c) RETURN a";
     let plan = binder
         .bind(&parse(query).unwrap())
         .expect("qualified and unqualified spellings resolve");
