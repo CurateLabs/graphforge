@@ -721,8 +721,8 @@ fn measured_single_source(project: &Path, by: PathAlgorithm, weight: Option<&str
 /// row (two UUIDs and a cost). The Parquet windows are added from row-group
 /// metadata; the property stream's own window is fixed, so it cancels.
 ///
-/// `bfs` retains edge ids and UUIDs, 24 bytes per entry, which it is asserted
-/// to hold above `bfs_depth`.
+/// `bfs` and `bfs_depth` both omit edge identity; only the additional path
+/// results make `bfs` larger than `bfs_depth`.
 #[test]
 fn cost_only_paths_hold_no_per_vertex_path_and_grow_by_the_export_costs() {
     let _guard = serial();
@@ -794,20 +794,19 @@ fn cost_only_paths_hold_no_per_vertex_path_and_grow_by_the_export_costs() {
              the export and search cost at most {allowed}"
         );
 
-        // `bfs` retains edge ids and UUIDs (24 bytes an entry) while it runs.
-        // `dijkstra`'s export, which weights make identical, is the peak of
-        // both, so only its per-path cost (the test below) can tell them apart.
-        let extra = if paths_by == PathAlgorithm::Bfs {
-            24 * large_edges
+        let path_bytes = if paths_by == PathAlgorithm::Bfs {
+            assert!(paths_large.path_entries >= paths_large.rows.len());
+            paths_large.path_entries * std::mem::size_of::<[u8; 16]>()
         } else {
             0
         };
         assert!(
-            paths_large.peak >= cost_large.peak + extra,
-            "{paths_by} held {} bytes; {cost_by} held {} and the paths variant must hold \
-             {extra} more",
+            paths_large.peak >= cost_large.peak + path_bytes,
+            "{paths_by} held {} bytes; {cost_by} held {} and {} path entries need at least \
+             {path_bytes} additional bytes",
             paths_large.peak,
-            cost_large.peak
+            cost_large.peak,
+            paths_large.path_entries
         );
     }
 }
