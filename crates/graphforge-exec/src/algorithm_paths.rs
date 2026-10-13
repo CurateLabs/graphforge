@@ -605,10 +605,13 @@ impl RustAlgorithm for Bfs {
             if target == Some(node) {
                 break;
             }
+            let ordinal = graph
+                .ordinal_of(node)
+                .ok_or_else(|| execution("bfs node has no adjacency ordinal"))?;
             let mut neighbors: Vec<_> = graph
-                .neighbors(node)
+                .neighbor_ordinals(ordinal)
                 .iter()
-                .map(|edge| edge.neighbor_id)
+                .map(|&neighbor| graph.node_id_of_ordinal(neighbor as usize))
                 .collect();
             neighbors.sort_unstable();
             neighbors.dedup();
@@ -901,10 +904,13 @@ pub fn paths_algorithm_with_compute(
     shape_algorithm_output(algorithm, &output).map_err(Into::into)
 }
 
-/// The cost-only searches never report an edge or a path, so their execution
-/// export keeps no edge identity. Fingerprints always keep it.
+/// BFS and the cost-only searches never report edge identity, so their execution
+/// export keeps none. Fingerprints always keep it.
 fn execution_identity(by: PathAlgorithm) -> EdgeIdentityDemand {
-    if matches!(by, PathAlgorithm::BfsDepth | PathAlgorithm::DijkstraCost) {
+    if matches!(
+        by,
+        PathAlgorithm::Bfs | PathAlgorithm::BfsDepth | PathAlgorithm::DijkstraCost
+    ) {
         EdgeIdentityDemand::Omit
     } else {
         EdgeIdentityDemand::Retain
