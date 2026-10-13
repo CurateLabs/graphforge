@@ -566,6 +566,20 @@ pub struct ExpandNode {
     /// How many of the `var_<edge_var>` fields are edge-property columns
     /// (the trailing ones); the rest are edge topology columns.
     pub edge_prop_count: usize,
+    /// A total, deterministic predicate over this expansion's own
+    /// `var_<edge_var>` property columns, parameters and literals that the
+    /// expansion applies to each traversed edge before it reads the edge's
+    /// destination: only edges for which it is `true` produce an output row. A
+    /// `NULL` result excludes the edge, as in a `WHERE`.
+    ///
+    /// It is a copy of a conjunct the plan keeps in a `Filter` above this node,
+    /// so removing it never changes a result; it only decides how many
+    /// destinations are read. Like [`EdgeFilter`] it is deliberately **not** an
+    /// expression of the logical node ([`UserDefinedLogicalNodeCore::expressions`]
+    /// stays empty): its columns name this node's output, not its input, so
+    /// exposing it would send it through rules that resolve columns against the
+    /// input.
+    pub edge_predicate: Option<Expr>,
     schema: DFSchemaRef,
 }
 
@@ -575,6 +589,29 @@ impl ExpandNode {
     pub fn with_read_contract(mut self, contract: Option<GraphReadContract>) -> Self {
         self.read_contract = contract;
         self
+    }
+
+    /// Attach the predicate over this node's edge property columns that is
+    /// applied before the destination read; see [`Self::edge_predicate`].
+    #[must_use]
+    pub fn with_edge_predicate(mut self, predicate: Option<Expr>) -> Self {
+        self.edge_predicate = predicate;
+        self
+    }
+
+    /// The output columns that carry this hop's persisted relationship
+    /// properties, qualified `var_<edge_var>`, in schema order.
+    #[must_use]
+    pub fn edge_property_fields(&self) -> Vec<(TableReference, Arc<Field>)> {
+        let edge_qual = format!("var_{}", self.edge_var);
+        let all_edge: Vec<_> = self
+            .schema
+            .iter()
+            .filter(|(q, _)| q.map(TableReference::table) == Some(edge_qual.as_str()))
+            .filter_map(|(q, f)| q.map(|q| (q.clone(), Arc::clone(f))))
+            .collect();
+        let topology = all_edge.len().saturating_sub(self.edge_prop_count);
+        all_edge[topology..].to_vec()
     }
 
     /// Create an adjacency-backed single-hop expand node.
@@ -617,6 +654,7 @@ impl ExpandNode {
             rel_ty,
             read_contract: None,
             edge_prop_count,
+            edge_predicate: None,
             schema,
         }
     }
@@ -692,7 +730,11 @@ impl UserDefinedLogicalNodeCore for ExpandNode {
             f,
             "Expand: rel={}, dir={arrow}, edge=var_{}",
             self.rel_type_name, self.edge_var
-        )
+        )?;
+        if let Some(predicate) = &self.edge_predicate {
+            write!(f, ", edge_predicate={predicate}")?;
+        }
+        Ok(())
     }
 
     /// The input columns the expansion needs: the ones its parent reads, which
@@ -754,7 +796,8 @@ impl UserDefinedLogicalNodeCore for ExpandNode {
             edge_prop_fields,
             dst_fields,
         )
-        .with_read_contract(self.read_contract.clone()))
+        .with_read_contract(self.read_contract.clone())
+        .with_edge_predicate(self.edge_predicate.clone()))
     }
 }
 

@@ -1620,6 +1620,10 @@ pub struct ExpandExec {
     /// A facade configured an identity authority, but admission may have
     /// failed closed for this generation. Standalone sessions leave this false.
     ordinal_identity_required: bool,
+    /// A total predicate over this hop's relationship properties, tested on
+    /// each traversed relationship before its destination is read. The plan
+    /// keeps an equivalent filter above, so it only reduces destination reads.
+    edge_predicate: Option<Arc<edge_predicate::PhysicalEdgePredicate>>,
 }
 
 impl ExpandExec {
@@ -1668,7 +1672,22 @@ impl ExpandExec {
             required_output: None,
             ordinal_identities,
             ordinal_identity_required,
+            edge_predicate: None,
         }
+    }
+
+    /// Test `predicate` on each traversed relationship before its destination
+    /// is read; see [`graphforge_plan::ExpandNode::edge_predicate`].
+    #[must_use]
+    pub(crate) fn with_edge_predicate(
+        mut self,
+        predicate: Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        fields: &[arrow::datatypes::FieldRef],
+    ) -> Self {
+        self.edge_predicate = Some(Arc::new(edge_predicate::PhysicalEdgePredicate::new(
+            predicate, fields,
+        )));
+        self
     }
 
     pub(super) fn with_demand(
@@ -1698,6 +1717,7 @@ impl ExpandExec {
             required_output: self.required_output.clone(),
             ordinal_identities: self.ordinal_identities.clone(),
             ordinal_identity_required: self.ordinal_identity_required,
+            edge_predicate: self.edge_predicate.clone(),
         })
     }
 
@@ -1723,6 +1743,7 @@ impl ExpandExec {
             required_output: Some(required.into()),
             ordinal_identities: self.ordinal_identities.clone(),
             ordinal_identity_required: self.ordinal_identity_required,
+            edge_predicate: self.edge_predicate.clone(),
         })
     }
 
@@ -1744,6 +1765,7 @@ impl ExpandExec {
             required_output: self.required_output.clone(),
             ordinal_identities: self.ordinal_identities.clone(),
             ordinal_identity_required: self.ordinal_identity_required,
+            edge_predicate: self.edge_predicate.clone(),
             reservation: std::sync::Mutex::new(crate::fast_path::expand_reservation(context)),
         }
     }
@@ -1897,7 +1919,11 @@ impl DisplayAs for ExpandExec {
             } else {
                 "none"
             }
-        )
+        )?;
+        if let Some(predicate) = &self.edge_predicate {
+            write!(f, ", edge_predicate={}", predicate.predicate())?;
+        }
+        Ok(())
     }
 }
 
@@ -1950,6 +1976,7 @@ impl ExecutionPlan for ExpandExec {
             required_output: self.required_output.clone(),
             ordinal_identities: self.ordinal_identities.clone(),
             ordinal_identity_required: self.ordinal_identity_required,
+            edge_predicate: self.edge_predicate.clone(),
         }))
     }
 
@@ -1981,6 +2008,7 @@ impl ExecutionPlan for ExpandExec {
             required_output: self.required_output.clone(),
             ordinal_identities: self.ordinal_identities.clone(),
             ordinal_identity_required: self.ordinal_identity_required,
+            edge_predicate: self.edge_predicate.clone(),
         }))
     }
 
@@ -2121,6 +2149,8 @@ struct SingleHopConfig {
     required_output: Option<Arc<[bool]>>,
     ordinal_identities: Option<Arc<V4OrdinalIdentitySession>>,
     ordinal_identity_required: bool,
+    /// Tested on each traversed relationship before its destination is read.
+    edge_predicate: Option<Arc<edge_predicate::PhysicalEdgePredicate>>,
     /// #1688 candidate C: the memory-pool reservation for held batches.
     /// Memory-pool reservation for the batches this hop holds (ADR 0050).
     reservation: std::sync::Mutex<datafusion::execution::memory_pool::MemoryReservation>,
@@ -2305,11 +2335,14 @@ fn expand_single_hop_chunk(
                 })
             })
     });
-    let relationship_properties_required = required.is_none_or(|mask| {
-        mask[edge_topology_end..edge_end]
-            .iter()
-            .any(|needed| *needed)
-    });
+    // A pushed relationship predicate reads properties the hop's consumers may
+    // not demand, so it needs them even when no output column does.
+    let relationship_properties_required = cfg.edge_predicate.is_some()
+        || required.is_none_or(|mask| {
+            mask[edge_topology_end..edge_end]
+                .iter()
+                .any(|needed| *needed)
+        });
     let edge_materialization_unused = ordinal_topology_only && !relationship_properties_required;
     let destination_uuid_index = edge_end;
     let destination_id_index = edge_end + 1;
@@ -2454,7 +2487,15 @@ fn expand_single_hop_chunk(
     let demanded_property_fields = prop_fields
         .iter()
         .enumerate()
-        .filter(|(offset, _)| required.is_none_or(|mask| mask[edge_topology_end + offset]))
+        .filter(|(offset, field)| {
+            required.is_none_or(|mask| mask[edge_topology_end + offset])
+                || cfg.edge_predicate.as_ref().is_some_and(|predicate| {
+                    predicate
+                        .fields()
+                        .iter()
+                        .any(|read| read.name() == field.name())
+                })
+        })
         .map(|(_, field)| Arc::clone(field))
         .collect::<Vec<_>>();
     // A hop that reads the edge only for its ordinal and its properties finds
@@ -2562,6 +2603,85 @@ fn expand_single_hop_chunk(
         })
         .transpose()?;
 
+    // The relationship-only predicate (#1984): evaluate it on the properties of
+    // every traversed relationship before any destination node is read, so a
+    // relationship that fails it costs no destination read. `NULL` drops the
+    // relationship, as the `WHERE` above the hop does. The properties fetched
+    // here are reused for the output columns.
+    let mut prefetched_properties: Option<Vec<ArrayRef>> = None;
+    if let Some(predicate) = cfg.edge_predicate.as_ref() {
+        let hop_edge_ids = triples
+            .iter()
+            .map(|(_, edge_id, _)| *edge_id)
+            .collect::<Vec<_>>();
+        let mut children = if let Some(source) = id_keyed_properties.as_ref() {
+            edge_properties::edge_prop_children_by_id(
+                source,
+                &demanded_property_fields,
+                &hop_edge_ids,
+            )?
+        } else {
+            let edge_uuids = edge_uuids.ok_or_else(|| {
+                exec_err("Expand: an edge predicate needs the edge_uuid column".into())
+            })?;
+            let mut uuids = Vec::with_capacity(hop_edge_ids.len());
+            for edge_id in &hop_edge_ids {
+                let Some(&edge_idx) = edge_row.get(edge_id) else {
+                    return Err(exec_err(format!(
+                        "Expand: adjacency entry references unknown edge_id {edge_id}"
+                    )));
+                };
+                if edge_uuids.is_null(edge_idx) {
+                    return Err(exec_err(format!(
+                        "Expand: edge_id {edge_id} has a null edge_uuid"
+                    )));
+                }
+                let mut edge_uuid = [0u8; 16];
+                edge_uuid.copy_from_slice(edge_uuids.value(edge_idx));
+                uuids.push(edge_uuid);
+            }
+            build_edge_prop_children(
+                cfg.provider.admitted_inventory().as_deref(),
+                &cfg.rel_type_name,
+                &cfg.dir,
+                &demanded_property_fields,
+                &uuids,
+            )?
+        };
+        let mut read = Vec::with_capacity(predicate.fields().len());
+        for field in predicate.fields() {
+            let column = demanded_property_fields
+                .iter()
+                .position(|demanded| demanded.name() == field.name())
+                .and_then(|index| children.get(index))
+                .ok_or_else(|| {
+                    exec_err(format!(
+                        "Expand: edge predicate reads property {} that was not fetched",
+                        field.name()
+                    ))
+                })?;
+            read.push(Arc::clone(column));
+        }
+        let verdicts = predicate.passing(read, triples.len())?;
+        if verdicts.iter().any(|passes| !passes) {
+            let keep = arrow::array::BooleanArray::from(verdicts.clone());
+            children = children
+                .iter()
+                .map(|column| {
+                    arrow::compute::filter(column, &keep)
+                        .map_err(|error| exec_err(error.to_string()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut verdicts = verdicts.into_iter();
+            triples.retain(|_| verdicts.next().unwrap_or(false));
+            reached = triples.iter().map(|(_, _, neighbor)| *neighbor).collect();
+        }
+        if triples.is_empty() {
+            return Ok(RecordBatch::new_empty(cfg.out_schema.clone()));
+        }
+        prefetched_properties = Some(children);
+    }
+
     // Destination node rows keyed by node_id — read lazily for the reached
     // neighbors only (#838), so an index Hit does not scan the whole node table.
     let node_permit = cfg
@@ -2593,12 +2713,7 @@ fn expand_single_hop_chunk(
         edge_projection
             .len()
             .saturating_add(1_usize.saturating_sub(edge_key_already_demanded))
-            .saturating_add(required.map_or(cfg.edge_prop_count, |mask| {
-                mask[cfg.input_width + edge_topology_width..edge_end]
-                    .iter()
-                    .filter(|needed| **needed)
-                    .count()
-            }))
+            .saturating_add(demanded_property_fields.len())
     } else {
         0
     };
@@ -2668,7 +2783,8 @@ fn expand_single_hop_chunk(
             )));
         };
         edge_take.push(to_u32(edge_idx)?);
-        if let Some(edge_uuids) = edge_uuids {
+        // Properties fetched ahead of the destination read already used these.
+        if let Some(edge_uuids) = edge_uuids.filter(|_| prefetched_properties.is_none()) {
             if edge_uuids.is_null(edge_idx) {
                 return Err(exec_err(format!(
                     "Expand: edge_id {edge_id} has a null edge_uuid"
@@ -2719,7 +2835,9 @@ fn expand_single_hop_chunk(
             ))
         });
     }
-    let demanded_property_columns = if let Some(source) = id_keyed_properties.as_ref() {
+    let demanded_property_columns = if let Some(children) = prefetched_properties {
+        children
+    } else if let Some(source) = id_keyed_properties.as_ref() {
         let hop_edge_ids = triples
             .iter()
             .map(|(_, edge_id, _)| *edge_id)
@@ -2768,6 +2886,7 @@ fn expand_single_hop_chunk(
 }
 
 mod edge_filter;
+mod edge_predicate;
 mod edge_properties;
 mod reachability;
 #[cfg(test)]
