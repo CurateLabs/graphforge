@@ -208,6 +208,15 @@ fn corrupt_edge_property_uuid_blob(project: &Path) {
     let at = usize::try_from(offset + byte_length - 1).unwrap();
     assert!(at < bytes.len(), "UUID blob lies inside its pack");
     bytes[at] ^= 1;
+    let mut permissions = std::fs::metadata(&pack_object).unwrap().permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        permissions.set_mode(0o600);
+    }
+    #[cfg(not(unix))]
+    permissions.set_readonly(false);
+    std::fs::set_permissions(&pack_object, permissions).unwrap();
     std::fs::write(pack_object, bytes).unwrap();
 }
 
