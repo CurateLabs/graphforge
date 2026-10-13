@@ -387,7 +387,7 @@ impl PackHandles {
             .map_err(|e| storage("seek pack", &e))?;
         // Sized to the range so it is one `read`, not the doubling probe an empty
         // buffer makes; `length` is bounded by `PACK_BYTES` above.
-        let mut bytes = Vec::with_capacity(length as usize);
+        let mut bytes = Vec::with_capacity(usize::try_from(length).expect("bounded by PACK_BYTES"));
         file.take(length)
             .read_to_end(&mut bytes)
             .map_err(|e| storage("read pack", &e))?;
@@ -428,7 +428,8 @@ impl PackHandles {
             return Err(self.corrupt(seal.pack));
         }
         let blob_end = seal.offset + seal.byte_length;
-        let window = (fixed + SCHEMA_ALLOWANCE).min(seal.byte_length as usize);
+        let window = (fixed + SCHEMA_ALLOWANCE)
+            .min(usize::try_from(seal.byte_length).expect("bounded by PACK_BYTES"));
         let mut tail = self.read_range(seal.pack, blob_end - window as u64, window as u64)?;
         let schema_length = u32::from_le_bytes(
             tail[tail.len() - TRAILER_BYTES..]
@@ -514,7 +515,7 @@ impl PackHandles {
         {
             return Err(validation("blob schema is malformed"));
         }
-        let mut decoded = Vec::with_capacity(wanted.len());
+        let mut arrays = Vec::with_capacity(wanted.len());
         let mut next = 0;
         while next < wanted.len() {
             let mut end = next + 1;
@@ -532,7 +533,10 @@ impl PackHandles {
             for &index in &wanted[next..end] {
                 let page = &pages[index];
                 let start = usize::try_from(page.offset - first.offset).expect("run fits memory");
-                let mut message = run.slice_with_length(start, page.length as usize);
+                let mut message = run.slice_with_length(
+                    start,
+                    usize::try_from(page.length).expect("page fits memory"),
+                );
                 if crate::corruption_checksum::checksum(message.as_slice()) != page.xxh64 {
                     return Err(self.corrupt(pack));
                 }
@@ -546,11 +550,11 @@ impl PackHandles {
                 }
                 let array = Arc::clone(batch.column(0));
                 check_page(blob.keys, &array, blob.rows_in(index), blob.bounds(index))?;
-                decoded.push(array);
+                arrays.push(array);
             }
             next = end;
         }
-        Ok(decoded)
+        Ok(arrays)
     }
 
     /// The whole column of a blob written before paging, checked against its
