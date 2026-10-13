@@ -18,6 +18,19 @@ use parquet::{
 pub(crate) const PAGE_BYTES: usize = 1024 * 1024;
 pub(crate) const PAGE_ROWS: usize = 20_000;
 
+/// Data-page row limit for files that are read by row position or by key:
+/// node and edge topology, and property fragments. A read that selects a few
+/// rows decompresses whole pages, so the page is the unit of read amplification.
+///
+/// The Parquet writer tests the limit only after each `write_batch_size`
+/// (1,024-row) mini-batch, so a limit that is not a multiple of 1,024 behaves
+/// as the next multiple. This one is a multiple, so it is the real page size.
+pub(crate) const POINT_ACCESS_PAGE_ROWS: usize = 2_048;
+
+/// Data-page byte limit for point-access files. It bounds a page of wide rows
+/// whose 2,048 rows would otherwise exceed it.
+pub(crate) const POINT_ACCESS_PAGE_BYTES: usize = 128 * 1024;
+
 /// The `created_by` string embedded in every permanent Parquet footer.
 ///
 /// arrow-rs otherwise writes its own crate version here, which puts the
@@ -55,6 +68,22 @@ pub fn writer_properties() -> WriterPropertiesBuilder {
         .set_statistics_truncate_length(Some(64))
         .set_offset_index_disabled(false)
         .set_coerce_types(false)
+}
+
+/// [`writer_properties`] with the small data pages that point reads need.
+///
+/// Used for node and edge topology files and property fragments, which readers
+/// open and then fetch a few rows from by dense ordinal or UUID. It is not used
+/// for files read only as whole columns or whole objects, which keep the larger
+/// pages that compress better. Files written before this existed keep their
+/// larger pages; readers take page boundaries from each file's own page index.
+/// The page row limit is a durable format parameter in the same way as
+/// [`CREATED_BY`]: changing it changes the digest of every point-access file.
+#[must_use]
+pub fn point_access_writer_properties() -> WriterPropertiesBuilder {
+    writer_properties()
+        .set_data_page_size_limit(POINT_ACCESS_PAGE_BYTES)
+        .set_data_page_row_count_limit(POINT_ACCESS_PAGE_ROWS)
 }
 
 fn overflow() -> GfError {
@@ -108,8 +137,8 @@ pub(crate) fn replay_encoder_buffers(
         .and_then(|n| n.checked_add(levels))
         .ok_or_else(overflow)?;
     let pages = columns
-        .checked_mul(1 + active_rows / PAGE_ROWS)
-        .and_then(|n| n.checked_add(source / PAGE_BYTES))
+        .checked_mul(1 + active_rows / POINT_ACCESS_PAGE_ROWS)
+        .and_then(|n| n.checked_add(source / POINT_ACCESS_PAGE_BYTES))
         .ok_or_else(overflow)?;
     // compressBound <= source + ceil(source/256) + 64 per page. Current
     // truncated page statistics keep each encoded page header below 512 bytes.
@@ -148,7 +177,7 @@ pub(crate) fn replay_encoder_buffers(
         maximum_leaf_source = maximum_leaf_source.max(leaf_source);
     }
     let active_codec = zstd_encoder_workspace(maximum_leaf_source);
-    let native = if source < PAGE_BYTES && active_rows < PAGE_ROWS {
+    let native = if source < POINT_ACCESS_PAGE_BYTES && active_rows < POINT_ACCESS_PAGE_ROWS {
         // No data page can flush during writes below both page thresholds.
         // Row-group close compresses and drops leaf writers sequentially, so
         // only one CCtx is active alongside the other dormant codec pairs.
@@ -263,8 +292,8 @@ pub(crate) fn replay_metadata_bytes(
                 .saturating_mul(rows_per_group)
         };
         let pages = 1_usize
-            .saturating_add(rows_per_group.saturating_sub(1) / PAGE_ROWS)
-            .saturating_add(source / PAGE_BYTES);
+            .saturating_add(rows_per_group.saturating_sub(1) / POINT_ACCESS_PAGE_ROWS)
+            .saturating_add(source / POINT_ACCESS_PAGE_BYTES);
         let binary = matches!(
             leaf.physical_type(),
             parquet::basic::Type::BYTE_ARRAY | parquet::basic::Type::FIXED_LEN_BYTE_ARRAY

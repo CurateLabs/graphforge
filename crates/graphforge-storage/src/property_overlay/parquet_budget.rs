@@ -73,7 +73,7 @@ impl ReadCounts {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct CountingChunkReader {
     pub(super) file: Arc<PropertyFile>,
     pub(super) length: u64,
@@ -289,16 +289,24 @@ pub(super) fn admit_target_footer(
     Ok(())
 }
 
+/// The counted chunk reader over one opened, authenticated fragment.
+pub(super) fn counting_chunk_reader(
+    opened: &OpenPropertyFragment,
+    counts: ReadCounts,
+) -> CountingChunkReader {
+    CountingChunkReader {
+        file: Arc::clone(&opened.file),
+        length: opened.logical_length,
+        counts,
+    }
+}
+
 pub(super) fn open_counted_retained_property_builder(
     opened: &OpenPropertyFragment,
     counts: ReadCounts,
 ) -> Result<ParquetRecordBatchReaderBuilder<CountingChunkReader>, GfError> {
-    ParquetRecordBatchReaderBuilder::try_new(CountingChunkReader {
-        file: Arc::clone(&opened.file),
-        length: opened.logical_length,
-        counts,
-    })
-    .map_err(parquet_error)
+    ParquetRecordBatchReaderBuilder::try_new(counting_chunk_reader(opened, counts))
+        .map_err(parquet_error)
 }
 
 pub(super) fn validate_fragment_schema(

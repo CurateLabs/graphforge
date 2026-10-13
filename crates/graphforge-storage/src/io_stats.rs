@@ -82,6 +82,9 @@ pub struct FilteredReadPruning {
     pub pages_considered: u64,
     /// Key-column pages containing at least one selected row.
     pub pages_selected: u64,
+    /// Rows held by those pages: the rows a decoder decompresses to return the
+    /// selected ones, which falls with the writer's page size.
+    pub page_rows_selected: u64,
     /// Exact row ordinals selected before the membership guard.
     pub exact_rows_selected: u64,
     /// Dense selection was unavailable because its metadata contract failed.
@@ -135,9 +138,25 @@ pub(crate) struct Counters {
     node_row_groups_selected: AtomicU64,
     node_pages_considered: AtomicU64,
     node_pages_selected: AtomicU64,
+    node_page_rows_selected: AtomicU64,
     node_exact_rows_selected: AtomicU64,
     node_metadata_fallbacks: AtomicU64,
     node_validation_fallbacks: AtomicU64,
+    edge_dense_row_selection_reads: AtomicU64,
+    edge_dense_layout_declined: AtomicU64,
+    edge_dense_half_file_declined: AtomicU64,
+    edge_row_groups_considered: AtomicU64,
+    edge_row_groups_selected: AtomicU64,
+    edge_pages_considered: AtomicU64,
+    edge_pages_selected: AtomicU64,
+    edge_page_rows_selected: AtomicU64,
+    edge_exact_rows_selected: AtomicU64,
+    edge_validation_fallbacks: AtomicU64,
+    property_uuid_selections: AtomicU64,
+    property_uuid_rows_decoded: AtomicU64,
+    property_uuid_pages_considered: AtomicU64,
+    property_uuid_pages_selected: AtomicU64,
+    property_uuid_index_fallbacks: AtomicU64,
     rewrite_commits: AtomicU64,
     topology_rewrite_existing_rows: AtomicU64,
     topology_rewrite_new_rows: AtomicU64,
@@ -195,12 +214,50 @@ pub struct IoSnapshot {
     pub node_pages_considered: u64,
     /// Node-id pages containing selected rows.
     pub node_pages_selected: u64,
+    /// Rows held by those node-id pages: what the decoder decompressed.
+    pub node_page_rows_selected: u64,
     /// Exact node row ordinals selected before the membership guard.
     pub node_exact_rows_selected: u64,
     /// Dense selection attempts rejected by the metadata contract.
     pub node_metadata_fallbacks: u64,
     /// Dense selection attempts rejected by post-read validation.
     pub node_validation_fallbacks: u64,
+    /// Edge reads that used exact dense row selection.
+    pub edge_dense_row_selection_reads: u64,
+    /// Edge files whose footer does not prove the dense `edge_id` layout, so
+    /// the conservative membership read ran instead.
+    pub edge_dense_layout_declined: u64,
+    /// Edge files where the request covered more than half of the file, so
+    /// the conservative membership read ran instead.
+    pub edge_dense_half_file_declined: u64,
+    /// Edge row groups whose metadata was considered by dense selection.
+    pub edge_row_groups_considered: u64,
+    /// Edge row groups retained for decoding by dense selection.
+    pub edge_row_groups_selected: u64,
+    /// Edge-id pages considered by exact dense selection.
+    pub edge_pages_considered: u64,
+    /// Edge-id pages containing selected rows.
+    pub edge_pages_selected: u64,
+    /// Rows held by those edge-id pages: what the decoder decompressed.
+    pub edge_page_rows_selected: u64,
+    /// Exact edge row ordinals selected before the membership guard.
+    pub edge_exact_rows_selected: u64,
+    /// Dense edge selections rejected by post-read validation.
+    pub edge_validation_fallbacks: u64,
+    /// Property-fragment reads that located wanted rows by decoding the UUID
+    /// column.
+    pub property_uuid_selections: u64,
+    /// UUID-column rows those reads decoded to locate wanted rows.
+    pub property_uuid_rows_decoded: u64,
+    /// UUID-column pages the page index offered across the row groups those
+    /// reads selected.
+    pub property_uuid_pages_considered: u64,
+    /// UUID-column pages whose min/max range could hold a wanted UUID and were
+    /// therefore decoded.
+    pub property_uuid_pages_selected: u64,
+    /// Property reads that could not use the UUID page index (absent, unreadable
+    /// or failing its sort proof) and decoded the whole UUID column instead.
+    pub property_uuid_index_fallbacks: u64,
     /// Successful non-empty [`RewriteBatch`](crate::RewriteBatch) commits.
     /// This counts persistence cycles, not the number of files in a batch.
     pub rewrite_commits: u64,
@@ -258,9 +315,35 @@ pub fn snapshot() -> Option<IoSnapshot> {
         node_row_groups_selected: counters.node_row_groups_selected.load(Ordering::Relaxed),
         node_pages_considered: counters.node_pages_considered.load(Ordering::Relaxed),
         node_pages_selected: counters.node_pages_selected.load(Ordering::Relaxed),
+        node_page_rows_selected: counters.node_page_rows_selected.load(Ordering::Relaxed),
         node_exact_rows_selected: counters.node_exact_rows_selected.load(Ordering::Relaxed),
         node_metadata_fallbacks: counters.node_metadata_fallbacks.load(Ordering::Relaxed),
         node_validation_fallbacks: counters.node_validation_fallbacks.load(Ordering::Relaxed),
+        edge_dense_row_selection_reads: counters
+            .edge_dense_row_selection_reads
+            .load(Ordering::Relaxed),
+        edge_dense_layout_declined: counters.edge_dense_layout_declined.load(Ordering::Relaxed),
+        edge_dense_half_file_declined: counters
+            .edge_dense_half_file_declined
+            .load(Ordering::Relaxed),
+        edge_row_groups_considered: counters.edge_row_groups_considered.load(Ordering::Relaxed),
+        edge_row_groups_selected: counters.edge_row_groups_selected.load(Ordering::Relaxed),
+        edge_pages_considered: counters.edge_pages_considered.load(Ordering::Relaxed),
+        edge_pages_selected: counters.edge_pages_selected.load(Ordering::Relaxed),
+        edge_page_rows_selected: counters.edge_page_rows_selected.load(Ordering::Relaxed),
+        edge_exact_rows_selected: counters.edge_exact_rows_selected.load(Ordering::Relaxed),
+        edge_validation_fallbacks: counters.edge_validation_fallbacks.load(Ordering::Relaxed),
+        property_uuid_selections: counters.property_uuid_selections.load(Ordering::Relaxed),
+        property_uuid_rows_decoded: counters.property_uuid_rows_decoded.load(Ordering::Relaxed),
+        property_uuid_pages_considered: counters
+            .property_uuid_pages_considered
+            .load(Ordering::Relaxed),
+        property_uuid_pages_selected: counters
+            .property_uuid_pages_selected
+            .load(Ordering::Relaxed),
+        property_uuid_index_fallbacks: counters
+            .property_uuid_index_fallbacks
+            .load(Ordering::Relaxed),
         rewrite_commits: counters.rewrite_commits.load(Ordering::Relaxed),
         topology_rewrite_existing_rows: counters
             .topology_rewrite_existing_rows
@@ -296,6 +379,7 @@ pub fn snapshot() -> Option<IoSnapshot> {
 }
 
 /// Reset the current capture; an inactive caller remains inactive.
+#[allow(clippy::too_many_lines)] // One zeroing store per counter; a helper would hide a missed one.
 pub fn reset() {
     let _ = crate::lifecycle_io::with_io_stats(|counters| {
         counters.edge_full_reads.store(0, Ordering::Relaxed);
@@ -322,12 +406,52 @@ pub fn reset() {
             .store(0, Ordering::Relaxed);
         counters.node_pages_considered.store(0, Ordering::Relaxed);
         counters.node_pages_selected.store(0, Ordering::Relaxed);
+        counters.node_page_rows_selected.store(0, Ordering::Relaxed);
         counters
             .node_exact_rows_selected
             .store(0, Ordering::Relaxed);
         counters.node_metadata_fallbacks.store(0, Ordering::Relaxed);
         counters
             .node_validation_fallbacks
+            .store(0, Ordering::Relaxed);
+        counters
+            .edge_dense_row_selection_reads
+            .store(0, Ordering::Relaxed);
+        counters
+            .edge_dense_layout_declined
+            .store(0, Ordering::Relaxed);
+        counters
+            .edge_dense_half_file_declined
+            .store(0, Ordering::Relaxed);
+        counters
+            .edge_row_groups_considered
+            .store(0, Ordering::Relaxed);
+        counters
+            .edge_row_groups_selected
+            .store(0, Ordering::Relaxed);
+        counters.edge_pages_considered.store(0, Ordering::Relaxed);
+        counters.edge_pages_selected.store(0, Ordering::Relaxed);
+        counters.edge_page_rows_selected.store(0, Ordering::Relaxed);
+        counters
+            .edge_exact_rows_selected
+            .store(0, Ordering::Relaxed);
+        counters
+            .edge_validation_fallbacks
+            .store(0, Ordering::Relaxed);
+        counters
+            .property_uuid_selections
+            .store(0, Ordering::Relaxed);
+        counters
+            .property_uuid_rows_decoded
+            .store(0, Ordering::Relaxed);
+        counters
+            .property_uuid_pages_considered
+            .store(0, Ordering::Relaxed);
+        counters
+            .property_uuid_pages_selected
+            .store(0, Ordering::Relaxed);
+        counters
+            .property_uuid_index_fallbacks
             .store(0, Ordering::Relaxed);
         counters.rewrite_commits.store(0, Ordering::Relaxed);
         counters
@@ -507,6 +631,9 @@ pub(crate) fn record_node_pruning(pruning: FilteredReadPruning) {
             .node_pages_selected
             .fetch_add(pruning.pages_selected, Ordering::Relaxed);
         counters
+            .node_page_rows_selected
+            .fetch_add(pruning.page_rows_selected, Ordering::Relaxed);
+        counters
             .node_exact_rows_selected
             .fetch_add(pruning.exact_rows_selected, Ordering::Relaxed);
         counters
@@ -515,6 +642,90 @@ pub(crate) fn record_node_pruning(pruning: FilteredReadPruning) {
         counters
             .node_validation_fallbacks
             .fetch_add(pruning.validation_fallbacks, Ordering::Relaxed);
+    });
+}
+
+/// Record one dense-selection edge read that reached the Parquet decoder.
+pub(crate) fn record_edge_dense_pruning(pruning: FilteredReadPruning) {
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters
+            .edge_dense_row_selection_reads
+            .fetch_add(1, Ordering::Relaxed);
+        counters
+            .edge_row_groups_considered
+            .fetch_add(pruning.row_groups_considered, Ordering::Relaxed);
+        counters
+            .edge_row_groups_selected
+            .fetch_add(pruning.row_groups_selected, Ordering::Relaxed);
+        counters
+            .edge_pages_considered
+            .fetch_add(pruning.pages_considered, Ordering::Relaxed);
+        counters
+            .edge_pages_selected
+            .fetch_add(pruning.pages_selected, Ordering::Relaxed);
+        counters
+            .edge_page_rows_selected
+            .fetch_add(pruning.page_rows_selected, Ordering::Relaxed);
+        counters
+            .edge_exact_rows_selected
+            .fetch_add(pruning.exact_rows_selected, Ordering::Relaxed);
+        counters
+            .edge_validation_fallbacks
+            .fetch_add(pruning.validation_fallbacks, Ordering::Relaxed);
+    });
+}
+
+/// Record one property-fragment read that decoded `rows` UUID-column rows to
+/// locate the rows it wanted.
+pub(crate) fn record_property_uuid_selection(rows: u64) {
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters
+            .property_uuid_selections
+            .fetch_add(1, Ordering::Relaxed);
+        counters
+            .property_uuid_rows_decoded
+            .fetch_add(rows, Ordering::Relaxed);
+    });
+}
+
+/// Record the UUID-column pages one page-indexed property read offered and
+/// decoded.
+pub(crate) fn record_property_uuid_pages(considered: u64, selected: u64) {
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters
+            .property_uuid_pages_considered
+            .fetch_add(considered, Ordering::Relaxed);
+        counters
+            .property_uuid_pages_selected
+            .fetch_add(selected, Ordering::Relaxed);
+    });
+}
+
+/// Record a property read that fell back to decoding the whole UUID column
+/// because the page index was absent, unreadable or failed its sort proof.
+pub(crate) fn record_property_uuid_index_fallback() {
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters
+            .property_uuid_index_fallbacks
+            .fetch_add(1, Ordering::Relaxed);
+    });
+}
+
+/// Record an edge file whose footer does not prove the dense layout.
+pub(crate) fn record_edge_dense_layout_declined() {
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters
+            .edge_dense_layout_declined
+            .fetch_add(1, Ordering::Relaxed);
+    });
+}
+
+/// Record an edge file whose request covered more than half of it.
+pub(crate) fn record_edge_dense_half_file_declined() {
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters
+            .edge_dense_half_file_declined
+            .fetch_add(1, Ordering::Relaxed);
     });
 }
 

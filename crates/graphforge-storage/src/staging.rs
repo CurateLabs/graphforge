@@ -414,13 +414,46 @@ impl RewriteBatch {
     where
         I: IntoIterator<Item = Result<RecordBatch, GfError>>,
     {
+        self.stage_batches_with_pages(
+            final_path,
+            schema,
+            batches,
+            is_point_access_path(final_path),
+        )
+    }
+
+    /// Stage a property file as one object with the small data pages every
+    /// property fragment takes, whatever its path. The caller owns the size
+    /// check, so this does not reframe an oversized file.
+    pub(crate) fn stage_point_access_batches<I>(
+        &mut self,
+        final_path: &Path,
+        schema: SchemaRef,
+        batches: I,
+    ) -> Result<(), GfError>
+    where
+        I: IntoIterator<Item = Result<RecordBatch, GfError>>,
+    {
+        self.stage_batches_with_pages(final_path, schema, batches, true)
+    }
+
+    fn stage_batches_with_pages<I>(
+        &mut self,
+        final_path: &Path,
+        schema: SchemaRef,
+        batches: I,
+        point_access: bool,
+    ) -> Result<(), GfError>
+    where
+        I: IntoIterator<Item = Result<RecordBatch, GfError>>,
+    {
         if self.staged.iter().any(|(_, path)| path == final_path) {
             return Err(GfError::Storage(format!(
                 "destination staged twice in one rewrite batch: {}",
                 final_path.display()
             )));
         }
-        let tmp = stage_parquet_batches_temp(final_path, schema, batches)?;
+        let tmp = stage_parquet_batches_temp(final_path, schema, batches, point_access)?;
         self.staged.push((tmp, final_path.to_path_buf()));
         Ok(())
     }
@@ -435,7 +468,7 @@ impl RewriteBatch {
     where
         I: IntoIterator<Item = Result<RecordBatch, GfError>>,
     {
-        let tmp = stage_parquet_batches_temp(final_path, schema, batches)?;
+        let tmp = stage_parquet_batches_temp(final_path, schema, batches, true)?;
         if tmp
             .as_file()
             .metadata()
@@ -574,9 +607,7 @@ impl RewriteBatch {
             .suffix(".tmp")
             .tempfile_in(parent)
             .map_err(|error| io_err(&error))?;
-        let properties = crate::permanent_parquet::writer_properties()
-            .set_max_row_group_row_count(Some(ROW_GROUP_SIZE))
-            .build();
+        let properties = staged_writer_properties(is_point_access_path(final_path));
         let mut writer =
             ArrowWriter::try_new(tmp.as_file(), schema, Some(properties)).map_err(pq_err)?;
         let mut existing_rows = 0_u64;
@@ -1112,6 +1143,44 @@ pub(crate) fn is_reserved_authority(relative: &Path) -> bool {
 /// row-group metadata; the engine targets small-to-medium graphs.
 const ROW_GROUP_SIZE: usize = 64 * 1024;
 
+/// The writer policy for one staged Parquet file. Files fetched by row position
+/// or key take the small data pages; everything else is read whole and keeps
+/// the larger pages.
+fn staged_writer_properties(point_access: bool) -> parquet::file::properties::WriterProperties {
+    let builder = if point_access {
+        crate::permanent_parquet::point_access_writer_properties()
+    } else {
+        crate::permanent_parquet::writer_properties()
+    };
+    builder
+        .set_max_row_group_row_count(Some(ROW_GROUP_SIZE))
+        .build()
+}
+
+/// Whether `final_path` is a node or edge topology file, judged only by the
+/// last components so the bytes never depend on where the project lives. A
+/// staged property file asks for small pages explicitly instead.
+fn is_point_access_path(final_path: &Path) -> bool {
+    let mut names = final_path
+        .components()
+        .rev()
+        .map(|component| component.as_os_str().to_str());
+    let file = names.next().flatten();
+    let parent = names.next().flatten();
+    let grandparent = names.next().flatten();
+    let great_grandparent = names.next().flatten();
+    matches!(
+        (file, parent, grandparent, great_grandparent),
+        (
+            Some("nodes.parquet" | "edges.parquet"),
+            Some("topology"),
+            _,
+            _
+        ) | (_, Some("nodes" | "edges"), Some("topology"), _)
+            | (_, _, Some("nodes" | "edges"), Some("topology"))
+    )
+}
+
 /// Write `batch` to a fresh temp file in `final_path`'s directory and return
 /// it. The temp lives next to its destination so the eventual rename is a
 /// same-filesystem atomic replace; its `.tmp` extension keeps it invisible to
@@ -1137,9 +1206,7 @@ fn stage_parquet_temp(
         .tempfile_in(parent)
         .map_err(|e| io_err(&e))?;
 
-    let props = crate::permanent_parquet::writer_properties()
-        .set_max_row_group_row_count(Some(ROW_GROUP_SIZE))
-        .build();
+    let props = staged_writer_properties(is_point_access_path(final_path));
     let mut writer = ArrowWriter::try_new(tmp.as_file(), schema, Some(props)).map_err(pq_err)?;
     writer.write(batch).map_err(pq_err)?;
     writer.close().map_err(pq_err)?;
@@ -1150,6 +1217,7 @@ fn stage_parquet_batches_temp<I>(
     final_path: &Path,
     schema: SchemaRef,
     batches: I,
+    point_access: bool,
 ) -> Result<NamedTempFile, GfError>
 where
     I: IntoIterator<Item = Result<RecordBatch, GfError>>,
@@ -1170,9 +1238,7 @@ where
         .suffix(".tmp")
         .tempfile_in(parent)
         .map_err(|error| io_err(&error))?;
-    let properties = crate::permanent_parquet::writer_properties()
-        .set_max_row_group_row_count(Some(ROW_GROUP_SIZE))
-        .build();
+    let properties = staged_writer_properties(point_access);
     let mut writer =
         ArrowWriter::try_new(tmp.as_file(), schema, Some(properties)).map_err(pq_err)?;
     for batch in batches {
@@ -1224,6 +1290,114 @@ mod tests {
             out.extend(col.values().iter().copied());
         }
         out
+    }
+
+    /// Row counts of every data page of the first column, read back from the
+    /// offset index the writer must have produced.
+    fn first_column_page_rows(path: &Path) -> Vec<i64> {
+        use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
+        use parquet::file::metadata::PageIndexPolicy;
+
+        let file = std::fs::File::open(path).unwrap();
+        let metadata = ArrowReaderMetadata::load(
+            &file,
+            ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Required),
+        )
+        .unwrap();
+        let metadata = metadata.metadata();
+        let offsets = metadata.offset_index().expect("offset index is written");
+        let mut rows = Vec::new();
+        for (group, group_offsets) in metadata.row_groups().iter().zip(offsets) {
+            let locations = group_offsets[0].page_locations();
+            for (index, location) in locations.iter().enumerate() {
+                let next = locations
+                    .get(index + 1)
+                    .map_or(group.num_rows(), |next| next.first_row_index);
+                rows.push(next - location.first_row_index);
+            }
+        }
+        rows
+    }
+
+    fn staged_page_rows(final_path: &Path, rows: i64) -> Vec<i64> {
+        let values = (0..rows).collect::<Vec<_>>();
+        let (schema, batch) = int_batch(&values);
+        let mut staged = RewriteBatch::new();
+        staged
+            .stage_batches(final_path, schema, [Ok(batch)])
+            .unwrap();
+        first_column_page_rows(staged.staged[0].0.path())
+    }
+
+    #[test]
+    fn point_access_paths_are_judged_by_their_last_components_only() {
+        for point_access in [
+            "topology/nodes.parquet",
+            "topology/edges.parquet",
+            "topology/nodes/part-0.parquet",
+            "topology/edges/part-0.parquet",
+            "topology/nodes/Person/part-0.parquet",
+            "topology/edges/KNOWS/part-0.parquet",
+            "/a/very/deep/project/root/topology/edges/KNOWS/part-0.parquet",
+        ] {
+            assert!(
+                is_point_access_path(Path::new(point_access)),
+                "{point_access} is fetched by position"
+            );
+        }
+        for whole_file in [
+            "topology/surrogate_tails.parquet",
+            "topology/adjacency/out/part-0.parquet",
+            "topology/deleted_nodes.parquet",
+            "runtime_catalog.parquet",
+            "nodes.parquet",
+            "nodes/part-0.parquet",
+            "edges.parquet",
+            "indexes/uuid-membership/part-0.parquet",
+            "properties/route/1.parquet",
+        ] {
+            assert!(
+                !is_point_access_path(Path::new(whole_file)),
+                "{whole_file} is read whole"
+            );
+        }
+    }
+
+    #[test]
+    fn staged_topology_files_take_small_pages_and_other_files_keep_large_pages() {
+        let dir = TempDir::new().unwrap();
+        let rows = 3 * crate::permanent_parquet::POINT_ACCESS_PAGE_ROWS as i64 + 7;
+        let small = staged_page_rows(&dir.path().join("topology/nodes/Person/0.parquet"), rows);
+        let page = crate::permanent_parquet::POINT_ACCESS_PAGE_ROWS as i64;
+        assert_eq!(small, vec![page, page, page, 7]);
+
+        let large = staged_page_rows(&dir.path().join("topology/surrogate_tails.parquet"), rows);
+        assert_eq!(
+            large,
+            vec![rows],
+            "a whole-file read keeps the large page: {rows} rows fit one page"
+        );
+    }
+
+    #[test]
+    fn staged_property_files_take_small_pages_on_request() {
+        let dir = TempDir::new().unwrap();
+        let rows = 2 * crate::permanent_parquet::POINT_ACCESS_PAGE_ROWS as i64 + 1;
+        let values = (0..rows).collect::<Vec<_>>();
+        let (schema, batch) = int_batch(&values);
+        let mut staged = RewriteBatch::new();
+        staged
+            .stage_point_access_batches(
+                &dir.path().join("properties/Person/1.parquet"),
+                schema,
+                [Ok(batch)],
+            )
+            .unwrap();
+        let page = crate::permanent_parquet::POINT_ACCESS_PAGE_ROWS as i64;
+        assert_eq!(
+            first_column_page_rows(staged.staged[0].0.path()),
+            vec![page, page, 1]
+        );
     }
 
     #[test]
