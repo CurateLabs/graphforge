@@ -12,6 +12,7 @@ use datafusion::logical_expr::{
     Volatility,
 };
 use datafusion::scalar::ScalarValue;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, LazyLock};
 
 pub(super) static CYPHER_AND: LazyLock<ScalarUDF> =
@@ -908,6 +909,222 @@ pub(super) fn cypher_value_eq(l: &ScalarValue, r: &ScalarValue) -> Option<bool> 
         // Same-typed scalar ⇒ direct equality; different types ⇒ false.
         _ if std::mem::discriminant(l) == std::mem::discriminant(r) => Some(l == r),
         _ => Some(false),
+    }
+}
+
+/// A hash of `v` consistent with [`cypher_value_eq`]: whenever
+/// `cypher_value_eq(a, b) == Some(true)`, `cypher_equality_hash(a)` and
+/// `cypher_equality_hash(b)` are the same `Some` value. `None` means `v` is never
+/// `Some(true)`-equal to anything (a NaN, a `null`, or a list or map holding one),
+/// so it need not be looked up.
+///
+/// The converse does not hold and cannot: equality is not an equivalence
+/// relation (NaN is unequal to itself; `Int`/`Float` equality goes through
+/// `f64`, so it is not transitive above 2^53), so the hash only buckets values
+/// and equality is still decided by `cypher_value_eq`.
+pub(super) fn cypher_equality_hash(v: &ScalarValue) -> Option<u64> {
+    let mut hasher = std::hash::DefaultHasher::new();
+    feed_equality_hash(v, &mut hasher).then(|| hasher.finish())
+}
+
+/// Feed the equality-relevant content of `v` to `h`, mirroring the arms of
+/// [`cypher_value_eq`]. `false` means the value is never equal to anything.
+fn feed_equality_hash(v: &ScalarValue, h: &mut std::hash::DefaultHasher) -> bool {
+    if v.is_null() {
+        return false;
+    }
+    if let Some(decoded) = decode_het(v) {
+        return feed_equality_hash(&decoded, h);
+    }
+    match v {
+        ScalarValue::List(list) => feed_seq_hash(0, &list.value(0), h),
+        ScalarValue::LargeList(list) => feed_seq_hash(1, &list.value(0), h),
+        ScalarValue::Struct(s) => {
+            if let Some(kind) = temporal_kind(v) {
+                feed_temporal_hash(kind, s, h)
+            } else if let Some(kind) = entity_kind(s) {
+                feed_entity_hash(kind, s, h)
+            } else {
+                feed_map_hash(s, h)
+            }
+        }
+        _ if is_numeric_scalar(v) => {
+            // `1` equals `1.0`, and `0.0` equals `-0.0`: key every number by the
+            // canonical bits of the `f64` that `cypher_value_eq` compares.
+            let Some(f) = scalar_as_f64(v) else {
+                return false;
+            };
+            if f.is_nan() {
+                return false;
+            }
+            let canonical = if f == 0.0 { 0.0_f64 } else { f };
+            2_u8.hash(h);
+            canonical.to_bits().hash(h);
+            true
+        }
+        // Same-typed scalars compare with `ScalarValue`'s own equality, which its
+        // `Hash` agrees with for these flat variants. Anything else (a fixed-size
+        // list, a map, a dictionary, ...) is bucketed by type alone: coarse but
+        // correct.
+        _ => {
+            3_u8.hash(h);
+            std::mem::discriminant(v).hash(h);
+            if matches!(
+                v,
+                ScalarValue::Boolean(_)
+                    | ScalarValue::Decimal32(..)
+                    | ScalarValue::Decimal64(..)
+                    | ScalarValue::Decimal128(..)
+                    | ScalarValue::Decimal256(..)
+                    | ScalarValue::Utf8(_)
+                    | ScalarValue::LargeUtf8(_)
+                    | ScalarValue::Utf8View(_)
+                    | ScalarValue::Binary(_)
+                    | ScalarValue::LargeBinary(_)
+                    | ScalarValue::BinaryView(_)
+                    | ScalarValue::FixedSizeBinary(..)
+                    | ScalarValue::Date32(_)
+                    | ScalarValue::Date64(_)
+                    | ScalarValue::Time32Second(_)
+                    | ScalarValue::Time32Millisecond(_)
+                    | ScalarValue::Time64Microsecond(_)
+                    | ScalarValue::Time64Nanosecond(_)
+                    | ScalarValue::TimestampSecond(..)
+                    | ScalarValue::TimestampMillisecond(..)
+                    | ScalarValue::TimestampMicrosecond(..)
+                    | ScalarValue::TimestampNanosecond(..)
+                    | ScalarValue::DurationSecond(_)
+                    | ScalarValue::DurationMillisecond(_)
+                    | ScalarValue::DurationMicrosecond(_)
+                    | ScalarValue::DurationNanosecond(_)
+                    | ScalarValue::IntervalYearMonth(_)
+                    | ScalarValue::IntervalDayTime(_)
+                    | ScalarValue::IntervalMonthDayNano(_)
+            ) {
+                v.hash(h);
+            }
+            true
+        }
+    }
+}
+
+/// Lists are equal only when element-wise equal with no `null` in play, so one
+/// unhashable element makes the whole list unhashable.
+fn feed_seq_hash(
+    tag: u8,
+    elements: &datafusion::arrow::array::ArrayRef,
+    h: &mut std::hash::DefaultHasher,
+) -> bool {
+    tag.hash(h);
+    elements.len().hash(h);
+    (0..elements.len()).all(|i| {
+        ScalarValue::try_from_array(elements, i)
+            .is_ok_and(|element| feed_equality_hash(&element, h))
+    })
+}
+
+fn feed_temporal_hash(
+    kind: TemporalKind,
+    s: &datafusion::arrow::array::StructArray,
+    h: &mut std::hash::DefaultHasher,
+) -> bool {
+    4_u8.hash(h);
+    match kind {
+        TemporalKind::Date => date_struct_value(s, 0).map(|p| (0_u8, p).hash(h)),
+        TemporalKind::LocalDateTime => localdatetime_struct_parts(s, 0).map(|p| (1_u8, p).hash(h)),
+        TemporalKind::Time => time_struct_parts(s, 0).map(|p| (2_u8, p).hash(h)),
+        TemporalKind::DateTime => datetime_struct_parts(s, 0).map(|p| (3_u8, p).hash(h)),
+        TemporalKind::Duration => duration_struct_parts(s, 0)
+            .map(|d| (4_u8, d.months, d.days, d.seconds, d.nanos).hash(h)),
+    }
+    .is_some()
+}
+
+/// A node or relationship hashes as its identity scalar, because it also equals
+/// that bare 16-byte UUID; a path hashes as its node and relationship sequences.
+fn feed_entity_hash(
+    kind: EntityKind,
+    s: &datafusion::arrow::array::StructArray,
+    h: &mut std::hash::DefaultHasher,
+) -> bool {
+    let mut field = |name: &str| {
+        s.column_by_name(name)
+            .and_then(|column| ScalarValue::try_from_array(column, 0).ok())
+            .is_some_and(|value| feed_equality_hash(&value, h))
+    };
+    match kind {
+        EntityKind::Node => field("node_uuid"),
+        EntityKind::Relationship => field("edge_uuid"),
+        EntityKind::Path => field("nodes") && field("relationships"),
+    }
+}
+
+/// Maps are equal when their key sets and values are, whatever the field order.
+fn feed_map_hash(
+    s: &datafusion::arrow::array::StructArray,
+    h: &mut std::hash::DefaultHasher,
+) -> bool {
+    let mut keys: Vec<&str> = s.fields().iter().map(|f| f.name().as_str()).collect();
+    keys.sort_unstable();
+    5_u8.hash(h);
+    keys.hash(h);
+    keys.iter().all(|key| {
+        s.column_by_name(key)
+            .and_then(|column| ScalarValue::try_from_array(column, 0).ok())
+            .is_some_and(|value| feed_equality_hash(&value, h))
+    })
+}
+
+/// First-seen-ordered membership index for `collect(DISTINCT)`: buckets the
+/// admitted values by [`cypher_equality_hash`] so a probe compares against the
+/// few values sharing its hash instead of every value seen.
+#[derive(Debug, Default)]
+pub(super) struct DistinctIndex {
+    /// Hash to the most recently admitted value with that hash.
+    heads: std::collections::HashMap<u64, usize>,
+    /// Per admitted value, the previous value in its bucket (`NO_LINK` ends the
+    /// chain, and marks an unhashable value, which belongs to no bucket).
+    links: Vec<usize>,
+}
+
+const NO_LINK: usize = usize::MAX;
+
+impl DistinctIndex {
+    /// Append `v` to `values` unless a value already there is `Some(true)`-equal
+    /// to it under `eq`; returns whether it was appended. `values` must only be
+    /// appended to through this index. `eq` must be [`cypher_value_eq`] (the
+    /// parameter exists so a test can count comparisons).
+    pub(super) fn admit(
+        &mut self,
+        values: &mut Vec<ScalarValue>,
+        v: ScalarValue,
+        eq: impl Fn(&ScalarValue, &ScalarValue) -> Option<bool>,
+    ) -> bool {
+        debug_assert_eq!(values.len(), self.links.len());
+        let Some(hash) = cypher_equality_hash(&v) else {
+            self.links.push(NO_LINK);
+            values.push(v);
+            return true;
+        };
+        let head = self.heads.get(&hash).copied();
+        let mut cursor = head;
+        while let Some(index) = cursor {
+            if eq(&values[index], &v) == Some(true) {
+                return false;
+            }
+            cursor = Some(self.links[index]).filter(|&link| link != NO_LINK);
+        }
+        self.heads.insert(hash, values.len());
+        self.links.push(head.unwrap_or(NO_LINK));
+        values.push(v);
+        true
+    }
+
+    /// Heap bytes held by the index (the struct itself is counted by its owner).
+    pub(super) fn heap_size(&self) -> usize {
+        self.heads.capacity()
+            * (std::mem::size_of::<u64>() + std::mem::size_of::<usize>() + 1)
+            + self.links.capacity() * std::mem::size_of::<usize>()
     }
 }
 

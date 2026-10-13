@@ -5,7 +5,7 @@ use datafusion::logical_expr::{Signature, Volatility};
 use datafusion::scalar::ScalarValue;
 use std::sync::LazyLock;
 
-use super::value_semantics::{cypher_order, cypher_value_eq, scalar_as_f64};
+use super::value_semantics::{DistinctIndex, cypher_order, cypher_value_eq, scalar_as_f64};
 
 /// `min`/`max` over a heterogeneous (tagged) column use Cypher orderability
 /// ([`cypher_order`]) — native struct min/max would order by `__het_key` (null for
@@ -203,11 +203,10 @@ impl datafusion::logical_expr::AggregateUDFImpl for CypherCollect {
                 "cypher_collect return type must be a list".into(),
             ));
         };
-        Ok(Box::new(CollectAcc {
-            distinct: self.distinct,
-            elem_type: field.data_type().clone(),
-            values: Vec::new(),
-        }))
+        Ok(Box::new(CollectAcc::new(
+            self.distinct,
+            field.data_type().clone(),
+        )))
     }
     fn state_fields(
         &self,
@@ -227,22 +226,39 @@ struct CollectAcc {
     distinct: bool,
     elem_type: DataType,
     values: Vec<ScalarValue>,
+    /// Hash-bucketed membership over `values`; consulted only when `distinct`.
+    seen: DistinctIndex,
 }
 
 impl CollectAcc {
+    fn new(distinct: bool, elem_type: DataType) -> Self {
+        Self {
+            distinct,
+            elem_type,
+            values: Vec::new(),
+            seen: DistinctIndex::default(),
+        }
+    }
+
     fn push_value(&mut self, v: ScalarValue) {
+        self.push_value_with(v, cypher_value_eq);
+    }
+
+    /// `push_value` with the equality used to detect a repeat injected, so a test
+    /// can count how many comparisons a `DISTINCT` collection performs.
+    fn push_value_with(
+        &mut self,
+        v: ScalarValue,
+        eq: impl Fn(&ScalarValue, &ScalarValue) -> Option<bool>,
+    ) {
         if v.is_null() {
             return;
         }
-        if self.distinct
-            && self
-                .values
-                .iter()
-                .any(|seen| cypher_value_eq(seen, &v) == Some(true))
-        {
-            return;
+        if self.distinct {
+            self.seen.admit(&mut self.values, v, eq);
+        } else {
+            self.values.push(v);
         }
-        self.values.push(v);
     }
 
     fn as_list(&self) -> ScalarValue {
@@ -269,7 +285,9 @@ impl datafusion::logical_expr::Accumulator for CollectAcc {
         Ok(self.as_list())
     }
     fn size(&self) -> usize {
-        std::mem::size_of_val(self) + self.values.iter().map(ScalarValue::size).sum::<usize>()
+        std::mem::size_of_val(self)
+            + self.values.iter().map(ScalarValue::size).sum::<usize>()
+            + self.seen.heap_size()
     }
     fn state(&mut self) -> datafusion::error::Result<Vec<ScalarValue>> {
         Ok(vec![self.as_list()])
@@ -658,11 +676,7 @@ mod tests {
         }
 
         for distinct in [false, true] {
-            let mut acc = CollectAcc {
-                distinct,
-                elem_type: DataType::Int64,
-                values: Vec::new(),
-            };
+            let mut acc = CollectAcc::new(distinct, DataType::Int64);
             acc.update_batch(std::slice::from_ref(&ints)).unwrap();
             let merge: ArrayRef = Arc::new(ListArray::from_iter_primitive::<
                 datafusion::arrow::datatypes::Int64Type,
