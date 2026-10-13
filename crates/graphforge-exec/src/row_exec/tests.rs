@@ -352,3 +352,69 @@ fn binding_a_correlated_seed_leaves_other_seeds_and_requires_its_own_leaf() {
         .collect();
     assert_eq!(bound_leaves, vec![true, false]);
 }
+
+fn qualified_scan(name: &str, schema: &Arc<Schema>) -> Arc<datafusion::logical_expr::LogicalPlan> {
+    use datafusion::logical_expr::LogicalPlanBuilder;
+    use datafusion::logical_expr::logical_plan::LogicalTableSource;
+
+    let source = Arc::new(LogicalTableSource::new(schema.clone()));
+    Arc::new(
+        LogicalPlanBuilder::scan(name, source, None)
+            .unwrap()
+            .build()
+            .unwrap(),
+    )
+}
+
+#[test]
+fn optional_match_demand_is_the_keys_plus_the_columns_it_outputs() {
+    use arrow::datatypes::Field;
+    use datafusion::physical_plan::empty::EmptyExec;
+
+    let outer_schema = Arc::new(Schema::new(vec![
+        Field::new("a", DataType::UInt64, false),
+        Field::new("a_extra", DataType::UInt64, false),
+    ]));
+    let inner_schema = Arc::new(Schema::new(vec![
+        Field::new("a", DataType::UInt64, false),
+        Field::new("b", DataType::UInt64, false),
+        Field::new("r", DataType::UInt64, false),
+    ]));
+    // Outer column 0 joins inner column 0; the output appends inner `b` then `r`,
+    // so output columns 0 and 1 are the outer's and 2 and 3 are `b` and `r`.
+    let node = OptionalMatchNode::new(
+        qualified_scan("var_0", &outer_schema),
+        qualified_scan("var_1", &inner_schema),
+        vec![(0, 0)],
+        vec![1, 2],
+    );
+    let exec = |node: &OptionalMatchNode| {
+        OptionalMatchExec::new(
+            node,
+            Arc::new(EmptyExec::new(outer_schema.clone())),
+            Arc::new(EmptyExec::new(inner_schema.clone())),
+        )
+    };
+    let demand = |exec: &OptionalMatchExec, required: &[usize]| {
+        let required = required.iter().copied().collect::<BTreeSet<_>>();
+        let (outer, inner) = exec.input_demand(&required);
+        (
+            outer.into_iter().collect::<Vec<_>>(),
+            inner.into_iter().collect::<Vec<_>>(),
+        )
+    };
+
+    let plain = exec(&node);
+    // Nothing demanded still needs the join keys of both sides.
+    assert_eq!(demand(&plain, &[]), (vec![0], vec![0]));
+    assert_eq!(demand(&plain, &[1]), (vec![0, 1], vec![0]));
+    // Output column 3 is the inner's column 2, not column 3.
+    assert_eq!(demand(&plain, &[3]), (vec![0], vec![0, 2]));
+    assert_eq!(demand(&plain, &[2, 3]), (vec![0], vec![0, 1, 2]));
+
+    // A correlated sub-plan is seeded with every outer column, so it demands the
+    // whole outer row whatever the output needs.
+    let correlated = exec(&node.with_correlated_seed(5));
+    assert_eq!(demand(&correlated, &[]), (vec![0, 1], vec![0]));
+    assert_eq!(demand(&correlated, &[3]), (vec![0, 1], vec![0, 2]));
+}

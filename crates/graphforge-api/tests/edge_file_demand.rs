@@ -227,6 +227,17 @@ fn warm_measured(forge: &GraphForge, query: &str) -> Measured {
 /// Both anchor on the node whose `ident` is 5: it links to nodes 6 and 7.
 const ONE_HOP: &str = "MATCH (a:Entity {ident: 5})-[r:LINK]->(b:Entity)";
 const VAR_LEN: &str = "MATCH (a:Entity {ident: 5})-[r:LINK*1..2]->(b:Entity)";
+/// Two hops of one relationship type in one pattern: the binder adds a
+/// relationship-uniqueness check between `r1` and `r2`, which compares their
+/// `edge_id`s and nothing else.
+const TWO_HOPS: &str = "MATCH (a:Entity {ident: 5})-[r1:LINK]->(b:Entity)-[r2:LINK]->(c:Entity)";
+/// One hop under `OPTIONAL MATCH`: the optional sub-plan is joined to the outer
+/// rows, and the demand on its columns must reach the expansion inside it.
+const OPTIONAL_ONE_HOP: &str =
+    "MATCH (a:Entity {ident: 5}) OPTIONAL MATCH (a)-[r:LINK]->(b:Entity)";
+/// The same two hops under `OPTIONAL MATCH`.
+const OPTIONAL_TWO_HOPS: &str =
+    "MATCH (a:Entity {ident: 5}) OPTIONAL MATCH (a)-[r1:LINK]->(b:Entity)-[r2:LINK]->(c:Entity)";
 
 struct Statement {
     query: String,
@@ -257,6 +268,25 @@ fn unused_edge_statements() -> Vec<Statement> {
             "v",
             &[6, 7, 7, 8, 8, 9],
         ),
+        // Node 5 reaches 6 and 7, which reach 7, 8, 8 and 9. The uniqueness
+        // check between `r1` and `r2` reads only their `edge_id`s, which the
+        // adjacency holds.
+        statement(format!("{TWO_HOPS} RETURN count(c) AS n"), "n", &[4]),
+        statement(
+            format!("{TWO_HOPS} RETURN c.ident AS v ORDER BY v"),
+            "v",
+            &[7, 8, 8, 9],
+        ),
+        statement(
+            format!("{OPTIONAL_ONE_HOP} RETURN count(b) AS n"),
+            "n",
+            &[2],
+        ),
+        statement(
+            format!("{OPTIONAL_TWO_HOPS} RETURN count(c) AS n"),
+            "n",
+            &[4],
+        ),
     ]
 }
 
@@ -264,11 +294,25 @@ fn unused_edge_statements() -> Vec<Statement> {
 /// index addresses a bulk-built relation by the `edge_id` the adjacency already
 /// holds, so the edge file is not read for them either (#1984).
 fn ordinal_property_statements() -> Vec<Statement> {
-    vec![statement(
-        format!("{ONE_HOP} RETURN r.weight AS w ORDER BY w"),
-        "w",
-        &[10, 11],
-    )]
+    vec![
+        statement(
+            format!("{ONE_HOP} RETURN r.weight AS w ORDER BY w"),
+            "w",
+            &[10, 11],
+        ),
+        // `r2` is unused and `r1` is read only for its property, under the
+        // uniqueness check between them.
+        statement(
+            format!("{TWO_HOPS} RETURN r1.weight AS w ORDER BY w"),
+            "w",
+            &[10, 10, 11, 11],
+        ),
+        statement(
+            format!("{OPTIONAL_ONE_HOP} RETURN r.weight AS w ORDER BY w"),
+            "w",
+            &[10, 11],
+        ),
+    ]
 }
 
 /// Statements that read the edge variable's identity and so must read the edge
