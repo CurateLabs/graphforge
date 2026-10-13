@@ -2443,10 +2443,21 @@ fn expand_single_hop_chunk(
     let dst_width = graphforge_storage::TOPOLOGY_NODES_SCHEMA.fields().len();
     let edge_end = cfg.out_schema.fields().len().saturating_sub(dst_width);
     let required = cfg.required_output.as_deref();
+    let edge_topology_width = edge_end
+        .saturating_sub(cfg.input_width)
+        .saturating_sub(cfg.edge_prop_count);
+    let edge_topology_end = cfg.input_width + edge_topology_width;
+    // The edge file is needed only for what the CSR does not carry: the edge's
+    // UUID and endpoints, and its properties. The CSR entry already holds the
+    // edge's ordinal `edge_id`, so a hop whose edge variable is demanded for
+    // nothing beyond that ordinal reads no edge file (#1984).
     let edge_materialization_unused = required.is_some_and(|mask| {
         mask.get(cfg.input_width..edge_end).is_some_and(|fields| {
             fields.iter().enumerate().all(|(offset, needed)| {
-                !needed || cfg.out_schema.field(cfg.input_width + offset).name() == "edge_id"
+                let index = cfg.input_width + offset;
+                !needed
+                    || (index < edge_topology_end
+                        && cfg.out_schema.field(index).name() == "edge_id")
             })
         })
     });
@@ -2582,9 +2593,6 @@ fn expand_single_hop_chunk(
             cfg.capture_epoch,
         )) as Arc<dyn graphforge_storage::io_stats::FilteredReadObserver>
     });
-    let edge_topology_width = edge_end
-        .saturating_sub(cfg.input_width)
-        .saturating_sub(cfg.edge_prop_count);
     let relationship_properties_required = required.is_none_or(|mask| {
         mask[cfg.input_width + edge_topology_width..edge_end]
             .iter()
@@ -2598,61 +2606,75 @@ fn expand_single_hop_chunk(
     if relationship_properties_required {
         edge_projection.push(0);
     }
-    let admitted_inventory = cfg.provider.admitted_inventory();
-    let edge_batches =
-        if let Some(inventory) = admitted_inventory.as_deref().filter(|_| required.is_some()) {
-            graphforge_storage::read_edges_filtered_projected_from_inventory(
-                inventory,
-                &cfg.rel_type_name,
-                cfg.mode,
-                &traversed,
-                &edge_projection,
-                edge_observer.as_ref(),
-            )
-        } else if required.is_some() {
-            graphforge_storage::read_edges_filtered_projected_observed(
-                &cfg.dir,
-                &cfg.rel_type_name,
-                cfg.mode,
-                &traversed,
-                &edge_projection,
-                edge_observer.as_ref(),
-            )
-        } else if let Some(inventory) = admitted_inventory.as_deref() {
-            graphforge_storage::read_edges_filtered_observed_from_inventory(
-                inventory,
-                &cfg.rel_type_name,
-                cfg.mode,
-                &traversed,
-                edge_observer.as_ref(),
-            )
-        } else {
-            graphforge_storage::read_edges_filtered_observed(
-                &cfg.dir,
-                &cfg.rel_type_name,
-                cfg.mode,
-                &traversed,
-                edge_observer.as_ref(),
-            )
+    // A hop whose edge variable is demanded for nothing beyond its ordinal
+    // reads no edge file: the CSR entry already supplies `edge_id` (#1984).
+    let edge_batch = if edge_materialization_unused {
+        drop(edge_permit);
+        None
+    } else {
+        let admitted_inventory = cfg.provider.admitted_inventory();
+        let edge_batches =
+            if let Some(inventory) = admitted_inventory.as_deref().filter(|_| required.is_some()) {
+                graphforge_storage::read_edges_filtered_projected_from_inventory(
+                    inventory,
+                    &cfg.rel_type_name,
+                    cfg.mode,
+                    &traversed,
+                    &edge_projection,
+                    edge_observer.as_ref(),
+                )
+            } else if required.is_some() {
+                graphforge_storage::read_edges_filtered_projected_observed(
+                    &cfg.dir,
+                    &cfg.rel_type_name,
+                    cfg.mode,
+                    &traversed,
+                    &edge_projection,
+                    edge_observer.as_ref(),
+                )
+            } else if let Some(inventory) = admitted_inventory.as_deref() {
+                graphforge_storage::read_edges_filtered_observed_from_inventory(
+                    inventory,
+                    &cfg.rel_type_name,
+                    cfg.mode,
+                    &traversed,
+                    edge_observer.as_ref(),
+                )
+            } else {
+                graphforge_storage::read_edges_filtered_observed(
+                    &cfg.dir,
+                    &cfg.rel_type_name,
+                    cfg.mode,
+                    &traversed,
+                    edge_observer.as_ref(),
+                )
+            }
+            .map_err(|e| exec_err(e.to_string()))?;
+        drop(edge_permit);
+        let edge_schema = edge_batches
+            .first()
+            .map(RecordBatch::schema)
+            .ok_or_else(|| exec_err("Expand: edge scan returned no batches".into()))?;
+        Some(concat_batches(&edge_schema, &edge_batches).map_err(|e| exec_err(e.to_string()))?)
+    };
+    // Position of each traversed edge within the edge batch, by `edge_id`.
+    let edge_row: HashMap<u64, usize> = match edge_batch.as_ref() {
+        Some(edge_batch) => {
+            let edge_id_index = edge_batch
+                .schema()
+                .index_of("edge_id")
+                .map_err(|error| exec_err(error.to_string()))?;
+            let edge_ids_col = u64_column(edge_batch, edge_id_index)?;
+            (0..edge_batch.num_rows())
+                .filter_map(|i| edge_ids_col.value_at(i).map(|id| (id, i)))
+                .collect()
         }
-        .map_err(|e| exec_err(e.to_string()))?;
-    drop(edge_permit);
-    let edge_schema = edge_batches
-        .first()
-        .map(RecordBatch::schema)
-        .ok_or_else(|| exec_err("Expand: edge scan returned no batches".into()))?;
-    let edge_batch =
-        concat_batches(&edge_schema, &edge_batches).map_err(|e| exec_err(e.to_string()))?;
-    let edge_id_index = edge_batch
-        .schema()
-        .index_of("edge_id")
-        .map_err(|error| exec_err(error.to_string()))?;
-    let edge_ids_col = u64_column(&edge_batch, edge_id_index)?;
-    let edge_row: HashMap<u64, usize> = (0..edge_batch.num_rows())
-        .filter_map(|i| edge_ids_col.value_at(i).map(|id| (id, i)))
-        .collect();
-    let edge_uuids = relationship_properties_required
-        .then(|| {
+        None => HashMap::new(),
+    };
+    let edge_uuids = edge_batch
+        .as_ref()
+        .filter(|_| relationship_properties_required)
+        .map(|edge_batch| {
             edge_batch
                 .column_by_name("edge_uuid")
                 .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
@@ -2690,9 +2712,7 @@ fn expand_single_hop_chunk(
         .map_err(|error| exec_err(error.to_string()))?;
     let edge_key_already_demanded = usize::from(edge_projection.contains(&edge_key_index));
     let node_key_already_demanded = usize::from(node_projection.contains(&1));
-    demand::record_materialization_projection(
-        cfg.capture_epoch,
-        cfg.edge_var,
+    let edge_projected_columns = if edge_batch.is_some() {
         edge_projection
             .len()
             .saturating_add(1_usize.saturating_sub(edge_key_already_demanded))
@@ -2701,7 +2721,14 @@ fn expand_single_hop_chunk(
                     .iter()
                     .filter(|needed| **needed)
                     .count()
-            })),
+            }))
+    } else {
+        0
+    };
+    demand::record_materialization_projection(
+        cfg.capture_epoch,
+        cfg.edge_var,
+        edge_projected_columns,
         node_projection
             .len()
             .saturating_add(1_usize.saturating_sub(node_key_already_demanded)),
@@ -2748,19 +2775,22 @@ fn expand_single_hop_chunk(
     let mut dst_take: Vec<u32> = Vec::new();
     let mut output_edge_uuids: Vec<[u8; 16]> = Vec::new();
     for &(row, edge_id, neighbor) in &triples {
-        let Some(&edge_idx) = edge_row.get(&edge_id) else {
-            return Err(exec_err(format!(
-                "Expand: adjacency entry references unknown edge_id {edge_id}"
-            )));
-        };
         let Some(&dst_idx) = node_row.get(&neighbor) else {
             return Err(exec_err(format!(
                 "Expand reached unknown destination node_id {neighbor}"
             )));
         };
         src_take.push(to_u32(row)?);
-        edge_take.push(to_u32(edge_idx)?);
         dst_take.push(to_u32(dst_idx)?);
+        if edge_batch.is_none() {
+            continue;
+        }
+        let Some(&edge_idx) = edge_row.get(&edge_id) else {
+            return Err(exec_err(format!(
+                "Expand: adjacency entry references unknown edge_id {edge_id}"
+            )));
+        };
+        edge_take.push(to_u32(edge_idx)?);
         if let Some(edge_uuids) = edge_uuids {
             if edge_uuids.is_null(edge_idx) {
                 return Err(exec_err(format!(
@@ -2799,7 +2829,9 @@ fn expand_single_hop_chunk(
         .enumerate()
     {
         let index = cfg.input_width + offset;
-        columns.push(if required.is_none_or(|mask| mask[index]) {
+        columns.push(if !required.is_none_or(|mask| mask[index]) {
+            unused_expand_column(field, triples.len())?
+        } else if let Some(edge_batch) = edge_batch.as_ref() {
             let column = edge_batch.column_by_name(field.name()).ok_or_else(|| {
                 exec_err(format!(
                     "Expand: projected edge column {} is absent",
@@ -2808,7 +2840,14 @@ fn expand_single_hop_chunk(
             })?;
             take(column, &edge_take, None).map_err(|error| exec_err(error.to_string()))?
         } else {
-            unused_expand_column(field, triples.len())?
+            // No edge file was read: the only demanded edge column is the
+            // ordinal the CSR carries.
+            Arc::new(UInt64Array::from(
+                triples
+                    .iter()
+                    .map(|(_, edge_id, _)| *edge_id)
+                    .collect::<Vec<_>>(),
+            ))
         });
     }
     let demanded_property_fields = prop_fields
