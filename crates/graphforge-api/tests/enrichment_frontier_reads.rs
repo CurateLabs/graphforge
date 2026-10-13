@@ -3,7 +3,10 @@
 //! and whether or not the projection keeps the node's UUID (#1984).
 //!
 //! The fixture is a ring: node `i` links forward to `i + 1` and `i + 2`, for
-//! the first few thousand nodes (the rest only add route). The
+//! the first few thousand nodes (the rest only add route). Three of those
+//! nodes carry the label `Seed`, so a label scan reaches a handful of nodes
+//! that no equality anchors and no limit bounds, and one `Wide` hub links to
+//! a hundred thousand others. The
 //! route holds more rows than DataFusion collects into one partition, so every
 //! enrichment plans as a partitioned hash join, as it does on any real graph,
 //! and spans several property fragments, so any read that scales with the
@@ -39,6 +42,32 @@ const ANCHOR: i64 = 5;
 /// Nodes whose index is this modulo 1,000 have no `ident`, so an enrichment
 /// that loses a preserved row shows as a missing value.
 const MISSING_IDENT: usize = 9;
+/// The nodes labelled `Seed`; every ring node but these is an `Entity`.
+const SEEDS: [usize; 3] = [1007, 2007, 3007];
+/// The node labelled `Wide`, which links to the `WIDE_FANOUT` nodes after it.
+const HUB: usize = LINKED_NODES;
+/// More than half of the small route and less than half of the large one.
+const WIDE_FANOUT: usize = 100_000;
+
+fn label(index: usize) -> &'static str {
+    if SEEDS.contains(&index) {
+        "Seed"
+    } else if index == HUB {
+        "Wide"
+    } else {
+        "Entity"
+    }
+}
+
+/// The `ident` of a node, which some nodes lack.
+fn ident(index: usize) -> Option<i64> {
+    (index % 1000 != MISSING_IDENT).then_some(index as i64)
+}
+
+/// The nodes a ring node links to.
+fn ring_neighbours(index: usize) -> [usize; 2] {
+    [index + 1, index + 2]
+}
 
 fn node_uuid(index: usize) -> Uuid {
     Uuid::from_u128(0x1000_0000_0000_0000_0000_0000_0000_0000 | (index as u128 + 1))
@@ -94,7 +123,7 @@ fn construct(dir: &Path, nodes: usize) {
             Arc::clone(&node_schema),
             vec![
                 Arc::new(ids.finish()) as ArrayRef,
-                Arc::new(StringArray::from(vec!["Entity"; end - start])),
+                Arc::new(StringArray::from_iter_values((start..end).map(label))),
                 Arc::new(idents.finish()),
                 Arc::new(StringArray::from_iter_values((start..end).map(padding))),
             ],
@@ -104,7 +133,8 @@ fn construct(dir: &Path, nodes: usize) {
             .append_nodes(&format!("nodes-{start}"), &batch)
             .unwrap();
     }
-    let edges = LINKED_NODES * 2;
+    let ring = LINKED_NODES * 2;
+    let edges = ring + WIDE_FANOUT;
     for start in (0..edges).step_by(WRITE_WINDOW) {
         let end = (start + WRITE_WINDOW).min(edges);
         let rows = end - start;
@@ -112,12 +142,15 @@ fn construct(dir: &Path, nodes: usize) {
         let mut sources = FixedSizeBinaryBuilder::with_capacity(rows, 16);
         let mut targets = FixedSizeBinaryBuilder::with_capacity(rows, 16);
         for edge in start..end {
-            let source = edge / 2;
+            let (source, target) = if edge < ring {
+                let source = edge / 2;
+                (source, (source + edge % 2 + 1) % nodes)
+            } else {
+                (HUB, HUB + 1 + (edge - ring))
+            };
             ids.append_value(edge_uuid(edge).as_bytes()).unwrap();
             sources.append_value(node_uuid(source).as_bytes()).unwrap();
-            targets
-                .append_value(node_uuid((source + edge % 2 + 1) % nodes).as_bytes())
-                .unwrap();
+            targets.append_value(node_uuid(target).as_bytes()).unwrap();
         }
         let batch = RecordBatch::try_new(
             Arc::clone(&CONSTRUCTION_EDGE_SCHEMA),
@@ -162,11 +195,11 @@ fn parameters(ident: i64) -> HashMap<String, IrLiteral> {
     HashMap::from([("ident".to_owned(), IrLiteral::Int(ident))])
 }
 
-fn measured(forge: &GraphForge, query: &str, ident: i64) -> (i64, Io) {
+fn measured(forge: &GraphForge, query: &str, parameters: &HashMap<String, IrLiteral>) -> (i64, Io) {
     let _capture = LifecycleIoCapture::install();
     let before = lifecycle_io_snapshot().expect("requested observation");
     let result = forge
-        .execute_with_params(query, &parameters(ident))
+        .execute_with_params(query, parameters)
         .expect("statement executes");
     let delta = lifecycle_io_snapshot()
         .expect("requested observation")
@@ -216,8 +249,8 @@ fn build(nodes: usize) -> Built {
     }
 }
 
-/// How many property fragments a project's route spans.
-fn property_fragments(project: &Path) -> usize {
+/// The bytes of the property fragments a project's route spans.
+fn property_bytes(project: &Path) -> u64 {
     graphforge_storage::resolve_project_generation(project)
         .expect("project resolves")
         .unadmitted_graph_files_inventory()
@@ -226,7 +259,8 @@ fn property_fragments(project: &Path) -> usize {
         .files
         .iter()
         .filter(|file| file.relative_path.starts_with("properties/"))
-        .count()
+        .map(|file| file.byte_length)
+        .sum()
 }
 
 const AFTER_TOP_K: &str = "MATCH (a:Entity {ident: $ident})-[:LINK]->(m:Entity) \
@@ -284,11 +318,21 @@ fn idents(batches: &[RecordBatch]) -> Vec<Option<i64>> {
     values
 }
 
-/// Every property scan waits for the UUIDs of the frontier that reaches it,
-/// whatever the partition count.
-fn un_nominated_scans(forge: &GraphForge, partitions: usize) -> Vec<String> {
+/// Every property scan that enriches a frontier waits for the UUIDs of the
+/// frontier that reaches it, whatever the partition count. `at_least` is how
+/// many scans the statements plan, and `own_scans` how many of them resolve the
+/// ids of the nodes that a scan of the topology finds (the label scan's own
+/// nodes: the seed of the traversal, not a frontier that reached them), which
+/// plan no tap.
+fn un_nominated_scans(
+    forge: &GraphForge,
+    partitions: usize,
+    statements: &[(&'static str, String, i64)],
+    at_least: usize,
+    own_scans: usize,
+) -> Vec<String> {
     let mut found = Vec::new();
-    for (name, query, _) in statements() {
+    for (name, query, _) in statements {
         let plan = forge
             .explain_stage(
                 &query.replace("$ident", &ANCHOR.to_string()),
@@ -298,12 +342,13 @@ fn un_nominated_scans(forge: &GraphForge, partitions: usize) -> Vec<String> {
         let scans = plan.matches("PropertyOverlayExec").count();
         let taps = plan.matches("UuidBuildKeyTapExec").count();
         assert!(
-            scans >= 3,
-            "{name}: the anchor and two enrichments:\n{plan}"
+            scans >= at_least,
+            "{name}: at least {at_least} property scans:\n{plan}"
         );
-        if taps != scans {
+        if taps + own_scans != scans {
             found.push(format!(
-                "{name}, partitions {partitions}: {scans} property scans, {taps} taps:\n{plan}"
+                "{name}, partitions {partitions}: {scans} property scans, {taps} taps, \
+                 {own_scans} not enriching a frontier:\n{plan}"
             ));
         }
     }
@@ -335,13 +380,32 @@ fn assert_preserved_rows_survive(forge: &GraphForge, partitions: usize) {
 /// The anchor alone: what the lookup of `a` costs before any enrichment.
 const ANCHOR_ONLY: &str = "MATCH (a:Entity {ident: $ident}) RETURN count(*) AS n";
 
-/// Run `query` on a warm session and return its value and I/O.
+/// Run `query` on a warm session and return its value and I/O. A statement
+/// that names `$ident` runs once for another node first; one that does not
+/// runs twice as written.
 fn steady(forge: &GraphForge, name: &str, query: &str) -> (i64, Io) {
     // The first statement admits the route's footers and walks its keys once
     // per session; the measured one is the steady state.
-    let (warm, _) = measured(forge, query, 0);
+    let anchored = query.contains("$ident");
+    let (warm, _) = measured(
+        forge,
+        query,
+        &if anchored {
+            parameters(0)
+        } else {
+            HashMap::new()
+        },
+    );
     assert!(warm > 0, "{name}: warm-up returned {warm}");
-    let (value, io) = measured(forge, query, ANCHOR);
+    let (value, io) = measured(
+        forge,
+        query,
+        &if anchored {
+            parameters(ANCHOR)
+        } else {
+            HashMap::new()
+        },
+    );
     assert_eq!(io.write_bytes, 0, "{name}: {io:?}");
     assert_eq!(io.write_calls, 0, "{name}: {io:?}");
     (value, io)
@@ -355,39 +419,237 @@ fn enrichment_is_bounded_by_its_frontier() {
     let _serial = serial();
     let small = build(SMALL_NODES);
     let large = build(LARGE_NODES);
+    // The `Seed` and `Wide` labels add a few small fragments that do not grow,
+    // so the route nearly doubles rather than exactly.
+    let (small_bytes, large_bytes) = (
+        property_bytes(&small.project),
+        property_bytes(&large.project),
+    );
     assert!(
-        property_fragments(&large.project) >= 2 * property_fragments(&small.project) - 1,
-        "the route doubles with the nodes"
+        large_bytes * 10 >= small_bytes * 19,
+        "the route doubles with the nodes: {small_bytes} property bytes for {SMALL_NODES} \
+         nodes, {large_bytes} for {LARGE_NODES}",
     );
     let mut grew = Vec::new();
     let mut un_nominated = Vec::new();
     for target_partitions in [1, 2, 4] {
         let small_forge = open(&small.project, target_partitions);
         let large_forge = open(&large.project, target_partitions);
-        un_nominated.extend(un_nominated_scans(&small_forge, target_partitions));
+        un_nominated.extend(un_nominated_scans(
+            &small_forge,
+            target_partitions,
+            &statements(),
+            3,
+            0,
+        ));
         assert_preserved_rows_survive(&small_forge, target_partitions);
-        // Locating the anchor reads the topology, which also doubles.
-        let (_, anchor_small) = steady(&small_forge, "anchor", ANCHOR_ONLY);
-        let (_, anchor_large) = steady(&large_forge, "anchor", ANCHOR_ONLY);
-        let anchor_growth = anchor_large
-            .read_bytes
-            .saturating_sub(anchor_small.read_bytes);
-        for (name, query, expected) in statements() {
-            let (value, small_io) = steady(&small_forge, name, &query);
-            assert_eq!(value, expected, "{name}, partitions {target_partitions}");
-            let (value, large_io) = steady(&large_forge, name, &query);
-            assert_eq!(value, expected, "{name}, partitions {target_partitions}");
-            let reads = [small_io.read_bytes, large_io.read_bytes];
-            if reads[1] > reads[0] + anchor_growth + (256 << 10) {
-                grew.push(format!(
-                    "{name}, partitions {target_partitions}: {reads:?}, anchor grew by {anchor_growth}"
-                ));
-            }
-        }
+        grew.extend(reads_that_grew(
+            &small_forge,
+            &large_forge,
+            target_partitions,
+            ANCHOR_ONLY,
+            &statements(),
+        ));
     }
     assert!(
         grew.is_empty() && un_nominated.is_empty(),
         "reads grew with unrelated nodes: {grew:#?}\nscans without a frontier: {}",
+        un_nominated.join("\n")
+    );
+}
+
+/// The statements whose reads grew, when the route doubled, by more than
+/// finding their first node did. Each returns its value on both routes.
+fn reads_that_grew(
+    small: &GraphForge,
+    large: &GraphForge,
+    partitions: usize,
+    start: &str,
+    statements: &[(&'static str, String, i64)],
+) -> Vec<String> {
+    // Locating the first node reads the topology or the labels, which also
+    // double.
+    let (_, start_small) = steady(small, "start", start);
+    let (_, start_large) = steady(large, "start", start);
+    let start_growth = start_large
+        .read_bytes
+        .saturating_sub(start_small.read_bytes);
+    let mut grew = Vec::new();
+    for (name, query, expected) in statements {
+        let (value, small_io) = steady(small, name, query);
+        assert_eq!(value, *expected, "{name}, partitions {partitions}");
+        let (value, large_io) = steady(large, name, query);
+        assert_eq!(value, *expected, "{name}, partitions {partitions}");
+        let reads = [small_io.read_bytes, large_io.read_bytes];
+        if reads[1] > reads[0] + start_growth + (256 << 10) {
+            grew.push(format!(
+                "{name}, partitions {partitions}: {reads:?}, start grew by {start_growth}"
+            ));
+        }
+    }
+    grew
+}
+
+/// The label scan alone: what finding the seeds costs before any enrichment.
+const SEEDS_ONLY: &str = "MATCH (a:Seed) RETURN count(*) AS n";
+const SEED_FIRST_HOP: &str = "MATCH (a:Seed)-[:LINK]->(b:Entity) ";
+const SEED_SECOND_HOP: &str = "MATCH (a:Seed)-[:LINK]->(b:Entity)-[:LINK]->(c:Entity) ";
+
+/// What the seeds' links reach, from the fixture's definition.
+fn seed_first_hop() -> Vec<usize> {
+    SEEDS
+        .iter()
+        .flat_map(|&seed| ring_neighbours(seed))
+        .collect()
+}
+
+fn seed_second_hop() -> Vec<usize> {
+    seed_first_hop()
+        .into_iter()
+        .flat_map(ring_neighbours)
+        .collect()
+}
+
+fn sum_of(nodes: impl IntoIterator<Item = usize>) -> i64 {
+    nodes.into_iter().filter_map(ident).sum()
+}
+
+/// Each statement enriches a node variable from a frontier that only a label
+/// scan of three nodes produces: no equality anchors it and no limit bounds it.
+fn seed_statements() -> Vec<(&'static str, String, i64)> {
+    vec![
+        (
+            "enrichment after a label scan",
+            format!("{SEED_FIRST_HOP}RETURN sum(b.ident) AS n"),
+            sum_of(seed_first_hop()),
+        ),
+        (
+            "enrichment after a label scan and a second hop",
+            format!("{SEED_SECOND_HOP}RETURN sum(c.ident) AS n"),
+            sum_of(seed_second_hop()),
+        ),
+        (
+            "a node that only the second hop names, after a label scan",
+            format!("{SEED_SECOND_HOP}RETURN count(*) AS n"),
+            seed_second_hop().len() as i64,
+        ),
+    ]
+}
+
+/// A preserved row whose node holds no value survives the pruned scan as a
+/// missing value.
+fn assert_seed_rows_survive(forge: &GraphForge, partitions: usize) {
+    for (name, text, variable, nodes) in [
+        ("after a label scan", SEED_FIRST_HOP, "b", seed_first_hop()),
+        (
+            "after a label scan and a second hop",
+            SEED_SECOND_HOP,
+            "c",
+            seed_second_hop(),
+        ),
+    ] {
+        let result = forge
+            .execute(&format!("{text}RETURN {variable}.ident AS n"))
+            .expect("statement executes");
+        let mut expected: Vec<Option<i64>> = nodes.into_iter().map(ident).collect();
+        expected.sort_unstable();
+        assert!(
+            expected.contains(&None),
+            "{name}: a preserved row has no value"
+        );
+        assert_eq!(
+            idents(&result.batches),
+            expected,
+            "{name}, partitions {partitions}"
+        );
+    }
+}
+
+/// A frontier that no equality anchors and no limit bounds is still enriched
+/// for its own rows: three seeds reach a handful of nodes whatever the size of
+/// the route behind them.
+#[test]
+fn enrichment_of_an_unanchored_frontier_is_bounded_by_it() {
+    let _serial = serial();
+    let small = build(SMALL_NODES);
+    let large = build(LARGE_NODES);
+    let mut grew = Vec::new();
+    let mut un_nominated = Vec::new();
+    for target_partitions in [1, 2, 4] {
+        let small_forge = open(&small.project, target_partitions);
+        let large_forge = open(&large.project, target_partitions);
+        un_nominated.extend(un_nominated_scans(
+            &small_forge,
+            target_partitions,
+            &seed_statements(),
+            2,
+            1,
+        ));
+        assert_seed_rows_survive(&small_forge, target_partitions);
+        grew.extend(reads_that_grew(
+            &small_forge,
+            &large_forge,
+            target_partitions,
+            SEEDS_ONLY,
+            &seed_statements(),
+        ));
+    }
+    assert!(
+        grew.is_empty() && un_nominated.is_empty(),
+        "reads grew with unrelated nodes: {grew:#?}\nscans without a frontier: {}",
+        un_nominated.join("\n")
+    );
+}
+
+const WIDE_FIRST_HOP: &str = "MATCH (a:Wide)-[:LINK]->(b:Entity) ";
+
+/// A frontier that names more than half of the route is not worth pruning to:
+/// one scan of the route reads less than that many point reads. The statement
+/// still returns exactly what it returns with the route pruned, and it still
+/// plans the same shaped enrichment; the scan abandons the nomination only
+/// once the frontier proves too large.
+#[test]
+fn a_frontier_past_half_the_route_keeps_the_whole_scan_and_every_row() {
+    let _serial = serial();
+    let small = build(SMALL_NODES);
+    let targets: Vec<usize> = (HUB + 1..=HUB + WIDE_FANOUT).collect();
+    assert!(
+        targets.len() > SMALL_NODES / 2,
+        "the hub names more than half of the small route"
+    );
+    let sum = (
+        "enrichment of a frontier past half the route",
+        format!("{WIDE_FIRST_HOP}RETURN sum(b.ident) AS n"),
+        sum_of(targets.iter().copied()),
+    );
+    let mut un_nominated = Vec::new();
+    for target_partitions in [1, 2, 4] {
+        let forge = open(&small.project, target_partitions);
+        un_nominated.extend(un_nominated_scans(
+            &forge,
+            target_partitions,
+            std::slice::from_ref(&sum),
+            2,
+            1,
+        ));
+        let (value, _) = steady(&forge, sum.0, &sum.1);
+        assert_eq!(value, sum.2, "partitions {target_partitions}");
+
+        // Every preserved row survives, including those without a value.
+        let result = forge
+            .execute(&format!("{WIDE_FIRST_HOP}RETURN b.ident AS n"))
+            .expect("statement executes");
+        let mut expected: Vec<Option<i64>> = targets.iter().copied().map(ident).collect();
+        expected.sort_unstable();
+        assert_eq!(
+            idents(&result.batches),
+            expected,
+            "partitions {target_partitions}"
+        );
+    }
+    assert!(
+        un_nominated.is_empty(),
+        "scans without a frontier: {}",
         un_nominated.join("\n")
     );
 }
