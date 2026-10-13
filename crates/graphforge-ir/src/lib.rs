@@ -525,6 +525,9 @@ mod tests {
 pub mod lowering_snapshot;
 pub use lowering_snapshot::LoweringSnapshot;
 
+pub mod node_property_demand;
+pub use node_property_demand::{NodePropertyDemand, node_property_demand};
+
 pub mod property_demand;
 pub use property_demand::{PropertyDemand, property_demand};
 

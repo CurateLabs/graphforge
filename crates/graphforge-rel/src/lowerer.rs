@@ -61,7 +61,7 @@ use graphforge_ir::arrow_schema::{
 use graphforge_ir::plan::PATTERN_COMPREHENSION_VALUE_ALIAS;
 use graphforge_ir::{
     AggExpr, AggFunc, CreatePattern, Direction, ExprArena, ExprId, GraphOp, GraphPlan, IrExpr,
-    IrLiteral, ProjectItem, RemovePropItem, SetPropItem, SortOrder, VarId,
+    IrLiteral, NodePropertyDemand, ProjectItem, RemovePropItem, SetPropItem, SortOrder, VarId,
 };
 use graphforge_ontology::OntologyHandle;
 use graphforge_plan::{
@@ -119,6 +119,12 @@ pub struct GraphPlanLowerer {
     /// `NodeScan`s for bare-node-value materialization (#785). Interior
     /// mutability so the `&self` lowering pass can populate it.
     node_shapes: std::sync::RwLock<HashMap<u32, crate::expr::NodeShape>>,
+    /// The node property columns the plan being lowered observes, per node
+    /// variable. [`lower_plan`](Self::lower_plan) seeds it from the whole
+    /// statement; every other entry point lowers part of a statement and leaves
+    /// it at [`NodePropertyDemand::everything`], so a node enrichment keeps
+    /// every column unless the whole plan is known.
+    node_property_demand: std::sync::RwLock<NodePropertyDemand>,
     /// `TypeId.0 → [(rule_id, confidence_model)]` for relations carrying
     /// inference semantics (transitive/symmetric), built from the ontology at
     /// construction (#605). Empty in exploratory mode — the TCK-safety gate: a
@@ -210,6 +216,7 @@ impl GraphPlanLowerer {
             write_target: write_target.is_some(),
             read_snapshot: read_snapshot.map(|(snapshot, mode)| (snapshot.clone(), mode)),
             node_shapes: std::sync::RwLock::new(HashMap::new()),
+            node_property_demand: std::sync::RwLock::new(NodePropertyDemand::everything()),
             inference_rules: build_inference_rules(ontology)?,
             #[cfg(feature = "differential-testing")]
             relational_fixed_hop_reference: false,
@@ -264,6 +271,22 @@ impl GraphPlanLowerer {
             Some(c) => c.prop_names().clone(),
             None => HashMap::new(),
         }
+    }
+
+    fn set_node_property_demand(&self, demand: NodePropertyDemand) {
+        *self
+            .node_property_demand
+            .write()
+            .expect("node property demand lock poisoned") = demand;
+    }
+
+    /// Whether the plan being lowered can observe property column `column` of
+    /// node variable `var`, so its enrichment must read it.
+    fn node_property_needed(&self, var: VarId, column: &str) -> bool {
+        self.node_property_demand
+            .read()
+            .expect("node property demand lock poisoned")
+            .needs(var, column)
     }
 
     /// Build an `ExprLowerer` for the current plan, seeded with the resolved
@@ -377,6 +400,10 @@ impl GraphPlanLowerer {
         // plan's NodeScans before lowering its expressions.
         *self.node_shapes.write().expect("node shapes lock poisoned") =
             self.build_node_shapes(&plan.ops);
+        self.set_node_property_demand(graphforge_ir::node_property_demand(
+            plan,
+            &self.prop_names(),
+        ));
         let mut var_map = VarMap::new();
         let lowered = self.lower_pipeline(&plan.ops, &plan.exprs, &mut var_map);
         let lowered = lowered.map(|lowered| self.wrap_structural_fast_path(plan, lowered));
@@ -497,6 +524,9 @@ impl GraphPlanLowerer {
         var_map: &mut VarMap,
     ) -> Result<LogicalPlan, GfError> {
         *self.node_shapes.write().expect("node shapes lock poisoned") = self.build_node_shapes(ops);
+        // The prefix runs before the statement's write operators, which the
+        // plan-wide analysis cannot see past: keep every column.
+        self.set_node_property_demand(NodePropertyDemand::everything());
         self.lower_pipeline(ops, exprs, var_map)
             .and_then(|plan| self.attach_graph_contract(plan))
             .map_err(GfError::from)
@@ -516,6 +546,7 @@ impl GraphPlanLowerer {
             produce_one_row: true,
             schema: input_schema,
         });
+        self.set_node_property_demand(NodePropertyDemand::everything());
         self.lower_pipeline_from(ops, exprs, var_map, input, None)
             .and_then(|plan| self.attach_graph_contract(plan))
             .map_err(GfError::from)

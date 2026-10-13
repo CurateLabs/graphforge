@@ -375,9 +375,11 @@ fn the_equality_is_planned_into_the_property_scan() {
         plan.contains("PropertyOverlayExec: route=_untyped, equality=ident=Int(5)"),
         "{plan}"
     );
-    // The destination's route is still joined by key: a statement that reads
-    // no property of it still authenticates it (permanent_storage_budgets).
-    assert_eq!(plan.matches("PropertyOverlayExec").count(), 2, "{plan}");
+    // The destination reads no property, so it joins no route: only the
+    // equality-anchored source carries an overlay. A statement that reads no
+    // property anywhere still key-joins and authenticates every route
+    // (permanent_storage_budgets).
+    assert_eq!(plan.matches("PropertyOverlayExec").count(), 1, "{plan}");
 }
 
 /// An id-anchored lookup reads the fragment that holds the id, not the route:

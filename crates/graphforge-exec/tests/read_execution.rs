@@ -242,13 +242,38 @@ async fn logical_read_resources_relocate_and_bind_independently() {
     let create_wrong = bind("CREATE (:Person {name:7})", rc.clone());
     let writer = session_with(wrong_schema.path(), &rc.lock().unwrap());
     writer.execute_create(&create_wrong).await.unwrap();
-    for query in [
-        "MATCH (b) WHERE b.name <> 'seed' AND b.name <> 'unconnected' RETURN b.name AS name",
-        "MATCH ()-[r]->() WHERE r.selected = true RETURN r.name AS name",
-        "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN b.name AS name",
-        "MATCH (a:Person)-[:KNOWS*1..2]->(b:Person) RETURN b.name AS name",
-        "MATCH p=(a:Person)-[:KNOWS*1..2]->(b) RETURN nodes(p)[1].name AS name",
-        "MATCH p=(a:Person)-[:KNOWS*1..2]->(b) RETURN [n IN nodes(p) | n.name][1] AS name",
+    // The flag records whether the plan reads a node property. A plan binds only
+    // the node property routes it reads, so a graph whose node `name` column has
+    // a different type is refused exactly by the queries that read it.
+    for (query, reads_node_property) in [
+        (
+            "MATCH (b) WHERE b.name <> 'seed' AND b.name <> 'unconnected' RETURN b.name AS name",
+            true,
+        ),
+        (
+            "MATCH ()-[r]->() WHERE r.selected = true RETURN r.name AS name",
+            false,
+        ),
+        (
+            "MATCH (a)-[r]->(b) WHERE r.selected = true AND a.name = 'seed' RETURN r.name AS name",
+            true,
+        ),
+        (
+            "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN b.name AS name",
+            true,
+        ),
+        (
+            "MATCH (a:Person)-[:KNOWS*1..2]->(b:Person) RETURN b.name AS name",
+            true,
+        ),
+        (
+            "MATCH p=(a:Person)-[:KNOWS*1..2]->(b) RETURN nodes(p)[1].name AS name",
+            true,
+        ),
+        (
+            "MATCH p=(a:Person)-[:KNOWS*1..2]->(b) RETURN [n IN nodes(p) | n.name][1] AS name",
+            true,
+        ),
     ] {
         let ir = bind(query, rc.clone());
         let left_catalog = GraphCatalog::open(left.path(), None, &rc.lock().unwrap()).unwrap();
@@ -338,16 +363,26 @@ async fn logical_read_resources_relocate_and_bind_independently() {
             );
         }
         let incompatible_schema = session_with(wrong_schema.path(), &rc.lock().unwrap());
-        let error = incompatible_schema
+        let bound_to_wrong_schema = incompatible_schema
             .context()
             .state()
             .create_physical_plan(&plan)
-            .await
-            .unwrap_err();
-        assert!(
-            error.to_string().contains("GF_READ_RESOURCE_INCOMPATIBLE"),
-            "{query}: {error}"
-        );
+            .await;
+        if reads_node_property {
+            let error = bound_to_wrong_schema
+                .expect_err(&format!("{query}: the wrong-schema graph must be refused"));
+            assert!(
+                error.to_string().contains("GF_READ_RESOURCE_INCOMPATIBLE"),
+                "{query}: {error}"
+            );
+        } else {
+            // The plan reads no node property, so it binds only the topology node
+            // table and joins no node property route; a graph that differs only
+            // in a node property type is compatible with it.
+            if let Err(error) = bound_to_wrong_schema {
+                panic!("{query}: a plan that reads no node property must bind: {error}");
+            }
+        }
         let mut incompatible_catalog = RuntimeCatalog::new();
         incompatible_catalog.intern_label("DifferentLabel").unwrap();
         let incompatible = session_with(right.path(), &incompatible_catalog);
