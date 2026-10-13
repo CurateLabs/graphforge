@@ -705,11 +705,14 @@ mod memory {
     use datafusion::execution::runtime_env::RuntimeEnvBuilder;
     use datafusion::prelude::SessionConfig;
 
-    /// A greedy pool that remembers the highest total it ever held.
+    /// A greedy pool that remembers the highest total it ever held, and counts
+    /// the calls that change what a reservation holds and the bytes they move.
     #[derive(Debug)]
     struct PeakPool {
         inner: GreedyMemoryPool,
         peak: AtomicUsize,
+        calls: AtomicUsize,
+        moved: AtomicUsize,
     }
 
     impl PeakPool {
@@ -717,7 +720,23 @@ mod memory {
             Arc::new(Self {
                 inner: GreedyMemoryPool::new(limit),
                 peak: AtomicUsize::new(0),
+                calls: AtomicUsize::new(0),
+                moved: AtomicUsize::new(0),
             })
+        }
+
+        /// Pool calls that grew or shrank a reservation, and the bytes in total
+        /// they grew or shrank it by.
+        fn traffic(&self) -> (usize, usize) {
+            (
+                self.calls.load(Ordering::SeqCst),
+                self.moved.load(Ordering::SeqCst),
+            )
+        }
+
+        fn record(&self, bytes: usize) {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.moved.fetch_add(bytes, Ordering::SeqCst);
         }
 
         fn peak(&self) -> usize {
@@ -741,11 +760,13 @@ mod memory {
         }
 
         fn grow(&self, reservation: &MemoryReservation, additional: usize) {
+            self.record(additional);
             self.inner.grow(reservation, additional);
             self.observe();
         }
 
         fn shrink(&self, reservation: &MemoryReservation, shrink: usize) {
+            self.record(shrink);
             self.inner.shrink(reservation, shrink);
         }
 
@@ -754,6 +775,7 @@ mod memory {
             reservation: &MemoryReservation,
             additional: usize,
         ) -> datafusion::error::Result<()> {
+            self.record(additional);
             self.inner.try_grow(reservation, additional)?;
             self.observe();
             Ok(())
@@ -935,5 +957,101 @@ mod memory {
         );
         assert!(pool.peak() <= 64 * 1024, "the pool limit was exceeded");
         assert_eq!(pool.reserved(), 0, "reservation leaked after the failure");
+    }
+
+    /// The pool is called once per chunk of reservation, not once per path
+    /// state (#1985). Each of the 99,000 path states below is charged and
+    /// released, and every emitted path charged and released with its batch,
+    /// yet a call that grows or shrinks the reservation moves a whole chunk
+    /// (never fewer than 16 KiB): the calls are bounded by the bytes moved over
+    /// that chunk, and sit orders of magnitude under the path count. Per-state
+    /// charging made two calls per path state, each taking the pool's lock.
+    #[tokio::test]
+    async fn pool_calls_follow_bytes_per_chunk_not_path_states() {
+        const NODES: usize = 100;
+        const PATHS_PER_SEED: usize = (NODES - 1) + (NODES - 1) * (NODES - 1);
+        const SEEDS: usize = 10;
+        const SMALLEST_CHUNK: usize = 16 * 1024;
+        let dir = TempDir::new().unwrap();
+        let ids = write_complete(dir.path(), NODES);
+
+        let pool = PeakPool::new(usize::MAX / 2);
+        let batches = run_expand_in(pool.clone(), dir.path(), (1, 2), ids[..SEEDS].to_vec())
+            .await
+            .unwrap();
+        assert_eq!(rows(&batches), SEEDS * PATHS_PER_SEED);
+        drop(batches);
+        assert_eq!(pool.reserved(), 0, "reservation leaked after the stream");
+
+        let (calls, moved) = pool.traffic();
+        let paths = SEEDS * PATHS_PER_SEED;
+        assert!(
+            calls * SMALLEST_CHUNK <= moved,
+            "{calls} pool calls moved {moved} bytes: a call moves under a chunk"
+        );
+        assert!(
+            calls * 100 <= paths,
+            "{calls} pool calls for {paths} path states"
+        );
+    }
+
+    /// The budget stays exact under chunked charging (#1985): the query passes
+    /// at the limit equal to the largest exact usage it ever charges and fails,
+    /// typed and naming the consumer, one byte below it, and the pool is empty
+    /// after either. The smallest passing limit is bounded below by the
+    /// queued-path charge and above by the peak an unlimited pool saw, which
+    /// includes the reservation's slack of at most two chunks.
+    #[tokio::test]
+    async fn the_smallest_passing_budget_is_the_exact_peak_usage() {
+        const LEAVES: usize = 2_000;
+        let dir = TempDir::new().unwrap();
+        let ids = write_star(dir.path(), LEAVES);
+        let unlimited = PeakPool::new(usize::MAX / 2);
+        let batches = run_expand_in(unlimited.clone(), dir.path(), (1, 1), vec![ids[0]])
+            .await
+            .unwrap();
+        assert_eq!(rows(&batches), LEAVES);
+        drop(batches);
+        let ceiling = unlimited.peak();
+
+        let passes = |limit: usize| {
+            let dir = dir.path().to_path_buf();
+            let root = ids[0];
+            async move {
+                let pool = PeakPool::new(limit);
+                let result = run_expand_in(pool.clone(), &dir, (1, 1), vec![root]).await;
+                assert_eq!(pool.reserved(), 0, "leak at limit {limit}");
+                assert!(pool.peak() <= limit, "limit {limit} exceeded");
+                result.map(|batches| rows(&batches))
+            }
+        };
+
+        // Bisect the smallest passing limit.
+        let (mut low, mut high) = (LEAVES * 96 / 2, ceiling);
+        assert!(passes(low).await.is_err(), "half the lower bound passed");
+        assert_eq!(passes(high).await.unwrap(), LEAVES);
+        while high - low > 1 {
+            let mid = low + (high - low) / 2;
+            if passes(mid).await.is_ok() {
+                high = mid;
+            } else {
+                low = mid;
+            }
+        }
+        let smallest = high;
+        assert!(
+            smallest >= LEAVES * 96,
+            "{smallest} bytes held {LEAVES} queued paths of at least 96 bytes"
+        );
+        assert!(
+            ceiling - smallest <= 2 * 1024 * 1024,
+            "the unlimited peak {ceiling} is more than the slack above the exact peak {smallest}"
+        );
+        let message = passes(smallest - 1).await.unwrap_err().to_string();
+        assert!(
+            message.contains("VarLenExpand path state") && message.contains("Resources exhausted"),
+            "{message}"
+        );
+        assert_eq!(passes(smallest).await.unwrap(), LEAVES);
     }
 }

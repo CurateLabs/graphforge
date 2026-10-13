@@ -522,6 +522,7 @@ mod create_exec;
 pub use create_exec::GraphCreateExec;
 mod write_exec;
 pub use write_exec::{GraphDeleteExec, GraphRemoveExec, GraphSetExec};
+mod chunked_reservation;
 mod expand_exec;
 pub use expand_exec::{ExpandExec, OntologyInferExec, V4OrdinalIdentityResolver, VarLenExpandExec};
 mod row_exec;

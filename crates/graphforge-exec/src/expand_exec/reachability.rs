@@ -7,12 +7,12 @@
 
 use super::Arc;
 use super::Array;
+use super::ChunkedReservation;
 use super::DataFusionError;
 use super::Direction;
 use super::EXPAND_BATCH_MAX_ROWS;
 use super::ExpandConfig;
 use super::GfError;
-use super::MemoryReservation;
 use super::RecordBatch;
 use super::SendableRecordBatchStream;
 use super::StreamExt;
@@ -57,7 +57,7 @@ pub(super) async fn reach_bfs(
     cfg: &ExpandConfig,
     mut input: SendableRecordBatchStream,
     tx: &tokio::sync::mpsc::Sender<Result<RecordBatch, DataFusionError>>,
-    reservation: &mut MemoryReservation,
+    reservation: &mut ChunkedReservation,
 ) -> Result<(), GfError> {
     // The shortest trail is the shortest path only for `min_hops <= 1` (see the
     // proof conditions); the planner never selects the mode for more.
@@ -187,7 +187,7 @@ impl ReachOutput<'_> {
         &mut self,
         input: &RecordBatch,
         reached: Reached,
-        reservation: &mut MemoryReservation,
+        reservation: &mut ChunkedReservation,
     ) -> Result<bool, GfError> {
         grow_reservation(reservation, REACHED_BYTES)?;
         self.pending.push(reached);
@@ -207,7 +207,7 @@ impl ReachOutput<'_> {
         rows: &[(usize, Option<u64>)],
         reached: &ReachSet,
         required: bool,
-        reservation: &mut MemoryReservation,
+        reservation: &mut ChunkedReservation,
     ) -> Result<bool, GfError> {
         let hops_of: std::collections::HashMap<u64, u64> = if required {
             reached.found.iter().copied().collect()
@@ -243,7 +243,7 @@ impl ReachOutput<'_> {
     async fn flush(
         &mut self,
         input: &RecordBatch,
-        reservation: &mut MemoryReservation,
+        reservation: &mut ChunkedReservation,
     ) -> Result<bool, GfError> {
         if self.pending.is_empty() {
             return Ok(true);
@@ -265,7 +265,7 @@ struct ReachSet {
 
 /// Move the reservation from `held` to `now` bytes.
 pub(super) fn settle(
-    reservation: &mut MemoryReservation,
+    reservation: &mut ChunkedReservation,
     held: &mut usize,
     now: usize,
 ) -> Result<(), GfError> {
@@ -438,7 +438,7 @@ fn reach_from_seed(
     adjacency: &mut adjacency::AdjacencyReader<'_>,
     seed: u64,
     targets: Option<&std::collections::HashSet<u64>>,
-    reservation: &mut MemoryReservation,
+    reservation: &mut ChunkedReservation,
 ) -> Result<ReachSet, GfError> {
     use std::collections::HashSet;
 
@@ -588,7 +588,7 @@ fn materialise_reached(
     cfg: &ExpandConfig,
     input: &RecordBatch,
     reached: &[Reached],
-    reservation: &mut MemoryReservation,
+    reservation: &mut ChunkedReservation,
 ) -> Result<RecordBatch, GfError> {
     use arrow::compute::concat_batches;
     use arrow::compute::take;
