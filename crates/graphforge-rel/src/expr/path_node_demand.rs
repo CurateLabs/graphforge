@@ -179,3 +179,6 @@ impl ExprLowerer<'_> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests;
