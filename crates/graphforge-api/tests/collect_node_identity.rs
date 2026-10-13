@@ -505,11 +505,18 @@ fn union_branches_narrow_independently() {
 // Uses that read more than identity keep the whole node, and still work.
 // ---------------------------------------------------------------------------
 
+/// `MEMBERS` with each forum's members collected in name order. `collect`
+/// keeps the order its rows arrive in, which the query must fix itself when a
+/// test reads the list's order (a comprehension's result, `ps[0]`): without
+/// an `ORDER BY` the order depends on how the plan partitions its joins.
+const MEMBERS_BY_NAME: &str = "MATCH (f:Forum)-[:HAS_MEMBER]->(p:Person) \
+                               WITH f, p ORDER BY p.name WITH f, collect(p) AS ps";
+
 /// `rest` reads the list beyond identity next to an identity use, so only
 /// `rest` can keep the collect whole.
 #[track_caller]
 fn assert_whole_with(graph: &GraphForge, rest: &str, expected: &[&[&str]]) {
-    let query = format!("{MEMBERS} WHERE size(ps) > 0 {rest}");
+    let query = format!("{MEMBERS_BY_NAME} WHERE size(ps) > 0 {rest}");
     assert_whole_collect(graph, &query);
     let mut got = rows(graph, &query);
     got.sort();
