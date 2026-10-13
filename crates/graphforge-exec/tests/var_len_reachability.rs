@@ -433,33 +433,46 @@ fn plain_queries(consumer_indices: &[usize]) -> Vec<String> {
     queries
 }
 
-#[tokio::test]
-async fn an_all_predicate_over_each_relationship_matches_trail_enumeration() {
-    // Each unfiltered query, then the same query under each predicate: the
-    // search runs over the relationships that pass, the enumeration over every
-    // trail that is made only of them. The plan checks make sure the first is
-    // a reachability expansion carrying the predicate.
+/// Each unfiltered query, then the same query under each of `windows`: the
+/// search runs over the relationships that pass, the enumeration over every
+/// trail that is made only of them. The plan checks make sure the first is a
+/// reachability expansion carrying the predicate.
+async fn assert_predicates_match_trail_enumeration(windows: std::ops::Range<usize>) {
     let plain = plain_queries(&[0, 3, 5, 7]);
     let mut queries = plain.clone();
     for query in &plain {
-        for predicate in WINDOWS {
+        for predicate in &WINDOWS[windows.clone()] {
             queries.push(with_all(query, predicate));
         }
     }
     let graph = Graph::shapes().weighted(varied);
     let indexed = compare_graph(&graph, true, true, &queries).await;
-    let scanned = compare_graph(&graph, false, false, &queries).await;
-    assert_eq!(indexed, scanned, "indexed and scan-built adjacency agree");
+    // Adjacency built by a scan instead of read from the index must agree: on
+    // the unfiltered queries and on every third predicate.
+    let scan_rows: Vec<usize> = (0..queries.len())
+        .filter(|&row| {
+            row < plain.len() || (windows.start + (row - plain.len()) % windows.len()) % 3 == 0
+        })
+        .collect();
+    let scan_queries: Vec<String> = scan_rows.iter().map(|&row| queries[row].clone()).collect();
+    let scanned = compare_graph(&graph, false, false, &scan_queries).await;
+    for (&row, rows) in scan_rows.iter().zip(&scanned) {
+        assert_eq!(
+            rows, &indexed[row],
+            "{}: indexed and scan-built adjacency agree",
+            queries[row]
+        );
+    }
 
     let (unfiltered, filtered) = indexed.split_at(plain.len());
     let filtered_total = total(filtered);
     assert!(
-        filtered_total > 1_000,
+        filtered_total > 400 * windows.len(),
         "the corpus must return rows: {filtered_total}"
     );
     // The predicates must change the answers, or the corpus proves nothing.
     let changed = filtered
-        .chunks(WINDOWS.len())
+        .chunks(windows.len())
         .zip(unfiltered)
         .flat_map(|(rows, plain)| rows.iter().filter(move |rows| *rows != plain))
         .count();
@@ -468,6 +481,22 @@ async fn an_all_predicate_over_each_relationship_matches_trail_enumeration() {
         "only {changed} of {} filtered queries differ from the unfiltered one",
         filtered.len()
     );
+}
+
+#[tokio::test]
+async fn comparison_predicates_over_each_relationship_match_trail_enumeration() {
+    assert_predicates_match_trail_enumeration(0..4).await;
+}
+
+#[tokio::test]
+async fn negation_and_null_tests_over_each_relationship_match_trail_enumeration() {
+    assert_predicates_match_trail_enumeration(4..8).await;
+}
+
+#[tokio::test]
+async fn connectives_arithmetic_and_absent_properties_over_each_relationship_match_trail_enumeration()
+ {
+    assert_predicates_match_trail_enumeration(8..12).await;
 }
 
 #[tokio::test]

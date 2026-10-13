@@ -302,9 +302,22 @@ visited set per seed, emitting one row per reached node with its hop count. When
 destination is separately pinned (`(b {id: $y})`) and the expansion is unbounded, the
 lowerer scans `b` first and the search stops at the level that reaches it. The mode
 changes cost, never the result; a query that returns the path, the relationship list, or
-a multiplicity-sensitive aggregate stays on trail enumeration. Per-hop
-`ALL(e IN r WHERE ...)` predicates over edge properties are not yet pushed into the
-search and keep the expansion on trails.
+a multiplicity-sensitive aggregate stays on trail enumeration.
+
+A top-level conjunct `ALL(e IN r WHERE p)` of the `WHERE` clause is pushed into the search
+when `p` reads only `e`'s own properties, parameters and literals, and calls only
+deterministic functions (`graphforge_ir::reachability` lists them). Such a conjunct
+holds for a trail exactly when every relationship of the trail passes `p`, so the
+trails are the trails of the subgraph of passing relationships, and the search is the
+same breadth-first search over that subgraph. `EXPLAIN` shows the predicate as
+`edge_filter=`. The executor evaluates `p` with the ordinary expression evaluator, once
+per search level over that level's frontier relationships, reading their properties
+with one batched edge-property lookup (through the edge-property index when the route
+has a current one, [ADR 0059](../../adr/0059-edge-properties-are-read-through-a-derived-shard-index.md),
+and from the property overlay otherwise). A relationship whose predicate is `NULL` is not
+crossed, as with `false`. `ANY`, `NONE` and `SINGLE`, a predicate that reads another
+variable, the relationship itself, a position or another element, an `ALL` combined with
+`OR`, and an `ALL` over `nodes(p)` keep the expansion on trails.
 
 The index is **optional and never authoritative**: a stale or missing index
 falls back to scan-and-build with identical output. The pinned v0.5
