@@ -289,6 +289,9 @@ impl DisplayAs for VarLenExpandExec {
         if self.expansion == VarLenMode::Reachability {
             f.write_str(", mode=reachability")?;
         }
+        if self.reverse_edge_list {
+            f.write_str(", edge_list=reversed")?;
+        }
         if let Some(filter) = &self.edge_filter {
             write!(f, ", edge_filter={}", filter.predicate())?;
         }

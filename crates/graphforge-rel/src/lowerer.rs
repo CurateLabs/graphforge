@@ -645,13 +645,8 @@ impl GraphPlanLowerer {
                 exprs,
                 var_map,
             ) {
-                current = self.lower_bound_end_expansion(
-                    from_bound_end,
-                    op,
-                    current,
-                    exprs,
-                    var_map,
-                )?;
+                current =
+                    self.lower_bound_end_expansion(from_bound_end, op, current, exprs, var_map)?;
                 // The scan and the expansion were lowered together.
                 next += 1;
                 continue;
