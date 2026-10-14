@@ -70,6 +70,41 @@ impl GraphPlanLowerer {
         Ok(joined)
     }
 
+    /// One projection per joined property column: the column of the one route
+    /// that owns it, or the reconciliation of the routes that all do.
+    /// `preferred` is the schema of the variable's own label, which decides the
+    /// column's type where the routes disagree.
+    fn route_value_projections(
+        alias: &str,
+        preferred: Option<&datafusion::arrow::datatypes::SchemaRef>,
+        references: BTreeMap<String, Vec<Expr>>,
+        mut types: BTreeMap<String, Vec<datafusion::arrow::datatypes::FieldRef>>,
+    ) -> Vec<Expr> {
+        let mut projections = Vec::with_capacity(references.len());
+        for (name, mut refs) in references {
+            let fields = types.remove(&name).expect("property fields");
+            let compatible = fields.iter().all(|field| {
+                field.data_type() == fields[0].data_type()
+                    && field.metadata() == fields[0].metadata()
+            });
+            let expected = preferred
+                .and_then(|schema| schema.field_with_name(&name).ok())
+                .map(|field| std::sync::Arc::new(field.clone()))
+                .or_else(|| compatible.then(|| fields[0].clone()));
+            let value = if refs.len() == 1 {
+                refs.remove(0)
+            } else {
+                super::primary_property_value::expression(refs, expected.clone())
+            };
+            projections.push(value.alias_qualified_with_metadata(
+                Some(alias),
+                name,
+                expected.map(|field| field.metadata().clone().into()),
+            ));
+        }
+        projections
+    }
+
     pub(super) fn join_semantic_node_properties_in(
         &self,
         phase: PropertyPhase,
@@ -165,27 +200,9 @@ impl GraphPlanLowerer {
                     .push(crate::expr::qualified_col(&property_alias, field.name()));
             }
         }
-        for (name, mut refs) in references {
-            let fields = types.remove(&name).expect("property fields");
-            let compatible = fields.iter().all(|field| {
-                field.data_type() == fields[0].data_type()
-                    && field.metadata() == fields[0].metadata()
-            });
-            let expected = preferred
-                .and_then(|schema| schema.field_with_name(&name).ok())
-                .map(|field| std::sync::Arc::new(field.clone()))
-                .or_else(|| compatible.then(|| fields[0].clone()));
-            let value = if refs.len() == 1 {
-                refs.remove(0)
-            } else {
-                super::primary_property_value::expression(refs, expected.clone())
-            };
-            projections.push(value.alias_qualified_with_metadata(
-                Some(alias.as_str()),
-                name,
-                expected.map(|field| field.metadata().clone().into()),
-            ));
-        }
+        projections.extend(Self::route_value_projections(
+            &alias, preferred, references, types,
+        ));
         LogicalPlanBuilder::from(joined)
             .project(projections)
             .and_then(LogicalPlanBuilder::build)
