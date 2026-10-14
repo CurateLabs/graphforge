@@ -9,8 +9,7 @@ GraphForge uses one `.graphforge/` directory. Definitions in `graphforge.yaml`,
 `ontology/`, `schemas/`, `seeds/`, and `migrations/` are ordinary reviewable Git
 content. Runtime state, imports, and exports are data and must not be committed.
 
-Follow [Installation](installation.md) to install the selected v0.6.0 release
-or candidate. The examples below use `graphforge` from that activated Python
+Follow [Installation](installation.md) to install GraphForge. The examples below use `graphforge` from that activated Python
 environment. Open a terminal at the root of the Git repository you intend to
 manage. Durable state needs [supported storage](installation.md#durable-storage).
 
@@ -20,8 +19,8 @@ graphforge --project-dir . init
 ```
 
 Alternatively, replace `graphforge` in the commands below with
-`npx @curatelabs/graphforge-cli@0.6.0`, substituting the exact published
-candidate version when appropriate. The npm package also supplies the `gf`
+`npx @curatelabs/graphforge-cli@next` (latest pre-release) or
+`npx @curatelabs/graphforge-cli` (latest release). The npm package also supplies the `gf`
 alias; the Python package supplies only `graphforge`. Run one launcher, not
 both initialization paths.
 

@@ -46,13 +46,12 @@ On Windows use `py -3 -m venv .venv`. Activate it with
 Python distribution's venv and pip support. Then run:
 
 ```bash
-python -m pip install graphforge==0.6.0
+python -m pip install --pre graphforge
 python -c "import sys, graphforge; print(sys.executable); print(graphforge.__version__)"
 ```
 
-The final-version command requires v0.6.0 to be published. Check
-[Installation](installation.md) first; for a published candidate substitute its
-exact PyPI version. Give the agent the printed interpreter path: a new shell
+`--pre` installs the latest pre-release, which these docs describe until v0.6.0
+is published; [Installation](installation.md) covers the latest release. Give the agent the printed interpreter path: a new shell
 may not keep the environment activation from the previous command.
 
 </details>

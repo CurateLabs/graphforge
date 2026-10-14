@@ -53,9 +53,9 @@ npm install @curatelabs/graphforge@next apache-arrow # latest pre-release
 ```
 
 ```bash
-npm install @curatelabs/graphforge apache-arrow  # latest release
+npm install @curatelabs/graphforge apache-arrow # latest release
 ```
-.
+
 [Releases](https://github.com/CurateLabs/graphforge/releases) lists what is
 available, and the [installation guide](docs/guide/installation.md) covers
 candidates and source builds. Before v1.0.0 there is no backward-compatibility
