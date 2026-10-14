@@ -328,10 +328,12 @@ struct PlannedScans {
     own: usize,
 }
 
-/// Every property scan that enriches a frontier waits for the UUIDs of the
-/// frontier that reaches it, whatever the partition count. `planned` is, for
-/// each statement in order, the scans it plans: a node variable whose
-/// properties the statement never reads plans none, so the count is exact.
+/// Every property read that enriches a frontier waits for the UUIDs of the
+/// frontier that reaches it, whatever the partition count: a scan behind a tap
+/// of the frontier's keys, or, when a limit bounds the rows, a keyed lookup
+/// that reads only those keys. `planned` is, for each statement in order, the
+/// reads it plans: a node variable whose properties the statement never reads
+/// plans none, so the count is exact.
 fn un_nominated_scans(
     forge: &GraphForge,
     partitions: usize,
@@ -347,15 +349,16 @@ fn un_nominated_scans(
                 ExplainStage::PhysicalPlan,
             )
             .expect("physical plan");
-        let scans = plan.matches("PropertyOverlayExec").count();
-        let taps = plan.matches("UuidBuildKeyTapExec").count();
+        let lookups = plan.matches("KeyedPropertyLookupExec").count();
+        let scans = plan.matches("PropertyOverlayExec").count() + lookups;
+        let taps = plan.matches("UuidBuildKeyTapExec").count() + lookups;
         assert_eq!(
             scans, planned.all,
-            "{name}, partitions {partitions}: property scans planned:\n{plan}"
+            "{name}, partitions {partitions}: property reads planned:\n{plan}"
         );
         if taps + planned.own != scans {
             found.push(format!(
-                "{name}, partitions {partitions}: {scans} property scans, {taps} taps, \
+                "{name}, partitions {partitions}: {scans} property reads, {taps} bounded by a frontier, \
                  {} not enriching a frontier:\n{plan}",
                 planned.own
             ));
