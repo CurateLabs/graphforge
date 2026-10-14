@@ -470,9 +470,7 @@ pub fn reset() {
         counters
             .edge_validation_fallbacks
             .store(0, Ordering::Relaxed);
-        counters
-            .property_rows_requested
-            .store(0, Ordering::Relaxed);
+        counters.property_rows_requested.store(0, Ordering::Relaxed);
         counters
             .property_uuid_selections
             .store(0, Ordering::Relaxed);

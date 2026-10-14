@@ -999,12 +999,7 @@ fn a_plan_that_cannot_defer_reads_every_column_at_bind_time() {
         (
             "scanned twice",
             Box::new(move |exprs| {
-                vec![
-                    scan(N),
-                    scan(N),
-                    projecting(vec![projected(exprs)]),
-                    LIMIT,
-                ]
+                vec![scan(N), scan(N), projecting(vec![projected(exprs)]), LIMIT]
             }),
         ),
         (
@@ -1197,11 +1192,7 @@ mod interactive_shapes {
              message.creationDate AS postOrCommentCreationDate \
              ORDER BY postOrCommentCreationDate DESC, toInteger(postOrCommentId) ASC LIMIT 20",
         );
-        let (person, friend, message) = (
-            scanned(&plan, 0),
-            scanned(&plan, 1),
-            scanned(&plan, 2),
-        );
+        let (person, friend, message) = (scanned(&plan, 0), scanned(&plan, 1), scanned(&plan, 2));
         // The start person is filtered by id: nothing left to defer.
         assert_eq!(late(&demand, person), Vec::<&str>::new());
         // The friend's columns are all returned and none is a sort key.

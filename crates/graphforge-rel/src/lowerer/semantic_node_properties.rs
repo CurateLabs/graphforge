@@ -1,7 +1,5 @@
 //! Composition-bound node properties follow immutable primary storage ownership.
-use super::{
-    GraphPlanLowerer, LoweringError, MapUnsupportedExpr, PropertyPhase, VarId, var_alias,
-};
+use super::{GraphPlanLowerer, LoweringError, MapUnsupportedExpr, PropertyPhase, VarId, var_alias};
 use datafusion::{
     common::Column,
     logical_expr::{Expr, JoinType, LogicalPlan, LogicalPlanBuilder, col},

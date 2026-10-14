@@ -51,11 +51,11 @@ use datafusion::functions_aggregate::count::count_all;
 use datafusion::functions_aggregate::expr_fn::{
     array_agg, avg, avg_distinct, count, count_distinct, max, min, sum, sum_distinct,
 };
+use datafusion::functions_window::expr_fn::row_number;
 use datafusion::logical_expr::{
     Expr as DfExpr, ExprFunctionExt, ExprSchemable, Extension, JoinType, LogicalPlanBuilder,
     SortExpr,
 };
-use datafusion::functions_window::expr_fn::row_number;
 
 use graphforge_core::{GfError, OntologyMode};
 use graphforge_ir::arrow_schema::{
@@ -1234,7 +1234,9 @@ impl GraphPlanLowerer {
                         // later `x.prop` / `WHERE x.p = …` resolves. In
                         // exploratory mode `join_node_properties` routes to
                         // `_untyped` (#889); a no-op otherwise.
-                        None => self.join_node_properties_in(PropertyPhase::Early, *var, None, input),
+                        None => {
+                            self.join_node_properties_in(PropertyPhase::Early, *var, None, input)
+                        }
                     };
                 }
                 let scan =
