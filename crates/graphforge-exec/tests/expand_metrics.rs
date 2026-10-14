@@ -177,6 +177,15 @@ async fn optional_match_shows_the_metrics_of_the_plan_it_executed() {
         "{text}"
     );
     assert_compute_time_recorded(&expands[0]);
+
+    // A DataFusion join below the Expand is rebuilt when the plan is bound, so
+    // it only reports its rows if the executed copy is the one displayed.
+    let joins = operators(&text, "HashJoinExec");
+    assert!(
+        text.lines()
+            .any(|line| { line.contains("join_type=Right") && line.contains("output_rows=4") }),
+        "the executed inner join is missing: {joins:?}\n{text}"
+    );
 }
 
 #[tokio::test]
