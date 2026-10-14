@@ -36,6 +36,7 @@ use datafusion::physical_plan::ExecutionPlanProperties;
 use datafusion::physical_plan::Partitioning;
 use datafusion::physical_plan::PlanProperties;
 use datafusion::physical_plan::SendableRecordBatchStream;
+use datafusion::physical_plan::metrics::MetricsSet;
 use datafusion::physical_plan::execution_plan::Boundedness;
 use datafusion::physical_plan::execution_plan::EmissionType;
 use datafusion::physical_plan::stream::RecordBatchReceiverStream;
@@ -45,6 +46,8 @@ pub(crate) use edge_properties::EdgePropSource;
 use edge_properties::build_edge_prop_children;
 use edge_properties::edge_prop_children;
 use edge_properties::load_edge_prop_source;
+use metrics::ExpandMetrics;
+use metrics::PartitionMetrics;
 use futures::StreamExt;
 use graphforge_core::GfError;
 use graphforge_core::OntologyMode;
@@ -175,6 +178,8 @@ pub struct VarLenExpandExec {
     /// The `ALL(e IN r WHERE ..)` predicate each crossed edge must satisfy;
     /// only reachability expansions carry one (#1984).
     edge_filter: Option<Arc<PhysicalEdgeFilter>>,
+    /// What `EXPLAIN ANALYZE` shows; shared by every copy of this node.
+    metrics: ExpandMetrics,
 }
 
 impl VarLenExpandExec {
@@ -226,6 +231,7 @@ impl VarLenExpandExec {
             provider,
             capture_epoch: demand::stamp_capture_epoch().unwrap_or(0),
             edge_filter: None,
+            metrics: ExpandMetrics::default(),
         }
     }
 
@@ -284,6 +290,7 @@ impl VarLenExpandExec {
             provider: Arc::clone(&self.provider),
             capture_epoch: self.capture_epoch,
             edge_filter: self.edge_filter.clone(),
+            metrics: self.metrics.clone(),
         })
     }
 
@@ -385,7 +392,12 @@ impl ExecutionPlan for VarLenExpandExec {
             provider: self.provider.clone(),
             capture_epoch: self.capture_epoch,
             edge_filter: self.edge_filter.clone(),
+            metrics: self.metrics.clone(),
         }))
+    }
+
+    fn metrics(&self) -> Option<MetricsSet> {
+        Some(self.metrics.snapshot())
     }
 
     fn partition_statistics(
@@ -439,6 +451,7 @@ impl ExecutionPlan for VarLenExpandExec {
             capture_epoch: self.capture_epoch,
             edge_filter: self.edge_filter.clone(),
             lifecycle: graphforge_storage::lifecycle_io::CaptureContext::current(),
+            metrics: self.metrics.partition(partition),
         };
         let mut reservation = ChunkedReservation::register(VAR_LEN_CONSUMER, context.memory_pool());
         let mut builder = RecordBatchReceiverStream::builder(self.schema.clone(), 2);
@@ -575,6 +588,8 @@ pub(super) struct ExpandConfig {
     /// The statement's read-path observer. The traversal runs as a spawned
     /// task, so each synchronous section attaches it to count its reads.
     pub(super) lifecycle: graphforge_storage::lifecycle_io::CaptureContext,
+    /// This execution's counters, shown by `EXPLAIN ANALYZE`.
+    pub(super) metrics: PartitionMetrics,
 }
 
 /// One in-progress path during the variable-length BFS.
@@ -672,7 +687,7 @@ async fn send_chunk(
     if cfg.capture_epoch != 0 {
         demand::record_emitted(cfg.capture_epoch, cfg.edge_var, out.num_rows());
     }
-    let sent = tx.send(Ok(out)).await.is_ok();
+    let sent = tx.send(Ok(cfg.metrics.emitted(out))).await.is_ok();
     reservation.shrink(bytes);
     sent
 }
@@ -745,6 +760,7 @@ async fn expand_bfs(
         let input = batch.map_err(GfError::from_execution_error)?;
         let input_bytes = input.get_array_memory_size();
         grow_reservation(reservation, input_bytes)?;
+        cfg.metrics.input_rows(input.num_rows());
         if cfg.capture_epoch != 0 {
             demand::record_input(cfg.capture_epoch, cfg.edge_var, input.num_rows());
         }
@@ -970,6 +986,7 @@ fn load_chunk_sources(
     use arrow::compute::concat_batches;
 
     let exec_err = |m: String| GfError::Execution(m);
+    let _compute = cfg.metrics.compute();
     let _capture = cfg.lifecycle.attach();
     // Charged for the whole function, released before it returns.
     let mut temporary = 0usize;
@@ -999,6 +1016,8 @@ fn load_chunk_sources(
     // opens the file).
     let edge_records = if cfg.edge_list_demanded {
         let edge_batches = read_traversed_edges(cfg, &traversed)?;
+        cfg.metrics
+            .edge_rows(edge_batches.iter().map(RecordBatch::num_rows).sum());
         charge(
             reservation,
             &mut temporary,
@@ -1044,6 +1063,7 @@ fn load_chunk_sources(
     };
     let node_batch =
         concat_batches(&first.schema(), &node_batches).map_err(|e| exec_err(e.to_string()))?;
+    cfg.metrics.destination_rows(node_batch.num_rows());
     charge(
         reservation,
         &mut charged,
@@ -1106,6 +1126,7 @@ fn materialise_chunk(
     use arrow::compute::take;
 
     let exec_err = |m: String| GfError::Execution(m);
+    let _compute = cfg.metrics.compute();
     let _capture = cfg.lifecycle.attach();
     let to_u32 = |v: usize| -> Result<u32, GfError> {
         u32::try_from(v).map_err(|_| exec_err(format!("row index {v} exceeds u32")))
@@ -1241,6 +1262,7 @@ fn bfs_emit_seed(
 ) -> Result<Vec<Emission>, GfError> {
     use std::collections::VecDeque;
 
+    let _compute = cfg.metrics.compute();
     let _capture = cfg.lifecycle.attach();
 
     let mut emissions: Vec<Emission> = Vec::new();
@@ -1293,6 +1315,7 @@ fn bfs_emit_seed(
         })??;
         reservation.shrink(path_state_bytes(&p));
     }
+    cfg.metrics.adjacency_entries(examined);
     if cfg.capture_epoch != 0 {
         demand::record_candidates(cfg.capture_epoch, cfg.edge_var, examined);
     }
@@ -1686,6 +1709,8 @@ pub struct ExpandExec {
     /// each traversed relationship before its destination is read. The plan
     /// keeps an equivalent filter above, so it only reduces destination reads.
     edge_predicate: Option<Arc<edge_predicate::PhysicalEdgePredicate>>,
+    /// What `EXPLAIN ANALYZE` shows; shared by every copy of this node.
+    metrics: ExpandMetrics,
 }
 
 impl ExpandExec {
@@ -1735,6 +1760,7 @@ impl ExpandExec {
             ordinal_identities,
             ordinal_identity_required,
             edge_predicate: None,
+            metrics: ExpandMetrics::default(),
         }
     }
 
@@ -1780,6 +1806,7 @@ impl ExpandExec {
             ordinal_identities: self.ordinal_identities.clone(),
             ordinal_identity_required: self.ordinal_identity_required,
             edge_predicate: self.edge_predicate.clone(),
+            metrics: self.metrics.clone(),
         })
     }
 
@@ -1806,11 +1833,12 @@ impl ExpandExec {
             ordinal_identities: self.ordinal_identities.clone(),
             ordinal_identity_required: self.ordinal_identity_required,
             edge_predicate: self.edge_predicate.clone(),
+            metrics: self.metrics.clone(),
         })
     }
 
     /// The owned per-stream configuration of one `execute` call.
-    fn single_hop_config(&self, context: &TaskContext) -> SingleHopConfig {
+    fn single_hop_config(&self, context: &TaskContext, partition: usize) -> SingleHopConfig {
         SingleHopConfig {
             rel_type_name: self.rel_type_name.clone(),
             direction: self.direction,
@@ -1828,6 +1856,7 @@ impl ExpandExec {
             ordinal_identities: self.ordinal_identities.clone(),
             ordinal_identity_required: self.ordinal_identity_required,
             edge_predicate: self.edge_predicate.clone(),
+            metrics: self.metrics.partition(partition),
             reservation: std::sync::Mutex::new(crate::fast_path::expand_reservation(context)),
         }
     }
@@ -2039,7 +2068,12 @@ impl ExecutionPlan for ExpandExec {
             ordinal_identities: self.ordinal_identities.clone(),
             ordinal_identity_required: self.ordinal_identity_required,
             edge_predicate: self.edge_predicate.clone(),
+            metrics: self.metrics.clone(),
         }))
+    }
+
+    fn metrics(&self) -> Option<MetricsSet> {
+        Some(self.metrics.snapshot())
     }
 
     fn with_fetch(&self, fetch: Option<usize>) -> Option<Arc<dyn ExecutionPlan>> {
@@ -2071,6 +2105,7 @@ impl ExecutionPlan for ExpandExec {
             ordinal_identities: self.ordinal_identities.clone(),
             ordinal_identity_required: self.ordinal_identity_required,
             edge_predicate: self.edge_predicate.clone(),
+            metrics: self.metrics.clone(),
         }))
     }
 
@@ -2111,7 +2146,7 @@ impl ExecutionPlan for ExpandExec {
     ) -> Result<SendableRecordBatchStream, DataFusionError> {
         check_partition("ExpandExec", &self.input, partition)?;
         let input = self.input.clone();
-        let cfg = self.single_hop_config(&context);
+        let cfg = self.single_hop_config(&context, partition);
         let schema = self.schema.clone();
         let batch_size = context.session_config().batch_size();
         let input_stream = input.execute(partition, context)?;
@@ -2148,9 +2183,11 @@ impl ExecutionPlan for ExpandExec {
                     if let Some((input_batch, position)) = pending.as_mut() {
                         let max_output =
                             remaining.map_or(next_batch_goal, |left| left.min(next_batch_goal));
-                        let output =
+                        let output = {
+                            let _compute = cfg.metrics.compute();
                             expand_single_hop_chunk(&cfg, input_batch, position, max_output)
-                                .map_err(to_df_err)?;
+                                .map_err(to_df_err)?
+                        };
                         if position.row >= input_batch.num_rows() {
                             pending = None;
                         }
@@ -2165,7 +2202,7 @@ impl ExecutionPlan for ExpandExec {
                             next_batch_goal = next_batch_goal.saturating_mul(2).min(batch_size);
                         }
                         return Ok(Some((
-                            output,
+                            cfg.metrics.emitted(output),
                             (
                                 input_stream,
                                 cfg,
@@ -2181,6 +2218,7 @@ impl ExecutionPlan for ExpandExec {
                     };
                     let input_batch = input_batch?;
                     demand::record_input(cfg.capture_epoch, cfg.edge_var, input_batch.num_rows());
+                    cfg.metrics.input_rows(input_batch.num_rows());
                     cfg.account(
                         Some(&input_batch),
                         &RecordBatch::new_empty(cfg.out_schema.clone()),
@@ -2213,6 +2251,8 @@ struct SingleHopConfig {
     ordinal_identity_required: bool,
     /// Tested on each traversed relationship before its destination is read.
     edge_predicate: Option<Arc<edge_predicate::PhysicalEdgePredicate>>,
+    /// This execution's counters, shown by `EXPLAIN ANALYZE`.
+    metrics: PartitionMetrics,
     /// #1688 candidate C: the memory-pool reservation for held batches.
     /// Memory-pool reservation for the batches this hop holds (ADR 0050).
     reservation: std::sync::Mutex<datafusion::execution::memory_pool::MemoryReservation>,
@@ -2343,6 +2383,8 @@ fn expand_single_hop_chunk(
     let mut traversed: std::collections::HashSet<u64> = std::collections::HashSet::new();
     // Reached destination node ids, for the lazy node-record read (#838).
     let mut reached: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    // Adjacency entries stepped over, including undirected repeats skipped below.
+    let mut examined = 0usize;
     while position.row < input.num_rows() && triples.len() < max_output {
         let row = position.row;
         let Some(src) = src_ids.value_at(row) else {
@@ -2357,6 +2399,7 @@ fn expand_single_hop_chunk(
                     .get(position.neighbor_offset)
                     .expect("neighbor_offset < len");
                 position.neighbor_offset += 1;
+                examined += 1;
                 if matches!(cfg.direction, Direction::Undirected)
                     && !position.seen_edges.insert(edge_id)
                 {
@@ -2373,6 +2416,7 @@ fn expand_single_hop_chunk(
             }
         })?;
     }
+    cfg.metrics.adjacency_entries(examined);
     if triples.is_empty() {
         return Ok(RecordBatch::new_empty(cfg.out_schema.clone()));
     }
@@ -2635,7 +2679,10 @@ fn expand_single_hop_chunk(
             .first()
             .map(RecordBatch::schema)
             .ok_or_else(|| exec_err("Expand: edge scan returned no batches".into()))?;
-        Some(concat_batches(&edge_schema, &edge_batches).map_err(|e| exec_err(e.to_string()))?)
+        let edge_batch =
+            concat_batches(&edge_schema, &edge_batches).map_err(|e| exec_err(e.to_string()))?;
+        cfg.metrics.edge_rows(edge_batch.num_rows());
+        Some(edge_batch)
     };
     // Position of each traversed edge within the edge batch, by `edge_id`.
     let edge_row: HashMap<u64, usize> = match edge_batch.as_ref() {
@@ -2837,6 +2884,7 @@ fn expand_single_hop_chunk(
         };
         concat_batches(&first.schema(), &node_batches).map_err(|e| exec_err(e.to_string()))?
     };
+    cfg.metrics.destination_rows(node_batch.num_rows());
     let node_id_index = node_batch
         .schema()
         .index_of("node_id")
@@ -2981,6 +3029,7 @@ mod edge_filter;
 mod edge_predicate;
 mod edge_properties;
 mod input_columns;
+mod metrics;
 mod reachability;
 #[cfg(test)]
 mod tests;
