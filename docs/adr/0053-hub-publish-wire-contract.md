@@ -201,6 +201,16 @@ whole next snapshot locally:
 
 ### Credentials
 
+`gf auth login/status/logout` now provide persistent WorkOS browser/link
+sessions through same-origin `/api/cli/*` Hub endpoints. Access/refresh pairs
+live only in the OS credential vault. Before publishing, the CLI exchanges its
+saved session at `/api/cli/repository-token` for the selected repository's
+publish capability. `GRAPHFORGE_HUB_PUBLISH_TOKEN` still takes precedence for CI.
+Only the scoped publish token reaches publish control endpoints. The device
+flow described below remains a compatibility path for interactive publishing
+when no saved session exists.
+
+
 The client obtains a short-lived token with the RFC 8628 device flow: `POST`
 `device_authorization_endpoint` with `client_id` and `scope`
 (`publish:<owner>/<repository>`), show `user_code` and `verification_uri`, then
@@ -216,8 +226,8 @@ or revealing `Debug`). It is never written to project files, configuration
 participants, or logs. A CI job passes a token in `GRAPHFORGE_HUB_PUBLISH_TOKEN`
 instead of running the device flow. `gf publish` runs the device flow only when
 standard input and standard error are terminals; a captured invocation (the
-Python and Node CLI shims) without that variable fails `auth_denied` before any
-network request. The client sends the bearer only to the repository's own origin,
+Python and Node CLI shims) without that variable or a saved session fails
+`auth_denied`. The client sends the bearer only to the repository's own origin,
 never to OAuth endpoints, upload URLs, or public reads. Every control-plane
 request checks the bearer token's expiry and its scope against the URL
 repository.

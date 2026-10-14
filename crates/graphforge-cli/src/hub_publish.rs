@@ -167,18 +167,34 @@ fn run_command(
         && std::io::stdin().is_terminal()
         && std::io::stderr().is_terminal();
     // Locations and arguments are validated before any credential or network use.
-    parse_input(&args.repository)?;
+    let (identity, base) = parse_input(&args.repository)?;
     if let Some(origin) = &args.fork_of {
         parse_input(origin)?;
     }
     let credential = match PublishToken::from_env() {
         Some(token) => Credential::Token(token),
-        None if interactive => Credential::DeviceFlow,
         None => {
-            return Err(publish_error(
-                HubPublishErrorCode::AuthDenied,
-                "no publish credential: set GRAPHFORGE_HUB_PUBLISH_TOKEN or run gf publish in a terminal",
-            ));
+            if let Some(grant) = crate::auth::repository_token(
+                &base,
+                &identity.owner,
+                &identity.repository,
+                "publish",
+            )? {
+                if grant.origin.origin() != base.origin() {
+                    return Err(validation(
+                        "hub.auth_denied",
+                        "publish capability must match the Hub origin",
+                    ));
+                }
+                Credential::Token(PublishToken::new(grant.token))
+            } else if interactive {
+                Credential::DeviceFlow
+            } else {
+                return Err(publish_error(
+                    HubPublishErrorCode::AuthDenied,
+                    "no saved session: run gf auth login or set GRAPHFORGE_HUB_PUBLISH_TOKEN",
+                ));
+            }
         }
     };
     let path = crate::resolve_project_path(project, project_dir)?;

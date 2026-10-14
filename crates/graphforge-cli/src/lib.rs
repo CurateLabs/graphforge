@@ -23,6 +23,7 @@ use uuid::Uuid;
 
 include!(concat!(env!("OUT_DIR"), "/project_skills.rs"));
 
+mod auth;
 mod hub_clone;
 pub mod hub_fixture_artifacts;
 mod hub_http;
@@ -257,6 +258,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Manage your Hub browser session.
+    Auth(auth::AuthArgs),
     /// Validate and exercise the Rust-owned telemetry lifecycle.
     Telemetry(TelemetryArgs),
     Clone(hub_clone::CloneArgs),
@@ -1270,6 +1273,9 @@ fn run_with_allocation(
             output,
         )
         .map_err(Into::into);
+    }
+    if let Command::Auth(args) = command {
+        return auth::run(args, cli.json, output);
     }
     if let hub @ (Command::Clone(_) | Command::Publish(_)) = command {
         return hub_publish::run_hub_command(hub, cli.project, cli.project_dir, cli.json, output);

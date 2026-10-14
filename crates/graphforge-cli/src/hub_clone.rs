@@ -997,6 +997,12 @@ pub(crate) fn run_clone(
     json: bool,
     output: &mut dyn Write,
 ) -> Result<(), graphforge_api::GfError> {
+    let transport = crate::auth::CloneTransport::new(
+        &args.repository,
+        args.hub.as_deref(),
+        args.token_env.as_deref(),
+        args.protection_bypass_env.as_deref(),
+    )?;
     let runtime = clone_telemetry_runtime(args.telemetry_endpoint.as_deref());
     let attached = PROCESS_ATTACHED.load(Ordering::Relaxed);
     if attached {
@@ -1015,7 +1021,7 @@ pub(crate) fn run_clone(
         progress: CloneProgress::new(attached.then_some(&mut stderr as &mut dyn Write)),
     };
     let result = run_clone_profiled_with_delays(
-        &HttpTransport::new(),
+        &transport,
         args,
         json,
         output,

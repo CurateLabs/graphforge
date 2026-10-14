@@ -118,6 +118,18 @@ pub(crate) trait Transport {
         limit: u64,
     ) -> Result<HttpResponse, graphforge_api::GfError>;
 
+    /// Send a repository-authorized read while preserving resume validators.
+    fn get_authorized(
+        &self,
+        _url: &Url,
+        _range: Option<u64>,
+        _if_range: Option<&str>,
+        _limit: u64,
+        _headers: &[(&str, ureq::http::HeaderValue)],
+    ) -> Result<HttpResponse, graphforge_api::GfError> {
+        Err(network("transport does not support authorized downloads"))
+    }
+
     /// Send an initial discovery request with explicit, sensitive headers.
     /// This must never install default headers on the shared agent.
     fn get_discovery(
@@ -278,7 +290,7 @@ impl ureq::unversioned::transport::Transport for IdleTransport {
 }
 
 impl HttpTransport {
-    fn get_with_headers(
+    pub(crate) fn get_with_headers(
         &self,
         url: &Url,
         range: Option<u64>,
@@ -325,6 +337,17 @@ impl HttpTransport {
 }
 
 impl Transport for HttpTransport {
+    fn get_authorized(
+        &self,
+        url: &Url,
+        range: Option<u64>,
+        if_range: Option<&str>,
+        limit: u64,
+        headers: &[(&str, ureq::http::HeaderValue)],
+    ) -> Result<HttpResponse, graphforge_api::GfError> {
+        self.get_with_headers(url, range, if_range, limit, headers)
+    }
+
     fn get(
         &self,
         url: &Url,
