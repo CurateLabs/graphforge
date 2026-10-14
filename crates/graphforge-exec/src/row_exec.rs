@@ -21,6 +21,9 @@ use datafusion::physical_plan::collect;
 use datafusion::physical_plan::execution_plan::Boundedness;
 use datafusion::physical_plan::execution_plan::EmissionType;
 use datafusion::physical_plan::memory::MemoryStream;
+use datafusion::physical_plan::metrics::{
+    BaselineMetrics, Count, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet, RecordOutput,
+};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use graphforge_core::GfError;
 use graphforge_plan::CorrelatedSeedNode;
@@ -28,7 +31,7 @@ use graphforge_plan::OptionalMatchNode;
 use graphforge_plan::UnwindNode;
 use std::collections::BTreeSet;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 // ---------------------------------------------------------------------------
 // OptionalMatchExec — physical node for OPTIONAL MATCH
@@ -57,6 +60,13 @@ pub struct OptionalMatchExec {
     correlated_seed: Option<u64>,
     schema: SchemaRef,
     props: Arc<PlanProperties>,
+    /// What `EXPLAIN ANALYZE` shows; shared by every copy of this node.
+    metrics: ExecutionPlanMetricsSet,
+    /// The bound copy of `inner` this node executed. A correlated execution
+    /// runs a rebound copy of `inner`, and the operators of that copy own
+    /// their metrics, so `children` shows the executed copy once it exists.
+    /// Only the first execution is kept.
+    executed_inner: Arc<OnceLock<Arc<dyn ExecutionPlan>>>,
 }
 
 impl OptionalMatchExec {
@@ -82,6 +92,8 @@ impl OptionalMatchExec {
             correlated_seed: node.correlated_seed,
             schema,
             props,
+            metrics: ExecutionPlanMetricsSet::new(),
+            executed_inner: Arc::new(OnceLock::new()),
         }
     }
 
@@ -167,7 +179,14 @@ impl ExecutionPlan for OptionalMatchExec {
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
-        vec![&self.outer, &self.inner]
+        vec![
+            &self.outer,
+            self.executed_inner.get().unwrap_or(&self.inner),
+        ]
+    }
+
+    fn metrics(&self) -> Option<MetricsSet> {
+        Some(self.metrics.clone_inner())
     }
 
     fn with_new_children(
@@ -188,6 +207,8 @@ impl ExecutionPlan for OptionalMatchExec {
             correlated_seed: self.correlated_seed,
             schema: self.schema.clone(),
             props: self.props.clone(),
+            metrics: self.metrics.clone(),
+            executed_inner: Arc::new(OnceLock::new()),
         }))
     }
 
@@ -216,21 +237,76 @@ impl ExecutionPlan for OptionalMatchExec {
             inner_schema: self.inner.schema(),
         };
         let schema = self.schema.clone();
+        let metrics = OptionalMetrics::new(&self.metrics, partition);
+        let executed_inner = Arc::clone(&self.executed_inner);
         let fut = async move {
             let outer_batches = collect(outer, context.clone()).await?;
+            metrics.outer_rows.add(row_count(&outer_batches));
             // A correlated sub-plan starts from the rows just collected, not
             // from a second evaluation of the outer plan (#1919).
-            let inner = match correlated_seed {
-                Some(seed) => bind_correlated_seed(inner, seed, &outer_batches)?,
-                None => inner,
+            let (inner, seed_release) = match correlated_seed {
+                Some(seed) => {
+                    let _timer = metrics.baseline.elapsed_compute().timer();
+                    let (bound, rows) = bind_seed_rows(inner, seed, &outer_batches)?;
+                    let release = SeedReleaseGuard(rows);
+                    // Keep the copy that runs: its operators own the metrics.
+                    let _ = executed_inner.set(Arc::clone(&bound));
+                    (bound, Some(release))
+                }
+                None => (inner, None),
             };
-            let inner_batches = collect(inner, context).await?;
-            optional_join(&cfg, &outer_batches, &inner_batches).map_err(to_df_err)
+            let collected = collect(inner, context).await;
+            // The executed copy stays for display; release its rows on success
+            // or error here, and on cancellation or panic through the guard.
+            drop(seed_release);
+            let inner_batches = collected?;
+            metrics.inner_rows.add(row_count(&inner_batches));
+            let _timer = metrics.baseline.elapsed_compute().timer();
+            let joined = optional_join(&cfg, &outer_batches, &inner_batches).map_err(to_df_err)?;
+            Ok(joined.record_output(&metrics.baseline))
         };
         Ok(Box::pin(RecordBatchStreamAdapter::new(
             schema,
             futures::stream::once(fut),
         )))
+    }
+}
+
+/// The outer rows every bound [`CorrelatedSeedExec`] of one execution reads.
+/// The executed sub-plan stays reachable for display after the execution, so
+/// the owner releases the rows once the sub-plan has been collected.
+#[derive(Clone)]
+struct SeedRows(Arc<Mutex<Option<Vec<RecordBatch>>>>);
+
+impl SeedRows {
+    fn new(rows: Vec<RecordBatch>) -> Self {
+        Self(Arc::new(Mutex::new(Some(rows))))
+    }
+
+    /// A copy of the rows, or `None` once they were released.
+    fn get(&self) -> Option<Vec<RecordBatch>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn release(&self) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+    }
+}
+
+/// One execution's ownership of the bound seed rows. The display plan keeps
+/// the bound leaves, so dropping the execution must release their buffers even
+/// when collection is cancelled or unwinds before returning.
+struct SeedReleaseGuard(SeedRows);
+
+impl Drop for SeedReleaseGuard {
+    fn drop(&mut self) {
+        self.0.release();
     }
 }
 
@@ -241,18 +317,29 @@ fn bind_correlated_seed(
     seed: u64,
     rows: &[RecordBatch],
 ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+    bind_seed_rows(plan, seed, rows).map(|(bound, _)| bound)
+}
+
+/// [`bind_correlated_seed`], also returning the handle that releases the rows
+/// the bound leaves share.
+fn bind_seed_rows(
+    plan: Arc<dyn ExecutionPlan>,
+    seed: u64,
+    rows: &[RecordBatch],
+) -> Result<(Arc<dyn ExecutionPlan>, SeedRows), DataFusionError> {
     use datafusion::common::tree_node::{Transformed, TreeNode};
 
+    let rows = SeedRows::new(rows.to_vec());
     let bound = plan.transform_up(|node| {
         let leaf = node
             .downcast_ref::<CorrelatedSeedExec>()
             .filter(|leaf| leaf.seed == seed);
         match leaf {
-            Some(leaf) => Ok(Transformed::yes(Arc::new(CorrelatedSeedExec::with_rows(
-                seed,
-                leaf.schema.clone(),
-                Some(rows.to_vec()),
-            )) as Arc<dyn ExecutionPlan>)),
+            Some(leaf) => {
+                let mut bound = CorrelatedSeedExec::with_rows(seed, leaf.schema.clone(), None);
+                bound.rows = Some(rows.clone());
+                Ok(Transformed::yes(Arc::new(bound) as Arc<dyn ExecutionPlan>))
+            }
             None => Ok(Transformed::no(node)),
         }
     })?;
@@ -261,7 +348,7 @@ fn bind_correlated_seed(
             "correlated optional match has no seed leaf {seed} in its sub-plan"
         )));
     }
-    Ok(bound.data)
+    Ok((bound.data, rows))
 }
 
 /// Physical leaf of a correlated sub-plan: the outer rows of the
@@ -274,7 +361,7 @@ fn bind_correlated_seed(
 pub struct CorrelatedSeedExec {
     seed: u64,
     schema: SchemaRef,
-    rows: Option<Vec<RecordBatch>>,
+    rows: Option<SeedRows>,
     /// The output columns the sub-plan above this leaf reads, once the demand
     /// pass has run; `None` means every column.
     demanded: Option<BTreeSet<usize>>,
@@ -289,7 +376,7 @@ impl CorrelatedSeedExec {
         Self::with_rows(node.id(), schema, None)
     }
 
-    fn with_rows(seed: u64, schema: SchemaRef, rows: Option<Vec<RecordBatch>>) -> Self {
+    fn with_rows(seed: u64, schema: SchemaRef, rows: Option<SeedRows>) -> Self {
         let props = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
             Partitioning::UnknownPartitioning(1),
@@ -382,9 +469,15 @@ impl ExecutionPlan for CorrelatedSeedExec {
                 "CorrelatedSeedExec only has partition 0, got {partition}"
             )));
         }
-        let rows = self.rows.clone().ok_or_else(|| {
+        let bound = self.rows.as_ref().ok_or_else(|| {
             DataFusionError::Internal(format!(
                 "correlated seed {} executed before its outer rows were bound",
+                self.seed
+            ))
+        })?;
+        let rows = bound.get().ok_or_else(|| {
+            DataFusionError::Internal(format!(
+                "correlated seed {} executed after its outer rows were released",
                 self.seed
             ))
         })?;
@@ -394,6 +487,28 @@ impl ExecutionPlan for CorrelatedSeedExec {
             None,
         )?))
     }
+}
+
+/// The metrics of one execution of an [`OptionalMatchExec`]: the baseline
+/// (`output_rows`, `elapsed_compute`) plus the rows it joined.
+struct OptionalMetrics {
+    baseline: BaselineMetrics,
+    outer_rows: Count,
+    inner_rows: Count,
+}
+
+impl OptionalMetrics {
+    fn new(set: &ExecutionPlanMetricsSet, partition: usize) -> Self {
+        Self {
+            baseline: BaselineMetrics::new(set, partition),
+            outer_rows: MetricBuilder::new(set).counter("outer_rows", partition),
+            inner_rows: MetricBuilder::new(set).counter("inner_rows", partition),
+        }
+    }
+}
+
+fn row_count(batches: &[RecordBatch]) -> usize {
+    batches.iter().map(RecordBatch::num_rows).sum()
 }
 
 /// Owned config for [`optional_join`] (so it can run in a `'static` future).

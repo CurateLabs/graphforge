@@ -1625,6 +1625,31 @@ impl ExecutionSession {
             .to_string())
     }
 
+    /// Execute a read [`GraphPlan`] with `params` and render the physical plan
+    /// with the metrics the operators recorded (`EXPLAIN ANALYZE`). The rows
+    /// are produced and discarded.
+    ///
+    /// # Errors
+    /// Returns [`GfError`] if lowering, planning or execution fails.
+    pub async fn explain_analyze_with_params(
+        &self,
+        plan: &GraphPlan,
+        params: &HashMap<String, graphforge_ir::IrLiteral>,
+    ) -> Result<String, GfError> {
+        let resolved_plan = self.resolve_row_count_expressions(plan, params).await?;
+        let (physical, _) = self.plan_physical(&resolved_plan, params).await?;
+        path_hydration::drain_guarded(Arc::clone(&physical), self.ctx.task_ctx())
+            .await
+            .map_err(GfError::from_execution_error)?;
+        Ok(
+            datafusion::physical_plan::display::DisplayableExecutionPlan::with_metrics(
+                physical.as_ref(),
+            )
+            .indent(false)
+            .to_string(),
+        )
+    }
+
     /// Lower `plan`, bind `$name` parameters, and build the physical plan —
     /// shared by the collecting and streaming read paths. Returns the physical
     /// plan and the logical plan's schema (a fallback for an empty result).

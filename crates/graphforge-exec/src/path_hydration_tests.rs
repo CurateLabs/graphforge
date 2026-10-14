@@ -1488,3 +1488,6 @@ fn labels_only_demand_scans_labels_and_opens_no_stem() {
         ]
     );
 }
+
+#[path = "path_hydration/drain_tests.rs"]
+mod drain_tests;

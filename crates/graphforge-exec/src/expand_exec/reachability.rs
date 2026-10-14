@@ -69,6 +69,7 @@ pub(super) async fn reach_bfs(
         )));
     }
     let mut adjacency = {
+        let _compute = cfg.metrics.compute();
         let _capture = cfg.lifecycle.attach();
         adjacency::AdjacencyReader::for_capture(
             cfg.provider.as_ref(),
@@ -96,6 +97,7 @@ pub(super) async fn reach_bfs(
                 input.num_columns()
             )));
         }
+        cfg.metrics.input_rows(input.num_rows());
         if cfg.capture_epoch != 0 {
             demand::record_input(cfg.capture_epoch, cfg.edge_var, input.num_rows());
         }
@@ -443,6 +445,7 @@ fn reach_from_seed(
 ) -> Result<ReachSet, GfError> {
     use std::collections::HashSet;
 
+    let _compute = cfg.metrics.compute();
     let _capture = cfg.lifecycle.attach();
     let max_hops = cfg.max_hops.map(u64::from);
     let mut hits = Hits {
@@ -570,6 +573,7 @@ fn reach_from_seed(
     }
     drop((visited, frontier, next, cycle, crossable));
     settle(reservation, &mut held, hits.bytes())?;
+    cfg.metrics.adjacency_entries(examined);
     if cfg.capture_epoch != 0 {
         demand::record_candidates(cfg.capture_epoch, cfg.edge_var, examined);
     }
@@ -595,6 +599,7 @@ fn materialise_reached(
     use arrow::compute::take;
 
     let exec_err = |m: String| GfError::Execution(m);
+    let _compute = cfg.metrics.compute();
     let _capture = cfg.lifecycle.attach();
     let to_u32 = |v: usize| -> Result<u32, GfError> {
         u32::try_from(v).map_err(|_| exec_err(format!("row index {v} exceeds u32")))
@@ -621,6 +626,7 @@ fn materialise_reached(
     };
     let node_batch =
         concat_batches(&first.schema(), &node_batches).map_err(|e| exec_err(e.to_string()))?;
+    cfg.metrics.destination_rows(node_batch.num_rows());
     charge(
         reservation,
         &mut temporary,

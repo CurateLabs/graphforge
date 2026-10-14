@@ -1,4 +1,5 @@
-//! Traversal execution and generation-pinned ordinal identity.
+//! Traversal execution. The generation-pinned ordinal identity the operators
+//! resolve destinations through lives in `ordinal_identity`.
 
 use crate::ValueAt;
 use crate::adjacency;
@@ -38,6 +39,7 @@ use datafusion::physical_plan::PlanProperties;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::physical_plan::execution_plan::Boundedness;
 use datafusion::physical_plan::execution_plan::EmissionType;
+use datafusion::physical_plan::metrics::MetricsSet;
 use datafusion::physical_plan::stream::RecordBatchReceiverStream;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use edge_filter::PhysicalEdgeFilter;
@@ -53,16 +55,16 @@ use graphforge_plan::VarLenExpandNode;
 use graphforge_plan::VarLenMode;
 use input_columns::copy_mask;
 use input_columns::push_input_columns;
+use metrics::ExpandMetrics;
+use metrics::PartitionMetrics;
+pub use ordinal_identity::V4OrdinalIdentityResolver;
+pub(crate) use ordinal_identity::V4OrdinalIdentitySession;
 use reachability::reach_bfs;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::RwLock;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 
 // ---------------------------------------------------------------------------
 // Partitioning shared by the traversal operators
@@ -175,6 +177,8 @@ pub struct VarLenExpandExec {
     /// The `ALL(e IN r WHERE ..)` predicate each crossed edge must satisfy;
     /// only reachability expansions carry one (#1984).
     edge_filter: Option<Arc<PhysicalEdgeFilter>>,
+    /// What `EXPLAIN ANALYZE` shows; shared by every copy of this node.
+    metrics: ExpandMetrics,
 }
 
 impl VarLenExpandExec {
@@ -226,6 +230,7 @@ impl VarLenExpandExec {
             provider,
             capture_epoch: demand::stamp_capture_epoch().unwrap_or(0),
             edge_filter: None,
+            metrics: ExpandMetrics::default(),
         }
     }
 
@@ -284,6 +289,7 @@ impl VarLenExpandExec {
             provider: Arc::clone(&self.provider),
             capture_epoch: self.capture_epoch,
             edge_filter: self.edge_filter.clone(),
+            metrics: self.metrics.clone(),
         })
     }
 
@@ -385,7 +391,12 @@ impl ExecutionPlan for VarLenExpandExec {
             provider: self.provider.clone(),
             capture_epoch: self.capture_epoch,
             edge_filter: self.edge_filter.clone(),
+            metrics: self.metrics.clone(),
         }))
+    }
+
+    fn metrics(&self) -> Option<MetricsSet> {
+        Some(self.metrics.snapshot())
     }
 
     fn partition_statistics(
@@ -439,6 +450,7 @@ impl ExecutionPlan for VarLenExpandExec {
             capture_epoch: self.capture_epoch,
             edge_filter: self.edge_filter.clone(),
             lifecycle: graphforge_storage::lifecycle_io::CaptureContext::current(),
+            metrics: self.metrics.partition(partition),
         };
         let mut reservation = ChunkedReservation::register(VAR_LEN_CONSUMER, context.memory_pool());
         let mut builder = RecordBatchReceiverStream::builder(self.schema.clone(), 2);
@@ -575,6 +587,8 @@ pub(super) struct ExpandConfig {
     /// The statement's read-path observer. The traversal runs as a spawned
     /// task, so each synchronous section attaches it to count its reads.
     pub(super) lifecycle: graphforge_storage::lifecycle_io::CaptureContext,
+    /// This execution's counters, shown by `EXPLAIN ANALYZE`.
+    pub(super) metrics: PartitionMetrics,
 }
 
 /// One in-progress path during the variable-length BFS.
@@ -672,7 +686,7 @@ async fn send_chunk(
     if cfg.capture_epoch != 0 {
         demand::record_emitted(cfg.capture_epoch, cfg.edge_var, out.num_rows());
     }
-    let sent = tx.send(Ok(out)).await.is_ok();
+    let sent = tx.send(Ok(cfg.metrics.emitted(out))).await.is_ok();
     reservation.shrink(bytes);
     sent
 }
@@ -731,6 +745,7 @@ async fn expand_bfs(
 
     // --- Obtain the directed adjacency the traversal needs (#762). ---
     let mut adjacency = {
+        let _compute = cfg.metrics.compute();
         let _capture = cfg.lifecycle.attach();
         adjacency::AdjacencyReader::for_capture(
             cfg.provider.as_ref(),
@@ -745,6 +760,7 @@ async fn expand_bfs(
         let input = batch.map_err(GfError::from_execution_error)?;
         let input_bytes = input.get_array_memory_size();
         grow_reservation(reservation, input_bytes)?;
+        cfg.metrics.input_rows(input.num_rows());
         if cfg.capture_epoch != 0 {
             demand::record_input(cfg.capture_epoch, cfg.edge_var, input.num_rows());
         }
@@ -970,6 +986,7 @@ fn load_chunk_sources(
     use arrow::compute::concat_batches;
 
     let exec_err = |m: String| GfError::Execution(m);
+    let _compute = cfg.metrics.compute();
     let _capture = cfg.lifecycle.attach();
     // Charged for the whole function, released before it returns.
     let mut temporary = 0usize;
@@ -1044,6 +1061,7 @@ fn load_chunk_sources(
     };
     let node_batch =
         concat_batches(&first.schema(), &node_batches).map_err(|e| exec_err(e.to_string()))?;
+    cfg.metrics.destination_rows(node_batch.num_rows());
     charge(
         reservation,
         &mut charged,
@@ -1106,6 +1124,7 @@ fn materialise_chunk(
     use arrow::compute::take;
 
     let exec_err = |m: String| GfError::Execution(m);
+    let _compute = cfg.metrics.compute();
     let _capture = cfg.lifecycle.attach();
     let to_u32 = |v: usize| -> Result<u32, GfError> {
         u32::try_from(v).map_err(|_| exec_err(format!("row index {v} exceeds u32")))
@@ -1199,7 +1218,7 @@ fn read_traversed_edges(
                 .map_err(|e| exec_err(e.to_string()))?,
         );
     }
-    match cfg.provider.admitted_inventory() {
+    let batches = match cfg.provider.admitted_inventory() {
         Some(inventory) => graphforge_storage::read_edges_filtered_projected_from_inventory(
             &inventory,
             &cfg.rel_type_name,
@@ -1217,7 +1236,10 @@ fn read_traversed_edges(
             None,
         ),
     }
-    .map_err(|e| exec_err(e.to_string()))
+    .map_err(|e| exec_err(e.to_string()))?;
+    cfg.metrics
+        .edge_rows(batches.iter().map(RecordBatch::num_rows).sum());
+    Ok(batches)
 }
 
 /// BFS one source seed over `adjacency`, with per-path relationship
@@ -1241,6 +1263,7 @@ fn bfs_emit_seed(
 ) -> Result<Vec<Emission>, GfError> {
     use std::collections::VecDeque;
 
+    let _compute = cfg.metrics.compute();
     let _capture = cfg.lifecycle.attach();
 
     let mut emissions: Vec<Emission> = Vec::new();
@@ -1293,6 +1316,7 @@ fn bfs_emit_seed(
         })??;
         reservation.shrink(path_state_bytes(&p));
     }
+    cfg.metrics.adjacency_entries(examined);
     if cfg.capture_epoch != 0 {
         demand::record_candidates(cfg.capture_epoch, cfg.edge_var, examined);
     }
@@ -1500,143 +1524,6 @@ pub(super) fn build_edge_list_column(
 // ExpandExec — adjacency-backed single-hop expansion (#763)
 // ---------------------------------------------------------------------------
 
-/// Generation-pinned destination-identity resolver shared by every query and
-/// hop of one facade. Replacement is atomic with facade generation adoption;
-/// execution never rediscovers mutable identity files by path.
-#[derive(Debug, Default)]
-pub struct V4OrdinalIdentityResolver {
-    handle: RwLock<
-        Option<Arc<Mutex<graphforge_storage::ordinal_identity_v4::V4OrdinalIdentityHandle>>>,
-    >,
-}
-
-pub(super) struct V4OrdinalIdentityPin {
-    pub(super) session: Option<Arc<V4OrdinalIdentitySession>>,
-    pub(super) required: bool,
-}
-
-impl V4OrdinalIdentityResolver {
-    /// Construct a resolver for an optional admitted generation facet.
-    #[must_use]
-    pub fn new(
-        handle: Option<graphforge_storage::ordinal_identity_v4::V4OrdinalIdentityHandle>,
-    ) -> Self {
-        Self {
-            handle: RwLock::new(handle.map(|handle| Arc::new(Mutex::new(handle)))),
-        }
-    }
-
-    /// Replace the exact generation served by subsequent sessions.
-    pub fn replace(
-        &self,
-        handle: Option<graphforge_storage::ordinal_identity_v4::V4OrdinalIdentityHandle>,
-    ) {
-        *self.handle.write().expect("ordinal identity lock poisoned") =
-            handle.map(|handle| Arc::new(Mutex::new(handle)));
-    }
-
-    /// The exact generation this resolver serves, revalidated (by stat, no
-    /// artifact bytes) for one caller outside query execution, such as search
-    /// membership projection. `None` when the facade has no ordinal authority.
-    ///
-    /// # Errors
-    /// Returns the refusal when the retained artifacts no longer match the
-    /// generation the handle authenticated.
-    pub fn revalidated_handle(
-        &self,
-    ) -> Result<
-        Option<Arc<Mutex<graphforge_storage::ordinal_identity_v4::V4OrdinalIdentityHandle>>>,
-        GfError,
-    > {
-        let handle = self
-            .handle
-            .read()
-            .expect("ordinal identity lock poisoned")
-            .clone();
-        if let Some(handle) = &handle {
-            handle
-                .lock()
-                .expect("ordinal identity handle poisoned")
-                .revalidate_for_session()
-                .map_err(GfError::from)?;
-        }
-        Ok(handle)
-    }
-
-    pub(super) fn pin(&self) -> Result<V4OrdinalIdentityPin, GfError> {
-        let handle = self
-            .handle
-            .read()
-            .expect("ordinal identity lock poisoned")
-            .clone();
-        let Some(handle) = handle else {
-            return Ok(V4OrdinalIdentityPin {
-                session: None,
-                required: false,
-            });
-        };
-        let revalidation = handle
-            .lock()
-            .expect("ordinal identity handle poisoned")
-            .revalidate_for_session()
-            .map_err(GfError::from)?;
-        Ok(V4OrdinalIdentityPin {
-            session: Some(Arc::new(V4OrdinalIdentitySession {
-                handle,
-                revalidation,
-                attribution_available: AtomicBool::new(true),
-            })),
-            required: true,
-        })
-    }
-}
-
-/// One exact, already-authenticated ordinal authority pinned for the lifetime
-/// of an execution session.
-#[derive(Debug)]
-pub(crate) struct V4OrdinalIdentitySession {
-    handle: Arc<Mutex<graphforge_storage::ordinal_identity_v4::V4OrdinalIdentityHandle>>,
-    revalidation: graphforge_storage::V4OrdinalRevalidationMetrics,
-    attribution_available: AtomicBool,
-}
-
-impl V4OrdinalIdentitySession {
-    pub(crate) fn max_requested_ids(&self) -> usize {
-        self.handle
-            .lock()
-            .expect("ordinal identity handle poisoned")
-            .max_requested_ids()
-    }
-
-    /// Whether node-ordinal order is UUID order. The first call reads and
-    /// authenticates every ordinal block once; a corrupted block is an error,
-    /// never an "unordered" answer.
-    pub(crate) fn uuid_order_matches_ordinals(&self) -> Result<bool, GfError> {
-        self.handle
-            .lock()
-            .expect("ordinal identity handle poisoned")
-            .uuid_order_matches_ordinals()
-            .map_err(GfError::from)
-    }
-
-    pub(crate) fn lookup_node_uuids(
-        &self,
-        requested: &[u64],
-    ) -> Result<graphforge_storage::V4OrdinalLookup, GfError> {
-        let mut lookup = self
-            .handle
-            .lock()
-            .expect("ordinal identity handle poisoned")
-            .lookup_node_uuids_pinned(requested)
-            .map_err(GfError::from)?;
-        if self.attribution_available.swap(false, Ordering::AcqRel) {
-            lookup.metrics.revalidation_calls = self.revalidation.calls;
-            lookup.metrics.revalidation_bytes = self.revalidation.bytes_read;
-        }
-        Ok(lookup)
-    }
-}
-
 /// Physical node for adjacency-backed single-hop expansion, the physical
 /// counterpart of [`graphforge_plan::ExpandNode`].
 ///
@@ -1686,6 +1573,8 @@ pub struct ExpandExec {
     /// each traversed relationship before its destination is read. The plan
     /// keeps an equivalent filter above, so it only reduces destination reads.
     edge_predicate: Option<Arc<edge_predicate::PhysicalEdgePredicate>>,
+    /// What `EXPLAIN ANALYZE` shows; shared by every copy of this node.
+    metrics: ExpandMetrics,
 }
 
 impl ExpandExec {
@@ -1735,6 +1624,7 @@ impl ExpandExec {
             ordinal_identities,
             ordinal_identity_required,
             edge_predicate: None,
+            metrics: ExpandMetrics::default(),
         }
     }
 
@@ -1780,6 +1670,7 @@ impl ExpandExec {
             ordinal_identities: self.ordinal_identities.clone(),
             ordinal_identity_required: self.ordinal_identity_required,
             edge_predicate: self.edge_predicate.clone(),
+            metrics: self.metrics.clone(),
         })
     }
 
@@ -1806,11 +1697,12 @@ impl ExpandExec {
             ordinal_identities: self.ordinal_identities.clone(),
             ordinal_identity_required: self.ordinal_identity_required,
             edge_predicate: self.edge_predicate.clone(),
+            metrics: self.metrics.clone(),
         })
     }
 
     /// The owned per-stream configuration of one `execute` call.
-    fn single_hop_config(&self, context: &TaskContext) -> SingleHopConfig {
+    fn single_hop_config(&self, context: &TaskContext, partition: usize) -> SingleHopConfig {
         SingleHopConfig {
             rel_type_name: self.rel_type_name.clone(),
             direction: self.direction,
@@ -1828,6 +1720,7 @@ impl ExpandExec {
             ordinal_identities: self.ordinal_identities.clone(),
             ordinal_identity_required: self.ordinal_identity_required,
             edge_predicate: self.edge_predicate.clone(),
+            metrics: self.metrics.partition(partition),
             reservation: std::sync::Mutex::new(crate::fast_path::expand_reservation(context)),
         }
     }
@@ -2039,7 +1932,12 @@ impl ExecutionPlan for ExpandExec {
             ordinal_identities: self.ordinal_identities.clone(),
             ordinal_identity_required: self.ordinal_identity_required,
             edge_predicate: self.edge_predicate.clone(),
+            metrics: self.metrics.clone(),
         }))
+    }
+
+    fn metrics(&self) -> Option<MetricsSet> {
+        Some(self.metrics.snapshot())
     }
 
     fn with_fetch(&self, fetch: Option<usize>) -> Option<Arc<dyn ExecutionPlan>> {
@@ -2071,6 +1969,7 @@ impl ExecutionPlan for ExpandExec {
             ordinal_identities: self.ordinal_identities.clone(),
             ordinal_identity_required: self.ordinal_identity_required,
             edge_predicate: self.edge_predicate.clone(),
+            metrics: self.metrics.clone(),
         }))
     }
 
@@ -2111,7 +2010,7 @@ impl ExecutionPlan for ExpandExec {
     ) -> Result<SendableRecordBatchStream, DataFusionError> {
         check_partition("ExpandExec", &self.input, partition)?;
         let input = self.input.clone();
-        let cfg = self.single_hop_config(&context);
+        let cfg = self.single_hop_config(&context, partition);
         let schema = self.schema.clone();
         let batch_size = context.session_config().batch_size();
         let input_stream = input.execute(partition, context)?;
@@ -2148,9 +2047,11 @@ impl ExecutionPlan for ExpandExec {
                     if let Some((input_batch, position)) = pending.as_mut() {
                         let max_output =
                             remaining.map_or(next_batch_goal, |left| left.min(next_batch_goal));
-                        let output =
+                        let output = {
+                            let _compute = cfg.metrics.compute();
                             expand_single_hop_chunk(&cfg, input_batch, position, max_output)
-                                .map_err(to_df_err)?;
+                                .map_err(to_df_err)?
+                        };
                         if position.row >= input_batch.num_rows() {
                             pending = None;
                         }
@@ -2165,7 +2066,7 @@ impl ExecutionPlan for ExpandExec {
                             next_batch_goal = next_batch_goal.saturating_mul(2).min(batch_size);
                         }
                         return Ok(Some((
-                            output,
+                            cfg.metrics.emitted(output),
                             (
                                 input_stream,
                                 cfg,
@@ -2181,6 +2082,7 @@ impl ExecutionPlan for ExpandExec {
                     };
                     let input_batch = input_batch?;
                     demand::record_input(cfg.capture_epoch, cfg.edge_var, input_batch.num_rows());
+                    cfg.metrics.input_rows(input_batch.num_rows());
                     cfg.account(
                         Some(&input_batch),
                         &RecordBatch::new_empty(cfg.out_schema.clone()),
@@ -2213,6 +2115,8 @@ struct SingleHopConfig {
     ordinal_identity_required: bool,
     /// Tested on each traversed relationship before its destination is read.
     edge_predicate: Option<Arc<edge_predicate::PhysicalEdgePredicate>>,
+    /// This execution's counters, shown by `EXPLAIN ANALYZE`.
+    metrics: PartitionMetrics,
     /// #1688 candidate C: the memory-pool reservation for held batches.
     /// Memory-pool reservation for the batches this hop holds (ADR 0050).
     reservation: std::sync::Mutex<datafusion::execution::memory_pool::MemoryReservation>,
@@ -2343,6 +2247,8 @@ fn expand_single_hop_chunk(
     let mut traversed: std::collections::HashSet<u64> = std::collections::HashSet::new();
     // Reached destination node ids, for the lazy node-record read (#838).
     let mut reached: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    // Adjacency entries stepped over, including undirected repeats skipped below.
+    let mut examined = 0usize;
     while position.row < input.num_rows() && triples.len() < max_output {
         let row = position.row;
         let Some(src) = src_ids.value_at(row) else {
@@ -2357,6 +2263,7 @@ fn expand_single_hop_chunk(
                     .get(position.neighbor_offset)
                     .expect("neighbor_offset < len");
                 position.neighbor_offset += 1;
+                examined += 1;
                 if matches!(cfg.direction, Direction::Undirected)
                     && !position.seen_edges.insert(edge_id)
                 {
@@ -2373,6 +2280,7 @@ fn expand_single_hop_chunk(
             }
         })?;
     }
+    cfg.metrics.adjacency_entries(examined);
     if triples.is_empty() {
         return Ok(RecordBatch::new_empty(cfg.out_schema.clone()));
     }
@@ -2432,6 +2340,8 @@ fn expand_single_hop_chunk(
         requested.sort_unstable();
         let (resolved, identity_metrics) = if uuid_required {
             let lookup = ordinal_identities.lookup_node_uuids(&requested)?;
+            cfg.metrics
+                .destination_rows(lookup.values.iter().filter(|uuid| uuid.is_some()).count());
             (lookup.values, lookup.metrics)
         } else {
             (
@@ -2635,7 +2545,10 @@ fn expand_single_hop_chunk(
             .first()
             .map(RecordBatch::schema)
             .ok_or_else(|| exec_err("Expand: edge scan returned no batches".into()))?;
-        Some(concat_batches(&edge_schema, &edge_batches).map_err(|e| exec_err(e.to_string()))?)
+        let edge_batch =
+            concat_batches(&edge_schema, &edge_batches).map_err(|e| exec_err(e.to_string()))?;
+        cfg.metrics.edge_rows(edge_batch.num_rows());
+        Some(edge_batch)
     };
     // Position of each traversed edge within the edge batch, by `edge_id`.
     let edge_row: HashMap<u64, usize> = match edge_batch.as_ref() {
@@ -2837,6 +2750,7 @@ fn expand_single_hop_chunk(
         };
         concat_batches(&first.schema(), &node_batches).map_err(|e| exec_err(e.to_string()))?
     };
+    cfg.metrics.destination_rows(node_batch.num_rows());
     let node_id_index = node_batch
         .schema()
         .index_of("node_id")
@@ -2981,6 +2895,8 @@ mod edge_filter;
 mod edge_predicate;
 mod edge_properties;
 mod input_columns;
+pub(crate) mod metrics;
+mod ordinal_identity;
 mod reachability;
 #[cfg(test)]
 mod tests;
@@ -2994,3 +2910,6 @@ fn topology_for_provider(
         None => graphforge_storage::TopologyFiles::discover_legacy(legacy_root),
     }
 }
+
+#[cfg(test)]
+mod metrics_tests;
