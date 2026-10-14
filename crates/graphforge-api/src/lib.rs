@@ -1049,6 +1049,24 @@ impl GraphForge {
     ) -> Result<Self, GfError> {
         let options = GraphForgeOptions::default();
         let (_, resource_policy) = options.clone().validate()?;
+        Self::open_resolved_with_lifecycle_resources(
+            container_dir,
+            resolved_generation,
+            read_only,
+            lifecycle_mode,
+            options,
+            resource_policy,
+        )
+    }
+
+    fn open_resolved_with_lifecycle_resources(
+        container_dir: PathBuf,
+        resolved_generation: ResolvedProjectGeneration,
+        read_only: bool,
+        lifecycle_mode: graphforge_storage::filesystem_admission::ProjectLifecycleMode,
+        options: GraphForgeOptions,
+        resource_policy: resource_policy::NormalizedResourcePolicy,
+    ) -> Result<Self, GfError> {
         let project_open_recovery = if read_only {
             graphforge_storage::ProjectOpenRecoveryEvidence::checkpoint_view(
                 resolved_generation.generation_uuid(),

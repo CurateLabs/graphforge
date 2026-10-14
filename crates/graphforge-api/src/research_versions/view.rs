@@ -155,7 +155,7 @@ pub(crate) fn materialize(
     owner: &GraphForge,
     version: &ResearchVersionRecord,
 ) -> Result<GraphForge, GfError> {
-    materialize_with(owner, version, true)
+    materialize_with_resources(owner, version, true, owner.resource_policy.clone())
 }
 
 /// Materialize one Version for editing: the facade is writable from the start
@@ -163,14 +163,16 @@ pub(crate) fn materialize(
 pub(crate) fn materialize_writable(
     owner: &GraphForge,
     version: &ResearchVersionRecord,
+    resource_policy: crate::NormalizedResourcePolicy,
 ) -> Result<GraphForge, GfError> {
-    materialize_with(owner, version, false)
+    materialize_with_resources(owner, version, false, resource_policy)
 }
 
-fn materialize_with(
+pub(super) fn materialize_with_resources(
     owner: &GraphForge,
     version: &ResearchVersionRecord,
     read_only: bool,
+    resource_policy: crate::NormalizedResourcePolicy,
 ) -> Result<GraphForge, GfError> {
     let directory =
         Arc::new(tempfile::tempdir().map_err(|error| GfError::Storage(error.to_string()))?);
@@ -185,7 +187,7 @@ fn materialize_with(
         generation.clone(),
         read_only,
         owner.write_options.clone(),
-        owner.resource_policy.clone(),
+        resource_policy,
         graphforge_storage::ProjectOpenRecoveryEvidence::checkpoint_view(
             generation.generation_uuid(),
         ),

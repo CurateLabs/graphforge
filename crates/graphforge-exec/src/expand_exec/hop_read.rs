@@ -33,6 +33,29 @@ impl<'a> HopReadCharge<'a> {
         Ok(())
     }
 
+    /// Transfer a completed decoder envelope to the exact returned buffers.
+    /// Grow/shrink only the difference while holding one reservation lock.
+    pub(super) fn replace(&mut self, old: usize, new: usize) -> Result<(), GfError> {
+        if old > self.held {
+            return Err(GfError::Execution(
+                "ExpandExec invalid hop reservation transfer".into(),
+            ));
+        }
+        let mut reservation = self
+            .reservation
+            .lock()
+            .map_err(|_| GfError::Execution("ExpandExec hop read reservation poisoned".into()))?;
+        if new > old {
+            reservation
+                .try_grow(new - old)
+                .map_err(GfError::from_execution_error)?;
+        } else {
+            reservation.shrink(old - new);
+        }
+        self.held = self.held - old + new;
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(super) fn held_bytes(&self) -> usize {
         self.held
@@ -77,6 +100,15 @@ pub(super) fn concat_charged(
 ) -> Result<RecordBatch, GfError> {
     let decoded = batches_bytes(&batches);
     charge.charge(decoded)?;
+    concat_precharged(charge, batches)
+}
+
+/// Concatenate batches whose decoded buffers are already charged.
+pub(super) fn concat_precharged(
+    charge: &mut HopReadCharge<'_>,
+    batches: Vec<RecordBatch>,
+) -> Result<RecordBatch, GfError> {
+    let decoded = batches_bytes(&batches);
     if let [only] = batches.as_slice() {
         return Ok(only.clone());
     }

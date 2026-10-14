@@ -1120,6 +1120,103 @@ fn capture_lazy_footer_inventory(root: &Path) -> AuthenticatedPropertyInventory 
     .unwrap()
 }
 
+fn metadata_heavy_footer_fixture(row_groups: usize) -> TempDir {
+    use parquet::file::properties::WriterProperties;
+
+    let root = TempDir::new().unwrap();
+    fs::create_dir_all(root.path().join("properties")).unwrap();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+        Field::new("value", DataType::Int64, false),
+    ]));
+    let uuids = (1..=row_groups)
+        .map(|value| graphforge_core::uuid::Uuid::from_u128(value as u128))
+        .collect::<Vec<_>>();
+    let batch = arrow::record_batch::RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(
+                FixedSizeBinaryArray::try_from_iter(
+                    uuids.iter().map(|uuid| uuid.as_bytes().as_slice()),
+                )
+                .unwrap(),
+            ),
+            Arc::new(Int64Array::from(vec![1; row_groups])),
+        ],
+    )
+    .unwrap();
+    for route in ["Route0", "Route1"] {
+        let properties = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(1))
+            .build();
+        let mut writer = ArrowWriter::try_new(
+            File::create(root.path().join(format!("properties/{route}.parquet"))).unwrap(),
+            Arc::clone(&schema),
+            Some(properties),
+        )
+        .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+    root
+}
+
+#[test]
+fn metadata_heavy_footer_fits_once_but_a_second_footer_exceeds_the_fixed_share() {
+    const ROW_GROUPS: usize = 1200;
+    const QUERY_BUDGET: u64 = 16 << 20;
+    const INVENTORY_CEILING: usize = 2 << 20;
+
+    let root = metadata_heavy_footer_fixture(ROW_GROUPS);
+    let roomy = capture_lazy_footer_inventory(root.path());
+    roomy.set_query_memory_budget(512 << 20).unwrap();
+    roomy
+        .route_schema(PropertyRouteKind::Node, "Route0")
+        .unwrap()
+        .unwrap();
+    let fragment = &roomy.routes[&(PropertyRouteKind::Node, "Route0".into())][0];
+    let footer = roomy
+        .fragment_footer_of(fragment, PropertyRouteKind::Node, "Route0")
+        .unwrap();
+    assert_eq!(footer.metadata.num_row_groups(), ROW_GROUPS);
+    let metadata_bytes = footer.metadata.memory_size();
+    assert!(
+        metadata_bytes * 2 > INVENTORY_CEILING,
+        "the old charge for two metadata copies must refuse this fixture: {metadata_bytes}"
+    );
+
+    let tight = capture_lazy_footer_inventory(root.path());
+    tight.set_query_memory_budget(QUERY_BUDGET).unwrap();
+    let schema = tight
+        .route_schema(PropertyRouteKind::Node, "Route0")
+        .expect("one retained metadata allocation fits the fixed share")
+        .unwrap();
+    let held = tight.retained_metadata_bytes();
+    assert!(held <= INVENTORY_CEILING, "retained {held}");
+    for _ in 0..2 {
+        let again = tight
+            .route_schema(PropertyRouteKind::Node, "Route0")
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(&schema, &again));
+        assert_eq!(
+            tight
+                .route_row_upper_bound(PropertyRouteKind::Node, "Route0")
+                .unwrap(),
+            ROW_GROUPS
+        );
+        assert_eq!(tight.retained_metadata_bytes(), held);
+        let error = tight
+            .route_schema(PropertyRouteKind::Node, "Route1")
+            .unwrap_err();
+        assert_eq!(error.code(), "GF_RESOURCE_LIMIT");
+        assert!(error.to_string().contains("property inventory metadata"));
+        assert_eq!(tight.retained_metadata_bytes(), held);
+    }
+    let refused = &tight.routes[&(PropertyRouteKind::Node, "Route1".into())][0];
+    assert!(refused.footer.get().unwrap().is_err());
+}
+
 #[test]
 fn retained_fragment_footers_share_one_budget_and_refuse_before_caching_more() {
     let root = footer_budget_fixture();

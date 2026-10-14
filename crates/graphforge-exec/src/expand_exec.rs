@@ -2508,8 +2508,8 @@ fn expand_single_hop_chunk(
             }
             .map_err(|e| exec_err(e.to_string()))?;
         drop(edge_permit);
-        let edge_batch = concat_charged(&mut read_charge, edge_batches)?;
-        read_charge.release(decode_bytes);
+        read_charge.replace(decode_bytes, batches_bytes(&edge_batches))?;
+        let edge_batch = concat_precharged(&mut read_charge, edge_batches)?;
         cfg.metrics.edge_rows(edge_batch.num_rows());
         Some(edge_batch)
     };
@@ -2867,7 +2867,9 @@ mod edge_predicate;
 mod edge_properties;
 mod hop_read;
 mod input_columns;
-use hop_read::{HOP_READ_CONSUMER, HopReadCharge, concat_charged};
+use hop_read::{
+    HOP_READ_CONSUMER, HopReadCharge, batches_bytes, concat_charged, concat_precharged,
+};
 pub(crate) mod metrics;
 mod ordinal_identity;
 mod reachability;

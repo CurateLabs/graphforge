@@ -121,17 +121,16 @@ pub(super) fn admit_footer(
     fragment
         .footer_admission
         .get_or_init(|| {
-            // Include both the parsed Parquet metadata and Arrow schema. A second
-            // copy allows the route summary to merge fields/metadata while the
-            // source footer remains cached. Parquet's method counts capacities
-            // and shared pointers conservatively, but excludes allocator overhead.
+            // The footer retains one shared Parquet metadata allocation. Only
+            // the Arrow schema needs a second allowance for the merged route
+            // summary beside its cached source schema. Parquet's method counts
+            // shared pointers conservatively, but excludes allocator overhead.
             let schema_bytes = schema_bytes(footer.schema.as_ref());
             budget.admit(
                 footer
                     .metadata
                     .memory_size()
-                    .saturating_add(schema_bytes)
-                    .saturating_mul(2),
+                    .saturating_add(schema_bytes.saturating_mul(2)),
             )
         })
         .clone()

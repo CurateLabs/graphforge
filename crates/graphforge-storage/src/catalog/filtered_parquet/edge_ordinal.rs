@@ -219,6 +219,7 @@ fn read_selection(
 
     let builder = builder
         .with_row_groups(row_groups)
+        .with_row_selection_policy(parquet::arrow::arrow_reader::RowSelectionPolicy::Selectors)
         .with_row_selection(selection);
     let builder = if let Some(indices) = projection {
         let mask = ProjectionMask::roots(builder.parquet_schema(), indices.iter().copied());

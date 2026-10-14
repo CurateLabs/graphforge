@@ -76,19 +76,28 @@ when those caches are empty. An oversized supplied cache fails with
 admission changes shared state. Compatible supplied authorities are retained;
 attachment never replaces them or raises their ceilings.
 
-An edge-record decode reserves a conservative metadata-derived estimate before
-reading pages: four times compressed pages, uncompressed pages, reconstructed
-values and decoder levels, plus 64 KiB per selected column chunk. The estimate
-covers complete selected row groups, including rows later discarded by the
-filter. Dictionary strings use unencoded value-size statistics; a footer that
-lacks them uses `num_values * uncompressed_size`. An estimate beyond the query
-pool fails with the named `ExpandExec hop read` consumer. The ordinary storage
-reader also enforces its encoded-footer, row-group and column admission caps.
+An edge-record decode reserves active decoder scratch plus accumulated Arrow
+output before reading pages. Files run sequentially; each projected column can
+advance row groups independently, so active scratch sums each column's largest
+selected chunk. Complete chunk/page/dictionary/level allowances remain
+conservative. Uncompressed and Zstandard pages have admitted decoder bounds;
+Zstandard includes the two contexts that can overlap at a group transition.
+Other codecs fail before pages unless their native workspace has a justified
+bound. Fixed output counts full reader batch capacities, including the
+last partial batch; edge selection uses the bounded Selectors policy.
+Variable strings use unencoded value-size statistics; a footer that lacks them
+uses `num_values * uncompressed_size`. The envelope also covers a file's
+concat/filter copies. After decoding, the reservation transfers atomically to
+actual retained batches, and concatenation admits its additional copy before
+allocation. An estimate beyond the query pool fails with the named
+`ExpandExec hop read` consumer. Storage retains its encoded-footer, row-group
+and column admission caps; noncanonical nested/dictionary Arrow topology is
+refused rather than treated as scalar output.
 
-Property inventory admission counts route/path/map capacities and twice
-`ParquetMetaData::memory_size()` plus Arrow schema storage per cached footer
-(the second copy allows merged route summaries). A footer beyond the shared
-inventory allowance fails with `GF_RESOURCE_LIMIT`, naming `property inventory
+Property inventory admission counts route/path/map capacities and one
+`ParquetMetaData::memory_size()` plus two Arrow schema allowances per cached
+footer (the second schema allows merged route summaries). A footer beyond the
+shared inventory allowance fails with `GF_RESOURCE_LIMIT`, naming `property inventory
 metadata`, and is not cached. The budget includes every fragment rather than
 applying a separate limit to each one. Facade diagnostics expose admitted
 `retained_inventory_metadata_bytes`.

@@ -35,14 +35,16 @@ pub(crate) fn validate(
         crate::research_claims::ledger::read_claims(generation)?;
         crate::research_claims::ledger::read_suppressions(generation)?;
     }
-    let mut graph = GraphForge::open_resolved_with_lifecycle_mode(
+    let options = crate::GraphForgeOptions::default();
+    let (_, resource_policy) = options.clone().validate()?;
+    let graph = GraphForge::open_resolved_with_lifecycle_resources(
         generation.container_root().to_path_buf(),
         generation.clone(),
         true,
         graphforge_storage::filesystem_admission::ProjectLifecycleMode::Ephemeral,
+        options,
+        resource_policy.with_private_query_budget(64 * 1024 * 1024),
     )?;
-    graph.resource_policy.memory_budget_bytes = 64 * 1024 * 1024;
-    graph.resource_policy.spill_enabled = false;
     let fields = crate::branches::fields::read(&graph, &CancellationToken::new())?;
     for row in crate::branches::baseline::read(&graph)?.values() {
         if !registry.identities.contains_key(&row.origin)

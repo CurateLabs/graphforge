@@ -64,7 +64,8 @@ fn edge_uuid(slot: usize) -> Uuid {
     Uuid::from_u128(0x2000_0000_0000_0000_0000_0000_0000_0000 | (slot as u128 + 1))
 }
 
-fn construct(dir: &Path, edges: usize) {
+fn construct(dir: &Path, edges: usize, source_span: usize) {
+    assert!(source_span > 0 && source_span <= NODES);
     let mut node_fields = CONSTRUCTION_NODE_SCHEMA.fields().to_vec();
     node_fields.push(Arc::new(Field::new("ident", DataType::Int64, true)));
     let node_schema = Arc::new(Schema::new(node_fields));
@@ -110,7 +111,7 @@ fn construct(dir: &Path, edges: usize) {
         for edge in start..end {
             ids.append_value(edge_uuid(edge).as_bytes()).unwrap();
             sources
-                .append_value(node_uuid(edge % NODES).as_bytes())
+                .append_value(node_uuid(edge % source_span).as_bytes())
                 .unwrap();
             targets
                 .append_value(node_uuid((edge * 7 + 1) % NODES).as_bytes())
@@ -136,6 +137,10 @@ fn construct(dir: &Path, edges: usize) {
 }
 
 fn open(project: &Path, budget: u64) -> GraphForge {
+    open_with_batch_size(project, budget, None)
+}
+
+fn open_with_batch_size(project: &Path, budget: u64, batch_size: Option<usize>) -> GraphForge {
     GraphForge::new_with_options(
         Some(project.to_str().expect("utf-8 path")),
         GraphForgeOptions {
@@ -147,6 +152,7 @@ fn open(project: &Path, budget: u64) -> GraphForge {
                 target_partitions: Some(1),
                 io_concurrency: Some(2),
                 compute_threads: Some(1),
+                batch_size,
                 memory_budget_bytes: Some(budget),
                 ..ExecutionResourcePolicy::default()
             },
@@ -197,9 +203,13 @@ struct Built {
 /// A graph of `edges` relationships with an adjacency index of 87,381-edge
 /// shards, the size the smallest explicit budget gives.
 fn build(edges: usize) -> Built {
+    build_with_source_span(edges, NODES)
+}
+
+fn build_with_source_span(edges: usize, source_span: usize) -> Built {
     let root = tempfile::tempdir().expect("project directory");
     let project = root.path().join("project");
-    construct(&project, edges);
+    construct(&project, edges, source_span);
     open(&project, TIGHT_BUDGET).index_adjacency().unwrap();
     Built {
         _root: root,
@@ -335,21 +345,53 @@ fn a_map_larger_than_the_share_is_declined_and_the_shards_take_what_it_would_hav
     assert!(all.total() <= all.budget, "{all:?}");
 }
 
-/// A small pool refuses the decoder before page allocation, even when the
-/// requested rows themselves would fit. The same graph and query complete
-/// with a roomy budget, so refusal is resource admission rather than invalid
-/// topology or a binding-only check.
+/// The distributed 120,000-edge read fits the small pool when sequential
+/// decoders reserve their live windows rather than the whole route's scratch.
 #[test]
-fn edge_record_decode_is_admitted_before_reading_parquet_pages() {
+fn edge_record_reads_that_fit_the_pool_preserve_every_row() {
     let _serial = serial();
     let built = build(FITTING_EDGES);
     let query = "MATCH (a:Entity)-[e:LINK]->(b:Entity) RETURN e";
+    for budget in [TIGHT_BUDGET, ROOMY_BUDGET] {
+        let forge = open(&built.project, budget);
+        let result = forge
+            .execute(query)
+            .expect("the distributed edge-record read fits the pool");
+        assert_eq!(
+            result
+                .batches
+                .iter()
+                .map(RecordBatch::num_rows)
+                .sum::<usize>(),
+            built.edges
+        );
+        assert!(result.stats.peak_memory_bytes <= budget);
+    }
+}
+
+/// One anchored hop requests every edge of the concentrated graph in one
+/// 800,000-row frame. Its retained edge-id and UUID columns alone exceed the
+/// small pool, before other output or decoder scratch. The public batch size
+/// keeps this unlimited read from splitting that frame. Admission refuses
+/// before pages are read, while the identical graph/query fits a roomy pool.
+#[test]
+fn edge_record_decode_is_admitted_before_reading_parquet_pages() {
+    const HOP_EDGES: usize = 800_000;
+    const EDGE_ID_AND_UUID_BYTES: u64 = 8 + 16;
+
+    let _serial = serial();
+    assert!(
+        u64::try_from(HOP_EDGES).unwrap() * EDGE_ID_AND_UUID_BYTES > TIGHT_BUDGET,
+        "one frame's retained edge-id and UUID columns must exceed the tight pool"
+    );
+    let built = build_with_source_span(HOP_EDGES, 1);
+    let query = "MATCH (a:Entity {ident: 0})-[e:LINK]->(b:Entity) RETURN e";
     let _capture = LifecycleIoCapture::install();
-    let tight = open(&built.project, TIGHT_BUDGET);
+    let tight = open_with_batch_size(&built.project, TIGHT_BUDGET, Some(HOP_EDGES));
     io_stats::reset();
     let message = tight
         .execute(query)
-        .expect_err("the full edge decode cannot fit the tight pool")
+        .expect_err("one anchored frame's retained edge records cannot fit the tight pool")
         .to_string();
     assert!(
         message.contains("Resources exhausted") && message.contains("ExpandExec hop read"),
@@ -361,7 +403,7 @@ fn edge_record_decode_is_admitted_before_reading_parquet_pages() {
         "refusal must precede page decode: {io:?}"
     );
     drop(tight);
-    let roomy = open(&built.project, ROOMY_BUDGET);
+    let roomy = open_with_batch_size(&built.project, ROOMY_BUDGET, Some(HOP_EDGES));
     let result = roomy
         .execute(query)
         .expect("the same decoder fits a roomy budget");

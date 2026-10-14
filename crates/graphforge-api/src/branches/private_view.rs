@@ -36,7 +36,10 @@ fn open_with(
         generation.clone(),
         read_only,
         owner.write_options.clone(),
-        owner.resource_policy.clone(),
+        owner
+            .resource_policy
+            .clone()
+            .with_private_query_budget(64 * 1024 * 1024),
         graphforge_storage::ProjectOpenRecoveryEvidence::checkpoint_view(
             generation.generation_uuid(),
         ),
@@ -44,7 +47,5 @@ fn open_with(
     graph.lifecycle_mode =
         graphforge_storage::filesystem_admission::ProjectLifecycleMode::Ephemeral;
     graph.research_materialization = Some(directory);
-    graph.resource_policy.memory_budget_bytes = 64 * 1024 * 1024;
-    graph.resource_policy.spill_enabled = false;
     Ok(graph)
 }

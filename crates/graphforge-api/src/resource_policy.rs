@@ -537,6 +537,14 @@ fn construction_cpu_split(
 }
 
 impl NormalizedResourcePolicy {
+    /// Apply a private view's query ceiling before its retained caches hydrate.
+    pub(crate) fn with_private_query_budget(mut self, memory_budget_bytes: u64) -> Self {
+        self.memory_budget_bytes = memory_budget_bytes;
+        self.memory_budget_source = MemoryBudgetSource::Explicit;
+        self.spill_enabled = false;
+        self
+    }
+
     /// A fresh instance construction admission sized by this policy (#1586).
     pub(crate) fn construction_cpu_admission(
         &self,

@@ -1209,3 +1209,40 @@ async fn a_single_hop_expansion_charges_its_reads_and_fails_typed_over_budget() 
     );
     assert_eq!(pool.leaked(), 0, "a reservation leaked");
 }
+
+#[test]
+fn decoder_admission_transfers_to_retained_batches_without_a_duplicate_charge() {
+    let pool = ConsumerPool::new(160 * 1024);
+    let reservation = hop_read_reservation(&pool);
+    let batches: Vec<_> = (0..2).map(|_| counting_batch(4096)).collect();
+    let decoded = batches_bytes(&batches);
+    assert!(2 * decoded < 160 * 1024);
+    let mut charge = HopReadCharge::new(&reservation);
+    let envelope = 128 * 1024;
+    charge.charge(envelope).unwrap();
+    charge.replace(envelope, decoded).unwrap();
+    assert_eq!(charge.held_bytes(), decoded);
+    let joined = concat_precharged(&mut charge, batches).unwrap();
+    assert_eq!(joined.num_rows(), 8192);
+    assert_eq!(charge.held_bytes(), decoded);
+    assert!(pool.peak(HOP_READ_CONSUMER) <= 160 * 1024);
+    drop(joined);
+    drop(charge);
+    drop(reservation);
+    assert_eq!(pool.now(HOP_READ_CONSUMER), 0);
+    assert_eq!(pool.leaked(), 0);
+}
+
+#[test]
+fn a_failed_decoder_transfer_preserves_its_original_reservation() {
+    let pool = ConsumerPool::new(64 * 1024);
+    let reservation = hop_read_reservation(&pool);
+    let mut charge = HopReadCharge::new(&reservation);
+    charge.charge(32 * 1024).unwrap();
+    let error = charge.replace(32 * 1024, 128 * 1024).unwrap_err();
+    assert!(error.to_string().contains(HOP_READ_CONSUMER));
+    assert_eq!(charge.held_bytes(), 32 * 1024);
+    drop(charge);
+    drop(reservation);
+    assert_eq!(pool.now(HOP_READ_CONSUMER), 0);
+}
