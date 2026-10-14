@@ -659,7 +659,13 @@ impl GraphPlanLowerer {
 
     /// The OPTIONAL MATCH counterpart of [`Self::lower_correlated_exists`]:
     /// the optional pipeline is seeded with the distinct outer rows, executed
-    /// once, and left-joined back on every outer column, null-safe.
+    /// once, and left-joined back to them null-safe.
+    ///
+    /// A plain pattern is seeded with, and joined back on, only the outer
+    /// variables it names (see [`Self::narrow_correlated_seed`]): a pattern
+    /// that matches `friend` again does not depend on the other columns of the
+    /// outer row, so rows that share the node share its matches. Any other
+    /// pattern keeps every outer column as its seed and its key.
     fn lower_correlated_optional_op(
         &self,
         child: &GraphPlan,
@@ -667,6 +673,28 @@ impl GraphPlanLowerer {
         var_map: &mut VarMap,
     ) -> Result<Option<LogicalPlan>, LoweringError> {
         let input = self.bind_outer_nodes(&child.ops, input, var_map)?;
+        if let Some(narrowed) =
+            self.narrow_correlated_seed(&child.ops, &child.exprs, &input, var_map)?
+        {
+            let mut child_vm = var_map.clone();
+            let child_plan = self.lower_pipeline_from(
+                &narrowed.ops,
+                &child.exprs,
+                &mut child_vm,
+                narrowed.seed,
+                None,
+            )?;
+            if let Some(join_keys) = column_keys(&input, &child_plan, &narrowed.key_columns) {
+                return Ok(Some(seeded_optional_match(
+                    input,
+                    child_plan,
+                    narrowed.seed_id,
+                    join_keys,
+                    &child_vm,
+                    var_map,
+                )));
+            }
+        }
         let (seed_id, seed) = correlated_seed(&input)?;
         let mut child_vm = var_map.clone();
         let child_plan =
@@ -674,29 +702,9 @@ impl GraphPlanLowerer {
         let Some(join_keys) = outer_column_keys(&input, &child_plan) else {
             return Ok(None);
         };
-        let outer_schema = input.schema().clone();
-        let inner_keep_idx = child_plan
-            .schema()
-            .iter()
-            .enumerate()
-            .filter(|(_, (qualifier, field))| {
-                outer_schema
-                    .index_of_column_by_name(*qualifier, field.name())
-                    .is_none()
-            })
-            .map(|(index, _)| index)
-            .collect();
-        merge_optional_child_vars(&child_vm, var_map);
-        let node = OptionalMatchNode::new(
-            Arc::new(input),
-            Arc::new(child_plan),
-            join_keys,
-            inner_keep_idx,
-        )
-        .with_correlated_seed(seed_id);
-        Ok(Some(LogicalPlan::Extension(Extension {
-            node: Arc::new(node),
-        })))
+        Ok(Some(seeded_optional_match(
+            input, child_plan, seed_id, join_keys, &child_vm, var_map,
+        )))
     }
 
     pub(super) fn lower_optional_op(
@@ -1068,6 +1076,43 @@ fn correlated_exists_join(
     .and_then(|builder| builder.project(plan_columns(outer)))
     .and_then(LogicalPlanBuilder::build)
     .map_unsupported_expr()
+}
+
+/// `outer` left-joined, null-safe on `join_keys`, to `child_plan`, the optional
+/// pipeline seeded by the correlated seed `seed_id`. The result keeps the
+/// columns of `child_plan` that `outer` lacks, and registers the variables the
+/// pipeline introduced in `var_map`.
+fn seeded_optional_match(
+    outer: LogicalPlan,
+    child_plan: LogicalPlan,
+    seed_id: u64,
+    join_keys: Vec<(usize, usize)>,
+    child_vm: &VarMap,
+    var_map: &mut VarMap,
+) -> LogicalPlan {
+    let inner_keep_idx = child_plan
+        .schema()
+        .iter()
+        .enumerate()
+        .filter(|(_, (qualifier, field))| {
+            outer
+                .schema()
+                .index_of_column_by_name(*qualifier, field.name())
+                .is_none()
+        })
+        .map(|(index, _)| index)
+        .collect();
+    merge_optional_child_vars(child_vm, var_map);
+    let node = OptionalMatchNode::new(
+        Arc::new(outer),
+        Arc::new(child_plan),
+        join_keys,
+        inner_keep_idx,
+    )
+    .with_correlated_seed(seed_id);
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(node),
+    })
 }
 
 /// The given `outer` columns paired with the same qualified column of a
