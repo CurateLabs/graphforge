@@ -462,52 +462,25 @@ fn clustering_coefficient_hub_pair_work_never_consumes_the_iteration_budget() {
     }
 }
 
-/// Run `execute` while another thread cancels it after `delay`; the work is
-/// sized to run for seconds, so only an in-loop poll can end it sooner.
-fn cancelled_midway(
-    graph: &AdjacencyGraph,
-    normalization: ClusteringNormalization,
-    threads: usize,
-) -> (Result<AlgorithmOutput, AlgorithmError>, std::time::Duration) {
+#[test]
+fn clustering_coefficient_cancels_inside_an_intersection() {
+    let ordinals = (0..4_096).collect::<Vec<u32>>();
     let cancellation = AlgorithmCancellation::default();
-    let mut control = lcc_control(
-        AlgorithmLimits::default().with_compute_threads(threads),
-        normalization,
+    let control = lcc_control(
+        AlgorithmLimits::default(),
+        ClusteringNormalization::NeighborEdges,
         cancellation.clone(),
     );
-    if threads > 1 {
-        control = control.with_compute_pool(Arc::new(crate::ComputePool::new(threads).unwrap()));
-    }
-    let canceller = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(100));
+    let mut work = 0;
+    let mut visited = 0;
+    let result = for_each_intersection(&ordinals, &ordinals, &control, &mut work, |_| {
+        visited += 1;
         cancellation.cancel();
+        Ok(())
     });
-    let started = std::time::Instant::now();
-    let result = ClusteringCoefficient.execute(graph, &control);
-    let elapsed = started.elapsed();
-    canceller.join().unwrap();
-    (result, elapsed)
-}
-
-#[test]
-fn clustering_coefficient_cancels_inside_a_large_hub_pair_loop() {
-    // 12,000 leaves is 144,000,000 hub pairs, and 12,001 nodes exceed the
-    // iteration budget: cancellation must still end the run promptly.
-    let graph = hub_graph(12_000);
-    for normalization in NORMALIZATIONS {
-        for threads in [1, 4] {
-            let (result, elapsed) = cancelled_midway(&graph, normalization, threads);
-            assert_eq!(
-                result,
-                Err(AlgorithmError::Cancelled),
-                "{normalization:?} threads={threads} ran {elapsed:?}"
-            );
-            assert!(
-                elapsed < std::time::Duration::from_secs(5),
-                "{normalization:?} threads={threads} took {elapsed:?} to observe cancellation"
-            );
-        }
-    }
+    assert_eq!(result, Err(AlgorithmError::Cancelled));
+    assert_eq!(visited, CLUSTERING_COEFFICIENT_CHECKPOINT_WORK);
+    assert_eq!(work, CLUSTERING_COEFFICIENT_CHECKPOINT_WORK);
 }
 
 #[test]
@@ -591,4 +564,114 @@ fn clustering_coefficient_keeps_node_edge_and_output_limits_on_large_graphs() {
         Err(AlgorithmError::OutputLimit { .. })
     ));
     assert_eq!(dispatched(AlgorithmLimits::default()), Ok(()));
+}
+
+/// Independent ordered-pair oracle retained from the previous kernel.
+fn pair_oracle(
+    prepared: &PreparedClusteringCoefficient,
+    node: usize,
+    normalization: ClusteringNormalization,
+) -> f64 {
+    let outgoing = &prepared.outgoing;
+    let incoming = &prepared.incoming;
+    let mut neighbors = outgoing.row(node).to_vec();
+    neighbors.extend_from_slice(incoming.row(node));
+    neighbors.sort_unstable();
+    neighbors.dedup();
+    let strength =
+        |a: u32, b: u32| u64::from(outgoing.has_arc(a, b)) + u64::from(outgoing.has_arc(b, a));
+    let node_ordinal = node as u32;
+    let (numerator, denominator) = match normalization {
+        ClusteringNormalization::NeighborEdges => {
+            let degree = neighbors.len() as u64;
+            let edges = neighbors
+                .iter()
+                .flat_map(|&a| neighbors.iter().map(move |&b| (a, b)))
+                .filter(|&(a, b)| a != b && outgoing.has_arc(a, b))
+                .count() as u64;
+            (edges, degree * degree.saturating_sub(1))
+        }
+        ClusteringNormalization::Fagiolo => {
+            let degree = (outgoing.row(node).len() + incoming.row(node).len()) as u64;
+            let reciprocal = outgoing
+                .row(node)
+                .iter()
+                .filter(|&&a| outgoing.has_arc(a, node_ordinal))
+                .count() as u64;
+            let mut triangles = 0;
+            for &a in &neighbors {
+                for &b in &neighbors {
+                    triangles +=
+                        strength(node_ordinal, a) * strength(a, b) * strength(b, node_ordinal);
+                }
+            }
+            (
+                triangles,
+                2 * (degree * degree.saturating_sub(1) - 2 * reciprocal),
+            )
+        }
+    };
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 / denominator as f64
+    }
+}
+
+#[test]
+fn clustering_intersections_match_pair_oracle_for_every_small_directed_graph() {
+    // Every four-node directed simple graph, with an isolated fifth node.
+    // Repeated arcs and self-loops exercise the simplification contract too.
+    let possible = (0..4_u64)
+        .flat_map(|a| (0..4_u64).filter(move |&b| b != a).map(move |b| (a, b)))
+        .collect::<Vec<_>>();
+    for mask in 0..(1_u32 << possible.len()) {
+        let mut edges = possible
+            .iter()
+            .enumerate()
+            .filter(|(bit, _)| mask & (1 << bit) != 0)
+            .map(|(_, &edge)| edge)
+            .collect::<Vec<_>>();
+        edges.extend(edges.clone());
+        edges.extend((0..5).map(|node| (node, node)));
+        let graph = AdjacencyGraph::with_test_directed_edges(5, &edges);
+        for normalization in NORMALIZATIONS {
+            let control = lcc_control(
+                AlgorithmLimits::default(),
+                normalization,
+                AlgorithmCancellation::default(),
+            );
+            let prepared = prepare_clustering_coefficient(&graph, &control).unwrap();
+            let scores = clustering_coefficient_scores_serial(&prepared, &control).unwrap();
+            for (node, score) in scores.iter().enumerate() {
+                assert_eq!(
+                    score.to_bits(),
+                    pair_oracle(&prepared, node, normalization).to_bits(),
+                    "mask={mask} node={node} normalization={normalization:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn clustering_intersections_bound_sparse_hub_work_by_neighbor_degrees() {
+    let leaves = 12_000;
+    let graph = hub_graph(leaves);
+    for normalization in NORMALIZATIONS {
+        let control = lcc_control(
+            AlgorithmLimits::default(),
+            normalization,
+            AlgorithmCancellation::default(),
+        );
+        let prepared = prepare_clustering_coefficient(&graph, &control).unwrap();
+        let mut work = 0;
+        let hub_score =
+            clustering_coefficient_score_node(&prepared, 0, &control, &mut work).unwrap();
+        assert_eq!(hub_score, 2.0 / leaves as f64);
+        // Each leaf has at most three neighbors (the hub and chain links).
+        // Fagiolo visits both directions, at most six probes per leaf.
+        assert!(work <= 6 * leaves, "{normalization:?}: {work} probes");
+        assert!(work > leaves, "the fixture must exercise intersections");
+    }
 }
