@@ -178,14 +178,15 @@ async fn optional_match_shows_the_metrics_of_the_plan_it_executed() {
     );
     assert_compute_time_recorded(&expands[0]);
 
-    // A DataFusion join below the Expand is rebuilt when the plan is bound, so
-    // it only reports its rows if the executed copy is the one displayed.
-    let joins = operators(&text, "HashJoinExec");
-    assert!(
-        text.lines()
-            .any(|line| { line.contains("join_type=Right") && line.contains("output_rows=4") }),
-        "the executed inner join is missing: {joins:?}\n{text}"
-    );
+    // DataFusion operators of the inner plan are rebuilt when it is bound to
+    // the outer rows, so they report their rows only if the executed copy is
+    // the one displayed. The outer scan's filter and the inner's both pass the
+    // four rows they were given.
+    let filters = operators(&text, "FilterExec");
+    assert_eq!(filters.len(), 2, "{text}");
+    for filter in &filters {
+        assert_eq!(count(filter, "output_rows"), 4, "{text}");
+    }
 }
 
 #[tokio::test]
