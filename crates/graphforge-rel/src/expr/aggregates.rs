@@ -254,10 +254,18 @@ impl CollectAcc {
         if v.is_null() {
             return;
         }
+        // A nested value extracted from a batch is a slice that keeps the whole batch's
+        // buffers alive, and `ScalarValue::size` reports those buffers for every slice.
+        // Copy each retained element down to its own row so the charge to the memory
+        // pool is the element's own bytes, not the batch's once per element.
         if self.distinct {
-            self.seen.admit(&mut self.values, v, eq);
+            if self.seen.admit(&mut self.values, v, eq)
+                && let Some(admitted) = self.values.last_mut()
+            {
+                admitted.compact();
+            }
         } else {
-            self.values.push(v);
+            self.values.push(v.compacted());
         }
     }
 
@@ -286,7 +294,12 @@ impl datafusion::logical_expr::Accumulator for CollectAcc {
     }
     fn size(&self) -> usize {
         std::mem::size_of_val(self)
-            + self.values.iter().map(ScalarValue::size).sum::<usize>()
+            // ScalarValue::size includes each occupied vector slot and its
+            // owned buffers; size_of_vec also counts unused allocated slots.
+            + ScalarValue::size_of_vec(&self.values)
+            - std::mem::size_of_val(&self.values)
+            + self.elem_type.size()
+            - std::mem::size_of_val(&self.elem_type)
             + self.seen.heap_size()
     }
     fn state(&mut self) -> datafusion::error::Result<Vec<ScalarValue>> {
@@ -1135,6 +1148,105 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// The memory a `collect` reports must be the elements' own bytes. A nested value
+    /// sliced out of a batch keeps that whole batch alive, and `ScalarValue::size`
+    /// would charge the batch once per element.
+    mod collect_memory {
+        use super::*;
+        use datafusion::arrow::array::{ArrayRef, Int64Array, ListArray, StructArray};
+        use datafusion::arrow::datatypes::{Field, Fields, Int64Type};
+        use datafusion::logical_expr::Accumulator;
+
+        const ROWS: usize = 4_096;
+
+        fn pairs() -> ArrayRef {
+            let ids: ArrayRef = Arc::new(Int64Array::from_iter_values(0..ROWS as i64));
+            let times: ArrayRef = Arc::new(Int64Array::from_iter_values(
+                (0..ROWS as i64).map(|i| i % 7),
+            ));
+            let fields = Fields::from(vec![
+                Field::new("id", DataType::Int64, true),
+                Field::new("time", DataType::Int64, true),
+            ]);
+            Arc::new(StructArray::new(fields, vec![ids, times], None))
+        }
+
+        /// Far under the batch's own size and linear in the rows; the uncompacted
+        /// charge was the batch's buffers once per row, about `ROWS` times larger.
+        fn assert_per_row(acc: &CollectAcc, rows: usize) {
+            let per_row = acc.size() / rows;
+            assert!(
+                per_row < 1_024,
+                "{per_row} bytes charged per collected row of 16 bytes"
+            );
+        }
+
+        #[test]
+        fn spare_slots_and_scalar_buffer_capacity_are_charged() {
+            let mut acc = CollectAcc::new(false, DataType::Utf8);
+            let mut text = String::with_capacity(16_384);
+            text.push_str("kept");
+            acc.push_value(ScalarValue::Utf8(Some(text)));
+            let before = acc.size();
+            let old_capacity = acc.values.capacity();
+            acc.values.reserve(128);
+            let slots = acc.values.capacity() - old_capacity;
+            assert_eq!(
+                acc.size() - before,
+                slots * std::mem::size_of::<ScalarValue>()
+            );
+            assert!(
+                acc.size() >= 16_384 + acc.values.capacity() * std::mem::size_of::<ScalarValue>()
+            );
+        }
+
+        #[test]
+        fn collected_structs_are_charged_per_row_not_per_batch() {
+            for distinct in [false, true] {
+                let batch = pairs();
+                let mut acc = CollectAcc::new(distinct, batch.data_type().clone());
+                acc.update_batch(std::slice::from_ref(&batch)).unwrap();
+                assert_eq!(acc.values.len(), ROWS);
+                assert_per_row(&acc, ROWS);
+                let ScalarValue::List(list) = acc.evaluate().unwrap() else {
+                    panic!("collect must return a list")
+                };
+                assert_eq!(list.value(0).as_ref(), batch.as_ref());
+            }
+        }
+
+        #[test]
+        fn merged_structs_are_charged_per_row_not_per_state() {
+            for distinct in [false, true] {
+                let batch = pairs();
+                let mut partial = CollectAcc::new(distinct, batch.data_type().clone());
+                partial.update_batch(std::slice::from_ref(&batch)).unwrap();
+                let ScalarValue::List(state) = partial.state().unwrap().remove(0) else {
+                    panic!("collect state must be a list")
+                };
+                let mut acc = CollectAcc::new(distinct, batch.data_type().clone());
+                acc.merge_batch(&[state as ArrayRef]).unwrap();
+                assert_eq!(acc.values.len(), ROWS);
+                assert_per_row(&acc, ROWS);
+                let ScalarValue::List(list) = acc.evaluate().unwrap() else {
+                    panic!("collect must return a list")
+                };
+                assert_eq!(list.value(0).as_ref(), batch.as_ref());
+            }
+        }
+
+        #[test]
+        fn collected_lists_are_charged_per_row_not_per_batch() {
+            let rows: ArrayRef = Arc::new(ListArray::from_iter_primitive::<Int64Type, _, _>(
+                (0..ROWS as i64).map(|i| Some(vec![Some(i), Some(i + 1)])),
+            ));
+            let mut acc = CollectAcc::new(false, rows.data_type().clone());
+            acc.update_batch(std::slice::from_ref(&rows)).unwrap();
+            assert_eq!(acc.values.len(), ROWS);
+            assert_per_row(&acc, ROWS);
         }
     }
 }

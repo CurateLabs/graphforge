@@ -5,7 +5,10 @@
 //! `WITH person, liker, max(like.creationDate) AS t MATCH (person)<-[..]-(m)<-[..]-(liker)`
 //! used to expand `person`'s whole relationship set for every aggregated row. The
 //! planner now expands it once per distinct `person` and hash-joins the result
-//! back to the rows.
+//! back to the rows. IC7's own first two stages no longer reach this rewrite:
+//! the binder answers both from one expansion (`extremum_rematch.rs`), so the
+//! full query keeps one anchored expansion, and a second stage that rewrite
+//! declines keeps two.
 //!
 //! Every result test asserts that the plan really contains the anchored
 //! expansion, then compares the rewrite with the same query written so the
@@ -173,18 +176,24 @@ fn assert_same_rows(rewritten: &str, per_row: &str, anchored: usize, expected: &
 
 /// The three stages of LDBC SNB Interactive IC7 over every person, not one.
 /// `barrier` follows each aggregating WITH: empty for the rewritten form, an
-/// ORDER BY for the form the planner keeps per row.
-fn latest_like_query(first_stage_filter: &str, barrier: [&str; 2]) -> String {
+/// ORDER BY for the form the planner keeps per row. `second_stage_extra` is
+/// appended to the second stage's WHERE.
+fn latest_like_query(
+    first_stage_filter: &str,
+    second_stage_extra: &str,
+    barrier: [&str; 2],
+) -> String {
     format!(
         "MATCH (person:Person)<-[:HAS_CREATOR]-(message)<-[like:LIKES]-(liker:Person)
          WHERE {first_stage_filter}(message:Post OR message:Comment)
          WITH person, liker, max(like.creationDate) AS likeTime {first}
          MATCH (person)<-[:HAS_CREATOR]-(message)<-[like:LIKES]-(liker)
-         WHERE (message:Post OR message:Comment) AND like.creationDate = likeTime
+         WHERE (message:Post OR message:Comment) AND like.creationDate = likeTime{extra}
          WITH person, liker, likeTime, min(message.id) AS latestMessageId {second}
          MATCH (person)<-[:HAS_CREATOR]-(message)
          WHERE (message:Post OR message:Comment) AND message.id = latestMessageId
          RETURN person.id AS personId, liker.id AS likerId, likeTime, message.id AS messageId",
+        extra = second_stage_extra,
         first = barrier[0],
         second = barrier[1],
     )
@@ -200,25 +209,52 @@ fn latest_like_query(first_stage_filter: &str, barrier: [&str; 2]) -> String {
 ///
 /// Person 1 anchors three groups, so its relationships are the same expansion
 /// three times in the per-row form. Liker 12's NULL key must match no row.
+const LATEST_LIKE_ROWS: &[&[&str]] = &[
+    &["1", "10", "7", "101"],
+    &["1", "11", "3", "100"],
+    &["2", "10", "2", "102"],
+    &["2", "11", "4", "102"],
+    &["3", "12", "9", "201"],
+];
+
+/// The binder answers stages one and two from one expansion (see
+/// `extremum_rematch.rs`), so only the third stage is left to restart at the
+/// carried `person`, and it is expanded once per distinct person.
 #[test]
 fn latest_like_per_liker_matches_the_per_row_form() {
     assert_same_rows(
-        &latest_like_query("", ["", ""]),
+        &latest_like_query("", "", ["", ""]),
         &latest_like_query(
+            "",
             "",
             [
                 "ORDER BY person.id, liker.id",
                 "ORDER BY person.id, liker.id",
             ],
         ),
+        1,
+        LATEST_LIKE_ROWS,
+    );
+}
+
+/// A second stage that is not the first stage's rows with the extremum
+/// conjunct (here one more conjunct, true of every message) is left alone by the
+/// extremum rewrite, so both the second and the third stage restart at a
+/// carried node and each is expanded once per distinct anchor.
+#[test]
+fn a_second_stage_the_extremum_rewrite_declines_is_still_expanded_once_per_anchor() {
+    assert_same_rows(
+        &latest_like_query("", " AND message.id > 0", ["", ""]),
+        &latest_like_query(
+            "",
+            " AND message.id > 0",
+            [
+                "ORDER BY person.id, liker.id",
+                "ORDER BY person.id, liker.id",
+            ],
+        ),
         2,
-        &[
-            &["1", "10", "7", "101"],
-            &["1", "11", "3", "100"],
-            &["2", "10", "2", "102"],
-            &["2", "11", "4", "102"],
-            &["3", "12", "9", "201"],
-        ],
+        LATEST_LIKE_ROWS,
     );
 }
 
@@ -261,15 +297,16 @@ fn duplicate_input_rows_and_null_anchors_keep_their_multiplicity() {
 #[test]
 fn empty_input_returns_no_rows() {
     assert_same_rows(
-        &latest_like_query("person.id = 999 AND ", ["", ""]),
+        &latest_like_query("person.id = 999 AND ", "", ["", ""]),
         &latest_like_query(
             "person.id = 999 AND ",
+            "",
             [
                 "ORDER BY person.id, liker.id",
                 "ORDER BY person.id, liker.id",
             ],
         ),
-        2,
+        1,
         &[],
     );
 }

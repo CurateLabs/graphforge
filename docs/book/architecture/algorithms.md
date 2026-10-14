@@ -476,15 +476,31 @@ A zero denominator yields `0.0`, including isolated and degree-one nodes.
 remain distinct directions, but duplicate same-direction arcs do not increase the
 score and self-loops never participate in degree or triangles. Disconnected
 selections retain every node. Stable topology order drives adjacency construction,
-neighbor-pair accumulation, and output; an empty selection returns the typed
+integer triangle accumulation, and output; an empty selection returns the typed
 zero-row table.
+
+The kernel intersects each node's distinct neighbor list with each neighbor's
+outgoing row. Fagiolo also intersects the incoming row, so reciprocal arcs
+contribute twice. `clustering_normalization="neighbor_edges"` counts only the
+outgoing intersections and divides by `k * (k - 1)` for the unique-neighbor
+count `k`. Both modes preserve the exact integer numerator before conversion to
+`Float64`.
+
+Comparable rows use a linear merge. When one row is more than twice as large,
+the kernel searches the smaller row in the larger row's advancing suffix:
+`O(min(a, b) * log(max(a, b)))` work per intersection instead of enumerating
+all neighbor pairs. The temporary node-local neighbor list uses at most
+`4 * (out_degree + in_degree)` bytes; intersections allocate no additional
+adjacency representation.
 
 The public schema is non-null `node_uuid: FixedSizeBinary(16)`, non-null
 `score: Float64`, then materialized node properties with Arrow NULLs for missing
 values. `write_property` atomically persists all scores only after successful
-execution and is otherwise read-only. Shared selected-node, adjacency-entry,
-output-row, iteration, and cancellation limits apply, including edge-heavy
-neighbor-pair checkpoints. Invalid selectors, unavailable catalog values, limits,
+execution and is otherwise read-only. Shared selected-node, logical-edge,
+output-row, and cancellation limits apply. Clustering coefficient is a single
+pass and does not consume the iteration budget. Cancellation is checked for
+every node and every 1,024 intersection probes, including probes that find no
+common neighbor. Invalid selectors, unavailable catalog values, limits,
 cancellation, non-finite or out-of-range counts, and adjacency/storage/shaping/
 write-back failures remain structured Rust errors. Python and Node only translate
 arguments and Arrow IPC; neither contains an algorithm backend, fallback,

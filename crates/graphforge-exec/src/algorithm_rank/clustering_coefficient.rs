@@ -192,7 +192,13 @@ fn clustering_coefficient_score_node(
     control.check_cancelled()?;
     let outgoing = &prepared.outgoing;
     let incoming = &prepared.incoming;
-    let mut neighbors = outgoing.row(node).to_vec();
+    let degree_capacity = outgoing
+        .row(node)
+        .len()
+        .checked_add(incoming.row(node).len())
+        .ok_or_else(|| execution("clustering coefficient degree exceeds supported range"))?;
+    let mut neighbors = Vec::with_capacity(degree_capacity);
+    neighbors.extend_from_slice(outgoing.row(node));
     neighbors.extend_from_slice(incoming.row(node));
     neighbors.sort_unstable();
     neighbors.dedup();
@@ -208,14 +214,18 @@ fn clustering_coefficient_score_node(
             })?;
         let mut edges = 0_u64;
         for &first in &neighbors {
-            for &second in &neighbors {
-                clustering_coefficient_checkpoint(control, work)?;
-                if first != second && outgoing.has_arc(first, second) {
+            for_each_intersection(
+                &neighbors,
+                outgoing.row(first as usize),
+                control,
+                work,
+                |_| {
                     edges = edges.checked_add(1).ok_or_else(|| {
                         execution("clustering coefficient edge count exceeds supported range")
                     })?;
-                }
-            }
+                    Ok(())
+                },
+            )?;
         }
         return if denominator == 0 {
             Ok(0.0)
@@ -250,14 +260,23 @@ fn clustering_coefficient_score_node(
 
     let mut triangles = 0_u64;
     for &first in &neighbors {
-        for &second in &neighbors {
-            clustering_coefficient_checkpoint(control, work)?;
-            let contribution = arc_strength(outgoing, node, first)
-                * arc_strength(outgoing, first, second)
-                * arc_strength(outgoing, second, node);
-            triangles = triangles.checked_add(contribution).ok_or_else(|| {
-                execution("clustering coefficient triangle count exceeds supported range")
-            })?;
+        let first_strength = arc_strength(outgoing, node, first);
+        // Each direction contributes once; a reciprocal arc contributes twice,
+        // exactly as the middle arc_strength in the ordered-pair formula.
+        for rows in [outgoing, incoming] {
+            for_each_intersection(
+                &neighbors,
+                rows.row(first as usize),
+                control,
+                work,
+                |second| {
+                    let contribution = first_strength * arc_strength(outgoing, second, node);
+                    triangles = triangles.checked_add(contribution).ok_or_else(|| {
+                        execution("clustering coefficient triangle count exceeds supported range")
+                    })?;
+                    Ok(())
+                },
+            )?;
         }
     }
     let score = if denominator == 0 {
@@ -272,8 +291,58 @@ fn clustering_coefficient_score_node(
     Ok(score)
 }
 
+/// Visit common ordinals in sorted, distinct rows. Searching only the smaller
+/// row bounds a hub/leaf intersection by the leaf's degree, rather than scanning
+/// the hub for every leaf. Advance the larger suffix after each search so near-
+/// equal rows also make progress without revisiting earlier ordinals.
+fn for_each_intersection(
+    left: &[u32],
+    right: &[u32],
+    control: &AlgorithmControl,
+    work: &mut usize,
+    mut visit: impl FnMut(u32) -> Result<(), AlgorithmError>,
+) -> Result<(), AlgorithmError> {
+    let (small, mut large) = if left.len() <= right.len() {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    // Merge comparable rows in linear time; binary searches are useful only
+    // when one row is much larger, as on a hub joined to a low-degree node.
+    if large.len() <= small.len().saturating_mul(2) {
+        let (mut a, mut b) = (0, 0);
+        while a < small.len() && b < large.len() {
+            clustering_coefficient_checkpoint(control, work)?;
+            match small[a].cmp(&large[b]) {
+                std::cmp::Ordering::Less => a += 1,
+                std::cmp::Ordering::Greater => b += 1,
+                std::cmp::Ordering::Equal => {
+                    visit(small[a])?;
+                    a += 1;
+                    b += 1;
+                }
+            }
+        }
+        return Ok(());
+    }
+    for &candidate in small {
+        clustering_coefficient_checkpoint(control, work)?;
+        match large.binary_search(&candidate) {
+            Ok(index) => {
+                visit(candidate)?;
+                large = &large[index + 1..];
+            }
+            Err(index) => large = &large[index..],
+        }
+        if large.is_empty() {
+            break;
+        }
+    }
+    Ok(())
+}
+
 /// Poll cancellation every [`CLUSTERING_COEFFICIENT_CHECKPOINT_WORK`] units of
-/// pair work. Clustering coefficient is a single pass, so this never consumes the
+/// intersection probes. Clustering coefficient is a single pass, so this never consumes the
 /// iteration budget that bounds iterative algorithms (#1922).
 fn clustering_coefficient_checkpoint(
     control: &AlgorithmControl,
