@@ -2,6 +2,8 @@
 
 use std::collections::BTreeSet;
 
+use datafusion::arrow::datatypes::DataType;
+
 use super::{
     Arc, CorrelatedSeedNode, DfExpr, ExprArena, ExprFunctionExt, ExprId, ExprSchemable, Extension,
     GraphOp, GraphPlan, GraphPlanLowerer, IrExpr, JoinType, LogicalPlan, LogicalPlanBuilder,
@@ -193,10 +195,6 @@ impl GraphPlanLowerer {
         input: LogicalPlan,
         var_map: &mut VarMap,
     ) -> Result<LogicalPlan, LoweringError> {
-        use datafusion::common::Column;
-        use datafusion::functions::core::expr_fn::coalesce;
-        use datafusion::scalar::ScalarValue;
-
         let (terminal, match_ops) = child.ops.split_last().ok_or_else(|| {
             LoweringError::UnsupportedExpr("pattern comprehension child is empty".into())
         })?;
@@ -217,13 +215,22 @@ impl GraphPlanLowerer {
             ));
         }
 
-        let outer_columns = input
-            .schema()
-            .iter()
-            .map(|(qualifier, field)| {
-                DfExpr::Column(Column::new(qualifier.cloned(), field.name().to_owned()))
-            })
-            .collect::<Vec<_>>();
+        let output_alias = format!("{PATTERN_COMPREHENSION_VALUE_ALIAS}_{}", output.0);
+        if child_rebinds_outer_nodes(child, var_map)
+            && let Some(plan) = self.lower_seeded_pattern_comprehension(
+                child,
+                match_ops,
+                item.expr,
+                &output_alias,
+                &input,
+                var_map,
+            )?
+        {
+            var_map.insert(output, output_alias);
+            return Ok(plan);
+        }
+
+        let outer_columns = plan_columns(&input);
         let mut child_vm = VarMap::new();
         let child_plan = self.lower_pipeline(match_ops, &child.exprs, &mut child_vm)?;
         let (mut join_keys, _) = optional_join_keys(&input, &child_plan, var_map, &child_vm);
@@ -238,52 +245,90 @@ impl GraphPlanLowerer {
             .expr_lowerer(&child.exprs, &child_vm)
             .with_input_schema(child_plan.schema().clone())
             .lower(item.expr)?;
-        let element_type = value.get_type(child_plan.schema()).map_unsupported_expr()?;
-        let key_aliases = (0..join_keys.len())
-            .map(|idx| format!("__gf_pattern_key_{idx}"))
-            .collect::<Vec<_>>();
-        let group_exprs = join_keys
-            .iter()
-            .zip(&key_aliases)
-            .map(|((_, inner_idx), alias)| {
-                DfExpr::Column(schema_join_column(child_plan.schema(), *inner_idx)).alias(alias)
-            })
-            .collect::<Vec<_>>();
-        let output_alias = format!("{PATTERN_COMPREHENSION_VALUE_ALIAS}_{}", output.0);
-        let aggregate_exprs = vec![array_agg(value).alias(&output_alias)];
-        let collected = LogicalPlanBuilder::from(child_plan)
-            .aggregate(group_exprs, aggregate_exprs)
-            .and_then(LogicalPlanBuilder::build)
-            .map_unsupported_expr()?;
+        let (collected, right_keys, element_type) =
+            collect_pattern_values(child_plan, &join_keys, value, &output_alias)?;
 
         let left_keys = join_keys
             .iter()
             .map(|(outer_idx, _)| schema_join_column(input.schema(), *outer_idx))
-            .collect::<Vec<_>>();
-        let right_keys = key_aliases
-            .iter()
-            .map(|alias| Column::from_name(alias.clone()))
             .collect::<Vec<_>>();
         let joined = LogicalPlanBuilder::from(input)
             .join(collected, JoinType::Left, (left_keys, right_keys), None)
             .and_then(LogicalPlanBuilder::build)
             .map_unsupported_expr()?;
 
-        let empty = ScalarValue::List(ScalarValue::new_list(&[], &element_type, true));
-        let mut projection = outer_columns;
-        projection.push(
-            coalesce(vec![
-                DfExpr::Column(Column::from_name(output_alias.clone())),
-                DfExpr::Literal(empty, None),
-            ])
-            .alias(&output_alias),
-        );
-        let result = LogicalPlanBuilder::from(joined)
-            .project(projection)
-            .and_then(LogicalPlanBuilder::build)
-            .map_unsupported_expr()?;
+        let result = default_to_empty_list(joined, outer_columns, &output_alias, &element_type)?;
         var_map.insert(output, output_alias);
         Ok(result)
+    }
+
+    /// A pattern comprehension that matches outer nodes again, seeded from the
+    /// outer rows: the pattern starts at the bound nodes, and the values it
+    /// collects join back to the outer rows on those nodes' identities.
+    ///
+    /// The unseeded form lowers the pattern over the whole graph and joins the
+    /// collected values back, so a comprehension over two bound people scans
+    /// every relationship of its type for each query. Seeded, the traversal
+    /// expands only from the nodes the outer rows hold (#1984).
+    ///
+    /// Returns `None` when the pattern is not a plain pattern of single-hop
+    /// traversals (see [`Self::narrow_correlated_seed`]) or its pipeline drops
+    /// a seed column, leaving the unseeded lowering in place.
+    fn lower_seeded_pattern_comprehension(
+        &self,
+        child: &GraphPlan,
+        match_ops: &[GraphOp],
+        value: ExprId,
+        output_alias: &str,
+        input: &LogicalPlan,
+        var_map: &VarMap,
+    ) -> Result<Option<LogicalPlan>, LoweringError> {
+        let Some(narrowed) =
+            self.narrow_correlated_seed(match_ops, &child.exprs, input, var_map)?
+        else {
+            return Ok(None);
+        };
+        let mut child_vm = var_map.clone();
+        let child_plan = self.lower_pipeline_from(
+            &narrowed.ops,
+            &child.exprs,
+            &mut child_vm,
+            narrowed.seed,
+            None,
+        )?;
+        let Some(join_keys) = column_keys(input, &child_plan, &narrowed.key_columns) else {
+            return Ok(None);
+        };
+
+        let value = self
+            .expr_lowerer(&child.exprs, &child_vm)
+            .with_input_schema(child_plan.schema().clone())
+            .lower(value)?;
+        let (collected, _, element_type) =
+            collect_pattern_values(child_plan, &join_keys, value, output_alias)?;
+
+        // The collected values are keyed by the seed's columns, one group per
+        // seed row, and join back to the outer rows null-safe by the node that
+        // binds the seed: an outer row the pattern did not match gets no list,
+        // and takes the empty one below.
+        let key_width = join_keys.len();
+        let keys = join_keys
+            .iter()
+            .enumerate()
+            .map(|(group_idx, (outer_idx, _))| (*outer_idx, group_idx))
+            .collect::<Vec<_>>();
+        let outer_columns = plan_columns(input);
+        let optional = OptionalMatchNode::new(
+            Arc::new(input.clone()),
+            Arc::new(collected),
+            keys,
+            vec![key_width],
+        )
+        .with_correlated_seed(narrowed.seed_id);
+        let joined = LogicalPlan::Extension(Extension {
+            node: Arc::new(optional),
+        });
+        default_to_empty_list(joined, outer_columns, output_alias, &element_type).map(Some)
     }
 
     #[allow(
@@ -304,7 +349,7 @@ impl GraphPlanLowerer {
         exprs: &ExprArena,
         var_map: &mut VarMap,
     ) -> Result<LogicalPlan, LoweringError> {
-        use datafusion::arrow::datatypes::{DataType, Field};
+        use datafusion::arrow::datatypes::Field;
         use datafusion::common::Column;
         use datafusion::functions::core::expr_fn::{coalesce, get_field};
         use datafusion::functions_nested::expr_fn::array_element;
@@ -770,6 +815,64 @@ fn promote_optional_entity_vars(
             var_map.insert(var, inner_alias.to_owned());
         }
     }
+}
+
+/// The values of a pattern comprehension collected per outer key: the rows of
+/// `child_plan` grouped by the `join_keys` inner columns, named
+/// `__gf_pattern_key_{idx}`, with `value` aggregated into a list named
+/// `output_alias`. Returns the collected plan, the key columns and the list's
+/// element type.
+fn collect_pattern_values(
+    child_plan: LogicalPlan,
+    join_keys: &[(usize, usize)],
+    value: DfExpr,
+    output_alias: &str,
+) -> Result<(LogicalPlan, Vec<datafusion::common::Column>, DataType), LoweringError> {
+    use datafusion::common::Column;
+
+    let element_type = value.get_type(child_plan.schema()).map_unsupported_expr()?;
+    let key_aliases = (0..join_keys.len())
+        .map(|idx| format!("__gf_pattern_key_{idx}"))
+        .collect::<Vec<_>>();
+    let group_exprs = join_keys
+        .iter()
+        .zip(&key_aliases)
+        .map(|((_, inner_idx), alias)| {
+            DfExpr::Column(schema_join_column(child_plan.schema(), *inner_idx)).alias(alias)
+        })
+        .collect::<Vec<_>>();
+    let collected = LogicalPlanBuilder::from(child_plan)
+        .aggregate(group_exprs, vec![array_agg(value).alias(output_alias)])
+        .and_then(LogicalPlanBuilder::build)
+        .map_unsupported_expr()?;
+    let right_keys = key_aliases.into_iter().map(Column::from_name).collect();
+    Ok((collected, right_keys, element_type))
+}
+
+/// `joined` with its `outer_columns` and the collected list `output_alias`, an
+/// outer row that collected nothing taking the empty list.
+fn default_to_empty_list(
+    joined: LogicalPlan,
+    mut outer_columns: Vec<DfExpr>,
+    output_alias: &str,
+    element_type: &DataType,
+) -> Result<LogicalPlan, LoweringError> {
+    use datafusion::common::Column;
+    use datafusion::functions::core::expr_fn::coalesce;
+    use datafusion::scalar::ScalarValue;
+
+    let empty = ScalarValue::List(ScalarValue::new_list(&[], element_type, true));
+    outer_columns.push(
+        coalesce(vec![
+            DfExpr::Column(Column::from_name(output_alias)),
+            DfExpr::Literal(empty, None),
+        ])
+        .alias(output_alias),
+    );
+    LogicalPlanBuilder::from(joined)
+        .project(outer_columns)
+        .and_then(LogicalPlanBuilder::build)
+        .map_unsupported_expr()
 }
 
 /// The seed of a correlated subquery over the rows of `outer`, and its id:
