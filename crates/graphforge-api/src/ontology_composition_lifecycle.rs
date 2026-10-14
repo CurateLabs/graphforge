@@ -547,6 +547,7 @@ impl GraphForge {
                 let inventory = crate::property_inventory_for_hydrated_generation(
                     &self.resolved_generation,
                     &dir,
+                    self.resource_policy.memory_budget_bytes,
                 )?;
                 self.replace_workspace_owner(crate::GraphWorkspace::new(dir, owner, &inventory)?);
                 self.graph_open_evidence = evidence;

@@ -412,8 +412,11 @@ impl GraphForge {
             .map_err(MultiOntologyError::from)?
             .ok_or_else(|| GfError::Validation("semantic storage bindings are missing"))?;
         let (parent_tree, _parent_guard, _) = crate::hydrate_graph_workspace(&parent, true)?;
-        let parent_inventory =
-            crate::property_inventory_for_hydrated_generation(&parent, &parent_tree)?;
+        let parent_inventory = crate::property_inventory_for_hydrated_generation(
+            &parent,
+            &parent_tree,
+            self.resource_policy.memory_budget_bytes,
+        )?;
         let parent_authority = graphforge_storage::TopologyFileAuthority::from_inventory(
             &parent_tree,
             &parent_inventory,
@@ -484,8 +487,11 @@ impl GraphForge {
         )?;
         let (source_tree, _source_guard, _) =
             crate::hydrate_graph_workspace(&migration_parent, true)?;
-        let source_inventory =
-            crate::property_inventory_for_hydrated_generation(&migration_parent, &source_tree)?;
+        let source_inventory = crate::property_inventory_for_hydrated_generation(
+            &migration_parent,
+            &source_tree,
+            self.resource_policy.memory_budget_bytes,
+        )?;
         let source_authority = graphforge_storage::TopologyFileAuthority::from_inventory(
             &source_tree,
             &source_inventory,

@@ -209,7 +209,7 @@ fn high_degree_row_spans_hard_capped_shards_in_order() {
         let chunk = reader.row_chunk(0, offset, 3).unwrap();
         assert!(chunk.len() <= 3);
         chunks.extend(chunk);
-        let cache = reader.cache.read().unwrap();
+        let cache = reader.cache.inner.read().unwrap();
         assert!(
             cache
                 .entries
@@ -358,7 +358,7 @@ fn decoded_shard_cache_evicts_by_bytes_and_serves_correct_rows() {
             );
         }
     }
-    let cache = reader.cache.read().unwrap();
+    let cache = reader.cache.inner.read().unwrap();
     assert!(
         cache.retained_bytes <= one_shard,
         "retained {} exceeds the one-shard bound",
@@ -389,24 +389,147 @@ fn decoded_shard_cache_holds_every_shard_within_budget() {
     for node in [0_u64, 3, 1, 4, 2, 5, 0, 5, 1, 4, 2, 3] {
         reader.row(node).unwrap();
     }
-    let cache = reader.cache.read().unwrap();
+    let cache = reader.cache.inner.read().unwrap();
     assert_eq!(cache.entries.len(), 3);
     assert_eq!(cache.retained_bytes, total);
     assert!(cache.retained_bytes <= cache.budget_bytes);
 }
 
-/// Opening with the default budget wires the documented 1 GiB bound.
+/// A reader opened on its own gets a private cache of the standalone budget; the
+/// provider path shares one cache instead (#1987).
 #[test]
-fn default_cache_budget_matches_documented_bytes() {
+fn standalone_open_wires_a_private_cache_of_the_standalone_budget() {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("KNOWS.out.csr");
     write_sharded_csr(&path, &sample_csr(), 2).unwrap();
     let reader = ShardedCsrIndex::open(&path).unwrap();
+    let other = ShardedCsrIndex::open(&path).unwrap();
     assert_eq!(
-        reader.cache.read().unwrap().budget_bytes,
-        DEFAULT_DECODED_SHARD_CACHE_BYTES
+        reader.cache.budget_bytes(),
+        STANDALONE_DECODED_SHARD_CACHE_BYTES
     );
-    assert_eq!(DEFAULT_DECODED_SHARD_CACHE_BYTES, 1024 * 1024 * 1024);
+    assert_eq!(STANDALONE_DECODED_SHARD_CACHE_BYTES, 64 * 1024 * 1024);
+    reader.row(0).unwrap();
+    assert!(reader.cache.retained_bytes() > 0);
+    assert_eq!(other.cache.retained_bytes(), 0, "the caches are separate");
+}
+
+/// Writes a six-node, three-shard index named `stem` and returns the bytes one
+/// decoded shard occupies, plus the whole index.
+fn three_shard_index(directory: &Path, stem: &str) -> (PathBuf, CsrIndex, u64) {
+    let path = directory.join(format!("{stem}.out.csr"));
+    let expected = CsrIndex {
+        offsets: vec![0, 1, 2, 3, 4, 5, 6],
+        edge_ids: (100..106).collect(),
+        neighbor_ids: (200..206).collect(),
+    };
+    write_sharded_csr(&path, &expected, 2).unwrap();
+    let manifest: CsrShardManifest =
+        serde_json::from_slice(&std::fs::read(path.with_extension("csr.json")).unwrap()).unwrap();
+    (path, expected, manifest.shards[0].decoded_bytes)
+}
+
+fn read_every_row(index: &ShardedCsrIndex, expected: &CsrIndex) {
+    for node in [0_u64, 3, 1, 4, 2, 5] {
+        assert_eq!(
+            index.row(node).unwrap(),
+            expected.row(node).iter().collect::<Vec<_>>()
+        );
+    }
+}
+
+/// #1987: every index opened against one cache shares one budget. Two indexes of
+/// three shards each, behind a budget of two shards, never retain more than
+/// two shards in total, whichever index reads, and every row stays correct.
+#[test]
+fn shared_cache_bounds_the_decoded_shards_of_all_its_indexes() {
+    let directory = TempDir::new().unwrap();
+    let (out_path, out_expected, shard) = three_shard_index(directory.path(), "KNOWS");
+    let (in_path, in_expected, _) = three_shard_index(directory.path(), "FOLLOWS");
+    let cache = ShardCache::new(shard * 2);
+    let out = ShardedCsrIndex::open_with_cache(&out_path, &cache).unwrap();
+    let inbound = ShardedCsrIndex::open_with_cache(&in_path, &cache).unwrap();
+
+    for _ in 0..3 {
+        read_every_row(&out, &out_expected);
+        assert!(cache.retained_bytes() <= shard * 2);
+        read_every_row(&inbound, &in_expected);
+        assert!(cache.retained_bytes() <= shard * 2);
+    }
+    // The per-index figures partition the shared total.
+    assert_eq!(
+        out.retained_decoded_bytes() + inbound.retained_decoded_bytes(),
+        cache.retained_bytes()
+    );
+    assert_eq!(cache.retained_bytes(), shard * 2);
+    // Three indexes' worth of shards would have held six; the single budget
+    // forced re-decodes instead.
+    assert!(out.shard_decode_count() > 3 && inbound.shard_decode_count() > 3);
+}
+
+/// #1987: bytes another consumer holds against the budget (the label index)
+/// reduce what shards may occupy, evicting at once, and releasing them restores
+/// the room.
+#[test]
+fn external_bytes_reduce_the_shard_capacity() {
+    let directory = TempDir::new().unwrap();
+    let (path, expected, shard) = three_shard_index(directory.path(), "KNOWS");
+    let cache = ShardCache::new(shard * 3);
+    let index = ShardedCsrIndex::open_with_cache(&path, &cache).unwrap();
+    read_every_row(&index, &expected);
+    assert_eq!(cache.retained_bytes(), shard * 3);
+
+    cache.set_external_bytes(shard + shard / 2);
+    assert_eq!(cache.external_bytes(), shard + shard / 2);
+    assert_eq!(
+        cache.retained_bytes(),
+        shard,
+        "only one shard fits the rest"
+    );
+    read_every_row(&index, &expected);
+    assert!(cache.retained_bytes() + cache.external_bytes() <= cache.budget_bytes());
+
+    cache.set_external_bytes(0);
+    read_every_row(&index, &expected);
+    assert_eq!(cache.retained_bytes(), shard * 3);
+}
+
+/// Dropping the last clone of an index returns its shards to the shared
+/// budget, so a rebuilt generation does not compete with the one it replaced.
+#[test]
+fn dropping_an_index_releases_its_decoded_shards() {
+    let directory = TempDir::new().unwrap();
+    let (path, expected, shard) = three_shard_index(directory.path(), "KNOWS");
+    let cache = ShardCache::new(shard * 3);
+    let index = ShardedCsrIndex::open_with_cache(&path, &cache).unwrap();
+    let clone = index.clone();
+    read_every_row(&index, &expected);
+    assert_eq!(cache.retained_bytes(), shard * 3);
+    drop(index);
+    assert_eq!(
+        cache.retained_bytes(),
+        shard * 3,
+        "a clone still serves them"
+    );
+    assert_eq!(clone.shard_decode_count(), 3);
+    drop(clone);
+    assert_eq!(cache.retained_bytes(), 0);
+}
+
+/// Two opens of one path never serve each other's entries: a rebuild may reuse
+/// shard file names with different bytes.
+#[test]
+fn opens_of_one_path_do_not_share_cached_shards() {
+    let directory = TempDir::new().unwrap();
+    let (path, expected, shard) = three_shard_index(directory.path(), "KNOWS");
+    let cache = ShardCache::new(shard * 6);
+    let first = ShardedCsrIndex::open_with_cache(&path, &cache).unwrap();
+    let second = ShardedCsrIndex::open_with_cache(&path, &cache).unwrap();
+    read_every_row(&first, &expected);
+    read_every_row(&second, &expected);
+    assert_eq!(first.shard_decode_count(), 3);
+    assert_eq!(second.shard_decode_count(), 3);
+    assert_eq!(cache.retained_bytes(), shard * 6);
 }
 
 /// A failed shard authentication leaves every retained entry in place:
@@ -442,9 +565,9 @@ fn failed_decode_evicts_nothing() {
     std::fs::write(&victim_path, bytes).unwrap();
 
     assert!(reader.row(5).is_err());
-    let cache = reader.cache.read().unwrap();
+    let cache = reader.cache.inner.read().unwrap();
     assert_eq!(cache.entries.len(), 2);
-    assert_eq!(cache.decodes, 2);
+    assert_eq!(reader.shard_decode_count(), 2);
     assert_eq!(
         cache.retained_bytes,
         total - manifest.shards[2].decoded_bytes
@@ -483,6 +606,7 @@ fn decoded_shard_cache_evicts_the_least_recently_used_shard() {
 
     let retained: Vec<_> = reader
         .cache
+        .inner
         .read()
         .unwrap()
         .entries
@@ -563,13 +687,7 @@ fn concurrent_readers_of_a_cold_shard_decode_it_once() {
 
 #[cfg(test)]
 fn open_with_budget(path: &Path, budget_bytes: u64) -> Result<ShardedCsrIndex, GfError> {
-    let reader = ShardedCsrIndex::open(path)?;
-    let manifest = reader.manifest.clone();
-    Ok(ShardedCsrIndex {
-        root: reader.root.clone(),
-        manifest,
-        cache: std::sync::Arc::new(std::sync::RwLock::new(DecodedShardCache::new(budget_bytes))),
-    })
+    ShardedCsrIndex::open_with_cache(path, &ShardCache::new(budget_bytes))
 }
 
 #[test]

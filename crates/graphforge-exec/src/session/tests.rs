@@ -45,6 +45,54 @@ fn session_uses_sound_row_estimates_for_partition_planning() {
 }
 
 #[test]
+fn supplied_provider_must_fit_the_session_topology_share_without_replacement() {
+    let dir = TempDir::new().unwrap();
+    let catalog = || GraphCatalog::open(dir.path(), None, &RuntimeCatalog::new()).unwrap();
+    let provider = Arc::new(PersistentAdjacencyProvider::new(
+        dir.path().to_path_buf(),
+        OntologyMode::Exploratory,
+    ));
+    let before = provider.retained_topology_bytes();
+    let resources = SessionResourceConfig {
+        memory_budget_bytes: 16 * 1024 * 1024,
+        ..SessionResourceConfig::default()
+    };
+    let attach = |provider: Arc<PersistentAdjacencyProvider>, resources: &SessionResourceConfig| {
+        ExecutionSession::new_with_target_provider_and_resources(
+            catalog(),
+            None,
+            dir.path().to_path_buf(),
+            OntologyMode::Exploratory,
+            provider,
+            resources,
+        )
+    };
+    let error = attach(Arc::clone(&provider), &resources)
+        .err()
+        .expect("the supplied 128 MiB topology ceiling cannot fit a 4 MiB share");
+    assert_eq!(error.code(), "GF_RESOURCE_LIMIT");
+    assert!(
+        error.to_string().contains("supplied adjacency provider"),
+        "{error}"
+    );
+    assert_eq!(provider.retained_topology_bytes(), before);
+    let roomy = attach(Arc::clone(&provider), &SessionResourceConfig::default()).unwrap();
+    assert!(Arc::ptr_eq(&roomy.adjacency_provider, &provider));
+    assert_eq!(provider.retained_topology_bytes(), before);
+
+    let fitting = Arc::new(
+        PersistentAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Exploratory)
+            .with_memory_budget(resources.memory_budget_bytes),
+    );
+    let session = attach(Arc::clone(&fitting), &resources).unwrap();
+    assert!(Arc::ptr_eq(&session.adjacency_provider, &fitting));
+    assert_eq!(
+        fitting.retained_topology_bytes().budget,
+        resources.memory_budget_bytes / 4
+    );
+}
+
+#[test]
 fn persisted_read_detection_recurses_through_every_nested_plan_shape() {
     let scan = GraphPlan::builder("openCypher")
         .push_op(GraphOp::NodeScan {

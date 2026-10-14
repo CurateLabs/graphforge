@@ -124,16 +124,24 @@ struct CsrShardManifest {
     shards: Vec<CsrShardRecord>,
 }
 
-/// Default byte budget for decoded shards retained by one [`ShardedCsrIndex`].
-/// Mirrors the 1 GiB `DEFAULT_CACHE_RELEASE_WINDOW_BYTES` operation scale: a
-/// hard-capped shard decodes to at most `8*(N+1) + 16*E + bitmaps` bytes with
-/// `N, E <= 1_048_576` (under 24 MiB), so the budget always retains dozens of
-/// shards while never scaling with the graph (`#1094`).
-pub const DEFAULT_DECODED_SHARD_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
+/// Decoded-shard byte budget of a [`ShardedCsrIndex`] opened on its own with
+/// [`ShardedCsrIndex::open`], for one-shot readers and tests. A hard-capped
+/// shard decodes to at most `8*(N+1) + 16*E + bitmaps` bytes with
+/// `N, E <= 1_048_576` (under 24 MiB), so this retains a few shards while never
+/// scaling with the graph (#1094). A provider serving queries does not use it:
+/// it opens every index against one [`ShardCache`] sized from the query memory
+/// budget (#1987).
+pub const STANDALONE_DECODED_SHARD_CACHE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Source of the per-open owner ids that key a shared [`ShardCache`].
+static NEXT_SHARD_OWNER: AtomicU64 = AtomicU64::new(1);
 
 /// One decoded shard retained by [`DecodedShardCache`].
 #[derive(Debug)]
 struct CachedShard {
+    /// The [`ShardOwner`] (one open index) that decoded it. Two opens of one
+    /// path never share an entry: a rebuild may reuse file names with new bytes.
+    owner: u64,
     file: String,
     csr: CsrIndex,
     decoded_bytes: u64,
@@ -153,13 +161,18 @@ struct CachedShard {
 /// A lookup that hits only reads the entry list and refreshes two atomics, so
 /// readers on different threads do not queue behind one another; only an insert
 /// or an eviction needs exclusive access (#1985).
+///
+/// One cache serves every index of a provider, so the decoded shards of all
+/// relation types and directions together stay within one budget (#1987).
 #[derive(Debug, Default)]
 struct DecodedShardCache {
     entries: Vec<CachedShard>,
     retained_bytes: u64,
     budget_bytes: u64,
+    /// Bytes another consumer holds against the same budget (the label index).
+    /// Shards may occupy `budget_bytes - external_bytes`.
+    external_bytes: u64,
     tick: AtomicU64,
-    decodes: u64,
 }
 
 impl DecodedShardCache {
@@ -170,8 +183,16 @@ impl DecodedShardCache {
         }
     }
 
-    fn position(&self, file: &str) -> Option<usize> {
-        self.entries.iter().position(|entry| entry.file == file)
+    /// Bytes decoded shards may occupy: the budget less what other consumers
+    /// of it hold.
+    const fn capacity(&self) -> u64 {
+        self.budget_bytes.saturating_sub(self.external_bytes)
+    }
+
+    fn position(&self, owner: u64, file: &str) -> Option<usize> {
+        self.entries
+            .iter()
+            .position(|entry| entry.owner == owner && entry.file == file)
     }
 
     /// Mark entry `index` the most recently used. Shared access suffices: the
@@ -182,30 +203,136 @@ impl DecodedShardCache {
         self.entries[index].last_used.store(tick, Ordering::Relaxed);
     }
 
+    /// Evict the least-recently-used entry.
+    fn evict_one(&mut self) {
+        let victim = self
+            .entries
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, entry)| entry.last_used.load(Ordering::Relaxed))
+            .map(|(index, _)| index)
+            .expect("non-empty entries");
+        let removed = self.entries.remove(victim);
+        self.retained_bytes -= removed.decoded_bytes;
+    }
+
     /// Insert a fully authenticated shard, evicting least-recently-used
-    /// entries first. A shard larger than the whole budget (impossible under
-    /// the hard shard caps) still caches alone instead of being dropped, so
-    /// the retained total never exceeds `max(budget, one shard)`.
-    fn insert(&mut self, file: String, csr: CsrIndex, decoded_bytes: u64) {
+    /// entries first. A shard larger than the whole capacity (impossible under
+    /// the hard shard caps unless the budget is tiny) still caches alone
+    /// instead of being dropped, so the retained total never exceeds
+    /// `max(capacity, one shard)`.
+    fn insert(&mut self, owner: u64, file: String, csr: CsrIndex, decoded_bytes: u64) {
         let tick = self.tick.fetch_add(1, Ordering::Relaxed) + 1;
-        while !self.entries.is_empty() && self.retained_bytes + decoded_bytes > self.budget_bytes {
-            let victim = self
-                .entries
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, entry)| entry.last_used.load(Ordering::Relaxed))
-                .map(|(index, _)| index)
-                .expect("non-empty entries");
-            let removed = self.entries.remove(victim);
-            self.retained_bytes -= removed.decoded_bytes;
+        while !self.entries.is_empty() && self.retained_bytes + decoded_bytes > self.capacity() {
+            self.evict_one();
         }
         self.retained_bytes += decoded_bytes;
         self.entries.push(CachedShard {
+            owner,
             file,
             csr,
             decoded_bytes,
             last_used: AtomicU64::new(tick),
         });
+    }
+
+    /// Drop every entry `owner` decoded.
+    fn remove_owner(&mut self, owner: u64) {
+        self.entries.retain(|entry| entry.owner != owner);
+        self.retained_bytes = self.entries.iter().map(|entry| entry.decoded_bytes).sum();
+    }
+}
+
+/// A shared, byte-budgeted cache of decoded CSR shards. Clones share one
+/// cache. Open every index of one provider with
+/// [`ShardedCsrIndex::open_with_cache`] so their decoded shards together stay
+/// within the budget, instead of each index holding a budget of its own (#1987).
+#[derive(Clone, Debug)]
+pub struct ShardCache {
+    inner: std::sync::Arc<std::sync::RwLock<DecodedShardCache>>,
+}
+
+impl ShardCache {
+    /// A cache that retains at most `budget_bytes` of decoded shards (see
+    /// [`Self::set_external_bytes`] for sharing that budget).
+    #[must_use]
+    pub fn new(budget_bytes: u64) -> Self {
+        Self {
+            inner: std::sync::Arc::new(std::sync::RwLock::new(DecodedShardCache::new(
+                budget_bytes,
+            ))),
+        }
+    }
+
+    /// The whole budget, shards plus [`Self::external_bytes`].
+    #[must_use]
+    pub fn budget_bytes(&self) -> u64 {
+        self.inner
+            .read()
+            .map(|cache| cache.budget_bytes)
+            .unwrap_or_default()
+    }
+
+    /// Decoded shard bytes currently retained, across every index sharing the
+    /// cache.
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        self.inner
+            .read()
+            .map(|cache| cache.retained_bytes)
+            .unwrap_or_default()
+    }
+
+    /// Bytes another consumer holds against this cache's budget.
+    #[must_use]
+    pub fn external_bytes(&self) -> u64 {
+        self.inner
+            .read()
+            .map(|cache| cache.external_bytes)
+            .unwrap_or_default()
+    }
+
+    /// Record that another consumer (the label index, #2053) holds `bytes`
+    /// against this cache's budget. Shards then occupy at most
+    /// `budget - bytes`, and least-recently-used shards are evicted until they
+    /// do, so the two consumers never exceed the budget together.
+    pub fn set_external_bytes(&self, bytes: u64) {
+        if let Ok(mut cache) = self.inner.write() {
+            cache.external_bytes = bytes;
+            while !cache.entries.is_empty() && cache.retained_bytes > cache.capacity() {
+                cache.evict_one();
+            }
+        }
+    }
+}
+
+/// The identity of one opened index inside a [`ShardCache`]: its entries'
+/// key, its decode count, and the release of its entries when the last clone of
+/// the index drops.
+#[derive(Debug)]
+struct ShardOwner {
+    id: u64,
+    decodes: AtomicU64,
+    cache: ShardCache,
+}
+
+impl ShardOwner {
+    fn new(cache: &ShardCache) -> Self {
+        Self {
+            id: NEXT_SHARD_OWNER.fetch_add(1, Ordering::Relaxed),
+            decodes: AtomicU64::new(0),
+            cache: cache.clone(),
+        }
+    }
+}
+
+impl Drop for ShardOwner {
+    fn drop(&mut self) {
+        // A dropped index (a rebuilt generation) must not leave its decoded
+        // shards counted against the shared budget.
+        if let Ok(mut cache) = self.cache.inner.write() {
+            cache.remove_owner(self.id);
+        }
     }
 }
 
@@ -218,13 +345,22 @@ pub struct ShardedCsrIndex {
     // Decoded shards are retained least-recently-used within a byte budget:
     // sequential traversal still pays O(shards) decodes, while random-access
     // frontiers stop paying one decode per row (#1518). Reader memory stays
-    // bounded by the budget, never by the graph (#1094).
-    cache: std::sync::Arc<std::sync::RwLock<DecodedShardCache>>,
+    // bounded by the budget, never by the graph (#1094). The cache may be
+    // shared with other indexes (#1987); `owner` keys this index's entries.
+    cache: ShardCache,
+    owner: std::sync::Arc<ShardOwner>,
 }
 
 impl ShardedCsrIndex {
-    /// Open the current shard manifest beside the logical `.csr` path.
+    /// Open the current shard manifest beside the logical `.csr` path, with a
+    /// decoded-shard cache of its own ([`STANDALONE_DECODED_SHARD_CACHE_BYTES`]).
     pub fn open(path: &Path) -> Result<Self, GfError> {
+        Self::open_with_cache(path, &ShardCache::new(STANDALONE_DECODED_SHARD_CACHE_BYTES))
+    }
+
+    /// Open the current shard manifest beside the logical `.csr` path, retaining
+    /// decoded shards in `cache`, which other indexes may share.
+    pub fn open_with_cache(path: &Path, cache: &ShardCache) -> Result<Self, GfError> {
         let manifest_path = path.with_extension("csr.json");
         let bytes = codec::read_admitted_manifest(&manifest_path)?;
         crate::lifecycle_io::record_read(
@@ -290,9 +426,8 @@ impl ShardedCsrIndex {
         Ok(Self {
             root,
             manifest,
-            cache: std::sync::Arc::new(std::sync::RwLock::new(DecodedShardCache::new(
-                DEFAULT_DECODED_SHARD_CACHE_BYTES,
-            ))),
+            cache: cache.clone(),
+            owner: std::sync::Arc::new(ShardOwner::new(cache)),
         })
     }
 
@@ -430,9 +565,10 @@ impl ShardedCsrIndex {
         {
             let cache = self
                 .cache
+                .inner
                 .read()
                 .map_err(|_| GfError::Storage("CSR shard cache lock poisoned".into()))?;
-            if let Some(index) = cache.position(&record.file) {
+            if let Some(index) = cache.position(self.owner.id, &record.file) {
                 cache.note_hit(index);
                 return Ok(map(cache.entries[index]
                     .csr
@@ -441,11 +577,12 @@ impl ShardedCsrIndex {
         }
         let mut cache = self
             .cache
+            .inner
             .write()
             .map_err(|_| GfError::Storage("CSR shard cache lock poisoned".into()))?;
         // Another reader may have decoded the shard while this one waited for
         // exclusive access.
-        if let Some(index) = cache.position(&record.file) {
+        if let Some(index) = cache.position(self.owner.id, &record.file) {
             cache.note_hit(index);
             return Ok(map(cache.entries[index]
                 .csr
@@ -457,8 +594,13 @@ impl ShardedCsrIndex {
         let path = self.root.join(&record.file);
         let csr = read_authenticated_shard(&path, record)?;
         let output = map(csr.row(node_id - record.first_node));
-        cache.decodes += 1;
-        cache.insert(record.file.clone(), csr, record.decoded_bytes);
+        self.owner.decodes.fetch_add(1, Ordering::Relaxed);
+        cache.insert(
+            self.owner.id,
+            record.file.clone(),
+            csr,
+            record.decoded_bytes,
+        );
         Ok(output)
     }
 
@@ -490,10 +632,7 @@ impl ShardedCsrIndex {
     /// must not drive this toward the frontier length.
     #[must_use]
     pub fn shard_decode_count(&self) -> u64 {
-        self.cache
-            .read()
-            .map(|cache| cache.decodes)
-            .unwrap_or_default()
+        self.owner.decodes.load(Ordering::Relaxed)
     }
 
     /// Number of shards in the opened manifest.
@@ -502,12 +641,22 @@ impl ShardedCsrIndex {
         self.manifest.shards.len()
     }
 
-    /// Decoded shard bytes currently retained by the byte-budgeted cache.
+    /// Decoded shard bytes of this index currently retained by the
+    /// byte-budgeted cache. [`ShardCache::retained_bytes`] totals every index
+    /// sharing the cache.
     #[must_use]
     pub fn retained_decoded_bytes(&self) -> u64 {
         self.cache
+            .inner
             .read()
-            .map(|cache| cache.retained_bytes)
+            .map(|cache| {
+                cache
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.owner == self.owner.id)
+                    .map(|entry| entry.decoded_bytes)
+                    .sum()
+            })
             .unwrap_or_default()
     }
 }

@@ -73,6 +73,7 @@ pub use export_streams::{
     EXPORT_STREAM_BATCH_ROWS, count_node_rows, visit_edge_identities, visit_edge_property_batches,
     visit_node_identities, visit_node_property_values,
 };
+pub use filtered_parquet::edge_decode_admission_bytes;
 pub use filtered_parquet::read_edges_filtered;
 pub use filtered_parquet::read_edges_filtered_from_inventory;
 pub use filtered_parquet::read_edges_filtered_observed;
@@ -184,7 +185,9 @@ pub(crate) fn read_parquet_required_projected(
 /// returned as they are; the caller derives the singleton membership from the
 /// primary exactly as [`normalize_topology_nodes`] does. Reads no other column
 /// and records no node-read statistic.
-pub(crate) fn read_node_label_columns(path: &Path) -> Result<Vec<RecordBatch>, DataFusionError> {
+pub(crate) fn read_node_label_columns(
+    path: &Path,
+) -> Result<parquet::arrow::arrow_reader::ParquetRecordBatchReader, DataFusionError> {
     let builder = admitted_parquet(path)?;
     let schema = builder.schema().clone();
     let column = |name: &str| {
@@ -201,8 +204,7 @@ pub(crate) fn read_node_label_columns(path: &Path) -> Result<Vec<RecordBatch>, D
     }
     let mask =
         parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), indices.iter().copied());
-    let reader = builder.with_projection(mask).build().map_err(parquet_err)?;
-    reader.collect::<Result<Vec<_>, _>>().map_err(parquet_err)
+    builder.with_projection(mask).build().map_err(parquet_err)
 }
 
 /// Normalize legacy scalar-label topology batches to the current multi-label
@@ -926,6 +928,16 @@ fn admit_parquet_edges(leading: &[u8], footer: &[u8], length: u64) -> Result<(),
 pub(crate) fn admitted_parquet_source<T: parquet::file::reader::ChunkReader + 'static>(
     source: T,
 ) -> Result<ParquetRecordBatchReaderBuilder<T>, DataFusionError> {
+    preflight_parquet_source(&source)?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(source).map_err(parquet_err)?;
+    admit_decoded_parquet(&builder)?;
+    Ok(builder)
+}
+
+/// Check encoded metadata size before any logical-source footer is decoded.
+pub(crate) fn preflight_parquet_source<T: parquet::file::reader::ChunkReader>(
+    source: &T,
+) -> Result<(), DataFusionError> {
     let length = source.len();
     if length < 12 {
         return Err(DataFusionError::Execution(
@@ -935,9 +947,7 @@ pub(crate) fn admitted_parquet_source<T: parquet::file::reader::ChunkReader + 's
     let leading = source.get_bytes(0, 4).map_err(parquet_err)?;
     let footer = source.get_bytes(length - 8, 8).map_err(parquet_err)?;
     admit_parquet_edges(&leading, &footer, length)?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(source).map_err(parquet_err)?;
-    admit_decoded_parquet(&builder)?;
-    Ok(builder)
+    Ok(())
 }
 
 fn admit_decoded_parquet<T: parquet::file::reader::ChunkReader + 'static>(

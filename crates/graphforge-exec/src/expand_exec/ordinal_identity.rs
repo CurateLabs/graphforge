@@ -70,7 +70,7 @@ impl V4OrdinalIdentityResolver {
         Ok(handle)
     }
 
-    pub(crate) fn pin(&self) -> Result<V4OrdinalIdentityPin, GfError> {
+    pub(crate) fn pin(&self, query_budget_bytes: u64) -> Result<V4OrdinalIdentityPin, GfError> {
         let handle = self
             .handle
             .read()
@@ -82,11 +82,24 @@ impl V4OrdinalIdentityResolver {
                 required: false,
             });
         };
-        let revalidation = handle
-            .lock()
-            .expect("ordinal identity handle poisoned")
-            .revalidate_for_session()
-            .map_err(GfError::from)?;
+        let revalidation = {
+            let authority = handle.lock().expect("ordinal identity handle poisoned");
+            let supplied = u64::try_from(authority.cache_budget_bytes()).unwrap_or(u64::MAX);
+            let allowed =
+                graphforge_storage::read_cache_budget::ReadCacheBudget::from_query_budget(
+                    query_budget_bytes,
+                )
+                .identity_bytes;
+            if supplied > allowed {
+                return Err(GfError::Api {
+                    code: graphforge_core::ApiErrorCode::ResourceLimit,
+                    message: format!(
+                        "supplied ordinal identity has a {supplied} byte cache ceiling against the session's {allowed} byte read-cache share"
+                    ),
+                });
+            }
+            authority.revalidate_for_session().map_err(GfError::from)?
+        };
         Ok(V4OrdinalIdentityPin {
             session: Some(Arc::new(V4OrdinalIdentitySession {
                 handle,

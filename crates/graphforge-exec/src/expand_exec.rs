@@ -14,18 +14,11 @@ use arrow::array::Array;
 use arrow::array::ArrayRef;
 use arrow::array::FixedSizeBinaryArray;
 use arrow::array::FixedSizeBinaryBuilder;
-use arrow::array::ListBuilder;
 use arrow::array::RecordBatch;
-use arrow::array::StringArray;
-use arrow::array::TimestampMicrosecondArray;
 use arrow::array::UInt32Array;
-use arrow::array::UInt32Builder;
 use arrow::array::UInt64Array;
 use arrow::array::new_null_array;
-use arrow::datatypes::DataType;
-use arrow::datatypes::Field;
 use arrow::datatypes::SchemaRef;
-use arrow::datatypes::TimeUnit;
 use datafusion::common::DataFusionError;
 use datafusion::execution::TaskContext;
 use datafusion::logical_expr::UserDefinedLogicalNode;
@@ -55,6 +48,7 @@ use graphforge_plan::VarLenExpandNode;
 use graphforge_plan::VarLenMode;
 use input_columns::copy_mask;
 use input_columns::push_input_columns;
+use input_columns::unused_expand_column;
 use metrics::ExpandMetrics;
 use metrics::PartitionMetrics;
 pub use ordinal_identity::V4OrdinalIdentityResolver;
@@ -1722,6 +1716,10 @@ impl ExpandExec {
             edge_predicate: self.edge_predicate.clone(),
             metrics: self.metrics.partition(partition),
             reservation: std::sync::Mutex::new(crate::fast_path::expand_reservation(context)),
+            read_reservation: std::sync::Mutex::new(ChunkedReservation::register(
+                HOP_READ_CONSUMER,
+                context.memory_pool(),
+            )),
         }
     }
 }
@@ -2120,22 +2118,10 @@ struct SingleHopConfig {
     /// #1688 candidate C: the memory-pool reservation for held batches.
     /// Memory-pool reservation for the batches this hop holds (ADR 0050).
     reservation: std::sync::Mutex<datafusion::execution::memory_pool::MemoryReservation>,
-}
-
-impl SingleHopConfig {
-    /// Charge the held input batch and the output batch to the session memory pool.
-    fn account(
-        &self,
-        held: Option<&RecordBatch>,
-        output: &RecordBatch,
-    ) -> Result<(), DataFusionError> {
-        let bytes =
-            held.map_or(0, RecordBatch::get_array_memory_size) + output.get_array_memory_size();
-        self.reservation
-            .lock()
-            .map_err(|_| DataFusionError::Internal("ExpandExec reservation poisoned".into()))?
-            .try_resize(bytes)
-    }
+    /// Memory-pool reservation for the edge and destination-node reads one
+    /// chunk holds while it assembles its output (#1987). Separate from
+    /// `reservation`, which is resized absolutely to the held input and output.
+    read_reservation: std::sync::Mutex<ChunkedReservation>,
 }
 
 /// Resumable position within one input batch. Keeping the raw adjacency offset
@@ -2147,49 +2133,6 @@ struct SingleHopPosition {
     row: usize,
     neighbor_offset: usize,
     seen_edges: std::collections::HashSet<u64>,
-}
-
-/// Build a schema-valid value column for an output that is provably unused by
-/// every operator above this Expand. Nullable fields use Arrow nulls; required
-/// physical fields receive inert values so the unchanged logical schema stays
-/// valid without forcing their backing Parquet columns to be read.
-fn unused_expand_column(field: &Field, rows: usize) -> Result<ArrayRef, GfError> {
-    if field.is_nullable() {
-        return Ok(new_null_array(field.data_type(), rows));
-    }
-    let column: ArrayRef = match field.data_type() {
-        DataType::FixedSizeBinary(width) => Arc::new(
-            FixedSizeBinaryArray::try_from_iter(
-                (0..rows).map(|_| vec![0_u8; usize::try_from(*width).unwrap_or(0)]),
-            )
-            .map_err(GfError::from_execution_error)?,
-        ),
-        DataType::UInt64 => Arc::new(UInt64Array::from(vec![0_u64; rows])),
-        DataType::UInt32 => Arc::new(UInt32Array::from(vec![0_u32; rows])),
-        DataType::Utf8 => Arc::new(StringArray::from(vec![""; rows])),
-        DataType::Timestamp(TimeUnit::Microsecond, timezone) => {
-            let values = TimestampMicrosecondArray::from(vec![0_i64; rows]);
-            Arc::new(if let Some(timezone) = timezone {
-                values.with_timezone(Arc::clone(timezone))
-            } else {
-                values
-            })
-        }
-        DataType::List(item) if item.data_type() == &DataType::UInt32 => {
-            let mut builder = ListBuilder::new(UInt32Builder::new()).with_field(Arc::clone(item));
-            for _ in 0..rows {
-                builder.append(true);
-            }
-            Arc::new(builder.finish())
-        }
-        data_type => {
-            return Err(GfError::Execution(format!(
-                "Expand cannot synthesize unused non-nullable output '{}' with type {data_type}",
-                field.name()
-            )));
-        }
-    };
-    Ok(column)
 }
 
 fn require_admitted_ordinal_identity(required: bool, admitted: bool) -> Result<(), GfError> {
@@ -2215,7 +2158,7 @@ fn expand_single_hop_chunk(
 ) -> Result<RecordBatch, GfError> {
     use std::collections::HashMap;
 
-    use arrow::compute::{concat_batches, take};
+    use arrow::compute::take;
 
     let exec_err = |m: String| GfError::Execution(m);
 
@@ -2230,6 +2173,9 @@ fn expand_single_hop_chunk(
         )));
     }
     let src_ids = u64_column(input, cfg.src_col_idx)?;
+    // Everything this chunk reads from the edge and node files is charged to the
+    // pool until the chunk ends (#1987).
+    let mut read_charge = HopReadCharge::new(&cfg.read_reservation);
 
     // The adjacency view: directional for Out/In, merged for Undirected
     // (dedup per input row happens in the emit pass below).
@@ -2503,6 +2449,27 @@ fn expand_single_hop_chunk(
         None
     } else {
         let admitted_inventory = cfg.provider.admitted_inventory();
+        // Admit decoder scratch before Parquet reads allocate it. The estimate
+        // includes dictionary expansion and the returned buffers; retain it
+        // through concatenation until the owned result has its own charge.
+        let decode_bytes = if let Some(inventory) = admitted_inventory.as_deref() {
+            let projection = if required.is_some() {
+                edge_projection.clone()
+            } else {
+                (0..edge_topology_width).collect()
+            };
+            graphforge_storage::edge_decode_admission_bytes(
+                inventory,
+                &cfg.rel_type_name,
+                cfg.mode,
+                &traversed,
+                &projection,
+            )
+            .map_err(GfError::from_execution_error)?
+        } else {
+            0
+        };
+        read_charge.charge(decode_bytes)?;
         let edge_batches =
             if let Some(inventory) = admitted_inventory.as_deref().filter(|_| required.is_some()) {
                 graphforge_storage::read_edges_filtered_projected_from_inventory(
@@ -2541,12 +2508,8 @@ fn expand_single_hop_chunk(
             }
             .map_err(|e| exec_err(e.to_string()))?;
         drop(edge_permit);
-        let edge_schema = edge_batches
-            .first()
-            .map(RecordBatch::schema)
-            .ok_or_else(|| exec_err("Expand: edge scan returned no batches".into()))?;
-        let edge_batch =
-            concat_batches(&edge_schema, &edge_batches).map_err(|e| exec_err(e.to_string()))?;
+        read_charge.replace(decode_bytes, batches_bytes(&edge_batches))?;
+        let edge_batch = concat_precharged(&mut read_charge, edge_batches)?;
         cfg.metrics.edge_rows(edge_batch.num_rows());
         Some(edge_batch)
     };
@@ -2564,6 +2527,10 @@ fn expand_single_hop_chunk(
         }
         None => HashMap::new(),
     };
+    read_charge.charge(hash_table_bytes(
+        edge_row.capacity(),
+        std::mem::size_of::<(u64, usize)>(),
+    ))?;
     let edge_uuids = edge_batch
         .as_ref()
         .filter(|_| relationship_properties_required)
@@ -2745,10 +2712,10 @@ fn expand_single_hop_chunk(
         }
         .map_err(|e| exec_err(e.to_string()))?;
         drop(node_permit);
-        let Some(first) = node_batches.first() else {
+        if node_batches.is_empty() {
             return Ok(RecordBatch::new_empty(cfg.out_schema.clone()));
-        };
-        concat_batches(&first.schema(), &node_batches).map_err(|e| exec_err(e.to_string()))?
+        }
+        concat_charged(&mut read_charge, node_batches)?
     };
     cfg.metrics.destination_rows(node_batch.num_rows());
     let node_id_index = node_batch
@@ -2761,6 +2728,10 @@ fn expand_single_hop_chunk(
         .enumerate()
         .filter_map(|(i, id)| id.map(|v| (v, i)))
         .collect();
+    read_charge.charge(hash_table_bytes(
+        node_row.capacity(),
+        std::mem::size_of::<(u64, usize)>(),
+    ))?;
 
     // Pass 2: convert triples into take indices against the FILTERED edge
     // batch (edge_row maps edge_id -> position within it).
@@ -2894,7 +2865,11 @@ mod destination_rows;
 mod edge_filter;
 mod edge_predicate;
 mod edge_properties;
+mod hop_read;
 mod input_columns;
+use hop_read::{
+    HOP_READ_CONSUMER, HopReadCharge, batches_bytes, concat_charged, concat_precharged,
+};
 pub(crate) mod metrics;
 mod ordinal_identity;
 mod reachability;

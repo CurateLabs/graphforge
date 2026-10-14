@@ -68,6 +68,7 @@ use graphforge_plan::UnwindNode;
 use graphforge_plan::VarLenExpandNode;
 use graphforge_rel::GraphPlanLowerer;
 use graphforge_storage::GraphCatalog;
+use graphforge_storage::read_cache_budget::DEFAULT_QUERY_MEMORY_BUDGET_BYTES;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -426,7 +427,7 @@ impl Default for SessionResourceConfig {
         Self {
             target_partitions: 2,
             batch_size: 8_192,
-            memory_budget_bytes: 512 * 1024 * 1024,
+            memory_budget_bytes: DEFAULT_QUERY_MEMORY_BUDGET_BYTES,
             spill_enabled: false,
             spill_directory: None,
             spill_max_bytes: None,
@@ -589,6 +590,10 @@ pub struct ExecutionSession {
     /// read → write → read must observe post-write adjacency.
     pub(super) adjacency_provider: Arc<PersistentAdjacencyProvider>,
     owned_adjacency: Option<Arc<OwnedSessionAdjacency>>,
+    /// The query memory budget the pool was built with; the adjacency provider
+    /// derives its retained topology caches from it, and a provider rebuilt
+    /// after a mutation takes the same one (#1987).
+    memory_budget_bytes: u64,
     /// Cumulative session-pool high-water mark reported in [`ExecutionStats`].
     /// Repeated and concurrent reads share this gauge without resetting it.
     memory_peak: Arc<std::sync::atomic::AtomicUsize>,
@@ -601,6 +606,71 @@ pub struct ExecutionSession {
 struct OrdinalIdentityConfig {
     session: Option<Arc<V4OrdinalIdentitySession>>,
     required: bool,
+}
+
+/// Apply the tighter successfully attached query ceiling without replacing a
+/// shared catalog or provider authority.
+fn admit_inventory_memory(
+    catalog: &GraphCatalog,
+    provider: Option<&PersistentAdjacencyProvider>,
+    resources: &SessionResourceConfig,
+) -> Result<(), GfError> {
+    let catalog_inventory = catalog.admitted_inventory();
+    let provider_inventory = provider.and_then(AdjacencyProvider::admitted_inventory);
+    match (catalog_inventory, provider_inventory) {
+        (Some(catalog), Some(provider)) => {
+            catalog.set_query_memory_budget_pair(&provider, resources.memory_budget_bytes)?;
+        }
+        (Some(inventory), None) | (None, Some(inventory)) => {
+            inventory.set_query_memory_budget(resources.memory_budget_bytes)?;
+        }
+        (None, None) => {}
+    }
+    Ok(())
+}
+
+fn validate_provider_memory_budget(
+    provider: &PersistentAdjacencyProvider,
+    resources: &SessionResourceConfig,
+) -> Result<(), GfError> {
+    let supplied = provider.retained_topology_bytes().budget;
+    let allowed = graphforge_storage::read_cache_budget::ReadCacheBudget::from_query_budget(
+        resources.memory_budget_bytes,
+    )
+    .topology_bytes;
+    if supplied > allowed {
+        return Err(GfError::Api {
+            code: graphforge_core::ApiErrorCode::ResourceLimit,
+            message: format!(
+                "supplied adjacency provider has a {supplied} byte topology ceiling against the session's {allowed} byte read-cache share"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Resolve the session's provider after shared inventory admission.
+fn session_adjacency_provider(
+    catalog: &GraphCatalog,
+    dir: &std::path::Path,
+    mode: OntologyMode,
+    shared: Option<Arc<PersistentAdjacencyProvider>>,
+    memory_budget_bytes: u64,
+) -> Arc<PersistentAdjacencyProvider> {
+    shared.map_or_else(
+        || {
+            let provider = PersistentAdjacencyProvider::new(dir.to_path_buf(), mode)
+                .with_memory_budget(memory_budget_bytes);
+            Arc::new(match catalog.admitted_inventory() {
+                Some(inventory) => provider.with_inventory(inventory),
+                None => provider,
+            })
+        },
+        |provider| {
+            provider.revalidate();
+            provider
+        },
+    )
 }
 
 impl ExecutionSession {
@@ -730,9 +800,10 @@ impl ExecutionSession {
                 "query spill is enabled without a spill directory".into(),
             ));
         }
+        validate_provider_memory_budget(&provider, resources)?;
         let identity = match ordinal_identities {
             Some(resolver) => {
-                let pin = resolver.pin()?;
+                let pin = resolver.pin(resources.memory_budget_bytes)?;
                 OrdinalIdentityConfig {
                     // Requirement and payload come from one resolver snapshot.
                     // Keep them separate so the expansion boundary remains
@@ -771,19 +842,14 @@ impl ExecutionSession {
         // A facade-shared provider (#832) is revalidated here — once per
         // session — so its memoized state is as fresh as a per-query
         // provider's, while loaded views amortize across queries.
+        admit_inventory_memory(&catalog, shared_provider.as_deref(), resources)?;
         let owns_provider = shared_provider.is_none();
-        let adjacency_provider = shared_provider.map_or_else(
-            || {
-                let provider = PersistentAdjacencyProvider::new(dir.clone(), mode);
-                Arc::new(match catalog.admitted_inventory() {
-                    Some(inventory) => provider.with_inventory(inventory),
-                    None => provider,
-                })
-            },
-            |p| {
-                p.revalidate();
-                p
-            },
+        let adjacency_provider = session_adjacency_provider(
+            &catalog,
+            &dir,
+            mode,
+            shared_provider,
+            resources.memory_budget_bytes,
         );
         let owned_adjacency = owns_provider.then(|| {
             Arc::new(OwnedSessionAdjacency(RwLock::new(Arc::clone(
@@ -888,6 +954,7 @@ impl ExecutionSession {
             semantic_composition_fingerprint,
             adjacency_provider,
             owned_adjacency,
+            memory_budget_bytes: resources.memory_budget_bytes,
             memory_peak,
             #[cfg(feature = "differential-testing")]
             relational_fixed_hop_reference: false,
@@ -902,12 +969,14 @@ impl ExecutionSession {
         let inventory = self.catalog.admitted_inventory().ok_or_else(|| {
             GfError::Storage("refreshed session lacks admitted graph inventory".into())
         })?;
+        inventory.set_query_memory_budget(self.memory_budget_bytes)?;
         let private = tempfile::Builder::new()
             .prefix("graphforge-session-adjacency-")
             .tempdir()
             .map_err(|error| GfError::Storage(error.to_string()))?;
         let provider = Arc::new(
             PersistentAdjacencyProvider::new(self.dir.clone(), self.mode)
+                .with_memory_budget(self.memory_budget_bytes)
                 .with_inventory(inventory)
                 .with_rebuild_root(private),
         );

@@ -63,15 +63,27 @@ pub(super) fn open(
     owner: &GraphForge,
     request: &SliceRequest,
 ) -> Result<(GraphForge, Uuid), GfError> {
-    let (mut view, id) = match request.source {
+    // Hydration and execution must use the same ceiling. Retained provider and
+    // ordinal caches cannot be opened under a larger policy and lowered later.
+    let slice_policy = |policy: crate::NormalizedResourcePolicy| {
+        let mut policy = policy.with_private_query_budget(request.limits.working_bytes);
+        policy.batch_size = 256;
+        policy.target_partitions = 1;
+        policy
+    };
+    let (view, id) = match request.source {
         SliceSource::Current => {
             let generation = owner.generation_for_read()?;
             let id = generation.generation_uuid();
-            let mut view = GraphForge::open_resolved_with_lifecycle_mode(
+            let options = crate::GraphForgeOptions::default();
+            let (_, resource_policy) = options.clone().validate()?;
+            let mut view = GraphForge::open_resolved_with_lifecycle_resources(
                 generation.container_root().to_path_buf(),
                 generation,
                 true,
                 owner.lifecycle_mode,
+                options,
+                slice_policy(resource_policy),
             )?;
             view.runtime_catalog = Arc::new(Mutex::new(
                 owner
@@ -87,16 +99,14 @@ pub(super) fn open(
         }
         SliceSource::Version { version_uuid } => (
             owner
-                .open_research_version(version_uuid)?
+                .open_research_version_with_resources(
+                    version_uuid,
+                    slice_policy(owner.resource_policy.clone()),
+                )?
                 .into_slice_graph()?,
             version_uuid,
         ),
     };
-    // The engine memory pool is bounded separately from Slice-owned collections.
-    view.resource_policy.memory_budget_bytes = request.limits.working_bytes;
-    view.resource_policy.batch_size = 256;
-    view.resource_policy.target_partitions = 1;
-    view.resource_policy.spill_enabled = false;
     Ok((view, id))
 }
 pub(super) fn stream(

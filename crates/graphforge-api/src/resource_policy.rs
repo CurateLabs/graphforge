@@ -201,6 +201,10 @@ pub struct ResourcePolicyDiagnostics {
     pub construction_cpu_peak: usize,
     /// Logical CPUs observed at normalize time.
     pub observed_logical_cpus: usize,
+    /// Bytes retained by the adjacency provider against its share of the query budget.
+    pub retained_topology_bytes: graphforge_exec::RetainedTopologyBytes,
+    /// Admitted route/path structure and memoized property footer metadata.
+    pub retained_inventory_metadata_bytes: usize,
 }
 
 /// Fail-closed ceiling that still preserves concurrent same-instance reads
@@ -209,7 +213,8 @@ pub(crate) const DEFAULT_MAX_CONCURRENT_HEAVY_QUERIES: usize = 64;
 const DEFAULT_BATCH_SIZE: usize = 8_192;
 /// Floor of the derived query budget: what every instance had before the
 /// budget followed the host, so deriving never shrinks the pool.
-pub(crate) const DEFAULT_MEMORY_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
+pub(crate) const DEFAULT_MEMORY_BUDGET_BYTES: u64 =
+    graphforge_storage::read_cache_budget::DEFAULT_QUERY_MEMORY_BUDGET_BYTES;
 /// Share of the process memory limit the query pool may account. The rest
 /// covers what the pool does not see: Arrow buffers held by operators that do
 /// not reserve, the page cache of the scans, sort and spill buffers, and the
@@ -532,6 +537,14 @@ fn construction_cpu_split(
 }
 
 impl NormalizedResourcePolicy {
+    /// Apply a private view's query ceiling before its retained caches hydrate.
+    pub(crate) fn with_private_query_budget(mut self, memory_budget_bytes: u64) -> Self {
+        self.memory_budget_bytes = memory_budget_bytes;
+        self.memory_budget_source = MemoryBudgetSource::Explicit;
+        self.spill_enabled = false;
+        self
+    }
+
     /// A fresh instance construction admission sized by this policy (#1586).
     pub(crate) fn construction_cpu_admission(
         &self,

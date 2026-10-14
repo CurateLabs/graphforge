@@ -450,16 +450,18 @@ impl GraphForge {
             &self.dir().topology_files()?,
         )?;
         let inventory = std::sync::Arc::new(
-            graphforge_storage::AuthenticatedPropertyInventory::from_materialized_inventory(
+            graphforge_storage::AuthenticatedPropertyInventory::from_materialized_inventory_with_query_memory_budget(
                 &generation,
                 &self.dir(),
                 captured,
+                self.resource_policy.memory_budget_bytes,
             )?,
         );
         let adjacency = std::sync::Arc::new(crate::adjacency_provider_for_graph(
             &self.dir(),
             self.ontology_mode,
             std::sync::Arc::clone(&inventory),
+            self.resource_policy.memory_budget_bytes,
         )?);
         *self
             .property_authority

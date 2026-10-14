@@ -1068,3 +1068,428 @@ fn segmented_inventory_rejects_missing_parts_and_changed_admitted_payload() {
             .is_err()
     );
 }
+
+fn footer_budget_fixture() -> TempDir {
+    let root = TempDir::new().unwrap();
+    fs::create_dir_all(root.path().join("properties")).unwrap();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+        Field::new("value", DataType::Int64, false),
+    ]));
+    for index in 0..8 {
+        let path = root.path().join(format!("properties/Route{index}.parquet"));
+        let mut writer =
+            ArrowWriter::try_new(File::create(path).unwrap(), Arc::clone(&schema), None).unwrap();
+        let uuid = graphforge_core::uuid::Uuid::from_u128(index + 1);
+        let batch = arrow::record_batch::RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter([uuid.as_bytes().as_slice()].into_iter())
+                        .unwrap(),
+                ),
+                Arc::new(Int64Array::from(vec![1])),
+            ],
+        )
+        .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+    root
+}
+
+fn capture_lazy_footer_inventory(root: &Path) -> AuthenticatedPropertyInventory {
+    let inventory = crate::capture_graph_read_inventory(root).unwrap();
+    let entries = inventory
+        .files
+        .into_iter()
+        .map(|entry| {
+            let relative = PathBuf::from(&entry.relative_path);
+            (entry, relative)
+        })
+        .collect();
+    AuthenticatedPropertyInventory::admit_read_entries(
+        root,
+        entries,
+        None,
+        None,
+        false,
+        None,
+        FragmentAdmission::FirstTouch.into(),
+    )
+    .unwrap()
+}
+
+fn metadata_heavy_footer_fixture(row_groups: usize) -> TempDir {
+    use parquet::file::properties::WriterProperties;
+
+    let root = TempDir::new().unwrap();
+    fs::create_dir_all(root.path().join("properties")).unwrap();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+        Field::new("value", DataType::Int64, false),
+    ]));
+    let uuids = (1..=row_groups)
+        .map(|value| graphforge_core::uuid::Uuid::from_u128(value as u128))
+        .collect::<Vec<_>>();
+    let batch = arrow::record_batch::RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(
+                FixedSizeBinaryArray::try_from_iter(
+                    uuids.iter().map(|uuid| uuid.as_bytes().as_slice()),
+                )
+                .unwrap(),
+            ),
+            Arc::new(Int64Array::from(vec![1; row_groups])),
+        ],
+    )
+    .unwrap();
+    for route in ["Route0", "Route1"] {
+        let properties = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(1))
+            .build();
+        let mut writer = ArrowWriter::try_new(
+            File::create(root.path().join(format!("properties/{route}.parquet"))).unwrap(),
+            Arc::clone(&schema),
+            Some(properties),
+        )
+        .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+    root
+}
+
+#[test]
+fn metadata_heavy_footer_fits_once_but_a_second_footer_exceeds_the_fixed_share() {
+    const ROW_GROUPS: usize = 1200;
+    const QUERY_BUDGET: u64 = 16 << 20;
+    const INVENTORY_CEILING: usize = 2 << 20;
+
+    let root = metadata_heavy_footer_fixture(ROW_GROUPS);
+    let roomy = capture_lazy_footer_inventory(root.path());
+    roomy.set_query_memory_budget(512 << 20).unwrap();
+    roomy
+        .route_schema(PropertyRouteKind::Node, "Route0")
+        .unwrap()
+        .unwrap();
+    let fragment = &roomy.routes[&(PropertyRouteKind::Node, "Route0".into())][0];
+    let footer = roomy
+        .fragment_footer_of(fragment, PropertyRouteKind::Node, "Route0")
+        .unwrap();
+    assert_eq!(footer.metadata.num_row_groups(), ROW_GROUPS);
+    let metadata_bytes = footer.metadata.memory_size();
+    assert!(
+        metadata_bytes * 2 > INVENTORY_CEILING,
+        "the old charge for two metadata copies must refuse this fixture: {metadata_bytes}"
+    );
+
+    let tight = capture_lazy_footer_inventory(root.path());
+    tight.set_query_memory_budget(QUERY_BUDGET).unwrap();
+    let schema = tight
+        .route_schema(PropertyRouteKind::Node, "Route0")
+        .expect("one retained metadata allocation fits the fixed share")
+        .unwrap();
+    let held = tight.retained_metadata_bytes();
+    assert!(held <= INVENTORY_CEILING, "retained {held}");
+    for _ in 0..2 {
+        let again = tight
+            .route_schema(PropertyRouteKind::Node, "Route0")
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(&schema, &again));
+        assert_eq!(
+            tight
+                .route_row_upper_bound(PropertyRouteKind::Node, "Route0")
+                .unwrap(),
+            ROW_GROUPS
+        );
+        assert_eq!(tight.retained_metadata_bytes(), held);
+        let error = tight
+            .route_schema(PropertyRouteKind::Node, "Route1")
+            .unwrap_err();
+        assert_eq!(error.code(), "GF_RESOURCE_LIMIT");
+        assert!(error.to_string().contains("property inventory metadata"));
+        assert_eq!(tight.retained_metadata_bytes(), held);
+    }
+    let refused = &tight.routes[&(PropertyRouteKind::Node, "Route1".into())][0];
+    assert!(refused.footer.get().unwrap().is_err());
+}
+
+fn metadata_heavy_generation_fixture(
+    row_groups: usize,
+    routes: usize,
+) -> (TempDir, TempDir, crate::ResolvedProjectGeneration) {
+    let source = metadata_heavy_footer_fixture(row_groups);
+    for route in 2..routes {
+        fs::copy(
+            source.path().join("properties/Route0.parquet"),
+            source
+                .path()
+                .join(format!("properties/Route{route}.parquet")),
+        )
+        .unwrap();
+    }
+    let (_, graph_files) = crate::capture_graph_files(source.path()).unwrap();
+    let mut participants = crate::empty_workspace_participants().unwrap();
+    participants.insert(0, graph_files);
+    let container = TempDir::new().unwrap();
+    crate::open_or_initialize_project(container.path()).unwrap();
+    let request = crate::ProjectGenerationRequest {
+        transaction_uuid: graphforge_core::uuid::Uuid::now_v7(),
+        generation_uuid: graphforge_core::uuid::Uuid::now_v7(),
+        capabilities: vec![
+            crate::ProjectCapability {
+                capability_id: crate::GRAPH_CAPABILITY_ID.into(),
+                capability_version: crate::GRAPH_CAPABILITY_VERSION,
+            },
+            crate::ProjectCapability {
+                capability_id: "workspace".into(),
+                capability_version: 1,
+            },
+        ],
+        participants,
+    };
+    let crate::ProjectStageOutcome::Staged(staged) =
+        crate::stage_project_generation_with_graph_tree(
+            container.path(),
+            &request,
+            Some(source.path()),
+        )
+        .unwrap()
+    else {
+        panic!("fresh footer fixture unexpectedly replayed");
+    };
+    staged
+        .validate(|_| Ok(()), |_, _| Ok(()))
+        .unwrap()
+        .publish()
+        .unwrap();
+    let generation = crate::resolve_project_generation(container.path()).unwrap();
+    (source, container, generation)
+}
+
+#[test]
+fn eager_generation_footers_use_the_query_share_before_capture() {
+    const ROW_GROUPS: usize = 1200;
+    const ROUTES: usize = 64;
+    const QUERY_BUDGET: u64 = 2 << 30;
+    let (source, _container, generation) = metadata_heavy_generation_fixture(ROW_GROUPS, ROUTES);
+    let (materialized_inventory, _) = crate::capture_graph_files(source.path()).unwrap();
+    assert!(matches!(
+        generation.declared_graph_files_participant().unwrap(),
+        Some(crate::GraphFilesParticipant::V1(_))
+    ));
+    let private_inventory = crate::capture_graph_read_inventory(source.path()).unwrap();
+    for error in [
+        AuthenticatedPropertyInventory::from_resolved_generation(&generation).unwrap_err(),
+        AuthenticatedPropertyInventory::from_private_workspace_inventory(
+            &generation,
+            source.path(),
+            private_inventory.clone(),
+        )
+        .unwrap_err(),
+        AuthenticatedPropertyInventory::from_materialized_inventory(
+            &generation,
+            source.path(),
+            materialized_inventory.clone(),
+        )
+        .unwrap_err(),
+    ] {
+        assert_eq!(error.code(), "GF_RESOURCE_LIMIT");
+        assert!(error.to_string().contains("property inventory metadata"));
+    }
+    let resolved =
+        AuthenticatedPropertyInventory::from_resolved_generation_with_query_memory_budget(
+            &generation,
+            QUERY_BUDGET,
+        )
+        .expect("the final share must apply before eager V1 footer admission");
+    let private =
+        AuthenticatedPropertyInventory::from_private_workspace_inventory_with_query_memory_budget(
+            &generation,
+            source.path(),
+            private_inventory.clone(),
+            QUERY_BUDGET,
+        )
+        .expect("the final share must apply before eager replay footer admission");
+    let materialized =
+        AuthenticatedPropertyInventory::from_materialized_inventory_with_query_memory_budget(
+            &generation,
+            source.path(),
+            materialized_inventory.clone(),
+            QUERY_BUDGET,
+        )
+        .expect("the final share must apply before eager materialized footer admission");
+    for inventory in [&resolved, &private, &materialized] {
+        let retained = inventory.retained_metadata_bytes();
+        assert!(
+            retained > crate::read_cache_budget::ReadCacheBudget::DEFAULT.inventory_bytes as usize,
+            "real retained footers must exceed the standalone allowance: {retained}"
+        );
+        assert!(
+            retained
+                <= crate::read_cache_budget::ReadCacheBudget::from_query_budget(QUERY_BUDGET)
+                    .inventory_bytes as usize
+        );
+        assert_eq!(
+            inventory.generation_uuid(),
+            Some(generation.generation_uuid())
+        );
+        for route in 0..ROUTES {
+            assert_eq!(
+                inventory
+                    .route_row_upper_bound(PropertyRouteKind::Node, &format!("Route{route}"))
+                    .unwrap(),
+                ROW_GROUPS
+            );
+        }
+        assert_eq!(inventory.retained_metadata_bytes(), retained);
+    }
+    for error in [
+        AuthenticatedPropertyInventory::from_resolved_generation_with_query_memory_budget(
+            &generation,
+            512 << 20,
+        )
+        .unwrap_err(),
+        AuthenticatedPropertyInventory::from_materialized_inventory_with_query_memory_budget(
+            &generation,
+            source.path(),
+            materialized_inventory,
+            512 << 20,
+        )
+        .unwrap_err(),
+        AuthenticatedPropertyInventory::from_private_workspace_inventory_with_query_memory_budget(
+            &generation,
+            source.path(),
+            private_inventory,
+            512 << 20,
+        )
+        .unwrap_err(),
+    ] {
+        assert_eq!(error.code(), "GF_RESOURCE_LIMIT");
+    }
+}
+
+#[test]
+fn retained_fragment_footers_share_one_budget_and_refuse_before_caching_more() {
+    let root = footer_budget_fixture();
+    let capture = || capture_lazy_footer_inventory(root.path());
+    let roomy = capture();
+    roomy.set_query_memory_budget(512 << 20).unwrap();
+    let structure = roomy.retained_metadata_bytes();
+    roomy
+        .route_schema(PropertyRouteKind::Node, "Route0")
+        .unwrap()
+        .unwrap();
+    let footer_charge = roomy.retained_metadata_bytes() - structure;
+    assert!(footer_charge > 0);
+
+    let limit = structure + 2 * footer_charge;
+    let tight = capture();
+    tight.set_query_memory_budget((limit as u64) * 8).unwrap();
+    for route in ["Route0", "Route1"] {
+        tight
+            .route_schema(PropertyRouteKind::Node, route)
+            .unwrap()
+            .unwrap();
+    }
+    assert_eq!(tight.retained_metadata_bytes(), limit);
+    for _ in 0..2 {
+        let error = tight
+            .route_schema(PropertyRouteKind::Node, "Route2")
+            .unwrap_err();
+        assert_eq!(error.code(), "GF_RESOURCE_LIMIT");
+        assert!(
+            error.to_string().contains("property inventory metadata"),
+            "{error}"
+        );
+        assert!(tight.retained_metadata_bytes() <= limit);
+    }
+    let fragment = &tight.routes[&(PropertyRouteKind::Node, "Route2".into())][0];
+    assert!(
+        fragment.footer.get().unwrap().is_err(),
+        "the refused parsed footer must be dropped"
+    );
+    tight.set_query_memory_budget(512 << 20).unwrap();
+    let error = tight
+        .route_schema(PropertyRouteKind::Node, "Route3")
+        .unwrap_err();
+    assert_eq!(
+        error.code(),
+        "GF_RESOURCE_LIMIT",
+        "a larger attachment cannot raise the existing ceiling"
+    );
+    assert_eq!(tight.retained_metadata_bytes(), limit);
+    assert!(
+        tight.set_query_memory_budget(0).is_err(),
+        "zero is not unlimited"
+    );
+}
+
+#[test]
+fn paired_inventory_refusal_preserves_both_shared_ceilings() {
+    let root = footer_budget_fixture();
+    for reverse in [false, true] {
+        let first = capture_lazy_footer_inventory(root.path());
+        let second = capture_lazy_footer_inventory(root.path());
+        first.set_query_memory_budget(512 << 20).unwrap();
+        second.set_query_memory_budget(512 << 20).unwrap();
+        first
+            .route_schema(PropertyRouteKind::Node, "Route0")
+            .unwrap()
+            .unwrap();
+        for route in ["Route0", "Route1", "Route2"] {
+            second
+                .route_schema(PropertyRouteKind::Node, route)
+                .unwrap()
+                .unwrap();
+        }
+        let before_first = first.retained_metadata_bytes();
+        let before_second = second.retained_metadata_bytes();
+        assert!(before_second > before_first);
+        let proposed = (before_first as u64) * 8;
+        let error = if reverse {
+            second.set_query_memory_budget_pair(&first, proposed)
+        } else {
+            first.set_query_memory_budget_pair(&second, proposed)
+        }
+        .unwrap_err();
+        assert_eq!(error.code(), "GF_RESOURCE_LIMIT");
+        assert!(
+            error.to_string().contains("property inventory metadata"),
+            "{error}"
+        );
+        assert_eq!(first.retained_metadata_bytes(), before_first);
+        assert_eq!(second.retained_metadata_bytes(), before_second);
+        // Retained bytes alone cannot prove a ceiling was unchanged. Both
+        // authorities must admit new footers beyond the refused small limit.
+        first
+            .route_schema(PropertyRouteKind::Node, "Route1")
+            .unwrap()
+            .unwrap();
+        second
+            .route_schema(PropertyRouteKind::Node, "Route3")
+            .unwrap()
+            .unwrap();
+        assert!(first.retained_metadata_bytes() > before_first);
+        assert!(second.retained_metadata_bytes() > before_first);
+        std::thread::scope(|scope| {
+            let forward = scope.spawn(|| first.set_query_memory_budget_pair(&second, 512 << 20));
+            let backward = scope.spawn(|| second.set_query_memory_budget_pair(&first, 512 << 20));
+            forward.join().unwrap().unwrap();
+            backward.join().unwrap().unwrap();
+        });
+        let tight = first.retained_metadata_bytes() as u64 * 8;
+        first.set_query_memory_budget_pair(&first, tight).unwrap();
+        let error = first
+            .route_schema(PropertyRouteKind::Node, "Route2")
+            .unwrap_err();
+        assert_eq!(
+            error.code(),
+            "GF_RESOURCE_LIMIT",
+            "an identical authority is tightened once"
+        );
+    }
+}
