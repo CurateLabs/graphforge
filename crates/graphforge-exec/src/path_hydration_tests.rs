@@ -1281,6 +1281,87 @@ fn hydration_retains_selected_recovery_health_and_typed_failure() {
     assert_eq!(udf.resource.pool.reserved(), 0);
 }
 
+#[test]
+fn stored_nodes_serve_the_next_batch_without_reading_storage() {
+    // #1984: nodes resolved by one invocation are served to the next one of
+    // the same bound operator, in whatever order it asks for them.
+    let _guard = PathHydrationTestGuard::arm();
+    let (_dir, hydrate, one, two) = two_stem_fixture();
+    let udf = test_udf(hydrate.clone());
+    let resource = Arc::clone(&udf.resource);
+    let (seed, rels) = one_edge_inputs(one, two);
+    let first = invoke_udf(&udf, seed, rels, 8).unwrap();
+    assert_eq!(resource.counters["requested"].value(), 2);
+    assert_eq!(resource.counters["shared_hits"].value(), 0);
+    assert_eq!(resource.counters["shared_bypass"].value(), 0);
+    let node_batches = resource.counters["node_batches"].value();
+    let property_batches = resource.counters["property_batches"].value();
+    assert!(node_batches > 0 && property_batches > 0);
+    assert!(
+        resource.pool.reserved() > 0,
+        "the stored set is charged to the pool while the operator lives"
+    );
+
+    // The reverse path asks for the same two nodes in the opposite order.
+    let (seed, rels) = one_edge_inputs(two, one);
+    let again = invoke_udf(&udf, seed.clone(), rels.clone(), 8).unwrap();
+    assert_eq!(resource.counters["requested"].value(), 2);
+    assert_eq!(resource.counters["shared_hits"].value(), 2);
+    assert_eq!(resource.counters["shared_bypass"].value(), 0);
+    assert_eq!(resource.counters["node_batches"].value(), node_batches);
+    assert_eq!(
+        resource.counters["property_batches"].value(),
+        property_batches
+    );
+
+    // A fresh operator has stored nothing and answers the same call alike.
+    let fresh = test_udf(hydrate);
+    let direct = invoke_udf(&fresh, seed, rels, 8).unwrap();
+    assert_eq!(again.to_data(), direct.to_data());
+    assert_eq!(fresh.resource.counters["shared_hits"].value(), 0);
+    assert_ne!(first.to_data(), again.to_data(), "the order is the path's");
+
+    drop(udf);
+    assert_eq!(
+        resource.pool.reserved(),
+        0,
+        "nothing stored outlives its operator"
+    );
+}
+
+#[test]
+fn a_set_the_pool_cannot_hold_leaves_every_batch_hydrated_directly() {
+    // #1984: sharing is an optimization charged to the pool. When the pool
+    // share is too small the operator hydrates each batch itself and
+    // returns exactly what the shared path returns; it never fails.
+    let _guard = PathHydrationTestGuard::arm();
+    let (_dir, hydrate, one, two) = two_stem_fixture();
+    let (seed, rels) = one_edge_inputs(one, two);
+
+    let roomy = test_udf(hydrate.clone());
+    let expected = invoke_udf(&roomy, seed.clone(), rels.clone(), 8).unwrap();
+    assert_eq!(roomy.resource.counters["shared_bypass"].value(), 0);
+
+    // Hydrating two nodes fits this budget; an eighth of it, the share the
+    // stored set may hold, does not fit even one block.
+    path_hydration_stats::set_memory_budget(16 << 10);
+    let tight = test_udf(hydrate);
+    let resource = Arc::clone(&tight.resource);
+    for round in 1..=2_usize {
+        let output = invoke_udf(&tight, seed.clone(), rels.clone(), 8).unwrap();
+        assert_eq!(output.to_data(), expected.to_data());
+        assert_eq!(resource.counters["shared_hits"].value(), 0);
+        assert_eq!(
+            resource.counters["requested"].value(),
+            2 * round,
+            "each batch hydrates its own nodes once the set is exhausted"
+        );
+        // The call that fills the set past its cap leads; later ones bypass.
+        assert_eq!(resource.counters["shared_bypass"].value(), round - 1);
+        assert_eq!(resource.pool.reserved(), 0);
+    }
+}
+
 /// Two stems, two nodes: `1` carries `title` (Company) and `name` (Person)
 /// and both labels, `2` carries only `name` and one label.
 fn two_stem_fixture() -> (tempfile::TempDir, TestHydration, [u8; 16], [u8; 16]) {
