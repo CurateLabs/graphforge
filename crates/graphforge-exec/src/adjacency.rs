@@ -2372,6 +2372,49 @@ mod tests {
         assert!(!Arc::ptr_eq(out_index, sharded_base(&fresh.inner)));
     }
 
+    /// #1987: a provider's decoded shards and its label index are one
+    /// consumer of the topology share (`query budget / 4`), across every index
+    /// it opens. The multi-shard eviction is proved in storage, where shard
+    /// sizes can be set; here the provider's derivation and its label-index
+    /// charge are checked end to end on a real built graph.
+    #[test]
+    fn provider_derives_its_topology_budget_and_charges_the_label_index() {
+        const QUERY_BUDGET: u64 = 64 * 1024 * 1024;
+        let dir = TempDir::new().unwrap();
+        let _ids = write_diamond(dir.path());
+        graphforge_storage::adjacency::build_adjacency_index(dir.path(), TS).unwrap();
+        let provider = persistent_provider(dir.path().to_path_buf(), OntologyMode::Strict)
+            .with_memory_budget(QUERY_BUDGET);
+        let topology = ReadCacheBudget::from_query_budget(QUERY_BUDGET).topology_bytes;
+        assert_eq!(topology, QUERY_BUDGET / 4, "the stated formula");
+        assert_eq!(provider.shard_cache.budget_bytes(), topology);
+
+        for direction in [Direction::Out, Direction::In] {
+            provider
+                .adjacency("KNOWS", direction)
+                .unwrap()
+                .for_each_row(|_, _| {})
+                .unwrap();
+        }
+        let labels = provider
+            .node_labels()
+            .unwrap()
+            .expect("the built graph has a label index");
+        assert!(labels.bytes() > 0);
+        assert_eq!(provider.shard_cache.external_bytes(), labels.bytes());
+        let retained = provider.shard_cache.retained_bytes();
+        assert!(retained > 0, "the reads decoded shards");
+        assert!(
+            retained + provider.shard_cache.external_bytes() <= topology,
+            "shards {retained} + label index {} exceed {topology}",
+            labels.bytes()
+        );
+
+        // A rebuilt generation releases the label index's share.
+        provider.invalidate();
+        assert_eq!(provider.shard_cache.external_bytes(), 0);
+    }
+
     #[test]
     fn undirected_csr_merge_preserves_out_before_in_ties() {
         let out = CsrIndex {
