@@ -2,7 +2,7 @@
 
 use super::*;
 
-use arrow::array::{ArrayRef, Int64Array, StringArray, StringViewArray};
+use arrow::array::{ArrayRef, BinaryViewArray, Int64Array, StringArray, StringViewArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::execution::memory_pool::MemoryPool;
@@ -96,6 +96,48 @@ async fn oversized_strings_are_copied_into_bounded_runs_in_source_order() {
 #[tokio::test]
 async fn oversized_string_views_do_not_retain_the_source_backing_buffers() {
     assert_compact_runs(true).await;
+}
+
+#[test]
+fn sizing_many_view_runs_does_not_repeatedly_scan_the_remaining_batch() {
+    let rows = 8_192;
+    let value = "x".repeat(4_096);
+    let arrays: [ArrayRef; 2] = [
+        Arc::new(StringViewArray::from(vec![Some(value.as_str()); rows])),
+        Arc::new(BinaryViewArray::from(vec![Some(value.as_bytes()); rows])),
+    ];
+    for array in arrays {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            array.data_type().clone(),
+            true,
+        )]));
+        let source = RecordBatch::try_new(schema, vec![array]).unwrap();
+        let target = 1024 * 1024;
+        let mut offset = 0;
+        let mut visits = 0;
+        let mut runs = 0;
+        while offset < rows {
+            let length = compact_window_rows(rows - offset, target, |length| {
+                visits += length;
+                compact_charge(&source.slice(offset, length))
+            });
+            assert!(length > 0);
+            assert!(compact_charge(&source.slice(offset, length)) <= target);
+            if offset + length < rows {
+                assert!(compact_charge(&source.slice(offset, length + 1)) > target);
+            }
+            offset += length;
+            runs += 1;
+        }
+        assert_eq!(offset, rows);
+        assert!(runs > 64, "fixture must produce many small runs: {runs}");
+        assert!(
+            visits <= 16 * rows,
+            "{}: {visits} values inspected for {rows} rows in {runs} runs",
+            source.schema().field(0).data_type(),
+        );
+    }
 }
 
 #[tokio::test]

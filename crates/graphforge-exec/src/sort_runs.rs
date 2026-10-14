@@ -257,18 +257,11 @@ impl SortRunCoalesceStream {
     fn compact_window(&mut self) -> Result<RecordBatch> {
         let (source, offset) = self.pending.as_ref().expect("pending source");
         let remaining = source.num_rows() - offset;
-        let mut low = 1;
-        let mut high = remaining;
         // The copy allowance covers buffer rounding and array metadata. A
         // single wide row is indivisible and is admitted against the pool.
-        while low < high {
-            let middle = low + (high - low).div_ceil(2);
-            if compact_charge(&source.slice(*offset, middle)) <= self.run_bytes {
-                low = middle;
-            } else {
-                high = middle - 1;
-            }
-        }
+        let low = compact_window_rows(remaining, self.run_bytes, |rows| {
+            compact_charge(&source.slice(*offset, rows))
+        });
         let window = source.slice(*offset, low);
         let admitted = compact_charge(&window);
         self.reservation.try_grow(admitted)?;
@@ -303,6 +296,30 @@ impl SortRunCoalesceStream {
         self.reservation.shrink(actual);
         Ok(compact)
     }
+}
+
+fn compact_window_rows(
+    remaining: usize,
+    run_bytes: usize,
+    mut charge: impl FnMut(usize) -> usize,
+) -> usize {
+    let mut low = 1;
+    let mut high = 1;
+    // View sizing walks every selected value. Grow a local bound so sizing a
+    // small run never starts by scanning half of the entire remaining batch.
+    while high < remaining && charge(high) <= run_bytes {
+        low = high;
+        high = high.saturating_mul(2).min(remaining);
+    }
+    while low < high {
+        let middle = low + (high - low).div_ceil(2);
+        if charge(middle) <= run_bytes {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    low
 }
 
 /// Conservative compact-copy admission. Nested/dictionary children can retain
