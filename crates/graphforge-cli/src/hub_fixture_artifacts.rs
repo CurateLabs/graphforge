@@ -30,7 +30,7 @@ use uuid::Uuid;
 /// rather than caller-controlled artifact metadata.
 pub const GENERATOR_CONTRACT: &str = "graphforge-hub-fixture-generator/1";
 /// Object location base used by the checked-in fixture. Locations are transport,
-/// never identity, so a different base changes only `objects[].locations`.
+/// never identity, so a different base changes the manifest locations and their bindings.
 pub const DEFAULT_LOCATION_BASE: &str = "https://data.graphforge.sh/objects/sha256/";
 const OBJECT_PATH: &str = "objects/openalex-openalex.gfpb";
 const SUMMARY_PATH: &str = "objects/openalex-openalex.summary.json";
@@ -90,6 +90,7 @@ struct FixtureMetadata<'a> {
     summary_object_length: u64,
     module_objects: Vec<ModuleObjectRecord>,
     manifest_digest: String,
+    location_base: &'a str,
 }
 
 fn err(error: impl std::fmt::Display) -> String {
@@ -240,6 +241,31 @@ fn authority(graph: &GraphForge, operation: u128) -> Result<OntologyAuthorityExp
     })
 }
 
+/// Validate a digest-addressed HTTPS base using the Hub transport's location rules.
+/// No network lookup is needed to generate deterministic artifacts; clone still
+/// validates resolved addresses when fetching them.
+pub fn validate_location_base(location_base: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(location_base).map_err(err)?;
+    crate::hub_http::validate_url(&parsed).map_err(err)?;
+    let public_host = match parsed.host() {
+        Some(url::Host::Ipv4(ip)) => crate::hub_http::public_ip(ip.into()),
+        Some(url::Host::Ipv6(ip)) => crate::hub_http::public_ip(ip.into()),
+        Some(url::Host::Domain(host)) => {
+            let host = host.trim_end_matches('.');
+            let suffix = host.rsplit('.').next().unwrap_or_default();
+            host.contains('.') && !matches!(suffix, "localhost" | "local")
+        }
+        None => false,
+    };
+    if !public_host {
+        return Err("fixture location base host is not public".into());
+    }
+    if !location_base.ends_with('/') || parsed.as_str() != location_base {
+        return Err("fixture location base must be a canonical HTTPS URL ending in /".into());
+    }
+    Ok(())
+}
+
 fn location(location_base: &str, digest: &str) -> Result<String, String> {
     let hex = digest
         .strip_prefix("sha256:")
@@ -286,6 +312,7 @@ fn repository_identity() -> RepositoryIdentity {
     reason = "one transaction binds portable and discovery artifacts"
 )]
 pub fn generate(source: &Path, destination: &Path, location_base: &str) -> Result<(), String> {
+    validate_location_base(location_base)?;
     let limits = PortableV2Limits::default();
     let source_report = verify_full(source)?;
     let scratch = tempfile::tempdir().map_err(err)?;
@@ -438,6 +465,7 @@ pub fn generate(source: &Path, destination: &Path, location_base: &str) -> Resul
         summary_object_length: summary_object.length,
         module_objects: module_records,
         manifest_digest,
+        location_base,
     };
     write(destination.join("manifest.json"), &manifest_bytes)?;
     write(destination.join("refs.json"), &refs_bytes)?;
@@ -446,11 +474,12 @@ pub fn generate(source: &Path, destination: &Path, location_base: &str) -> Resul
     write(destination.join("fixture.json"), &metadata_bytes)
 }
 
-/// Regenerate in a private directory and compare every checked-in artifact byte.
-pub fn check(source: &Path, expected: &Path) -> Result<(), String> {
-    validate(source, expected)?;
+/// Regenerate at `location_base` in a private directory and compare every artifact byte.
+pub fn check(source: &Path, expected: &Path, location_base: &str) -> Result<(), String> {
+    validate_location_base(location_base)?;
+    validate(source, expected, location_base)?;
     let scratch = tempfile::tempdir().map_err(err)?;
-    generate(source, scratch.path(), DEFAULT_LOCATION_BASE)?;
+    generate(source, scratch.path(), location_base)?;
     let regenerated = artifact_files(scratch.path())?;
     if regenerated != artifact_files(expected)? {
         return Err("generated Hub fixture artifact set drifted".into());
@@ -486,7 +515,7 @@ fn artifact_files(root: &Path) -> Result<Vec<String>, String> {
 }
 
 /// Validate all generator, source, portable, discovery, summary, and metadata bindings.
-fn validate(source: &Path, artifacts: &Path) -> Result<(), String> {
+fn validate(source: &Path, artifacts: &Path, location_base: &str) -> Result<(), String> {
     let metadata: serde_json::Value =
         serde_json::from_slice(&fs::read(artifacts.join("fixture.json")).map_err(err)?)
             .map_err(err)?;
@@ -522,10 +551,17 @@ fn validate(source: &Path, artifacts: &Path) -> Result<(), String> {
     if reference.validator.0 != manifest_digest {
         return Err("fixture validator does not bind canonical manifest bytes".into());
     }
-    let selected = manifest.package_object().map_err(err)?;
-    if selected.locations != [location(DEFAULT_LOCATION_BASE, &selected.digest.0)?] {
-        return Err("fixture object location is not digest addressed".into());
+    if metadata["location_base"] != location_base {
+        return Err("fixture location base does not match the requested base".into());
     }
+    for object in &manifest.objects {
+        if object.locations != [location(location_base, &object.digest.0)?] {
+            return Err(
+                "fixture object location is not digest addressed at the requested base".into(),
+            );
+        }
+    }
+    let selected = manifest.package_object().map_err(err)?;
     let object_path = metadata["object_path"]
         .as_str()
         .ok_or("fixture object path is absent")?;
@@ -576,9 +612,6 @@ fn validate_summary(
         .as_ref()
         .ok_or("fixture manifest does not advertise a summary")?;
     let selected = manifest.summary_object().map_err(err)?;
-    if selected.locations != [location(DEFAULT_LOCATION_BASE, &selected.digest.0)?] {
-        return Err("fixture summary location is not digest addressed".into());
-    }
     let bytes = fs::read(artifacts.join(SUMMARY_PATH)).map_err(err)?;
     if digest_bytes(&bytes) != reference.object_digest.0 || bytes.len() as u64 != selected.length {
         return Err("fixture summary object bytes do not match the manifest descriptor".into());
@@ -623,9 +656,6 @@ fn validate_modules(
             content_digest: module.content_digest.clone(),
         };
         let (_, selected) = manifest.ontology_module_object(&identity).map_err(err)?;
-        if selected.locations != [location(DEFAULT_LOCATION_BASE, &selected.digest.0)?] {
-            return Err("fixture module object location is not digest addressed".into());
-        }
         let path = module_object_path(&module.content_digest.0)?;
         let file = artifacts.join(&path);
         let bytes = fs::read(&file).map_err(err)?;
@@ -845,7 +875,7 @@ mod tests {
     fn checked_in_hub_fixture_is_exact_rust_output() {
         let source = private_source();
         let artifacts = copy_artifacts(&root().join("tests/fixtures/hub/generated/v1"));
-        check(source.path(), artifacts.path()).unwrap();
+        check(source.path(), artifacts.path(), DEFAULT_LOCATION_BASE).unwrap();
     }
 
     #[test]
@@ -854,7 +884,7 @@ mod tests {
         let output = tempfile::tempdir().unwrap();
         generate(source.path(), output.path(), DEFAULT_LOCATION_BASE).unwrap();
         fs::write(output.path().join("refs.json"), b"{}\n").unwrap();
-        let error = check(source.path(), output.path()).unwrap_err();
+        let error = check(source.path(), output.path(), DEFAULT_LOCATION_BASE).unwrap_err();
         assert!(!error.is_empty());
     }
 
@@ -978,11 +1008,11 @@ mod tests {
             mutate(&mut value);
             fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
             assert!(
-                validate(source.path(), candidate.path()).is_err(),
+                validate(source.path(), candidate.path(), DEFAULT_LOCATION_BASE).is_err(),
                 "semantic case {name}"
             );
             assert!(
-                check(source.path(), candidate.path()).is_err(),
+                check(source.path(), candidate.path(), DEFAULT_LOCATION_BASE).is_err(),
                 "drift case {name}"
             );
         }
@@ -991,11 +1021,11 @@ mod tests {
         let mut bytes = fs::read(&path).unwrap();
         bytes[1024] ^= 1;
         fs::write(path, bytes).unwrap();
-        assert!(validate(source.path(), package.path()).is_err());
-        assert!(check(source.path(), package.path()).is_err());
+        assert!(validate(source.path(), package.path(), DEFAULT_LOCATION_BASE).is_err());
+        assert!(check(source.path(), package.path(), DEFAULT_LOCATION_BASE).is_err());
         let altered_source = private_source();
         fs::write(altered_source.path().join("bag-info.txt"), b"changed").unwrap();
-        assert!(validate(altered_source.path(), &pristine).is_err());
+        assert!(validate(altered_source.path(), &pristine, DEFAULT_LOCATION_BASE).is_err());
     }
 
     #[test]
@@ -1008,11 +1038,11 @@ mod tests {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, b"extra").unwrap();
             assert!(
-                validate(source.path(), candidate.path()).is_err(),
+                validate(source.path(), candidate.path(), DEFAULT_LOCATION_BASE).is_err(),
                 "{relative}"
             );
             assert!(
-                check(source.path(), candidate.path()).is_err(),
+                check(source.path(), candidate.path(), DEFAULT_LOCATION_BASE).is_err(),
                 "{relative}"
             );
         }
@@ -1053,9 +1083,12 @@ mod tests {
         let source = private_source();
         let candidate = copy_artifacts(&root().join("tests/fixtures/hub/generated/v1"));
         mutate(candidate.path());
-        let error = validate(source.path(), candidate.path()).unwrap_err();
+        let error = validate(source.path(), candidate.path(), DEFAULT_LOCATION_BASE).unwrap_err();
         assert!(error.contains(expected), "{name}: {error}");
-        assert!(check(source.path(), candidate.path()).is_err(), "{name}");
+        assert!(
+            check(source.path(), candidate.path(), DEFAULT_LOCATION_BASE).is_err(),
+            "{name}"
+        );
     }
 
     fn mutate_manifest(dir: &Path, mutate: impl FnOnce(&mut serde_json::Value)) {
@@ -1236,7 +1269,127 @@ mod tests {
         }
         // The mirror manifest is self-consistent but is not the checked-in
         // location contract.
-        assert!(validate(source.path(), second.path()).is_err());
+        assert!(validate(source.path(), second.path(), DEFAULT_LOCATION_BASE).is_err());
+    }
+
+    #[test]
+    fn location_bases_follow_public_https_transport_rules_before_writing() {
+        for base in [
+            DEFAULT_LOCATION_BASE,
+            "https://preview-data.example.org/objects/sha256/",
+            "https://8.8.8.8/objects/",
+            "https://[2606:4700:4700::1111]/objects/",
+        ] {
+            validate_location_base(base).unwrap();
+        }
+        let output = tempfile::tempdir().unwrap();
+        for base in [
+            "http://preview.example.org/objects/",
+            "https://user:secret@preview.example.org/objects/",
+            "https://preview.example.org/objects/?token=x/",
+            "https://preview.example.org/objects/#fragment/",
+            "https://preview.example.org/objects",
+            "https://localhost/objects/",
+            "https://service.localhost/objects/",
+            "https://service.local/objects/",
+            "https://localhost./objects/",
+            "https://127.0.0.1/objects/",
+            "https://10.0.0.1/objects/",
+            "https://192.168.1.1/objects/",
+            "https://169.254.1.1/objects/",
+            "https://[::1]/objects/",
+            "https://[fc00::1]/objects/",
+            "https://[::ffff:127.0.0.1]/objects/",
+            "https://preview.example.org/a/../objects/",
+        ] {
+            assert!(validate_location_base(base).is_err(), "{base}");
+            // A missing source demonstrates validation precedes import and writes.
+            let error = generate(Path::new("absent-source"), output.path(), base).unwrap_err();
+            assert!(!error.is_empty(), "{base}");
+            assert_eq!(fs::read_dir(output.path()).unwrap().count(), 0, "{base}");
+        }
+    }
+
+    #[test]
+    fn preview_generation_is_deterministic_and_only_transport_bindings_change() {
+        let source = private_source();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let base = "https://preview-data.example.org/objects/sha256/";
+        generate(source.path(), first.path(), base).unwrap();
+        generate(source.path(), second.path(), base).unwrap();
+        assert_eq!(tree_bytes(first.path()), tree_bytes(second.path()));
+        check(source.path(), first.path(), base).unwrap();
+        assert!(check(source.path(), first.path(), DEFAULT_LOCATION_BASE).is_err());
+
+        let default = root().join("tests/fixtures/hub/generated/v1");
+        let preview_bytes = tree_bytes(first.path());
+        let default_bytes = tree_bytes(&default);
+        assert_eq!(
+            preview_bytes.keys().collect::<Vec<_>>(),
+            default_bytes.keys().collect::<Vec<_>>()
+        );
+        for (relative, bytes) in &preview_bytes {
+            if !["manifest.json", "refs.json", "fixture.json"].contains(&relative.as_str()) {
+                assert_eq!(bytes, &default_bytes[relative], "{relative}");
+            }
+        }
+        let json = |dir: &Path, name: &str| -> serde_json::Value {
+            serde_json::from_slice(&fs::read(dir.join(name)).unwrap()).unwrap()
+        };
+        let mut preview = json(first.path(), "manifest.json");
+        let canonical = json(&default, "manifest.json");
+        for (object, default_object) in preview["objects"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .zip(canonical["objects"].as_array().unwrap())
+        {
+            assert_eq!(
+                object["locations"],
+                serde_json::json!([location(base, object["digest"].as_str().unwrap()).unwrap()])
+            );
+            object["locations"] = default_object["locations"].clone();
+        }
+        assert_eq!(preview, canonical);
+        for name in ["refs.json", "fixture.json"] {
+            let mut preview = json(first.path(), name);
+            let canonical = json(&default, name);
+            if name == "refs.json" {
+                assert_ne!(
+                    preview["refs"][0]["validator"],
+                    canonical["refs"][0]["validator"]
+                );
+                preview["refs"][0]["validator"] = canonical["refs"][0]["validator"].clone();
+            } else {
+                assert_eq!(preview["location_base"], base);
+                preview["location_base"] = canonical["location_base"].clone();
+                preview["manifest_digest"] = canonical["manifest_digest"].clone();
+            }
+            assert_eq!(preview, canonical, "{name}");
+        }
+        // Even a re-sealed manifest must bind every object's location to the base.
+        for index in 0..canonical["objects"].as_array().unwrap().len() {
+            let candidate = copy_artifacts(first.path());
+            mutate_manifest(candidate.path(), |value| {
+                value["objects"][index]["locations"][0] =
+                    serde_json::json!("https://other.example.org/tampered");
+            });
+            reseal_manifest_digest(candidate.path());
+            let error = check(source.path(), candidate.path(), base).unwrap_err();
+            assert!(
+                error.contains("not digest addressed"),
+                "object {index}: {error}"
+            );
+        }
+        mutate_json(&first.path().join("fixture.json"), |value| {
+            value["location_base"] = serde_json::json!(DEFAULT_LOCATION_BASE);
+        });
+        assert!(
+            check(source.path(), first.path(), base)
+                .unwrap_err()
+                .contains("does not match")
+        );
     }
 
     fn tree_bytes(root: &Path) -> BTreeMap<String, Vec<u8>> {

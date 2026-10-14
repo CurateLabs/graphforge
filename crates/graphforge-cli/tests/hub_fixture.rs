@@ -38,7 +38,7 @@ fn digest(bytes: &[u8]) -> String {
 fn checked_in_fixture_has_no_drift() {
     // Regenerates every artifact from the checked-in source and compares bytes.
     // On failure: `cargo run -p graphforge-cli --example generate_hub_fixture -- --update`.
-    check(&source(), &generated()).unwrap();
+    check(&source(), &generated(), DEFAULT_LOCATION_BASE).unwrap();
 }
 
 #[test]
