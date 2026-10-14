@@ -53,10 +53,6 @@ impl NodeLabelSet {
     pub fn type_ids(&self) -> &[u32] {
         &self.type_ids
     }
-
-    fn heap_bytes(&self) -> u64 {
-        (size_of::<Self>() + self.type_ids.len() * size_of::<u32>()) as u64
-    }
 }
 
 #[derive(Debug)]
@@ -77,6 +73,13 @@ impl Slots {
         match self {
             Self::Narrow(slots) => slots.len(),
             Self::Wide(slots) => slots.len(),
+        }
+    }
+
+    fn capacity(&self) -> usize {
+        match self {
+            Self::Narrow(slots) => slots.capacity(),
+            Self::Wide(slots) => slots.capacity(),
         }
     }
 
@@ -117,8 +120,14 @@ impl Slots {
 
     fn grow_to(&mut self, len: usize) {
         match self {
-            Self::Narrow(slots) if slots.len() < len => slots.resize(len, NARROW_ABSENT),
-            Self::Wide(slots) if slots.len() < len => slots.resize(len, WIDE_ABSENT),
+            Self::Narrow(slots) if slots.len() < len => {
+                slots.reserve_exact(len - slots.len());
+                slots.resize(len, NARROW_ABSENT);
+            }
+            Self::Wide(slots) if slots.len() < len => {
+                slots.reserve_exact(len - slots.len());
+                slots.resize(len, WIDE_ABSENT);
+            }
             _ => {}
         }
     }
@@ -177,8 +186,11 @@ impl NodeLabelIndex {
             let batches = crate::catalog::read_node_label_columns(path).map_err(|error| {
                 GfError::Storage(format!("node label index: {}: {error}", path.display()))
             })?;
-            for batch in &batches {
-                if !builder.absorb(batch)? {
+            for batch in batches {
+                let batch = batch.map_err(|error| {
+                    GfError::Storage(format!("node label index: {}: {error}", path.display()))
+                })?;
+                if !builder.absorb(&batch)? {
                     return Ok(None);
                 }
             }
@@ -198,8 +210,13 @@ impl NodeLabelIndex {
     /// Resident size: one slot per ordinal plus the label-set dictionary.
     #[must_use]
     pub fn bytes(&self) -> u64 {
-        (self.slots.len() * self.slots.width()) as u64
-            + self.sets.iter().map(NodeLabelSet::heap_bytes).sum::<u64>()
+        (self.slots.capacity() * self.slots.width()
+            + self.sets.capacity() * size_of::<NodeLabelSet>()) as u64
+            + self
+                .sets
+                .iter()
+                .map(|set| (set.type_ids.len() * size_of::<u32>()) as u64)
+                .sum::<u64>()
     }
 
     /// Number of distinct label sets.
@@ -419,16 +436,28 @@ impl Builder {
             }
             self.slots.widen();
         }
+        // Admit the complete retained allocation before creating it. Exact
+        // growth avoids Vec's doubling slack escaping the shared cache budget.
+        let dictionary_capacity = self.sets.capacity().max(set + 1);
+        let payload_bytes = (self.scratch.len() - 1) * size_of::<u32>();
+        let dictionary_bytes = self
+            .dictionary_bytes
+            .saturating_add(payload_bytes as u64)
+            .saturating_add(
+                ((dictionary_capacity - self.sets.capacity()) * size_of::<NodeLabelSet>()) as u64,
+            );
+        let slot_bytes = (self.slots.capacity() * self.slots.width()) as u64;
+        if slot_bytes.saturating_add(dictionary_bytes) > self.budget_bytes {
+            return Ok(None);
+        }
+        self.sets.reserve_exact(1);
         let entry = NodeLabelSet {
             primary: self.scratch[0],
             type_ids: self.scratch[1..].into(),
         };
-        self.dictionary_bytes += entry.heap_bytes();
+        self.dictionary_bytes = dictionary_bytes;
         self.by_key.insert(self.scratch.as_slice().into(), set);
         self.sets.push(entry);
-        if self.over_budget(self.slots.len(), self.slots.width()) {
-            return Ok(None);
-        }
         Ok(Some(set))
     }
 }
@@ -700,6 +729,54 @@ mod tests {
             NodeLabelIndex::build(&topology, index.bytes() - 1)
                 .expect("build")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn growth_between_files_admits_the_allocated_capacity() {
+        let dir = tempfile::tempdir().expect("dir");
+        let first: Vec<(u64, u32, Option<&[u32]>)> = (0..1000)
+            .map(|node| (node, 4, Some(&[4_u32][..])))
+            .collect();
+        let topology = files(vec![
+            node_file(dir.path(), "a.parquet", &first, true),
+            node_file(dir.path(), "b.parquet", &[(1000, 4, Some(&[4]))], true),
+        ]);
+        let budget = 1100;
+        let index = NodeLabelIndex::build(&topology, budget)
+            .expect("build")
+            .expect("exact growth fits");
+        let allocated = index.slots.capacity() * index.slots.width()
+            + index.sets.capacity() * size_of::<NodeLabelSet>()
+            + index
+                .sets
+                .iter()
+                .map(|set| set.type_ids.len() * size_of::<u32>())
+                .sum::<usize>();
+        assert_eq!(index.bytes(), allocated as u64);
+        assert!(
+            allocated as u64 <= budget,
+            "allocated {allocated} against {budget}"
+        );
+        assert!(index.get(1000).is_some());
+    }
+
+    #[test]
+    fn reporting_counts_unused_slot_and_dictionary_capacity() {
+        let mut slots = Vec::with_capacity(20);
+        slots.push(0);
+        let mut sets = Vec::with_capacity(4);
+        sets.push(NodeLabelSet {
+            primary: 4,
+            type_ids: Box::new([4]),
+        });
+        let index = NodeLabelIndex {
+            slots: Slots::Narrow(slots),
+            sets,
+        };
+        assert_eq!(
+            index.bytes(),
+            (20 + 4 * size_of::<NodeLabelSet>() + 4) as u64
         );
     }
 

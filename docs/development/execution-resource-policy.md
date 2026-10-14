@@ -51,6 +51,33 @@ Normalization returns structured [`GfError::Validation`](../../crates/graphforge
 Invalid settings never partially construct a runtime or authoritative spill
 state.
 
+## Retained read caches
+
+The query pool has budget `B`. Each hydrated generation's adjacency provider
+shares `B / 4` across decoded CSR shards, the node-label index and edge-property
+ID maps; its ordinal-identity handle gets another `B / 4`. A single decoded
+CSR shard may exceed the topology share, bounded by the shard admission limits.
+Label slots and dictionary arrays count allocated capacity, and optional views
+that do not fit are declined before allocation. The facade's
+`resource_diagnostics().retained_topology_bytes` reports the topology consumers
+and their shared ceiling.
+
+An edge-record decode reserves a conservative metadata-derived estimate before
+reading pages: four times compressed pages, uncompressed pages, reconstructed
+values and decoder levels, plus 64 KiB per selected column chunk. The estimate
+covers complete selected row groups, including rows later discarded by the
+filter. Dictionary strings use unencoded value-size statistics; a footer that
+lacks them uses `num_values * uncompressed_size`. An estimate beyond the query
+pool fails with the named `ExpandExec hop read` consumer. The ordinary storage
+reader also enforces its encoded-footer, row-group and column admission caps.
+
+These formulas bound the named caches and edge decoder. They do not establish
+a universal RSS ceiling: inventory metadata, node/property decoder scratch,
+runtime buffers and allocator retention remain separate consumers. Reproduce
+the facade pressure, refusal and subprocess RSS checks with the Rust gate
+narrowed to `graphforge-api` tests `read_cache_budget` and `read_cache_rss`.
+Record observed RSS and workload results on the issue or PR, not in this page.
+
 ## Query spill (#1595)
 
 `SpillPolicy` decides where a query whose sort or aggregation exceeds

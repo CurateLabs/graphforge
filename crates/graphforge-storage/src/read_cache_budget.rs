@@ -20,7 +20,11 @@
 //!
 //! so a provider and its identity handle together retain at most `B / 2`
 //! (plus one decoded shard, below 24 MiB, when a single shard exceeds the
-//! topology share), and a query's peak is the pool `B` plus `B / 2` retained.
+//! topology share). The pool and these retained caches therefore account for
+//! `B + B / 2`; this is not a process-RSS bound. Decoder scratch, catalog
+//! inventory, allocator retention and runtime overhead need separate admission
+//! or measurement. Building a label index can also temporarily hold its old
+//! slot buffer beside its replacement (at most twice the admitted slot bytes).
 //!
 //! # Symmetric accounting inside the topology share
 //!

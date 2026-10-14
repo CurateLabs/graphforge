@@ -423,7 +423,9 @@ pub use generation_diff::{
     GenerationDiffRequest, GenerationGraphDiff, GraphChangeStream, ReloadRequiredReason,
 };
 pub use graphforge_exec::validate_embedding_options;
-pub use graphforge_exec::{ExecutionResult, ExecutionStats, SendableRecordBatchStream};
+pub use graphforge_exec::{
+    ExecutionResult, ExecutionStats, RetainedTopologyBytes, SendableRecordBatchStream,
+};
 pub use graphforge_storage::{
     GraphDirectedness, ResearchAccessPolicyMetadata, ResearchCorpusSize, ResearchDiscoveryFacets,
     ResearchGeographicCoverage, ResearchProjectDiscoveryLimits, ResearchProjectDiscoveryQuery,

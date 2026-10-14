@@ -201,6 +201,8 @@ pub struct ResourcePolicyDiagnostics {
     pub construction_cpu_peak: usize,
     /// Logical CPUs observed at normalize time.
     pub observed_logical_cpus: usize,
+    /// Bytes retained by the adjacency provider against its share of the query budget.
+    pub retained_topology_bytes: graphforge_exec::RetainedTopologyBytes,
 }
 
 /// Fail-closed ceiling that still preserves concurrent same-instance reads
