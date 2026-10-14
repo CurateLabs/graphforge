@@ -342,7 +342,10 @@ impl Binder {
         let mut plan = state.builder.build();
         collect_identity::narrow_node_collects(&mut plan);
         {
-            let catalog = self.catalog.lock().expect("staged runtime catalog poisoned");
+            let catalog = self
+                .catalog
+                .lock()
+                .expect("staged runtime catalog poisoned");
             extremum_rematch::rematch_extremum(&mut plan, &catalog, &mut state.next_var);
         }
         Ok(plan)

@@ -195,15 +195,6 @@ fn detect(plan: &GraphPlan, catalog: &RuntimeCatalog) -> Option<Found> {
     let second_agg = first_agg + 1 + second_len;
 
     let GraphOp::Aggregate {
-        group_by: first_by,
-        group_aliases: first_aliases,
-        group_vars: first_vars,
-        aggs: first_aggs,
-    } = &ops[first_agg]
-    else {
-        return None;
-    };
-    let GraphOp::Aggregate {
         group_by: second_by,
         aggs: second_aggs,
         ..
@@ -211,31 +202,7 @@ fn detect(plan: &GraphPlan, catalog: &RuntimeCatalog) -> Option<Found> {
     else {
         return None;
     };
-
-    // A1: group only by passed-through bare variables; one `max`.
-    if first_by.is_empty()
-        || first_by.len() != first_aliases.len()
-        || first_by.len() != first_vars.len()
-    {
-        return None;
-    }
-    let mut carried: HashSet<VarId> = HashSet::new();
-    for ((by, alias), var) in first_by.iter().zip(first_aliases).zip(first_vars) {
-        let IrExpr::VarRef(v) = exprs.get(*by) else {
-            return None;
-        };
-        if alias.is_some() || *var != Some(*v) {
-            return None;
-        }
-        carried.insert(*v);
-    }
-    let [max_agg] = first_aggs.as_slice() else {
-        return None;
-    };
-    if max_agg.func != AggFunc::Max || max_agg.percentile.is_some() {
-        return None;
-    }
-    let (extremum_arg, extremum_var) = (max_agg.arg?, max_agg.out_var?);
+    let (carried, extremum_arg, extremum_var) = first_stage(exprs, &ops[first_agg])?;
 
     // A2: group only by `g` or `t`; one `min`.
     for by in second_by {
@@ -275,34 +242,12 @@ fn detect(plan: &GraphPlan, catalog: &RuntimeCatalog) -> Option<Found> {
     }
 
     // Conjuncts: the second WHERE is the first plus exactly `e' = t`.
-    let mut claimed = vec![false; first.conjuncts.len()];
-    let mut extra = Vec::new();
-    for &conjunct in &second.conjuncts {
-        let hit = (0..first.conjuncts.len())
-            .find(|&i| !claimed[i] && same_expr(exprs, first.conjuncts[i], conjunct, &rename));
-        match hit {
-            Some(i) => claimed[i] = true,
-            None => extra.push(conjunct),
-        }
-    }
-    let [extra] = extra.as_slice() else {
-        return None;
-    };
-    for (i, &conjunct) in first.conjuncts.iter().enumerate() {
-        if !claimed[i]
-            && !(deterministic(exprs, conjunct)
-                && referenced_vars(exprs, conjunct)
-                    .iter()
-                    .all(|v| carried.contains(v)))
-        {
-            return None;
-        }
-    }
+    let extra = extra_conjunct(exprs, &first, &second, &rename, &carried)?;
     let IrExpr::BinaryOp {
         op: BinaryOpKind::Eq,
         left,
         right,
-    } = exprs.get(*extra)
+    } = exprs.get(extra)
     else {
         return None;
     };
@@ -344,6 +289,80 @@ fn detect(plan: &GraphPlan, catalog: &RuntimeCatalog) -> Option<Found> {
         extremum_var,
         extremum_on_left,
     })
+}
+
+/// The first aggregate's shape: group only by passed-through bare variables
+/// and compute one `max`. Returns the carried variables, the `max` argument and
+/// the variable the `max` is bound to.
+fn first_stage(exprs: &ExprArena, op: &GraphOp) -> Option<(HashSet<VarId>, ExprId, VarId)> {
+    let GraphOp::Aggregate {
+        group_by,
+        group_aliases,
+        group_vars,
+        aggs,
+    } = op
+    else {
+        return None;
+    };
+    if group_by.is_empty()
+        || group_by.len() != group_aliases.len()
+        || group_by.len() != group_vars.len()
+    {
+        return None;
+    }
+    let mut carried: HashSet<VarId> = HashSet::new();
+    for ((by, alias), var) in group_by.iter().zip(group_aliases).zip(group_vars) {
+        let IrExpr::VarRef(v) = exprs.get(*by) else {
+            return None;
+        };
+        if alias.is_some() || *var != Some(*v) {
+            return None;
+        }
+        carried.insert(*v);
+    }
+    let [max_agg] = aggs.as_slice() else {
+        return None;
+    };
+    if max_agg.func != AggFunc::Max || max_agg.percentile.is_some() {
+        return None;
+    }
+    Some((carried, max_agg.arg?, max_agg.out_var?))
+}
+
+/// The one second-stage conjunct the first stage lacks, provided every other
+/// second-stage conjunct matches a distinct first-stage conjunct under the
+/// renaming and every first-stage conjunct left over only reads carried
+/// variables deterministically (so the second stage's rows are a superset).
+fn extra_conjunct(
+    exprs: &ExprArena,
+    first: &Region<'_>,
+    second: &Region<'_>,
+    rename: &Rename<'_>,
+    carried: &HashSet<VarId>,
+) -> Option<ExprId> {
+    let mut claimed = vec![false; first.conjuncts.len()];
+    let mut extra = Vec::new();
+    for &conjunct in &second.conjuncts {
+        let hit = (0..first.conjuncts.len())
+            .find(|&i| !claimed[i] && same_expr(exprs, first.conjuncts[i], conjunct, rename));
+        match hit {
+            Some(i) => claimed[i] = true,
+            None => extra.push(conjunct),
+        }
+    }
+    let [extra] = extra.as_slice() else {
+        return None;
+    };
+    for (i, &conjunct) in first.conjuncts.iter().enumerate() {
+        let carried_only = deterministic(exprs, conjunct)
+            && referenced_vars(exprs, conjunct)
+                .iter()
+                .all(|v| carried.contains(v));
+        if !claimed[i] && !carried_only {
+            return None;
+        }
+    }
+    Some(*extra)
 }
 
 fn runtime_property_name(catalog: &RuntimeCatalog, prop: PropertyId) -> Option<String> {
@@ -407,17 +426,15 @@ impl<'a> Rename<'a> {
         if self.reserved.contains(&second) {
             return false;
         }
-        match self.second_to_first.get(&second) {
-            Some(known) => *known == first,
-            None => {
-                if self.first_to_second.contains_key(&first) {
-                    return false;
-                }
-                self.second_to_first.insert(second, first);
-                self.first_to_second.insert(first, second);
-                true
-            }
+        if let Some(known) = self.second_to_first.get(&second) {
+            return *known == first;
         }
+        if self.first_to_second.contains_key(&first) {
+            return false;
+        }
+        self.second_to_first.insert(second, first);
+        self.first_to_second.insert(first, second);
+        true
     }
 
     /// The first-stage variable a second-stage variable stands for.
@@ -593,10 +610,12 @@ fn same_expr(exprs: &ExprArena, first: ExprId, second: ExprId, rename: &Rename<'
                     .all(|((ka, va), (kb, vb))| ka == kb && same_expr(exprs, *va, *vb, rename))
         }
         // A loop variable has a distinct id in each stage, so two copies are
-        // never "the same" under the renaming; refuse rather than reason.
-        (IrExpr::Quantifier { .. } | IrExpr::ListComprehension { .. }, _) => false,
+        // never "the same" under the renaming; refuse rather than reason. The
+        // remaining arms are every other pairing of unlike expression kinds.
         (
-            IrExpr::Literal(_)
+            IrExpr::Quantifier { .. }
+            | IrExpr::ListComprehension { .. }
+            | IrExpr::Literal(_)
             | IrExpr::VarRef(_)
             | IrExpr::PropertyAccess { .. }
             | IrExpr::BinaryOp { .. }
@@ -612,8 +631,8 @@ fn same_expr(exprs: &ExprArena, first: ExprId, second: ExprId, rename: &Rename<'
 }
 
 fn apply(plan: &mut GraphPlan, found: &Found, next_var: &mut u32) {
-    let rows_var = VarId(*next_var);
-    let row_var = VarId(*next_var + 1);
+    let list_var = VarId(*next_var);
+    let item_var = VarId(*next_var + 1);
     *next_var += 2;
 
     let exprs = &mut plan.exprs;
@@ -626,8 +645,8 @@ fn apply(plan: &mut GraphPlan, found: &Found, next_var: &mut u32) {
         (found.extremum_name.clone(), found.extremum_arg),
         (found.id_name.clone(), id_access),
     ]));
-    let rows = exprs.push(IrExpr::VarRef(rows_var));
-    let row_ref = exprs.push(IrExpr::VarRef(row_var));
+    let rows = exprs.push(IrExpr::VarRef(list_var));
+    let row_ref = exprs.push(IrExpr::VarRef(item_var));
     let row_extremum = exprs.push(IrExpr::PropertyAccess {
         base: row_ref,
         prop: found.extremum_prop,
@@ -643,7 +662,7 @@ fn apply(plan: &mut GraphPlan, found: &Found, next_var: &mut u32) {
         left,
         right,
     });
-    let row_ref_id = exprs.push(IrExpr::VarRef(row_var));
+    let row_ref_id = exprs.push(IrExpr::VarRef(item_var));
     let row_id = exprs.push(IrExpr::PropertyAccess {
         base: row_ref_id,
         prop: found.id_prop,
@@ -660,8 +679,8 @@ fn apply(plan: &mut GraphPlan, found: &Found, next_var: &mut u32) {
             func: AggFunc::Collect,
             arg: Some(row),
             percentile: None,
-            alias: format!("_extremum_rematch_{}", rows_var.0),
-            out_var: Some(rows_var),
+            alias: format!("_extremum_rematch_{}", list_var.0),
+            out_var: Some(list_var),
         });
     }
     if let GraphOp::Aggregate { aggs, .. } = &mut second {
@@ -669,7 +688,7 @@ fn apply(plan: &mut GraphPlan, found: &Found, next_var: &mut u32) {
     }
     ops.push(GraphOp::Unwind {
         list_expr: rows,
-        alias: row_var,
+        alias: item_var,
     });
     ops.push(GraphOp::Filter { predicate: hit });
     ops.push(second);
