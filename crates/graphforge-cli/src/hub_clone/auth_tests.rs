@@ -84,10 +84,27 @@ impl Reply {
 fn server(replies: Vec<Reply>) -> (NativeTransport, std::thread::JoinHandle<Vec<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
+    listener.set_nonblocking(true).unwrap();
     let server = std::thread::spawn(move || {
         let mut requests = Vec::new();
+        let expected = replies.len();
+        let deadline = Instant::now() + Duration::from_secs(15);
         for reply in replies {
-            let (mut socket, _) = listener.accept().unwrap();
+            let (mut socket, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            Instant::now() < deadline,
+                            "fixture deadline: {} of {expected} expected requests received",
+                            requests.len()
+                        );
+                        std::thread::park_timeout(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("fixture accept failed: {error}"),
+                }
+            };
+            socket.set_nonblocking(false).unwrap();
             socket
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
@@ -488,4 +505,56 @@ fn clone_cli_parses_explicit_hub_and_credential_source_names() {
         args.protection_bypass_env.as_deref(),
         Some("PREVIEW_SECRET")
     );
+}
+
+#[test]
+fn credential_setup_errors_emit_redacted_invalid_input_telemetry() {
+    for source in ["MISSING", "MALFORMED"] {
+        let runtime = TelemetryRuntime::new(TelemetryConfig {
+            mode: TelemetryMode::InMemory,
+            ..TelemetryConfig::default()
+        })
+        .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut args = clone_args(&root.path().join("clone"));
+        args.token_env = Some(source.into());
+        let mut env = CloneEnv {
+            credential_lookup: |name| {
+                if name == "MALFORMED" {
+                    Ok(format!("{TOKEN} invalid"))
+                } else {
+                    credential_lookup(name)
+                }
+            },
+            ..CloneEnv::quiet()
+        };
+        let transport = tests::Scripted::new(vec![tests::response(200, None, b"never")]);
+        let mut output = Vec::new();
+        let error = run_clone_profiled_with_delays(
+            &transport,
+            args,
+            true,
+            &mut output,
+            &runtime,
+            &CloneDelays::default(),
+            &mut env,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("hub.auth_denied"));
+        assert_eq!(transport.remaining(), 1);
+        assert!(output.is_empty());
+        assert_eq!(
+            runtime.force_flush(),
+            graphforge_api::telemetry::LifecycleStatus::Complete
+        );
+        let snapshots = runtime.snapshots();
+        assert_eq!(snapshots.len(), 1);
+        let job = snapshots[0].job.as_ref().unwrap();
+        assert_eq!(job.outcome, Outcome::Failed);
+        assert_eq!(job.failure, Some(Failure::InvalidInput));
+        let serialized = serde_json::to_string(&snapshots).unwrap();
+        assert!(!serialized.contains(TOKEN));
+        assert!(!serialized.contains(BYPASS));
+        assert!(!serialized.contains(source));
+    }
 }

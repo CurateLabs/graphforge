@@ -876,6 +876,7 @@ fn invalid_clone_emits_one_normalized_terminal_without_identity() {
 fn hub_failure_codes_map_through_a_finite_matrix() {
     for (code, expected) in [
         ("hub.invalid_identity", Failure::InvalidInput),
+        ("hub.auth_denied", Failure::InvalidInput),
         ("hub.destination_conflict", Failure::InvalidInput),
         ("hub.unsupported_future", Failure::InvalidInput),
         ("hub.integrity", Failure::InvalidInput),

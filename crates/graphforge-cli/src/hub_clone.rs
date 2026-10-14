@@ -274,6 +274,7 @@ fn classify_failure(error: &graphforge_api::GfError) -> Failure {
         "hub.network" | "hub.unsafe_location" => Failure::Network,
         "hub.limit_exceeded" | "hub.package.limit_exceeded" => Failure::ResourceLimit,
         "hub.invalid_identity"
+        | "hub.auth_denied"
         | "hub.malformed_response"
         | "hub.unsupported_future"
         | "hub.missing_ref"
