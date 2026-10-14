@@ -521,6 +521,9 @@ fn clone_into(
     run_clone_with(
         &hub.transport(),
         CloneArgs {
+            hub: None,
+            token_env: None,
+            protection_bypass_env: None,
             repository: repository_url(repository),
             destination: Some(destination.to_path_buf()),
             telemetry_endpoint: None,

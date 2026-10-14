@@ -50,6 +50,30 @@ only the versioned `/.gf/refs` and `/.gf/manifest` control documents from that
 identity; package bytes come only from the content-addressed HTTPS location in
 the validated manifest. Existing destinations are never overwritten.
 
+For another Hub, use `--hub https://preview.example` with `owner/repository`,
+or pass an explicit HTTPS repository URL (which cannot be combined with `--hub`).
+Private discovery is opt-in and noninteractive. Select an environment variable
+containing a Hub bearer token with `--token-env HUB_READ_TOKEN`. For a Vercel
+protected preview, independently select the bypass secret with
+`--protection-bypass-env PREVIEW_BYPASS_SECRET`:
+
+```bash
+# Supply these variables through your shell or CI secret store.
+gf clone openalex/openalex --hub https://preview.example \
+  --token-env HUB_READ_TOKEN --protection-bypass-env PREVIEW_BYPASS_SECRET
+```
+
+The token becomes `Authorization: Bearer ...`; the preview secret becomes
+`x-vercel-protection-bypass`. Neither replaces the other. Only the initial
+`/.gf/refs` and `/.gf/manifest` requests to the selected Hub's exact origin
+(scheme, host, effective port) receive these headers. Every redirect and every
+object request, including objects on the Hub origin, omits both. Protected Hubs
+must serve discovery directly; objects must be accessible without these headers.
+Missing, empty, non-ASCII, or whitespace-containing secrets fail before discovery
+with `hub.auth_denied`. A `401` or `403` stops without retrying the credentials.
+Clone never prompts, uses publish credentials, or stores secrets in resume state,
+output, or telemetry. Unauthenticated clones read no credential variables.
+
 Downloads use finite response, object (1 TiB), redirect, and connection
 limits, and an idle bound instead of a whole-transfer deadline: a slow transfer
 continues as long as bytes keep arriving. Transient failures (a failed

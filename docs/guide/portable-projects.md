@@ -262,6 +262,15 @@ the partial download, its resume checkpoint, and the import target. The project
 appears at `DESTINATION` only once it is complete and reopened, through one
 atomic rename that never replaces an existing path.
 
+Private Hubs and protected previews support opt-in discovery credentials:
+use `--hub https://preview.example --token-env HUB_READ_TOKEN`, adding
+`--protection-bypass-env PREVIEW_BYPASS_SECRET` for Vercel protection. The flags
+name environment variables, keeping secret values out of command arguments.
+Hub authorization and preview bypass are separate headers. They are sent only
+to initial refs/manifest requests on the configured Hub origin, never redirects
+or object downloads. See the CLI reference above for credential validation and
+transport requirements.
+
 ### Large projects
 
 **Disk space.** Clone needs free space on the destination's filesystem, not in
