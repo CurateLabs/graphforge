@@ -484,6 +484,34 @@ fn clustering_coefficient_cancels_inside_an_intersection() {
 }
 
 #[test]
+fn clustering_coefficient_cancels_on_disjoint_intersection_probes_in_both_paths() {
+    let small = (0..4_096).map(|value| value * 2).collect::<Vec<u32>>();
+    for larger_multiple in [1, 3] {
+        // Interleaved even/odd ordinals never match. Equal lengths select the
+        // linear merge; a threefold larger row selects binary search.
+        let large = (0..4_096 * larger_multiple)
+            .map(|value| value * 2 + 1)
+            .collect::<Vec<u32>>();
+        let cancellation = AlgorithmCancellation::default();
+        let control = lcc_control(
+            AlgorithmLimits::default(),
+            ClusteringNormalization::NeighborEdges,
+            cancellation.clone(),
+        );
+        // Model cancellation arriving after a preceding probe. It must be
+        // observed at the next checkpoint even when no visitor ever runs.
+        let mut work = 1;
+        cancellation.cancel();
+        let result = for_each_intersection(&small, &large, &control, &mut work, |_| {
+            panic!("disjoint rows must never invoke the visitor")
+        });
+        assert_eq!(result, Err(AlgorithmError::Cancelled));
+        assert_eq!(work, CLUSTERING_COEFFICIENT_CHECKPOINT_WORK);
+        assert!(work < small.len(), "cancellation must interrupt both paths");
+    }
+}
+
+#[test]
 fn clustering_coefficient_cancels_while_preparing_a_large_graph() {
     let graph = large_ring_graph();
     let cancellation = AlgorithmCancellation::default();
