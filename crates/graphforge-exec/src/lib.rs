@@ -99,6 +99,7 @@ pub(crate) mod algorithm_embedding_hashgnn;
 mod algorithm_embedding_invocation;
 #[cfg(feature = "algorithms-extended")]
 pub(crate) mod algorithm_embedding_options;
+mod keyed_property_lookup;
 pub mod mutation;
 mod path_hydration;
 pub mod read_resource;

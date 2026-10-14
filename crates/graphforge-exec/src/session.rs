@@ -355,6 +355,20 @@ impl ExtensionPlanner for GraphForgeExtensionPlanner {
             })?;
             return Ok(Some(Arc::new(OntologyInferExec::new(infer, input))));
         }
+        if let Some(lookup) = node
+            .as_any()
+            .downcast_ref::<crate::keyed_property_lookup::KeyedPropertyLookupNode>()
+        {
+            let input = physical_inputs.first().cloned().ok_or_else(|| {
+                DataFusionError::Internal("KeyedPropertyLookup requires one physical input".into())
+            })?;
+            let graph = read_resource::required(session_state)?;
+            return Ok(Some(Arc::new(
+                crate::keyed_property_lookup::KeyedPropertyLookupExec::try_new(
+                    lookup, input, graph,
+                )?,
+            )));
+        }
         Ok(None)
     }
 }
@@ -388,6 +402,7 @@ impl QueryPlanner for GraphForgeQueryPlanner {
         }
         let session_state = &pinned_state;
         let (logical_plan, hydration) = read_resource::bind(logical_plan, session_state)?;
+        let logical_plan = crate::keyed_property_lookup::rewrite(logical_plan)?;
         let planner = DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(
             GraphForgeExtensionPlanner,
         )]);
