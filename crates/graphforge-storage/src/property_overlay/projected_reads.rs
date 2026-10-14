@@ -2,7 +2,7 @@
 
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
 
-use super::selective_reads::{RowGroupSelection, groups_fully_covered};
+use super::selective_reads::{RangePruning, RowGroupSelection, groups_fully_covered};
 use super::uuid_pages::wanted_row_selection;
 use super::{
     Arc, Array, AtomicU64, AuthenticatedPropertyFragment, AuthenticatedPropertyInventory, BTreeMap,
@@ -119,6 +119,7 @@ impl AuthenticatedPropertyInventory {
             inventory: self,
             scratch: SnapshotScratch::Directory(scratch),
             row_groups: RowGroupSelection::All,
+            range_pruning: None,
             limits,
             kind,
             route,
@@ -164,6 +165,9 @@ pub(super) struct ProjectedReaderContext<'a> {
     pub(super) inventory: &'a AuthenticatedPropertyInventory,
     pub(super) scratch: SnapshotScratch<'a>,
     pub(super) row_groups: RowGroupSelection<'a>,
+    /// Row groups a range read leaves undecoded; `None` reads every group the
+    /// selection names.
+    pub(super) range_pruning: Option<&'a RangePruning>,
     pub(super) limits: PropertyOverlayLimits,
     pub(super) kind: PropertyRouteKind,
     pub(super) route: &'a str,
@@ -280,6 +284,14 @@ fn open_projected_fragment(
     let selected_groups = context
         .row_groups
         .select(footer.metadata(), context.kind.uuid_field());
+    let selected_groups = match context.range_pruning {
+        Some(pruning) => pruning.restrict(
+            fragment.id,
+            selected_groups,
+            footer.metadata().num_row_groups(),
+        )?,
+        None => selected_groups,
+    };
     // A nominated read decodes only the rows it names. The UUID column of the
     // selected row groups is read first (one narrow column, and only the pages
     // its page index leaves possible), and the full projection is then decoded

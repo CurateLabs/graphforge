@@ -33,7 +33,9 @@ mod partition_cuts;
 pub(crate) use partition_cuts::partition_interval;
 mod route_digest;
 mod selective_reads;
-pub(crate) use selective_reads::{EqualityValue, PropertyEquality};
+pub(crate) use selective_reads::{
+    EqualityValue, PropertyEquality, PropertyRange, RangeBound, RangeSide, RangeValue,
+};
 mod streaming_merge;
 pub(crate) use streaming_merge::RouteRead;
 mod targeted_reads;

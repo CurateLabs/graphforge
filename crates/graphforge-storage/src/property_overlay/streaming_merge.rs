@@ -21,7 +21,9 @@ use super::projected_reads::{
     DecodedRetention, ProjectedMetricSources, ProjectedReaderContext, PropertyParquetRows,
     finalize_projected_metrics, projected_fragment_rows,
 };
-use super::selective_reads::{PropertyEquality, RowGroupSelection, fragment_may_equal};
+use super::selective_reads::{
+    PropertyEquality, PropertyRange, RangePruning, RowGroupSelection, fragment_may_equal,
+};
 use super::{
     Arc, AtomicU64, AuthenticatedPropertyFragment, AuthenticatedPropertyInventory, GfError,
     LiveByteBudget, Mutex, PropertyFragmentId, PropertyOverlayLimits, PropertyOverlayMetrics,
@@ -149,6 +151,21 @@ impl AuthenticatedPropertyInventory {
     pub(crate) fn visit_route_streaming<F>(
         &self,
         read: &RouteRead<'_>,
+        emit: F,
+    ) -> Result<PropertyOverlayMetrics, GfError>
+    where
+        F: FnMut(PropertySnapshotRow) -> Result<bool, GfError>,
+    {
+        self.visit_route_streaming_in_range(read, None, emit)
+    }
+
+    /// Like [`Self::visit_route_streaming`], but decodes only row groups that
+    /// can hold a value in `range`, or that shadow one that can. The caller
+    /// still applies the predicate to every row it is handed.
+    pub(crate) fn visit_route_streaming_in_range<F>(
+        &self,
+        read: &RouteRead<'_>,
+        range: Option<&PropertyRange>,
         mut emit: F,
     ) -> Result<PropertyOverlayMetrics, GfError>
     where
@@ -160,16 +177,36 @@ impl AuthenticatedPropertyInventory {
         // Resolve the route's footer summary before any fragment is trusted, so
         // a route that cannot be summarized refuses here rather than reading.
         self.route_summary(read.kind, read.route)?;
-        let mut plan = Vec::with_capacity(fragments.len());
+        let mut candidates = Vec::with_capacity(fragments.len());
         for fragment in fragments {
             let footer = self.fragment_footer_of(fragment, read.kind, read.route)?;
-            let range = footer.uuid_range;
-            if let (Some(wanted), Some((min, max))) = (read.uuids, range)
+            let span = footer.uuid_range;
+            if let (Some(wanted), Some((min, max))) = (read.uuids, span)
                 && !wanted.may_contain_in_range(&min, &max)
             {
                 continue;
             }
-            plan.push((range.map_or([0; 16], |(min, _)| min), range, fragment));
+            candidates.push((fragment, footer));
+        }
+        let pruning = range.map(|range| {
+            RangePruning::new(
+                range,
+                read.kind.uuid_field(),
+                candidates
+                    .iter()
+                    .map(|(fragment, footer)| (fragment.id, footer.metadata.as_ref())),
+            )
+        });
+        let mut plan = Vec::with_capacity(candidates.len());
+        for (fragment, footer) in candidates {
+            if pruning
+                .as_ref()
+                .is_some_and(|pruning| !pruning.reads_fragment(fragment.id))
+            {
+                continue;
+            }
+            let span = footer.uuid_range;
+            plan.push((span.map_or([0; 16], |(min, _)| min), span, fragment));
         }
         plan.sort_unstable_by_key(|(min, _, fragment)| (*min, fragment.id));
 
@@ -181,6 +218,7 @@ impl AuthenticatedPropertyInventory {
             row_groups: read
                 .uuids
                 .map_or(RowGroupSelection::All, RowGroupSelection::Uuids),
+            range_pruning: pruning.as_ref(),
             limits: read.limits,
             kind: read.kind,
             route: read.route,
@@ -323,6 +361,7 @@ impl AuthenticatedPropertyInventory {
             inventory: self,
             scratch: SnapshotScratch::Lazy(&scratch),
             row_groups: RowGroupSelection::Equals(equality),
+            range_pruning: None,
             limits,
             kind,
             route,

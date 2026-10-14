@@ -110,6 +110,7 @@ where
         batch_size,
         selected_properties,
         None,
+        None,
         &[],
         None,
         visit,
@@ -136,6 +137,7 @@ pub(crate) fn visit_property_overlay_batched_selected<F>(
     batch_size: usize,
     selected_properties: Option<&std::collections::BTreeSet<String>>,
     equality: Option<&crate::property_overlay::PropertyEquality>,
+    range: Option<&crate::property_overlay::PropertyRange>,
     uuid_sets: &[&dyn crate::uuid_set::UuidMembership],
     interval: Option<crate::uuid_set::UuidInterval>,
     mut visit: F,
@@ -242,7 +244,7 @@ where
             collect,
         };
         let work = inventory
-            .visit_route_streaming(&read, |row| {
+            .visit_route_streaming_in_range(&read, range, |row| {
                 // A candidate's newest snapshot may differ from the value the
                 // candidate scan saw; the predicate decides.
                 if uuid_filter.is_some()

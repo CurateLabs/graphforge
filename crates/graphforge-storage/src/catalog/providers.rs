@@ -507,6 +507,7 @@ impl PropertyTable {
             batch_size,
             Some(selected),
             None,
+            None,
             &[&targets],
             None,
             visit,
@@ -702,7 +703,8 @@ impl TableProvider for PropertyTable {
                         &self.route,
                     ),
                 },
-            )?,
+            )?
+            .with_range(property_range(filters, &self.schema)),
         ))
     }
 
@@ -710,13 +712,15 @@ impl TableProvider for PropertyTable {
         &self,
         filters: &[&Expr],
     ) -> Result<Vec<TableProviderFilterPushDown>, DataFusionError> {
-        // A pushed-down equality prunes by statistics and reads less; the plan
-        // keeps the filter, so the answer does not depend on how far the scan
-        // narrows it.
+        // A pushed-down equality or range prunes by statistics and reads less;
+        // the plan keeps the filter, so the answer does not depend on how far
+        // the scan narrows it.
         Ok(filters
             .iter()
             .map(|filter| {
-                if self.keys_only || property_equality(filter, &self.schema).is_none() {
+                let pushable = property_equality(filter, &self.schema).is_some()
+                    || property_range(std::slice::from_ref(filter), &self.schema).is_some();
+                if self.keys_only || !pushable {
                     TableProviderFilterPushDown::Unsupported
                 } else {
                     TableProviderFilterPushDown::Inexact
@@ -758,6 +762,119 @@ fn property_equality(
         column: column.name.clone(),
         value,
     })
+}
+
+/// The comparisons `column <, <=, >, >= literal` (and `BETWEEN`) that the
+/// filters place on one stored property column, against a literal of the
+/// column's own Arrow type: integers, UTC microsecond timestamps and strings.
+/// Floats are left to the plan, where NaN ordering decides.
+///
+/// The range only narrows what the scan decodes; every filter stays above it.
+fn property_range(
+    filters: &[Expr],
+    schema: &SchemaRef,
+) -> Option<crate::property_overlay::PropertyRange> {
+    let mut bounds = Vec::new();
+    for filter in filters {
+        collect_range_bounds(filter, schema, &mut bounds);
+    }
+    let column = bounds.first()?.0.clone();
+    Some(crate::property_overlay::PropertyRange {
+        bounds: bounds
+            .into_iter()
+            .filter_map(|(name, bound)| (name == column).then_some(bound))
+            .collect(),
+        column,
+    })
+}
+
+/// Appends the range bounds `expr` implies, descending through `AND`.
+fn collect_range_bounds(
+    expr: &Expr,
+    schema: &SchemaRef,
+    out: &mut Vec<(String, crate::property_overlay::RangeBound)>,
+) {
+    use crate::property_overlay::{RangeBound, RangeSide};
+    use datafusion::logical_expr::Operator;
+    match expr {
+        Expr::BinaryExpr(binary) if binary.op == Operator::And => {
+            collect_range_bounds(&binary.left, schema, out);
+            collect_range_bounds(&binary.right, schema, out);
+        }
+        Expr::BinaryExpr(binary) => {
+            // `column op literal`, or the mirrored `literal op column`.
+            let (column, literal, op) = match (binary.left.as_ref(), binary.right.as_ref()) {
+                (Expr::Column(column), Expr::Literal(literal, _)) => (column, literal, binary.op),
+                (Expr::Literal(literal, _), Expr::Column(column)) => {
+                    let Some(mirrored) = binary.op.swap() else {
+                        return;
+                    };
+                    (column, literal, mirrored)
+                }
+                _ => return,
+            };
+            let (side, inclusive) = match op {
+                Operator::Gt => (RangeSide::Lower, false),
+                Operator::GtEq => (RangeSide::Lower, true),
+                Operator::Lt => (RangeSide::Upper, false),
+                Operator::LtEq => (RangeSide::Upper, true),
+                _ => return,
+            };
+            if let Some(value) = range_value(column, literal, schema) {
+                out.push((
+                    column.name.clone(),
+                    RangeBound {
+                        side,
+                        value,
+                        inclusive,
+                    },
+                ));
+            }
+        }
+        Expr::Between(between) if !between.negated => {
+            let Expr::Column(column) = between.expr.as_ref() else {
+                return;
+            };
+            for (bound, side) in [
+                (between.low.as_ref(), RangeSide::Lower),
+                (between.high.as_ref(), RangeSide::Upper),
+            ] {
+                if let Expr::Literal(literal, _) = bound
+                    && let Some(value) = range_value(column, literal, schema)
+                {
+                    out.push((
+                        column.name.clone(),
+                        RangeBound {
+                            side,
+                            value,
+                            inclusive: true,
+                        },
+                    ));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `literal` as an orderable bound on `column`, when its Arrow type is the
+/// column's own.
+fn range_value(
+    column: &datafusion::common::Column,
+    literal: &datafusion::scalar::ScalarValue,
+    schema: &SchemaRef,
+) -> Option<crate::property_overlay::RangeValue> {
+    use crate::property_overlay::RangeValue;
+    use datafusion::scalar::ScalarValue;
+    let value = match literal {
+        ScalarValue::Int64(Some(value)) | ScalarValue::TimestampMicrosecond(Some(value), _) => {
+            RangeValue::Int(*value)
+        }
+        ScalarValue::Utf8(Some(value)) => RangeValue::Str(value.clone()),
+        _ => return None,
+    };
+    let field = schema.field_with_name(&column.name).ok()?;
+    (field.data_type() == &literal.data_type()).then_some(value)
 }
 
 #[cfg(test)]

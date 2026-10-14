@@ -8,10 +8,14 @@
 //! Pruning only ever removes work that cannot change the answer. A missing,
 //! deprecated or non-comparable statistic keeps its row group.
 
+use std::collections::BTreeMap;
+
 use arrow::datatypes::DataType;
 use graphforge_ir::IrLiteral;
 use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
 use parquet::file::statistics::Statistics;
+
+use super::{GfError, PropertyFragmentId, corrupt};
 
 /// A property value an equality predicate can compare without coercion.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -61,6 +65,70 @@ impl PropertyEquality {
         values
             .get(&self.column)
             .is_some_and(|literal| self.value.matches(literal))
+    }
+}
+
+/// A property value a range predicate orders without coercion. Integers and
+/// UTC microsecond timestamps are both stored as `INT64`, so they share a
+/// variant; the scan accepts a bound only against a column of the same type.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum RangeValue {
+    /// A 64-bit integer, or a timestamp in microseconds since the epoch.
+    Int(i64),
+    /// A string, ordered by its UTF-8 bytes.
+    Str(String),
+}
+
+/// Which side of a value a column must fall on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum RangeSide {
+    /// `column > value` or `column >= value`.
+    Lower,
+    /// `column < value` or `column <= value`.
+    Upper,
+}
+
+/// One comparison against a literal.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct RangeBound {
+    pub(crate) side: RangeSide,
+    pub(crate) value: RangeValue,
+    pub(crate) inclusive: bool,
+}
+
+/// The conjunction of comparisons a pushed-down predicate places on one stored
+/// property column. NULL satisfies none of them.
+///
+/// The range only chooses what to decode: the predicate is kept above the
+/// scan and decides every row that is read.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct PropertyRange {
+    /// Property column name.
+    pub(crate) column: String,
+    /// Every bound the column must satisfy.
+    pub(crate) bounds: Vec<RangeBound>,
+}
+
+impl PropertyRange {
+    /// Whether values within `[min, max]` can satisfy every bound.
+    fn admits_interval<T: Ord + ?Sized>(
+        &self,
+        min: &T,
+        max: &T,
+        value_of: impl Fn(&RangeValue) -> Option<&T>,
+    ) -> bool {
+        self.bounds.iter().all(|bound| {
+            let Some(value) = value_of(&bound.value) else {
+                // A bound of another type orders nothing here.
+                return true;
+            };
+            match (bound.side, bound.inclusive) {
+                (RangeSide::Lower, true) => max >= value,
+                (RangeSide::Lower, false) => max > value,
+                (RangeSide::Upper, true) => min <= value,
+                (RangeSide::Upper, false) => min < value,
+            }
+        })
     }
 }
 
@@ -215,6 +283,180 @@ fn group_may_equal(group: &RowGroupMetaData, leaf: usize, value: &EqualityValue)
             }
         }
         _ => true,
+    }
+}
+
+/// Whether a row group can hold a row whose `leaf` column satisfies `range`. A
+/// missing, deprecated or non-comparable statistic keeps the row group; so does
+/// any group the statistics cannot rule out, because pruning must never remove
+/// a row the predicate admits.
+pub(crate) fn group_may_satisfy_range(
+    group: &RowGroupMetaData,
+    leaf: usize,
+    range: &PropertyRange,
+) -> bool {
+    let Some(statistics) = group.column(leaf).statistics() else {
+        return true;
+    };
+    if statistics.is_min_max_deprecated() {
+        return true;
+    }
+    if statistics
+        .null_count_opt()
+        .is_some_and(|nulls| i64::try_from(nulls).is_ok_and(|nulls| nulls >= group.num_rows()))
+    {
+        // Every slot is NULL, and NULL satisfies no comparison.
+        return false;
+    }
+    match statistics {
+        Statistics::Int64(stats) => match (stats.min_opt(), stats.max_opt()) {
+            (Some(min), Some(max)) => range.admits_interval(min, max, |value| match value {
+                RangeValue::Int(value) => Some(value),
+                RangeValue::Str(_) => None,
+            }),
+            _ => true,
+        },
+        Statistics::ByteArray(stats) => match (stats.min_bytes_opt(), stats.max_bytes_opt()) {
+            // Truncated bounds still bracket the column: the stored minimum is
+            // a prefix, never above the true minimum, and the stored maximum
+            // is rounded up, never below the true maximum.
+            (Some(min), Some(max)) => range.admits_interval(min, max, |value| match value {
+                RangeValue::Str(value) => Some(value.as_bytes()),
+                RangeValue::Int(_) => None,
+            }),
+            _ => true,
+        },
+        _ => true,
+    }
+}
+
+/// The row groups of each fragment a range read decodes.
+///
+/// A row group whose statistics cannot satisfy the range is only skipped when
+/// skipping it cannot let an older row it shadows reach the result. Fragments
+/// are walked from oldest to newest. A group is kept when its statistics admit
+/// the range, or when its UUID span overlaps a kept group of an older fragment:
+/// then it may hold the newest snapshot (a changed value, or a tombstone) of a
+/// UUID an older kept group would otherwise contribute stale. An older group
+/// that is skipped contributes nothing, so a newer group is never kept on its
+/// account, and a skipped group never hides a newer snapshot: newer groups are
+/// decided on their own. The filter above the scan still decides every row that
+/// is read, so a kept group costs only its decode.
+pub(crate) struct RangePruning {
+    kept: BTreeMap<PropertyFragmentId, Vec<bool>>,
+}
+
+type UuidSpan = ([u8; 16], [u8; 16]);
+
+/// The union of the UUID spans of kept groups of older fragments.
+#[derive(Default)]
+struct KeptSpans {
+    /// A kept group without UUID statistics may hold any UUID.
+    unbounded: bool,
+    /// Sorted, non-overlapping spans.
+    merged: Vec<UuidSpan>,
+}
+
+impl KeptSpans {
+    fn overlaps(&self, span: Option<UuidSpan>) -> bool {
+        if self.unbounded {
+            return true;
+        }
+        let Some((min, max)) = span else {
+            // The group may hold any UUID.
+            return !self.merged.is_empty();
+        };
+        // The first merged span ending at or after `min` is the only one that
+        // can start at or before `max`.
+        let index = self.merged.partition_point(|(_, end)| *end < min);
+        self.merged
+            .get(index)
+            .is_some_and(|(start, _)| *start <= max)
+    }
+
+    fn extend(&mut self, spans: Vec<Option<UuidSpan>>) {
+        for span in spans {
+            match span {
+                None => self.unbounded = true,
+                Some(span) => self.merged.push(span),
+            }
+        }
+        self.merged.sort_unstable();
+        let mut merged: Vec<UuidSpan> = Vec::with_capacity(self.merged.len());
+        for (start, end) in self.merged.drain(..) {
+            match merged.last_mut() {
+                Some((_, last_end)) if start <= *last_end => *last_end = (*last_end).max(end),
+                _ => merged.push((start, end)),
+            }
+        }
+        self.merged = merged;
+    }
+}
+
+impl RangePruning {
+    /// Decide the row groups of `fragments`, given in any order with the footer
+    /// metadata of each.
+    pub(crate) fn new<'a>(
+        range: &PropertyRange,
+        uuid_field: &str,
+        fragments: impl IntoIterator<Item = (PropertyFragmentId, &'a ParquetMetaData)>,
+    ) -> Self {
+        let mut ordered: Vec<_> = fragments.into_iter().collect();
+        ordered.sort_unstable_by_key(|(id, _)| *id);
+        let mut older = KeptSpans::default();
+        let mut kept = BTreeMap::new();
+        for (id, metadata) in ordered {
+            let value_leaf = column_leaf(metadata, &range.column);
+            let uuid_leaf = column_leaf(metadata, uuid_field);
+            let mut flags = Vec::with_capacity(metadata.num_row_groups());
+            let mut spans = Vec::new();
+            for group in metadata.row_groups() {
+                let span = uuid_leaf.and_then(|leaf| uuid_bounds(group, leaf));
+                // A fragment without the column holds NULL in every row.
+                let admits =
+                    value_leaf.is_some_and(|leaf| group_may_satisfy_range(group, leaf, range));
+                let keep = admits || older.overlaps(span);
+                if keep {
+                    spans.push(span);
+                }
+                flags.push(keep);
+            }
+            // Groups of one fragment hold distinct UUIDs, so they only shadow
+            // the fragments after this one.
+            older.extend(spans);
+            kept.insert(id, flags);
+        }
+        Self { kept }
+    }
+
+    /// Whether any row group of the fragment is decoded. A fragment this
+    /// pruning did not see is read in full.
+    pub(crate) fn reads_fragment(&self, id: PropertyFragmentId) -> bool {
+        self.kept
+            .get(&id)
+            .is_none_or(|flags| flags.iter().any(|keep| *keep))
+    }
+
+    /// Narrow a row-group selection of a fragment to the groups this pruning
+    /// keeps. `selected` is `None` for every group.
+    pub(crate) fn restrict(
+        &self,
+        id: PropertyFragmentId,
+        selected: Option<Vec<usize>>,
+        row_groups: usize,
+    ) -> Result<Option<Vec<usize>>, GfError> {
+        let Some(flags) = self.kept.get(&id) else {
+            return Ok(selected);
+        };
+        if flags.len() != row_groups {
+            return Err(corrupt(
+                "property fragment row groups changed after its footer was read",
+            ));
+        }
+        Ok(Some(match selected {
+            Some(groups) => groups.into_iter().filter(|group| flags[*group]).collect(),
+            None => (0..row_groups).filter(|group| flags[*group]).collect(),
+        }))
     }
 }
 

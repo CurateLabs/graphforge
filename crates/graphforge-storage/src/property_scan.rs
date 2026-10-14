@@ -96,6 +96,10 @@ pub(crate) struct PropertyOverlayExec {
     equality: Option<crate::property_overlay::PropertyEquality>,
     /// Whether a current persisted equality index answers `equality`.
     equality_index: bool,
+    /// A range on one property column whose row groups the merge skips when
+    /// their statistics rule the range out. The plan keeps the filter above the
+    /// scan, so the scan may return more rows than satisfy it.
+    range: Option<crate::property_overlay::PropertyRange>,
     uuid_filters: Vec<Arc<dyn PhysicalExpr>>,
     uuid_nominations: Vec<Arc<crate::property_join_nomination::UuidBuildKeyNomination>>,
     props: Arc<PlanProperties>,
@@ -253,6 +257,7 @@ impl PropertyOverlayExec {
             cuts: Arc::default(),
             equality: options.equality,
             equality_index,
+            range: None,
             uuid_filters: Vec::new(),
             uuid_nominations: Vec::new(),
             props,
@@ -263,6 +268,20 @@ impl PropertyOverlayExec {
             digest_context: graphforge_core::hash_observation::operation::Context::capture(),
             lifecycle_context: crate::lifecycle_io::CaptureContext::current(),
         })
+    }
+
+    /// Lets the scan skip row groups whose statistics rule `range` out. A
+    /// limited scan validates the whole route before it emits and an equality
+    /// scan reads by statistics, so neither takes a range.
+    #[must_use]
+    pub(crate) fn with_range(
+        mut self,
+        range: Option<crate::property_overlay::PropertyRange>,
+    ) -> Self {
+        if self.limit.is_none() && self.equality.is_none() {
+            self.range = range;
+        }
+        self
     }
 
     fn projects_property_payload(&self) -> bool {
@@ -500,6 +519,9 @@ impl DisplayAs for PropertyOverlayExec {
         if self.partitions > 1 {
             write!(f, ", partitions={}", self.partitions)?;
         }
+        if let Some(range) = &self.range {
+            write!(f, ", range={}", range.column)?;
+        }
         if let Some(equality) = &self.equality {
             write!(f, ", equality={}={:?}", equality.column, equality.value)?;
             if self.equality_index {
@@ -641,6 +663,7 @@ impl ExecutionPlan for PropertyOverlayExec {
         let batch_size = self.batch_size;
         let work_counts = self.work_counts.clone();
         let equality = self.equality.clone();
+        let range = self.range.clone();
         #[cfg(any(test, feature = "test-support"))]
         let digest_context = self.digest_context.clone();
         let lifecycle_context = self.lifecycle_context.clone();
@@ -748,6 +771,7 @@ impl ExecutionPlan for PropertyOverlayExec {
                     batch_size,
                     selected_properties.as_ref(),
                     equality.as_ref(),
+                    range.as_ref(),
                     &uuid_sets,
                     interval,
                     |batch| {
@@ -804,6 +828,7 @@ impl ExecutionPlan for PropertyOverlayExec {
                             batch_size,
                             selected_properties.as_ref(),
                             equality.as_ref(),
+                            range.as_ref(),
                             &uuid_sets,
                             interval,
                             |batch| {
