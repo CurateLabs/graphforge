@@ -27,6 +27,8 @@ use std::time::Duration;
 type Uuid = [u8; 16];
 /// The child columns of one hydrated union, one entry per column.
 type Block = Arc<[ArrayRef]>;
+/// `(block, row)` addresses, one per requested node.
+type Positions = Vec<(usize, usize)>;
 /// `(block, row)` of a stored node; blocks are only ever appended.
 type Slot = (u32, u32);
 
@@ -68,7 +70,7 @@ enum Turn {
     /// Every uuid is stored; positions address `blocks`.
     Hit {
         blocks: Vec<Block>,
-        positions: Vec<(usize, usize)>,
+        positions: Positions,
     },
     /// The set cannot take more; hydrate the whole batch directly.
     Bypass,
@@ -240,7 +242,7 @@ impl SharedNodes {
         flat: &[Uuid],
         union: &[Uuid],
         block: &Block,
-    ) -> Result<(Vec<Block>, Vec<(usize, usize)>)> {
+    ) -> Result<(Vec<Block>, Positions)> {
         let mut state = self.lock();
         let stored = state.store(block, union, self.cap);
         let mut blocks = state.blocks.clone();
@@ -272,19 +274,16 @@ impl State {
         if self.exhausted {
             return false;
         }
-        let array_bytes: usize = block
-            .iter()
-            .map(|column| column.get_array_memory_size())
-            .sum();
+        let array_bytes: usize = block.iter().map(Array::get_array_memory_size).sum();
         let kept = match (
             hash_table_bytes::<(Uuid, Slot)>(self.index.len() + union.len()),
             u32::try_from(self.blocks.len()),
             u32::try_from(union.len()),
         ) {
-            (Ok(index_bytes), Ok(id), Ok(_)) => Some((index_bytes, id)),
+            (Ok(index_bytes), Ok(id), Ok(rows)) => Some((index_bytes, id, rows)),
             _ => None,
         };
-        let Some((index_bytes, id)) = kept else {
+        let Some((index_bytes, id, rows)) = kept else {
             return self.exhaust();
         };
         if self.array_bytes + array_bytes + index_bytes > cap {
@@ -301,9 +300,8 @@ impl State {
         }
         self.blocks.push(Arc::clone(block));
         self.index.reserve(union.len());
-        for (row, uuid) in union.iter().enumerate() {
-            // `union.len()` fits `u32`, checked above.
-            self.index.insert(*uuid, (id, row as u32));
+        for (row, uuid) in (0..rows).zip(union) {
+            self.index.insert(*uuid, (id, row));
         }
         self.reservation.shrink(stale * 2);
         self.array_bytes += array_bytes;
