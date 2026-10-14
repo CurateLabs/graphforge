@@ -82,6 +82,7 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Schema};
 use arrow::record_batch::RecordBatch;
 use graphforge_core::GfError;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -1021,7 +1022,7 @@ pub struct EdgeIdMap {
 #[derive(Debug)]
 pub enum EdgeIdMapBuild {
     /// The map of the route's current index.
-    Built(EdgeIdMap),
+    Built(Box<EdgeIdMap>),
     /// The route has no current index that answers by id. This can change
     /// without the project generation moving (a lazy index rebuild replaces
     /// the manifest), so a holder does not remember it.
@@ -1066,55 +1067,70 @@ impl EdgeIdMap {
             return Ok(EdgeIdMapBuild::Declined);
         }
         let pack_dir = index_dir(project_dir).join(&manifest.pack_dir);
-        Self::decode(route, manifest, pack_dir, rows).map(EdgeIdMapBuild::Built)
+        Self::decode(route, manifest, pack_dir, rows)
+            .map(|map| EdgeIdMapBuild::Built(Box::new(map)))
     }
 
     /// The map of a manifest whose ids are current, read from every page of
     /// every shard's id blob. Each page is checked against its shard's seal as
     /// it is read, and each id against the shard's range.
+    ///
+    /// The shards are independent, so they are decoded in parallel, each into
+    /// the slice of the map that holds its rows, and the map is then sorted in
+    /// parallel. A caller waits on this build, so a serial decode would make
+    /// the first by-id lookup of a generation slower than the pruned reads it
+    /// replaces. The outcome is the same as a serial decode: a failed shard is
+    /// reported by its position in the manifest, and the sort keys are unique.
     fn decode(
         route: &str,
         manifest: Manifest,
         pack_dir: PathBuf,
         rows: u64,
     ) -> Result<Self, GfError> {
-        let mut packs = PackHandles::new(pack_dir.clone(), manifest.page_rows);
-        let mut locations = Vec::with_capacity(
-            usize::try_from(rows).map_err(|_| validation("manifest row counts overflow"))?,
-        );
-        let mut pages_decoded = 0_u64;
-        for (index, shard) in manifest.shards.iter().enumerate() {
-            let (Some(seal), Some(min), Some(max)) = (shard.ids, shard.id_min, shard.id_max) else {
-                return Err(validation("manifest ids are incomplete"));
+        let total =
+            usize::try_from(rows).map_err(|_| validation("manifest row counts overflow"))?;
+        let mut locations = vec![
+            IdLocation {
+                id: 0,
+                shard: 0,
+                row: 0,
             };
-            let shard_index =
-                u32::try_from(index).map_err(|_| validation("manifest holds too many shards"))?;
-            let blob = packs.open_blob(seal, shard.rows, Keys::Id)?;
-            blob.check_id_range(min, max)?;
-            let every_page: Vec<usize> = (0..blob.page_count()).collect();
-            let decoded = packs.read_pages(&blob, &every_page)?;
-            pages_decoded += every_page.len() as u64;
-            for (page, array) in every_page.iter().zip(&decoded) {
-                let ids = array
-                    .as_any()
-                    .downcast_ref::<UInt64Array>()
-                    .ok_or_else(|| validation("shard id column has the wrong type"))?;
-                for (offset, id) in ids.values().iter().enumerate() {
-                    if *id < min || *id > max {
-                        return Err(validation("shard id lies outside its manifest range"));
-                    }
-                    let row = u32::try_from(page * blob.page_rows() + offset)
-                        .map_err(|_| validation("shard row does not fit a map"))?;
-                    locations.push(IdLocation {
-                        id: *id,
-                        shard: shard_index,
-                        row,
-                    });
-                }
+            total
+        ];
+        let mut slices: Vec<&mut [IdLocation]> = Vec::with_capacity(manifest.shards.len());
+        let mut rest = locations.as_mut_slice();
+        for shard in &manifest.shards {
+            let length = usize::try_from(shard.rows)
+                .map_err(|_| validation("manifest row counts overflow"))?;
+            if length > rest.len() {
+                return Err(validation("manifest row counts overflow"));
             }
+            let (head, tail) = rest.split_at_mut(length);
+            slices.push(head);
+            rest = tail;
+        }
+        // Rayon workers carry the caller's requested I/O measurement, so the
+        // bytes the build reads are attributed to the statement that asked.
+        let capture = crate::lifecycle_io::CaptureContext::current();
+        let page_rows = manifest.page_rows;
+        let outcomes: Vec<Result<u64, GfError>> = slices
+            .into_par_iter()
+            .zip(manifest.shards.par_iter())
+            .enumerate()
+            .map_init(
+                || PackHandles::new(pack_dir.clone(), page_rows),
+                |packs, (index, (slice, shard))| {
+                    let _scope = capture.attach();
+                    Self::decode_shard(packs, index, shard, slice)
+                },
+            )
+            .collect();
+        let mut pages_decoded = 0_u64;
+        for outcome in outcomes {
+            pages_decoded += outcome?;
         }
         crate::io_stats::record_edge_property_id_pages(pages_decoded);
-        locations.sort_unstable_by_key(|location| (location.id, location.shard, location.row));
+        locations.par_sort_unstable_by_key(|location| (location.id, location.shard, location.row));
         let bytes = (locations.capacity() * std::mem::size_of::<IdLocation>()) as u64
             + manifest_resident_bytes(&manifest);
         crate::io_stats::record_edge_property_id_map_build(bytes);
@@ -1125,6 +1141,52 @@ impl EdgeIdMap {
             locations,
             bytes,
         })
+    }
+
+    /// Read every id page of shard `index` into `out`, one entry per row of the
+    /// shard, and return the number of pages read.
+    fn decode_shard(
+        packs: &mut PackHandles,
+        index: usize,
+        shard: &ShardEntry,
+        out: &mut [IdLocation],
+    ) -> Result<u64, GfError> {
+        let (Some(seal), Some(min), Some(max)) = (shard.ids, shard.id_min, shard.id_max) else {
+            return Err(validation("manifest ids are incomplete"));
+        };
+        let shard_index =
+            u32::try_from(index).map_err(|_| validation("manifest holds too many shards"))?;
+        let blob = packs.open_blob(seal, shard.rows, Keys::Id)?;
+        blob.check_id_range(min, max)?;
+        let every_page: Vec<usize> = (0..blob.page_count()).collect();
+        let decoded = packs.read_pages(&blob, &every_page)?;
+        let mut written = 0_usize;
+        for (page, array) in every_page.iter().zip(&decoded) {
+            let ids = array
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .ok_or_else(|| validation("shard id column has the wrong type"))?;
+            for (offset, id) in ids.values().iter().enumerate() {
+                if *id < min || *id > max {
+                    return Err(validation("shard id lies outside its manifest range"));
+                }
+                let row = u32::try_from(page * blob.page_rows() + offset)
+                    .map_err(|_| validation("shard row does not fit a map"))?;
+                let slot = out
+                    .get_mut(written)
+                    .ok_or_else(|| validation("shard holds more ids than its manifest rows"))?;
+                *slot = IdLocation {
+                    id: *id,
+                    shard: shard_index,
+                    row,
+                };
+                written += 1;
+            }
+        }
+        if written != out.len() {
+            return Err(validation("shard holds fewer ids than its manifest rows"));
+        }
+        Ok(every_page.len() as u64)
     }
 
     /// Resident bytes of the map, which its holder charges to its budget.

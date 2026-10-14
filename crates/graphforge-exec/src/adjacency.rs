@@ -1821,7 +1821,7 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
             route,
             graphforge_storage::adjacency::DEFAULT_DECODED_SHARD_CACHE_BYTES.saturating_sub(held),
         )? {
-            EdgeIdMapBuild::Built(map) => Some(Arc::new(map)),
+            EdgeIdMapBuild::Built(map) => Some(Arc::from(map)),
             EdgeIdMapBuild::Declined => None,
             EdgeIdMapBuild::Unavailable => {
                 entry.routes.remove(route);

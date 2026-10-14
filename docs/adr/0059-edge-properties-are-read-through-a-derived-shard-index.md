@@ -246,8 +246,9 @@ holds a target. Ids follow the UUID order inside a shard and the ranges of
 shards overlap, so a call decoded about 19 times the id pages it needed, and
 one IC5 statement spent 36.5% of its samples there. The persistent adjacency
 provider therefore keeps an `EdgeIdMap` per route: every id of the current index
-and the shard and row that hold it, built once from the id pages (each checked
-against its directory entry and its shard's range) and reused by every lookup of
+and the shard and row that hold it, built once from the id pages (decoded shard
+by shard on the rayon pool, each page checked against its directory entry and
+its shard's range) and reused by every lookup of
 the project generation, across statements. A lookup through the map reads only
 the property pages of the rows it wants, still checked page by page. The map is
 charged to the budget of the decoded adjacency shards, and a route whose map
