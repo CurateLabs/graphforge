@@ -298,15 +298,17 @@ pub(crate) fn group_may_satisfy_range(
     let Some(statistics) = group.column(leaf).statistics() else {
         return true;
     };
-    if statistics.is_min_max_deprecated() {
-        return true;
-    }
     if statistics
         .null_count_opt()
         .is_some_and(|nulls| i64::try_from(nulls).is_ok_and(|nulls| nulls >= group.num_rows()))
     {
-        // Every slot is NULL, and NULL satisfies no comparison.
+        // Every slot is NULL, and NULL satisfies no comparison. This comes
+        // before the minimum and maximum checks: a group with no value has
+        // none, and the writer marks such statistics as deprecated.
         return false;
+    }
+    if statistics.is_min_max_deprecated() {
+        return true;
     }
     match statistics {
         Statistics::Int64(stats) => match (stats.min_opt(), stats.max_opt()) {

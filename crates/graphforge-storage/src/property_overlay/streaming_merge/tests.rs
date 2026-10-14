@@ -1,10 +1,13 @@
-use super::super::selective_reads::{EqualityValue, PropertyEquality};
+use super::super::selective_reads::{
+    EqualityValue, PropertyEquality, PropertyRange, RangeBound, RangeSide, RangeValue,
+};
 use super::super::*;
 use super::*;
-use arrow::array::{FixedSizeBinaryArray, Int64Array, StringArray};
+use arrow::array::{ArrayRef, FixedSizeBinaryArray, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
+use parquet::file::reader::{FileReader, SerializedFileReader};
 use std::collections::{BTreeSet, HashMap};
 use tempfile::TempDir;
 
@@ -42,17 +45,43 @@ impl Fixture {
 
     /// Write one fragment. `row_group_rows` splits it into row groups.
     fn fragment(&mut self, generation: u64, ordinal: u64, rows: &[Row], row_group_rows: usize) {
+        self.write_fragment(generation, ordinal, rows, row_group_rows, true);
+    }
+
+    /// Write a fragment from before the `name` column existed: its rows carry
+    /// `ident` only, and their `name` is ignored.
+    fn fragment_without_name(
+        &mut self,
+        generation: u64,
+        ordinal: u64,
+        rows: &[Row],
+        row_group_rows: usize,
+    ) {
+        self.write_fragment(generation, ordinal, rows, row_group_rows, false);
+    }
+
+    fn write_fragment(
+        &mut self,
+        generation: u64,
+        ordinal: u64,
+        rows: &[Row],
+        row_group_rows: usize,
+        with_name: bool,
+    ) {
         let id = PropertyFragmentId {
             generation,
             ordinal,
         };
+        let mut fields = vec![
+            Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+            Field::new(PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
+            Field::new("ident", DataType::Int64, true),
+        ];
+        if with_name {
+            fields.push(Field::new("name", DataType::Utf8, true));
+        }
         let schema = Arc::new(Schema::new_with_metadata(
-            vec![
-                Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
-                Field::new(PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
-                Field::new("ident", DataType::Int64, true),
-                Field::new("name", DataType::Utf8, true),
-            ],
+            fields,
             HashMap::from([
                 (
                     PROPERTY_OVERLAY_FORMAT_KEY.into(),
@@ -65,22 +94,21 @@ impl Fixture {
             ]),
         ));
         let uuids = rows.iter().map(|row| uuid(row.0)).collect::<Vec<_>>();
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![
-                Arc::new(FixedSizeBinaryArray::try_from_iter(uuids.iter()).unwrap()),
-                Arc::new(BooleanArray::from(
-                    rows.iter().map(|row| row.1).collect::<Vec<_>>(),
-                )),
-                Arc::new(Int64Array::from(
-                    rows.iter().map(|row| row.2).collect::<Vec<_>>(),
-                )),
-                Arc::new(StringArray::from(
-                    rows.iter().map(|row| row.3).collect::<Vec<_>>(),
-                )),
-            ],
-        )
-        .unwrap();
+        let mut columns: Vec<ArrayRef> = vec![
+            Arc::new(FixedSizeBinaryArray::try_from_iter(uuids.iter()).unwrap()),
+            Arc::new(BooleanArray::from(
+                rows.iter().map(|row| row.1).collect::<Vec<_>>(),
+            )),
+            Arc::new(Int64Array::from(
+                rows.iter().map(|row| row.2).collect::<Vec<_>>(),
+            )),
+        ];
+        if with_name {
+            columns.push(Arc::new(StringArray::from(
+                rows.iter().map(|row| row.3).collect::<Vec<_>>(),
+            )));
+        }
+        let batch = RecordBatch::try_new(Arc::clone(&schema), columns).unwrap();
         let path = self
             .dir
             .path()
@@ -92,6 +120,7 @@ impl Fixture {
             Some(
                 WriterProperties::builder()
                     .set_max_row_group_row_count(Some(row_group_rows))
+                    .set_statistics_truncate_length(Some(64))
                     .build(),
             ),
         )
@@ -587,4 +616,388 @@ fn a_route_without_fragments_has_no_cuts() {
             .unwrap()
             .is_empty()
     );
+}
+
+fn streamed_in_range(
+    inventory: &AuthenticatedPropertyInventory,
+    range: &PropertyRange,
+) -> (Vec<PropertySnapshotRow>, PropertyOverlayMetrics) {
+    let mut rows = Vec::new();
+    let metrics = inventory
+        .visit_route_streaming_in_range(
+            &RouteRead {
+                kind: PropertyRouteKind::Node,
+                route: "Person",
+                selected_properties: None,
+                uuids: None,
+                limits: PropertyOverlayLimits::default(),
+                collect: true,
+            },
+            Some(range),
+            |row| {
+                rows.push(row);
+                Ok(true)
+            },
+        )
+        .unwrap();
+    (rows, metrics)
+}
+
+fn bound(side: RangeSide, value: RangeValue, inclusive: bool) -> RangeBound {
+    RangeBound {
+        side,
+        value,
+        inclusive,
+    }
+}
+
+/// `lower`/`upper` are `(value, inclusive)` bounds on `ident`.
+fn ident_between(lower: Option<(i64, bool)>, upper: Option<(i64, bool)>) -> PropertyRange {
+    PropertyRange {
+        column: "ident".into(),
+        bounds: lower
+            .map(|(value, inclusive)| bound(RangeSide::Lower, RangeValue::Int(value), inclusive))
+            .into_iter()
+            .chain(upper.map(|(value, inclusive)| {
+                bound(RangeSide::Upper, RangeValue::Int(value), inclusive)
+            }))
+            .collect(),
+    }
+}
+
+fn name_between(lower: Option<(&str, bool)>, upper: Option<(&str, bool)>) -> PropertyRange {
+    PropertyRange {
+        column: "name".into(),
+        bounds: lower
+            .map(|(value, inclusive)| {
+                bound(RangeSide::Lower, RangeValue::Str(value.into()), inclusive)
+            })
+            .into_iter()
+            .chain(upper.map(|(value, inclusive)| {
+                bound(RangeSide::Upper, RangeValue::Str(value.into()), inclusive)
+            }))
+            .collect(),
+    }
+}
+
+/// The predicate the engine keeps above the scan: a missing or NULL value, or a
+/// value of another type, satisfies no comparison.
+fn satisfies(range: &PropertyRange, row: &PropertySnapshotRow) -> bool {
+    let Some(value) = row.values.get(&range.column) else {
+        return false;
+    };
+    range.bounds.iter().all(|bound| {
+        let ordering = match (value, &bound.value) {
+            (IrLiteral::Int(actual), RangeValue::Int(expected)) => actual.cmp(expected),
+            (IrLiteral::Str(actual), RangeValue::Str(expected)) => {
+                actual.as_str().cmp(expected.as_str())
+            }
+            _ => return false,
+        };
+        match (bound.side, bound.inclusive) {
+            (RangeSide::Lower, true) => ordering.is_ge(),
+            (RangeSide::Lower, false) => ordering.is_gt(),
+            (RangeSide::Upper, true) => ordering.is_le(),
+            (RangeSide::Upper, false) => ordering.is_lt(),
+        }
+    })
+}
+
+fn uuids_satisfying(range: &PropertyRange, rows: &[PropertySnapshotRow]) -> Vec<[u8; 16]> {
+    rows.iter()
+        .filter(|row| satisfies(range, row))
+        .map(|row| row.uuid)
+        .collect()
+}
+
+/// The rows a range read hands the filter, once the filter has run, are the rows
+/// a full read hands it: pruning changes what is decoded, never the answer.
+fn assert_range_agrees_with_full_scan(
+    inventory: &AuthenticatedPropertyInventory,
+    range: &PropertyRange,
+) {
+    let (full, _) = streamed(inventory, None);
+    let (pruned, _) = streamed_in_range(inventory, range);
+    assert_eq!(
+        uuids_satisfying(range, &pruned),
+        uuids_satisfying(range, &full),
+        "{range:?}"
+    );
+    // The surviving values agree too, not only which UUIDs survive.
+    let kept = |rows: &[PropertySnapshotRow]| {
+        rows.iter()
+            .filter(|row| satisfies(range, row))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(kept(&pruned), kept(&full), "{range:?}");
+}
+
+#[test]
+fn a_range_answers_what_a_full_scan_answers_across_mutation_fragments() {
+    let fixture = layered();
+    let inventory = fixture.inventory();
+    let ranges = [
+        ident_between(Some((0, true)), None),
+        ident_between(Some((5, false)), None),
+        ident_between(None, Some((17, true))),
+        ident_between(None, Some((5, true))),
+        ident_between(None, Some((4, true))),
+        ident_between(Some((10, true)), Some((20, false))),
+        ident_between(Some((33, true)), Some((35, true))),
+        ident_between(Some((400, true)), None),
+        ident_between(Some((500, false)), None),
+        ident_between(Some((790, true)), None),
+        ident_between(Some((790, false)), None),
+        ident_between(Some((12_345, true)), None),
+        ident_between(Some((30, true)), Some((20, true))),
+        ident_between(Some((60, true)), Some((60, true))),
+        name_between(Some(("rewritten", true)), None),
+        name_between(Some(("rewritten", false)), None),
+        name_between(None, Some(("base", false))),
+        name_between(None, Some(("base", true))),
+        name_between(Some(("resurrected", true)), Some(("resurrected", true))),
+        name_between(Some(("zzz", true)), None),
+    ];
+    for range in &ranges {
+        assert_range_agrees_with_full_scan(&inventory, range);
+    }
+}
+
+#[test]
+fn a_range_never_lets_a_shadowed_older_value_back_in() {
+    let fixture = layered();
+    let inventory = fixture.inventory();
+    // 5 held 500 in the second snapshot, was deleted, and returned holding 5; 79
+    // holds 790. The group holding 500 satisfies the range on its own statistics,
+    // but its UUID is shadowed by groups whose statistics do not.
+    let range = ident_between(Some((400, true)), None);
+    let (rows, _) = streamed_in_range(&inventory, &range);
+    let holding_5 = rows
+        .iter()
+        .find(|row| row.uuid == uuid(5))
+        .expect("the newest snapshot of 5 is read so that it shadows 500");
+    assert_eq!(
+        holding_5.values.get("ident"),
+        Some(&IrLiteral::Int(5)),
+        "a stale 500 would be returned for 5"
+    );
+    assert_eq!(uuids_satisfying(&range, &rows), vec![uuid(79)]);
+    // 60 is deleted for good; 79 was rewritten after a base value of 79.
+    let low = ident_between(None, Some((5, true)));
+    let (rows, _) = streamed_in_range(&inventory, &low);
+    // 45 moved into the range: its base value 45 is outside it and is not read.
+    assert_eq!(
+        uuids_satisfying(&low, &rows),
+        vec![
+            uuid(0),
+            uuid(1),
+            uuid(2),
+            uuid(3),
+            uuid(4),
+            uuid(5),
+            uuid(45)
+        ]
+    );
+}
+
+#[test]
+fn a_range_decodes_only_the_row_groups_that_can_satisfy_it() {
+    let fixture = layered();
+    let inventory = fixture.inventory();
+    let (_, full) = streamed(&inventory, None);
+    let range = ident_between(Some((33, true)), Some((35, true)));
+    let (rows, metrics) = streamed_in_range(&inventory, &range);
+    assert_eq!(
+        uuids_satisfying(&range, &rows),
+        vec![uuid(33), uuid(34), uuid(35)]
+    );
+    // The base row group holding 32..=39 admits the range. So do the groups of
+    // the first mutation fragment, whose min/max (5..=790) straddle it; the
+    // tombstone fragment and the resurrecting one are read because their UUIDs
+    // overlap those kept groups and they would shadow them. The other eight
+    // base row groups, 72 rows, are never decoded.
+    assert_eq!(metrics.physical_rows, 8 + 2 + 2 + 2 + 1, "{metrics:?}");
+    assert!(
+        full.physical_rows > 5 * metrics.physical_rows,
+        "a full scan decodes {} rows, the range {}",
+        full.physical_rows,
+        metrics.physical_rows
+    );
+
+    // A range that no statistics admit decodes nothing at all.
+    let (rows, none) = streamed_in_range(&inventory, &ident_between(Some((12_345, true)), None));
+    assert!(rows.is_empty());
+    assert_eq!(none.physical_rows, 0, "{none:?}");
+}
+
+/// NULL satisfies no comparison, whether it is a missing value in a live row, a
+/// whole group of them, or the value that replaces an in-range one.
+fn nullable() -> Fixture {
+    let mut fixture = Fixture::new();
+    let row = |index: u8, ident: Option<i64>| (index, false, ident, Some("person"));
+    fixture.fragment(
+        0,
+        0,
+        &(0..16)
+            .map(|index| {
+                row(
+                    index,
+                    (!(8..12).contains(&index)).then_some(i64::from(index)),
+                )
+            })
+            .collect::<Vec<_>>(),
+        4,
+    );
+    fixture.fragment(
+        1,
+        0,
+        &[row(3, None), row(9, Some(900)), row(13, Some(-13))],
+        2,
+    );
+    fixture
+}
+
+#[test]
+fn a_range_never_returns_a_null_or_the_value_a_null_replaced() {
+    let fixture = nullable();
+    let inventory = fixture.inventory();
+    for range in [
+        ident_between(Some((0, true)), None),
+        ident_between(None, Some((100, true))),
+        ident_between(Some((i64::MIN, true)), Some((i64::MAX, true))),
+        ident_between(Some((2, true)), Some((9, true))),
+        ident_between(None, Some((0, false))),
+        name_between(Some(("", true)), None),
+    ] {
+        assert_range_agrees_with_full_scan(&inventory, &range);
+    }
+    let range = ident_between(Some((0, true)), None);
+    let (rows, metrics) = streamed_in_range(&inventory, &range);
+    let satisfying = uuids_satisfying(&range, &rows);
+    assert!(!satisfying.contains(&uuid(3)), "3 was set to NULL");
+    assert!(!satisfying.contains(&uuid(13)), "13 became negative");
+    assert!(satisfying.contains(&uuid(9)), "9 was NULL and is now 900");
+    for null in [8, 10, 11] {
+        assert!(!satisfying.contains(&uuid(null)), "{null} holds NULL");
+    }
+    // The older fragment's group of four NULLs holds no value, so it is not
+    // decoded. Nothing older could be shadowed by it, and 9 is still read
+    // through the newer snapshot that fills it. Every other group is decoded:
+    // the newer group holding 13 fails the range but overlaps a kept older
+    // group, so it is kept to shadow 13's old value. 16 + 3 - 4 rows remain.
+    let (_, full) = streamed(&inventory, None);
+    assert_eq!(full.physical_rows, 19, "{full:?}");
+    assert_eq!(metrics.physical_rows, 15, "{metrics:?}");
+}
+
+#[test]
+fn a_fragment_without_the_column_holds_nothing_the_range_admits() {
+    let mut fixture = Fixture::new();
+    // The older fragment predates `name`: a missing column is all NULL, so it
+    // is pruned for a range on `name` and still resolved for a range on `ident`.
+    fixture.fragment_without_name(
+        0,
+        0,
+        &(0..8)
+            .map(|index| (index, false, Some(i64::from(index)), None))
+            .collect::<Vec<_>>(),
+        4,
+    );
+    fixture.fragment(1, 0, &[live(2, 20, "b"), live(6, 60, "d")], 2);
+    let inventory = fixture.inventory();
+    let (_, full) = streamed(&inventory, None);
+
+    let by_name = name_between(Some(("a", true)), None);
+    assert_range_agrees_with_full_scan(&inventory, &by_name);
+    let (rows, metrics) = streamed_in_range(&inventory, &by_name);
+    assert_eq!(uuids_satisfying(&by_name, &rows), vec![uuid(2), uuid(6)]);
+    assert_eq!(
+        metrics.physical_rows, 2,
+        "{metrics:?} of {}",
+        full.physical_rows
+    );
+
+    let by_ident = ident_between(Some((10, true)), None);
+    assert_range_agrees_with_full_scan(&inventory, &by_ident);
+    let (rows, _) = streamed_in_range(&inventory, &by_ident);
+    assert_eq!(uuids_satisfying(&by_ident, &rows), vec![uuid(2), uuid(6)]);
+
+    // A column no fragment has is NULL everywhere: nothing satisfies, nothing
+    // is decoded.
+    let missing = PropertyRange {
+        column: "nickname".into(),
+        bounds: vec![bound(
+            RangeSide::Lower,
+            RangeValue::Str(String::new()),
+            true,
+        )],
+    };
+    let (rows, metrics) = streamed_in_range(&inventory, &missing);
+    assert!(uuids_satisfying(&missing, &rows).is_empty());
+    assert_eq!(metrics.physical_rows, 0, "{metrics:?}");
+}
+
+#[test]
+fn a_range_over_truncated_string_statistics_is_exact() {
+    let mut fixture = Fixture::new();
+    // Names longer than the statistics truncate length: their bounds are cut
+    // and rounded, so they only bracket the column. The names differ inside
+    // the retained prefix, so the bracket is still tight enough to prune.
+    let name = |prefix: &str| -> &'static str {
+        Box::leak(format!("{prefix}{}", "z".repeat(100)).into_boxed_str())
+    };
+    let names = ["b", "d", "f", "h", "j", "l", "n", "p"].map(name);
+    let rows = names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (index as u8, false, Some(index as i64), Some(*name)))
+        .collect::<Vec<_>>();
+    fixture.fragment(0, 0, &rows, 2);
+    let inventory = fixture.inventory();
+    for (lower, upper) in [
+        (Some((name("e"), true)), Some((name("k"), true))),
+        (Some((name("n"), false)), None),
+        (None, Some((name("b"), false))),
+        (Some((name("q"), true)), None),
+        (Some((name("a"), true)), Some((name("z"), true))),
+    ] {
+        assert_range_agrees_with_full_scan(&inventory, &name_between(lower, upper));
+    }
+    let range = name_between(Some((name("e"), true)), Some((name("k"), true)));
+    let (rows, metrics) = streamed_in_range(&inventory, &range);
+    assert_eq!(
+        uuids_satisfying(&range, &rows),
+        vec![uuid(2), uuid(3), uuid(4)]
+    );
+    // The groups holding b and d, and n and p, are ruled out by bounds cut to
+    // 64 bytes; the other two groups are decoded.
+    let footer = SerializedFileReader::new(
+        File::open(
+            fixture
+                .dir
+                .path()
+                .join("properties/Person")
+                .join(
+                    PropertyFragmentId {
+                        generation: 0,
+                        ordinal: 0,
+                    }
+                    .file_name(),
+                ),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let max = footer
+        .metadata()
+        .row_group(0)
+        .column(3)
+        .statistics()
+        .and_then(|statistics| statistics.max_bytes_opt())
+        .map(<[u8]>::len);
+    assert_eq!(max, Some(64), "the fixture must truncate the bounds");
+    let (_, full) = streamed(&inventory, None);
+    assert_eq!(full.physical_rows, 8, "{full:?}");
+    assert_eq!(metrics.physical_rows, 4, "{metrics:?}");
 }
