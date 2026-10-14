@@ -3029,7 +3029,7 @@ mod edge_filter;
 mod edge_predicate;
 mod edge_properties;
 mod input_columns;
-mod metrics;
+pub(crate) mod metrics;
 mod reachability;
 #[cfg(test)]
 mod tests;
